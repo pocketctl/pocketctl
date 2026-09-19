@@ -437,11 +437,11 @@
         <!-- Turn status bar: lives inside the message stream (visually part of
              it), below the last message. Live timer while working; on completion
              shows total duration + output tokens + a copy button. -->
-        <div v-if="!focusedSubAgentId && (isExecuting || awaitingStart || lastTurnDuration !== null || completedBarVisible)" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
-          <template v-if="isExecuting || awaitingStart">
+        <div v-if="!focusedSubAgentId && (isTurnWorking || lastTurnDuration !== null || completedBarVisible)" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
+          <template v-if="isTurnWorking">
             <span class="status-dot working"></span>
             <span class="status-text">{{ t('session.creating') }}</span>
-            <span class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
+            <span v-if="turnStartTime !== null" class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
           </template>
           <template v-else>
             <svg class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
@@ -1037,7 +1037,9 @@ const effortLabel = computed(() => {
 const isPendingSession = computed(() => sessionId.value.startsWith('pending-'))
 const selectedIndex = ref(0)
 const popoverDismissed = ref(false)
-const status = ref('running')
+const status = ref('unknown')
+const statusReady = ref(false)
+const runtimeSnapshotReady = ref(false)
 // A (web-post-send-feedback): transient flag set on sendMessage, cleared when
 // the first running/busy/waiting status or agent_text arrives. Bridges the
 // round-trip so the turn-bar shows "working" instantly instead of after daemon
@@ -1226,8 +1228,9 @@ const statusClass = computed(() => {
 })
 
 const statusLabel = computed(() => {
+  if (!runtimeSnapshotReady.value || !statusReady.value) return t('session.loading_history')
   const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', retry: 'session.status.retry', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
-  return t(STATUS_KEYS[status.value] || 'session.status.running')
+  return t(STATUS_KEYS[status.value] || 'session.status.idle')
 })
 
 // Conversation connectivity must not follow the list filter.
@@ -1437,16 +1440,17 @@ const canInput = computed(() => composerState.value.sendEnabled)
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),
 // otherwise the timer would stop prematurely when a tool call is running.
-const isExecuting = computed(() => status.value === 'running' || status.value === 'busy' || status.value === 'retry' || status.value === 'waiting')
+const EXECUTING_SESSION_STATUSES = new Set(['running', 'busy', 'retry', 'waiting'])
+function isExecutingStatus(value: unknown): boolean {
+  return typeof value === 'string' && EXECUTING_SESSION_STATUSES.has(value)
+}
+const isExecuting = computed(() => runtimeSnapshotReady.value && statusReady.value && isExecutingStatus(status.value))
+const isTurnWorking = computed(() => runtimeSnapshotReady.value && !isDisconnected.value && (isExecuting.value || awaitingStart.value))
 
 // --- Turn timer (status bar above the input area) ---
-// Timer is driven entirely by isExecuting transitions: starts on false→true
-// (covers both sendMessage and new-session-with-prompt, which bypasses
-// sendMessage), stops on true→false (whole turn done, incl. tool calls).
-// sessionSwitching gates the watch during a session change: the placeholder
-// status='running' (set in the sessionId watcher before replay) must NOT start
-// the timer from zero. The real turn start is recovered from the last
-// authoritative turn_started_at once replay completes.
+// Fresh sends start the timer optimistically. Restored sessions start only from
+// an authoritative turn_started_at, while transitions to a terminal state stop
+// the timer after the whole turn (including tool calls) finishes.
 const turnStartTime = ref<number | null>(null)   // 本轮开始时间戳
 const turnElapsed = ref(0)                        // 实时计时（秒）
 const lastTurnDuration = ref<number | null>(null) // 完成后的总耗时（秒）
@@ -1454,6 +1458,34 @@ const lastTurnEndedAt = ref('')                    // 服务端确认的本轮�
 let turnTimer: ReturnType<typeof setInterval> | null = null
 let sessionSwitching = false                        // true while switching sessions (suppress timer)
 let resumeStartAt: number | null = null           // turn start recovered from replay (ms epoch)
+let replayStatusResolved = false
+
+function parseTurnStart(value: unknown): number | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+  const parsed = typeof value === 'number' ? value : new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function sessionRuntimeStatus(meta: any): string {
+  if (!meta) return ''
+  let nextStatus = meta.statusEffective === 'disconnected'
+    ? meta.status
+    : (meta.statusEffective || meta.status)
+  if (normalizedAgentType(meta) === 'opencode' && isExecutingStatus(nextStatus)) {
+    const lastActivity = meta.last_activity_at || meta.created_at
+    const ageMs = lastActivity ? Date.now() - new Date(lastActivity).getTime() : Infinity
+    if (ageMs > 120000) nextStatus = 'idle'
+  }
+  return typeof nextStatus === 'string' ? nextStatus : ''
+}
+
+function applySessionRuntime(meta: any) {
+  const nextStatus = sessionRuntimeStatus(meta)
+  if (!nextStatus) return
+  status.value = nextStatus
+  statusReady.value = true
+  resumeStartAt = isExecutingStatus(nextStatus) ? parseTurnStart(meta.turn_started_at) : null
+}
 
 function startTurnTimer(startAt?: number) {
   if (turnTimer) clearInterval(turnTimer)
@@ -1475,18 +1507,32 @@ function stopTurnTimer() {
     lastTurnDuration.value = Math.floor((Date.now() - turnStartTime.value) / 1000)
   }
 }
+function discardTurnTimer() {
+  if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
+  turnStartTime.value = null
+  turnElapsed.value = 0
+  lastTurnDuration.value = null
+}
 // Drive the timer from isExecuting: start on false→true, stop on true→false.
-// Gated by sessionSwitching so the placeholder status during initial load /
-// session switch doesn't start the timer from zero. The real turn start is
-// recovered from the last executing session_status's last_activity_at once
-// replay completes (replay_end handler calls startTurnTimer directly).
+// Gated by sessionSwitching so status snapshots received during initial load /
+// session switch don't start the timer. The authoritative turn start is
+// recovered from replay_end and must be present before a historical timer runs.
 // NOTE: no { immediate: true } — that would fire before sessionSwitching is
 // set in onMounted, starting a zero-based timer that competes with the
 // replay_end recovery.
 watch(() => isExecuting.value, (exec, prev) => {
   if (sessionSwitching) return
-  if (exec && !prev) startTurnTimer(resumeStartAt ?? undefined)
+  if (exec && !prev) {
+    const startAt = resumeStartAt
+    resumeStartAt = null
+    if (!turnTimer && startAt !== null && !isDisconnected.value) startTurnTimer(startAt)
+  }
   else if (!exec && prev) stopTurnTimer()
+})
+watch(isDisconnected, disconnected => {
+  if (!disconnected) return
+  if (isExecuting.value || awaitingStart.value) discardTurnTimer()
+  awaitingStart.value = false
 })
 
 // Last agent_text usage (output tokens for the completed bar). Reuses the same
@@ -3194,7 +3240,10 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     target.push({ id: nextId('ts'), type: 'turn_status', role: 'agent', eventId, ...eventWithTurnMetadata(evt) })
   } else if (type === 'session_status') {
     const s = evt.status || evt.payload?.status
-    if (s) status.value = s
+    if (s) {
+      status.value = s
+      statusReady.value = true
+    }
     // A: first executing status from daemon ends the optimistic window.
     if (s === 'running' || s === 'busy' || s === 'retry' || s === 'waiting') awaitingStart.value = false
     // During a session switch, capture the turn start time from the last
@@ -3406,20 +3455,19 @@ watch(loadKey, (newKey, oldKey) => {
     mobileFileChange.value = null
     fileChangeOpener.value = null
     resetReplayTrustBuffers()
-    // Gate the turn-timer watch: the placeholder status='running' below must
-    // not start the timer from zero. The real turn start (if executing) is
-    // recovered from the last executing session_status once replay completes.
+    // Gate runtime rendering and timer recovery until replay supplies the
+    // target session's authoritative lifecycle snapshot.
     sessionSwitching = true
     resumeStartAt = null
-    if (turnTimer) { clearInterval(turnTimer); turnTimer = null }
-    turnStartTime.value = null
-    turnElapsed.value = 0
-    lastTurnDuration.value = null
+    replayStatusResolved = false
+    runtimeSnapshotReady.value = false
+    discardTurnTimer()
     lastUsage.value = null  // reset context usage on session switch
     messages.value = []
     subagentMessages.value = {}
     childrenToken.value = {}
-    status.value = 'running'
+    status.value = 'unknown'
+    statusReady.value = false
     awaitingStart.value = false  // A: reset optimistic window on session switch
     exitReason.value = ''
     exitedAt.value = ''
@@ -3446,6 +3494,13 @@ onMounted(() => {
 	cleanups.push(onEvent('connection_restored', () => {
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
+		sessionSwitching = true
+		replayStatusResolved = false
+		runtimeSnapshotReady.value = false
+		status.value = 'unknown'
+		statusReady.value = false
+		awaitingStart.value = false
+		discardTurnTimer()
 		loadHistory()
 		void refreshSessionDocuments()
 	}))
@@ -3458,6 +3513,7 @@ onMounted(() => {
     allSessions.value = msg.sessions || []
     // P1a: populate childrenToken from current session's children
     const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
+    if (cur && !replayStatusResolved) applySessionRuntime(cur)
     if (cur && interactionCapabilities.value.length === 0 && Array.isArray(cur.capabilities)) {
       interactionCapabilities.value = cur.capabilities
     }
@@ -3634,39 +3690,32 @@ onMounted(() => {
     // Skipped in focused-sub-agent mode: status/timer reflect the parent session
     // and don't apply to a read-only sub-agent replay.
     if (sessionSwitching) {
-      sessionSwitching = false
       if (focusedSubAgentId.value) {
         // Focused sub-agent: no turn timer; status is the sub-agent's own
         // (from session_list children[]), not the parent's.
         status.value = focusedSubAgentInfo.value?.status || 'completed'
+        statusReady.value = true
         resumeStartAt = null
       } else {
-        // The placeholder status set on switch is 'running'; the relay does NOT
-        // replay session_status events (only message history), so correct it from
-        // the authoritative session list (DB status, kept current by the relay).
-        // Without this an idle session (e.g. opencode) would look "running" and
-        // start the turn timer from zero.
         const meta = allSessions.value.find((s: any) => s.session_id === sessionId.value)
-        if (meta) {
-          let st = meta.statusEffective === 'disconnected' ? meta.status : (meta.statusEffective || meta.status)
-          // OpenCode polling can leave an abandoned turn marked executing after
-          // it falls out of the sync window. Codex and Claude instead publish
-          // explicit lifecycle events, and long-running tools/subagents can be
-          // quiet for more than two minutes, so their persisted status must not
-          // be overridden by this OpenCode-specific fallback.
-          if (normalizedAgentType(meta) === 'opencode'
-            && (st === 'running' || st === 'busy' || st === 'retry' || st === 'waiting')) {
-            const la = meta.last_activity_at || meta.created_at
-            const ageMs = la ? Date.now() - new Date(la).getTime() : Infinity
-            if (ageMs > 120000) st = 'idle'
-          }
-          if (st) status.value = st
-          const turnStartedAt = meta.turn_started_at || msg.turn_started_at
-          if (turnStartedAt) resumeStartAt = new Date(turnStartedAt).getTime()
+        const hasReplayStatus = typeof msg.status === 'string' && msg.status.length > 0
+        const nextStatus = hasReplayStatus
+          ? msg.status
+          : (sessionRuntimeStatus(meta) || (statusReady.value ? status.value : ''))
+        replayStatusResolved = hasReplayStatus
+        status.value = nextStatus || 'unknown'
+        statusReady.value = !!nextStatus
+        const turnStartedAt = Object.prototype.hasOwnProperty.call(msg, 'turn_started_at')
+          ? msg.turn_started_at
+          : meta?.turn_started_at
+        resumeStartAt = isExecutingStatus(nextStatus) ? parseTurnStart(turnStartedAt) : null
+        if (statusReady.value && isExecutingStatus(nextStatus) && resumeStartAt !== null && !isDisconnected.value) {
+          startTurnTimer(resumeStartAt)
         }
-        if (isExecuting.value) startTurnTimer(resumeStartAt ?? undefined)
         resumeStartAt = null
       }
+      sessionSwitching = false
+      runtimeSnapshotReady.value = true
     }
     reconcileVisibleUnresolvedTools(status.value)
     if (hasMore.value) void settleHistoryReplayPage(msg)
@@ -3866,7 +3915,11 @@ onMounted(() => {
     }
     if (msg.session_id === sessionId.value) {
       const wasExecuting = isExecuting.value
+      if (!wasExecuting && isExecutingStatus(msg.status)) {
+        resumeStartAt = parseTurnStart(msg.turn_started_at || msg.payload?.turn_started_at) ?? Date.now()
+      }
       status.value = msg.status
+      statusReady.value = true
       if (wasExecuting && !isExecuting.value && lastActivityAt) lastTurnEndedAt.value = lastActivityAt
       reconcileVisibleUnresolvedTools(msg.status)
       if (msg.exit_reason) exitReason.value = msg.exit_reason
@@ -3976,8 +4029,8 @@ onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
   send({ type: 'list_daemons' })
-  // Gate the timer watch for the initial load too: status defaults to 'running'
-  // until replay/session metadata supplies the authoritative state.
+  // Gate status and timer rendering until replay supplies the authoritative
+  // runtime snapshot for the initial load.
   sessionSwitching = true
   loadHistory()
   void refreshSessionDocuments()
