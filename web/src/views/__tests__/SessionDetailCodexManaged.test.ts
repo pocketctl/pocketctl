@@ -353,7 +353,7 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(wrapper.find('.chat-input-container').exists()).toBe(false)
   })
 
-  test('offline managed Codex keeps an editable draft composer after a terminal status', async () => {
+  test('offline managed Codex hides the composer and shows a host-offline notice', async () => {
     const wrapper = mountSession()
     setTerminalSession({
       control_mode: 'managed', daemon_online: false,
@@ -361,28 +361,46 @@ describe('SessionDetail managed Codex terminal control', () => {
     })
     await nextTick()
 
-    expect(wrapper.find('.chat-input-container').exists()).toBe(true)
-    expect(wrapper.find('.chat-textarea').attributes('disabled')).toBeUndefined()
-    expect(wrapper.find('.send-btn').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+    expect(wrapper.get('.host-offline-notice').text()).toContain('session.host_offline_notice')
     expect(wrapper.find('.ended-text').exists()).toBe(false)
   })
 
-  test('daemon_status offline disables a managed Codex send without ending the session', async () => {
+  test('daemon_status offline hides the managed Codex composer without ending the session', async () => {
     const wrapper = mountSession()
     setTerminalSession({
       control_mode: 'managed',
       capabilities: ['message_acceptance_receipt'],
     })
     await nextTick()
+    await wrapper.get('.chat-textarea').setValue('preserved draft')
     expect(wrapper.get('.session-panel-presence .status-dot').classes()).toContain('online')
 
     websocketMock.handlers.get('daemon_status')?.({ type: 'daemon_status', daemon_id: 'd1', status: 'offline' })
     await nextTick()
 
     expect(wrapper.get('.session-panel-presence .status-dot').classes()).not.toContain('online')
-    expect(wrapper.find('.chat-input-container').exists()).toBe(true)
-    expect(wrapper.find('.send-btn').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+    expect(wrapper.find('.chat-textarea').exists()).toBe(false)
+    expect(wrapper.get('.host-offline-notice').text()).toContain('session.host_offline_notice')
     expect(wrapper.find('.ended-text').exists()).toBe(false)
+
+    websocketMock.handlers.get('daemon_status')?.({ type: 'daemon_status', daemon_id: 'd1', status: 'online' })
+    await nextTick()
+    expect((wrapper.get('.chat-textarea').element as HTMLTextAreaElement).value).toBe('preserved draft')
+    expect(wrapper.find('.host-offline-notice').exists()).toBe(false)
+  })
+
+  test('host-offline notice also replaces a read-only session state', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({})
+    await nextTick()
+    expect(wrapper.find('.unmanaged-readonly-notice').exists()).toBe(true)
+
+    websocketMock.handlers.get('daemon_status')?.({ type: 'daemon_status', daemon_id: 'd1', status: 'offline' })
+    await nextTick()
+    expect(wrapper.find('.unmanaged-readonly-notice').exists()).toBe(false)
+    expect(wrapper.get('.host-offline-notice').text()).toContain('session.host_offline_notice')
   })
 
   test('legacy disconnected status does not replace the managed Codex lifecycle', async () => {
@@ -394,8 +412,8 @@ describe('SessionDetail managed Codex terminal control', () => {
     websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status: 'disconnected' })
     await nextTick()
 
-    expect(wrapper.find('.chat-input-container').exists()).toBe(true)
-    expect(wrapper.find('.send-btn').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+    expect(wrapper.get('.host-offline-notice').text()).toContain('session.host_offline_notice')
     expect(wrapper.find('.ended-text').exists()).toBe(false)
   })
 
