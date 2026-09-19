@@ -1149,7 +1149,7 @@ describe('SessionDetail processEvent integration', () => {
     })
     vm.processEvent({ ...metadata, type: 'turn_status', turn_status: 'interrupted' })
 
-    expect(vm.status).toBe('running')
+    expect(vm.status).toBe('unknown')
     expect(vm.messages.find((message: any) => message.partId === 'part-meta')).toMatchObject(metadata)
     expect(vm.messages.find((message: any) => message.request_id === 'approval-meta')).toMatchObject(metadata)
     expect(vm.messages.find((message: any) => message.type === 'agent_file_change')).toMatchObject({ turn_id: 'turn-meta', content_class: 'execution' })
@@ -1178,6 +1178,67 @@ describe('SessionDetail processEvent integration', () => {
     expect(vm.messages.find((message: any) => message.call_id === 'missing-result')).toMatchObject({
       status: 'completed', output: 'received later',
     })
+  })
+
+  test('uses replay_end idle over a stale running session-list snapshot', async () => {
+    const wrapper = shallowMount(SessionDetail)
+
+    websocketMock.handlers.get('session_list')?.({
+      type: 'session_list',
+      sessions: [{
+        session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running',
+        turn_started_at: '2026-09-18T05:00:00.000Z', daemon_online: true,
+      }],
+    })
+    websocketMock.handlers.get('replay_end')?.({
+      type: 'replay_end', session_id: 'ses_1', status: 'idle', turn_started_at: null,
+    })
+    await wrapper.vm.$nextTick()
+
+    expect((wrapper.vm as any).status).toBe('idle')
+    expect(wrapper.find('.turn-status-bar').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('does not invent elapsed time for a running replay without turn_started_at', async () => {
+    const wrapper = shallowMount(SessionDetail)
+
+    websocketMock.handlers.get('session_list')?.({
+      type: 'session_list',
+      sessions: [{
+        session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'idle', daemon_online: true,
+      }],
+    })
+    websocketMock.handlers.get('replay_end')?.({
+      type: 'replay_end', session_id: 'ses_1', status: 'running', turn_started_at: null,
+    })
+    await wrapper.vm.$nextTick()
+
+    expect((wrapper.vm as any).status).toBe('running')
+    expect(wrapper.find('.turn-status-bar').exists()).toBe(true)
+    expect(wrapper.find('.turn-status-bar .status-timer').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('hides running work state when the session daemon is offline', async () => {
+    const wrapper = shallowMount(SessionDetail)
+
+    websocketMock.handlers.get('session_list')?.({
+      type: 'session_list',
+      sessions: [{
+        session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running',
+        turn_started_at: '2026-09-18T05:00:00.000Z', daemon_online: false,
+      }],
+    })
+    websocketMock.handlers.get('replay_end')?.({
+      type: 'replay_end', session_id: 'ses_1', status: 'running',
+      turn_started_at: '2026-09-18T05:00:00.000Z',
+    })
+    await wrapper.vm.$nextTick()
+
+    expect((wrapper.vm as any).status).toBe('running')
+    expect(wrapper.find('.turn-status-bar').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   test.each(['codex', 'claude-code'])(
