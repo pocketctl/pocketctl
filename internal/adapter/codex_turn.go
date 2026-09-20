@@ -53,7 +53,7 @@ func (t *codexTurnTracker) begin(sourceTurnID string) (protocol.DaemonEvent, boo
 	), true
 }
 
-func (t *codexTurnTracker) end(sourceTurnID string) (protocol.DaemonEvent, bool) {
+func (t *codexTurnTracker) end(sourceTurnID, state, reason string) (protocol.DaemonEvent, bool) {
 	if t.activeLogical == "" {
 		return protocol.DaemonEvent{}, false
 	}
@@ -65,7 +65,7 @@ func (t *codexTurnTracker) end(sourceTurnID string) (protocol.DaemonEvent, bool)
 		return protocol.DaemonEvent{}, false
 	}
 	event := codexTurnStatusEvent(
-		t.sessionID, t.activeLogical, t.activeSource, protocol.TurnStateCompleted, "task_complete_event",
+		t.sessionID, t.activeLogical, t.activeSource, state, reason,
 	)
 	t.activeLogical, t.activeSource = "", ""
 	return event, true
@@ -111,7 +111,18 @@ func (t *codexTurnTracker) decorate(topType string, payload codexPayload, events
 			return append([]protocol.DaemonEvent{started}, events...)
 		}
 	case "task_complete":
-		if completed, ok := t.end(payload.TurnID); ok {
+		// Stamp the terminal diagnostic before end clears the active identity.
+		t.stamp(events)
+		state, reason := protocol.TurnStateCompleted, "task_complete_event"
+		if ProjectCodexError(payload.Error).Present {
+			state, reason = protocol.TurnStateFailed, "task_complete_error"
+		}
+		if completed, ok := t.end(payload.TurnID, state, reason); ok {
+			for i := range events {
+				if events[i].Type == "error" && events[i].EventID == "" {
+					events[i].EventID = CodexErrorEventID(completed.TurnID, events[i].Code, events[i].Error)
+				}
+			}
 			return append([]protocol.DaemonEvent{completed}, events...)
 		}
 	default:

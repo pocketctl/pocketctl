@@ -450,6 +450,31 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(deliveryStatus(wrapper, 'second prompt')).toBe('forwarded')
   })
 
+  test('does not reuse transport message ids after the session component remounts', async () => {
+    const firstWrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
+    await nextTick()
+    const first = await sendPrompt(firstWrapper, 'first mount')
+    firstWrapper.unmount()
+
+    const secondWrapper = mountSession()
+    setTerminalSession({
+      control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
+    await nextTick()
+    const second = await sendPrompt(secondWrapper, 'second mount')
+
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+    expect(second).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+    expect(second).not.toBe(first)
+    expect(first).not.toMatch(/^m-u\d+$/)
+    expect(second).not.toMatch(/^m-u\d+$/)
+  })
+
   test('keeps a rejected managed Codex prompt bubble without retrying it', async () => {
     const wrapper = mountSession()
     setTerminalSession({

@@ -283,6 +283,7 @@ type codexPayload struct {
 	Message          string                      `json:"message,omitempty"`            // agent_message / user_message text
 	LastAgentMessage string                      `json:"last_agent_message,omitempty"` // task_complete
 	LastTokenUsage   *codexTokenUsage            `json:"last_token_usage,omitempty"`   // token_count
+	Error            json.RawMessage             `json:"error,omitempty"`              // task_complete failure
 	TurnID           string                      `json:"turn_id,omitempty"`
 	Success          bool                        `json:"success,omitempty"`
 	Status           string                      `json:"status,omitempty"`
@@ -673,10 +674,17 @@ func convertCodexEventMsg(p codexPayload) []protocol.DaemonEvent {
 
 	case "task_complete":
 		// task_complete ends one Codex turn, not the interactive terminal session.
-		return []protocol.DaemonEvent{{
+		events := make([]protocol.DaemonEvent, 0, 2)
+		if projected := ProjectCodexError(p.Error); projected.Present {
+			retryable := false
+			events = append(events, protocol.DaemonEvent{
+				Type: "error", Error: projected.Message, Code: projected.Code, Retryable: &retryable,
+			})
+		}
+		return append(events, protocol.DaemonEvent{
 			Type:   "session_status",
 			Status: protocol.StatusIdle,
-		}}
+		})
 
 	case "patch_apply_end":
 		return projectCodexPatchApplyEnd(p)

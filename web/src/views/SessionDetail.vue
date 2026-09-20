@@ -2434,7 +2434,9 @@ function sendPromptText(text: string, invocationID?: string): boolean {
   // processEvent reconciles the authoritative echo with this local bubble,
   // including when lifecycle rows arrive before an uncorrelated Claude echo.
   const bubbleId = nextId('u')
-  const msgId = `m-${bubbleId}`  // L2: correlate ack/nack with this optimistic bubble
+  // Transport identity must survive component/session counter reuse. Relay
+  // admissions are keyed by this value across every session owned by a user.
+  const msgId = createClientId()
   messages.value.push({
     id: bubbleId,
     type: 'user_text',
@@ -3226,7 +3228,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       preserveTurnMetadata(existing, evt)
       return
     }
-    target.push({ id: nextId('e'), type: 'error', role: 'agent', content: errorText, error: errorText, eventKey, message_id: evt.message_id || evt.payload?.message_id, ...eventWithTurnMetadata(evt) })
+    target.push({
+      id: nextId('e'), type: 'error', role: 'agent', content: errorText, error: errorText,
+      code: evt.code || evt.payload?.code,
+      eventKey, message_id: evt.message_id || evt.payload?.message_id, ...eventWithTurnMetadata(evt),
+    })
   } else if (type === 'turn_status') {
     const turnId = evt.turn_id || evt.payload?.turn_id
     const turnStatus = evt.turn_status || evt.payload?.turn_status

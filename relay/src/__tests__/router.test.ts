@@ -443,7 +443,10 @@ describe.each([
     ;(router as any).pendingSessionCreate.set('durable-session-error', originWs)
     const durableAccept = vi.spyOn((router as any).durableIngress, 'accept')
     const payload = {
-      type: 'error', session_id: sessionId, error: 'turn failed', seq: 1,
+      type: 'error', session_id: sessionId,
+      error: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage or try again later.",
+      code: 'codex_usage_limit_exceeded', event_id: 'codex:error:stable',
+      turn_id: 'turn:v1:codex:stable', retryable: false, seq: 1,
     }
 
     router.handleDaemonMessage('durable-session-error', payload)

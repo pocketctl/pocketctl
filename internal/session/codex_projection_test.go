@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -119,6 +121,78 @@ func TestCodexProjectionTurnCompletionKeepsThreadWritable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodexProjectionFailedTurnUsesNativeUsageLimitError(t *testing.T) {
+	const completion = `{
+		"threadId":"thr_limit",
+		"turn":{"id":"turn_limit","status":"failed","items":[],"error":{
+			"message":"You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage or try again later.",
+			"codexErrorInfo":"usageLimitExceeded",
+			"additionalDetails":"private provider diagnostic"
+		}}
+	}`
+	var firstID string
+	for generation := uint64(1); generation <= 2; generation++ {
+		p := newCodexProjection(generation)
+		events := p.Project(codexNotification("turn/completed", completion))
+		if len(events) != 3 || events[0].TurnStatus != protocol.TurnStateFailed || events[1].Type != "error" || events[2].Status != protocol.StatusIdle {
+			t.Fatalf("generation %d events=%+v", generation, events)
+		}
+		errorEvent := events[1]
+		if errorEvent.Code != adapter.CodexUsageLimitExceededCode || !strings.Contains(errorEvent.Error, "You've hit your usage limit") ||
+			strings.Contains(errorEvent.Error, "private provider diagnostic") {
+			t.Fatalf("generation %d error=%+v", generation, errorEvent)
+		}
+		if errorEvent.Retryable == nil || *errorEvent.Retryable || errorEvent.EventID == "" ||
+			errorEvent.TurnID != logicalCodexTurnID("thr_limit", "turn_limit") || errorEvent.SourceTurnID != "turn_limit" ||
+			errorEvent.TurnOrigin != protocol.TurnOriginNative || errorEvent.TurnConfidence != protocol.TurnConfidenceNative {
+			t.Fatalf("generation %d identity=%+v", generation, errorEvent)
+		}
+		if firstID == "" {
+			firstID = errorEvent.EventID
+		} else if errorEvent.EventID != firstID {
+			t.Fatalf("event id changed across generations: %q != %q", errorEvent.EventID, firstID)
+		}
+	}
+}
+
+func TestCodexProjectionCachesOnlyTerminalNativeErrors(t *testing.T) {
+	start := codexNotification("turn/started", `{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}`)
+	completion := codexNotification("turn/completed", `{"threadId":"thr_1","turn":{"id":"turn_1","status":"failed","items":[]}}`)
+	usageError := `{"threadId":"thr_1","turnId":"turn_1","willRetry":%s,"error":{"message":"You've hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}`
+
+	t.Run("non-retry error is used when completion omits details", func(t *testing.T) {
+		p := newCodexProjection(1)
+		p.Project(start)
+		if events := p.Project(codexNotification("error", fmt.Sprintf(usageError, "false"))); len(events) != 0 {
+			t.Fatalf("error notification emitted early: %+v", events)
+		}
+		events := p.Project(completion)
+		if len(events) != 3 || events[1].Code != adapter.CodexUsageLimitExceededCode || events[1].Error != "You've hit your usage limit." {
+			t.Fatalf("completion did not use cached error: %+v", events)
+		}
+	})
+
+	t.Run("retrying error never becomes terminal detail", func(t *testing.T) {
+		p := newCodexProjection(2)
+		p.Project(start)
+		p.Project(codexNotification("error", fmt.Sprintf(usageError, "true")))
+		events := p.Project(completion)
+		if len(events) != 3 || events[1].Code != adapter.CodexTurnFailedCode || events[1].Error != adapter.CodexTurnFailedMessage {
+			t.Fatalf("retrying error leaked into terminal event: %+v", events)
+		}
+	})
+
+	t.Run("stale error is ignored", func(t *testing.T) {
+		p := newCodexProjection(3)
+		p.Project(start)
+		p.Project(codexNotification("error", `{"threadId":"thr_1","turnId":"old_turn","willRetry":false,"error":{"message":"You've hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}`))
+		events := p.Project(completion)
+		if len(events) != 3 || events[1].Code != adapter.CodexTurnFailedCode {
+			t.Fatalf("stale error bound to active turn: %+v", events)
+		}
+	})
 }
 
 func TestCodexManagedPlanTextIsNotProjectedAsStructuredAgentPlan(t *testing.T) {
