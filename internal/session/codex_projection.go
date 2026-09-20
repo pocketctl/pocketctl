@@ -53,6 +53,7 @@ type codexProjection struct {
 	parts          map[string]codexProjectedPart
 	turnDiff       map[string]string
 	fileChangePath map[string]map[string]struct{}
+	turnError      map[string]adapter.CodexProjectedError
 }
 
 type codexProjectedPart struct {
@@ -112,6 +113,7 @@ func newCodexProjection(generation uint64) *codexProjection {
 		parts:          make(map[string]codexProjectedPart),
 		turnDiff:       make(map[string]string),
 		fileChangePath: make(map[string]map[string]struct{}),
+		turnError:      make(map[string]adapter.CodexProjectedError),
 	}
 }
 
@@ -151,6 +153,8 @@ func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protoc
 		return p.projectThreadStatus(in.Params)
 	case "turn/started", "turn/completed":
 		return p.projectTurn(in.Method, in.Params, historical)
+	case "error":
+		return p.projectError(in.Params, historical)
 	case "turn/diff/updated":
 		return p.projectTurnDiff(in.Params, historical)
 	case "item/started", "item/completed":
@@ -219,8 +223,9 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 	var params struct {
 		ThreadID string `json:"threadId"`
 		Turn     struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
+			ID     string          `json:"id"`
+			Status string          `json:"status"`
+			Error  json.RawMessage `json:"error,omitempty"`
 		} `json:"turn"`
 	}
 	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.Turn.ID == "" {
@@ -244,9 +249,11 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 			previousEnd.TurnConfidence = protocol.TurnConfidenceDerived
 			events = append(events, previousEnd)
 			p.clearManagedTurnDiff(params.ThreadID, previous)
+			delete(p.turnError, p.turnErrorKey(params.ThreadID, previous))
 		}
 		p.activeTurn[params.ThreadID] = params.Turn.ID
 		delete(p.completedTurn, params.ThreadID+"\x00"+params.Turn.ID)
+		delete(p.turnError, p.turnErrorKey(params.ThreadID, params.Turn.ID))
 		p.clearManagedTurnDiff(params.ThreadID, params.Turn.ID)
 		if historical {
 			return nil
@@ -274,9 +281,14 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 	if !historical && managedTurnCompletedSuccessfully(params.Turn.Status) {
 		managedFileChanges = p.projectManagedTurnDiff(params.ThreadID, params.Turn.ID)
 	}
+	projectedError := adapter.ProjectCodexError(params.Turn.Error)
+	if !projectedError.Present {
+		projectedError = p.turnError[p.turnErrorKey(params.ThreadID, params.Turn.ID)]
+	}
 	delete(p.activeTurn, params.ThreadID)
 	p.completedTurn[params.ThreadID+"\x00"+params.Turn.ID] = struct{}{}
 	p.clearManagedTurnDiff(params.ThreadID, params.Turn.ID)
+	delete(p.turnError, p.turnErrorKey(params.ThreadID, params.Turn.ID))
 	if historical {
 		return nil
 	}
@@ -286,14 +298,65 @@ func (p *codexProjection) projectTurn(method string, raw json.RawMessage, histor
 	case "inProgress":
 		return append(append(recovered, managedFileChanges...), terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusRunning})
 	case "failed":
+		if !projectedError.Present {
+			projectedError = adapter.CodexProjectedError{Present: true, Code: adapter.CodexTurnFailedCode, Message: adapter.CodexTurnFailedMessage}
+		}
 		return append(append(recovered, managedFileChanges...), []protocol.DaemonEvent{
 			terminal,
-			{Type: "error", SessionID: params.ThreadID, Error: "Codex turn failed"},
+			p.codexErrorEvent(params.ThreadID, params.Turn.ID, projectedError),
 			{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle},
 		}...)
 	default:
 		return append(append(recovered, managedFileChanges...), terminal, protocol.DaemonEvent{Type: "session_status", SessionID: params.ThreadID, Status: protocol.StatusIdle})
 	}
+}
+
+func (p *codexProjection) projectError(raw json.RawMessage, historical bool) []protocol.DaemonEvent {
+	if historical {
+		return nil
+	}
+	var params struct {
+		ThreadID  string          `json:"threadId"`
+		TurnID    string          `json:"turnId"`
+		WillRetry bool            `json:"willRetry"`
+		Error     json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.TurnID == "" {
+		return nil
+	}
+	key := p.turnErrorKey(params.ThreadID, params.TurnID)
+	if params.WillRetry {
+		delete(p.turnError, key)
+		return nil
+	}
+	// Only an active native turn may reserve pending diagnostic state. Stale
+	// errors from a superseded turn must not grow the map or bind to a later turn.
+	if p.activeTurn[params.ThreadID] != params.TurnID {
+		return nil
+	}
+	if projected := adapter.ProjectCodexError(params.Error); projected.Present {
+		p.turnError[key] = projected
+	}
+	return nil
+}
+
+func (p *codexProjection) codexErrorEvent(threadID, nativeTurnID string, projected adapter.CodexProjectedError) protocol.DaemonEvent {
+	retryable := false
+	logicalTurnID := logicalCodexTurnID(threadID, nativeTurnID)
+	event := protocol.DaemonEvent{
+		Type:              "error",
+		SessionID:         threadID,
+		Error:             projected.Message,
+		Code:              projected.Code,
+		Retryable:         &retryable,
+		ActorScope:        protocol.ActorScopeRoot,
+		FlowScope:         protocol.FlowScopeAuxiliary,
+		ContentClass:      protocol.ContentClassLifecycle,
+		ClassifierVersion: protocol.ClassifierVersionV1,
+		EventID:           adapter.CodexErrorEventID(logicalTurnID, projected.Code, projected.Message),
+	}
+	stampTurnIdentity(&event, threadID, nativeTurnID, "")
+	return event
 }
 
 // mapNativeTurnCompletion maps the native turn/completed status onto the
@@ -702,6 +765,10 @@ func (p *codexProjection) key(parts ...string) string {
 
 func (p *codexProjection) partKey(threadID, turnID, itemID, eventType string) string {
 	return strings.Join([]string{threadID, turnID, itemID, eventType}, "\x00")
+}
+
+func (p *codexProjection) turnErrorKey(threadID, turnID string) string {
+	return strings.Join([]string{threadID, turnID}, "\x00")
 }
 
 func (p *codexProjection) contentStreamID(eventType, threadID, turnID, itemID string, suffix ...string) string {

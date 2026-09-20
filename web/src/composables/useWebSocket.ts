@@ -21,6 +21,7 @@ export interface DaemonEvent {
   output?: string
   status?: string
   error?: string
+  code?: string
   attempt?: number
   retry_at?: number
   auto?: boolean

@@ -209,7 +209,7 @@ type DaemonEvent struct {
 	Output                 string                   `json:"output,omitempty"`
 	Status                 string                   `json:"status,omitempty"`
 	Error                  string                   `json:"error,omitempty"`
-	Code                   string                   `json:"code,omitempty"`     // stable machine-readable error code (e.g. invocation_result replies); empty for display-only errors
+	Code                   string                   `json:"code,omitempty"`     // stable machine-readable error code (e.g. typed provider and invocation failures)
 	Attempt                int                      `json:"attempt,omitempty"`  // retry attempt number (OpenCode retry Part)
 	RetryAt                int64                    `json:"retry_at,omitempty"` // retry creation time in source milliseconds
 	Auto                   bool                     `json:"auto,omitempty"`     // compaction was automatically triggered
@@ -264,7 +264,7 @@ type DaemonEvent struct {
 	UserMessage            string                   `json:"user_message,omitempty"`      // for generate_title_request
 	AssistantMessage       string                   `json:"assistant_message,omitempty"` // for generate_title_request
 	Reason                 string                   `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
-	Retryable              *bool                    `json:"retryable,omitempty"`         // user_message_receipt failure may be retried by an explicit future action
+	Retryable              *bool                    `json:"retryable,omitempty"`         // whether the failed operation may be retried without starting a new action
 	Commands               []CommandItem            `json:"commands,omitempty"`          // for command_list
 	Command                string                   `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
 	ReceiptStatus          string                   `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable

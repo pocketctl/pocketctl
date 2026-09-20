@@ -362,6 +362,60 @@ func TestCodexJSONLParser_StampsNativeTurnLifecycleAndContent(t *testing.T) {
 	}
 }
 
+func TestCodexJSONLParser_ProjectsUsageLimitFailure(t *testing.T) {
+	parseRun := func() []protocol.DaemonEvent {
+		p := NewCodexJSONLParser()
+		parse := func(line string) []protocol.DaemonEvent {
+			t.Helper()
+			events, err := p.Parse(line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return events
+		}
+		parse(`{"type":"session_meta","payload":{"id":"codex-limit-session"}}`)
+		parse(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"codex-limit-turn"}}`)
+		return parse(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"codex-limit-turn","error":{"message":"You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.","codex_error_info":"usage_limit_exceeded","additionalDetails":"private diagnostic"}}}`)
+	}
+
+	first := parseRun()
+	if len(first) != 3 || first[0].Type != protocol.EventTypeTurnStatus || first[0].TurnStatus != protocol.TurnStateFailed ||
+		first[0].TurnReason != "task_complete_error" || first[1].Type != "error" || first[2].Status != protocol.StatusIdle {
+		t.Fatalf("usage-limit completion = %+v", first)
+	}
+	wantTurnID := turn.LogicalTurnID(AgentCodex, "codex-limit-session", "", "native", "codex-limit-turn")
+	errorEvent := first[1]
+	if errorEvent.Code != CodexUsageLimitExceededCode || !strings.Contains(errorEvent.Error, "You've hit your usage limit") ||
+		strings.Contains(errorEvent.Error, "private diagnostic") || errorEvent.Retryable == nil || *errorEvent.Retryable ||
+		errorEvent.SessionID != "codex-limit-session" || errorEvent.TurnID != wantTurnID || errorEvent.SourceTurnID != "codex-limit-turn" ||
+		errorEvent.TurnOrigin != protocol.TurnOriginNative || errorEvent.TurnConfidence != protocol.TurnConfidenceNative || errorEvent.EventID == "" {
+		t.Fatalf("usage-limit error = %+v", errorEvent)
+	}
+	second := parseRun()
+	if second[1].EventID != errorEvent.EventID {
+		t.Fatalf("event id is not stable: %q != %q", second[1].EventID, errorEvent.EventID)
+	}
+}
+
+func TestCodexJSONLParser_UnknownFailureStaysGeneric(t *testing.T) {
+	p := NewCodexJSONLParser()
+	parse := func(line string) []protocol.DaemonEvent {
+		t.Helper()
+		events, err := p.Parse(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return events
+	}
+	parse(`{"type":"session_meta","payload":{"id":"codex-generic-session"}}`)
+	parse(`{"type":"event_msg","payload":{"type":"task_started","turn_id":"codex-generic-turn"}}`)
+	events := parse(`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"codex-generic-turn","error":{"message":"provider body must not cross boundary","codex_error_info":"other"}}}`)
+	if len(events) != 3 || events[0].TurnStatus != protocol.TurnStateFailed || events[1].Code != CodexTurnFailedCode ||
+		events[1].Error != CodexTurnFailedMessage || events[2].Status != protocol.StatusIdle {
+		t.Fatalf("generic failure = %+v", events)
+	}
+}
+
 func TestCodexJSONLParser_IdlessCompletionDoesNotPoisonFollowingTurn(t *testing.T) {
 	p := NewCodexJSONLParser()
 	parse := func(line string) []protocol.DaemonEvent {

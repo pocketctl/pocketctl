@@ -131,6 +131,18 @@ describe('daemon event ingress policy', () => {
       .not.toBe(buildDedupKey('daemon-1', 7, first.seq, first));
   });
 
+  test('typed Codex usage-limit errors converge across daemon generations', () => {
+    const first = {
+      type: 'error', session_id: 'session-1', turn_id: 'turn:v1:codex:abc',
+      event_id: 'codex:error:stable', code: 'codex_usage_limit_exceeded',
+      error: "You've hit your usage limit.", retryable: false, seq: 11,
+    };
+    const replay = { ...first, seq: 27 };
+    expect(classifyDaemonEvent(first)).toEqual({ durable: true, priority: 'live' });
+    expect(buildDedupKey('daemon-1', 7, first.seq, first))
+      .toBe(buildDedupKey('daemon-1', 8, replay.seq, replay));
+  });
+
   test('typed interrupt-pending receipt passes through with reason and retryable', () => {
     const before = structuredClone(turnInterruptPendingReceipt);
     const policy = classifyDaemonEvent(turnInterruptPendingReceipt);

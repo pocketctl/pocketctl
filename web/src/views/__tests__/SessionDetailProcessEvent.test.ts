@@ -1516,6 +1516,31 @@ describe('SessionDetail processEvent integration', () => {
     expect(errors[0]).toMatchObject({ content: event.error, eventKey: event.event_id })
   })
 
+  test('shows the complete typed Codex usage-limit error once across live and replay', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const event = {
+      type: 'error', session_id: 'ses_1', event_id: 'codex:error:usage-limit',
+      turn_id: 'turn:v1:codex:limit', source_turn_id: 'native-limit',
+      code: 'codex_usage_limit_exceeded', retryable: false,
+      error: "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 8:37 PM.",
+    }
+
+    vm.processEvent(event)
+    vm.processEvent({ type: 'replay_batch', session_id: 'ses_1', events: [event] })
+
+    const errors = vm.messages.filter((message: any) => message.type === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({
+      content: event.error,
+      error: event.error,
+      code: 'codex_usage_limit_exceeded',
+      eventKey: event.event_id,
+      turn_id: event.turn_id,
+      source_turn_id: event.source_turn_id,
+    })
+  })
+
   test('preserves Codex approval decisions and redacted user-input metadata', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
