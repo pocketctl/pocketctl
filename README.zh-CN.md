@@ -162,6 +162,7 @@ Memory 把 Agent 对仓库的了解沉淀为经过评审的持久知识，而不
 | `pocketctl daemon start [--prod]` | 启动 Daemon 并发现本地 Agent。 |
 | `pocketctl daemon status` | 查看 Daemon、Relay 和已发现 Agent 的状态。 |
 | `pocketctl daemon doctor` | 诊断配置和连接问题。 |
+| `pocketctl daemon diagnose <会话ID>` | 检查单个会话是否已代理，并输出原因和恢复建议。 |
 | `pocketctl daemon logs` | 定位或跟踪 Daemon 日志。 |
 | `pocketctl daemon update [--version TAG]` | 下载并校验已发布的更新。 |
 | `pocketctl agent <agent> status` | 查看 Launcher、能力和 Runtime 状态。 |

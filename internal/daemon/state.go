@@ -47,6 +47,9 @@ var daemonStateWriteMu sync.Mutex
 type SessionState struct {
 	SessionID      string    `json:"session_id"`
 	Agent          string    `json:"agent"`
+	Source         string    `json:"source,omitempty"`
+	ControlMode    string    `json:"control_mode,omitempty"`
+	Capabilities   []string  `json:"capabilities,omitempty"`
 	Cwd            string    `json:"cwd"`
 	Status         string    `json:"status"`
 	StartedAt      time.Time `json:"started_at"`

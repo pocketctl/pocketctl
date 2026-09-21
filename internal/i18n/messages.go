@@ -32,6 +32,7 @@ Commands:
   daemon status  Show daemon status and 10 recent sessions [--limit N | --all | --pager]
   daemon logs    Show daemon logs
   daemon doctor  Diagnose connection and configuration issues
+  daemon diagnose <session-id>  Diagnose whether a session is remotely controlled
   daemon update  Update daemon to the latest version
   daemon service Install/remove a native auto-restart service (launchd/systemd)
   daemon keep-awake on|off|status   Prevent system sleep while agents run (auto-disables on battery)
@@ -164,6 +165,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   daemon status  查看 daemon 状态及最近 10 个会话 [--limit N | --all | --pager]
   daemon logs    查看 daemon 日志
   daemon doctor  诊断连接和配置问题
+  daemon diagnose <会话ID>  诊断会话是否已代理及远程控制状态
   daemon update  更新到最新版本
   daemon service 安装/卸载原生自动重启服务（launchd/systemd）
   daemon keep-awake on|off|status   阻止系统休眠（电池供电时自动关闭）
@@ -436,8 +438,8 @@ var messages = map[string]msg{
 		"Daemon 运行中 (PID %d)，状态不可用",
 	},
 	"daemon.usage_sub": {
-		"usage: pocketctl daemon <start|stop|status|logs|doctor|update|service|keep-awake>",
-		"用法: pocketctl daemon <start|stop|status|logs|doctor|update|service|keep-awake>",
+		"usage: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake>",
+		"用法: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake>",
 	},
 	"daemon.unknown_sub":     {"unknown daemon subcommand: %s", "未知的 daemon 子命令: %s"},
 	"daemon.already_running": {"daemon already running (PID %d)", "守护进程已在运行 (PID %d)"},
@@ -548,6 +550,68 @@ var messages = map[string]msg{
 	"status.sessions":           {"\nSessions (%d):", "\n会话 (%d):"},
 	"status.sessions_truncated": {"  Showing %d of %d sessions; use pocketctl daemon status --pager to browse all.", "  显示 %d / %d 个会话；使用 pocketctl daemon status --pager 浏览全部。"},
 	"status.session_row":        {"  %s  %-10s  %s", "  %s  %-10s  %s"},
+
+	// ---- diagnose.* (single-session proxy/control diagnosis) ------------
+	"diagnose.usage": {"usage: pocketctl daemon diagnose <session-id>", "用法: pocketctl daemon diagnose <会话ID>"},
+	"diagnose.help": {`Diagnose whether a session is proxied and remotely controllable.
+
+Usage:
+  pocketctl daemon diagnose <session-id>
+
+Reports:
+  - whether the session is owned by Pocketctl's managed control path
+  - whether the daemon-to-Relay remote link is available
+  - why a session is read-only or was not proxied
+  - an Agent-specific recovery suggestion
+
+Examples:
+  pocketctl daemon status --all
+  pocketctl daemon diagnose thr_1234567890`, `诊断会话是否已代理并可被远程控制。
+
+用法:
+  pocketctl daemon diagnose <会话ID>
+
+诊断内容:
+  - 会话是否由 Pocketctl 托管控制链路持有
+  - daemon 到 Relay 的远程链路是否可用
+  - 会话只读或未被代理的原因
+  - 针对具体 Agent 的恢复建议
+
+示例:
+  pocketctl daemon status --all
+  pocketctl daemon diagnose thr_1234567890`},
+	"diagnose.title":                    {"Session diagnosis", "会话诊断"},
+	"diagnose.session":                  {"Session: %s", "会话: %s"},
+	"diagnose.agent":                    {"Agent: %s", "Agent: %s"},
+	"diagnose.status":                   {"Status: %s", "状态: %s"},
+	"diagnose.proxy":                    {"Proxied: %s", "已代理: %s"},
+	"diagnose.relay":                    {"Remote link: %s", "远程链路: %s"},
+	"diagnose.yes":                      {"yes", "是"},
+	"diagnose.no":                       {"no", "否"},
+	"diagnose.unknown":                  {"unknown", "无法确认"},
+	"diagnose.relay_connected":          {"available", "可用"},
+	"diagnose.relay_disconnected":       {"unavailable (daemon is not connected to Relay)", "不可用（daemon 未连接 Relay）"},
+	"diagnose.reason":                   {"Reason: %s", "原因: %s"},
+	"diagnose.suggestion":               {"Suggested fix:", "建议处理:"},
+	"diagnose.reason_managed":           {"the session is owned by Pocketctl's managed runtime", "会话由 Pocketctl 托管运行时持有"},
+	"diagnose.reason_claude":            {"the Claude session is registered with Pocketctl's terminal control path", "Claude 会话已注册到 Pocketctl 终端控制链路"},
+	"diagnose.reason_unmanaged_active":  {"a native Agent process was already active, so Pocketctl did not hot-adopt it to avoid conflicting controllers", "检测到已在运行的原生 Agent 进程；为避免双重控制，Pocketctl 未热接管该会话"},
+	"diagnose.reason_read_only":         {"the session was discovered as history/read-only and is not owned by a managed runtime", "该会话以历史/只读方式被发现，不属于托管运行时"},
+	"diagnose.reason_codex_desktop":     {"Codex Desktop sessions are read-only observers by design", "Codex Desktop 会话按设计仅支持只读观察"},
+	"diagnose.reason_zcode_observer":    {"synced ZCode sessions are read-only observers by design", "同步的 ZCode 会话按设计仅支持只读观察"},
+	"diagnose.reason_metadata":          {"the running daemon did not publish enough control metadata; it may be an older daemon process", "当前 daemon 未发布足够的控制元数据，可能仍是旧版本进程"},
+	"diagnose.reason_not_found":         {"the current daemon has not discovered this exact session ID", "当前 daemon 未发现这个精确的会话 ID"},
+	"diagnose.reason_not_running":       {"the daemon is not running, so live proxy ownership cannot be inspected", "daemon 未运行，无法检查当前代理归属"},
+	"diagnose.reason_state_unavailable": {"the daemon state is unavailable: %s", "无法读取 daemon 状态: %s"},
+	"diagnose.reason_state_uncertain":   {"the daemon process identity could not be verified: %s", "无法验证 daemon 进程身份: %s"},
+	"diagnose.fix_relay":                {"Restore the daemon connection first; run `pocketctl daemon doctor` and inspect `pocketctl daemon logs`.", "先恢复 daemon 连接；运行 `pocketctl daemon doctor`，并检查 `pocketctl daemon logs`。"},
+	"diagnose.fix_opencode":             {"Exit the active OpenCode process, run `pocketctl agent opencode enable`, then resume with `opencode -s %s` (without `--native`).", "退出当前 OpenCode 进程，运行 `pocketctl agent opencode enable`，再用 `opencode -s %s` 恢复（不要加 `--native`）。"},
+	"diagnose.fix_codex":                {"Exit the active Codex process, run `pocketctl agent codex enable`, then resume with `codex resume %s` (without `--native`).", "退出当前 Codex 进程，运行 `pocketctl agent codex enable`，再用 `codex resume %s` 恢复（不要加 `--native`）。"},
+	"diagnose.fix_claude":               {"Run `pocketctl agent claude-code enable`, then start or resume through the normal `claude` command (not `claude --native`).", "运行 `pocketctl agent claude-code enable`，再通过普通 `claude` 命令启动或恢复会话（不要使用 `claude --native`）。"},
+	"diagnose.fix_observer":             {"This observer session cannot accept remote input; create or resume a CLI-managed session instead.", "该观察会话不能接收远程输入；请改为创建或恢复由 CLI 托管的会话。"},
+	"diagnose.fix_restart":              {"Restart the daemon with the current Pocketctl binary, then run this diagnosis again.", "使用当前 Pocketctl 二进制重启 daemon，然后再次执行诊断。"},
+	"diagnose.fix_not_found":            {"Check the full session ID and host with `pocketctl daemon status --all`; then enable the matching Agent launcher and resume the session without `--native`.", "用 `pocketctl daemon status --all` 核对完整会话 ID 和所在主机；再启用对应 Agent launcher，并在不使用 `--native` 的情况下恢复会话。"},
+	"diagnose.fix_start":                {"Start the daemon with `pocketctl daemon start`, then resume the session through the managed Agent launcher.", "先运行 `pocketctl daemon start`，再通过托管 Agent launcher 恢复会话。"},
 
 	// ---- error.* (stderr) ------------------------------------------------
 	"error.generic":         {"error: %v", "错误: %v"},

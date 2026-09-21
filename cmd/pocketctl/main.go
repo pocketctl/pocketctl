@@ -241,6 +241,8 @@ func cmdDaemon(args []string) {
 		cmdDaemonLogs()
 	case "doctor":
 		cmdDoctor()
+	case "diagnose":
+		cmdDaemonDiagnose(args[1:])
 	case "update":
 		cmdDaemonUpdate(args[1:])
 	case "service":
@@ -2062,9 +2064,10 @@ func cmdDaemonStart(args []string) {
 		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker, memoryContextGrants)
 	})
 
-	// Periodic state update. Durable-ingress diagnostics are refreshed on this
-	// bounded cadence because normal ACKs do not necessarily change connection
-	// status or session state.
+	// Periodic state update. Always refresh the session snapshot as well as
+	// durable-ingress diagnostics: control ownership can change through a local
+	// Agent launcher without a Relay command, and `daemon diagnose` must observe
+	// that transition within this bounded cadence.
 	daemon.RunLoop(ctx, "state-persist", logger, func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -2073,24 +2076,8 @@ func cmdDaemonStart(args []string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !stateDirty.Swap(false) {
-					if err := statePersistence.refreshDiagnostics(client.DurableIngressDiagnostics()); err != nil {
-						logger.Error("write daemon ingress diagnostics", "error", err)
-					}
-					continue
-				}
-				sessions := sm.ListSessions()
-				stateSessions := make([]daemon.SessionState, len(sessions))
-				for i, s := range sessions {
-					stateSessions[i] = daemon.SessionState{
-						SessionID:      s.SessionID,
-						Agent:          s.Agent,
-						Cwd:            s.Cwd,
-						Status:         s.Status,
-						StartedAt:      s.StartedAt,
-						LastActivityAt: s.LastActivityAt,
-					}
-				}
+				stateDirty.Swap(false)
+				stateSessions := daemonSessionStates(sm.ListSessions())
 				if err := statePersistence.updateSessionsWithDiagnostics(stateSessions, client.DurableIngressDiagnostics()); err != nil {
 					logger.Error("write daemon session state", "error", err)
 				}
@@ -2849,6 +2836,24 @@ type daemonStatePersistence struct {
 func newDaemonStatePersistence(initial daemon.DaemonState) *daemonStatePersistence {
 	initial.Sessions = append([]daemon.SessionState(nil), initial.Sessions...)
 	return &daemonStatePersistence{state: initial}
+}
+
+func daemonSessionStates(sessions []session.SessionInfo) []daemon.SessionState {
+	states := make([]daemon.SessionState, len(sessions))
+	for i, current := range sessions {
+		states[i] = daemon.SessionState{
+			SessionID:      current.SessionID,
+			Agent:          current.Agent,
+			Source:         current.Source,
+			ControlMode:    current.ControlMode,
+			Capabilities:   append([]string(nil), current.Capabilities...),
+			Cwd:            current.Cwd,
+			Status:         current.Status,
+			StartedAt:      current.StartedAt,
+			LastActivityAt: current.LastActivityAt,
+		}
+	}
+	return states
 }
 
 func persistInitialDaemonStateAndContinue(

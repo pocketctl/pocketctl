@@ -175,6 +175,7 @@ what leaves the development host.
 | `pocketctl daemon start [--prod]` | Start the daemon and discover local agents. |
 | `pocketctl daemon status` | Show daemon, Relay, and discovered-agent status. |
 | `pocketctl daemon doctor` | Diagnose configuration and connection problems. |
+| `pocketctl daemon diagnose <session-id>` | Check whether one session is proxied and print a reason and recovery advice. |
 | `pocketctl daemon logs` | Locate or follow daemon logs. |
 | `pocketctl daemon update [--version TAG]` | Download and verify a published update. |
 | `pocketctl agent <agent> status` | Inspect launcher, capability, and runtime state. |
