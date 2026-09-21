@@ -369,6 +369,7 @@ async function main(): Promise<void> {
       ? withTextProviderBudget(rawTextGenerator, providerBudgetStore, {
           key: config.providerBudget.key,
           maxRequests: config.providerBudget.textMaxRequests,
+          window: config.providerBudget.textWindow,
           maxInputTokens: config.providerBudget.textMaxInputTokens,
           maxOutputTokens: config.providerBudget.textMaxOutputTokens,
           maxOutputTokensPerRequest: config.providerBudget.textMaxOutputTokensPerRequest,

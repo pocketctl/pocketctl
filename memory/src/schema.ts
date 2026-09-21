@@ -2057,6 +2057,14 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   GIT_LIFECYCLE_MIGRATION,
   GIT_METRICS_MIGRATION,
   GIT_OBSERVABILITY_MIGRATION,
+  {
+    // Keep each day's provider budget check bounded as the reservation ledger grows.
+    version: 47,
+    statements: [
+      `CREATE INDEX IF NOT EXISTS memory_provider_budget_reservations_daily_idx
+         ON memory_provider_budget_reservations (budget_key, provider_kind, created_at)`,
+    ],
+  },
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

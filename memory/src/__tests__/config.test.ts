@@ -134,6 +134,7 @@ describe('memory config', () => {
     expect(loadMemoryConfig(baseEnv(budget)).providerBudget).toEqual({
       key: 'phase3-pilot-b',
       textMaxRequests: 8,
+      textWindow: 'lifetime',
       textMaxInputTokens: 100000,
       textMaxOutputTokens: 50000,
       textMaxOutputTokensPerRequest: 4096,
@@ -144,6 +145,10 @@ describe('memory config', () => {
       .toThrow(/MEMORY_TEXT_BUDGET_MAX_REQUESTS/)
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_TEXT_BUDGET_MAX_REQUESTS: '8' })))
       .toThrow(/MEMORY_PROVIDER_BUDGET_KEY/)
+    expect(loadMemoryConfig(baseEnv({ ...budget, MEMORY_TEXT_BUDGET_WINDOW: 'daily-asia-shanghai' }))
+      .providerBudget?.textWindow).toBe('daily-asia-shanghai')
+    expect(() => loadMemoryConfig(baseEnv({ ...budget, MEMORY_TEXT_BUDGET_WINDOW: 'daily' })))
+      .toThrow(/MEMORY_TEXT_BUDGET_WINDOW/)
   })
 
   test('bounds the worker id to 64 characters', () => {

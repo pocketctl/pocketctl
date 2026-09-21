@@ -44,4 +44,26 @@ describeWithDatabase('provider budget reservations (PostgreSQL)', () => {
       maxRequests: 1, maxInputTokens: 100, maxOutputTokens: 100,
     })).resolves.toEqual({ ok: false, dimension: 'text_requests' })
   })
+
+  test('Shanghai daily text cap ignores yesterday and fences concurrent requests today', async () => {
+    const key = 'daily-shanghai-test'
+    await pool.query(`
+      INSERT INTO memory_provider_budget_reservations
+        (reservation_id, budget_key, provider_kind, reserved_input_tokens, reserved_output_tokens, created_at)
+      VALUES (gen_random_uuid(), $1, 'text', 10, 5,
+        (date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') - interval '1 second') AT TIME ZONE 'Asia/Shanghai')
+    `, [key])
+    const store = createProviderBudgetStore(pool)
+    const reserve = () => store.reserve({
+      key, kind: 'text', window: 'daily-asia-shanghai',
+      inputTokens: 10, outputTokens: 5,
+      maxRequests: 2, maxInputTokens: 20, maxOutputTokens: 10,
+    })
+    const results = await Promise.all(Array.from({ length: 4 }, reserve))
+    expect(results.filter(result => result.ok)).toHaveLength(2)
+    expect(results.filter(result => !result.ok)).toHaveLength(2)
+    expect(await reserve()).toEqual({ ok: false, dimension: 'text_requests' })
+    expect((await pool.query(`SELECT count(*)::int AS count FROM memory_provider_budget_reservations
+      WHERE budget_key = $1`, [key])).rows[0].count).toBe(3)
+  })
 })
