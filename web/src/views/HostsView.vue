@@ -915,6 +915,7 @@ onUnmounted(() => {
 .agent-card .ag-icon.codex { background: rgba(63,185,80,0.15); color: var(--success); }
 .agent-card .ag-icon.codex-desktop { background: rgba(63,185,80,0.22); color: var(--success); box-shadow: inset 0 0 0 1px rgba(63,185,80,0.2); }
 .agent-card .ag-icon.zcode { background: rgba(20,184,166,0.15); color: #14b8a6; }
+.agent-card .ag-icon.zcode-managed { background: rgba(20,184,166,0.22); color: #0d9488; box-shadow: inset 0 0 0 1px rgba(20,184,166,0.2); }
 .agent-card .ag-info { flex: 1; min-width: 0; }
 .agent-card .ag-name { font-size: 14px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agent-card .ag-version { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); display: inline-flex; align-items: center; gap: 4px; }

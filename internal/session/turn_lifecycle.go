@@ -105,7 +105,7 @@ func (sm *SessionManager) executionAgent(sessionID string) (string, error) {
 		return "", fmt.Errorf("%w: session %s", ErrSessionExecutionIdentityUnavailable, sessionID)
 	}
 	switch agent {
-	case adapter.AgentClaude, adapter.AgentCodex, adapter.AgentOpencode:
+	case adapter.AgentClaude, adapter.AgentCodex, adapter.AgentOpencode, adapter.AgentZcodeManaged:
 		return agent, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported agent %q", ErrSessionExecutionIdentityUnavailable, agent)

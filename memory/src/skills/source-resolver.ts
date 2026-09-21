@@ -22,7 +22,7 @@ export const SkillSourceRequestSchema = z.discriminatedUnion('kind', [
 export type SkillSourceRequest = z.infer<typeof SkillSourceRequestSchema>
 export interface SkillSourcePacket {
   token: string; handle: string; excerpt: string; excerptHash: string
-  kind: 'episode' | 'event' | 'artifact'
+  kind: 'episode' | 'event' | 'artifact' | 'accepted_excerpt'
   eventId: string | null; artifactId: string | null; evidenceId: string | null
 }
 export interface ResolvedSkillInput {
@@ -156,20 +156,39 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
     if (!row || (row.repository_id ? row.repository_id !== repositoryId
       : row.scope_kind !== 'repository' || ![repositoryId, row.repository_key].includes(row.scope_key))
       || (row.repo_snapshot_id && row.repo_snapshot_id !== repoSnapshotId)) throw new SkillWorkError('skill_claim_scope_invalid')
+    const capsuleSchema = await client.query<{ available: boolean }>(`
+      SELECT to_regclass('knowledge_evidence_capsules') IS NOT NULL AS available
+    `)
     const evidence = await client.query<{
-      evidence_id: string; evidence_kind: 'event' | 'artifact' | 'episode'; excerpt: string
-      excerpt_hash: Buffer; source_event_id: string | null; artifact_id: string | null; session_id: string
-    }>(`SELECT k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
-      FROM knowledge_evidence k JOIN work_episodes e USING(installation_id,episode_id)
-      LEFT JOIN source_sessions s USING(installation_id,session_id)
-      WHERE k.installation_id=$1 AND k.version_id=$2 AND k.visibility=$3
-        AND ($3='shared' OR (s.session_id IS NOT NULL AND s.deleted_at IS NULL))
-        AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=k.installation_id AND t.session_id=e.session_id)
-      ORDER BY k.ordinal FOR SHARE OF k,e`,
+      evidence_id: string; evidence_kind: 'event' | 'artifact' | 'episode' | 'accepted_excerpt'; excerpt: string
+      excerpt_hash: Buffer; source_event_id: string | null; artifact_id: string | null; session_id: string | null
+    }>(capsuleSchema.rows[0]?.available
+      ? `SELECT k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
+        FROM knowledge_evidence k
+        LEFT JOIN work_episodes e USING(installation_id,episode_id)
+        LEFT JOIN source_sessions s USING(installation_id,session_id)
+        LEFT JOIN knowledge_evidence_capsules capsule
+          ON capsule.installation_id=k.installation_id AND capsule.capsule_id=k.capsule_id
+        WHERE k.installation_id=$1 AND k.version_id=$2 AND k.visibility=$3
+          AND ((k.evidence_kind='accepted_excerpt' AND capsule.version_id=k.version_id
+                AND capsule.retention_basis='user_accepted')
+            OR (k.evidence_kind<>'accepted_excerpt'
+                AND ($3='shared' OR (s.session_id IS NOT NULL AND s.deleted_at IS NULL))
+                AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t
+                  WHERE t.installation_id=k.installation_id AND t.session_id=e.session_id)))
+        ORDER BY k.ordinal FOR SHARE OF k`
+      : `SELECT k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
+        FROM knowledge_evidence k JOIN work_episodes e USING(installation_id,episode_id)
+        LEFT JOIN source_sessions s USING(installation_id,session_id)
+        WHERE k.installation_id=$1 AND k.version_id=$2 AND k.visibility=$3
+          AND ($3='shared' OR (s.session_id IS NOT NULL AND s.deleted_at IS NULL))
+          AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t
+            WHERE t.installation_id=k.installation_id AND t.session_id=e.session_id)
+        ORDER BY k.ordinal FOR SHARE OF k,e`,
     [input.installationId, versionId, binding.owner_scope_kind === 'personal' ? 'personal' : 'shared'])
     if (!evidence.rows.length || evidence.rows.length > 64) throw new SkillWorkError('skill_evidence_invalid')
     packets = evidence.rows.map((e, index) => {
-      if (!sessionIds.includes(e.session_id)) throw new SkillWorkError('skill_source_invalid')
+      if (e.session_id && !sessionIds.includes(e.session_id)) throw new SkillWorkError('skill_source_invalid')
       const hash = createHash('sha256').update(e.excerpt).digest('hex')
       if (hash !== e.excerpt_hash.toString('hex')) throw new SkillWorkError('skill_evidence_invalid')
       return { token: `source-${index + 1}`, handle: `claim:${e.evidence_id}`, excerpt: e.excerpt,

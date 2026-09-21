@@ -44,6 +44,31 @@ func TestAgentTypeToCLIRejectsEveryNonCLIProvider(t *testing.T) {
 	}
 }
 
+func TestZcodeDesktopCandidatePathsAreDarwinOnly(t *testing.T) {
+	got := zcodeDesktopCandidatePaths("darwin", "/Users/tester")
+	want := []string{
+		"/Users/tester/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+		"/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("zcode desktop candidates = %#v, want %#v", got, want)
+	}
+	if got := zcodeDesktopCandidatePaths("linux", "/home/tester"); len(got) != 0 {
+		t.Fatalf("linux desktop candidates = %#v, want none", got)
+	}
+}
+
+func TestCandidatePathsAddsZcodeDesktopAfterNormalCLIPaths(t *testing.T) {
+	got := candidatePaths("zcode", "/Users/tester", "/custom/bin", "")
+	if len(got) < 2 {
+		t.Fatalf("candidate paths = %#v", got)
+	}
+	wantLast := "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+	if runtime.GOOS == "darwin" && got[len(got)-1] != wantLast {
+		t.Fatalf("last candidate = %q, want Desktop fallback %q", got[len(got)-1], wantLast)
+	}
+}
+
 func TestCandidatePaths_UserLocalFirstAndDedup(t *testing.T) {
 	home := "/home/u"
 	// PATH 用平台分隔符(Unix ':' Windows ';'),否则 filepath.SplitList 在 Windows

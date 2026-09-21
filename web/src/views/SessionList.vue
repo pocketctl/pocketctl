@@ -178,7 +178,7 @@
       <div class="mobile-sheet-grab" aria-hidden="true"></div>
       <h2 id="mobile-delete-title" class="mobile-sheet-title">删除会话</h2>
       <p class="mobile-sheet-desc">「{{ pendingDeleteSession.title || pendingDeleteSession.session_id.slice(0, 8) }}」</p>
-      <p class="mobile-sheet-desc">删除后将无法恢复该会话的历史记录,确定删除?</p>
+      <p class="mobile-sheet-desc">将删除消息、工具调用和未审核候选内容。已接受并入库的 Memory 内容会保留并继续用于检索和后续处理，可在 Memory 中单独永久删除。确定删除？</p>
       <div class="mobile-sheet-row">
         <button type="button" class="mobile-sheet-btn" @click="pendingDeleteSession = null">取消</button>
         <button type="button" class="mobile-sheet-btn danger" @click="confirmMobileDelete">删除</button>

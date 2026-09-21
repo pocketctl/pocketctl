@@ -66,7 +66,7 @@ describe('NewSessionDialog permission serialization', () => {
     })
 
     const agentButtons = wrapper.findAll('button.agent-pill')
-    expect(agentButtons.map(button => button.text())).toEqual(['Claude Code', 'Codex CLI', 'OpenCode'])
+    expect(agentButtons.map(button => button.text())).toEqual(['Claude Code', 'Codex CLI', 'OpenCode', 'ZCode Runtime'])
     expect(wrapper.text()).not.toContain('Codex Desktop')
 
     await agentButtons[1].trigger('click')
@@ -167,6 +167,23 @@ describe('NewSessionDialog permission serialization', () => {
     expect(JSON.parse(JSON.stringify(opencodeCreateMessage))).not.toHaveProperty('permission')
     expect(opencodeCreateMessage.model).toBe('opencode/deepseek-v4-flash-free')
 
+    wrapper.unmount()
+  })
+
+  test('creates managed ZCode with its dedicated wire identity and no forged permission', async () => {
+    const wrapper = mount(NewSessionDialog, {
+      props: { daemons: [{ daemon_id: 'daemon-1', daemon_online: true, hostname: 'host' }] },
+    })
+    const zcode = wrapper.findAll('button.agent-pill').find(button => button.text() === 'ZCode Runtime')
+    expect(zcode).toBeDefined()
+    await zcode!.trigger('click')
+    expect((wrapper.vm as any).form.agent).toBe('zcode-managed')
+    expect(wrapper.find('.permission-field').exists()).toBe(false)
+    await wrapper.find('button.btn-start').trigger('click')
+    const create = ws.send.mock.calls.map(([message]) => message)
+      .find(message => message.type === 'session_create' && message.agent === 'zcode-managed')
+    expect(create).toBeDefined()
+    expect(JSON.parse(JSON.stringify(create))).not.toHaveProperty('permission')
     wrapper.unmount()
   })
 })

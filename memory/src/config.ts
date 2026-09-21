@@ -41,6 +41,7 @@ export interface TombstoneHmacKey {
 export interface ProviderBudgetSettings {
   key: string
   textMaxRequests: number
+  textWindow: 'lifetime' | 'daily-asia-shanghai'
   textMaxInputTokens: number
   textMaxOutputTokens: number
   textMaxOutputTokensPerRequest: number
@@ -180,9 +181,14 @@ function parseProviderBudget(env: Record<string, string | undefined>): ProviderB
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(key)) {
     throw new ConfigError('MEMORY_PROVIDER_BUDGET_KEY must be a bounded identifier')
   }
+  const textWindow = env.MEMORY_TEXT_BUDGET_WINDOW || 'lifetime'
+  if (textWindow !== 'lifetime' && textWindow !== 'daily-asia-shanghai') {
+    throw new ConfigError('MEMORY_TEXT_BUDGET_WINDOW must be lifetime or daily-asia-shanghai')
+  }
   return {
     key,
     textMaxRequests: parseBoundedInteger('MEMORY_TEXT_BUDGET_MAX_REQUESTS', env.MEMORY_TEXT_BUDGET_MAX_REQUESTS, 0, 0, 1_000_000),
+    textWindow,
     textMaxInputTokens: parseBoundedInteger('MEMORY_TEXT_BUDGET_MAX_INPUT_TOKENS', env.MEMORY_TEXT_BUDGET_MAX_INPUT_TOKENS, 0, 0, 1_000_000_000),
     textMaxOutputTokens: parseBoundedInteger('MEMORY_TEXT_BUDGET_MAX_OUTPUT_TOKENS', env.MEMORY_TEXT_BUDGET_MAX_OUTPUT_TOKENS, 0, 0, 1_000_000_000),
     textMaxOutputTokensPerRequest: parseBoundedInteger('MEMORY_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST', env.MEMORY_TEXT_MAX_OUTPUT_TOKENS_PER_REQUEST, 0, 1, 1_000_000),

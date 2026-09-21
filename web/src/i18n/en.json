@@ -347,7 +347,7 @@
   "session.export_text": "Plain text",
   "session.export_confirm": "Export & Download",
   "session.delete_dialog_title": "Delete session?",
-  "session.delete_dialog_desc": "This will delete the session and all its messages and tool call records. You can undo within 5 seconds.",
+  "session.delete_dialog_desc": "This deletes the session's messages, tool calls, and unreviewed candidates. Accepted Memory content remains available for retrieval and downstream processing, and can be permanently deleted separately in Memory. You can undo within 5 seconds.",
   "session.title_default": "Session",
   "session.ago_seconds": "{{n}}s ago",
   "session.ago_minutes": "{{n}}m ago",

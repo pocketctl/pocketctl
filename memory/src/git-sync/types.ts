@@ -211,6 +211,7 @@ export const DOMAIN_FIELD_MAPPING = {
     evidence_id: 'immutable.evidence[].evidenceId', installation_id: 'immutable.installationId', version_id: 'immutable.evidence[].versionId',
     evidence_kind: 'immutable.evidence[].kind', excerpt_hash: 'immutable.evidence[].hash', ordinal: 'immutable.evidence[].ordinal',
     visibility: 'immutable.evidence[].visibility', episode_id: 'serverOnly.evidence[].episodeId',
+    capsule_id: 'serverOnly.evidence[].capsuleId',
     source_event_id: 'serverOnly.evidence[].sourceEventId', artifact_id: 'serverOnly.evidence[].artifactId',
     locator: 'serverOnly.evidence[].locator', excerpt: 'serverOnly.evidence[].excerpt',
     occurred_at: 'serverOnly.evidence[].occurredAt', created_at: 'serverOnly.evidence[].createdAt',

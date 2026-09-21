@@ -822,6 +822,23 @@ describe('observer session projection', () => {
     expect(args[12]).toEqual(['history_sync'])
   })
 
+  test('managed ZCode keeps daemon ownership and managed capabilities', async () => {
+    const { upsert, materializer } = materializerFor()
+    const input = inputFor({
+      type: 'session_discovered', session_id: 'zmanaged-1',
+      agent: 'zcode-managed', source: 'daemon', control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    await materializer.materialize(input)
+    const args = upsert.mock.calls.at(-1)!
+    expect(args[3]).toBe('zcode-managed')
+	// Discovery records non-observers as terminal; importantly, it does not
+	// rewrite the managed identity to source=observer/read-only.
+	expect(args[7]).toBe('terminal')
+    expect(args[11]).toBe('managed')
+    expect(args[12]).toEqual(['message_acceptance_receipt'])
+  })
+
   test('codex-desktop cannot forge terminal managed write capabilities during discovery', async () => {
     const { upsert, materializer } = materializerFor()
     await materializer.materialize(inputFor({

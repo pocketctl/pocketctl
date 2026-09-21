@@ -6,6 +6,7 @@ describe('agent permissions', () => {
     expect(defaultPermission('claude-code')).toEqual({ agent: 'claude-code', mode: 'manual' })
     expect(defaultPermission('codex')).toEqual({ agent: 'codex', preset: 'request_approval', approval_policy: 'on-request', sandbox_mode: 'workspace-write' })
     expect(defaultPermission('opencode')).toBeUndefined()
+	 expect(defaultPermission('zcode-managed')).toBeUndefined()
   })
 
   test('expands codex presets without silently enabling blocking approval', () => {

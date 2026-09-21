@@ -1,10 +1,12 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS = -ldflags "-X main.version=$(VERSION)"
+RELEASE_LDFLAGS = -ldflags "-s -w -X main.version=$(VERSION)"
 BINARY = pocketctl
+RELEASE_OUTPUT ?= $(BINARY)
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
-.PHONY: build build-all clean relay web memory dev dev-relay test test-relay-durable-ingress test-relay-extensions test-pocketctl-memory test-pocketctl-memory-integration test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release-preflight release release-dry-run
+.PHONY: build build-release build-all clean relay web memory dev dev-relay test test-relay-durable-ingress test-relay-extensions test-pocketctl-memory test-pocketctl-memory-integration test-opencode-managed test-opencode-managed-release test-codex-managed test-codex-managed-release test-claude-channel-approval release-preflight release release-dry-run
 
 -include .env
 export JWT_SECRET
@@ -17,6 +19,11 @@ export DEV_EMAIL_CODE
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/pocketctl
 	@echo "✅ 构建: $(BINARY) ($(VERSION))"
+
+## 构建正式发布二进制（去除构建机路径、符号表与 DWARF；开发调试继续使用 make build）
+build-release:
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath $(RELEASE_LDFLAGS) -o $(RELEASE_OUTPUT) ./cmd/pocketctl
+	@echo "✅ 发布构建: $(RELEASE_OUTPUT) ($(VERSION), $(GOOS)/$(GOARCH))"
 
 ## 构建 Relay
 relay:
@@ -37,10 +44,10 @@ memory:
 build-all:
 	@echo "构建发布平台（macOS / Linux）..."
 	@mkdir -p dist
-	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o dist/pocketctl_darwin_arm64 ./cmd/pocketctl
-	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_darwin_amd64 ./cmd/pocketctl
-	GOOS=linux  GOARCH=amd64 go build $(LDFLAGS) -o dist/pocketctl_linux_amd64 ./cmd/pocketctl
-	GOOS=linux  GOARCH=arm64 go build $(LDFLAGS) -o dist/pocketctl_linux_arm64 ./cmd/pocketctl
+	@$(MAKE) --no-print-directory build-release GOOS=darwin GOARCH=arm64 RELEASE_OUTPUT=dist/pocketctl_darwin_arm64 VERSION="$(VERSION)"
+	@$(MAKE) --no-print-directory build-release GOOS=darwin GOARCH=amd64 RELEASE_OUTPUT=dist/pocketctl_darwin_amd64 VERSION="$(VERSION)"
+	@$(MAKE) --no-print-directory build-release GOOS=linux GOARCH=amd64 RELEASE_OUTPUT=dist/pocketctl_linux_amd64 VERSION="$(VERSION)"
+	@$(MAKE) --no-print-directory build-release GOOS=linux GOARCH=arm64 RELEASE_OUTPUT=dist/pocketctl_linux_arm64 VERSION="$(VERSION)"
 	@echo "✅ 发布平台构建完成，正在生成 SHA256 校验和..."
 	@cd dist && for f in pocketctl_*; do if [ -f "$$f" ]; then shasum -a 256 "$$f" | awk '{print $$1}' > "$${f}.sha256"; fi; done
 	@echo "✅ SHA256 校验和已生成: dist/*.sha256"
@@ -182,6 +189,7 @@ help:
 	@echo ""
 	@echo "构建:"
 	@echo "  make build       构建 Daemon 二进制"
+	@echo "  make build-release 构建当前平台正式发布二进制（trimpath + stripped）"
 	@echo "  make relay       构建 Relay"
 	@echo "  make web         构建 Web UI"
 	@echo "  make build-all   构建全平台二进制"

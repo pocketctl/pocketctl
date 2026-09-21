@@ -8,7 +8,8 @@ export const AGENT_DISPLAY_NAMES: Record<string, string> = {
   opencode: 'OpenCode',
   codex: 'Codex CLI',
   'codex-desktop': 'Codex Desktop',
-  zcode: 'ZCode',
+  zcode: 'ZCode Desktop',
+  'zcode-managed': 'ZCode Runtime',
 }
 
 export function agentDisplayName(raw: string): string {
@@ -22,6 +23,7 @@ export function agentReplyLabel(raw?: string): string {
     case 'codex-desktop': return 'codex desktop'
     case 'opencode': return 'opencode'
     case 'zcode': return 'zcode'
+    case 'zcode-managed': return 'zcode'
     default: return 'assistant'
   }
 }
@@ -29,15 +31,17 @@ export function agentReplyLabel(raw?: string): string {
 export function agentShortLabel(raw: string): string {
   const n = raw.toLowerCase()
   if (n === 'codex-desktop') return 'CD'
+  if (n === 'zcode-managed') return 'ZR'
+  if (n === 'zcode') return 'ZD'
   if (/codex/.test(n)) return 'Cx'
   if (/opencode/.test(n)) return 'OC'
-  if (/zcode/.test(n)) return 'ZC'
   return 'CC'
 }
 
 export function agentIconClass(raw: string): string {
   const n = raw.toLowerCase()
   if (n === 'codex-desktop') return 'codex-desktop'
+  if (n === 'zcode-managed') return 'zcode-managed'
   if (/codex/.test(n)) return 'codex'
   if (/zcode/.test(n)) return 'zcode'
   return 'claude'

@@ -75,6 +75,21 @@ func TestSessionCapabilitiesAdvertiseTrustedActionPolicyOnlyForManagedCodexAndOp
 	}
 }
 
+func TestManagedZcodeAdvertisesOnlyImplementedControlCapabilities(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	caps := sm.sessionCapabilitiesLocked(&ProcessState{
+		Agent: adapter.AgentZcodeManaged, ControlMode: protocol.ControlManaged,
+	})
+	if len(caps) != 1 || caps[0] != MessageAcceptanceReceiptCapability {
+		t.Fatalf("managed ZCode capabilities = %v", caps)
+	}
+	if caps := sm.sessionCapabilitiesLocked(&ProcessState{
+		Agent: adapter.AgentZcode, ControlMode: protocol.ControlLegacyReadOnly,
+	}); len(caps) != 0 {
+		t.Fatalf("observer ZCode capabilities = %v, want none", caps)
+	}
+}
+
 func testContainsCapability(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

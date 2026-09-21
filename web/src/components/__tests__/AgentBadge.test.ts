@@ -3,11 +3,16 @@ import { mount } from '@vue/test-utils'
 import AgentBadge from '../AgentBadge.vue'
 
 describe('AgentBadge', () => {
-  test('zcode renders ZCode label and kind, not Claude fallback', () => {
-    const w = mount(AgentBadge, { props: { agent: 'zcode' } })
-    expect(w.text()).toContain('ZCode')
-    expect(w.find('.agent-badge.zcode').exists()).toBe(true)
-    expect(w.find('.agent-badge.claude').exists()).toBe(false)
+  test('desktop observer and managed runtime render distinct ZCode badges', () => {
+    const desktop = mount(AgentBadge, { props: { agent: 'zcode' } })
+    const runtime = mount(AgentBadge, { props: { agent: 'zcode-managed' } })
+
+    expect(desktop.text()).toBe('ZCode Desktop')
+    expect(desktop.find('.agent-badge.zcode').exists()).toBe(true)
+    expect(desktop.find('.agent-badge.claude').exists()).toBe(false)
+    expect(runtime.text()).toBe('ZCode Runtime')
+    expect(runtime.find('.agent-badge.zcode-managed').exists()).toBe(true)
+    expect(runtime.find('.agent-badge.zcode').exists()).toBe(false)
   })
 
   test('Codex Desktop renders a distinguishable desktop badge in the Codex family', () => {

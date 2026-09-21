@@ -112,7 +112,7 @@ func ListModelsForAgent(agentType string) []protocol.ModelOption {
 	switch agentType {
 	case adapter.AgentCodex:
 		return listCodexModels()
-	case adapter.AgentOpencode:
+	case adapter.AgentOpencode, adapter.AgentZcodeManaged, adapter.AgentZcode, adapter.AgentCodexDesktop:
 		// opencode models are provider/model and come from its serve API
 		// (GET /api/model); surfacing them through this stateless helper needs a
 		// running server, so it's deferred. Empty = the client shows no picker and

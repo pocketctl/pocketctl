@@ -120,7 +120,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           VERSION=${GITHUB_REF_NAME:-dev}
-          go build -ldflags "-X main.version=$VERSION" -o pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/pocketctl
+          make build-release VERSION="$VERSION" RELEASE_OUTPUT="pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}"
 
       - uses: actions/upload-artifact@v4
         with:

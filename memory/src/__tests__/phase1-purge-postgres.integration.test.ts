@@ -167,6 +167,7 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
       ['knowledge_claims', 'installation_id'],
       ['knowledge_versions', 'installation_id'],
       ['knowledge_evidence', 'installation_id'],
+      ['knowledge_evidence_capsules', 'installation_id'],
       ['claim_search_documents', 'installation_id'],
       ['memory_feedback', 'installation_id'],
       ['memory_idempotency_keys', 'installation_id'],
@@ -183,7 +184,7 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
     return counts
   }
 
-  test('session delete invalidates dependent candidates, claims, index and projections', async () => {
+  test('session delete removes raw projections but preserves accepted knowledge and index', async () => {
     const extractor = extractorWith([{ ok: true, value: VALID_OUTPUT, usage: { inputTokens: 5, outputTokens: 5, model: 'm' } }])
     await extractor.extract({ installationId: INSTALLATION, turnId: 'ses-1-turn', signal: new AbortController().signal })
     const claimId = await acceptCandidateFromRun(INSTALLATION)
@@ -200,11 +201,30 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
 
     const counts = await phase1ContentCounts(INSTALLATION)
     expect(counts.memory_candidates).toBe(0)
-    expect(counts.knowledge_claims).toBe(0)
-    expect(counts.knowledge_versions).toBe(0)
-    expect(counts.knowledge_evidence).toBe(0)
-    expect(counts.claim_search_documents).toBe(0)
+    expect(counts.knowledge_claims).toBe(1)
+    expect(counts.knowledge_versions).toBe(1)
+    expect(counts.knowledge_evidence).toBe(1)
+    expect(counts.claim_search_documents).toBe(1)
     expect(counts.memory_extraction_runs).toBe(0)
+    const retained = await pool.query<{
+      capsule_id: string | null
+      episode_id: string | null
+      source_event_id: string | null
+      artifact_id: string | null
+      evidence_kind: string
+    }>(`
+      SELECT capsule_id::text, episode_id::text, source_event_id::text,
+             artifact_id::text, evidence_kind
+      FROM knowledge_evidence
+      WHERE installation_id = $1
+    `, [INSTALLATION])
+    expect(retained.rows).toEqual([{
+      capsule_id: expect.any(String),
+      episode_id: null,
+      source_event_id: null,
+      artifact_id: null,
+      evidence_kind: 'accepted_excerpt',
+    }])
     // Other installations are untouched.
     expect((await phase1ContentCounts(OTHER)).knowledge_claims).toBe(0)
     const otherEpisodes = await pool.query(
@@ -419,7 +439,7 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
     }
   })
 
-  test('feed replay after a session purge cannot resurrect candidates or claims', async () => {
+  test('feed replay after a session purge cannot duplicate accepted knowledge', async () => {
     const extractor = extractorWith([
       { ok: true, value: VALID_OUTPUT, usage: { inputTokens: 3, outputTokens: 3, model: 'm' } },
       { ok: true, value: VALID_OUTPUT, usage: { inputTokens: 3, outputTokens: 3, model: 'm' } },
@@ -450,7 +470,7 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
       WHERE installation_id = $1 AND statement = $2
       ORDER BY created_at DESC LIMIT 1
     `, [INSTALLATION, purgedStatement.rows[0].statement])
-    expect(replayed.rows[0].status).toBe('rejected_by_validator')
+    expect(replayed.rows[0].status).toBe('duplicate')
     const acceptance = await createClaimRepository(pool).acceptCandidate({
       installationId: INSTALLATION,
       candidateId: replayed.rows[0].candidate_id,
@@ -458,7 +478,7 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
     })
     expect(acceptance).toMatchObject({ ok: false, error: { code: 'candidate_not_reviewable' } })
     const claims = await pool.query(`SELECT COUNT(*)::int AS count FROM knowledge_claims WHERE installation_id = $1`, [INSTALLATION])
-    expect(claims.rows[0].count).toBe(0)
+    expect(claims.rows[0].count).toBe(1)
   })
 
   test('snapshot rebuild never mutates the ledger and drops stale projections', async () => {

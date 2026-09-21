@@ -9,6 +9,7 @@ describe('session agent protocol policy', () => {
     ['claude-code', true],
     ['codex', true],
     ['opencode', true],
+	['zcode-managed', true],
     ['', false],
     ['zcode', false],
     ['codex-desktop', false],
@@ -22,5 +23,10 @@ describe('session agent protocol policy', () => {
   test.each(['zcode', 'codex-desktop'])('keeps observer code for %s', (agent) => {
     expect(isObserverAgentType(agent)).toBe(true)
     expect(isCreateCapableAgentType(agent)).toBe(false)
+  })
+
+  test('keeps managed ZCode distinct from the Desktop observer identity', () => {
+    expect(isCreateCapableAgentType('zcode-managed')).toBe(true)
+    expect(isObserverAgentType('zcode-managed')).toBe(false)
   })
 })

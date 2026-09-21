@@ -21,6 +21,7 @@ export interface ProviderBudgetStore {
     inputTokens: number
     outputTokens: number
     maxRequests: number
+    window?: 'lifetime' | 'daily-asia-shanghai'
     maxInputTokens: number
     maxOutputTokens: number
   }): Promise<ProviderBudgetReservation>
@@ -40,6 +41,15 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
       try {
         await client.query('BEGIN')
         await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [input.key])
+        const reservationTime = (await client.query<{ reserved_at: Date }>(
+          'SELECT clock_timestamp() AS reserved_at',
+        )).rows[0].reserved_at
+        const dayOffsetMs = 8 * 60 * 60 * 1000
+        const dayStart = input.window === 'daily-asia-shanghai'
+          ? new Date(Math.floor((reservationTime.getTime() + dayOffsetMs) / 86_400_000) * 86_400_000 - dayOffsetMs)
+          : null
+        const dayEnd = dayStart ? new Date(dayStart.getTime() + 86_400_000) : null
+        const windowClause = dayStart ? 'AND created_at >= $3 AND created_at < $4' : ''
         const totals = await client.query<{
           requests: string
           input_tokens: string
@@ -50,7 +60,8 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
                  COALESCE(SUM(CASE WHEN state = 'settled' THEN actual_output_tokens ELSE reserved_output_tokens END), 0)::text AS output_tokens
           FROM memory_provider_budget_reservations
           WHERE budget_key = $1 AND provider_kind = $2
-        `, [input.key, input.kind])
+            ${windowClause}
+        `, dayStart ? [input.key, input.kind, dayStart, dayEnd] : [input.key, input.kind])
         const row = totals.rows[0] ?? { requests: '0', input_tokens: '0', output_tokens: '0' }
         const dimensions: Array<[boolean, ProviderBudgetDimension]> = input.kind === 'text'
           ? [
@@ -70,9 +81,9 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
         const reservationId = randomUUID()
         await client.query(`
           INSERT INTO memory_provider_budget_reservations
-            (reservation_id, budget_key, provider_kind, reserved_input_tokens, reserved_output_tokens)
-          VALUES ($1, $2, $3, $4, $5)
-        `, [reservationId, input.key, input.kind, input.inputTokens, input.outputTokens])
+            (reservation_id, budget_key, provider_kind, reserved_input_tokens, reserved_output_tokens, created_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [reservationId, input.key, input.kind, input.inputTokens, input.outputTokens, reservationTime])
         await client.query('COMMIT')
         return { ok: true, reservationId }
       } catch (error) {
@@ -100,6 +111,7 @@ export function withTextProviderBudget(
   limits: {
     key: string
     maxRequests: number
+    window?: 'lifetime' | 'daily-asia-shanghai'
     maxInputTokens: number
     maxOutputTokens: number
     maxOutputTokensPerRequest: number
@@ -121,6 +133,7 @@ export function withTextProviderBudget(
           inputTokens,
           outputTokens: limits.maxOutputTokensPerRequest,
           maxRequests: limits.maxRequests,
+          window: limits.window,
           maxInputTokens: limits.maxInputTokens,
           maxOutputTokens: limits.maxOutputTokens,
         })

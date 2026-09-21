@@ -1,4 +1,4 @@
-export type AgentType = 'claude-code' | 'codex' | 'opencode'
+export type AgentType = 'claude-code' | 'codex' | 'opencode' | 'zcode-managed'
 export type ClaudeMode = 'manual' | 'auto' | 'acceptEdits' | 'dontAsk' | 'plan' | 'bypassPermissions'
 export type CodexPreset = 'request_approval' | 'agent_managed' | 'full_access' | 'custom'
 export type ApprovalPolicy = 'untrusted' | 'on-request' | 'never'

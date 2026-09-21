@@ -13,7 +13,7 @@ export function createEvidenceService(pool: pg.Pool) {
     }): Promise<readonly {
       evidenceId: string
       evidenceKind: string
-      episodeId: string
+      episodeId: string | null
       sourceEventId: string | null
       artifactId: string | null
       excerpt: string
@@ -39,7 +39,7 @@ export function createEvidenceService(pool: pg.Pool) {
       versionId: string
       claimId: string
       evidenceKind: string
-      episodeId: string
+      episodeId: string | null
       excerpt: string
       locator: Record<string, unknown>
       occurredAt: Date

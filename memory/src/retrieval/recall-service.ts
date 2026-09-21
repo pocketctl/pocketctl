@@ -25,7 +25,7 @@ export interface RecallInput {
 export interface RecallEvidence {
   evidenceId: string
   evidenceKind: string
-  episodeId: string
+  episodeId: string | null
   excerpt: string
   occurredAt: Date
   truncated: boolean
@@ -90,7 +90,7 @@ export function createRecallService(
         const evidenceRows = await pool.query<{
           evidence_id: string
           evidence_kind: string
-          episode_id: string
+          episode_id: string | null
           excerpt: string
           occurred_at: Date
         }>(`
@@ -122,7 +122,7 @@ export function createRecallService(
             occurredAt: row.occurred_at,
             truncated: excerpt.length < row.excerpt.length,
           })
-          episodeIds.add(row.episode_id)
+          if (row.episode_id) episodeIds.add(row.episode_id)
         }
         claims.push({
           claimId: hit.claimId,
