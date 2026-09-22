@@ -444,6 +444,16 @@ server {
         try_files \$uri \$uri/ /index.html;
     }
 
+    # 临时会话分享页 -> Relay。分享令牌位于路径中，不写入边缘访问日志。
+    location ^~ /share/session/ {
+        proxy_pass http://127.0.0.1:${RELAY_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        access_log off;
+    }
+
     # Daemon 安装脚本（精确匹配，避免被 SPA fallback 吞掉）
     location = /install.sh {
         alias /var/www/pocketctl/install.sh;

@@ -40,7 +40,8 @@ PocketCtl 按真实能力开放控制。发现一个会话，并不代表它会�
 | **Codex CLI 0.144.1+** | Thread、Turn、Item、计划与交互 | 受管会话支持共享输入、Steer/Interrupt、审批、问题、标准 MCP Elicitation，以及带自动补全的 `/` 命令与技能显式调用。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个 App Server。详见 [Codex 受管终端控制](docs/codex-managed-terminal.md)。 |
 | **Codex Desktop** | 增量同步 rollout 历史、状态、模型、Token、工具、计划和文件改动 | 只读，不支持远程输入、审批、中断、终止、恢复或创建会话。 | 自动发现的 Observer；以 `codex-desktop` 与 Codex CLI 分开显示。 |
 | **OpenCode 1.17.11+** | 会话、内容、状态、命令与交互 | 受管会话支持共享输入、Permission 和 Question；已独立运行的进程保持只读，直到通过 Launcher 安全恢复。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个共享 Server。详见 [OpenCode 受管终端控制](docs/opencode-managed-terminal.md)。 |
-| **ZCode** | 从本地 SQLite 增量同步历史 | 只读，不支持远程输入、审批、恢复或控制。 | 显式启用的 Observer。 |
+| **ZCode Desktop** | 从本地 SQLite 增量同步历史 | 只读，不支持远程输入、审批、恢复或控制。 | 针对 Desktop 拥有会话、显式启用的 Observer。 |
+| **ZCode Runtime** | 原生 ZCode 会话的实时事件与 Turn 状态 | PocketCtl 创建的会话支持远程创建、共享输入和中断活动 Turn；其余反向交互请求保持不支持。 | Daemon 拥有的 `zcode app-server --stdio` 运行时，与 ZCode Desktop Observer 分开显示。 |
 
 PocketCtl 可通过 Agent Provider 扩展。公共适配协议见
 [添加 Agent](docs/adding-an-agent.md)。
