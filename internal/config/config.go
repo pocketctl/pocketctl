@@ -139,6 +139,24 @@ func memoryMcpSocketPathFor(goos, home string) string {
 	return filepath.Join(home, ".pocketctl", "memory-mcp.sock")
 }
 
+// SessionMcpSocketPath is the user-private endpoint used only by the local
+// read-only Session History MCP process. It is intentionally separate from
+// Memory MCP and all approval/control sockets.
+func SessionMcpSocketPath() string {
+	home, err := HomeDir()
+	if err != nil {
+		return ""
+	}
+	return sessionMcpSocketPathFor(runtime.GOOS, home)
+}
+
+func sessionMcpSocketPathFor(goos, home string) string {
+	if goos == "windows" {
+		return `\\.\pipe\pocketctl-session-mcp`
+	}
+	return filepath.Join(home, ".pocketctl", "session-mcp.sock")
+}
+
 func claudeChannelSocketPathFor(goos, home string) string {
 	if goos == "windows" {
 		return `\\.\pipe\pocketctl-claude-channel`

@@ -97,7 +97,7 @@ export const SYSTEM_EXTRACTION_POLICY_V1: ExtractionPolicyDocument = {
   evidence: { min_items: 1, require_terminal_outcome: false, require_distinct_turns: 1 },
   versions: {
     prompt: 'extraction-prompt-v6',
-    extractor: 'extraction-v5',
+    extractor: 'extraction-v6',
     content_policy: 'extraction-content-v1',
     model_profile: 'default',
   },

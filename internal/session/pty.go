@@ -24,7 +24,11 @@ func startPTYCli(provider platform.PTYProvider, cliPath string, args []string, c
 		cmd.Dir = cwd
 	}
 	env := sanitizePTYEnv(os.Environ(), agentType)
-	env = append(env, extraEnv...)
+	for _, entry := range extraEnv {
+		if separator := strings.IndexByte(entry, '='); separator > 0 {
+			env = setEnvValue(env, entry[:separator], entry[separator+1:])
+		}
+	}
 	// Ensure TERM is set to a value the agent's TUI accepts. Claude tolerates an
 	// unset/dumb TERM, but codex's TUI refuses to start under TERM=dumb. Setting
 	// xterm-256color is safe for both and matches what a real terminal provides.
@@ -46,6 +50,17 @@ func startPTYCli(provider platform.PTYProvider, cliPath string, args []string, c
 		return nil, nil, fmt.Errorf("pty start: %w", err)
 	}
 	return ptmx, cmd, nil
+}
+
+func setEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 // sanitizePTYEnv strips inherited per-agent markers so the spawned interactive

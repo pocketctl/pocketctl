@@ -79,17 +79,32 @@ describe('stream evidence', () => {
     expect(changed.sourceDigest).not.toEqual(first.sourceDigest)
   })
 
-  test('long tool-heavy turns retain final conclusions and explicitly disclose omissions', () => {
+  test('long tool-heavy turns cap routine tool evidence and summarize omissions', () => {
     const events = [event(1, 'user_goal', { text: '查明缓存问题' }),
       ...Array.from({ length: 205 }, (_, i) => event(i + 2, 'tool_result', { call_id: `c${i}`, summary: '读取文件', status: 'ok' })),
       event(208, 'agent_text', { text: '已验证：缓存键遗漏租户标识，补齐后隔离测试通过。' }),
     ]
     const packet = build(events)
-    expect(packet.document.timeline).toHaveLength(200)
+    expect(packet.document.timeline.filter(entry => entry.summary.startsWith('tool_'))).toHaveLength(12)
+    expect(packet.document.timeline).toHaveLength(14)
     expect(packet.document.timeline.at(-1)?.summary).toContain('缓存键遗漏租户标识')
-    expect(packet.document.incomplete.some(item => item.text.includes('timeline events omitted'))).toBe(true)
+    expect(packet.document.incomplete.some(item => item.text.includes('193 lower-priority tool events omitted'))).toBe(true)
     const final = packet.document.timeline.at(-1)!
     expect(packet.manifest[final.evidence_handle].occurred_at).toBe(events.at(-1)!.occurred_at.toISOString())
+  })
+
+  test('failed tool results survive the routine tool evidence cap', () => {
+    const packet = build([
+      ...Array.from({ length: 20 }, (_, i) => event(i + 1, 'tool_result', {
+        call_id: `ok-${i}`, status: 'ok', summary: '读取文件',
+      })),
+      event(21, 'tool_result', { call_id: 'failed', status: 'error', summary: '构建失败' }),
+      event(22, 'agent_text', { text: '根因是构建配置错误。' }),
+    ])
+
+    expect(packet.document.timeline.some(entry => entry.summary.includes('call_id=failed'))).toBe(true)
+    expect(packet.document.failures.some(entry => entry.text.includes('call_id=failed'))).toBe(true)
+    expect(packet.document.timeline.filter(entry => entry.summary.startsWith('tool_'))).toHaveLength(13)
   })
 
   test('collapses more than 200 deltas before budgeting and anchors the final snapshot', () => {
@@ -130,6 +145,26 @@ describe('stream evidence', () => {
     expect(packet.document.timeline.map(e => e.summary)).toEqual([
       'agent_text text=最新完整消息', 'agent_text text=子代理完整消息', 'agent_text text=另一条完整消息',
     ])
+  })
+
+  test('prefers the root main final answer over a later subagent answer', () => {
+    const root = event(1, 'agent_text', { text: '根 Agent 最终结论', final: true })
+    root.classification = { actor_scope: 'root', flow_scope: 'main', content_class: 'dialogue' }
+    const child = event(2, 'agent_text', {
+      text: '子 Agent 辅助输出', final: true, agent_id: 'child', is_subagent: true,
+    })
+    child.classification = { actor_scope: 'subagent', flow_scope: 'main', content_class: 'dialogue' }
+
+    const packet = buildEpisodePacket({
+      ...BASE,
+      events: [root, child],
+      artifacts: [],
+      repository: null,
+      budget: { statementChars: 480, timelineEntries: 1, sectionEntries: 64, totalDocumentChars: 200_000 },
+    })
+
+    expect(packet.document.timeline).toHaveLength(1)
+    expect(packet.document.timeline[0]).toMatchObject({ kind: 'final', summary: 'agent_text text=根 Agent 最终结论' })
   })
 
   test('keeps legacy text and final text without snapshot; drops unfinished streams and empty events', () => {

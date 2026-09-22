@@ -44,6 +44,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/repositoryidentity"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/sessiondocument"
+	"github.com/pocketctl/pocketctl/internal/sessionmcp"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
 	"github.com/pocketctl/pocketctl/internal/turn"
 	"github.com/pocketctl/pocketctl/internal/update"
@@ -143,6 +144,13 @@ func main() {
 		// agent's stdio framing is never corrupted.
 		if err := memorymcp.RunBridgeStdio(context.Background()); err != nil {
 			fmt.Fprintln(os.Stderr, "pocketctl memory-mcp:", err)
+			os.Exit(1)
+		}
+	case "session-mcp":
+		// Local read-only Session History MCP server. It holds no account
+		// credential and reaches Relay only through the authenticated daemon.
+		if err := sessionmcp.RunStdio(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "pocketctl session-mcp:", err)
 			os.Exit(1)
 		}
 	case "version":
@@ -1543,7 +1551,20 @@ func cmdDaemonStart(args []string) {
 	client := ws.NewClient(url, tok, id, agentTypes, agentVersions, agentLatests, outputCh, logger)
 	client.HostAwake = platform.HostAwake
 	memoryContextGrants := wireMemoryContext(sm, client)
-	client.OnControlMessage = sm.DispatchMemoryContextControl
+	sessionHistoryBroker := sessionmcp.NewWsBroker(client)
+	sm.SetSessionHistoryReader(func(ctx context.Context, sourceSessionID, targetSessionID, cursor string) (protocol.SessionHistoryReadResult, error) {
+		return sessionHistoryBroker.Read(ctx, sessionmcp.IpcReadRequest{
+			SourceSessionID: sourceSessionID,
+			TargetSessionID: targetSessionID,
+			Cursor:          cursor,
+		})
+	})
+	client.OnControlMessage = func(message protocol.ClientMessage) bool {
+		if sessionHistoryBroker.Dispatch(message) {
+			return true
+		}
+		return sm.DispatchMemoryContextControl(message)
+	}
 	client.SetAgentManageable(agentManageable)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
@@ -2059,6 +2080,21 @@ func cmdDaemonStart(args []string) {
 		} else {
 			logger.Info("memory-mcp bridge socket listening", "path", config.MemoryMcpSocketPath())
 			daemon.Go("memory-mcp-server", logger, func() { memoryMcpServer.Serve(ctx, ln) })
+		}
+
+		// Session History MCP is a distinct read-only socket. Each request is
+		// correlated over the same authenticated Relay WebSocket and carries no
+		// account token or target-host dependency.
+		sessionMcpServer := &sessionmcp.IPCServer{
+			SocketPath: config.SessionMcpSocketPath(),
+			Reader:     sessionHistoryBroker,
+			Logger:     logger,
+		}
+		if ln, err := sessionMcpServer.Start(); err != nil {
+			logger.Warn("session-mcp bridge socket not started", "error", err)
+		} else {
+			logger.Info("session-mcp bridge socket listening", "path", config.SessionMcpSocketPath())
+			daemon.Go("session-mcp-server", logger, func() { sessionMcpServer.Serve(ctx, ln) })
 		}
 
 		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker, memoryContextGrants)

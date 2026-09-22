@@ -127,6 +127,7 @@ type SessionManager struct {
 	memoryContext           *memorycontext.Coordinator
 	memoryContextReady      func() bool
 	memoryContextCapability func(context.Context, string, string) memorycontext.Capability
+	sessionHistoryReader    SessionHistoryReader
 
 	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.
 	// nil on daemons that don't surface approvals (or before wiring).

@@ -79,3 +79,12 @@ func TestClaudeChannelSocketPathForUnixIsFilePath(t *testing.T) {
 		t.Errorf("unix claude channel path = %q, want %q", got, want)
 	}
 }
+
+func TestSessionMcpSocketPathIsDedicatedPerPlatform(t *testing.T) {
+	if got, want := sessionMcpSocketPathFor("windows", `C:\Users\foo`), `\\.\pipe\pocketctl-session-mcp`; got != want {
+		t.Fatalf("windows session MCP path = %q, want %q", got, want)
+	}
+	if got, want := sessionMcpSocketPathFor("linux", "/home/foo"), filepath.Join("/home/foo", ".pocketctl", "session-mcp.sock"); got != want {
+		t.Fatalf("unix session MCP path = %q, want %q", got, want)
+	}
+}

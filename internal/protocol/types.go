@@ -77,6 +77,9 @@ const (
 	// Typed nack reason for backends that cannot accept another input while the
 	// current native turn is still generating.
 	ReasonSessionBusy = "session_busy"
+	// SessionHistoryToolName is shared by the stdio MCP server and Codex
+	// app-server dynamic-tool adapter.
+	SessionHistoryToolName = "pocketctl_read_session_history"
 )
 
 // Client → Daemon commands
@@ -139,6 +142,52 @@ type ClientMessage struct {
 	// CodexHomeID selects one daemon-configured Codex account/runtime. It is an
 	// opaque allowlisted identity, never a client-supplied filesystem path.
 	CodexHomeID string `json:"codex_home_id,omitempty"`
+	// Read-only cross-host session history response fields. Identity and
+	// authorization are resolved by Relay from the authenticated daemon.
+	SourceSessionID        string                  `json:"source_session_id,omitempty"`
+	TargetSessionID        string                  `json:"target_session_id,omitempty"`
+	SessionHistoryMessages []SessionHistoryMessage `json:"messages,omitempty"`
+	HasMore                bool                    `json:"has_more,omitempty"`
+	NextCursor             string                  `json:"next_cursor,omitempty"`
+	LargeSession           bool                    `json:"large_session,omitempty"`
+	SnapshotThroughEventID string                  `json:"snapshot_through_event_id,omitempty"`
+	SyncedThroughAt        string                  `json:"synced_through_at,omitempty"`
+	PossiblyIncomplete     bool                    `json:"possibly_incomplete,omitempty"`
+	UntrustedContent       bool                    `json:"untrusted_content,omitempty"`
+}
+
+type SessionHistoryReadRequest struct {
+	Type            string `json:"type"`
+	RequestID       string `json:"request_id"`
+	SourceSessionID string `json:"source_session_id"`
+	TargetSessionID string `json:"target_session_id"`
+	Cursor          string `json:"cursor,omitempty"`
+}
+
+type SessionHistoryMessage struct {
+	EventID    string `json:"event_id"`
+	CreatedAt  string `json:"created_at,omitempty"`
+	Role       string `json:"role"`
+	Kind       string `json:"kind,omitempty"`
+	Content    string `json:"content,omitempty"`
+	Tool       string `json:"tool,omitempty"`
+	CallID     string `json:"call_id,omitempty"`
+	ChunkIndex *int   `json:"chunk_index,omitempty"`
+	ChunkCount *int   `json:"chunk_count,omitempty"`
+}
+
+type SessionHistoryReadResult struct {
+	Type                   string                  `json:"type"`
+	SourceSessionID        string                  `json:"source_session_id"`
+	TargetSessionID        string                  `json:"target_session_id"`
+	Messages               []SessionHistoryMessage `json:"messages"`
+	HasMore                bool                    `json:"has_more"`
+	NextCursor             string                  `json:"next_cursor,omitempty"`
+	LargeSession           bool                    `json:"large_session"`
+	SnapshotThroughEventID string                  `json:"snapshot_through_event_id"`
+	SyncedThroughAt        string                  `json:"synced_through_at,omitempty"`
+	PossiblyIncomplete     bool                    `json:"possibly_incomplete"`
+	UntrustedContent       bool                    `json:"untrusted_content"`
 }
 
 type CodexHomeOption struct {

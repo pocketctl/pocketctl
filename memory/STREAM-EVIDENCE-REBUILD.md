@@ -1,9 +1,17 @@
-# 流式证据修复后的历史数据重建
+# Episode 证据编译升级后的历史数据重建
 
-`memory-episode-packet-v4` 在证据条数限制前按消息 Part（缺失时按
-Stream）归并文本，优先选择最终事件的 Snapshot。证据仍指向该原始事件；
-不拼接无法验证完整性的 delta。未结束的 streaming 消息不作为证据。
-usage-only、空正文、未知事件不占证据额度；工具输出仍不进入允许字段。
+`memory-episode-packet-v6` 在原有流式证据归并基础上，增加三项证据质量约束：
+
+- 普通 `tool_call` / `tool_result` 在 timeline 中最多保留 12 条，多余事件只生成
+  不可引用的聚合省略摘要；失败工具结果仍独立保留。
+- 根 Agent 的 main/dialogue/final 输出优先作为 Turn 最终结论；仅当该 Turn
+  没有根 Agent 输出时，才回退到子 Agent 输出。
+- evidence manifest 标注 `substantive | verification | auxiliary | outcome | omission`
+  角色；只引用 auxiliary/outcome/omission 的候选会被
+  `weak_evidence_only` 确定性拒绝。
+
+工具完整输入/输出仍不进入 Episode Packet，`agent_reasoning` 仍不在模型可见
+字段白名单中。
 
 代码更新只影响新编译的 Episode，不会自动修改历史候选或已接受的知识。
 下面是**需要运维明确执行的维护步骤**，不要作为启动迁移自动运行。
@@ -19,7 +27,7 @@ SELECT e.episode_id, e.turn_id, e.document_compiler_version,
 FROM work_episodes e
 LEFT JOIN memory_candidates c USING (installation_id, episode_id)
 WHERE e.installation_id = :'installation_id'::uuid
-  AND e.document_compiler_version IS DISTINCT FROM 'memory-episode-packet-v4'
+  AND e.document_compiler_version IS DISTINCT FROM 'memory-episode-packet-v6'
 GROUP BY e.episode_id, e.turn_id, e.document_compiler_version;
 
 SELECT extraction_mode FROM memory_feature_settings
@@ -35,11 +43,11 @@ BEGIN;
 
 UPDATE memory_candidates c
 SET status = 'rejected_by_validator', revision = revision + 1,
-    validation = validation || '{"codes":["obsolete_stream_evidence"]}'::jsonb
+    validation = validation || '{"codes":["obsolete_evidence_packet"]}'::jsonb
 FROM work_episodes e
 WHERE c.installation_id = :'installation_id'::uuid
   AND e.installation_id = c.installation_id AND e.episode_id = c.episode_id
-  AND e.document_compiler_version IS DISTINCT FROM 'memory-episode-packet-v4'
+  AND e.document_compiler_version IS DISTINCT FROM 'memory-episode-packet-v6'
   AND c.status IN ('validated', 'conflict', 'shadow', 'duplicate');
 
 INSERT INTO memory_jobs
@@ -48,7 +56,7 @@ SELECT gen_random_uuid(), e.installation_id, 'compile_episode',
        'compile_episode:' || e.turn_id, 80, '{}'::jsonb, NOW()
 FROM work_episodes e
 WHERE e.installation_id = :'installation_id'::uuid
-  AND e.document_compiler_version IS DISTINCT FROM 'memory-episode-packet-v4'
+  AND e.document_compiler_version IS DISTINCT FROM 'memory-episode-packet-v6'
 ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
   state = 'pending', attempts = 0, available_at = NOW(),
   claimed_by = NULL, claim_expires_at = NULL, last_error_code = NULL, completed_at = NULL;

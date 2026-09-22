@@ -171,6 +171,28 @@ func TestCodexAppServerBackendDoesNotAnnounceUnpersistedEmptyThread(t *testing.T
 	}
 }
 
+func TestCodexAppServerBackendAdvertisesSessionHistoryDynamicTool(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	sm.SetSessionHistoryReader(func(context.Context, string, string, string) (protocol.SessionHistoryReadResult, error) {
+		return protocol.SessionHistoryReadResult{}, nil
+	})
+	coord := newVerifiedTestCodexCoordinator(sm)
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/start"] = json.RawMessage(`{"thread":{"id":"thr_tool"}}`)
+	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
+	if _, err := backend.Start(context.Background(), protocol.SessionConfig{Agent: "codex", Cwd: "/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(rpc.lastCall(t, "thread/start").params, &params); err != nil {
+		t.Fatal(err)
+	}
+	tools, ok := params["dynamicTools"].([]any)
+	if !ok || len(tools) != 1 || tools[0].(map[string]any)["name"] != protocol.SessionHistoryToolName {
+		t.Fatalf("dynamicTools=%#v", params["dynamicTools"])
+	}
+}
+
 func TestCodexAppServerBackendForkDoesNotInjectInitializer(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
 	coord := newVerifiedTestCodexCoordinator(sm)

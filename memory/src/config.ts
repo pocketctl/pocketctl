@@ -29,6 +29,14 @@ export interface TextAdapterSettings extends ModelAdapterSettings {
   thinking?: 'enabled' | 'disabled'
 }
 
+export interface MimoBatchTextSettings {
+  provider: 'mimo-batch'
+  baseUrl: string
+  model: string
+  apiKey: string
+  thinking: 'disabled'
+}
+
 export interface EmbeddingAdapterSettings extends ModelAdapterSettings {
   dimensions: number
 }
@@ -95,6 +103,7 @@ export interface MemoryConfig {
   logLevel: MemoryLogLevel
   isProduction: boolean
   textModel: TextAdapterSettings | undefined
+  mimoBatchTextModel: MimoBatchTextSettings | undefined
   embeddingModel: EmbeddingAdapterSettings | undefined
   providerBudget: ProviderBudgetSettings | undefined
   wikiProviderBudget: WikiProviderBudgetSettings | undefined
@@ -321,6 +330,37 @@ function parseModelAdapter(env: Record<string, string | undefined>, prefix: 'MEM
   }
 }
 
+function parseMimoBatchTextAdapter(
+  env: Record<string, string | undefined>,
+): MimoBatchTextSettings | undefined {
+  const names = [
+    'MEMORY_TEXT_MODEL_MIMO',
+    'MEMORY_TEXT_BASE_URL_MIMO_BATCH',
+    'MEMORY_TEXT_API_KEY_MIMO',
+  ] as const
+  const configured = names.filter(name => env[name] !== undefined && env[name] !== '')
+  if (configured.length === 0) return undefined
+  for (const name of names) {
+    if (env[name] === undefined || env[name] === '') {
+      throw new ConfigError(`${name} is required when MiMo Batch text is configured`)
+    }
+  }
+  const model = env.MEMORY_TEXT_MODEL_MIMO!
+  if (model !== 'mimo-v2.6-flash') {
+    throw new ConfigError('MEMORY_TEXT_MODEL_MIMO must be mimo-v2.6-flash')
+  }
+  return {
+    provider: 'mimo-batch',
+    baseUrl: parseModelBaseUrl(
+      'MEMORY_TEXT_BASE_URL_MIMO_BATCH',
+      env.MEMORY_TEXT_BASE_URL_MIMO_BATCH!,
+    ),
+    model,
+    apiKey: env.MEMORY_TEXT_API_KEY_MIMO!,
+    thinking: 'disabled',
+  }
+}
+
 function parseStringList(envName: string, raw: string | undefined, max: number): string[] {
   if (raw === undefined || raw.trim() === '') return []
   const items = raw.split(',').map(item => item.trim()).filter(item => item.length > 0)
@@ -470,6 +510,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
       ...(thinking === 'enabled' || thinking === 'disabled' ? { thinking } : {}),
     }
   }
+  const mimoBatchTextModel = parseMimoBatchTextAdapter(env)
   const embeddingModelBase = parseModelAdapter(env, 'MEMORY_EMBEDDING')
   let embeddingModel: EmbeddingAdapterSettings | undefined
   if (embeddingModelBase) {
@@ -554,6 +595,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     logLevel,
     isProduction,
     textModel,
+    mimoBatchTextModel,
     embeddingModel,
     providerBudget,
     wikiProviderBudget,

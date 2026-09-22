@@ -42,6 +42,7 @@ import { createSearchService } from './retrieval/search-service.js'
 import { registerMcpRoute } from './mcp/server.js'
 import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleEmbeddingProvider } from './model/openai-compatible-embedding.js'
+import { createExtractionTextRoute } from './model/text-fallback.js'
 import { createRateLimiter } from './api/rate-limiter.js'
 import {
   createProviderBudgetStore,
@@ -173,7 +174,7 @@ async function main(): Promise<void> {
             .digest('hex'),
         }
       : undefined
-    const extractionAdapter = disclosure(config.textModel)
+    const extractionAdapter = createExtractionTextRoute(config.mimoBatchTextModel, config.textModel)
     const embeddingAdapter = config.embeddingModel
       ? {
           ...disclosure(config.embeddingModel)!,
@@ -252,7 +253,7 @@ async function main(): Promise<void> {
       guard,
       policy,
       rateLimiter,
-      textConfigured: config.textModel !== undefined,
+      textConfigured: extractionAdapter !== undefined,
       embeddingConfigured: config.embeddingModel !== undefined,
       ...(extractionAdapter ? { extractionAdapter } : {}),
       ...(embeddingAdapter ? { embeddingAdapter } : {}),

@@ -10,7 +10,7 @@ import type { ExtractionPolicyDocument } from '../policies/schemas.js'
 
 export const EXTRACTION_PROMPT_VERSION = 'extraction-prompt-v6'
 
-export const EXTRACTION_EXTRACTOR_VERSION = 'extraction-v5'
+export const EXTRACTION_EXTRACTOR_VERSION = 'extraction-v6'
 
 export function buildExtractionSystemPrompt(evidenceHandles: readonly string[], turnId: string): string {
   return [

@@ -202,7 +202,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// H-7: for modes that depend on remote approval the hook is mandatory —
 	// without it an approval prompt would deadlock the unattended session, so
 	// installation failures now fail closed instead of continuing silently.
-	var extraEnv []string
+	// Every daemon-created CLI session inherits its immutable PocketCtl id so
+	// the read-only Session History MCP can bind calls to the actual source
+	// session without trusting a model-supplied identifier.
+	extraEnv := []string{"POCKETCTL_SESSION_ID=" + sessionID}
 	caps := adapter.Capabilities(config.Agent)
 	if caps.SupportsApprovalHook && sm.approvalEnabled && sm.approvals != nil {
 		if err := approval.EnsureHooks(resolvedCwd, sm.pocketctlPath); err != nil {
@@ -219,7 +222,6 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 				permMode = config.Permission.Mode
 			}
 			extraEnv = append(extraEnv,
-				"POCKETCTL_SESSION_ID="+sessionID,
 				"POCKETCTL_APPROVAL_SOCK="+sm.approvals.SocketPath(),
 				"POCKETCTL_PERM_MODE="+permMode,
 			)
@@ -319,7 +321,8 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 	env = ensureEnvDefault(env, "PAGER", "cat")
 	env = ensureEnvDefault(env, "GIT_PAGER", "cat")
 	env = ensureEnvDefault(env, "GH_PAGER", "cat")
-	cmd.Env = ensureEnvDefault(env, "TERM_PROGRAM", "pocketctl")
+	env = ensureEnvDefault(env, "TERM_PROGRAM", "pocketctl")
+	cmd.Env = setEnvValue(env, "POCKETCTL_SESSION_ID", sessionID)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()

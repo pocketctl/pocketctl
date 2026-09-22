@@ -194,9 +194,10 @@ that does **not** mean session content stays local.
 - Session and tool content is **not end-to-end encrypted**. The configured Relay
   can read and persist normalized content required for routing, replay,
   notifications, and account features.
-- If `DEEPSEEK_API_KEY` is configured on the Relay, the text needed to generate a
-  session title may be sent to DeepSeek. Without the key, title generation is
-  skipped.
+- If `MIMO_API_KEY` is configured on the Relay, the text needed to generate a
+  session title is sent to Xiaomi MiMo first with thinking disabled. A MiMo
+  timeout falls back to DeepSeek when `DEEPSEEK_API_KEY` is configured; without
+  either key, title generation is skipped.
 - If Memory is enabled, model-assisted knowledge extraction sends the relevant
   repository text to the configured server-side provider. Pre-turn context
   packs travel through the authenticated Relay like other session content;
