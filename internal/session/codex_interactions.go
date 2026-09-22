@@ -13,6 +13,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
+	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
@@ -143,6 +144,93 @@ func (c *codexInteractions) Handle(message codexapp.Inbound) {
 		c.handleQuestion(message)
 	case "mcpServer/elicitation/request":
 		c.handleMcpElicitation(message)
+	case "item/tool/call":
+		c.handleSessionHistoryTool(message)
+	}
+}
+
+func (c *codexInteractions) handleSessionHistoryTool(message codexapp.Inbound) {
+	if c.closed.Load() {
+		return
+	}
+	var params struct {
+		ThreadID  string          `json:"threadId"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if message.ID == nil {
+		return
+	}
+	if json.Unmarshal(message.Params, &params) != nil || params.ThreadID == "" {
+		_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "invalid_request"), nil)
+		return
+	}
+	if params.Tool != protocol.SessionHistoryToolName {
+		_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "tool_not_allowed"), nil)
+		return
+	}
+	reader := c.sm.getSessionHistoryReader()
+	if reader == nil {
+		_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "feature_disabled"), nil)
+		return
+	}
+	var args map[string]json.RawMessage
+	if json.Unmarshal(params.Arguments, &args) != nil || len(args) < 1 || len(args) > 2 {
+		_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "invalid_request"), nil)
+		return
+	}
+	for key := range args {
+		if key != "target_session_id" && key != "cursor" {
+			_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "invalid_request"), nil)
+			return
+		}
+	}
+	var target, cursor string
+	if json.Unmarshal(args["target_session_id"], &target) != nil || target == "" {
+		_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "invalid_request"), nil)
+		return
+	}
+	if raw, ok := args["cursor"]; ok && json.Unmarshal(raw, &cursor) != nil {
+		_ = c.client.Respond(*message.ID, codexDynamicToolResponse(false, "invalid_request"), nil)
+		return
+	}
+	requestID := *message.ID
+	daemon.Go("codex-session-history-tool", nil, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		result, err := reader(ctx, params.ThreadID, target, cursor)
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+		if err != nil {
+			_ = c.client.Respond(requestID, codexDynamicToolResponse(false, boundedSessionHistoryCode(err.Error())), nil)
+			return
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			_ = c.client.Respond(requestID, codexDynamicToolResponse(false, "internal_error"), nil)
+			return
+		}
+		_ = c.client.Respond(requestID, codexDynamicToolResponse(true, string(encoded)), nil)
+	})
+}
+
+func codexDynamicToolResponse(success bool, text string) map[string]any {
+	return map[string]any{
+		"contentItems": []any{map[string]any{"type": "inputText", "text": text}},
+		"success":      success,
+	}
+}
+
+func boundedSessionHistoryCode(code string) string {
+	switch code {
+	case "unauthenticated", "invalid_request", "invalid_cursor", "not_found_or_not_owned",
+		"feature_disabled", "timeout":
+		return code
+	default:
+		return "internal_error"
 	}
 }
 

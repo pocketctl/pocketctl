@@ -70,6 +70,28 @@ describe('candidate validator', () => {
     ]))
   })
 
+  test('rejects candidates backed only by auxiliary evidence', () => {
+    const verdict = validateCandidate(candidate({ evidenceHandles: [...HANDLES] }), context({
+      evidenceRoles: new Map([...HANDLES].map(handle => [handle, 'auxiliary'])),
+    }))
+
+    expect(verdict).toMatchObject({
+      status: 'rejected_by_validator',
+      validation: { codes: expect.arrayContaining(['weak_evidence_only']) },
+    })
+  })
+
+  test('keeps candidates with at least one substantive evidence item', () => {
+    const verdict = validateCandidate(candidate({ evidenceHandles: [...HANDLES] }), context({
+      evidenceRoles: new Map([
+        ['h0-aaaaaaaa', 'auxiliary'],
+        ['h1-bbbbbbbb', 'substantive'],
+      ]),
+    }))
+
+    expect(verdict.status).toBe('validated')
+  })
+
   test('value thresholds are independent of confidence and fail closed without assessments', () => {
     const ctx = context({ policy: { ...SYSTEM_EXTRACTION_POLICY_V1,
       value_filter: { min_utility: 0.8, min_repeatability: 0.8, max_friction: 0.2 },

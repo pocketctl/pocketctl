@@ -1,5 +1,6 @@
 import { normalizedClaimKey, tokenSimilarity } from '../retrieval/query-normalizer.js'
 import type { ExtractionPolicyDocument } from '../policies/schemas.js'
+import type { EvidenceRole } from '../episodes/packet.js'
 
 /**
  * Deterministic candidate validation (plan §8.3 / Task 6). The validator runs
@@ -33,6 +34,8 @@ export interface ValidationContext {
   policy?: ExtractionPolicyDocument
   /** Different handles can refer to the same source event. */
   evidenceSourceKeys?: ReadonlyMap<string, string>
+  /** Semantic strength assigned by the deterministic Episode compiler. */
+  evidenceRoles?: ReadonlyMap<string, EvidenceRole | 'legacy'>
 }
 
 export type CandidateForValidation = {
@@ -91,6 +94,13 @@ export function validateCandidate(
   if (unresolved.length > 0) codes.push('evidence_unresolved')
   if (new Set(candidate.evidenceHandles).size !== candidate.evidenceHandles.length) {
     codes.push('evidence_handles_repeated')
+  }
+  if (candidate.evidenceHandles.length > 0 && context.evidenceRoles
+    && candidate.evidenceHandles.every(handle => {
+      const role = context.evidenceRoles?.get(handle)
+      return role === 'auxiliary' || role === 'outcome' || role === 'omission'
+    })) {
+    codes.push('weak_evidence_only')
   }
   if (context.policy) {
     const policy = context.policy

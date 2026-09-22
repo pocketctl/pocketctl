@@ -849,6 +849,53 @@ func TestCodexInteractionsMcpFormElicitationValidatesAndResponds(t *testing.T) {
 	}
 }
 
+func TestCodexInteractionsRoutesSessionHistoryDynamicToolWithNativeThreadIdentity(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 2)
+	sm := NewSessionManager(output)
+	called := make(chan [3]string, 1)
+	sm.SetSessionHistoryReader(func(_ context.Context, source, target, cursor string) (protocol.SessionHistoryReadResult, error) {
+		called <- [3]string{source, target, cursor}
+		return protocol.SessionHistoryReadResult{
+			Type: "session_history_read_result", SourceSessionID: source, TargetSessionID: target,
+			Messages:               []protocol.SessionHistoryMessage{{EventID: "1", Role: "assistant", Content: "hello"}},
+			SnapshotThroughEventID: "1", UntrustedContent: true,
+		}, nil
+	})
+	client := newInteractionCodexClient()
+	interactions := newCodexInteractions(sm, 1, client)
+	interactions.Handle(codexServerRequest(t, `91`, "item/tool/call", `{
+		"threadId":"source-native","turnId":"turn-1","callId":"call-1",
+		"tool":"pocketctl_read_session_history","arguments":{"target_session_id":"target-b","cursor":"next"}
+	}`))
+	select {
+	case got := <-called:
+		if got != [3]string{"source-native", "target-b", "next"} {
+			t.Fatalf("call=%v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("history reader was not called")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		client.responseMu.Lock()
+		ready := len(client.responses) == 1
+		client.responseMu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	client.responseMu.Lock()
+	defer client.responseMu.Unlock()
+	if len(client.responses) != 1 {
+		t.Fatal("dynamic tool response was not written")
+	}
+	if client.responses[0].err != nil || !strings.Contains(string(client.responses[0].result), `"success":true`) ||
+		!strings.Contains(string(client.responses[0].result), `\"untrusted_content\":true`) {
+		t.Fatalf("response=%+v", client.responses[0])
+	}
+}
+
 func TestSessionManagerRoutesMcpElicitationDecline(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 8)
 	sm := NewSessionManager(output)

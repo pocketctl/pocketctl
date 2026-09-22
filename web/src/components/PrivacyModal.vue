@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年8月26日' : 'Updated: August 26, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年9月22日' : 'Updated: September 22, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -39,7 +39,8 @@
           <h4>三、第三方处理者</h4>
           <ol>
             <li>腾讯云邮件服务（SES）：处理收件邮箱、验证码和必要的服务邮件内容。</li>
-            <li>DeepSeek：在服务配置了 API Key 且触发标题生成时，处理用于生成标题的用户消息和助手回复；在您对 Memory 模型出口显式同意并开启提取后，还会处理经筛选、截断和脱敏规则生成的有界 Episode Packet，用于记忆候选提取。未配置或未开启相应功能时不会执行该调用。</li>
+            <li>Xiaomi MiMo：在服务配置了 API Key 且触发标题生成时，优先处理用于生成标题的用户消息和助手回复；在您对 Memory 模型出口显式同意并开启提取后，还会通过 Batch API 处理经筛选、截断和脱敏规则生成的有界 Episode Packet，用于记忆候选提取。Batch 输入和结果文件按供应商规则默认保留 30 天；未配置或未开启相应功能时不会执行该调用。</li>
+            <li>DeepSeek：在未配置 Xiaomi MiMo 或 MiMo 请求超时回退时，处理用于生成标题的用户消息和助手回复；在您对 Memory 模型出口显式同意并开启提取后，MiMo Batch 超时时还可能处理相同的有界 Episode Packet。未配置回退模型或未开启相应功能时不会执行该调用。</li>
             <li>阿里云百炼 DashScope：仅在您对 Memory 模型出口显式同意并开启向量功能后，使用 qwen3.7-text-embedding 处理待索引的已接受记忆文本和检索查询，以生成向量嵌入；未配置或未开启时不会调用。</li>
             <li>Apple Push Notification Service（APNs）：处理设备推送令牌和通知载荷。通知预览可能包含会话标题、主机名、命令、路径、审批摘要或问题内容。</li>
           </ol>
@@ -113,7 +114,8 @@
           <h4>3. Third-Party Processors</h4>
           <ol>
             <li>Tencent Cloud Simple Email Service (SES): processes recipient email addresses, verification codes, and necessary service-email content.</li>
-            <li>DeepSeek: when an API key is configured and title generation is triggered, processes user messages and assistant responses used to create a title. After your explicit consent to Memory model egress and activation of extraction, it also processes a bounded Episode Packet produced by filtering, truncation, and redaction rules for memory candidate extraction. The applicable call is not made when unconfigured or disabled.</li>
+            <li>Xiaomi MiMo: when an API key is configured and title generation is triggered, preferentially processes user messages and assistant responses used to create a title. After your explicit consent to Memory model egress and activation of extraction, it also processes a bounded Episode Packet through its Batch API for memory candidate extraction. Batch input and result files are retained for 30 days by default under the provider's rules; the applicable call is not made when unconfigured or disabled.</li>
+            <li>DeepSeek: when Xiaomi MiMo is unconfigured or a MiMo request times out and fallback is available, processes user messages and assistant responses used to create a title. After your explicit consent to Memory model egress and activation of extraction, it may also process the same bounded Episode Packet after a MiMo Batch timeout. The applicable fallback call is not made when unconfigured or disabled.</li>
             <li>Alibaba Cloud Model Studio DashScope: only after your explicit consent to Memory model egress and activation of vector features, qwen3.7-text-embedding processes accepted-memory text to be indexed and retrieval queries to produce vector embeddings. It is not called when unconfigured or disabled.</li>
             <li>Apple Push Notification Service (APNs): processes device push tokens and notification payloads. Notification previews may contain a session title, hostname, command, path, approval summary, or question content.</li>
           </ol>

@@ -1,10 +1,11 @@
 /**
- * Session title generation using DeepSeek-V4-Flash API (OpenAI-compatible).
+ * Session title generation using OpenAI-compatible providers.
+ * MiMo-V2.6-Flash is preferred when configured; DeepSeek remains the
+ * compatibility path and the timeout fallback.
  * Generates a concise title (≤15 chars) from the first user+assistant messages.
  *
- * 失败语义：
- * 任何失败 —— key 未配 / HTTP 错误 / 超时 / 空内容 / 网络错误，且重试 MAX_RETRIES
- * 次后仍失败 —— 都返回「空串」，而不是 fallback 截断串。
+ * 失败语义：MiMo 非超时失败直接返回空串；MiMo 超时转入现有 DeepSeek
+ * 重试路径。两者均不可用或 DeepSeek 重试耗尽后返回空串，不返回截断串。
  *
  * 空串让 relay（router.ts 的 `if (!title) return`）跳过写库，title 保持默认占位
  * 状态（hasDefaultTitle 仍为 true），由 daemon 的定时退避任务重新触发，
@@ -13,13 +14,25 @@
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODEL = 'deepseek-v4-flash';
+const MIMO_API_URL = 'https://api.xiaomimimo.com/v1/chat/completions';
+const MIMO_MODEL = 'mimo-v2.6-flash';
 // DeepSeek-V4-Flash 实测通常 1-3s (non-thinking)；thinking 首包可能更久。title 生成
 // 是异步的 (relay 收到 generate_title_request 后后台调用，不阻塞 daemon/用户)，给 20s。
-const DEEPSEEK_TIMEOUT_MS = 20_000;
+const TITLE_PROVIDER_TIMEOUT_MS = 20_000;
 const MAX_RETRIES = 2;          // 初次失败后最多重试 2 次（共 3 次尝试）
 const BASE_BACKOFF_MS = 500;    // 指数退避基数：500ms → 1000ms
 const MAX_BACKOFF_MS = 5_000;   // 单次退避上限
 const MAX_TITLE_LEN = 15;
+
+type TitleProvider = 'MiMo' | 'DeepSeek';
+
+interface TitleProviderOptions {
+  name: TitleProvider;
+  apiUrl: string;
+  model: string;
+  apiKey: string;
+  maxTokenField: 'max_tokens' | 'max_completion_tokens';
+}
 
 const SYSTEM_PROMPT = `You are a session title generator. Based on the conversation, generate a concise session title.
 
@@ -47,54 +60,27 @@ const LOCALE_HINT = (locale: string) => `The user's UI language is ${locale}.
  * @returns A cleaned title string (≤15 chars), or '' on any failure
  */
 export async function generateTitle(userMessage: string, assistantMessage: string, locale?: string, sessionId?: string): Promise<string> {
-  const context = sessionId ? { sessionId } : {};
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    console.log('[title] DEEPSEEK_API_KEY not set, skipping LLM title generation', context);
-    return '';
-  }
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const label = `attempt ${attempt + 1}/${MAX_RETRIES + 1}`;
-    try {
-      const systemContent = locale ? `${SYSTEM_PROMPT}\n\n${LOCALE_HINT(locale)}` : SYSTEM_PROMPT;
-      const raw = await callDeepSeekOnce(apiKey, systemContent, `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`, MAX_TITLE_LEN);
-      if (raw) return cleanTitle(raw);
-      // DeepSeek 200 但 content 为空（thinking 模式下 reasoning 可能占满 max_tokens）—— 当作瞬时故障重试
-      console.warn(`[title] DeepSeek returned empty content (${label})`, context);
-    } catch (err: any) {
-      const msg = err?.message || String(err);
-      // 不可重试，或已用尽重试次数：放弃，返回空串
-      if (!err?.retryable || attempt >= MAX_RETRIES) {
-        console.error(`[title] DeepSeek API call failed (${label}): ${msg}`, context);
-        break;
-      }
-      const delay = err.retryAfterMs ?? backoffMs(attempt);
-      console.warn(`[title] ${label} failed (${msg}), retrying in ${delay}ms`, context);
-      await sleep(delay);
-      continue;
-    }
-    // 走到这里 = 空内容，可重试；用完次数则跳出
-    if (attempt >= MAX_RETRIES) break;
-    await sleep(backoffMs(attempt));
-  }
-  return '';
+  const context: Record<string, string> = sessionId ? { sessionId } : {};
+  const systemContent = locale ? `${SYSTEM_PROMPT}\n\n${LOCALE_HINT(locale)}` : SYSTEM_PROMPT;
+  const userContent = `User message: ${userMessage}\n\nAssistant reply: ${assistantMessage}`;
+  const raw = await generateWithPreferredProvider(systemContent, userContent, MAX_TITLE_LEN, context, 'session');
+  return raw ? cleanTitle(raw) : '';
 }
 
-/** Single DeepSeek call with caller-supplied system prompt + max length. Throws retryable Error on failure. */
-async function callDeepSeekOnce(apiKey: string, systemContent: string, userContent: string, maxLen: number): Promise<string> {
+/** Single OpenAI-compatible call. Throws a bounded provider error on failure. */
+async function callProviderOnce(provider: TitleProviderOptions, systemContent: string, userContent: string, maxLen: number): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEEPSEEK_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), TITLE_PROVIDER_TIMEOUT_MS);
   try {
-    const response = await fetch(DEEPSEEK_API_URL, {
+    const response = await fetch(provider.apiUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${provider.apiKey}` },
       body: JSON.stringify({
-        model: DEEPSEEK_MODEL,
-        // V4-Flash 默认 thinking 模式，reasoning 会吃光 max_tokens 导致 content 为空。
-        // title 是简单摘要，不需推理；显式关闭 (ThinkingOptions { type: 'disabled' })。
+        model: provider.model,
+        // Both current Flash models default to thinking. Title generation is
+        // bounded summarization, so preserve the output budget for the title.
         thinking: { type: 'disabled' },
-        max_tokens: Math.min(64, Math.max(32, maxLen * 2)),
+        [provider.maxTokenField]: Math.min(64, Math.max(32, maxLen * 2)),
         temperature: 0.3,
         stream: false,
         messages: [
@@ -107,10 +93,11 @@ async function callDeepSeekOnce(apiKey: string, systemContent: string, userConte
     if (!response.ok) {
       const retryable = response.status === 429 || response.status >= 500;
       const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
-      if (response.status === 429) console.warn(`[title] DeepSeek 429${retryAfterMs ? ` (Retry-After ${retryAfterMs}ms)` : ''}`);
-      const err = new Error(`DeepSeek API ${response.status} ${response.statusText}`);
+      if (response.status === 429) console.warn(`[title] ${provider.name} 429${retryAfterMs ? ` (Retry-After ${retryAfterMs}ms)` : ''}`);
+      const err = new Error(`${provider.name} API ${response.status} ${response.statusText}`);
       (err as any).retryable = retryable;
       (err as any).retryAfterMs = retryAfterMs;
+      (err as any).code = response.status === 408 ? 'timeout' : 'http_error';
       throw err;
     }
     const data = await response.json() as any;
@@ -119,13 +106,85 @@ async function callDeepSeekOnce(apiKey: string, systemContent: string, userConte
     // AbortError（超时）→ 可重试。不重写 err.message: node 的 AbortError 实为 DOMException,
     // 其 message 是只读 getter, 赋值会抛 TypeError, 反而吞掉 retryable 让本该重试 3 次
     // 的超时只试 1 次就放弃。
-    if (err?.name === 'AbortError') { err.retryable = true; }
+    if (err?.name === 'AbortError') {
+      const timeoutError = new Error(`${provider.name} API timeout`);
+      (timeoutError as any).retryable = true;
+      (timeoutError as any).code = 'timeout';
+      throw timeoutError;
+    }
     // 裸 fetch 网络错误（TypeError "fetch failed" 等）→ 可重试
-    else if (err?.retryable === undefined) { err.retryable = true; }
+    else if (err?.retryable === undefined) { err.retryable = true; err.code = 'network'; }
     throw err;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function mimoProvider(): TitleProviderOptions | undefined {
+  const apiKey = process.env.MIMO_API_KEY;
+  return apiKey ? {
+    name: 'MiMo', apiUrl: MIMO_API_URL, model: MIMO_MODEL, apiKey,
+    maxTokenField: 'max_completion_tokens',
+  } : undefined;
+}
+
+function deepSeekProvider(): TitleProviderOptions | undefined {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  return apiKey ? {
+    name: 'DeepSeek', apiUrl: DEEPSEEK_API_URL, model: DEEPSEEK_MODEL, apiKey,
+    maxTokenField: 'max_tokens',
+  } : undefined;
+}
+
+async function generateWithPreferredProvider(
+  systemContent: string,
+  userContent: string,
+  maxLen: number,
+  context: Record<string, string>,
+  kind: 'session' | 'subagent',
+): Promise<string> {
+  const mimo = mimoProvider();
+  if (mimo) {
+    try {
+      const raw = await callProviderOnce(mimo, systemContent, userContent, maxLen);
+      if (raw) return raw;
+      console.warn(`[title] ${kind} MiMo returned empty content`, context);
+      return '';
+    } catch (err: any) {
+      if (err?.code !== 'timeout') {
+        console.error(`[title] ${kind} MiMo API call failed: ${err?.message || String(err)}`, context);
+        return '';
+      }
+      console.warn(`[title] ${kind} MiMo timed out, falling back to DeepSeek`, context);
+    }
+  }
+
+  const deepSeek = deepSeekProvider();
+  if (!deepSeek) {
+    console.log('[title] no configured title provider, skipping LLM title generation', context);
+    return '';
+  }
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const label = `attempt ${attempt + 1}/${MAX_RETRIES + 1}`;
+    try {
+      const raw = await callProviderOnce(deepSeek, systemContent, userContent, maxLen);
+      if (raw) return raw;
+      console.warn(`[title] ${kind} DeepSeek returned empty content (${label})`, context);
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      if (!err?.retryable || attempt >= MAX_RETRIES) {
+        console.error(`[title] ${kind} DeepSeek API call failed (${label}): ${message}`, context);
+        break;
+      }
+      const delay = err.retryAfterMs ?? backoffMs(attempt);
+      console.warn(`[title] ${kind} ${label} failed (${message}), retrying in ${delay}ms`, context);
+      await sleep(delay);
+      continue;
+    }
+    if (attempt >= MAX_RETRIES) break;
+    await sleep(backoffMs(attempt));
+  }
+  return '';
 }
 
 /** Parse Retry-After header (delta-seconds or HTTP-date) into ms, capped at MAX_BACKOFF_MS. */
@@ -170,24 +229,16 @@ Rules:
 
 /**
  * Generate a task-oriented title for a subagent based on its task prompt + agent_type.
- * 失败一律返回 '' (调用方据此保持 title NULL)。复用 DeepSeek-V4-Flash。
+ * 失败一律返回 '' (调用方据此保持 title NULL)。复用 MiMo-first provider 路由。
  */
 export async function generateSubagentTitle(userMessage: string, agentType: string, locale?: string): Promise<string> {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) { console.log('[title] DEEPSEEK_API_KEY not set, skipping subagent title'); return ''; }
   const systemContent = locale ? `${SUBAGENT_SYSTEM_PROMPT(agentType)}\n\n${LOCALE_HINT(locale)}` : SUBAGENT_SYSTEM_PROMPT(agentType);
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const raw = await callDeepSeekOnce(apiKey, systemContent, `Subagent task prompt: ${userMessage}`, MAX_SUBAGENT_TITLE_LEN);
-      if (raw) return cleanTitleLen(raw, MAX_SUBAGENT_TITLE_LEN);
-      console.warn(`[title] subagent DeepSeek empty content (attempt ${attempt + 1})`);
-    } catch (err: any) {
-      if (!err?.retryable || attempt >= MAX_RETRIES) { console.error(`[title] subagent DeepSeek failed: ${err?.message}`); break; }
-      await sleep(backoffMs(attempt));
-      continue;
-    }
-    if (attempt >= MAX_RETRIES) break;
-    await sleep(backoffMs(attempt));
-  }
-  return '';
+  const raw = await generateWithPreferredProvider(
+    systemContent,
+    `Subagent task prompt: ${userMessage}`,
+    MAX_SUBAGENT_TITLE_LEN,
+    {},
+    'subagent',
+  );
+  return raw ? cleanTitleLen(raw, MAX_SUBAGENT_TITLE_LEN) : '';
 }

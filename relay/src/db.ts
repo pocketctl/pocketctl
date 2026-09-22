@@ -133,6 +133,20 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_daemon ON sessions(daemon_id);
     CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id);
+    CREATE TABLE IF NOT EXISTS session_history_read_audit (
+      id BIGSERIAL PRIMARY KEY,
+      user_id INT,
+      daemon_id VARCHAR(64) NOT NULL,
+      source_session_id VARCHAR(64) NOT NULL,
+      target_session_id VARCHAR(64) NOT NULL,
+      outcome VARCHAR(32) NOT NULL,
+      snapshot_max_event_id BIGINT,
+      message_count INT NOT NULL DEFAULT 0,
+      response_bytes INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_history_read_audit_user_created
+      ON session_history_read_audit(user_id, created_at DESC);
   `);
   // Migration: add event_hash for deduplication
   await pool.query(`ALTER TABLE events ADD COLUMN IF NOT EXISTS event_hash VARCHAR(32)`);

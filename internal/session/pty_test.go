@@ -83,6 +83,13 @@ func TestSanitizePTYEnvStripsParentCodexRuntime(t *testing.T) {
 	}
 }
 
+func TestSetEnvValueReplacesInheritedSessionIdentity(t *testing.T) {
+	got := setEnvValue([]string{"PATH=/bin", "POCKETCTL_SESSION_ID=stale"}, "POCKETCTL_SESSION_ID", "current")
+	if joined := strings.Join(got, "\n"); strings.Count(joined, "POCKETCTL_SESSION_ID=") != 1 || !strings.Contains(joined, "POCKETCTL_SESSION_ID=current") {
+		t.Fatalf("environment=%q", joined)
+	}
+}
+
 func TestResolveCodexNativeBinaryFromNPMWrapper(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("symlink layout test is unix-only")

@@ -112,7 +112,7 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
   }
 }
 
-function completionUsage(
+export function completionUsage(
   completion: ChatCompletionPayload,
   fallbackModel: string,
   inputRate: number | undefined,

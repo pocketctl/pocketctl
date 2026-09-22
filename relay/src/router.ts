@@ -61,6 +61,10 @@ import {
   isObserverSessionMessageAllowed,
   OBSERVER_READ_ONLY_CODE,
 } from './session-observer-policy.js';
+import {
+  handleSessionHistoryReadMessage,
+  type SessionHistoryReadBroker,
+} from './session-history-read.js';
 
 interface DaemonConnection { supportsDirectoryBrowse?: boolean; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
@@ -161,6 +165,8 @@ export interface RouterOptions {
   memoryMcpGrantBroker?: MemoryMcpGrantBroker;
   /** Phase 4 source-sync grant broker; absent disables the memory_codegraph_grant leg. */
   memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
+  /** Same-account, read-only Relay transcript broker; absent is fail-closed. */
+  sessionHistoryReadBroker?: SessionHistoryReadBroker;
   observeIngressClass?: (daemonId: string, priority: PriorityClass) => void;
   authLeaseOptions?: AuthLeaseOptions;
   tokenUsageFactsAuthoritative?: boolean;
@@ -246,6 +252,7 @@ export class Router {
   private memoryMcpGrantBroker?: MemoryMcpGrantBroker;
   private memoryContextGrantBroker?: MemoryContextGrantBroker;
   private memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
+  private sessionHistoryReadBroker?: SessionHistoryReadBroker;
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; reply?: any; timer: ReturnType<typeof setTimeout> }>();
@@ -366,6 +373,7 @@ export class Router {
     this.memoryMcpGrantBroker = options.memoryMcpGrantBroker;
     this.memoryContextGrantBroker = options.memoryContextGrantBroker;
     this.memoryCodegraphGrantBroker = options.memoryCodegraphGrantBroker;
+    this.sessionHistoryReadBroker = options.sessionHistoryReadBroker;
     this.ingestPool = normalized.ingest;
     this.queryPool = normalized.query;
     this.workerPool = normalized.worker;
@@ -2129,6 +2137,32 @@ export class Router {
     if (msg.type === 'daemon_shutdown') {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
       this.finalizeDaemonShutdown(daemonId);
+      return;
+    }
+
+    // Read-only session transcript brokerage. This is control-plane traffic:
+    // it is never inserted into events or broadcast into either session. The
+    // caller identity comes only from the authenticated daemon connection.
+    if (msg.type === 'session_history_read') {
+      const daemon = originDaemon ?? this.daemons.get(daemonId);
+      if (!daemon || !originWs) return;
+      const requestId = typeof msg.request_id === 'string'
+        ? msg.request_id.slice(0, 128)
+        : undefined;
+      if (!this.sessionHistoryReadBroker) {
+        this.send(originWs, {
+          type: 'session_history_read_error',
+          ...(requestId ? { request_id: requestId } : {}),
+          code: 'feature_disabled',
+        });
+        return;
+      }
+      void handleSessionHistoryReadMessage(
+        this.sessionHistoryReadBroker,
+        { userId: daemon.userId, daemonId },
+        msg,
+        (payload) => { if (originWs.readyState === originWs.OPEN) originWs.send(payload); },
+      ).catch((error) => this.logBestEffortFailure?.('session_history_read', error));
       return;
     }
 

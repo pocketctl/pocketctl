@@ -52,6 +52,11 @@ export interface ModelDisclosure {
   model: string
   fingerprint: string
   pricing_configured: boolean
+  fallback?: {
+    provider: string
+    origin: string
+    model: string
+  }
 }
 
 interface ReplyLike {

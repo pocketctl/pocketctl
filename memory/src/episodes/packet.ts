@@ -14,7 +14,7 @@ import {
   sanitizeText,
 } from './content-policy.js'
 
-export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v5'
+export const EPISODE_PACKET_COMPILER_VERSION = 'memory-episode-packet-v6'
 export const PACKET_SCHEMA_VERSION = 1 as const
 
 export interface EvidenceStatement {
@@ -55,9 +55,11 @@ export interface EpisodeDocumentV1 {
 }
 
 export type EvidenceKind = 'event' | 'artifact' | 'episode'
+export type EvidenceRole = 'substantive' | 'verification' | 'auxiliary' | 'outcome' | 'omission'
 
 export interface EvidenceManifestEntry {
   kind: EvidenceKind
+  evidence_role: EvidenceRole
   source_event_id?: string
   artifact_id?: string
   occurred_at?: string
@@ -111,6 +113,9 @@ export const DEFAULT_PACKET_BUDGET: PacketBudget = Object.freeze({
   totalDocumentChars: 200_000,
 })
 
+/** Routine navigation/execution history is auxiliary evidence, not the episode. */
+const MAX_ROUTINE_TOOL_TIMELINE_ENTRIES = 12
+
 export interface BuiltPacket {
   document: EpisodeDocumentV1
   manifest: EvidenceManifest
@@ -156,6 +161,48 @@ function testStatus(value: unknown): 'passed' | 'failed' | 'unknown' {
   return 'unknown'
 }
 
+function evidenceRoleForEvent(eventType: string): EvidenceRole {
+  if (eventType === 'tool_call' || eventType === 'tool_result'
+    || eventType === 'command' || eventType.includes('approval')) return 'auxiliary'
+  if (eventType === 'turn_status' || eventType === 'session_status') return 'outcome'
+  if (eventType === 'file_change' || eventType === 'diff' || eventType === 'code_symbol'
+    || eventType === 'test_result' || eventType.includes('test')
+    || eventType === 'ci_result' || eventType.includes('ci')) return 'verification'
+  return 'substantive'
+}
+
+function isRoutineToolEvent(event: PacketSourceEvent): boolean {
+  if (event.event_type !== 'tool_call' && event.event_type !== 'tool_result') return false
+  return event.payload.status !== 'error' && event.payload.status !== 'failed'
+}
+
+function eventFacet(event: PacketSourceEvent, key: string): unknown {
+  return event.classification?.[key] ?? event.payload?.[key]
+}
+
+function isAuxiliaryAgentAnswer(event: PacketSourceEvent): boolean {
+  return eventFacet(event, 'actor_scope') === 'subagent'
+    || eventFacet(event, 'flow_scope') === 'auxiliary'
+    || event.payload?.is_subagent === true
+}
+
+function answerAuthority(event: PacketSourceEvent): number {
+  return (eventFacet(event, 'actor_scope') === 'root' ? 4 : 0)
+    + (eventFacet(event, 'flow_scope') === 'main' ? 2 : 0)
+    + (eventFacet(event, 'content_class') === 'dialogue' ? 1 : 0)
+}
+
+function selectFinalAnswer(events: readonly PacketSourceEvent[]): PacketSourceEvent | undefined {
+  const answers = events.filter(event => event.event_type === 'agent_text')
+  const primary = answers.filter(event => !isAuxiliaryAgentAnswer(event))
+  const actorPool = primary.length > 0 ? primary : answers
+  const finals = actorPool.filter(event => event.payload.final === true)
+  const pool = finals.length > 0 ? finals : actorPool
+  return [...pool].sort((a, b) => answerAuthority(a) - answerAuthority(b)
+    || a.occurred_at.getTime() - b.occurred_at.getTime()
+    || a.source_event_id.localeCompare(b.source_event_id)).at(-1)
+}
+
 /**
  * Compile the bounded Episode Packet. Handles are Episode-local and derive
  * from statement order plus a stable hash — identical input yields identical
@@ -180,6 +227,7 @@ export function buildEpisodePacket(input: {
   const register = (
     sanitized: { text: string; truncated: boolean; originalLength: number; originalHash: string },
     kind: EvidenceKind,
+    role: EvidenceRole,
     refs: { source_event_id?: string; artifact_id?: string },
   ): EvidenceStatement => {
     const index = statements.length
@@ -188,6 +236,7 @@ export function buildEpisodePacket(input: {
       .digest('hex').slice(0, 8)}`
     manifest[handle] = {
       kind,
+      evidence_role: role,
       ...(refs.source_event_id ? { source_event_id: refs.source_event_id } : {}),
       ...(refs.artifact_id ? { artifact_id: refs.artifact_id } : {}),
       ...(refs.source_event_id ? { occurred_at: eventTimes.get(refs.source_event_id) } : {}),
@@ -213,7 +262,7 @@ export function buildEpisodePacket(input: {
     const text = typeof event.payload?.text === 'string' ? event.payload.text : ''
     if (!text) continue
     if (timelineKindFor(event.event_type, event.payload) !== 'user_goal') continue
-    objective.push(register(sanitizeText(text, budget.statementChars), 'event', {
+    objective.push(register(sanitizeText(text, budget.statementChars), 'event', 'substantive', {
       source_event_id: event.source_event_id,
     }))
     break
@@ -232,17 +281,26 @@ export function buildEpisodePacket(input: {
   // goals/corrections/verification, then restore chronological order. Empty
   // or usage-only events cannot affect selection or the extraction digest.
   const visibleEvents = orderedEvents.filter(event => describeEvent(event.event_type, event.payload, budget.statementChars).text)
-  const lastAnswer = [...visibleEvents].reverse().find(event => event.event_type === 'agent_text')
+  const lastAnswer = selectFinalAnswer(visibleEvents)
   const priority = (event: PacketSourceEvent): number => {
     if (event === lastAnswer) return 0
     const kind = timelineKindFor(event.event_type, event.payload)
     if (['user_goal', 'correction', 'test', 'ci', 'failure', 'final'].includes(kind)) return 1
     return event.event_type === 'tool_call' || event.event_type === 'tool_result' ? 3 : 2
   }
-  const selectedEvents = new Set([...visibleEvents]
+  const rankedEvents = [...visibleEvents]
     .sort((a, b) => priority(a) - priority(b) || b.occurred_at.getTime() - a.occurred_at.getTime()
       || a.source_event_id.localeCompare(b.source_event_id))
-    .slice(0, budget.timelineEntries))
+  const selectedEvents = new Set<PacketSourceEvent>()
+  let routineToolEntries = 0
+  for (const event of rankedEvents) {
+    if (selectedEvents.size >= budget.timelineEntries) break
+    if (isRoutineToolEvent(event)) {
+      if (routineToolEntries >= MAX_ROUTINE_TOOL_TIMELINE_ENTRIES) continue
+      routineToolEntries++
+    }
+    selectedEvents.add(event)
+  }
 
   for (const event of orderedEvents) {
     const kind = event === lastAnswer ? 'final' : timelineKindFor(event.event_type, event.payload)
@@ -253,7 +311,9 @@ export function buildEpisodePacket(input: {
       ? event.payload.status
       : (typeof event.payload?.turn_status === 'string' ? event.payload.turn_status : null)
     if (selectedEvents.has(event)) {
-      const statement = register(sanitized, 'event', { source_event_id: event.source_event_id })
+      const statement = register(sanitized, 'event', evidenceRoleForEvent(event.event_type), {
+        source_event_id: event.source_event_id,
+      })
       timeline.push({
         kind,
         status: status && status.length <= 64 ? status : null,
@@ -262,23 +322,36 @@ export function buildEpisodePacket(input: {
       })
     }
     if (kind === 'correction' && corrections.length < budget.sectionEntries) {
-      corrections.push(register(sanitized, 'event', { source_event_id: event.source_event_id }))
+      corrections.push(register(sanitized, 'event', 'substantive', { source_event_id: event.source_event_id }))
     }
     if (kind === 'failure' && failures.length < budget.sectionEntries) {
-      failures.push(register(sanitized, 'event', { source_event_id: event.source_event_id }))
+      failures.push(register(sanitized, 'event', evidenceRoleForEvent(event.event_type), {
+        source_event_id: event.source_event_id,
+      }))
     }
     if (kind === 'test' && tests.length < budget.sectionEntries) {
       tests.push({
-        ...register(sanitized, 'event', { source_event_id: event.source_event_id }),
+        ...register(sanitized, 'event', 'verification', { source_event_id: event.source_event_id }),
         status: testStatus(status),
       })
     }
     if (kind === 'approval' && approvals.length < budget.sectionEntries) {
-      approvals.push(register(sanitized, 'event', { source_event_id: event.source_event_id }))
+      approvals.push(register(sanitized, 'event', 'auxiliary', { source_event_id: event.source_event_id }))
     }
     if (event.event_type === 'code_symbol' && symbols.length < budget.sectionEntries) {
-      symbols.push(register(sanitized, 'event', { source_event_id: event.source_event_id }))
+      symbols.push(register(sanitized, 'event', 'verification', { source_event_id: event.source_event_id }))
     }
+  }
+
+  const omittedRoutineTools = visibleEvents.filter(event =>
+    isRoutineToolEvent(event) && !selectedEvents.has(event))
+  if (omittedRoutineTools.length > 0) {
+    const notice = register(sanitizeText(
+      `tool activity: ${omittedRoutineTools.length} lower-priority tool events omitted; ${routineToolEntries} retained`,
+      budget.statementChars,
+    ), 'episode', 'omission', {})
+    manifest[notice.evidence_handle].omitted = true
+    incomplete.push(notice)
   }
 
   const omittedEvents = visibleEvents.length - selectedEvents.size
@@ -287,7 +360,7 @@ export function buildEpisodePacket(input: {
     const notice = register(sanitizeText(
       `packet limits: ${omittedEvents} timeline events omitted; ${truncatedCount} excerpts truncated; do not infer missing conclusions`,
       budget.statementChars,
-    ), 'episode', {})
+    ), 'episode', 'omission', {})
     manifest[notice.evidence_handle].omitted = true
     incomplete.push(notice)
   }
@@ -307,6 +380,7 @@ export function buildEpisodePacket(input: {
         budget.statementChars,
       ),
       'artifact',
+      'verification',
       { artifact_id: artifact.artifact_id, source_event_id: artifact.source_event_id },
     ))
   }
@@ -315,11 +389,12 @@ export function buildEpisodePacket(input: {
     `turn ${input.outcome}${input.reason ? `: ${input.reason}` : ''}`,
     budget.statementChars,
   )
-  const final_outcome = register(finalSanitized, 'episode', {})
+  const final_outcome = register(finalSanitized, 'episode', 'outcome', {})
   if (input.outcome !== 'completed' && incomplete.length < budget.sectionEntries) {
     incomplete.push(register(
       sanitizeText(`turn ended ${input.outcome}; work may be unfinished`, budget.statementChars),
       'episode',
+      'outcome',
       {},
     ))
   }
@@ -455,6 +530,7 @@ function enforceTotalDocumentBudget(
     document.incomplete.push({ text: summary.text, evidence_handle: omissionHandle })
     manifest[omissionHandle] = {
       kind: 'episode',
+      evidence_role: 'omission',
       excerpt_hash: omittedHash,
       excerpt_length: omittedLength,
       truncated: true,

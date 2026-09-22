@@ -191,6 +191,11 @@ export interface MemoryModelDisclosure {
   model: string
   fingerprint: string
   pricing_configured: boolean
+  fallback?: {
+    provider: string
+    origin: string
+    model: string
+  }
 }
 
 // ---- Phase 2: context, policies, loadouts (plan sections 9-13) ----

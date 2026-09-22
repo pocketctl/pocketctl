@@ -84,6 +84,7 @@ import { registerPurgeRoutes } from './extensions/purge-routes.js';
 import { createExtensionRateLimiterSet } from './extensions/rate-limit.js';
 import { resolveExtensionRateLimitConfig } from './runtime-config.js';
 import { registerSessionShareRoutes } from './session-share-routes.js';
+import { createSessionHistoryReadBroker } from './session-history-read.js';
 import { attentionInboxConfig } from './attention-inbox/config.js';
 import { serializeAttentionItem, serializeAttentionRecovery } from './attention-inbox/dto.js';
 import { createAttentionNotifier } from './attention-inbox/notifier.js';
@@ -987,6 +988,12 @@ async function main() {
     tokenUsageFactsAuthoritative: useFactAuthoritativeSessionDeletion(tokenFeatures),
     writeTokenUsageFacts: tokenFeatures.writeFacts,
     recoveryObserver,
+    ...(process.env.SESSION_HISTORY_MCP === 'on' ? {
+      sessionHistoryReadBroker: createSessionHistoryReadBroker({
+        pool: pools.query,
+        cursorSecret: process.env.SESSION_HISTORY_CURSOR_SECRET ?? process.env.JWT_SECRET!,
+      }),
+    } : {}),
     ...(extensionConfig.mode === 'enabled' ? {
       memoryMcpGrantBroker: createMemoryMcpGrantBroker({
         pool: pools.control,

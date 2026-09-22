@@ -11,7 +11,7 @@ import {
   buildExtractionSystemPromptFromPolicy,
   buildRepairSystemPrompt,
 } from './prompt.js'
-import { canonicalPacketJson } from '../episodes/packet.js'
+import { canonicalPacketJson, type EvidenceRole } from '../episodes/packet.js'
 import { canonicalPolicyHash, SYSTEM_EXTRACTION_POLICY_V1 } from '../policies/schemas.js'
 import {
   validateExtractionOutput,
@@ -207,6 +207,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         return [handle, typeof entry.source_event_id === 'string' ? `event:${entry.source_event_id}`
           : typeof entry.artifact_id === 'string' ? `artifact:${entry.artifact_id}` : `episode:${episode.episodeId}`]
       }))
+      const evidenceRoles = new Map<string, EvidenceRole | 'legacy'>(manifestHandles.map(handle => {
+        const raw = episode.manifest[handle]
+        const entry = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+        return [handle, parseEvidenceRole(entry.evidence_role)]
+      }))
       const seen = new Set<string>()
       const baseRows = outcome.candidates.filter(candidate => {
         // Do not collapse differing validity/structured facts just because
@@ -266,6 +271,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
             },
             policy: policy.document,
             evidenceSourceKeys,
+            evidenceRoles,
             now: new Date(),
             tombstonedKeys,
             activeFamily: family.exactClaimId
@@ -345,6 +351,11 @@ function evidenceFreshness(
   })
   return times.length ? new Date(Math.max(...times))
     : episode.terminalAt ?? episode.sessionFirstRecordedAt
+}
+
+function parseEvidenceRole(value: unknown): EvidenceRole | 'legacy' {
+  return value === 'substantive' || value === 'verification' || value === 'auxiliary'
+    || value === 'outcome' || value === 'omission' ? value : 'legacy'
 }
 
 function candidatesReferenceKnownHandles(

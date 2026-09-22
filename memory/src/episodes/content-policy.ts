@@ -8,7 +8,7 @@
 
 import { createHash } from 'crypto'
 
-export const PACKET_POLICY_VERSION = 'episode-packet-policy-v3'
+export const PACKET_POLICY_VERSION = 'episode-packet-policy-v4'
 /** ADR-P3-06: per-item cap for re-redacted shared evidence copies. */
 export const SHARED_EVIDENCE_MAX_CHARS = 4000
 

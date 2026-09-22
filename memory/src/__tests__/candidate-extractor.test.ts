@@ -222,6 +222,25 @@ describe('candidate extractor orchestration', () => {
     expect(store.persistCandidates.mock.calls[0][0].candidates[0]).toMatchObject({ status: 'validated', freshnessAt: new Date('2026-08-30T12:00:00Z') })
   })
 
+  test('passes manifest evidence roles into deterministic candidate validation', async () => {
+    const store = fakeStore({
+      manifest: {
+        'h0-aaaaaaaa': { kind: 'event', evidence_role: 'auxiliary', source_event_id: 'ev-tool' },
+      },
+    })
+    const { fn } = generator([{
+      ok: true, value: okOutput(), usage: { inputTokens: 1, outputTokens: 1, model: 'm' },
+    }])
+
+    await createCandidateExtractor({ store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE, deduper })
+      .extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+
+    expect(store.persistCandidates.mock.calls[0][0].candidates[0]).toMatchObject({
+      status: 'rejected_by_validator',
+      validation: { codes: expect.arrayContaining(['weak_evidence_only']) },
+    })
+  })
+
   test('old policy labels cannot mislabel the actual prompt; template constraints change run identity', async () => {
     const hashes: Buffer[] = []
     for (const topics of [[], ['testing']]) {

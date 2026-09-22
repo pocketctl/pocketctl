@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
-import { generateTitle } from '../title.js'
+import { generateSubagentTitle, generateTitle } from '../title.js'
 
 // --- fetch 响应构造器 ---
 
@@ -21,10 +21,60 @@ const httpError = (status: number, statusText = '', retryAfter?: string) => ({
 
 describe('generateTitle - 失败语义与重试', () => {
   beforeEach(() => {
+    delete process.env.MIMO_API_KEY
     process.env.DEEPSEEK_API_KEY = 'test-key'
   })
   afterEach(() => {
+    delete process.env.MIMO_API_KEY
     vi.restoreAllMocks()
+  })
+
+  test('MIMO_API_KEY 已设 → 优先使用 mimo-v2.6-flash 并显式关闭思考', async () => {
+    process.env.MIMO_API_KEY = 'mimo-test-key'
+    global.fetch = vi.fn().mockResolvedValue(ok('MiMo 标题'))
+
+    expect(await generateTitle('帮我写登录', '好的')).toBe('MiMo 标题')
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = vi.mocked(global.fetch).mock.calls[0]!
+    expect(String(url)).toBe('https://api.xiaomimimo.com/v1/chat/completions')
+    const headers = new Headers(init?.headers)
+    expect(headers.get('authorization')).toBe('Bearer mimo-test-key')
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    expect(body).toMatchObject({
+      model: 'mimo-v2.6-flash',
+      thinking: { type: 'disabled' },
+      stream: false,
+    })
+    expect(body).toHaveProperty('max_completion_tokens')
+    expect(body).not.toHaveProperty('max_tokens')
+  })
+
+  test('MiMo 超时 → fallback 到现有 DeepSeek 路径', async () => {
+    process.env.MIMO_API_KEY = 'mimo-test-key'
+    global.fetch = vi.fn()
+      .mockRejectedValueOnce(new DOMException('timed out', 'AbortError'))
+      .mockResolvedValueOnce(ok('DeepSeek 回退'))
+
+    expect(await generateTitle('u', 'a')).toBe('DeepSeek 回退')
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(String(vi.mocked(global.fetch).mock.calls[0]![0])).toContain('xiaomimimo.com')
+    expect(String(vi.mocked(global.fetch).mock.calls[1]![0])).toContain('api.deepseek.com')
+  })
+
+  test('MiMo 非超时错误 → 不静默 fallback 到 DeepSeek', async () => {
+    process.env.MIMO_API_KEY = 'mimo-test-key'
+    global.fetch = vi.fn().mockResolvedValue(httpError(401, 'Unauthorized'))
+
+    expect(await generateTitle('u', 'a')).toBe('')
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  test('subagent title 与 session title 使用相同的 MiMo 优先路由', async () => {
+    process.env.MIMO_API_KEY = 'mimo-test-key'
+    global.fetch = vi.fn().mockResolvedValue(ok('审查 · relay/src'))
+
+    expect(await generateSubagentTitle('审查 relay', 'code-reviewer')).toBe('审查 · relay/src')
+    expect(String(vi.mocked(global.fetch).mock.calls[0]![0])).toContain('xiaomimimo.com')
   })
 
   test('DEEPSEEK_API_KEY 未设 → 返回空串，不调 fetch', async () => {

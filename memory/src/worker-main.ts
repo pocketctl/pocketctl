@@ -30,6 +30,8 @@ import { createCandidateExtractor } from './extraction/extractor.js'
 import { createCandidateDeduper } from './extraction/deduper.js'
 import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleTextGenerator } from './model/openai-compatible-text.js'
+import { createMimoBatchTextGenerator } from './model/mimo-batch-text.js'
+import { createExtractionTextRoute, withTimeoutFallback } from './model/text-fallback.js'
 import { createClaimRepository } from './claims/repository.js'
 import { createLifecycleService } from './claims/lifecycle-service.js'
 import { createClaimIndexer } from './retrieval/indexer.js'
@@ -350,7 +352,7 @@ async function main(): Promise<void> {
       mode: config.codegraphMode === 'enabled' ? 'enabled' : 'shadow',
     })
     jobWorker.register('parse_code_snapshot', codeGraphBuild.handleParseCodeSnapshot)
-    const rawTextGenerator = config.textModel
+    const rawDeepSeekTextGenerator = config.textModel
       ? createOpenAICompatibleTextGenerator({
           baseUrl: config.textModel.baseUrl,
           model: config.textModel.model,
@@ -365,16 +367,34 @@ async function main(): Promise<void> {
           thinking: config.textModel.thinking,
         })
       : undefined
-    const textGenerator = rawTextGenerator && config.providerBudget && providerBudgetStore
-      ? withTextProviderBudget(rawTextGenerator, providerBudgetStore, {
+    const rawMimoBatchTextGenerator = config.mimoBatchTextModel
+      ? createMimoBatchTextGenerator({
+          baseUrl: config.mimoBatchTextModel.baseUrl,
+          model: config.mimoBatchTextModel.model,
+          apiKey: config.mimoBatchTextModel.apiKey,
+          timeoutMs: config.modelTimeoutMs,
+          maxOutputTokens: config.providerBudget?.textMaxOutputTokensPerRequest,
+        })
+      : undefined
+    const textBudgetOptions = config.providerBudget ? {
           key: config.providerBudget.key,
           maxRequests: config.providerBudget.textMaxRequests,
           window: config.providerBudget.textWindow,
           maxInputTokens: config.providerBudget.textMaxInputTokens,
           maxOutputTokens: config.providerBudget.textMaxOutputTokens,
           maxOutputTokensPerRequest: config.providerBudget.textMaxOutputTokensPerRequest,
-        })
-      : rawTextGenerator
+        } : undefined
+    // Guard each provider call independently. If MiMo times out and DeepSeek
+    // runs, both attempts reserve budget instead of being miscounted as one.
+    const deepSeekTextGenerator = rawDeepSeekTextGenerator && textBudgetOptions && providerBudgetStore
+      ? withTextProviderBudget(rawDeepSeekTextGenerator, providerBudgetStore, textBudgetOptions)
+      : rawDeepSeekTextGenerator
+    const mimoBatchTextGenerator = rawMimoBatchTextGenerator && textBudgetOptions && providerBudgetStore
+      ? withTextProviderBudget(rawMimoBatchTextGenerator, providerBudgetStore, textBudgetOptions)
+      : rawMimoBatchTextGenerator
+    const textGenerator = mimoBatchTextGenerator && deepSeekTextGenerator
+      ? withTimeoutFallback(mimoBatchTextGenerator, deepSeekTextGenerator)
+      : (mimoBatchTextGenerator ?? deepSeekTextGenerator)
     const rawWikiTextGenerator = config.textModel && config.wikiProviderBudget
       ? createOpenAICompatibleTextGenerator({
           baseUrl: config.textModel.baseUrl,
@@ -441,10 +461,9 @@ async function main(): Promise<void> {
     })
     jobWorker.register('build_wiki', wikiBuild.handleBuildWiki)
 
-    if (config.textModel && textGenerator) {
-      const extractionConsentFingerprint = createHash('sha256')
-        .update(`${config.textModel.provider}\n${config.textModel.baseUrl}\n${config.textModel.model}`)
-        .digest('hex')
+    const extractionTextRoute = createExtractionTextRoute(config.mimoBatchTextModel, config.textModel)
+    if (extractionTextRoute && textGenerator) {
+      const extractionConsentFingerprint = extractionTextRoute.fingerprint
       const extractionStore = createExtractionRepository(pool)
       const extractionPolicyResolver = createPolicyResolver({
         pool,
@@ -453,8 +472,8 @@ async function main(): Promise<void> {
       const extractor = createCandidateExtractor({
         store: extractionStore,
         textGenerator,
-        provider: config.textModel.provider,
-        model: config.textModel.model,
+        provider: extractionTextRoute.provider,
+        model: extractionTextRoute.model,
         modelConfigFingerprint: extractionConsentFingerprint,
         timeoutMs: config.modelTimeoutMs,
         extractionNotBefore: config.extractionNotBefore,
