@@ -90,7 +90,29 @@ describe('read-only observer session fail-closed gate', () => {
     expect(isReadOnlyObserverAgent('claude-code')).toBe(false)
     expect(isReadOnlyObserverAgent('codex')).toBe(false)
     expect(isReadOnlyObserverAgent('opencode')).toBe(false)
+    expect(isReadOnlyObserverAgent('zcode-managed')).toBe(false)
     expect(isReadOnlyObserverAgent('')).toBe(false)
+  })
+
+  test('managed ZCode requires both managed control and an acceptance receipt', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    mounted.push(wrapper)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{
+      session_id: 'desktop-1', daemon_id: 'daemon-1', title: 'Managed ZCode',
+      agent_type: 'zcode-managed', source: 'daemon', status: 'idle', daemon_online: true,
+      control_mode: 'managed', capabilities: [], cwd: '/repo',
+    }] })
+    websocketMock.handlers.get('session_status')?.({ session_id: 'desktop-1', status: 'idle' })
+    websocketMock.handlers.get('replay_end')?.({ session_id: 'desktop-1' })
+    await nextTick()
+    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+
+    websocketMock.handlers.get('session_meta')?.({
+      session_id: 'desktop-1', control_mode: 'managed',
+      capabilities: ['message_acceptance_receipt'],
+    })
+    await nextTick()
+    expect(wrapper.find('.chat-input-container').exists()).toBe(true)
   })
 
   test('zcode is never writable in any status', () => {

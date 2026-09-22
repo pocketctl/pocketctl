@@ -39,7 +39,7 @@ db('Phase 6 Git ledger schema', () => {
     await applyMemorySchema(pool)
     expect((await pool.query('SELECT statement FROM knowledge_versions WHERE version_id=$1', [source.versionId])).rows[0].statement).toBe('Synthetic statement')
     const versions = await pool.query('SELECT version FROM memory_schema_migrations ORDER BY version')
-    expect(versions.rows.map(row => row.version)).toEqual(Array.from({ length: 46 }, (_, i) => i + 1))
+    expect(versions.rows.map(row => row.version)).toEqual(Array.from({ length: 48 }, (_, i) => i + 1))
     const tables = await pool.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'memory_git_%'")
     expect(tables.rows.map(row => row.tablename).sort()).toEqual([
       'memory_git_connections', 'memory_git_actor_mappings', 'memory_git_asset_bindings',

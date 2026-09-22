@@ -41,6 +41,34 @@ const requiredScripts = new Set(
 )
 
 const makefile = fs.readFileSync(path.join(repoRoot, 'Makefile'), 'utf8')
+assert.match(
+  makefile,
+  /^RELEASE_LDFLAGS\s*=\s*-ldflags "-s -w -X main\.version=\$\(VERSION\)"$/m,
+  'Makefile release profile must strip the symbol table and DWARF while preserving version injection',
+)
+assert.match(
+  makefile,
+  /^build-release:\n\tGOOS=\$\(GOOS\) GOARCH=\$\(GOARCH\) go build -trimpath \$\(RELEASE_LDFLAGS\)/m,
+  'Makefile release profile must remove build-machine paths',
+)
+
+for (const workflowName of ['release.yml', 'release-candidate.yml']) {
+  const releaseWorkflow = fs.readFileSync(
+    path.join(repoRoot, '.github/workflows', workflowName),
+    'utf8',
+  )
+  assert.match(
+    releaseWorkflow,
+    /\bmake build-release\b/,
+    `${workflowName} must use the centralized release build profile`,
+  )
+  assert.doesNotMatch(
+    releaseWorkflow,
+    /\bgo build\s+-ldflags/,
+    `${workflowName} must not duplicate release linker flags`,
+  )
+}
+
 for (const match of workflowText.matchAll(/\bmake\s+([A-Za-z0-9._-]+)/g)) {
   const target = match[1]
   const recipe = makefile.match(

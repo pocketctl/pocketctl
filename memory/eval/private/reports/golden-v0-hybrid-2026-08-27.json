@@ -1,0 +1,75 @@
+{
+  "datasetVersion": "golden-v0-user-queries-hybrid",
+  "runAt": "2026-08-27T07:58:22.913Z",
+  "totalCases": 5,
+  "top5EvaluatedCases": 4,
+  "top5HitRate": 1,
+  "evidenceCoverageRate": 1,
+  "scopeLeakCount": 0,
+  "duplicateClaimCases": 0,
+  "emptyResultCases": 0,
+  "medianLatencyMs": 123,
+  "p95LatencyMs": 241,
+  "degradedCases": 0,
+  "reviewOutcomes": {
+    "accepted_as_is": 3,
+    "light_edit": 1
+  },
+  "cases": [
+    {
+      "id": "gs-001-phase1-web-memory-auth",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 241,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "gs-002-daemon-deploy-version",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 123,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "gs-003-synthetic-token-handling",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 110,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "gs-004-marker-seeding-method",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 108,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "gs-005-negative-ios-testing",
+      "top5ValidHit": false,
+      "expectedClaimFoundAtRank": null,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 128,
+      "emptyResult": false,
+      "degradedComponents": []
+    }
+  ]
+}

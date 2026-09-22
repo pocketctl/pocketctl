@@ -1512,6 +1512,38 @@ func TestCreateSessionUnknownAgentRejectedBeforeAnySideEffect(t *testing.T) {
 	}
 }
 
+func TestCreateSessionRoutesManagedZcodeToDedicatedRuntime(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	allowCwdForTest(t, sm)
+	cwd := t.TempDir()
+	canonicalCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotBinary string
+	sm.createDeps.resolveAgentCLI = func(config protocol.SessionConfig) (string, error) {
+		if config.Agent != adapter.AgentZcodeManaged {
+			t.Fatalf("resolved agent = %q", config.Agent)
+		}
+		return "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs", nil
+	}
+	sm.createDeps.startZcodeManaged = func(_ *SessionManager, _ context.Context, config protocol.SessionConfig, binary string) (string, error) {
+		gotBinary = binary
+		if config.Cwd != canonicalCwd {
+			t.Fatalf("cwd = %q, want %q", config.Cwd, canonicalCwd)
+		}
+		return "zses_1", nil
+	}
+
+	sid, err := sm.CreateSession(context.Background(), protocol.SessionConfig{Agent: adapter.AgentZcodeManaged, Cwd: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sid != "zses_1" || gotBinary == "" {
+		t.Fatalf("result = %q binary=%q", sid, gotBinary)
+	}
+}
+
 // --- H-7: remote creation without allowed roots fails closed ---
 
 func TestCreateSessionFailsClosedWithoutCwdRoots(t *testing.T) {

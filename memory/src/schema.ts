@@ -2065,6 +2065,106 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          ON memory_provider_budget_reservations (budget_key, provider_kind, created_at)`,
     ],
   },
+  {
+    // Accepted personal knowledge owns a bounded evidence capsule. The source
+    // Session can then be purged without deleting the reviewed ledger entry.
+    version: 48,
+    statements: [
+      `CREATE TABLE knowledge_evidence_capsules (
+         capsule_id          UUID PRIMARY KEY,
+         installation_id     UUID NOT NULL
+           REFERENCES memory_installations(installation_id) ON DELETE CASCADE,
+         version_id          UUID NOT NULL,
+         retention_basis     TEXT NOT NULL CHECK (retention_basis = 'user_accepted'),
+         accepted_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         repository_id       UUID,
+         repo_snapshot_id    UUID,
+         branch              TEXT,
+         source_content_hash BYTEA NOT NULL,
+         created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         UNIQUE (installation_id, capsule_id),
+         UNIQUE (installation_id, version_id),
+         FOREIGN KEY (installation_id, version_id)
+           REFERENCES knowledge_versions(installation_id, version_id) ON DELETE CASCADE
+       )`,
+      `ALTER TABLE knowledge_evidence ADD COLUMN capsule_id UUID`,
+      `ALTER TABLE knowledge_evidence ALTER COLUMN episode_id DROP NOT NULL`,
+      `ALTER TABLE knowledge_evidence DROP CONSTRAINT IF EXISTS knowledge_evidence_evidence_kind_check`,
+      `ALTER TABLE knowledge_evidence DROP CONSTRAINT IF EXISTS knowledge_evidence_check`,
+      `ALTER TABLE knowledge_evidence
+         ADD CONSTRAINT knowledge_evidence_capsule_fk
+         FOREIGN KEY (installation_id, capsule_id)
+         REFERENCES knowledge_evidence_capsules(installation_id, capsule_id) ON DELETE CASCADE`,
+      `INSERT INTO knowledge_evidence_capsules
+         (capsule_id, installation_id, version_id, retention_basis, accepted_at,
+          repository_id, repo_snapshot_id, branch, source_content_hash)
+       SELECT gen_random_uuid(), v.installation_id, v.version_id, 'user_accepted',
+              v.created_at, v.repository_id, v.repo_snapshot_id, v.branch,
+              sha256(convert_to(string_agg(encode(e.excerpt_hash, 'hex'), ':' ORDER BY e.ordinal), 'utf8'))
+       FROM knowledge_versions v
+       JOIN knowledge_claims c
+         ON c.installation_id = v.installation_id AND c.claim_id = v.claim_id
+       JOIN knowledge_evidence e
+         ON e.installation_id = v.installation_id AND e.version_id = v.version_id
+       WHERE c.owner_scope_kind = 'personal'
+         AND v.authority IN ('user_accepted', 'user_corrected')
+       GROUP BY v.installation_id, v.version_id, v.created_at,
+                v.repository_id, v.repo_snapshot_id, v.branch
+       ON CONFLICT (installation_id, version_id) DO NOTHING`,
+      `UPDATE knowledge_evidence e
+       SET capsule_id = c.capsule_id,
+           episode_id = NULL,
+           source_event_id = NULL,
+           artifact_id = NULL,
+           evidence_kind = 'accepted_excerpt',
+           source_evidence_hash = COALESCE(e.source_evidence_hash, encode(e.excerpt_hash, 'hex')),
+           locator = e.locator
+             - 'session_id' - 'sessionId' - 'episode_id' - 'episodeId'
+             - 'source_event_id' - 'sourceEventId' - 'artifact_id' - 'artifactId'
+       FROM knowledge_evidence_capsules c
+       WHERE c.installation_id = e.installation_id AND c.version_id = e.version_id`,
+      `ALTER TABLE knowledge_evidence
+         ADD CONSTRAINT knowledge_evidence_evidence_kind_check CHECK (evidence_kind IN
+           ('event','artifact','episode','accepted_excerpt'))`,
+      `ALTER TABLE knowledge_evidence
+         ADD CONSTRAINT knowledge_evidence_check CHECK (
+           (evidence_kind = 'accepted_excerpt' AND capsule_id IS NOT NULL
+             AND episode_id IS NULL AND source_event_id IS NULL AND artifact_id IS NULL) OR
+           (capsule_id IS NULL AND episode_id IS NOT NULL AND (
+             (evidence_kind = 'event' AND source_event_id IS NOT NULL) OR
+             (evidence_kind = 'artifact' AND artifact_id IS NOT NULL) OR
+             (evidence_kind = 'episode' AND source_event_id IS NULL AND artifact_id IS NULL)
+           ))
+         )`,
+      `CREATE INDEX knowledge_evidence_capsules_installation_version_idx
+         ON knowledge_evidence_capsules (installation_id, version_id)`,
+      `ALTER TABLE memory_skill_archive_sources
+         DROP CONSTRAINT IF EXISTS memory_skill_archive_sources_evidence_kind_check`,
+      `ALTER TABLE memory_skill_archive_sources
+         DROP CONSTRAINT IF EXISTS memory_skill_archive_sources_check`,
+      `ALTER TABLE memory_skill_archive_sources
+         DISABLE TRIGGER memory_skill_source_no_update`,
+      `UPDATE memory_skill_archive_sources archive_source
+       SET evidence_kind = 'accepted_excerpt',
+           source_event_id = NULL,
+           artifact_id = NULL
+       FROM knowledge_evidence evidence
+       WHERE evidence.installation_id = archive_source.installation_id
+         AND evidence.evidence_id = archive_source.evidence_id
+         AND evidence.evidence_kind = 'accepted_excerpt'`,
+      `ALTER TABLE memory_skill_archive_sources
+         ENABLE TRIGGER memory_skill_source_no_update`,
+      `ALTER TABLE memory_skill_archive_sources
+         ADD CONSTRAINT memory_skill_archive_sources_evidence_kind_check CHECK
+           (evidence_kind IN ('event','artifact','episode','accepted_excerpt'))`,
+      `ALTER TABLE memory_skill_archive_sources
+         ADD CONSTRAINT memory_skill_archive_sources_source_check CHECK
+           ((evidence_kind='event' AND source_event_id IS NOT NULL AND artifact_id IS NULL)
+            OR (evidence_kind='artifact' AND artifact_id IS NOT NULL)
+            OR (evidence_kind IN ('episode','accepted_excerpt')
+                AND source_event_id IS NULL AND artifact_id IS NULL))`,
+    ],
+  },
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

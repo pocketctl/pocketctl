@@ -15,7 +15,7 @@ async function runProbe() {
   const old = (path: string) => import(pathToFileURL(join(dir, 'memory/src', path)).href)
   const { applyMemorySchema } = await old('schema.ts')
   await applyMemorySchema(pool)
-  assert.equal((await pool.query('SELECT max(version) v FROM memory_schema_migrations')).rows[0].v, 46)
+  assert.equal((await pool.query('SELECT max(version) v FROM memory_schema_migrations')).rows[0].v, 48)
   const { createWikiReadService } = await old('wiki/read-service.ts')
   const wiki = await createWikiReadService(pool).getActiveWiki({ installationId: input.installationId, repositoryId: input.repositoryId })
   assert.equal(wiki.pages[0].title, 'Complete overview')
@@ -38,7 +38,7 @@ async function runProbe() {
   const rows = await pool.query('SELECT statement FROM knowledge_versions WHERE installation_id=$1 AND version_id=$2', [input.installationId, correction.versionId])
   assert.equal(rows.rows[0].statement, 'Baseline 38 isolated correction')
   assert.equal((await pool.query('SELECT count(*)::int n FROM memory_wiki_manual_section_versions WHERE manual_version_id=$1', [manual.manualVersionId])).rows[0].n, 1)
-  console.log(JSON.stringify({ baseline: '036f6d12', schemaBefore: 46, schemaAfter: 46, oldMigrator: 'pass',
+  console.log(JSON.stringify({ baseline: '036f6d12', schemaBefore: 48, schemaAfter: 48, oldMigrator: 'pass',
     oldWikiRead: 'pass', oldWikiManualWrite: 'pass', oldClaimCorrectionWrite: 'pass', oldQueueEnqueueClaimComplete: 'pass',
     runtimeStarted: false, providerRequests: 0 }))
 }

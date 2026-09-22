@@ -142,7 +142,7 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           VERSION: ${{ inputs.version }}
-        run: go build -ldflags "-X main.version=$VERSION" -o pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }} ./cmd/pocketctl
+        run: make build-release VERSION="$VERSION" RELEASE_OUTPUT="pocketctl_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.ext }}"
 
       - uses: actions/upload-artifact@v4
         with:

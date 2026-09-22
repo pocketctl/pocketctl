@@ -116,8 +116,31 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     `, [result.versionId])
     expect(version.rows[0]).toMatchObject({ version_number: '1', authority: 'user_accepted' })
     expect(version.rows[0].structured_content).toEqual({ owner: 'memory' })
-    const evidence = await pool.query(`SELECT COUNT(*)::int AS count FROM knowledge_evidence WHERE version_id = $1`, [result.versionId])
+    const evidence = await pool.query<{
+      count: number
+      capsule_count: number
+      source_episode_count: number
+    }>(`
+      SELECT COUNT(*)::int AS count,
+             COUNT(capsule_id)::int AS capsule_count,
+             COUNT(episode_id)::int AS source_episode_count
+      FROM knowledge_evidence WHERE version_id = $1
+    `, [result.versionId])
     expect(evidence.rows[0].count).toBeGreaterThanOrEqual(1)
+    expect(evidence.rows[0].capsule_count).toBe(evidence.rows[0].count)
+    expect(evidence.rows[0].source_episode_count).toBe(0)
+    const capsules = await pool.query<{
+      retention_basis: string
+      version_id: string
+    }>(`
+      SELECT retention_basis, version_id::text
+      FROM knowledge_evidence_capsules
+      WHERE installation_id = $1 AND version_id = $2
+    `, [INSTALLATION, result.versionId])
+    expect(capsules.rows).toEqual([{
+      retention_basis: 'user_accepted',
+      version_id: result.versionId,
+    }])
     const feedback = await pool.query<{ action: string }>(`
       SELECT action FROM memory_feedback WHERE candidate_id = $1
     `, [candidateId])

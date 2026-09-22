@@ -73,9 +73,10 @@ var (
 	// registered for discovery/history. New providers fail closed until they
 	// are deliberately added here and their lifecycle side effects are audited.
 	createCapableAgentTypes = map[string]struct{}{
-		AgentClaude:   {},
-		AgentCodex:    {},
-		AgentOpencode: {},
+		AgentClaude:       {},
+		AgentCodex:        {},
+		AgentOpencode:     {},
+		AgentZcodeManaged: {},
 	}
 )
 

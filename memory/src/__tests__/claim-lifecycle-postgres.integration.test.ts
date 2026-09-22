@@ -130,6 +130,19 @@ describeWithDatabase('claim lifecycle transactions (PostgreSQL)', () => {
     expect(claim.rows[0].current_version_id).toBe(corrected.versionId)
     expect(Number(claim.rows[0].revision)).toBe(2)
     expect(claim.rows[0].normalized_key).toContain('central tests/ tree')
+    const correctedEvidence = await pool.query<{
+      capsule_id: string | null
+      episode_id: string | null
+      evidence_kind: string
+    }>(`
+      SELECT capsule_id::text, episode_id::text, evidence_kind
+      FROM knowledge_evidence WHERE version_id = $1
+    `, [corrected.versionId])
+    expect(correctedEvidence.rows).toEqual([{
+      capsule_id: expect.any(String),
+      episode_id: null,
+      evidence_kind: 'accepted_excerpt',
+    }])
     // Stale correction attempts now conflict.
     const stale = await lifecycle.correctClaim({
       installationId: INSTALLATION, claimId, expectedRevision: 1,

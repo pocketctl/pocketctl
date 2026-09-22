@@ -457,14 +457,27 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             row.repository_id, row.repo_snapshot_id, row.branch, correctionAt])
           const versionId = version.rows[0].version_id
 
+          const capsuleId = await insertEvidenceCapsule(client, {
+            installationId: input.installationId,
+            versionId,
+            repositoryId: row.repository_id,
+            repoSnapshotId: row.repo_snapshot_id,
+            branch: row.branch,
+            acceptedAt: correctionAt,
+            sourceContent: JSON.stringify(input.evidence.slice(0, 13).map(evidence => ({
+              kind: evidence.evidenceKind,
+              excerpt: evidence.excerpt,
+              occurredAt: evidence.occurredAt,
+            }))),
+          })
+
           let inserted = 0
           for (const [index, evidence] of input.evidence.slice(0, 13).entries()) {
             if (index >= 64) break
-            const episodeId = evidence.episodeId ?? null
             await insertExplicitEvidence(client, {
               installationId: input.installationId,
               versionId,
-              episodeId,
+              capsuleId,
               evidence,
               ordinal: index,
             })
@@ -612,8 +625,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
 type QueryClient = Pick<pg.PoolClient, 'query'>
 
 /**
- * Derive evidence from the episode packet: one 'episode' evidence row bound
- * to the episode that produced the candidate.
+ * Resolve source evidence, then persist only the bounded accepted capsule.
  */
 async function insertEvidenceForVersion(
   client: QueryClient,
@@ -648,7 +660,10 @@ async function insertEvidenceForVersion(
   )
   if (resolved.length !== input.evidenceHandles.length) return 0
 
-  let insertedCount = 0
+  const prepared: Array<{
+    evidence: (typeof resolved)[number]
+    occurredAt: Date
+  }> = []
   for (const [ordinal, evidence] of resolved.entries()) {
     let occurredAt = episode.terminal_at ?? episode.updated_at
     if (evidence.manifest.kind === 'event' && evidence.manifest.source_event_id) {
@@ -667,23 +682,41 @@ async function insertEvidenceForVersion(
       if (!artifact.rows[0]) return 0
       occurredAt = artifact.rows[0].occurred_at
     }
+    prepared.push({ evidence, occurredAt })
+  }
+  const capsuleId = await insertEvidenceCapsule(client, {
+    installationId: input.installationId,
+    versionId: input.versionId,
+    repositoryId: input.repositoryId,
+    repoSnapshotId: input.repoSnapshotId,
+    branch: input.branch,
+    acceptedAt: null,
+    sourceContent: JSON.stringify(prepared.map(({ evidence }) => ({
+      handle: evidence.handle,
+      kind: evidence.manifest.kind,
+      excerptHash: evidence.manifest.excerpt_hash ?? null,
+      excerpt: evidence.excerpt,
+    }))),
+  })
+
+  let insertedCount = 0
+  for (const [ordinal, { evidence, occurredAt }] of prepared.entries()) {
     const inserted = await client.query(`
       INSERT INTO knowledge_evidence
-        (evidence_id, installation_id, version_id, episode_id, source_event_id, artifact_id,
-         evidence_kind, locator, excerpt, excerpt_hash, occurred_at, ordinal)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7::jsonb, $8,
-              sha256(convert_to($8, 'utf8')), $9, $10)
+        (evidence_id, installation_id, version_id, capsule_id, episode_id,
+         source_event_id, artifact_id, evidence_kind, locator, excerpt, excerpt_hash,
+         source_evidence_hash, occurred_at, ordinal)
+      VALUES (gen_random_uuid(), $1, $2, $3, NULL, NULL, NULL, 'accepted_excerpt',
+              $4::jsonb, $5, sha256(convert_to($5, 'utf8')), $6, $7, $8)
       ON CONFLICT (version_id, ordinal) DO NOTHING
     `, [
       input.installationId,
       input.versionId,
-      input.episodeId,
-      evidence.manifest.kind === 'event' ? evidence.manifest.source_event_id ?? null : null,
-      evidence.manifest.kind === 'artifact' ? evidence.manifest.artifact_id ?? null : null,
-      evidence.manifest.kind,
+      capsuleId,
       JSON.stringify({
         key: input.locatorKey,
         evidence_handle: evidence.handle,
+        source_kind: evidence.manifest.kind,
         excerpt_hash: evidence.manifest.excerpt_hash ?? null,
         truncated: evidence.manifest.truncated ?? false,
         repository_id: input.repositoryId,
@@ -691,6 +724,7 @@ async function insertEvidenceForVersion(
         branch: input.branch,
       }),
       evidence.excerpt,
+      evidence.manifest.excerpt_hash ?? null,
       occurredAt,
       ordinal,
     ])
@@ -704,28 +738,65 @@ async function insertExplicitEvidence(
   input: {
     installationId: string
     versionId: string
-    episodeId: string | null
+    capsuleId: string
     evidence: EvidenceInput
     ordinal: number
   },
 ): Promise<void> {
   await client.query(`
     INSERT INTO knowledge_evidence
-      (evidence_id, installation_id, version_id, episode_id, source_event_id, artifact_id,
-       evidence_kind, locator, excerpt, excerpt_hash, occurred_at, ordinal)
-    VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7::jsonb, $8,
-            sha256(convert_to($8, 'utf8')), $9, $10)
+      (evidence_id, installation_id, version_id, capsule_id, episode_id,
+       source_event_id, artifact_id, evidence_kind, locator, excerpt, excerpt_hash,
+       source_evidence_hash, occurred_at, ordinal)
+    VALUES (gen_random_uuid(), $1, $2, $3, NULL, NULL, NULL, 'accepted_excerpt',
+            $4::jsonb, $5, sha256(convert_to($5, 'utf8')),
+            encode(sha256(convert_to($5, 'utf8')), 'hex'), $6, $7)
     ON CONFLICT (version_id, ordinal) DO NOTHING
   `, [
-    input.installationId, input.versionId, input.episodeId,
-    input.evidence.evidenceKind === 'event' ? input.evidence.sourceEventId ?? null : null,
-    input.evidence.evidenceKind === 'artifact' ? input.evidence.artifactId ?? null : null,
-    input.evidence.evidenceKind,
-    JSON.stringify(input.evidence.locator ?? {}),
+    input.installationId, input.versionId, input.capsuleId,
+    JSON.stringify(sanitizeAcceptedLocator(input.evidence.locator ?? {}, input.evidence.evidenceKind)),
     input.evidence.excerpt,
     input.evidence.occurredAt,
     input.ordinal,
   ])
+}
+
+async function insertEvidenceCapsule(
+  client: QueryClient,
+  input: {
+    installationId: string
+    versionId: string
+    repositoryId: string | null
+    repoSnapshotId: string | null
+    branch: string | null
+    acceptedAt: Date | null
+    sourceContent: string
+  },
+): Promise<string> {
+  const inserted = await client.query<{ capsule_id: string }>(`
+    INSERT INTO knowledge_evidence_capsules
+      (capsule_id, installation_id, version_id, retention_basis, accepted_at,
+       repository_id, repo_snapshot_id, branch, source_content_hash)
+    VALUES (gen_random_uuid(), $1, $2, 'user_accepted', COALESCE($3, NOW()),
+            $4, $5, $6, sha256(convert_to($7, 'utf8')))
+    RETURNING capsule_id::text
+  `, [
+    input.installationId, input.versionId, input.acceptedAt,
+    input.repositoryId, input.repoSnapshotId, input.branch, input.sourceContent,
+  ])
+  return inserted.rows[0].capsule_id
+}
+
+function sanitizeAcceptedLocator(
+  locator: Record<string, unknown>,
+  sourceKind: EvidenceInput['evidenceKind'],
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = { ...locator, source_kind: sourceKind }
+  for (const key of [
+    'session_id', 'sessionId', 'episode_id', 'episodeId',
+    'source_event_id', 'sourceEventId', 'artifact_id', 'artifactId',
+  ]) delete sanitized[key]
+  return sanitized
 }
 
 export type ClaimRepository = ReturnType<typeof createClaimRepository>

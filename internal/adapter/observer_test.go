@@ -73,6 +73,9 @@ func TestZcodeAgentConstant(t *testing.T) {
 	if AgentZcode != "zcode" {
 		t.Fatalf("AgentZcode = %q, want %q", AgentZcode, "zcode")
 	}
+	if AgentZcodeManaged != "zcode-managed" {
+		t.Fatalf("AgentZcodeManaged = %q, want %q", AgentZcodeManaged, "zcode-managed")
+	}
 }
 
 // TestCodexDesktopProviderIsSessionOnlyObserver pins Codex Desktop's distinct
@@ -131,6 +134,7 @@ func TestDiscoveryKindValues(t *testing.T) {
 		{AgentCodex, DiscoveryCLI},
 		{AgentOpencode, DiscoveryCLI},
 		{AgentZcode, DiscoveryStorage},
+		{AgentZcodeManaged, DiscoveryCLI},
 	} {
 		p, ok := Get(tt.agent)
 		if !ok {

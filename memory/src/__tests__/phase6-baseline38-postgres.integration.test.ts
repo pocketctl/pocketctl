@@ -13,7 +13,7 @@ import { gitImportFixture } from '../testing/phase6-import-fixture.js'
 
 const url = process.env.MEMORY_TEST_DATABASE_URL
 const db = url && process.env.RUN_MEMORY_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
-db('actual baseline38 sources against additive schema46', () => {
+db('actual baseline38 sources against additive schema48', () => {
   let pool: pg.Pool, temporary: string
   let validatedTarget: BaselineTestTarget
   const root = fileURLToPath(new URL('../../../', import.meta.url))
@@ -62,10 +62,10 @@ db('actual baseline38 sources against additive schema46', () => {
         grant: f.grant, claimId: f.rule.claimId, claimRevision, episodeId: f.skill.episodeId })],
     { cwd: root, env: { ...process.env, MEMORY_TEST_DATABASE_URL: url!, MEMORY_BASELINE38_DIR: temporary,
       MEMORY_BASELINE38_TARGET: JSON.stringify(validatedTarget) }, encoding: 'utf8', timeout: 45_000 })
-    expect(JSON.parse(output)).toEqual({ baseline: '036f6d12', schemaBefore: 46, schemaAfter: 46, oldMigrator: 'pass',
+    expect(JSON.parse(output)).toEqual({ baseline: '036f6d12', schemaBefore: 48, schemaAfter: 48, oldMigrator: 'pass',
       oldWikiRead: 'pass', oldWikiManualWrite: 'pass', oldClaimCorrectionWrite: 'pass', oldQueueEnqueueClaimComplete: 'pass', runtimeStarted: false, providerRequests: 0 })
     expect(await fingerprint()).toEqual(before)
-    expect((await pool.query('SELECT count(*)::int n, max(version) v FROM memory_schema_migrations')).rows[0]).toEqual({ n: 46, v: 46 })
+    expect((await pool.query('SELECT count(*)::int n, max(version) v FROM memory_schema_migrations')).rows[0]).toEqual({ n: 48, v: 48 })
     // Exercise additive lifecycle triggers on a source that really has a Git
     // baseline. Derived bodies are invalidated; the metadata-only45 binding and
     // original immutable domain version must survive the old writer.

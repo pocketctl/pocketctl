@@ -99,6 +99,7 @@ export const MEMORY_TEST_DATABASE_TABLES = [
   'memory_schema_migrations',
   'memory_provider_state',
   'memory_installations',
+  'knowledge_evidence_capsules',
   'memory_feed_inbox',
   'memory_snapshot_runs',
   'memory_snapshot_events',

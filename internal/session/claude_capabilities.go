@@ -57,6 +57,11 @@ func (sm *SessionManager) sessionCapabilitiesLocked(state *ProcessState) []strin
 			return capabilities
 		}
 		return nil
+	case adapter.AgentZcodeManaged:
+		if state.ControlMode == protocol.ControlManaged {
+			return []string{MessageAcceptanceReceiptCapability}
+		}
+		return nil
 	default:
 		return nil
 	}

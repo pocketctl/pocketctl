@@ -137,7 +137,7 @@ suite('Phase 6 canonical metrics survive source projection cleanup',()=>{
     await createGitImportService({...s.deps,applicationMode:async()=> 'enabled' as const}).apply(s.f.skill.publisher.grant,{installationId:s.f.installationId,connectionId:s.f.connectionId,expectedGeneration:'1',exportId:s.bundle.exportId,proposalId:proposals[0].proposalId,expectedRevision:'1'})
     await pool.query('DELETE FROM knowledge_evidence WHERE version_id=$1',[s.f.rule.versionId])
     await applyMemorySchema(pool);await applyMemorySchema(pool)
-    expect((await pool.query('SELECT max(version) version FROM memory_schema_migrations')).rows[0].version).toBe(46)
+    expect((await pool.query('SELECT max(version) version FROM memory_schema_migrations')).rows[0].version).toBe(48)
     const rows=await snapshot()
     expect(value(rows,'asset_outcome','linked')).toBe(1)
     expect(value(rows,'asset_outcome','unfinished','unattributed')).toBe(1)

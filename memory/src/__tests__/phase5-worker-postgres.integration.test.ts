@@ -100,6 +100,70 @@ db('Phase 5 fenced Skill worker', () => {
       await running?.catch(() => undefined)
     }
   })
+  test('an accepted claim remains a valid Skill source after its Session is deleted', async () => {
+    const f = await fixture()
+    const claimId = randomUUID(), versionId = randomUUID(), capsuleId = randomUUID()
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(`
+        INSERT INTO knowledge_claims
+          (claim_id, installation_id, claim_type, scope_kind, scope_key,
+           normalized_key, state, current_version_id)
+        VALUES ($1, $2, 'work_method', 'repository', $3, 'accepted-method',
+                'active', $4)
+      `, [claimId, f.installationId, f.repositoryId, versionId])
+      await client.query(`
+        INSERT INTO knowledge_versions
+          (version_id, installation_id, claim_id, version_number, statement,
+           authority, confidence, repository_id, repo_snapshot_id)
+        VALUES ($1, $2, $3, 1, 'Run the repository tests first',
+                'user_accepted', 1, $4, $5)
+      `, [versionId, f.installationId, claimId, f.repositoryId,
+        (await pool.query(`SELECT repo_snapshot_id::text FROM repo_snapshots WHERE repository_id=$1`, [f.repositoryId])).rows[0].repo_snapshot_id])
+      await client.query(`
+        INSERT INTO knowledge_evidence_capsules
+          (capsule_id, installation_id, version_id, retention_basis, source_content_hash)
+        VALUES ($1, $2, $3, 'user_accepted', sha256(convert_to('tests passed', 'utf8')))
+      `, [capsuleId, f.installationId, versionId])
+      await client.query(`
+        INSERT INTO knowledge_evidence
+          (evidence_id, installation_id, version_id, capsule_id, evidence_kind,
+           excerpt, excerpt_hash, occurred_at, ordinal)
+        VALUES (gen_random_uuid(), $1, $2, $3, 'accepted_excerpt',
+                'tests passed', sha256(convert_to('tests passed', 'utf8')), NOW(), 0)
+      `, [f.installationId, versionId, capsuleId])
+      await client.query('COMMIT')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+    await createPurgeRepository(pool, { hmacKey: 'fixture-only' }).purgeSession({
+      installationId: f.installationId, sessionId: f.sessionId,
+      reason: 'user_deleted', sourceFeedId: null,
+    })
+    const sourceClient = await pool.connect()
+    try {
+      await sourceClient.query('BEGIN')
+      const snapshotId = (await pool.query<{ repo_snapshot_id: string }>(
+        `SELECT repo_snapshot_id::text FROM repo_snapshots WHERE repository_id=$1`,
+        [f.repositoryId],
+      )).rows[0].repo_snapshot_id
+      const resolved = await resolveSkillSource(sourceClient, {
+        installationId: f.installationId,
+        grant: f.grant,
+        source: { kind: 'claim_version', versionId, repositoryId: f.repositoryId, repoSnapshotId: snapshotId },
+      }, context)
+      expect(resolved.sessionId).toBeNull()
+      expect(resolved.sources).toEqual([expect.objectContaining({
+        excerpt: 'tests passed',
+        kind: 'accepted_excerpt',
+      })])
+    } finally {
+      await sourceClient.query('ROLLBACK').catch(() => undefined)
+      sourceClient.release()
+    }
+  })
   test.each(['session', 'repository'])('a %s purge during generation fences the late output', async (scope) => {
     const f = await fixture(), w = worker(), purge = createPurgeRepository(pool, { hmacKey: 'fixture-only' })
     w.call.mockImplementationOnce(async () => {

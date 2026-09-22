@@ -1,11 +1,13 @@
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { applyMemorySchema, MEMORY_MIGRATIONS } from '../schema.js'
+import { createPurgeRepository } from '../purge/repository.js'
 import {
   MEMORY_TEST_DATABASE_TABLES,
   assertMemoryTestDatabase,
   memoryTestDatabaseConfig,
 } from '../testing/test-db.js'
+import { skillFixtureDocument } from '../testing/skill-fixture.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -68,7 +70,7 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
     const versions = await pool.query<{ version: number }>(
       `SELECT version FROM memory_schema_migrations ORDER BY version`,
     )
-    expect(versions.rows.map(row => Number(row.version))).toEqual(Array.from({ length: 47 }, (_, index) => index + 1))
+    expect(versions.rows.map(row => Number(row.version))).toEqual(Array.from({ length: 48 }, (_, index) => index + 1))
 
     // v4 must have removed the obsolete observed_at-bearing unique that v2
     // failed to drop (its auto-generated name is truncated past 63 chars);
@@ -79,10 +81,170 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
       WHERE conrelid = 'repo_snapshots'::regclass AND contype = 'u'
       ORDER BY def
     `)
-    expect(constraints.rows.map(row => row.def)).toEqual([
+    expect(new Set(constraints.rows.map(row => row.def))).toEqual(new Set([
       'UNIQUE (installation_id, repo_snapshot_id)',
       'UNIQUE (installation_id, repository_id, commit_sha)',
-    ])
+    ]))
+  })
+
+  test('v48 converts existing accepted personal evidence into independent capsules in place', async () => {
+    await pool.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
+    for (const migration of MEMORY_MIGRATIONS.filter(entry => entry.version <= 47)) {
+      await pool.query('BEGIN')
+      try {
+        for (const statement of migration.statements) await pool.query(statement)
+        await pool.query(
+          `INSERT INTO memory_schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING`,
+          [migration.version],
+        )
+        await pool.query('COMMIT')
+      } catch (error) {
+        await pool.query('ROLLBACK')
+        throw error
+      }
+    }
+    const installationId = '48484848-4848-4848-8848-484848484848'
+    const claimId = '48484848-4848-4848-8848-484848484849'
+    const versionId = '48484848-4848-4848-8848-484848484850'
+    const evidenceId = '48484848-4848-4848-8848-484848484851'
+    const episodeId = '48484848-4848-4848-8848-484848484852'
+    const repositoryId = '48484848-4848-4848-8848-484848484853'
+    const snapshotId = '48484848-4848-4848-8848-484848484854'
+    const sourceEventId = '48484848-4848-4848-8848-484848484855'
+    const archiveId = '48484848-4848-4848-8848-484848484856'
+    await pool.query(`
+      INSERT INTO memory_installations
+        (installation_id, provider_id, relay_status, local_status, config_version)
+      VALUES ($1, 'pocketctl-memory', 'active', 'ready', 1)
+    `, [installationId])
+    await pool.query(`
+      INSERT INTO source_sessions
+        (installation_id, session_id, first_recorded_at, last_recorded_at)
+      VALUES ($1, 'legacy-session', NOW(), NOW())
+    `, [installationId])
+    await pool.query(`
+      INSERT INTO repositories
+        (installation_id, repository_id, repository_key, first_observed_at, last_observed_at)
+      VALUES ($1, $2, 'legacy-repository', NOW(), NOW())
+    `, [installationId, repositoryId])
+    await pool.query(`
+      INSERT INTO repo_snapshots
+        (installation_id, repository_id, repo_snapshot_id, commit_sha, observed_at)
+      VALUES ($1, $2, $3, $4, NOW())
+    `, [installationId, repositoryId, snapshotId, '4'.repeat(40)])
+    await pool.query(`
+      INSERT INTO source_turns (installation_id, turn_id, session_id, state, terminal_at)
+      VALUES ($1, 'legacy-turn', 'legacy-session', 'completed', NOW())
+    `, [installationId])
+    await pool.query(`
+      INSERT INTO source_events
+        (source_event_id, installation_id, origin, origin_position, session_id,
+         turn_id, event_type, occurred_at, payload, payload_hash)
+      VALUES ($2, $1, 'feed', 'legacy-event', 'legacy-session', 'legacy-turn',
+              'assistant_message', NOW(), '{}'::jsonb, sha256(convert_to('legacy-event', 'utf8')))
+    `, [installationId, sourceEventId])
+    await pool.query(`
+      INSERT INTO work_episodes
+        (installation_id, episode_id, session_id, turn_id, state, compiler_version,
+         outcome, repository_id, repo_snapshot_id, document, evidence_manifest,
+         compiled_at, source_digest)
+      VALUES ($1, $2, 'legacy-session', 'legacy-turn', 'ready', 'v1',
+              'completed', $3, $4, '{}'::jsonb, '{}'::jsonb, NOW(),
+              sha256(convert_to('legacy', 'utf8')))
+    `, [installationId, episodeId, repositoryId, snapshotId])
+    await pool.query(`
+      INSERT INTO knowledge_claims
+        (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key, state)
+      VALUES ($2, $1, 'work_method', 'installation', 'global', 'legacy-key', 'active')
+    `, [installationId, claimId])
+    await pool.query(`
+      INSERT INTO knowledge_versions
+        (version_id, installation_id, claim_id, version_number, statement, authority,
+         confidence, repository_id, repo_snapshot_id)
+      VALUES ($3, $1, $2, 1, 'Accepted before capsule migration', 'user_accepted',
+              1, $4, $5)
+    `, [installationId, claimId, versionId, repositoryId, snapshotId])
+    await pool.query(`UPDATE knowledge_claims SET current_version_id = $2 WHERE claim_id = $1`,
+      [claimId, versionId])
+    await pool.query(`
+      INSERT INTO knowledge_evidence
+        (evidence_id, installation_id, version_id, episode_id, source_event_id,
+         evidence_kind, excerpt, excerpt_hash, occurred_at, ordinal)
+      VALUES ($3, $1, $2, $4, $5, 'event', 'bounded legacy excerpt',
+              sha256(convert_to('bounded legacy excerpt', 'utf8')), NOW(), 0)
+    `, [installationId, versionId, evidenceId, episodeId, sourceEventId])
+    const archiveClient = await pool.connect()
+    try {
+      await archiveClient.query('BEGIN')
+      await archiveClient.query(`
+        INSERT INTO memory_skill_archives
+          (archive_id, installation_id, repository_id, repo_snapshot_id, episode_id,
+           task_id, generation, candidate_key, policy_version, source_digest,
+           input_digest, content_hash, document_hash, document, source_kind,
+           claim_version_id)
+        VALUES ($1, $2, $3, $4, NULL, $5, 1, 'legacy-candidate', 'policy.v1',
+                $6, $7, $8, $9, $10::jsonb, 'claim_version', $11)
+      `, [archiveId, installationId, repositoryId, snapshotId,
+        '48484848-4848-4848-8848-484848484857', '1'.repeat(64), '2'.repeat(64),
+        '3'.repeat(64), '4'.repeat(64), JSON.stringify(skillFixtureDocument()), versionId])
+      await archiveClient.query(`
+        INSERT INTO memory_skill_archive_sources
+          (installation_id, archive_id, source_token, evidence_handle, excerpt_hash,
+           evidence_kind, source_event_id, evidence_id)
+        VALUES ($1, $2, 'source-1', $3::uuid::text, $4, 'event', $5, $3)
+      `, [installationId, archiveId, evidenceId,
+        'a3e2d0d2b45a043dec8baa487585f7068f4844fc873615fb8ca47ad73eb292a7',
+        sourceEventId])
+      await archiveClient.query('COMMIT')
+    } catch (error) {
+      await archiveClient.query('ROLLBACK')
+      throw error
+    } finally {
+      archiveClient.release()
+    }
+
+    await applyMemorySchema(pool)
+
+    const converted = await pool.query<{
+      evidence_id: string
+      evidence_kind: string
+      episode_id: string | null
+      capsule_id: string
+      retention_basis: string
+    }>(`
+      SELECT e.evidence_id::text, e.evidence_kind, e.episode_id::text,
+             e.capsule_id::text, c.retention_basis
+      FROM knowledge_evidence e
+      JOIN knowledge_evidence_capsules c
+        ON c.installation_id = e.installation_id AND c.capsule_id = e.capsule_id
+      WHERE e.installation_id = $1 AND e.version_id = $2
+    `, [installationId, versionId])
+    expect(converted.rows).toEqual([{
+      evidence_id: evidenceId,
+      evidence_kind: 'accepted_excerpt',
+      episode_id: null,
+      capsule_id: expect.any(String),
+      retention_basis: 'user_accepted',
+    }])
+    await createPurgeRepository(pool, { hmacKey: 'fixture-only' }).purgeSession({
+      installationId,
+      sessionId: 'legacy-session',
+      reason: 'user_deleted',
+      sourceFeedId: null,
+    })
+    expect((await pool.query(`
+      SELECT evidence_kind, source_event_id::text, artifact_id::text
+      FROM memory_skill_archive_sources
+      WHERE installation_id = $1 AND archive_id = $2
+    `, [installationId, archiveId])).rows).toEqual([{
+      evidence_kind: 'accepted_excerpt',
+      source_event_id: null,
+      artifact_id: null,
+    }])
+    expect((await pool.query(`
+      SELECT 1 FROM memory_skill_archives
+      WHERE installation_id = $1 AND archive_id = $2
+    `, [installationId, archiveId])).rowCount).toBe(1)
   })
 
   test('allows only one running snapshot generation per installation (v5)', async () => {

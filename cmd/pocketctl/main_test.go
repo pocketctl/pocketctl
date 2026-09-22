@@ -45,6 +45,19 @@ type recordingDaemonMessageSender struct {
 	messages []any
 }
 
+type sessionControlMetadataStub struct {
+	capabilities []string
+	controlMode  string
+}
+
+func (s sessionControlMetadataStub) SessionCapabilities(string) []string {
+	return s.capabilities
+}
+
+func (s sessionControlMetadataStub) SessionControlMode(string) string {
+	return s.controlMode
+}
+
 func (s *recordingDaemonMessageSender) SendMsg(message any) {
 	s.messages = append(s.messages, message)
 }
@@ -77,6 +90,19 @@ func (s promptReceiptSessionStub) SessionControlMode(string) string {
 		return s.mode()
 	}
 	return s.controlMode
+}
+
+func TestSetSessionControlMetadataPublishesManagedZcodeContract(t *testing.T) {
+	event := protocol.DaemonEvent{Type: "session_created", SessionID: "zses_1"}
+	setSessionControlMetadata(&event, sessionControlMetadataStub{
+		capabilities: []string{session.MessageAcceptanceReceiptCapability},
+		controlMode:  protocol.ControlManaged,
+	}, event.SessionID)
+
+	if event.ControlMode != protocol.ControlManaged ||
+		!reflect.DeepEqual(event.Capabilities, []string{session.MessageAcceptanceReceiptCapability}) {
+		t.Fatalf("ZCode runtime control metadata=%+v", event)
+	}
 }
 
 func TestDeliverUserMessageFreezesReceiptContractBeforeDispatch(t *testing.T) {
@@ -215,6 +241,25 @@ func TestDeliverUserMessageRejectsBusyOpenCodeWithRetryableReceipt(t *testing.T)
 		RequestID: "req-busy", MsgID: "msg-busy",
 	}, func(event protocol.DaemonEvent) { events = append(events, event) })
 	if !errors.Is(err, session.ErrOpenCodeSessionBusy) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(events) != 1 || events[0].Status != "rejected" ||
+		events[0].Reason != protocol.ReasonSessionBusy || events[0].Retryable == nil || !*events[0].Retryable {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestDeliverUserMessageRejectsBusyManagedZcodeWithRetryableReceipt(t *testing.T) {
+	sm := promptReceiptSessionStub{
+		agent: adapter.AgentZcodeManaged, controlMode: protocol.ControlManaged,
+		sendErr: session.ErrZcodeSessionBusy,
+	}
+	var events []protocol.DaemonEvent
+	err := deliverUserMessage(context.Background(), sm, protocol.ClientMessage{
+		Type: "user_message", SessionID: "zses_busy", Content: "next",
+		RequestID: "req-busy", MsgID: "msg-busy",
+	}, func(event protocol.DaemonEvent) { events = append(events, event) })
+	if !errors.Is(err, session.ErrZcodeSessionBusy) {
 		t.Fatalf("error=%v", err)
 	}
 	if len(events) != 1 || events[0].Status != "rejected" ||
@@ -2260,16 +2305,17 @@ func TestNormalDaemonShutdownDrainsResumeBeforeAgentRuntimes(t *testing.T) {
 			_ = drainResumeProcessesBeforeExit(context.Background(), shutdowner, slog.Default())
 			record("drain-resumes")()
 		},
-		ShutdownCodex:     record("codex-shutdown"),
-		StopZCodeObserver: record("zcode-stop"),
-		ShutdownOpencode:  record("opencode-shutdown"),
+		ShutdownCodex:        record("codex-shutdown"),
+		StopZCodeObserver:    record("zcode-stop"),
+		ShutdownZcodeManaged: record("zcode-managed-shutdown"),
+		ShutdownOpencode:     record("opencode-shutdown"),
 	})
 
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{
 		"keepawake-release", "keepawake-close", "agentcontrol-close",
-		"drain-resumes", "codex-shutdown", "zcode-stop", "opencode-shutdown",
+		"drain-resumes", "codex-shutdown", "zcode-stop", "zcode-managed-shutdown", "opencode-shutdown",
 	}
 	if !reflect.DeepEqual(order, want) {
 		t.Fatalf("shutdown order=%v, want %v", order, want)

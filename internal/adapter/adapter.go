@@ -90,6 +90,9 @@ const (
 	AgentCodex        = "codex"
 	AgentCodexDesktop = "codex-desktop"
 	AgentOpencode     = "opencode"
+	// AgentZcodeManaged is deliberately distinct from AgentZcode: the latter is
+	// a read-only Desktop observer, while this identity is daemon-owned.
+	AgentZcodeManaged = "zcode-managed"
 )
 
 // ExtractFirstUserMessageFor 按 agentType 选首条 user 消息提取函数。

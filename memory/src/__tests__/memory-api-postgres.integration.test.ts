@@ -362,6 +362,7 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
       headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'accept-before-delete' }, payload: { expected_revision: 1 },
     })
     expect(accepted.statusCode).toBe(200)
+    expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_evidence_capsules`)).rows[0].count).toBe(1)
     const deleted = await app.inject({ method: 'DELETE', url: `/api/v1/memory/claims/${accepted.json().claim_id}`,
       headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'delete-before-duplicate' }, payload: { expected_revision: 1 },
     })
@@ -372,6 +373,7 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
     expect(restored.statusCode).toBe(409)
     expect(restored.json().error.reason_code).toBe('tombstoned_identity')
     expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_claims`)).rows[0].count).toBe(0)
+    expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_evidence_capsules`)).rows[0].count).toBe(0)
   })
 
   test('settings refuse shadow modes while adapters are unconfigured', async () => {

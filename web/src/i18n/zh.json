@@ -347,7 +347,7 @@
   "session.export_text": "纯文本",
   "session.export_confirm": "导出下载",
   "session.delete_dialog_title": "删除会话？",
-  "session.delete_dialog_desc": "将删除该会话及其所有消息和工具调用记录。删除后 5 秒内可撤销恢复。",
+  "session.delete_dialog_desc": "将删除该会话的消息、工具调用和未审核候选内容。已接受并入库的 Memory 内容会保留并继续用于检索和后续处理，可在 Memory 中单独永久删除。删除后 5 秒内可撤销恢复。",
   "session.title_default": "会话",
   "session.ago_seconds": "{{n}}秒前",
   "session.ago_minutes": "{{n}}分钟前",

@@ -56,6 +56,7 @@
           <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="selectAgent('claude-code')">Claude Code</button>
           <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="selectAgent('codex')">Codex CLI</button>
           <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" @click="selectAgent('opencode')">OpenCode</button>
+          <button :class="['agent-pill', { selected: form.agent === 'zcode-managed' }]" @click="selectAgent('zcode-managed')">ZCode Runtime</button>
         </div>
 
         <div v-if="form.agent === 'codex' && codexHomes.length > 1" class="form-group">
@@ -96,7 +97,7 @@
         </div>
 
         <!-- Agent-specific native permission configuration -->
-        <div v-if="form.agent !== 'opencode'" class="form-group permission-field">
+        <div v-if="form.agent === 'claude-code' || form.agent === 'codex'" class="form-group permission-field">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             {{ t('new_session.permission_label') }}
@@ -295,7 +296,7 @@ const selectedDaemonName = computed(() => {
   return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
-const CREATE_CAPABLE_AGENTS = new Set<AgentType>(['claude-code', 'codex', 'opencode'])
+const CREATE_CAPABLE_AGENTS = new Set<AgentType>(['claude-code', 'codex', 'opencode', 'zcode-managed'])
 function isCreateCapableAgent(agent: string): agent is AgentType {
   return CREATE_CAPABLE_AGENTS.has(agent as AgentType)
 }

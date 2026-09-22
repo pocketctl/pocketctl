@@ -56,6 +56,7 @@ if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/n
       ios/Pocketctl/Models/SubAgent.swift \
       ios/Pocketctl/Models/User.swift \
       ios/Pocketctl/Models/WebSocketEvent.swift \
+      ios/Pocketctl/Utils/L10n.swift \
       ios/Pocketctl/Utils/SessionEventPolicy.swift \
       ios/Pocketctl/Utils/UnifiedDiffParser.swift \
       ios/Tests/SessionEventRegressionTests.swift \
@@ -71,6 +72,7 @@ if [[ -d ios ]] && command -v swift >/dev/null 2>&1 && command -v swiftc >/dev/n
       ios/Pocketctl/Models/SubAgent.swift \
       ios/Pocketctl/Models/User.swift \
       ios/Pocketctl/Models/WebSocketEvent.swift \
+      ios/Pocketctl/Utils/L10n.swift \
       ios/Pocketctl/Utils/UnifiedDiffParser.swift \
       ios/Pocketctl/Utils/SessionEventPolicy.swift \
       ios/Tests/AgentFileChangeRegressionTests.swift \

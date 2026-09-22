@@ -2,8 +2,9 @@ import { describe, test, expect } from 'vitest'
 import { AGENT_DISPLAY_NAMES, agentDisplayName, agentShortLabel, agentIconClass } from '../agentDisplay.js'
 
 describe('agentDisplay', () => {
-  test('uses distinct public names for Codex CLI and Codex Desktop', () => {
-    expect(agentDisplayName('zcode')).toBe('ZCode')
+  test('uses distinct public names for desktop observers and managed runtimes', () => {
+    expect(agentDisplayName('zcode')).toBe('ZCode Desktop')
+    expect(agentDisplayName('zcode-managed')).toBe('ZCode Runtime')
     expect(agentDisplayName('claude-code')).toBe('Claude Code')
     expect(agentDisplayName('codex')).toBe('Codex CLI')
     expect(agentDisplayName('codex-desktop')).toBe('Codex Desktop')
@@ -12,12 +13,14 @@ describe('agentDisplay', () => {
   })
 
   test('gives Codex Desktop a distinct short label in the Codex visual family', () => {
-    expect(agentShortLabel('zcode')).toBe('ZC')
+    expect(agentShortLabel('zcode')).toBe('ZD')
+    expect(agentShortLabel('zcode-managed')).toBe('ZR')
     expect(agentShortLabel('codex')).toBe('Cx')
     expect(agentShortLabel('codex-desktop')).toBe('CD')
     expect(agentShortLabel('opencode')).toBe('OC')
     expect(agentShortLabel('claude-code')).toBe('CC')
     expect(agentIconClass('zcode')).toBe('zcode')
+    expect(agentIconClass('zcode-managed')).toBe('zcode-managed')
     expect(agentIconClass('codex')).toBe('codex')
     expect(agentIconClass('codex-desktop')).toBe('codex-desktop')
     // opencode falls back to claude icon class (pre-existing behavior, unchanged)
@@ -26,6 +29,6 @@ describe('agentDisplay', () => {
   })
 
   test('publishes all five supported agent display names', () => {
-    expect(Object.keys(AGENT_DISPLAY_NAMES).sort()).toEqual(['claude-code', 'codex', 'codex-desktop', 'opencode', 'zcode'])
+    expect(Object.keys(AGENT_DISPLAY_NAMES).sort()).toEqual(['claude-code', 'codex', 'codex-desktop', 'opencode', 'zcode', 'zcode-managed'])
   })
 })

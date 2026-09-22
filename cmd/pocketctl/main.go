@@ -241,6 +241,8 @@ func cmdDaemon(args []string) {
 		cmdDaemonLogs()
 	case "doctor":
 		cmdDoctor()
+	case "diagnose":
+		cmdDaemonDiagnose(args[1:])
 	case "update":
 		cmdDaemonUpdate(args[1:])
 	case "service":
@@ -2062,9 +2064,10 @@ func cmdDaemonStart(args []string) {
 		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker, memoryContextGrants)
 	})
 
-	// Periodic state update. Durable-ingress diagnostics are refreshed on this
-	// bounded cadence because normal ACKs do not necessarily change connection
-	// status or session state.
+	// Periodic state update. Always refresh the session snapshot as well as
+	// durable-ingress diagnostics: control ownership can change through a local
+	// Agent launcher without a Relay command, and `daemon diagnose` must observe
+	// that transition within this bounded cadence.
 	daemon.RunLoop(ctx, "state-persist", logger, func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -2073,24 +2076,8 @@ func cmdDaemonStart(args []string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if !stateDirty.Swap(false) {
-					if err := statePersistence.refreshDiagnostics(client.DurableIngressDiagnostics()); err != nil {
-						logger.Error("write daemon ingress diagnostics", "error", err)
-					}
-					continue
-				}
-				sessions := sm.ListSessions()
-				stateSessions := make([]daemon.SessionState, len(sessions))
-				for i, s := range sessions {
-					stateSessions[i] = daemon.SessionState{
-						SessionID:      s.SessionID,
-						Agent:          s.Agent,
-						Cwd:            s.Cwd,
-						Status:         s.Status,
-						StartedAt:      s.StartedAt,
-						LastActivityAt: s.LastActivityAt,
-					}
-				}
+				stateDirty.Swap(false)
+				stateSessions := daemonSessionStates(sm.ListSessions())
 				if err := statePersistence.updateSessionsWithDiagnostics(stateSessions, client.DurableIngressDiagnostics()); err != nil {
 					logger.Error("write daemon session state", "error", err)
 				}
@@ -2143,6 +2130,11 @@ func cmdDaemonStart(args []string) {
 				zcodeObserver.Stop()
 			}
 		},
+		ShutdownZcodeManaged: func() {
+			if err := sm.ShutdownZcodeManaged(); err != nil {
+				logger.Warn("ZCode managed runtime shutdown incomplete", "error", err)
+			}
+		},
 		ShutdownOpencode: func() { sm.ShutdownOpencode() },
 	})
 	cancel()
@@ -2187,13 +2179,14 @@ func drainResumeProcessesBeforeExit(ctx context.Context, sm resumeShutdowner, lo
 // daemonShutdownSteps is the normal daemon shutdown sequence as injectable
 // steps so ordering can be regression-tested without a real daemon.
 type daemonShutdownSteps struct {
-	ReleaseKeepAwake  func()
-	CloseKeepAwake    func()
-	CloseAgentControl func()
-	DrainResumes      func()
-	ShutdownCodex     func()
-	StopZCodeObserver func()
-	ShutdownOpencode  func()
+	ReleaseKeepAwake     func()
+	CloseKeepAwake       func()
+	CloseAgentControl    func()
+	DrainResumes         func()
+	ShutdownCodex        func()
+	StopZCodeObserver    func()
+	ShutdownZcodeManaged func()
+	ShutdownOpencode     func()
 }
 
 // runDaemonShutdownSequence tears the daemon down in the required order:
@@ -2218,6 +2211,9 @@ func runDaemonShutdownSequence(steps daemonShutdownSteps) {
 	}
 	if steps.StopZCodeObserver != nil {
 		steps.StopZCodeObserver()
+	}
+	if steps.ShutdownZcodeManaged != nil {
+		steps.ShutdownZcodeManaged()
 	}
 	if steps.ShutdownOpencode != nil {
 		steps.ShutdownOpencode()
@@ -2840,6 +2836,24 @@ type daemonStatePersistence struct {
 func newDaemonStatePersistence(initial daemon.DaemonState) *daemonStatePersistence {
 	initial.Sessions = append([]daemon.SessionState(nil), initial.Sessions...)
 	return &daemonStatePersistence{state: initial}
+}
+
+func daemonSessionStates(sessions []session.SessionInfo) []daemon.SessionState {
+	states := make([]daemon.SessionState, len(sessions))
+	for i, current := range sessions {
+		states[i] = daemon.SessionState{
+			SessionID:      current.SessionID,
+			Agent:          current.Agent,
+			Source:         current.Source,
+			ControlMode:    current.ControlMode,
+			Capabilities:   append([]string(nil), current.Capabilities...),
+			Cwd:            current.Cwd,
+			Status:         current.Status,
+			StartedAt:      current.StartedAt,
+			LastActivityAt: current.LastActivityAt,
+		}
+	}
+	return states
 }
 
 func persistInitialDaemonStateAndContinue(
@@ -3600,9 +3614,8 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 		meta.CodexHomeID = homeID
 		meta.CodexHomeLabel = homeLabel
 	}
-	if parserAgent == adapter.AgentCodex {
-		meta.Capabilities = sm.SessionCapabilities(sessionID)
-		meta.ControlMode = sm.SessionControlMode(sessionID)
+	if parserAgent == adapter.AgentCodex || agentType == adapter.AgentZcodeManaged {
+		setSessionControlMetadata(&meta, sm, sessionID)
 	} else if agentType == adapter.AgentOpencode {
 		meta.Capabilities = sm.OpenCodeInteractionCapabilities(sessionID)
 		meta.ControlMode = sm.SessionControlMode(sessionID)
@@ -3614,6 +3627,16 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 		meta.Permission, meta.PermissionMutable, meta.PermissionMutableModes = permission, mutable, modes
 	}
 	return meta
+}
+
+type sessionControlMetadataProvider interface {
+	SessionCapabilities(string) []string
+	SessionControlMode(string) string
+}
+
+func setSessionControlMetadata(event *protocol.DaemonEvent, provider sessionControlMetadataProvider, sessionID string) {
+	event.Capabilities = provider.SessionCapabilities(sessionID)
+	event.ControlMode = provider.SessionControlMode(sessionID)
 }
 
 type userMessageSession interface {
@@ -3661,7 +3684,7 @@ func deliverUserMessage(
 		})
 		return err
 	}
-	if errors.Is(err, session.ErrOpenCodeSessionBusy) && cmd.MsgID != "" {
+	if (errors.Is(err, session.ErrOpenCodeSessionBusy) || errors.Is(err, session.ErrZcodeSessionBusy)) && cmd.MsgID != "" {
 		retryable := true
 		send(protocol.DaemonEvent{
 			Type: "user_message_receipt", SessionID: cmd.SessionID,
@@ -3869,7 +3892,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if config.Agent == "" {
 					config.Agent = "claude-code"
 				}
-				if config.Prompt != "" && (config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode) {
+				if config.Prompt != "" && (config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged) {
 					config.DeferInitialPrompt = true
 				}
 				sessionID, err := sm.CreateSession(ctx, config)
@@ -3894,8 +3917,8 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Model:         model,
 					RequestID:     cmd.RequestID,
 					ReservationID: quotaReservationID(cmd.QuotaGrant),
-					Capabilities:  sm.SessionCapabilities(sessionID),
 				}
+				setSessionControlMetadata(&evt, sm, sessionID)
 				if permission, mutable, modes, ok := sm.GetPermissionMeta(sessionID); ok {
 					evt.Permission = permission
 					evt.PermissionMutable = mutable

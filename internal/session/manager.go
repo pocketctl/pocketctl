@@ -156,6 +156,7 @@ type SessionManager struct {
 	// opencode coordinates the shared `opencode serve` process and its SSE demux
 	// for server-kind (opencode) sessions. Lazily created on first use.
 	opencode                    *opencodeCoordinator
+	zcodeManaged                *zcodeCoordinator
 	codexProvider               *CodexRuntimeProvider
 	leases                      *agentcontrol.LeaseRegistry
 	recordOpenCodeRuntimeHealth func(bool)
@@ -192,6 +193,7 @@ type SessionManager struct {
 type createSessionDependencies struct {
 	resolveAgentCLI   func(protocol.SessionConfig) (string, error)
 	startOpencode     func(*SessionManager, context.Context, protocol.SessionConfig) (string, error)
+	startZcodeManaged func(*SessionManager, context.Context, protocol.SessionConfig, string) (string, error)
 	startCodexManaged func(*SessionManager, context.Context, protocol.SessionConfig, string, string, string, string, string) (string, bool, error)
 }
 
@@ -231,6 +233,9 @@ func NewSessionManagerWithTrustedActionPolicy(outputCh chan protocol.DaemonEvent
 			},
 			startOpencode: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig) (string, error) {
 				return sm.createOpencodeSession(ctx, config)
+			},
+			startZcodeManaged: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig, binary string) (string, error) {
+				return sm.createZcodeManagedSession(ctx, config, binary)
 			},
 			startCodexManaged: func(sm *SessionManager, ctx context.Context, config protocol.SessionConfig, cliPath, cwd, model, worktreePath, worktreeBranch string) (string, bool, error) {
 				return sm.tryCreateManagedCodexSession(ctx, config, cliPath, cwd, model, worktreePath, worktreeBranch)

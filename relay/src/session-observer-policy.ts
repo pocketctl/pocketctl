@@ -10,6 +10,7 @@ export const CREATE_CAPABLE_AGENT_TYPES: ReadonlySet<string> = new Set([
   'claude-code',
   'codex',
   'opencode',
+  'zcode-managed',
 ])
 
 /** Current daemon-native commands that can mutate an agent runtime. */

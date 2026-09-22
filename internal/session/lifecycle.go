@@ -83,6 +83,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// Server-kind agents (opencode) are driven via a SessionBackend (shared
 	// `opencode serve` + SSE), not the PTY spawn flow below.
 	if adapter.BackendKindFor(config.Agent) == adapter.BackendServer {
+		if config.Agent == adapter.AgentZcodeManaged {
+			return sm.createDeps.startZcodeManaged(sm, ctx, config, cliPath)
+		}
 		return sm.createDeps.startOpencode(sm, ctx, config)
 	}
 
@@ -1029,15 +1032,10 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 // per agent (discovery is the canonical registry; this is the session layer's
 // lookup for spawning).
 func agentCLIName(agentType string) string {
-	switch agentType {
-	case adapter.AgentClaude:
-		return "claude"
-	case adapter.AgentCodex:
-		return "codex"
-	default:
-		// opencode / unknown → use the type as-is (its CLI usually matches).
-		return agentType
+	if provider, ok := adapter.Get(agentType); ok && provider.CLIName != "" {
+		return provider.CLIName
 	}
+	return agentType
 }
 
 func findAgentCLI(agent string) (string, error) {

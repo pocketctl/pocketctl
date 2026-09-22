@@ -26,6 +26,11 @@
         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
         <circle cx="12" cy="12" r="3" />
       </g>
+      <!-- Managed ZCode: terminal prompt, distinct from the read-only eye. -->
+      <g v-else-if="kind === 'zcode-managed'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2.5" y="4" width="19" height="16" rx="2" />
+        <path d="m7 9 3 3-3 3M13 15h4" />
+      </g>
     </svg>
     <span class="agent-text">{{ label }}</span>
   </span>
@@ -45,12 +50,13 @@ const props = withDefaults(defineProps<{
 })
 
 // normalized visual kind
-const kind = computed<'claude' | 'codex' | 'codex-desktop' | 'opencode' | 'zcode'>(() => {
+const kind = computed<'claude' | 'codex' | 'codex-desktop' | 'opencode' | 'zcode' | 'zcode-managed'>(() => {
   const a = (props.agent || '').toLowerCase()
   if (a === 'codex') return 'codex'
   if (a === 'codex-desktop') return 'codex-desktop'
   if (a === 'opencode') return 'opencode'
   if (a === 'zcode') return 'zcode'
+  if (a === 'zcode-managed') return 'zcode-managed'
   return 'claude'
 })
 
@@ -86,4 +92,5 @@ const iconSize = computed(() => props.size === 'md' ? 14 : 12)
 .agent-badge.opencode { background: rgba(167, 139, 250, 0.14); color: #a78bfa; }
 /* ZCode — teal (read-only observer) */
 .agent-badge.zcode { background: rgba(20, 184, 166, 0.14); color: #14b8a6; }
+.agent-badge.zcode-managed { background: rgba(20, 184, 166, 0.2); color: #0d9488; box-shadow: inset 0 0 0 1px rgba(20, 184, 166, 0.18); }
 </style>

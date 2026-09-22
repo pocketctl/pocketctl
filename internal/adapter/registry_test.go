@@ -11,10 +11,11 @@ func TestRegistryContainsAllAgents(t *testing.T) {
 	t.Parallel()
 
 	want := map[string]bool{
-		AgentClaude:   false,
-		AgentCodex:    false,
-		AgentOpencode: false,
-		AgentZcode:    false,
+		AgentClaude:       false,
+		AgentCodex:        false,
+		AgentOpencode:     false,
+		AgentZcode:        false,
+		AgentZcodeManaged: false,
 	}
 	for _, p := range All() {
 		if _, ok := want[p.Type]; ok {
@@ -77,6 +78,7 @@ func TestCreateCapableAgentTypesRequireExactRegistryOptIn(t *testing.T) {
 		{agent: AgentClaude, want: true},
 		{agent: AgentCodex, want: true},
 		{agent: AgentOpencode, want: true},
+		{agent: AgentZcodeManaged, want: true},
 		{agent: "", want: false},
 		{agent: AgentZcode, want: false},
 		{agent: AgentCodexDesktop, want: false},
@@ -92,5 +94,23 @@ func TestCreateCapableAgentTypesRequireExactRegistryOptIn(t *testing.T) {
 				t.Fatalf("IsCreateCapableAgent(%q) = %v, want %v", tt.agent, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestZcodeManagedProviderUsesDedicatedManagedIdentity(t *testing.T) {
+	t.Parallel()
+
+	p, ok := Get(AgentZcodeManaged)
+	if !ok {
+		t.Fatalf("Get(%q) = false, want registered", AgentZcodeManaged)
+	}
+	if p.Type != "zcode-managed" || p.CLIName != "zcode" {
+		t.Fatalf("managed ZCode identity = %+v", p)
+	}
+	if p.Discovery != DiscoveryCLI || p.Backend != BackendServer {
+		t.Fatalf("managed ZCode backend/discovery = %v/%v, want server/CLI", p.Backend, p.Discovery)
+	}
+	if IsObserverAgent(AgentZcodeManaged) {
+		t.Fatal("managed ZCode must not inherit the zcode observer policy")
 	}
 }

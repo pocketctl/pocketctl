@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +64,7 @@ func DiscoverAgents() []AgentInfo {
 			Path:       path,
 			Version:    detectVersion(path),
 			Latest:     detectLatest(a.Package),
-			Manageable: manageable,
+			Manageable: manageable && (a.Package != "" || a.UpdateCmd != ""),
 		})
 	}
 	return agents
@@ -96,6 +97,9 @@ func candidatePaths(cliName, home, pathEnv, npmPrefix string) []string {
 		}
 		addPath(dir, cliName)
 	}
+	if cliName == "zcode" {
+		ordered = append(ordered, zcodeDesktopCandidatePaths(runtime.GOOS, home)...)
+	}
 	seen := make(map[string]bool, len(ordered))
 	var out []string
 	for _, p := range ordered {
@@ -106,6 +110,18 @@ func candidatePaths(cliName, home, pathEnv, npmPrefix string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+func zcodeDesktopCandidatePaths(goos, home string) []string {
+	if goos != "darwin" {
+		return nil
+	}
+	const relative = "ZCode.app/Contents/Resources/glm/zcode.cjs"
+	paths := make([]string, 0, 2)
+	if home != "" {
+		paths = append(paths, filepath.Join(home, "Applications", relative))
+	}
+	return append(paths, filepath.Join("/Applications", relative))
 }
 
 // resolveFrom 从有序候选中选择:优先第一个 manageable(owned)的;否则第一个存在的。

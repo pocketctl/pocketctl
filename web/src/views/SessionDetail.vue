@@ -1172,7 +1172,7 @@ const agentFilterOptions = computed(() => {
     const agent = normalizedAgentType(session)
     counts.set(agent, (counts.get(agent) || 0) + 1)
   }
-  const order = ['codex', 'codex-desktop', 'zcode', 'opencode', 'claude-code']
+  const order = ['codex', 'codex-desktop', 'zcode-managed', 'zcode', 'opencode', 'claude-code']
   const agents = [...counts.keys()].sort((left, right) => {
     const leftIndex = order.indexOf(left)
     const rightIndex = order.indexOf(right)
@@ -1404,6 +1404,12 @@ const canWriteWhenConnected = computed(() => {
   // acceptance receipt is emitted only by the shim-managed backend, so require
   // it before rendering a multi-device composer for Codex.
   if (currentSessionAgent.value === 'codex') {
+    return isManagedSession.value
+      && supportsMessageAcceptanceReceipt.value
+      && !isSubagent.value
+      && !focusedSubAgentId.value
+  }
+  if (currentSessionAgent.value === 'zcode-managed') {
     return isManagedSession.value
       && supportsMessageAcceptanceReceipt.value
       && !isSubagent.value

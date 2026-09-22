@@ -54,6 +54,16 @@ func init() {
 		Backend:   BackendServer,
 	})
 
+	// ZCode managed — a daemon-owned `zcode app-server --stdio` runtime. Keep
+	// this separate from AgentZcode so enabling remote creation can never grant
+	// write authority over Desktop-observed sessions.
+	Register(Provider{
+		Type:      AgentZcodeManaged,
+		CLIName:   "zcode",
+		Discovery: DiscoveryCLI,
+		Backend:   BackendServer,
+	})
+
 	// zcode — read-only observer backend. The daemon never launches or drives a
 	// ZCode session: it only reads historical/incremental content from the local
 	// SQLite store out of band (see internal/zcode). No CLI/npm metadata, no

@@ -43,7 +43,8 @@ automatically advertised as remotely controllable.
 | **Codex CLI 0.144.1+** | Threads, turns, items, plans, and interactions | Managed sessions support shared input, steer/interrupt, approvals, questions, standard MCP elicitation, and explicit `/` command/skill invocation with autocomplete. | Optional launcher connects the official TUI and daemon to one app-server. See [Codex managed terminal control](docs/codex-managed-terminal.md). |
 | **Codex Desktop** | Incremental rollout history, status, model, token usage, tools, plans, and file changes | Read-only: no remote input, approval, interrupt, kill, resume, or session creation. | Automatically discovered observer; displayed separately from Codex CLI as `codex-desktop`. |
 | **OpenCode 1.17.11+** | Sessions, content, status, commands, and interactions | Managed sessions support shared input, permissions, and questions. Existing independent processes stay read-only until safely resumed through the launcher. | Optional launcher connects the official TUI and daemon to one shared server. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md). |
-| **ZCode** | Incremental history sync from the local SQLite store | Read-only: no remote input, approval, resume, or control. | Explicit opt-in observer. |
+| **ZCode Desktop** | Incremental history sync from the local SQLite store | Read-only: no remote input, approval, resume, or control. | Explicit opt-in observer for Desktop-owned sessions. |
+| **ZCode Runtime** | Live events and turn state of native ZCode sessions | PocketCtl-created sessions support remote creation, shared input, and interrupting active turns; other reverse interaction requests stay unsupported. | Daemon-owned `zcode app-server --stdio` runtime, listed separately from the ZCode Desktop observer. |
 
 PocketCtl is extensible through agent providers. See [Adding an agent](docs/adding-an-agent.md)
 for the public adapter contract.
@@ -175,6 +176,7 @@ what leaves the development host.
 | `pocketctl daemon start [--prod]` | Start the daemon and discover local agents. |
 | `pocketctl daemon status` | Show daemon, Relay, and discovered-agent status. |
 | `pocketctl daemon doctor` | Diagnose configuration and connection problems. |
+| `pocketctl daemon diagnose <session-id>` | Check whether one session is proxied and print a reason and recovery advice. |
 | `pocketctl daemon logs` | Locate or follow daemon logs. |
 | `pocketctl daemon update [--version TAG]` | Download and verify a published update. |
 | `pocketctl agent <agent> status` | Inspect launcher, capability, and runtime state. |

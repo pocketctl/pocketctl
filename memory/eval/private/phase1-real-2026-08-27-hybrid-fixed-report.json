@@ -1,0 +1,74 @@
+{
+  "datasetVersion": "phase1-real-2026-08-27-hybrid-fixed",
+  "runAt": "2026-08-27T02:42:02.831Z",
+  "totalCases": 5,
+  "top5EvaluatedCases": 5,
+  "top5HitRate": 1,
+  "evidenceCoverageRate": 1,
+  "scopeLeakCount": 0,
+  "duplicateClaimCases": 0,
+  "emptyResultCases": 0,
+  "medianLatencyMs": 120,
+  "p95LatencyMs": 276,
+  "degradedCases": 0,
+  "reviewOutcomes": {
+    "accepted_as_is": 3
+  },
+  "cases": [
+    {
+      "id": "p1-real-001",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 276,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "p1-real-002",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 103,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "p1-real-003",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 120,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "p1-real-004",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 120,
+      "emptyResult": false,
+      "degradedComponents": []
+    },
+    {
+      "id": "p1-real-005",
+      "top5ValidHit": true,
+      "expectedClaimFoundAtRank": 1,
+      "evidenceCoverage": 1,
+      "scopeLeak": false,
+      "duplicateActiveClaims": 0,
+      "latencyMs": 110,
+      "emptyResult": false,
+      "degradedComponents": []
+    }
+  ]
+}
