@@ -25,6 +25,9 @@ off your development machine.
   for replay, and the daemon reconciles supported managed sessions after restart.
 - **Browse session documents remotely** — capture secure snapshots of a
   session's key documents and view or download them from Web or iOS.
+- **Organize sessions with projects** — group sessions into projects, pin the
+  ones that matter, and archive finished sessions to keep the active list
+  focused, from Web or iOS.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
 - **Grow governed project knowledge (experimental)** — the optional Memory

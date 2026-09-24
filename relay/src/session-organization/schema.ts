@@ -44,7 +44,7 @@ export async function initSessionOrganizationSchema(pool: Pick<pg.Pool, 'query'>
     DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_project_owner_fk') THEN
         ALTER TABLE sessions ADD CONSTRAINT sessions_project_owner_fk
-          FOREIGN KEY (project_id, user_id) REFERENCES session_projects(id, user_id) ON DELETE SET NULL (project_id);
+          FOREIGN KEY (project_id, user_id) REFERENCES session_projects(id, user_id);
       END IF;
     END $$;
     CREATE INDEX IF NOT EXISTS idx_sessions_organization_bucket

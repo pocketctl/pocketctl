@@ -1,11 +1,14 @@
 import pg from 'pg'
 import Fastify from 'fastify'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
-import { initDB, listSessionsWithChildren, setSessionPin, upsertSession } from '../db.js'
-import { signAccessToken } from '../auth.js'
-import { registerSessionOrganizationRoutes } from './routes.js'
-import { reserveConcurrentSession } from '../quota.js'
-import { attachReservedSessionProject } from './attach.js'
+
+process.env.JWT_SECRET ||= 'session-organization-test-secret'
+
+const { initDB, listSessionsWithChildren, setSessionPin, upsertSession } = await import('../db.js')
+const { signAccessToken } = await import('../auth.js')
+const { registerSessionOrganizationRoutes } = await import('./routes.js')
+const { reserveConcurrentSession } = await import('../quota.js')
+const { attachReservedSessionProject } = await import('./attach.js')
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const enabled = Boolean(databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1')

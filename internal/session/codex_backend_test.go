@@ -28,7 +28,7 @@ type fakeCodexCall struct {
 }
 
 func newFakeCodexRuntimeClient() *fakeCodexRuntimeClient {
-	return &fakeCodexRuntimeClient{results: make(map[string]json.RawMessage), errs: make(map[string]error), events: make(chan codexapp.Inbound)}
+	return &fakeCodexRuntimeClient{results: map[string]json.RawMessage{"thread/unsubscribe": json.RawMessage(`{"status":"unsubscribed"}`)}, errs: make(map[string]error), events: make(chan codexapp.Inbound)}
 }
 
 func (f *fakeCodexRuntimeClient) Call(_ context.Context, method string, params any, result any) error {

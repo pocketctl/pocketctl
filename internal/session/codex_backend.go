@@ -192,19 +192,34 @@ func (b *CodexAppServerBackend) Resume(ctx context.Context, threadID string) err
 	if threadID == "" {
 		return fmt.Errorf("Codex thread id is required")
 	}
+	current, release, err := b.beginThreadOperation(ctx, threadID, false)
+	if err != nil {
+		return err
+	}
+	defer release()
 	var response json.RawMessage
-	if err := b.client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &response); err != nil {
+	if err := current.client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &response); err != nil {
 		return fmt.Errorf("Codex thread/resume: %w", err)
 	}
+	b.coord.markSubscribed(threadID)
 	return nil
 }
 
 // SendWithContext delivers the hidden developer item before the unchanged
 // user text in one ordered turn/start input array (plan 11.3).
 func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
+	current, release, err := b.beginThreadOperation(ctx, sessionID, true)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return current.sendWithContext(ctx, sessionID, content, hidden)
+}
+
+func (b *CodexAppServerBackend) sendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
 	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
 		// Steering stays addendum-only: no pack, no injection.
-		return b.Send(ctx, sessionID, content)
+		return b.send(ctx, sessionID, content)
 	}
 	config := protocol.SessionConfig{}
 	b.sm.mu.RLock()
@@ -219,6 +234,15 @@ func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, 
 }
 
 func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content string) error {
+	current, release, err := b.beginThreadOperation(ctx, sessionID, true)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return current.send(ctx, sessionID, content)
+}
+
+func (b *CodexAppServerBackend) send(ctx context.Context, sessionID, content string) error {
 	if b.coord.projectCwd != "" && strings.HasPrefix(strings.TrimSpace(content), "/") && b.coord.currentTurn(sessionID) != "" {
 		return fmt.Errorf("本轮结束后可调用命令或技能")
 	}
@@ -368,8 +392,14 @@ func (b *CodexAppServerBackend) Interrupt(sessionID string) error {
 }
 
 func (b *CodexAppServerBackend) Close(sessionID string) error {
-	b.coord.setActiveTurn(sessionID, "")
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	current, release, err := b.beginThreadOperation(ctx, sessionID, false)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return b.coord.releaseThread(ctx, sessionID, current.client, current.generation)
 }
 
 func applyCodexPermissionParams(params map[string]any, permission *protocol.PermissionConfig) {
