@@ -17,6 +17,7 @@ func TestListCodexModelsReadsCodexCache(t *testing.T) {
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("CODEX_HOME", codexDir)
 	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(`model = "gpt-5.4"`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +48,7 @@ func TestListCodexModelsReadsCodexCache(t *testing.T) {
 func TestListCodexModelsFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
 
 	got := listCodexModels()
 	want := []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}

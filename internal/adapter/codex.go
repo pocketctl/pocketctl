@@ -160,6 +160,7 @@ func expandCodexHomeTilde(path string) string {
 // ParentThreadID is the immediate parent for nested subagents.
 type CodexRolloutMetadata struct {
 	ID             string
+	StartedAt      int64
 	Cwd            string
 	ParentThreadID string
 	RootSessionID  string
@@ -191,6 +192,10 @@ func ReadCodexRolloutMetadata(path string) (CodexRolloutMetadata, bool) {
 			continue
 		}
 		if p.ID != "" {
+			startedAt := int64(0)
+			if parsed, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
+				startedAt = parsed.Unix()
+			}
 			relationID := p.ParentThreadID
 			if relationID == "" {
 				relationID = p.SessionID
@@ -201,6 +206,7 @@ func ReadCodexRolloutMetadata(path string) (CodexRolloutMetadata, bool) {
 			}
 			return CodexRolloutMetadata{
 				ID:             p.ID,
+				StartedAt:      startedAt,
 				Cwd:            p.Cwd,
 				ParentThreadID: p.ParentThreadID,
 				RootSessionID:  rootSessionID,

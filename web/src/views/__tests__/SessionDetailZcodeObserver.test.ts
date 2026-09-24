@@ -260,4 +260,16 @@ describe('read-only observer session fail-closed gate', () => {
     expect(websocketMock.send).toHaveBeenCalledWith({ type: 'session_delete', session_id: 'desktop-1' })
     wrapper.unmount()
   })
+
+  test('archived session hides pin and resume command but keeps restore', async () => {
+    const session = { ...observerSession(), agent_type: 'codex', pinned: true, archived_at: new Date().toISOString() }
+    const wrapper = mount(SessionActions, { props: { session, archivedView: true } })
+
+    await wrapper.get('.ss-more-btn').trigger('click')
+    const labels = wrapper.findAll('.ss-menu-item').map(item => item.text())
+    expect(labels).not.toContain('session.actions.unpin')
+    expect(labels).not.toContain('session.actions.resume')
+    expect(labels).toContain('恢复会话')
+    wrapper.unmount()
+  })
 })

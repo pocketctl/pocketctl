@@ -20,6 +20,7 @@ export interface QuotaTransitionResult {
 
 export interface ReserveConcurrentSessionInput {
   commandHash?: string
+  projectId?: string | null
   userId: number
   requestId: string
   operation: QuotaOperation
@@ -488,7 +489,7 @@ export async function reserveConcurrentSessionInTransaction(
   )
   if (admission.rows[0]) return { allowed: false, reason: 'quota_reservation_binding_conflict' }
   const existing = await client.query(
-    `SELECT id, expires_at, operation, daemon_id, session_id, state, command_hash
+    `SELECT id, expires_at, operation, daemon_id, session_id, state, command_hash, project_id
      FROM quota_reservations
      WHERE user_id = $1 AND request_id = $2`,
     [input.userId, input.requestId],
@@ -502,6 +503,7 @@ export async function reserveConcurrentSessionInTransaction(
       && row.daemon_id === input.daemonId
       && sameSession
       && (row.command_hash ?? null) === (input.commandHash ?? null)
+      && (row.project_id ?? null) === (input.projectId ?? null)
     if (sameBinding && row.state !== 'settled' && input.operation === 'create') {
       await client.query(
         `UPDATE quota_reservations
@@ -547,11 +549,11 @@ export async function reserveConcurrentSessionInTransaction(
   const reservationId = randomUUID()
   await client.query(
     `INSERT INTO quota_reservations
-       (id, user_id, resource, operation, daemon_id, session_id, request_id, expires_at, agent_type, cwd, command_hash)
-     VALUES ($1, $2, 'concurrent_session', $3, $4, $5, $6, $7, $8, $9, $10)`,
+       (id, user_id, resource, operation, daemon_id, session_id, request_id, expires_at, agent_type, cwd, command_hash, project_id)
+     VALUES ($1, $2, 'concurrent_session', $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     [
       reservationId, input.userId, input.operation, input.daemonId, input.sessionId || null,
-      input.requestId, expiresAt, input.agentType?.slice(0, 64) || null, input.cwd ?? null, input.commandHash ?? null,
+      input.requestId, expiresAt, input.agentType?.slice(0, 64) || null, input.cwd ?? null, input.commandHash ?? null, input.projectId ?? null,
     ],
   )
   return { allowed: true, reservationId, expiresAt: expiresAt.getTime(), reused: false }

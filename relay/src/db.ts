@@ -6,6 +6,7 @@ import { initDurableIngressSchema } from './schema/durable-ingress.js';
 import { initAttentionInboxSchema } from './attention-inbox/schema.js';
 import { initExtensionSchema } from './extensions/schema.js';
 import { initSessionDocumentSchema } from './session-documents/schema.js';
+import { initSessionOrganizationSchema } from './session-organization/schema.js';
 import { extensionModeFromEnv } from './extensions/config.js';
 import type { ExtensionMode } from './extensions/types.js';
 import {
@@ -810,6 +811,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initDurableIngressSchema(pool);
   await initAttentionInboxSchema(pool);
   await initSessionDocumentSchema(pool);
+  await initSessionOrganizationSchema(pool);
   // ADR-0003: extension tables exist in every flag mode so flipping
   // RELAY_EXTENSIONS never needs a schema deployment window.
   await initExtensionSchema(pool);
@@ -2590,13 +2592,15 @@ export async function listSessionsWithChildren(pool: pg.Pool, whereUser?: number
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.control_mode, s.capabilities, s.codex_home_id, s.codex_home_label,
-            s.created_at, s.updated_at, s.last_activity_at, s.turn_started_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.created_at, s.updated_at, s.last_activity_at, s.turn_started_at, s.exit_reason, s.subagent_count, s.pinned, s.pinned_at,
+            s.project_id, s.archived_at, s.manual_rank, s.membership_changed_at, s.new_badge_pending,
             s.model, s.effort, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
+       AND s.archived_at IS NULL
        AND COALESCE(s.is_subagent, false) = false ${userClause}
      ORDER BY s.pinned DESC, s.pinned_at DESC NULLS LAST, COALESCE(s.last_activity_at, s.created_at) DESC`,
     baseParams
@@ -2716,7 +2720,8 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
   const result = await pool.query(
     `SELECT s.session_id, s.daemon_id, s.agent_type, s.active_agent, s.cwd, s.title, s.source, s.status,
             s.control_mode, s.capabilities, s.codex_home_id, s.codex_home_label,
-            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned,
+            s.created_at, s.updated_at, s.last_activity_at, s.exit_reason, s.subagent_count, s.pinned, s.pinned_at,
+            s.project_id, s.archived_at, s.manual_rank, s.membership_changed_at, s.new_badge_pending,
             s.model, s.effort, s.parent_session_id, s.is_subagent, s.root_session_id,
             s.total_tokens, s.tok_input, s.tok_output, s.tok_cache_read, s.tok_cache_create,
             d.status AS daemon_status, d.hostname AS hostname, d.alias AS daemon_alias,
@@ -2726,6 +2731,7 @@ export async function listSessionsPageByDaemon(pool: pg.Pool, opts: {
      FROM sessions s
      LEFT JOIN daemons d ON s.daemon_id = d.daemon_id
      WHERE s.session_id NOT LIKE 'pending-%'
+       AND s.archived_at IS NULL
        AND s.daemon_id = $1
        AND COALESCE(s.is_subagent, false) = false
        ${userClause}
@@ -2808,10 +2814,13 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
   };
 }
 
-export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[], codexHomeId?: string, codexHomeLabel?: string): Promise<void> {
+export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[], codexHomeId?: string, codexHomeLabel?: string, terminalStartedAt?: string): Promise<void> {
   const result = await pool.query(
-    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, codex_home_id, codex_home_label, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, NOW(), NOW())
+    `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, codex_home_id, codex_home_label, new_badge_pending, created_at, updated_at)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
+       ($6::varchar(16) = 'terminal' AND $15::timestamptz IS NOT NULL
+        AND $15::timestamptz >= (SELECT enabled_at FROM session_organization_cutover WHERE key='terminal-new-v1')
+        AND $15::timestamptz <= NOW() + interval '5 minutes'), NOW(), NOW()
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
@@ -2819,9 +2828,13 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
        cwd = COALESCE(NULLIF($4, ''), sessions.cwd),
        title = COALESCE($5, sessions.title),
        source = CASE
-         WHEN sessions.source = 'daemon' AND $6 = 'terminal' THEN sessions.source
+         WHEN sessions.source = 'daemon' AND $6::varchar(16) = 'terminal' AND sessions.agent_type <> '' THEN sessions.source
          ELSE COALESCE($6, sessions.source)
        END,
+       new_badge_pending = CASE
+         WHEN sessions.source = 'daemon' AND sessions.agent_type = ''
+           AND sessions.new_badge_seen_at IS NULL AND EXCLUDED.new_badge_pending
+           THEN true ELSE sessions.new_badge_pending END,
        exit_reason = CASE
          WHEN $7 IN ('exited', 'completed', 'error', 'killed')
            THEN COALESCE($8, sessions.exit_reason)
@@ -2837,7 +2850,7 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
      WHERE sessions.user_id = EXCLUDED.user_id
         OR (sessions.user_id IS NULL AND sessions.daemon_id = EXCLUDED.daemon_id)
      RETURNING session_id`,
-    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null, codexHomeId || null, codexHomeLabel || null]
+    [sessionId, daemonId, agentType, cwd, title || null, source || 'daemon', status, exitReason || null, userId || null, model || null, controlMode || null, capabilities ? JSON.stringify(capabilities) : null, codexHomeId || null, codexHomeLabel || null, terminalStartedAt || null]
   );
   // A conflict update refused by the ownership guard returns zero rows. That
   // is a permanent security rejection, never a silent success.
@@ -3883,12 +3896,37 @@ export async function updateSessionTitle(pool: pg.Pool, userId: number, sessionI
 
 /** Set session pinned state, with ownership check. Returns true if updated. */
 export async function setSessionPin(pool: pg.Pool, userId: number, sessionId: string, pinned: boolean): Promise<boolean> {
-  const result = await pool.query(
-    `UPDATE sessions SET pinned = $1, pinned_at = CASE WHEN $1 THEN NOW() ELSE NULL END, updated_at = NOW()
-     WHERE session_id = $2 AND user_id = $3 AND session_id NOT LIKE 'pending-%'`,
-    [pinned, sessionId, userId]
-  );
-  return (result.rowCount ?? 0) > 0;
+  if (typeof pool.connect !== 'function') {
+    // Lightweight query-only test doubles keep the legacy single-statement contract.
+    const result = await pool.query(`UPDATE sessions SET pinned = $1, pinned_at = CASE WHEN $1 THEN NOW() ELSE NULL END, updated_at = NOW()
+      WHERE session_id = $2 AND user_id = $3 AND archived_at IS NULL AND session_id NOT LIKE 'pending-%'`,[pinned,sessionId,userId]);
+    return (result.rowCount ?? 0) > 0;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1,$2)', [47011,userId]);
+    const target = (await client.query(`SELECT s.project_id,s.pinned,COALESCE(p.order_mode,settings.ungrouped_order_mode,'activity') AS order_mode
+      FROM sessions s LEFT JOIN session_projects p ON p.id=s.project_id
+      LEFT JOIN session_organization_settings settings ON settings.user_id=s.user_id
+      WHERE s.session_id=$1 AND s.user_id=$2 AND s.archived_at IS NULL AND s.session_id NOT LIKE 'pending-%' FOR UPDATE OF s`,[sessionId,userId])).rows[0];
+    if (!target) { await client.query('COMMIT'); return false; }
+    let rank: number | null = null;
+    if (target.order_mode === 'manual' && target.pinned !== pinned) {
+      const position = (await client.query(`SELECT MIN(manual_rank) AS first_rank FROM sessions
+        WHERE user_id=$1 AND project_id IS NOT DISTINCT FROM $2::uuid AND pinned=$3 AND session_id<>$4 AND archived_at IS NULL`,
+        [userId,target.project_id,pinned,sessionId])).rows[0].first_rank;
+      rank = Number(position ?? 1024) - 1024;
+    }
+    await client.query(`UPDATE sessions SET pinned=$1,pinned_at=CASE WHEN $1 THEN NOW() ELSE NULL END,
+      manual_rank=COALESCE($4,manual_rank),updated_at=NOW(),organization_revision=organization_revision+1
+      WHERE session_id=$2 AND user_id=$3`,[pinned,sessionId,userId,rank]);
+    if (target.project_id) await client.query('UPDATE session_projects SET revision=revision+1 WHERE id=$1 AND user_id=$2',[target.project_id,userId]);
+    else await client.query('UPDATE session_organization_settings SET ungrouped_revision=ungrouped_revision+1 WHERE user_id=$1',[userId]);
+    await client.query('COMMIT');
+    return true;
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
 }
 
 /** Check if a session belongs to the given user. */

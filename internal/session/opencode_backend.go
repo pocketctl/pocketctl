@@ -1005,6 +1005,7 @@ func (c *opencodeCoordinator) discoverOnce(ctx context.Context) {
 		}
 		c.sm.outputCh <- protocol.DaemonEvent{
 			Type:         "session_discovered",
+			SessionStartedAt: time.UnixMilli(s.Time.Created).UTC().Format(time.RFC3339Nano),
 			SessionID:    s.ID,
 			Cwd:          s.Directory(),
 			Status:       protocol.StatusIdle,

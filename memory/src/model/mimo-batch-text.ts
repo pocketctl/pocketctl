@@ -100,12 +100,8 @@ export function createMimoBatchTextGenerator(options: MimoBatchTextOptions): Tex
       })
       const text = await readBoundedBody(response, maxResponseBytes)
       if (!response.ok) {
-        const detail = response.status === 408 ? 'timeout'
-          : response.status === 401 || response.status === 403 ? 'unauthorized'
-            : response.status === 429 ? 'rate_limited'
-              : response.status >= 500 ? 'server_error' : 'bad_request'
         throw new MimoBatchError(
-          detail,
+          `http_status_${response.status}`,
           response.status === 408 || response.status === 429 || response.status >= 500,
         )
       }
@@ -195,6 +191,9 @@ export function createMimoBatchTextGenerator(options: MimoBatchTextOptions): Tex
           input_file_id: uploaded.id,
           endpoint: '/v1/chat/completions',
           completion_window: '24h',
+          // Xiaomi's Batch API fails with 500 internal_error when name is
+          // absent (OpenAI treats it as optional). Bounded, content-free.
+          name: `pocketctl-memory-${randomUUID().slice(0, 8)}`,
         }),
       }, controller.signal) as BatchStatus
       if (typeof created.id !== 'string' || created.id.length === 0) {

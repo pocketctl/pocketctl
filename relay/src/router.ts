@@ -2561,6 +2561,7 @@ export class Router {
             this.send(ws, { type: 'session_pinned', session_id: sessionId, pinned });
           }
         }
+        this.broadcastToUser(client.userId!, { type:'session_organization_changed', session_id:sessionId });
       }).catch(console.error);
       return;
     }
@@ -2628,6 +2629,16 @@ export class Router {
     }
 
     if (msg.type === 'session_create') {
+      const requestedProject = msg.project_id === undefined ? null : msg.project_id;
+      if (requestedProject !== null) {
+        const valid = typeof requestedProject === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedProject)
+          && client.userId !== null
+          && (await this.pool.query('SELECT 1 FROM session_projects WHERE id=$1 AND user_id=$2', [requestedProject, client.userId])).rowCount === 1;
+        if (!valid) {
+          this.send(clientWs, { type: 'session_create_failed', request_id: msg.request_id, reason: 'invalid_project', retryable: false });
+          return;
+        }
+      }
       if (msg.fork_from != null) {
         const source = typeof msg.fork_from === 'string' && client.userId != null
           ? await db.getSessionRuntimePolicy(this.pool,msg.fork_from,client.userId).catch(() => null) : null;
@@ -2697,6 +2708,10 @@ export class Router {
       const { id: daemonId } = targetDaemon;
       const existingPending = this.findPendingSessionOperation(daemonId, requestId, client.userId);
       if (existingPending?.daemonId === daemonId && existingPending.operation === 'create') {
+        const binding = await this.pool.query('SELECT project_id FROM quota_reservations WHERE user_id=$1 AND request_id=$2', [client.userId, requestId]);
+        if ((binding.rows[0]?.project_id ?? null) !== requestedProject) {
+          this.send(clientWs, { type:'session_create_failed', request_id:requestId, reason:'quota_reservation_binding_conflict', retryable:false });
+        }
         return;
       }
       let reservationId: string | null = null;
@@ -2724,6 +2739,7 @@ export class Router {
           daemonId,
           agentType: createAgentType,
           cwd: msg.cwd || '',
+          projectId: requestedProject,
           limit: enforcement === 'enforce' ? entitlements.maxConcurrentSessions : null,
         });
         if (!decision.allowed) {
@@ -2792,8 +2808,9 @@ export class Router {
         });
         return;
       }
+      const { project_id: _projectId, ...daemonMessage } = msg;
       this.send(targetDaemon.daemon.ws, {
-        ...msg,
+        ...daemonMessage,
         agent: createAgentType,
         request_id: requestId,
         quota_grant: {

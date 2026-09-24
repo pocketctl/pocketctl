@@ -72,28 +72,43 @@
         </div>
       </div>
     </div>
-    <div v-else-if="isMobile && hasSearchQuery && searchResults.length === 0" class="mobile-search-empty">
-      <strong>在已加载的 {{ sortedSessions.length }} 个会话中未找到“{{ searchQuery.trim() }}”</strong>
-      <span>可搜索会话标题、模型或 Agent 类型</span>
+    <div v-else-if="isMobile && hasSearchQuery && (organizationReady ? serverSearchResults.length : searchResults.length) === 0" class="mobile-search-empty">
+      <strong>{{ organizationReady ? `未找到“${searchQuery.trim()}”` : `在已加载的 ${sortedSessions.length} 个会话中未找到“${searchQuery.trim()}”` }}</strong>
+      <span>{{ organizationReady ? '搜索当前主机的会话标题、工作目录或会话 ID' : '可搜索会话标题、模型或 Agent 类型' }}</span>
     </div>
     <DaemonInstallGuide
-      v-else-if="sortedSessions.length === 0"
+      v-else-if="sortedSessions.length === 0 && !organizationReady"
       data-state="daemon-install-guide"
       :install-command="getInstallCommand()"
       @create="showNewSession = true"
     />
-    <div v-for="s in renderedSessions" :key="s.session_id" class="session-group">
+    <div v-for="s in renderedEntries" :key="s.kind === 'session' ? s.session_id : `${s.kind}-${s.id}`" class="session-group">
+      <div v-if="s.kind === 'projectSection'" class="organization-section-label">
+        <span>项目</span>
+        <CreateProjectControl @created="refreshOrganization" />
+      </div>
+      <div v-else-if="s.kind === 'project'" class="organization-header" draggable="true" @dragstart="dragProjectId = s.id" @dragover.prevent @drop.prevent="dropOnProject(s.id)">
+        <button type="button" class="organization-fold" @click="toggleProject(s.id)">
+          <svg v-if="collapsedProjects[s.id]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3 10V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2M4 10h17l-3 10H2z"/></svg>
+          {{ s.name }} <small>{{ s.count }}</small>
+        </button>
+        <button type="button" class="organization-action" @click="pendingProjectId = s.id; showNewSession = true">＋ 新建会话</button>
+      </div>
+      <div v-else-if="s.kind === 'ungrouped'" class="organization-header ungrouped" @dragover.prevent @drop.prevent="dropOnProject(null)">未分组 <small>{{ s.count }}</small></div>
+      <button v-else-if="s.kind === 'archiveBack'" class="organization-back" @click="archivedView = false">‹ 返回会话</button>
+      <button v-else-if="s.kind === 'loadMore'" :class="['organization-back', { 'project-load-more': s.id !== 'ungrouped' }]" :data-project-load-more="s.id" @click="loadMoreOrganization(s.id)">加载更多</button>
       <MobileSessionCard
-        v-if="isMobile"
+        v-else-if="isMobile"
         :session="s"
         :effective-status="getEffectiveStatus(s)"
         :relative-time="formatRelativeTime(s.last_activity_at || s.started_at)"
         :expanded="!!folded[s.session_id]"
-        @open="$router.push(`/session/${s.session_id}`)"
+        @open="openSession(s)"
         @toggle-subagents="toggleFold(s.session_id)"
         @long-press="openMobileMenu"
       />
-      <div v-else :class="['session-row', { 'pending-delete': s.__pendingDelete }]" @click="!s.__pendingDelete && $router.push(`/session/${s.session_id}`)">
+      <div v-else :class="['session-row', { 'pending-delete': s.__pendingDelete }]" draggable="true" @dragstart="dragSessionId = s.session_id" @dragover.prevent @drop.prevent="dropOnSession(s)" @click="!s.__pendingDelete && openSession(s)">
         <span class="status-indicator" :class="getEffectiveStatus(s)">
           <span v-if="getEffectiveStatus(s) === 'running' || getEffectiveStatus(s) === 'busy' || getEffectiveStatus(s) === 'retry'" class="pulse-ring"></span>
           <span v-if="getEffectiveStatus(s) === 'completed'" class="icon">✓</span>
@@ -102,10 +117,11 @@
         <div class="session-info">
           <div class="session-title">
             <span v-if="s.children && s.children.length" class="fold-toggle" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
-            <SessionPinBadge v-if="s.pinned" />
+            <SessionPinBadge v-if="!archivedView && s.pinned" />
             <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
               @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
             <span v-else class="session-title-copy">{{ s.title || s.session_id.slice(0, 8) }}</span>
+            <span v-if="s.new_badge_pending" class="session-new-badge">NEW</span>
           </div>
           <div class="session-meta">
             <span class="source-badge" :class="s.source">{{ s.source === 'terminal' ? '📺 终端' : '🌐 Web' }}</span>
@@ -120,9 +136,9 @@
           </div>
         </div>
         <span class="session-time">{{ formatRelativeTime(s.last_activity_at || s.started_at) }}</span>
-        <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
+        <SessionActions :session="s" :projects="projects" :archived-view="archivedView" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" @moved="onMoved" @archived="onArchived" />
       </div>
-      <div v-if="s.children && s.children.length && folded[s.session_id]" :class="['child-rows', { 'mobile-child-panel': isMobile }]">
+      <div v-if="s.kind === 'session' && s.children && s.children.length && folded[s.session_id]" :class="['child-rows', { 'mobile-child-panel': isMobile }]">
         <div v-if="isMobile" class="mobile-child-header">
           <strong>派生活动 · {{ s.children.length }}</strong>
           <button type="button" @click="showAllChildren[s.session_id] = !showAllChildren[s.session_id]">
@@ -146,7 +162,8 @@
         </button>
       </div>
     </div>
-    <div v-if="canLoadMore && !hasSearchQuery" ref="loadMoreSentinel" class="session-load-more">
+    <button v-if="!archivedView && organizationReady" class="organization-archive-entry" @click="openArchived()">已归档 <span>{{ archivedCount }}</span></button>
+    <div v-if="canLoadMore && !hasSearchQuery && !organizationReady" ref="loadMoreSentinel" class="session-load-more">
       <button class="session-load-more-btn" type="button" :disabled="isLoadingPage" @click="loadMoreSessions">
         <span v-if="isLoadingPage" class="load-more-spinner" aria-hidden="true"></span>
         {{ isLoadingPage ? '正在加载…' : '加载更多会话' }}
@@ -157,7 +174,7 @@
     <div v-if="mobileMenuSession" class="mobile-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-menu-title">
       <div class="mobile-sheet-grab" aria-hidden="true"></div>
       <h2 id="mobile-menu-title" class="mobile-sheet-title">{{ mobileMenuSession.title || mobileMenuSession.session_id.slice(0, 8) }}</h2>
-      <button type="button" class="mobile-sheet-item" @click="menuTogglePin">
+      <button v-if="!archivedView" type="button" class="mobile-sheet-item" @click="menuTogglePin">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z"/></svg>
         <span>{{ mobileMenuSession.pinned ? '取消置顶' : '置顶' }}</span>
       </button>
@@ -165,11 +182,20 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         <span>复制会话 ID</span>
       </button>
+      <button type="button" class="mobile-sheet-item" @click="menuMoveSession"><span>移动到项目</span></button>
+      <button type="button" class="mobile-sheet-item" @click="menuArchiveSession"><span>{{ archivedView ? '恢复会话' : '归档会话' }}</span></button>
       <button v-if="mobileMenuSessionTerminal" type="button" class="mobile-sheet-item danger" @click="menuRequestDelete">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6"/></svg>
         <span>删除会话</span>
       </button>
       <div class="mobile-sheet-cancel" role="button" tabindex="0" @click="closeMobileMenu" @keydown.enter="closeMobileMenu">取消</div>
+    </div>
+    <div v-if="mobileMoveSession" class="mobile-sheet-scrim" @click="mobileMoveSession = null"></div>
+    <div v-if="mobileMoveSession" class="mobile-sheet" role="dialog" aria-modal="true">
+      <div class="mobile-sheet-grab"></div><h2 class="mobile-sheet-title">移动到项目</h2>
+      <button class="mobile-sheet-item" @click="confirmMobileMove(null)">未分组</button>
+      <button v-for="project in projects" :key="project.id" class="mobile-sheet-item" @click="confirmMobileMove(project.id)">{{ project.name }}</button>
+      <button class="mobile-sheet-cancel" @click="mobileMoveSession = null">取消</button>
     </div>
 
     <!-- m 端删除确认(底部 sheet,拇指可达) -->
@@ -186,7 +212,7 @@
     </div>
 
     <div v-if="mobileToast" class="mobile-toast" role="status">{{ mobileToast }}</div>
-    <NewSessionDialog v-if="showNewSession" :daemons="daemons" @close="showNewSession = false" @create="handleCreate" />
+    <NewSessionDialog v-if="showNewSession" :daemons="daemons" :project-id="pendingProjectId" @close="showNewSession = false; pendingProjectId = null" @create="handleCreate" />
   </div>
 </template>
 
@@ -202,8 +228,10 @@ import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import MobileSessionCard from '../components/MobileSessionCard.vue'
 import SessionPinBadge from '../components/SessionPinBadge.vue'
+import CreateProjectControl from '../components/CreateProjectControl.vue'
 import DaemonInstallGuide from '../components/DaemonInstallGuide.vue'
-import { getInstallCommand } from '../composables/useEnv'
+import { getInstallCommand, getRelayOrigin } from '../composables/useEnv'
+import { listProjects, listOrganizedSessions, moveSession, archiveSession, reorderProjects, reorderSession, markSessionSeen, type SessionProject } from '../services/sessionOrganization'
 import { formatTokenCount, childAgentTokenTotal } from '../utils/tokenFormat'
 import { useLocale } from '../composables/useLocale'
 import { useSessionRename } from '../composables/useSessionRename'
@@ -222,7 +250,7 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } = use
 const { t } = useLocale()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
-const { isLoggedIn, accessToken, logout } = useAuth()
+const { isLoggedIn, accessToken, logout, user } = useAuth()
 const $router = useRouter()
 const route = useRoute()
 const sessions = ref<any[]>([])
@@ -248,6 +276,7 @@ const searchQuery = ref('')
 const searchField = ref<HTMLInputElement | null>(null)
 const pendingDeleteSession = ref<any | null>(null)
 const mobileMenuSession = ref<any | null>(null)
+const mobileMoveSession = ref<any | null>(null)
 const mobileToast = ref('')
 let mobileToastTimer: ReturnType<typeof setTimeout> | null = null
 let normalScrollY: number | null = null
@@ -274,6 +303,131 @@ const searchResults = computed(() => hasSearchQuery.value
   ? sortedSessions.value.filter(session => matchesSessionSearch(session, searchQuery.value))
   : [])
 const renderedSessions = computed(() => hasSearchQuery.value ? searchResults.value : displayedSessions.value)
+const projects = ref<SessionProject[]>([])
+const organizationReady = ref(false)
+const archivedView = ref(false)
+const archivedCount = ref(0)
+const archivedSessions = ref<any[]>([])
+const archivedCursor = ref<string | null>(null)
+const bucketSessions = ref<Record<string, any[]>>({})
+const bucketCursors = ref<Record<string, string | null>>({})
+const projectOrderRevision = ref(0)
+const ungroupedRevision = ref(0)
+const pendingProjectId = ref<string | null>(null)
+const dragProjectId = ref<string | null>(null)
+const dragSessionId = ref<string | null>(null)
+const collapsedProjects = ref<Record<string, boolean>>({})
+const collapseKey = computed(() => `pocketctl-project-folds:${getRelayOrigin()}:${user?.value?.id || 'anonymous'}`)
+watch(collapseKey, key => { try { collapsedProjects.value = JSON.parse(localStorage.getItem(key) || '{}') } catch { collapsedProjects.value = {} } }, { immediate: true })
+const serverSearchResults = ref<any[]>([])
+const serverSearchCursor = ref<string | null>(null)
+const renderedEntries = computed<any[]>(() => {
+  if (!organizationReady.value) return renderedSessions.value.map(s => ({ ...s, kind:'session' }))
+  if (archivedView.value) return [{ kind:'archiveBack', id:'back' }, ...archivedSessions.value.map(s => ({ ...s, kind:'session' })), ...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
+  if (hasSearchQuery.value) return [...serverSearchResults.value.map(s => ({ ...s, kind:'session' })), ...(serverSearchCursor.value ? [{kind:'loadMore',id:'search'}] : [])]
+  const entries: any[] = []
+  entries.push({ kind:'projectSection', id:'projects' })
+  for (const p of projects.value) {
+    entries.push({ ...p, kind:'project' })
+    if (!collapsedProjects.value[p.id]) entries.push(...(bucketSessions.value[p.id] || []).map(s => ({ ...s, kind:'session' })))
+    if (!collapsedProjects.value[p.id] && bucketCursors.value[p.id]) entries.push({kind:'loadMore',id:p.id})
+  }
+  entries.push({ kind:'ungrouped', id:'ungrouped', count:bucketSessions.value.ungrouped?.length || 0 })
+  entries.push(...(bucketSessions.value.ungrouped || []).map(s => ({ ...s, kind:'session' })))
+  if (bucketCursors.value.ungrouped) entries.push({kind:'loadMore',id:'ungrouped'})
+  return entries
+})
+async function loadBucket(bucket: string, cursor?: string) {
+    const page = await listOrganizedSessions({ bucket, daemonId:hostId.value || undefined, cursor, limit:bucket === 'ungrouped' ? 30 : 5 })
+    const live = new Map(sessions.value.map(s => [s.session_id,s]))
+    const rows = page.sessions.map(s => ({ ...s, agent:s.agent_type, children:live.get(s.session_id)?.children || s.children || [],
+      subagent_count:live.get(s.session_id)?.subagent_count || s.subagent_count || 0 }))
+    bucketSessions.value[bucket] = cursor ? [...(bucketSessions.value[bucket] || []), ...rows.filter(s => !(bucketSessions.value[bucket] || []).some(old => old.session_id === s.session_id))] : rows
+    bucketCursors.value[bucket] = page.next_cursor
+}
+async function refreshOrganization() {
+  try {
+    const snapshot = await listProjects(hostId.value || undefined)
+    projects.value = snapshot.projects
+    archivedCount.value = snapshot.archived_count
+    projectOrderRevision.value = snapshot.project_order_revision
+    ungroupedRevision.value = snapshot.ungrouped_revision
+    await Promise.all([loadBucket('ungrouped'), ...snapshot.projects.filter(p => !collapsedProjects.value[p.id]).map(p => loadBucket(p.id))])
+    organizationReady.value = true
+    if (archivedView.value) await openArchived()
+  } catch { /* Keep the existing session list available during API upgrades. */ }
+}
+function toggleProject(id: string) {
+  collapsedProjects.value[id] = !collapsedProjects.value[id]
+  localStorage.setItem(collapseKey.value,JSON.stringify(collapsedProjects.value))
+  if (!collapsedProjects.value[id] && !bucketSessions.value[id]) void loadBucket(id).catch(error => { lastError.value = String(error) })
+}
+async function openArchived(cursor?: string) {
+  archivedView.value = true
+  try {
+    const page = await listOrganizedSessions({ view:'archived', daemonId:hostId.value || undefined, limit:100, cursor })
+    archivedSessions.value = cursor ? [...archivedSessions.value,...page.sessions.filter(s => !archivedSessions.value.some(old => old.session_id === s.session_id))] : page.sessions
+    archivedCursor.value = page.next_cursor
+  }
+  catch (error) { lastError.value = error instanceof Error ? error.message : '读取归档失败' }
+}
+async function loadMoreOrganization(id: string) {
+  if (id === 'archived') return openArchived(archivedCursor.value || undefined)
+  if (id === 'search') return loadSearch(serverSearchCursor.value || undefined)
+  try { await loadBucket(id,bucketCursors.value[id] || undefined) }
+  catch (error) { lastError.value = String(error) }
+}
+async function openSession(s: any) {
+  try { await markSessionSeen(s.session_id); s.new_badge_pending = false } catch {}
+  $router.push(`/session/${s.session_id}`)
+}
+function onMoved(_id: string, _projectId: string | null) { void refreshOrganization() }
+function onArchived(id: string, archived: boolean) {
+  if (archived) for (const bucket of Object.keys(bucketSessions.value)) bucketSessions.value[bucket] = bucketSessions.value[bucket].filter(s => s.session_id !== id)
+  else archivedSessions.value = archivedSessions.value.filter(s => s.session_id !== id)
+  void refreshOrganization()
+}
+async function dropOnProject(id: string | null) {
+  if (dragProjectId.value && id && dragProjectId.value !== id) {
+    const ids = projects.value.map(p => p.id)
+    ids.splice(ids.indexOf(dragProjectId.value),1); ids.splice(ids.indexOf(id),0,dragProjectId.value)
+    try { await reorderProjects(ids,projectOrderRevision.value); await refreshOrganization() } catch (error) { lastError.value = String(error) }
+    dragProjectId.value = null; return
+  }
+  if (!dragSessionId.value) return
+  const sessionId = dragSessionId.value; dragSessionId.value = null
+  try { await moveSession(sessionId,id); await refreshOrganization() } catch (error) { lastError.value = String(error) }
+}
+async function dropOnSession(target: any) {
+  const movingId = dragSessionId.value; dragSessionId.value = null
+  if (!movingId || movingId === target.session_id) return
+  const moving = Object.values(bucketSessions.value).flat().find(s => s.session_id === movingId)
+  try {
+    if (moving?.project_id !== target.project_id) await moveSession(movingId,target.project_id || null)
+    else {
+      const bucket = target.project_id || 'ungrouped'
+      const page = await listOrganizedSessions({ bucket,daemonId:hostId.value || undefined,limit:1 })
+      await reorderSession(bucket,movingId,target.session_id,page.revision)
+    }
+    await refreshOrganization()
+  } catch (error) { lastError.value = String(error) }
+}
+async function loadSearch(cursor?: string) {
+  const query = searchQuery.value
+  try {
+    const page = await listOrganizedSessions({ view:'active', q:query, daemonId:hostId.value || undefined, limit:100, cursor })
+    if (searchQuery.value !== query) return
+    serverSearchResults.value = cursor ? [...serverSearchResults.value,...page.sessions.filter(s => !serverSearchResults.value.some(old => old.session_id === s.session_id))] : page.sessions
+    serverSearchCursor.value = page.next_cursor
+  } catch (error) { lastError.value = String(error) }
+}
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+watch(searchQuery, query => {
+  if (searchTimer) clearTimeout(searchTimer)
+  if (!query.trim()) { serverSearchResults.value = []; serverSearchCursor.value = null; return }
+  searchTimer = setTimeout(() => { void loadSearch() }, 250)
+})
+watch(hostId, () => { void refreshOrganization() })
 const selectedDaemon = computed(() => daemons.value.find(daemon => daemon.daemon_id === hostId.value))
 // 主机状态三态：daemon_list 未到(loading)不误报离线；无主机上下文或未知主机(unknown)隐藏状态行
 const hasLoadedDaemons = ref(false)
@@ -421,6 +575,7 @@ function showMobileToast(text: string) {
 }
 
 function menuTogglePin() {
+  if (archivedView.value) return
   const session = mobileMenuSession.value
   if (!session) return
   toggleMobilePin(session)
@@ -439,6 +594,21 @@ function menuCopyId() {
 function menuRequestDelete() {
   pendingDeleteSession.value = mobileMenuSession.value
   closeMobileMenu()
+}
+function menuMoveSession() { mobileMoveSession.value = mobileMenuSession.value; closeMobileMenu() }
+async function confirmMobileMove(projectId: string | null) {
+  const session = mobileMoveSession.value
+  if (!session) return
+  try { await moveSession(session.session_id,projectId); mobileMoveSession.value = null; await refreshOrganization() }
+  catch (error) { showMobileToast(error instanceof Error ? error.message : '移动失败') }
+}
+async function menuArchiveSession() {
+  const session = mobileMenuSession.value
+  closeMobileMenu()
+  if (!session) return
+  if (!archivedView.value && !window.confirm(`归档「${session.title || session.session_id.slice(0,8)}」？归档不会停止会话。`)) return
+  try { await archiveSession(session.session_id,!archivedView.value); onArchived(session.session_id,!archivedView.value) }
+  catch (error) { showMobileToast(error instanceof Error ? error.message : '归档失败') }
 }
 
 function onMobileSheetKeydown(event: KeyboardEvent) {
@@ -464,11 +634,13 @@ onMounted(() => {
   const token = accessToken.value
   if (!token) { $router.push('/login'); return }
   connect()
+  void refreshOrganization()
 
   setTimeout(() => { requestSessionPage() }, 500)
   send({ type: 'list_daemons' })
 
   onEvent((evt: DaemonEvent) => {
+    if (['session_organization_changed','session_created','session_discovered'].includes((evt as any).type)) { void refreshOrganization() }
     if (evt.type === 'error') {
       lastError.value = evt.error || 'Unknown error'
       isLoadingPage.value = false
@@ -642,6 +814,18 @@ function handleLogout() {
 
 <style scoped>
 .session-list { padding: 20px; max-width: 800px; margin: 0 auto; }
+.organization-section-label { display: flex; align-items: center; justify-content: space-between; margin: 14px 8px 7px; color: var(--fg-secondary); font-size: 11px; font-weight: 700; letter-spacing: .09em; }
+.organization-header { display: flex; align-items: center; gap: 10px; min-height: 43px; margin: 14px 0 6px; padding: 0 12px; border-radius: 9px; background: var(--surface); color: var(--fg-secondary); font-size: 13px; font-weight: 650; }
+.organization-header.ungrouped { background: transparent; border-top: 1px solid var(--border); border-radius: 0; }
+.organization-fold { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.organization-fold svg { width: 18px; height: 18px; flex-shrink: 0; }
+.organization-header small { margin-left: auto; font: 11px var(--font-mono); color: var(--fg-tertiary); }
+.organization-action { border: 0; background: transparent; color: var(--accent); font-size: 12px; cursor: pointer; }
+.organization-archive-entry,.organization-back { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 43px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--fg-secondary); cursor: pointer; text-align: left; }
+.organization-archive-entry span { margin-left: auto; }
+.organization-archive-entry:hover,.organization-back:hover { background: var(--surface-hover); }
+.project-load-more { width: calc(100% - 13px); margin-left: 13px; color: var(--accent); font-size: 12px; }
+.session-new-badge { display: inline-flex; padding: 2px 5px; border-radius: 4px; color: var(--accent); background: var(--accent-muted); font-size: 9px; font-weight: 700; }
 .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .header-row h2 { font-size: 20px; }
 .btn { padding: 8px 16px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; cursor: pointer; font-size: 14px; }

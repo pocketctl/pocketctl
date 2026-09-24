@@ -475,6 +475,22 @@ describe('candidate extractor orchestration', () => {
     expect(outcome).toMatchObject({ kind: 'failed', retryable: true })
     expect(store.markRun).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed' }))
   })
+
+  test('persists a bounded provider HTTP status without provider response text', async () => {
+    const store = fakeStore()
+    const { fn } = generator([{
+      ok: false, code: 'http_error', retryable: false, detail: 'http_status_402',
+    }])
+
+    const outcome = await createCandidateExtractor({
+      store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE,
+    }).extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+
+    expect(outcome).toMatchObject({ kind: 'failed', errorCode: 'http_error:http_status_402' })
+    expect(store.markRun).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'failed', errorCode: 'http_error:http_status_402',
+    }))
+  })
   test('policy-driven runs carry the effective policy hash and bounded topic labels', async () => {
     const store = fakeStore()
     const { fn } = generator([{ ok: true, value: okOutput(), usage: { inputTokens: 3, outputTokens: 2, model: 'extractor-small' } }])

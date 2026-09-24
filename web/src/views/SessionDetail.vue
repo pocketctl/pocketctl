@@ -68,23 +68,45 @@
         <span class="session-panel-presence-copy">{{ t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
       </div>
       <div class="session-list">
-        <template v-for="s in visibleSessions" :key="s.session_id">
-          <div :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete, 'has-children': s.children && s.children.length }]"
+        <button v-if="archivedView" type="button" class="archive-back" @click="archivedView = false">‹ <span>返回会话</span></button>
+        <div v-else class="project-section-label">
+          <span>项目</span>
+          <CreateProjectControl @created="refreshProjects" />
+        </div>
+        <template v-for="s in sidebarEntries" :key="s.kind === 'session' ? s.session_id : `${s.kind}-${s.id}`">
+          <div v-if="s.kind === 'project'" class="project-heading" :draggable="true" @dragstart="dragProjectId = s.id" @dragover.prevent @drop.prevent="dropOnProject(s.id)">
+            <button type="button" class="project-toggle" :aria-expanded="!collapsedProjects[s.id]" @click="toggleProject(s.id)">
+              <svg v-if="collapsedProjects[s.id]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+              <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M3 10V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2M4 10h17l-3 10H2z"/></svg>
+              <span>{{ s.name }}</span><small>{{ s.count }}</small>
+            </button>
+            <button type="button" class="project-menu-button" title="项目操作" @click="projectMenuId = projectMenuId === s.id ? null : s.id">···</button>
+            <div v-if="projectMenuId === s.id" class="project-menu">
+              <button @click="newSessionProjectId = s.id; emitNewSession(); projectMenuId = null">在项目中新建会话</button>
+              <button @click="editProjectName(s)">重命名</button>
+              <button @click="shiftProject(s.id, -1)">上移</button>
+              <button @click="shiftProject(s.id, 1)">下移</button>
+            </div>
+          </div>
+          <div v-else-if="s.kind === 'ungrouped'" class="project-heading ungrouped-heading" @dragover.prevent @drop.prevent="dropOnProject(null)">未分组 <small>{{ s.count }}</small></div>
+          <button v-else-if="s.kind === 'loadMore'" type="button" :class="['archive-back', { 'project-load-more': s.id !== 'ungrouped' }]" :data-project-load-more="s.id" @click="loadMoreSidebar(s.id)">加载更多</button>
+          <div v-else :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete, 'has-children': s.children && s.children.length, 'in-project': !!s.project_id }]"
+            draggable="true" @dragstart="dragSessionId = s.session_id" @dragend="dragSessionId = null" @dragover.prevent @drop.prevent="dropOnSession(s)"
             @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
             <span v-if="s.children && s.children.length" class="sl-fold" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
             <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
             <div class="sl-info">
               <div :class="['sl-title', { mono: !s.title || s.title.startsWith('Terminal Session') }]">
-                <SessionPinBadge v-if="s.pinned" />
+                <SessionPinBadge v-if="!archivedView && s.pinned" />
                 <input v-if="renamingId === s.session_id" class="ss-rename-input" v-model="renameInput" maxlength="60"
                   @click.stop @keydown.enter="commitRename(s)" @keydown.escape="cancelRename" @blur="commitRename(s)" />
-                <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template>
+                <template v-else>{{ s.title || s.session_id.slice(0, 8) }}</template><span v-if="s.new_badge_pending" class="session-new-badge">NEW</span>
               </div>
               <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.created_at) }}<span v-if="!selectedHostId && uniqueHosts.length > 1" :title="sessionHostName(s)"> · {{ sessionHostName(s) }}</span><span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
             </div>
-            <SessionActions :session="s" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" />
+            <SessionActions :session="s" :projects="projects" :archived-view="archivedView" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" @moved="onMoved" @archived="onArchived" />
           </div>
-          <div v-if="s.children && s.children.length && folded[s.session_id]" class="sl-children">
+          <div v-if="s.kind === 'session' && s.children && s.children.length && folded[s.session_id]" class="sl-children">
             <div v-for="c in s.children" :key="c.agentId" class="sl-child" role="button" tabindex="0"
               :class="{ active: s.session_id === sessionId && c.agentId === focusedSubAgentId }"
               :title="c.title || c.agentId.slice(0, 8)"
@@ -95,6 +117,7 @@
             </div>
           </div>
         </template>
+        <button v-if="!archivedView" class="archived-entry" type="button" @click="openArchived()">已归档 <span>{{ archivedCount }}</span></button>
         <div v-if="!hasNoSessions && !visibleSessions.length" class="host-filter-empty" role="status">
           <p>{{ t('session.host_filter_empty') }}</p>
           <button type="button" @click="selectedHostId = ''; selectedAgentType = 'all'">{{ t('session.host_filter_reset') }}</button>
@@ -215,7 +238,7 @@
           </button>
           <div v-if="(currentPlan || fileChangeMessages.length) && !focusedSubAgentId" class="toolbar-overflow-separator"></div>
           <button type="button" class="toolbar-overflow-item" data-toolbar-action="copy-id" role="menuitem" @click="copySessionId"><span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span><code>{{ sessionId?.slice(0, 8) }}</code></button>
-          <button v-if="!focusedSubAgentId && !isReadOnlyObserverSession" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
+          <button v-if="!archivedView && !currentSession?.archived_at && !focusedSubAgentId && !isReadOnlyObserverSession" type="button" class="toolbar-overflow-item" data-toolbar-action="resume" role="menuitem" @click="copyResumeCmd"><span>{{ resumeCopied ? t('session.actions.resume_toast') : t('session.actions.resume') }}</span><code>resume</code></button>
         </div>
       </div>
 
@@ -665,7 +688,8 @@
     v-if="showNewSession"
     :daemons="daemonList"
     :preSelectedDaemonId="selectedHostId"
-    @close="showNewSession = false"
+    :project-id="newSessionProjectId"
+    @close="showNewSession = false; newSessionProjectId = null"
   />
   <CommandHelpModal
     v-if="showHelpModal"
@@ -686,6 +710,7 @@
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import CreateProjectControl from '../components/CreateProjectControl.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { normalizeEffort, shouldShowEffort } from '../utils/effort'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
@@ -753,6 +778,9 @@ import { HistoryViewportFillCoordinator, shouldStartHistoryResizeFill } from '..
 import SessionDocumentShelf from '../components/session-documents/SessionDocumentShelf.vue'
 import SessionDocumentViewer from '../components/session-documents/SessionDocumentViewer.vue'
 import { useSessionDocuments } from '../composables/useSessionDocuments'
+import { useAuth } from '../composables/useAuth'
+import { getRelayOrigin } from '../composables/useEnv'
+import { listProjects, renameProject, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject } from '../services/sessionOrganization'
 import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
@@ -764,6 +792,7 @@ const { isMobile } = useResponsiveLayout()
 const { setSessionHeader, clearSessionHeader } = useSessionHeader()
 const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
+const { user } = useAuth()
 
 const sessionId = computed(() => route.params.id as string)
 const sessionDocumentState = useSessionDocuments(sessionId)
@@ -1159,8 +1188,9 @@ function sessionHostName(session: any): string {
   return d?.daemon_alias || d?.hostname || session.daemon_alias || session.hostname || session.daemon_id?.slice(0, 8) || t('session.unknown_host')
 }
 const hostScopedSessions = computed(() => {
-  if (!selectedHostId.value) return allSessions.value
-  return allSessions.value.filter((s: any) => s.daemon_id === selectedHostId.value)
+  const active = allSessions.value.filter((s: any) => !s.archived_at)
+  if (!selectedHostId.value) return active
+  return active.filter((s: any) => s.daemon_id === selectedHostId.value)
 })
 function normalizedAgentType(session: any): string {
   const raw = String(session?.agent_type || session?.agent || 'claude-code').toLowerCase()
@@ -1191,6 +1221,152 @@ const visibleSessions = computed(() => {
   if (selectedAgentType.value === 'all') return hostScopedSessions.value
   return hostScopedSessions.value.filter((session: any) => normalizedAgentType(session) === selectedAgentType.value)
 })
+const projects = ref<SessionProject[]>([])
+const projectOrderRevision = ref(0)
+const ungroupedRevision = ref(0)
+const archivedCount = ref(0)
+const ungroupedCount = ref(0)
+const archivedView = ref(false)
+const archivedSessions = ref<any[]>([])
+const archivedCursor = ref<string | null>(null)
+const sidebarBuckets = ref<Record<string, any[]>>({})
+const sidebarCursors = ref<Record<string, string | null>>({})
+const organizationLoaded = ref(false)
+const projectMenuId = ref<string | null>(null)
+const newSessionProjectId = ref<string | null>(null)
+const dragSessionId = ref<string | null>(null)
+const dragProjectId = ref<string | null>(null)
+const collapseKey = computed(() => `pocketctl-project-folds:${getRelayOrigin()}:${user?.value?.id || 'anonymous'}`)
+const collapsedProjects = ref<Record<string, boolean>>({})
+watch(collapseKey, key => { try { collapsedProjects.value = JSON.parse(localStorage.getItem(key) || '{}') } catch { collapsedProjects.value = {} } }, { immediate: true })
+function toggleProject(id: string) {
+  collapsedProjects.value[id] = !collapsedProjects.value[id]
+  localStorage.setItem(collapseKey.value, JSON.stringify(collapsedProjects.value))
+  if (!collapsedProjects.value[id] && !sidebarBuckets.value[id]) void loadSidebarBucket(id).catch(error => console.error('project bucket failed',error))
+}
+async function refreshProjects() {
+  try {
+    const snapshot = await listProjects(selectedHostId.value || undefined)
+    projects.value = snapshot.projects
+    archivedCount.value = snapshot.archived_count
+    ungroupedCount.value = snapshot.ungrouped_count
+    projectOrderRevision.value = snapshot.project_order_revision
+    ungroupedRevision.value = snapshot.ungrouped_revision
+    await Promise.all([loadSidebarBucket('ungrouped'),...snapshot.projects.filter(p => !collapsedProjects.value[p.id]).map(p => loadSidebarBucket(p.id))])
+    organizationLoaded.value = true
+  } catch (error) { console.error('project list failed', error) }
+}
+async function loadSidebarBucket(bucket: string, cursor?: string) {
+  const page = await listOrganizedSessions({ bucket, daemonId:selectedHostId.value || undefined, limit:bucket === 'ungrouped' ? 30 : 5, cursor })
+  sidebarBuckets.value[bucket] = cursor
+    ? [...(sidebarBuckets.value[bucket] || []),...page.sessions.filter(s => !(sidebarBuckets.value[bucket] || []).some(old => old.session_id === s.session_id))]
+    : page.sessions
+  sidebarCursors.value[bucket] = page.next_cursor
+}
+async function loadMoreSidebar(id: string) {
+  if (id === 'archived') return openArchived(archivedCursor.value || undefined)
+  try { await loadSidebarBucket(id,sidebarCursors.value[id] || undefined) }
+  catch (error) { window.alert(error instanceof Error ? error.message : '加载失败') }
+}
+watch(selectedHostId, () => { void refreshProjects() })
+function sortBucket(sessions: any[], mode: string) {
+  return [...sessions].sort((a,b) => a.pinned !== b.pinned ? (a.pinned ? -1 : 1)
+    : mode === 'manual' ? Number(a.manual_rank ?? 1e15) - Number(b.manual_rank ?? 1e15)
+    : ((a.pinned && b.pinned ? new Date(b.pinned_at || 0).getTime() - new Date(a.pinned_at || 0).getTime() : 0)
+      || Math.max(new Date(b.last_activity_at || 0).getTime(),new Date(b.membership_changed_at || 0).getTime(),new Date(b.created_at || 0).getTime())
+        - Math.max(new Date(a.last_activity_at || 0).getTime(),new Date(a.membership_changed_at || 0).getTime(),new Date(a.created_at || 0).getTime())))
+}
+const sidebarEntries = computed<any[]>(() => {
+  if (archivedView.value) return [...archivedSessions.value.map(s => ({ ...s, kind: 'session' })),...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
+  const out: any[] = []
+  const live = new Map(allSessions.value.map((s:any) => [s.session_id,s]))
+  const enriched = (rows: any[]) => rows.map(s => ({ ...s, status:live.get(s.session_id)?.status || s.status,
+    children:live.get(s.session_id)?.children || s.children, kind:'session' }))
+  for (const project of projects.value) {
+    const members = organizationLoaded.value ? (sidebarBuckets.value[project.id] || []) : sortBucket(visibleSessions.value.filter((s:any) => s.project_id === project.id),project.order_mode).slice(0,5)
+    const filtered = selectedAgentType.value === 'all' ? members : members.filter((s:any) => normalizedAgentType(s) === selectedAgentType.value)
+    out.push({ ...project, kind: 'project' })
+    if (!collapsedProjects.value[project.id]) out.push(...enriched(filtered))
+    if (!collapsedProjects.value[project.id] && sidebarCursors.value[project.id]) out.push({kind:'loadMore',id:project.id})
+  }
+  const ungrouped = organizationLoaded.value ? (sidebarBuckets.value.ungrouped || []) : visibleSessions.value.filter((s:any) => !s.project_id)
+  const filteredUngrouped = selectedAgentType.value === 'all' ? ungrouped : ungrouped.filter((s:any) => normalizedAgentType(s) === selectedAgentType.value)
+  out.push({ kind: 'ungrouped', id: 'ungrouped', name: '未分组', count: organizationLoaded.value ? ungroupedCount.value : ungrouped.length })
+  out.push(...enriched(filteredUngrouped))
+  if (sidebarCursors.value.ungrouped) out.push({kind:'loadMore',id:'ungrouped'})
+  return out
+})
+async function editProjectName(project: SessionProject) {
+  projectMenuId.value = null
+  const name = window.prompt('项目名称', project.name)
+  if (name === null || name.trim() === project.name) return
+  try { await renameProject(project.id, name, Number(project.revision)); await refreshProjects() }
+  catch (error) { window.alert(error instanceof Error ? error.message : '重命名失败') }
+}
+async function shiftProject(id: string, direction: number) {
+  projectMenuId.value = null
+  const ids = projects.value.map(p => p.id)
+  const index = ids.indexOf(id); const next = index + direction
+  if (next < 0 || next >= ids.length) return
+  ;[ids[index], ids[next]] = [ids[next], ids[index]]
+  try { await reorderProjects(ids, projectOrderRevision.value); await refreshProjects() }
+  catch (error) { window.alert(error instanceof Error ? error.message : '排序失败') }
+}
+async function dropOnProject(id: string | null) {
+  if (dragProjectId.value && id && dragProjectId.value !== id) {
+    const ids = projects.value.map(p => p.id)
+    ids.splice(ids.indexOf(dragProjectId.value),1)
+    ids.splice(ids.indexOf(id),0,dragProjectId.value)
+    try { await reorderProjects(ids,projectOrderRevision.value) } catch (error) { window.alert(String(error)) }
+    dragProjectId.value = null; await refreshProjects(); return
+  }
+  const sessionId = dragSessionId.value
+  dragSessionId.value = null
+  if (!sessionId) return
+  try { await moveSession(sessionId,id); onMoved(sessionId,id) }
+  catch (error) { window.alert(error instanceof Error ? error.message : '移动失败') }
+}
+async function dropOnSession(target: any) {
+  const movingId = dragSessionId.value; dragSessionId.value = null
+  if (!movingId || movingId === target.session_id) return
+  const moving = allSessions.value.find((s:any) => s.session_id === movingId)
+  if (!moving) return
+  if (moving.project_id !== target.project_id) {
+    try { await moveSession(movingId,target.project_id || null); onMoved(movingId,target.project_id || null) }
+    catch (error) { window.alert(error instanceof Error ? error.message : '移动失败') }
+    return
+  }
+  const project = projects.value.find(p => p.id === target.project_id)
+  try {
+    await reorderSession(target.project_id || 'ungrouped',movingId,target.session_id,Number(project?.revision ?? ungroupedRevision.value))
+    await refreshProjects()
+    send({ type: 'list_sessions' })
+  } catch (error) { window.alert(error instanceof Error ? error.message : '排序失败') }
+}
+function onMoved(id: string, projectId: string | null) {
+  const s = allSessions.value.find((row:any) => row.session_id === id)
+  if (s) s.project_id = projectId
+  void refreshProjects()
+}
+function onArchived(id: string, archived: boolean) {
+  if (archived) {
+    const current = allSessions.value.find((s:any) => s.session_id === id)
+    if (id === sessionId.value && current) current.archived_at = new Date().toISOString()
+    else allSessions.value = allSessions.value.filter((s:any) => s.session_id !== id)
+  }
+  else archivedSessions.value = archivedSessions.value.filter((s:any) => s.session_id !== id)
+  void refreshProjects()
+  if (!archived) send({ type:'list_sessions' })
+}
+async function openArchived(cursor?: string) {
+  archivedView.value = true
+  try {
+    const page = await listOrganizedSessions({ view:'archived', daemonId:selectedHostId.value || undefined, limit:100, cursor })
+    archivedSessions.value = cursor ? [...archivedSessions.value,...page.sessions.filter(s => !archivedSessions.value.some(old => old.session_id === s.session_id))] : page.sessions
+    archivedCursor.value = page.next_cursor
+  }
+  catch (error) { window.alert(error instanceof Error ? error.message : '读取归档失败') }
+}
 const currentSessionOutsideFilter = computed(() => !!currentSession.value && !visibleSessions.value.some(s => s.session_id === sessionId.value))
 function showCurrentSessionInList() {
   selectedHostId.value = currentSession.value?.daemon_id || ''
@@ -1731,6 +1907,7 @@ function copySessionId() {
 
 // session-resume-command: copy `cd "<cwd>" && <agent resume <sid>>` for terminal handoff
 function copyResumeCmd() {
+  if (archivedView.value || currentSession.value?.archived_at) return
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value)
   if (!s) return
   const cmd = buildResumeCommand({
@@ -3503,7 +3680,16 @@ watch(loadKey, (newKey, oldKey) => {
 const cleanups: (() => void)[] = []
 
 onMounted(() => {
+	void refreshProjects()
+	cleanups.push(onEvent('session_organization_changed', () => {
+		void refreshProjects()
+		if (archivedView.value) void openArchived()
+		send({ type: 'list_sessions' })
+	}))
+	cleanups.push(onEvent('session_discovered', () => { void refreshProjects() }))
+	cleanups.push(onEvent('session_created', () => { void refreshProjects() }))
 	cleanups.push(onEvent('connection_restored', () => {
+		void refreshProjects()
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
 		sessionSwitching = true
@@ -3523,6 +3709,11 @@ onMounted(() => {
 
 	cleanups.push(onEvent('session_list', (msg: any) => {
     allSessions.value = msg.sessions || []
+    if (sessionId.value !== 'default' && !allSessions.value.some((s:any) => s.session_id === sessionId.value)) {
+      void getSessionSummary(sessionId.value).then(summary => {
+        if (sessionId.value === summary.session_id && !allSessions.value.some((s:any) => s.session_id === summary.session_id)) allSessions.value.push(summary)
+      }).catch(() => {})
+    }
     // P1a: populate childrenToken from current session's children
     const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
     if (cur && !replayStatusResolved) applySessionRuntime(cur)
@@ -4048,6 +4239,15 @@ onMounted(() => {
   void refreshSessionDocuments()
 })
 
+watch(sessionId, id => {
+  if (id && id !== 'default' && !id.startsWith('pending-')) {
+    void markSessionSeen(id).then(() => {
+      const session = allSessions.value.find((s:any) => s.session_id === id)
+      if (session) session.new_badge_pending = false
+    }).catch(() => {})
+  }
+}, { immediate: true })
+
 // SessionActions handlers (optimistic local updates)
 function onDeleted(_sessionId: string) { /* handled by session_deleted WS event */ }
 function onPinned(sessionId: string, pinned: boolean) {
@@ -4164,6 +4364,24 @@ onMounted(() => {
 .sl-child-indent { color: var(--fg-tertiary); flex-shrink: 0; }
 .sl-child-title { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-list-item { display: flex; align-items: center; gap: 9px; min-height: 54px; padding: 8px 9px; border: 1px solid transparent; border-radius: var(--radius-md); cursor: pointer; transition: background 0.15s, border-color 0.15s, opacity 0.25s ease, transform .15s ease; margin-bottom: 3px; }
+.session-list-item.in-project { margin-left: 13px; }
+.session-new-badge { display: inline-flex; margin-left: 6px; padding: 1px 4px; border-radius: 4px; color: var(--accent); background: var(--accent-muted); font: 700 9px/13px var(--font-body); vertical-align: middle; }
+.project-section-label { display: flex; align-items: center; justify-content: space-between; margin: 9px 8px 7px; color: var(--fg-secondary); font-size: 10px; font-weight: 700; letter-spacing: .09em; }
+.project-load-more { width: calc(100% - 13px); margin-left: 13px; color: var(--accent); font-size: 11px; }
+.project-heading { display: flex; align-items: center; position: relative; min-height: 37px; margin-top: 8px; padding: 0 6px; color: var(--fg-secondary); font-size: 12px; font-weight: 650; border-radius: 7px; }
+.project-heading:hover { background: var(--surface-hover); }
+.project-toggle { display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; height: 36px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.project-toggle svg { width: 17px; height: 17px; flex-shrink: 0; }
+.project-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-heading small { margin-left: auto; color: var(--fg-tertiary); font: 10px var(--font-mono); }
+.project-menu-button { border: 0; background: transparent; color: var(--fg-tertiary); cursor: pointer; padding: 4px; }
+.project-menu { position: absolute; right: 4px; top: 32px; z-index: 40; min-width: 155px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-lg); }
+.project-menu button { display: block; width: 100%; padding: 7px 9px; border: 0; border-radius: 5px; background: none; color: var(--fg); text-align: left; cursor: pointer; }
+.project-menu button:hover { background: var(--surface-hover); }
+.ungrouped-heading { margin-top: 14px; border-top: 1px solid var(--border); border-radius: 0; }
+.archived-entry,.archive-back { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; margin-top: 8px; padding: 0 10px; background: transparent; border: 0; border-radius: 8px; color: var(--fg-secondary); text-align: left; cursor: pointer; }
+.archived-entry:hover,.archive-back:hover { background: var(--surface-hover); color: var(--fg); }
+.archived-entry span { margin-left: auto; }
 .session-list-item:hover { border-color: var(--border); background: var(--surface-hover); }
 .session-list-item.pending-delete { opacity: 0.35; pointer-events: none; }
 .session-list-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--sidebar-active); box-shadow: inset 2px 0 0 var(--accent); }

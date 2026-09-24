@@ -2377,6 +2377,9 @@ func reconnectDiscoveryEvent(s session.SessionInfo) protocol.DaemonEvent {
 		CodexHomeLabel: s.CodexHomeLabel,
 		Resync:         true,
 	}
+	if !s.StartedAt.IsZero() {
+		event.SessionStartedAt = s.StartedAt.UTC().Format(time.RFC3339Nano)
+	}
 	if !s.LastActivityAt.IsZero() {
 		event.LastActivityAt = s.LastActivityAt.UTC().Format(time.RFC3339Nano)
 	}
@@ -3294,6 +3297,9 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						CodexHomeID:    evt.Session.CodexHomeID,
 						CodexHomeLabel: evt.Session.CodexHomeLabel,
 					}
+					if evt.Session.StartedAt > 0 {
+						discoveryEvent.SessionStartedAt = time.Unix(evt.Session.StartedAt, 0).UTC().Format(time.RFC3339Nano)
+					}
 					if activity, ok := sm.SessionActivityAt(evt.Session.SessionID); ok && !activity.IsZero() {
 						discoveryEvent.LastActivityAt = activity.UTC().Format(time.RFC3339Nano)
 					}
@@ -3394,6 +3400,9 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						Capabilities:   sm.SessionCapabilities(sessionSnapshot.SessionID),
 						CodexHomeID:    sessionSnapshot.CodexHomeID,
 						CodexHomeLabel: sessionSnapshot.CodexHomeLabel,
+					}
+					if sessionSnapshot.StartedAt > 0 {
+						discoveryEvent.SessionStartedAt = time.Unix(sessionSnapshot.StartedAt, 0).UTC().Format(time.RFC3339Nano)
 					}
 					if !jsonlActivityAt.IsZero() {
 						discoveryEvent.LastActivityAt = jsonlActivityAt.UTC().Format(time.RFC3339Nano)

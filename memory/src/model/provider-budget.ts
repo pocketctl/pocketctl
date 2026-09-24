@@ -105,6 +105,14 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
   }
 }
 
+/**
+ * Failure codes proving the request never reached a provider ledger entry
+ * (no completion was returned, so nothing was spent). These settle at zero.
+ * invalid_usage — the provider answered but its counters were untrustworthy —
+ * deliberately keeps the worst-case reservation unsettled.
+ */
+const TRANSPORT_FAILURE_CODES: ReadonlySet<string> = new Set(['http_error', 'aborted'])
+
 export function withTextProviderBudget(
   provider: TextGenerator,
   store: ProviderBudgetStore,
@@ -144,12 +152,17 @@ export function withTextProviderBudget(
         return { ok: false, code: 'budget_exceeded', retryable: false, detail: reservation.dimension }
       }
       const result = await provider.generateJson<T>(input)
-      const usage = result.ok ? result.usage : result.usage
+      const usage = result.usage
       if (usage) {
         await store.settle(reservation.reservationId, {
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
         })
+      } else if (!result.ok && TRANSPORT_FAILURE_CODES.has(result.code)) {
+        // The request never completed (http_error, aborted): no provider
+        // ledger entry exists, so settle at zero instead of permanently
+        // leaking the conservative reservation.
+        await store.settle(reservation.reservationId, { inputTokens: 0, outputTokens: 0 })
       }
       return { ...result, budgetReservationId: reservation.reservationId }
     },

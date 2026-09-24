@@ -149,7 +149,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           if (result.code === 'invalid_json' || result.code === 'empty_content') {
             return { ok: false, errorCode: `invalid_output:${result.code}`, retryable: false }
           }
-          return { ok: false, errorCode: result.code, retryable: result.retryable }
+          const errorCode = result.code === 'http_error'
+            && /^http_status_[1-5]\d{2}$/.test(result.detail ?? '')
+            ? `${result.code}:${result.detail}`
+            : result.code
+          return { ok: false, errorCode, retryable: result.retryable }
         }
         usage = {
           inputTokens: usage.inputTokens + result.usage.inputTokens,
