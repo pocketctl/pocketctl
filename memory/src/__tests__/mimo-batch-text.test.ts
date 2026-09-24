@@ -32,9 +32,13 @@ describe('MiMo Batch text adapter', () => {
         return jsonResponse({ id: 'file-input', status: 'active' })
       }
       if (path.endsWith('/batches') && init?.method === 'POST') {
-        expect(JSON.parse(String(init.body))).toEqual({
+        const createBody = JSON.parse(String(init.body))
+        expect(createBody).toMatchObject({
           input_file_id: 'file-input', endpoint: '/v1/chat/completions', completion_window: '24h',
         })
+        // Xiaomi's Batch API answers 500 internal_error when the (optional in
+        // OpenAI) name field is missing; the adapter must always send one.
+        expect(createBody.name).toMatch(/^pocketctl-memory-[0-9a-f]{8}$/)
         return jsonResponse({ id: 'batch-1', status: 'validating' })
       }
       if (path.endsWith('/batches/batch-1')) {
@@ -120,6 +124,27 @@ describe('MiMo Batch text adapter', () => {
 
     await expect(generator.generateJson(input({}, controller.signal))).resolves.toMatchObject({
       ok: false, code: 'aborted', retryable: false,
+    })
+  })
+
+  test('exposes only the HTTP status when batch creation is rejected', async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = String(url)
+      if (path.endsWith('/files') && init?.method === 'POST') {
+        return jsonResponse({ id: 'file-input', status: 'active' })
+      }
+      if (path.endsWith('/batches') && init?.method === 'POST') {
+        return jsonResponse({ message: 'provider response body must not be disclosed' }, 402)
+      }
+      throw new Error(`unexpected request: ${path}`)
+    })
+    const generator = createMimoBatchTextGenerator({
+      baseUrl: 'https://batch.example/v1', model: 'mimo-v2.6-flash', apiKey: 'secret',
+      timeoutMs: 5_000, batchWindowMs: 0, fetchImpl: fetchImpl as typeof fetch,
+    })
+
+    await expect(generator.generateJson(input({ episode: 1 }))).resolves.toMatchObject({
+      ok: false, code: 'http_error', detail: 'http_status_402', retryable: false,
     })
   })
 })

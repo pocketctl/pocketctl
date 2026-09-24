@@ -329,6 +329,9 @@ func (sm *SessionManager) ResyncSessions() {
 			CodexHomeLabel: ps.CodexHomeLabel,
 			Resync:         true,
 		}
+		if !ps.StartedAt.IsZero() {
+			event.SessionStartedAt = ps.StartedAt.UTC().Format(time.RFC3339Nano)
+		}
 		if !ps.LastActivityAt.IsZero() {
 			event.LastActivityAt = ps.LastActivityAt.UTC().Format(time.RFC3339Nano)
 		}

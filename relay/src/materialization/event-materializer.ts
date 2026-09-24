@@ -2,6 +2,7 @@ import { recoverContinueAdmission, completeContinueAdmission, claimContinueAdmis
 import { createHash } from 'crypto'
 import type pg from 'pg'
 import * as db from '../db.js'
+import { attachReservedSessionProject } from '../session-organization/attach.js'
 import { normalizeSessionId } from '../ingress/event-policy.js'
 import {
   approvalPush,
@@ -378,6 +379,8 @@ export class EventMaterializer {
       capabilities,
       typeof payload.codex_home_id === 'string' ? payload.codex_home_id : undefined,
       typeof payload.codex_home_label === 'string' ? payload.codex_home_label : undefined,
+      typeof payload.session_started_at === 'string' && Number.isFinite(Date.parse(payload.session_started_at))
+        ? payload.session_started_at : undefined,
     )
     if (agentType === 'codex-desktop' && input.userId !== null) {
       await db.reclassifyCodexDesktopTokenUsageFacts(
@@ -501,6 +504,12 @@ export class EventMaterializer {
           typeof payload.codex_home_id === 'string' ? payload.codex_home_id : undefined,
           typeof payload.codex_home_label === 'string' ? payload.codex_home_label : undefined,
         )
+        if (binding?.operation === 'create' && input.userId !== null) {
+          await attachReservedSessionProject(this.effectPool, {
+            reservationId: binding.reservationId, userId: input.userId, daemonId: input.daemonId,
+            requestId: binding.requestId, sessionId,
+          })
+        }
         this.options.hooks?.bindSession?.(sessionId, input.daemonId)
       })
       await effect.assertActive()

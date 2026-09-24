@@ -60,6 +60,54 @@ describe('provider budget guard', () => {
     expect(store.settle).toHaveBeenCalledWith('r1', { inputTokens: 7, outputTokens: 3 })
   })
 
+  test('settles a usage-less terminal failure at zero so the reservation cannot leak', async () => {
+    const store: ProviderBudgetStore = {
+      reserve: vi.fn(async () => ({ ok: true as const, reservationId: 'r1' })),
+      settle: vi.fn(async () => undefined),
+    }
+    // Adapter failures such as http_error/timeout carry no usage; without a
+    // zero settle their conservative output reservation would permanently
+    // consume the budget (93 leaked reservations starved production).
+    const generateJson = vi.fn(async () => ({
+      ok: false as const,
+      code: 'http_error' as const,
+      detail: 'http_status_500',
+      retryable: true,
+    }))
+    const guarded = withTextProviderBudget({ generateJson } as TextGenerator, store, {
+      key: 'pilot', maxRequests: 2, maxInputTokens: 100, maxOutputTokens: 20,
+      maxOutputTokensPerRequest: 10,
+    })
+    await guarded.generateJson({
+      operation: 'candidate_extract', system: 's', document: {}, schema: {},
+      timeoutMs: 1000, signal: new AbortController().signal,
+    })
+    expect(store.settle).toHaveBeenCalledWith('r1', { inputTokens: 0, outputTokens: 0 })
+  })
+
+  test('keeps the worst-case reservation unsettled for invalid_usage', async () => {
+    const store: ProviderBudgetStore = {
+      reserve: vi.fn(async () => ({ ok: true as const, reservationId: 'r1' })),
+      settle: vi.fn(async () => undefined),
+    }
+    // The provider answered but its counters were untrustworthy: tokens were
+    // spent, so the reservation must stay as the worst-case estimate.
+    const generateJson = vi.fn(async () => ({
+      ok: false as const,
+      code: 'invalid_usage' as const,
+      retryable: false,
+    }))
+    const guarded = withTextProviderBudget({ generateJson } as TextGenerator, store, {
+      key: 'pilot', maxRequests: 2, maxInputTokens: 100, maxOutputTokens: 20,
+      maxOutputTokensPerRequest: 10,
+    })
+    await guarded.generateJson({
+      operation: 'candidate_extract', system: 's', document: {}, schema: {},
+      timeoutMs: 1000, signal: new AbortController().signal,
+    })
+    expect(store.settle).not.toHaveBeenCalled()
+  })
+
   test('a budget-store outage fails closed before the provider', async () => {
     const store: ProviderBudgetStore = {
       reserve: vi.fn(async () => { throw new Error('database unavailable') }),

@@ -213,7 +213,7 @@ import { useQuota } from '../composables/useQuota'
 import { createClientId } from '../utils/clientId'
 import { defaultPermission, expandCodexPreset, permissionOptions, type AgentType, type ClaudeMode, type CodexPreset, type PermissionConfig } from '../types/permission'
 
-const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string }>()
+const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string; projectId?: string | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const router = useRouter()
@@ -441,6 +441,7 @@ function startSession() {
     type: 'session_create',
     request_id: currentRequestId,
     daemon_id: form.daemonId,
+    project_id: props.projectId || undefined,
     agent: form.agent,
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,

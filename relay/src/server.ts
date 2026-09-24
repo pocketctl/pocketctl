@@ -84,6 +84,7 @@ import { registerPurgeRoutes } from './extensions/purge-routes.js';
 import { createExtensionRateLimiterSet } from './extensions/rate-limit.js';
 import { resolveExtensionRateLimitConfig } from './runtime-config.js';
 import { registerSessionShareRoutes } from './session-share-routes.js';
+import { registerSessionOrganizationRoutes } from './session-organization/routes.js';
 import { createSessionHistoryReadBroker } from './session-history-read.js';
 import { attentionInboxConfig } from './attention-inbox/config.js';
 import { serializeAttentionItem, serializeAttentionRecovery } from './attention-inbox/dto.js';
@@ -1150,6 +1151,10 @@ async function main() {
     options: { maxPayload: runtimeConfig.maxEventBytes },
   });
   registerSessionShareRoutes(app, { pool, publicIssuer });
+  registerSessionOrganizationRoutes(app, {
+    pool,
+    broadcast: (userId, payload) => router.broadcastToUser(userId, payload),
+  });
   registerSessionDocumentRoutes(app, {
     pool,
     repository: new SessionDocumentRepository(pool, runtimeConfig.sessionDocuments),

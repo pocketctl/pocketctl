@@ -229,6 +229,15 @@ function sessionPool(
       }
       if (sql.includes('FROM subagents')) return { rows: [], rowCount: 0 }
       if (sql.includes('FROM events')) return { rows: [], rowCount: 0 }
+      if (sql.includes('SELECT s.project_id,s.pinned,COALESCE(p.order_mode')) {
+        const owned = !state.deleted && params[0] === state.sessionId && params[1] === state.userId
+        return { rows: owned ? [{ project_id: null, pinned: state.pinned, order_mode: 'activity' }] : [], rowCount: owned ? 1 : 0 }
+      }
+      if (sql.includes('UPDATE sessions SET pinned=$1,pinned_at=')) {
+        const owned = !state.deleted && params[1] === state.sessionId && params[2] === state.userId
+        if (owned) state.pinned = params[0]
+        return { rows: [], rowCount: owned ? 1 : 0 }
+      }
       if (sql.includes('SET pinned =')) {
         const owned = !state.deleted && params[1] === state.sessionId && params[2] === state.userId
         if (owned) state.pinned = params[0]

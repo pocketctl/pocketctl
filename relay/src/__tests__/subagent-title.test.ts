@@ -3,8 +3,17 @@ import { generateSubagentTitle } from '../title.js'
 
 describe('title.generateSubagentTitle', () => {
   const origKey = process.env.DEEPSEEK_API_KEY
-  beforeEach(() => { process.env.DEEPSEEK_API_KEY = 'test-key' })
-  afterEach(() => { process.env.DEEPSEEK_API_KEY = origKey })
+  const origMimoKey = process.env.MIMO_API_KEY
+  beforeEach(() => {
+    delete process.env.MIMO_API_KEY
+    process.env.DEEPSEEK_API_KEY = 'test-key'
+  })
+  afterEach(() => {
+    if (origKey === undefined) delete process.env.DEEPSEEK_API_KEY
+    else process.env.DEEPSEEK_API_KEY = origKey
+    if (origMimoKey === undefined) delete process.env.MIMO_API_KEY
+    else process.env.MIMO_API_KEY = origMimoKey
+  })
 
   test('returns cleaned title from DeepSeek response', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({

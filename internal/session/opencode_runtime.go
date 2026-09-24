@@ -193,9 +193,10 @@ func (sm *SessionManager) registerManagedOpenCodeSession(coord *opencodeCoordina
 	coord.markManagedSession(sessionID, cwd)
 	coord.startSync(sessionID, true)
 	if created {
-		event := protocol.DaemonEvent{
-			Type: "session_discovered", SessionID: sessionID, Cwd: cwd, Status: protocol.StatusIdle,
-			Source: "terminal", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged,
+			event := protocol.DaemonEvent{
+				Type: "session_discovered", SessionID: sessionID, Cwd: cwd, Status: protocol.StatusIdle,
+				Source: "terminal", Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged,
+				SessionStartedAt: now.UTC().Format(time.RFC3339Nano),
 			Capabilities: sm.OpenCodeInteractionCapabilities(sessionID),
 		}
 		sm.enqueueOpenCodeLifecycleEvent(coord, event)

@@ -290,6 +290,7 @@ func (cw *CodexSessionWatcher) projectSession(path string, meta adapter.CodexRol
 	}
 	session := DiscoveredSession{
 		SessionID:       meta.ID,
+		StartedAt:       meta.StartedAt,
 		Cwd:             meta.Cwd,
 		Pid:             pid,
 		Status:          "busy",
