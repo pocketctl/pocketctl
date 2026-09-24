@@ -29,7 +29,7 @@ func startCodexAppServer(ctx context.Context, binary, version string, generation
 
 func startCodexAppServerForHome(ctx context.Context, binary, version string, generation uint64, homeID, home string) (*codexAppServerRuntime, error) {
 	return startCodexAppServerWithFactoryForHome(ctx, binary, version, generation, homeID, home, 10*time.Second, func(binary, socketPath string) *exec.Cmd {
-		return exec.Command(binary, "app-server", "--listen", "unix://"+socketPath)
+		return exec.Command(binary, "app-server", "-c", "thread_unload_delay_secs=0", "--listen", "unix://"+socketPath)
 	})
 }
 

@@ -61,31 +61,36 @@ type codexCoordinator struct {
 	titleTurns       map[string]codexTitleTurn
 	sm               *SessionManager
 
-	mu              sync.Mutex
-	runtime         *codexAppServerRuntime
-	binary          string
-	version         string
-	schemaHash      string
-	generation      uint64
-	start           codexRuntimeStarter
-	adopt           func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
-	probe           codexRuntimeProbe
-	pumpCancel      context.CancelFunc
-	projectionMu    sync.Mutex
-	turnMu          sync.RWMutex
-	activeTurn      map[string]string
-	turnRevision    map[string]uint64
-	subscribeMu     sync.Mutex
-	subscribed      map[string]struct{}
-	subscribing     map[string]struct{}
-	managedThreads  map[string]struct{}
-	interactions    *codexInteractions
-	reconnecting    bool
-	reconnectCancel context.CancelFunc
-	reconnectDone   chan struct{}
-	shuttingDown    bool
-	pumpWG          sync.WaitGroup
-	subscriptionWG  sync.WaitGroup
+	mu                 sync.Mutex
+	runtime            *codexAppServerRuntime
+	binary             string
+	version            string
+	schemaHash         string
+	generation         uint64
+	start              codexRuntimeStarter
+	adopt              func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
+	probe              codexRuntimeProbe
+	pumpCancel         context.CancelFunc
+	projectionMu       sync.Mutex
+	turnMu             sync.RWMutex
+	activeTurn         map[string]string
+	turnRevision       map[string]uint64
+	subscribeMu        sync.Mutex
+	subscribed         map[string]struct{}
+	subscribing        map[string]struct{}
+	managedThreads     map[string]struct{}
+	detachedThreads    map[string]bool
+	idleThreads        map[string]time.Time
+	threadOperations   sync.Map
+	threadStateVersion uint64
+	threadStateSaved   uint64
+	interactions       *codexInteractions
+	reconnecting       bool
+	reconnectCancel    context.CancelFunc
+	reconnectDone      chan struct{}
+	shuttingDown       bool
+	pumpWG             sync.WaitGroup
+	subscriptionWG     sync.WaitGroup
 
 	admissionMu         sync.Mutex
 	admissionGeneration uint64
@@ -126,6 +131,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 		return codexRuntimeSnapshot{}, errors.New("Codex coordinator is shutting down")
 	}
 	var restoredThreads []string
+	restoredDetached := c.detachedThreadSnapshot()
 	if c.runtime != nil {
 		probeErr := c.probe(ctx, c.runtime)
 		activeLease := c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation)
@@ -160,6 +166,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 		}
 		c.generation = state.Generation
 		restoredThreads = append(restoredThreads, state.Threads...)
+		restoredDetached = append(restoredDetached, state.DetachedThreads...)
 		alive := platform.NewProcessController().IsAlive(state.PID)
 		ownerAvailable := state.OwnerPID <= 0 || state.OwnerPID == os.Getpid() || !platform.NewProcessController().IsAlive(state.OwnerPID)
 		compatible := codexRuntimeCompatible(state.Binary, state.Version, state.SchemaHash, binary, version, capabilities.SchemaHash)
@@ -197,6 +204,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 						}
 					}
 					c.restoreManagedThreads(state.Threads)
+					c.restoreDetachedThreads(state.DetachedThreads)
 					c.startEventPumpLocked()
 					if c.sm != nil {
 						if c.projectCwd == "" {
@@ -241,6 +249,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	c.schemaHash = capabilities.SchemaHash
 	c.generation = generation
 	c.restoreManagedThreads(restoredThreads)
+	c.restoreDetachedThreads(restoredDetached)
 	c.startEventPumpLocked()
 	if c.sm != nil {
 		if err := c.persistLocked(); err != nil {
@@ -317,14 +326,22 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 			delete(leases, id)
 		}
 	}
-	return daemon.WriteCodexAppServerStateAt(c.runtimeStatePath(), &daemon.CodexAppServerState{
+	threads, detached, revision := c.threadStateSnapshot()
+	err := daemon.WriteCodexAppServerStateAt(c.runtimeStatePath(), &daemon.CodexAppServerState{
 		Cwd: c.projectCwd, CodexHomeID: c.codexHomeID, CodexHome: c.codexHome,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
 		RemoteURI: c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
 		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
-		Threads:   c.managedThreadSnapshot(),
-		UpdatedAt: time.Now().UTC(),
+		Threads:         threads,
+		DetachedThreads: detached,
+		UpdatedAt:       time.Now().UTC(),
 	})
+	if err == nil {
+		c.subscribeMu.Lock()
+		c.threadStateSaved = revision
+		c.subscribeMu.Unlock()
+	}
+	return err
 }
 
 func (c *codexCoordinator) status() (codexRuntimeSnapshot, bool) {
@@ -415,6 +432,8 @@ func (c *codexCoordinator) startEventPumpLocked() {
 		defer c.pumpWG.Done()
 		c.consumeEventsWithInteractions(ctx, client.Events(), projector, interactions)
 	}()
+	c.pumpWG.Add(1)
+	go func() { defer c.pumpWG.Done(); c.reapThreads(ctx) }()
 	for _, threadID := range c.managedThreadSnapshot() {
 		if c.beginSubscription(threadID) {
 			c.startTerminalThreadSubscription(ctx, client, generation, threadID, projector)
@@ -426,7 +445,7 @@ func (c *codexCoordinator) startTerminalThreadSubscription(parent context.Contex
 	c.subscriptionWG.Add(1)
 	go func() {
 		defer c.subscriptionWG.Done()
-		c.subscribeTerminalThread(parent, client, generation, threadID, projector)
+		c.subscribeThread(parent, client, generation, threadID, projector, true)
 	}()
 }
 
@@ -747,10 +766,24 @@ func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message cod
 	c.projectionMu.Lock()
 	defer c.projectionMu.Unlock()
 	c.observeTurnNotification(message)
+	if id != "" {
+		c.subscribeMu.Lock()
+		delete(c.idleThreads, id)
+		c.subscribeMu.Unlock()
+	}
 	if threadID, status, ok := codexThreadStatusNotification(message); ok {
 		c.reconcileActiveTurnStatus(threadID, status)
 	}
-	c.publishProjectedAt(projector.Project(message), received)
+	events := projector.Project(message)
+	if threadID, status, ok := codexThreadStatusNotification(message); ok && status == "notLoaded" && c.threadDetached(threadID) {
+		for i := range events {
+			if events[i].Type == "session_status" {
+				events[i].Status = c.detachedSessionStatus(threadID)
+				events[i].Resync = true
+			}
+		}
+	}
+	c.publishProjectedAt(events, received)
 	if threadID := codexTurnStartedThreadID(message); threadID != "" {
 		c.refreshManagedThreadModelAsync(threadID)
 	}
@@ -785,6 +818,12 @@ func (c *codexCoordinator) refreshManagedThreadModelAsync(threadID string) {
 		defer cancel()
 		var resumed struct {
 			Model string `json:"model"`
+		}
+		lock := c.threadOperationLock(threadID)
+		lock.Lock()
+		defer lock.Unlock()
+		if c.threadDetached(threadID) {
+			return
 		}
 		if err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed); err != nil {
 			slog.Default().Debug("Codex model refresh failed", "thread", threadID, "generation", generation, "error", err)
@@ -841,10 +880,21 @@ func (c *codexCoordinator) maybeSubscribeTerminalThread(parent context.Context, 
 	ps := c.sm.sessions[params.ThreadID]
 	alreadyOwned := ps != nil && ps.Source == "daemon" && ps.Backend != nil
 	c.sm.mu.RUnlock()
-	if alreadyOwned || !c.beginSubscription(params.ThreadID) {
+	detached := c.threadDetached(params.ThreadID)
+	if detached {
+		_, status, valid := codexThreadStatusNotification(message)
+		if !valid || status != "active" {
+			return
+		}
+	}
+	if (alreadyOwned && !detached) || !c.beginSubscription(params.ThreadID) {
 		return
 	}
-	c.startTerminalThreadSubscription(parent, client, generation, params.ThreadID, projector)
+	c.subscriptionWG.Add(1)
+	go func() {
+		defer c.subscriptionWG.Done()
+		c.subscribeTerminalThread(parent, client, generation, params.ThreadID, projector)
+	}()
 }
 
 func (c *codexCoordinator) beginSubscription(threadID string) bool {
@@ -874,6 +924,8 @@ func (c *codexCoordinator) finishSubscription(threadID string, success bool, cli
 	if success {
 		c.subscribed[threadID] = struct{}{}
 		c.managedThreads[threadID] = struct{}{}
+		delete(c.detachedThreads, threadID)
+		c.threadStateVersion++
 	}
 	c.subscribeMu.Unlock()
 	if success && c.sm != nil {
@@ -891,6 +943,8 @@ func (c *codexCoordinator) markSubscribed(threadID string) {
 	delete(c.subscribing, threadID)
 	c.subscribed[threadID] = struct{}{}
 	c.managedThreads[threadID] = struct{}{}
+	delete(c.detachedThreads, threadID)
+	c.threadStateVersion++
 	c.subscribeMu.Unlock()
 	if c.sm != nil {
 		if err := c.persist(); err != nil {
@@ -949,6 +1003,11 @@ func (c *codexCoordinator) rejectCodexDesktopManagedThread(threadID string) bool
 	delete(c.managedThreads, threadID)
 	delete(c.subscribed, threadID)
 	delete(c.subscribing, threadID)
+	delete(c.detachedThreads, threadID)
+	delete(c.idleThreads, threadID)
+	if persisted {
+		c.threadStateVersion++
+	}
 	c.subscribeMu.Unlock()
 	if persisted && c.sm != nil {
 		if err := c.persist(); err != nil {
@@ -970,6 +1029,14 @@ func (c *codexCoordinator) managedThreadSnapshot() []string {
 }
 
 func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, client codexRuntimeClient, generation uint64, threadID string, projector *codexProjection) {
+	c.subscribeThread(parent, client, generation, threadID, projector, false)
+}
+
+func (c *codexCoordinator) subscribeThread(parent context.Context, client codexRuntimeClient, generation uint64, threadID string, projector *codexProjection, readOnly bool) {
+	lock := c.threadOperationLock(threadID)
+	lock.Lock()
+	defer lock.Unlock()
+	readOnly = readOnly && c.threadDetached(threadID)
 	current := func() bool {
 		if parent.Err() != nil || !c.admissionGenerationCurrent(generation) {
 			return false
@@ -998,7 +1065,22 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	}
 	statusRevision := projector.ThreadStatusRevision(threadID)
 	_, turnRevision := c.turnSnapshot(threadID)
-	err := client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed)
+	method := "thread/resume"
+	params := map[string]any{"threadId": threadID, "excludeTurns": true}
+	if readOnly {
+		method = "thread/read"
+		params = map[string]any{"threadId": threadID}
+	}
+	err := client.Call(ctx, method, params, &resumed)
+	if err == nil && readOnly {
+		var thread struct {
+			Status codexThreadStatus `json:"status"`
+		}
+		if json.Unmarshal(resumed.Thread, &thread) == nil && thread.Status.Type == "active" {
+			readOnly = false
+			err = client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed)
+		}
+	}
 	if !current() {
 		return
 	}
@@ -1008,6 +1090,9 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	c.projectionMu.Lock()
 	if err == nil && len(resumed.Thread) > 0 {
 		overrideStatus := ""
+		if readOnly {
+			overrideStatus = "idle"
+		}
 		liveTurn, currentTurnRevision := c.turnSnapshot(threadID)
 		if currentTurnRevision != turnRevision {
 			overrideStatus = "idle"
@@ -1016,6 +1101,13 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 			}
 		}
 		events, _ := projector.ProjectResumedThread(resumed.Thread, threadID, statusRevision, overrideStatus)
+		if readOnly {
+			for i := range events {
+				if events[i].Status != "" {
+					events[i].Status = c.detachedSessionStatus(threadID)
+				}
+			}
+		}
 		if hasRestoredActivity && !restoredActivityAt.IsZero() {
 			for i := range events {
 				if events[i].Type == "session_discovered" && events[i].LastActivityAt == "" {
@@ -1109,7 +1201,11 @@ func (c *codexCoordinator) subscribeTerminalThread(parent context.Context, clien
 	if resumed.Model != "" {
 		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: resumed.Model, Resync: true}
 	}
-	c.finishSubscription(threadID, true, client, generation)
+	if readOnly {
+		c.finishSubscription(threadID, false, client, generation)
+	} else {
+		c.finishSubscription(threadID, true, client, generation)
+	}
 }
 
 func (c *codexCoordinator) hydrateTurns(threadID string, turns []json.RawMessage, activeTurn string, projector *codexProjection) string {

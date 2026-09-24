@@ -28,7 +28,7 @@ func startCodexAppServer(ctx context.Context, binary, _ string, _ uint64) (*code
 }
 
 func startCodexAppServerForHome(ctx context.Context, binary, _ string, _ uint64, _, home string) (*codexAppServerRuntime, error) {
-	cmd := exec.Command(binary, "app-server", "--listen", "ws://127.0.0.1:0")
+	cmd := exec.Command(binary, "app-server", "-c", "thread_unload_delay_secs=0", "--listen", "ws://127.0.0.1:0")
 	// Pin the app-server to a stable dir instead of inheriting the daemon's
 	// cwd: a removed start directory leaves Codex rejecting turns with
 	// "invalid cwd: No such file or directory".

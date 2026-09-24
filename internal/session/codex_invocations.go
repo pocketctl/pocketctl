@@ -272,6 +272,14 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 	if b.coord.currentTurn(id) != "" && name != "skills" && name != "status" && name != "pwd" && name != "usage" && name != "copy" && name != "export" {
 		return nil, errors.New("本轮结束后可调用")
 	}
+	if executeTurn || (name == "model" && args != "") {
+		current, release, opErr := b.beginThreadOperation(ctx, id, false)
+		if opErr != nil {
+			return nil, opErr
+		}
+		defer release()
+		client = current.client
+	}
 	if executeTurn {
 		// review/start and compact/start inherit loaded thread settings instead
 		// of accepting turn/start overrides. Apply the authoritative next-turn
@@ -291,6 +299,7 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		if err := client.Call(ctx, "thread/resume", params, nil); err != nil {
 			return nil, err
 		}
+		b.coord.markSubscribed(id)
 	}
 	if item.Kind == "skill" {
 		return map[string]any{"kind": "skill", "entry_id": item.ID}, nil
@@ -368,6 +377,7 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		if err = client.Call(ctx, "thread/resume", params, nil); err != nil {
 			return nil, err
 		}
+		b.coord.markSubscribed(id)
 		sm.mu.Lock()
 		sm.sessions[id].Model = model
 		sm.sessions[id].Effort = effort
@@ -468,7 +478,7 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		if !b.coord.ownsInvocationThread(args) {
 			return nil, errors.New("会话不属于当前项目运行时")
 		}
-		if err = client.Call(ctx, "thread/resume", map[string]any{"threadId": args}, nil); err != nil {
+		if err = b.Resume(ctx, args); err != nil {
 			return nil, err
 		}
 		return map[string]any{"kind": "navigate", "session_id": args}, nil
