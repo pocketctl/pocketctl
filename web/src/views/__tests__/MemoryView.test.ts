@@ -150,7 +150,7 @@ describe('MemoryView', () => {
     )
   })
 
-  test('an active installation uses the latest full-width horizontal workspace', async () => {
+  test('an active installation groups all modules in the workspace navigation', async () => {
     memoryInstallation.value = activeInstallation({
 	  enabled_services: ['memory.search', 'memory.recall', 'memory.manage', 'memory.context', 'memory.mcp'],
     })
@@ -158,10 +158,13 @@ describe('MemoryView', () => {
     await flushPromises()
     expect(view.find('[data-testid="memory-workspace"]').exists()).toBe(true)
     expect(view.get('[data-testid="memory-workspace-toolbar"]').attributes('aria-label')).toBeTruthy()
-    expect(view.get('[data-testid="memory-tabs"]').attributes('aria-orientation')).toBe('horizontal')
-    expect(view.find('[data-testid="memory-workbench-frame"]').exists()).toBe(false)
-    expect(view.find('[data-testid="memory-module-rail"]').exists()).toBe(false)
-    for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
+    expect(view.get('[data-testid="memory-tabs"]').attributes('aria-orientation')).toBe('vertical')
+    expect(view.find('[data-testid="memory-workbench-frame"]').exists()).toBe(true)
+    expect(view.find('[data-testid="memory-module-rail"]').exists()).toBe(true)
+    for (const group of ['knowledge', 'collaboration', 'context', 'service']) {
+      expect(view.find(`[data-testid="memory-module-group-${group}"]`).exists()).toBe(true)
+    }
+    for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'git', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
       expect(view.find(`[data-testid="memory-tab-${tab}"]`).exists()).toBe(true)
     }
     expect(view.get('[data-testid="memory-tab-search"]').attributes('aria-selected')).toBe('true')

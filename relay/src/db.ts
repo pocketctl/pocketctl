@@ -7,6 +7,7 @@ import { initAttentionInboxSchema } from './attention-inbox/schema.js';
 import { initExtensionSchema } from './extensions/schema.js';
 import { initSessionDocumentSchema } from './session-documents/schema.js';
 import { initSessionOrganizationSchema } from './session-organization/schema.js';
+import { initTeamSchema } from './team/schema.js';
 import { extensionModeFromEnv } from './extensions/config.js';
 import type { ExtensionMode } from './extensions/types.js';
 import {
@@ -812,6 +813,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initAttentionInboxSchema(pool);
   await initSessionDocumentSchema(pool);
   await initSessionOrganizationSchema(pool);
+  await initTeamSchema(pool);
   // ADR-0003: extension tables exist in every flag mode so flipping
   // RELAY_EXTENSIONS never needs a schema deployment window.
   await initExtensionSchema(pool);
@@ -1158,6 +1160,7 @@ export interface DaemonRegistrationActivation {
   tokenJti?: string;
   machineId?: string;
   registrationId: string;
+  collaborationCapabilities?: string[];
 }
 
 export interface DaemonRegistrationSnapshot {
@@ -1172,6 +1175,7 @@ export interface DaemonRegistrationSnapshot {
   machine_id: string | null;
   last_login_at: Date | string | null;
   registration_id: string | null;
+  collaboration_capabilities?: unknown;
 }
 
 export type DaemonRegistrationRestoreResult =
@@ -1388,16 +1392,16 @@ export async function activateDaemonRegistration(  pool: pg.Pool,
     }
     const previous = await client.query(
       `SELECT hostname, agents, status, last_heartbeat, arch, version, started_at,
-              active_token_jti, machine_id, last_login_at, registration_id
+              active_token_jti, machine_id, last_login_at, registration_id, collaboration_capabilities
        FROM daemons WHERE daemon_id = $1 FOR UPDATE`,
       [input.daemonId],
     );
     const activated = await client.query(
       `INSERT INTO daemons
          (daemon_id, user_id, hostname, agents, status, last_heartbeat, arch, version, started_at,
-          active_token_jti, machine_id, last_login_at, registration_id)
+          active_token_jti, machine_id, last_login_at, registration_id, collaboration_capabilities)
        VALUES ($1, $2, $3, $4, 'online', NOW(), $5, $6, $7, $8::varchar, $9,
-               CASE WHEN $8::varchar IS NULL THEN NULL ELSE NOW() END, $10)
+               CASE WHEN $8::varchar IS NULL THEN NULL ELSE NOW() END, $10, $11::jsonb)
        ON CONFLICT (daemon_id) DO UPDATE SET
          user_id = COALESCE(daemons.user_id, EXCLUDED.user_id),
          hostname = EXCLUDED.hostname, agents = EXCLUDED.agents, status = 'online', last_heartbeat = NOW(),
@@ -1406,11 +1410,13 @@ export async function activateDaemonRegistration(  pool: pg.Pool,
          active_token_jti = COALESCE(EXCLUDED.active_token_jti, daemons.active_token_jti),
          machine_id = COALESCE(EXCLUDED.machine_id, daemons.machine_id),
          last_login_at = CASE WHEN EXCLUDED.active_token_jti IS NULL THEN daemons.last_login_at ELSE NOW() END,
-         registration_id = EXCLUDED.registration_id
+         registration_id = EXCLUDED.registration_id,
+         collaboration_capabilities = EXCLUDED.collaboration_capabilities
        WHERE EXCLUDED.user_id IS NULL OR daemons.user_id IS NULL OR daemons.user_id = EXCLUDED.user_id
        RETURNING daemon_id`,
       [input.daemonId, input.userId, input.hostname, JSON.stringify(input.agents), input.arch || null,
-       input.version || null, input.startedAt ?? null, input.tokenJti || null, input.machineId || null, input.registrationId],
+       input.version || null, input.startedAt ?? null, input.tokenJti || null, input.machineId || null, input.registrationId,
+       JSON.stringify(input.collaborationCapabilities ?? [])],
     );
     if (!activated.rows[0] && activated.rowCount === 0) throw new Error(`daemon owner changed during activation: ${input.daemonId}`);
     await client.query('COMMIT');
@@ -1621,11 +1627,12 @@ export async function restoreDaemonRegistration(
       : await pool.query(
         `UPDATE daemons SET
            hostname = $3, agents = $4, status = $5, last_heartbeat = $6, arch = $7, version = $8,
-           started_at = $9, active_token_jti = $10, machine_id = $11, last_login_at = $12, registration_id = $13
+           started_at = $9, active_token_jti = $10, machine_id = $11, last_login_at = $12, registration_id = $13,
+           collaboration_capabilities = $14::jsonb
          WHERE daemon_id = $1 AND registration_id = $2`,
         [daemonId, registrationId, snapshot.hostname, jsonbParameter(snapshot.agents), snapshot.status, snapshot.last_heartbeat,
          snapshot.arch, snapshot.version, snapshot.started_at, snapshot.active_token_jti, snapshot.machine_id,
-         snapshot.last_login_at, snapshot.registration_id],
+         snapshot.last_login_at, snapshot.registration_id, jsonbParameter(snapshot.collaboration_capabilities)],
       );
     return (result.rowCount ?? 0) > 0
       ? { status: 'confirmed_restored' }

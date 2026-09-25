@@ -14,6 +14,7 @@
           </div>
         </div>
         <div class="mobile-session-nav-actions">
+          <button type="button" aria-label="团队共享会话" @click="$router.push('/teams?tab=sessions')">T</button>
           <AttentionInboxEntryButton
             v-if="hostId"
             class="mobile-session-inbox"
@@ -57,6 +58,7 @@
     <div v-else class="header-row">
       <h2>Sessions</h2>
       <div class="header-actions">
+        <button class="btn" data-testid="personal-to-team-sessions" @click="$router.push('/teams?tab=sessions')">团队会话</button>
         <button class="btn logout" @click="handleLogout">退出</button>
         <button class="btn primary" @click="showNewSession = true">+ New Session</button>
       </div>

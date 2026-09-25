@@ -15,6 +15,10 @@ const (
 	RiskReasonChangesFiles        = "changes_files"
 	RiskReasonRequestsPermissions = "requests_permissions"
 	RiskReasonRequiresUserInput   = "requires_user_input"
+	TeamCollaborationProtocolV1   = 1
+	CapabilityTeamDispatchV1      = "team_collaboration_dispatch_v1"
+	CapabilityTeamContextV1       = "team_collaboration_context_v1"
+	CapabilityTeamReconcileV1     = "team_collaboration_reconcile_v1"
 )
 
 // Turn lifecycle vocabulary (plan §3.2/§3.4/§4). All values are optional wire
@@ -84,24 +88,26 @@ const (
 
 // Client → Daemon commands
 type ClientMessage struct {
-	ForkFrom     string      `json:"fork_from,omitempty"`
-	InvocationID string      `json:"invocation_id,omitempty"`
-	Path         string      `json:"path,omitempty"`
-	Query        string      `json:"query,omitempty"`
-	Cursor       string      `json:"cursor,omitempty"`
-	Limit        int         `json:"limit,omitempty"`
-	Fallback     bool        `json:"fallback,omitempty"`
-	Type         string      `json:"type"`
-	Status       string      `json:"status,omitempty"`
-	SessionID    string      `json:"session_id,omitempty"`
-	Content      string      `json:"content,omitempty"`
-	Agent        string      `json:"agent,omitempty"`
-	Cwd          string      `json:"cwd,omitempty"`
-	Prompt       string      `json:"prompt,omitempty"`
-	RequestID    string      `json:"request_id,omitempty"`
-	MsgID        string      `json:"msg_id,omitempty"`
-	QuotaGrant   *QuotaGrant `json:"quota_grant,omitempty"`
-	Approved     bool        `json:"approved,omitempty"`
+	ForkFrom      string                      `json:"fork_from,omitempty"`
+	InvocationID  string                      `json:"invocation_id,omitempty"`
+	Path          string                      `json:"path,omitempty"`
+	Query         string                      `json:"query,omitempty"`
+	Cursor        string                      `json:"cursor,omitempty"`
+	Limit         int                         `json:"limit,omitempty"`
+	Fallback      bool                        `json:"fallback,omitempty"`
+	Type          string                      `json:"type"`
+	Status        string                      `json:"status,omitempty"`
+	SessionID     string                      `json:"session_id,omitempty"`
+	Content       string                      `json:"content,omitempty"`
+	Agent         string                      `json:"agent,omitempty"`
+	Cwd           string                      `json:"cwd,omitempty"`
+	Prompt        string                      `json:"prompt,omitempty"`
+	RequestID     string                      `json:"request_id,omitempty"`
+	MsgID         string                      `json:"msg_id,omitempty"`
+	QuotaGrant    *QuotaGrant                 `json:"quota_grant,omitempty"`
+	Collaboration *CollaborationAuthorization `json:"collaboration,omitempty"`
+	TeamContext   *CollaborationContext       `json:"team_context,omitempty"`
+	Approved      bool                        `json:"approved,omitempty"`
 	// Action upgrades OpenCode permission replies to once/always/reject. Empty
 	// keeps the legacy Approved boolean contract for older clients.
 	Action string `json:"action,omitempty"`
@@ -209,9 +215,11 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	Invocation map[string]any   `json:"invocation,omitempty"`
-	Directory  *DirectoryResult `json:"directory,omitempty"`
-	Type       string           `json:"type"`
+	Invocation    map[string]any              `json:"invocation,omitempty"`
+	Directory     *DirectoryResult            `json:"directory,omitempty"`
+	Type          string                      `json:"type"`
+	Collaboration *CollaborationAuthorization `json:"collaboration,omitempty"`
+	TeamContext   *CollaborationContext       `json:"team_context,omitempty"`
 	// Seq is a monotonically increasing per-connection sequence number stamped
 	// by the ws.Client just before the event is sent to the relay. It enables
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
@@ -302,25 +310,25 @@ type DaemonEvent struct {
 	ExitReason             string                   `json:"exit_reason,omitempty"`
 	LastActivityAt         string                   `json:"last_activity_at,omitempty"`
 	SessionStartedAt       string                   `json:"session_started_at,omitempty"` // trusted native start time for terminal discovery
-	TurnStartedAt          string                   `json:"turn_started_at,omitempty"`   // authoritative start of the currently active turn
-	AgentID                string                   `json:"agent_id,omitempty"`          // sub-agent identifier (e.g. "afa8314e6e3f6e552)
-	ParentSessionID        string                   `json:"parent_session_id,omitempty"` // subagent's parent session (P0 subagent relation)
-	IsSubagent             bool                     `json:"is_subagent,omitempty"`       // true for subagent-scoped events
-	RootSessionID          string                   `json:"root_session_id,omitempty"`   // root session for multi-level aggregation
-	SubagentKind           string                   `json:"subagent_kind,omitempty"`     // relation kind override (e.g. "sdk_session" for SDK-spawned claude sessions)
-	Agent                  string                   `json:"agent,omitempty"`             // agent type for upgrade_result (claude-code, codex)
-	SubAgentDesc           string                   `json:"subagent_desc,omitempty"`     // sub-agent task description
-	SubAgentType           string                   `json:"subagent_type,omitempty"`     // sub-agent type (Explore, general-purpose, etc.)
-	UserMessage            string                   `json:"user_message,omitempty"`      // for generate_title_request
-	AssistantMessage       string                   `json:"assistant_message,omitempty"` // for generate_title_request
-	Reason                 string                   `json:"reason,omitempty"`            // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
-	Retryable              *bool                    `json:"retryable,omitempty"`         // whether the failed operation may be retried without starting a new action
-	Commands               []CommandItem            `json:"commands,omitempty"`          // for command_list
-	Command                string                   `json:"command,omitempty"`           // for command_receipt (e.g. "/compact")
-	ReceiptStatus          string                   `json:"receipt_status,omitempty"`    // for command_receipt: success/failed/unavailable
-	Message                string                   `json:"message,omitempty"`           // for command_receipt message
-	Operation              string                   `json:"operation,omitempty"`         // failing interaction operation, for correlated UI rollback
-	Usage                  *ContextUsage            `json:"usage,omitempty"`             // token usage for agent_text events
+	TurnStartedAt          string                   `json:"turn_started_at,omitempty"`    // authoritative start of the currently active turn
+	AgentID                string                   `json:"agent_id,omitempty"`           // sub-agent identifier (e.g. "afa8314e6e3f6e552)
+	ParentSessionID        string                   `json:"parent_session_id,omitempty"`  // subagent's parent session (P0 subagent relation)
+	IsSubagent             bool                     `json:"is_subagent,omitempty"`        // true for subagent-scoped events
+	RootSessionID          string                   `json:"root_session_id,omitempty"`    // root session for multi-level aggregation
+	SubagentKind           string                   `json:"subagent_kind,omitempty"`      // relation kind override (e.g. "sdk_session" for SDK-spawned claude sessions)
+	Agent                  string                   `json:"agent,omitempty"`              // agent type for upgrade_result (claude-code, codex)
+	SubAgentDesc           string                   `json:"subagent_desc,omitempty"`      // sub-agent task description
+	SubAgentType           string                   `json:"subagent_type,omitempty"`      // sub-agent type (Explore, general-purpose, etc.)
+	UserMessage            string                   `json:"user_message,omitempty"`       // for generate_title_request
+	AssistantMessage       string                   `json:"assistant_message,omitempty"`  // for generate_title_request
+	Reason                 string                   `json:"reason,omitempty"`             // failure reason code (no_cli, bad_cwd, start_fail, timeout, daemon_offline)
+	Retryable              *bool                    `json:"retryable,omitempty"`          // whether the failed operation may be retried without starting a new action
+	Commands               []CommandItem            `json:"commands,omitempty"`           // for command_list
+	Command                string                   `json:"command,omitempty"`            // for command_receipt (e.g. "/compact")
+	ReceiptStatus          string                   `json:"receipt_status,omitempty"`     // for command_receipt: success/failed/unavailable
+	Message                string                   `json:"message,omitempty"`            // for command_receipt message
+	Operation              string                   `json:"operation,omitempty"`          // failing interaction operation, for correlated UI rollback
+	Usage                  *ContextUsage            `json:"usage,omitempty"`              // token usage for agent_text events
 	Permission             *PermissionConfig        `json:"permission,omitempty"`
 	PermissionEffective    string                   `json:"permission_effective,omitempty"`
 	PermissionMutable      bool                     `json:"permission_mutable,omitempty"`
@@ -571,6 +579,32 @@ type RegisterMessage struct {
 	ActiveSessionIDs        []string `json:"active_session_ids"`
 	SupportsQuotaGrant      bool     `json:"supports_quota_grant,omitempty"`
 	SupportsDirectoryBrowse bool     `json:"supports_directory_browse,omitempty"`
+	Capabilities            []string `json:"capabilities,omitempty"`
+}
+
+// CollaborationAuthorization is a Relay-authored, daemon-enforced binding for
+// one Team Agent operation. It never grants arbitrary native-session access.
+type CollaborationAuthorization struct {
+	ProtocolVersion int    `json:"protocol_version"`
+	Operation       string `json:"operation"`
+	CallID          string `json:"call_id"`
+	TeamSessionID   string `json:"team_session_id"`
+	BindingID       string `json:"binding_id"`
+	BindingRevision int64  `json:"binding_revision"`
+	OfferID         string `json:"offer_id"`
+	OfferRevision   int64  `json:"offer_revision"`
+	OwnerUserID     int    `json:"owner_user_id"`
+	DaemonID        string `json:"daemon_id"`
+}
+
+type CollaborationContext struct {
+	SchemaVersion          int    `json:"schema_version"`
+	ContextVersion         int64  `json:"context_version"`
+	ContentHash            string `json:"content_hash"`
+	HistoryThroughEventSeq int64  `json:"history_through_event_seq"`
+	PayloadHash            string `json:"payload_hash"`
+	StableText             string `json:"stable_text"`
+	Truncated              bool   `json:"truncated,omitempty"`
 }
 
 type QuotaGrant struct {

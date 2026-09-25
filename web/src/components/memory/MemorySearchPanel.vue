@@ -1,6 +1,7 @@
 <template>
   <section class="memory-search-panel" data-testid="memory-search-panel">
-    <div class="memory-search-workspace" data-testid="memory-search-workspace">
+    <div class="memory-search-workspace" :class="{ 'has-preview': previewOpen }"
+      data-testid="memory-search-workspace">
       <div class="memory-search-column">
         <div class="memory-search-hero">
           <form class="memory-search-box" @submit.prevent="runSearch">
@@ -48,7 +49,7 @@
             <li v-for="hit in hits" :key="hit.versionId">
               <button type="button" class="memory-result-item" :class="{ selected: selectedHit?.claimId === hit.claimId }"
                 :aria-current="selectedHit?.claimId === hit.claimId ? 'true' : undefined"
-                :data-testid="`memory-hit-${hit.claimId}`" @click="selectPreview(hit, true)">
+                :data-testid="`memory-hit-${hit.claimId}`" @click="selectPreview(hit, true, $event)">
                 <span class="memory-result-marker" aria-hidden="true"></span>
                 <span class="memory-result-content">
                   <span class="memory-result-type">{{ humanizeType(hit.claimType) }}</span>
@@ -68,10 +69,11 @@
         </template>
       </div>
 
-      <aside class="memory-search-detail" :class="{ 'mobile-open': previewOpen }" data-testid="memory-search-detail">
+      <aside class="memory-search-detail" :class="{ 'is-open': previewOpen, 'mobile-open': previewOpen }"
+        :aria-hidden="!previewOpen" data-testid="memory-search-detail">
         <div class="memory-search-detail-toolbar">
           <span>{{ t('memory.knowledge_detail') }}</span>
-          <button type="button" class="memory-search-detail-close" :aria-label="t('memory.close_detail')" @click="previewOpen = false">
+          <button type="button" class="memory-search-detail-close" :aria-label="t('memory.close_detail')" @click="closePreview">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           </button>
         </div>
@@ -130,7 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { getMemoryClaim, listVersionEvidence, MemoryClientError, searchMemory } from '../../services/memoryClient'
 import type {
@@ -157,6 +159,7 @@ const suggestions = ['Phase 2 Gate', 'Relay Extension', 'Local deployment']
 const selectedScopeIds = ref<string[]>([])
 let controller: AbortController | undefined
 let previewRequestId = 0
+let previewTrigger: HTMLElement | null = null
 
 const currentPreviewVersion = computed(() => {
   if (!previewDetail.value) return null
@@ -187,10 +190,18 @@ function openSelectedClaim(): void {
   if (selectedHit.value) emit('select-claim', selectedHit.value.claimId, selectedHit.value)
 }
 
-function selectPreview(hit: MemorySearchHit, open: boolean): void {
+function selectPreview(hit: MemorySearchHit, open: boolean, event?: MouseEvent): void {
   selectedHit.value = hit
-  if (open) previewOpen.value = true
+  if (open) {
+    previewTrigger = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null
+    previewOpen.value = true
+  }
   void loadPreview(hit)
+}
+
+function closePreview(): void {
+  previewOpen.value = false
+  void nextTick(() => previewTrigger?.focus())
 }
 
 async function loadPreview(hit: MemorySearchHit): Promise<void> {

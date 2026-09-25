@@ -7,50 +7,47 @@ const memoryWorkbenchCss = readFileSync(
   'utf8',
 )
 
-describe('Memory workspace toolbar layout', () => {
+describe('Memory workspace grouped navigation layout', () => {
   afterEach(() => {
     document.head.querySelector('[data-memory-toolbar-test-style]')?.remove()
     document.body.replaceChildren()
   })
 
-  test('contains an oversized tab row instead of widening the page', () => {
+  test('keeps navigation in a fixed rail and content shrinkable', () => {
     const style = document.createElement('style')
     style.dataset.memoryToolbarTestStyle = 'true'
     style.textContent = memoryWorkbenchCss
     document.head.append(style)
 
-    const toolbar = document.createElement('header')
-    toolbar.className = 'memory-workspace-toolbar'
-    toolbar.innerHTML = '<nav class="memory-tabs"></nav><span class="memory-workspace-health"></span>'
-    document.body.append(toolbar)
+    const shell = document.createElement('section')
+    shell.className = 'memory-workspace-shell'
+    shell.innerHTML = '<nav class="memory-module-navigation"><div class="memory-module-tabs"></div></nav><main class="memory-workspace-main"></main>'
+    document.body.append(shell)
 
-    const toolbarStyle = getComputedStyle(toolbar)
-    const tabsStyle = getComputedStyle(toolbar.querySelector('.memory-tabs')!)
+    const shellStyle = getComputedStyle(shell)
+    const navigationStyle = getComputedStyle(shell.querySelector('.memory-module-navigation')!)
     const tab = document.createElement('button')
-    tab.className = 'memory-tab'
-    toolbar.querySelector('.memory-tabs')!.append(tab)
+    tab.className = 'memory-module-tab'
+    shell.querySelector('.memory-module-tabs')!.append(tab)
     const tabStyle = getComputedStyle(tab)
 
     expect({
-      maxWidth: toolbarStyle.maxWidth,
-      overflow: toolbarStyle.overflow,
+      display: shellStyle.display,
+      columns: shellStyle.gridTemplateColumns,
+      overflow: shellStyle.overflow,
     }).toEqual({
-      maxWidth: '100%',
+      display: 'grid',
+      columns: '196px minmax(0, 1fr)',
       overflow: 'hidden',
     })
     expect({
-      minWidth: tabsStyle.minWidth,
-      flexGrow: tabsStyle.flexGrow,
-      flexShrink: tabsStyle.flexShrink,
-      overflowX: tabsStyle.overflowX,
-      overflowY: tabsStyle.overflowY,
+      minWidth: navigationStyle.minWidth,
+      width: tabStyle.width,
+      display: tabStyle.display,
     }).toEqual({
       minWidth: '0',
-      flexGrow: '1',
-      flexShrink: '1',
-      overflowX: 'auto',
-      overflowY: 'hidden',
+      width: '100%',
+      display: 'grid',
     })
-    expect(tabStyle.flexShrink).toBe('0')
   })
 })

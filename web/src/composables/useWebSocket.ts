@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { getRelayOrigin, getRelayWs } from './useEnv'
 import { isTokenExpired, useAuth } from './useAuth'
 import { applyQuotaPayload } from './useQuota'
+import type { TeamEvent } from '../types/team'
 
 export interface DaemonEvent {
   type: string
@@ -57,6 +58,10 @@ export interface DaemonEvent {
   classifier_version?: string
   retryable?: boolean
   resync?: boolean
+  team_session_id?: string
+  subscribed?: boolean
+  protocol?: string
+  event?: TeamEvent
 }
 
 export type InputMode = 'new_turn' | 'steer' | 'auto'
@@ -69,6 +74,11 @@ export interface UserMessageCommand {
   content: string
   msg_id: string
   input_mode?: InputMode
+}
+
+export interface TeamCollaborationSubscriptionCommand {
+  type: 'team_collaboration_subscribe' | 'team_collaboration_unsubscribe'
+  team_session_id: string
 }
 
 // CommandItem represents a slash command or skill available for autocompletion.
@@ -307,6 +317,14 @@ function sendUserMessage(data: Omit<UserMessageCommand, 'type'>): boolean {
   return send({ type: 'user_message', ...data })
 }
 
+function subscribeTeamSession(teamSessionID: string): boolean {
+  return send({ type: 'team_collaboration_subscribe', team_session_id: teamSessionID } satisfies TeamCollaborationSubscriptionCommand)
+}
+
+function unsubscribeTeamSession(teamSessionID: string): boolean {
+  return send({ type: 'team_collaboration_unsubscribe', team_session_id: teamSessionID } satisfies TeamCollaborationSubscriptionCommand)
+}
+
 function reportLocale() {
   const locale = localStorage.getItem('pocketctl-locale') || 'zh'
   send({ type: 'set_locale', locale })
@@ -335,5 +353,5 @@ function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandl
 }
 
 export function useWebSocket() {
-  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, sendUserMessage, onEvent, reportLocale }
+  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, sendUserMessage, subscribeTeamSession, unsubscribeTeamSession, onEvent, reportLocale }
 }

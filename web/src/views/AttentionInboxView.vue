@@ -1,6 +1,6 @@
 <template>
   <div class="attention-inbox-view" :class="{ 'is-mobile': isMobile }">
-    <div v-if="!store.isAvailable.value" class="attention-disabled" data-testid="attention-disabled">
+    <div v-if="!store.isAvailable.value && !teamInvitations.length" class="attention-disabled" data-testid="attention-disabled">
       <div class="empty-mark">P</div>
       <h1>{{ t('attention.unavailable_title') }}</h1>
       <p>{{ t('attention.unavailable_copy') }}</p>
@@ -12,7 +12,7 @@
           <h1>{{ t('attention.title') }}</h1>
           <p>{{ scopeCopy }}</p>
         </div>
-        <div class="head-count"><span>{{ t('attention.needs_attention') }}</span><strong>{{ store.attentionCount(scope) }}</strong></div>
+        <div class="head-count"><span>{{ t('attention.needs_attention') }}</span><strong>{{ totalAttentionCount }}</strong></div>
       </header>
 
       <div v-if="!isMobile || !selectedEntry" class="filter-deck">
@@ -26,6 +26,7 @@
           <button type="button" :class="{ active: kind === 'approval' }" data-testid="attention-kind-approval" @click="kind = 'approval'">{{ t('attention.kind_approval') }}</button>
           <button type="button" :class="{ active: kind === 'question' }" data-testid="attention-kind-question" @click="kind = 'question'">{{ t('attention.kind_question') }}</button>
           <button type="button" :class="{ active: kind === 'recovery' }" data-testid="attention-kind-recovery" @click="kind = 'recovery'">{{ t('attention.kind_recovery') }}</button>
+          <button v-if="scope.type === 'global'" type="button" :class="{ active: kind === 'invitation' }" data-testid="attention-kind-invitation" @click="kind = 'invitation'">{{ t('team.inbox_invitation') }}</button>
         </div>
       </div>
 
@@ -36,8 +37,11 @@
             <template v-for="entry in visibleEntries" :key="entry.key">
               <AttentionInboxItemRow v-if="entry.type === 'item'" :item="entry.item"
                 :selected="selectedKey === entry.key" @select="selectItem(entry.item)" />
-              <AttentionRecoveryItemRow v-else :item="entry.item"
+              <AttentionRecoveryItemRow v-else-if="entry.type === 'recovery'" :item="entry.item"
                 :selected="selectedKey === entry.key" @select="selectRecovery(entry.item)" />
+              <button v-else type="button" class="invitation-row" :class="{ selected: selectedKey === entry.key }" :data-invitation-id="entry.item.id" @click="selectInvitation(entry.item)">
+                <span class="invite-mark">T</span><span><strong>{{ t('team.invited_to', { team: entry.item.team_name || entry.item.team_id }) }}</strong><small>{{ entry.item.invited_by_label || t('team.inbox_invitation') }}</small></span><span class="invite-arrow">›</span>
+              </button>
             </template>
           </div>
           <div v-else class="queue-empty"><span>✓</span><strong>{{ t('attention.empty') }}</strong><small>{{ t('attention.empty_copy') }}</small></div>
@@ -52,8 +56,16 @@
           @submit="submit" @snooze="snooze" @restore="restore" @open-session="openSession" @close="selectedKey = ''" />
         <AttentionRecoveryDetail v-else-if="selectedRecovery" :item="selectedRecovery" :mobile="isMobile" :busy="busy"
           @snooze="snoozeRecovery" @restore="restoreRecovery" @open-host="openHost" @close="selectedKey = ''" />
+        <section v-else-if="selectedInvitation" class="invitation-detail" data-testid="team-invitation-detail">
+          <button v-if="isMobile" type="button" class="invite-back" @click="selectedKey = ''">← {{ t('attention.queue') }}</button>
+          <span class="invite-detail-mark">T</span>
+          <p>{{ t('team.inbox_invitation') }}</p>
+          <h2>{{ t('team.invited_to', { team: selectedInvitation.team_name || selectedInvitation.team_id }) }}</h2>
+          <p>{{ t('team.invited_by', { inviter: selectedInvitation.invited_by_label || selectedInvitation.invited_by_user_id }) }}</p>
+          <div><button type="button" class="btn btn-secondary" :disabled="busy" data-testid="team-invitation-decline" @click="respondInvitation('decline')">{{ t('team.decline') }}</button><button type="button" class="btn btn-primary" :disabled="busy" data-testid="team-invitation-accept" @click="respondInvitation('accept')">{{ t('team.accept') }}</button></div>
+        </section>
       </div>
-      <p v-if="store.errorMessage.value" class="inbox-error" role="status">{{ store.errorMessage.value }}</p>
+      <p v-if="store.errorMessage.value || invitationError" class="inbox-error" role="status">{{ invitationError || store.errorMessage.value }}</p>
     </template>
   </div>
 </template>
@@ -68,7 +80,9 @@ import AttentionRecoveryItemRow from '../components/attention-inbox/AttentionRec
 import { useAttentionInbox, type AttentionInboxStore, type AttentionLifecycleFilter } from '../composables/useAttentionInbox'
 import { useLocale } from '../composables/useLocale'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+import { listMyInvitations, respondToTeamInvitation } from '../services/teamClient'
 import type { AttentionActionID, AttentionInboxDisplayKind, AttentionInboxItem, AttentionInboxScope, AttentionRecoveryItem } from '../types/attentionInbox'
+import type { TeamInvitation } from '../types/team'
 
 const props = defineProps<{ store?: AttentionInboxStore }>()
 const store = props.store ?? useAttentionInbox()
@@ -77,9 +91,11 @@ const router = useRouter()
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
 const lifecycle = ref<AttentionLifecycleFilter>('active')
-const kind = ref<'all' | AttentionInboxDisplayKind>('all')
+const kind = ref<'all' | AttentionInboxDisplayKind | 'invitation'>('all')
 const selectedKey = ref('')
 const busy = ref(false)
+const teamInvitations = ref<TeamInvitation[]>([])
+const invitationError = ref('')
 const lifecycleOptions: AttentionLifecycleFilter[] = ['active', 'snoozed', 'handled']
 
 const scope = computed<AttentionInboxScope>(() => typeof route.query.daemon_id === 'string' && route.query.daemon_id
@@ -92,15 +108,19 @@ const visibleEntries = computed(() => {
   const entries: Array<
     | { type: 'item'; key: string; item: AttentionInboxItem }
     | { type: 'recovery'; key: string; item: AttentionRecoveryItem }
+    | { type: 'invitation'; key: string; item: TeamInvitation }
   > = []
-  if (kind.value !== 'recovery') {
+  if (kind.value !== 'recovery' && kind.value !== 'invitation' && store.isAvailable.value) {
     entries.push(...store.itemsFor(scope.value, lifecycle.value)
       .filter(item => kind.value === 'all' || item.kind === kind.value)
       .map(item => ({ type: 'item' as const, key: `item:${item.item_id}`, item })))
   }
   if (kind.value === 'all' || kind.value === 'recovery') {
-    entries.push(...store.recoveryItemsFor(scope.value, lifecycle.value)
+    if (store.isAvailable.value) entries.push(...store.recoveryItemsFor(scope.value, lifecycle.value)
       .map(item => ({ type: 'recovery' as const, key: `recovery:${item.recovery_id}`, item })))
+  }
+  if (scope.value.type === 'global' && lifecycle.value === 'active' && (kind.value === 'all' || kind.value === 'invitation')) {
+    entries.push(...teamInvitations.value.map(item => ({ type: 'invitation' as const, key: `invitation:${item.id}`, item })))
   }
   return entries
 })
@@ -108,7 +128,10 @@ const selectedItem = computed(() => selectedKey.value.startsWith('item:')
   ? store.itemById(selectedKey.value.slice(5)) : undefined)
 const selectedRecovery = computed(() => selectedKey.value.startsWith('recovery:')
   ? store.recoveryById(selectedKey.value.slice(9)) : undefined)
-const selectedEntry = computed(() => selectedItem.value ?? selectedRecovery.value)
+const selectedInvitation = computed(() => selectedKey.value.startsWith('invitation:')
+  ? teamInvitations.value.find(invitation => invitation.id === selectedKey.value.slice(11)) : undefined)
+const selectedEntry = computed(() => selectedItem.value ?? selectedRecovery.value ?? selectedInvitation.value)
+const totalAttentionCount = computed(() => store.attentionCount(scope.value) + (scope.value.type === 'global' ? teamInvitations.value.length : 0))
 const queueTitle = computed(() => lifecycle.value === 'active' ? t('attention.needs_action') : lifecycleLabel(lifecycle.value))
 const hasMoreHint = computed(() => store.hasMore(scope.value))
 
@@ -127,6 +150,24 @@ async function selectItem(item: AttentionInboxItem): Promise<void> {
 async function selectRecovery(item: AttentionRecoveryItem): Promise<void> {
   selectedKey.value = `recovery:${item.recovery_id}`
   if (!item.seen_at) await store.markRecoverySeen(item.recovery_id)
+}
+function selectInvitation(invitation: TeamInvitation): void { selectedKey.value = `invitation:${invitation.id}` }
+async function loadTeamInvitations(): Promise<void> {
+  invitationError.value = ''
+  try { teamInvitations.value = await listMyInvitations() }
+  catch (failure) { teamInvitations.value = []; invitationError.value = failure instanceof Error ? failure.message : t('common.error') }
+}
+async function respondInvitation(action: 'accept' | 'decline'): Promise<void> {
+  if (!selectedInvitation.value) return
+  busy.value = true; invitationError.value = ''
+  const invitation = selectedInvitation.value
+  try {
+    await respondToTeamInvitation(invitation, action)
+    teamInvitations.value = teamInvitations.value.filter(current => current.id !== invitation.id)
+    selectedKey.value = ''
+    if (action === 'accept') await router.push({ path: '/teams', query: { team: invitation.team_id, tab: 'members' } })
+  } catch (failure) { invitationError.value = failure instanceof Error ? failure.message : t('common.error') }
+  finally { busy.value = false }
 }
 async function submit(actionID: AttentionActionID, answers?: string[][]): Promise<void> {
   if (!selectedItem.value) return
@@ -178,10 +219,12 @@ watch(visibleEntries, entries => {
 watch(scope, async nextScope => {
   selectedKey.value = ''
   await store.refresh(nextScope)
-  if (!isMobile.value && visibleEntries.value.length) selectedKey.value = visibleEntries.value[0].key
+  if (!selectedKey.value && !isMobile.value && visibleEntries.value.length) selectedKey.value = visibleEntries.value[0].key
 })
 onMounted(async () => {
-  await store.refresh(scope.value)
+  await Promise.all([store.refresh(scope.value), loadTeamInvitations()])
+  const invitationID = typeof route.query.invitation_id === 'string' ? route.query.invitation_id : ''
+  if (invitationID && teamInvitations.value.some(invitation => invitation.id === invitationID)) selectedKey.value = `invitation:${invitationID}`
   if (!isMobile.value && visibleEntries.value.length) selectedKey.value = visibleEntries.value[0].key
 })
 </script>
@@ -211,11 +254,13 @@ onMounted(async () => {
 .detail-placeholder { min-height: 100%; }.attention-disabled { min-height: 70dvh; }.empty-mark { display: grid; width: 54px; height: 54px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 16px; color: var(--accent); background: var(--accent-muted); font-size: 23px; font-weight: 800; }
 .attention-disabled h1 { margin: 10px 0 0; color: var(--fg); }.attention-disabled p { max-width: 420px; margin: 0; }
 .inbox-error { margin: 12px 0 0; color: var(--error); font-size: 12px; }
+.invitation-row { width: 100%; min-height: 76px; display: flex; align-items: center; gap: 11px; padding: 12px; border: 1px solid transparent; border-radius: var(--radius-md); color: var(--fg); background: transparent; text-align: left; cursor: pointer; }.invitation-row:hover, .invitation-row.selected { border-color: var(--accent-muted); background: var(--accent-subtle); }.invite-mark, .invite-detail-mark { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; color: var(--accent); background: var(--accent-muted); font-weight: 800; }.invitation-row > span:nth-child(2) { min-width: 0; display: grid; gap: 6px; flex: 1; }.invitation-row strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; }.invitation-row small { color: var(--fg-tertiary); font-size: 10px; }.invite-arrow { color: var(--fg-tertiary); font-size: 22px; }
+.invitation-detail { min-height: 100%; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; padding: clamp(28px, 6vw, 70px); }.invite-detail-mark { width: 48px; height: 48px; margin-bottom: 20px; font-size: 19px; }.invitation-detail > p { max-width: 520px; color: var(--fg-secondary); font-size: 12px; line-height: 1.7; }.invitation-detail > p:first-of-type { margin: 0 0 8px; color: var(--accent); font: 700 10px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }.invitation-detail h2 { margin: 0; font-size: 24px; line-height: 1.35; }.invitation-detail > div { display: flex; gap: 8px; margin-top: 22px; }.invite-back { margin-bottom: 24px; border: 0; color: var(--fg-secondary); background: transparent; }
 @media (max-width: 820px) {
   .attention-inbox-view { width: 100%; min-height: 100dvh; padding: 18px 14px max(28px, env(safe-area-inset-bottom)); }
   .inbox-head { align-items: flex-start; }.inbox-head h1 { font-size: 31px; }.head-count { flex-direction: column; align-items: flex-end; gap: 3px; }
   .filter-deck { align-items: stretch; flex-direction: column; }.lifecycle-tabs { display: grid; grid-template-columns: repeat(3, 1fr); border-radius: var(--radius-md); }.kind-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-radius: var(--radius-md); }
-  .filter-deck button { border-radius: var(--radius-sm); }
+  .filter-deck button { border-radius: var(--radius-sm); }.kind-tabs { grid-template-columns: repeat(5, 1fr); overflow-x: auto; }
   .inbox-stage { min-height: calc(100dvh - 245px); display: block; border-radius: var(--radius-md); }
   .inbox-stage.detail-only { min-height: calc(100dvh - 36px); }.queue-panel { min-height: inherit; border-right: 0; }
 }

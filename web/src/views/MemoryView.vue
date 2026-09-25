@@ -55,27 +55,11 @@
     </section>
 
     <section v-else class="memory-workspace" data-testid="memory-workspace">
+      <div class="memory-workspace-shell" data-testid="memory-workbench-frame">
+        <MemoryModuleNavigation v-model="active" :review-count="reviewCount" />
+        <div class="memory-workspace-main">
       <header class="memory-workspace-toolbar" :aria-label="t('memory.workspace_label')"
         data-testid="memory-workspace-toolbar">
-        <nav class="memory-tabs" role="tablist" aria-orientation="horizontal" data-testid="memory-tabs">
-          <button v-for="tab in tabs" :key="tab" :id="`memory-tab-${tab}`" type="button"
-            class="memory-tab" :class="{ active: active === tab }" role="tab"
-            :aria-selected="active === tab" :aria-controls="`memory-panel-${tab}`"
-            :data-testid="`memory-tab-${tab}`" @click="active = tab">
-            <span class="memory-tab-icon" aria-hidden="true">
-              <svg v-if="tab === 'search'" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
-              <svg v-else-if="tab === 'review'" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="m8 12 2.5 2.5L16 9"/></svg>
-              <svg v-else-if="tab === 'claims'" viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
-              <svg v-else-if="tab === 'wiki'" viewBox="0 0 24 24"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23z"/></svg>
-              <svg v-else-if="tab === 'codegraph'" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 11 9.2-5M7 13l10 4"/></svg>
-              <svg v-else viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
-            </span>
-            <span class="memory-tab-copy"><strong>{{ t(`memory.tab_${tab}`) }}</strong><small>{{ t(`memory.tab_${tab}_desc`) }}</small></span>
-            <span v-if="tab === 'review' && reviewCount !== null" class="memory-tab-badge">{{ reviewCount > 99 ? '99+' : reviewCount }}</span>
-          </button>
-        </nav>
-
-        <span class="memory-workspace-separator" aria-hidden="true"></span>
         <p class="memory-workspace-description" data-testid="memory-workspace-description">
           {{ t(`memory.module_${active}_copy`) }}
         </p>
@@ -165,28 +149,22 @@
               <p v-else role="status">{{ t('memory.git.shared_scope_required') }}</p>
             </template>
           </template>
+          <section v-if="active === 'context'" data-testid="memory-panel-context">
+            <MemoryContextSettings />
+            <ContextPackList @select="selectedContextPack = $event" />
+            <ContextPackDetail :pack="selectedContextPack" />
+          </section>
+          <MemoryPersonaPanel v-if="active === 'persona'" data-testid="memory-panel-persona" />
+          <MemoryPolicyEditor v-if="active === 'policies'" data-testid="memory-panel-policies" />
+          <MemoryLoadoutEditor v-if="active === 'loadouts'" data-testid="memory-panel-loadouts" />
           <MemorySettingsCard v-if="active === 'settings'" :services="installation.enabled_services"
             :installation-status="installation.status" @changed="reload"/>
         </div>
       </div>
+        </div>
+      </div>
     </section>
   </div>
-
-  <!-- Phase 2 tabs (plan section 13): context, persona, policies, loadouts -->
-  <section id="memory-panel-context" role="tabpanel" aria-labelledby="memory-tab-context" :hidden="active !== 'context'" data-testid="memory-panel-context">
-    <MemoryContextSettings />
-		<ContextPackList @select="selectedContextPack = $event" />
-		<ContextPackDetail :pack="selectedContextPack" />
-  </section>
-  <section id="memory-panel-persona" role="tabpanel" aria-labelledby="memory-tab-persona" :hidden="active !== 'persona'" data-testid="memory-panel-persona">
-    <MemoryPersonaPanel />
-  </section>
-  <section id="memory-panel-policies" role="tabpanel" aria-labelledby="memory-tab-policies" :hidden="active !== 'policies'" data-testid="memory-panel-policies">
-    <MemoryPolicyEditor />
-  </section>
-  <section id="memory-panel-loadouts" role="tabpanel" aria-labelledby="memory-tab-loadouts" :hidden="active !== 'loadouts'" data-testid="memory-panel-loadouts">
-    <MemoryLoadoutEditor />
-  </section>
   <MemoryPromotionDialog :claim="promotionClaim" :evidence="promotionEvidence"
     :targets="promotionTargets" @confirm="confirmPromotion" @cancel="closePromotion" />
   <div v-if="pendingLifecycleState && selectedGovernanceScope" class="memory-modal-backdrop"
@@ -245,6 +223,8 @@ import MemoryWikiPanel from '../components/memory/MemoryWikiPanel.vue'
 import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 import MemorySkillsView from './MemorySkillsView.vue'
 import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
+import MemoryModuleNavigation from '../components/memory/MemoryModuleNavigation.vue'
+import type { MemoryModule } from '../components/memory/memoryModules'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
@@ -254,7 +234,7 @@ const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'skills' | 'git' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
+const active = ref<MemoryModule>('search')
 const phase4RepositoryId = ref('')
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
@@ -276,7 +256,6 @@ const promotionEvidence = ref<MemoryEvidence[]>([])
 const promotionSourceInstallationId = ref<string | null>(null)
 const pendingLifecycleState = ref<'suspended' | 'dissolving' | null>(null)
 
-const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'git', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
 const gitScopes=computed(()=>governanceScopes.value.filter(scope=>scope.owner_scope_kind!=='personal'&&scope.state==='active'&&scope.permissions.includes('read')))
 const gitTarget=computed({get:()=>gitScopes.value.some(scope=>scope.installation_id===governanceTarget.value)?governanceTarget.value:gitScopes.value[0]?.installation_id??'',set:(value:string)=>{governanceTarget.value=value}})
 const requiredServices = ['memory.search', 'memory.recall', 'memory.manage', 'memory.context']

@@ -9,6 +9,9 @@ import SettingsView from './views/SettingsView.vue'
 import TokenUsage from './views/TokenUsage.vue'
 import AttentionInboxView from './views/AttentionInboxView.vue'
 import MemoryView from './views/MemoryView.vue'
+import TeamsView from './views/TeamsView.vue'
+import TeamSessionDetail from './views/TeamSessionDetail.vue'
+import TeamSessionListView from './views/TeamSessionListView.vue'
 import { useAuth } from './composables/useAuth'
 import { isPwaMobileShellEnabled } from './composables/useEnv'
 import { isMobileViewport } from './composables/useResponsiveLayout'
@@ -24,6 +27,9 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/hosts', component: HostsView, meta: { requiresAuth: true } },
   { path: '/inbox', component: AttentionInboxView, meta: { requiresAuth: true } },
   { path: '/memory', component: MemoryView, meta: { requiresAuth: true } },
+  { path: '/teams', component: TeamsView, meta: { requiresAuth: true } },
+  { path: '/team/:teamId/sessions', name: 'team-sessions', component: TeamSessionListView, props: true, meta: { requiresAuth: true, sessionScope: 'team' } },
+  { path: '/team/:teamId/session/:id', name: 'team-session', component: TeamSessionDetail, props: true, meta: { requiresAuth: true, sessionScope: 'team' } },
 ]
 
 export function resolveAuthenticatedLanding(

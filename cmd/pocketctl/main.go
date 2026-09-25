@@ -3903,6 +3903,71 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			case "memory_mcp_grant_result", "memory_mcp_grant_error":
 				memoryMcpBroker.Dispatch(cmd)
 				continue
+			case "collaboration_session_create":
+				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())
+				if grantErr != nil || duplicate || session.ValidateCollaborationAuthorization(cmd.Collaboration, "create") != nil {
+					reason := "collaboration_authorization_invalid"
+					if duplicate {
+						reason = "duplicate_request"
+					} else if grantErr != nil {
+						reason = "quota_grant_invalid"
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", RequestID: cmd.RequestID,
+						MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
+					continue
+				}
+				nativeSessionID, err := sm.CreateCollaborationSession(ctx, cmd.Collaboration, cmd.TeamContext, cmd.Agent, cmd.Content)
+				if err != nil {
+					if cmd.TeamContext != nil {
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", RequestID: cmd.RequestID,
+							MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", RequestID: cmd.RequestID,
+						MsgID: cmd.MsgID, Status: "rejected", Reason: classifyCreateError(err.Error()), Error: err.Error(), Collaboration: cmd.Collaboration})
+					continue
+				}
+				cwd, _ := sm.GetSessionCwd(nativeSessionID)
+				client.SendMsg(protocol.DaemonEvent{Type: "session_created", SessionID: nativeSessionID,
+					RequestID: cmd.RequestID, ReservationID: quotaReservationID(cmd.QuotaGrant), Agent: cmd.Agent,
+					Cwd: cwd, Collaboration: cmd.Collaboration})
+				stateDirty.Store(true)
+				if cmd.TeamContext != nil {
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: nativeSessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+				}
+				client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: nativeSessionID,
+					RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
+				continue
+			case "collaboration_user_message":
+				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "resume", time.Now())
+				if grantErr != nil || duplicate || session.ValidateCollaborationAuthorization(cmd.Collaboration, "message") != nil {
+					reason := "collaboration_authorization_invalid"
+					if duplicate {
+						reason = "duplicate_request"
+					} else if grantErr != nil {
+						reason = "quota_grant_invalid"
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
+					continue
+				}
+				if err := sm.DispatchCollaborationMessage(ctx, cmd.Collaboration, cmd.TeamContext, cmd.SessionID, cmd.Content, cmd.RequestID, cmd.MsgID); err != nil {
+					if cmd.TeamContext != nil {
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
+							RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: cmd.Collaboration})
+					continue
+				}
+				stateDirty.Store(true)
+				if cmd.TeamContext != nil {
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+				}
+				client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
+					RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
+				continue
 			case "session_create":
 				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())
 				if grantErr != nil || duplicate {

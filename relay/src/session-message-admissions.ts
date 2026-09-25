@@ -15,6 +15,21 @@ export type MessageAdmissionDecision =
   | { kind: 'conflict' }
   | { kind: 'forbidden'; reason?: string }
 
+export async function isCollaborationManagedSession(
+  pool: Pick<pg.Pool, 'query'>,
+  userId: number,
+  sessionId: string,
+): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM collaboration_session_agent_bindings binding
+     JOIN collaboration_sessions team_session ON team_session.team_session_id = binding.team_session_id
+     WHERE binding.native_session_id = $1 AND binding.owner_user_id = $2
+       AND binding.state = 'active' AND team_session.state IN ('active', 'paused') LIMIT 1`,
+    [sessionId, userId],
+  )
+  return Boolean(result.rows[0])
+}
+
 // Recursive key ordering preserves array order and all actual wire semantics.
 // Transport identities and a client-supplied grant are bound separately/overwritten.
 export function messageCommandHash(command: Record<string, unknown>): string {

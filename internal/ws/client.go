@@ -410,6 +410,7 @@ func (c *Client) ResendRegister() {
 		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 		SupportsQuotaGrant:      true,
 		SupportsDirectoryBrowse: true,
+		Capabilities:            []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1},
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
@@ -703,6 +704,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 		SupportsQuotaGrant:      true,
 		SupportsDirectoryBrowse: true,
+		Capabilities:            []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1},
 	}
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()

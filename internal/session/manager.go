@@ -109,18 +109,21 @@ var (
 type SessionManager struct {
 	opencodeDocumentCapture func(adapter.OpencodeDocumentCandidate) bool
 
-	mu                   sync.RWMutex
-	sessions             map[string]*ProcessState
-	observerDriveGatesMu sync.Mutex
-	observerDriveGates   map[string]*observerDriveGate
-	outputCh             chan protocol.DaemonEvent
-	childPids            map[int]bool                           // PIDs of daemon-spawned processes
-	OnNotifyTerminal     NotifyFunc                             // callback after --resume on terminal session
-	OnSessionIDResolved  func(realSessionID, cwd, agent string) // callback when daemon session gets real ID
-	OnStateChanged       func()                                 // callback when in-memory session state should be persisted
-	ptyProvider          platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
-	proc                 platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
-	createDeps           createSessionDependencies
+	mu                    sync.RWMutex
+	sessions              map[string]*ProcessState
+	observerDriveGatesMu  sync.Mutex
+	observerDriveGates    map[string]*observerDriveGate
+	outputCh              chan protocol.DaemonEvent
+	childPids             map[int]bool                           // PIDs of daemon-spawned processes
+	OnNotifyTerminal      NotifyFunc                             // callback after --resume on terminal session
+	OnSessionIDResolved   func(realSessionID, cwd, agent string) // callback when daemon session gets real ID
+	OnStateChanged        func()                                 // callback when in-memory session state should be persisted
+	ptyProvider           platform.PTYProvider                   // PR2: daemon-session PTY backend (was direct creack/pty)
+	proc                  platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
+	createDeps            createSessionDependencies
+	collaborationMu       sync.Mutex
+	collaborationBindings map[string]collaborationNativeBinding
+	collaborationCalls    map[string]string
 
 	// memoryContext is the Phase 2 context coordinator; nil until the relay
 	// grant transport is attached, which keeps the enrichment seam inert.

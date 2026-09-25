@@ -12,7 +12,7 @@ import type pg from 'pg';
 import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
 import { MessageRequestLog, logMessageReceipt } from './message-request-log.js';
-import { admitSessionMessage, resolveMessageSessionId, type MessageAdmissionDecision } from './session-message-admissions.js';
+import { admitSessionMessage, isCollaborationManagedSession, resolveMessageSessionId, type MessageAdmissionDecision } from './session-message-admissions.js';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
 import * as db from './db.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
@@ -65,9 +65,10 @@ import {
   handleSessionHistoryReadMessage,
   type SessionHistoryReadBroker,
 } from './session-history-read.js';
+import type { TeamSubscriptionAuthorizer } from './team/subscription.js';
 
-interface DaemonConnection { supportsDirectoryBrowse?: boolean; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
-interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; userId: number | null; locale: string }
+interface DaemonConnection { supportsDirectoryBrowse?: boolean; collaborationCapabilities: string[]; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
+interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; subscribedTeamSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
 
@@ -159,6 +160,11 @@ interface DaemonRevocationGateState {
 }
 
 export interface RouterOptions {
+  teamSubscriptionAuthorizer?: TeamSubscriptionAuthorizer;
+  teamDispatchBroker?: {
+    observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>): void;
+    handleDaemonDisconnected(daemonId: string): Promise<void>;
+  };
   /** Session-bound context grant broker (Phase 2); absent disables the leg. */
   memoryContextGrantBroker?: MemoryContextGrantBroker;
   /** Agent MCP grant broker; absent disables the memory_mcp_grant leg. */
@@ -253,6 +259,8 @@ export class Router {
   private memoryContextGrantBroker?: MemoryContextGrantBroker;
   private memoryCodegraphGrantBroker?: MemoryCodegraphGrantBroker;
   private sessionHistoryReadBroker?: SessionHistoryReadBroker;
+  private teamSubscriptionAuthorizer?: TeamSubscriptionAuthorizer;
+  private teamDispatchBroker?: RouterOptions['teamDispatchBroker'];
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; reply?: any; timer: ReturnType<typeof setTimeout> }>();
@@ -374,6 +382,8 @@ export class Router {
     this.memoryContextGrantBroker = options.memoryContextGrantBroker;
     this.memoryCodegraphGrantBroker = options.memoryCodegraphGrantBroker;
     this.sessionHistoryReadBroker = options.sessionHistoryReadBroker;
+    this.teamSubscriptionAuthorizer = options.teamSubscriptionAuthorizer;
+    this.teamDispatchBroker = options.teamDispatchBroker;
     this.ingestPool = normalized.ingest;
     this.queryPool = normalized.query;
     this.workerPool = normalized.worker;
@@ -1036,6 +1046,9 @@ export class Router {
     const daemonArch = msg.arch || '';
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
+    const collaborationCapabilities = Array.isArray(msg.capabilities)
+      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1'))] as string[]
+      : [];
     const registrationId = randomUUID();
 
     // Count every persisted binding, including offline hosts. Claiming the row
@@ -1099,7 +1112,7 @@ export class Router {
     try {
       activationSnapshot = await db.activateDaemonRegistration(this.controlPool, {
         daemonId, userId, hostname, agents, arch: daemonArch, version: daemonVersion,
-        startedAt: daemonStartedAt, tokenJti, machineId, registrationId,
+        startedAt: daemonStartedAt, tokenJti, machineId, registrationId, collaborationCapabilities,
       });
     } catch (e) {
       console.error('activateDaemonRegistration:', e);
@@ -1254,7 +1267,7 @@ export class Router {
     if (previousDaemon && previousDaemon.ws !== ws) {
       this.cancelDaemonRevocationGate(previousDaemon.registrationId);
     }
-    this.daemons.set(daemonId, { supportsDirectoryBrowse: msg.supports_directory_browse === true, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
+    this.daemons.set(daemonId, { supportsDirectoryBrowse: msg.supports_directory_browse === true, collaborationCapabilities, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
     if (tokenJti) this.authLeases.confirm(registrationId);
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     if (previousDaemon && previousDaemon.ws !== ws) {
@@ -1369,6 +1382,8 @@ export class Router {
       return;
     }
     if (!daemon) return;
+    void this.teamDispatchBroker?.handleDaemonDisconnected(daemonId)
+      .catch((error) => console.error('[team-dispatch] disconnect reconciliation failed', error));
     this.cancelDaemonRevocationGate(daemon.registrationId);
 
     // Clean up any pending takeover timer
@@ -1547,6 +1562,7 @@ export class Router {
     this.clients.set(ws, {
       ws,
       subscribedSessions: existing?.subscribedSessions ?? new Set(),
+      subscribedTeamSessions: existing?.subscribedTeamSessions ?? new Set(),
       userId,
       locale: existing?.locale ?? 'zh',
     });
@@ -2002,6 +2018,8 @@ export class Router {
       }
     }
     msg = sanitizeJSONBPayload(msg);
+    const collaborationOwner = (originDaemon ?? this.daemons.get(daemonId))?.userId;
+    if (collaborationOwner) this.teamDispatchBroker?.observeDaemonEvent(daemonId, collaborationOwner, msg);
     if (msg.type === 'user_message_receipt') {
       logMessageReceipt(this.daemons.get(daemonId)?.userId ?? null, daemonId, msg);
     }
@@ -2358,6 +2376,26 @@ export class Router {
   private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    if (msg.type === 'team_collaboration_subscribe' || msg.type === 'team_collaboration_unsubscribe') {
+      const teamSessionId = typeof msg.team_session_id === 'string' ? msg.team_session_id : '';
+      if (!client.userId || !teamSessionId || !this.teamSubscriptionAuthorizer) {
+        this.send(clientWs, { type: 'team_collaboration_subscription_error', team_session_id: teamSessionId, error: 'forbidden' });
+        return;
+      }
+      if (msg.type === 'team_collaboration_unsubscribe') {
+        client.subscribedTeamSessions.delete(teamSessionId);
+        this.send(clientWs, { type: 'team_collaboration_subscription', team_session_id: teamSessionId, subscribed: false });
+        return;
+      }
+      if (!await this.teamSubscriptionAuthorizer.canSubscribe(client.userId, teamSessionId)) {
+        client.subscribedTeamSessions.delete(teamSessionId);
+        this.send(clientWs, { type: 'team_collaboration_subscription_error', team_session_id: teamSessionId, error: 'not_found' });
+        return;
+      }
+      client.subscribedTeamSessions.add(teamSessionId);
+      this.send(clientWs, { type: 'team_collaboration_subscription', team_session_id: teamSessionId, subscribed: true, protocol: 'team_collaboration_v1' });
+      return;
+    }
     if (msg.type === 'user_message' && client.userId !== null) {
       try {
         const canonical = await resolveMessageSessionId(this.pool,client.userId,msg);
@@ -2858,6 +2896,11 @@ export class Router {
         if (daemon && daemon.ws.readyState === 1) {
           let outbound = msg;
           if (msg.type === 'user_message' && client.userId !== null) {
+            if (await isCollaborationManagedSession(this.pool, client.userId, msg.session_id)) {
+              this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id,
+                request_id: msg.request_id, reason: 'collaboration_session_requires_team_dispatch', retryable: false });
+              return;
+            }
             const requestId = typeof msg.request_id === 'string' && msg.request_id
               ? msg.request_id
               : (typeof msg.msg_id === 'string' && msg.msg_id ? msg.msg_id : randomUUID());
@@ -3544,11 +3587,51 @@ export class Router {
     return { success: true };
   }
 
+  sendTeamCommand(daemonId: string, ownerUserId: number, capability: string, command: Record<string, unknown>): boolean {
+    const daemon = this.daemons.get(daemonId);
+    if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== ownerUserId
+      || !daemon.collaborationCapabilities.includes(capability)) return false;
+    this.send(daemon.ws, command);
+    return true;
+  }
+
   /** Broadcast a message to all clients of the given user. */
   broadcastToUser(userId: number, data: any): void {
     for (const [ws, c] of this.clients) {
       if (ws.readyState === 1 && this.sameUser(c.userId, userId)) {
         this.send(ws, data);
+      }
+    }
+  }
+
+  broadcastTeamEvent(teamSessionId: string, participantUserIds: number[], event: unknown): void {
+    const allowed = new Set(participantUserIds);
+    for (const [ws, client] of this.clients) {
+      if (!client.subscribedTeamSessions.has(teamSessionId)) continue;
+      if (client.userId === null || !allowed.has(client.userId)) {
+        client.subscribedTeamSessions.delete(teamSessionId);
+        this.send(ws, { type: 'team_collaboration_access_revoked', team_session_id: teamSessionId });
+        continue;
+      }
+      this.send(ws, { type: 'team_collaboration_event', protocol: 'team_collaboration_v1', team_session_id: teamSessionId, event });
+    }
+  }
+
+  revokeTeamSubscription(teamSessionId: string, userId: number): void {
+    for (const [ws, client] of this.clients) {
+      if (client.userId !== userId || !client.subscribedTeamSessions.delete(teamSessionId)) continue;
+      this.send(ws, { type: 'team_collaboration_access_revoked', team_session_id: teamSessionId });
+    }
+  }
+
+  async revalidateTeamSubscriptions(): Promise<void> {
+    if (!this.teamSubscriptionAuthorizer) return;
+    for (const [ws, client] of this.clients) {
+      if (client.userId === null) continue;
+      for (const teamSessionId of [...client.subscribedTeamSessions]) {
+        if (await this.teamSubscriptionAuthorizer.canSubscribe(client.userId, teamSessionId)) continue;
+        client.subscribedTeamSessions.delete(teamSessionId);
+        this.send(ws, { type: 'team_collaboration_access_revoked', team_session_id: teamSessionId });
       }
     }
   }

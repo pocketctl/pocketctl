@@ -249,6 +249,9 @@
         :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
         @scroll="onMessagesScroll"
       >
+        <button v-if="returnTeamSessionID && returnTeamID" type="button" class="banner banner-info team-return-banner" @click="returnToTeamSession">
+          ‹ 返回共享会话
+        </button>
         <div v-if="!isComposerVisible" class="messages-bottom-spacer" aria-hidden="true"></div>
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
@@ -780,6 +783,7 @@ import SessionDocumentViewer from '../components/session-documents/SessionDocume
 import { useSessionDocuments } from '../composables/useSessionDocuments'
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
+import { useScopedSessionDraft, type SessionScope } from '../composables/useScopedSessionState'
 import { listProjects, renameProject, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject } from '../services/sessionOrganization'
 import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
@@ -795,6 +799,13 @@ const { t } = useLocale()
 const { user } = useAuth()
 
 const sessionId = computed(() => route.params.id as string)
+const returnTeamSessionID = computed(() => typeof route.query.return_team_session === 'string' ? route.query.return_team_session : '')
+const returnTeamID = computed(() => typeof route.query.team === 'string' ? route.query.team : '')
+function returnToTeamSession(): void {
+  if (!returnTeamSessionID.value || !returnTeamID.value) return
+  void router.push({ name: 'team-session', params: { teamId: returnTeamID.value, id: returnTeamSessionID.value }, query: { from_native: '1' } })
+}
+const sessionScope = computed<SessionScope>(() => ({ type: 'personal' }))
 const sessionDocumentState = useSessionDocuments(sessionId)
 const {
   documents: sessionDocuments,
@@ -980,7 +991,7 @@ function handleInvocationResult(msg: any) {
   if(!['choose','input'].includes(result.kind)&&messageInput.value===invocationDraft) {messageInput.value='';invocationSelection.value=null}
 }
 watch(sessionId,()=>{for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer);nativeCommandMessages.clear();invocationEnabled.value=false;invocationFilter.value='all';invocationSelection.value=null;invocationDialog.value=null;invocationRequest='';invocationError.value='';clearTimeout(invocationTimer)})
-const messageInput = ref('')
+const { draft: messageInput } = useScopedSessionDraft(sessionScope, sessionId)
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
 const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
@@ -4953,5 +4964,6 @@ onMounted(() => {
 </style>
 
 <style scoped>
+.team-return-banner { width: 100%; font: inherit; text-align: left; cursor: pointer; }
 .invocation-hint{pointer-events:auto;font-size:12px;color:var(--fg-secondary);margin:0 12px 6px;overflow-wrap:anywhere}.invocation-hint button{background:none;border:0;color:var(--accent);cursor:pointer}
 </style>

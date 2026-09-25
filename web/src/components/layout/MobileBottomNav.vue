@@ -8,6 +8,19 @@
       <span>{{ t('nav.sessions') }}</span>
       <span v-if="sessionCount > 0" class="mobile-nav-badge">{{ sessionCount }}</span>
     </router-link>
+    <router-link to="/inbox" class="mobile-nav-link" :aria-label="t('attention.title')" data-testid="mobile-nav-inbox">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      <span>{{ t('attention.title') }}</span>
+      <span v-if="attentionCount > 0" class="mobile-nav-badge">{{ attentionCount > 99 ? '99+' : attentionCount }}</span>
+    </router-link>
+    <router-link to="/teams" class="mobile-nav-link" :aria-label="t('team.title')" data-testid="mobile-nav-teams">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
+      </svg>
+      <span>{{ t('team.title') }}</span>
+    </router-link>
     <router-link to="/hosts" class="mobile-nav-link" :aria-label="t('nav.hosts')">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <rect x="3" y="3" width="18" height="7" rx="2" />
@@ -40,7 +53,7 @@
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
 
-defineProps<{ sessionCount: number }>()
+withDefaults(defineProps<{ sessionCount: number; attentionCount?: number }>(), { attentionCount: 0 })
 const { t } = useLocale()
 </script>
 
@@ -52,7 +65,7 @@ const { t } = useLocale()
   min-height: var(--mobile-bottom-nav-h);
   padding: 6px 16px max(6px, env(safe-area-inset-bottom));
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(14px);

@@ -73,6 +73,13 @@ import { registerSnapshotRoutes } from './extensions/snapshot-routes.js';
 import { registerProviderInstallationRoutes } from './extensions/provider-installation-routes.js';
 import { registerCapabilityRoutes } from './extensions/capability-routes.js';
 import { resolveGrantKeyMaterial } from './extensions/capability-grant.js';
+import { registerTeamCapabilityRoutes, resolveTeamCollaborationConfig } from './team/config.js';
+import { createTeamRouteService, registerTeamRoutes } from './team/routes.js';
+import { createTeamTaskRouteService, registerTeamTaskRoutes } from './team/task-routes.js';
+import { TeamSessionService } from './team/session-service.js';
+import { registerTeamSessionRoutes } from './team/session-routes.js';
+import { TeamDispatchService } from './team/dispatch-service.js';
+import { TeamContextService } from './team/context-service.js';
 import {
   createMemoryCodegraphGrantBroker,
   createMemoryContextGrantBroker,
@@ -922,6 +929,7 @@ async function main() {
   // ADR-0003: extension flag fails closed — invalid values or an
   // enabled production deployment without provider key material abort boot.
   const extensionConfig = resolveExtensionConfig(process.env)
+  const teamConfig = resolveTeamCollaborationConfig(process.env)
   // Resolve capability signing material exactly once. In development the
   // fallback key is generated in memory, so resolving separately for the
   // HTTP route and daemon broker would produce grants that the published
@@ -961,7 +969,22 @@ async function main() {
       if (result.quickResolved > 0) attentionRecoveryQuickResolutions.inc(result.quickResolved)
     },
   } : undefined
-  const router = new Router(pools, {
+  let router: Router
+  let teamDispatchService: TeamDispatchService | undefined
+  const teamContextService = new TeamContextService(pool, {
+    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+  })
+  const teamSessionService = new TeamSessionService(pool, {
+    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+    revoked: (sessionId, userId) => router.revokeTeamSubscription(sessionId, userId),
+    dispatch: callIds => teamDispatchService?.enqueue(callIds),
+  })
+  router = new Router(pools, {
+    teamSubscriptionAuthorizer: teamSessionService,
+    teamDispatchBroker: {
+      observeDaemonEvent: (daemonId, ownerUserId, message) => teamDispatchService?.observeDaemonEvent(daemonId, ownerUserId, message),
+      handleDaemonDisconnected: daemonId => teamDispatchService?.handleDaemonDisconnected(daemonId) ?? Promise.resolve(),
+    },
     transport: {
       maxEventBytes: runtimeConfig.maxEventBytes,
       maxChunkBytes: runtimeConfig.maxChunkBytes,
@@ -1020,6 +1043,11 @@ async function main() {
       }),
     } : {}),
   });
+  teamDispatchService = new TeamDispatchService(pool, {
+    send: input => router.sendTeamCommand(input.daemonId, input.ownerUserId, input.capability, input.command),
+  }, {
+    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+  })
   const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
     repository: new RealtimeOutboxRepository(pools.query),
     deliver: (delivery) => router.deliverDurableMaterializedEvent(delivery),
@@ -1151,6 +1179,31 @@ async function main() {
     options: { maxPayload: runtimeConfig.maxEventBytes },
   });
   registerSessionShareRoutes(app, { pool, publicIssuer });
+  registerTeamCapabilityRoutes(app, {
+    config: teamConfig,
+    memoryExtensionAvailable: extensionConfig.mode === 'enabled',
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+  });
+  registerTeamRoutes(app, {
+    config: teamConfig,
+    service: createTeamRouteService(pool),
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+    revalidateTeamSubscriptions: () => router.revalidateTeamSubscriptions(),
+  });
+  registerTeamTaskRoutes(app, {
+    config: teamConfig,
+    service: createTeamTaskRouteService(pool),
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
+  registerTeamSessionRoutes(app, {
+    config: teamConfig,
+    service: teamSessionService,
+    contextService: teamContextService,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
   registerSessionOrganizationRoutes(app, {
     pool,
     broadcast: (userId, payload) => router.broadcastToUser(userId, payload),

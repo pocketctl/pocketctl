@@ -5,6 +5,7 @@
       'sidebar-collapsed': sidebarCollapsed,
       'mobile-shell-active': showMobileShell,
       'mobile-session-route': showMobileShell && isSessionRoute,
+      'mobile-team-session-route': showMobileShell && isTeamSessionRoute,
       'mobile-session-list-route': showMobileShell && isSessionListRoute,
     }"
   >
@@ -29,10 +30,15 @@
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
         </router-link>
 
-        <router-link v-if="attentionInbox.isAvailable.value" to="/inbox" class="sidebar-link" active-class="active">
+        <router-link to="/teams" class="sidebar-link" active-class="active">
+          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+          <span class="link-text">{{ t('team.title') }}</span>
+        </router-link>
+
+        <router-link to="/inbox" class="sidebar-link" active-class="active">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span>
           <span class="link-text">{{ t('attention.title') }}</span>
-          <span class="badge" v-if="attentionInbox.actionableCount({ type: 'global' }) > 0">{{ attentionInbox.actionableCount({ type: 'global' }) > 99 ? '99+' : attentionInbox.actionableCount({ type: 'global' }) }}</span>
+          <span class="badge" v-if="attentionTotalCount > 0">{{ attentionTotalCount > 99 ? '99+' : attentionTotalCount }}</span>
         </router-link>
 
         <router-link to="/memory" class="sidebar-link" active-class="active">
@@ -79,10 +85,11 @@
       :connected="connected"
       :reconnecting="reconnecting"
       :is-session="isSessionRoute"
-      :show-top-bar="!isSessionListRoute"
+      :show-top-bar="!isSessionListRoute && !isTeamSessionRoute"
       :show-bottom-nav="!isSessionRoute && !isSessionListRoute"
       :show-new-session="route.path === '/sessions'"
       :session-count="sessionCount"
+      :attention-count="attentionTotalCount"
       :plan="mobileCurrentPlan"
       :session-host="sessionHeader.host"
       :session-host-id="sessionHeader.hostId"
@@ -143,13 +150,15 @@ const { t, locale, setLocale } = useLocale()
 const { connected, reconnecting } = useWebSocket()
 const { isMobile } = useResponsiveLayout()
 const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
-const isSessionRoute = computed(() => route.path.startsWith('/session/'))
+const isTeamSessionRoute = computed(() => route.name === 'team-session')
+const isSessionRoute = computed(() => route.path.startsWith('/session/') || isTeamSessionRoute.value)
 const isSessionListRoute = computed(() => route.path === '/sessions')
 const { planForSession } = useAgentPlanProgress()
 const { sessionHeader } = useSessionHeader()
 const attentionInbox = useAttentionInbox()
+const attentionTotalCount = computed(() => attentionInbox.actionableCount({ type: 'global' }))
 const mobileCurrentPlan = planForSession(computed(() =>
-  isSessionRoute.value && !route.query.subagent ? String(route.params.id || '') : '',
+  route.path.startsWith('/session/') && !route.query.subagent ? String(route.params.id || '') : '',
 ))
 function toggleLocale() { setLocale(locale.value === 'zh' ? 'en' : 'zh') }
 
@@ -188,6 +197,7 @@ const pageTitle = computed(() => {
     '/tokens': t('nav.tokens'),
     '/inbox': t('attention.title'),
     '/memory': t('memory.title'),
+    '/teams': t('team.title'),
   }
   if (route.path.startsWith('/session/')) return t('nav.session_detail')
   return titles[route.path] || t('nav.overview')
@@ -316,6 +326,9 @@ if (typeof window !== 'undefined') {
 }
 .mobile-shell-active.mobile-session-route .main-content {
   padding-bottom: 0;
+}
+.mobile-shell-active.mobile-team-session-route .main-content {
+  padding-top: 0;
 }
 .mobile-shell-active.mobile-session-list-route .main-content {
   padding-top: 0;

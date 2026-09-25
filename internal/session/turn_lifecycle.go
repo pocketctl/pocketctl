@@ -68,7 +68,8 @@ type UserMessageInput struct {
 	// HiddenContext is the Phase 2 native hidden-context payload for this
 	// new turn. Content stays the exact user input for echo, receipts,
 	// titles, Relay events and turn identity.
-	HiddenContext *memorycontext.PreparedContext
+	HiddenContext          *memorycontext.PreparedContext
+	SuppressContextReceipt bool
 	// SkipMemoryContext is internal fail-open state for an initial prompt whose
 	// Relay session-registration ACK timed out. The prompt still dispatches.
 	SkipMemoryContext bool
@@ -361,10 +362,14 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 			in.HiddenContext = sm.prepareMemoryContext(ctx, in, requestID, agent)
 		}
 		if err := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); err != nil {
-			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+			if !in.SuppressContextReceipt {
+				sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+			}
 			return err
 		}
-		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
+		if !in.SuppressContextReceipt {
+			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
+		}
 		return nil
 	}
 
@@ -404,7 +409,9 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
-		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+		if !in.SuppressContextReceipt {
+			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+		}
 		sm.outputCh <- protocol.DaemonEvent{
 			Type:           "error",
 			SessionID:      rec.Actor.SessionID,
@@ -418,7 +425,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		sm.terminalizeTurn(key, rec, protocol.TurnStateFailed, protocol.TurnReasonInputDispatchFailed, protocol.TurnConfidenceDerived)
 		return dispatchErr
 	}
-	if !sm.defersMemoryContextReceipt(in.SessionID) {
+	if !in.SuppressContextReceipt && !sm.defersMemoryContextReceipt(in.SessionID) {
 		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
 	}
 	return nil
