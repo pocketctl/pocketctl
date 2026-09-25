@@ -35,26 +35,66 @@ export class TeamDispatchService {
   private readonly repository: TeamDispatchRepository
   private readonly contextDelivery: TeamContextDeliveryService
   private readonly timeoutMs: number
+  private readonly pollIntervalMs: number
   private readonly daemonEventChains = new Map<string, Promise<void>>()
   private readonly receiptTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly activeDispatches = new Map<string, Promise<void>>()
+  private pollTimer?: ReturnType<typeof setTimeout>
+  private stopped = true
 
   constructor(
     private readonly pool: pg.Pool,
     private readonly transport: TeamDispatchTransport,
     private readonly notifier: DispatchNotifier = {},
-    options: { timeoutMs?: number } = {},
+    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
   ) {
     this.repository = new TeamDispatchRepository(pool)
     this.contextDelivery = new TeamContextDeliveryService(pool)
     this.timeoutMs = options.timeoutMs ?? 30_000
+    this.pollIntervalMs = Math.max(25, options.pollIntervalMs ?? 250)
   }
 
   enqueue(callIds: string[]): void {
-    for (const callId of callIds) void this.dispatch(callId).catch(async error => {
+    for (const callId of callIds) {
+      if (this.activeDispatches.has(callId)) continue
+      const dispatch = this.dispatch(callId).catch(async error => {
       console.error('[team-dispatch] dispatch failed', { callId, error })
       await this.contextDelivery.stop(callId, 'uncertain', 'dispatch_internal_error').catch(() => {})
       await this.repository.stop(callId, 'uncertain', 'dispatch_internal_error').catch(() => {})
-    })
+      }).finally(() => {
+        if (this.activeDispatches.get(callId) === dispatch) this.activeDispatches.delete(callId)
+      })
+      this.activeDispatches.set(callId, dispatch)
+    }
+  }
+
+  private schedulePoll(delayMs: number): void {
+    if (this.stopped || this.pollTimer) return
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = undefined
+      void this.pollPending().catch(error => console.error('[team-dispatch] pending poll failed', { error }))
+        .finally(() => this.schedulePoll(this.pollIntervalMs))
+    }, delayMs)
+    this.pollTimer.unref?.()
+  }
+
+  private async pollPending(): Promise<void> {
+    this.enqueue(await this.repository.listPendingCallIds())
+  }
+
+  start(): void {
+    if (!this.stopped) return
+    this.stopped = false
+    this.schedulePoll(0)
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer)
+      this.pollTimer = undefined
+    }
+    await Promise.allSettled(this.activeDispatches.values())
   }
 
   async dispatch(callId: string): Promise<void> {

@@ -194,7 +194,14 @@ export interface TeamRun {
   stop_requested: boolean
   budget: TeamRunBudget
   calls_used: number
+  next_step: number
+  processed_call_step: number
   revision: number
+  waiting_question: string | null
+  terminal_reason: string | null
+  started_at: string | null
+  deadline_at: string
+  finished_at: string | null
   created_at: string
   updated_at: string
 }
@@ -203,6 +210,8 @@ export interface TeamCall {
   id: TeamCallID
   team_session_id: TeamSessionID
   run_id: TeamRunID | null
+  run_step: number | null
+  run_role: 'coordinator' | 'worker' | null
   offer_id: TeamAgentOfferID
   native_session_id: string | null
   provider_request_id: string | null

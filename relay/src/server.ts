@@ -80,6 +80,8 @@ import { TeamSessionService } from './team/session-service.js';
 import { registerTeamSessionRoutes } from './team/session-routes.js';
 import { TeamDispatchService } from './team/dispatch-service.js';
 import { TeamContextService } from './team/context-service.js';
+import { TeamRunService } from './team/run-service.js';
+import { registerTeamRunRoutes } from './team/run-routes.js';
 import {
   createMemoryCodegraphGrantBroker,
   createMemoryContextGrantBroker,
@@ -979,6 +981,9 @@ async function main() {
     revoked: (sessionId, userId) => router.revokeTeamSubscription(sessionId, userId),
     dispatch: callIds => teamDispatchService?.enqueue(callIds),
   })
+  const teamRunService = new TeamRunService(pool, {
+    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+  })
   router = new Router(pools, {
     teamSubscriptionAuthorizer: teamSessionService,
     teamDispatchBroker: {
@@ -1141,6 +1146,7 @@ async function main() {
       if (!shuttingDown) {
         await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
         await attentionRuntime.start();
+        if (teamConfig.collaboration === 'on') teamDispatchService?.start()
       }
       if (!shuttingDown) databaseReady = true
     })
@@ -1201,6 +1207,12 @@ async function main() {
     config: teamConfig,
     service: teamSessionService,
     contextService: teamContextService,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
+  registerTeamRunRoutes(app, {
+    config: teamConfig,
+    service: teamRunService,
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
   });
@@ -2506,6 +2518,11 @@ async function main() {
       await attentionRuntime.stop()
     } catch (e) {
       console.error('[shutdown] attention inbox drain error:', e instanceof Error ? e.name : typeof e)
+    }
+    try {
+      await teamDispatchService?.stop()
+    } catch (e) {
+      console.error('[shutdown] team dispatch drain error:', e instanceof Error ? e.name : typeof e)
     }
     router.broadcastRelayRestarting();
     router.terminateAllConnections()

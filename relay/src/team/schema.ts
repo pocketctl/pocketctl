@@ -207,10 +207,45 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_collaboration_events_replay
       ON collaboration_events(team_session_id, event_seq);
 
+    CREATE TABLE IF NOT EXISTS collaboration_runs (
+      run_id TEXT PRIMARY KEY,
+      team_session_id TEXT NOT NULL REFERENCES collaboration_sessions(team_session_id) ON DELETE CASCADE,
+      initiator_user_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      coordinator_offer_id TEXT NOT NULL REFERENCES team_agent_offers(offer_id) ON DELETE RESTRICT,
+      context_version BIGINT NOT NULL,
+      state VARCHAR(24) NOT NULL DEFAULT 'ready'
+        CHECK (state IN ('ready', 'running', 'waiting_input', 'blocked', 'paused', 'completed', 'failed', 'cancelled')),
+      stop_requested BOOLEAN NOT NULL DEFAULT false,
+      budget JSONB NOT NULL,
+      calls_used INT NOT NULL DEFAULT 0,
+      next_step INT NOT NULL DEFAULT 1,
+      processed_call_step INT NOT NULL DEFAULT 0,
+      revision BIGINT NOT NULL DEFAULT 1,
+      waiting_question TEXT,
+      terminal_reason TEXT,
+      started_at TIMESTAMPTZ,
+      deadline_at TIMESTAMPTZ NOT NULL,
+      finished_at TIMESTAMPTZ,
+      lease_owner TEXT,
+      lease_token BIGINT NOT NULL DEFAULT 0,
+      lease_expires_at TIMESTAMPTZ,
+      next_wake_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_collaboration_active_run_session
+      ON collaboration_runs(team_session_id)
+      WHERE state IN ('ready', 'running', 'waiting_input', 'blocked', 'paused');
+    CREATE INDEX IF NOT EXISTS idx_collaboration_runs_worker
+      ON collaboration_runs(next_wake_at, created_at)
+      WHERE state IN ('ready', 'running') OR stop_requested;
+
     CREATE TABLE IF NOT EXISTS collaboration_calls (
       call_id TEXT PRIMARY KEY,
       team_session_id TEXT NOT NULL REFERENCES collaboration_sessions(team_session_id) ON DELETE CASCADE,
-      run_id TEXT,
+      run_id TEXT REFERENCES collaboration_runs(run_id) ON DELETE CASCADE,
+      run_step INT,
+      run_role VARCHAR(16) CHECK (run_role IS NULL OR run_role IN ('coordinator', 'worker')),
       event_id TEXT NOT NULL REFERENCES collaboration_events(event_id) ON DELETE CASCADE,
       offer_id TEXT NOT NULL REFERENCES team_agent_offers(offer_id) ON DELETE RESTRICT,
       binding_id TEXT REFERENCES collaboration_session_agent_bindings(binding_id) ON DELETE RESTRICT,
@@ -235,6 +270,8 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_collaboration_calls_pending
       ON collaboration_calls(state, created_at) WHERE state = 'pending';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_collaboration_run_step
+      ON collaboration_calls(run_id, run_step) WHERE run_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS uq_collaboration_active_binding_call
       ON collaboration_calls(binding_id)
       WHERE binding_id IS NOT NULL AND state IN ('dispatched', 'accepted', 'uncertain');
@@ -272,6 +309,8 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
   `)
   await db.query(`
     ALTER TABLE collaboration_calls ADD COLUMN IF NOT EXISTS binding_id TEXT REFERENCES collaboration_session_agent_bindings(binding_id) ON DELETE RESTRICT;
+    ALTER TABLE collaboration_calls ADD COLUMN IF NOT EXISTS run_step INT;
+    ALTER TABLE collaboration_calls ADD COLUMN IF NOT EXISTS run_role VARCHAR(16);
     ALTER TABLE collaboration_calls ADD COLUMN IF NOT EXISTS operation VARCHAR(16);
     ALTER TABLE collaboration_calls ADD COLUMN IF NOT EXISTS binding_revision BIGINT;
     ALTER TABLE collaboration_calls ADD COLUMN IF NOT EXISTS offer_revision BIGINT;
@@ -284,7 +323,20 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS uq_collaboration_active_binding_call
       ON collaboration_calls(binding_id)
       WHERE binding_id IS NOT NULL AND state IN ('dispatched', 'accepted', 'uncertain');
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_collaboration_run_step
+      ON collaboration_calls(run_id, run_step) WHERE run_id IS NOT NULL;
     ALTER TABLE collaboration_team_idempotency
-      ALTER COLUMN operation TYPE VARCHAR(256)
+      ALTER COLUMN operation TYPE VARCHAR(256);
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'collaboration_calls_run_id_fkey') THEN
+        ALTER TABLE collaboration_calls ADD CONSTRAINT collaboration_calls_run_id_fkey
+          FOREIGN KEY (run_id) REFERENCES collaboration_runs(run_id) ON DELETE CASCADE;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'collaboration_calls_run_role_check') THEN
+        ALTER TABLE collaboration_calls ADD CONSTRAINT collaboration_calls_run_role_check
+          CHECK (run_role IS NULL OR run_role IN ('coordinator', 'worker'));
+      END IF;
+    END $$
   `)
 }

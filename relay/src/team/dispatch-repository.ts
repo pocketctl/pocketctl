@@ -62,6 +62,15 @@ function hasCapability(value: unknown, capability: string): boolean {
 export class TeamDispatchRepository {
   constructor(private readonly pool: pg.Pool) {}
 
+  async listPendingCallIds(limit = 50): Promise<string[]> {
+    const result = await this.pool.query<{ call_id: string }>(
+      `SELECT call_id FROM collaboration_calls WHERE state = 'pending'
+       ORDER BY created_at, call_id LIMIT $1`,
+      [Math.max(1, Math.min(500, Math.trunc(limit)))],
+    )
+    return result.rows.map(row => row.call_id)
+  }
+
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
     try {
