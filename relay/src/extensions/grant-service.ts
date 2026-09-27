@@ -467,6 +467,7 @@ export interface MemoryContextGrantRequestMessage {
   type: 'memory_context_grant'
   request_id?: string
   session_id: string
+  scope_installation_ids?: string[]
 }
 
 export interface MemoryContextGrantResult {
@@ -474,7 +475,7 @@ export interface MemoryContextGrantResult {
   request_id?: string
   grant: string
   expires_in: number
-  token_type: 'extension_capability'
+  token_type: 'extension_capability' | 'extension_capability_v2'
   installation_id: string
   session_id: string
   provider_public_origin: string
@@ -552,12 +553,56 @@ export function createMemoryContextGrantBroker(deps: MemoryMcpGrantBrokerDeps & 
 
     async requestGrant(daemon: {
       userId: number | null
-    }, sessionId: string): Promise<MemoryContextGrantResult | MemoryContextGrantError> {
+    }, sessionId: string, scopeInstallationIds?: string[]): Promise<MemoryContextGrantResult | MemoryContextGrantError> {
       if (daemon.userId === null || !Number.isInteger(daemon.userId) || daemon.userId <= 0) {
         return { type: 'memory_context_grant_error', code: 'unauthenticated' }
       }
       if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 64) {
         return { type: 'memory_context_grant_error', code: 'invalid_request' }
+      }
+      if (scopeInstallationIds !== undefined) {
+        if (!Array.isArray(scopeInstallationIds) || scopeInstallationIds.length !== 1
+          || typeof scopeInstallationIds[0] !== 'string') {
+          return { type: 'memory_context_grant_error', code: 'invalid_request' }
+        }
+        const owned = await deps.pool.query(
+          `SELECT 1 FROM sessions WHERE session_id = $1 AND user_id = $2`,
+          [sessionId, daemon.userId],
+        )
+        if (!owned.rows[0]) return { type: 'memory_context_grant_error', code: 'session_not_owned' }
+        const minted = await createV2GrantService({
+          pool: deps.pool,
+          issuer: deps.issuer,
+          v2Mode: deps.v2Mode ?? 'off',
+          grantKeys: deps.grantKeys,
+          ttlSeconds: 60,
+          providerPublicOrigins: deps.providerPublicOrigins,
+        }).mint({
+          userId: daemon.userId,
+          installationIds: scopeInstallationIds,
+          callerType: 'daemon',
+          services: ['memory.context'],
+        })
+        if (!minted.ok) {
+          const code = minted.code === 'feature_disabled' ? 'feature_disabled'
+            : minted.code === 'not_found' ? 'no_installation'
+              : minted.code === 'installation_paused' ? 'installation_not_active'
+                : minted.code === 'forbidden' ? 'service_disabled' : 'internal_error'
+          return { type: 'memory_context_grant_error', code }
+        }
+        if (!minted.bindings[0]?.permissions.includes('read')) {
+          return { type: 'memory_context_grant_error', code: 'no_installation' }
+        }
+        return {
+          type: 'memory_context_grant_result',
+          grant: minted.token,
+          expires_in: minted.expiresInSeconds,
+          token_type: 'extension_capability_v2',
+          installation_id: scopeInstallationIds[0],
+          session_id: sessionId,
+          provider_public_origin: minted.providerPublicOrigin ?? '',
+          services: ['memory.context'],
+        }
       }
       const resolved = await this.resolveForSession({ userId: daemon.userId, sessionId })
       if ('error' in resolved) {
@@ -601,8 +646,11 @@ export async function handleMemoryContextGrantMessage(
     ? message.request_id.slice(0, 128)
     : undefined
   const sessionId = typeof message?.session_id === 'string' ? message.session_id : ''
+  const scopeInstallationIds = Array.isArray(message?.scope_installation_ids)
+    ? message.scope_installation_ids.filter((value): value is string => typeof value === 'string')
+    : undefined
   try {
-    const result = await broker.requestGrant(daemon, sessionId)
+    const result = await broker.requestGrant(daemon, sessionId, scopeInstallationIds)
     send(JSON.stringify(
       'grant' in result ? { ...result, ...(requestId ? { request_id: requestId } : {}) }
         : { ...result, ...(requestId ? { request_id: requestId } : {}) },

@@ -161,8 +161,10 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
       const references: TeamContextReference[] | null = rawReferences?.every(reference => {
         if (!reference || typeof reference !== 'object' || Array.isArray(reference)) return false
         const value = reference as Record<string, unknown>
-        return value.source_kind === 'team_event' && typeof value.source_id === 'string' && typeof value.source_version === 'string'
-          && value.owner_scope_id === null && value.installation_id === null
+        if (typeof value.source_id !== 'string' || typeof value.source_version !== 'string') return false
+        if (value.source_kind === 'team_event') return value.owner_scope_id === null && value.installation_id === null
+        return ['memory_claim', 'memory_evidence', 'wiki_section'].includes(String(value.source_kind))
+          && typeof value.owner_scope_id === 'string' && typeof value.installation_id === 'string'
       }) ? rawReferences as TeamContextReference[] : null
       if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || !goal || goal.length > 16_000
         || !consensus || consensus.length > 50 || consensus.some(item => item.length > 4_000)

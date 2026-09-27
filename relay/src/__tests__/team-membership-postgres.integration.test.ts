@@ -146,6 +146,16 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
     const members = await app.inject({ method: 'GET', url: `/api/team/teams/${teamId}/members`, headers: headers(memberId) })
     expect(members.json().members.map((entry: { user_id: number }) => entry.user_id)).toEqual([creatorId, memberId])
 
+    const task = await app.inject({
+      method: 'POST', url: `/api/team/teams/${teamId}/tasks`, headers: headers(memberId),
+      payload: { request_id: 'member-task-before-removal', title: 'Release holder on removal', background: '' },
+    })
+    const taskId = task.json().task.id
+    await app.inject({
+      method: 'POST', url: `/api/team/tasks/${taskId}/holders/self`, headers: headers(memberId),
+      payload: { request_id: 'member-claims-before-removal', expected_revision: 1 },
+    })
+
     const daemonCount = await pool.query(`SELECT COUNT(*)::int AS count FROM daemons WHERE user_id = $1`, [memberId])
     expect(daemonCount.rows[0].count).toBe(0)
 
@@ -162,6 +172,8 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
     })
     expect(removed.statusCode, removed.body).toBe(200)
     expect(removed.json().membership.state).toBe('removed')
+    expect((await pool.query(`SELECT state FROM team_task_holders WHERE task_id = $1 AND user_id = $2`, [taskId, memberId])).rows[0].state).toBe('released')
+    expect((await pool.query(`SELECT revision FROM team_tasks WHERE task_id = $1`, [taskId])).rows[0].revision).toBe('3')
     const hiddenAfterRemoval = await app.inject({ method: 'GET', url: `/api/team/teams/${teamId}`, headers: headers(memberId) })
     expect(hiddenAfterRemoval.statusCode).toBe(404)
   })
@@ -257,6 +269,15 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
       method: 'POST', url: `/api/team/invitations/${invitation.json().invitation.id}/accept`, headers: headers(memberId),
       payload: { request_id: 'accept-exit', expected_revision: 1 },
     })
+    const task = await app.inject({
+      method: 'POST', url: `/api/team/teams/${teamId}/tasks`, headers: headers(memberId),
+      payload: { request_id: 'member-task-before-leave', title: 'Release holder on leave', background: '' },
+    })
+    const taskId = task.json().task.id
+    await app.inject({
+      method: 'POST', url: `/api/team/tasks/${taskId}/holders/self`, headers: headers(memberId),
+      payload: { request_id: 'member-claims-before-leave', expected_revision: 1 },
+    })
     const offered = await app.inject({
       method: 'POST', url: `/api/team/teams/${teamId}/agent-offers`, headers: headers(memberId),
       payload: { request_id: 'member-offer', expected_revision: 3, daemon_id: 'member-daemon', provider: 'codex' },
@@ -268,6 +289,8 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
       payload: { request_id: 'member-leave', expected_revision: 1 },
     })
     expect(left.json().membership.state).toBe('left')
+    expect((await pool.query(`SELECT state FROM team_task_holders WHERE task_id = $1 AND user_id = $2`, [taskId, memberId])).rows[0].state).toBe('released')
+    expect((await pool.query(`SELECT revision FROM team_tasks WHERE task_id = $1`, [taskId])).rows[0].revision).toBe('3')
     expect((await pool.query(`SELECT state FROM team_agent_offers WHERE offer_id = $1`, [offered.json().offer.id])).rows[0].state).toBe('revoked')
     expect((await pool.query(`SELECT COUNT(*)::int AS count FROM collaboration_team_daemon_bindings WHERE daemon_id = 'member-daemon'`)).rows[0].count).toBe(0)
     expect((await pool.query(`SELECT COUNT(*)::int AS count FROM sessions WHERE session_id = 'member-native-session'`)).rows[0].count).toBe(1)

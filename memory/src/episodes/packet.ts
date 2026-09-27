@@ -66,6 +66,7 @@ export interface EvidenceManifestEntry {
   excerpt_hash: string
   excerpt_length: number
   truncated: boolean
+  source_provenance?: Record<string, unknown>
   /** Compiler metadata only; never eligible as Claim Evidence. */
   omitted?: boolean
 }
@@ -79,6 +80,7 @@ export interface PacketSourceEvent {
   payload_hash: Buffer
   payload: Record<string, unknown>
   classification: Record<string, unknown>
+  source_provenance?: Record<string, unknown>
 }
 
 export interface PacketSourceArtifact {
@@ -223,6 +225,7 @@ export function buildEpisodePacket(input: {
   const manifest: EvidenceManifest = {}
   const statements: EvidenceStatement[] = []
   const eventTimes = new Map(input.events.map(event => [event.source_event_id, event.occurred_at.toISOString()]))
+  const eventProvenance = new Map(input.events.map(event => [event.source_event_id, event.source_provenance ?? {}]))
 
   const register = (
     sanitized: { text: string; truncated: boolean; originalLength: number; originalHash: string },
@@ -240,6 +243,9 @@ export function buildEpisodePacket(input: {
       ...(refs.source_event_id ? { source_event_id: refs.source_event_id } : {}),
       ...(refs.artifact_id ? { artifact_id: refs.artifact_id } : {}),
       ...(refs.source_event_id ? { occurred_at: eventTimes.get(refs.source_event_id) } : {}),
+      ...(refs.source_event_id && Object.keys(eventProvenance.get(refs.source_event_id) ?? {}).length > 0
+        ? { source_provenance: eventProvenance.get(refs.source_event_id) }
+        : {}),
       excerpt_hash: sanitized.originalHash,
       excerpt_length: sanitized.originalLength,
       truncated: sanitized.truncated,

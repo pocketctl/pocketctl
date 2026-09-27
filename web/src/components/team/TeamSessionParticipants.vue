@@ -1,5 +1,5 @@
 <template>
-  <aside class="participants-panel" data-testid="team-session-participants">
+  <aside ref="panel" class="participants-panel" data-testid="team-session-participants" role="dialog" aria-modal="true" aria-label="参与者与 Agent" tabindex="-1" @keydown.esc.stop.prevent="emit('close')" @keydown.tab="trapFocus">
     <header><div><span>参与者与 Agent</span><strong>{{ session.participants.length }} 人 · {{ session.agent_bindings.length }} Agents</strong></div><button type="button" aria-label="关闭参与者" @click="$emit('close')">×</button></header>
     <div class="participants-body">
       <section>
@@ -30,11 +30,13 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { getTeamContext, getTeamSession, setTeamSessionParticipant } from '../../services/teamClient'
+import { usePanelFocus } from '../../composables/usePanelFocus'
+import { getTeamSession, setTeamSessionParticipant } from '../../services/teamClient'
 import type { TeamMember, TeamSession } from '../../types/team'
 
 const props = defineProps<{ session: TeamSession; members: TeamMember[]; currentUserId: number }>()
 const emit = defineEmits<{ close: []; updated: [session: TeamSession] }>()
+const { panel, trapFocus } = usePanelFocus()
 const selectedUserID = ref(0), busy = ref(false), error = ref('')
 const canManage = computed(() => props.session.creator_user_id === props.currentUserId)
 const participantIDs = computed(() => new Set(props.session.participants.map(participant => participant.user_id)))
@@ -46,10 +48,6 @@ async function add(): Promise<void> {
   if (!selectedUserID.value) return
   busy.value = true; error.value = ''
   try {
-    const context = await getTeamContext(props.session.id)
-    if (context?.references.some(reference => reference.source_kind !== 'team_event' || reference.owner_scope_id !== null || reference.installation_id !== null)) {
-      throw new Error('当前 Context 含有未确认对新成员可见的引用，已阻止加入')
-    }
     const current = await getTeamSession(props.session.id)
     const updated = await setTeamSessionParticipant(current, selectedUserID.value, true)
     selectedUserID.value = 0; emit('updated', updated)

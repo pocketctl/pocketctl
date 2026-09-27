@@ -118,6 +118,94 @@ describeWithDatabase('Phase 4 REST reads (PostgreSQL)', () => {
     await app.close()
   })
 
+  test('binds Wiki reads to the explicitly selected installation, repository, and version', async () => {
+    const personal = await insertWikiCandidateFixture(pool, 'api-scope-personal')
+    const team = await insertWikiCandidateFixture(pool, 'api-scope-team')
+    await pool.query(`UPDATE repositories SET repository_key = 'github.com/example/shared-repo'
+      WHERE repository_id = ANY($1::uuid[])`, [[personal.repositoryId, team.repositoryId]])
+    const publication = createWikiPublicationService(pool)
+    const personalPublished = await publication.publish({
+      grant: personal.grant, targetInstallationId: personal.installationId,
+      wikiId: personal.wikiId, runId: personal.runId,
+      expectedGeneration: 1, expectedHeadRevision: 0,
+    })
+    const teamPublished = await publication.publish({
+      grant: team.grant, targetInstallationId: team.installationId,
+      wikiId: team.wikiId, runId: team.runId,
+      expectedGeneration: 1, expectedHeadRevision: 0,
+    })
+    const grant: VerifiedMemoryGrant = {
+      version: 'v2', installationId: personal.installationId,
+      primaryInstallationId: personal.installationId,
+      services: ['memory.search'], configVersion: '1', callerType: 'web',
+      scopeBindings: [personal.grant.scopeBindings[0]!, team.grant.scopeBindings[0]!],
+    }
+    const app = Fastify()
+    registerWikiRoutes(app, {
+      pool, guard: fakeGuard(grant), wikiMode: 'enabled', sharedScopesMode: 'enabled',
+      cursorSigningKey: 'phase4-cursor',
+    })
+    const scopedUrl = (fixture: typeof team, wikiVersionId?: string) => {
+      const query = new URLSearchParams({
+        installation_id: fixture.installationId,
+        repository_id: fixture.repositoryId,
+        ...(wikiVersionId ? { wiki_version_id: wikiVersionId } : {}),
+      })
+      return `/api/v1/memory/repositories/${fixture.repositoryId}/wiki?${query.toString()}`
+    }
+    const teamRead = await app.inject({
+      method: 'GET', url: scopedUrl(team), headers: { authorization: 'Bearer test' },
+    })
+    expect(teamRead.statusCode, teamRead.body).toBe(200)
+    expect(teamRead.json()).toMatchObject({
+      repository_id: team.repositoryId,
+      commit_sha: team.commitSha,
+      wiki_version_id: teamPublished.wikiVersionId,
+    })
+    const personalRead = await app.inject({
+      method: 'GET', url: scopedUrl(personal), headers: { authorization: 'Bearer test' },
+    })
+    expect(personalRead.statusCode, personalRead.body).toBe(200)
+    expect(personalRead.json()).toMatchObject({
+      repository_id: personal.repositoryId,
+      commit_sha: personal.commitSha,
+      wiki_version_id: personalPublished.wikiVersionId,
+    })
+
+    const unbound = await app.inject({
+      method: 'GET',
+      url: `/api/v1/memory/repositories/${personal.repositoryId}/wiki?${new URLSearchParams({
+        installation_id: crypto.randomUUID(), repository_id: personal.repositoryId,
+      })}`,
+      headers: { authorization: 'Bearer test' },
+    })
+    expect(unbound.statusCode).toBe(403)
+    expect(unbound.json()).toMatchObject({ error: { code: 'forbidden' } })
+
+    const mismatchedRepository = await app.inject({
+      method: 'GET',
+      url: `/api/v1/memory/repositories/${team.repositoryId}/wiki?${new URLSearchParams({
+        installation_id: team.installationId, repository_id: personal.repositoryId,
+      })}`,
+      headers: { authorization: 'Bearer test' },
+    })
+    expect(mismatchedRepository.statusCode).toBe(404)
+    expect(mismatchedRepository.json()).toMatchObject({ error: { code: 'not_found' } })
+
+    const staleVersion = await app.inject({
+      method: 'GET',
+      url: `/api/v1/memory/wikis/${team.wikiId}/builds?${new URLSearchParams({
+        installation_id: team.installationId,
+        repository_id: team.repositoryId,
+        wiki_version_id: crypto.randomUUID(),
+      })}`,
+      headers: { authorization: 'Bearer test' },
+    })
+    expect(staleVersion.statusCode).toBe(409)
+    expect(staleVersion.json()).toMatchObject({ error: { code: 'revision_conflict' } })
+    await app.close()
+  })
+
   test('denies shared build scheduling without contribute permission instead of trusting request identity', async () => {
     const fixture = await insertWikiCandidateFixture(pool, 'api-permission')
     const readOnlyGrant = {

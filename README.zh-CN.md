@@ -28,6 +28,8 @@ PocketCtl 是面向 Claude Code、Codex、OpenCode 和 ZCode 的跨设备控制�
   已完成的会话，让活跃列表保持聚焦。
 - **只关注真正需要处理的事项** — 可选的 Attention Inbox 会聚合待回答问题、
   审批、高风险操作和恢复信号，并保留对应会话上下文。
+- **与成员及其 Agent 协作（实验性）** — Web 客户端可创建 Team、共享任务和
+  会话，并把有界工作定向给各成员明确提供的 Agent。
 - **沉淀受治理的项目知识（实验性）** — 可选的 Memory 工作台将仓库源码转化
   为经评审才发布的 Wiki 和带影响分析的依赖代码图谱，并对 Skill 文档保持
   显式治理。
@@ -157,6 +159,17 @@ Memory 把 Agent 对仓库的了解沉淀为经过评审的持久知识，而不
 保持不可用，而不是降级运行。关于哪些数据会离开开发机，见
 [安全与数据边界](#安全与数据边界)。
 
+## Team 协作（实验性）
+
+Web 客户端可创建协作 Team、邀请成员、维护轻量任务、共享带版本的会话
+Context、调用成员明确提供的 Agent，并可选运行有预算的多 Agent 协作。共享
+Memory 是到既有受治理安装的独立可选桥接；Team 成员身份本身不会授予知识权限。
+
+自托管环境需要分别通过 `TEAM_COLLABORATION`、`TEAM_AUTORUN` 和
+`TEAM_MEMORY_BRIDGE` 开放各阶段，三者默认均为 `off`；iOS 暂不提供 Team UI。
+详见[功能矩阵](docs/team-collaboration-feature-matrix.md)和
+[灰度与关闭手册](docs/operations/team-collaboration-rollout.md)。
+
 ## 常用命令
 
 | 命令 | 用途 |
@@ -187,6 +200,9 @@ PocketCtl 让代码仓库和 Agent 进程留在开发机上，但这**不代表�
 - 如果启用 Memory，模型辅助的知识提炼会把相关仓库文本发送给服务端配置的
   模型 Provider。回合前上下文包与其他会话内容一样经已认证的 Relay 传输；
   Daemon 从不持久化或记录上下文包内容。
+- 如果启用 Team 协作，显式共享事件和冻结 Context 会由 Relay 保存并投递给
+  选定成员的 Agent。原生私有会话日志不会自动共享；Team Memory 只接受精确、
+  已授权且已发布的引用。
 - 受管 Codex/OpenCode 的本地 Endpoint 和 Runtime 凭据保留在开发机上，
   客户端通过已认证的 Relay 通信。
 

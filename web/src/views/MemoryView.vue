@@ -127,6 +127,8 @@
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
             @propose="openPromotion"/>
           <MemoryWikiPanel v-if="active === 'wiki'" v-model:repository-id="phase4RepositoryId"
+            v-model:installation-id="wikiTarget" :scopes="wikiScopes"
+            :legacy-grant="wikiUsesLegacyGrant"
             :can-contribute="canContributePhase4" :can-publish="canPublishPhase4" />
           <MemoryCodeGraphPanel v-if="active === 'codegraph'" v-model:repository-id="phase4RepositoryId" />
           <template v-if="active === 'skills'">
@@ -244,6 +246,7 @@ const governanceScopes = ref<MemoryGovernanceScope[]>([])
 const governanceScopesLoading = ref(false)
 const governanceScopesError = ref('')
 const governanceTarget = ref('')
+const wikiTarget = ref('')
 const governanceQueue = ref<MemoryGovernanceQueueEntry[]>([])
 const governanceLoading = ref(false)
 const governanceError = ref<string | null>(null)
@@ -264,11 +267,27 @@ const selectedGovernanceScope = computed(() => governanceScopes.value.find(
   scope => scope.installation_id === governanceTarget.value) ?? null)
 const canManageScope = computed(() => selectedGovernanceScope.value?.permissions.includes('scope_admin') === true)
 const canEditReviewPolicy = computed(() => selectedGovernanceScope.value?.permissions.includes('policy_admin') === true)
-const primaryGovernanceScope = computed(() => governanceScopes.value.find(
-  scope => scope.installation_id === installation.value?.installation_id,
-))
-const canContributePhase4 = computed(() => primaryGovernanceScope.value?.permissions.includes('contribute') === true)
-const canPublishPhase4 = computed(() => primaryGovernanceScope.value?.permissions.includes('publish') === true)
+const wikiScopes = computed<MemoryGovernanceScope[]>(() => {
+  const readable = governanceScopes.value.filter(scope =>
+    (scope.state ?? 'active') === 'active' && scope.permissions.includes('read'))
+  if (readable.length > 0) return readable
+  const personal = installation.value
+  return personal ? [{
+    installation_id: personal.installation_id,
+    owner_scope_kind: 'personal',
+    owner_scope_id: personal.installation_id,
+    authorization_epoch: String(personal.config_version),
+    permissions: ['read', 'contribute', 'publish'],
+    state: 'active',
+    name: 'Personal',
+  }] : []
+})
+const selectedWikiScope = computed(() => wikiScopes.value.find(
+  scope => scope.installation_id === wikiTarget.value) ?? null)
+const wikiUsesLegacyGrant = computed(() => !governanceScopes.value.some(
+  scope => scope.installation_id === wikiTarget.value))
+const canContributePhase4 = computed(() => selectedWikiScope.value?.permissions.includes('contribute') === true)
+const canPublishPhase4 = computed(() => selectedWikiScope.value?.permissions.includes('publish') === true)
 const conflictCandidates = computed(() => governanceQueue.value
   .filter(entry => entry.candidate.state === 'conflict')
   .map(entry => ({
@@ -339,11 +358,17 @@ async function loadGovernanceScopes(): Promise<void> {
       ?? governanceScopes.value.find(scope => scope.owner_scope_kind === 'personal')
       ?? governanceScopes.value[0]
     governanceTarget.value = preferred?.installation_id ?? ''
+    const previousWiki = wikiTarget.value
+    const wikiPreferred = wikiScopes.value.find(scope => scope.installation_id === previousWiki)
+      ?? wikiScopes.value.find(scope => scope.owner_scope_kind === 'personal')
+      ?? wikiScopes.value[0]
+    wikiTarget.value = wikiPreferred?.installation_id ?? ''
   } catch (err) {
     governanceError.value = err instanceof Error ? err.message : 'governance unavailable'
     const status = err && typeof err === 'object' && 'status' in err ? Number(err.status) : 0
     const kind = status === 403 ? 'forbidden' : status === 503 ? 'off' : 'request_failed'
     governanceScopesError.value = `${t(`memory.skills.${kind}`)} · ${governanceError.value}`
+    wikiTarget.value = installation.value?.installation_id ?? ''
   } finally {
     governanceScopesLoading.value = false
   }

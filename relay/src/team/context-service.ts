@@ -4,6 +4,7 @@ import type pg from 'pg'
 import { teamEventView } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamContextReference, TeamContextSnapshot, TeamEvent } from './types.js'
+import type { TeamMemoryContextBridge } from './memory-context-bridge.js'
 
 interface ContextNotifier {
   event?(sessionId: string, participantUserIds: number[], event: TeamEvent): void
@@ -30,7 +31,11 @@ function snapshot(row: any): TeamContextSnapshot {
 }
 
 export class TeamContextService {
-  constructor(private readonly pool: pg.Pool, private readonly notifier: ContextNotifier = {}) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly notifier: ContextNotifier = {},
+    private readonly memoryBridge?: TeamMemoryContextBridge,
+  ) {}
 
   private async accessible(db: Pick<pg.Pool, 'query'>, sessionId: string, actorUserId: number, lock = false): Promise<any> {
     const result = await db.query(
@@ -95,9 +100,19 @@ export class TeamContextService {
       if (currentRevision !== input.expectedRevision) {
         throw new TeamRepositoryError('context_revision_conflict', 'context changed; reload before creating another version', currentRevision)
       }
-      for (const reference of input.references) {
-        if (reference.source_kind !== 'team_event' || reference.owner_scope_id !== null || reference.installation_id !== null) {
-          throw new TeamRepositoryError('invalid_state', 'only shared-session event references are available before the Memory bridge')
+      if (input.references.some(reference => reference.source_kind !== 'team_event')) {
+        if (!this.memoryBridge) {
+          throw new TeamRepositoryError('team_feature_disabled', 'Team Memory bridge is disabled')
+        }
+        await this.memoryBridge.validateSnapshot({
+          sessionId: input.sessionId,
+          actorUserId: input.actorUserId,
+          references: input.references,
+        })
+      }
+      for (const reference of input.references.filter(item => item.source_kind === 'team_event')) {
+        if (reference.owner_scope_id !== null || reference.installation_id !== null) {
+          throw new TeamRepositoryError('invalid_state', 'shared-session event references cannot carry a Memory scope')
         }
         const referenced = await client.query(
           `SELECT event_seq FROM collaboration_events WHERE team_session_id = $1 AND event_id = $2`,

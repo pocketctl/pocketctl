@@ -1208,6 +1208,8 @@
   "memory.phase4.edges": "条边",
   "memory.phase4.wiki_loading": "正在加载活跃 Wiki…",
   "memory.phase4.wiki_failed": "Wiki 请求失败",
+  "memory.phase4.scope_unavailable": "当前 Memory 范围不可用",
+  "memory.phase4.scope_unavailable_copy": "团队尚未绑定、读取权限已撤销，或该范围已失效。已清除先前范围的 Wiki 内容。",
   "memory.phase4.wiki_empty": "尚未发布活跃 Wiki",
   "memory.phase4.wiki_empty_copy": "请求成功。请先构建并复核候选，再显式发布活跃 Wiki。",
   "memory.phase4.active_wiki": "活跃 Wiki 提交",

@@ -229,8 +229,10 @@ export function createPublicationService(pool: pg.Pool) {
             excerpt_hash: string
             source_evidence_hash: string
             occurred_at: Date | null
+            sanitized_locator: Record<string, unknown> | null
           }>(`
-            SELECT ordinal, evidence_kind, excerpt, excerpt_hash, source_evidence_hash, occurred_at
+            SELECT ordinal, evidence_kind, excerpt, excerpt_hash, source_evidence_hash,
+                   occurred_at, sanitized_locator
             FROM memory_promotion_evidence WHERE candidate_revision_id = $1
             ORDER BY ordinal ASC FOR UPDATE
           `, [latest.candidate_revision_id])
@@ -429,12 +431,13 @@ export function createPublicationService(pool: pg.Pool) {
             await client.query(`
               INSERT INTO knowledge_evidence
                 (evidence_id, installation_id, version_id, episode_id, ordinal, evidence_kind,
-                 excerpt, excerpt_hash, occurred_at, visibility, source_evidence_hash, contributor_membership_id)
-              VALUES ($1, $2, $3, $4, $5, 'episode', $6, $7, $8, 'shared', $9, $10)
+                 locator, excerpt, excerpt_hash, occurred_at, visibility, source_evidence_hash,
+                 contributor_membership_id)
+              VALUES ($1, $2, $3, $4, $5, 'episode', $6::jsonb, $7, $8, $9, 'shared', $10, $11)
             `, [
               randomUUID(), input.targetInstallationId, versionId,
-              sharedEpisodeId, item.ordinal, item.excerpt,
-              Buffer.from(item.excerpt_hash, 'hex'), item.occurred_at,
+              sharedEpisodeId, item.ordinal, item.sanitized_locator ?? {},
+              item.excerpt, Buffer.from(item.excerpt_hash, 'hex'), item.occurred_at,
               item.source_evidence_hash, candidate.created_by_membership_id,
             ])
           }

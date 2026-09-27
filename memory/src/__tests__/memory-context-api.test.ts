@@ -46,6 +46,46 @@ function appWith(deps: Partial<Parameters<typeof registerContextRoutes>[1]>) {
 }
 
 describe('context route contracts (unit)', () => {
+  test('validates an exact published Team claim through a readable v2 binding', async () => {
+    const version = '11111111-1111-4111-8111-111111111111'
+    const claim = '22222222-2222-4222-8222-222222222222'
+    const scope = '33333333-3333-4333-8333-333333333333'
+    const guardV2 = vi.fn(async () => ({
+      version: 'v2' as const,
+      installationId: INSTALLATION,
+      primaryInstallationId: INSTALLATION,
+      services: ['memory.context'], configVersion: '1', callerType: 'web',
+      scopeBindings: [{
+        installation_id: INSTALLATION, owner_scope_kind: 'team' as const,
+        owner_scope_id: scope, membership_id: 'membership', membership_revision: '1',
+        authorization_epoch: '1', permissions: ['read'],
+      }],
+    }))
+    const query = vi.fn(async () => ({ rows: [{
+      claim_id: claim, version_id: version, claim_type: 'implementation_map',
+      statement: 'published', owner_scope_kind: 'team', owner_scope_id: scope,
+      evidence_ids: ['44444444-4444-4444-8444-444444444444'],
+    }] }))
+    const app = appWith({
+      pool: { query } as never,
+      guard: { guardV2 } as unknown as GrantGuard,
+    })
+    const response = await app.inject({
+      method: 'POST', url: '/api/v1/memory/context/references/validate',
+      headers: { host: 'memory.test', authorization: 'Bearer v2' },
+      payload: {
+        installation_id: INSTALLATION,
+        references: [{
+          source_kind: 'memory_claim', source_id: claim, source_version: version,
+          owner_scope_id: scope, installation_id: INSTALLATION,
+        }],
+      },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ valid: true })
+    expect(guardV2).toHaveBeenCalledWith(expect.objectContaining({ requiredService: 'memory.context' }))
+  })
+
   test('compile rejects a malformed body with a bounded error', async () => {
     const app = appWith({})
     const response = await app.inject({

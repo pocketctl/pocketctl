@@ -2,6 +2,7 @@ import { coordinatorPrompt, parseTeamRunDecision, TeamRunDecisionError } from '.
 import { TeamRunRepository, type TeamRunMutation } from './run-repository.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamEvent, TeamRun } from './types.js'
+import { teamBudgetStopsTotal, teamUncertainTotal } from '../metrics.js'
 
 interface TeamRunWorkerRepository {
   claimNext(workerId: string, leaseMs: number): ReturnType<TeamRunRepository['claimNext']>
@@ -47,6 +48,11 @@ export class TeamRunWorker {
     this.publish(await this.options.repository.transition(input))
   }
 
+  private observeBudgetStop(runId: string, dimension: 'calls' | 'concurrency' | 'duration'): void {
+    teamBudgetStopsTotal.inc({ dimension })
+    console.info('[team-observability] run budget stopped', { runId, reason: 'budget_exhausted', dimension })
+  }
+
   private async schedule(input: Parameters<TeamRunWorkerRepository['scheduleCall']>[0]): Promise<void> {
     const scheduled = await this.options.repository.scheduleCall(input)
     this.options.onEvent?.(scheduled.teamSessionId, scheduled.participantUserIds, scheduled.event)
@@ -81,6 +87,7 @@ export class TeamRunWorker {
     }
 
     if (new Date(run.deadline_at).getTime() <= Date.now()) {
+      this.observeBudgetStop(run.id, 'duration')
       await this.options.repository.cancelPending(run.id, lease.leaseToken)
       if (latestCall && ['dispatched', 'accepted', 'uncertain'].includes(latestCall.state)) {
         await this.transition({ ...transitionBase, state: 'blocked', terminalReason: 'run_deadline_reconcile_required', content: 'Run time budget expired; in-flight or uncertain calls require reconciliation.' })
@@ -106,6 +113,7 @@ export class TeamRunWorker {
       return true
     }
     if (latestCall.state === 'uncertain') {
+      teamUncertainTotal.inc({ reason: 'run_dispatch' })
       await this.transition({ ...transitionBase, state: 'blocked', terminalReason: 'dispatch_uncertain', processedCallStep: latestCall.runStep, content: 'Run is blocked because a call outcome is uncertain and will not be retried automatically.' })
       return true
     }
@@ -153,6 +161,7 @@ export class TeamRunWorker {
 
   private async scheduleCoordinator(run: TeamRun, leaseToken: number, allowedOfferIds: string[], processedCallStep: number, observation?: string): Promise<void> {
     if (run.calls_used >= run.budget.max_calls) {
+      this.observeBudgetStop(run.id, 'calls')
       await this.transition({
         runId: run.id, leaseToken, state: 'failed', terminalReason: 'budget_exhausted',
         processedCallStep, content: 'Run stopped because its call budget was exhausted.',
@@ -169,6 +178,7 @@ export class TeamRunWorker {
       })
     } catch (error) {
       if (!(error instanceof TeamRepositoryError) || error.code !== 'budget_exhausted') throw error
+      this.observeBudgetStop(run.id, 'concurrency')
       await this.transition({
         runId: run.id, leaseToken, state: 'failed', terminalReason: 'budget_exhausted',
         processedCallStep, content: 'Run stopped because its frozen call or concurrency budget was exhausted.',

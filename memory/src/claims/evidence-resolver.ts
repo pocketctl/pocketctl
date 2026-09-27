@@ -7,6 +7,7 @@ export interface ResolvedPacketEvidence {
     artifact_id?: string
     excerpt_hash?: string
     truncated?: boolean
+    source_provenance?: Record<string, unknown>
   }
 }
 
@@ -51,6 +52,10 @@ export function resolvePacketEvidence(
         ...(typeof entry.artifact_id === 'string' ? { artifact_id: entry.artifact_id } : {}),
         ...(typeof entry.excerpt_hash === 'string' ? { excerpt_hash: entry.excerpt_hash } : {}),
         ...(typeof entry.truncated === 'boolean' ? { truncated: entry.truncated } : {}),
+        ...(entry.source_provenance !== null && typeof entry.source_provenance === 'object'
+          && !Array.isArray(entry.source_provenance)
+          ? { source_provenance: entry.source_provenance as Record<string, unknown> }
+          : {}),
       },
     })
   }

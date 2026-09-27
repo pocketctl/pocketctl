@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/repositoryidentity"
 )
 
@@ -27,14 +28,17 @@ type Coordinator struct {
 
 // TurnRequest describes one new-turn enrichment decision.
 type TurnRequest struct {
-	ClientRequestID string
-	SessionID       string
-	Agent           string
-	Cwd             string
-	UserContent     string
-	IsNewTurn       bool
-	Mode            Mode
-	Capability      Capability
+	ClientRequestID      string
+	SessionID            string
+	Agent                string
+	Cwd                  string
+	UserContent          string
+	IsNewTurn            bool
+	Mode                 Mode
+	Capability           Capability
+	ScopeInstallationIDs []string
+	SelectedReferences   []SelectedReference
+	rebuildAttempt       int
 }
 
 // Mode is the locally resolved effective mode ceiling for this session.
@@ -109,7 +113,17 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		requestID = newRequestID()
 	}
 
-	grant, err := c.Grants.RequestContextGrant(ctx, requestID, req.SessionID)
+	var grant *protocol.MemoryContextGrantResult
+	var err error
+	if len(req.ScopeInstallationIDs) > 0 {
+		scoped, ok := c.Grants.(ScopedGrantTransport)
+		if !ok {
+			return nil, Outcome{Kind: "dispatched", Reason: "scoped_grant_unavailable"}
+		}
+		grant, err = scoped.RequestScopedContextGrant(ctx, requestID, req.SessionID, req.ScopeInstallationIDs)
+	} else {
+		grant, err = c.Grants.RequestContextGrant(ctx, requestID, req.SessionID)
+	}
 	if err != nil {
 		return nil, Outcome{Kind: "dispatched", Reason: "grant_unavailable"}
 	}
@@ -119,14 +133,15 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		query = ""
 	}
 	compileReq := CompileRequest{
-		SchemaVersion:     1,
-		ClientRequestID:   requestID,
-		SessionID:         req.SessionID,
-		Agent:             req.Agent,
-		AdapterCapability: string(req.Capability),
-		RepositoryHint:    repositoryHint(ctx, req.Cwd),
-		Query:             query,
-		RequestedAt:       started.UTC(),
+		SchemaVersion:      1,
+		ClientRequestID:    requestID,
+		SessionID:          req.SessionID,
+		Agent:              req.Agent,
+		AdapterCapability:  string(req.Capability),
+		RepositoryHint:     repositoryHint(ctx, req.Cwd),
+		Query:              query,
+		RequestedAt:        started.UTC(),
+		SelectedReferences: req.SelectedReferences,
 	}
 	compiled, err := c.Memory.Compile(ctx, grant.ProviderPublicOrigin, grant.Grant, compileReq)
 	if err != nil {
@@ -136,7 +151,11 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 	case "off":
 		return nil, Outcome{Kind: "skipped", Reason: "mode_off"}
 	case "empty", "degraded":
-		return nil, Outcome{Kind: "dispatched", Reason: compiled.Outcome}
+		reason := compiled.Reason
+		if reason == "" {
+			reason = compiled.Outcome
+		}
+		return nil, Outcome{Kind: "dispatched", Reason: reason}
 	case "unsupported_adapter":
 		return nil, Outcome{Kind: "skipped", Reason: "unsupported_adapter"}
 	case "shadow_queued":
@@ -153,17 +172,26 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		Adapter:         nativeAdapterForAgent(req.Agent),
 	})
 	if err != nil {
+		if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
+			return c.rebuildSelectedContext(ctx, req, requestID)
+		}
 		return nil, Outcome{Kind: "dispatched", Reason: "admission_failed"}
 	}
 	if admitted.Existing || admitted.Nonce == "" {
 		// A duplicate request returns existing state; without a fresh nonce
 		// there is nothing this attempt may deliver.
+		if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
+			return c.rebuildSelectedContext(ctx, req, requestID)
+		}
 		return nil, Outcome{Kind: "skipped", Reason: "admission_existing"}
 	}
 	text, err := c.Memory.ConsumePack(ctx, grant.ProviderPublicOrigin, grant.Grant,
 		compiled.Pack.PackID, req.SessionID, admitted.InjectionID, admitted.Nonce)
 	if err != nil || text == nil || text.PackID != compiled.Pack.PackID ||
 		(text.StableText == "" && text.DynamicText == "") {
+		if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
+			return c.rebuildSelectedContext(ctx, req, requestID)
+		}
 		return nil, Outcome{Kind: "dispatched", Reason: "pack_unavailable"}
 	}
 	return &PreparedContext{
@@ -179,6 +207,16 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		providerOrigin: grant.ProviderPublicOrigin,
 		grant:          grant.Grant,
 	}, Outcome{Kind: "injected", Pack: nil}
+}
+
+func (c *Coordinator) rebuildSelectedContext(ctx context.Context, req TurnRequest, requestID string) (*PreparedContext, Outcome) {
+	req.rebuildAttempt = 1
+	req.ClientRequestID = requestID
+	if len(req.ClientRequestID) > 112 {
+		req.ClientRequestID = req.ClientRequestID[:112]
+	}
+	req.ClientRequestID += "-rebuild-1"
+	return c.Prepare(ctx, req)
 }
 
 // prepareShadow holds the minimized query only in this process and starts the
@@ -244,27 +282,34 @@ func (c *Coordinator) Receipt(parent context.Context, pack *PreparedContext, res
 	if pack == nil {
 		return
 	}
-	if pack.providerOrigin == "" || pack.grant == "" || pack.sessionID == "" || pack.InjectionID == "" {
-		return
-	}
 	pack.receiptOnce.Do(func() {
+		pack.receiptMu.Lock()
+		origin, grant := pack.providerOrigin, pack.grant
+		injectionID, sessionID := pack.InjectionID, pack.sessionID
+		pack.receiptMu.Unlock()
+		if origin == "" || grant == "" || sessionID == "" || injectionID == "" {
+			return
+		}
+		clearGrant := func() {
+			pack.receiptMu.Lock()
+			pack.grant = ""
+			pack.receiptMu.Unlock()
+		}
 		ctx, cancel := context.WithTimeout(parent, 2*time.Second)
-		err := c.Memory.Receipt(ctx, pack.providerOrigin, pack.grant, pack.InjectionID, ReceiptRequest{
-			Delivered: result.Delivered, OutcomeCode: result.OutcomeCode, SessionID: pack.sessionID,
+		err := c.Memory.Receipt(ctx, origin, grant, injectionID, ReceiptRequest{
+			Delivered: result.Delivered, OutcomeCode: result.OutcomeCode, SessionID: sessionID,
 		})
 		cancel()
 		if err == nil {
-			pack.grant = ""
+			clearGrant()
 			return
 		}
 
-		origin, grant := pack.providerOrigin, pack.grant
-		injectionID, sessionID := pack.InjectionID, pack.sessionID
 		request := ReceiptRequest{
 			Delivered: result.Delivered, OutcomeCode: result.OutcomeCode, SessionID: sessionID,
 		}
 		go func() {
-			defer func() { pack.grant = "" }()
+			defer clearGrant()
 			for attempt := 0; attempt < 2; attempt++ {
 				timer := time.NewTimer(c.receiptRetryDelay() * time.Duration(attempt+1))
 				<-timer.C

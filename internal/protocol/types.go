@@ -598,13 +598,29 @@ type CollaborationAuthorization struct {
 }
 
 type CollaborationContext struct {
-	SchemaVersion          int    `json:"schema_version"`
-	ContextVersion         int64  `json:"context_version"`
-	ContentHash            string `json:"content_hash"`
-	HistoryThroughEventSeq int64  `json:"history_through_event_seq"`
-	PayloadHash            string `json:"payload_hash"`
-	StableText             string `json:"stable_text"`
-	Truncated              bool   `json:"truncated,omitempty"`
+	SchemaVersion          int                         `json:"schema_version"`
+	ContextVersion         int64                       `json:"context_version"`
+	ContentHash            string                      `json:"content_hash"`
+	HistoryThroughEventSeq int64                       `json:"history_through_event_seq"`
+	PayloadHash            string                      `json:"payload_hash"`
+	StableText             string                      `json:"stable_text"`
+	Truncated              bool                        `json:"truncated,omitempty"`
+	MemoryContext          *CollaborationMemoryContext `json:"memory_context,omitempty"`
+}
+
+type CollaborationMemoryContext struct {
+	SchemaVersion  int                            `json:"schema_version"`
+	InstallationID string                         `json:"installation_id"`
+	OwnerScopeID   string                         `json:"owner_scope_id"`
+	References     []CollaborationMemoryReference `json:"references"`
+}
+
+type CollaborationMemoryReference struct {
+	SourceKind     string `json:"source_kind"`
+	SourceID       string `json:"source_id"`
+	SourceVersion  string `json:"source_version"`
+	OwnerScopeID   string `json:"owner_scope_id"`
+	InstallationID string `json:"installation_id"`
 }
 
 type QuotaGrant struct {
@@ -862,9 +878,10 @@ var MemoryCodegraphGrantErrorCodes = map[string]bool{
 // The session must be owned by the authenticated daemon's user; identity is
 // derived from the connection, never from this payload.
 type MemoryContextGrantRequest struct {
-	Type      string `json:"type"` // "memory_context_grant"
-	RequestID string `json:"request_id,omitempty"`
-	SessionID string `json:"session_id"`
+	Type                 string   `json:"type"` // "memory_context_grant"
+	RequestID            string   `json:"request_id,omitempty"`
+	SessionID            string   `json:"session_id"`
+	ScopeInstallationIDs []string `json:"scope_installation_ids,omitempty"`
 }
 
 // MemoryContextGrantResult is the relay->daemon success reply. TTL <= 300s.

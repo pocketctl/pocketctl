@@ -30,6 +30,9 @@ off your development machine.
   focused, from Web or iOS.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
+- **Collaborate with people and their Agents (experimental)** — the Web client
+  can create Teams, shared tasks and sessions, then route bounded work to Agents
+  that each member explicitly contributes.
 - **Grow governed project knowledge (experimental)** — the optional Memory
   workbench turns repository sources into a review-gated wiki and a dependency
   code graph with impact analysis, and keeps skill documents under explicit
@@ -171,6 +174,20 @@ provider; without one the workbench stays unavailable instead of running
 degraded. See [Security and data boundary](#security-and-data-boundary) for
 what leaves the development host.
 
+## Team collaboration (experimental)
+
+The Web client can create collaboration Teams, invite members, maintain
+lightweight tasks, share versioned session Context, call explicitly contributed
+Agents, and optionally run bounded multi-Agent coordination. Shared Memory is a
+separate opt-in bridge to an existing governed installation; Team membership
+never grants knowledge access by itself.
+
+Self-hosted operators must enable each phase independently with
+`TEAM_COLLABORATION`, `TEAM_AUTORUN`, and `TEAM_MEMORY_BRIDGE`. All default to
+`off`; iOS does not yet provide Team UI. See the
+[feature matrix](docs/team-collaboration-feature-matrix.md) and
+[rollout runbook](docs/operations/team-collaboration-rollout.md).
+
 ## Essential commands
 
 | Command | Purpose |
@@ -205,6 +222,10 @@ that does **not** mean session content stays local.
   repository text to the configured server-side provider. Pre-turn context
   packs travel through the authenticated Relay like other session content;
   the daemon never persists or logs them.
+- If Team collaboration is enabled, explicit shared events and frozen Context
+  are stored by Relay and delivered to selected members' Agents. Native private
+  session logs are not shared automatically; Team Memory accepts only exact,
+  authorized published references.
 - Managed Codex/OpenCode endpoints and local runtime credentials remain on the
   development host; clients communicate through the authenticated Relay.
 

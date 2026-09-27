@@ -1208,6 +1208,8 @@
   "memory.phase4.edges": "edges",
   "memory.phase4.wiki_loading": "Loading the active Wiki…",
   "memory.phase4.wiki_failed": "Wiki request failed",
+  "memory.phase4.scope_unavailable": "The current Memory scope is unavailable",
+  "memory.phase4.scope_unavailable_copy": "The team is not bound, read access was revoked, or the scope is inactive. Wiki content from the previous scope has been cleared.",
   "memory.phase4.wiki_empty": "No active Wiki is published",
   "memory.phase4.wiki_empty_copy": "The request succeeded. Build and review a candidate before publishing an active Wiki.",
   "memory.phase4.active_wiki": "Active Wiki commit",

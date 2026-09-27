@@ -66,6 +66,8 @@ import { registerExtensionInstallationRoutes } from './extensions/installation-r
 import { registerExtensionScopeRoutes } from './extensions/scope-routes.js';
 import { extensionV2ModeFromEnv } from './extensions/config.js';
 import { registerV2Routes } from './extensions/v2-routes.js';
+import { ExtensionInstallationRepository } from './extensions/installation-repository.js';
+import { createV2GrantService } from './extensions/v2-grant-service.js';
 import { registerCapabilityV2GrantRoutes } from './extensions/capability-routes.js';
 import { registerProviderTokenRoute } from './extensions/provider-auth-routes.js';
 import { registerFeedRoutes } from './extensions/feed-routes.js';
@@ -82,6 +84,10 @@ import { TeamDispatchService } from './team/dispatch-service.js';
 import { TeamContextService } from './team/context-service.js';
 import { TeamRunService } from './team/run-service.js';
 import { registerTeamRunRoutes } from './team/run-routes.js';
+import { createTeamMemoryBindingService } from './team/memory-binding-service.js';
+import { registerTeamMemoryBindingRoutes } from './team/memory-binding-routes.js';
+import { TeamMemorySourceProjector } from './team/memory-source-projector.js';
+import { TeamMemoryContextBridge } from './team/memory-context-bridge.js';
 import {
   createMemoryCodegraphGrantBroker,
   createMemoryContextGrantBroker,
@@ -931,7 +937,13 @@ async function main() {
   // ADR-0003: extension flag fails closed — invalid values or an
   // enabled production deployment without provider key material abort boot.
   const extensionConfig = resolveExtensionConfig(process.env)
+  const extensionV2Mode = extensionV2ModeFromEnv()
   const teamConfig = resolveTeamCollaborationConfig(process.env)
+  const teamMemoryBridgeEnabled = teamConfig.collaboration === 'on'
+    && teamConfig.memoryBridge === 'on'
+    && extensionConfig.mode === 'enabled'
+    && extensionV2Mode === 'enabled'
+  const teamMemorySources = new TeamMemorySourceProjector(teamMemoryBridgeEnabled)
   // Resolve capability signing material exactly once. In development the
   // fallback key is generated in memory, so resolving separately for the
   // HTTP route and daemon broker would produce grants that the published
@@ -944,6 +956,16 @@ async function main() {
   assertTokenUsageFeatureDependencies(tokenFeatures, runtimeConfig.durableIngress.mode)
   const pools = createRelayPools(parseDBUrl(DB_URL))
   const pool = pools.query
+  const teamV2GrantService = createV2GrantService({
+    pool,
+    issuer: publicIssuer,
+    v2Mode: extensionV2Mode,
+    grantKeys: extensionGrantKeys,
+    providerPublicOrigins: extensionConfig.providerPublicOrigins,
+  })
+  const teamMemoryContextBridge = new TeamMemoryContextBridge(pool, teamV2GrantService, {
+    enabled: teamMemoryBridgeEnabled,
+  })
   const wsTickets = createWsTicketStore(createPostgresWsTicketPersistence(pools.control), 60_000)
   const welcomeEmailWorker = createWelcomeEmailWorker({ pool: pools.worker })
   const attentionRepository = new AttentionInboxRepository(
@@ -975,12 +997,12 @@ async function main() {
   let teamDispatchService: TeamDispatchService | undefined
   const teamContextService = new TeamContextService(pool, {
     event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
-  })
+  }, teamMemoryContextBridge)
   const teamSessionService = new TeamSessionService(pool, {
     event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
     revoked: (sessionId, userId) => router.revokeTeamSubscription(sessionId, userId),
     dispatch: callIds => teamDispatchService?.enqueue(callIds),
-  })
+  }, teamMemorySources, teamMemoryContextBridge)
   const teamRunService = new TeamRunService(pool, {
     event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
   })
@@ -1035,6 +1057,7 @@ async function main() {
         pool: pools.control,
         issuer: publicIssuer,
         mode: extensionConfig.mode,
+        v2Mode: extensionV2Mode,
         providerPublicOrigins: extensionConfig.providerPublicOrigins,
         grantKeys: extensionGrantKeys,
       }),
@@ -1042,7 +1065,7 @@ async function main() {
         pool: pools.control,
         issuer: publicIssuer,
         mode: extensionConfig.mode,
-        v2Mode: extensionV2ModeFromEnv(),
+        v2Mode: extensionV2Mode,
         providerPublicOrigins: extensionConfig.providerPublicOrigins,
         grantKeys: extensionGrantKeys,
       }),
@@ -1052,6 +1075,9 @@ async function main() {
     send: input => router.sendTeamCommand(input.daemonId, input.ownerUserId, input.capability, input.command),
   }, {
     event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+  }, {
+    memorySources: teamMemorySources,
+    memoryContextBridge: teamMemoryContextBridge,
   })
   const realtimeOutboxConsumer = new RealtimeOutboxConsumer({
     repository: new RealtimeOutboxRepository(pools.query),
@@ -1161,6 +1187,12 @@ async function main() {
     jitter: () => Math.floor(Math.random() * 1_000),
   });
   const app = Fastify({ logger: false, trustProxy: trustedProxy });
+  const teamMemoryBindingService = createTeamMemoryBindingService(
+    pool,
+    new ExtensionInstallationRepository(pool),
+    teamV2GrantService,
+    { memoryBridgeEnabled: teamMemoryBridgeEnabled, memorySources: teamMemorySources },
+  )
 
   /**
    * M-2: enforce shared auth rate-limit buckets for a request. Returns true
@@ -1187,7 +1219,7 @@ async function main() {
   registerSessionShareRoutes(app, { pool, publicIssuer });
   registerTeamCapabilityRoutes(app, {
     config: teamConfig,
-    memoryExtensionAvailable: extensionConfig.mode === 'enabled',
+    memoryExtensionAvailable: extensionConfig.mode === 'enabled' && extensionV2Mode === 'enabled',
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
   });
   registerTeamRoutes(app, {
@@ -1213,6 +1245,13 @@ async function main() {
   registerTeamRunRoutes(app, {
     config: teamConfig,
     service: teamRunService,
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
+  registerTeamMemoryBindingRoutes(app, {
+    config: teamConfig,
+    memoryBridgeEnabled: teamMemoryBridgeEnabled,
+    service: teamMemoryBindingService,
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
   });
@@ -1247,7 +1286,7 @@ async function main() {
   registerExtensionScopeRoutes(app, {
     pool,
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
-    v2Mode: extensionV2ModeFromEnv(),
+    v2Mode: extensionV2Mode,
   });
   const extensionRateLimits = createExtensionRateLimiterSet(
     resolveExtensionRateLimitConfig(process.env),
@@ -1272,7 +1311,7 @@ async function main() {
   registerV2Routes(app, {
     pool,
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
-    v2Mode: extensionV2ModeFromEnv(),
+    v2Mode: extensionV2Mode,
     providerJwtSecret: extensionConfig.providerJwtSecret,
     issuer: publicIssuer,
     cursorSecret: extensionConfig.cursorSecret || publicIssuer,
@@ -1299,7 +1338,7 @@ async function main() {
     pool,
     verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool as typeof pool),
     mode: extensionConfig.mode,
-    v2Mode: extensionV2ModeFromEnv(),
+    v2Mode: extensionV2Mode,
     issuer: publicIssuer,
     ttlSeconds: 60,
     providerPublicOrigins: extensionConfig.providerPublicOrigins,

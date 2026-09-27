@@ -2,7 +2,11 @@ import type { FastifyInstance } from 'fastify'
 import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
 import type { GrantGuard } from '../auth/grant-guard.js'
 import { MemoryApiError, errorBody } from './errors.js'
-import type { ContextCompiler } from '../context/compiler.js'
+import {
+  resolveSelectedContextReferences,
+  type ContextCompiler,
+  type SelectedContextReference,
+} from '../context/compiler.js'
 import type { AdmissionService } from '../context/admission-service.js'
 import { createFeedbackService, type FeedbackService } from '../context/feedback-service.js'
 import type { PackRepository } from '../context/pack-repository.js'
@@ -109,6 +113,7 @@ interface CompileBody {
     commit_sha?: unknown
   } | null
   query?: unknown
+  selected_references?: unknown
 }
 
 export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDeps) {
@@ -134,13 +139,74 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     })
   }
   const daemonGuard = async (authorization: string | undefined, sessionId: string) => {
-    const grant = await deps.guard.guard({
-      authorization,
-      requiredService: 'memory.context',
-      sessionId,
-    })
+    let grant: Awaited<ReturnType<GrantGuard['guard']>> | Awaited<ReturnType<GrantGuard['guardV2']>>
+    try {
+      grant = await deps.guard.guard({
+        authorization,
+        requiredService: 'memory.context',
+        sessionId,
+      })
+    } catch (v1Error) {
+      if (!deps.guard.guardMcp) throw v1Error
+      grant = await deps.guard.guardMcp({
+        authorization,
+        requiredService: 'memory.context',
+      })
+    }
+    if (grant.callerType !== 'daemon') throw new MemoryApiError('forbidden', 'caller type not permitted')
+    if (!('version' in grant) && grant.sessionId !== sessionId) {
+      throw new MemoryApiError('unauthorized', 'grant rejected')
+    }
     return grant
   }
+
+  const selectedReferences = (value: unknown): SelectedContextReference[] | null => {
+    if (value === undefined) return []
+    if (!Array.isArray(value) || value.length === 0 || value.length > 32) return null
+    return value.every(reference => {
+      if (!reference || typeof reference !== 'object' || Array.isArray(reference)) return false
+      const item = reference as Record<string, unknown>
+      return ['memory_claim', 'memory_evidence', 'wiki_section'].includes(String(item.source_kind))
+        && typeof item.source_id === 'string' && UUID_RE.test(item.source_id)
+        && typeof item.source_version === 'string' && UUID_RE.test(item.source_version)
+        && typeof item.owner_scope_id === 'string' && item.owner_scope_id.length > 0
+        && typeof item.installation_id === 'string' && UUID_RE.test(item.installation_id)
+    }) ? value as SelectedContextReference[] : null
+  }
+
+  const sharedAuthorized = (
+    grant: Awaited<ReturnType<typeof daemonGuard>>,
+    installationId: string,
+  ): boolean => 'version' in grant && grant.version === 'v2'
+    && grant.primaryInstallationId === installationId
+    && Boolean(grant.scopeBindings.find(binding => binding.installation_id === installationId)
+      ?.permissions.includes('read'))
+
+  app.post('/api/v1/memory/context/references/validate', async (req, reply) => {
+    if (!gate(req, reply)) return
+    const body = (req.body ?? {}) as { installation_id?: unknown; references?: unknown }
+    const references = selectedReferences(body.references)
+    if (typeof body.installation_id !== 'string' || !UUID_RE.test(body.installation_id) || !references) {
+      throw new MemoryApiError('invalid_request', 'invalid reference validation body')
+    }
+    const grant = await deps.guard.guardV2({
+      authorization: req.headers.authorization,
+      requiredService: 'memory.context',
+    })
+    if (!sharedAuthorized(grant, body.installation_id)) {
+      throw new MemoryApiError('forbidden', 'selected Memory scope is not readable')
+    }
+    const resolved = await resolveSelectedContextReferences(deps.pool, body.installation_id, references)
+    if (!resolved) {
+      reply.code(404)
+      return { error: { code: 'missing_source' } }
+    }
+    return { valid: true, references: resolved.map(item => ({
+      source_kind: item.reference.source_kind,
+      source_id: item.reference.source_id,
+      source_version: item.reference.source_version,
+    })) }
+  })
 
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof MemoryApiError) {
@@ -167,12 +233,14 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
   app.post('/api/v1/memory/context/compile', { bodyLimit: 64 * 1024 }, async (req, reply) => {
     if (!gate(req, reply)) return
     const body = (req.body ?? {}) as CompileBody
+    const references = selectedReferences(body.selected_references)
     if (body.schema_version !== 1
       || !boundedString(body.client_request_id, 128)
       || !boundedString(body.session_id, 64)
       || !boundedString(body.agent, 64)
       || (body.adapter_capability !== 'native_hidden_v1' && body.adapter_capability !== 'shadow_only')
       || typeof body.query !== 'string'
+      || references === null
       || (body.repository_hint != null
         && (typeof body.repository_hint !== 'object'
           || (body.repository_hint.repository_id !== undefined
@@ -190,8 +258,8 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
 
     // Session binding: the body session MUST equal the grant session.
     const grant = await daemonGuard(req.headers.authorization, body.session_id)
-    if (grant.callerType !== 'daemon') {
-      throw new MemoryApiError('forbidden', 'caller type not permitted')
+    if (references.length > 0 && !sharedAuthorized(grant, grant.installationId)) {
+      throw new MemoryApiError('forbidden', 'shared Context requires a readable v2 scope grant')
     }
     if (deps.rateLimiter && !deps.rateLimiter.check(`context:${grant.installationId}`).allowed) {
       reply.code(429)
@@ -213,6 +281,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
         ? body.repository_hint.branch : null,
       query,
       requestKey: deps.requestKey,
+      selectedReferences: references,
     })
 
     switch (outcome.kind) {
@@ -262,9 +331,6 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       throw new MemoryApiError('invalid_request', 'invalid admit body')
     }
     const grant = await daemonGuard(req.headers.authorization, body.session_id)
-    if (grant.callerType !== 'daemon') {
-      throw new MemoryApiError('forbidden', 'caller type not permitted')
-    }
     const result = await deps.admission.admit({
       installationId: grant.installationId,
       sessionId: body.session_id,
@@ -273,6 +339,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       agent: body.agent,
       adapter: body.adapter,
       grantConfigVersion: grant.configVersion,
+      sharedGrantAuthorized: sharedAuthorized(grant, grant.installationId),
     })
     if (!result.ok) {
       reply.code(result.error === 'pack_not_ready' ? 404 : 409)
@@ -303,9 +370,6 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       throw new MemoryApiError('invalid_request', 'invalid pack consume request')
     }
     const grant = await daemonGuard(req.headers.authorization, query.session_id)
-    if (grant.callerType !== 'daemon') {
-      throw new MemoryApiError('forbidden', 'caller type not permitted')
-    }
     const result = await deps.admission.consume({
       installationId: grant.installationId,
       sessionId: query.session_id,
@@ -338,9 +402,6 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       throw new MemoryApiError('invalid_request', 'invalid receipt body')
     }
     const grant = await daemonGuard(req.headers.authorization, body.session_id)
-    if (grant.callerType !== 'daemon') {
-      throw new MemoryApiError('forbidden', 'caller type not permitted')
-    }
     const result = await deps.admission.receipt({
       injectionId,
       installationId: grant.installationId,

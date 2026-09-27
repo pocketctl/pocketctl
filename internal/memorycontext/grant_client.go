@@ -23,6 +23,11 @@ type GrantTransport interface {
 		*protocol.SessionRegistrationAck, error)
 }
 
+type ScopedGrantTransport interface {
+	RequestScopedContextGrant(ctx context.Context, requestID, sessionID string, installationIDs []string) (
+		*protocol.MemoryContextGrantResult, error)
+}
+
 // GrantClient is the production transport over a relay control sender.
 type GrantClient struct {
 	Send    func(ctx context.Context, payload []byte) error
@@ -152,8 +157,17 @@ func (g *GrantClient) roundTrip(ctx context.Context, requestID string, payload [
 }
 
 func (g *GrantClient) RequestContextGrant(ctx context.Context, requestID, sessionID string) (*protocol.MemoryContextGrantResult, error) {
+	return g.requestContextGrant(ctx, requestID, sessionID, nil)
+}
+
+func (g *GrantClient) RequestScopedContextGrant(ctx context.Context, requestID, sessionID string, installationIDs []string) (*protocol.MemoryContextGrantResult, error) {
+	return g.requestContextGrant(ctx, requestID, sessionID, installationIDs)
+}
+
+func (g *GrantClient) requestContextGrant(ctx context.Context, requestID, sessionID string, installationIDs []string) (*protocol.MemoryContextGrantResult, error) {
 	payload, err := json.Marshal(protocol.MemoryContextGrantRequest{
 		Type: "memory_context_grant", RequestID: requestID, SessionID: sessionID,
+		ScopeInstallationIDs: installationIDs,
 	})
 	if err != nil {
 		return nil, err

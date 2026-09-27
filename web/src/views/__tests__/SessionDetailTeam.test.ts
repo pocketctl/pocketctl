@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { computed, ref } from 'vue'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const sendMessage = vi.hoisted(() => vi.fn())
 const teamSession = {
@@ -29,7 +29,7 @@ vi.mock('../../composables/useTeamSession', () => ({ useTeamSession: () => {
 const api = vi.hoisted(() => ({ listTeams: vi.fn(), listTeamMembers: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), updateTeamSession: vi.fn() }))
 vi.mock('../../services/teamClient', () => api)
 
-async function render() {
+async function render(attachTo?: HTMLElement) {
   const View = (await import('../TeamSessionDetail.vue')).default
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/team/:teamId/session/:id', name: 'team-session', component: View },
@@ -38,7 +38,7 @@ async function render() {
     { path: '/session/:id', component: { template: '<div />' } },
   ] })
   await router.push('/team/ctm_1/session/css_1'); await router.isReady()
-  const wrapper = mount(View, { global: { plugins: [router] } })
+  const wrapper = mount(View, { attachTo, global: { plugins: [router] } })
   await flushPromises()
   return { wrapper, router }
 }
@@ -50,6 +50,7 @@ beforeEach(() => {
   api.listTeamAgentOffers.mockResolvedValue(teamSession.agent_bindings.map(binding => ({ id: binding.offer_id, provider: binding.provider, daemon_id: binding.daemon_id, managed_callable: true })))
   api.listTeamSessions.mockResolvedValue([teamSession])
 })
+afterEach(() => { document.body.innerHTML = '' })
 
 describe('team session detail', () => {
   test('sends a targeted reply through the shared-session event path', async () => {
@@ -68,5 +69,19 @@ describe('team session detail', () => {
     expect(links).toHaveLength(1)
     expect(links[0].attributes('href')).toContain('/session/native-1')
     expect(wrapper.text()).not.toContain('native-2')
+  })
+
+  test('focuses side panels, closes them with Escape, and restores opener focus', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const { wrapper } = await render(host)
+    const opener = wrapper.findAll<HTMLButtonElement>('.header-actions button').find(button => button.text() === 'Context')!
+    opener.element.focus()
+    await opener.trigger('click')
+    const panel = wrapper.get('[data-testid="team-context-panel"]')
+    expect(document.activeElement).toBe(panel.get('button[aria-label="关闭 Context"]').element)
+    await panel.trigger('keydown', { key: 'Escape' })
+    expect(wrapper.find('[data-testid="team-context-panel"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(opener.element)
   })
 })

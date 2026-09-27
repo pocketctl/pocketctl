@@ -1,5 +1,6 @@
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
+import { resetScopedMemoryAuthorization } from './memoryClient'
 import type {
   TeamAgentCandidate,
   TeamAgentOffer,
@@ -10,7 +11,9 @@ import type {
   TeamInvitation,
   TeamMember,
   TeamMessageTargetMode,
+  TeamMemoryBinding,
   TeamProvider,
+  TeamRun,
   TeamSession,
   TeamSessionState,
   TeamSessionSummary,
@@ -165,9 +168,56 @@ export async function dissolveTeam(team: TeamSummary): Promise<void> {
   })
 }
 
+export async function getTeamMemoryBinding(teamID: string): Promise<TeamMemoryBinding | null> {
+  try {
+    const binding = (await teamRequest<{ binding: TeamMemoryBinding | null }>(
+      `/api/team/teams/${encodeURIComponent(teamID)}/memory-binding`,
+    )).binding
+    if (!binding || binding.access_state !== 'available') resetScopedMemoryAuthorization()
+    return binding
+  } catch (error) {
+    if (error instanceof TeamApiError && [403, 404, 409, 503].includes(error.status)) {
+      resetScopedMemoryAuthorization()
+    }
+    throw error
+  }
+}
+
+export async function bindTeamMemory(
+  teamID: string,
+  installationID: string,
+  expectedRevision: number,
+): Promise<TeamMemoryBinding> {
+  const binding = (await teamRequest<{ binding: TeamMemoryBinding }>(
+    `/api/team/teams/${encodeURIComponent(teamID)}/memory-binding`,
+    {
+      method: 'PUT',
+      body: {
+        request_id: requestID(),
+        expected_revision: expectedRevision,
+        installation_id: installationID,
+      },
+    },
+  )).binding
+  resetScopedMemoryAuthorization()
+  return binding
+}
+
+export async function removeTeamMemoryBinding(binding: TeamMemoryBinding): Promise<void> {
+  await teamRequest(`/api/team/teams/${encodeURIComponent(binding.team_id)}/memory-binding`, {
+    method: 'DELETE',
+    body: { request_id: requestID(), expected_revision: binding.revision },
+  })
+  resetScopedMemoryAuthorization()
+}
+
 export async function listTeamTasks(teamID: string, includeDeleted = true): Promise<TeamTask[]> {
   const query = includeDeleted ? '?include_deleted=true' : ''
   return (await teamRequest<{ tasks: TeamTask[] }>(`/api/team/teams/${encodeURIComponent(teamID)}/tasks${query}`)).tasks
+}
+
+export async function getTeamTask(taskID: string): Promise<TeamTask> {
+  return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(taskID)}`)).task
 }
 
 export async function createTeamTask(teamID: string, title: string, background: string): Promise<TeamTask> {
@@ -238,8 +288,58 @@ export async function appendTeamMessage(sessionID: string, input: { content: str
   })
 }
 
-export async function getTeamContext(sessionID: string): Promise<TeamContextSnapshot | null> {
-  return (await teamRequest<{ context: TeamContextSnapshot | null }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/context`)).context
+export async function getTeamContext(sessionID: string, version?: number): Promise<TeamContextSnapshot | null> {
+  const query = version === undefined ? '' : `?version=${version}`
+  return (await teamRequest<{ context: TeamContextSnapshot | null }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/context${query}`)).context
+}
+
+export async function createTeamContext(sessionID: string, input: {
+  expectedRevision: number
+  goal: string
+  consensus: string[]
+  openQuestions: string[]
+  references: TeamContextSnapshot['references']
+}): Promise<TeamContextSnapshot> {
+  return (await teamRequest<{ context: TeamContextSnapshot }>(
+    `/api/team/sessions/${encodeURIComponent(sessionID)}/context`, {
+      method: 'POST',
+      body: {
+        request_id: requestID(), expected_revision: input.expectedRevision,
+        goal: input.goal, consensus: input.consensus, open_questions: input.openQuestions,
+        references: input.references,
+      },
+    },
+  )).context
+}
+
+export async function listTeamRuns(sessionID: string): Promise<TeamRun[]> {
+  return (await teamRequest<{ runs: TeamRun[] }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/runs`)).runs
+}
+
+export async function createTeamRun(sessionID: string, input: {
+  coordinatorOfferID: string
+  contextVersion: number
+  budget?: Partial<TeamRun['budget']>
+}): Promise<TeamRun> {
+  return (await teamRequest<{ run: TeamRun }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/runs`, {
+    method: 'POST',
+    body: {
+      request_id: requestID(), coordinator_offer_id: input.coordinatorOfferID,
+      context_version: input.contextVersion, ...(input.budget ? { budget: input.budget } : {}),
+    },
+  })).run
+}
+
+export async function controlTeamRun(run: TeamRun, action: 'pause' | 'resume' | 'cancel'): Promise<TeamRun> {
+  return (await teamRequest<{ run: TeamRun }>(`/api/team/runs/${encodeURIComponent(run.id)}`, {
+    method: 'PATCH', body: { request_id: requestID(), expected_revision: run.revision, action },
+  })).run
+}
+
+export async function supplementTeamRun(run: TeamRun, content: string): Promise<TeamRun> {
+  return (await teamRequest<{ run: TeamRun }>(`/api/team/runs/${encodeURIComponent(run.id)}/input`, {
+    method: 'POST', body: { request_id: requestID(), expected_revision: run.revision, content },
+  })).run
 }
 
 export async function setTeamSessionParticipant(session: TeamSession, userID: number, active: boolean): Promise<TeamSession> {

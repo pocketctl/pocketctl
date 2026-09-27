@@ -28,7 +28,11 @@ export interface CompiledEpisode {
     artifact_type_counts: Record<string, number>
     classification_distribution: Record<string, number>
     terminal_reason: string | null
-    references: { session_id: string; turn_id: string }
+    references: {
+      session_id: string
+      turn_id: string
+      source?: EpisodeSourceReference
+    }
   }
   compiler_version: string
 }
@@ -49,6 +53,17 @@ export interface EpisodeFacts {
   retryCount: number
   correctionCount: number
   stabilizationMs: number
+  sourceReference?: EpisodeSourceReference | null
+}
+
+export interface EpisodeSourceReference {
+  source_kind: 'team_session'
+  source_version: number
+  team_id: string
+  team_session_id: string
+  team_call_id: string
+  context_version: number
+  read_scope: Record<string, unknown>
 }
 
 export function compileEpisode(facts: EpisodeFacts): CompiledEpisode {
@@ -78,10 +93,40 @@ export function compileEpisode(facts: EpisodeFacts): CompiledEpisode {
       artifact_type_counts: facts.artifactCounts,
       classification_distribution: facts.classificationDistribution,
       terminal_reason: facts.reason,
-      references: { session_id: facts.sessionId, turn_id: facts.turnId },
+      references: {
+        session_id: facts.sessionId,
+        turn_id: facts.turnId,
+        ...(facts.sourceReference ? { source: facts.sourceReference } : {}),
+      },
     },
     compiler_version: EPISODE_COMPILER_VERSION,
   }
+}
+
+export function sourceReferenceFromEvents(
+  events: ReadonlyArray<{ source_provenance?: Record<string, unknown> }>,
+): EpisodeSourceReference | null {
+  for (const event of events) {
+    const source = event.source_provenance ?? {}
+    if (source.source_kind !== 'team_session'
+      || typeof source.source_version !== 'number'
+      || typeof source.team_id !== 'string'
+      || typeof source.team_session_id !== 'string'
+      || typeof source.team_call_id !== 'string'
+      || typeof source.context_version !== 'number'
+      || source.read_scope === null || typeof source.read_scope !== 'object'
+      || Array.isArray(source.read_scope)) continue
+    return {
+      source_kind: 'team_session',
+      source_version: source.source_version,
+      team_id: source.team_id,
+      team_session_id: source.team_session_id,
+      team_call_id: source.team_call_id,
+      context_version: source.context_version,
+      read_scope: source.read_scope as Record<string, unknown>,
+    }
+  }
+  return null
 }
 
 export interface EventObservation {

@@ -22,6 +22,16 @@ import {
 } from './dispatch-repository.js'
 import type { TeamEvent } from './types.js'
 import { TeamContextDeliveryService } from './context-delivery.js'
+import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js'
+import type { TeamMemoryContextBridge } from './memory-context-bridge.js'
+import {
+  teamContextInjectionFailuresTotal,
+  teamDispatchLatencySeconds,
+  teamDispatchTotal,
+  teamDuplicateSuppressedTotal,
+  teamReceiptLatencySeconds,
+  teamUncertainTotal,
+} from '../metrics.js'
 
 export interface TeamDispatchTransport {
   send(input: { daemonId: string; ownerUserId: number; capability: string; command: Record<string, unknown> }): boolean
@@ -46,21 +56,34 @@ export class TeamDispatchService {
     private readonly pool: pg.Pool,
     private readonly transport: TeamDispatchTransport,
     private readonly notifier: DispatchNotifier = {},
-    options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+    options: {
+      timeoutMs?: number
+      pollIntervalMs?: number
+      memorySources?: TeamMemorySourceProjectorLike
+      memoryContextBridge?: TeamMemoryContextBridge
+    } = {},
   ) {
-    this.repository = new TeamDispatchRepository(pool)
+    this.repository = new TeamDispatchRepository(pool, options.memorySources)
     this.contextDelivery = new TeamContextDeliveryService(pool)
+    this.memoryContextBridge = options.memoryContextBridge
     this.timeoutMs = options.timeoutMs ?? 30_000
     this.pollIntervalMs = Math.max(25, options.pollIntervalMs ?? 250)
   }
 
+  private readonly memoryContextBridge?: TeamMemoryContextBridge
+
   enqueue(callIds: string[]): void {
     for (const callId of callIds) {
-      if (this.activeDispatches.has(callId)) continue
+      if (this.activeDispatches.has(callId)) {
+        teamDuplicateSuppressedTotal.inc({ source: 'active_dispatch' })
+        continue
+      }
       const dispatch = this.dispatch(callId).catch(async error => {
-      console.error('[team-dispatch] dispatch failed', { callId, error })
-      await this.contextDelivery.stop(callId, 'uncertain', 'dispatch_internal_error').catch(() => {})
-      await this.repository.stop(callId, 'uncertain', 'dispatch_internal_error').catch(() => {})
+        teamDispatchTotal.inc({ operation: 'unknown', outcome: 'internal_error' })
+        teamUncertainTotal.inc({ reason: 'internal_error' })
+        console.error('[team-dispatch] dispatch failed', { callId, error })
+        await this.contextDelivery.stop(callId, 'uncertain', 'dispatch_internal_error').catch(() => {})
+        await this.repository.stop(callId, 'uncertain', 'dispatch_internal_error').catch(() => {})
       }).finally(() => {
         if (this.activeDispatches.get(callId) === dispatch) this.activeDispatches.delete(callId)
       })
@@ -98,15 +121,39 @@ export class TeamDispatchService {
   }
 
   async dispatch(callId: string): Promise<void> {
+    const startedAt = process.hrtime.bigint()
     const claimed = await this.repository.claim(callId)
     if (!claimed) return
+    const metricOperation = claimed.authorization.operation
     const ownerUserId = claimed.authorization.owner_user_id
+    console.info('[team-observability] call correlation', {
+      requestId: claimed.providerRequestId,
+      runId: claimed.runId,
+      callId: claimed.callId,
+      operation: metricOperation,
+    })
     let teamContext
+    let contextFailureStage: 'memory_prepare' | 'context_prepare' = 'memory_prepare'
     try {
-      teamContext = await this.contextDelivery.prepare(callId)
+      let memoryContext
+      try {
+        memoryContext = await this.memoryContextBridge?.prepareDispatch({
+          callId,
+          receiverUserId: ownerUserId,
+        })
+      } catch (error) {
+        teamContextInjectionFailuresTotal.inc({ stage: 'memory_prepare' })
+        throw error
+      }
+      contextFailureStage = 'context_prepare'
+      teamContext = await this.contextDelivery.prepare(callId, memoryContext)
     } catch (error) {
+      if (contextFailureStage === 'context_prepare') teamContextInjectionFailuresTotal.inc({ stage: 'context_prepare' })
       await this.repository.stop(callId, 'blocked', 'context_snapshot_unavailable')
-      throw error
+      teamDispatchTotal.inc({ operation: metricOperation, outcome: 'context_blocked' })
+      teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'context_blocked' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
+      console.error('[team-dispatch] context preparation failed', { callId, error })
+      return
     }
     const { plan, whitelist } = await db.getUserPlanAndWhitelist(this.pool, ownerUserId)
     const entitlements = resolveEntitlements(plan, whitelist)
@@ -135,6 +182,8 @@ export class TeamDispatchService {
       if (!decision.allowed) {
         await this.contextDelivery.stop(callId, 'failed', decision.reason)
         await this.repository.stop(callId, 'blocked', decision.reason)
+        teamDispatchTotal.inc({ operation: metricOperation, outcome: 'quota_blocked' })
+        teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'quota_blocked' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
         return
       }
       reservationId = decision.reservationId
@@ -153,6 +202,8 @@ export class TeamDispatchService {
         const reason = admitted.kind === 'conflict' ? 'admission_conflict' : admitted.reason ?? 'session_not_found'
         await this.contextDelivery.stop(callId, 'failed', reason)
         await this.repository.stop(callId, 'blocked', reason)
+        teamDispatchTotal.inc({ operation: metricOperation, outcome: 'admission_blocked' })
+        teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'admission_blocked' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
         return
       }
       const decision = admitted.kind === 'resume' ? admitted.decision : {
@@ -164,6 +215,8 @@ export class TeamDispatchService {
       if (!decision.allowed) {
         await this.contextDelivery.stop(callId, 'failed', decision.reason)
         await this.repository.stop(callId, 'blocked', decision.reason)
+        teamDispatchTotal.inc({ operation: metricOperation, outcome: 'quota_blocked' })
+        teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'quota_blocked' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
         return
       }
       reservationId = decision.reservationId
@@ -174,6 +227,10 @@ export class TeamDispatchService {
     if (reused) {
       await this.contextDelivery.stop(callId, 'uncertain', 'request_already_admitted')
       await this.repository.stop(callId, 'uncertain', 'request_already_admitted')
+      teamDuplicateSuppressedTotal.inc({ source: 'admission' })
+      teamUncertainTotal.inc({ reason: 'already_admitted' })
+      teamDispatchTotal.inc({ operation: metricOperation, outcome: 'duplicate' })
+      teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'duplicate' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
       return
     }
     const command = {
@@ -194,9 +251,13 @@ export class TeamDispatchService {
       await this.settleNotSent(claimed, reservationId, operation)
       await this.contextDelivery.stop(callId, 'failed', 'daemon_unavailable')
       await this.repository.stop(callId, 'blocked', 'daemon_unavailable')
+      teamDispatchTotal.inc({ operation: metricOperation, outcome: 'daemon_unavailable' })
+      teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'daemon_unavailable' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
       return
     }
     await this.contextDelivery.markDispatched(callId)
+    teamDispatchTotal.inc({ operation: metricOperation, outcome: 'sent' })
+    teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'sent' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
     const timer = setTimeout(() => {
       this.receiptTimers.delete(claimed.callId)
       void this.markTimedOut(claimed, reservationId, operation)
@@ -233,6 +294,9 @@ export class TeamDispatchService {
   private async markTimedOut(claimed: ClaimedDispatch, reservationId: string | null, operation: QuotaOperation): Promise<void> {
     await this.repository.stop(claimed.callId, 'uncertain', 'dispatch_timeout')
     await this.contextDelivery.stop(claimed.callId, 'uncertain', 'dispatch_timeout')
+    teamUncertainTotal.inc({ reason: 'dispatch_timeout' })
+    teamDispatchTotal.inc({ operation: claimed.authorization.operation, outcome: 'timeout' })
+    teamReceiptLatencySeconds.observe({ operation: claimed.authorization.operation, status: 'timeout' }, this.timeoutMs / 1_000)
     if (!reservationId) return
     await markQuotaReservationUncertain(this.pool, {
       reservationId,
@@ -266,22 +330,38 @@ export class TeamDispatchService {
     if (message.type === 'collaboration_context_receipt') {
       const teamContext = message.team_context as Record<string, unknown> | undefined
       if (!teamContext) return
-      await this.contextDelivery.recordReceipt({
+      const recorded = await this.contextDelivery.recordReceipt({
         callId: authorization.call_id, daemonId, ownerUserId,
         contextVersion: Number(teamContext.context_version), contentHash: String(teamContext.content_hash ?? ''),
         payloadHash: String(teamContext.payload_hash ?? ''), accepted: message.status === 'accepted',
         outcome: typeof message.reason === 'string' ? message.reason : null,
       })
+      if (!recorded || message.status !== 'accepted') {
+        teamContextInjectionFailuresTotal.inc({ stage: !recorded ? 'receipt_mismatch' : 'receipt_rejected' })
+      }
       return
     }
     if (message.type !== 'collaboration_dispatch_receipt') return
     this.clearReceiptTimer(authorization.call_id)
     const status = message.status === 'accepted' ? 'accepted' : 'rejected'
     const reason = typeof message.reason === 'string' ? message.reason : null
+    if (accounting?.state === status) teamDuplicateSuppressedTotal.inc({ source: 'receipt_replay' })
     if (nativeSessionId && authorization.operation === 'create') {
       await this.repository.bindNativeSession(authorization.call_id, daemonId, ownerUserId, nativeSessionId)
     }
-    if (!await this.repository.recordReceipt(authorization.call_id, daemonId, ownerUserId, status, reason)) return
+    if (!await this.repository.recordReceipt(authorization.call_id, daemonId, ownerUserId, status, reason)) {
+      teamDuplicateSuppressedTotal.inc({ source: 'receipt' })
+      return
+    }
+    if (reason === 'duplicate_request') {
+      teamDuplicateSuppressedTotal.inc({ source: 'daemon' })
+      teamUncertainTotal.inc({ reason: 'duplicate_request' })
+    }
+    const dispatchedAt = accounting?.dispatched_at ? new Date(accounting.dispatched_at).getTime() : Number.NaN
+    if (Number.isFinite(dispatchedAt)) {
+      teamReceiptLatencySeconds.observe({ operation: authorization.operation, status }, Math.max(0, (Date.now() - dispatchedAt) / 1_000))
+    }
+    teamDispatchTotal.inc({ operation: authorization.operation, outcome: status })
     if (status === 'accepted' && authorization.operation === 'message' && nativeSessionId) {
       await this.settleAcceptedMessage(accounting, nativeSessionId)
     }
@@ -314,6 +394,7 @@ export class TeamDispatchService {
       await new Promise(resolve => setTimeout(resolve, 20 * (attempt + 1)))
     }
     await this.repository.stop(accounting.call_id, 'uncertain', 'create_accounting_pending')
+    teamUncertainTotal.inc({ reason: 'accounting_pending' })
   }
 
   private async settleAcceptedMessage(accounting: any, nativeSessionId: string): Promise<void> {
@@ -339,5 +420,6 @@ export class TeamDispatchService {
       this.repository.markDaemonUncertain(daemonId),
       this.contextDelivery.markDaemonUncertain(daemonId),
     ])
+    teamUncertainTotal.inc({ reason: 'daemon_disconnected' })
   }
 }

@@ -27,6 +27,7 @@ export type TeamCallState = 'pending' | 'dispatched' | 'accepted' | 'completed' 
 export type TeamEventKind = 'member_message' | 'agent_message' | 'status' | 'context' | 'run' | 'system'
 export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
 export type TeamProvider = 'codex' | 'claude-code'
+export type TeamMemoryAccessState = 'available' | 'forbidden' | 'installation_paused' | 'feature_disabled'
 
 export const TEAM_DAEMON_CAPABILITIES = Object.freeze([
   'team_collaboration_dispatch_v1',
@@ -225,10 +226,14 @@ export interface TeamCall {
 export interface TeamMemoryBinding {
   id: TeamMemoryBindingID
   team_id: TeamID
+  owner_scope_kind: 'personal' | 'team' | 'organization'
   owner_scope_id: string
   installation_id: string
   revision: number
   created_by_user_id: number
+  access_state: TeamMemoryAccessState
+  permissions: string[]
+  manageable: boolean
   created_at: string
   updated_at: string
 }

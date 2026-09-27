@@ -5,6 +5,8 @@ import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.j
 import { TeamEventRepository } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamEvent, TeamMessageTargetMode, TeamProvider, TeamSessionState } from './types.js'
+import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js'
+import type { TeamMemoryContextBridge } from './memory-context-bridge.js'
 
 export interface TeamSessionView {
   id: string
@@ -39,7 +41,12 @@ function hash(value: unknown): string {
 export class TeamSessionService {
   private readonly events = new TeamEventRepository()
 
-  constructor(private readonly pool: pg.Pool, private readonly notifier: SessionNotifier = {}) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly notifier: SessionNotifier = {},
+    private readonly memorySources?: TeamMemorySourceProjectorLike,
+    private readonly memoryContextBridge?: TeamMemoryContextBridge,
+  ) {}
 
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
@@ -228,6 +235,11 @@ export class TeamSessionService {
   }
 
   async addParticipant(input: { sessionId: string; actorUserId: number; userId: number; expectedRevision: number; requestId: string }): Promise<TeamSessionView> {
+    await this.memoryContextBridge?.validateParticipantAddition({
+      sessionId: input.sessionId,
+      actorUserId: input.actorUserId,
+      participantUserId: input.userId,
+    })
     return this.changeParticipant({ ...input, active: true })
   }
 
@@ -258,6 +270,14 @@ export class TeamSessionService {
         if (ownsBinding.rows[0]) throw new TeamRepositoryError('invalid_state', 'remove the member Agent bindings first')
       }
       if (current.rows[0]) {
+        if (!input.active && current.rows[0].state === 'active') {
+          await this.memorySources?.revokeReaderSession?.(client, {
+            teamSessionId: input.sessionId,
+            userId: input.userId,
+            participantRevision: Number(current.rows[0].revision),
+            reason: 'participant_removed',
+          })
+        }
         await client.query(
           `UPDATE collaboration_session_participants SET state = $3::varchar, revision = revision + 1,
              updated_at = NOW(), removed_at = CASE WHEN $3::varchar = 'removed' THEN NOW() ELSE NULL END

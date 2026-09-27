@@ -11,14 +11,23 @@ import (
 
 // CompileRequest is the POST /api/v1/memory/context/compile body.
 type CompileRequest struct {
-	SchemaVersion     int             `json:"schema_version"`
-	ClientRequestID   string          `json:"client_request_id"`
-	SessionID         string          `json:"session_id"`
-	Agent             string          `json:"agent"`
-	AdapterCapability string          `json:"adapter_capability"`
-	RepositoryHint    *RepositoryHint `json:"repository_hint,omitempty"`
-	Query             string          `json:"query"`
-	RequestedAt       time.Time       `json:"requested_at"`
+	SchemaVersion      int                 `json:"schema_version"`
+	ClientRequestID    string              `json:"client_request_id"`
+	SessionID          string              `json:"session_id"`
+	Agent              string              `json:"agent"`
+	AdapterCapability  string              `json:"adapter_capability"`
+	RepositoryHint     *RepositoryHint     `json:"repository_hint,omitempty"`
+	Query              string              `json:"query"`
+	RequestedAt        time.Time           `json:"requested_at"`
+	SelectedReferences []SelectedReference `json:"selected_references,omitempty"`
+}
+
+type SelectedReference struct {
+	SourceKind     string `json:"source_kind"`
+	SourceID       string `json:"source_id"`
+	SourceVersion  string `json:"source_version"`
+	OwnerScopeID   string `json:"owner_scope_id"`
+	InstallationID string `json:"installation_id"`
 }
 
 // RepositoryHint is an applicability hint only — never an authorization.
@@ -88,6 +97,7 @@ type PreparedContext struct {
 	providerOrigin string
 	grant          string
 	receiptOnce    sync.Once
+	receiptMu      sync.Mutex
 }
 
 // DeliveryResult reports the native adapter outcome for the receipt.

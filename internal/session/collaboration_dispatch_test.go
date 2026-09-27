@@ -20,6 +20,29 @@ func collaborationAuth(operation, callID string) *protocol.CollaborationAuthoriz
 	}
 }
 
+func TestPrepareCollaborationContextBindsMemorySelectionIntoPayloadHash(t *testing.T) {
+	text := "team context"
+	memorySelection := &protocol.CollaborationMemoryContext{
+		SchemaVersion: 1, InstallationID: "installation", OwnerScopeID: "scope",
+		References: []protocol.CollaborationMemoryReference{{
+			SourceKind: "memory_claim", SourceID: "claim", SourceVersion: "version",
+			OwnerScopeID: "scope", InstallationID: "installation",
+		}},
+	}
+	digest := sha256.Sum256([]byte(text + "\n" + collaborationMemorySelectionText(memorySelection)))
+	value := &protocol.CollaborationContext{
+		SchemaVersion: 1, ContextVersion: 2, ContentHash: string(make([]byte, 64)),
+		PayloadHash: hex.EncodeToString(digest[:]), StableText: text, MemoryContext: memorySelection,
+	}
+	if _, err := prepareCollaborationContext(value); err != nil {
+		t.Fatalf("valid memory selection rejected: %v", err)
+	}
+	value.MemoryContext.References[0].SourceID = "other-claim"
+	if _, err := prepareCollaborationContext(value); !errors.Is(err, ErrCollaborationAuthorization) {
+		t.Fatal("tampered memory selection was accepted")
+	}
+}
+
 func TestValidateCollaborationAuthorization(t *testing.T) {
 	if err := ValidateCollaborationAuthorization(collaborationAuth("message", "call"), "message"); err != nil {
 		t.Fatal(err)

@@ -259,3 +259,57 @@ export const extensionV2GrantsTotal = new Counter({
   labelNames: ['caller', 'result', 'scope_count_bucket'],
   registers: [registry],
 })
+
+// Team collaboration metrics intentionally use closed-set labels only. Request,
+// run, call, session, Team, user, daemon, and provider identifiers belong in
+// structured correlation logs, never Prometheus labels.
+export const teamDispatchTotal = new Counter({
+  name: 'pocketctl_team_dispatch_total',
+  help: 'Team Agent dispatch attempts by operation and bounded outcome.',
+  labelNames: ['operation', 'outcome'] as const,
+  registers: [registry],
+})
+
+export const teamDispatchLatencySeconds = new Histogram({
+  name: 'pocketctl_team_dispatch_latency_seconds',
+  help: 'Time from a pending Team call claim attempt to transport dispatch.',
+  labelNames: ['operation', 'outcome'] as const,
+  buckets: [.01, .025, .05, .1, .25, .5, 1, 2, 5, 10],
+  registers: [registry],
+})
+
+export const teamReceiptLatencySeconds = new Histogram({
+  name: 'pocketctl_team_receipt_latency_seconds',
+  help: 'Time from Team call dispatch to an authenticated daemon receipt.',
+  labelNames: ['operation', 'status'] as const,
+  buckets: [.01, .025, .05, .1, .25, .5, 1, 2, 5, 10, 30],
+  registers: [registry],
+})
+
+export const teamUncertainTotal = new Counter({
+  name: 'pocketctl_team_uncertain_total',
+  help: 'Team operations entering an uncertain state by bounded reason.',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+})
+
+export const teamDuplicateSuppressedTotal = new Counter({
+  name: 'pocketctl_team_duplicate_suppressed_total',
+  help: 'Duplicate Team work suppressed before execution by bounded source.',
+  labelNames: ['source'] as const,
+  registers: [registry],
+})
+
+export const teamBudgetStopsTotal = new Counter({
+  name: 'pocketctl_team_budget_stops_total',
+  help: 'Automatic Team runs stopped by a frozen budget dimension.',
+  labelNames: ['dimension'] as const,
+  registers: [registry],
+})
+
+export const teamContextInjectionFailuresTotal = new Counter({
+  name: 'pocketctl_team_context_injection_failures_total',
+  help: 'Team context preparation or authenticated receipt failures by bounded stage.',
+  labelNames: ['stage'] as const,
+  registers: [registry],
+})

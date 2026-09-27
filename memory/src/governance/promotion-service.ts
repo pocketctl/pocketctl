@@ -12,7 +12,9 @@ import { loadEffectiveReviewPolicySnapshot } from './review-policy.js'
  * the proposer selects the source Claim's current Version and 1–8 Evidence
  * items, Memory re-redacts the excerpts into an immutable target-side copy,
  * and the proposal transaction never publishes. Shared rows never store a
- * personal Evidence ID, Session ID, event ID, artifact ID, or locator.
+ * personal Evidence ID, raw Session ID, source event ID, or artifact ID.
+ * A bounded Team-source locator may survive so published evidence remains
+ * traceable to the shared event/read-scope versions that authorized capture.
  */
 
 export type PromotionErrorCode =
@@ -71,6 +73,15 @@ interface SourceEvidenceRow {
   excerpt: string
   excerpt_hash: Buffer | string
   occurred_at: Date | null
+  locator: Record<string, unknown>
+}
+
+function sharedSourceLocator(locator: Record<string, unknown>): Record<string, unknown> | null {
+  const source = locator.source_provenance
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return null
+  const record = source as Record<string, unknown>
+  if (record.source_kind !== 'team_session') return null
+  return { source_provenance: record }
 }
 
 interface TargetClaimRow {
@@ -217,7 +228,7 @@ export function createPromotionService(pool: pg.Pool) {
 
           // Explicit evidence ownership + re-redaction.
           const evidence = await client.query<SourceEvidenceRow>(`
-            SELECT evidence_id, version_id, evidence_kind, excerpt, excerpt_hash, occurred_at
+            SELECT evidence_id, version_id, evidence_kind, excerpt, excerpt_hash, occurred_at, locator
             FROM knowledge_evidence
             WHERE installation_id = $1 AND evidence_id = ANY($2::uuid[])
             ORDER BY ordinal ASC
@@ -246,6 +257,7 @@ export function createPromotionService(pool: pg.Pool) {
                 ? row.excerpt_hash.toString('hex')
                 : String(row.excerpt_hash),
               occurred_at: row.occurred_at,
+              sanitized_locator: sharedSourceLocator(row.locator ?? {}),
             }
           })
 
@@ -318,10 +330,12 @@ export function createPromotionService(pool: pg.Pool) {
               INSERT INTO memory_promotion_evidence
                 (candidate_revision_id, ordinal, evidence_kind, excerpt, excerpt_hash,
                  sanitized_locator, source_evidence_hash, occurred_at)
-              VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)
+              VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
             `, [
               candidateRevisionId, item.ordinal, item.evidence_kind, item.excerpt,
-              item.excerpt_hash, item.source_evidence_hash, item.occurred_at,
+              item.excerpt_hash,
+              item.sanitized_locator,
+              item.source_evidence_hash, item.occurred_at,
             ])
           }
           await client.query(`

@@ -515,6 +515,7 @@ export class TeamRepository {
          WHERE membership_id = $1 RETURNING *`,
         [membership.rows[0].membership_id],
       )
+      await this.releaseTaskHolders(client, input.teamId, input.actorUserId)
       await this.revokeOwnerOffers(client, input.teamId, input.actorUserId)
       await client.query(
         `UPDATE collaboration_teams SET revision = revision + 1, updated_at = NOW() WHERE team_id = $1`,
@@ -556,6 +557,7 @@ export class TeamRepository {
          WHERE membership_id = $1 RETURNING *`,
         [input.membershipId],
       )
+      await this.releaseTaskHolders(client, input.teamId, Number(current.user_id))
       await this.revokeOwnerOffers(client, input.teamId, Number(current.user_id))
       await client.query(
         `UPDATE collaboration_teams SET revision = revision + 1, updated_at = NOW() WHERE team_id = $1`,
@@ -782,6 +784,22 @@ export class TeamRepository {
     for (const daemonId of new Set(revoked.rows.map(row => row.daemon_id))) {
       await this.releaseDaemonBindingIfUnused(client, daemonId, teamId)
     }
+  }
+
+  private async releaseTaskHolders(client: Queryable, teamId: string, userId: number): Promise<void> {
+    await client.query(
+      `WITH released AS (
+         UPDATE team_task_holders h
+         SET state = 'released', revision = h.revision + 1, updated_at = NOW(), released_at = NOW()
+         FROM team_tasks t
+         WHERE h.task_id = t.task_id AND t.team_id = $1 AND h.user_id = $2 AND h.state = 'active'
+         RETURNING h.task_id
+       )
+       UPDATE team_tasks t
+       SET revision = t.revision + 1, updated_at = NOW()
+       FROM released WHERE t.task_id = released.task_id`,
+      [teamId, userId],
+    )
   }
 
   private async releaseDaemonBindingIfUnused(client: Queryable, daemonId: string, teamId: string): Promise<void> {

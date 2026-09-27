@@ -260,3 +260,24 @@ describe('extension platform metrics registration', () => {
     expect(snapshot.values[0].value).toBe(3)
   })
 })
+
+describe('Team collaboration metrics registration', () => {
+  test('registers bounded aggregate metrics without correlation identifiers', async () => {
+    const metrics = await registry.getMetricsAsJSON()
+    const names = new Set(metrics.map((family: { name: string }) => family.name))
+    for (const name of [
+      'pocketctl_team_dispatch_total',
+      'pocketctl_team_dispatch_latency_seconds',
+      'pocketctl_team_receipt_latency_seconds',
+      'pocketctl_team_uncertain_total',
+      'pocketctl_team_duplicate_suppressed_total',
+      'pocketctl_team_budget_stops_total',
+      'pocketctl_team_context_injection_failures_total',
+    ]) expect(names.has(name)).toBe(true)
+
+    const text = await registry.metrics()
+    for (const forbidden of [
+      'request_id', 'run_id', 'call_id', 'session_id', 'team_id', 'user_id', 'daemon_id',
+    ]) expect(text).not.toContain(`${forbidden}=`)
+  })
+})

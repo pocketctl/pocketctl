@@ -63,6 +63,24 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_collaboration_daemon_bindings_team
       ON collaboration_team_daemon_bindings(team_id, owner_user_id);
 
+    CREATE TABLE IF NOT EXISTS team_memory_bindings (
+      binding_id TEXT PRIMARY KEY,
+      team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,
+      owner_scope_kind TEXT NOT NULL CHECK (owner_scope_kind IN ('personal', 'team', 'organization')),
+      owner_scope_id UUID NOT NULL,
+      installation_id UUID NOT NULL REFERENCES extension_installations(installation_id) ON DELETE RESTRICT,
+      state VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'removed')),
+      revision BIGINT NOT NULL DEFAULT 1,
+      created_by_user_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      removed_at TIMESTAMPTZ
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_team_memory_binding_active
+      ON team_memory_bindings(team_id) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS idx_team_memory_bindings_installation
+      ON team_memory_bindings(installation_id, state, team_id);
+
     CREATE TABLE IF NOT EXISTS team_agent_offers (
       offer_id TEXT PRIMARY KEY,
       team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,

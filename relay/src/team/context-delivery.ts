@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
+import type { TeamMemoryContextSelection } from './memory-context-bridge.js'
 
 export const TEAM_CONTEXT_INPUT_BUDGET_BYTES = 32_000
 
@@ -11,10 +12,21 @@ export interface CollaborationContextDelivery {
   payload_hash: string
   stable_text: string
   truncated: boolean
+  memory_context?: TeamMemoryContextSelection
 }
 
 function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function memorySelectionText(selection: TeamMemoryContextSelection): string {
+  return [
+    `${selection.schema_version}|${selection.installation_id}|${selection.owner_scope_id}`,
+    ...selection.references.map(reference => [
+      reference.source_kind, reference.source_id, reference.source_version,
+      reference.owner_scope_id ?? '', reference.installation_id ?? '',
+    ].join('|')),
+  ].join('\n')
 }
 
 function appendWithin(parts: string[], candidate: string, budget: number): boolean {
@@ -72,7 +84,7 @@ export function buildTeamContextStableText(input: {
 export class TeamContextDeliveryService {
   constructor(private readonly pool: pg.Pool, private readonly budgetBytes = TEAM_CONTEXT_INPUT_BUDGET_BYTES) {}
 
-  async prepare(callId: string): Promise<CollaborationContextDelivery> {
+  async prepare(callId: string, memoryContext?: TeamMemoryContextSelection | null): Promise<CollaborationContextDelivery> {
     const call = (await this.pool.query(
       `SELECT call.call_id, call.binding_id, call.context_version, call.context_snapshot_hash,
               call.history_through_event_seq, call.team_session_id,
@@ -107,10 +119,16 @@ export class TeamContextDeliveryService {
       context_version: contextVersion,
       content_hash: contentHash,
       history_through_event_seq: Number(call.history_through_event_seq),
-      payload_hash: hash(stableText),
+      payload_hash: hash(memoryContext
+        ? `${stableText}\n${memorySelectionText(memoryContext)}`
+        : stableText),
       stable_text: stableText,
       truncated,
+      ...(memoryContext ? { memory_context: memoryContext } : {}),
     }
+    const payloadBytes = Buffer.byteLength(memoryContext
+      ? `${stableText}\n${memorySelectionText(memoryContext)}`
+      : stableText, 'utf8')
     const persisted = await this.pool.query(
       `INSERT INTO collaboration_context_deliveries
         (delivery_id, call_id, binding_id, context_version, content_hash, history_through_event_seq,
@@ -123,7 +141,7 @@ export class TeamContextDeliveryService {
          AND collaboration_context_deliveries.payload_hash = EXCLUDED.payload_hash
        RETURNING delivery_id`,
       [`ccd_${randomUUID()}`, callId, call.binding_id, delivery.context_version, delivery.content_hash,
-        delivery.history_through_event_seq, delivery.payload_hash, Buffer.byteLength(stableText, 'utf8'), delivery.truncated],
+        delivery.history_through_event_seq, delivery.payload_hash, payloadBytes, delivery.truncated],
     )
     if (!persisted.rows[0]) throw new Error('collaboration context delivery binding conflict')
     return delivery

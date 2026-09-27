@@ -202,6 +202,40 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
     expect(audit.rows.some(row => row.action === 'candidate_proposed' && row.next_state === 'proposed')).toBe(true)
   })
 
+  test('preserves only bounded Team source provenance in the proposal evidence package', async () => {
+    await resetGovernance()
+    const sourceProvenance = {
+      source_kind: 'team_session', source_version: 1,
+      team_id: 'ctm_1', team_session_id: 'css_1', team_call_id: 'ccl_1',
+      team_event_ids: ['cev_reply_1'], team_event_seqs: [12],
+      author_offer_id: 'cao_1', context_version: 3,
+      read_scope: {
+        kind: 'team_session', team_id: 'ctm_1', team_session_id: 'css_1',
+        team_memory_binding_id: 'cmbd_1', team_memory_binding_revision: 4,
+        target_installation_id: TEAM, target_owner_scope_kind: 'team',
+        target_owner_scope_id: TEAM, participant_user_id: 7, participant_revision: 2,
+      },
+    }
+    await pool.query(`
+      UPDATE knowledge_evidence SET locator = $2::jsonb
+      WHERE installation_id = $1 AND evidence_id = $3
+    `, [PERSONAL, JSON.stringify({
+      key: 'candidate_acceptance',
+      source_provenance: sourceProvenance,
+      source_event_id: 'must-not-cross-scope',
+    }), EVIDENCE_1])
+    const proposed = await service.propose({
+      grant: grant(), sourceInstallationId: PERSONAL, sourceClaimId: SOURCE_CLAIM,
+      evidenceIds: [EVIDENCE_1], idempotencyDigest: 'team-source-provenance',
+    })
+    const stored = await pool.query<{ sanitized_locator: Record<string, unknown> }>(`
+      SELECT sanitized_locator FROM memory_promotion_evidence
+      WHERE candidate_revision_id = $1
+    `, [proposed.candidateRevision.candidate_revision_id])
+    expect(stored.rows[0].sanitized_locator).toEqual({ source_provenance: sourceProvenance })
+    expect(JSON.stringify(stored.rows[0])).not.toContain('must-not-cross-scope')
+  })
+
   test('applies the active review policy TTL and evidence cap when proposing', async () => {
     await resetGovernance()
     const policies = createReviewPolicyRepository(pool)

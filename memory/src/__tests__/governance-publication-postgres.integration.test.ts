@@ -123,9 +123,23 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
     `, [PERSONAL, EPISODE])
     await pool.query(`
       INSERT INTO knowledge_evidence
-        (evidence_id, installation_id, version_id, episode_id, ordinal, evidence_kind, excerpt, excerpt_hash, occurred_at)
-      VALUES ($1, $2, $3, $4, 1, 'episode', 'publish excerpt', 'hash', NOW())
-    `, [EVIDENCE, PERSONAL, SOURCE_VERSION, EPISODE])
+        (evidence_id, installation_id, version_id, episode_id, ordinal, evidence_kind,
+         locator, excerpt, excerpt_hash, occurred_at)
+      VALUES ($1, $2, $3, $4, 1, 'episode', $5::jsonb, 'publish excerpt', 'hash', NOW())
+    `, [EVIDENCE, PERSONAL, SOURCE_VERSION, EPISODE, JSON.stringify({
+      source_provenance: {
+        source_kind: 'team_session', source_version: 1,
+        team_id: 'ctm_1', team_session_id: 'css_1', team_call_id: 'ccl_1',
+        team_event_ids: ['cev_reply_1'], team_event_seqs: [12],
+        author_offer_id: 'cao_1', context_version: 3,
+        read_scope: {
+          kind: 'team_session', team_id: 'ctm_1', team_session_id: 'css_1',
+          team_memory_binding_id: 'cmbd_1', team_memory_binding_revision: 4,
+          target_installation_id: TEAM, target_owner_scope_kind: 'team',
+          target_owner_scope_id: TEAM, participant_user_id: 7, participant_revision: 2,
+        },
+      },
+    })])
 
     const memberships: Array<[string, string[]]> = [
       [PROPOSER, ['contributor']],
@@ -194,7 +208,8 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
     expect(version.rows[0].source_promotion_candidate_id).toBe(candidateId)
 
     const evidence = await pool.query(`
-      SELECT excerpt, excerpt_hash, visibility, source_evidence_hash, contributor_membership_id FROM knowledge_evidence
+      SELECT excerpt, excerpt_hash, visibility, source_evidence_hash,
+             contributor_membership_id, locator FROM knowledge_evidence
       WHERE installation_id = $1 AND version_id = $2
     `, [TEAM, result.versionId])
     expect(evidence.rows[0].visibility).toBe('shared')
@@ -202,6 +217,13 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
     expect(evidence.rows[0].excerpt_hash).toEqual(
       createHash('sha256').update(evidence.rows[0].excerpt, 'utf8').digest(),
     )
+    expect(evidence.rows[0].locator).toMatchObject({
+      source_provenance: {
+        team_id: 'ctm_1', team_session_id: 'css_1', team_call_id: 'ccl_1',
+        team_event_ids: ['cev_reply_1'], author_offer_id: 'cao_1',
+        read_scope: { team_memory_binding_revision: 4, participant_revision: 2 },
+      },
+    })
 
     const authority = await pool.query(`
       SELECT counted_decision_ids, publisher_membership_id, source_scope_kind

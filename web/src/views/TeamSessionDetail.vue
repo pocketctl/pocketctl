@@ -20,8 +20,9 @@
         <div class="title-copy"><span>团队共享会话</span><strong>{{ session?.title || '加载中…' }}</strong></div>
         <div class="header-actions">
           <span v-if="session" :class="['session-state', session.state]">{{ stateLabel(session.state) }}</span>
-          <button type="button" :class="{ active: showContext }" @click="showContext = !showContext; showParticipants = false">Context</button>
-          <button type="button" :class="{ active: showParticipants }" @click="showParticipants = !showParticipants; showContext = false">成员</button>
+          <button type="button" :class="{ active: showContext }" @click="showContext = !showContext; showParticipants = false; showRun = false">Context</button>
+          <button v-if="autorunEnabled || latestRun" type="button" :class="{ active: showRun }" @click="showRun = !showRun; showContext = false; showParticipants = false">运行</button>
+          <button type="button" :class="{ active: showParticipants }" @click="showParticipants = !showParticipants; showContext = false; showRun = false">成员</button>
           <button v-if="isCreator && session" type="button" @click="togglePaused">{{ session.state === 'paused' ? '恢复' : '暂停' }}</button>
         </div>
       </header>
@@ -54,8 +55,27 @@
       </footer>
     </main>
 
-    <TeamContextPanel v-if="showContext" :context="context" @close="showContext = false" />
+    <TeamContextPanel v-if="showContext && session" :context="context" :session="session" :current-user-id="currentUserID" @saved="context = $event" @close="showContext = false" />
     <TeamSessionParticipants v-if="showParticipants && session" :session="session" :members="members" :current-user-id="currentUserID" @updated="session = $event" @close="showParticipants = false" />
+    <TeamRunPanel
+      v-if="showRun && session"
+      :session="session"
+      :run="latestRun"
+      :context="runContext"
+      :current-context="context"
+      :task="task"
+      :members="members"
+      :current-user-id="currentUserID"
+      :autorun-enabled="autorunEnabled"
+      :busy="runBusy"
+      :error="runError"
+      @close="showRun = false"
+      @start="createRun"
+      @control="controlRun"
+      @supplement="supplementRunInput"
+      @suggest-pause="suggestRunPause"
+      @withdraw-agent="withdrawAgent"
+    />
   </div>
 </template>
 
@@ -68,6 +88,7 @@ import SessionScopeSwitcher from '../components/session/SessionScopeSwitcher.vue
 import TeamAgentTargetPicker, { type TeamAgentTargetValue } from '../components/team/TeamAgentTargetPicker.vue'
 import TeamContextPanel from '../components/team/TeamContextPanel.vue'
 import TeamSessionParticipants from '../components/team/TeamSessionParticipants.vue'
+import TeamRunPanel from '../components/team/TeamRunPanel.vue'
 import { useAuth } from '../composables/useAuth'
 import { getScopedReadingPosition, setScopedReadingPosition, type SessionScope } from '../composables/useScopedSessionState'
 import { useTeamSession } from '../composables/useTeamSession'
@@ -77,9 +98,13 @@ import type { TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSessionSu
 const route = useRoute(), router = useRouter(), { user } = useAuth()
 const teamID = computed(() => String(route.params.teamId ?? '')), sessionID = computed(() => String(route.params.id ?? ''))
 const scope = computed<SessionScope>(() => ({ type: 'team', teamId: teamID.value }))
-const { session, events, context, draft, loading, sending, error, readOnlyReason, canSend, sendMessage } = useTeamSession(teamID, sessionID)
+const {
+  session, events, context, runContext, latestRun, task, draft, loading, sending, runBusy, error, runError,
+  autorunEnabled, readOnlyReason, canSend, sendMessage, createRun, controlRun, supplementRunInput,
+  suggestRunPause, withdrawAgent,
+} = useTeamSession(teamID, sessionID)
 const teams = ref<TeamSummary[]>([]), members = ref<TeamMember[]>([]), offers = ref<TeamAgentOffer[]>([]), allSessions = ref<TeamSessionSummary[]>([]), filteredSessions = ref<TeamSessionSummary[]>([])
-const daemonID = ref(''), provider = ref<'' | TeamProvider>(''), showContext = ref(false), showParticipants = ref(false), referenceEvent = ref<TeamEvent | null>(null)
+const daemonID = ref(''), provider = ref<'' | TeamProvider>(''), showContext = ref(false), showParticipants = ref(false), showRun = ref(false), referenceEvent = ref<TeamEvent | null>(null)
 const target = ref<TeamAgentTargetValue>({ mode: 'all', offerIDs: [] }), messagesElement = ref<HTMLElement | null>(null)
 const currentUserID = computed(() => user.value?.id ?? 0), isCreator = computed(() => session.value?.creator_user_id === currentUserID.value)
 const teamName = computed(() => teams.value.find(team => team.id === teamID.value)?.name ?? '团队')

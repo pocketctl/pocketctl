@@ -15,6 +15,7 @@ export type TeamSessionState = 'active' | 'paused' | 'ended' | 'archived'
 export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | 'paused' | 'completed' | 'failed' | 'cancelled'
 export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
 export type TeamProvider = 'codex' | 'claude-code'
+export type TeamMemoryAccessState = 'available' | 'forbidden' | 'installation_paused' | 'feature_disabled'
 
 export interface TeamCapabilities {
   schema_version: 1
@@ -191,6 +192,7 @@ export interface TeamContextSnapshot {
 export interface TeamRun {
   id: TeamRunID
   team_session_id: TeamSessionID
+  initiator_user_id: number
   coordinator_offer_id: TeamAgentOfferID
   context_version: number
   state: TeamRunState
@@ -201,7 +203,29 @@ export interface TeamRun {
     max_duration_seconds: number
   }
   calls_used: number
+  next_step: number
+  processed_call_step: number
   revision: number
+  waiting_question: string | null
+  terminal_reason: string | null
+  started_at: string | null
+  deadline_at: string
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TeamMemoryBinding {
+  id: string
+  team_id: TeamID
+  owner_scope_kind: 'personal' | 'team' | 'organization'
+  owner_scope_id: string
+  installation_id: string
+  revision: number
+  created_by_user_id: number
+  access_state: TeamMemoryAccessState
+  permissions: string[]
+  manageable: boolean
   created_at: string
   updated_at: string
 }

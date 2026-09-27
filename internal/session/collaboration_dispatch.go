@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
@@ -50,12 +51,76 @@ func prepareCollaborationContext(value *protocol.CollaborationContext) (*memoryc
 	if value == nil {
 		return nil, nil
 	}
-	digest := sha256.Sum256([]byte(value.StableText))
+	payload := value.StableText
+	if value.MemoryContext != nil {
+		payload += "\n" + collaborationMemorySelectionText(value.MemoryContext)
+	}
+	digest := sha256.Sum256([]byte(payload))
 	if value.SchemaVersion != 1 || value.ContextVersion < 0 || value.HistoryThroughEventSeq < 0 ||
 		len(value.ContentHash) != 64 || len(value.PayloadHash) != 64 || hex.EncodeToString(digest[:]) != value.PayloadHash {
 		return nil, ErrCollaborationAuthorization
 	}
 	return &memorycontext.PreparedContext{StableText: value.StableText, StableDigest: value.PayloadHash}, nil
+}
+
+func collaborationMemorySelectionText(value *protocol.CollaborationMemoryContext) string {
+	lines := []string{fmt.Sprintf("%d|%s|%s", value.SchemaVersion, value.InstallationID, value.OwnerScopeID)}
+	for _, reference := range value.References {
+		lines = append(lines, fmt.Sprintf("%s|%s|%s|%s|%s",
+			reference.SourceKind, reference.SourceID, reference.SourceVersion,
+			reference.OwnerScopeID, reference.InstallationID))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (sm *SessionManager) prepareCollaborationMemoryContext(ctx context.Context, value *protocol.CollaborationContext, nativeSessionID, agent, content, requestID string) (*memorycontext.PreparedContext, memorycontext.Outcome) {
+	if value == nil || value.MemoryContext == nil || len(value.MemoryContext.References) == 0 {
+		return nil, memorycontext.Outcome{Kind: "skipped", Reason: "not_selected"}
+	}
+	memorySelection := value.MemoryContext
+	if memorySelection.SchemaVersion != 1 || memorySelection.InstallationID == "" || memorySelection.OwnerScopeID == "" {
+		return nil, memorycontext.Outcome{Kind: "skipped", Reason: "unreadable"}
+	}
+	sm.mu.RLock()
+	coordinator := sm.memoryContext
+	ready := sm.memoryContextReady
+	sm.mu.RUnlock()
+	if coordinator == nil || ready == nil || !ready() {
+		return nil, memorycontext.Outcome{Kind: "skipped", Reason: "memory_unavailable"}
+	}
+	references := make([]memorycontext.SelectedReference, 0, len(memorySelection.References))
+	for _, reference := range memorySelection.References {
+		if reference.InstallationID != memorySelection.InstallationID || reference.OwnerScopeID != memorySelection.OwnerScopeID {
+			return nil, memorycontext.Outcome{Kind: "skipped", Reason: "unreadable"}
+		}
+		references = append(references, memorycontext.SelectedReference{
+			SourceKind: reference.SourceKind, SourceID: reference.SourceID,
+			SourceVersion: reference.SourceVersion, OwnerScopeID: reference.OwnerScopeID,
+			InstallationID: reference.InstallationID,
+		})
+	}
+	return coordinator.Prepare(ctx, memorycontext.TurnRequest{
+		ClientRequestID: requestID, SessionID: nativeSessionID, Agent: agent,
+		Cwd: sm.cwdFor(nativeSessionID), UserContent: content, IsNewTurn: true,
+		Mode:                 memorycontext.ModeEnabled,
+		Capability:           sm.MemoryContextCapability(ctx, nativeSessionID, agent),
+		ScopeInstallationIDs: []string{memorySelection.InstallationID},
+		SelectedReferences:   references,
+	})
+}
+
+func mergeCollaborationContext(base, selected *memorycontext.PreparedContext) *memorycontext.PreparedContext {
+	if selected == nil {
+		return base
+	}
+	if base != nil && base.StableText != "" {
+		if selected.StableText != "" {
+			selected.StableText = base.StableText + "\n\n" + selected.StableText
+		} else {
+			selected.StableText = base.StableText
+		}
+	}
+	return selected
 }
 
 func collaborationInitialPrompt(content string, value *protocol.CollaborationContext) (string, error) {
@@ -108,8 +173,13 @@ func (sm *SessionManager) CreateCollaborationSession(ctx context.Context, auth *
 		sm.collaborationMu.Unlock()
 		return "", err
 	}
+	selectedMemory := teamContext != nil && teamContext.MemoryContext != nil
+	initialPrompt := prompt
+	if selectedMemory {
+		initialPrompt = ""
+	}
 	nativeSessionID, err := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: agent, Cwd: collaborationWorkspace(roots[0], auth.BindingID), Prompt: prompt, AutoCreateDir: true,
+		Agent: agent, Cwd: collaborationWorkspace(roots[0], auth.BindingID), Prompt: initialPrompt, AutoCreateDir: true,
 	})
 	if err != nil {
 		return "", err
@@ -123,6 +193,24 @@ func (sm *SessionManager) CreateCollaborationSession(ctx context.Context, auth *
 	}
 	sm.collaborationCalls[auth.CallID] = nativeSessionID
 	sm.collaborationMu.Unlock()
+	if selectedMemory {
+		base, baseErr := prepareCollaborationContext(teamContext)
+		if baseErr != nil {
+			return "", baseErr
+		}
+		selected, outcome := sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, agent, content, auth.CallID)
+		if selected == nil {
+			return "", fmt.Errorf("team_memory_context_%s", outcome.Reason)
+		}
+		if err := sm.SendMessageWithInput(ctx, UserMessageInput{
+			SessionID: nativeSessionID, Content: content, RequestID: auth.CallID, MsgID: auth.CallID,
+			InputMode: protocol.InputModeNewTurn, HiddenContext: mergeCollaborationContext(base, selected),
+			SkipMemoryContext: true,
+		}); err != nil {
+			sm.recordMemoryContextReceipt(ctx, selected, false, "dispatch_failed")
+			return "", err
+		}
+	}
 	return nativeSessionID, nil
 }
 
@@ -153,7 +241,8 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 	binding, exists := sm.collaborationBindings[auth.BindingID]
 	if !exists {
 		roots := policy.Roots()
-		if len(roots) == 0 || process.Source != "daemon" || process.Cwd != collaborationWorkspace(roots[0], auth.BindingID) ||
+		canonicalCwd, cwdErr := policy.AuthorizeProposed(process.Cwd)
+		if len(roots) == 0 || cwdErr != nil || process.Source != "daemon" || canonicalCwd != collaborationWorkspace(roots[0], auth.BindingID) ||
 			(process.Agent != adapter.AgentCodex && process.Agent != adapter.AgentClaude) {
 			sm.collaborationMu.Unlock()
 			return ErrCollaborationBinding
@@ -190,9 +279,17 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		sm.collaborationMu.Unlock()
 		return err
 	}
+	selectedContext, outcome := sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, process.Agent, content, requestID)
+	if teamContext != nil && teamContext.MemoryContext != nil && selectedContext == nil {
+		sm.collaborationMu.Lock()
+		delete(sm.collaborationCalls, auth.CallID)
+		sm.collaborationMu.Unlock()
+		return fmt.Errorf("team_memory_context_%s", outcome.Reason)
+	}
 	err = sm.SendMessageWithInput(ctx, UserMessageInput{
 		SessionID: nativeSessionID, Content: content, RequestID: requestID, MsgID: msgID,
-		InputMode: protocol.InputModeNewTurn, HiddenContext: preparedContext, SuppressContextReceipt: true,
+		InputMode: protocol.InputModeNewTurn, HiddenContext: mergeCollaborationContext(preparedContext, selectedContext),
+		SkipMemoryContext: true,
 	})
 	if err != nil {
 		sm.collaborationMu.Lock()

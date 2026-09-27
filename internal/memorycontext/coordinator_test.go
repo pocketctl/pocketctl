@@ -13,8 +13,14 @@ import (
 )
 
 type fakeGrants struct {
-	grant *protocol.MemoryContextGrantResult
-	err   error
+	grant                 *protocol.MemoryContextGrantResult
+	err                   error
+	scopedInstallationIDs []string
+}
+
+func (f *fakeGrants) RequestScopedContextGrant(ctx context.Context, requestID, sessionID string, installationIDs []string) (*protocol.MemoryContextGrantResult, error) {
+	f.scopedInstallationIDs = append([]string(nil), installationIDs...)
+	return f.grant, f.err
 }
 
 func (f *fakeGrants) RequestContextGrant(ctx context.Context, requestID, sessionID string) (*protocol.MemoryContextGrantResult, error) {
@@ -214,6 +220,34 @@ func TestPrepareAdmitsReadyPacksWithSingleUseNonce(t *testing.T) {
 	}
 	if memory.lastAdmitRequest.Adapter != string(RuntimeCodexAppServer) {
 		t.Fatalf("admission adapter = %q, want exact native runtime", memory.lastAdmitRequest.Adapter)
+	}
+}
+
+func TestPrepareTeamSelectionUsesScopedGrantAndExactReferences(t *testing.T) {
+	grants := &fakeGrants{grant: readyGrant}
+	started := make(chan CompileRequest, 1)
+	memory := &fakeMemory{
+		compile:        &CompileResponse{Outcome: "ready", Pack: &WirePack{PackID: "team-pack"}, AdmissionRequired: true},
+		admit:          &AdmitResponse{InjectionID: "team-injection", Nonce: "team-nonce", ExpiresAt: time.Now().Add(5 * time.Second)},
+		pack:           &PackText{PackID: "team-pack", StableText: "published team knowledge"},
+		compileStarted: started,
+	}
+	req := newTurn()
+	req.ScopeInstallationIDs = []string{"team-installation"}
+	req.SelectedReferences = []SelectedReference{{
+		SourceKind: "memory_claim", SourceID: "claim", SourceVersion: "version",
+		OwnerScopeID: "team", InstallationID: "team-installation",
+	}}
+	pack, outcome := coordinator(grants, memory).Prepare(context.Background(), req)
+	if outcome.Kind != "injected" || pack == nil {
+		t.Fatalf("team selection = pack %+v outcome %+v", pack, outcome)
+	}
+	if len(grants.scopedInstallationIDs) != 1 || grants.scopedInstallationIDs[0] != "team-installation" {
+		t.Fatalf("scoped grant ids = %v", grants.scopedInstallationIDs)
+	}
+	compiled := <-started
+	if len(compiled.SelectedReferences) != 1 || compiled.SelectedReferences[0].SourceVersion != "version" {
+		t.Fatalf("compile references = %+v", compiled.SelectedReferences)
 	}
 }
 

@@ -61,6 +61,17 @@ describe('TeamsView', () => {
     expect(api.listTeamMembers).toHaveBeenLastCalledWith('ctm_b')
   })
 
+  test('loads a member workspace without requesting creator-only invitations', async () => {
+    api.listTeams.mockResolvedValue([{ ...teams[1] }])
+    api.listTeamInvitations.mockRejectedValue(new Error('team creator authority required'))
+    const { wrapper } = await render()
+    await wrapper.get('[data-testid="team-tab-members"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('[data-testid="members-stub"]').text()).toBe('ctm_b')
+    expect(api.listTeamMembers).toHaveBeenCalledWith('ctm_b')
+    expect(api.listTeamInvitations).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('team creator authority required')
+  })
+
   test('creates with optional invitations and an honestly labeled offline agent', async () => {
     const { wrapper } = await render()
     await wrapper.get('[data-testid="team-create-open"]').trigger('click'); await flushPromises()

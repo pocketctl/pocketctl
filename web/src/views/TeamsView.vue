@@ -106,12 +106,13 @@ async function loadTeams(): Promise<void> {
 async function loadWorkspace(): Promise<void> {
   const teamID = selectedTeamID.value
   const generation = ++workspaceGeneration
+  const canManageInvitations = selectedTeam.value?.creator_user_id === currentUserID.value
   members.value = []; offers.value = []; invitations.value = []; candidates.value = []; sessions.value = []
   if (!teamID) return
   workspaceLoading.value = true; error.value = ''
   try {
     const [team, nextMembers, nextOffers, nextInvitations, nextCandidates, nextSessions] = await Promise.all([
-      getTeam(teamID), listTeamMembers(teamID), listTeamAgentOffers(teamID), listTeamInvitations(teamID), listTeamAgentCandidates(teamID), listTeamSessions(teamID),
+      getTeam(teamID), listTeamMembers(teamID), listTeamAgentOffers(teamID), canManageInvitations ? listTeamInvitations(teamID) : Promise.resolve([]), listTeamAgentCandidates(teamID), listTeamSessions(teamID),
     ])
     if (generation !== workspaceGeneration || selectedTeamID.value !== teamID) return
     teams.value = teams.value.map(current => current.id === team.id ? team : current)

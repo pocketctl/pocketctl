@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type pg from 'pg'
 
 import { teamEventView } from './event-repository.js'
+import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js'
 import type { TeamEvent, TeamProvider } from './types.js'
 
 export const TEAM_DISPATCH_CAPABILITY = 'team_collaboration_dispatch_v1'
@@ -23,6 +24,7 @@ export interface DispatchAuthorization {
 
 export interface ClaimedDispatch {
   callId: string
+  runId: string | null
   content: string
   provider: TeamProvider
   nativeSessionId: string | null
@@ -60,7 +62,10 @@ function hasCapability(value: unknown, capability: string): boolean {
 }
 
 export class TeamDispatchRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly memorySources?: TeamMemorySourceProjectorLike,
+  ) {}
 
   async listPendingCallIds(limit = 50): Promise<string[]> {
     const result = await this.pool.query<{ call_id: string }>(
@@ -133,6 +138,7 @@ export class TeamDispatchRepository {
       )
       return {
         callId,
+        runId: row.run_id ?? null,
         content: String(row.content),
         provider: row.provider,
         nativeSessionId: row.binding_native_session_id,
@@ -254,6 +260,11 @@ export class TeamDispatchRepository {
         await client.query(
           `UPDATE collaboration_calls SET state = $2, outcome = $3, finished_at = NOW(), updated_at = NOW() WHERE call_id = $1`,
           [call.call_id, completed ? 'completed' : 'failed', String(message.status)],
+        )
+        await this.memorySources?.projectCompletedCall(
+          client,
+          call.call_id,
+          teamEventView(inserted.rows[0]),
         )
       }
       const participants = await client.query<{ user_id: number }>(

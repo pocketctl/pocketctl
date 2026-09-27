@@ -813,10 +813,11 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initAttentionInboxSchema(pool);
   await initSessionDocumentSchema(pool);
   await initSessionOrganizationSchema(pool);
-  await initTeamSchema(pool);
   // ADR-0003: extension tables exist in every flag mode so flipping
   // RELAY_EXTENSIONS never needs a schema deployment window.
   await initExtensionSchema(pool);
+  // Team Memory bindings reference pre-existing Extension installations.
+  await initTeamSchema(pool);
 }
 
 export interface EmailChallengeSendDecision {
