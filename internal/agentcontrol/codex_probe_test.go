@@ -2,6 +2,7 @@ package agentcontrol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -16,6 +17,64 @@ item/permissions/requestApproval item/tool/requestUserInput
 mcpServer/elicitation/request serverRequest/resolved`
 
 const emptyThreadPersistenceMethod = `thread/inject_items`
+
+const nativeHiddenSchema = `{"title":"ClientRequest","description":"initialize thread/start thread/resume thread/turns/list turn/interrupt serverRequest/resolved","definitions":{"ThreadInjectItemsParams":{"type":"object","required":["threadId","items"],"properties":{"threadId":{"type":"string"},"items":{"type":"array","items":true}}},"TurnStartParams":{"type":"object","required":["threadId","input"],"properties":{"threadId":{"type":"string"},"input":{"type":"array","items":{"$ref":"#/definitions/UserInput"}}}},"UserInput":{"oneOf":[{"type":"object","required":["type","text"],"properties":{"type":{"type":"string","enum":["text"]},"text":{"type":"string"}}}]}},"oneOf":[{"type":"object","required":["id","method","params"],"properties":{"id":{"type":"string"},"method":{"type":"string","enum":["thread/inject_items"]},"params":{"$ref":"#/definitions/ThreadInjectItemsParams"}}},{"type":"object","required":["id","method","params"],"properties":{"id":{"type":"string"},"method":{"type":"string","enum":["turn/start"]},"params":{"$ref":"#/definitions/TurnStartParams"}}}]}`
+const nativeHiddenResponseSchema = `{"title":"ThreadInjectItemsResponse","type":"object"}`
+
+func TestCodexProbeStructurallyValidatesHiddenHistoryAndUserTurn(t *testing.T) {
+	// Any missing or changed native contract must leave ordinary persistence
+	// available while denying hidden delivery.
+	for _, tc := range []struct {
+		name, schema string
+		want         bool
+	}{
+		{"supported concatenated documents", nativeHiddenSchema + nativeHiddenResponseSchema, true},
+		{"method mentions only", completeCodexSchema + " thread/inject_items ThreadInjectItemsParams TurnStartParams UserInput", false},
+		{"trailing malformed JSON", nativeHiddenSchema + nativeHiddenResponseSchema + "{", false},
+		{"missing response", nativeHiddenSchema, false},
+		{"wrong response type", nativeHiddenSchema + `{"title":"ThreadInjectItemsResponse","type":"string"}`, false},
+		{"missing inject required", strings.Replace(nativeHiddenSchema, `["threadId","items"]`, `["threadId"]`, 1) + nativeHiddenResponseSchema, false},
+		{"extra inject required", strings.Replace(nativeHiddenSchema, `["threadId","items"]`, `["threadId","items","unknown"]`, 1) + nativeHiddenResponseSchema, false},
+		{"wrong items type", strings.Replace(nativeHiddenSchema, `"items":{"type":"array","items":true}`, `"items":{"type":"string"}`, 1) + nativeHiddenResponseSchema, false},
+		{"typed items disallow raw response", strings.Replace(nativeHiddenSchema, `"items":true`, `"items":{"type":"string"}`, 1) + nativeHiddenResponseSchema, false},
+		{"wrong thread ID type", strings.Replace(nativeHiddenSchema, `"threadId":{"type":"string"}`, `"threadId":{"type":"integer"}`, 1) + nativeHiddenResponseSchema, false},
+		{"method uncorrelated params", strings.Replace(nativeHiddenSchema, `"params":{"$ref":"#/definitions/ThreadInjectItemsParams"}`, `"params":{"$ref":"#/definitions/TurnStartParams"}`, 1) + nativeHiddenResponseSchema, false},
+		{"missing user text required", strings.Replace(nativeHiddenSchema, `["type","text"]`, `["type"]`, 1) + nativeHiddenResponseSchema, false},
+		{"user text must be string", strings.Replace(nativeHiddenSchema, `"text":{"type":"string"}`, `"text":{"type":"integer"}`, 1) + nativeHiddenResponseSchema, false},
+		{"required role cannot preserve user input", strings.Replace(nativeHiddenSchema, `["type","text"]`, `["type","text","role"]`, 1) + nativeHiddenResponseSchema, false},
+		{"wrong input array", strings.Replace(nativeHiddenSchema, `"input":{"type":"array"`, `"input":{"type":"string"`, 1) + nativeHiddenResponseSchema, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := CodexProbe{Run: func(context.Context, string, ...string) ([]byte, error) {
+				return []byte("--remote --listen unix://"), nil
+			}, GenerateSchema: func(context.Context, string) ([]byte, error) { return []byte(tc.schema), nil }}
+			caps, err := p.Probe(context.Background(), "/test/codex", "0.154.0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if caps.HiddenContext != tc.want || !caps.ThreadInjection || caps.SchemaHash == "" {
+				t.Fatalf("capabilities=%+v want hidden=%t", caps, tc.want)
+			}
+		})
+	}
+	var bundled map[string]any
+	if err := json.Unmarshal([]byte(nativeHiddenSchema), &bundled); err != nil {
+		t.Fatal(err)
+	}
+	delete(bundled, "title")
+	definitions := bundled["definitions"].(map[string]any)
+	delete(bundled, "definitions")
+	definitions["ClientRequest"] = bundled
+	bundle, _ := json.Marshal(map[string]any{"definitions": definitions})
+	p := CodexProbe{Run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("--remote --listen unix://"), nil
+	}, GenerateSchema: func(context.Context, string) ([]byte, error) {
+		return append(bundle, []byte(nativeHiddenResponseSchema)...), nil
+	}}
+	if caps, err := p.Probe(context.Background(), "/test/codex", "0.154.0"); err != nil || !caps.HiddenContext {
+		t.Fatalf("bundled schema=%+v error=%v", caps, err)
+	}
+}
 
 func TestCodexProbeReportsGranularCapabilities(t *testing.T) {
 	probe := CodexProbe{

@@ -1,6 +1,5 @@
 import { coordinatorPrompt, parseTeamRunDecision, TeamRunDecisionError } from './run-decision.js'
-import { TeamRunRepository, type TeamRunMutation } from './run-repository.js'
-import { TeamRepositoryError } from './repository.js'
+import { TeamRunRepository, TeamRunBudgetError, type TeamRunMutation } from './run-repository.js'
 import type { TeamEvent, TeamRun } from './types.js'
 import { teamBudgetStopsTotal, teamUncertainTotal } from '../metrics.js'
 
@@ -54,7 +53,18 @@ export class TeamRunWorker {
   }
 
   private async schedule(input: Parameters<TeamRunWorkerRepository['scheduleCall']>[0]): Promise<void> {
-    const scheduled = await this.options.repository.scheduleCall(input)
+    let scheduled: Awaited<ReturnType<TeamRunWorkerRepository['scheduleCall']>>
+    try {
+      scheduled = await this.options.repository.scheduleCall(input)
+    } catch (error) {
+      if (!(error instanceof TeamRunBudgetError)) throw error
+      this.observeBudgetStop(input.runId, error.dimension)
+      await this.transition({
+        runId: input.runId, leaseToken: input.leaseToken, state: 'failed', terminalReason: 'budget_exhausted',
+        processedCallStep: input.processedCallStep, content: `Run stopped because its frozen ${error.dimension} budget was exhausted.`,
+      })
+      return
+    }
     this.options.onEvent?.(scheduled.teamSessionId, scheduled.participantUserIds, scheduled.event)
     this.options.onCall?.(scheduled.callId)
   }
@@ -79,7 +89,11 @@ export class TeamRunWorker {
       if (latestCall && ['dispatched', 'accepted'].includes(latestCall.state)) {
         await this.options.repository.defer(run.id, lease.leaseToken, this.pollIntervalMs)
       } else if (latestCall?.state === 'uncertain') {
-        await this.transition({ ...transitionBase, state: 'blocked', terminalReason: 'dispatch_uncertain', content: 'Run stop is blocked until an uncertain call is reconciled.' })
+        if (run.state === 'blocked' && run.terminal_reason === 'dispatch_uncertain') {
+          await this.options.repository.defer(run.id, lease.leaseToken, this.pollIntervalMs)
+        } else {
+          await this.transition({ ...transitionBase, state: 'blocked', terminalReason: 'dispatch_uncertain', content: 'Run stop is blocked until an uncertain call is reconciled.' })
+        }
       } else {
         await this.transition({ ...transitionBase, state: 'cancelled', terminalReason: 'stop_requested', content: 'Run cancelled after all accepted calls settled.' })
       }
@@ -168,22 +182,13 @@ export class TeamRunWorker {
       })
       return
     }
-    try {
-      await this.schedule({
-        runId: run.id, leaseToken, offerId: run.coordinator_offer_id, role: 'coordinator', processedCallStep,
-        content: coordinatorPrompt({
-          contextVersion: run.context_version, allowedOfferIds,
-          callsRemaining: Math.max(0, run.budget.max_calls - run.calls_used - 1), observation,
-        }),
-      })
-    } catch (error) {
-      if (!(error instanceof TeamRepositoryError) || error.code !== 'budget_exhausted') throw error
-      this.observeBudgetStop(run.id, 'concurrency')
-      await this.transition({
-        runId: run.id, leaseToken, state: 'failed', terminalReason: 'budget_exhausted',
-        processedCallStep, content: 'Run stopped because its frozen call or concurrency budget was exhausted.',
-      })
-    }
+    await this.schedule({
+      runId: run.id, leaseToken, offerId: run.coordinator_offer_id, role: 'coordinator', processedCallStep,
+      content: coordinatorPrompt({
+        contextVersion: run.context_version, allowedOfferIds,
+        callsRemaining: Math.max(0, run.budget.max_calls - run.calls_used - 1), observation,
+      }),
+    })
   }
 
   private scheduleLoop(delayMs: number): void {

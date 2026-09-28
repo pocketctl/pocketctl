@@ -136,6 +136,7 @@ export class TeamMemoryBindingService {
       if (current) {
         await this.options.memorySources?.revokeTeamBinding?.(client, {
           teamId: input.teamId,
+          bindingId: current.binding_id,
           bindingRevision: Number(current.revision),
         })
         await client.query(
@@ -187,6 +188,7 @@ export class TeamMemoryBindingService {
       }
       await this.options.memorySources?.revokeTeamBinding?.(client, {
         teamId: input.teamId,
+        bindingId: current.binding_id,
         bindingRevision: currentRevision,
       })
       await client.query(

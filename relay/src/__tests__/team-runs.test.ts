@@ -38,6 +38,19 @@ function workerRepository(snapshot: Record<string, unknown>) {
 }
 
 describe('Team automatic collaboration', () => {
+  test('does not publish the same blocked-stop transition on every poll', async () => {
+    const repository = workerRepository({
+      run: { ...run, state: 'blocked', stop_requested: true, terminal_reason: 'dispatch_uncertain' },
+      bindings: [], latestCall: { state: 'uncertain' },
+    })
+    const published: TeamEvent[] = []
+    const worker = new TeamRunWorker({ repository: repository as any, workerId: 'worker-1', onEvent: (_s, _p, e) => published.push(e) })
+    await worker.runOnce()
+    await worker.runOnce()
+    expect(published).toEqual([])
+    expect(repository.defer).toHaveBeenCalled()
+    expect(repository.scheduleCall).not.toHaveBeenCalled()
+  })
   test('accepts only strict coordinator decisions for the frozen context and allowed offers', () => {
     expect(parseTeamRunDecision('```json\n{"action":"call_agent","context_version":3,"target_offer_id":"cao_worker","instruction":"Inspect logs"}\n```', {
       contextVersion: 3, allowedOfferIds: new Set(['cao_worker']),

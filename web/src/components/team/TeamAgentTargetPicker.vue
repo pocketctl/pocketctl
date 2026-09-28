@@ -1,7 +1,7 @@
 <template>
   <div class="target-picker" data-testid="team-agent-target-picker">
     <button type="button" :class="{ active: modelValue.mode === 'all' }" :disabled="!callableBindings.length" @click="selectAll">全部 Agent</button>
-    <button type="button" :class="{ active: modelValue.mode === 'discussion' }" :disabled="!callableBindings.length" @click="selectDiscussion">仅补充讨论</button>
+    <button type="button" :class="{ active: modelValue.mode === 'discussion' }" @click="selectDiscussion">仅补充讨论</button>
     <div class="target-agents" aria-label="定向 Agent">
       <button
         v-for="binding in bindings"

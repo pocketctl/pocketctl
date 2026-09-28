@@ -27,6 +27,7 @@ package ptyscan
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -302,6 +303,7 @@ type PendingPrompt struct {
 	RequestID  string   `json:"request_id"`
 	PromptText string   `json:"prompt"`
 	Options    []Option `json:"options"`
+	choiceKeys map[string]string
 }
 
 // Scanner inspects a rolling window of PTY bytes for selection menus. It is
@@ -386,6 +388,10 @@ func (s *Scanner) detectLocked() *PendingPrompt {
 		return nil
 	}
 
+	if prompt := s.detectClaudeTrustLocked(clean); prompt != nil {
+		return prompt
+	}
+
 	// Find the LAST question phrase in the window — the relevant prompt is the
 	// one currently blocking, which is the most recently drawn one.
 	phraseLoc := questionPhrases.FindStringIndex(clean)
@@ -441,6 +447,85 @@ func (s *Scanner) detectLocked() *PendingPrompt {
 		PromptText: promptText,
 		Options:    dedupOptions(opts),
 	}
+}
+
+// Modern Claude uses an unnumbered menu. Require the complete workspace trust
+// screen, not just prose containing "trust", before exposing owner choices.
+var claudeTrustQuestion = regexp.MustCompile(`(?i)Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust\?`)
+var claudeTrustOption = regexp.MustCompile(`(?m)^[ \t]*([❯›]?)[ \t]*(No,\s*exit|Yes,\s*I\s*trust\s*this\s*folder)[ \t]*$`)
+
+func (s *Scanner) detectClaudeTrustLocked(clean string) *PendingPrompt {
+	question := claudeTrustQuestion.FindString(clean)
+	compact := strings.Join(strings.Fields(clean), "")
+	if question == "" || !strings.Contains(compact, "Accessingworkspace:") || !strings.Contains(compact, "Entertoconfirm") {
+		return nil
+	}
+	matches := claudeTrustOption.FindAllStringSubmatch(clean, -1)
+	if len(matches) != 2 {
+		return nil
+	}
+	selected := -1
+	opts := make([]Option, 2)
+	for i, match := range matches {
+		if match[1] != "" {
+			selected = i
+		}
+		label := "No, exit"
+		if strings.HasPrefix(match[2], "Yes,") {
+			label = "Yes, I trust this folder"
+		}
+		opts[i] = Option{Index: strconv.Itoa(i + 1), Label: label}
+	}
+	if selected < 0 || opts[0].Label == opts[1].Label {
+		return nil
+	}
+	keys := make(map[string]string, 2)
+	for i, opt := range opts {
+		switch {
+		case i < selected:
+			keys[opt.Index] = "\x1b[A"
+		case i > selected:
+			keys[opt.Index] = "\x1b[B"
+		default:
+			keys[opt.Index] = ""
+		}
+	}
+	question = "Is this a project you created or one you trust?"
+	fp := fingerprintOf(question, opts)
+	if _, seen := s.seen[fp]; seen {
+		if s.active != nil && s.fingerprint(s.active) == fp {
+			s.active.choiceKeys = keys
+		}
+		return nil
+	}
+	return &PendingPrompt{RequestID: uuid.New().String(), PromptText: question, Options: opts, choiceKeys: keys}
+}
+
+// ClaimChoice atomically validates and claims one owner response. For arrow-key
+// menus the displayed synthetic index must never be typed into the terminal.
+func (s *Scanner) ClaimChoice(requestID, choice string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active == nil || s.active.RequestID != requestID {
+		return "", fmt.Errorf("interactive prompt %q not pending", requestID)
+	}
+	valid := false
+	for _, opt := range s.active.Options {
+		if opt.Index == choice {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return "", fmt.Errorf("invalid interactive choice %q", choice)
+	}
+	keys := choice
+	if s.active.choiceKeys != nil {
+		keys = s.active.choiceKeys[choice]
+	}
+	s.active = nil
+	s.buf = nil
+	return keys + "\r", nil
 }
 
 // ActiveRequestID returns the request id of the currently pending prompt, or ""

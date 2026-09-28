@@ -926,7 +926,7 @@ const explicitlyRoutedLiveEventTypes = new Set<string>([
   'tool_call', 'tool_result', 'approval_request', 'approval_resolved',
   'question_request', 'question_resolved', 'mcp_elicitation_request',
   'mcp_elicitation_resolved', 'interactive_prompt', 'turn_status', 'error',
-  'command_receipt', 'interaction_result', 'subagent_discovered',
+  'command_receipt', 'interaction_result', 'interactive_resolved', 'subagent_discovered',
   'subagent_title_update', 'subagent_usage', 'permission_config_changed',
   'session_status', 'session_title_update', 'session_deleted', 'session_pinned',
   'session_id_changed', 'session_documents_changed',
@@ -2365,7 +2365,7 @@ const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 // already flipped its local status optimistically; here we just dispatch the
 // approval_response command, which the relay forwards to the owning daemon.
 const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
-type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
+type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request' | 'interactive_prompt'
 const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown>; metadata: Record<string, unknown> }>()
 
 function uniqueBuckets(buckets: any[][]): any[][] {
@@ -2456,6 +2456,9 @@ function consumeInteractionResolution(type: InteractionCardType, requestId: stri
 }
 
 function interactionResultResolution(evt: any): { type: InteractionCardType; resolution: Record<string, unknown> } | null {
+  if (evt.operation === 'interactive_response' && evt.status === 'submitted') {
+    return { type: 'interactive_prompt', resolution: { selectedChoice: evt.choice, reason: 'submitted', resultUnknown: false } }
+  }
   let type: InteractionCardType
   if (evt.operation === 'approval_response') type = 'approval_request'
   else if (evt.operation === 'question_response' || evt.operation === 'question_reject') type = 'question_request'
@@ -3542,6 +3545,10 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (!requestId) return
     const resolution = { action: evt.action || evt.payload?.action, reason: evt.reason || evt.payload?.reason, redacted: !!(evt.redacted ?? evt.payload?.redacted) }
     recordInteractionResolution('mcp_elicitation_request', requestId, resolution, evt, rootTarget, interactionBuckets)
+  } else if (type === 'interactive_resolved') {
+    const payload = evt.payload ?? evt
+    const requestId = evt.request_id || payload.request_id
+    if (requestId) recordInteractionResolution('interactive_prompt', requestId, { selectedChoice: payload.choice, reason: 'submitted', resultUnknown: false }, evt, rootTarget, interactionBuckets)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
     // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that
@@ -3567,6 +3574,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       prompt: promptText, options, status: 'pending', selectedChoice: '',
       ...eventWithTurnMetadata(evt),
     })
+    consumeInteractionResolution('interactive_prompt', requestId, target[target.length - 1], target)
   } else {
     const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
     const stableIdentity = unknownTimelineEventIdentity(evt, type)
@@ -4056,6 +4064,9 @@ onMounted(() => {
   cleanups.push(onEvent('interaction_result', (msg: any) => {
     if (msg.session_id !== sessionId.value || !msg.request_id) return
     processImmediateLiveEvent(msg)
+  }))
+  cleanups.push(onEvent('interactive_resolved', (msg: any) => {
+    if (msg.session_id === sessionId.value) processImmediateLiveEvent(msg)
   }))
   cleanups.push(onEvent('interactive_prompt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return

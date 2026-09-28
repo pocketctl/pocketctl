@@ -239,3 +239,13 @@ export interface TeamApiErrorBody {
     current_revision?: number
   }
 }
+
+export interface TeamCallSummary {
+  id: string
+  event_id: string
+  offer_id: string
+  state: 'pending' | 'dispatched' | 'accepted' | 'completed' | 'failed' | 'blocked' | 'uncertain'
+  outcome: 'waiting_owner' | 'memory_adapter_unsupported' | null
+  created_at: string
+  updated_at: string
+}

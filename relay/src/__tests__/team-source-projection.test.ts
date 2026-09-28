@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
@@ -70,6 +71,21 @@ describe('Team Memory source projection', () => {
       reply: { ...input.reply, eventIds: [], eventSeqs: [], content: '' },
     })).toEqual([])
   })
+
+  test('isolates a replacement binding even when its revision restarts at the same value', () => {
+    const original = buildTeamMemorySourceRecords(input)
+    const rebound = buildTeamMemorySourceRecords({
+      ...input, binding: { ...input.binding, id: 'cmbd_rebound' },
+    })
+
+    expect(rebound.map(record => record.sessionId))
+      .not.toEqual(original.map(record => record.sessionId))
+    // Call IDs still deduplicate replay across a binding change.
+    expect(rebound.map(record => record.sourceId)).toEqual(original.map(record => record.sourceId))
+    expect(rebound[0].payload.read_scope).toMatchObject({
+      team_memory_binding_id: 'cmbd_rebound', team_memory_binding_revision: 4,
+    })
+  })
 })
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -99,7 +115,7 @@ describeWithDatabase('Team Memory source projection (PostgreSQL)', () => {
   }, 30_000)
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE extension_providers, users, daemons RESTART IDENTITY CASCADE`)
+    await pool.query(`TRUNCATE extension_source_outbox, extension_providers, users, daemons RESTART IDENTITY CASCADE`)
   })
 
   afterAll(async () => {
@@ -182,5 +198,59 @@ describeWithDatabase('Team Memory source projection (PostgreSQL)', () => {
       read_scope: { team_memory_binding_revision: 4, participant_revision: 2 },
     })
     expect(JSON.stringify(rows.rows)).not.toContain('native_session')
+
+    const originalSessionId = buildTeamMemorySourceRecords({
+      ...input, teamSessionId: 'css_source', readers: [{ userId, participantRevision: 2 }],
+      binding: { ...input.binding, id: 'cmbd_source' },
+    })[0].sessionId
+    const legacySessionId = 'team_' + createHash('sha256')
+      .update('css_source:4:2').digest('hex').slice(0, 32)
+    expect(originalSessionId).not.toBe(legacySessionId)
+    expect(await projector.revokeTeamBinding(pool, {
+      teamId: 'ctm_source', bindingId: 'cmbd_source', bindingRevision: 4,
+    })).toBe(2)
+    expect(await projector.revokeTeamBinding(pool, {
+      teamId: 'ctm_source', bindingId: 'cmbd_source', bindingRevision: 4,
+    })).toBe(0)
+    const revoked = await pool.query<{ session_id: string }>(`
+      SELECT session_id FROM extension_source_outbox WHERE source_kind = 'session_access_revoked'
+    `)
+    expect(new Set(revoked.rows.map(row => row.session_id)))
+      .toEqual(new Set([originalSessionId, legacySessionId]))
+
+    await pool.query(`
+      UPDATE team_memory_bindings SET state = 'removed', revision = 5 WHERE binding_id = 'cmbd_source';
+      INSERT INTO team_memory_bindings
+        (binding_id, team_id, owner_scope_kind, owner_scope_id, installation_id, revision, created_by_user_id)
+      VALUES ('cmbd_rebound', 'ctm_source', 'personal', '${installationId}', '${installationId}', 4, ${userId});
+      INSERT INTO collaboration_events
+        (event_id, team_session_id, event_seq, kind, author_user_id, context_version, content)
+      VALUES ('cev_goal_rebound', 'css_source', 5, 'member_message', ${userId}, 0, 'Check the new binding');
+      INSERT INTO collaboration_calls
+        (call_id, team_session_id, event_id, offer_id, binding_id, context_version, state)
+      SELECT 'ccl_rebound', team_session_id, 'cev_goal_rebound', offer_id, binding_id, context_version, state
+      FROM collaboration_calls WHERE call_id = 'ccl_source';
+      INSERT INTO collaboration_events
+        (event_id, team_session_id, event_seq, kind, author_offer_id, call_id, content)
+      VALUES ('cev_reply_rebound', 'css_source', 6, 'agent_message', 'cao_source', 'ccl_rebound', 'New binding reply'),
+             ('cev_done_rebound', 'css_source', 7, 'status', 'cao_source', 'ccl_rebound', 'completed')
+    `)
+    expect(await projector.projectCompletedCall(pool, 'ccl_source', outcome)).toBe(0)
+    expect(await projector.projectCompletedCall(pool, 'ccl_rebound', {
+      ...outcome, id: 'cev_done_rebound', event_seq: 7, call_id: 'ccl_rebound',
+    })).toBe(3)
+    const reboundRows = await pool.query<{ session_id: string }>(`
+      SELECT session_id FROM extension_source_outbox WHERE source_kind = $1 AND source_id LIKE 'team:ccl_rebound:%'
+    `, [TEAM_MEMORY_SOURCE_KIND])
+    expect(reboundRows.rows).toHaveLength(3)
+    const reboundSessionId = reboundRows.rows[0].session_id
+    expect(reboundSessionId).not.toBe(originalSessionId)
+    expect(reboundSessionId).not.toBe(legacySessionId)
+    expect(await projector.revokeReaderSession(pool, {
+      teamSessionId: 'css_source', userId, participantRevision: 2, reason: 'participant_removed',
+    })).toBe(1)
+    expect((await pool.query(`
+      SELECT session_id FROM extension_source_outbox WHERE source_kind = 'session_access_revoked'
+    `)).rows.map(row => row.session_id)).toContain(reboundSessionId)
   })
 })

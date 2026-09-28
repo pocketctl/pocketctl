@@ -30,9 +30,19 @@ describe('Team dispatch contract', () => {
   test('projects only shared reply text and terminal lifecycle', () => {
     expect(dispatchProjectionKind({ type: 'agent_text', text: 'answer' })).toBe('agent_message')
     expect(dispatchProjectionKind({ type: 'turn_status', status: 'completed' })).toBe('status')
-    expect(dispatchProjectionKind({ type: 'approval_request', text: 'secret' })).toBeNull()
+    expect(dispatchProjectionKind({ type: 'approval_request', text: 'secret' })).toBe('status')
+    expect(dispatchProjectionKind({ type: 'interactive_prompt', input: { prompt: 'private' } })).toBe('status')
     expect(dispatchProjectionKind({ type: 'tool_call', text: 'rm -rf' })).toBeNull()
     expect(dispatchProjectionKind({ type: 'agent_reasoning', text: 'hidden' })).toBeNull()
     expect(dispatchProjectionKind({ type: 'turn_status', status: 'running' })).toBeNull()
+  })
+
+  test('recognizes the native turn_status field and sanitizable startup failures', () => {
+    expect(dispatchProjectionKind({ type: 'turn_status', turn_status: 'completed' })).toBe('status')
+    expect(dispatchProjectionKind({ type: 'turn_status', turn_status: 'failed' })).toBe('status')
+    expect(dispatchProjectionKind({ type: 'turn_status', turn_status: 'running', status: 'completed' })).toBeNull()
+    expect(dispatchProjectionKind({ type: 'session_status', status: 'error' })).toBe('status')
+    expect(dispatchProjectionKind({ type: 'error', error: 'private terminal output' })).toBe('status')
+    expect(dispatchProjectionKind({ type: 'error', operation: 'interactive_response', error: 'stale choice' })).toBeNull()
   })
 })

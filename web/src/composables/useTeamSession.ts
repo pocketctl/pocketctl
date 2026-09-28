@@ -9,11 +9,12 @@ import {
   getTeamSession,
   getTeamTask,
   listTeamEvents,
+  listTeamCalls,
   listTeamRuns,
   setTeamSessionAgentBinding,
   supplementTeamRun,
 } from '../services/teamClient'
-import type { TeamCapabilities, TeamContextSnapshot, TeamEvent, TeamMessageTargetMode, TeamRun, TeamSession, TeamTask } from '../types/team'
+import type { TeamCallSummary, TeamCapabilities, TeamContextSnapshot, TeamEvent, TeamMessageTargetMode, TeamRun, TeamSession, TeamTask } from '../types/team'
 import { useScopedSessionDraft } from './useScopedSessionState'
 import { useWebSocket } from './useWebSocket'
 
@@ -26,6 +27,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   const { draft, clearDraft } = useScopedSessionDraft(scope, sessionID)
   const session = ref<TeamSession | null>(null)
   const events = ref<TeamEvent[]>([])
+  const calls = ref<TeamCallSummary[]>([])
   const context = ref<TeamContextSnapshot | null>(null)
   const runContext = ref<TeamContextSnapshot | null>(null)
   const runs = ref<TeamRun[]>([])
@@ -40,9 +42,11 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   const subscribed = ref(false)
   const { connect, connected, onEvent, subscribeTeamSession, unsubscribeTeamSession } = useWebSocket()
   let generation = 0
+  let callRequest = 0
   let disposers: Array<() => void> = []
   let runPollTimer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
+  let callPollTimer: ReturnType<typeof setTimeout> | undefined
 
   const callableBindings = computed(() => session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? [])
   const latestRun = computed(() => runs.value[0] ?? null)
@@ -52,8 +56,8 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     if (!session.value) return '共享会话尚未加载'
     if (session.value.state === 'paused') return '共享会话已暂停'
     if (session.value.state !== 'active') return '共享会话为只读状态'
+    if (capabilities.value?.writes_enabled !== true) return '团队写入暂不可用'
     if (!connected.value) return '实时连接已断开，恢复后可发送'
-    if (callableBindings.value.length === 0) return '当前没有可调用的 Agent'
     return ''
   })
   const canSend = computed(() => !loading.value && !sending.value && !readOnlyReason.value)
@@ -65,12 +69,49 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   }
 
   async function catchUp(afterSequence = 0): Promise<void> {
+    const currentGeneration = generation
+    const currentSessionID = sessionID.value
     let cursor: number | null = afterSequence
     do {
-      const page = await listTeamEvents(sessionID.value, cursor, 100)
+      const page = await listTeamEvents(currentSessionID, cursor, 100)
+      if (currentGeneration !== generation || accessRevoked.value) return
       mergeEvents(page.events)
       cursor = page.next_cursor
     } while (cursor !== null)
+  }
+
+  function clearCallPoll(): void {
+    if (callPollTimer) clearTimeout(callPollTimer)
+    callPollTimer = undefined
+  }
+
+  async function refreshCalls(): Promise<void> {
+    clearCallPoll()
+    const request = ++callRequest
+    const currentGeneration = generation
+    const currentSessionID = sessionID.value
+    if (disposed || accessRevoked.value) return
+    try {
+      const nextCalls = await listTeamCalls(currentSessionID)
+      if (request === callRequest && currentGeneration === generation && !accessRevoked.value) {
+        const previousStates = new Map(calls.value.map(call => [call.id, call.state]))
+        calls.value = nextCalls
+        // A first call creates the native binding asynchronously; make the
+        // owner's confirmation link available without requiring a page reload.
+        // Foreign native IDs remain null by design; only a changed call needs
+        // to refresh bindings, rather than refetching them on every poll.
+        if (nextCalls.some(call => call.state !== 'pending' && previousStates.get(call.id) !== call.state && session.value?.agent_bindings.some(binding => binding.offer_id === call.offer_id && !binding.native_session_id))) {
+          const nextSession = await getTeamSession(currentSessionID)
+          if (request === callRequest && currentGeneration === generation && !accessRevoked.value) session.value = nextSession
+        }
+      }
+    } catch (failure) {
+      if (currentGeneration === generation) error.value = errorMessage(failure)
+    } finally {
+      if (request === callRequest && currentGeneration === generation && !disposed && !accessRevoked.value) {
+        callPollTimer = setTimeout(() => { void refreshCalls() }, 1_500)
+      }
+    }
   }
 
   function clearRunPoll(): void {
@@ -127,6 +168,8 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     runError.value = ''
     accessRevoked.value = false
     events.value = []
+    calls.value = []
+    clearCallPoll()
     runs.value = []
     runContext.value = null
     task.value = null
@@ -155,6 +198,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       connect()
       subscribeTeamSession(sessionID.value)
       scheduleRunPoll()
+      void refreshCalls()
     } catch (failure) {
       if (currentGeneration === generation) error.value = errorMessage(failure)
     } finally {
@@ -260,13 +304,14 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
 
   async function sendMessage(input: { targetMode: TeamMessageTargetMode; targetOfferIDs?: string[]; referenceEventID?: string | null }): Promise<boolean> {
     const content = draft.value.trim()
-    if (!content || !canSend.value) return false
+    if (!content || !canSend.value || (input.targetMode !== 'discussion' && !callableBindings.value.length)) return false
     sending.value = true
     error.value = ''
     try {
       const result = await appendTeamMessage(sessionID.value, { content, ...input })
       mergeEvents([result.event])
       clearDraft()
+      void refreshCalls()
       return true
     } catch (failure) {
       error.value = errorMessage(failure)
@@ -280,7 +325,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   function installSubscriptionHandlers(): void {
     disposers = [
       onEvent('team_collaboration_event', message => {
-        if (message.team_session_id !== sessionID.value || !message.event) return
+        if (accessRevoked.value || message.team_session_id !== sessionID.value || !message.event) return
         mergeEvents([message.event])
         if (['run', 'status', 'agent_message'].includes(message.event.kind)) void refreshRuns().finally(scheduleRunPoll)
       }),
@@ -292,6 +337,12 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       }),
       onEvent('team_collaboration_access_revoked', message => {
         if (message.team_session_id !== sessionID.value) return
+        generation++
+        clearCallPoll()
+        clearRunPoll()
+        calls.value = []
+        events.value = []
+        session.value = null
         accessRevoked.value = true
         subscribed.value = false
       }),
@@ -317,13 +368,14 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   onBeforeUnmount(() => {
     disposed = true
     generation++
+    clearCallPoll()
     clearRunPoll()
     unsubscribeTeamSession(sessionID.value)
     disposers.forEach(dispose => dispose())
   })
 
   return {
-    session, events, context, runContext, runs, latestRun, task, capabilities, draft, loading, sending,
+    session, events, calls, context, runContext, runs, latestRun, task, capabilities, draft, loading, sending,
     runBusy, error, runError, connected, subscribed, callableBindings, autorunEnabled,
     readOnlyReason, canSend, load, reloadSession, refreshRuns, sendMessage, createRun,
     controlRun, supplementRunInput, suggestRunPause, withdrawAgent,

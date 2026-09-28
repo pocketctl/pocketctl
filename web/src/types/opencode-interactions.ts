@@ -8,7 +8,7 @@ export interface SessionAgentOption {
   hidden?: boolean
 }
 
-export type InteractionRequestType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
+export type InteractionRequestType = 'approval_request' | 'question_request' | 'mcp_elicitation_request' | 'interactive_prompt'
 
 export function isManagedOpenCodeSession(agent: string, controlMode: unknown, capabilities: unknown): boolean {
   return agent === 'opencode'

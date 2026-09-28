@@ -45,28 +45,27 @@ func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice 
 	}
 	scanner := ps.PTYScanner
 	ptyFile := ps.PTY
-	// Validate and claim the pending prompt atomically: a matching requestID
-	// clears the scanner's active state so a concurrent/duplicate answer can't
-	// write twice.
-	if ok && (scanner == nil || scanner.ActiveRequestID() != requestID) {
-		active := ""
-		if scanner != nil {
-			active = scanner.ActiveRequestID()
-		}
+	if scanner == nil || ptyFile == nil {
 		sm.mu.Unlock()
-		return fmt.Errorf("interactive prompt %q not pending (active=%q)", requestID, active)
+		return fmt.Errorf("session %s has no pending PTY prompt", sessionID)
 	}
-	if scanner != nil {
-		scanner.Reset()
+	keys, err := scanner.ClaimChoice(requestID, choice)
+	if err != nil {
+		sm.mu.Unlock()
+		return err
 	}
+	// Keep the session lock until the choice is written, before the startup
+	// goroutine can submit its task into this same PTY.
+	_, writeErr := ptyFile.Write([]byte(keys))
 	sm.mu.Unlock()
-
-	if ptyFile == nil {
-		return fmt.Errorf("session %s PTY already closed", sessionID)
-	}
-	if _, err := ptyFile.Write([]byte(choice + "\r")); err != nil {
+	if err := writeErr; err != nil {
 		return fmt.Errorf("write choice to PTY: %w", err)
 	}
+	sm.outputCh <- protocol.DaemonEvent{Type: "interaction_result", SessionID: sessionID, RequestID: requestID,
+		Operation: "interactive_response", Status: "submitted", Choice: choice}
+	// Persist a neutral closure for refresh/replay and other owner devices.
+	sm.outputCh <- protocol.DaemonEvent{Type: "interactive_resolved", SessionID: sessionID, RequestID: requestID,
+		Status: "submitted", Choice: choice}
 	return nil
 }
 
@@ -309,7 +308,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 				Status:         protocol.StatusRunning,
 				LastActivityAt: time.Now().UTC().Format(time.RFC3339),
 			}
-			if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+			if _, err := writePTYPrompt(ctx, ptyFile, content); err != nil {
 				// B: stdin write failed — roll back so web doesn't sit on "running" forever.
 				sm.mu.Lock()
 				ps.Status = protocol.StatusError

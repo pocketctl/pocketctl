@@ -5,22 +5,11 @@ import (
 	"testing"
 )
 
-func TestBuildCodexInputOrdersDeveloperBeforeUser(t *testing.T) {
+func TestBuildCodexInputKeepsMemoryOutOfUserInput(t *testing.T) {
 	pack := &PreparedContext{PackID: "p1", StableText: "stable line", DynamicText: "dynamic line"}
 	items := BuildCodexInput(pack, "user question")
-	if len(items) != 2 {
-		t.Fatalf("want 2 items, got %d", len(items))
-	}
-	first := items[0]
-	if first["role"] != "developer" || first["tag"] != CodexDeveloperItemTag {
-		t.Fatalf("first item must be the tagged developer item: %v", first)
-	}
-	if items[1]["text"] != "user question" {
-		t.Fatalf("user text must be unchanged: %v", items[1])
-	}
-	envelope := first["text"].(string)
-	if !containsStr(envelope, "<pocketctl_memory_context") || !containsStr(envelope, "stable line") {
-		t.Fatalf("envelope malformed: %q", envelope)
+	if len(items) != 1 || len(items[0]) != 2 || items[0]["type"] != "text" || items[0]["text"] != "user question" {
+		t.Fatalf("turn/start must contain only unchanged user input: %v", items)
 	}
 }
 
@@ -42,6 +31,24 @@ func TestIsCodexContextItemMatchesExplicitTagOnly(t *testing.T) {
 	}
 }
 
+func TestIsCodexContextItemMatchesNativeDeveloperID(t *testing.T) {
+	for _, raw := range []string{
+		`{"type":"message","id":"pocketctl-memory-context:p1","role":"developer","content":[{"type":"input_text","text":"secret"}]}`,
+	} {
+		if !IsCodexContextItem(json.RawMessage(raw)) {
+			t.Fatal("native developer item ID must identify hidden history")
+		}
+	}
+	for _, raw := range []string{
+		`{"type":"message","id":"pocketctl-memory-context:p1","role":"user","content":[{"type":"input_text","text":"<pocketctl_memory_context"}]}`,
+		`{"type":"message","id":"foreign-id","role":"developer","content":[{"type":"input_text","text":"<pocketctl_memory_context"}]}`,
+		`{"type":"message","id":"pocketctl-memory-contextual:p1","role":"developer","content":[]}`,
+	} {
+		if IsCodexContextItem(json.RawMessage(raw)) {
+			t.Fatalf("ordinary history was filtered: %s", raw)
+		}
+	}
+}
 
 func containsStr(h, n string) bool {
 	for i := 0; i+len(n) <= len(h); i++ {

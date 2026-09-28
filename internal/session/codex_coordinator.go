@@ -22,11 +22,12 @@ import (
 )
 
 type codexAppServerRuntime struct {
-	PID       int
-	Endpoint  string
-	RemoteURI string
-	Client    codexRuntimeClient
-	Stop      func() error
+	PID                  int
+	ProcessStartIdentity string
+	Endpoint             string
+	RemoteURI            string
+	Client               codexRuntimeClient
+	Stop                 func() error
 }
 
 type codexRuntimeClient interface {
@@ -37,13 +38,14 @@ type codexRuntimeClient interface {
 }
 
 type codexRuntimeSnapshot struct {
-	PID        int
-	Endpoint   string
-	RemoteURI  string
-	Binary     string
-	Version    string
-	SchemaHash string
-	Generation uint64
+	PID           int
+	Endpoint      string
+	RemoteURI     string
+	Binary        string
+	Version       string
+	SchemaHash    string
+	Generation    uint64
+	HiddenContext bool
 }
 
 type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAppServerRuntime, error)
@@ -66,6 +68,7 @@ type codexCoordinator struct {
 	binary             string
 	version            string
 	schemaHash         string
+	hiddenContextProof codexRuntimeSnapshot // ephemeral; never trusted from persisted handoff
 	generation         uint64
 	start              codexRuntimeStarter
 	adopt              func(context.Context, *daemon.CodexAppServerState) (*codexAppServerRuntime, error)
@@ -137,12 +140,15 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 		activeLease := c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation)
 		compatible := codexRuntimeCompatible(c.binary, c.version, c.schemaHash, binary, version, capabilities.SchemaHash)
 		if probeErr == nil && compatible {
+			c.setHiddenContextProofLocked(binary, version, capabilities)
 			return c.snapshotLocked(), nil
 		}
 		if probeErr == nil && activeLease {
+			c.hiddenContextProof = codexRuntimeSnapshot{}
 			return c.snapshotLocked(), errCodexRuntimeUpgradeDeferred
 		}
 		if probeErr != nil && activeLease {
+			c.hiddenContextProof = codexRuntimeSnapshot{}
 			return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", probeErr)
 		}
 		restoredThreads = c.managedThreadSnapshot()
@@ -168,6 +174,9 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 		restoredThreads = append(restoredThreads, state.Threads...)
 		restoredDetached = append(restoredDetached, state.DetachedThreads...)
 		alive := platform.NewProcessController().IsAlive(state.PID)
+		if alive && state.ProcessStartIdentity != "" {
+			alive = codexProcessBirthMatches(state.PID, state.ProcessStartIdentity)
+		}
 		ownerAvailable := state.OwnerPID <= 0 || state.OwnerPID == os.Getpid() || !platform.NewProcessController().IsAlive(state.OwnerPID)
 		compatible := codexRuntimeCompatible(state.Binary, state.Version, state.SchemaHash, binary, version, capabilities.SchemaHash)
 		if alive {
@@ -196,6 +205,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 					}
 				} else {
 					c.runtime, c.binary, c.version, c.schemaHash = runtime, state.Binary, state.Version, state.SchemaHash
+					c.setHiddenContextProofLocked(binary, version, capabilities)
 					if c.projectCwd != "" {
 						if err := c.configureProjectSkills(ctx, runtime.Client); err != nil {
 							_ = runtime.Client.Close()
@@ -248,6 +258,7 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	c.version = version
 	c.schemaHash = capabilities.SchemaHash
 	c.generation = generation
+	c.setHiddenContextProofLocked(binary, version, capabilities)
 	c.restoreManagedThreads(restoredThreads)
 	c.restoreDetachedThreads(restoredDetached)
 	c.startEventPumpLocked()
@@ -303,7 +314,23 @@ func (c *codexCoordinator) snapshotLocked() codexRuntimeSnapshot {
 	return codexRuntimeSnapshot{
 		PID: c.runtime.PID, Endpoint: c.runtime.Endpoint, RemoteURI: c.runtime.RemoteURI,
 		Binary: c.binary, Version: c.version, SchemaHash: c.schemaHash, Generation: c.generation,
+		HiddenContext: c.hiddenContextSupportedLocked(),
 	}
+}
+
+func (c *codexCoordinator) setHiddenContextProofLocked(binary, version string, capabilities agentcontrol.CodexCapabilities) {
+	c.hiddenContextProof = codexRuntimeSnapshot{}
+	if c.runtime == nil || !capabilities.Managed() || !capabilities.HiddenContext || capabilities.SchemaHash == "" || capabilities.Version != version ||
+		!codexRuntimeCompatible(c.binary, c.version, c.schemaHash, binary, version, capabilities.SchemaHash) {
+		return
+	}
+	c.hiddenContextProof = codexRuntimeSnapshot{PID: c.runtime.PID, Binary: binary, Version: version, SchemaHash: capabilities.SchemaHash, Generation: c.generation, HiddenContext: true}
+}
+
+func (c *codexCoordinator) hiddenContextSupportedLocked() bool {
+	proof := c.hiddenContextProof
+	return c.runtime != nil && proof.HiddenContext && proof.PID == c.runtime.PID && proof.Generation == c.generation &&
+		codexRuntimeCompatible(proof.Binary, proof.Version, proof.SchemaHash, c.binary, c.version, c.schemaHash)
 }
 
 func (c *codexCoordinator) persist() error {
@@ -330,7 +357,8 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 	err := daemon.WriteCodexAppServerStateAt(c.runtimeStatePath(), &daemon.CodexAppServerState{
 		Cwd: c.projectCwd, CodexHomeID: c.codexHomeID, CodexHome: c.codexHome,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
-		RemoteURI: c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
+		ProcessStartIdentity: c.runtime.ProcessStartIdentity,
+		RemoteURI:            c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
 		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
 		Threads:         threads,
 		DetachedThreads: detached,
@@ -1179,6 +1207,7 @@ func (c *codexCoordinator) subscribeThread(parent context.Context, client codexR
 	if c.rejectCodexDesktopManagedThread(threadID) {
 		return
 	}
+	daemonOwned := c.durableDaemonProjectThread(threadID)
 	c.mu.Lock()
 	if c.runtime == nil || c.generation != generation || c.runtime.Client != client {
 		c.mu.Unlock()
@@ -1186,10 +1215,21 @@ func (c *codexCoordinator) subscribeThread(parent context.Context, client codexR
 	}
 	backend := newCodexAppServerBackend(c.sm, c, client, generation)
 	c.sm.mu.Lock()
+	if c.sm.retiredCollaborationSessionLocked(threadID, adapter.AgentCodex, "") {
+		c.sm.mu.Unlock()
+		c.mu.Unlock()
+		c.finishSubscription(threadID, false, client, generation)
+		return
+	}
 	if ps := c.sm.sessions[threadID]; ps != nil {
 		ps.Backend = backend
 		ps.Agent = adapter.AgentCodex
-		ps.Source = "terminal"
+		if ps.Source != "daemon" {
+			ps.Source = "terminal"
+			if daemonOwned && normalizeCwd(ps.Cwd) == normalizeCwd(c.projectCwd) {
+				ps.Source = "daemon"
+			}
+		}
 		ps.ControlMode = protocol.ControlManaged
 		if resumed.Model != "" {
 			ps.Model = resumed.Model
@@ -1209,6 +1249,37 @@ func (c *codexCoordinator) subscribeThread(parent context.Context, client codexR
 	} else {
 		c.finishSubscription(threadID, true, client, generation)
 	}
+}
+
+// A persisted managed registry also includes terminal-created threads. Recover
+// daemon ownership only when immutable rollout creation metadata independently
+// proves the exact PocketCtl thread, HOME, and project. A successful resume or
+// a matching workspace alone never transfers ownership of foreign history.
+func (c *codexCoordinator) durableDaemonProjectThread(threadID string) bool {
+	if threadID == "" || c.projectCwd == "" {
+		return false
+	}
+	c.subscribeMu.Lock()
+	_, registered := c.managedThreads[threadID]
+	c.subscribeMu.Unlock()
+	if !registered {
+		return false
+	}
+	path, err := adapter.ResolveJSONLPathFor(adapter.AgentCodex, threadID, "")
+	if err != nil {
+		return false
+	}
+	profile, ok := adapter.CodexHomeProfileForPath(path)
+	home := c.codexHome
+	if home == "" {
+		home = adapter.CodexHome()
+	}
+	if !ok || home == "" || normalizeCwd(profile.Home) != normalizeCwd(home) {
+		return false
+	}
+	meta, ok := adapter.ReadCodexRolloutMetadata(path)
+	return ok && meta.ID == threadID && meta.Originator == "pocketctl" && !meta.IsSubagent && meta.ThreadSource != "subagent" &&
+		normalizeCwd(meta.Cwd) == normalizeCwd(c.projectCwd)
 }
 
 func (c *codexCoordinator) hydrateTurns(threadID string, turns []json.RawMessage, activeTurn string, projector *codexProjection) string {
@@ -1352,6 +1423,9 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 	}
 	c.sm.mu.Lock()
 	defer c.sm.mu.Unlock()
+	if c.sm.retiredCollaborationSessionLocked(event.SessionID, adapter.AgentCodex, "") {
+		return protocol.DaemonEvent{}, false
+	}
 	ps, exists := c.sm.sessions[event.SessionID]
 	if event.Type == "session_discovered" {
 		if !exists {

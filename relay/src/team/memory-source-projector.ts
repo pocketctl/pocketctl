@@ -55,14 +55,30 @@ export interface TeamMemorySourceProjectionInput {
 
 export function teamSourceSessionId(input: {
   teamSessionId: string
+  bindingId: string
   bindingRevision: number
   participantRevision: number
 }): string {
   const digest = createHash('sha256')
-    .update(`${input.teamSessionId}:${input.bindingRevision}:${input.participantRevision}`)
+    .update(JSON.stringify([
+      'team-source-binding-v1', input.teamSessionId, input.bindingId,
+      input.bindingRevision, input.participantRevision,
+    ]))
     .digest('hex')
     .slice(0, 32)
   return `team_${digest}`
+}
+
+// Pre-binding-ID sources can still be in the feed or retained in Memory.
+// Keep their revocation fence alongside the current binding's identity.
+function legacyTeamSourceSessionId(input: {
+  teamSessionId: string
+  bindingRevision: number
+  participantRevision: number
+}): string {
+  return 'team_' + createHash('sha256')
+    .update(`${input.teamSessionId}:${input.bindingRevision}:${input.participantRevision}`)
+    .digest('hex').slice(0, 32)
 }
 
 function sourceId(input: TeamMemorySourceProjectionInput, readerUserId: number, role: TeamMemorySourceRole): string {
@@ -77,6 +93,7 @@ export function buildTeamMemorySourceRecords(
   for (const reader of input.readers) {
     const sessionId = teamSourceSessionId({
       teamSessionId: input.teamSessionId,
+      bindingId: input.binding.id,
       bindingRevision: input.binding.revision,
       participantRevision: reader.participantRevision,
     })
@@ -168,11 +185,13 @@ export interface TeamMemorySourceProjectorLike {
     teamSessionId: string
     userId: number
     participantRevision: number
+    bindingId?: string
     bindingRevision?: number
     reason: 'participant_removed' | 'binding_removed'
   }): Promise<number>
   revokeTeamBinding?(client: Pick<pg.PoolClient, 'query'>, input: {
     teamId: string
+    bindingId: string
     bindingRevision: number
   }): Promise<number>
 }
@@ -309,13 +328,14 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
       teamSessionId: string
       userId: number
       participantRevision: number
+      bindingId?: string
       bindingRevision?: number
       reason: 'participant_removed' | 'binding_removed'
     },
   ): Promise<number> {
     if (!this.enabled) return 0
-    const access = await client.query<{ team_id: string; binding_revision: string | number }>(`
-      SELECT session.team_id, memory.revision AS binding_revision
+    const access = await client.query<{ team_id: string; binding_id: string; binding_revision: string | number }>(`
+      SELECT session.team_id, memory.binding_id, memory.revision AS binding_revision
       FROM collaboration_sessions session
       JOIN team_memory_bindings memory ON memory.team_id = session.team_id
       JOIN extension_installations installation
@@ -325,41 +345,50 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
        AND installation.status IN ('pending', 'active')
       WHERE session.team_session_id = $1
         AND memory.revision = COALESCE($3::bigint, memory.revision)
-      ORDER BY memory.created_at DESC
+        AND memory.binding_id = COALESCE($4::text, memory.binding_id)
+      ORDER BY (memory.state = 'active') DESC, memory.created_at DESC
       LIMIT 1
-    `, [input.teamSessionId, input.userId, input.bindingRevision ?? null])
+    `, [input.teamSessionId, input.userId, input.bindingRevision ?? null, input.bindingId ?? null])
     const row = access.rows[0]
     if (!row) return 0
     const bindingRevision = Number(row.binding_revision)
-    const sessionId = teamSourceSessionId({
+    const identity = {
       teamSessionId: input.teamSessionId,
+      bindingId: row.binding_id,
       bindingRevision,
       participantRevision: input.participantRevision,
-    })
-    const result = await client.query(`
-      INSERT INTO extension_source_outbox
-        (source_kind, source_id, owner_user_id, session_id, event_type, occurred_at, payload)
-      VALUES ('session_access_revoked', $1, $2, $3, 'session_access_revoked', NOW(), $4::jsonb)
-      ON CONFLICT (source_kind, source_id) DO NOTHING
-    `, [
-      `team-access:${input.teamSessionId}:u${input.userId}:b${bindingRevision}:p${input.participantRevision}`,
-      input.userId,
-      sessionId,
-      JSON.stringify({
-        reason: input.reason,
-        team_id: row.team_id,
-        team_session_id: input.teamSessionId,
-        team_memory_binding_revision: bindingRevision,
-        participant_user_id: input.userId,
-        participant_revision: input.participantRevision,
-      }),
-    ])
-    return result.rowCount ?? 0
+    }
+    const sourceId = `team-access:${input.teamSessionId}:u${input.userId}:b${bindingRevision}:p${input.participantRevision}`
+    let inserted = 0
+    for (const [revocationId, sessionId] of [
+      [sourceId, legacyTeamSourceSessionId(identity)],
+      [`${sourceId}:i${row.binding_id}`, teamSourceSessionId(identity)],
+    ]) {
+      const result = await client.query(`
+        INSERT INTO extension_source_outbox
+          (source_kind, source_id, owner_user_id, session_id, event_type, occurred_at, payload)
+        VALUES ('session_access_revoked', $1, $2, $3, 'session_access_revoked', NOW(), $4::jsonb)
+        ON CONFLICT (source_kind, source_id) DO NOTHING
+      `, [
+        revocationId, input.userId, sessionId,
+        JSON.stringify({
+          reason: input.reason,
+          team_id: row.team_id,
+          team_session_id: input.teamSessionId,
+          team_memory_binding_id: row.binding_id,
+          team_memory_binding_revision: bindingRevision,
+          participant_user_id: input.userId,
+          participant_revision: input.participantRevision,
+        }),
+      ])
+      inserted += result.rowCount ?? 0
+    }
+    return inserted
   }
 
   async revokeTeamBinding(
     client: Pick<pg.PoolClient, 'query'>,
-    input: { teamId: string; bindingRevision: number },
+    input: { teamId: string; bindingId: string; bindingRevision: number },
   ): Promise<number> {
     if (!this.enabled) return 0
     const readers = await client.query<{
@@ -381,6 +410,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
         teamSessionId: reader.team_session_id,
         userId: Number(reader.user_id),
         participantRevision: Number(reader.participant_revision),
+        bindingId: input.bindingId,
         bindingRevision: input.bindingRevision,
         reason: 'binding_removed',
       })

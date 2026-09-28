@@ -3916,27 +3916,10 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
 					continue
 				}
-				nativeSessionID, err := sm.CreateCollaborationSession(ctx, cmd.Collaboration, cmd.TeamContext, cmd.Agent, cmd.Content)
-				if err != nil {
-					if cmd.TeamContext != nil {
-						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", RequestID: cmd.RequestID,
-							MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
-					}
-					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", RequestID: cmd.RequestID,
-						MsgID: cmd.MsgID, Status: "rejected", Reason: classifyCreateError(err.Error()), Error: err.Error(), Collaboration: cmd.Collaboration})
-					continue
-				}
-				cwd, _ := sm.GetSessionCwd(nativeSessionID)
-				client.SendMsg(protocol.DaemonEvent{Type: "session_created", SessionID: nativeSessionID,
-					RequestID: cmd.RequestID, ReservationID: quotaReservationID(cmd.QuotaGrant), Agent: cmd.Agent,
-					Cwd: cwd, Collaboration: cmd.Collaboration})
-				stateDirty.Store(true)
-				if cmd.TeamContext != nil {
-					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: nativeSessionID,
-						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
-				}
-				client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: nativeSessionID,
-					RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
+				createCommand := cmd
+				daemon.Go("team-session-create", logger, func() {
+					runCollaborationSessionCreate(ctx, client, sm, createCommand, stateDirty, memoryContextGrants)
+				})
 				continue
 			case "collaboration_user_message":
 				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "resume", time.Now())

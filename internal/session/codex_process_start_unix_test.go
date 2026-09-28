@@ -29,7 +29,7 @@ func TestStartCodexAppServerWaitsForInitializedPrivateSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Stop()
-	if runtime.PID <= 0 || runtime.RemoteURI != "unix://"+runtime.Endpoint {
+	if runtime.PID <= 0 || runtime.ProcessStartIdentity == "" || !codexProcessBirthMatches(runtime.PID, runtime.ProcessStartIdentity) || runtime.RemoteURI != "unix://"+runtime.Endpoint {
 		t.Fatalf("runtime=%+v", runtime)
 	}
 	info, err := os.Stat(runtime.Endpoint)

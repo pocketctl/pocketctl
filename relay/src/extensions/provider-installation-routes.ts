@@ -255,6 +255,7 @@ export function registerProviderInstallationRoutes(
       owner_scope_id: string
       parent_organization_id: string | null
       authorization_epoch: string | number
+      scope_snapshot: { state: string; memberships: Array<Record<string, unknown>> } | null
     }>(`
       SELECT i.installation_id, i.status, i.config_version, i.granted_scopes,
              i.subscriptions, i.enabled_services, i.event_filter,
@@ -267,6 +268,22 @@ export function registerProviderInstallationRoutes(
                WHEN 'organization' THEN o.authorization_epoch
                ELSE i.authorization_epoch
              END AS authorization_epoch,
+             CASE WHEN i.owner_scope_kind IN ('team', 'organization') THEN
+               jsonb_build_object(
+                 'state', CASE i.owner_scope_kind WHEN 'team' THEN t.state ELSE o.state END,
+                 'memberships', COALESCE((
+                   SELECT jsonb_agg(jsonb_build_object(
+                     'membership_id', m.membership_id,
+                     'membership_revision', m.membership_revision::text,
+                     'roles', m.roles,
+                     'state', m.state
+                   ) ORDER BY m.membership_id)
+                   FROM extension_scope_memberships m
+                   WHERE m.scope_kind = i.owner_scope_kind
+                     AND m.scope_id = i.owner_scope_id
+                 ), '[]'::jsonb)
+               )
+             ELSE NULL END AS scope_snapshot,
              (c.snapshot_required_at IS NOT NULL) AS snapshot_required
       FROM extension_installations i
       LEFT JOIN extension_checkpoints c ON c.installation_id = i.installation_id
@@ -302,6 +319,7 @@ export function registerProviderInstallationRoutes(
         owner_scope_id: row.owner_scope_id,
         parent_organization_id: row.parent_organization_id,
         authorization_epoch: String(row.authorization_epoch),
+        scope_snapshot: row.scope_snapshot,
         granted_scopes: row.granted_scopes ?? [],
         subscriptions: row.subscriptions ?? [],
         enabled_services: row.enabled_services ?? [],

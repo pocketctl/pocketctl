@@ -283,6 +283,8 @@ describe('context route contracts (unit)', () => {
     const resolveLoadout = vi.fn()
     const replaceLoadout = vi.fn()
     const app = appWith({
+      guard: stubGuard({ callerType: 'web' }),
+      pool: { query: async () => ({ rows: [{ owner_scope_kind: 'personal' }] }) } as never,
       admission: { admit, receipt: vi.fn(), consume: vi.fn() } as never,
       packs: { listForSession, get: vi.fn() } as never,
       feedback: { submit: feedback } as never,

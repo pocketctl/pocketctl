@@ -1,0 +1,1910 @@
+{
+  "schema_version": 1,
+  "dataset_id": "phase2-shadow-2026-08-29",
+  "reviewer": "",
+  "completed_at": "2026-08-29T05:31:18.093Z",
+  "evaluation_case_ids": [
+    "case-91889feddf266e06",
+    "case-a26aade825194a69",
+    "case-0efa2c9d18143898",
+    "case-a58eacc37295b3c1",
+    "case-36b324ee42bafde8",
+    "case-5675e46fcc5d18c4",
+    "case-24ffbf2ef14a135f",
+    "case-94f2f5a31fec6c33",
+    "case-112c00811af7779f",
+    "case-6d28edcdd243a87c",
+    "case-85527c8cac28739f",
+    "case-4623701f6ba3c707",
+    "case-a150bec37b92eae4",
+    "case-9111fc0f091c9ca6",
+    "case-a0dc05d6c977fba3",
+    "case-ad7d8d838a39bcf8",
+    "case-ea4399d90afd7cb2",
+    "case-04859b9e922e17c1",
+    "case-fc11decabc84cb92",
+    "case-ef7982ff7c26bc4e",
+    "case-c9e18a064416d7ec",
+    "case-7014c42bf2a54db4",
+    "case-c4977af14a2b474c",
+    "case-6f46c423552d0b02",
+    "case-fbeb559fe620eb36",
+    "case-1fe7a9da443e8c09",
+    "case-6c0eba5d211cedd6",
+    "case-643889ca74d193e8",
+    "case-114727def1b9f867",
+    "case-53e1b45f79c0f860",
+    "case-eefdcdc4a0ba45a1",
+    "case-416b4ecb277e936f",
+    "case-6ac232f84b020e43",
+    "case-2d3a4f35d9441086",
+    "case-5de5c3d0b2e42598",
+    "case-039d210437ca4e39",
+    "case-1718c73c2d0c2ee7",
+    "case-a1222cdc2fe8947a",
+    "case-39d34852ca3debb8",
+    "case-84ac61116c5de340",
+    "case-922eeb14a11c18f0",
+    "case-21797765dca46893",
+    "case-3ae8a53f31795234",
+    "case-367a52d2b114cd24",
+    "case-076c6676e175585f",
+    "case-fc24c14313591fac",
+    "case-b7c302054a72883c",
+    "case-725e77904ef0dd95",
+    "case-5c8045c7dcd08c44",
+    "case-f4eafc5e2d336435",
+    "case-8e5277f80d6edd5c",
+    "case-046602d9b4adc115",
+    "case-a4507713da5957c1",
+    "case-53d769d768a905dc",
+    "case-b727292a412f217b",
+    "case-6bd3b901ee3f31d9",
+    "case-bc7a08c8ce79f5a7",
+    "case-3b9da40b0be05dd4",
+    "case-6c478d499e7a73e2",
+    "case-fae7ae07a3f78f3f",
+    "case-041386b095349952",
+    "case-d051558d15f8d391",
+    "case-e7a514845eeab01e",
+    "case-32d4ef7420422fac",
+    "case-4f76ee36fc30ff13",
+    "case-f92cc2305d0824d0",
+    "case-e89b7d42dc1fbd3c",
+    "case-f995357cee496362",
+    "case-a752f243e0d9f749",
+    "case-8f39bcf8844cc684",
+    "case-384c78d72e16bdb3",
+    "case-0cb010b2514ec458",
+    "case-2c40a7ae6694cc76",
+    "case-7ed3ab5f52bc8428",
+    "case-490e94813192738b",
+    "case-fe954dcf83dd50bf",
+    "case-ed17cd4bfd6f098e",
+    "case-0304cfbbb080247d",
+    "case-a35cdc1cbab5fa4f",
+    "case-8b5a08e0d06b9a09",
+    "case-97401dd0804174f9",
+    "case-411d7c89889ce8ae",
+    "case-79b7462dce98c5a2",
+    "case-2b3fce2b0392c213",
+    "case-44d782e916081ef6",
+    "case-a445f8c607499529",
+    "case-7993f65508d7bd2c",
+    "case-08db5c209512e9ba",
+    "case-89a54a650c008ee6",
+    "case-47125f307152fbc8",
+    "case-7a8e76ec5346a78d",
+    "case-e50e5d94ee5617ce",
+    "case-d845724232514580",
+    "case-226b0199c66117f0",
+    "case-31b9a6e6b299e362",
+    "case-8f8f398739470701",
+    "case-b8fffd5ac7497102",
+    "case-7560bd4e76afd5e9",
+    "case-4d35208e4332ecc9",
+    "case-a342b91709dd2058"
+  ],
+  "labels": [
+    {
+      "case_id": "case-91889feddf266e06",
+      "item_id": "a83faa50-8977-5440-a498-c0e575ee4dba",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-91889feddf266e06",
+      "item_id": "5d241f7e-f57e-5aad-8636-b7f0b8a1fba1",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-91889feddf266e06",
+      "item_id": "36493d2c-ade5-56fa-b0d1-d0b6bac487eb",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a26aade825194a69",
+      "item_id": "fb84391f-3255-5f01-9fd9-48241d44983e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a26aade825194a69",
+      "item_id": "f5af3e61-123f-5acb-b474-01b7eb500a1e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a26aade825194a69",
+      "item_id": "77b237b3-58a4-54c1-ad64-1ed38db57831",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0efa2c9d18143898",
+      "item_id": "5f972ae3-d951-58f2-9677-d0fff0c60255",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0efa2c9d18143898",
+      "item_id": "6ef28146-b797-5f3a-88ce-9eb7f2d56c47",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0efa2c9d18143898",
+      "item_id": "84eeecff-179c-5112-b510-3ab11cd3e1a5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a58eacc37295b3c1",
+      "item_id": "1db62bce-e0b6-5c72-a406-1d5f62b798e9",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a58eacc37295b3c1",
+      "item_id": "76ea8fad-dd9a-5727-9cc3-2c81cda6bd02",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a58eacc37295b3c1",
+      "item_id": "dafb4dbf-126c-5a56-bd94-cc4368116e94",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-36b324ee42bafde8",
+      "item_id": "d4e9649e-12a6-5893-87b5-963158987728",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-36b324ee42bafde8",
+      "item_id": "11828444-c89e-5564-92fd-d9a863e2a0bc",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-36b324ee42bafde8",
+      "item_id": "776805ee-0537-5b7a-86e7-4868530fadd8",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5675e46fcc5d18c4",
+      "item_id": "3fb79a54-7076-5322-9848-b5b1bdbb906b",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-5675e46fcc5d18c4",
+      "item_id": "c5b10603-3b07-50f0-9392-4ffc44a21091",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-5675e46fcc5d18c4",
+      "item_id": "a3a535f2-b42d-56de-a1ef-6022f1870127",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-24ffbf2ef14a135f",
+      "item_id": "da8a3b36-295b-5e0d-95e2-62db3e7ef799",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-24ffbf2ef14a135f",
+      "item_id": "73502067-2a28-5daa-ba00-ede4575a25b7",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-24ffbf2ef14a135f",
+      "item_id": "cfdc49da-b05c-5555-9508-4986ef4c9db1",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-94f2f5a31fec6c33",
+      "item_id": "ef69bf84-6533-5c82-9012-c798b23538bd",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-94f2f5a31fec6c33",
+      "item_id": "d207d684-431e-5bed-b7bd-f6474d595825",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-94f2f5a31fec6c33",
+      "item_id": "3b26e064-d582-5c39-a0bb-cdc6be1037fa",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-112c00811af7779f",
+      "item_id": "5ce640f7-a7ea-519b-9d43-03dc5d349967",
+      "label": "duplicate",
+      "note": ""
+    },
+    {
+      "case_id": "case-112c00811af7779f",
+      "item_id": "1083eaf9-9ea5-5190-a283-e5c479636a27",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-112c00811af7779f",
+      "item_id": "b1524173-116e-59ea-92bd-9c7d2a11c28f",
+      "label": "duplicate",
+      "note": ""
+    },
+    {
+      "case_id": "case-6d28edcdd243a87c",
+      "item_id": "22c797e8-526a-5241-8837-75a2c98ce2c7",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-6d28edcdd243a87c",
+      "item_id": "656b645b-2fe5-5469-afcb-7c68df969e61",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-6d28edcdd243a87c",
+      "item_id": "90049839-79cf-5f81-9fa2-86187a8df961",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-85527c8cac28739f",
+      "item_id": "b10ab643-422c-5cbd-8433-c8ba800777e2",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-85527c8cac28739f",
+      "item_id": "12a8201f-fb5a-5f8f-9e9e-6afa1213d2b6",
+      "label": "duplicate",
+      "note": ""
+    },
+    {
+      "case_id": "case-85527c8cac28739f",
+      "item_id": "d9fc450b-6b96-5225-a24d-56565be8a911",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-4623701f6ba3c707",
+      "item_id": "93aaef39-745f-5e6a-8b33-e0a41e77e70d",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-4623701f6ba3c707",
+      "item_id": "35e27cd7-b23b-5f33-b285-11ec8d5d00b6",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-4623701f6ba3c707",
+      "item_id": "ad1cef16-a563-5606-904e-ae78d9dc5667",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a150bec37b92eae4",
+      "item_id": "109c857b-b78f-59de-82bf-8686fd9bb3bc",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-a150bec37b92eae4",
+      "item_id": "1aa53a81-649b-5354-967d-0b156553742f",
+      "label": "harmful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a150bec37b92eae4",
+      "item_id": "1c7bb3d2-08f2-5a9b-b967-23de883a9a95",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-9111fc0f091c9ca6",
+      "item_id": "766ae2ee-a5c4-5142-8ed2-597e98859d4d",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-9111fc0f091c9ca6",
+      "item_id": "eb81de32-eca4-514a-93e5-0f0ce08c3204",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-9111fc0f091c9ca6",
+      "item_id": "947e9f9f-c987-5768-9621-7f07828422d8",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a0dc05d6c977fba3",
+      "item_id": "8cf702f5-f33f-5431-9f9b-8eb8a358116d",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a0dc05d6c977fba3",
+      "item_id": "356c7f64-b21a-53fc-903c-b26829b395f3",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a0dc05d6c977fba3",
+      "item_id": "f0f71cb2-b3c1-52f9-8efb-13d7d3934e9a",
+      "label": "duplicate",
+      "note": ""
+    },
+    {
+      "case_id": "case-ad7d8d838a39bcf8",
+      "item_id": "638f8a82-c6a0-549e-8106-0f4123ad67b5",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-ad7d8d838a39bcf8",
+      "item_id": "664b9d53-c457-5c6c-ba55-d02d1b8a545d",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-ad7d8d838a39bcf8",
+      "item_id": "0c3ffd7d-2334-54b4-a9b4-9cf86da697ba",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-ea4399d90afd7cb2",
+      "item_id": "e45b6e59-31f5-5dba-8d74-b991ba84a6fb",
+      "label": "duplicate",
+      "note": ""
+    },
+    {
+      "case_id": "case-ea4399d90afd7cb2",
+      "item_id": "4b5e131a-e47e-5695-adeb-c8a59b11c54d",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-ea4399d90afd7cb2",
+      "item_id": "4e1098a0-6e2c-5ff9-bc47-876a93d4e2cc",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-04859b9e922e17c1",
+      "item_id": "882abf2c-83c2-57fa-a22a-082041573621",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-04859b9e922e17c1",
+      "item_id": "fb79a799-f537-506e-93be-1b96b0c6ded0",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-04859b9e922e17c1",
+      "item_id": "8bb5aa5e-b381-5a1a-ab21-e7a26b500fd6",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-fc11decabc84cb92",
+      "item_id": "9ea6d49b-5db3-50b7-8571-0276e79853e0",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-fc11decabc84cb92",
+      "item_id": "d4efcae3-b894-5257-ab7b-e0707ecb486d",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-fc11decabc84cb92",
+      "item_id": "cf6b4a6d-4c4a-50b0-a61b-3132ee55cb8f",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-ef7982ff7c26bc4e",
+      "item_id": "fa9c944c-1b15-5073-b717-91c3a6bd2292",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-ef7982ff7c26bc4e",
+      "item_id": "70c12170-3b96-5026-9ac1-8f1a902aff94",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-ef7982ff7c26bc4e",
+      "item_id": "f894baf2-f975-53d9-b0b7-32f88c929640",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-c9e18a064416d7ec",
+      "item_id": "b6b79bbe-a5fc-5783-8f31-4a6395dcad15",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-c9e18a064416d7ec",
+      "item_id": "217c16b2-7c65-585d-9b62-60975eabec5b",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-c9e18a064416d7ec",
+      "item_id": "d8a881c4-50e8-5499-8840-e6d33eff82e2",
+      "label": "incorrect",
+      "note": ""
+    },
+    {
+      "case_id": "case-7014c42bf2a54db4",
+      "item_id": "d68b595b-158d-56d9-a095-7b2425377e4b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7014c42bf2a54db4",
+      "item_id": "b03a6ab5-95fa-5539-8a69-ad6ffeafd335",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-7014c42bf2a54db4",
+      "item_id": "46beeb97-f002-536f-aac7-da42380b1b22",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-c4977af14a2b474c",
+      "item_id": "dbfd6410-34d7-56f8-9f13-09aaea98be07",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-c4977af14a2b474c",
+      "item_id": "05626ea7-1c3d-57d8-9e5a-af3716c1cc29",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-c4977af14a2b474c",
+      "item_id": "b56d8919-ecfe-59d6-abe6-c8ea5807b1d1",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6f46c423552d0b02",
+      "item_id": "bde0fc75-88ad-502d-9414-2198158b0501",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6f46c423552d0b02",
+      "item_id": "cea2c59a-6ea4-5bc5-9626-fe8d07a79af5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6f46c423552d0b02",
+      "item_id": "0d20829f-3dbd-5b22-9bbc-c20e8c70a33b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fbeb559fe620eb36",
+      "item_id": "3586bb4c-2677-5e5f-aba7-679052cbd846",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fbeb559fe620eb36",
+      "item_id": "86c5bc26-8d5f-5a07-874c-72cbe654a0f7",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fbeb559fe620eb36",
+      "item_id": "6fb2b1cd-ea74-51b0-ab92-1d94d1016ff0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-1fe7a9da443e8c09",
+      "item_id": "b6c32911-f9e4-5ae7-9300-7e808e7a8110",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-1fe7a9da443e8c09",
+      "item_id": "d2665951-bb21-5fa6-b2f7-19c2dbde83ec",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-1fe7a9da443e8c09",
+      "item_id": "33e651be-2493-5e79-85ab-77c44aa81606",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6c0eba5d211cedd6",
+      "item_id": "ceaaa618-5221-5cbd-9b6c-9a96b31f280b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6c0eba5d211cedd6",
+      "item_id": "705b7e6b-fd1a-5dfb-a0aa-34b9e44b8329",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6c0eba5d211cedd6",
+      "item_id": "4a20f2da-9d00-54c4-9737-c7f818439d3c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-643889ca74d193e8",
+      "item_id": "1cf4021f-40e0-5010-8e0f-58adaa3abc9e",
+      "label": "harmful",
+      "note": ""
+    },
+    {
+      "case_id": "case-643889ca74d193e8",
+      "item_id": "c769f07f-327f-5f9c-b1cf-75d8caf51cb0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-643889ca74d193e8",
+      "item_id": "26d6c469-dc7f-5aa9-8154-ec53add1c27e",
+      "label": "harmful",
+      "note": ""
+    },
+    {
+      "case_id": "case-114727def1b9f867",
+      "item_id": "c2b60d68-5db9-551e-967c-ab0adb23945f",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-114727def1b9f867",
+      "item_id": "b69a078c-41a8-5cef-b6fe-277c56ba787a",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-114727def1b9f867",
+      "item_id": "5cb30537-f341-52b2-98ba-36f6563e1d9e",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-53e1b45f79c0f860",
+      "item_id": "6d27002d-4a08-5d59-80ee-729ee58234a9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-53e1b45f79c0f860",
+      "item_id": "22423543-fc21-55fe-bfce-e517050b4112",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-53e1b45f79c0f860",
+      "item_id": "4a48268c-53fd-5e3d-8c4a-9c9c280f0e67",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-eefdcdc4a0ba45a1",
+      "item_id": "8c40cda5-c264-5254-aeca-e804070c8667",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-eefdcdc4a0ba45a1",
+      "item_id": "94ea7de1-abc1-5a3f-a4bf-b18b1d12085c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-eefdcdc4a0ba45a1",
+      "item_id": "86aad37b-8661-5ce0-8796-36fc8f9c860b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-416b4ecb277e936f",
+      "item_id": "3f84ccfd-9be7-59ed-8116-bc1729442779",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-416b4ecb277e936f",
+      "item_id": "d923d915-9589-5f89-b834-ec5f4b482419",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-416b4ecb277e936f",
+      "item_id": "32ace799-1ac1-5a99-a80d-4e92243dc380",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6ac232f84b020e43",
+      "item_id": "7aa8f852-f910-5831-bd66-07ce6ee9afa8",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6ac232f84b020e43",
+      "item_id": "e7d298df-6d41-5fa8-8c06-401fc0dc4e77",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6ac232f84b020e43",
+      "item_id": "7f719a47-7437-5ecb-870f-875751c43762",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2d3a4f35d9441086",
+      "item_id": "90c3eeee-2056-5e63-9e08-a304129351ed",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2d3a4f35d9441086",
+      "item_id": "1efcd09d-581b-54c6-92dc-58328d7d2aa6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2d3a4f35d9441086",
+      "item_id": "26ae79ef-bac3-535f-9ccb-fbb1cd5f7305",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5de5c3d0b2e42598",
+      "item_id": "d4380483-59be-50f3-927b-1efcca04cecd",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5de5c3d0b2e42598",
+      "item_id": "054648e2-6695-55a3-9abb-fdaa2001bb95",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5de5c3d0b2e42598",
+      "item_id": "f56d1753-64fd-5ab7-831c-837008e3720b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-039d210437ca4e39",
+      "item_id": "ef334b40-726b-5210-8ccc-781ac6457d0a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-039d210437ca4e39",
+      "item_id": "778c548e-da79-5de1-8c91-ada426d84756",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-039d210437ca4e39",
+      "item_id": "06d3d360-fbbc-57e8-930e-a1ba7acb5ef9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-1718c73c2d0c2ee7",
+      "item_id": "8fc4c043-8c7e-55af-aecb-949834f57ec0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-1718c73c2d0c2ee7",
+      "item_id": "af2ac8ec-9cf4-54c4-8412-95848e6f6c70",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-1718c73c2d0c2ee7",
+      "item_id": "b5f7a3d9-178b-594c-8942-f23d6afa698a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a1222cdc2fe8947a",
+      "item_id": "e87f7507-1888-5960-990e-7a2bf9976c32",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a1222cdc2fe8947a",
+      "item_id": "e00b6834-0ad8-5142-852a-bec26cf5591c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a1222cdc2fe8947a",
+      "item_id": "384a2893-214f-5168-bdc6-d4f6abcd8852",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-39d34852ca3debb8",
+      "item_id": "4456449a-3e5a-5196-958f-2f3ad79e1ab4",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-39d34852ca3debb8",
+      "item_id": "2e87dd54-d931-57e5-97b3-c61d5b2af579",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-39d34852ca3debb8",
+      "item_id": "098104f7-653a-56f9-852a-4fa33d01adf5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-84ac61116c5de340",
+      "item_id": "ffa879e5-ce2d-57b3-860f-e9f37e17f09f",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-84ac61116c5de340",
+      "item_id": "9f2be6f4-15e2-5a7e-b4e1-f89fd13e2151",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-84ac61116c5de340",
+      "item_id": "51a9bb7e-6285-52c8-a16e-8b7cf82c8fa6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-922eeb14a11c18f0",
+      "item_id": "a1fb14b1-6d8f-534d-bc83-62b403922435",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-922eeb14a11c18f0",
+      "item_id": "057b1a2c-2c38-5f4c-aebd-e59546e0e190",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-922eeb14a11c18f0",
+      "item_id": "06e248d6-39ff-577a-b8e8-bfc330b41586",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-21797765dca46893",
+      "item_id": "a630962e-f940-5d65-aed0-f711551d5f97",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-21797765dca46893",
+      "item_id": "ea61f2c7-f994-50fe-8550-4783132415b9",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-21797765dca46893",
+      "item_id": "65ac7672-57a5-5a71-b5c4-201ef09930b5",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-3ae8a53f31795234",
+      "item_id": "7b7fab1b-3bd9-5ecf-8c34-a2adb5219447",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-3ae8a53f31795234",
+      "item_id": "6662cfe7-c6aa-522a-8c3f-2e81f807c522",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-3ae8a53f31795234",
+      "item_id": "29b2a73e-5ad5-537e-a147-3ec621e7e8b5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-367a52d2b114cd24",
+      "item_id": "e6671714-dd0a-5751-be64-ffbee1f98853",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-367a52d2b114cd24",
+      "item_id": "4c6d4fcd-a81d-559b-bce5-39067ece88c6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-367a52d2b114cd24",
+      "item_id": "d6c61ab7-5722-588c-81ee-e15220f451a9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-076c6676e175585f",
+      "item_id": "b20858d2-351f-5e09-8fa5-bca8421dc61a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-076c6676e175585f",
+      "item_id": "c2338863-f308-5f4a-9d51-9572af5f6cdd",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-076c6676e175585f",
+      "item_id": "81fa4fea-94b5-5418-a6da-7fb85599317c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fc24c14313591fac",
+      "item_id": "4053004b-0b97-57aa-8289-cee4c5f83284",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fc24c14313591fac",
+      "item_id": "1b7b1c5f-80fe-596f-9a57-35842749c0b0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fc24c14313591fac",
+      "item_id": "626669d7-aa1c-5587-9ce1-ad261a08ea8c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b7c302054a72883c",
+      "item_id": "1448dd87-7a61-53e8-8663-09679b2761e4",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b7c302054a72883c",
+      "item_id": "ac493e2b-4d1c-5835-95bb-36419d6dc8c9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b7c302054a72883c",
+      "item_id": "ed59c2c2-a3f4-5cf4-8985-aca90186078f",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-725e77904ef0dd95",
+      "item_id": "3f61cca2-39de-5403-92c2-44d281760b1b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-725e77904ef0dd95",
+      "item_id": "c2368704-7084-5bee-b357-048d98caa3c4",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-725e77904ef0dd95",
+      "item_id": "890ac63b-364d-5763-9062-660206e37145",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5c8045c7dcd08c44",
+      "item_id": "84944d40-4916-52b9-bb86-d4d233e5d348",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5c8045c7dcd08c44",
+      "item_id": "61634cc3-e617-57d6-b21d-5de0048e830c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-5c8045c7dcd08c44",
+      "item_id": "0e8d220f-9774-58e5-93d2-ed5db7126122",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f4eafc5e2d336435",
+      "item_id": "6a1fbbda-d8f7-57f6-b1fd-7ad7c21f741b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f4eafc5e2d336435",
+      "item_id": "825bf02c-26ca-58e7-9a11-66e718de0746",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f4eafc5e2d336435",
+      "item_id": "785e36c7-27f2-566a-aaa3-f40da207ea84",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8e5277f80d6edd5c",
+      "item_id": "702ba805-e40c-5ed3-b75b-5938b3134bf0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8e5277f80d6edd5c",
+      "item_id": "69d383c5-0dec-5d73-985a-dd09d3a9314c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8e5277f80d6edd5c",
+      "item_id": "80343307-1208-5d8c-af5b-a09bb659ffbe",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-046602d9b4adc115",
+      "item_id": "dfe79af3-fa81-590f-bc9b-dcd36bcdb9e1",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-046602d9b4adc115",
+      "item_id": "4c81c185-d074-57e6-b403-e7ed5be48a08",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-046602d9b4adc115",
+      "item_id": "7abac661-82b4-5a21-8282-1337d0a23794",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a4507713da5957c1",
+      "item_id": "48a6b6e1-5a62-5e80-b9b9-1c5e61c727ea",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a4507713da5957c1",
+      "item_id": "e84a0f1e-6633-58ef-8b42-f932c9037337",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a4507713da5957c1",
+      "item_id": "f6bb0e74-b6c8-5695-84bf-f9c872a182aa",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-53d769d768a905dc",
+      "item_id": "69e870ad-f188-52a5-99c3-8c57627e1f05",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-53d769d768a905dc",
+      "item_id": "6f630bbf-b58b-5977-9bf7-f10df53d86ed",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-53d769d768a905dc",
+      "item_id": "47455488-6860-5170-818e-48b387bf3599",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-b727292a412f217b",
+      "item_id": "d68420ec-ebbc-51c5-a30f-6524e3ca9151",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b727292a412f217b",
+      "item_id": "bae4bbbc-8905-55b5-89e5-3787aba4c816",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b727292a412f217b",
+      "item_id": "5f5d666f-ee43-5421-b1aa-a9d63f887552",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6bd3b901ee3f31d9",
+      "item_id": "14bf4db3-6a96-542c-9597-229e651a2997",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6bd3b901ee3f31d9",
+      "item_id": "50752bb9-3354-5844-aa5a-5d6cce0ae7ad",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6bd3b901ee3f31d9",
+      "item_id": "dde6657b-7fc1-549a-a906-a753f54b63cd",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-bc7a08c8ce79f5a7",
+      "item_id": "afc7377d-0e42-53ff-b13d-9ec16ca8dd0a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-bc7a08c8ce79f5a7",
+      "item_id": "19e7f16e-14f5-5ef8-afdb-6f8c7e116ccb",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-bc7a08c8ce79f5a7",
+      "item_id": "0b67a3d5-885a-5ae8-958b-cbb22296b0f9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-3b9da40b0be05dd4",
+      "item_id": "4a4f608a-80cf-5a33-a332-9f8b68c6ceb7",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-3b9da40b0be05dd4",
+      "item_id": "1edcf77f-da1d-5bff-b986-56054086fc7a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-3b9da40b0be05dd4",
+      "item_id": "f3dac346-cf17-5513-893f-79cf91703fdb",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6c478d499e7a73e2",
+      "item_id": "451cb4aa-7687-5b21-bc0e-3553c94ba2e6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6c478d499e7a73e2",
+      "item_id": "d7bb5ee9-1907-532d-a8ba-0d4f32567a36",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-6c478d499e7a73e2",
+      "item_id": "72fd822d-4a0f-5f3e-8637-3f75ed6ab928",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fae7ae07a3f78f3f",
+      "item_id": "6b8a3942-e12b-5f78-bbc5-f67d57b2423f",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fae7ae07a3f78f3f",
+      "item_id": "a4dc6178-86b7-546f-a1e7-51a477cc661e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fae7ae07a3f78f3f",
+      "item_id": "0899eefd-b456-5d5e-93e2-907b3138e923",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-041386b095349952",
+      "item_id": "0f16bbc5-3626-57aa-b17e-41a568e965b0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-041386b095349952",
+      "item_id": "510d1f20-6e57-588c-a770-553d0d6a6515",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-041386b095349952",
+      "item_id": "3bbe429a-b8b3-55ca-830a-fc4154dd1bd9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-d051558d15f8d391",
+      "item_id": "4ed2f9ab-680c-522f-80c3-f769baf81afb",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-d051558d15f8d391",
+      "item_id": "430f7d3a-adc7-530b-863a-fdc8fd6630b9",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-d051558d15f8d391",
+      "item_id": "5443e0a9-d211-5bf3-97f1-3cb1bf704f49",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e7a514845eeab01e",
+      "item_id": "967aa291-4bd1-5fa8-9645-6165daa8bcb6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e7a514845eeab01e",
+      "item_id": "1a34af25-54d5-52d5-941b-8e898442d839",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e7a514845eeab01e",
+      "item_id": "e0519122-9991-56b0-b778-7844aa4de3db",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-32d4ef7420422fac",
+      "item_id": "7309a613-8167-5efe-a5e6-e113085b647e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-32d4ef7420422fac",
+      "item_id": "3231ec42-5f4a-550f-b0d9-c3b1c87cfbf1",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-32d4ef7420422fac",
+      "item_id": "c247e234-a879-5b03-94e1-fdcc46bc4dd4",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-4f76ee36fc30ff13",
+      "item_id": "6d3c3894-4c14-5bde-8c21-a1b5f66553ee",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-4f76ee36fc30ff13",
+      "item_id": "1454c9bf-6a20-59fe-82a0-b22353acbc88",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-4f76ee36fc30ff13",
+      "item_id": "601bdc41-543c-5933-a90f-7097ce5ad718",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f92cc2305d0824d0",
+      "item_id": "c51e8ae2-8355-55fb-9f38-e439e371cfc5",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-f92cc2305d0824d0",
+      "item_id": "fd36ca11-c5f4-5ce9-a87b-bb6834b2c7f2",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-f92cc2305d0824d0",
+      "item_id": "81df226a-74ab-5550-8b11-759c7002965b",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-e89b7d42dc1fbd3c",
+      "item_id": "b1c7ffcd-6334-5c2f-85ad-9f34bd88afb8",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e89b7d42dc1fbd3c",
+      "item_id": "6ad100cb-1a85-57e2-a63d-f743f4d80007",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e89b7d42dc1fbd3c",
+      "item_id": "a9a368c2-d462-50fe-8320-0e30b512fdd1",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f995357cee496362",
+      "item_id": "e15043ab-c520-538a-ba3a-8234e2d6c659",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f995357cee496362",
+      "item_id": "8027094a-46b9-574b-a548-b9c80c1d3999",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-f995357cee496362",
+      "item_id": "c6efefff-bc5c-5a19-bb23-53d8e5e8f254",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a752f243e0d9f749",
+      "item_id": "9f615327-098b-59b6-aab6-cd58d72fb93a",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a752f243e0d9f749",
+      "item_id": "f86918e4-10bf-517c-bd7b-4dc6fd0d637c",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a752f243e0d9f749",
+      "item_id": "fc46f0c1-bcf6-5cd1-be25-e31072e67219",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-8f39bcf8844cc684",
+      "item_id": "dfa6652a-7956-559f-b1f1-034fe6c6fa61",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8f39bcf8844cc684",
+      "item_id": "e864830c-523c-52d8-a4bf-4f27b37a69b3",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8f39bcf8844cc684",
+      "item_id": "00f5533c-159c-5e63-9930-681de9905585",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-384c78d72e16bdb3",
+      "item_id": "b3cea45c-f432-51b8-b42e-6edea4218f07",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-384c78d72e16bdb3",
+      "item_id": "414db3d5-d212-5fb4-ab4e-2137747c9b87",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-384c78d72e16bdb3",
+      "item_id": "d5422f50-eb3c-560c-af0a-46bad5f5f264",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0cb010b2514ec458",
+      "item_id": "4fd7abf0-aa44-5454-ba4e-19af4f96d3c1",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0cb010b2514ec458",
+      "item_id": "8a039a4b-ed56-528b-a56e-681d04a624de",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0cb010b2514ec458",
+      "item_id": "16c031d9-9921-5090-b833-78972a1d613d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2c40a7ae6694cc76",
+      "item_id": "3e1f34ed-7aae-55c7-92dd-3b56665e5dc6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2c40a7ae6694cc76",
+      "item_id": "84b819e9-f00e-5dc1-9674-2c11f4adf26d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2c40a7ae6694cc76",
+      "item_id": "d01c4430-d35a-59a3-a454-1e78bcee492e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7ed3ab5f52bc8428",
+      "item_id": "a05c14f8-1d9d-5d42-a5bc-38fad0e6ad1a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7ed3ab5f52bc8428",
+      "item_id": "11c689bf-e971-522a-99ff-1b54166762fc",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7ed3ab5f52bc8428",
+      "item_id": "e9abfce9-464c-54f1-a635-35b6d0c825a6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-490e94813192738b",
+      "item_id": "72f21cff-0eb2-5d08-a40e-0ca26049b332",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-490e94813192738b",
+      "item_id": "22bc66f8-3700-54c8-8c05-218b2705df19",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-490e94813192738b",
+      "item_id": "9182b19c-eab6-50d2-8f64-1d4007e8e848",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fe954dcf83dd50bf",
+      "item_id": "d69fcc73-2a18-562c-83da-449741fb6284",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fe954dcf83dd50bf",
+      "item_id": "532e629b-a7da-5e8f-83c0-38192d2fc372",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-fe954dcf83dd50bf",
+      "item_id": "5dc772e9-8b44-54f1-a327-c8f2c9c06843",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-ed17cd4bfd6f098e",
+      "item_id": "c557dc59-9d78-5ce5-8c45-2af8ebda588b",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-ed17cd4bfd6f098e",
+      "item_id": "a313e7aa-1509-5bef-8849-c43aa2b2866d",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-ed17cd4bfd6f098e",
+      "item_id": "6c85e2b1-7ac9-5ccb-a7e9-05c5337aa887",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-0304cfbbb080247d",
+      "item_id": "554fdf7c-5500-563b-97da-1b4a82208a0e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0304cfbbb080247d",
+      "item_id": "9dd9011c-0fed-52c6-bd3c-d9deaaf7a5b0",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-0304cfbbb080247d",
+      "item_id": "9d910112-b492-5245-91cb-d7799a73da6d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a35cdc1cbab5fa4f",
+      "item_id": "c3352786-16c0-5ccd-8221-cc065012579d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a35cdc1cbab5fa4f",
+      "item_id": "1ec1699b-b784-5abe-a21c-5d9343e6d29d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a35cdc1cbab5fa4f",
+      "item_id": "f92a8e49-6359-58fb-abe0-720c32c974df",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8b5a08e0d06b9a09",
+      "item_id": "c52e6d27-f753-5477-b8f9-9d900eaad33c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8b5a08e0d06b9a09",
+      "item_id": "054f6fb5-e852-59df-9159-4e2409218c3c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8b5a08e0d06b9a09",
+      "item_id": "851ba84c-dd63-5515-b1b6-1d980d41c558",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-97401dd0804174f9",
+      "item_id": "b07be3af-b645-54a3-828f-0187387086e5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-97401dd0804174f9",
+      "item_id": "1138ddca-2711-56c2-a6bf-8f2bc0043bf8",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-97401dd0804174f9",
+      "item_id": "665073ba-8fb3-5800-96fd-f0814c9ed52f",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-411d7c89889ce8ae",
+      "item_id": "116ad09f-9f25-540e-aa4d-cef71f23610e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-411d7c89889ce8ae",
+      "item_id": "babaf5d8-6089-5e9b-b996-3ad524f27c40",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-411d7c89889ce8ae",
+      "item_id": "ac3f4891-b7e3-57a8-866e-5cca57e13f4e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-79b7462dce98c5a2",
+      "item_id": "752c520e-a665-573f-954d-a30fe80741d5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-79b7462dce98c5a2",
+      "item_id": "005e380b-ae0d-5ccd-b8cb-f869839c7434",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-79b7462dce98c5a2",
+      "item_id": "c875c45e-ab6d-5fa9-bf2a-42d7480a8cd8",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2b3fce2b0392c213",
+      "item_id": "269637ed-4c8b-5c0b-b54e-bd7837e44812",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2b3fce2b0392c213",
+      "item_id": "d2ee0bd1-b58a-5d2f-9489-619fa794bdad",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-2b3fce2b0392c213",
+      "item_id": "61cef508-390a-52cc-8058-b17c7442dadf",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-44d782e916081ef6",
+      "item_id": "9ab303f5-00fc-5292-8ac0-0dc14504db12",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-44d782e916081ef6",
+      "item_id": "a1f36775-4564-5c3a-92b0-9bf6ae1f5ab3",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-44d782e916081ef6",
+      "item_id": "14786267-6d48-5539-ab6a-ee98797033a1",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-a445f8c607499529",
+      "item_id": "ef2578e9-e3b3-52f8-8da5-12067629cb5c",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a445f8c607499529",
+      "item_id": "d1c20092-46e7-540f-8127-8f64961ab94d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a445f8c607499529",
+      "item_id": "8ce87cae-3bab-5426-aa87-ac404b154d93",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7993f65508d7bd2c",
+      "item_id": "b8fcf243-b6da-5859-b86d-94f3e3148b67",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7993f65508d7bd2c",
+      "item_id": "959b98a2-f7f9-57f5-bf28-f077e05a9629",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7993f65508d7bd2c",
+      "item_id": "f7ab700e-2c0c-5cb4-928d-d30510bac522",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-08db5c209512e9ba",
+      "item_id": "32cdf781-f705-5f93-9e86-995a680c876d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-08db5c209512e9ba",
+      "item_id": "0030fd99-fec4-5fbb-b7ea-57816fa3109a",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-08db5c209512e9ba",
+      "item_id": "4d392536-41ca-5a2d-81d0-e35ef434db41",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-89a54a650c008ee6",
+      "item_id": "39ac2d34-ff66-5bf2-97f1-5300371c9a83",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-89a54a650c008ee6",
+      "item_id": "85f22544-988b-54b1-8bd6-e346b52d35f4",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-89a54a650c008ee6",
+      "item_id": "c095432d-e742-5192-aa5b-4eb215255f5d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-47125f307152fbc8",
+      "item_id": "496a8723-3ba7-57ea-81c1-b97bdf67e12b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-47125f307152fbc8",
+      "item_id": "fd5089b0-ff62-55a2-9a66-1f86e4919885",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-47125f307152fbc8",
+      "item_id": "0a4c470a-bdf4-5b00-86a9-b9ad5153f533",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7a8e76ec5346a78d",
+      "item_id": "249c2a97-158e-5e84-9849-6023fe65f841",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7a8e76ec5346a78d",
+      "item_id": "64735db0-e194-5315-ba2f-225b4ee0794d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7a8e76ec5346a78d",
+      "item_id": "2a265298-dc8b-5020-8166-020a1c44d77b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e50e5d94ee5617ce",
+      "item_id": "fd1b5453-f464-52c8-bd8e-7b9a19110115",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e50e5d94ee5617ce",
+      "item_id": "db70b395-ea11-53af-a6a3-421f2149e588",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-e50e5d94ee5617ce",
+      "item_id": "8bfbe975-d24d-5d47-8d21-18716784929d",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-d845724232514580",
+      "item_id": "3f832df5-4249-56c5-86d6-d5c9eccf46e7",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-d845724232514580",
+      "item_id": "4bfcba53-5654-544b-a2b6-012c0b25833b",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-d845724232514580",
+      "item_id": "ed3037ae-aaa4-5a71-ae19-5567d2795323",
+      "label": "useful",
+      "note": ""
+    },
+    {
+      "case_id": "case-226b0199c66117f0",
+      "item_id": "c71171a3-c2b2-568c-8850-95dc22450d93",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-226b0199c66117f0",
+      "item_id": "c572238c-c319-54cd-85fb-b6437abcf263",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-226b0199c66117f0",
+      "item_id": "333c1474-5f67-5e2c-8159-15f057dcfb88",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-31b9a6e6b299e362",
+      "item_id": "7b7976fe-7361-5cc3-b6ae-fa8ad53b346b",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-31b9a6e6b299e362",
+      "item_id": "00655264-7c74-5747-ba0d-f4d9b6732f71",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-31b9a6e6b299e362",
+      "item_id": "f83a449e-3844-5d92-826a-897cc8ce62d4",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8f8f398739470701",
+      "item_id": "06ebbaa9-b4ac-570a-98a7-a94f5f722628",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8f8f398739470701",
+      "item_id": "7dde8d62-3a12-586a-aa07-b8b5f1dd8810",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-8f8f398739470701",
+      "item_id": "d40656a0-52db-58c1-96c3-03649909914e",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b8fffd5ac7497102",
+      "item_id": "fb484744-bfb8-53a7-b524-6c3504a98a62",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b8fffd5ac7497102",
+      "item_id": "f18f5e5b-92e8-5e6f-8b91-135bbb7dcd99",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-b8fffd5ac7497102",
+      "item_id": "879e8a57-7058-5209-a712-08692592d7ea",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7560bd4e76afd5e9",
+      "item_id": "fd05800e-4649-5a0d-8ee8-ce347c1196ce",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7560bd4e76afd5e9",
+      "item_id": "f8a757d5-1e8d-52cc-872b-909f2d0cfbfc",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-7560bd4e76afd5e9",
+      "item_id": "d365f692-8606-51cf-bd31-822211e017f6",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-4d35208e4332ecc9",
+      "item_id": "e5e868b7-df3c-5be6-ab28-80c9ed405c71",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-4d35208e4332ecc9",
+      "item_id": "1a0b795a-0125-52dd-a3f7-57dfcbc36adc",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-4d35208e4332ecc9",
+      "item_id": "ec838352-307a-5c11-97d4-7d4980ae6d50",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a342b91709dd2058",
+      "item_id": "84e9be1b-6aa4-5244-b967-40afe46f8da5",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a342b91709dd2058",
+      "item_id": "4b7d4261-e2d3-5987-ad3f-ec883ec8d4ec",
+      "label": "irrelevant",
+      "note": ""
+    },
+    {
+      "case_id": "case-a342b91709dd2058",
+      "item_id": "2820534b-be97-591f-8947-8601f645c4c8",
+      "label": "irrelevant",
+      "note": ""
+    }
+  ]
+}

@@ -194,9 +194,13 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       content_hash CHAR(64) NOT NULL,
       created_by_user_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (team_session_id, version),
-      UNIQUE (team_session_id, content_hash)
+      UNIQUE (team_session_id, version)
     );
+    -- Restoring an earlier body is a new immutable version. Content hashes
+    -- verify snapshot contents; request IDs, not hashes, deduplicate writes.
+    -- Also upgrade existing installations without changing their history.
+    ALTER TABLE collaboration_context_versions
+      DROP CONSTRAINT IF EXISTS collaboration_context_versions_team_session_id_content_hash_key;
     CREATE INDEX IF NOT EXISTS idx_collaboration_context_session
       ON collaboration_context_versions(team_session_id, version DESC);
 

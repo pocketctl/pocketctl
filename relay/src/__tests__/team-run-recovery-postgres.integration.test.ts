@@ -2,6 +2,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 import { initDB } from '../db.js'
+import { TeamContextDeliveryService } from '../team/context-delivery.js'
 import { TeamContextService } from '../team/context-service.js'
 import { TeamRepository } from '../team/repository.js'
 import { TeamRunRepository } from '../team/run-repository.js'
@@ -76,6 +77,12 @@ describeWithDatabase('Team run recovery (PostgreSQL)', () => {
       budget: { max_calls: 3, max_concurrent_calls: 1, max_duration_seconds: 1_800 }, requestId: 'run-create',
     })
 
+    // A newer session Context must not change this run's frozen delivery.
+    await new TeamContextService(pool).create({
+      sessionId: shared.id, actorUserId: ownerUserId, expectedRevision: 1, requestId: 'newer-context',
+      goal: 'A different task for future runs', consensus: [], openQuestions: [], references: [],
+    })
+
     const staleLease = await repository.claimNext('worker-before-crash', 1_000)
     expect(staleLease?.run.id).toBe(createdRun.run.id)
     await pool.query(`UPDATE collaboration_runs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE run_id = $1`, [createdRun.run.id])
@@ -90,6 +97,9 @@ describeWithDatabase('Team run recovery (PostgreSQL)', () => {
       role: 'coordinator', content: 'bounded coordinator dispatch', processedCallStep: 0,
     })
     expect(scheduled.callId).toMatch(/^ccl_/)
+    const prepared = await new TeamContextDeliveryService(pool).prepare(scheduled.callId)
+    expect(prepared).toMatchObject({ context_version: context.context.version, content_hash: context.context.content_hash })
+    expect(prepared.stable_text).toContain('Reach a bounded result')
     expect((await pool.query(`SELECT COUNT(*)::int AS count FROM collaboration_calls WHERE run_id = $1`, [createdRun.run.id])).rows[0].count).toBe(1)
 
     const current = await repository.get(createdRun.run.id, ownerUserId)

@@ -2969,7 +2969,7 @@ export class Router {
               reservation_id: decision.reservationId, expires_at: decision.expiresAt, operation: 'resume',
             } };
           }
-          if (['approval_response', 'question_response', 'question_reject'].includes(msg.type) && typeof msg.request_id === 'string') {
+          if (['approval_response', 'question_response', 'question_reject', 'interactive_response'].includes(msg.type) && typeof msg.request_id === 'string') {
             this.trackInteractionClient(msg.session_id, msg.request_id, msg.type, clientWs);
           }
           if (['list_invocations', 'invoke_command'].includes(msg.type)) {

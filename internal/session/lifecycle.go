@@ -416,13 +416,23 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 			return
 		case <-time.After(10 * time.Second):
 		}
+		// Startup trust/approval menus must be answered by the owner before
+		// task text is sent. JSONL discovery starts only after that submission.
+		if !waitForPTYPromptReady(ctx, done, ps.PTYScanner) {
+			select {
+			case <-done:
+				handleDone()
+			default:
+			}
+			return
+		}
 		if ps.PTY != nil {
 			slog.Default().Info("pty initial prompt write",
 				"session", ps.SessionID,
 				"agent", ps.Agent,
 				"prompt_len", len(initialPrompt),
 			)
-			n, err := ps.PTY.Write([]byte(initialPrompt + "\r"))
+			n, err := writePTYPrompt(ctx, ps.PTY, initialPrompt)
 			if err != nil {
 				slog.Default().Warn("pty initial prompt write failed",
 					"session", ps.SessionID,
@@ -1147,4 +1157,31 @@ func pathExists(path string) bool {
 	}
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// Allow a quiet interval after an owner response so a following startup menu
+// can be detected. A pending menu has no timeout: it requires an owner choice.
+func waitForPTYPromptReady(ctx context.Context, done <-chan struct{}, scanner *ptyscan.Scanner) bool {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	quiet := 0
+	quietRequired := 4
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-done:
+			return false
+		case <-ticker.C:
+			if scanner.ActiveRequestID() != "" {
+				quiet = 0
+				quietRequired = 40 // trust confirmation starts the CLI banner/plugins
+				continue
+			}
+			quiet++
+			if quiet >= quietRequired {
+				return true
+			}
+		}
+	}
 }

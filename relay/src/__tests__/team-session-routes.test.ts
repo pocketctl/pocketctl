@@ -30,6 +30,14 @@ function appFor(overrides: Record<string, unknown>) {
 }
 
 describe('Team shared session routes', () => {
+  test('reads call status through authenticated participant authorization', async () => {
+    const { app } = appFor({ listCalls: async (_session: string, actor: number) => [{ id: 'ccl_1', state: 'uncertain', actor }] })
+    expect((await app.inject({ method: 'GET', url: '/api/team/sessions/css_1/calls' })).statusCode).toBe(401)
+    const response = await app.inject({ method: 'GET', url: '/api/team/sessions/css_1/calls', headers: { authorization: 'Bearer valid' } })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ calls: [{ id: 'ccl_1', state: 'uncertain', actor: 23 }] })
+    await app.close()
+  })
   test('records the authenticated author and rejects a supplied author', async () => {
     const appendMessage = vi.fn(async input => ({ event: { id: 'cev_1', author_user_id: input.actorUserId }, call_ids: [] }))
     const { app, service } = appFor({ appendMessage })

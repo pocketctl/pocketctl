@@ -493,3 +493,21 @@ func TestGrantClientIgnoresReplyForRequestThatWasNeverEmitted(t *testing.T) {
 		t.Fatalf("pre-injected unmatched reply was accepted: %+v", result)
 	}
 }
+
+func TestPrepareSelectedMemoryRefusesUnsupportedAdapterWithReason(t *testing.T) {
+	started := make(chan CompileRequest, 1)
+	memory := &fakeMemory{compileStarted: started, compile: &CompileResponse{Outcome: "shadow_queued"}}
+	req := newTurn()
+	req.Capability = CapabilityShadowOnly
+	req.ScopeInstallationIDs = []string{"shared-installation"}
+	req.SelectedReferences = []SelectedReference{{SourceKind: "memory_claim", SourceID: "claim", SourceVersion: "version", OwnerScopeID: "scope", InstallationID: "shared-installation"}}
+	pack, outcome := coordinator(&fakeGrants{grant: readyGrant}, memory).Prepare(context.Background(), req)
+	if pack != nil || outcome.Reason != "unsupported_adapter" {
+		t.Fatalf("selected unsupported adapter: pack=%v outcome=%+v", pack, outcome)
+	}
+	select {
+	case <-started:
+		t.Fatal("rejected shared selection must not fall back to personal shadow compilation")
+	case <-time.After(20 * time.Millisecond):
+	}
+}

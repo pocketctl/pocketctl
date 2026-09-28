@@ -56,9 +56,15 @@ export function createScopeControlProjector(options: ScopeControlProjectorOption
       ? (envelope.data.roles as unknown[]).filter((role): role is string => typeof role === 'string')
       : []
     await options.pool.query(`
+      WITH current_scope AS (
+        SELECT installation_id FROM memory_owner_scopes
+        WHERE installation_id = $1 AND authorization_epoch <= $7
+        FOR UPDATE
+      )
       INSERT INTO memory_scope_memberships
         (installation_id, membership_id, roles, state, membership_revision, valid_from, valid_until, last_feed_id)
-      VALUES ($1, $2, $3::text[], $4, $5, NOW(), CASE WHEN $4 = 'revoked' THEN NOW() ELSE NULL END, $6)
+      SELECT $1, $2, $3::text[], $4, $5, NOW(), CASE WHEN $4 = 'revoked' THEN NOW() ELSE NULL END, $6
+      FROM current_scope
       ON CONFLICT (installation_id, membership_id) DO UPDATE SET
         roles = EXCLUDED.roles,
         state = EXCLUDED.state,
@@ -75,7 +81,7 @@ export function createScopeControlProjector(options: ScopeControlProjectorOption
       WHERE (memory_scope_memberships.membership_revision, memory_scope_memberships.last_feed_id)
             < (EXCLUDED.membership_revision, EXCLUDED.last_feed_id)
          OR memory_scope_memberships.membership_revision < EXCLUDED.membership_revision
-    `, [installationId, membershipId, roles, state, revision, feedId])
+    `, [installationId, membershipId, roles, state, revision, feedId, epoch])
     await mirror.advanceEpoch({
       installationId,
       authorizationEpoch: epoch,
@@ -95,7 +101,7 @@ export function createScopeControlProjector(options: ScopeControlProjectorOption
           authorization_epoch = GREATEST(authorization_epoch, $3),
           last_feed_id = GREATEST(last_feed_id, $4),
           updated_at = NOW()
-      WHERE installation_id = $1
+      WHERE installation_id = $1 AND authorization_epoch <= $3
     `, [installationId, state, epoch, envelope.feed_id])
     if (state === 'dissolved') {
       const scope = await mirror.get(installationId)

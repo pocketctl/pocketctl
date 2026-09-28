@@ -31,14 +31,19 @@
       <section ref="messagesElement" class="messages" @scroll="saveReadingPosition">
         <div v-if="loading && !events.length" class="empty">正在加载真实协作记录…</div>
         <div v-else-if="!events.length" class="empty"><strong>开始团队讨论</strong><span>选择全部、定向 Agent 或仅补充讨论后发送。事件会写入共享会话。</span></div>
-        <article v-for="event in events" :id="`team-event-${event.id}`" :key="event.id" :class="['event', event.kind]">
+        <article v-for="event in displayEvents" :id="`team-event-${event.id}`" :key="event.id" :class="['event', event.kind]">
           <div class="event-meta">
             <span>#{{ event.event_seq }} · {{ authorLabel(event) }}</span><time>{{ formatTime(event.created_at) }}</time>
           </div>
           <button v-if="event.reference" type="button" class="reference" @click="scrollToEvent(event.reference.event_id)">↪ 引用 #{{ event.reference.event_seq }}</button>
           <MessageUser v-if="event.kind === 'member_message'" :content="event.content" />
           <MessageAgent v-else-if="event.kind === 'agent_message'" :content="event.content" :agent-type="agentProvider(event.author_offer_id)" />
-          <div v-else class="system-event"><strong>{{ kindLabel(event.kind) }}</strong><span>{{ event.content }}</span></div>
+          <div v-else class="system-event"><strong>{{ kindLabel(event.kind) }}</strong><span>{{ event.kind === 'status' ? statusLabel(event.content) : event.content }}</span></div>
+          <div v-for="call in callsByEvent.get(event.id) ?? []" :key="call.id" :class="['call-status', call.state]" role="status">
+            <span>{{ agentProvider(call.offer_id) }} · {{ callLabel(call) }}</span>
+            <small v-if="call.state === 'uncertain'">结果尚未确认，请勿重复发送。</small>
+            <RouterLink v-if="ownerNativeLink(call.offer_id)" :to="ownerNativeLink(call.offer_id)!">打开我的原生会话</RouterLink>
+          </div>
           <div class="event-actions"><span v-if="event.target_mode">{{ targetLabel(event) }}</span><button type="button" @click="referenceEvent = event">引用回复</button></div>
         </article>
       </section>
@@ -48,9 +53,10 @@
         <TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" />
         <div class="composer-row">
           <textarea v-model="draft" :disabled="!!readOnlyReason" rows="1" :placeholder="readOnlyReason || '发送真实协作消息…'" data-testid="team-session-composer" @keydown.enter.exact.prevent="send" />
-          <button type="button" class="send-button" :disabled="!canSend || !draft.trim() || (target.mode === 'offers' && !target.offerIDs.length)" data-testid="team-session-send" @click="send">{{ sending ? '…' : '↑' }}</button>
+          <button type="button" class="send-button" :disabled="!canSend || !draft.trim() || !!targetUnavailableReason" data-testid="team-session-send" @click="send">{{ sending ? '…' : '↑' }}</button>
         </div>
         <p v-if="readOnlyReason" class="composer-status">{{ readOnlyReason }}</p>
+        <p v-else-if="targetUnavailableReason" class="composer-status">{{ targetUnavailableReason }}</p>
         <p v-else-if="target.mode === 'discussion'" class="composer-status">仅记录讨论，不触发 Agent 调用。</p>
       </footer>
     </main>
@@ -93,19 +99,26 @@ import { useAuth } from '../composables/useAuth'
 import { getScopedReadingPosition, setScopedReadingPosition, type SessionScope } from '../composables/useScopedSessionState'
 import { useTeamSession } from '../composables/useTeamSession'
 import { listTeamAgentOffers, listTeamMembers, listTeamSessions, listTeams, updateTeamSession } from '../services/teamClient'
-import type { TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSessionSummary, TeamSummary } from '../types/team'
+import type { TeamCallSummary, TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSessionSummary, TeamSummary } from '../types/team'
 
 const route = useRoute(), router = useRouter(), { user } = useAuth()
 const teamID = computed(() => String(route.params.teamId ?? '')), sessionID = computed(() => String(route.params.id ?? ''))
 const scope = computed<SessionScope>(() => ({ type: 'team', teamId: teamID.value }))
 const {
-  session, events, context, runContext, latestRun, task, draft, loading, sending, runBusy, error, runError,
+  session, events, calls, context, runContext, latestRun, task, draft, loading, sending, runBusy, error, runError,
   autorunEnabled, readOnlyReason, canSend, sendMessage, createRun, controlRun, supplementRunInput,
   suggestRunPause, withdrawAgent,
 } = useTeamSession(teamID, sessionID)
 const teams = ref<TeamSummary[]>([]), members = ref<TeamMember[]>([]), offers = ref<TeamAgentOffer[]>([]), allSessions = ref<TeamSessionSummary[]>([]), filteredSessions = ref<TeamSessionSummary[]>([])
 const daemonID = ref(''), provider = ref<'' | TeamProvider>(''), showContext = ref(false), showParticipants = ref(false), showRun = ref(false), referenceEvent = ref<TeamEvent | null>(null)
 const target = ref<TeamAgentTargetValue>({ mode: 'all', offerIDs: [] }), messagesElement = ref<HTMLElement | null>(null)
+const targetUnavailableReason = computed(() => {
+  if (target.value.mode === 'discussion') return ''
+  const callable = session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? []
+  if (!callable.length) return '当前没有可调用的 Agent，可选择“仅补充讨论”发送。'
+  if (target.value.mode === 'offers' && (!target.value.offerIDs.length || target.value.offerIDs.some(id => !callable.some(binding => binding.offer_id === id)))) return '请选择可调用的 Agent，或切换为“仅补充讨论”。'
+  return ''
+})
 const currentUserID = computed(() => user.value?.id ?? 0), isCreator = computed(() => session.value?.creator_user_id === currentUserID.value)
 const teamName = computed(() => teams.value.find(team => team.id === teamID.value)?.name ?? '团队')
 const daemonOptions = computed(() => [...new Set(offers.value.map(offer => offer.daemon_id))])
@@ -114,12 +127,41 @@ const visibleSessions = computed(() => {
   if (session.value && !list.some(item => item.id === session.value!.id)) list.unshift(session.value)
   return list
 })
+// Keep immutable source events for references and cursors; only coalesce display.
+const displayEvents = computed(() => {
+  const result: TeamEvent[] = [], replies = new Map<string, TeamEvent>()
+  for (const event of events.value) {
+    const key = event.kind === 'agent_message' && event.call_id ? `${event.call_id}:${event.author_offer_id}` : null
+    const existing = key ? replies.get(key) : undefined
+    if (existing) existing.content += event.content
+    else {
+      const copy = { ...event }; result.push(copy)
+      if (key) replies.set(key, copy)
+    }
+  }
+  return result
+})
+const callsByEvent = computed(() => {
+  const byEvent = new Map<string, TeamCallSummary[]>()
+  for (const call of calls?.value ?? []) byEvent.set(call.event_id, [...(byEvent.get(call.event_id) ?? []), call])
+  return byEvent
+})
+function callLabel(call: TeamCallSummary): string {
+  if (call.state === 'failed' && call.outcome === 'memory_adapter_unsupported') return '当前 Agent 不支持共享 Memory 注入'
+  if (call.outcome === 'waiting_owner' && ['accepted', 'dispatched'].includes(call.state)) return '等待 Agent 所有者在原生会话中确认'
+  return ({ pending: '等待调度', dispatched: '已派发', accepted: '执行中', completed: '已完成', failed: '执行失败', blocked: '调用受阻', uncertain: '结果未知' })[call.state]
+}
+function ownerNativeLink(offerID: string) {
+  const binding = session.value?.agent_bindings.find(item => item.offer_id === offerID && item.owner_user_id === currentUserID.value)
+  return binding?.native_session_id ? { path: `/session/${binding.native_session_id}`, query: { team: teamID.value, return_team_session: sessionID.value } } : null
+}
 const returnNotice = computed(() => route.query.from_native === '1')
 const listLink = computed(() => ({ name: 'team-sessions', params: { teamId: teamID.value }, query: { ...(daemonID.value ? { daemon: daemonID.value } : {}), ...(provider.value ? { provider: provider.value } : {}) } }))
 let listGeneration = 0
 let restoredSessionID = ''
 
 function stateLabel(state: string): string { return ({ active: '进行中', paused: '已暂停', ended: '已结束', archived: '已归档' } as Record<string,string>)[state] ?? state }
+function statusLabel(status: string): string { return ({ waiting_owner: '等待 Agent 所有者在原生会话中确认', completed: '已完成', failed: '执行失败', interrupted: '已中断', abandoned: '已放弃' } as Record<string, string>)[status] ?? status }
 function kindLabel(kind: string): string { return ({ status: 'Agent 状态', context: 'Context 更新', run: '协作运行', system: '系统事件' } as Record<string,string>)[kind] ?? kind }
 function formatTime(value: string): string { return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
 function authorLabel(event: TeamEvent): string {
@@ -158,7 +200,12 @@ async function send(): Promise<void> {
   const sent = await sendMessage({ targetMode: target.value.mode, targetOfferIDs: target.value.offerIDs, referenceEventID: referenceEvent.value?.id ?? null })
   if (sent) { referenceEvent.value = null; await nextTick(); scrollToBottom() }
 }
-function scrollToEvent(eventID: string): void { document.getElementById(`team-event-${eventID}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
+function scrollToEvent(eventID: string): void {
+  const source = events.value.find(event => event.id === eventID)
+  const target = source?.kind === 'agent_message' && source.call_id
+    ? displayEvents.value.find(event => event.call_id === source.call_id && event.author_offer_id === source.author_offer_id)?.id ?? eventID
+    : eventID
+  document.getElementById(`team-event-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
 function scrollToBottom(): void { const element = messagesElement.value; if (element) element.scrollTop = element.scrollHeight }
 function saveReadingPosition(): void { const element = messagesElement.value; if (element) setScopedReadingPosition(scope.value, sessionID.value, element.scrollTop) }
 function restoreReadingPosition(): void {
@@ -179,6 +226,11 @@ onBeforeUnmount(saveReadingPosition)
 </script>
 
 <style scoped>
+.call-status { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--fg-secondary); font-size: 11px; }
+.call-status.uncertain,.call-status.blocked { color: var(--warning); }
+.call-status.failed { color: var(--error); }
+.call-status a { color: var(--accent); }
+
 .team-session-layout { height: 100dvh; min-height: 0; display: flex; position: relative; color: var(--fg); background: var(--bg); overflow: hidden; }.session-panel { width: 282px; flex: 0 0 282px; display: flex; flex-direction: column; border-right: 1px solid var(--sidebar-border, var(--border)); background: var(--surface); }.session-panel-header { min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px 10px 16px; border-bottom: 1px solid var(--border); box-sizing: border-box; }.session-panel-header > div { min-width: 0; display: grid; gap: 4px; }.session-panel-header strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; }.session-panel-header small { color: var(--fg-tertiary); font-size: 9px; }.session-panel-header a { color: var(--accent); font-size: 20px; text-decoration: none; }.session-panel :deep(.session-scope-switcher) { margin: 9px 9px 5px; }.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; padding: 5px 9px 8px; }.filters select { min-width: 0; padding: 7px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: var(--bg); font-size: 9px; }.session-list { min-height: 0; flex: 1; overflow-y: auto; padding: 4px 8px 14px; }.session-list a { min-height: 54px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border-radius: 8px; color: inherit; text-decoration: none; }.session-list a:hover,.session-list a.active { background: var(--surface-hover); }.session-list a.active { box-shadow: inset 2px 0 var(--accent); }.session-list a > div { min-width: 0; display: grid; gap: 4px; }.session-list strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.session-list small { color: var(--fg-tertiary); font-size: 9px; }.state-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--fg-tertiary); }.state-dot.active { background: var(--success); }.state-dot.paused { background: var(--warning); }.conversation { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; position: relative; }.conversation-header { min-height: 62px; display: flex; align-items: center; gap: 12px; padding: 0 18px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 92%, transparent); box-sizing: border-box; }.title-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.title-copy span { color: var(--fg-tertiary); font-size: 9px; }.title-copy strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }.header-actions { display: flex; align-items: center; gap: 6px; }.header-actions button,.session-state { padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-secondary); background: transparent; font-size: 9px; }.header-actions button { cursor: pointer; }.header-actions button.active { color: var(--accent); background: var(--accent-muted); }.session-state.active { color: var(--success); }.session-state.paused { color: var(--warning); }.mobile-back { display: none; color: var(--fg); font-size: 25px; text-decoration: none; }.return-notice,.error-banner { padding: 7px 16px; border-bottom: 1px solid var(--border); color: var(--fg-secondary); background: var(--surface); font-size: 10px; }.error-banner { color: var(--error); }.messages { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; padding: 24px clamp(18px, 5vw, 72px) 190px; scrollbar-gutter: stable; }.event { display: flex; flex-direction: column; gap: 6px; }.event-meta { display: flex; justify-content: space-between; color: var(--fg-tertiary); font: 9px var(--font-mono); }.reference { align-self: flex-start; padding: 3px 7px; border: 0; border-radius: 6px; color: var(--accent); background: var(--accent-muted); font-size: 9px; cursor: pointer; }.event-actions { min-height: 18px; display: flex; justify-content: flex-end; gap: 9px; color: var(--fg-tertiary); font-size: 9px; opacity: .72; }.event-actions button { border: 0; color: var(--fg-tertiary); background: none; font-size: 9px; cursor: pointer; }.event-actions button:hover { color: var(--accent); }.system-event { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }.system-event strong { color: var(--fg-secondary); font-size: 10px; }.system-event span { white-space: pre-wrap; color: var(--fg-tertiary); font-size: 10px; line-height: 1.6; }.empty { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--fg-tertiary); font-size: 11px; text-align: center; }.empty strong { color: var(--fg-secondary); font-size: 14px; }.composer-shell { position: absolute; right: clamp(18px,5vw,72px); bottom: 20px; left: clamp(18px,5vw,72px); z-index: 30; padding: 10px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: 0 10px 32px rgba(0,0,0,.16); backdrop-filter: blur(16px); }.reply-preview { display: flex; justify-content: space-between; gap: 10px; margin: -2px 0 8px; padding: 6px 8px; border-radius: 7px; color: var(--fg-secondary); background: var(--accent-muted); font-size: 9px; }.reply-preview span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.reply-preview button { border: 0; color: var(--fg-secondary); background: none; cursor: pointer; }.composer-row { display: flex; align-items: flex-end; gap: 8px; margin-top: 8px; }.composer-row textarea { min-height: 38px; max-height: 150px; flex: 1; resize: vertical; padding: 9px 10px; border: 0; outline: 0; color: var(--fg); background: transparent; font: 13px/1.5 var(--font-body); }.send-button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #fff; background: var(--accent); font-size: 17px; cursor: pointer; }.send-button:disabled { opacity: .4; cursor: not-allowed; }.composer-status { margin: 5px 3px 0; color: var(--fg-tertiary); font-size: 9px; }
 @media(max-width:760px){.session-panel{display:none}.mobile-back{display:block}.conversation-header{padding:0 12px}.header-actions .session-state{display:none}.header-actions button{padding:6px}.messages{padding:18px 14px 180px}.composer-shell{right:10px;bottom:10px;left:10px}.event-meta time{display:none}}
 </style>

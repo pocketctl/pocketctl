@@ -1016,6 +1016,12 @@ func (c *Client) sendHeartbeat() {
 }
 
 func (c *Client) SendMsg(v any) {
+	// Collaboration lifecycle and receipts must share the durable ordering of
+	// session output: Relay cannot materialize a receipt before session_created.
+	if event, ok := v.(protocol.DaemonEvent); ok && event.Collaboration != nil {
+		c.sendEvent(event)
+		return
+	}
 	if err := c.sendMsg(v); err != nil {
 		c.logger.Error("send msg failed", "error", err)
 	}

@@ -4,6 +4,8 @@ import { computed, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const sendMessage = vi.hoisted(() => vi.fn())
+const extraEvents: any[] = []
+const calls = ref<any[]>([])
 const teamSession = {
   id: 'css_1', team_id: 'ctm_1', creator_user_id: 7, task_id: null, title: 'Review', state: 'active', revision: 2,
   latest_event_seq: 2, current_context_version: 1, created_at: '', updated_at: '',
@@ -22,7 +24,7 @@ vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ user: ref({ id: 
 vi.mock('../../composables/useTeamSession', () => ({ useTeamSession: () => {
   const session = ref<any>({ ...teamSession, agent_bindings: teamSession.agent_bindings.map(item => ({ ...item })) })
   return {
-    session, events: ref(events.map(event => ({ ...event }))), context: ref(null), draft: ref(''), loading: ref(false), sending: ref(false), error: ref(''),
+    session, calls, events: ref([...events, ...extraEvents].map(event => ({ ...event }))), context: ref(null), draft: ref(''), loading: ref(false), sending: ref(false), error: ref(''),
     readOnlyReason: computed(() => ''), canSend: computed(() => true), sendMessage,
   }
 } }))
@@ -44,6 +46,7 @@ async function render(attachTo?: HTMLElement) {
 }
 
 beforeEach(() => {
+  extraEvents.length = 0; calls.value = []
   vi.clearAllMocks(); sendMessage.mockResolvedValue(true)
   api.listTeams.mockResolvedValue([{ id: 'ctm_1', name: 'Alpha' }])
   api.listTeamMembers.mockResolvedValue([{ id: 'm1', team_id: 'ctm_1', user_id: 7, display_label: 'Me', state: 'active', revision: 1, joined_at: '', ended_at: null }])
@@ -53,6 +56,33 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = '' })
 
 describe('team session detail', () => {
+  test('explains unsupported shared Memory injection without displaying runtime details', async () => {
+    calls.value = [{ id: 'call-1', event_id: 'e1', offer_id: 'offer-1', state: 'failed', outcome: 'memory_adapter_unsupported' }]
+    const { wrapper } = await render()
+    expect(wrapper.text()).toContain('当前 Agent 不支持共享 Memory 注入')
+    expect(wrapper.text()).not.toContain('unsupported_adapter')
+  })
+  test('renders interleaved streaming chunks as one reply per call', async () => {
+    extraEvents.push(
+      { ...events[1], id: 'other', event_seq: 3, call_id: 'call-2', author_offer_id: 'offer-2', content: 'Other' },
+      { ...events[1], id: 'chunk', event_seq: 4, content: ' completely' },
+    )
+    const { wrapper } = await render()
+    expect(wrapper.findAll('article.agent_message')).toHaveLength(2)
+    expect(wrapper.findAll('article.agent_message')[0].text()).toContain('Reviewed completely')
+  })
+
+  test('shows manual unknown and failed calls without exposing another owner native session', async () => {
+    calls.value = [
+      { id: 'call-1', event_id: 'e1', offer_id: 'offer-1', state: 'uncertain', outcome: 'daemon_disconnected' },
+      { id: 'call-2', event_id: 'e1', offer_id: 'offer-2', state: 'failed', outcome: 'failed' },
+    ]
+    const { wrapper } = await render()
+    expect(wrapper.text()).toContain('结果未知')
+    expect(wrapper.text()).toContain('执行失败')
+    expect(wrapper.text()).toContain('请勿重复发送')
+    expect(wrapper.html()).not.toContain('/session/native-2')
+  })
   test('sends a targeted reply through the shared-session event path', async () => {
     const { wrapper } = await render()
     await wrapper.get('[data-offer-id="offer-1"]').trigger('click')

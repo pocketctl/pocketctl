@@ -530,12 +530,45 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     return outcome.metadata
   })
 
+  const settingsManage = async (authorization: string | undefined) => {
+    const input = {
+      authorization,
+      requiredService: 'memory.manage',
+    }
+    let grant: Awaited<ReturnType<GrantGuard['guard']>>
+    try {
+      grant = await deps.guard.guard(input)
+    } catch (error) {
+      if (!(error instanceof MemoryApiError) || error.code !== 'unauthorized') throw error
+      grant = await deps.guard.guardV2(input)
+    }
+    if (grant.callerType !== 'web') {
+      throw new MemoryApiError('forbidden', 'caller type not permitted')
+    }
+    if ('version' in grant && grant.version === 'v2') {
+      const binding = grant.scopeBindings.find(entry =>
+        entry.installation_id === grant.primaryInstallationId)
+      if (!binding || !binding.permissions.some(permission =>
+        permission === 'policy_admin' || permission === 'scope_admin')) {
+        throw new MemoryApiError('forbidden', 'settings administration permission required')
+      }
+    } else {
+      // Legacy personal grants carry no membership permissions. Shared scopes
+      // must use v2 so the local membership and authorization fences apply.
+      const owner = await deps.pool.query<{ owner_scope_kind: string }>(
+        'SELECT owner_scope_kind FROM memory_owner_scopes WHERE installation_id = $1',
+        [grant.installationId],
+      )
+      if (owner.rows[0] && owner.rows[0].owner_scope_kind !== 'personal') {
+        throw new MemoryApiError('forbidden', 'shared settings require a v2 grant')
+      }
+    }
+    return grant
+  }
+
   app.get('/api/v1/memory/context/settings', async (req, reply) => {
     if (!gate(req, reply)) return
-    const grant = await deps.guard.guard({
-      authorization: req.headers.authorization,
-      requiredService: 'memory.manage',
-    })
+    const grant = await settingsManage(req.headers.authorization)
     const rows = await deps.settings.list({ installationId: grant.installationId })
     return { settings: rows }
   })
@@ -543,10 +576,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
   app.put('/api/v1/memory/context/settings', { bodyLimit: 4096 }, async (req, reply) => {
     if (!gate(req, reply)) return
     const body = (req.body ?? {}) as Record<string, unknown>
-    const grant = await deps.guard.guard({
-      authorization: req.headers.authorization,
-      requiredService: 'memory.manage',
-    })
+    const grant = await settingsManage(req.headers.authorization)
     const scopeKeyValid = body.scope_kind === 'installation'
       ? body.scope_key === 'global'
       : body.scope_kind === 'repository'

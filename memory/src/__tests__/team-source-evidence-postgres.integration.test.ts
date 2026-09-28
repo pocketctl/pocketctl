@@ -1,5 +1,8 @@
+import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+
 
 import { createClaimRepository } from '../claims/repository.js'
 import { createEpisodeRepository } from '../episodes/repository.js'
@@ -109,6 +112,70 @@ describeWithDatabase('Team source evidence lifecycle (PostgreSQL)', () => {
       INSERT INTO memory_feature_settings (installation_id, extraction_mode)
       VALUES ($1, 'enabled')
     `, [PERSONAL])
+  })
+
+  test('projects a rebound binding while fencing legacy and removed binding replays', async () => {
+    // Resolve the cross-component fixture at runtime, outside Memory's tsc rootDir.
+    const relayProjectorPath = fileURLToPath(new URL('../../../relay/src/team/memory-source-projector.ts', import.meta.url))
+    const { buildTeamMemorySourceRecords }: {
+      buildTeamMemorySourceRecords(input: unknown): Array<{
+        sourceKind: string; sourceId: string; sessionId: string; eventType: string
+        occurredAt: Date; payload: Record<string, unknown>
+      }>
+    } = await import(relayProjectorPath)
+    const packet = (bindingId: string, callId: string) => buildTeamMemorySourceRecords({
+      teamId: 'ctm_f20', teamSessionId: 'css_f20', callId, contextVersion: 0,
+      binding: { id: bindingId, revision: 1, installationId: TEAM, ownerScopeKind: 'team', ownerScopeId: TEAM },
+      goal: { eventId: callId + '_goal', eventSeq: 1, content: 'Check binding recovery', authorUserId: 7, occurredAt: new Date('2026-09-28T01:00:00Z') },
+      reply: { eventIds: [callId + '_reply'], eventSeqs: [2], content: 'Binding recovery verified', authorOfferId: 'cao_1', occurredAt: new Date('2026-09-28T01:00:01Z') },
+      outcome: { eventId: callId + '_done', eventSeq: 3, status: 'completed', occurredAt: new Date('2026-09-28T01:00:02Z') },
+      readers: [{ userId: 7, participantRevision: 1 }],
+    })
+    let feedId = 0
+    const enqueue = async (records: ReturnType<typeof packet>) => {
+      for (const record of records) {
+        await pool.query(`
+          INSERT INTO memory_feed_inbox
+            (installation_id, feed_id, envelope_version, topic, source_kind, source_id,
+             session_id, turn_id, event_type, recorded_at, classification, data, payload_hash)
+          VALUES ($1, $2, 1, 'session.event.v1', $3, $4, $5, $6, $7, $8, '{}'::jsonb,
+                  $9::jsonb, sha256(convert_to($9::text, 'utf8')))
+        `, [PERSONAL, ++feedId, record.sourceKind, record.sourceId, record.sessionId,
+          record.payload.turn_id, record.eventType, record.occurredAt, JSON.stringify(record.payload)])
+      }
+    }
+    const legacySessionId = 'team_' + createHash('sha256').update('css_f20:1:1').digest('hex').slice(0, 32)
+    const legacy = packet('cmbd_old', 'ccl_legacy').map(record => ({ ...record, sessionId: legacySessionId }))
+    const original = packet('cmbd_old', 'ccl_old')
+    const rebound = packet('cmbd_new', 'ccl_new')
+    const purge = createPurgeRepository(pool, { hmacKey: 'team-source-test-key' })
+    const projector = createSourceProjector(pool, { stabilizationMs: 0, purge })
+    await enqueue(legacy)
+    await enqueue(original)
+    expect(await projector.projectOnce(PERSONAL)).toEqual({ projected: 6 })
+    for (const sessionId of new Set([legacySessionId, original[0].sessionId])) {
+      await purge.purgeSession({ installationId: PERSONAL, sessionId, reason: 'access_revoked', sourceFeedId: null })
+    }
+    await enqueue(legacy)
+    await enqueue(original)
+    await enqueue(rebound)
+    expect(await projector.projectOnce(PERSONAL)).toEqual({ projected: 9 })
+    const states = (await pool.query(`
+      SELECT feed_id::int, projection_state FROM memory_feed_inbox
+      WHERE installation_id = $1 AND feed_id > 6 ORDER BY feed_id
+    `, [PERSONAL])).rows
+    expect(states.map(row => row.projection_state)).toEqual([
+      'purged', 'purged', 'purged', 'purged', 'purged', 'purged',
+      'projected', 'projected', 'projected',
+    ])
+    expect((await pool.query(`SELECT DISTINCT session_id FROM source_events WHERE installation_id = $1`, [PERSONAL])).rows)
+      .toEqual([{ session_id: rebound[0].sessionId }])
+    await purge.purgeSession({ installationId: PERSONAL, sessionId: rebound[0].sessionId, reason: 'access_revoked', sourceFeedId: null })
+    await enqueue(rebound)
+    expect(await projector.projectOnce(PERSONAL)).toEqual({ projected: 3 })
+    expect((await pool.query(`SELECT COUNT(*)::int AS count FROM source_events WHERE installation_id = $1`, [PERSONAL])).rows[0].count).toBe(0)
+    expect((await pool.query(`SELECT projection_state FROM memory_feed_inbox WHERE installation_id = $1 AND feed_id > 15`, [PERSONAL])).rows)
+      .toEqual([{ projection_state: 'purged' }, { projection_state: 'purged' }, { projection_state: 'purged' }])
   })
 
   test('deduplicates a reply, preserves Team provenance, and retains only accepted evidence after revocation', async () => {

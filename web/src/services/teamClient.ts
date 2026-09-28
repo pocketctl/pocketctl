@@ -6,6 +6,7 @@ import type {
   TeamAgentOffer,
   TeamApiErrorBody,
   TeamCapabilities,
+  TeamCallSummary,
   TeamContextSnapshot,
   TeamEvent,
   TeamInvitation,
@@ -272,6 +273,10 @@ export async function updateTeamSession(session: TeamSession, input: { title?: s
   return (await teamRequest<{ session: TeamSession }>(`/api/team/sessions/${encodeURIComponent(session.id)}`, {
     method: 'PATCH', body: { request_id: requestID(), expected_revision: session.revision, ...input },
   })).session
+}
+
+export async function listTeamCalls(sessionID: string): Promise<TeamCallSummary[]> {
+  return (await teamRequest<{ calls: TeamCallSummary[] }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/calls`)).calls
 }
 
 export async function listTeamEvents(sessionID: string, afterSequence = 0, limit = 100): Promise<{ events: TeamEvent[]; next_cursor: number | null }> {

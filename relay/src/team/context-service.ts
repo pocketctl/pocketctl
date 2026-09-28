@@ -45,7 +45,7 @@ export class TeamContextService {
        JOIN collaboration_team_memberships member
          ON member.team_id = session.team_id AND member.user_id = $2 AND member.state = 'active'
        JOIN collaboration_teams team ON team.team_id = session.team_id AND team.state = 'active'
-       WHERE session.team_session_id = $1${lock ? ' FOR UPDATE OF session' : ''}`,
+       WHERE session.team_session_id = $1${lock ? ' FOR UPDATE OF session FOR SHARE OF team, member, participant' : ''}`,
       [sessionId, actorUserId],
     )
     if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'shared session not found')
@@ -83,6 +83,8 @@ export class TeamContextService {
         open_questions: input.openQuestions, references: input.references,
       }
       const requestHash = canonicalHash(requestPayload)
+      const session = await this.accessible(client as unknown as pg.Pool, input.sessionId, input.actorUserId, true)
+      if (Number(session.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       const prior = await client.query(
         `SELECT request_hash, response FROM collaboration_team_idempotency
          WHERE user_id = $1 AND operation = $2 AND request_id = $3`,
@@ -93,8 +95,6 @@ export class TeamContextService {
         await client.query('COMMIT')
         return prior.rows[0].response
       }
-      const session = await this.accessible(client as unknown as pg.Pool, input.sessionId, input.actorUserId, true)
-      if (Number(session.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       if (!['active', 'paused'].includes(session.state)) throw new TeamRepositoryError('invalid_state', 'shared session no longer accepts context versions')
       const currentRevision = Number(session.current_context_version)
       if (currentRevision !== input.expectedRevision) {

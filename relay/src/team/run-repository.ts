@@ -6,6 +6,12 @@ import { teamEventView } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamEvent, TeamRun, TeamRunBudget, TeamRunState } from './types.js'
 
+export class TeamRunBudgetError extends TeamRepositoryError {
+  constructor(readonly dimension: 'calls' | 'duration' | 'concurrency') {
+    super('budget_exhausted', `run ${dimension} budget exhausted`)
+  }
+}
+
 export interface TeamRunMutation {
   run: TeamRun
   event: TeamEvent
@@ -97,6 +103,30 @@ export class TeamRunRepository {
     } finally { client.release() }
   }
 
+  private async authorizedSession(client: pg.PoolClient, sessionId: string, actorUserId: number): Promise<any> {
+    // Keep lifecycle and authorization stable until the mutation/receipt commits.
+    const result = await client.query(
+      `SELECT session.* FROM collaboration_sessions session
+       JOIN collaboration_teams team ON team.team_id = session.team_id AND team.state = 'active'
+       JOIN collaboration_team_memberships member ON member.team_id = session.team_id
+         AND member.user_id = $2 AND member.state = 'active'
+       JOIN collaboration_session_participants participant ON participant.team_session_id = session.team_session_id
+         AND participant.user_id = $2 AND participant.state = 'active'
+       WHERE session.team_session_id = $1
+       FOR UPDATE OF session FOR SHARE OF team, member, participant`, [sessionId, actorUserId],
+    )
+    if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'shared session not found')
+    return result.rows[0]
+  }
+
+  private async authorizedRun(client: pg.PoolClient, runId: string, actorUserId: number): Promise<{ run: any; session: any }> {
+    // Workers lock the Run before appending to the Session; use the same order.
+    const run = (await client.query(`SELECT * FROM collaboration_runs WHERE run_id = $1 FOR UPDATE`, [runId])).rows[0]
+    if (!run) throw new TeamRepositoryError('team_not_found', 'collaboration run not found')
+    const session = await this.authorizedSession(client, run.team_session_id, actorUserId)
+    return { run, session }
+  }
+
   private async participants(db: Pick<pg.Pool, 'query'>, sessionId: string): Promise<number[]> {
     const result = await db.query<{ user_id: number }>(
       `SELECT user_id FROM collaboration_session_participants WHERE team_session_id = $1 AND state = 'active'`, [sessionId],
@@ -146,6 +176,8 @@ export class TeamRunRepository {
       const operation = `team.run.create:${input.sessionId}`
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${input.actorUserId}:${operation}:${input.requestId}`])
       const requestHash = canonicalHash({ coordinator_offer_id: input.coordinatorOfferId, context_version: input.contextVersion, budget: input.budget })
+      const session = await this.authorizedSession(client, input.sessionId, input.actorUserId)
+      if (Number(session.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       const prior = await client.query<{ request_hash: string; response: TeamRunMutation }>(
         `SELECT request_hash, response FROM collaboration_team_idempotency WHERE user_id = $1 AND operation = $2 AND request_id = $3`,
         [input.actorUserId, operation, input.requestId],
@@ -154,16 +186,6 @@ export class TeamRunRepository {
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different run content')
         return prior.rows[0].response
       }
-      const session = (await client.query(
-        `SELECT session.* FROM collaboration_sessions session
-         JOIN collaboration_session_participants participant ON participant.team_session_id = session.team_session_id
-           AND participant.user_id = $2 AND participant.state = 'active'
-         JOIN collaboration_team_memberships member ON member.team_id = session.team_id
-           AND member.user_id = $2 AND member.state = 'active'
-         WHERE session.team_session_id = $1 FOR UPDATE OF session`, [input.sessionId, input.actorUserId],
-      )).rows[0]
-      if (!session) throw new TeamRepositoryError('team_not_found', 'shared session not found')
-      if (Number(session.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not active')
       if (Number(session.current_context_version) !== input.contextVersion) {
         throw new TeamRepositoryError('context_revision_conflict', 'context changed before run creation', Number(session.current_context_version))
@@ -238,6 +260,8 @@ export class TeamRunRepository {
       const operation = `team.run.${input.action}:${input.runId}`
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${input.actorUserId}:${operation}:${input.requestId}`])
       const requestHash = canonicalHash({ expected_revision: input.expectedRevision })
+      const { run, session } = await this.authorizedRun(client, input.runId, input.actorUserId)
+      if (Number(session.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       const prior = await client.query<{ request_hash: string; response: TeamRunMutation }>(
         `SELECT request_hash, response FROM collaboration_team_idempotency WHERE user_id = $1 AND operation = $2 AND request_id = $3`,
         [input.actorUserId, operation, input.requestId],
@@ -246,18 +270,10 @@ export class TeamRunRepository {
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different run control content')
         return prior.rows[0].response
       }
-      const run = (await client.query(
-        `SELECT run.*, session.creator_user_id FROM collaboration_runs run
-         JOIN collaboration_sessions session ON session.team_session_id = run.team_session_id
-         JOIN collaboration_session_participants participant ON participant.team_session_id = run.team_session_id
-           AND participant.user_id = $2 AND participant.state = 'active'
-         WHERE run.run_id = $1 FOR UPDATE OF run`, [input.runId, input.actorUserId],
-      )).rows[0]
-      if (!run) throw new TeamRepositoryError('team_not_found', 'collaboration run not found')
-      if (Number(run.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       if (Number(run.revision) !== input.expectedRevision) throw new TeamRepositoryError('revision_conflict', 'revision mismatch', Number(run.revision))
       if (['completed', 'failed', 'cancelled'].includes(run.state)) throw new TeamRepositoryError('invalid_state', 'collaboration run is terminal')
       if (input.action === 'resume') {
+        if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not active')
         if (!['waiting_input', 'blocked', 'paused'].includes(run.state)) throw new TeamRepositoryError('invalid_state', 'collaboration run cannot resume from its current state')
         const uncertain = await client.query(`SELECT 1 FROM collaboration_calls WHERE run_id = $1 AND state = 'uncertain' LIMIT 1`, [input.runId])
         if (uncertain.rows[0]) throw new TeamRepositoryError('dispatch_uncertain', 'uncertain calls must be reconciled before resume')
@@ -292,6 +308,7 @@ export class TeamRunRepository {
       const operation = `team.run.input:${input.runId}`
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`${input.actorUserId}:${operation}:${input.requestId}`])
       const requestHash = canonicalHash({ content: input.content, expected_revision: input.expectedRevision })
+      const { run, session } = await this.authorizedRun(client, input.runId, input.actorUserId)
       const prior = await client.query<{ request_hash: string; response: TeamRunMutation }>(
         `SELECT request_hash, response FROM collaboration_team_idempotency WHERE user_id = $1 AND operation = $2 AND request_id = $3`,
         [input.actorUserId, operation, input.requestId],
@@ -300,16 +317,7 @@ export class TeamRunRepository {
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different run input')
         return prior.rows[0].response
       }
-      const run = (await client.query(
-        `SELECT run.* FROM collaboration_runs run
-         JOIN collaboration_sessions session ON session.team_session_id = run.team_session_id
-         JOIN collaboration_session_participants participant ON participant.team_session_id = run.team_session_id
-           AND participant.user_id = $2 AND participant.state = 'active'
-         JOIN collaboration_team_memberships member ON member.team_id = session.team_id
-           AND member.user_id = $2 AND member.state = 'active'
-         WHERE run.run_id = $1 FOR UPDATE OF run`, [input.runId, input.actorUserId],
-      )).rows[0]
-      if (!run) throw new TeamRepositoryError('team_not_found', 'collaboration run not found')
+      if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not active')
       if (run.state !== 'waiting_input') throw new TeamRepositoryError('invalid_state', 'collaboration run is not waiting for input')
       if (Number(run.revision) !== input.expectedRevision) throw new TeamRepositoryError('revision_conflict', 'revision mismatch', Number(run.revision))
       const sequence = await client.query<{ latest_event_seq: string }>(
@@ -413,13 +421,12 @@ export class TeamRunRepository {
       if (!run || Number(run.lease_token) !== input.leaseToken) throw new Error('run lease lost')
       if (!['ready', 'running'].includes(run.state) || run.stop_requested) throw new TeamRepositoryError('invalid_state', 'run no longer accepts calls')
       const frozenBudget = budget(run.budget)
-      if (Number(run.calls_used) >= frozenBudget.max_calls || new Date(run.deadline_at).getTime() <= Date.now()) {
-        throw new TeamRepositoryError('budget_exhausted', 'run budget exhausted')
-      }
+      if (Number(run.calls_used) >= frozenBudget.max_calls) throw new TeamRunBudgetError('calls')
+      if (new Date(run.deadline_at).getTime() <= Date.now()) throw new TeamRunBudgetError('duration')
       const active = await client.query<{ count: string }>(
         `SELECT COUNT(*)::text AS count FROM collaboration_calls WHERE run_id = $1 AND state IN ('pending','dispatched','accepted','uncertain')`, [input.runId],
       )
-      if (Number(active.rows[0].count) >= frozenBudget.max_concurrent_calls) throw new TeamRepositoryError('budget_exhausted', 'run concurrency budget exhausted')
+      if (Number(active.rows[0].count) >= frozenBudget.max_concurrent_calls) throw new TeamRunBudgetError('concurrency')
       const binding = (await client.query(
         `SELECT binding.binding_id FROM collaboration_session_agent_bindings binding
          WHERE binding.team_session_id = $1 AND binding.offer_id = $2 AND binding.state = 'active'`,
@@ -435,8 +442,9 @@ export class TeamRunRepository {
       await client.query(
         `INSERT INTO collaboration_calls
           (call_id, team_session_id, run_id, run_step, run_role, event_id, offer_id, binding_id,
-           context_version, history_through_event_seq)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+           context_version, history_through_event_seq, context_snapshot_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+           (SELECT content_hash FROM collaboration_context_versions WHERE team_session_id = $2 AND version = $9))`,
         [callId, run.team_session_id, input.runId, step, input.role, event.id, input.offerId, binding.binding_id,
           Number(run.context_version), event.event_seq],
       )

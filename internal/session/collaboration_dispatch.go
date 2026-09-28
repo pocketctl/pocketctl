@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -131,9 +132,116 @@ func collaborationInitialPrompt(content string, value *protocol.CollaborationCon
 	return prepared.StableText + "\n\n[Current Team request]\n" + content, nil
 }
 
+func collaborationHasSelectedMemory(value *protocol.CollaborationContext) bool {
+	return value != nil && value.MemoryContext != nil && len(value.MemoryContext.References) > 0
+}
+
+// rollbackCollaborationCreate only releases the reservation and native runtime
+// owned by this create attempt. A failed native close keeps the binding as a
+// quarantine, so retry cannot spawn a second thread beside the unclosed one.
+func (sm *SessionManager) rollbackCollaborationCreate(binding collaborationNativeBinding, callID, workspace string, created *ProcessState) error {
+	sm.collaborationMu.Lock()
+	defer sm.collaborationMu.Unlock()
+	if sm.collaborationBindings[binding.BindingID] != binding {
+		return nil
+	}
+	if sm.collaborationCalls[callID] == binding.NativeSessionID {
+		delete(sm.collaborationCalls, callID)
+	}
+	if err := sm.disposeFailedCollaborationSession(binding, workspace, created); err != nil {
+		return fmt.Errorf("collaboration_create_cleanup_failed: %w", err)
+	}
+	delete(sm.collaborationBindings, binding.BindingID)
+	return nil
+}
+
+func (sm *SessionManager) disposeFailedCollaborationSession(binding collaborationNativeBinding, workspace string, created *ProcessState) error {
+	if created == nil {
+		return nil
+	}
+	sm.mu.RLock()
+	owned := sm.sessions[binding.NativeSessionID] == created && created.SessionID == binding.NativeSessionID &&
+		created.Source == "daemon" && created.Agent == binding.Agent && created.Cwd == workspace
+	sm.mu.RUnlock()
+	if !owned {
+		return nil
+	}
+	_, release, err := sm.acquireObserverDrive(context.Background(), binding.NativeSessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	sm.mu.RLock()
+	if sm.sessions[binding.NativeSessionID] != created || created.Source != "daemon" || created.Agent != binding.Agent || created.Cwd != workspace {
+		sm.mu.RUnlock()
+		return nil
+	}
+	backend, cancel, cmd, pty := created.Backend, created.Cancel, created.Cmd, created.PTY
+	sm.mu.RUnlock()
+	if backend != nil {
+		// Codex Close detaches this thread through its native lifecycle; never
+		// terminate the shared app-server or another terminal's runtime.
+		if err := backend.Close(binding.NativeSessionID); err != nil {
+			return err
+		}
+	} else {
+		if cancel != nil {
+			cancel()
+		}
+		if sm.approvals != nil {
+			sm.approvals.DrainSession(binding.NativeSessionID)
+		}
+		if pty != nil {
+			if err := pty.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				return err
+			}
+		}
+		if cmd != nil && cmd.Process != nil {
+			// The existing lifecycle goroutine remains the single Wait owner.
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				return err
+			}
+		}
+	}
+	sm.mu.Lock()
+	if sm.sessions[binding.NativeSessionID] != created {
+		sm.mu.Unlock()
+		return nil
+	}
+	retirement, err := persistCollaborationRetirement(binding, workspace)
+	if err != nil {
+		sm.mu.Unlock()
+		return err
+	}
+	if sm.collaborationRetirements == nil {
+		sm.collaborationRetirements = make(map[string]*collaborationRetirement)
+	}
+	sm.collaborationRetirements[binding.NativeSessionID] = retirement
+	delete(sm.sessions, binding.NativeSessionID)
+	if cmd != nil && cmd.Process != nil {
+		delete(sm.childPids, cmd.Process.Pid)
+	}
+	sm.mu.Unlock()
+	sm.unregisterCwd(binding.NativeSessionID, workspace)
+	if sm.fileLocks != nil {
+		sm.fileLocks.ReleaseAll(binding.NativeSessionID)
+	}
+	return nil
+}
+
 // CreateCollaborationSession creates a daemon-local session in an isolated,
 // operator-authorized directory. No remote cwd or private session ID is accepted.
 func (sm *SessionManager) CreateCollaborationSession(ctx context.Context, auth *protocol.CollaborationAuthorization, teamContext *protocol.CollaborationContext, agent, content string) (string, error) {
+	return sm.createCollaborationSession(ctx, auth, teamContext, agent, content, nil)
+}
+
+// CreateCollaborationSessionRegistered waits for canonical native-session
+// registration before sending the first turn or preparing its Memory grant.
+func (sm *SessionManager) CreateCollaborationSessionRegistered(ctx context.Context, auth *protocol.CollaborationAuthorization, teamContext *protocol.CollaborationContext, agent, content string, register func(context.Context, string) error) (string, error) {
+	return sm.createCollaborationSession(ctx, auth, teamContext, agent, content, register)
+}
+
+func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *protocol.CollaborationAuthorization, teamContext *protocol.CollaborationContext, agent, content string, register func(context.Context, string) error) (_ string, createErr error) {
 	if err := ValidateCollaborationAuthorization(auth, "create"); err != nil {
 		return "", err
 	}
@@ -151,56 +259,87 @@ func (sm *SessionManager) CreateCollaborationSession(ctx context.Context, auth *
 	sm.collaborationMu.Lock()
 	if sm.collaborationBindings == nil {
 		sm.collaborationBindings = make(map[string]collaborationNativeBinding)
+	}
+	if sm.collaborationCalls == nil {
 		sm.collaborationCalls = make(map[string]string)
 	}
 	if _, exists := sm.collaborationBindings[auth.BindingID]; exists {
 		sm.collaborationMu.Unlock()
 		return "", ErrCollaborationBinding
 	}
-	sm.collaborationBindings[auth.BindingID] = collaborationNativeBinding{
+	if _, exists := sm.collaborationCalls[auth.CallID]; exists {
+		sm.collaborationMu.Unlock()
+		return "", ErrCollaborationDuplicateCall
+	}
+	binding := collaborationNativeBinding{
 		NativeSessionID: "creating", TeamSessionID: auth.TeamSessionID, BindingID: auth.BindingID,
 		BindingRevision: auth.BindingRevision, OfferID: auth.OfferID, OfferRevision: auth.OfferRevision,
 		OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: agent,
 	}
+	sm.collaborationBindings[auth.BindingID] = binding
 	sm.collaborationMu.Unlock()
+	workspace := collaborationWorkspace(roots[0], auth.BindingID)
+	var created *ProcessState
+	defer func() {
+		if createErr != nil && !errors.Is(createErr, errNativeSessionCreateUncertain) {
+			createErr = errors.Join(createErr, sm.rollbackCollaborationCreate(binding, auth.CallID, workspace, created))
+		}
+	}()
 
 	prompt, err := collaborationInitialPrompt(content, teamContext)
 	if err != nil {
-		sm.collaborationMu.Lock()
-		if sm.collaborationBindings[auth.BindingID].NativeSessionID == "creating" {
-			delete(sm.collaborationBindings, auth.BindingID)
-		}
-		sm.collaborationMu.Unlock()
 		return "", err
 	}
-	selectedMemory := teamContext != nil && teamContext.MemoryContext != nil
+	selectedMemory := collaborationHasSelectedMemory(teamContext)
 	initialPrompt := prompt
-	if selectedMemory {
+	if selectedMemory || register != nil {
 		initialPrompt = ""
 	}
 	nativeSessionID, err := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: agent, Cwd: collaborationWorkspace(roots[0], auth.BindingID), Prompt: initialPrompt, AutoCreateDir: true,
+		Agent: agent, Cwd: workspace, Prompt: initialPrompt, AutoCreateDir: true,
 	})
+	if nativeSessionID == "" && err == nil {
+		err = ErrCollaborationBinding
+	}
+	if nativeSessionID != "" {
+		sm.mu.RLock()
+		created = sm.sessions[nativeSessionID]
+		sm.mu.RUnlock()
+		sm.collaborationMu.Lock()
+		if sm.collaborationBindings[auth.BindingID] != binding {
+			sm.collaborationMu.Unlock()
+			return "", ErrCollaborationBinding
+		}
+		binding.NativeSessionID = nativeSessionID
+		sm.collaborationBindings[auth.BindingID] = binding
+		if err == nil {
+			sm.collaborationCalls[auth.CallID] = nativeSessionID
+		}
+		sm.collaborationMu.Unlock()
+	}
 	if err != nil {
 		return "", err
 	}
-	sm.collaborationMu.Lock()
-	sm.collaborationBindings[auth.BindingID] = collaborationNativeBinding{
-		NativeSessionID: nativeSessionID, TeamSessionID: auth.TeamSessionID,
-		BindingID: auth.BindingID, BindingRevision: auth.BindingRevision,
-		OfferID: auth.OfferID, OfferRevision: auth.OfferRevision,
-		OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: agent,
+	if register != nil && selectedMemory && sm.MemoryContextCapability(ctx, nativeSessionID, agent) != memorycontext.CapabilityNativeHiddenV1 {
+		return "", fmt.Errorf("team_memory_context_unsupported_adapter")
 	}
-	sm.collaborationCalls[auth.CallID] = nativeSessionID
-	sm.collaborationMu.Unlock()
-	if selectedMemory {
+	if register != nil {
+		if err := register(ctx, nativeSessionID); err != nil {
+			return "", err
+		}
+	}
+	if selectedMemory || register != nil {
 		base, baseErr := prepareCollaborationContext(teamContext)
 		if baseErr != nil {
 			return "", baseErr
 		}
-		selected, outcome := sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, agent, content, auth.CallID)
-		if selected == nil {
-			return "", fmt.Errorf("team_memory_context_%s", outcome.Reason)
+		var selected *memorycontext.PreparedContext
+		if selectedMemory {
+			var outcome memorycontext.Outcome
+			selected, outcome = sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, agent, content, auth.CallID)
+			if selected == nil {
+				return "", fmt.Errorf("team_memory_context_%s", outcome.Reason)
+			}
 		}
 		if err := sm.SendMessageWithInput(ctx, UserMessageInput{
 			SessionID: nativeSessionID, Content: content, RequestID: auth.CallID, MsgID: auth.CallID,
@@ -280,7 +419,7 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		return err
 	}
 	selectedContext, outcome := sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, process.Agent, content, requestID)
-	if teamContext != nil && teamContext.MemoryContext != nil && selectedContext == nil {
+	if collaborationHasSelectedMemory(teamContext) && selectedContext == nil {
 		sm.collaborationMu.Lock()
 		delete(sm.collaborationCalls, auth.CallID)
 		sm.collaborationMu.Unlock()

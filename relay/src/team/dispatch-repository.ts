@@ -53,8 +53,15 @@ export function dispatchAuthorizationMatches(
 
 export function dispatchProjectionKind(message: Record<string, unknown>): 'agent_message' | 'status' | null {
   if (message.type === 'agent_text' && typeof message.text === 'string' && message.text.length > 0) return 'agent_message'
-  if (message.type === 'turn_status' && ['completed', 'failed', 'interrupted', 'abandoned'].includes(String(message.status ?? ''))) return 'status'
+  if (dispatchTerminalStatus(message) || message.type === 'interactive_prompt' || message.type === 'approval_request') return 'status'
   return null
+}
+
+function dispatchTerminalStatus(message: Record<string, unknown>): string | null {
+  if ((message.type === 'error' && !message.operation) || (message.type === 'session_status' && message.status === 'error')) return 'failed'
+  if (message.type !== 'turn_status') return null
+  const status = String(message.turn_status ?? message.status ?? '')
+  return ['completed', 'failed', 'interrupted', 'abandoned'].includes(status) ? status : null
 }
 
 function hasCapability(value: unknown, capability: string): boolean {
@@ -165,8 +172,8 @@ export class TeamDispatchRepository {
 
   async stop(callId: string, state: 'blocked' | 'failed' | 'uncertain', outcome: string): Promise<void> {
     await this.pool.query(
-      `UPDATE collaboration_calls SET state = $2, outcome = $3, updated_at = NOW(),
-         finished_at = CASE WHEN $2 IN ('blocked', 'failed') THEN NOW() ELSE finished_at END
+      `UPDATE collaboration_calls SET state = $2::varchar, outcome = $3, updated_at = NOW(),
+         finished_at = CASE WHEN $2::varchar IN ('blocked', 'failed') THEN NOW() ELSE finished_at END
        WHERE call_id = $1 AND state IN ('dispatched', 'accepted')`,
       [callId, state, outcome],
     )
@@ -228,7 +235,7 @@ export class TeamDispatchRepository {
     if (!sessionId || !Number.isSafeInteger(seq) || seq <= 0) return null
     const projectionKind = dispatchProjectionKind(message)
     if (!projectionKind) return null
-    const terminal = projectionKind === 'status'
+    const terminal = dispatchTerminalStatus(message) !== null
     const agentText = projectionKind === 'agent_message'
     return this.transaction(async client => {
       const call = (await client.query(
@@ -247,7 +254,8 @@ export class TeamDispatchRepository {
          WHERE team_session_id = $1 RETURNING latest_event_seq`, [call.team_session_id],
       )
       const digest = createHash('sha256').update(`${call.call_id}:${projectionKey}`).digest('hex').slice(0, 32)
-      const content = agentText ? String(message.text) : String(message.status)
+      // Never copy private terminal diagnostics into the shared stream.
+      const content = agentText ? String(message.text) : dispatchTerminalStatus(message) ?? 'waiting_owner'
       const inserted = await client.query(
         `INSERT INTO collaboration_events
           (event_id, team_session_id, event_seq, kind, author_offer_id, call_id, content, request_id)
@@ -255,11 +263,15 @@ export class TeamDispatchRepository {
         [`cev_${digest}`, call.team_session_id, Number(sequence.rows[0].latest_event_seq), agentText ? 'agent_message' : 'status',
           call.offer_id, call.call_id, content, projectionKey],
       )
+      if (!terminal) {
+        await client.query(`UPDATE collaboration_calls SET outcome = $2, updated_at = NOW() WHERE call_id = $1`,
+          [call.call_id, agentText ? null : 'waiting_owner'])
+      }
       if (terminal) {
-        const completed = message.status === 'completed'
+        const completed = content === 'completed'
         await client.query(
           `UPDATE collaboration_calls SET state = $2, outcome = $3, finished_at = NOW(), updated_at = NOW() WHERE call_id = $1`,
-          [call.call_id, completed ? 'completed' : 'failed', String(message.status)],
+          [call.call_id, completed ? 'completed' : 'failed', content],
         )
         await this.memorySources?.projectCompletedCall(
           client,

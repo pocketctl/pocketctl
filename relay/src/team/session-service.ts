@@ -61,16 +61,18 @@ export class TeamSessionService {
     } finally { client.release() }
   }
 
-  private async idempotent<T>(actorUserId: number, operation: string, requestId: string, payload: unknown, mutate: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  private async idempotent(actorUserId: number, operation: string, requestId: string, payload: unknown, mutate: (client: pg.PoolClient) => Promise<TeamSessionView>): Promise<TeamSessionView> {
     const requestHash = hash(payload)
-    return this.transaction(async client => {
+    const result = await this.transaction(async client => {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`team:${actorUserId}:${operation}:${requestId}`])
-      const prior = await client.query<{ request_hash: string; response: T }>(
+      const prior = await client.query<{ request_hash: string; response: TeamSessionView }>(
         `SELECT request_hash, response FROM collaboration_team_idempotency
          WHERE user_id = $1 AND operation = $2 AND request_id = $3`,
         [actorUserId, operation, requestId],
       )
       if (prior.rows[0]) {
+        // A receipt preserves the old result, never the actor's old access.
+        await this.sessionFor(client, prior.rows[0].response.id, actorUserId, true)
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different content')
         return prior.rows[0].response
       }
@@ -82,6 +84,8 @@ export class TeamSessionService {
       )
       return response
     })
+    // Cached responses from older versions must obey the same owner boundary.
+    return this.ownerView(result, actorUserId)
   }
 
   private async requireMember(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number): Promise<void> {
@@ -103,7 +107,7 @@ export class TeamSessionService {
        JOIN collaboration_session_participants participant
          ON participant.team_session_id = session.team_session_id
         AND participant.user_id = $2 AND participant.state = 'active'
-       WHERE session.team_session_id = $1${lock ? ' FOR UPDATE OF session' : ''}`,
+       WHERE session.team_session_id = $1${lock ? ' FOR UPDATE OF session FOR SHARE OF team, member, participant' : ''}`,
       [sessionId, actorUserId],
     )
     if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'shared session not found')
@@ -167,11 +171,11 @@ export class TeamSessionService {
        ORDER BY session.updated_at DESC`,
       [teamId, actorUserId, filters.daemonId ?? null, filters.provider ?? null],
     )
-    return Promise.all(result.rows.map(row => this.view(this.pool, row)))
+    return Promise.all(result.rows.map(row => this.view(this.pool, row, actorUserId)))
   }
 
   async getSession(sessionId: string, actorUserId: number): Promise<TeamSessionView> {
-    return this.view(this.pool, await this.sessionFor(this.pool, sessionId, actorUserId))
+    return this.view(this.pool, await this.sessionFor(this.pool, sessionId, actorUserId), actorUserId)
   }
 
   async createSession(input: { teamId: string; actorUserId: number; title: string; taskId: string | null; offerIds: string[]; requestId: string }): Promise<TeamSessionView> {
@@ -210,7 +214,7 @@ export class TeamSessionService {
           [`cab_${randomUUID()}`, sessionId, offer.offer_id, offer.owner_user_id],
         )
       }
-      return this.view(client as unknown as pg.Pool, inserted.rows[0])
+      return this.view(client as unknown as pg.Pool, inserted.rows[0], input.actorUserId)
     })
   }
 
@@ -230,7 +234,7 @@ export class TeamSessionService {
            revision = revision + 1, updated_at = NOW() WHERE team_session_id = $1 RETURNING *`,
         [input.sessionId, input.title ?? null, nextState],
       )
-      return this.view(client as unknown as pg.Pool, updated.rows[0])
+      return this.view(client as unknown as pg.Pool, updated.rows[0], input.actorUserId)
     })
   }
 
@@ -295,7 +299,7 @@ export class TeamSessionService {
         `UPDATE collaboration_sessions SET revision = revision + 1, updated_at = NOW()
          WHERE team_session_id = $1 RETURNING *`, [input.sessionId],
       )
-      return this.view(client as unknown as pg.Pool, updated.rows[0])
+      return this.view(client as unknown as pg.Pool, updated.rows[0], input.actorUserId)
     })
   }
 
@@ -346,7 +350,7 @@ export class TeamSessionService {
         `UPDATE collaboration_sessions SET revision = revision + 1, updated_at = NOW()
          WHERE team_session_id = $1 RETURNING *`, [input.sessionId],
       )
-      return this.view(client as unknown as pg.Pool, updated.rows[0])
+      return this.view(client as unknown as pg.Pool, updated.rows[0], input.actorUserId)
     })
   }
 
@@ -368,7 +372,7 @@ export class TeamSessionService {
         [input.sessionId],
       )
       const callable = bindingRows.rows.filter(row => this.callable(row, session.team_id))
-      if (callable.length === 0) throw new TeamRepositoryError('no_callable_agent', 'no callable Agent is available')
+      if (input.targetMode !== 'discussion' && callable.length === 0) throw new TeamRepositoryError('no_callable_agent', 'no callable Agent is available')
       let targets: string[] = []
       if (input.targetMode === 'all') targets = callable.map(row => row.offer_id)
       if (input.targetMode === 'offers') {
@@ -409,13 +413,41 @@ export class TeamSessionService {
     return this.events.listEvents(this.pool, sessionId, afterSeq, limit)
   }
 
+  async listCalls(sessionId: string, actorUserId: number) {
+    await this.sessionFor(this.pool, sessionId, actorUserId)
+    const result = await this.pool.query(
+      `SELECT c.call_id AS id, c.event_id, c.offer_id, c.state,
+         CASE WHEN c.outcome = 'waiting_owner' THEN 'waiting_owner'
+              WHEN c.state = 'failed' AND d.outcome = 'team_memory_context_unsupported_adapter'
+                THEN 'memory_adapter_unsupported'
+              ELSE NULL END AS outcome,
+         c.created_at, c.updated_at
+       FROM collaboration_calls c
+       LEFT JOIN collaboration_context_deliveries d ON d.call_id = c.call_id
+       WHERE c.team_session_id = $1
+       ORDER BY c.created_at DESC, c.call_id DESC LIMIT 100`, [sessionId],
+    )
+    return result.rows
+  }
+
   async canSubscribe(userId: number, sessionId: string): Promise<boolean> {
     try { await this.sessionFor(this.pool, sessionId, userId); return true } catch { return false }
   }
 
-  private async view(db: Pick<pg.Pool, 'query'>, row: any): Promise<TeamSessionView> {
+  private ownerView(view: TeamSessionView, actorUserId: number): TeamSessionView {
+    return { ...view, agent_bindings: view.agent_bindings.map(binding => ({
+      ...binding, native_session_id: binding.owner_user_id === actorUserId ? binding.native_session_id : null,
+    })) }
+  }
+
+  private async view(db: Pick<pg.Pool, 'query'>, row: any, actorUserId: number): Promise<TeamSessionView> {
     const [participants, bindings] = await Promise.all([
-      db.query(`SELECT participant_id, user_id, state, revision FROM collaboration_session_participants WHERE team_session_id = $1 AND state = 'active' ORDER BY created_at`, [row.team_session_id]),
+      db.query(`SELECT participant.participant_id, participant.user_id, participant.state, participant.revision
+        FROM collaboration_session_participants participant
+        JOIN collaboration_team_memberships member ON member.team_id = $2
+          AND member.user_id = participant.user_id AND member.state = 'active'
+        WHERE participant.team_session_id = $1 AND participant.state = 'active'
+        ORDER BY participant.created_at`, [row.team_session_id, row.team_id]),
       db.query(
         `SELECT binding.*, offer.daemon_id, offer.provider, daemon.hostname, daemon.status, daemon.agents,
                 daemon.collaboration_capabilities, team_binding.team_id AS occupied_team_id
@@ -446,7 +478,7 @@ export class TeamSessionService {
         provider: binding.provider,
         state: binding.state,
         revision: Number(binding.revision),
-        native_session_id: binding.native_session_id,
+        native_session_id: Number(binding.owner_user_id) === actorUserId ? binding.native_session_id : null,
         availability: candidateForProvider({
           daemon_id: binding.daemon_id, hostname: binding.hostname, status: binding.status,
           agents: binding.agents, collaboration_capabilities: binding.collaboration_capabilities,

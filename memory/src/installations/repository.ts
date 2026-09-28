@@ -26,7 +26,7 @@ export function createInstallationRegistry(pool: pg.Pool) {
       items: Array<Omit<ProviderInstallationItem, 'subscriptions'> & {
         subscriptions: string[]
       } & Partial<Pick<ProviderInstallationItemV2,
-        'owner_scope_kind' | 'owner_scope_id' | 'parent_organization_id' | 'authorization_epoch'>>>
+        'owner_scope_kind' | 'owner_scope_id' | 'parent_organization_id' | 'authorization_epoch' | 'scope_snapshot'>>>
       installationCursor?: string
     }): Promise<DiscoveryApplyResult> {
       const client = await pool.connect()
@@ -107,24 +107,67 @@ export function createInstallationRegistry(pool: pg.Pool) {
           // ADR-0005: mirror the v2 owner-scope facts for every installation;
           // v1-only items default to the personal backfill shape.
           for (const item of input.items) {
-            await client.query(`
+            const scopeResult = await client.query<{ authorization_epoch: string }>(`
               INSERT INTO memory_owner_scopes
                 (installation_id, owner_scope_kind, owner_scope_id, parent_organization_id,
                  state, authorization_epoch)
-              VALUES ($1, $2, $3, $4, 'active', $5)
+              VALUES ($1, $2, $3, $4, $6, $5)
               ON CONFLICT (installation_id) DO UPDATE SET
                 owner_scope_kind = EXCLUDED.owner_scope_kind,
                 owner_scope_id = EXCLUDED.owner_scope_id,
                 parent_organization_id = EXCLUDED.parent_organization_id,
+                state = CASE WHEN $7::boolean AND memory_owner_scopes.state <> 'dissolved'
+                                  AND (EXCLUDED.authorization_epoch > memory_owner_scopes.authorization_epoch
+                                    OR (EXCLUDED.authorization_epoch = memory_owner_scopes.authorization_epoch
+                                        AND EXCLUDED.state <> 'active'))
+                             THEN EXCLUDED.state ELSE memory_owner_scopes.state END,
                 authorization_epoch = GREATEST(memory_owner_scopes.authorization_epoch, EXCLUDED.authorization_epoch),
                 updated_at = NOW()
+              RETURNING authorization_epoch::text
             `, [
               item.installation_id,
               item.owner_scope_kind ?? 'personal',
               item.owner_scope_id ?? item.installation_id,
               item.parent_organization_id ?? null,
               item.authorization_epoch ?? '1',
+              item.scope_snapshot?.state ?? 'active',
+              item.scope_snapshot != null,
             ])
+            // The scope UPSERT holds its row lock until COMMIT. Feed writes
+            // acquire the same lock so the epoch and complete member set are
+            // published atomically, including repair of earlier discoveries.
+            const snapshot = item.scope_snapshot
+            if (!snapshot || item.owner_scope_kind === 'personal'
+              || scopeResult.rows[0]?.authorization_epoch !== item.authorization_epoch) continue
+            const tombstone = await client.query(`
+              SELECT 1 FROM memory_scope_tombstones
+              WHERE owner_scope_kind = $1 AND owner_scope_id = $2 AND authorization_epoch >= $3
+            `, [item.owner_scope_kind, item.owner_scope_id, item.authorization_epoch])
+            if (tombstone.rows.length > 0) continue
+            for (const member of snapshot.memberships) {
+              await client.query(`
+                INSERT INTO memory_scope_memberships
+                  (installation_id, membership_id, roles, state, membership_revision, valid_from, valid_until)
+                VALUES ($1, $2, $3::text[], $4, $5, NOW(), CASE WHEN $4 = 'revoked' THEN NOW() ELSE NULL END)
+                ON CONFLICT (installation_id, membership_id) DO UPDATE SET
+                  roles = EXCLUDED.roles, state = EXCLUDED.state,
+                  membership_revision = EXCLUDED.membership_revision,
+                  valid_until = EXCLUDED.valid_until, updated_at = NOW()
+                WHERE memory_scope_memberships.membership_revision < EXCLUDED.membership_revision
+              `, [item.installation_id, member.membership_id, member.roles, member.state, member.membership_revision])
+            }
+            await client.query(`
+              UPDATE memory_scope_memberships SET state = 'revoked', valid_until = NOW(), updated_at = NOW()
+              WHERE installation_id = $1 AND membership_id <> ALL($2::uuid[]) AND state <> 'revoked'
+            `, [item.installation_id, snapshot.memberships.map(member => member.membership_id)])
+            if (snapshot.state === 'dissolved') {
+              await client.query(`
+                INSERT INTO memory_scope_tombstones (owner_scope_kind, owner_scope_id, authorization_epoch, reason)
+                VALUES ($1, $2, $3, 'dissolved')
+                ON CONFLICT (owner_scope_kind, owner_scope_id) DO UPDATE SET
+                  authorization_epoch = GREATEST(memory_scope_tombstones.authorization_epoch, EXCLUDED.authorization_epoch)
+              `, [item.owner_scope_kind, item.owner_scope_id, item.authorization_epoch])
+            }
           }
 
           await client.query(`

@@ -353,11 +353,12 @@ describeWithDatabase('Team Memory binding persistence (PostgreSQL)', () => {
             }],
           }),
     }
+    const revokeTeamBinding = vi.fn(async () => 0)
     const service = new TeamMemoryBindingService(
       pool,
       new ExtensionInstallationRepository(pool),
       grants,
-      { memoryBridgeEnabled: true },
+      { memoryBridgeEnabled: true, memorySources: { projectCompletedCall: vi.fn(async () => 0), revokeTeamBinding } },
     )
     server = app(service)
 
@@ -403,6 +404,9 @@ describeWithDatabase('Team Memory binding persistence (PostgreSQL)', () => {
       payload: { request_id: 'unbind-pg', expected_revision: 1 },
     })
     expect(removed.statusCode, removed.body).toBe(200)
+    expect(revokeTeamBinding).toHaveBeenCalledExactlyOnceWith(expect.anything(), {
+      teamId: 'ctm_memory_pg', bindingId: created.json().binding.id, bindingRevision: 1,
+    })
     const retained = await pool.query<{ state: string }>(
       `SELECT state FROM team_memory_bindings WHERE team_id = 'ctm_memory_pg'`,
     )

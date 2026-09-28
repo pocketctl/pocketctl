@@ -19,6 +19,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/daemon"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 type codexCommandFactory func(binary, socketPath string) *exec.Cmd
@@ -34,6 +35,10 @@ func startCodexAppServerForHome(ctx context.Context, binary, version string, gen
 }
 
 func adoptCodexAppServer(ctx context.Context, state *daemon.CodexAppServerState) (*codexAppServerRuntime, error) {
+	identity, matched := codexHandoffProcessIdentity(state)
+	if !matched {
+		return nil, fmt.Errorf("Codex app-server handoff process identity does not match")
+	}
 	client, err := codexapp.DialUnix(ctx, state.Endpoint)
 	if err != nil {
 		return nil, err
@@ -43,13 +48,16 @@ func adoptCodexAppServer(ctx context.Context, state *daemon.CodexAppServerState)
 		_ = client.Close()
 		return nil, err
 	}
-	runtime := &codexAppServerRuntime{PID: state.PID, Endpoint: state.Endpoint, RemoteURI: state.RemoteURI, Client: client}
+	if !codexProcessBirthMatches(state.PID, identity) {
+		_ = client.Close()
+		return nil, fmt.Errorf("Codex app-server changed during adoption")
+	}
+	owned := *state
+	owned.ProcessStartIdentity = identity
+	runtime := &codexAppServerRuntime{PID: state.PID, ProcessStartIdentity: identity, Endpoint: state.Endpoint, RemoteURI: state.RemoteURI, Client: client}
 	runtime.Stop = func() error {
 		_ = client.Close()
-		if err := syscall.Kill(-state.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		return nil
+		return stopPersistedCodexAppServer(&owned)
 	}
 	return runtime, nil
 }
@@ -57,6 +65,9 @@ func adoptCodexAppServer(ctx context.Context, state *daemon.CodexAppServerState)
 func stopPersistedCodexAppServer(state *daemon.CodexAppServerState) error {
 	if state == nil || state.PID <= 0 {
 		return fmt.Errorf("invalid Codex app-server handoff")
+	}
+	if _, matched := codexHandoffProcessIdentity(state); !matched {
+		return nil
 	}
 	if err := syscall.Kill(-state.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
@@ -105,17 +116,27 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start Codex app-server: %w", err)
 	}
+	processIdentity, err := platform.ProcessStartIdentity(cmd.Process.Pid)
+	if err != nil || processIdentity == "" {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("identify Codex app-server process: %w", err)
+	}
 	wait := make(chan error, 1)
 	go func() { wait <- cmd.Wait() }()
 	var stopOnce sync.Once
 	stop := func() error {
 		var stopErr error
 		stopOnce.Do(func() {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			if codexProcessBirthMatches(cmd.Process.Pid, processIdentity) {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			}
 			select {
 			case stopErr = <-wait:
 			case <-time.After(2 * time.Second):
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				if codexProcessBirthMatches(cmd.Process.Pid, processIdentity) {
+					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
 				stopErr = <-wait
 			}
 			_ = os.Remove(socketPath)
@@ -164,7 +185,7 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 			client = nil
 		}
 	}
-	runtime := &codexAppServerRuntime{PID: cmd.Process.Pid, Endpoint: socketPath, RemoteURI: "unix://" + socketPath, Client: client}
+	runtime := &codexAppServerRuntime{PID: cmd.Process.Pid, ProcessStartIdentity: processIdentity, Endpoint: socketPath, RemoteURI: "unix://" + socketPath, Client: client}
 	runtime.Stop = func() error {
 		_ = client.Close()
 		return stop()

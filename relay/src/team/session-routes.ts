@@ -113,6 +113,12 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
     })
   }
 
+  app.get('/api/team/sessions/:sessionId/calls', async (request, reply) => {
+    const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
+    try { return { calls: await deps.service.listCalls(param(request.params, 'sessionId'), identity.userId) } }
+    catch (error) { return mapError(error, reply) }
+  })
+
   app.get('/api/team/sessions/:sessionId/events', async (request, reply) => {
     const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
     const query = request.query as { after_seq?: string; limit?: string } | null

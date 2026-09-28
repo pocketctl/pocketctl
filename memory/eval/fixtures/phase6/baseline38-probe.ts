@@ -14,8 +14,13 @@ const pool = new pg.Pool({ connectionString: url, max: 2, statement_timeout: 10_
 async function runProbe() {
   const old = (path: string) => import(pathToFileURL(join(dir, 'memory/src', path)).href)
   const { applyMemorySchema } = await old('schema.ts')
+  const schemaBefore = (await pool.query('SELECT version, applied_at FROM memory_schema_migrations ORDER BY version')).rows
+  // The old migrator must leave every additive migration and its original
+  // application timestamp intact, including the current Context Pack schema.
+  assert.deepEqual(schemaBefore.map(row => row.version), Array.from({ length: 50 }, (_, index) => index + 1))
   await applyMemorySchema(pool)
-  assert.equal((await pool.query('SELECT max(version) v FROM memory_schema_migrations')).rows[0].v, 48)
+  const schemaAfter = (await pool.query('SELECT version, applied_at FROM memory_schema_migrations ORDER BY version')).rows
+  assert.deepEqual(schemaAfter, schemaBefore)
   const { createWikiReadService } = await old('wiki/read-service.ts')
   const wiki = await createWikiReadService(pool).getActiveWiki({ installationId: input.installationId, repositoryId: input.repositoryId })
   assert.equal(wiki.pages[0].title, 'Complete overview')
@@ -38,7 +43,7 @@ async function runProbe() {
   const rows = await pool.query('SELECT statement FROM knowledge_versions WHERE installation_id=$1 AND version_id=$2', [input.installationId, correction.versionId])
   assert.equal(rows.rows[0].statement, 'Baseline 38 isolated correction')
   assert.equal((await pool.query('SELECT count(*)::int n FROM memory_wiki_manual_section_versions WHERE manual_version_id=$1', [manual.manualVersionId])).rows[0].n, 1)
-  console.log(JSON.stringify({ baseline: '036f6d12', schemaBefore: 48, schemaAfter: 48, oldMigrator: 'pass',
+  console.log(JSON.stringify({ baseline: '036f6d12', schemaBefore: schemaBefore.at(-1)!.version, schemaAfter: schemaAfter.at(-1)!.version, oldMigrator: 'pass',
     oldWikiRead: 'pass', oldWikiManualWrite: 'pass', oldClaimCorrectionWrite: 'pass', oldQueueEnqueueClaimComplete: 'pass',
     runtimeStarted: false, providerRequests: 0 }))
 }

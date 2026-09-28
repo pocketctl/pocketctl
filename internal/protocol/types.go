@@ -215,6 +215,7 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
+	Choice        string                      `json:"choice,omitempty"` // owner-selected PTY option on interaction_result
 	Invocation    map[string]any              `json:"invocation,omitempty"`
 	Directory     *DirectoryResult            `json:"directory,omitempty"`
 	Type          string                      `json:"type"`

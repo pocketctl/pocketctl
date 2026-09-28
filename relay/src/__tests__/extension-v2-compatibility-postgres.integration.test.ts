@@ -2,6 +2,7 @@ import pg from 'pg'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { initDB } from '../db.js'
+import { createOrganizationWithCreator, addScopeMembership } from '../extensions/scope-repository.js'
 import { upsertProviderDefinitions } from '../extensions/catalog.js'
 import { registerProviderInstallationRoutes } from '../extensions/provider-installation-routes.js'
 import { registerFeedRoutes } from '../extensions/feed-routes.js'
@@ -174,6 +175,24 @@ describeWithDatabase('extension v1/v2 compatibility (PostgreSQL)', () => {
     // No user PII on the provider surface.
     expect(v2Row).not.toHaveProperty('owner_user_id')
     expect(v2Row).not.toHaveProperty('email')
+  })
+
+  test('v2 discovery includes all current opaque members in the same scope snapshot', async () => {
+    const { organization, creatorMembership } = await createOrganizationWithCreator(pool, { name: 'bootstrap', createdByUserId: userId })
+    const otherUser = (await pool.query(`INSERT INTO users(email,password_hash) VALUES('bootstrap-reader@example.test','x') RETURNING id`)).rows[0].id
+    const member = await addScopeMembership(pool, { scopeKind: 'organization', scopeId: organization.organization_id, userId: otherUser, roles: ['reader'] })
+    await pool.query(`INSERT INTO extension_installations(installation_id,provider_id,owner_scope_kind,owner_scope_id,created_by_user_id,status,granted_scopes,subscriptions,enabled_services,start_policy) VALUES(gen_random_uuid(),$1,'organization',$2,$3,'active',ARRAY['scope:control:read'],ARRAY['scope.membership.v2'],ARRAY['memory.search'],'from_now')`, [PROVIDER,organization.organization_id,userId])
+    const response = await app.inject({ method: 'GET', url: '/api/extensions/v2/provider/installations', headers: providerHeaders() })
+    expect(response.statusCode).toBe(200)
+    const row = response.json().installations.find((r: any) => r.owner_scope_id === organization.organization_id)
+    expect(row.authorization_epoch).toBe('2')
+    expect(row.scope_snapshot?.state).toBe('active')
+    expect(row.scope_snapshot?.memberships).toEqual(expect.arrayContaining([
+      { membership_id: creatorMembership.membership_id, membership_revision: '1', state: 'active', roles: ['scope_administrator'] },
+      { membership_id: member.membership_id, membership_revision: '1', state: 'active', roles: ['reader'] },
+    ]))
+    expect(row.scope_snapshot?.memberships).toHaveLength(2)
+    for (const m of row.scope_snapshot?.memberships ?? []) expect(Object.keys(m).sort()).toEqual(['membership_id','membership_revision','roles','state'])
   })
 
   test('v1 feed pull keeps the frozen v1 response for a personal installation', async () => {

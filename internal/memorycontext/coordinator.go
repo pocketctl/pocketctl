@@ -98,9 +98,14 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 	if !req.IsNewTurn || req.Mode == ModeOff {
 		return nil, Outcome{Kind: "skipped", Reason: "not_new_turn_or_not_enabled"}
 	}
+	// Explicit shared selections must not silently compile a personal shadow
+	// pack when the runtime cannot deliver hidden context.
+	if len(req.SelectedReferences) > 0 && req.Capability != CapabilityNativeHiddenV1 {
+		return nil, Outcome{Kind: "skipped", Reason: "unsupported_adapter"}
+	}
 	if req.Mode == ModeShadow || req.Capability != CapabilityNativeHiddenV1 {
 		c.prepareShadow(req)
-		return nil, Outcome{Kind: "shadow_enqueued"}
+		return nil, Outcome{Kind: "shadow_enqueued", Reason: "shadow_only"}
 	}
 
 	deadline := c.deadline()

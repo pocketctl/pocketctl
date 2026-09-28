@@ -40,6 +40,10 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     }
   })
 
+  test.each(['blocked', 'failed', 'uncertain'] as const)('can prepare stop SQL for %s', async state => {
+    await expect(new TeamDispatchRepository(pool).stop('ccl_nonexistent', state, 'probe')).resolves.toBeUndefined()
+  })
+
   test('claims once, serializes a binding, and projects only allowlisted events', async () => {
     const user = await pool.query<{ id: number }>(
       `INSERT INTO users (email, password_hash) VALUES ('dispatch.owner@example.test', 'x') RETURNING id`,
@@ -118,11 +122,35 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, {
       type: 'agent_text', session_id: 'native-team-session', seq: 10, text: 'Shared answer',
     })).toBeNull()
+    const waiting = await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, {
+      type: 'interactive_prompt', session_id: 'native-team-session', seq: 13, input: { prompt: 'private folder /secret' },
+    })
+    expect(waiting?.event.content).toBe('waiting_owner')
+    const summaries = await sessions.listCalls(shared.id, ownerUserId)
+    expect(summaries.find(call => call.id === first!.callId)).toMatchObject({ state: 'accepted', outcome: 'waiting_owner' })
+    expect(JSON.stringify(summaries)).not.toContain('native-team-session')
+    expect(JSON.stringify(summaries)).not.toContain('/secret')
+    await expect(sessions.listCalls(shared.id, ownerUserId + 99999)).rejects.toBeDefined()
     const terminal = await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, {
-      type: 'turn_status', session_id: 'native-team-session', seq: 12, status: 'completed',
+      type: 'turn_status', session_id: 'native-team-session', seq: 12, turn_status: 'completed',
     })
     expect(terminal?.event).toMatchObject({ kind: 'status', content: 'completed' })
     expect((await pool.query(`SELECT state FROM collaboration_calls WHERE call_id = $1`, [first!.callId])).rows[0].state).toBe('completed')
+    // Actual PostgreSQL parameter inference, not a mocked query result.
+    for (const state of ['blocked', 'failed', 'uncertain'] as const) {
+      await pool.query(`UPDATE collaboration_calls SET state = 'dispatched', finished_at = NULL WHERE call_id = $1`, [first!.callId])
+      await repository.stop(first!.callId, state, 'acceptance_stop')
+      const stopped = (await pool.query(`SELECT state, outcome, finished_at FROM collaboration_calls WHERE call_id = $1`, [first!.callId])).rows[0]
+      expect(stopped).toMatchObject({ state, outcome: 'acceptance_stop' })
+      expect(stopped.finished_at !== null).toBe(state !== 'uncertain')
+    }
+    await pool.query(`UPDATE collaboration_calls SET state = 'failed', outcome = 'private runtime /secret' WHERE call_id = $1`, [first!.callId])
+    await pool.query(`UPDATE collaboration_context_deliveries SET state = 'failed', outcome = 'team_memory_context_unsupported_adapter' WHERE call_id = $1`, [first!.callId])
+    const unsupported = await sessions.listCalls(shared.id, ownerUserId)
+    expect(unsupported.find(call => call.id === first!.callId)).toMatchObject({ state: 'failed', outcome: 'memory_adapter_unsupported' })
+    expect(JSON.stringify(unsupported)).not.toContain('/secret')
+    await pool.query(`UPDATE collaboration_context_deliveries SET outcome = 'private context /secret' WHERE call_id = $1`, [first!.callId])
+    expect((await sessions.listCalls(shared.id, ownerUserId)).find(call => call.id === first!.callId)?.outcome).toBeNull()
     const contextV2 = await contexts.create({
       sessionId: shared.id, actorUserId: ownerUserId, expectedRevision: 1, requestId: 'context-v2',
       goal: 'Produce the final recommendation', consensus: ['The first call completed'], openQuestions: [],

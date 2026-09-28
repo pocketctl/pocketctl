@@ -86,12 +86,25 @@ export interface ScopeControlFeedBatch {
   lease_expires_at: string
 }
 
+export interface ScopeAuthoritySnapshot {
+  state: 'active' | 'suspended' | 'dissolving' | 'dissolved'
+  memberships: Array<{
+    membership_id: string
+    membership_revision: string
+    state: 'active' | 'suspended' | 'revoked'
+    roles: string[]
+  }>
+}
+
 export interface ProviderInstallationItemV2
   extends Omit<ProviderInstallationItem, 'subscriptions'> {
   owner_scope_kind: 'personal' | 'team' | 'organization'
   owner_scope_id: string
   parent_organization_id: string | null
   authorization_epoch: string
+  // Optional for older Relay versions; shared installations use a complete
+  // opaque snapshot taken at the advertised authorization epoch.
+  scope_snapshot?: ScopeAuthoritySnapshot | null
   subscriptions: (ExtensionTopic | ScopeControlTopic)[]
 }
 

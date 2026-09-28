@@ -78,6 +78,11 @@ func (c *codexCoordinator) admissionAllowed(id string) bool {
 	if id == "" {
 		return true
 	}
+	// Retirement overrides cached admission: an owned empty thread's rollout
+	// is durable history, but must not resurrect a failed collaboration create.
+	if c.sm != nil && c.sm.isRetiredCollaborationSession(id, adapter.AgentCodex, "") {
+		return false
+	}
 	c.admissionMu.Lock()
 	defer c.admissionMu.Unlock()
 	if c.admitted[id] {
