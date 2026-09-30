@@ -1,12 +1,22 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { describe, expect, test, vi } from 'vitest'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import type { createTeamAccessController } from '../../../composables/useTeamAccess'
+import type { TeamCapabilities } from '../../../types/team'
 import { resetAgentPlanProgressForTests, useAgentPlanProgress } from '../../../composables/useAgentPlanProgress'
 
 const mobile = ref(true)
 const loggedIn = ref(true)
 const connected = ref(true)
+const teamEnabled = ref(false)
+const accessToken = ref('fixture-token')
+let realTeamAccess: ReturnType<typeof createTeamAccessController> | undefined
+
+vi.mock('../../../composables/useTeamAccess', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../composables/useTeamAccess')>(),
+  useTeamAccess: () => realTeamAccess ?? ({ enabled: teamEnabled, denied: computed(() => !teamEnabled.value), refresh: async () => teamEnabled.value }),
+}))
 
 vi.mock('../../../composables/useResponsiveLayout', () => ({
   useResponsiveLayout: () => ({ isMobile: mobile }),
@@ -17,6 +27,7 @@ vi.mock('../../../composables/useEnv', () => ({
 vi.mock('../../../composables/useAuth', () => ({
   useAuth: () => ({
     isLoggedIn: loggedIn,
+    accessToken,
     user: ref({ display_name: 'Mobile User', plan: 'free' }),
   }),
 }))
@@ -28,6 +39,8 @@ function testRouter(path = '/sessions') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
+      { path: '/teams', meta: { requiresTeam: true }, component: { template: '<div>Team content</div>' } },
+      ...['/inbox', '/hosts', '/memory'].map(path => ({ path, component: { template: '<div>Content</div>' } })),
       { path: '/sessions', component: { template: '<div>Sessions content</div>' } },
       { path: '/settings', component: { template: '<div>Settings content</div>' } },
       { path: '/session/:id', component: { template: '<div>Session content</div>' } },
@@ -38,6 +51,54 @@ function testRouter(path = '/sessions') {
 }
 
 describe('mobile application shell', () => {
+  test.each(['allowed', 'revoked', 'offline'] as const)('keeps the Team page during token renewal until qualification settles: %s', async outcome => {
+    const { createTeamAccessController } = await import('../../../composables/useTeamAccess')
+    const allowed: TeamCapabilities = { schema_version: 1, contract_version: 'team-collaboration.v1', collaboration: true, autorun: true, memory_bridge: false, writes_enabled: true }
+    accessToken.value = 'original-token'
+    let complete!: (value: TeamCapabilities) => void
+    let fail!: (reason: Error) => void
+    let deferred = false
+    realTeamAccess = createTeamAccessController(accessToken, () => deferred
+      ? new Promise((resolve, reject) => { complete = resolve; fail = reject })
+      : Promise.resolve(allowed))
+    await realTeamAccess.refresh()
+    const router = testRouter('/teams')
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    try {
+      await flushPromises()
+      deferred = true
+      accessToken.value = 'renewed-token'
+      await flushPromises()
+      expect(realTeamAccess.enabled.value).toBe(false)
+      expect(router.currentRoute.value.path).toBe('/teams')
+      if (outcome === 'offline') fail(new Error('offline'))
+      else complete({ ...allowed, collaboration: outcome === 'allowed', writes_enabled: outcome === 'allowed' })
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe(outcome === 'allowed' ? '/teams' : '/sessions')
+    } finally { wrapper.unmount(); realTeamAccess = undefined; accessToken.value = 'fixture-token' }
+  })
+  test('only shows the Team entry to enabled accounts on mobile and desktop', async () => {
+    const router = testRouter('/settings')
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    try {
+      teamEnabled.value = false; mobile.value = true
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('a[href="/teams"]').exists()).toBe(false)
+      teamEnabled.value = true
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-testid="mobile-nav-teams"]').exists()).toBe(true)
+      mobile.value = false
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('.sidebar a[href="/teams"]').exists()).toBe(true)
+      teamEnabled.value = false
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('a[href="/teams"]').exists()).toBe(false)
+    } finally { wrapper.unmount(); mobile.value = true; teamEnabled.value = false }
+  })
   test('replaces the desktop sidebar with accessible mobile navigation', async () => {
     const router = testRouter('/settings')
     await router.isReady()

@@ -13,7 +13,7 @@
       <span>{{ t('attention.title') }}</span>
       <span v-if="attentionCount > 0" class="mobile-nav-badge">{{ attentionCount > 99 ? '99+' : attentionCount }}</span>
     </router-link>
-    <router-link to="/teams" class="mobile-nav-link" :aria-label="t('team.title')" data-testid="mobile-nav-teams">
+    <router-link v-if="teamAccess.enabled.value" to="/teams" class="mobile-nav-link" :aria-label="t('team.title')" data-testid="mobile-nav-teams">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
         <circle cx="9" cy="7" r="4" />
@@ -52,9 +52,11 @@
 
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
+import { useTeamAccess } from '../../composables/useTeamAccess'
 
 withDefaults(defineProps<{ sessionCount: number; attentionCount?: number }>(), { attentionCount: 0 })
 const { t } = useLocale()
+const teamAccess = useTeamAccess()
 </script>
 
 <style scoped>
@@ -65,7 +67,8 @@ const { t } = useLocale()
   min-height: var(--mobile-bottom-nav-h);
   padding: 6px 16px max(6px, env(safe-area-inset-bottom));
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(14px);

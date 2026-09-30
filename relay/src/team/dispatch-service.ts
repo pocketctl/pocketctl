@@ -241,18 +241,20 @@ export class TeamDispatchService {
         operation,
       },
     }
-    const sent = this.transport.send({
+    const sendResult = await this.repository.sendIfEnabled(callId, () => this.transport.send({
       daemonId: claimed.authorization.daemon_id,
       ownerUserId,
       capability: 'team_collaboration_dispatch_v1',
       command,
-    })
-    if (!sent) {
+    }))
+    if (sendResult !== 'sent') {
       await this.settleNotSent(claimed, reservationId, operation)
-      await this.contextDelivery.stop(callId, 'failed', 'daemon_unavailable')
-      await this.repository.stop(callId, 'blocked', 'daemon_unavailable')
-      teamDispatchTotal.inc({ operation: metricOperation, outcome: 'daemon_unavailable' })
-      teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'daemon_unavailable' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
+      const reason = sendResult === 'access_denied' ? 'team_access_revoked' : 'daemon_unavailable'
+      await this.contextDelivery.stop(callId, 'failed', reason)
+      await this.repository.stop(callId, 'blocked', reason)
+      const outcome = sendResult === 'access_denied' ? 'access_revoked' : 'daemon_unavailable'
+      teamDispatchTotal.inc({ operation: metricOperation, outcome })
+      teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome }, Number(process.hrtime.bigint() - startedAt) / 1e9)
       return
     }
     await this.contextDelivery.markDispatched(callId)

@@ -39,9 +39,7 @@ describeWithDatabase('Team shared events (PostgreSQL)', () => {
 
   test('persists fixed targets, replay cursors, lifecycle fences, and participant revocation', async () => {
     const users = await pool.query<{ id: number; email: string }>(
-      `INSERT INTO users (email, password_hash) VALUES
-        ('event.creator@example.test', 'x'), ('event.member@example.test', 'x')
-       RETURNING id, email`,
+      `INSERT INTO users (email, password_hash, team_enabled) VALUES ('event.creator@example.test', 'x',true), ('event.member@example.test', 'x',true) RETURNING id, email`,
     )
     const creatorId = users.rows.find(row => row.email.startsWith('event.creator'))!.id
     const memberId = users.rows.find(row => row.email.startsWith('event.member'))!.id

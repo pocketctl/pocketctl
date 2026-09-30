@@ -124,7 +124,7 @@ describeWithDatabase('Team Memory source projection (PostgreSQL)', () => {
 
   test('writes one stable three-event source packet and collapses replay', async () => {
     const user = await pool.query<{ id: number }>(`
-      INSERT INTO users (email, password_hash) VALUES ('team-source@example.test', 'x') RETURNING id
+      INSERT INTO users (email, password_hash, team_enabled) VALUES ('team-source@example.test', 'x',true) RETURNING id
     `)
     const userId = user.rows[0].id
     const installationId = '61616161-6161-4616-8616-616161616161'

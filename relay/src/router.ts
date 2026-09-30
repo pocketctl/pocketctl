@@ -281,6 +281,8 @@ export class Router {
   private shuttingDown = false;
   private readonly heartbeatTimeoutMs = positiveInteger(process.env.DAEMON_HEARTBEAT_TIMEOUT_MS, 45_000);
   private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private teamEventQueue: Promise<void> = Promise.resolve();
+  private teamSubscriptionRevalidationRunning = false;
   // Per-daemon event delivery cursor for at-least-once delivery. `persistedHigh`
   // is the highest *contiguous* seq that has been durably persisted; it is what
   // event_ack reports, so the daemon only trims its outbound buffer/spool once an
@@ -498,6 +500,12 @@ export class Router {
     });
     this.pushDeduper.startSweeping();
     this.heartbeatTimer = setInterval(() => {
+      if (!this.teamSubscriptionRevalidationRunning && this.teamSubscriptionAuthorizer) {
+        this.teamSubscriptionRevalidationRunning = true;
+        void this.revalidateTeamSubscriptions()
+          .catch(error => console.error('[team] subscription revalidation failed', { error }))
+          .finally(() => { this.teamSubscriptionRevalidationRunning = false; });
+      }
       const now = Date.now();
       for (const [daemonId, daemon] of this.daemons) {
         if (now - daemon.lastHeartbeatAt < this.heartbeatTimeoutMs) continue;
@@ -3604,15 +3612,29 @@ export class Router {
     }
   }
 
-  broadcastTeamEvent(teamSessionId: string, participantUserIds: number[], event: unknown): void {
+  broadcastTeamEvent(teamSessionId: string, participantUserIds: number[], event: unknown): Promise<void> {
+    // Preserve event order while authorization now requires an asynchronous read.
+    this.teamEventQueue = this.teamEventQueue.then(() => this.sendAuthorizedTeamEvent(teamSessionId, participantUserIds, event))
+      .catch(error => console.error('[team] event delivery failed', { error }));
+    return this.teamEventQueue;
+  }
+
+  private async sendAuthorizedTeamEvent(teamSessionId: string, participantUserIds: number[], event: unknown): Promise<void> {
     const allowed = new Set(participantUserIds);
     for (const [ws, client] of this.clients) {
       if (!client.subscribedTeamSessions.has(teamSessionId)) continue;
-      if (client.userId === null || !allowed.has(client.userId)) {
+      const authorized = client.userId !== null
+        && await this.teamSubscriptionAuthorizer?.canSubscribe(client.userId, teamSessionId).catch(() => false);
+      // A disconnect/unsubscribe may complete during the authority check.
+      if (this.clients.get(ws) !== client || !client.subscribedTeamSessions.has(teamSessionId)) continue;
+      if (!authorized) {
         client.subscribedTeamSessions.delete(teamSessionId);
         this.send(ws, { type: 'team_collaboration_access_revoked', team_session_id: teamSessionId });
         continue;
       }
+      // An earlier event may have captured its audience before this authorized
+      // participant joined. Skip that event without withdrawing current access.
+      if (!allowed.has(client.userId!)) continue;
       this.send(ws, { type: 'team_collaboration_event', protocol: 'team_collaboration_v1', team_session_id: teamSessionId, event });
     }
   }

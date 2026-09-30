@@ -32,7 +32,7 @@ describeWithDatabase('Team management lifecycle acceptance (PostgreSQL)', () => 
   async function fixture() {
     const key = randomUUID(), teams = new TeamRepository(pool)
     const emails = [`${key}.owner@example.test`, `${key}.recipient@example.test`]
-    const users = (await pool.query(`INSERT INTO users (email,password_hash) VALUES ($1,'x'),($2,'x') RETURNING id`, emails)).rows
+    const users = (await pool.query(`INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true),($2,'x',true) RETURNING id`, emails)).rows
     const owner = Number(users[0].id), recipient = Number(users[1].id)
     const created = await teams.createTeam({ actorUserId: owner, name: 'Lifecycle acceptance', requestId: key })
     const inviteInput = { teamId: created.team.id, actorUserId: owner, email: emails[1], expectedRevision: 1, requestId: key }

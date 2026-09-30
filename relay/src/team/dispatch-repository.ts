@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
 
+import { teamAccountsEnabled } from './access.js'
 import { teamEventView } from './event-repository.js'
 import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js'
 import type { TeamEvent, TeamProvider } from './types.js'
@@ -99,7 +100,7 @@ export class TeamDispatchRepository {
   async claim(callId: string): Promise<ClaimedDispatch | null> {
     return this.transaction(async client => {
       const result = await client.query(
-        `SELECT call.*, event.content, session.state AS session_state, team.state AS team_state,
+        `SELECT call.*, event.content, COALESCE(run.initiator_user_id, event.author_user_id) AS initiator_user_id, session.state AS session_state, team.state AS team_state,
                 binding.binding_id, binding.revision AS current_binding_revision, binding.state AS binding_state,
                 binding.native_session_id AS binding_native_session_id, binding.owner_user_id AS binding_owner_user_id,
                 offer.revision AS current_offer_revision, offer.state AS offer_state, offer.provider,
@@ -107,6 +108,7 @@ export class TeamDispatchRepository {
                 daemon.status AS daemon_status, daemon.collaboration_capabilities
          FROM collaboration_calls call
          JOIN collaboration_events event ON event.event_id = call.event_id
+         LEFT JOIN collaboration_runs run ON run.run_id = call.run_id
          JOIN collaboration_sessions session ON session.team_session_id = call.team_session_id
          JOIN collaboration_teams team ON team.team_id = session.team_id
          JOIN collaboration_session_agent_bindings binding ON binding.binding_id = call.binding_id
@@ -117,6 +119,10 @@ export class TeamDispatchRepository {
       )
       const row = result.rows[0]
       if (!row || row.state !== 'pending') return null
+      if (!await teamAccountsEnabled(client, [Number(row.initiator_user_id), Number(row.owner_user_id)], true)) {
+        await client.query(`UPDATE collaboration_calls SET state = 'blocked', outcome = 'team_access_revoked', updated_at = NOW(), finished_at = NOW() WHERE call_id = $1`, [callId])
+        return null
+      }
       const unavailable = row.session_state !== 'active' || row.team_state !== 'active' || row.binding_state !== 'active'
         || row.offer_state !== 'active' || row.membership_state !== 'active' || row.daemon_status !== 'online'
         || Number(row.binding_owner_user_id) !== Number(row.owner_user_id)
@@ -163,6 +169,24 @@ export class TeamDispatchRepository {
           daemon_id: row.daemon_id,
         },
       }
+    })
+  }
+
+  // The synchronous transport handoff is the admission boundary. Hold the
+  // account locks until it returns, so a committed revocation cannot race a
+  // context/quota preparation that started earlier. Receipts never use this gate.
+  async sendIfEnabled(callId: string, send: () => boolean): Promise<'sent' | 'unavailable' | 'access_denied'> {
+    return this.transaction(async client => {
+      const row = (await client.query(`SELECT call.state, offer.owner_user_id,
+          COALESCE(run.initiator_user_id, event.author_user_id) AS initiator_user_id
+        FROM collaboration_calls call
+        JOIN team_agent_offers offer ON offer.offer_id = call.offer_id
+        JOIN collaboration_events event ON event.event_id = call.event_id
+        LEFT JOIN collaboration_runs run ON run.run_id = call.run_id
+        WHERE call.call_id = $1 FOR UPDATE OF call`, [callId])).rows[0]
+      if (!row || row.state !== 'dispatched') return 'unavailable'
+      if (!await teamAccountsEnabled(client, [Number(row.initiator_user_id), Number(row.owner_user_id)], true)) return 'access_denied'
+      return send() ? 'sent' : 'unavailable'
     })
   }
 

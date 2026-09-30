@@ -29,7 +29,7 @@ describeWithDatabase('Task and offer receipt authorization (PostgreSQL)', () => 
 
   async function fixture() {
     const key = randomUUID(), teams = new TeamRepository(pool), tasks = new TeamTaskService(pool), sessions = new TeamSessionService(pool)
-    const users = (await pool.query(`INSERT INTO users (email,password_hash) VALUES ($1,'x'),($2,'x') RETURNING id`,
+    const users = (await pool.query(`INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true),($2,'x',true) RETURNING id`,
       [`${key}.owner@example.test`, `${key}.member@example.test`])).rows
     const owner = Number(users[0].id), member = Number(users[1].id)
     const team = (await teams.createTeam({ actorUserId: owner, name: 'Receipt acceptance', requestId: key })).team

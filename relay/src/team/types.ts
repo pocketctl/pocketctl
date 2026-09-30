@@ -19,7 +19,7 @@ export type TeamState = 'active' | 'dissolved'
 export type TeamMembershipState = 'active' | 'left' | 'removed'
 export type TeamInvitationState = 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired'
 export type TeamAgentOfferState = 'active' | 'revoked'
-export type TeamAgentAvailability = 'online' | 'offline' | 'unsupported' | 'unmanaged' | 'occupied'
+export type TeamAgentAvailability = 'online' | 'offline' | 'unsupported' | 'unmanaged' | 'occupied' | 'access_disabled'
 export type TeamTaskState = 'open' | 'in_progress' | 'completed' | 'archived' | 'deleted'
 export type TeamSessionState = 'active' | 'paused' | 'ended' | 'archived'
 export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | 'paused' | 'completed' | 'failed' | 'cancelled'
@@ -254,6 +254,7 @@ export interface TeamErrorEnvelope {
 }
 
 export type TeamErrorCode =
+  | 'team_access_denied'
   | 'team_feature_disabled'
   | 'team_not_found'
   | 'membership_required'

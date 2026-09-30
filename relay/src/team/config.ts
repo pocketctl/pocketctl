@@ -68,6 +68,7 @@ interface CapabilityRouteDependencies {
   config: TeamCollaborationConfig
   memoryExtensionAvailable: boolean
   verifyAccessToken(token: string): Promise<{ userId: number } | null>
+  isTeamEnabled(userId: number): Promise<boolean>
 }
 
 export function registerTeamCapabilityRoutes(
@@ -81,11 +82,14 @@ export function registerTeamCapabilityRoutes(
       return { error: { code: 'authorization_required', message: 'Authorization required', retryable: false } }
     }
     const token = authorization.slice('Bearer '.length).trim()
-    if (!token || !await dependencies.verifyAccessToken(token)) {
+    const actor = token ? await dependencies.verifyAccessToken(token) : null
+    if (!actor) {
       reply.code(401)
       return { error: { code: 'invalid_token', message: 'Invalid token', retryable: false } }
     }
-    return teamCapabilitySnapshot(dependencies.config, {
+    reply.header('Cache-Control', 'no-store')
+    const enabled = await dependencies.isTeamEnabled(actor.userId)
+    return teamCapabilitySnapshot(enabled ? dependencies.config : { collaboration: 'off', autorun: 'off', memoryBridge: 'off' }, {
       memoryExtensionAvailable: dependencies.memoryExtensionAvailable,
     })
   })

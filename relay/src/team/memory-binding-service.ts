@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { requireTeamAccess } from './access.js'
 import type {
   ExtensionInstallationRepository,
   ScopedExtensionInstallation,
@@ -294,6 +295,7 @@ export class TeamMemoryBindingService {
     creator = false,
     lock = false,
   ): Promise<void> {
+    await requireTeamAccess(client, actorUserId, lock)
     const result = await client.query<{ creator_user_id: string | number; state: string }>(
       `SELECT team.creator_user_id, team.state
        FROM collaboration_teams team

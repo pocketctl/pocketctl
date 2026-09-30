@@ -44,7 +44,7 @@ describeWithDatabase('Team run recovery (PostgreSQL)', () => {
 
   test('fences an expired worker and never repeats an uncertain call after restart', async () => {
     const user = await pool.query<{ id: number }>(
-      `INSERT INTO users (email, password_hash) VALUES ('run.owner@example.test', 'x') RETURNING id`,
+      `INSERT INTO users (email, password_hash, team_enabled) VALUES ('run.owner@example.test', 'x',true) RETURNING id`,
     )
     const ownerUserId = user.rows[0].id
     const teams = new TeamRepository(pool)

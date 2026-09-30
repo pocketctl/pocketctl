@@ -74,7 +74,7 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
 
   async function user(email: string, displayName?: string): Promise<number> {
     const result = await pool.query<{ id: number }>(
-      `INSERT INTO users (email, password_hash, display_name) VALUES ($1, 'x', $2) RETURNING id`,
+      `INSERT INTO users (email, password_hash, display_name, team_enabled) VALUES ($1, 'x', $2,true) RETURNING id`,
       [email, displayName ?? null],
     )
     return result.rows[0].id

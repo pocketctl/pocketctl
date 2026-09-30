@@ -1,3 +1,4 @@
+import { isTeamEnabled, registerTeamAccessGuard } from './team/access.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyCors from '@fastify/cors';
@@ -1007,7 +1008,7 @@ async function main() {
     event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
   })
   router = new Router(pools, {
-    teamSubscriptionAuthorizer: teamSessionService,
+    teamSubscriptionAuthorizer: { canSubscribe: (userId, sessionId) => teamConfig.collaboration === 'on' ? teamSessionService.canSubscribe(userId, sessionId) : Promise.resolve(false) },
     teamDispatchBroker: {
       observeDaemonEvent: (daemonId, ownerUserId, message) => teamDispatchService?.observeDaemonEvent(daemonId, ownerUserId, message),
       handleDaemonDisconnected: daemonId => teamDispatchService?.handleDaemonDisconnected(daemonId) ?? Promise.resolve(),
@@ -1217,7 +1218,13 @@ async function main() {
     options: { maxPayload: runtimeConfig.maxEventBytes },
   });
   registerSessionShareRoutes(app, { pool, publicIssuer });
+  registerTeamAccessGuard(app, {
+    verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
+    isTeamEnabled: userId => isTeamEnabled(pool, userId),
+    getDatabaseReady: () => databaseReady,
+  });
   registerTeamCapabilityRoutes(app, {
+    isTeamEnabled: userId => isTeamEnabled(pool, userId),
     config: teamConfig,
     memoryExtensionAvailable: extensionConfig.mode === 'enabled' && extensionV2Mode === 'enabled',
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),

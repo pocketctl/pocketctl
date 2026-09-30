@@ -9,7 +9,7 @@ export type TeamRunID = string
 
 export type TeamState = 'active' | 'dissolved'
 export type TeamInvitationState = 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired'
-export type TeamAgentAvailability = 'online' | 'offline' | 'unsupported' | 'unmanaged' | 'occupied'
+export type TeamAgentAvailability = 'online' | 'offline' | 'unsupported' | 'unmanaged' | 'occupied' | 'access_disabled'
 export type TeamTaskState = 'open' | 'in_progress' | 'completed' | 'archived' | 'deleted'
 export type TeamSessionState = 'active' | 'paused' | 'ended' | 'archived'
 export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | 'paused' | 'completed' | 'failed' | 'cancelled'

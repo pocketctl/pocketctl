@@ -32,7 +32,8 @@ function fail(reply: Reply, status: number, code: string, message: string, retry
 
 function mapError(error: unknown, reply: Reply) {
   if (!(error instanceof TeamRepositoryError)) throw error
-  const status = error.code === 'team_not_found' ? 404
+  const status = error.code === 'team_access_denied' ? 403
+    : error.code === 'team_not_found' ? 404
     : error.code === 'creator_required' || error.code === 'membership_required' ? 403
       : error.code === 'capability_not_supported' ? 422
         : 409

@@ -34,7 +34,7 @@ const emit = defineEmits<{ 'update:modelValue': [value: TeamAgentTargetValue] }>
 const callableBindings = computed(() => props.bindings.filter(binding => binding.availability === 'online'))
 
 function availabilityLabel(value: TeamSessionAgentBinding['availability']): string {
-  return ({ offline: '离线', unsupported: '不支持团队调用', unmanaged: '未托管', occupied: '被其他团队占用', online: '在线' })[value]
+  return ({ offline: '离线', unsupported: '不支持团队调用', unmanaged: '未托管', occupied: '被其他团队占用', online: '在线', access_disabled: '账号未开通 Team' })[value]
 }
 function selectAll(): void { emit('update:modelValue', { mode: 'all', offerIDs: [] }) }
 function selectDiscussion(): void { emit('update:modelValue', { mode: 'discussion', offerIDs: [] }) }

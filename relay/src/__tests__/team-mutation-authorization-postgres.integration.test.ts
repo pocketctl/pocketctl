@@ -32,8 +32,7 @@ describeWithDatabase('Team mutation authorization (PostgreSQL)', () => {
 
   async function fixture() {
     const key = randomUUID()
-    const users = (await pool.query(`INSERT INTO users (email, password_hash)
-      VALUES ($1, 'x'), ($2, 'x') RETURNING id`, [`${key}.owner@example.test`, `${key}.member@example.test`])).rows
+    const users = (await pool.query(`INSERT INTO users (email, password_hash, team_enabled) VALUES ($1, 'x',true), ($2, 'x',true) RETURNING id`, [`${key}.owner@example.test`, `${key}.member@example.test`])).rows
     const owner = Number(users[0].id), member = Number(users[1].id)
     const teams = new TeamRepository(pool), service = new TeamSessionService(pool)
     const team = (await teams.createTeam({ actorUserId: owner, name: 'Acceptance', requestId: key })).team

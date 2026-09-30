@@ -72,7 +72,7 @@
       <section v-if="session.agent_bindings.some(binding => binding.owner_user_id === currentUserId && binding.state === 'active')" class="owned-agents">
         <small>我的执行能力</small>
         <div v-for="binding in session.agent_bindings.filter(item => item.owner_user_id === currentUserId && item.state === 'active')" :key="binding.id" class="owned-agent-row">
-          <div><strong>{{ bindingLabel(binding) }}</strong><span>{{ binding.availability }}</span></div>
+          <div><strong>{{ bindingLabel(binding) }}</strong><span>{{ binding.availability === 'access_disabled' ? '账号未开通 Team' : binding.availability }}</span></div>
           <button type="button" :disabled="busy" @click="$emit('withdraw-agent', binding.offer_id)">撤回</button>
         </div>
         <p>撤回只阻止新的共享调用；原生会话中的工具审批仍由你处理。</p>
@@ -119,7 +119,7 @@ const isCreator = computed(() => props.session.creator_user_id === props.current
 const terminal = computed(() => Boolean(props.run && ['completed', 'failed', 'cancelled'].includes(props.run.state)))
 const coordinator = computed(() => props.session.agent_bindings.find(binding => binding.offer_id === props.run?.coordinator_offer_id))
 const coordinatorLabel = computed(() => coordinator.value ? bindingLabel(coordinator.value) : `Agent ${props.run?.coordinator_offer_id ?? ''}`)
-const coordinatorAvailability = computed(() => coordinator.value?.availability ?? '已移除')
+const coordinatorAvailability = computed(() => coordinator.value?.availability === 'access_disabled' ? '账号未开通 Team' : coordinator.value?.availability ?? '已移除')
 const canResume = computed(() => props.run?.terminal_reason !== 'dispatch_uncertain' && props.run?.terminal_reason !== 'run_deadline_reconcile_required')
 const durationLabel = computed(() => {
   const seconds = props.run?.budget.max_duration_seconds ?? 0

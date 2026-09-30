@@ -9,7 +9,7 @@
     <div v-if="warning" class="capability-banner warning" role="status">{{ warning }}</div>
     <div v-if="loading" class="workspace-empty">{{ t('common.loading') }}</div>
     <div v-else-if="error && !teams.length" class="workspace-empty"><strong>{{ t('team.load_failed') }}</strong><span>{{ error }}</span><button type="button" class="btn btn-secondary" @click="loadTeams">{{ t('team.retry') }}</button></div>
-    <template v-else>
+    <template v-else-if="capabilities?.collaboration">
       <div v-if="teams.length" class="team-switcher" role="list" :aria-label="t('team.switcher')">
         <button v-for="team in teams" :key="team.id" type="button" :class="{ active: team.id === selectedTeamID }" :data-team-id="team.id" @click="selectTeam(team.id)">{{ team.name }}</button>
       </div>
@@ -94,8 +94,10 @@ function message(failure: unknown): string { return failure instanceof Error ? f
 async function loadTeams(): Promise<void> {
   loading.value = true; error.value = ''
   try {
-    const [nextCapabilities, nextTeams] = await Promise.all([getTeamCapabilities(), listTeams()])
-    capabilities.value = nextCapabilities; teams.value = nextTeams
+    capabilities.value = await getTeamCapabilities()
+    if (!capabilities.value.collaboration) { teams.value = []; selectedTeamID.value = ''; return }
+    const nextTeams = await listTeams()
+    teams.value = nextTeams
     const queryTeam = typeof route.query.team === 'string' ? route.query.team : ''
     const nextID = nextTeams.some(team => team.id === queryTeam) ? queryTeam : nextTeams[0]?.id ?? ''
     selectedTeamID.value = nextID

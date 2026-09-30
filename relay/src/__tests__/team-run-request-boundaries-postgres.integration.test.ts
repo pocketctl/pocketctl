@@ -29,7 +29,7 @@ withDatabase('Team Run request contract acceptance (PostgreSQL)', () => {
 
   async function fixture() {
     const key = randomUUID(), teams = new TeamRepository(pool), sessions = new TeamSessionService(pool)
-    const owner = Number((await pool.query("INSERT INTO users(email,password_hash) VALUES($1,'x') RETURNING id", [`${key}@example.test`])).rows[0].id)
+    const owner = Number((await pool.query("INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true) RETURNING id", [`${key}@example.test`])).rows[0].id)
     const team = (await teams.createTeam({ actorUserId: owner, name: 'Run contract acceptance', requestId: key })).team
     // Isolated account/capability input; this is not evidence of a native run.
     await pool.query(`INSERT INTO daemons(daemon_id,hostname,agents,status,user_id,collaboration_capabilities)

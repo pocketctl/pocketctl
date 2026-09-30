@@ -14,7 +14,7 @@
           </div>
         </div>
         <div class="mobile-session-nav-actions">
-          <button type="button" aria-label="团队共享会话" @click="$router.push('/teams?tab=sessions')">T</button>
+          <button v-if="teamAccess.enabled.value" type="button" aria-label="团队共享会话" @click="$router.push('/teams?tab=sessions')">T</button>
           <AttentionInboxEntryButton
             v-if="hostId"
             class="mobile-session-inbox"
@@ -58,7 +58,7 @@
     <div v-else class="header-row">
       <h2>Sessions</h2>
       <div class="header-actions">
-        <button class="btn" data-testid="personal-to-team-sessions" @click="$router.push('/teams?tab=sessions')">团队会话</button>
+        <button v-if="teamAccess.enabled.value" class="btn" data-testid="personal-to-team-sessions" @click="$router.push('/teams?tab=sessions')">团队会话</button>
         <button class="btn logout" @click="handleLogout">退出</button>
         <button class="btn primary" @click="showNewSession = true">+ New Session</button>
       </div>
@@ -225,6 +225,7 @@ import { useWebSocket } from '../composables/useWebSocket'
 import type { DaemonEvent } from '../composables/useWebSocket'
 import { formatRelativeTime } from '../composables/useRelativeTime'
 import { useAuth } from '../composables/useAuth'
+import { useTeamAccess } from '../composables/useTeamAccess'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
 import SessionActions from '../components/SessionActions.vue'
 import AgentBadge from '../components/AgentBadge.vue'
@@ -253,6 +254,7 @@ const { t } = useLocale()
 
 const { connect, send, onEvent, effectiveStatus } = useWebSocket()
 const { isLoggedIn, accessToken, logout, user } = useAuth()
+const teamAccess = useTeamAccess()
 const $router = useRouter()
 const route = useRoute()
 const sessions = ref<any[]>([])

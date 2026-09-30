@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { requireTeamAccess } from './access.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamTaskState } from './types.js'
 
@@ -79,6 +80,7 @@ export class TeamTaskService {
   }
 
   private async activeMembership(client: Pick<pg.Pool, 'query'>, teamId: string, actorUserId: number, lock = false): Promise<{ creator_user_id: number }> {
+    await requireTeamAccess(client, actorUserId, lock)
     if (lock) {
       // Match revocation's Team -> membership -> Task lock order. Separate
       // reads also observe a membership change committed while waiting on Team.

@@ -31,7 +31,7 @@ databaseTests('Run settlement and binding pool boundaries (PostgreSQL)', () => {
   afterAll(async () => { if (pool) { await pool.query('TRUNCATE extension_providers,users,daemons RESTART IDENTITY CASCADE'); await pool.end() } })
 
   async function user() {
-    return Number((await pool.query(`INSERT INTO users(email,password_hash) VALUES($1,'x') RETURNING id`, [`${randomUUID()}@example.test`])).rows[0].id)
+    return Number((await pool.query(`INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true) RETURNING id`, [`${randomUUID()}@example.test`])).rows[0].id)
   }
   async function fixture(otherCreator = false) {
     const owner = await user(), teams = new TeamRepository(pool)

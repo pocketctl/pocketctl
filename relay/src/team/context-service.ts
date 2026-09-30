@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { requireTeamAccess } from './access.js'
 import { teamEventView } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamContextReference, TeamContextSnapshot, TeamEvent } from './types.js'
@@ -38,6 +39,7 @@ export class TeamContextService {
   ) {}
 
   private async accessible(db: Pick<pg.Pool, 'query'>, sessionId: string, actorUserId: number, lock = false): Promise<any> {
+    await requireTeamAccess(db, actorUserId, lock)
     const result = await db.query(
       `SELECT session.* FROM collaboration_sessions session
        JOIN collaboration_session_participants participant

@@ -51,6 +51,14 @@ beforeEach(() => {
 })
 
 describe('TeamsView', () => {
+  test('shows the access notice without loading Team data for an account that is not enabled', async () => {
+    api.getTeamCapabilities.mockResolvedValue({ collaboration: false, writes_enabled: false })
+    const { wrapper } = await render()
+    expect(wrapper.find('[data-testid="team-disabled"]').exists()).toBe(true)
+    expect(api.listTeams).not.toHaveBeenCalled()
+    expect(api.getTeam).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   test('has one workspace with three internal tabs and isolates data while switching teams', async () => {
     const { wrapper } = await render()
     expect(wrapper.findAll('[role="tab"]')).toHaveLength(3)

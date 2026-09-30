@@ -435,6 +435,18 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // User plan and whitelist for daemon limit control
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS plan VARCHAR(16) DEFAULT 'free'`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS whitelist BOOLEAN DEFAULT false`);
+  // Team pilot access is separate from subscription and concurrent quota.
+  // Existing and new accounts stay closed until an operator grants access.
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS team_enabled BOOLEAN NOT NULL DEFAULT false`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS team_access_audit (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    previous_enabled BOOLEAN NOT NULL,
+    enabled BOOLEAN NOT NULL,
+    operator VARCHAR(100) NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
 
   // Session pin (pinned to top)
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false`);

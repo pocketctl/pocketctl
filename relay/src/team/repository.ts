@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { requireTeamAccess } from './access.js'
 import {
   candidateForProvider,
   offeredProviders,
@@ -135,6 +136,7 @@ export class TeamRepository {
   ): Promise<T> {
     const hash = requestHash(payload)
     const result = await this.transaction(async client => {
+      await requireTeamAccess(client, actorUserId, true)
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         `team:${actorUserId}:${operation}:${requestId}`,
       ])
@@ -235,6 +237,7 @@ export class TeamRepository {
     actorUserId: number,
     options: { creator?: boolean; lock?: boolean } = {},
   ): Promise<{ team_id: string; creator_user_id: number; state: string; revision: number }> {
+    await requireTeamAccess(client, actorUserId, options.lock === true)
     const result = await client.query<{
       team_id: string
       creator_user_id: number
@@ -264,6 +267,7 @@ export class TeamRepository {
   }
 
   async listTeams(actorUserId: number): Promise<CollaborationTeamView[]> {
+    await requireTeamAccess(this.pool, actorUserId)
     const result = await this.pool.query(
       `SELECT t.*, COUNT(active_members.membership_id)::int AS member_count
        FROM collaboration_teams t
@@ -434,6 +438,7 @@ export class TeamRepository {
   }
 
   async listMyInvitations(actorUserId: number): Promise<CollaborationInvitationView[]> {
+    await requireTeamAccess(this.pool, actorUserId)
     const result = await this.pool.query(
       `SELECT i.*, t.name AS team_name, inviter.display_name AS inviter_display_name,
               inviter.email AS inviter_email
@@ -685,6 +690,7 @@ export class TeamRepository {
   }
 
   async listMyAgentCandidates(actorUserId: number): Promise<TeamAgentCandidate[]> {
+    await requireTeamAccess(this.pool, actorUserId)
     const result = await this.pool.query<DaemonAgentEvidence>(
       `SELECT d.daemon_id, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id
        FROM daemons d
@@ -699,8 +705,9 @@ export class TeamRepository {
   async listAgentOffers(teamId: string, actorUserId: number): Promise<CollaborationAgentOfferView[]> {
     await this.requireTeam(this.pool, teamId, actorUserId)
     const result = await this.pool.query(
-      `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id
+      `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id, owner.team_enabled AS owner_team_enabled
        FROM team_agent_offers o
+       JOIN users owner ON owner.id = o.owner_user_id
        JOIN daemons d ON d.daemon_id = o.daemon_id
        LEFT JOIN collaboration_team_daemon_bindings b ON b.daemon_id = o.daemon_id
        WHERE o.team_id = $1 ORDER BY o.created_at ASC`,
@@ -751,8 +758,9 @@ export class TeamRepository {
         throw new TeamRepositoryError('daemon_team_conflict', 'daemon is already associated with another team')
       }
       const existing = await client.query(
-        `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id
+        `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id, owner.team_enabled AS owner_team_enabled
          FROM team_agent_offers o
+         JOIN users owner ON owner.id = o.owner_user_id
          JOIN daemons d ON d.daemon_id = o.daemon_id
          LEFT JOIN collaboration_team_daemon_bindings b ON b.daemon_id = o.daemon_id
          WHERE o.team_id = $1 AND o.owner_user_id = $2 AND o.daemon_id = $3
@@ -771,7 +779,7 @@ export class TeamRepository {
         `UPDATE collaboration_teams SET revision = revision + 1, updated_at = NOW() WHERE team_id = $1`,
         [input.teamId],
       )
-      return this.offerView({ ...inserted.rows[0], ...daemon, occupied_team_id: input.teamId })
+      return this.offerView({ ...inserted.rows[0], ...daemon, owner_team_enabled: true, occupied_team_id: input.teamId })
     }, async (client, response) => {
       // Only offer-add receipts require current membership here. Terminal
       // leave/dissolve/invitation receipts retain their existing replay contract.
@@ -806,8 +814,9 @@ export class TeamRepository {
       // Session creation and membership revocation also lock Team before offer.
       await this.requireTeam(client, identity.rows[0].team_id, input.actorUserId, { lock: true })
       const result = await client.query(
-        `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id
+        `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id, owner.team_enabled AS owner_team_enabled
          FROM team_agent_offers o
+         JOIN users owner ON owner.id = o.owner_user_id
          JOIN daemons d ON d.daemon_id = o.daemon_id
          LEFT JOIN collaboration_team_daemon_bindings b ON b.daemon_id = o.daemon_id
          WHERE o.offer_id = $1 FOR UPDATE OF o`,
@@ -962,10 +971,10 @@ export class TeamRepository {
       capability_revision: Number(row.capability_revision),
       state: row.state,
       revision: Number(row.revision),
-      availability: candidate.availability,
+      availability: row.owner_team_enabled === false ? 'access_disabled' : candidate.availability,
       installed: candidate.installed,
       online: candidate.online,
-      managed_callable: candidate.managed_callable,
+      managed_callable: row.owner_team_enabled !== false && candidate.managed_callable,
       dispatch_supported: candidate.dispatch_supported,
       created_at: iso(row.created_at),
       updated_at: iso(row.updated_at),

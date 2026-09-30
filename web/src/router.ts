@@ -13,6 +13,7 @@ import TeamsView from './views/TeamsView.vue'
 import TeamSessionDetail from './views/TeamSessionDetail.vue'
 import TeamSessionListView from './views/TeamSessionListView.vue'
 import { useAuth } from './composables/useAuth'
+import { useTeamAccess } from './composables/useTeamAccess'
 import { isPwaMobileShellEnabled } from './composables/useEnv'
 import { isMobileViewport } from './composables/useResponsiveLayout'
 
@@ -27,9 +28,9 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/hosts', component: HostsView, meta: { requiresAuth: true } },
   { path: '/inbox', component: AttentionInboxView, meta: { requiresAuth: true } },
   { path: '/memory', component: MemoryView, meta: { requiresAuth: true } },
-  { path: '/teams', component: TeamsView, meta: { requiresAuth: true } },
-  { path: '/team/:teamId/sessions', name: 'team-sessions', component: TeamSessionListView, props: true, meta: { requiresAuth: true, sessionScope: 'team' } },
-  { path: '/team/:teamId/session/:id', name: 'team-session', component: TeamSessionDetail, props: true, meta: { requiresAuth: true, sessionScope: 'team' } },
+  { path: '/teams', component: TeamsView, meta: { requiresAuth: true, requiresTeam: true } },
+  { path: '/team/:teamId/sessions', name: 'team-sessions', component: TeamSessionListView, props: true, meta: { requiresAuth: true, requiresTeam: true, sessionScope: 'team' } },
+  { path: '/team/:teamId/session/:id', name: 'team-session', component: TeamSessionDetail, props: true, meta: { requiresAuth: true, requiresTeam: true, sessionScope: 'team' } },
 ]
 
 export function resolveAuthenticatedLanding(
@@ -50,6 +51,7 @@ export function createPocketctlRouter() {
     const { accessToken, doRefreshToken } = useAuth()
     if (!accessToken.value) await doRefreshToken()
     if (to.meta.requiresAuth && !accessToken.value) return '/login'
+    if (to.meta.requiresTeam && !await useTeamAccess().refresh()) return '/sessions'
     if (to.path === '/login' && accessToken.value) {
       return resolveAuthenticatedLanding('/') || '/'
     }

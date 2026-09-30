@@ -1,3 +1,4 @@
+import { TeamRepositoryError } from './repository.js'
 import { coordinatorPrompt, parseTeamRunDecision, TeamRunDecisionError } from './run-decision.js'
 import { TeamRunRepository, TeamRunAuthorityError, TeamRunBudgetError, TeamRunSessionStateError, type TeamRunMutation } from './run-repository.js'
 import type { TeamEvent, TeamRun } from './types.js'
@@ -78,6 +79,10 @@ export class TeamRunWorker {
       scheduled = await this.options.repository.scheduleCall(input)
     } catch (error) {
       if (await this.handleContinuationError(input, error)) return
+      if (error instanceof TeamRepositoryError && error.code === 'agent_unavailable') {
+        await this.transition({ ...input, state: 'blocked', terminalReason: 'agent_unavailable', content: 'Run blocked because its target Agent is unavailable.' })
+        return
+      }
       if (!(error instanceof TeamRunBudgetError)) throw error
       this.observeBudgetStop(input.runId, error.dimension)
       await this.transition({
@@ -105,8 +110,8 @@ export class TeamRunWorker {
     const { run, latestCall } = snapshot
     const transitionBase = { runId: run.id, leaseToken: lease.leaseToken }
 
-    const dormantStop = ['waiting_input', 'blocked', 'paused'].includes(run.state) && snapshot.continuationBlockReason
-    if (run.stop_requested || dormantStop) {
+    // Lost access stops running and dormant Runs after accepted calls drain.
+    if (run.stop_requested || snapshot.continuationBlockReason) {
       await this.options.repository.cancelPending(run.id, lease.leaseToken)
       if (latestCall && ['dispatched', 'accepted'].includes(latestCall.state)) {
         await this.options.repository.defer(run.id, lease.leaseToken, this.pollIntervalMs)

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { requireTeamAccess, teamAccountsEnabled } from './access.js'
 import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.js'
 import { teamEventView } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
@@ -123,6 +124,7 @@ export class TeamRunRepository {
   }
 
   private async authorizedSession(client: pg.PoolClient, sessionId: string, actorUserId: number): Promise<any> {
+    await requireTeamAccess(client, actorUserId, true)
     // Keep lifecycle and authorization stable until the mutation/receipt commits.
     const result = await client.query(
       `SELECT session.* FROM collaboration_sessions session
@@ -152,7 +154,7 @@ export class TeamRunRepository {
       if (session.state !== 'active') throw new TeamRunSessionStateError(session.state)
       return session
     } catch (error) {
-      if (error instanceof TeamRepositoryError && error.code === 'team_not_found') throw new TeamRunAuthorityError()
+      if (error instanceof TeamRepositoryError && ['team_not_found', 'team_access_denied'].includes(error.code)) throw new TeamRunAuthorityError()
       throw error
     }
   }
@@ -185,7 +187,7 @@ export class TeamRunRepository {
   }
 
   private callable(row: any, teamId: string): boolean {
-    if (row.binding_state !== 'active' || row.offer_state !== 'active' || row.membership_state !== 'active') return false
+    if (row.binding_state !== 'active' || row.offer_state !== 'active' || row.membership_state !== 'active' || row.owner_team_enabled !== true) return false
     return candidateForProvider({
       daemon_id: row.daemon_id, hostname: row.hostname, status: row.daemon_status,
       agents: row.agents, collaboration_capabilities: row.collaboration_capabilities,
@@ -222,9 +224,10 @@ export class TeamRunRepository {
       const coordinator = (await client.query(
         `SELECT binding.state AS binding_state, offer.state AS offer_state, offer.provider, offer.daemon_id,
                 member.state AS membership_state, daemon.hostname, daemon.status AS daemon_status, daemon.agents,
-                daemon.collaboration_capabilities, occupied.team_id AS occupied_team_id
+                daemon.collaboration_capabilities, occupied.team_id AS occupied_team_id, owner.team_enabled AS owner_team_enabled
          FROM collaboration_session_agent_bindings binding
          JOIN team_agent_offers offer ON offer.offer_id = binding.offer_id
+         JOIN users owner ON owner.id = offer.owner_user_id
          JOIN collaboration_team_memberships member ON member.team_id = offer.team_id AND member.user_id = offer.owner_user_id
          JOIN daemons daemon ON daemon.daemon_id = offer.daemon_id AND daemon.user_id = offer.owner_user_id
          LEFT JOIN collaboration_team_daemon_bindings occupied ON occupied.daemon_id = offer.daemon_id
@@ -383,13 +386,14 @@ export class TeamRunRepository {
            OR (state IN ('waiting_input', 'blocked', 'paused') AND EXISTS (
              SELECT 1 FROM collaboration_sessions session
              JOIN collaboration_teams team ON team.team_id = session.team_id
+             JOIN users initiator ON initiator.id = run.initiator_user_id
              LEFT JOIN collaboration_team_memberships member
                ON member.team_id = session.team_id AND member.user_id = run.initiator_user_id
              LEFT JOIN collaboration_session_participants participant
                ON participant.team_session_id = session.team_session_id AND participant.user_id = run.initiator_user_id
              WHERE session.team_session_id = run.team_session_id
                AND (session.state IN ('ended', 'archived') OR team.state <> 'active'
-                 OR member.state IS DISTINCT FROM 'active' OR participant.state IS DISTINCT FROM 'active')
+                 OR NOT initiator.team_enabled OR member.state IS DISTINCT FROM 'active' OR participant.state IS DISTINCT FROM 'active')
            )))
            AND next_wake_at <= NOW()
            AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
@@ -410,9 +414,10 @@ export class TeamRunRepository {
     if (!run) return null
     const session = (await this.pool.query(
       `SELECT session.team_id, session.state,
-         (team.state = 'active' AND member.state = 'active' AND participant.state = 'active') AS initiator_authorized
+         (initiator.team_enabled AND team.state = 'active' AND member.state = 'active' AND participant.state = 'active') AS initiator_authorized
        FROM collaboration_sessions session
        JOIN collaboration_teams team ON team.team_id = session.team_id
+       JOIN users initiator ON initiator.id = $2
        LEFT JOIN collaboration_team_memberships member ON member.team_id = session.team_id AND member.user_id = $2
        LEFT JOIN collaboration_session_participants participant ON participant.team_session_id = session.team_session_id AND participant.user_id = $2
        WHERE session.team_session_id = $1`, [run.team_session_id, run.initiator_user_id],
@@ -422,9 +427,10 @@ export class TeamRunRepository {
       `SELECT binding.binding_id, binding.offer_id, binding.state AS binding_state,
               offer.state AS offer_state, offer.provider, offer.daemon_id,
               member.state AS membership_state, daemon.hostname, daemon.status AS daemon_status, daemon.agents,
-              daemon.collaboration_capabilities, occupied.team_id AS occupied_team_id
+              daemon.collaboration_capabilities, occupied.team_id AS occupied_team_id, owner.team_enabled AS owner_team_enabled
        FROM collaboration_session_agent_bindings binding
        JOIN team_agent_offers offer ON offer.offer_id = binding.offer_id
+         JOIN users owner ON owner.id = offer.owner_user_id
        JOIN collaboration_team_memberships member ON member.team_id = offer.team_id AND member.user_id = offer.owner_user_id
        JOIN daemons daemon ON daemon.daemon_id = offer.daemon_id AND daemon.user_id = offer.owner_user_id
        LEFT JOIN collaboration_team_daemon_bindings occupied ON occupied.daemon_id = offer.daemon_id
@@ -478,11 +484,11 @@ export class TeamRunRepository {
       )
       if (Number(active.rows[0].count) >= frozenBudget.max_concurrent_calls) throw new TeamRunBudgetError('concurrency')
       const binding = (await client.query(
-        `SELECT binding.binding_id FROM collaboration_session_agent_bindings binding
+        `SELECT binding.binding_id, binding.owner_user_id FROM collaboration_session_agent_bindings binding
          WHERE binding.team_session_id = $1 AND binding.offer_id = $2 AND binding.state = 'active'`,
         [run.team_session_id, input.offerId],
       )).rows[0]
-      if (!binding) throw new TeamRepositoryError('agent_unavailable', 'run target Agent binding is unavailable')
+      if (!binding || !await teamAccountsEnabled(client, [Number(binding.owner_user_id)], true)) throw new TeamRepositoryError('agent_unavailable', 'run target Agent binding is unavailable')
       const step = Number(run.next_step)
       const event = await this.appendEvent(client, {
         sessionId: run.team_session_id, contextVersion: Number(run.context_version),

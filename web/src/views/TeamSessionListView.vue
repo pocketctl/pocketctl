@@ -15,7 +15,7 @@
       <div class="offer-options">
         <label v-for="offer in offers" :key="offer.id" :class="{ unavailable: !offer.managed_callable }">
           <input v-model="selectedOfferIDs" type="checkbox" :value="offer.id" :disabled="!offer.managed_callable" />
-          <span>{{ offer.provider === 'codex' ? 'Codex' : 'Claude Code' }} · {{ offer.daemon_id }}</span><small>{{ offer.availability }}</small>
+          <span>{{ offer.provider === 'codex' ? 'Codex' : 'Claude Code' }} · {{ offer.daemon_id }}</span><small>{{ offer.availability === 'access_disabled' ? '账号未开通 Team' : offer.availability }}</small>
         </label>
       </div>
       <div class="form-actions"><button type="button" @click="createOpen = false">取消</button><button class="primary" :disabled="creating || !title || !selectedOfferIDs.length">{{ creating ? '创建中…' : '开始协作' }}</button></div>

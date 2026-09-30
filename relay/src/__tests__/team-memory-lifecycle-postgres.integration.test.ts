@@ -29,7 +29,7 @@ databaseTests('Memory binding and Session lifecycle boundaries (PostgreSQL)', ()
 
   async function fixture() {
     const key = randomUUID(), teams = new TeamRepository(pool)
-    const owner = Number((await pool.query(`INSERT INTO users(email,password_hash) VALUES($1,'x') RETURNING id`, [`${key}@example.test`])).rows[0].id)
+    const owner = Number((await pool.query(`INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true) RETURNING id`, [`${key}@example.test`])).rows[0].id)
     const team = (await teams.createTeam({ actorUserId: owner, name: 'Lifecycle boundaries', requestId: key })).team
     return { owner, team, teams }
   }

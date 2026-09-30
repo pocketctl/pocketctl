@@ -27,7 +27,7 @@ describeWithDatabase('Team message receipts and recipient identity acceptance (P
   async function fixture(notifier: ConstructorParameters<typeof TeamSessionService>[1] = {}) {
     const key=randomUUID(),teams=new TeamRepository(pool),sessions=new TeamSessionService(pool,notifier),contexts=new TeamContextService(pool)
     const emails=[`${key}.owner@example.test`,`${key}.member@example.test`]
-    const users=(await pool.query("INSERT INTO users(email,password_hash) VALUES($1,'x'),($2,'x') RETURNING id",emails)).rows
+    const users=(await pool.query("INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true),($2,'x',true) RETURNING id",emails)).rows
     const owner=Number(users[0].id),member=Number(users[1].id)
     const team=(await teams.createTeam({actorUserId:owner,name:'Message acceptance',requestId:key})).team
     const invitation=await teams.invite({teamId:team.id,actorUserId:owner,email:emails[1],expectedRevision:1,requestId:key})
@@ -151,11 +151,11 @@ describeWithDatabase('Team message receipts and recipient identity acceptance (P
 
   async function unregisteredInvitation() {
     const key=randomUUID(),email=`${key}.future@example.test`,teams=new TeamRepository(pool)
-    const owner=Number((await pool.query("INSERT INTO users(email,password_hash) VALUES($1,'x') RETURNING id",[`${key}.sender@example.test`])).rows[0].id)
+    const owner=Number((await pool.query("INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true) RETURNING id",[`${key}.sender@example.test`])).rows[0].id)
     const team=(await teams.createTeam({actorUserId:owner,name:'Future recipient',requestId:key})).team
     const input={teamId:team.id,actorUserId:owner,email,expectedRevision:1,requestId:key}
     const original=await teams.invite(input)
-    const recipient=Number((await pool.query("INSERT INTO users(email,password_hash) VALUES($1,'x') RETURNING id",[email])).rows[0].id)
+    const recipient=Number((await pool.query("INSERT INTO users (email,password_hash, team_enabled) VALUES ($1,'x',true) RETURNING id",[email])).rows[0].id)
     return {key,email,teams,team,input,original,recipient,owner}
   }
   test('registration preserves valid pending invitation deduplication for the same normalized recipient email',async()=>{

@@ -70,6 +70,7 @@ function mapError(error: unknown, reply: Reply): unknown {
   const status = {
     team_feature_disabled: 503,
     team_not_found: 404,
+    team_access_denied: 403,
     membership_required: 403,
     participant_required: 403,
     creator_required: 403,

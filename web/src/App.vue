@@ -30,7 +30,7 @@
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
         </router-link>
 
-        <router-link to="/teams" class="sidebar-link" active-class="active">
+        <router-link v-if="teamAccess.enabled.value" to="/teams" class="sidebar-link" active-class="active">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
           <span class="link-text">{{ t('team.title') }}</span>
         </router-link>
@@ -128,9 +128,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide, watch, onBeforeUnmount } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, provide, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from './composables/useAuth'
+import { useTeamAccess } from './composables/useTeamAccess'
 import { useLocale } from './composables/useLocale'
 import { useWebSocket } from './composables/useWebSocket'
 import { useResponsiveLayout } from './composables/useResponsiveLayout'
@@ -145,7 +146,23 @@ import { useSessionHeader } from './composables/useSessionHeader'
 import { useAttentionInbox } from './composables/useAttentionInbox'
 
 const route = useRoute()
-const { isLoggedIn, user } = useAuth()
+const { isLoggedIn, user, accessToken } = useAuth()
+const teamAccess = useTeamAccess()
+const router = useRouter()
+watch(accessToken, () => { void teamAccess.refresh() }, { immediate: true })
+watch(teamAccess.denied, denied => {
+  if (denied && route.meta.requiresTeam) void router.replace('/sessions')
+})
+const refreshTeamAccess = () => { void teamAccess.refresh() }
+let teamAccessTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  window.addEventListener('focus', refreshTeamAccess)
+  teamAccessTimer = setInterval(refreshTeamAccess, 30_000)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', refreshTeamAccess)
+  if (teamAccessTimer) clearInterval(teamAccessTimer)
+})
 const { t, locale, setLocale } = useLocale()
 const { connected, reconnecting } = useWebSocket()
 const { isMobile } = useResponsiveLayout()

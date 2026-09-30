@@ -44,8 +44,7 @@ describeWithDatabase('Team Context version restoration (PostgreSQL)', () => {
 
   beforeEach(async () => {
     await pool.query('TRUNCATE users, daemons RESTART IDENTITY CASCADE')
-    const users = (await pool.query(`INSERT INTO users (email, password_hash)
-      VALUES ('f21.owner@example.test', 'x'), ('f21.member@example.test', 'x') RETURNING id`)).rows
+    const users = (await pool.query(`INSERT INTO users (email, password_hash, team_enabled) VALUES ('f21.owner@example.test', 'x',true), ('f21.member@example.test', 'x',true) RETURNING id`)).rows
     owner = Number(users[0].id)
     member = Number(users[1].id)
     const teams = new TeamRepository(pool)

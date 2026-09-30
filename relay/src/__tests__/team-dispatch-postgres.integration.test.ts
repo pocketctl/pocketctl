@@ -46,7 +46,7 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
 
   test('claims once, serializes a binding, and projects only allowlisted events', async () => {
     const user = await pool.query<{ id: number }>(
-      `INSERT INTO users (email, password_hash) VALUES ('dispatch.owner@example.test', 'x') RETURNING id`,
+      `INSERT INTO users (email, password_hash, team_enabled) VALUES ('dispatch.owner@example.test', 'x',true) RETURNING id`,
     )
     const ownerUserId = user.rows[0].id
     const teams = new TeamRepository(pool)

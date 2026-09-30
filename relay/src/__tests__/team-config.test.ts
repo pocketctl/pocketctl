@@ -42,12 +42,33 @@ describe('Team collaboration configuration', () => {
 })
 
 describe('GET /api/team/capabilities', () => {
+  test('defaults accounts to closed and reflects grant and revocation without restarting', async () => {
+    const app = Fastify()
+    let enabled = false
+    const dependencies = {
+      config: resolveTeamCollaborationConfig({ TEAM_COLLABORATION: 'on', TEAM_AUTORUN: 'on', TEAM_MEMORY_BRIDGE: 'on' }),
+      memoryExtensionAvailable: true,
+      verifyAccessToken: async () => ({ userId: 7 }),
+      isTeamEnabled: async (userId: number) => userId === 7 && enabled,
+    }
+    registerTeamCapabilityRoutes(app, dependencies)
+    const query = () => app.inject({ method: 'GET', url: '/api/team/capabilities', headers: { authorization: 'Bearer valid' } })
+    try {
+      expect((await query()).json()).toMatchObject({ collaboration: false, autorun: false, memory_bridge: false, writes_enabled: false })
+      enabled = true
+      expect((await query()).json()).toMatchObject({ collaboration: true, autorun: true, memory_bridge: true, writes_enabled: true })
+      enabled = false
+      expect((await query()).json()).toMatchObject({ collaboration: false, writes_enabled: false })
+    } finally { await app.close() }
+  })
+
   test('requires authentication and reports server-owned flags', async () => {
     const app = Fastify()
     registerTeamCapabilityRoutes(app, {
       config: resolveTeamCollaborationConfig({ TEAM_COLLABORATION: 'on' }),
       memoryExtensionAvailable: false,
       verifyAccessToken: async token => token === 'valid' ? { userId: 7 } : null,
+      isTeamEnabled: async userId => userId === 7,
     })
 
     const unauthorized = await app.inject({ method: 'GET', url: '/api/team/capabilities' })

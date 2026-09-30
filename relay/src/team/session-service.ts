@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { requireTeamAccess } from './access.js'
 import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.js'
 import { TeamEventRepository } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
@@ -91,6 +92,11 @@ export class TeamSessionService {
   }
 
   private async requireMember(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number, lock = false): Promise<void> {
+    await requireTeamAccess(db, userId, lock)
+    await this.requireActiveMembership(db, teamId, userId, lock)
+  }
+
+  private async requireActiveMembership(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number, lock = false): Promise<void> {
     if (lock) {
       const team = await db.query(`SELECT 1 FROM collaboration_teams WHERE team_id = $1 AND state = 'active' FOR SHARE`, [teamId])
       if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
@@ -110,6 +116,7 @@ export class TeamSessionService {
   }
 
   private async sessionFor(db: Pick<pg.Pool, 'query'>, sessionId: string, actorUserId: number, lock = false): Promise<any> {
+    await requireTeamAccess(db, actorUserId, lock)
     const result = await db.query(
       `SELECT session.* FROM collaboration_sessions session
        JOIN collaboration_teams team ON team.team_id = session.team_id AND team.state = 'active'
@@ -134,8 +141,9 @@ export class TeamSessionService {
     if (offerIds.length === 0) return []
     const result = await db.query(
       `SELECT offer.*, daemon.hostname, daemon.status, daemon.agents, daemon.collaboration_capabilities,
-              binding.team_id AS occupied_team_id, member.state AS owner_membership_state
+              binding.team_id AS occupied_team_id, member.state AS owner_membership_state, owner.team_enabled AS owner_team_enabled
        FROM team_agent_offers offer
+       JOIN users owner ON owner.id = offer.owner_user_id
        JOIN daemons daemon ON daemon.daemon_id = offer.daemon_id AND daemon.user_id = offer.owner_user_id
        JOIN collaboration_team_memberships member
          ON member.team_id = offer.team_id AND member.user_id = offer.owner_user_id
@@ -148,7 +156,7 @@ export class TeamSessionService {
   }
 
   private callable(row: any, teamId: string): boolean {
-    if (row.state !== 'active' || row.owner_membership_state !== 'active') return false
+    if (row.state !== 'active' || row.owner_membership_state !== 'active' || row.owner_team_enabled !== true) return false
     return candidateForProvider({
       daemon_id: row.daemon_id,
       hostname: row.hostname,
@@ -269,7 +277,8 @@ export class TeamSessionService {
       if (Number(session.creator_user_id) !== input.actorUserId) throw new TeamRepositoryError('creator_required', 'shared session creator authority required')
       this.expectRevision(session, input.expectedRevision)
       if (input.userId === Number(session.creator_user_id) && !input.active) throw new TeamRepositoryError('invalid_state', 'shared session creator cannot be removed')
-      await this.requireMember(client as unknown as pg.Pool, session.team_id, input.userId)
+      if (input.active) await this.requireMember(client, session.team_id, input.userId)
+      else await this.requireActiveMembership(client, session.team_id, input.userId)
       if (input.active) {
         // Context writers take this same Session lock. Validate the Context
         // committed before our lock was acquired, before admitting its reader.
@@ -398,9 +407,10 @@ export class TeamSessionService {
       const bindingRows = await client.query(
         `SELECT binding.offer_id, offer.*, daemon.hostname, daemon.status, daemon.agents,
                 daemon.collaboration_capabilities, team_binding.team_id AS occupied_team_id,
-                member.state AS owner_membership_state
+                member.state AS owner_membership_state, owner.team_enabled AS owner_team_enabled
          FROM collaboration_session_agent_bindings binding
          JOIN team_agent_offers offer ON offer.offer_id = binding.offer_id
+         JOIN users owner ON owner.id = offer.owner_user_id
          JOIN daemons daemon ON daemon.daemon_id = offer.daemon_id AND daemon.user_id = offer.owner_user_id
          JOIN collaboration_team_memberships member ON member.team_id = offer.team_id AND member.user_id = offer.owner_user_id
          LEFT JOIN collaboration_team_daemon_bindings team_binding ON team_binding.daemon_id = offer.daemon_id
@@ -487,10 +497,11 @@ export class TeamSessionService {
         WHERE participant.team_session_id = $1 AND participant.state = 'active'
         ORDER BY participant.created_at`, [row.team_session_id, row.team_id]),
       db.query(
-        `SELECT binding.*, offer.daemon_id, offer.provider, daemon.hostname, daemon.status, daemon.agents,
+        `SELECT binding.*, offer.daemon_id, offer.provider, owner.team_enabled AS owner_team_enabled, daemon.hostname, daemon.status, daemon.agents,
                 daemon.collaboration_capabilities, team_binding.team_id AS occupied_team_id
          FROM collaboration_session_agent_bindings binding
          JOIN team_agent_offers offer ON offer.offer_id = binding.offer_id
+         JOIN users owner ON owner.id = offer.owner_user_id
          JOIN daemons daemon ON daemon.daemon_id = offer.daemon_id
          LEFT JOIN collaboration_team_daemon_bindings team_binding ON team_binding.daemon_id = offer.daemon_id
          WHERE binding.team_session_id = $1 AND binding.state = 'active' ORDER BY binding.created_at`,
@@ -517,7 +528,7 @@ export class TeamSessionService {
         state: binding.state,
         revision: Number(binding.revision),
         native_session_id: Number(binding.owner_user_id) === actorUserId ? binding.native_session_id : null,
-        availability: candidateForProvider({
+        availability: binding.owner_team_enabled !== true ? 'access_disabled' : candidateForProvider({
           daemon_id: binding.daemon_id, hostname: binding.hostname, status: binding.status,
           agents: binding.agents, collaboration_capabilities: binding.collaboration_capabilities,
           team_id: binding.occupied_team_id,

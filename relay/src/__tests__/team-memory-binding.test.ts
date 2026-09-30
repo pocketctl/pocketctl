@@ -177,6 +177,7 @@ describe('Team Memory binding authorization', () => {
 
   test('revalidates the current actor grant and hides cached permissions after revocation', async () => {
     const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: 8, team_enabled: true }] })
       .mockResolvedValueOnce({ rows: [{ creator_user_id: 7, state: 'active' }] })
       .mockResolvedValueOnce({ rows: [row] })
     const grants: TeamMemoryBindingGrantService = {
@@ -202,6 +203,7 @@ describe('Team Memory binding authorization', () => {
 
   test('retains the association but does not mint grants while the bridge is disabled', async () => {
     const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: 7, team_enabled: true }] })
       .mockResolvedValueOnce({ rows: [{ creator_user_id: 7, state: 'active' }] })
       .mockResolvedValueOnce({ rows: [row] })
     const grants: TeamMemoryBindingGrantService = { mint: vi.fn() }
@@ -216,7 +218,7 @@ describe('Team Memory binding authorization', () => {
   })
 
   test('does not infer scope administration from Team creator status', async () => {
-    const query = vi.fn().mockResolvedValueOnce({
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: 7, team_enabled: true }] }).mockResolvedValueOnce({
       rows: [{ creator_user_id: 7, state: 'active' }],
     })
     const pool = { query, connect: vi.fn() }
@@ -292,6 +294,7 @@ describeWithDatabase('Team Memory binding persistence (PostgreSQL)', () => {
     pool = new pg.Pool({ connectionString: databaseUrl })
     await assertTeamTestDatabase(pool, databaseUrl!)
     await initDB(pool)
+    await resetTeamTestDatabase(pool, databaseUrl!)
   }, 30_000)
 
   afterEach(async () => {
@@ -306,7 +309,7 @@ describeWithDatabase('Team Memory binding persistence (PostgreSQL)', () => {
 
   test('binds an existing installation, revalidates revocation, and soft-removes while disabled', async () => {
     const creator = await pool.query<{ id: number }>(
-      `INSERT INTO users (email, password_hash) VALUES ('memory-owner@example.test', 'x') RETURNING id`,
+      `INSERT INTO users (email, password_hash, team_enabled) VALUES ('memory-owner@example.test', 'x',true) RETURNING id`,
     )
     const creatorId = creator.rows[0].id
     await pool.query(
