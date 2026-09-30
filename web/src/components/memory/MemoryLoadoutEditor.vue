@@ -1,12 +1,12 @@
 <template>
-  <section class="memory-loadout-editor" data-testid="memory-loadout-editor">
+  <section class="memory-loadout-editor memory-config-card" data-testid="memory-loadout-editor">
     <h3>{{ t('memory.loadout.title') }}</h3>
     <p class="hint">{{ t('memory.loadout.hint') }}</p>
     <p class="inert" data-testid="loadout-inert-note">{{ t('memory.loadout.inertNote') }}</p>
 		<ul v-if="items.length > 0" data-testid="loadout-items">
 			<li v-for="item in items" :key="item.itemId">
 				<span>{{ item.assetKind }} · {{ item.claimId ?? '—' }} · {{ item.status }}</span>
-				<button :disabled="busy" @click="remove(item.itemId)">{{ t('memory.loadout.remove') }}</button>
+				<button class="memory-button" :disabled="busy" @click="remove(item.itemId)">{{ t('memory.loadout.remove') }}</button>
 			</li>
 		</ul>
 		<div class="loadout-form">
@@ -15,7 +15,7 @@
 			</select>
 			<input v-model.trim="claimId" data-testid="loadout-claim-id" :placeholder="t('memory.loadout.claimPlaceholder')">
 			<input v-model.number="priority" type="number" min="0" max="100" data-testid="loadout-priority">
-			<button data-testid="loadout-add" :disabled="busy || !claimId" @click="add">{{ t('memory.loadout.add') }}</button>
+			<button class="memory-button" data-testid="loadout-add" :disabled="busy || !claimId" @click="add">{{ t('memory.loadout.add') }}</button>
 		</div>
 		<p v-if="error" class="error" data-testid="loadout-error">{{ error }}</p>
   </section>

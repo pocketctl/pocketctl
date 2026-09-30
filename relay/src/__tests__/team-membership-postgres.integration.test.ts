@@ -91,6 +91,23 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
     })
   }
 
+  test('persists descriptions in create, list and detail while protecting idempotent replay', async () => {
+    const actor = await user('description@example.test')
+    const request = {method:'POST' as const,url:'/api/team/teams',headers:headers(actor),payload:{request_id:'create-description',name:'Team',description:'A shared goal'}}
+    const created = await app.inject(request)
+    expect(created.statusCode).toBe(201)
+    const team = created.json().team
+    expect(team.description).toBe('A shared goal')
+    expect((await app.inject(request)).json().team.id).toBe(team.id)
+    const conflict = await app.inject({...request,payload:{...request.payload,description:'Different goal'}})
+    expect(conflict.statusCode).toBe(409)
+    expect((await app.inject({method:'GET',url:'/api/team/teams',headers:headers(actor)})).json().teams[0].description).toBe('A shared goal')
+    expect((await app.inject({method:'GET',url:`/api/team/teams/${team.id}`,headers:headers(actor)})).json().team.description).toBe('A shared goal')
+    const withoutDescription = await createTeam(actor, 'Legacy client', 'legacy-description')
+    expect(withoutDescription.statusCode).toBe(201)
+    expect(withoutDescription.json().team.description).toBe('')
+  })
+
   test('keeps pending invitations out of membership and accepts them without a daemon', async () => {
     const creatorId = await user('team.creator@example.test', 'Creator')
     const memberId = await user('team.member@example.test', 'Member')

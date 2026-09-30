@@ -1,6 +1,6 @@
 <template>
   <div v-if="open" class="dialog-backdrop" data-testid="team-create-dialog" @mousedown.self="emit('close')">
-    <form class="dialog-card" @submit.prevent="submit">
+    <form ref="panel" class="dialog-card" role="dialog" aria-modal="true" :aria-label="t('team.create')" tabindex="-1" @keydown.esc.stop.prevent="emit('close')" @keydown.tab="trapFocus" @submit.prevent="submit">
       <header>
         <div><p>{{ t('team.create_kicker') }}</p><h2>{{ t('team.create') }}</h2></div>
         <button type="button" class="icon-button" :aria-label="t('common.close')" @click="emit('close')">×</button>
@@ -10,6 +10,7 @@
           <span>{{ t('team.name') }}</span>
           <input v-model.trim="name" maxlength="120" required data-testid="team-create-name" />
         </label>
+        <label class="field team-description"><span>{{ t('team.description') }} <small>{{ t('team.optional') }}</small></span><textarea v-model.trim="description" maxlength="2000" rows="2" :placeholder="t('team.description_placeholder')" /></label>
         <section>
           <h3>{{ t('team.add_my_agents') }} <small>{{ t('team.optional') }}</small></h3>
           <p>{{ t('team.create_agents_copy') }}</p>
@@ -35,7 +36,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { TeamAgentCandidate } from '../../types/team'
 import TeamAgentPicker from './TeamAgentPicker.vue'
@@ -49,25 +50,37 @@ const props = withDefaults(defineProps<{
 }>(), { candidatesLoading: false, busy: false, error: '' })
 const emit = defineEmits<{
   close: []
-  submit: [value: { name: string; invitationEmails: string[]; agents: TeamAgentCandidate[] }]
+  submit: [value: { name: string; description?: string; invitationEmails: string[]; agents: TeamAgentCandidate[] }]
 }>()
 const { t } = useLocale()
+const panel = ref<HTMLElement|null>(null)
+let previousFocus: HTMLElement|null = null
+function trapFocus(event:KeyboardEvent) {
+  const nodes=Array.from(panel.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled)') ?? [])
+  if(event.shiftKey && document.activeElement === nodes[0]) {event.preventDefault();nodes.at(-1)?.focus()}
+  else if(!event.shiftKey && document.activeElement === nodes.at(-1)) {event.preventDefault();nodes[0]?.focus()}
+}
 const name = ref('')
+const description = ref('')
 const emails = ref('')
 const selectedAgentKeys = ref<string[]>([])
 const candidateKey = (candidate: Pick<TeamAgentCandidate, 'daemon_id' | 'provider'>) => `${candidate.daemon_id}:${candidate.provider}`
 
-watch(() => props.open, open => {
-  if (!open) return
+watch(() => props.open, async open => {
+  if (!open) {previousFocus?.focus();return}
+  previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   name.value = ''
+  description.value = ''
   emails.value = ''
   selectedAgentKeys.value = []
+  await nextTick();panel.value?.querySelector<HTMLInputElement>('input')?.focus()
 })
 
 function submit(): void {
   const invitationEmails = [...new Set(emails.value.split(/[\s,;]+/).map(value => value.trim().toLowerCase()).filter(Boolean))]
   emit('submit', {
     name: name.value,
+    ...(description.value ? {description: description.value} : {}),
     invitationEmails,
     agents: props.candidates.filter(candidate => selectedAgentKeys.value.includes(candidateKey(candidate))),
   })
@@ -86,4 +99,10 @@ header p { margin: 0 0 5px; color: var(--accent); font: 700 9px var(--font-mono)
 .boundary-copy { margin-top: 8px !important; padding: 9px 10px; border-left: 2px solid var(--warning); color: var(--fg-tertiary) !important; background: color-mix(in srgb, var(--warning) 6%, transparent); }
 .dialog-error { margin: 0; padding: 9px 20px; color: var(--error); background: color-mix(in srgb, var(--error) 7%, transparent); font-size: 11px; }
 @media (max-width: 620px) { .dialog-backdrop { padding: 0; align-items: end; }.dialog-card { max-height: 94dvh; border-radius: 16px 16px 0 0; } footer { align-items: stretch; flex-direction: column; } footer > div { display: grid; grid-template-columns: 1fr 1fr; } }
+
+.dialog-backdrop { background:var(--overlay); backdrop-filter:blur(2px); }.dialog-card { width:550px; max-width:calc(100vw - 32px); max-height:90dvh; padding:24px; background:var(--bg); border-color:var(--border-light); border-radius:12px; box-shadow:var(--shadow-lg); }
+header,footer { padding:0; border:0; }header { margin-bottom:20px; }header p { display:none; }header h2 { font-size:17px; font-weight:550; }.dialog-scroll { padding:0; }.dialog-scroll h3 { font-size:12px; font-weight:500; }.dialog-scroll section { margin-top:24px; }.field { gap:7px; font-size:12px; }.field input,.field textarea { padding:10px 11px; background:var(--surface); }.icon-button { width:30px; height:30px; border:1px solid var(--border); border-radius:6px; }
+footer { flex-wrap:wrap; justify-content:flex-end; margin-top:24px; }footer > span { flex:1 1 100%; max-width:none; padding:11px 13px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:7px; font-size:12px; line-height:1.7; }
+@media(max-width:768px){.dialog-backdrop{padding:16px}.dialog-card{padding:24px}}
+.team-description { margin-top:18px; }.team-description small { color:var(--fg-tertiary); font-size:10px; }
 </style>

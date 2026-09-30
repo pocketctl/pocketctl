@@ -20,7 +20,7 @@ describe('Memory button typography', () => {
     document.head.append(style)
 
     const host = document.createElement('div')
-    host.className = 'memory-workbench'
+    host.className = 'memory-workbench memory-layout-v2'
     host.style.setProperty('--font-body', 'Design Body')
     host.style.fontFamily = 'Inherited Body'
     host.style.lineHeight = '1.8'
@@ -48,12 +48,12 @@ describe('Memory button typography', () => {
 
     expect(expected).toMatchObject({
       fontFamily: '"Design Body"',
-      fontSize: '10.5px',
-      fontWeight: '600',
-      lineHeight: '1',
+      fontSize: '12px',
+      fontWeight: '500',
+      lineHeight: '1.5',
       textAlign: 'center',
     })
-    expect(Number.parseFloat(expected.letterSpacing)).toBeGreaterThan(0)
+    expect(Number.parseFloat(expected.letterSpacing)).toBe(0)
     for (const button of buttons.slice(1)) expect(metrics(button)).toEqual(expected)
   })
 
@@ -64,7 +64,7 @@ describe('Memory button typography', () => {
     document.head.append(style)
 
     const host = document.createElement('div')
-    host.className = 'memory-workbench'
+    host.className = 'memory-workbench memory-layout-v2'
     host.style.setProperty('--font-body', 'Design Body')
     host.style.fontFamily = 'Inherited Body'
     host.style.fontSize = '16px'
@@ -81,7 +81,7 @@ describe('Memory button typography', () => {
       lineHeight: computed.lineHeight,
     }).toEqual({
       fontFamily: '"Design Body"',
-      fontSize: '9px',
+      fontSize: '11px',
       fontWeight: '400',
       lineHeight: '1',
     })

@@ -7,15 +7,19 @@
       'mobile-session-route': showMobileShell && isSessionRoute,
       'mobile-team-session-route': showMobileShell && isTeamSessionRoute,
       'mobile-session-list-route': showMobileShell && isSessionListRoute,
+      'mobile-team-workspace': showMobileShell && (route.path === '/teams' || route.path === '/memory'),
     }"
   >
+    <button v-if="showMobileShell && (route.name === 'team-sessions' || route.path === '/teams' || route.path === '/memory')" ref="mobileNavTrigger" class="team-mobile-menu" aria-label="打开导航" :aria-expanded="mobileNavOpen" @click="openMobileNav"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /></svg></button>
+    <div v-if="showMobileShell && mobileNavOpen" class="mobile-nav-backdrop" @click="closeMobileNav"></div>
     <!-- Sidebar -->
-    <nav class="sidebar" v-if="isLoggedIn && !showMobileShell">
+    <nav ref="mobileNavPanel" class="sidebar" :class="{'mobile-open':showMobileShell && mobileNavOpen}" v-if="isLoggedIn && (!showMobileShell || mobileNavOpen)" :role="showMobileShell ? 'dialog' : undefined" :aria-modal="showMobileShell ? true : undefined" aria-label="主导航" @keydown.esc.stop.prevent="closeMobileNav" @keydown.tab="trapMobileNavFocus">
       <router-link to="/" class="sidebar-logo">
         <img :src="sidebarLogoSrc" alt="pocketctl" />
         <span class="brand-name">pocketctl</span>
       </router-link>
 
+      <button v-if="showMobileShell" class="mobile-nav-close" aria-label="关闭导航" @click="closeMobileNav">×</button>
       <div class="sidebar-nav">
         <div class="sidebar-section-label">{{ t('nav.overview') }}</div>
 
@@ -30,10 +34,7 @@
           <span class="badge" v-if="sessionCount > 0">{{ sessionCount }}</span>
         </router-link>
 
-        <router-link v-if="teamAccess.enabled.value" to="/teams" class="sidebar-link" active-class="active">
-          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
-          <span class="link-text">{{ t('team.title') }}</span>
-        </router-link>
+
 
         <router-link to="/inbox" class="sidebar-link" active-class="active">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span>
@@ -43,7 +44,7 @@
 
         <router-link to="/memory" class="sidebar-link" active-class="active">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/><path d="M3.477 10.896a4 4 0 0 1 .585-.396"/><path d="M19.938 10.5a4 4 0 0 1 .585.396"/><path d="M6 18a4 4 0 0 1-1.967-.516"/><path d="M19.967 17.484A4 4 0 0 1 18 18"/></svg></span>
-          <span class="link-text">{{ t('memory.title') }}</span>
+          <span class="link-text">Memory</span>
         </router-link>
 
         <router-link to="/tokens" class="sidebar-link" active-class="active">
@@ -52,6 +53,11 @@
         </router-link>
 
         <div class="sidebar-section-label">{{ t('nav.manage') }}</div>
+
+        <router-link v-if="teamAccess.enabled.value" to="/teams" class="sidebar-link" active-class="active">
+          <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+          <span class="link-text">{{ t('team.title') }}</span>
+        </router-link>
 
         <router-link to="/hosts" class="sidebar-link" active-class="active" v-slot="{ isActive }">
           <span class="link-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg></span>
@@ -64,7 +70,7 @@
         </router-link>
       </div>
 
-      <button class="sidebar-toggle-btn" @click="toggleSidebar" :title="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')" :aria-label="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')">
+      <button v-if="!showMobileShell" class="sidebar-toggle-btn" @click="toggleSidebar" :title="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')" :aria-label="sidebarCollapsed ? t('nav.expand') : t('nav.collapse')">
         <svg v-if="!sidebarCollapsed" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 19l-7-7 7-7"/><path d="M18 19l-7-7 7-7"/></svg>
         <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 5l7 7-7 7"/><path d="M6 5l7 7-7 7"/></svg>
       </button>
@@ -85,8 +91,8 @@
       :connected="connected"
       :reconnecting="reconnecting"
       :is-session="isSessionRoute"
-      :show-top-bar="!isSessionListRoute && !isTeamSessionRoute"
-      :show-bottom-nav="!isSessionRoute && !isSessionListRoute"
+      :show-top-bar="!isSessionListRoute && !isTeamSessionRoute && route.path !== '/teams' && route.path !== '/memory'"
+      :show-bottom-nav="!isSessionRoute && !isSessionListRoute && route.path !== '/teams' && route.path !== '/memory'"
       :show-new-session="route.path === '/sessions'"
       :session-count="sessionCount"
       :attention-count="attentionTotalCount"
@@ -102,7 +108,7 @@
     <!-- Main Content -->
     <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell, 'session-detail-route': isSessionRoute && !showMobileShell }">
       <!-- Topbar (only when logged in) -->
-      <header class="topbar" v-if="isLoggedIn && !showMobileShell && !isSessionRoute">
+      <header class="topbar" v-if="isLoggedIn && !showMobileShell && !isSessionRoute && route.path !== '/teams' && route.path !== '/memory'">
         <div class="topbar-breadcrumb">
           <span class="current">{{ pageTitle }}</span>
         </div>
@@ -128,7 +134,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, provide, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useTeamAccess } from './composables/useTeamAccess'
@@ -167,9 +173,14 @@ const { t, locale, setLocale } = useLocale()
 const { connected, reconnecting } = useWebSocket()
 const { isMobile } = useResponsiveLayout()
 const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
+const mobileNavOpen=ref(false),mobileNavPanel=ref<HTMLElement|null>(null),mobileNavTrigger=ref<HTMLButtonElement|null>(null)
+async function openMobileNav(){mobileNavOpen.value=true;await nextTick();mobileNavPanel.value?.querySelector<HTMLElement>('a[href]')?.focus()}
+function closeMobileNav(){mobileNavOpen.value=false;void nextTick(()=>mobileNavTrigger.value?.focus())}
+function trapMobileNavFocus(event:KeyboardEvent){if(!showMobileShell.value || !mobileNavOpen.value)return;const nodes=Array.from(mobileNavPanel.value?.querySelectorAll<HTMLElement>('a[href],button:not(:disabled)')??[]);if(event.shiftKey && document.activeElement===nodes[0]){event.preventDefault();nodes.at(-1)?.focus()}else if(!event.shiftKey && document.activeElement===nodes.at(-1)){event.preventDefault();nodes[0]?.focus()}}
+watch([()=>route.fullPath,isMobile],()=>{mobileNavOpen.value=false})
 const isTeamSessionRoute = computed(() => route.name === 'team-session')
-const isSessionRoute = computed(() => route.path.startsWith('/session/') || isTeamSessionRoute.value)
-const isSessionListRoute = computed(() => route.path === '/sessions')
+const isSessionRoute = computed(() => route.path.startsWith('/session/') || (route.path === '/sessions' && !isMobile.value) || isTeamSessionRoute.value || route.name === 'team-sessions')
+const isSessionListRoute = computed(() => route.path === '/sessions' || route.name === 'team-sessions')
 const { planForSession } = useAgentPlanProgress()
 const { sessionHeader } = useSessionHeader()
 const attentionInbox = useAttentionInbox()
@@ -185,6 +196,17 @@ provide('triggerNewSession', triggerNewSession)
 const currentTheme = ref(document.documentElement.getAttribute('data-theme') || 'dark')
 const isDark = computed(() => currentTheme.value !== 'light')
 const sidebarLogoSrc = computed(() => isDark.value ? logoDark : logoLight)
+// Settings resolves the theme on the shared root without remounting App.
+let themeObserver: MutationObserver | undefined
+const syncResolvedTheme = () => {
+  currentTheme.value = document.documentElement.getAttribute('data-theme') || 'dark'
+}
+onMounted(() => {
+  syncResolvedTheme()
+  themeObserver = new MutationObserver(syncResolvedTheme)
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+})
+onBeforeUnmount(() => themeObserver?.disconnect())
 const sessionCount = ref(0)
 const sidebarCollapsed = ref(localStorage.getItem('pocketctl_sidebar_collapsed') === 'true')
 
@@ -257,11 +279,6 @@ function setSidebarCollapsed(collapsed: boolean) {
 
 function toggleSidebar() { setSidebarCollapsed(!sidebarCollapsed.value) }
 
-// Session detail owns a second navigation rail. Collapse the application rail
-// when entering it, while keeping the existing toggle available to expand it.
-watch(isSessionRoute, active => {
-  if (active) setSidebarCollapsed(true)
-}, { immediate: true })
 
 // Watch system theme changes when in "system" mode
 if (window.matchMedia) {
@@ -347,8 +364,11 @@ if (typeof window !== 'undefined') {
 .mobile-shell-active.mobile-team-session-route .main-content {
   padding-top: 0;
 }
-.mobile-shell-active.mobile-session-list-route .main-content {
+.mobile-shell-active.mobile-session-list-route .main-content,
+.mobile-shell-active.mobile-team-workspace .main-content {
   padding-top: 0;
   padding-bottom: 0;
 }
+.team-mobile-menu { position:fixed; left:12px; top:16px; z-index:60; width:30px; height:30px; display:grid; place-items:center; padding:6px; border:1px solid var(--border); border-radius:5px; background:var(--surface); color:var(--fg); cursor:pointer; }.team-mobile-menu svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.7; }.mobile-nav-backdrop { position:fixed; inset:0; z-index:64; background:var(--overlay); }.mobile-nav-close { position:absolute; top:18px; right:10px; border:0; background:none; color:var(--fg); font-size:22px; cursor:pointer; }
+@media(max-width:768px){.sidebar.mobile-open { display:flex; width:230px; position:fixed; inset:0 auto 0 0; z-index:65; box-shadow:var(--shadow-lg); }.sidebar.mobile-open .brand-name,.sidebar.mobile-open .sidebar-section-label,.sidebar.mobile-open .link-text,.sidebar.mobile-open .user-info { display:block; }.sidebar.mobile-open .sidebar-link,.sidebar.mobile-open .sidebar-logo,.sidebar.mobile-open .sidebar-user { justify-content:flex-start; }.sidebar.mobile-open .sidebar-logo { padding:16px 20px; }.sidebar.mobile-open .sidebar-link { padding:10px 14px; }.sidebar.mobile-open .sidebar-user { padding:20px 24px; }.sidebar.mobile-open .user-avatar { margin-right:10px; }}
 </style>

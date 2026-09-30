@@ -38,6 +38,7 @@ export const TEAM_DAEMON_CAPABILITIES = Object.freeze([
 export type TeamDaemonCapability = typeof TEAM_DAEMON_CAPABILITIES[number]
 
 export interface TeamRecord {
+  description?: string
   id: TeamID
   name: string
   creator_user_id: number

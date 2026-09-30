@@ -42,7 +42,7 @@ vi.mock('../../composables/useSessionRename', () => ({
     renamingId: ref(''), renameInput: ref(''), startRename: vi.fn(), commitRename: vi.fn(), cancelRename: vi.fn(),
   }),
 }))
-vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ accessToken: ref('token') }) }))
+vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ accessToken: ref('token'), user: ref({id:7}) }) }))
 vi.mock('../../composables/useEnv', () => ({ getRelayOrigin: () => 'https://relay.example' }))
 
 const mounted: Array<ReturnType<typeof shallowMount>> = []

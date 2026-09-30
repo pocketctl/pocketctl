@@ -20,9 +20,12 @@ describe('Memory workspace grouped navigation layout', () => {
     document.head.append(style)
 
     const shell = document.createElement('section')
+    const host = document.createElement('div')
+    host.className = 'memory-workbench memory-layout-v2'
     shell.className = 'memory-workspace-shell'
+    host.append(shell)
     shell.innerHTML = '<nav class="memory-module-navigation"><div class="memory-module-tabs"></div></nav><main class="memory-workspace-main"></main>'
-    document.body.append(shell)
+    document.body.append(host)
 
     const shellStyle = getComputedStyle(shell)
     const navigationStyle = getComputedStyle(shell.querySelector('.memory-module-navigation')!)
@@ -37,8 +40,8 @@ describe('Memory workspace grouped navigation layout', () => {
       overflow: shellStyle.overflow,
     }).toEqual({
       display: 'grid',
-      columns: '196px minmax(0, 1fr)',
-      overflow: 'hidden',
+      columns: '164px minmax(0,1fr)',
+      overflow: 'visible',
     })
     expect({
       minWidth: navigationStyle.minWidth,
@@ -47,7 +50,7 @@ describe('Memory workspace grouped navigation layout', () => {
     }).toEqual({
       minWidth: '0',
       width: '100%',
-      display: 'grid',
+      display: 'flex',
     })
   })
 })

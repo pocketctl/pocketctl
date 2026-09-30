@@ -50,14 +50,14 @@ import { searchTeamContextClaimReferences, type TeamContextClaimReferenceOption 
 import { createTeamContext, getTeamMemoryBinding } from '../../services/teamClient'
 import type { TeamContextReference, TeamContextSnapshot, TeamMemoryBinding, TeamSession } from '../../types/team'
 
-const props = defineProps<{ context: TeamContextSnapshot | null; session: TeamSession; currentUserId: number }>()
+const props = defineProps<{ context: TeamContextSnapshot | null; session: TeamSession; currentUserId: number; readOnly?: boolean }>()
 const emit = defineEmits<{ close: []; saved: [context: TeamContextSnapshot] }>()
 const { panel, trapFocus } = usePanelFocus()
 const goal = ref(''), consensusText = ref(''), questionsText = ref(''), query = ref('')
 const binding = ref<TeamMemoryBinding | null>(null), options = ref<TeamContextClaimReferenceOption[]>([])
 const selected = ref<TeamContextReference[]>([]), busy = ref(false), error = ref('')
 const selectedLabels = ref<Record<string, string>>({})
-const canEdit = computed(() => props.session.creator_user_id === props.currentUserId
+const canEdit = computed(() => !props.readOnly && props.session.creator_user_id === props.currentUserId
   && ['active', 'paused'].includes(props.session.state))
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let controller: AbortController | undefined
@@ -129,4 +129,5 @@ async function save(): Promise<void> {
 .reference-row { display: grid; gap: 3px; padding: 7px 0; border-bottom: 1px solid var(--border); }.reference-row strong { font-size: 10px; }.reference-row code,.memory-option code { color: var(--fg-tertiary); font-size: 8px; }.context-editor { display: grid; gap: 10px; padding: 16px; border-top: 1px solid var(--border); }.context-editor > small { color: var(--accent); font: 650 9px var(--font-mono); text-transform: uppercase; }.context-editor label { display: grid; gap: 5px; color: var(--fg-secondary); font-size: 9px; }.context-editor textarea,.context-editor input { padding: 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg); background: var(--bg); font-size: 10px; resize: vertical; }.memory-picker { display: grid; gap: 6px; }.memory-option { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg); background: var(--surface); text-align: left; cursor: pointer; }.memory-option span { font-size: 10px; line-height: 1.4; }.save-context { padding: 8px; border: 0; border-radius: 7px; color: white; background: var(--accent); cursor: pointer; }.panel-error { color: var(--error); font-size: 10px; }
 .selected-references { display: grid; gap: 6px; }.selected-references > small { color: var(--fg-secondary); font-size: 9px; }.selected-reference { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }.selected-reference .reference-row { flex: 1; min-width: 0; padding: 0; border: 0; }.selected-reference p { margin: 2px 0; color: var(--fg-secondary); font-size: 10px; line-height: 1.4; }.selected-reference code { overflow-wrap: anywhere; }.remove-reference { flex-shrink: 0; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg-secondary); background: var(--surface); font-size: 9px; cursor: pointer; }.remove-reference:disabled { opacity: .5; cursor: default; }.reference-hint { margin: 0; color: var(--fg-tertiary); font-size: 9px; line-height: 1.5; }
 @media (max-width: 900px) { .context-panel { position: absolute; inset: 62px 0 0 auto; z-index: 80; width: min(330px, 88vw); box-shadow: -12px 0 30px rgba(0,0,0,.18); } }
+.context-panel { position:fixed; inset:0 0 0 auto; z-index:110; width:470px; max-width:100vw; min-width:0; box-shadow:var(--shadow-lg); box-sizing:border-box; background:var(--bg); }.context-panel header { padding:20px 24px; min-height:70px; }.context-panel header span { font-size:14px; color:var(--fg); }.context-panel header strong { font-size:12px; }.context-panel :deep(p),.context-panel :deep(li) { font-size:12px; line-height:1.8; }
 </style>

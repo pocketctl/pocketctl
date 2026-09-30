@@ -2,8 +2,10 @@
   <div class="agent-picker" data-testid="team-agent-picker">
     <div v-if="loading" class="picker-empty">{{ t('common.loading') }}</div>
     <div v-else-if="!candidates.length" class="picker-empty">{{ t('team.agents_empty') }}</div>
+    <section v-for="host in hosts" :key="host.id" class="installed-host">
+      <header><strong>{{ host.name }}</strong><span class="availability" :class="host.online ? 'online' : 'offline'">{{ t(host.agents.some(agent => agent.availability === 'occupied') ? 'team.availability.occupied' : host.online ? 'team.availability.online' : 'team.availability.offline') }}</span></header>
     <label
-      v-for="candidate in candidates"
+      v-for="candidate in host.agents"
       :key="candidateKey(candidate)"
       class="agent-option"
       :class="{ disabled: !selectable(candidate) }"
@@ -16,18 +18,16 @@
         :data-testid="`team-agent-${candidateKey(candidate)}`"
         @change="toggle(candidate)"
       />
-      <span class="provider-mark">{{ candidate.provider === 'codex' ? 'C' : 'CC' }}</span>
       <span class="agent-copy">
         <strong>{{ providerLabel(candidate.provider) }}</strong>
-        <small>{{ candidate.hostname || candidate.daemon_id }}</small>
         <span>{{ availabilityCopy(candidate) }}</span>
       </span>
-      <span class="availability" :class="candidate.availability">{{ t(`team.availability.${candidate.availability}`) }}</span>
-    </label>
+    </label>    </section>
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { TeamAgentCandidate, TeamProvider } from '../../types/team'
 
@@ -39,6 +39,16 @@ const props = withDefaults(defineProps<{
 }>(), { loading: false, disabled: false })
 const emit = defineEmits<{ 'update:modelValue': [value: string[]] }>()
 const { t } = useLocale()
+
+const hosts = computed(() => {
+  const grouped = new Map<string, { id:string; name:string; online:boolean; agents:TeamAgentCandidate[] }>()
+  for(const candidate of props.candidates) {
+    let host=grouped.get(candidate.daemon_id)
+    if(!host) {host={id:candidate.daemon_id,name:candidate.hostname||candidate.daemon_id,online:candidate.online,agents:[]};grouped.set(candidate.daemon_id,host)}
+    host.agents.push(candidate)
+  }
+  return [...grouped.values()]
+})
 
 function candidateKey(candidate: Pick<TeamAgentCandidate, 'daemon_id' | 'provider'>): string {
   return `${candidate.daemon_id}:${candidate.provider}`
@@ -83,4 +93,7 @@ function toggle(candidate: TeamAgentCandidate): void {
 .availability.offline, .availability.occupied { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
 .availability.unsupported, .availability.unmanaged { color: var(--error); background: color-mix(in srgb, var(--error) 10%, transparent); }
 .picker-empty { padding: 22px; border: 1px dashed var(--border); border-radius: var(--radius-md); color: var(--fg-tertiary); font-size: 12px; text-align: center; }
+
+.agent-picker { gap:0; }.installed-host { border:1px solid var(--border); background:var(--surface); border-radius:8px; margin:12px 0; padding:13px 15px; }.installed-host > header { display:flex; justify-content:space-between; gap:10px; align-items:center; }.installed-host > header strong { font-size:12px; font-weight:550; }
+.agent-option { min-height:0; padding:11px 0; gap:9px; border:0; border-radius:0; background:transparent; }.agent-option:has(input:checked) { background:transparent; }.agent-option:last-child { padding-bottom:0; }.agent-copy { gap:4px; }.agent-copy strong { font-size:12px; font-weight:500; }.agent-copy > span { font-size:11px; color:var(--fg-secondary); }.availability { padding:3px 7px; border-radius:5px; font-size:10px; }
 </style>

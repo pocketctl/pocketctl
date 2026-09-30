@@ -1,26 +1,11 @@
 <template>
-  <div class="memory-workbench" :class="{ 'is-mobile': isMobile }">
+  <div class="memory-workbench memory-layout-v2" :class="{ 'is-mobile': isMobile }">
     <header class="memory-page-head">
-      <div class="memory-page-copy">
-        <p class="memory-eyebrow">{{ t('memory.overline') }}</p>
-        <h1>{{ t('memory.title') }}</h1>
-        <p class="memory-subtitle">{{ t('memory.subtitle') }}</p>
+      <div class="memory-page-brand">
+        <span class="memory-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-6 .5A4 4 0 0 0 4 12a4 4 0 0 0 2 6.5A3 3 0 0 0 12 19zM12 5a3 3 0 1 1 6 .5A4 4 0 0 1 20 12a4 4 0 0 1-2 6.5A3 3 0 0 1 12 19zM12 7v10"/></svg></span>
+        <div class="memory-page-copy"><h1>Memory</h1><p class="memory-subtitle">{{ t('memory.subtitle') }}</p></div>
       </div>
-
-      <dl v-if="installation && servicesEnabled" class="memory-summary" aria-label="Memory status summary">
-        <div>
-          <dt>{{ t('memory.summary_status') }}</dt>
-          <dd><span class="memory-status-dot"></span>{{ t('memory.status_online') }}</dd>
-        </div>
-        <div data-testid="memory-summary-services">
-          <dt>{{ t('memory.summary_services') }}</dt>
-          <dd>{{ installation.enabled_services.length }}</dd>
-        </div>
-        <div data-testid="memory-summary-review">
-          <dt>{{ t('memory.summary_review') }}</dt>
-          <dd>{{ reviewCount ?? '—' }}</dd>
-        </div>
-      </dl>
+      <span v-if="installation && servicesEnabled" class="memory-page-status"><span class="memory-status-dot"></span>{{ t('memory.services_enabled') }}</span>
     </header>
 
     <section v-if="loading" class="memory-gate memory-loading-gate" data-testid="memory-loading">
@@ -58,38 +43,24 @@
       <div class="memory-workspace-shell" data-testid="memory-workbench-frame">
         <MemoryModuleNavigation v-model="active" :review-count="reviewCount" />
         <div class="memory-workspace-main">
-      <header class="memory-workspace-toolbar" :aria-label="t('memory.workspace_label')"
-        data-testid="memory-workspace-toolbar">
-        <p class="memory-workspace-description" data-testid="memory-workspace-description">
-          {{ t(`memory.module_${active}_copy`) }}
-        </p>
-
-        <div class="memory-workspace-actions" data-testid="memory-workspace-actions">
-          <button v-if="active === 'search'" type="button" class="memory-button"
-            data-testid="memory-filter-scope" :title="t('memory.filter_scope_unavailable')" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4"/></svg>{{ t('memory.filter_scope') }}
-          </button>
-          <template v-else-if="active === 'review'">
-            <button type="button" class="memory-button" :title="t('memory.skip_low_confidence_unavailable')" disabled>
-              {{ t('memory.skip_low_confidence') }}
-            </button>
-            <button type="button" class="memory-button memory-mobile-essential"
-              :title="t('memory.review_history_unavailable')" disabled>
-              {{ t('memory.review_history') }}
-            </button>
-          </template>
-          <button v-else-if="active === 'claims'" type="button" class="memory-button memory-claim-create"
-            data-testid="memory-claim-create" :title="t('memory.new_claim_unavailable')" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>{{ t('memory.new_claim') }}
-          </button>
-        </div>
-        <span class="memory-workspace-health" data-testid="memory-workspace-health">
-          <span class="memory-status-dot"></span>{{ t('memory.health_title') }}
-        </span>
-      </header>
+          <div class="memory-module-picker">
+            <label for="memory-module-select">{{ t('memory.module') }}
+              <select id="memory-module-select" v-model="active" :aria-label="t('memory.choose_module')" data-testid="memory-module-select">
+                <optgroup v-for="group in MEMORY_MODULE_GROUPS" :key="group.id" :label="t(`memory.group_${group.id}`)">
+                  <option v-for="module in group.modules" :key="module" :value="module">{{ t(`memory.tab_${module}`) }}</option>
+                </optgroup>
+              </select>
+            </label>
+          </div>
+          <header class="memory-module-header" :aria-label="t('memory.workspace_label')" data-testid="memory-workspace-toolbar">
+            <p :id="`memory-description-${active}`" data-testid="memory-workspace-description">{{ t(`memory.module_${active}_copy`) }}</p>
+          </header>
+          <div v-if="active === 'claims'" class="memory-knowledge-heading"><h3>{{ t('memory.knowledge_versions') }}</h3>
+            <button type="button" class="memory-button" data-testid="memory-claim-create" :title="t('memory.new_claim_unavailable')" disabled>+ {{ t('memory.new_claim') }}</button>
+          </div>
 
       <div class="memory-module-stage" data-testid="memory-module-stage">
-        <div :id="`memory-panel-${active}`" class="memory-module-body" role="tabpanel" :aria-labelledby="`memory-tab-${active}`">
+        <div :id="`memory-panel-${active}`" class="memory-module-body" role="tabpanel" :aria-label="t(`memory.tab_${active}`)" :aria-describedby="`memory-description-${active}`">
           <MemorySearchPanel v-if="active === 'search'" :scopes="governanceScopes" @select-claim="selectClaim"/>
           <template v-if="active === 'review'">
             <MemoryScopeSwitcher v-if="governanceScopes.length > 0" v-model="governanceTarget"
@@ -120,8 +91,10 @@
               </button>
             </div>
             <p v-else-if="governanceError" class="memory-error" role="alert">{{ governanceError }}</p>
+            <section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
             <CandidateReviewList ref="reviewList" @accepted="rememberAcceptedClaim"
               @changed="refreshReview" @count="reviewCount = $event"/>
+            </section>
           </template>
           <ClaimDetailPanel v-if="active === 'claims'" :claim-id="claimId"
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
@@ -163,6 +136,7 @@
             :installation-status="installation.status" @changed="reload"/>
         </div>
       </div>
+          <details class="memory-scope-help"><summary>{{ t('memory.scope_help_title') }}</summary><p>{{ t('memory.scope_help_copy') }}</p></details>
         </div>
       </div>
     </section>
@@ -226,7 +200,7 @@ import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 import MemorySkillsView from './MemorySkillsView.vue'
 import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
 import MemoryModuleNavigation from '../components/memory/MemoryModuleNavigation.vue'
-import type { MemoryModule } from '../components/memory/memoryModules'
+import { MEMORY_MODULE_GROUPS, type MemoryModule } from '../components/memory/memoryModules'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()

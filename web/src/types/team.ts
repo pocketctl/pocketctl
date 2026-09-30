@@ -27,6 +27,7 @@ export interface TeamCapabilities {
 }
 
 export interface TeamSummary {
+  description?: string
   id: TeamID
   name: string
   creator_user_id: number

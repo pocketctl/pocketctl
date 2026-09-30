@@ -6,7 +6,7 @@
         <div class="memory-search-hero">
           <form class="memory-search-box" @submit.prevent="runSearch">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
-            <input v-model="query" type="search" :placeholder="t('memory.search_placeholder')"
+            <input v-model="query" type="search" :aria-label="t('memory.search_memory')" :placeholder="t('memory.search_placeholder')"
               data-testid="memory-search-input" :disabled="loading"/>
             <span class="memory-search-shortcut" aria-hidden="true">⌘ K</span>
             <button type="submit" class="memory-button is-primary" :disabled="loading || query.trim().length === 0"
@@ -15,36 +15,35 @@
               <span class="memory-search-submit-label" data-testid="memory-search-submit-label">{{ loading ? t('memory.searching') : t('memory.search') }}</span>
             </button>
           </form>
-          <div class="memory-quick-queries" :aria-label="t('memory.suggested_searches')">
-            <button v-for="suggestion in suggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">
-              {{ suggestion }}
-            </button>
-          </div>
           <fieldset v-if="scopes.length" class="memory-federated-scopes">
-            <legend>{{ t('memory.governance.scope.switcher') }}</legend>
-            <label v-for="scope in scopes" :key="scope.installation_id">
+            <legend>{{ t('memory.search_scope') }}</legend>
+            <label v-for="scope in scopes" :key="scope.installation_id" :class="{ selected: selectedScopeIds.includes(scope.installation_id) }">
               <input type="checkbox" :value="scope.installation_id" v-model="selectedScopeIds">
-              <span>{{ scope.owner_scope_kind }} · {{ (scope.name || scope.owner_scope_id).slice(0, 20) }}</span>
+              <span>{{ scopeLabel(scope) }}</span>
             </label>
           </fieldset>
         </div>
 
+        <div class="memory-results-head"><span>{{ searched ? `${hits.length} ${t('memory.results')} · ${t('memory.sorted_by_relevance')}` : t('memory.search_start') }}</span></div>
+        <div v-if="!searched && !loading" class="memory-search-initial" data-testid="memory-search-initial">
+          <span class="memory-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg></span>
+          <h3>{{ t('memory.search_empty_title') }}</h3><p>{{ t('memory.search_empty_copy') }}</p>
+          <div class="memory-quick-queries" :aria-label="t('memory.suggested_searches')"><button v-for="suggestion in suggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }}</button></div>
+          <small>{{ t('memory.search_publication_note') }}</small>
+        </div>
         <div v-if="degraded" class="memory-notice is-warning" data-testid="memory-search-degraded">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.5 20h19z"/><path d="M12 9v4M12 16h.01"/></svg>
           <span>{{ t('memory.degraded_embedding') }}</span>
         </div>
         <div v-else-if="error" class="memory-notice is-error" data-testid="memory-search-error">{{ error }}</div>
-        <div v-else-if="!loading && searched && hits.length === 0" class="memory-empty-state" data-testid="memory-search-empty">
+        <div v-else-if="!loading && searched && hits.length === 0" class="memory-search-initial" data-testid="memory-search-empty">
           <span class="memory-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4M8.5 11h5"/></svg></span>
-          <strong>{{ t('memory.no_results') }}</strong>
+          <h3>{{ t('memory.no_results') }}</h3>
           <p>{{ t('memory.no_results_copy') }}</p>
+          <small>{{ t('memory.search_publication_note') }}</small>
         </div>
 
         <template v-if="hits.length">
-          <div class="memory-results-head">
-            <span>{{ hits.length }} {{ t('memory.results') }}</span>
-            <span>{{ t('memory.sorted_by_relevance') }}</span>
-          </div>
           <ul class="memory-result-list" data-testid="memory-search-hits">
             <li v-for="hit in hits" :key="hit.versionId">
               <button type="button" class="memory-result-item" :class="{ selected: selectedHit?.claimId === hit.claimId }"
@@ -74,7 +73,7 @@
         <div class="memory-search-detail-toolbar">
           <span>{{ t('memory.knowledge_detail') }}</span>
           <button type="button" class="memory-search-detail-close" :aria-label="t('memory.close_detail')" @click="closePreview">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
         </div>
 
@@ -155,7 +154,11 @@ const previewEvidence = ref<MemoryEvidence[]>([])
 const previewLoading = ref(false)
 const previewError = ref('')
 const previewOpen = ref(false)
-const suggestions = ['Phase 2 Gate', 'Relay Extension', 'Local deployment']
+const suggestions = computed(() => [t('memory.search_suggestion_project'), t('memory.search_suggestion_shared')])
+function scopeLabel(scope: MemoryGovernanceScope): string {
+  const kind = t(`memory.governance.scope.${scope.owner_scope_kind}`)
+  return scope.owner_scope_kind === 'personal' ? kind : `${kind} · ${scope.name || scope.owner_scope_id.slice(0, 20)}`
+}
 const selectedScopeIds = ref<string[]>([])
 let controller: AbortController | undefined
 let previewRequestId = 0

@@ -1,7 +1,7 @@
 <template>
   <div class="teams-view" data-testid="teams-view">
     <header class="page-head">
-      <div><p class="overline">{{ t('team.overline') }}</p><h1>{{ t('team.title') }}</h1><p>{{ t('team.subtitle') }}</p></div>
+      <div><p class="overline">TEAM / {{ selectedTeam?.name || t('team.title') }}</p><h1>{{ t('team.title') }}</h1><p>{{ t('team.workspace_copy') }}</p></div>
       <button v-if="capabilities?.writes_enabled" type="button" class="btn btn-primary" data-testid="team-create-open" @click="openCreate">+ {{ t('team.create') }}</button>
     </header>
 
@@ -16,7 +16,7 @@
 
       <div v-if="selectedTeam" class="team-workspace">
         <section class="team-overview">
-          <div><h2>{{ selectedTeam.name }}</h2><p>{{ t('team.workspace_copy') }}</p></div>
+          <div><h2>{{ selectedTeam.name }}</h2><p>{{ selectedTeam.description || t('team.workspace_copy') }}</p></div>
           <div class="summary-badges"><span>{{ members.length || selectedTeam.member_count }} {{ t('team.people_unit') }}</span><span>{{ activeOffers.length }} Agents</span><span class="online">{{ onlineOfferCount }} {{ t('team.online') }}</span></div>
         </section>
         <div class="team-tabs" role="tablist" :aria-label="t('team.workspace_tabs')">
@@ -24,11 +24,11 @@
         </div>
 
         <div v-if="workspaceLoading" class="workspace-empty compact">{{ t('common.loading') }}</div>
-        <TeamTasksPanel v-else-if="activeTab === 'tasks'" :key="selectedTeam.id" :team-id="selectedTeam.id" :team-creator-id="selectedTeam.creator_user_id" :current-user-id="currentUserID" :writes-enabled="capabilities?.writes_enabled === true" />
+        <TeamTasksPanel v-else-if="activeTab === 'tasks'" :key="selectedTeam.id" :team-id="selectedTeam.id" :team-creator-id="selectedTeam.creator_user_id" :current-user-id="currentUserID" :writes-enabled="capabilities?.writes_enabled === true" :members="members" :sessions="sessions" @create-session="newSessionTaskID = $event; newSessionOpen = true" />
         <section v-else-if="activeTab === 'sessions'" class="sessions-panel" data-testid="team-sessions-panel">
-          <div class="panel-intro"><span>{{ t('team.sessions_copy') }}</span><div><small>{{ t('team.sessions_management_boundary') }}</small><RouterLink :to="{ name: 'team-sessions', params: { teamId: selectedTeam.id } }">打开共享会话</RouterLink></div></div>
+          <div class="panel-intro"><span>围绕任务，把人与 Agent 带到同一条讨论里。</span><button v-if="capabilities?.writes_enabled" class="btn btn-primary" @click="newSessionTaskID = undefined; newSessionOpen = true">+ 新建共享会话</button></div>
           <div v-if="sessions.length" class="session-list">
-            <RouterLink v-for="session in sessions" :key="session.id" :to="{ name: 'team-session', params: { teamId: selectedTeam.id, id: session.id } }" class="team-session-link"><div><strong>{{ session.title }}</strong><span>{{ t(`team.session_state.${session.state}`) }} · {{ session.participants.length }} {{ t('team.people_unit') }} · {{ session.agent_bindings.length }} Agents</span></div><small>Context v{{ session.current_context_version }} · #{{ session.latest_event_seq }}</small></RouterLink>
+            <RouterLink v-for="session in sessions" :key="session.id" :to="{ name: 'team-session', params: { teamId: selectedTeam.id, id: session.id } }" class="team-session-link"><div><strong>{{ session.title }}</strong><span>{{ t(`team.session_state.${session.state}`) }} · {{ session.participants.length }} {{ t('team.people_unit') }} · {{ session.agent_bindings.length }} Agents</span></div><small>{{ members.find(member => member.user_id === session.creator_user_id)?.display_label || '成员' }} 创建 <span class="session-open">打开 →</span></small></RouterLink>
           </div>
           <div v-else class="workspace-empty compact"><strong>{{ t('team.sessions_empty') }}</strong><span>{{ t('team.sessions_empty_copy') }}</span></div>
         </section>
@@ -52,6 +52,7 @@
       </div>
     </template>
 
+    <TeamSessionCreateDialog v-if="newSessionOpen && selectedTeam" :team-id="selectedTeam.id" :task-id="newSessionTaskID" @close="newSessionOpen = false" />
     <TeamCreateDialog :open="createOpen" :candidates="createCandidates" :candidates-loading="createCandidatesLoading" :busy="creating" :error="createError" @close="createOpen = false" @submit="submitCreate" />
   </div>
 </template>
@@ -59,6 +60,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import TeamSessionCreateDialog from '../components/team/TeamSessionCreateDialog.vue'
 import TeamCreateDialog from '../components/team/TeamCreateDialog.vue'
 import TeamMembersPanel from '../components/team/TeamMembersPanel.vue'
 import TeamTasksPanel from '../components/team/TeamTasksPanel.vue'
@@ -78,6 +80,7 @@ import {
 } from '../services/teamClient'
 import type { TeamAgentCandidate, TeamAgentOffer, TeamCapabilities, TeamInvitation, TeamMember, TeamSessionSummary, TeamSummary } from '../types/team'
 
+const newSessionOpen = ref(false), newSessionTaskID = ref<string>()
 const tabs = ['tasks', 'sessions', 'members'] as const
 type TeamTab = typeof tabs[number]
 const route = useRoute(), router = useRouter(), { user } = useAuth(), { t } = useLocale()
@@ -88,7 +91,7 @@ let workspaceGeneration = 0
 const currentUserID = computed(() => user.value?.id ?? 0)
 const selectedTeam = computed(() => teams.value.find(team => team.id === selectedTeamID.value) ?? null)
 const activeOffers = computed(() => offers.value.filter(offer => offer.state === 'active'))
-const onlineOfferCount = computed(() => activeOffers.value.filter(offer => offer.managed_callable).length)
+const onlineOfferCount = computed(() => activeOffers.value.filter(offer => offer.online).length)
 function message(failure: unknown): string { return failure instanceof Error ? failure.message : t('common.error') }
 
 async function loadTeams(): Promise<void> {
@@ -134,7 +137,7 @@ async function openCreate(): Promise<void> {
   try { createCandidates.value = await listMyTeamAgentCandidates() } catch (failure) { createError.value = message(failure) }
   finally { createCandidatesLoading.value = false }
 }
-async function submitCreate(input: { name: string; invitationEmails: string[]; agents: TeamAgentCandidate[] }): Promise<void> {
+async function submitCreate(input: { name: string; description?: string; invitationEmails: string[]; agents: TeamAgentCandidate[] }): Promise<void> {
   creating.value = true; createError.value = ''; warning.value = ''
   try {
     const result = await createTeamWorkspace(input)
@@ -159,4 +162,22 @@ onMounted(() => {
 .team-tabs { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--border); }.team-tabs button { padding: 11px 13px; border: 0; border-bottom: 2px solid transparent; color: var(--fg-secondary); background: transparent; font-size: 12px; cursor: pointer; }.team-tabs button.active { border-bottom-color: var(--accent); color: var(--fg); }.workspace-empty { min-height: 360px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; color: var(--fg-tertiary); font-size: 11px; text-align: center; }.workspace-empty.compact { min-height: 260px; }.workspace-empty.large { min-height: 500px; }.workspace-empty strong { color: var(--fg-secondary); font-size: 14px; }.workspace-empty p { max-width: 420px; line-height: 1.7; }.empty-mark { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 15px; color: var(--accent); background: var(--accent-muted); font-size: 22px; font-weight: 800; }.workspace-error { color: var(--error); font-size: 11px; }
 .panel-intro { display: flex; justify-content: space-between; gap: 20px; color: var(--fg-secondary); font-size: 11px; }.panel-intro > div { display: flex; align-items: center; gap: 10px; }.panel-intro small { max-width: 450px; color: var(--fg-tertiary); text-align: right; }.panel-intro a { padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px; color: var(--accent); text-decoration: none; white-space: nowrap; }.session-list { margin-top: 17px; padding: 0 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }.team-session-link { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--border); color: inherit; text-decoration: none; }.team-session-link:last-child { border-bottom: 0; }.team-session-link > div { min-width: 0; display: grid; gap: 5px; }.team-session-link:hover strong { color: var(--accent); }.session-list strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; }.session-list span, .session-list small { color: var(--fg-tertiary); font-size: 10px; }.session-list small { font-family: var(--font-mono); }
 @media (max-width: 760px) { .teams-view { width: 100%; min-height: 100dvh; padding: 20px 14px max(30px, env(safe-area-inset-bottom)); }.page-head { align-items: flex-start; }.page-head h1 { font-size: 24px; }.team-overview { align-items: flex-start; flex-direction: column; }.summary-badges { justify-content: flex-start; }.panel-intro,.panel-intro > div { align-items: flex-start; flex-direction: column; }.panel-intro small { text-align: left; }.team-session-link { align-items: flex-start; flex-direction: column; padding: 15px 0; } }
+
+/* Geometry and controls from ui-design/css/team-collaboration.css. */
+.teams-view { font-size:14px; line-height:1.5; width:100%; max-width:1250px; min-height:100dvh; margin:auto; padding:34px 36px 50px; box-sizing:border-box; }
+.page-head { margin-bottom:26px; }.page-head h1 { font-size:23px; font-weight:600; margin:0 0 7px; letter-spacing:-.03em; }
+.page-head .overline { margin:0 0 9px; font:400 10px var(--font-body); letter-spacing:.1em; line-height:1.5; color:var(--accent); }
+.page-head > div > p:last-child { margin:0; font-size:12px; line-height:1.8; }
+.team-switcher { gap:10px; flex-wrap:wrap; overflow:visible; padding:0; }.team-switcher button { padding:8px 12px; border-color:var(--border-light); border-radius:6px; color:var(--fg); font:550 12px/1.5 var(--font-body); }
+.team-switcher button.active { color:var(--bg-secondary); background:var(--accent); border-color:var(--accent); }
+.team-overview { min-height:0; padding:26px 0 0; flex-wrap:wrap; }.team-overview h2 { font-weight:550; }.team-overview p { font-size:12px; line-height:1.8; }
+.summary-badges { gap:10px; }.summary-badges span { padding:3px 7px; border-radius:5px; font-size:10px; }.summary-badges span:nth-child(2) { color:var(--sub-agent); background:var(--sub-agent-bg); }
+.summary-badges .online { background:var(--success-bg); }
+.team-tabs button { line-height:1.5; }.team-tabs { gap:5px; margin:20px 0 24px; }
+:deep(.btn) { display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:0; padding:8px 12px; border:1px solid var(--border-light); border-radius:6px; background:var(--surface); color:var(--fg); font:550 12px/1.5 var(--font-body); white-space:nowrap; }
+:deep(.btn-primary) { color:var(--bg-secondary); background:var(--accent); border-color:var(--accent); }
+:deep(.btn:hover) { border-color:var(--fg-tertiary); }:deep(.btn-primary:hover) { background:var(--accent); border-color:var(--accent); }
+@media(max-width:1024px) { .teams-view { padding:28px 24px; } }
+@media(max-width:768px) { .teams-view { padding:75px 18px 35px; }.page-head h1 { font-size:21px; }.team-overview { flex-direction:row; align-items:center; }.panel-intro { flex-wrap:wrap; } }
+.panel-intro { font-size:14px; align-items:center; }.session-list { padding:20px; border-radius:9px; }.team-session-link { padding:16px 0; min-height:0; }.session-list strong { font-size:13px; font-weight:550; }.session-list span,.session-list small { font:11px var(--font-body); line-height:1.65; }.session-open { display:inline-block; margin-left:16px; color:var(--accent)!important; }
 </style>

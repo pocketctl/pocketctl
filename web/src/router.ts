@@ -4,7 +4,7 @@ import DeviceAuthView from './views/DeviceAuthView.vue'
 import HostsView from './views/HostsView.vue'
 import LoginView from './views/LoginView.vue'
 import SessionDetail from './views/SessionDetail.vue'
-import SessionList from './views/SessionList.vue'
+import SessionWorkspace from './views/SessionWorkspace.vue'
 import SettingsView from './views/SettingsView.vue'
 import TokenUsage from './views/TokenUsage.vue'
 import AttentionInboxView from './views/AttentionInboxView.vue'
@@ -21,7 +21,7 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/login', component: LoginView },
   { path: '/login/cli', component: DeviceAuthView },
   { path: '/', component: DashboardView, meta: { requiresAuth: true } },
-  { path: '/sessions', component: SessionList, meta: { requiresAuth: true } },
+  { path: '/sessions', component: SessionWorkspace, meta: { requiresAuth: true } },
   { path: '/session/:id', component: SessionDetail, props: true, meta: { requiresAuth: true } },
   { path: '/tokens', component: TokenUsage, meta: { requiresAuth: true } },
   { path: '/settings', component: SettingsView, meta: { requiresAuth: true } },

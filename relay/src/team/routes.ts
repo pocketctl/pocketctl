@@ -16,7 +16,7 @@ import type { TeamProvider } from './types.js'
 export interface TeamRouteService {
   listTeams(actorUserId: number): Promise<CollaborationTeamView[]>
   getTeam(teamId: string, actorUserId: number): Promise<CollaborationTeamView>
-  createTeam(input: { actorUserId: number; name: string; requestId: string }): Promise<unknown>
+  createTeam(input: { actorUserId: number; name: string; description?: string; requestId: string }): Promise<unknown>
   renameTeam(input: { teamId: string; actorUserId: number; name: string; expectedRevision: number; requestId: string }): Promise<CollaborationTeamView>
   listMembers(teamId: string, actorUserId: number): Promise<CollaborationMembershipView[]>
   invite(input: { teamId: string; actorUserId: number; email: string; expectedRevision: number; requestId: string }): Promise<CollaborationInvitationView>
@@ -150,8 +150,10 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
     if ('error' in parsed) return parsed.error
     const name = typeof parsed.body.name === 'string' ? parsed.body.name.trim() : ''
     if (!name || name.length > 120) return failure(reply, 400, 'invalid_request', 'name must be 1 to 120 characters')
+    const description = parsed.body.description
+    if (description !== undefined && (typeof description !== 'string' || description.length > 2000)) return failure(reply, 400, 'invalid_request', 'description must be at most 2000 characters')
     try {
-      const result = await dependencies.service.createTeam({ actorUserId: actor.userId, name, requestId: parsed.requestId })
+      const result = await dependencies.service.createTeam({ actorUserId: actor.userId, name, ...(description !== undefined ? {description: (description as string).trim()} : {}), requestId: parsed.requestId })
       reply.code(201)
       return result
     } catch (error) { return mapError(error, reply) }

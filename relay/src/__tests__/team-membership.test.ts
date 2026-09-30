@@ -80,6 +80,20 @@ describe('Team membership routes', () => {
     await app.close()
   })
 
+  test('accepts a bounded description and rejects malformed descriptions before creation', async () => {
+    const createTeam = vi.fn(async () => ({ team: { id: 'ctm_description' } }))
+    const app = register(service({ createTeam }))
+    for (const description of [123, null, 'x'.repeat(2001)]) {
+      const response = await app.inject({method:'POST',url:'/api/team/teams',headers:{authorization:'Bearer user-7'},payload:{request_id:'invalid-description',name:'Team',description}})
+      expect(response.statusCode).toBe(400)
+    }
+    expect(createTeam).not.toHaveBeenCalled()
+    const response = await app.inject({method:'POST',url:'/api/team/teams',headers:{authorization:'Bearer user-7'},payload:{request_id:'valid-description',name:'Team',description:'  A shared goal  '}})
+    expect(response.statusCode).toBe(201)
+    expect(createTeam).toHaveBeenCalledWith({actorUserId:7,name:'Team',description:'A shared goal',requestId:'valid-description'})
+    await app.close()
+  })
+
   test('conceals foreign team resources and exposes revision conflicts', async () => {
     const app = register(service({
       getTeam: vi.fn(async () => { throw new TeamRepositoryError('team_not_found', 'team not found') }),

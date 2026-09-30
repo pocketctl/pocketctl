@@ -28,6 +28,7 @@ export class TeamRepositoryError extends Error {
 class CommittedInvitationExpiry {}
 
 export interface CollaborationTeamView {
+  description?: string
   id: string
   name: string
   creator_user_id: number
@@ -298,16 +299,17 @@ export class TeamRepository {
 
   async createTeam(input: {
     actorUserId: number
+    description?: string
     name: string
     requestId: string
   }): Promise<{ team: CollaborationTeamView; creator_membership: CollaborationMembershipView }> {
-    return this.idempotent(input.actorUserId, 'team.create', input.requestId, { name: input.name }, async client => {
+    return this.idempotent(input.actorUserId, 'team.create', input.requestId, { name: input.name, ...(input.description ? {description: input.description} : {}) }, async client => {
       const teamId = id('ctm_')
       const membershipId = id('cmb_')
       const team = await client.query(
-        `INSERT INTO collaboration_teams (team_id, name, creator_user_id)
-         VALUES ($1, $2, $3) RETURNING *`,
-        [teamId, input.name, input.actorUserId],
+        `INSERT INTO collaboration_teams (team_id, name, creator_user_id, description)
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [teamId, input.name, input.actorUserId, input.description ?? ''],
       )
       const membership = await client.query(
         `INSERT INTO collaboration_team_memberships (membership_id, team_id, user_id)
@@ -904,6 +906,7 @@ export class TeamRepository {
     return {
       id: row.team_id,
       name: row.name,
+      description: row.description ?? '',
       creator_user_id: Number(row.creator_user_id),
       state: row.state,
       revision: Number(row.revision),

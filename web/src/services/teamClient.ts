@@ -87,9 +87,9 @@ export async function getTeam(teamID: string): Promise<TeamSummary> {
   return (await teamRequest<{ team: TeamSummary }>(`/api/team/teams/${encodeURIComponent(teamID)}`)).team
 }
 
-export async function createTeam(name: string): Promise<TeamSummary> {
+export async function createTeam(name: string, description?: string): Promise<TeamSummary> {
   return (await teamRequest<{ team: TeamSummary }>('/api/team/teams', {
-    method: 'POST', body: { request_id: requestID(), name },
+    method: 'POST', body: { request_id: requestID(), name, ...(description ? {description} : {}) },
   })).team
 }
 
@@ -239,6 +239,12 @@ export async function setTeamTaskSelfHolder(task: TeamTask, active: boolean): Pr
   })).task
 }
 
+export async function setTeamTaskHolder(task: TeamTask, userID: number, active: boolean): Promise<TeamTask> {
+  return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(task.id)}/holders/${userID}`, {
+    method: active ? 'PUT' : 'DELETE', body: { request_id: requestID(), expected_revision: task.revision },
+  })).task
+}
+
 export async function deleteTeamTask(task: TeamTask): Promise<TeamTask> {
   return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(task.id)}`, {
     method: 'DELETE', body: { request_id: requestID(), expected_revision: task.revision },
@@ -360,6 +366,7 @@ export async function setTeamSessionAgentBinding(session: TeamSession, offerID: 
 }
 
 export interface CreateTeamWorkspaceInput {
+  description?: string
   name: string
   invitationEmails: string[]
   agents: TeamAgentCandidate[]
@@ -371,7 +378,7 @@ export interface CreateTeamWorkspaceResult {
 }
 
 export async function createTeamWorkspace(input: CreateTeamWorkspaceInput): Promise<CreateTeamWorkspaceResult> {
-  let team = await createTeam(input.name)
+  let team = await createTeam(input.name, input.description)
   const warnings: string[] = []
   for (const email of input.invitationEmails) {
     try {

@@ -49,6 +49,21 @@ beforeEach(() => { mocks.handlers.clear(); vi.clearAllMocks() })
 afterEach(() => { wrapper?.unmount() })
 
 describe('SessionDetail host filtering', () => {
+  test('searches titles while retaining the current conversation and draft route', async () => {
+    await openPage()
+    const initialReplayCount = mocks.send.mock.calls.filter((args: any[]) => args[0]?.type === 'replay').length
+    await wrapper.get('[aria-label="搜索会话"]').trigger('click')
+    await wrapper.get('[aria-label="搜索会话标题"]').setValue('REMOTE')
+    expect(wrapper.findAll('.session-list-item')).toHaveLength(1)
+    expect(wrapper.get('.session-list').text()).toContain('Remote session')
+    expect(wrapper.get('.session-toolbar-host').text()).toContain('MacBook')
+    expect(wrapper.find('.session-filter-notice').exists()).toBe(true)
+    expect(mocks.push).not.toHaveBeenCalled()
+    expect(mocks.send.mock.calls.filter((args: any[]) => args[0]?.type === 'replay')).toHaveLength(initialReplayCount)
+    await wrapper.get('.session-filter-notice button').trigger('click')
+    expect(wrapper.get('[aria-label="搜索会话标题"]').element).toHaveProperty('value', '')
+    expect(wrapper.find('.session-filter-notice').exists()).toBe(false)
+  })
   test('uses Relay host connectivity and keeps live updates across session refreshes', async () => {
     await openPage()
     mocks.handlers.get('daemon_list')!({ daemons: [
@@ -89,7 +104,11 @@ describe('SessionDetail host filtering', () => {
     expect(wrapper.get('.session-list').text()).toContain('Remote session')
     expect(wrapper.get('.session-toolbar-host').text()).toContain('MacBook')
     expect(wrapper.find('.banner-warning').exists()).toBe(false)
-    expect(wrapper.get('.session-filter-notice').text()).toContain('session.host_filter_retained')
+    const notice = wrapper.get('.session-filter-notice')
+    expect(notice.text()).toContain('session.host_filter_retained')
+    expect(notice.element.previousElementSibling).toBe(wrapper.get('.chat-toolbar').element)
+    expect(notice.element.parentElement).toBe(wrapper.get('.chat-area').element)
+    expect(wrapper.get('.chat-messages').element.contains(notice.element)).toBe(false)
     expect(mocks.push).not.toHaveBeenCalled()
     expect(mocks.replace).not.toHaveBeenCalled()
     expect(replayCount()).toBe(initialReplayCount)

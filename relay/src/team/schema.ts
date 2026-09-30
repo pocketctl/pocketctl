@@ -14,6 +14,8 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       dissolved_at TIMESTAMPTZ
     );
 
+    ALTER TABLE collaboration_teams ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+
     CREATE TABLE IF NOT EXISTS collaboration_team_memberships (
       membership_id TEXT PRIMARY KEY,
       team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,

@@ -35,6 +35,11 @@
       <strong>{{ t('memory.phase4.wiki_empty') }}</strong><p>{{ t('memory.phase4.wiki_empty_copy') }}</p>
     </div>
 
+    <section v-if="!repositoryId && !scopeUnavailable" class="memory-wiki-layout memory-wiki-intro" data-testid="memory-wiki-intro">
+      <aside><h3>{{ t('memory.wiki_index') }}</h3><p>{{ t('memory.wiki_index_empty') }}</p></aside>
+      <article><h3>{{ t('memory.wiki_choose_repository') }}</h3><p>{{ t('memory.wiki_choose_repository_copy') }}</p></article>
+    </section>
+
     <template v-if="wiki">
       <div class="memory-provenance-spine" data-testid="memory-wiki-provenance">
         <span class="memory-provenance-dot" aria-hidden="true"></span>

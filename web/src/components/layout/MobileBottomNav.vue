@@ -13,14 +13,6 @@
       <span>{{ t('attention.title') }}</span>
       <span v-if="attentionCount > 0" class="mobile-nav-badge">{{ attentionCount > 99 ? '99+' : attentionCount }}</span>
     </router-link>
-    <router-link v-if="teamAccess.enabled.value" to="/teams" class="mobile-nav-link" :aria-label="t('team.title')" data-testid="mobile-nav-teams">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
-      </svg>
-      <span>{{ t('team.title') }}</span>
-    </router-link>
     <router-link to="/hosts" class="mobile-nav-link" :aria-label="t('nav.hosts')">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <rect x="3" y="3" width="18" height="7" rx="2" />
@@ -28,17 +20,6 @@
         <path d="M7 6.5h.01M7 17.5h.01" />
       </svg>
       <span>{{ t('nav.hosts') }}</span>
-    </router-link>
-    <router-link to="/memory" class="mobile-nav-link" :aria-label="t('memory.title')" data-testid="mobile-nav-memory">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
-        <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
-        <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
-        <path d="M17.599 6.5a3 3 0 0 0 .399-1.375M6.003 5.125A3 3 0 0 0 6.401 6.5" />
-        <path d="M3.477 10.896a4 4 0 0 1 .585-.396M19.938 10.5a4 4 0 0 1 .585.396" />
-        <path d="M6 18a4 4 0 0 1-1.967-.516M19.967 17.484A4 4 0 0 1 18 18" />
-      </svg>
-      <span>{{ t('memory.title') }}</span>
     </router-link>
     <router-link to="/settings" class="mobile-nav-link" :aria-label="t('nav.settings')">
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -52,11 +33,9 @@
 
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
-import { useTeamAccess } from '../../composables/useTeamAccess'
 
 withDefaults(defineProps<{ sessionCount: number; attentionCount?: number }>(), { attentionCount: 0 })
 const { t } = useLocale()
-const teamAccess = useTeamAccess()
 </script>
 
 <style scoped>

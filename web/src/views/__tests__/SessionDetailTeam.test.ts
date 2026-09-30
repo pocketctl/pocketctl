@@ -20,7 +20,7 @@ const events = [
   { id: 'e2', team_session_id: 'css_1', event_seq: 2, kind: 'agent_message', author_user_id: null, author_offer_id: 'offer-1', target_mode: null, target_offer_ids: [], reference: null, context_version: 1, call_id: 'call-1', content: 'Reviewed', created_at: '2026-09-25T00:01:00Z' },
 ] as const
 
-vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ user: ref({ id: 7 }) }) }))
+vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ user: ref({ id: 7 }), accessToken: ref('token') }) }))
 vi.mock('../../composables/useTeamSession', () => ({ useTeamSession: () => {
   const session = ref<any>({ ...teamSession, agent_bindings: teamSession.agent_bindings.map(item => ({ ...item })) })
   return {
@@ -28,7 +28,8 @@ vi.mock('../../composables/useTeamSession', () => ({ useTeamSession: () => {
     readOnlyReason: computed(() => ''), canSend: computed(() => true), sendMessage,
   }
 } }))
-const api = vi.hoisted(() => ({ listTeams: vi.fn(), listTeamMembers: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), updateTeamSession: vi.fn() }))
+vi.mock('../../composables/useTeamAccess', async()=>{const {ref}=await import('vue');return {useTeamAccess:()=>({capabilities:ref({writes_enabled:true})})}})
+const api = vi.hoisted(() => ({ getTeamContext:vi.fn(), listTeamAgentCandidates: vi.fn(async()=>[]), listTeams: vi.fn(), listTeamMembers: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), updateTeamSession: vi.fn() }))
 vi.mock('../../services/teamClient', () => api)
 
 async function render(attachTo?: HTMLElement) {
@@ -86,7 +87,7 @@ describe('team session detail', () => {
   test('sends a targeted reply through the shared-session event path', async () => {
     const { wrapper } = await render()
     await wrapper.get('[data-offer-id="offer-1"]').trigger('click')
-    await wrapper.findAll('.event-actions button')[0].trigger('click')
+    await wrapper.findAll('.event-actions button').find(button=>button.text()==='引用')!.trigger('click')
     await wrapper.get('[data-testid="team-session-composer"]').setValue('Follow up')
     await wrapper.get('[data-testid="team-session-send"]').trigger('click')
     expect(sendMessage).toHaveBeenCalledWith({ targetMode: 'offers', targetOfferIDs: ['offer-1'], referenceEventID: 'e1' })
@@ -94,7 +95,7 @@ describe('team session detail', () => {
 
   test('only exposes native sessions owned by the current user', async () => {
     const { wrapper } = await render()
-    await wrapper.findAll('.header-actions button').find(button => button.text() === '成员')!.trigger('click')
+    await wrapper.findAll('.people-strip button').find(button => button.text().includes('位参与者'))!.trigger('click')
     const links = wrapper.findAll('[data-testid="team-session-participants"] a')
     expect(links).toHaveLength(1)
     expect(links[0].attributes('href')).toContain('/session/native-1')
@@ -105,7 +106,7 @@ describe('team session detail', () => {
     const host = document.createElement('div')
     document.body.append(host)
     const { wrapper } = await render(host)
-    const opener = wrapper.findAll<HTMLButtonElement>('.header-actions button').find(button => button.text() === 'Context')!
+    const opener = wrapper.findAll<HTMLButtonElement>('.people-strip button').find(button => button.text().startsWith('Context v'))!
     opener.element.focus()
     await opener.trigger('click')
     const panel = wrapper.get('[data-testid="team-context-panel"]')
@@ -114,4 +115,13 @@ describe('team session detail', () => {
     expect(wrapper.find('[data-testid="team-context-panel"]').exists()).toBe(false)
     expect(document.activeElement).toBe(opener.element)
   })
+  test('opens the exact historical Context version as read-only', async()=>{
+    api.getTeamContext.mockResolvedValue({version:1,revision:1,goal:'Historical goal',consensus:[],open_questions:[],references:[]})
+    const {wrapper}=await render()
+    await wrapper.findAll('.context-receipt').find(button=>button.text()==='Context v1')!.trigger('click');await flushPromises()
+    expect(api.getTeamContext).toHaveBeenCalledWith('css_1',1)
+    expect(wrapper.get('[data-testid="team-context-panel"]').text()).toContain('Historical goal')
+    expect(wrapper.find('.context-editor').exists()).toBe(false)
+  })
+
 })

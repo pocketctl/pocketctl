@@ -4,14 +4,14 @@
       <span>{{ t('team.people_agents_copy') }}</span>
       <div v-if="writesEnabled"><button v-if="isCreator" type="button" class="btn btn-secondary" @click="showInvite = !showInvite">{{ t('team.invite_member') }}</button><button type="button" class="btn btn-primary" @click="showAgents = !showAgents">+ {{ t('team.add_my_agents') }}</button></div>
     </div>
-    <form v-if="showInvite" class="inline-form" @submit.prevent="invite"><input v-model.trim="inviteEmail" type="email" required :placeholder="t('team.member_email')" /><button class="btn btn-primary" :disabled="busy">{{ t('team.create_invitation') }}</button></form>
-    <div v-if="showAgents" class="agent-add"><TeamAgentPicker v-model="selectedAgentKeys" :candidates="candidates" :disabled="busy" /><div><button type="button" class="btn btn-primary" :disabled="busy || !selectedAgentKeys.length" @click="addAgents">{{ t('team.add_selected_agents') }}</button></div></div>
+    <TeamOverlay v-if="showInvite" title="邀请成员" @close="showInvite = false"><form class="inline-form" @submit.prevent="invite"><input v-model.trim="inviteEmail" type="email" required :placeholder="t('team.member_email')" /><button class="btn btn-primary" :disabled="busy">{{ t('team.create_invitation') }}</button></form><p class="invite-note">邀请发送至已有 PocketCtl 账号；接受后即可参与团队。</p><p v-if="error" class="panel-error" role="alert">{{ error }}</p></TeamOverlay>
+    <TeamOverlay v-if="showAgents" title="添加我的 Agent" drawer @close="showAgents = false"><p class="invite-note">选择自己的主机与 Agent，加入当前团队。</p><div class="agent-add"><TeamAgentPicker v-model="selectedAgentKeys" :candidates="candidates" :disabled="busy" /><div><button type="button" class="btn btn-primary" :disabled="busy || !selectedAgentKeys.length" @click="addAgents">{{ t('team.add_selected_agents') }}</button></div></div><p v-if="error" class="panel-error" role="alert">{{ error }}</p></TeamOverlay>
 
     <h3 class="section-title">{{ t('team.members') }} · {{ members.length }}</h3>
     <div class="row-card">
       <div v-for="member in members" :key="member.id" class="member-row">
         <span class="avatar">{{ member.display_label.charAt(0).toUpperCase() }}</span>
-        <div><strong>{{ member.display_label }}</strong><small>{{ member.user_id === currentUserId ? t('team.me') : t('team.active_member') }}</small></div>
+        <div><strong>{{ member.display_label }}</strong><small>{{ activeOffers.filter(offer => offer.owner_user_id === member.user_id).length }} 个 Agent · {{ member.user_id === currentUserId ? t('team.me') : t('team.active_member') }}</small></div>
         <span class="role">{{ member.user_id === team.creator_user_id ? t('team.creator') : t('team.member') }}</span>
         <button v-if="isCreator && member.user_id !== team.creator_user_id && writesEnabled" type="button" class="quiet-action" @click="removeMember(member)">{{ t('team.remove') }}</button>
       </div>
@@ -20,7 +20,7 @@
     <h3 class="section-title">Agent · {{ activeOffers.length }}</h3>
     <div v-if="activeOffers.length" class="offer-grid">
       <article v-for="offer in activeOffers" :key="offer.id" class="offer-card">
-        <div><span class="provider-mark">{{ offer.provider === 'codex' ? 'C' : 'CC' }}</span><div><strong>{{ offer.provider === 'codex' ? 'Codex' : 'Claude Code' }}</strong><small>{{ offer.daemon_id }}</small></div><span class="availability" :class="offer.availability">{{ t(`team.availability.${offer.availability}`) }}</span></div>
+        <div><span class="provider-mark">{{ offer.provider === 'codex' ? 'C' : 'CC' }}</span><div><strong>{{ offer.provider === 'codex' ? 'Codex' : 'Claude Code' }}</strong><small>{{ candidates.find(candidate => candidate.daemon_id === offer.daemon_id)?.hostname || offer.daemon_id }} · {{ members.find(member => member.user_id === offer.owner_user_id)?.display_label }}</small></div><span class="availability" :class="offer.availability">{{ t(`team.availability.${offer.availability}`) }}</span></div>
         <p>{{ offer.managed_callable ? t('team.agent_callable') : t('team.offer_unavailable_copy') }}</p>
         <button v-if="offer.owner_user_id === currentUserId && writesEnabled" type="button" class="quiet-action" @click="removeOffer(offer)">{{ t('team.remove_from_team') }}</button>
       </article>
@@ -53,6 +53,7 @@ import {
 } from '../../services/teamClient'
 import type { TeamAgentCandidate, TeamAgentOffer, TeamInvitation, TeamMember, TeamSummary } from '../../types/team'
 import TeamAgentPicker from './TeamAgentPicker.vue'
+import TeamOverlay from './TeamOverlay.vue'
 
 const props = defineProps<{
   team: TeamSummary
@@ -94,4 +95,8 @@ async function leaveOrDissolve(): Promise<void> {
 .section-title { margin: 25px 0 10px; color: var(--fg-secondary); font-size: 11px; font-weight: 600; }.row-card { padding: 0 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }.member-row { min-height: 68px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); }.member-row:last-child { border-bottom: 0; }.member-row > div { min-width: 0; display: grid; gap: 4px; flex: 1; }.member-row strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; }.member-row small { color: var(--fg-tertiary); font-size: 10px; }.avatar { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; color: var(--accent); background: var(--accent-muted); font-size: 12px; font-weight: 700; }.role, .availability { padding: 4px 7px; border-radius: 999px; color: var(--fg-secondary); background: var(--surface-hover); font-size: 10px; }.availability.online { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }.availability.offline, .availability.occupied { color: var(--warning); }.quiet-action, .danger-action { padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; font-size: 10px; cursor: pointer; }.danger-action { color: var(--error); }
 .offer-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }.offer-card { padding: 15px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }.offer-card > div { display: flex; align-items: center; gap: 10px; }.offer-card > div > div { min-width: 0; display: grid; gap: 3px; flex: 1; }.offer-card strong { font-size: 12px; }.offer-card small { overflow: hidden; color: var(--fg-tertiary); font: 10px var(--font-mono); text-overflow: ellipsis; }.offer-card p { min-height: 32px; color: var(--fg-secondary); font-size: 10px; line-height: 1.6; }.provider-mark { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--accent); background: var(--accent-muted); font: 700 9px var(--font-mono); }.compact-empty { padding: 18px 0; color: var(--fg-tertiary); font-size: 11px; }.team-boundary { margin-top: 25px; padding-top: 18px; border-top: 1px solid var(--border); }.team-boundary span { max-width: 520px; line-height: 1.6; }.panel-error { color: var(--error); font-size: 11px; }
 @media (max-width: 700px) { .panel-toolbar { align-items: stretch; flex-direction: column; }.panel-toolbar > div { display: grid; grid-template-columns: 1fr 1fr; }.offer-grid { grid-template-columns: 1fr; }.inline-form { flex-direction: column; }.team-boundary { align-items: flex-start; flex-direction: column; } }
+
+.panel-toolbar { font-size:14px; }.section-title { margin:24px 0 12px; color:var(--fg-secondary); font-size:12px; font-weight:500; }.row-card { padding:20px; border-radius:9px; }.member-row { min-height:0; padding:16px 0; gap:12px; }.member-row strong { font-size:13px; font-weight:550; }.member-row small { margin-top:6px; font-size:11px; line-height:1.65; }.avatar { width:27px; height:27px; border-radius:50%; font-size:11px; border:1px solid var(--border-light); }.role { padding:3px 7px; border-radius:5px; font-size:10px; background:var(--surface-active); }
+.offer-grid { gap:16px; }.offer-card { padding:20px; border-radius:9px; }.offer-card strong { font-size:14px; font-weight:550; }.offer-card p { font-size:12px; line-height:1.8; margin:8px 0 15px; }.provider-mark { width:27px; height:27px; border-radius:7px; color:var(--fg); background:var(--surface-active); border:1px solid var(--border-light); font-size:11px; }.availability { padding:3px 7px; border-radius:5px; font-size:10px; }.team-boundary { margin-top:24px; font-size:11px; }
+.agent-add,.inline-form { margin:0; padding:0; border:0; background:none; }.invite-note { color:var(--fg-secondary); font-size:12px; line-height:1.8; margin:0 0 18px; }.inline-form { margin-bottom:16px; }
 </style>

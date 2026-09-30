@@ -2,6 +2,9 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { describe, expect, test, vi } from 'vitest'
 import { computed, ref } from 'vue'
+import { useLocale } from '../../../composables/useLocale'
+import logoDark from '../../../assets/logo-github-org.svg'
+import logoLight from '../../../assets/logo-github-org-light.svg'
 import type { createTeamAccessController } from '../../../composables/useTeamAccess'
 import type { TeamCapabilities } from '../../../types/team'
 import { resetAgentPlanProgressForTests, useAgentPlanProgress } from '../../../composables/useAgentPlanProgress'
@@ -51,6 +54,73 @@ function testRouter(path = '/sessions') {
 }
 
 describe('mobile application shell', () => {
+  test.each(['light', 'dark'])('keeps the sidebar logo in sync with %s theme across sessions, Memory and Team', async theme => {
+    const previousTheme = document.documentElement.getAttribute('data-theme')
+    const previousPreference = localStorage.getItem('pocketctl-theme')
+    const previousMobile = mobile.value
+    const previousTeamEnabled = teamEnabled.value
+    mobile.value = false
+    teamEnabled.value = true
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('pocketctl-theme', theme)
+    const router = testRouter('/memory')
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    const assertLogoOnAllModules = async (expectedTheme: string) => {
+      for (const path of ['/sessions', '/memory', '/teams']) {
+        await router.push(path)
+        await flushPromises()
+        await vi.waitFor(() => expect(wrapper.get('.sidebar-logo img').attributes('src')).toBe(
+          expectedTheme === 'light' ? logoLight : logoDark,
+        ))
+      }
+    }
+    try {
+      await assertLogoOnAllModules(theme)
+      await router.push('/memory')
+      await flushPromises()
+      expect(wrapper.find('.memory-appearance-actions').exists()).toBe(false)
+      await router.push('/settings')
+      await flushPromises()
+      await wrapper.get(`.topbar [title="${useLocale().t('common.toggle_theme')}"]`).trigger('click')
+      await flushPromises()
+      const nextTheme = theme === 'light' ? 'dark' : 'light'
+      expect(document.documentElement.getAttribute('data-theme')).toBe(nextTheme)
+      await assertLogoOnAllModules(nextTheme)
+      // Settings and system theme updates change the shared root attribute.
+      document.documentElement.setAttribute('data-theme', theme)
+      await flushPromises()
+      await assertLogoOnAllModules(theme)
+    } finally {
+      wrapper.unmount()
+      mobile.value = previousMobile
+      teamEnabled.value = previousTeamEnabled
+      if (previousTheme === null) document.documentElement.removeAttribute('data-theme')
+      else document.documentElement.setAttribute('data-theme', previousTheme)
+      if (previousPreference === null) localStorage.removeItem('pocketctl-theme')
+      else localStorage.setItem('pocketctl-theme', previousPreference)
+    }
+  })
+
+  test.each(['/teams', '/memory'])('opens the prototype navigation on %s and closes it after selecting another module', async path => {
+    mobile.value = true; teamEnabled.value = true
+    const router = testRouter(path)
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [router] } })
+    try {
+      expect(wrapper.find('.mobile-topbar').exists()).toBe(false)
+      expect(wrapper.find('.mobile-bottom-nav').exists()).toBe(false)
+      await wrapper.get('[aria-label="打开导航"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[role="dialog"]').attributes('aria-label')).toBe('主导航')
+      await wrapper.get('.sidebar a[href="/hosts"]').trigger('click')
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe('/hosts')
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    } finally { wrapper.unmount(); teamEnabled.value = false }
+  })
   test.each(['allowed', 'revoked', 'offline'] as const)('keeps the Team page during token renewal until qualification settles: %s', async outcome => {
     const { createTeamAccessController } = await import('../../../composables/useTeamAccess')
     const allowed: TeamCapabilities = { schema_version: 1, contract_version: 'team-collaboration.v1', collaboration: true, autorun: true, memory_bridge: false, writes_enabled: true }
@@ -79,7 +149,7 @@ describe('mobile application shell', () => {
       expect(router.currentRoute.value.path).toBe(outcome === 'allowed' ? '/teams' : '/sessions')
     } finally { wrapper.unmount(); realTeamAccess = undefined; accessToken.value = 'fixture-token' }
   })
-  test('only shows the Team entry to enabled accounts on mobile and desktop', async () => {
+  test('keeps Team out of the mobile bottom nav and gates the desktop entry by account', async () => {
     const router = testRouter('/settings')
     await router.isReady()
     const App = (await import('../../../App.vue')).default
@@ -90,7 +160,7 @@ describe('mobile application shell', () => {
       expect(wrapper.find('a[href="/teams"]').exists()).toBe(false)
       teamEnabled.value = true
       await wrapper.vm.$nextTick()
-      expect(wrapper.find('[data-testid="mobile-nav-teams"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="mobile-nav-teams"]').exists()).toBe(false)
       mobile.value = false
       await wrapper.vm.$nextTick()
       expect(wrapper.find('.sidebar a[href="/teams"]').exists()).toBe(true)
@@ -112,13 +182,16 @@ describe('mobile application shell', () => {
     expect(wrapper.get('[role="status"]').text()).not.toBe('')
   })
 
-  test('mobile navigation carries the Memory entry alongside sessions and hosts', async () => {
+  test('mobile bottom navigation only contains sessions, inbox, hosts and settings', async () => {
     const router = testRouter('/settings')
     await router.isReady()
     const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
-    expect(wrapper.find('[data-testid="mobile-nav-memory"]').exists()).toBe(true)
-    expect(wrapper.get('a[href="/memory"]').attributes('aria-label')).toBeTruthy()
+    try {
+      expect(wrapper.findAll('.mobile-bottom-nav a').map(link => link.attributes('href'))).toEqual([
+        '/sessions', '/inbox', '/hosts', '/settings',
+      ])
+    } finally { wrapper.unmount() }
   })
 
   test('lets the session list render its iOS-style navigation chrome', async () => {
@@ -202,7 +275,7 @@ describe('mobile application shell', () => {
     mobile.value = true
   })
 
-  test('collapses the desktop sidebar on session routes and still allows manual expansion', async () => {
+  test('preserves the desktop sidebar preference on session routes and allows manual toggling', async () => {
     mobile.value = false
     localStorage.removeItem('pocketctl_sidebar_collapsed')
     const router = testRouter('/session/ses_1')
@@ -210,9 +283,9 @@ describe('mobile application shell', () => {
     const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
-    expect(wrapper.get('.app-layout').classes()).toContain('sidebar-collapsed')
-    await wrapper.get('.sidebar-toggle-btn').trigger('click')
     expect(wrapper.get('.app-layout').classes()).not.toContain('sidebar-collapsed')
+    await wrapper.get('.sidebar-toggle-btn').trigger('click')
+    expect(wrapper.get('.app-layout').classes()).toContain('sidebar-collapsed')
 
     wrapper.unmount()
     mobile.value = true

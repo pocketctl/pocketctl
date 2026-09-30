@@ -1,11 +1,11 @@
 <template>
-  <section class="memory-context-settings" data-testid="memory-context-settings">
+  <section class="memory-context-settings memory-config-card" data-testid="memory-context-settings">
     <h3>{{ t('memory.context.settingsTitle') }}</h3>
     <p class="hint">{{ t('memory.context.settingsHint') }}</p>
     <div v-for="row in settings" :key="row.settingId" class="row" :data-testid="`context-setting-${row.scopeKind}`">
       <span class="scope">{{ row.scopeKind }}:{{ row.scopeKey }}{{ row.agent ? `@${row.agent}` : '' }}</span>
       <span class="modes">
-        <button
+        <button class="memory-button"
           v-for="mode in ['off', 'shadow', 'enabled'] as const"
           :key="mode"
           :data-testid="`mode-${mode}-${row.scopeKind}`"
@@ -19,7 +19,7 @@
 		<div v-if="settings.length === 0" class="empty" data-testid="context-settings-empty">
 			<span>{{ t('memory.context.settingsEmpty') }}</span>
 			<span class="modes">
-				<button
+				<button class="memory-button"
 					v-for="mode in ['off', 'shadow', 'enabled'] as const"
 					:key="mode"
 					:data-testid="`initial-mode-${mode}`"

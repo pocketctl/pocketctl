@@ -1,23 +1,26 @@
 <template>
-  <section class="context-pack-list" data-testid="context-pack-list">
+  <section class="context-pack-list memory-config-card" data-testid="context-pack-list">
     <h3>{{ t('memory.context.packTitle') }}</h3>
-    <input
-      v-model="sessionId"
-      :placeholder="t('memory.context.sessionPlaceholder')"
-      data-testid="pack-session-input"
-      @keyup.enter="refresh"
-    >
-    <button data-testid="pack-refresh" :disabled="busy" @click="refresh">{{ t('memory.context.refresh') }}</button>
+    <div class="memory-config-toolbar">
+      <input
+        v-model="sessionId"
+        :placeholder="t('memory.context.sessionPlaceholder')"
+        :aria-label="t('memory.context.sessionPlaceholder')"
+        data-testid="pack-session-input"
+        @keyup.enter="refresh"
+      >
+      <button class="memory-button" data-testid="pack-refresh" :disabled="busy" @click="refresh">{{ t('memory.context.refresh') }}</button>
+    </div>
     <ul v-if="packs.length > 0" data-testid="pack-rows">
       <li v-for="pack in packs" :key="pack.pack_id" :data-testid="`pack-${pack.state}`">
-				<button class="pack-select" :data-testid="`pack-select-${pack.pack_id}`" @click="emit('select', pack)">
+				<button class="memory-button pack-select" :data-testid="`pack-select-${pack.pack_id}`" @click="emit('select', pack)">
 					{{ pack.pack_id.slice(0, 8) }}
 				</button>
         <span class="state" :class="pack.state">{{ stateLabel(pack.state) }}</span>
         <span class="meta">{{ pack.client_request_id }} · {{ new Date(pack.created_at).toLocaleString() }}</span>
         <span v-if="pack.delivery" class="delivery">{{ t('memory.context.delivery') }}: {{ pack.delivery.state }}</span>
         <span class="feedback">
-          <button
+          <button class="memory-button"
             v-for="action in ['used', 'ignored', 'incorrect', 'harmful'] as const"
             :key="action"
             :data-testid="`feedback-${action}`"
