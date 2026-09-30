@@ -35,11 +35,11 @@ export interface TeamMemoryBindingGrantService {
     userId: number
     installationIds: string[]
     callerType: 'web'
-  }): Promise<V2GrantMintResult>
+  }, database?: Queryable): Promise<V2GrantMintResult>
 }
 
 export interface TeamMemoryInstallationReader {
-  getScopedInstallation(installationId: string): Promise<ScopedExtensionInstallation | null>
+  getScopedInstallation(installationId: string, database?: Queryable): Promise<ScopedExtensionInstallation | null>
 }
 
 function iso(value: Date | string): string {
@@ -97,31 +97,13 @@ export class TeamMemoryBindingService {
       throw new TeamRepositoryError('team_feature_disabled', 'Team Memory bridge is disabled')
     }
     await this.requireTeam(this.pool, input.teamId, input.actorUserId, true)
-    const installation = await this.installations.getScopedInstallation(input.installationId)
-    if (!installation || installation.provider_id !== 'pocketctl-memory') {
-      throw new TeamRepositoryError('memory_grant_required', 'Memory installation administration permission required')
-    }
-    const access = await this.grants.mint({
-      userId: input.actorUserId,
-      installationIds: [input.installationId],
-      callerType: 'web',
-    })
-    const authorized = grantAccess(access, input.installationId)
-    if (authorized.state === 'installation_paused') {
-      throw new TeamRepositoryError('invalid_state', 'Memory installation is not active')
-    }
-    if (authorized.state !== 'available'
-      || !authorized.binding?.permissions.includes('scope_admin')
-      || authorized.binding.owner_scope_kind !== installation.owner_scope_kind
-      || authorized.binding.owner_scope_id !== installation.owner_scope_id) {
-      throw new TeamRepositoryError('memory_grant_required', 'Memory installation administration permission required')
-    }
+    const initial = await this.bindingAuthority(input.actorUserId, input.installationId)
+    let authority = initial
 
     return this.idempotent(input.actorUserId, `team.memory.bind:${input.teamId}`, input.requestId, {
       installation_id: input.installationId,
       expected_revision: input.expectedRevision,
     }, async client => {
-      await this.requireTeam(client, input.teamId, input.actorUserId, true, true)
       const current = await this.activeBinding(client, input.teamId, true)
       const currentRevision = current ? Number(current.revision) : 0
       if (currentRevision !== input.expectedRevision) {
@@ -130,7 +112,7 @@ export class TeamMemoryBindingService {
       if (current?.installation_id === input.installationId) {
         return this.view(current, {
           state: 'available',
-          binding: authorized.binding,
+          binding: authority.authorized.binding,
         })
       }
       if (current) {
@@ -156,17 +138,21 @@ export class TeamMemoryBindingService {
         [
           `cmbd_${randomUUID()}`,
           input.teamId,
-          installation.owner_scope_kind,
-          installation.owner_scope_id,
-          installation.installation_id,
+          authority.installation.owner_scope_kind,
+          authority.installation.owner_scope_id,
+          authority.installation.installation_id,
           currentRevision + 1,
           input.actorUserId,
         ],
       )
       return this.view(inserted.rows[0], {
         state: 'available',
-        binding: authorized.binding,
+        binding: authority.authorized.binding,
       })
+    }, async client => {
+      await this.requireTeam(client, input.teamId, input.actorUserId, true, true)
+      await this.lockBindingAuthority(client, input.actorUserId, initial.installation)
+      authority = await this.bindingAuthority(input.actorUserId, input.installationId, client)
     })
   }
 
@@ -179,7 +165,6 @@ export class TeamMemoryBindingService {
     return this.idempotent(input.actorUserId, `team.memory.remove:${input.teamId}`, input.requestId, {
       expected_revision: input.expectedRevision,
     }, async client => {
-      await this.requireTeam(client, input.teamId, input.actorUserId, true, true)
       const current = await this.activeBinding(client, input.teamId, true)
       if (!current) throw new TeamRepositoryError('invalid_state', 'Team has no active Memory binding')
       const currentRevision = Number(current.revision)
@@ -198,7 +183,67 @@ export class TeamMemoryBindingService {
         [current.binding_id],
       )
       return null
-    })
+    }, client => this.requireTeam(client, input.teamId, input.actorUserId, true, true))
+  }
+
+  private async bindingAuthority(actorUserId: number, installationId: string, database?: Queryable) {
+    const installation = await this.installations.getScopedInstallation(installationId, database)
+    if (!installation || installation.provider_id !== 'pocketctl-memory') {
+      throw new TeamRepositoryError('memory_grant_required', 'Memory installation administration permission required')
+    }
+    const access = await this.grants.mint({
+      userId: actorUserId,
+      installationIds: [installationId],
+      callerType: 'web',
+    }, database)
+    const authorized = grantAccess(access, installationId)
+    if (authorized.state === 'installation_paused') {
+      throw new TeamRepositoryError('invalid_state', 'Memory installation is not active')
+    }
+    if (authorized.state !== 'available'
+      || !authorized.binding?.permissions.includes('scope_admin')
+      || authorized.binding.owner_scope_kind !== installation.owner_scope_kind
+      || authorized.binding.owner_scope_id !== installation.owner_scope_id) {
+      throw new TeamRepositoryError('memory_grant_required', 'Memory installation administration permission required')
+    }
+
+    return { installation, authorized }
+  }
+
+  private async lockBindingAuthority(client: Queryable, actorUserId: number, installation: ScopedExtensionInstallation): Promise<void> {
+    const denied = () => new TeamRepositoryError('memory_grant_required', 'Memory installation administration permission required')
+    if (installation.owner_scope_kind !== 'personal') {
+      // Membership mutations lock the member before bumping the scope epoch.
+      // Match that order and hold all authorization rows until the receipt commits.
+      const member = await client.query(
+        `SELECT 1 FROM extension_scope_memberships
+         WHERE scope_kind=$1 AND scope_id=$2 AND user_id=$3 AND state='active' FOR SHARE`,
+        [installation.owner_scope_kind, installation.owner_scope_id, actorUserId],
+      )
+      if (!member.rows[0]) throw denied()
+      const table = installation.owner_scope_kind === 'team' ? 'extension_teams' : 'extension_organizations'
+      const column = installation.owner_scope_kind === 'team' ? 'team_id' : 'organization_id'
+      const scope = await client.query(
+        `SELECT 1 FROM ${table} WHERE ${column}=$1 AND state='active' FOR SHARE`,
+        [installation.owner_scope_id],
+      )
+      if (!scope.rows[0]) throw denied()
+    }
+    const result = await client.query<{
+      status: string; provider_id: string; owner_user_id: string | number | null;
+      owner_scope_kind: string; owner_scope_id: string;
+    }>(
+      `SELECT status,provider_id,owner_user_id,owner_scope_kind,owner_scope_id
+       FROM extension_installations WHERE installation_id=$1 FOR SHARE`, [installation.installation_id],
+    )
+    const row = result.rows[0]
+    if (!row || row.provider_id !== 'pocketctl-memory'
+      || row.owner_scope_kind !== installation.owner_scope_kind || row.owner_scope_id !== installation.owner_scope_id
+      || (row.owner_scope_kind === 'personal' && Number(row.owner_user_id) !== actorUserId)) throw denied()
+    if (row.status === 'paused' || row.status === 'pending') {
+      throw new TeamRepositoryError('invalid_state', 'Memory installation is not active')
+    }
+    if (row.status !== 'active') throw denied()
   }
 
   private async currentAccess(actorUserId: number, installationId: string): Promise<{
@@ -256,7 +301,7 @@ export class TeamMemoryBindingService {
          ON membership.team_id = team.team_id
         AND membership.user_id = $2
         AND membership.state = 'active'
-       WHERE team.team_id = $1${lock ? ' FOR UPDATE OF team' : ''}`,
+       WHERE team.team_id = $1${lock ? ' FOR UPDATE OF team FOR SHARE OF membership' : ''}`,
       [teamId, actorUserId],
     )
     const team = result.rows[0]
@@ -273,6 +318,7 @@ export class TeamMemoryBindingService {
     requestId: string,
     payload: unknown,
     mutate: (client: pg.PoolClient) => Promise<T>,
+    authorize: (client: pg.PoolClient) => Promise<void>,
   ): Promise<T> {
     const requestHash = hash(payload)
     const client = await this.pool.connect()
@@ -281,6 +327,7 @@ export class TeamMemoryBindingService {
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `team:${actorUserId}:${operation}:${requestId}`,
       ])
+      await authorize(client)
       const prior = await client.query<{ request_hash: string; response: T }>(
         `SELECT request_hash, response FROM collaboration_team_idempotency
          WHERE user_id = $1 AND operation = $2 AND request_id = $3`,

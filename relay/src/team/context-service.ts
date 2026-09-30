@@ -145,11 +145,13 @@ export class TeamContextService {
       )
       const event = await client.query(
         `INSERT INTO collaboration_events
-          (event_id, team_session_id, event_seq, kind, author_user_id, context_version, content, request_id)
-         VALUES ($1, $2, $3, 'context', $4, $5, $6, $7) RETURNING *`,
+          (event_id, team_session_id, event_seq, kind, author_user_id, context_version, content)
+         VALUES ($1, $2, $3, 'context', $4, $5, $6) RETURNING *`,
         [`cev_${randomUUID()}`, input.sessionId, Number(sequence.rows[0].latest_event_seq), input.actorUserId,
-          version, `Context v${version} updated`, `context:${canonicalHash(input.requestId).slice(0, 40)}`],
+          version, `Context v${version} updated`],
       )
+      // The operation/session-scoped receipt below owns Context deduplication.
+      // Context events must leave the independent direct-message key unused.
       const response = { context: snapshot(inserted.rows[0]), event: teamEventView(event.rows[0]) }
       await client.query(
         `INSERT INTO collaboration_team_idempotency (user_id, operation, request_id, request_hash, response)

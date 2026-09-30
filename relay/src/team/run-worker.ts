@@ -1,5 +1,5 @@
 import { coordinatorPrompt, parseTeamRunDecision, TeamRunDecisionError } from './run-decision.js'
-import { TeamRunRepository, TeamRunBudgetError, type TeamRunMutation } from './run-repository.js'
+import { TeamRunRepository, TeamRunAuthorityError, TeamRunBudgetError, TeamRunSessionStateError, type TeamRunMutation } from './run-repository.js'
 import type { TeamEvent, TeamRun } from './types.js'
 import { teamBudgetStopsTotal, teamUncertainTotal } from '../metrics.js'
 
@@ -44,7 +44,27 @@ export class TeamRunWorker {
   }
 
   private async transition(input: Parameters<TeamRunWorkerRepository['transition']>[0]): Promise<void> {
-    this.publish(await this.options.repository.transition(input))
+    try {
+      this.publish(await this.options.repository.transition(input))
+    } catch (error) {
+      if (!await this.handleContinuationError(input, error)) throw error
+    }
+  }
+
+  private async handleContinuationError(input: { runId: string; leaseToken: number; processedCallStep?: number }, error: unknown): Promise<boolean> {
+    if (!(error instanceof TeamRunSessionStateError) && !(error instanceof TeamRunAuthorityError)) return false
+    if (error instanceof TeamRunSessionStateError && error.sessionState === 'paused') {
+      // Preserve the accepted decision until the shared Session resumes.
+      await this.options.repository.defer(input.runId, input.leaseToken, this.pollIntervalMs)
+    } else {
+      const lostAuthority = error instanceof TeamRunAuthorityError
+      this.publish(await this.options.repository.transition({
+        ...input, state: 'cancelled', terminalReason: lostAuthority ? 'initiator_unavailable' : 'session_ended',
+        content: lostAuthority ? 'Run stopped because its initiator no longer has access to the shared session.'
+          : 'Run stopped because its shared session ended.',
+      }))
+    }
+    return true
   }
 
   private observeBudgetStop(runId: string, dimension: 'calls' | 'concurrency' | 'duration'): void {
@@ -57,6 +77,7 @@ export class TeamRunWorker {
     try {
       scheduled = await this.options.repository.scheduleCall(input)
     } catch (error) {
+      if (await this.handleContinuationError(input, error)) return
       if (!(error instanceof TeamRunBudgetError)) throw error
       this.observeBudgetStop(input.runId, error.dimension)
       await this.transition({
@@ -84,7 +105,8 @@ export class TeamRunWorker {
     const { run, latestCall } = snapshot
     const transitionBase = { runId: run.id, leaseToken: lease.leaseToken }
 
-    if (run.stop_requested) {
+    const dormantStop = ['waiting_input', 'blocked', 'paused'].includes(run.state) && snapshot.continuationBlockReason
+    if (run.stop_requested || dormantStop) {
       await this.options.repository.cancelPending(run.id, lease.leaseToken)
       if (latestCall && ['dispatched', 'accepted'].includes(latestCall.state)) {
         await this.options.repository.defer(run.id, lease.leaseToken, this.pollIntervalMs)
@@ -95,7 +117,9 @@ export class TeamRunWorker {
           await this.transition({ ...transitionBase, state: 'blocked', terminalReason: 'dispatch_uncertain', content: 'Run stop is blocked until an uncertain call is reconciled.' })
         }
       } else {
-        await this.transition({ ...transitionBase, state: 'cancelled', terminalReason: 'stop_requested', content: 'Run cancelled after all accepted calls settled.' })
+        await this.transition({ ...transitionBase, state: 'cancelled',
+          terminalReason: run.stop_requested ? 'stop_requested' : snapshot.continuationBlockReason,
+          content: 'Run cancelled after all accepted calls settled.' })
       }
       return true
     }

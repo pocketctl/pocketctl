@@ -220,17 +220,20 @@ export function registerSessionOrganizationRoutes(app: FastifyInstance, options:
       s.codex_home_id,s.codex_home_label,s.created_at,s.updated_at,s.last_activity_at,s.turn_started_at,s.exit_reason,s.subagent_count,
       s.pinned,s.pinned_at,s.project_id,s.archived_at,s.manual_rank,s.new_badge_pending,s.model,s.effort,s.parent_session_id,s.is_subagent,s.root_session_id,
       s.total_tokens,s.tok_input,s.tok_output,s.tok_cache_read,s.tok_cache_create,d.status AS daemon_status,d.hostname,d.alias AS daemon_alias,
-      p.name AS project_name,${key} AS cursor_key
+      p.name AS project_name,(${key})::text AS cursor_key,
+      COALESCE(s.pinned_at,'1970-01-01T00:00:00Z'::timestamptz)::text AS cursor_pin_at
       FROM sessions s LEFT JOIN daemons d ON d.daemon_id=s.daemon_id LEFT JOIN session_projects p ON p.id=s.project_id
       WHERE ${where} ORDER BY ${order} LIMIT $${params.length}`, params);
     const rows = result.rows.slice(0,limit);
     const last = rows.at(-1);
     const serialized = await addChildren(pool, rows);
     return { sessions: serialized.map(row => ({ ...row, daemon_online: row.daemon_status === 'online', daemon_status: undefined,
-      cursor_key: undefined })), has_more: result.rows.length > limit,
+      cursor_key: undefined, cursor_pin_at: undefined })), has_more: result.rows.length > limit,
       next_cursor: result.rows.length > limit && last ? encodeCursor({ v:1,f:fingerprint,p:last.pinned ? 1 : 0,
-        pinAt:last.pinned_at ? new Date(last.pinned_at).toISOString() : '1970-01-01T00:00:00.000Z',
-        key:last.cursor_key instanceof Date ? last.cursor_key.toISOString() : String(last.cursor_key),id:last.session_id }) : null,
+        // PostgreSQL timestamps retain microseconds; JS Date would truncate them
+        // and skip rows when the ordering keys share a millisecond.
+        pinAt:last.cursor_pin_at,
+        key:String(last.cursor_key),id:last.session_id }) : null,
       revision: modeInfo.revision, order_mode: modeInfo.mode };
   }));
   app.get('/api/sessions/:id/summary', (req, reply) => run(req, reply, async userId => {

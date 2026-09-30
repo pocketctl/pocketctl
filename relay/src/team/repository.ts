@@ -22,6 +22,10 @@ export class TeamRepositoryError extends Error {
   }
 }
 
+// Expiration is a durable transition, even though the requested action fails.
+// Only this outcome commits without storing a successful idempotency receipt.
+class CommittedInvitationExpiry {}
+
 export interface CollaborationTeamView {
   id: string
   name: string
@@ -126,10 +130,11 @@ export class TeamRepository {
     operation: string,
     requestId: string,
     payload: unknown,
-    mutate: (client: pg.PoolClient) => Promise<T>,
+    mutate: (client: pg.PoolClient) => Promise<T | CommittedInvitationExpiry>,
+    authorizeReplay?: (client: pg.PoolClient, response: T) => Promise<void>,
   ): Promise<T> {
     const hash = requestHash(payload)
-    return this.transaction(async client => {
+    const result = await this.transaction(async client => {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         `team:${actorUserId}:${operation}:${requestId}`,
       ])
@@ -139,12 +144,14 @@ export class TeamRepository {
         [actorUserId, operation, requestId],
       )
       if (prior.rows[0]) {
+        await authorizeReplay?.(client, prior.rows[0].response)
         if (prior.rows[0].request_hash !== hash) {
           throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different content')
         }
         return prior.rows[0].response
       }
       const response = await mutate(client)
+      if (response instanceof CommittedInvitationExpiry) return response
       await client.query(
         `INSERT INTO collaboration_team_idempotency
            (user_id, operation, request_id, request_hash, response)
@@ -153,6 +160,73 @@ export class TeamRepository {
       )
       return response
     })
+    if (result instanceof CommittedInvitationExpiry) {
+      throw new TeamRepositoryError('invalid_state', 'invitation has expired')
+    }
+    return result
+  }
+
+  private async authorizeCreatorReplay(client: Queryable, teamId: string, actorUserId: number): Promise<void> {
+    // Team mutations lock the Team before membership rows. Separate reads also
+    // ensure a waiter checks membership after the Team revocation commits.
+    const team = await client.query<{ creator_user_id: number }>(
+      `SELECT creator_user_id FROM collaboration_teams WHERE team_id = $1 AND state = 'active' FOR SHARE`,
+      [teamId],
+    )
+    if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+    const membership = await client.query(
+      `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
+      [teamId, actorUserId],
+    )
+    if (!membership.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+    if (Number(team.rows[0].creator_user_id) !== actorUserId) {
+      throw new TeamRepositoryError('creator_required', 'team creator authority required')
+    }
+  }
+
+  private async lockInvitation(client: Queryable, invitationId: string, actorUserId: number, authority: 'recipient' | 'creator') {
+    const preview = await client.query(
+      `SELECT i.*, u.email AS actor_email, t.creator_user_id
+       FROM collaboration_team_invitations i
+       JOIN collaboration_teams t ON t.team_id = i.team_id
+       JOIN users u ON u.id = $2 WHERE i.invitation_id = $1`,
+      [invitationId, actorUserId],
+    )
+    const recipientMatches = (row: any) => row && (
+      Number(row.recipient_user_id) === actorUserId
+      || (row.recipient_user_id === null && row.recipient_email.toLowerCase() === row.actor_email.toLowerCase())
+    )
+    const identity = preview.rows[0]
+    if (!identity || (authority === 'recipient' && !recipientMatches(identity))) {
+      throw new TeamRepositoryError('team_not_found', 'invitation not found')
+    }
+    if (authority === 'creator' && Number(identity.creator_user_id) !== actorUserId) {
+      await this.requireTeam(client, identity.team_id, actorUserId, { creator: true })
+    }
+    // Match dissolution's Team -> invitation order. Locking a dissolved Team
+    // is allowed here so repeats of an existing terminal action still work.
+    await client.query(`SELECT team_id FROM collaboration_teams WHERE team_id = $1 FOR UPDATE`, [identity.team_id])
+    const result = await client.query(
+      `SELECT i.*, u.email AS actor_email, i.expires_at <= clock_timestamp() AS expired
+       FROM collaboration_team_invitations i
+       JOIN users u ON u.id = $2 WHERE i.invitation_id = $1 FOR UPDATE OF i`,
+      [invitationId, actorUserId],
+    )
+    const invitation = result.rows[0]
+    if (!invitation || (authority === 'recipient' && !recipientMatches(invitation))) {
+      throw new TeamRepositoryError('team_not_found', 'invitation not found')
+    }
+    return invitation
+  }
+
+  private async expireInvitation(client: Queryable, invitationId: string): Promise<CommittedInvitationExpiry> {
+    await client.query(
+      `UPDATE collaboration_team_invitations
+       SET state = 'expired', revision = revision + 1, updated_at = NOW(), responded_at = NOW()
+       WHERE invitation_id = $1`,
+      [invitationId],
+    )
+    return new CommittedInvitationExpiry()
   }
 
   private async requireTeam(
@@ -268,7 +342,7 @@ export class TeamRepository {
         [input.teamId],
       )
       return this.teamView({ ...updated.rows[0], member_count: count.rows[0].member_count })
-    })
+    }, client => this.authorizeCreatorReplay(client, input.teamId, input.actorUserId))
   }
 
   async listMembers(teamId: string, actorUserId: number): Promise<CollaborationMembershipView[]> {
@@ -315,11 +389,17 @@ export class TeamRepository {
           throw new TeamRepositoryError('invalid_state', 'user already has a team membership record')
         }
       }
+      await client.query(
+        `UPDATE collaboration_team_invitations
+         SET state = 'expired', revision = revision + 1, updated_at = NOW(), responded_at = NOW()
+         WHERE team_id = $1 AND state = 'pending' AND expires_at <= clock_timestamp()`,
+        [input.teamId],
+      )
       const existing = await client.query(
         `SELECT * FROM collaboration_team_invitations
          WHERE team_id = $1 AND state = 'pending'
            AND (($2::int IS NOT NULL AND recipient_user_id = $2)
-             OR ($2::int IS NULL AND recipient_user_id IS NULL AND lower(recipient_email) = $3))
+             OR (recipient_user_id IS NULL AND lower(recipient_email) = $3))
          FOR UPDATE`,
         [input.teamId, recipientUserId, email],
       )
@@ -335,13 +415,14 @@ export class TeamRepository {
         [input.teamId],
       )
       return this.invitationView(invitation.rows[0])
-    })
+    }, client => this.authorizeCreatorReplay(client, input.teamId, input.actorUserId))
   }
 
   async listInvitations(teamId: string, actorUserId: number): Promise<CollaborationInvitationView[]> {
     await this.requireTeam(this.pool, teamId, actorUserId, { creator: true })
     const result = await this.pool.query(
-      `SELECT i.*, t.name AS team_name, inviter.display_name AS inviter_display_name,
+      `SELECT i.*, CASE WHEN i.state = 'pending' AND i.expires_at <= clock_timestamp() THEN 'expired' ELSE i.state END AS state,
+              t.name AS team_name, inviter.display_name AS inviter_display_name,
               inviter.email AS inviter_email
        FROM collaboration_team_invitations i
        JOIN collaboration_teams t ON t.team_id = i.team_id
@@ -361,6 +442,7 @@ export class TeamRepository {
        JOIN users inviter ON inviter.id = i.invited_by_user_id
        JOIN users u ON u.id = $1
        WHERE i.state = 'pending'
+         AND i.expires_at > clock_timestamp()
          AND (i.recipient_user_id = $1 OR (i.recipient_user_id IS NULL AND lower(i.recipient_email) = lower(u.email)))
        ORDER BY i.created_at DESC`,
       [actorUserId],
@@ -375,23 +457,10 @@ export class TeamRepository {
     expectedRevision: number
     requestId: string
   }): Promise<{ invitation: CollaborationInvitationView; membership?: CollaborationMembershipView }> {
-    return this.idempotent(input.actorUserId, `team.invitation.${input.action}:${input.invitationId}`, input.requestId, {
+    return this.idempotent<{ invitation: CollaborationInvitationView; membership?: CollaborationMembershipView }>(input.actorUserId, `team.invitation.${input.action}:${input.invitationId}`, input.requestId, {
       expected_revision: input.expectedRevision,
     }, async client => {
-      const result = await client.query(
-        `SELECT i.*, u.email AS actor_email
-         FROM collaboration_team_invitations i
-         JOIN users u ON u.id = $2
-         WHERE i.invitation_id = $1 FOR UPDATE OF i`,
-        [input.invitationId, input.actorUserId],
-      )
-      const invitation = result.rows[0]
-      const recipientMatches = invitation && (
-        Number(invitation.recipient_user_id) === input.actorUserId
-        || (invitation.recipient_user_id === null
-          && invitation.recipient_email.toLowerCase() === invitation.actor_email.toLowerCase())
-      )
-      if (!recipientMatches) throw new TeamRepositoryError('team_not_found', 'invitation not found')
+      const invitation = await this.lockInvitation(client, input.invitationId, input.actorUserId, 'recipient')
       if (invitation.state === input.action) {
         if (input.action === 'accepted') {
           const current = await client.query(
@@ -409,16 +478,8 @@ export class TeamRepository {
         throw new TeamRepositoryError('invalid_state', `invitation is already ${invitation.state}`)
       }
       this.expectRevision(Number(invitation.revision), input.expectedRevision)
-      if (new Date(invitation.expires_at).getTime() <= Date.now()) {
-        await client.query(
-          `UPDATE collaboration_team_invitations
-           SET state = 'expired', revision = revision + 1, updated_at = NOW(), responded_at = NOW()
-           WHERE invitation_id = $1`,
-          [input.invitationId],
-        )
-        throw new TeamRepositoryError('invalid_state', 'invitation has expired')
-      }
       await this.requireTeam(client, invitation.team_id, invitation.invited_by_user_id, { lock: true })
+      if (invitation.expired) return this.expireInvitation(client, input.invitationId)
       const updated = await client.query(
         `UPDATE collaboration_team_invitations
          SET state = $2, recipient_user_id = COALESCE(recipient_user_id, $3),
@@ -461,21 +522,17 @@ export class TeamRepository {
     expectedRevision: number
     requestId: string
   }): Promise<CollaborationInvitationView> {
-    return this.idempotent(input.actorUserId, `team.invitation.revoke:${input.invitationId}`, input.requestId, {
+    return this.idempotent<CollaborationInvitationView>(input.actorUserId, `team.invitation.revoke:${input.invitationId}`, input.requestId, {
       expected_revision: input.expectedRevision,
     }, async client => {
-      const result = await client.query(
-        `SELECT * FROM collaboration_team_invitations WHERE invitation_id = $1 FOR UPDATE`,
-        [input.invitationId],
-      )
-      const invitation = result.rows[0]
-      if (!invitation) throw new TeamRepositoryError('team_not_found', 'invitation not found')
-      await this.requireTeam(client, invitation.team_id, input.actorUserId, { creator: true, lock: true })
+      const invitation = await this.lockInvitation(client, input.invitationId, input.actorUserId, 'creator')
       if (invitation.state === 'revoked') return this.invitationView(invitation)
       if (invitation.state !== 'pending') {
         throw new TeamRepositoryError('invalid_state', `invitation is already ${invitation.state}`)
       }
       this.expectRevision(Number(invitation.revision), input.expectedRevision)
+      await this.requireTeam(client, invitation.team_id, input.actorUserId, { creator: true, lock: true })
+      if (invitation.expired) return this.expireInvitation(client, input.invitationId)
       const updated = await client.query(
         `UPDATE collaboration_team_invitations
          SET state = 'revoked', revision = revision + 1, updated_at = NOW(), responded_at = NOW()
@@ -715,6 +772,20 @@ export class TeamRepository {
         [input.teamId],
       )
       return this.offerView({ ...inserted.rows[0], ...daemon, occupied_team_id: input.teamId })
+    }, async (client, response) => {
+      // Only offer-add receipts require current membership here. Terminal
+      // leave/dissolve/invitation receipts retain their existing replay contract.
+      const team = await client.query(
+        `SELECT 1 FROM collaboration_teams WHERE team_id = $1 AND state = 'active' FOR SHARE`, [input.teamId],
+      )
+      if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      const member = await client.query(
+        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
+        [input.teamId, input.actorUserId],
+      )
+      if (!member.rows[0] || response.owner_user_id !== input.actorUserId) {
+        throw new TeamRepositoryError('team_not_found', 'offer not found')
+      }
     })
   }
 
@@ -727,6 +798,13 @@ export class TeamRepository {
     return this.idempotent(input.actorUserId, `team.offer.revoke:${input.offerId}`, input.requestId, {
       expected_revision: input.expectedRevision,
     }, async client => {
+      const identity = await client.query<{ team_id: string }>(
+        `SELECT team_id FROM team_agent_offers WHERE offer_id = $1 AND owner_user_id = $2`,
+        [input.offerId, input.actorUserId],
+      )
+      if (!identity.rows[0]) throw new TeamRepositoryError('team_not_found', 'offer not found')
+      // Session creation and membership revocation also lock Team before offer.
+      await this.requireTeam(client, identity.rows[0].team_id, input.actorUserId, { lock: true })
       const result = await client.query(
         `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id
          FROM team_agent_offers o
@@ -743,7 +821,6 @@ export class TeamRepository {
       )
       const offer = result.rows[0]
       if (!offer) throw new TeamRepositoryError('team_not_found', 'offer not found')
-      await this.requireTeam(client, offer.team_id, input.actorUserId, { lock: true })
       if (Number(offer.owner_user_id) !== input.actorUserId) {
         throw new TeamRepositoryError('team_not_found', 'offer not found')
       }

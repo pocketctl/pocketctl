@@ -14,6 +14,17 @@ export interface AppendMemberEventInput {
   contextVersion: number
 }
 
+type MemberEventRequest = Omit<AppendMemberEventInput, 'contextVersion'>
+
+function memberRequestHash(input: Pick<MemberEventRequest, 'content' | 'targetMode' | 'targetOfferIds' | 'referenceEventId'>): string {
+  return createHash('sha256').update(JSON.stringify({
+    content: input.content,
+    target_mode: input.targetMode,
+    target_offer_ids: input.targetMode === 'offers' ? [...new Set(input.targetOfferIds)].sort() : [],
+    reference_event_id: input.referenceEventId,
+  })).digest('hex')
+}
+
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
@@ -40,27 +51,36 @@ export function teamEventView(row: any): TeamEvent {
 }
 
 export class TeamEventRepository {
-  async appendMemberEvent(client: pg.PoolClient, input: AppendMemberEventInput): Promise<{ event: TeamEvent; call_ids: string[] }> {
-    const fingerprint = createHash('sha256').update(JSON.stringify({
-      content: input.content,
-      target_mode: input.targetMode,
-      target_offer_ids: input.targetOfferIds,
-      reference_event_id: input.referenceEventId,
-      context_version: input.contextVersion,
-    })).digest('hex')
+  async findMemberEventReceipt(client: pg.PoolClient, input: MemberEventRequest): Promise<{ event: TeamEvent; call_ids: string[] } | null> {
     const duplicate = await client.query(
       `SELECT * FROM collaboration_events
        WHERE team_session_id = $1 AND author_user_id = $2 AND request_id = $3 FOR UPDATE`,
       [input.teamSessionId, input.authorUserId, input.requestId],
     )
     if (duplicate.rows[0]) {
-      if (duplicate.rows[0].request_hash !== fingerprint) throw new Error('event_idempotency_conflict')
+      const row = duplicate.rows[0]
+      // Compare the accepted client intent. Older request_hash values also
+      // contain server-derived Context/targets, so reconstruct from the row.
+      if (memberRequestHash({
+        content: row.content,
+        targetMode: row.target_mode,
+        targetOfferIds: row.target_offer_ids,
+        referenceEventId: row.reference_event_id,
+      }) !== memberRequestHash(input)) throw new Error('event_idempotency_conflict')
       const calls = await client.query<{ call_id: string }>(
-        `SELECT call_id FROM collaboration_calls WHERE event_id = $1 ORDER BY offer_id`,
-        [duplicate.rows[0].event_id],
+        `SELECT call_id FROM collaboration_calls WHERE event_id = $1
+         ORDER BY array_position($2::text[], offer_id), offer_id`,
+        [row.event_id, row.target_offer_ids],
       )
-      return { event: teamEventView(duplicate.rows[0]), call_ids: calls.rows.map(row => row.call_id) }
+      return { event: teamEventView(row), call_ids: calls.rows.map(call => call.call_id) }
     }
+    return null
+  }
+
+  async appendMemberEvent(client: pg.PoolClient, input: AppendMemberEventInput): Promise<{ event: TeamEvent; call_ids: string[] }> {
+    const duplicate = await this.findMemberEventReceipt(client, input)
+    if (duplicate) return duplicate
+    const fingerprint = memberRequestHash(input)
     let reference: { event_id: string; event_seq: string } | undefined
     if (input.referenceEventId) {
       const found = await client.query<{ event_id: string; event_seq: string }>(

@@ -52,16 +52,19 @@ export class TeamTaskService {
     }
   }
 
-  private async idempotent<T>(actorUserId: number, operation: string, requestId: string, payload: unknown, mutate: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  private async idempotent(actorUserId: number, operation: string, requestId: string, payload: unknown, mutate: (client: pg.PoolClient) => Promise<TeamTaskView>): Promise<TeamTaskView> {
     const requestHash = hash(payload)
     return this.transaction(async client => {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`team:${actorUserId}:${operation}:${requestId}`])
-      const prior = await client.query<{ request_hash: string; response: T }>(
+      const prior = await client.query<{ request_hash: string; response: TeamTaskView }>(
         `SELECT request_hash, response FROM collaboration_team_idempotency
          WHERE user_id = $1 AND operation = $2 AND request_id = $3`,
         [actorUserId, operation, requestId],
       )
       if (prior.rows[0]) {
+        // A receipt retains the result, not the actor's former membership.
+        // Do not reapply CAS or state transitions when replaying accepted work.
+        await this.taskForUpdate(client, prior.rows[0].response.id, actorUserId)
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different content')
         return prior.rows[0].response
       }
@@ -75,7 +78,21 @@ export class TeamTaskService {
     })
   }
 
-  private async activeMembership(client: Pick<pg.Pool, 'query'>, teamId: string, actorUserId: number): Promise<{ creator_user_id: number }> {
+  private async activeMembership(client: Pick<pg.Pool, 'query'>, teamId: string, actorUserId: number, lock = false): Promise<{ creator_user_id: number }> {
+    if (lock) {
+      // Match revocation's Team -> membership -> Task lock order. Separate
+      // reads also observe a membership change committed while waiting on Team.
+      const team = await client.query<{ creator_user_id: number }>(
+        `SELECT creator_user_id FROM collaboration_teams WHERE team_id = $1 AND state = 'active' FOR SHARE`, [teamId],
+      )
+      if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      const member = await client.query(
+        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
+        [teamId, actorUserId],
+      )
+      if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      return team.rows[0]
+    }
     const result = await client.query<{ creator_user_id: number }>(
       `SELECT t.creator_user_id FROM collaboration_teams t
        JOIN collaboration_team_memberships m
@@ -88,17 +105,15 @@ export class TeamTaskService {
   }
 
   private async taskForUpdate(client: pg.PoolClient, taskId: string, actorUserId: number): Promise<any> {
+    const identity = await client.query<{ team_id: string }>(`SELECT team_id FROM team_tasks WHERE task_id = $1`, [taskId])
+    if (!identity.rows[0]) throw new TeamRepositoryError('team_not_found', 'task not found')
+    const team = await this.activeMembership(client, identity.rows[0].team_id, actorUserId, true)
     const result = await client.query(
-      `SELECT task.*, team.creator_user_id AS team_creator_user_id
-       FROM team_tasks task
-       JOIN collaboration_teams team ON team.team_id = task.team_id AND team.state = 'active'
-       JOIN collaboration_team_memberships membership
-         ON membership.team_id = task.team_id AND membership.user_id = $2 AND membership.state = 'active'
-       WHERE task.task_id = $1 FOR UPDATE OF task`,
-      [taskId, actorUserId],
+      `SELECT * FROM team_tasks WHERE task_id = $1 FOR UPDATE`,
+      [taskId],
     )
     if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'task not found')
-    return result.rows[0]
+    return { ...result.rows[0], team_creator_user_id: team.creator_user_id }
   }
 
   private expectRevision(row: { revision: string | number }, expectedRevision: number): void {
@@ -134,7 +149,7 @@ export class TeamTaskService {
     return this.idempotent(input.actorUserId, `team.task.create:${input.teamId}`, input.requestId, {
       title: input.title, background: input.background,
     }, async client => {
-      await this.activeMembership(client as unknown as pg.Pool, input.teamId, input.actorUserId)
+      await this.activeMembership(client, input.teamId, input.actorUserId, true)
       const result = await client.query(
         `INSERT INTO team_tasks (task_id, team_id, creator_user_id, title, background)
          VALUES ($1, $2, $3, $4, $5) RETURNING *`,

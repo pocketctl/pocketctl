@@ -300,8 +300,8 @@ export class ExtensionInstallationRepository {
     return row ? toInstallation(row) : null
   }
 
-  async getScopedInstallation(installationId: string): Promise<ScopedExtensionInstallation | null> {
-    const result = await this.pool.query<ScopedExtensionInstallation>(
+  async getScopedInstallation(installationId: string, database: Pick<pg.PoolClient, 'query'> = this.pool): Promise<ScopedExtensionInstallation | null> {
+    const result = await database.query<ScopedExtensionInstallation>(
       `SELECT installation_id, provider_id, status, enabled_services,
               owner_scope_kind, owner_scope_id
        FROM extension_installations

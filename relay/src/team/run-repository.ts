@@ -4,7 +4,19 @@ import type pg from 'pg'
 import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.js'
 import { teamEventView } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
-import type { TeamEvent, TeamRun, TeamRunBudget, TeamRunState } from './types.js'
+import type { TeamEvent, TeamRun, TeamRunBudget, TeamRunState, TeamSessionState } from './types.js'
+
+export class TeamRunSessionStateError extends TeamRepositoryError {
+  constructor(readonly sessionState: Exclude<TeamSessionState, 'active'>) {
+    super('invalid_state', 'shared session is not active')
+  }
+}
+
+export class TeamRunAuthorityError extends TeamRepositoryError {
+  constructor() {
+    super('team_not_found', 'run initiator no longer has access to the shared session')
+  }
+}
 
 export class TeamRunBudgetError extends TeamRepositoryError {
   constructor(readonly dimension: 'calls' | 'duration' | 'concurrency') {
@@ -16,6 +28,8 @@ export interface TeamRunMutation {
   run: TeamRun
   event: TeamEvent
   participantUserIds: number[]
+  // Runtime-only receipt metadata. Historical receipts have no such field.
+  replayed?: true
 }
 
 export interface TeamRunLease {
@@ -44,6 +58,7 @@ export interface TeamRunWorkSnapshot {
   bindings: TeamRunBinding[]
   latestCall: TeamRunCallSnapshot | null
   latestMemberInput: string | null
+  continuationBlockReason?: 'session_ended' | 'initiator_unavailable' | null
 }
 
 function iso(value: Date | string | null): string | null {
@@ -90,6 +105,10 @@ function canonicalHash(value: unknown): string {
 export class TeamRunRepository {
   constructor(private readonly pool: pg.Pool) {}
 
+  // Run requests are deduplicated solely by collaboration_team_idempotency,
+  // scoped by operation and Session/Run ID. Their events must not consume the
+  // direct-message request namespace or expand the client's 128-character ID.
+
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
     try {
@@ -127,6 +146,17 @@ export class TeamRunRepository {
     return { run, session }
   }
 
+  private async continuationSession(client: pg.PoolClient, run: any): Promise<any> {
+    try {
+      const session = await this.authorizedSession(client, run.team_session_id, Number(run.initiator_user_id))
+      if (session.state !== 'active') throw new TeamRunSessionStateError(session.state)
+      return session
+    } catch (error) {
+      if (error instanceof TeamRepositoryError && error.code === 'team_not_found') throw new TeamRunAuthorityError()
+      throw error
+    }
+  }
+
   private async participants(db: Pick<pg.Pool, 'query'>, sessionId: string): Promise<number[]> {
     const result = await db.query<{ user_id: number }>(
       `SELECT user_id FROM collaboration_session_participants WHERE team_session_id = $1 AND state = 'active'`, [sessionId],
@@ -139,7 +169,6 @@ export class TeamRunRepository {
     contextVersion: number
     content: string
     authorUserId?: number
-    requestId?: string
   }): Promise<TeamEvent> {
     const sequence = await client.query<{ latest_event_seq: string }>(
       `UPDATE collaboration_sessions SET latest_event_seq = latest_event_seq + 1, updated_at = NOW()
@@ -147,10 +176,10 @@ export class TeamRunRepository {
     )
     const inserted = await client.query(
       `INSERT INTO collaboration_events
-        (event_id, team_session_id, event_seq, kind, author_user_id, context_version, content, request_id)
-       VALUES ($1, $2, $3, 'run', $4, $5, $6, $7) RETURNING *`,
+        (event_id, team_session_id, event_seq, kind, author_user_id, context_version, content)
+       VALUES ($1, $2, $3, 'run', $4, $5, $6) RETURNING *`,
       [`cev_${randomUUID()}`, input.sessionId, Number(sequence.rows[0].latest_event_seq), input.authorUserId ?? null,
-        input.contextVersion, input.content, input.requestId ?? null],
+        input.contextVersion, input.content],
     )
     return teamEventView(inserted.rows[0])
   }
@@ -184,7 +213,7 @@ export class TeamRunRepository {
       )
       if (prior.rows[0]) {
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different run content')
-        return prior.rows[0].response
+        return { ...prior.rows[0].response, replayed: true }
       }
       if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not active')
       if (Number(session.current_context_version) !== input.contextVersion) {
@@ -216,7 +245,7 @@ export class TeamRunRepository {
       })
       const event = await this.appendEvent(client, {
         sessionId: input.sessionId, contextVersion: input.contextVersion, authorUserId: input.actorUserId,
-        requestId: `run:create:${input.requestId}`, content: `Automatic collaboration run ${runId} created with a frozen budget of ${input.budget.max_calls} calls.`,
+        content: `Automatic collaboration run ${runId} created with a frozen budget of ${input.budget.max_calls} calls.`,
       })
       const response = { run: teamRunView(inserted.rows[0]), event, participantUserIds: await this.participants(client, input.sessionId) }
       await client.query(
@@ -268,7 +297,7 @@ export class TeamRunRepository {
       )
       if (prior.rows[0]) {
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different run control content')
-        return prior.rows[0].response
+        return { ...prior.rows[0].response, replayed: true }
       }
       if (Number(run.revision) !== input.expectedRevision) throw new TeamRepositoryError('revision_conflict', 'revision mismatch', Number(run.revision))
       if (['completed', 'failed', 'cancelled'].includes(run.state)) throw new TeamRepositoryError('invalid_state', 'collaboration run is terminal')
@@ -290,7 +319,6 @@ export class TeamRunRepository {
       )
       const event = await this.appendEvent(client, {
         sessionId: run.team_session_id, contextVersion: Number(run.context_version), authorUserId: input.actorUserId,
-        requestId: `run:${input.action}:${input.requestId}`,
         content: input.action === 'cancel' ? 'Run stop requested; accepted calls will be reconciled before cancellation.' : `Run ${input.action} requested.`,
       })
       const response = { run: teamRunView(updated.rows[0]), event, participantUserIds: await this.participants(client, run.team_session_id) }
@@ -315,7 +343,7 @@ export class TeamRunRepository {
       )
       if (prior.rows[0]) {
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different run input')
-        return prior.rows[0].response
+        return { ...prior.rows[0].response, replayed: true }
       }
       if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not active')
       if (run.state !== 'waiting_input') throw new TeamRepositoryError('invalid_state', 'collaboration run is not waiting for input')
@@ -326,10 +354,10 @@ export class TeamRunRepository {
       )
       const insertedEvent = await client.query(
         `INSERT INTO collaboration_events
-          (event_id, team_session_id, event_seq, kind, author_user_id, target_mode, context_version, content, request_id)
-         VALUES ($1, $2, $3, 'member_message', $4, 'discussion', $5, $6, $7) RETURNING *`,
+          (event_id, team_session_id, event_seq, kind, author_user_id, target_mode, context_version, content)
+         VALUES ($1, $2, $3, 'member_message', $4, 'discussion', $5, $6) RETURNING *`,
         [`cev_${randomUUID()}`, run.team_session_id, Number(sequence.rows[0].latest_event_seq), input.actorUserId,
-          Number(run.context_version), input.content, `run:input:${input.requestId}`],
+          Number(run.context_version), input.content],
       )
       const updated = await client.query(
         `UPDATE collaboration_runs SET state = 'running', waiting_question = NULL, terminal_reason = NULL,
@@ -350,8 +378,19 @@ export class TeamRunRepository {
   async claimNext(workerId: string, leaseMs: number): Promise<TeamRunLease | null> {
     return this.transaction(async client => {
       const selected = await client.query(
-        `SELECT * FROM collaboration_runs
-         WHERE (state IN ('ready', 'running') OR (stop_requested AND state IN ('waiting_input', 'blocked', 'paused')))
+        `SELECT * FROM collaboration_runs run
+         WHERE (state IN ('ready', 'running') OR (stop_requested AND state IN ('waiting_input', 'blocked', 'paused'))
+           OR (state IN ('waiting_input', 'blocked', 'paused') AND EXISTS (
+             SELECT 1 FROM collaboration_sessions session
+             JOIN collaboration_teams team ON team.team_id = session.team_id
+             LEFT JOIN collaboration_team_memberships member
+               ON member.team_id = session.team_id AND member.user_id = run.initiator_user_id
+             LEFT JOIN collaboration_session_participants participant
+               ON participant.team_session_id = session.team_session_id AND participant.user_id = run.initiator_user_id
+             WHERE session.team_session_id = run.team_session_id
+               AND (session.state IN ('ended', 'archived') OR team.state <> 'active'
+                 OR member.state IS DISTINCT FROM 'active' OR participant.state IS DISTINCT FROM 'active')
+           )))
            AND next_wake_at <= NOW()
            AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
          ORDER BY next_wake_at, created_at FOR UPDATE SKIP LOCKED LIMIT 1`,
@@ -369,7 +408,15 @@ export class TeamRunRepository {
   async loadWork(runId: string, leaseToken: number): Promise<TeamRunWorkSnapshot | null> {
     const run = (await this.pool.query(`SELECT * FROM collaboration_runs WHERE run_id = $1 AND lease_token = $2`, [runId, leaseToken])).rows[0]
     if (!run) return null
-    const session = (await this.pool.query(`SELECT team_id FROM collaboration_sessions WHERE team_session_id = $1`, [run.team_session_id])).rows[0]
+    const session = (await this.pool.query(
+      `SELECT session.team_id, session.state,
+         (team.state = 'active' AND member.state = 'active' AND participant.state = 'active') AS initiator_authorized
+       FROM collaboration_sessions session
+       JOIN collaboration_teams team ON team.team_id = session.team_id
+       LEFT JOIN collaboration_team_memberships member ON member.team_id = session.team_id AND member.user_id = $2
+       LEFT JOIN collaboration_session_participants participant ON participant.team_session_id = session.team_session_id AND participant.user_id = $2
+       WHERE session.team_session_id = $1`, [run.team_session_id, run.initiator_user_id],
+    )).rows[0]
     if (!session) return null
     const bindings = await this.pool.query(
       `SELECT binding.binding_id, binding.offer_id, binding.state AS binding_state,
@@ -405,6 +452,8 @@ export class TeamRunRepository {
         offerId: latest.offer_id, state: latest.state, outcome: latest.outcome, response: latest.response,
       } : null,
       latestMemberInput: latestMember?.content ?? null,
+      continuationBlockReason: ['ended', 'archived'].includes(session.state) ? 'session_ended'
+        : session.initiator_authorized !== true ? 'initiator_unavailable' : null,
     }
   }
 
@@ -420,6 +469,7 @@ export class TeamRunRepository {
       const run = (await client.query(`SELECT * FROM collaboration_runs WHERE run_id = $1 FOR UPDATE`, [input.runId])).rows[0]
       if (!run || Number(run.lease_token) !== input.leaseToken) throw new Error('run lease lost')
       if (!['ready', 'running'].includes(run.state) || run.stop_requested) throw new TeamRepositoryError('invalid_state', 'run no longer accepts calls')
+      await this.continuationSession(client, run)
       const frozenBudget = budget(run.budget)
       if (Number(run.calls_used) >= frozenBudget.max_calls) throw new TeamRunBudgetError('calls')
       if (new Date(run.deadline_at).getTime() <= Date.now()) throw new TeamRunBudgetError('duration')
@@ -471,6 +521,7 @@ export class TeamRunRepository {
     return this.transaction(async client => {
       const run = (await client.query(`SELECT * FROM collaboration_runs WHERE run_id = $1 FOR UPDATE`, [input.runId])).rows[0]
       if (!run || Number(run.lease_token) !== input.leaseToken) throw new Error('run lease lost')
+      if (input.state === 'waiting_input') await this.continuationSession(client, run)
       const terminal = ['completed', 'failed', 'cancelled'].includes(input.state)
       const updated = await client.query(
         `UPDATE collaboration_runs SET state = $2::varchar, terminal_reason = $3, waiting_question = $4,

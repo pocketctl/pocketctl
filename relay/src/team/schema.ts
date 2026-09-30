@@ -349,6 +349,16 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       ON collaboration_calls(run_id, run_step) WHERE run_id IS NOT NULL;
     ALTER TABLE collaboration_team_idempotency
       ALTER COLUMN operation TYPE VARCHAR(256);
+    -- Old Run and Context writers copied derived request IDs into the direct-message
+    -- namespace. The authoritative operation receipt identifies exactly those
+    -- events; do not infer their origin from a user-controlled ID prefix.
+    -- Preserve events and cached responses, freeing only the internal key.
+    UPDATE collaboration_events event SET request_id = NULL
+      FROM collaboration_team_idempotency receipt
+      WHERE receipt.user_id = event.author_user_id
+        AND (receipt.operation LIKE 'team.run.%' OR receipt.operation LIKE 'team.context.create:%')
+        AND receipt.response->'event'->>'id' = event.event_id
+        AND event.request_id IS NOT NULL;
     DO $$
     BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'collaboration_calls_run_id_fkey') THEN

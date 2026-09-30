@@ -61,7 +61,7 @@ export class TeamSessionService {
     } finally { client.release() }
   }
 
-  private async idempotent(actorUserId: number, operation: string, requestId: string, payload: unknown, mutate: (client: pg.PoolClient) => Promise<TeamSessionView>): Promise<TeamSessionView> {
+  private async idempotent(actorUserId: number, operation: string, requestId: string, payload: unknown, mutate: (client: pg.PoolClient) => Promise<TeamSessionView>, afterCommit?: () => void): Promise<TeamSessionView> {
     const requestHash = hash(payload)
     const result = await this.transaction(async client => {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`team:${actorUserId}:${operation}:${requestId}`])
@@ -74,7 +74,7 @@ export class TeamSessionService {
         // A receipt preserves the old result, never the actor's old access.
         await this.sessionFor(client, prior.rows[0].response.id, actorUserId, true)
         if (prior.rows[0].request_hash !== requestHash) throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different content')
-        return prior.rows[0].response
+        return { response: prior.rows[0].response, mutated: false }
       }
       const response = await mutate(client)
       await client.query(
@@ -82,13 +82,24 @@ export class TeamSessionService {
          VALUES ($1, $2, $3, $4, $5::jsonb)`,
         [actorUserId, operation, requestId, requestHash, JSON.stringify(response)],
       )
-      return response
+      return { response, mutated: true }
     })
+    // Only a committed mutation may publish effects; receipts retain data only.
+    if (result.mutated) afterCommit?.()
     // Cached responses from older versions must obey the same owner boundary.
-    return this.ownerView(result, actorUserId)
+    return this.ownerView(result.response, actorUserId)
   }
 
-  private async requireMember(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number): Promise<void> {
+  private async requireMember(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number, lock = false): Promise<void> {
+    if (lock) {
+      const team = await db.query(`SELECT 1 FROM collaboration_teams WHERE team_id = $1 AND state = 'active' FOR SHARE`, [teamId])
+      if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      const member = await db.query(
+        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`, [teamId, userId],
+      )
+      if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      return
+    }
     const result = await db.query(
       `SELECT 1 FROM collaboration_teams team
        JOIN collaboration_team_memberships member ON member.team_id = team.team_id
@@ -182,10 +193,14 @@ export class TeamSessionService {
     return this.idempotent(input.actorUserId, `team.session.create:${input.teamId}`, input.requestId, {
       title: input.title, task_id: input.taskId, offer_ids: [...input.offerIds].sort(),
     }, async client => {
-      await this.requireMember(client as unknown as pg.Pool, input.teamId, input.actorUserId)
+      await this.requireMember(client, input.teamId, input.actorUserId, true)
       if (input.taskId) {
-        const task = await client.query(`SELECT 1 FROM team_tasks WHERE task_id = $1 AND team_id = $2 AND state <> 'deleted'`, [input.taskId, input.teamId])
+        const task = await client.query<{ state: string }>(
+          `SELECT state FROM team_tasks WHERE task_id = $1 AND team_id = $2 AND state <> 'deleted' FOR UPDATE`,
+          [input.taskId, input.teamId],
+        )
         if (!task.rows[0]) throw new TeamRepositoryError('team_not_found', 'task not found')
+        if (task.rows[0].state === 'archived') throw new TeamRepositoryError('invalid_state', 'task must be restored before linking a new session')
       }
       const offers = await this.offers(client as unknown as pg.Pool, input.teamId, input.offerIds, true)
       if (offers.length === 0 || offers.some(offer => !this.callable(offer, input.teamId))) {
@@ -239,18 +254,11 @@ export class TeamSessionService {
   }
 
   async addParticipant(input: { sessionId: string; actorUserId: number; userId: number; expectedRevision: number; requestId: string }): Promise<TeamSessionView> {
-    await this.memoryContextBridge?.validateParticipantAddition({
-      sessionId: input.sessionId,
-      actorUserId: input.actorUserId,
-      participantUserId: input.userId,
-    })
     return this.changeParticipant({ ...input, active: true })
   }
 
   async removeParticipant(input: { sessionId: string; actorUserId: number; userId: number; expectedRevision: number; requestId: string }): Promise<TeamSessionView> {
-    const result = await this.changeParticipant({ ...input, active: false })
-    this.notifier.revoked?.(input.sessionId, input.userId)
-    return result
+    return this.changeParticipant({ ...input, active: false })
   }
 
   private async changeParticipant(input: { sessionId: string; actorUserId: number; userId: number; active: boolean; expectedRevision: number; requestId: string }): Promise<TeamSessionView> {
@@ -262,6 +270,15 @@ export class TeamSessionService {
       this.expectRevision(session, input.expectedRevision)
       if (input.userId === Number(session.creator_user_id) && !input.active) throw new TeamRepositoryError('invalid_state', 'shared session creator cannot be removed')
       await this.requireMember(client as unknown as pg.Pool, session.team_id, input.userId)
+      if (input.active) {
+        // Context writers take this same Session lock. Validate the Context
+        // committed before our lock was acquired, before admitting its reader.
+        await this.memoryContextBridge?.validateParticipantAddition({
+          sessionId: input.sessionId,
+          actorUserId: input.actorUserId,
+          participantUserId: input.userId,
+        })
+      }
       const current = await client.query(
         `SELECT * FROM collaboration_session_participants WHERE team_session_id = $1 AND user_id = $2 FOR UPDATE`,
         [input.sessionId, input.userId],
@@ -300,7 +317,7 @@ export class TeamSessionService {
          WHERE team_session_id = $1 RETURNING *`, [input.sessionId],
       )
       return this.view(client as unknown as pg.Pool, updated.rows[0], input.actorUserId)
-    })
+    }, input.active ? undefined : () => this.notifier.revoked?.(input.sessionId, input.userId))
   }
 
   async changeBinding(input: { sessionId: string; actorUserId: number; offerId: string; active: boolean; expectedRevision: number; requestId: string }): Promise<TeamSessionView> {
@@ -319,6 +336,15 @@ export class TeamSessionService {
         throw new TeamRepositoryError('offer_owner_required', 'only the Agent owner may remove it')
       }
       if (input.active && !this.callable(offer, session.team_id)) throw new TeamRepositoryError('agent_unavailable', 'Agent is not callable')
+      if (input.active) {
+        // The Agent owner joins as a participant in the same transaction.
+        // Hold the session lock while checking its current shared references.
+        await this.memoryContextBridge?.validateParticipantAddition({
+          sessionId: input.sessionId,
+          actorUserId: input.actorUserId,
+          participantUserId: Number(offer.owner_user_id),
+        })
+      }
       const current = await client.query(
         `SELECT * FROM collaboration_session_agent_bindings WHERE team_session_id = $1 AND offer_id = $2 FOR UPDATE`,
         [input.sessionId, input.offerId],
@@ -359,6 +385,16 @@ export class TeamSessionService {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`team:event:${input.sessionId}:${input.actorUserId}:${input.requestId}`])
       const session = await this.sessionFor(client as unknown as pg.Pool, input.sessionId, input.actorUserId, true)
       if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not writable')
+      const prior = await this.events.findMemberEventReceipt(client, {
+        teamSessionId: input.sessionId,
+        authorUserId: input.actorUserId,
+        requestId: input.requestId,
+        content: input.content,
+        targetMode: input.targetMode,
+        targetOfferIds: input.targetOfferIds,
+        referenceEventId: input.referenceEventId,
+      })
+      if (prior) return { appended: prior, participantUserIds: [], replayed: true }
       const bindingRows = await client.query(
         `SELECT binding.offer_id, offer.*, daemon.hostname, daemon.status, daemon.agents,
                 daemon.collaboration_capabilities, team_binding.team_id AS occupied_team_id,
@@ -389,10 +425,6 @@ export class TeamSessionService {
         targetOfferIds: targets,
         referenceEventId: input.referenceEventId,
         contextVersion: Number(session.current_context_version),
-      }).catch(error => {
-        if (error instanceof Error && error.message === 'event_idempotency_conflict') throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different message content')
-        if (error instanceof Error && error.message === 'reference_not_found') throw new TeamRepositoryError('team_not_found', 'referenced event not found')
-        throw error
       })
       const participants = await client.query<{ user_id: number }>(
         `SELECT participant.user_id FROM collaboration_session_participants participant
@@ -401,10 +433,16 @@ export class TeamSessionService {
          WHERE participant.team_session_id = $1 AND participant.state = 'active'`,
         [input.sessionId, session.team_id],
       )
-      return { appended, participantUserIds: participants.rows.map(row => Number(row.user_id)) }
+      return { appended, participantUserIds: participants.rows.map(row => Number(row.user_id)), replayed: false }
+    }).catch(error => {
+      if (error instanceof Error && error.message === 'event_idempotency_conflict') throw new TeamRepositoryError('idempotency_conflict', 'request_id was reused with different message content')
+      if (error instanceof Error && error.message === 'reference_not_found') throw new TeamRepositoryError('team_not_found', 'referenced event not found')
+      throw error
     })
-    this.notifier.event?.(input.sessionId, result.participantUserIds, result.appended.event)
-    this.notifier.dispatch?.(result.appended.call_ids)
+    if (!result.replayed) {
+      this.notifier.event?.(input.sessionId, result.participantUserIds, result.appended.event)
+      this.notifier.dispatch?.(result.appended.call_ids)
+    }
     return result.appended
   }
 

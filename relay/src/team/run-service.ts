@@ -42,7 +42,11 @@ export class TeamRunService {
   }
 
   private publish(mutation: TeamRunMutation): TeamRun {
-    this.notifier.event?.(mutation.run.team_session_id, mutation.participantUserIds, mutation.event)
+    // Cached receipts preserve the original response, including its old audience.
+    // Only a freshly committed mutation can publish a new live event.
+    if (!mutation.replayed) {
+      this.notifier.event?.(mutation.run.team_session_id, mutation.participantUserIds, mutation.event)
+    }
     return mutation.run
   }
 
