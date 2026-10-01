@@ -31,8 +31,9 @@ off your development machine.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
 - **Collaborate with people and their Agents (experimental)** — the Web client
-  can create Teams, shared tasks and sessions, then route bounded work to Agents
-  that each member explicitly contributes.
+  can create Teams, shared tasks and sessions, route bounded work to
+  member-contributed Codex or Claude Code Agents, and optionally run budgeted
+  multi-Agent coordination.
 - **Grow governed project knowledge (experimental)** — the optional Memory
   workbench turns repository sources into a review-gated wiki and a dependency
   code graph with impact analysis, and keeps skill documents under explicit
@@ -176,11 +177,29 @@ what leaves the development host.
 
 ## Team collaboration (experimental)
 
-The Web client can create collaboration Teams, invite members, maintain
-lightweight tasks, share versioned session Context, call explicitly contributed
-Agents, and optionally run bounded multi-Agent coordination. Shared Memory is a
-separate opt-in bridge to an existing governed installation; Team membership
-never grants knowledge access by itself.
+Team collaboration turns PocketCtl from a personal cross-device cockpit into a
+small human-and-Agent workspace. In the Web client you can:
+
+- **Create Teams and manage membership** — invite members by email, gate
+  joining per account, and remove members; removal revokes future reads and
+  execution, and retained history never transfers native-session ownership.
+- **Maintain lightweight tasks** — assign holders and track progress, separate
+  from shared sessions and automatic runs.
+- **Share sessions with frozen Context** — explicit collaboration events and
+  versioned Context snapshots (goals, consensus, open questions, references)
+  are shared with authenticated receipts; native private session logs are
+  never shared automatically.
+- **Call member-contributed Agents** — both Codex and Claude Code agents can
+  join a Team as explicitly contributed, callable receivers with live
+  presence and occupancy; narrow owner/daemon/offer/binding authorization and
+  the existing quota and approval rules still apply.
+- **Run bounded multi-Agent coordination (optional)** — frozen call,
+  concurrency, and wall-time budgets with recovery for uncertain outcomes;
+  uncertain work is never blindly retried.
+
+Shared Memory is a separate opt-in bridge to an existing governed installation;
+Team membership never grants knowledge access by itself — every participant and
+receiver is revalidated, and only exact published Memory references are used.
 
 Self-hosted operators must enable each phase independently with
 `TEAM_COLLABORATION`, `TEAM_AUTORUN`, and `TEAM_MEMORY_BRIDGE`. All default to

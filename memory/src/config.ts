@@ -29,8 +29,8 @@ export interface TextAdapterSettings extends ModelAdapterSettings {
   thinking?: 'enabled' | 'disabled'
 }
 
-export interface MimoBatchTextSettings {
-  provider: 'mimo-batch'
+export interface MimoTextSettings {
+  provider: 'mimo-realtime'
   baseUrl: string
   model: string
   apiKey: string
@@ -103,7 +103,7 @@ export interface MemoryConfig {
   logLevel: MemoryLogLevel
   isProduction: boolean
   textModel: TextAdapterSettings | undefined
-  mimoBatchTextModel: MimoBatchTextSettings | undefined
+  mimoTextModel: MimoTextSettings | undefined
   embeddingModel: EmbeddingAdapterSettings | undefined
   providerBudget: ProviderBudgetSettings | undefined
   wikiProviderBudget: WikiProviderBudgetSettings | undefined
@@ -330,33 +330,44 @@ function parseModelAdapter(env: Record<string, string | undefined>, prefix: 'MEM
   }
 }
 
-function parseMimoBatchTextAdapter(
+function parseMimoTextAdapter(
   env: Record<string, string | undefined>,
-): MimoBatchTextSettings | undefined {
+): MimoTextSettings | undefined {
   const names = [
     'MEMORY_TEXT_MODEL_MIMO',
-    'MEMORY_TEXT_BASE_URL_MIMO_BATCH',
+    'MEMORY_TEXT_BASE_URL_MIMO',
     'MEMORY_TEXT_API_KEY_MIMO',
   ] as const
-  const configured = names.filter(name => env[name] !== undefined && env[name] !== '')
+  const values = { ...env }
+  // Migrate the official legacy Batch URL to realtime. Custom legacy hosts
+  // need an explicit new setting rather than an inferred destination.
+  if (!values.MEMORY_TEXT_BASE_URL_MIMO && values.MEMORY_TEXT_BASE_URL_MIMO_BATCH) {
+    const legacy = parseModelBaseUrl('MEMORY_TEXT_BASE_URL_MIMO_BATCH', values.MEMORY_TEXT_BASE_URL_MIMO_BATCH)
+    if (legacy !== 'https://batch-api-cn.xiaomimimo.com/v1') {
+      throw new ConfigError('MEMORY_TEXT_BASE_URL_MIMO is required to replace a custom legacy Batch URL')
+    }
+    values.MEMORY_TEXT_BASE_URL_MIMO = 'https://api.xiaomimimo.com/v1'
+  }
+  const configured = names.filter(name => values[name] !== undefined && values[name] !== '')
   if (configured.length === 0) return undefined
   for (const name of names) {
-    if (env[name] === undefined || env[name] === '') {
-      throw new ConfigError(`${name} is required when MiMo Batch text is configured`)
+    if (values[name] === undefined || values[name] === '') {
+      throw new ConfigError(`${name} is required when MiMo realtime text is configured`)
     }
   }
-  const model = env.MEMORY_TEXT_MODEL_MIMO!
+  const model = values.MEMORY_TEXT_MODEL_MIMO!
   if (model !== 'mimo-v2.6-flash') {
     throw new ConfigError('MEMORY_TEXT_MODEL_MIMO must be mimo-v2.6-flash')
   }
+  const baseUrl = parseModelBaseUrl('MEMORY_TEXT_BASE_URL_MIMO', values.MEMORY_TEXT_BASE_URL_MIMO!)
+  if (new URL(baseUrl).hostname.startsWith('batch-api-')) {
+    throw new ConfigError('MEMORY_TEXT_BASE_URL_MIMO must use a realtime endpoint, not a Batch endpoint')
+  }
   return {
-    provider: 'mimo-batch',
-    baseUrl: parseModelBaseUrl(
-      'MEMORY_TEXT_BASE_URL_MIMO_BATCH',
-      env.MEMORY_TEXT_BASE_URL_MIMO_BATCH!,
-    ),
+    provider: 'mimo-realtime',
+    baseUrl,
     model,
-    apiKey: env.MEMORY_TEXT_API_KEY_MIMO!,
+    apiKey: values.MEMORY_TEXT_API_KEY_MIMO!,
     thinking: 'disabled',
   }
 }
@@ -510,7 +521,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
       ...(thinking === 'enabled' || thinking === 'disabled' ? { thinking } : {}),
     }
   }
-  const mimoBatchTextModel = parseMimoBatchTextAdapter(env)
+  const mimoTextModel = parseMimoTextAdapter(env)
   const embeddingModelBase = parseModelAdapter(env, 'MEMORY_EMBEDDING')
   let embeddingModel: EmbeddingAdapterSettings | undefined
   if (embeddingModelBase) {
@@ -595,7 +606,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     logLevel,
     isProduction,
     textModel,
-    mimoBatchTextModel,
+    mimoTextModel,
     embeddingModel,
     providerBudget,
     wikiProviderBudget,
