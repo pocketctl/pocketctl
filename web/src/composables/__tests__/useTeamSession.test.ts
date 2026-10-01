@@ -56,6 +56,46 @@ describe('useTeamSession run recovery', () => {
     vi.clearAllMocks()
   })
 
+  test('refreshes remote session state and Context without a discussion event', async () => {
+    api.listTeamRuns.mockResolvedValue([])
+    let state!: ReturnType<typeof useTeamSession>
+    const wrapper = mount(defineComponent({ setup() { state = useTeamSession(ref('ctm_1'), ref('css_1')); return () => h('div') } }))
+    await flushPromises()
+    api.getTeamSession.mockResolvedValue({ ...session('css_1'), revision: 2, state: 'archived', current_context_version: 2 })
+    api.getTeamContext.mockResolvedValue({ version: 2, goal: 'Updated goal' })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(state.session.value?.state).toBe('archived')
+    expect(state.context.value?.version).toBe(2)
+    expect(state.canSend.value).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('discards metadata responses after navigation and revocation', async () => {
+    api.listTeamRuns.mockResolvedValue([])
+    const sessionID = ref('css_1')
+    let state!: ReturnType<typeof useTeamSession>
+    const wrapper = mount(defineComponent({ setup() { state = useTeamSession(ref('ctm_1'), sessionID); return () => h('div') } }))
+    await flushPromises()
+    let resolveOld!: (value: any) => void
+    api.getTeamSession.mockImplementation((id: string) => id === 'css_1' ? new Promise(resolve => { resolveOld = resolve }) : Promise.resolve(session(id)))
+    await vi.advanceTimersByTimeAsync(5000)
+    sessionID.value = 'css_2'
+    await flushPromises()
+    resolveOld({ ...session('css_1'), state: 'archived' })
+    await flushPromises()
+    expect(state.session.value?.id).toBe('css_2')
+    let resolveRevoked!: (value: any) => void
+    api.getTeamSession.mockImplementation(() => new Promise(resolve => { resolveRevoked = resolve }))
+    await vi.advanceTimersByTimeAsync(5000)
+    ws.handlers.get('team_collaboration_access_revoked')?.({ team_session_id: 'css_2' })
+    resolveRevoked(session('css_2')); await flushPromises()
+    expect(state.session.value).toBeNull()
+    const requests = api.getTeamSession.mock.calls.length
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(api.getTeamSession).toHaveBeenCalledTimes(requests)
+    wrapper.unmount()
+  })
+
   test('sends offline discussion while keeping Agent dispatch, paused sessions and revoked access gated', async () => {
     api.listTeamRuns.mockResolvedValue([])
     api.appendTeamMessage.mockResolvedValue({ event: { id: 'discussion', event_seq: 1, kind: 'member_message' }, call_ids: [] })

@@ -277,6 +277,7 @@ import SessionScopeSwitcher from "./SessionScopeSwitcher.vue";
 import TeamSessionCreateDialog from "../team/TeamSessionCreateDialog.vue";
 import {
   updateTeamSession,
+  getTeamSession,
   listTeams,
   listTeamSessions,
   listTeamAgentOffers,
@@ -285,6 +286,7 @@ import {
 import type {
   TeamAgentCandidate,
   TeamAgentOffer,
+  TeamSession,
   TeamSessionSummary,
   TeamSummary,
 } from "../../types/team";
@@ -298,6 +300,7 @@ const emit = defineEmits<{
   "update:scope": [scope: SessionScope];
   filtered: [outside: boolean];
   opened: [id: string];
+  updated: [session: TeamSession];
 }>();
 const teams = ref<TeamSummary[]>([]),
   sessions = ref<TeamSessionSummary[]>([]),
@@ -335,10 +338,12 @@ async function mutate(
   mutationBusy.value = true;
   error.value = "";
   try {
-    const updated = await updateTeamSession(item, input);
+    const current = await getTeamSession(item.id);
+    const updated = await updateTeamSession(current, input);
     sessions.value = sessions.value.map((row) =>
       row.id === updated.id ? updated : row,
     );
+    emit("updated", updated);
     editing.value = null;
     archiveTarget.value = null;
     rowMenu.value = "";

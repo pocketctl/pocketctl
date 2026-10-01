@@ -13,14 +13,15 @@ const localStorageMock = (() => {
 Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true })
 
 // --- useAuth mock（isTokenExpired 等其余导出保留真实实现）---
-const { mockAccessToken, mockRefresh, mockLogout } = vi.hoisted(() => ({
+const { mockAccessToken, mockRefresh, mockLogout, mockUser } = await vi.hoisted(async () => ({
   mockAccessToken: { value: '' },
   mockRefresh: vi.fn(),
   mockLogout: vi.fn(),
+  mockUser: (await import('vue')).ref<{ id: number } | null>(null),
 }))
 vi.mock('../useAuth', async () => {
   const actual = await vi.importActual<any>('../useAuth')
-  return { ...actual, useAuth: () => ({ accessToken: mockAccessToken, doRefreshToken: mockRefresh, logout: mockLogout }) }
+  return { ...actual, useAuth: () => ({ user: mockUser, accessToken: mockAccessToken, doRefreshToken: mockRefresh, logout: mockLogout }) }
 })
 
 // --- WebSocket mock：记录每次实例化的 url，暴露 onclose 供测试触发 ---
@@ -42,7 +43,7 @@ class FakeWS {
     capturedUrls.push(url)
     lastWs = this
   }
-  close() {}
+  close = vi.fn()
   send() {}
 }
 
@@ -53,6 +54,7 @@ function makeToken(payload: object): string {
 beforeEach(() => {
   localStorageMock.clear()
   mockAccessToken.value = ''
+  mockUser.value = null
   mockRefresh.mockReset()
   mockLogout.mockReset()
   capturedUrls = []
@@ -70,6 +72,49 @@ afterEach(() => {
 })
 
 describe('useWebSocket — connect 前确保 token 新鲜', () => {
+  test('account switching closes the previous socket and clears its daemon state', async () => {
+    mockUser.value = { id: 1 }
+    mockAccessToken.value = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
+    vi.resetModules()
+    const socket = (await import('../useWebSocket')).useWebSocket()
+    await socket.connect()
+    const previous = lastWs
+    previous.readyState = FakeWS.OPEN
+    previous.onopen()
+    previous.onmessage({ data: JSON.stringify({ type: 'daemon_list', daemons: [{ daemon_id: 'owner-one', status: 'online' }] }) })
+    expect(socket.daemons.value.has('owner-one')).toBe(true)
+    mockUser.value = null
+    expect(previous.close).toHaveBeenCalledOnce()
+    expect(previous.onmessage).toBeNull()
+    expect(previous.onclose).toBeNull()
+    expect(socket.connected.value).toBe(false)
+    expect(socket.daemons.value.size).toBe(0)
+    expect(socket.send({ type: 'list_sessions' })).toBe(false)
+    mockUser.value = { id: 2 }
+    mockAccessToken.value = makeToken({ exp: Math.floor(Date.now() / 1000) + 7200 })
+    await socket.connect()
+    expect(lastWs).not.toBe(previous)
+    expect(capturedUrls).toHaveLength(2)
+  })
+
+  test('an old account ticket finishing after a switch cannot open a socket', async () => {
+    mockUser.value = { id: 1 }
+    mockAccessToken.value = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
+    let resolveTicket!: (value: any) => void
+    vi.mocked(globalThis.fetch).mockImplementationOnce(() => new Promise(resolve => { resolveTicket = resolve }))
+    vi.resetModules()
+    const socket = (await import('../useWebSocket')).useWebSocket()
+    const previousConnect = socket.connect()
+    await Promise.resolve()
+    mockUser.value = { id: 2 }
+    await socket.connect()
+    expect(capturedUrls).toHaveLength(1)
+    resolveTicket({ ok: true, json: async () => ({ ticket: 'previous-owner-ticket' }) })
+    await previousConnect
+    expect(capturedUrls).toHaveLength(1)
+    expect(capturedUrls[0]).not.toContain('previous-owner-ticket')
+  })
+
   test('access token 已过期时，connect 先刷新再用新 token 建连', async () => {
     const expired = makeToken({ exp: Math.floor(Date.now() / 1000) - 100 })
     const fresh = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })

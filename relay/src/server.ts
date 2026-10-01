@@ -1235,6 +1235,7 @@ async function main() {
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
     revalidateTeamSubscriptions: () => router.revalidateTeamSubscriptions(),
+    isDaemonOnline: (daemonId, ownerUserId) => router.isTeamDaemonOnline(daemonId, ownerUserId),
   });
   registerTeamTaskRoutes(app, {
     config: teamConfig,

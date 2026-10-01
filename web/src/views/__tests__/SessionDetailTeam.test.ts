@@ -57,6 +57,18 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = '' })
 
 describe('team session detail', () => {
+  test('immediately updates the open detail after sidebar archive and ignores other sessions', async () => {
+    const { wrapper } = await render()
+    const browser = wrapper.findComponent({ name: 'TeamSessionBrowser' })
+    browser.vm.$emit('updated', { ...teamSession, id: 'css_other', state: 'archived' })
+    await flushPromises()
+    expect(wrapper.text()).toContain('进行中')
+    browser.vm.$emit('updated', { ...teamSession, state: 'archived', revision: 3 })
+    await flushPromises()
+    expect(wrapper.text()).toContain('已归档')
+    wrapper.unmount()
+  })
+
   test('explains unsupported shared Memory injection without displaying runtime details', async () => {
     calls.value = [{ id: 'call-1', event_id: 'e1', offer_id: 'offer-1', state: 'failed', outcome: 'memory_adapter_unsupported' }]
     const { wrapper } = await render()

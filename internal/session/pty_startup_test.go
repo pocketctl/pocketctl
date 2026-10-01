@@ -3,11 +3,57 @@ package session
 import (
 	"bytes"
 	"context"
+	"errors"
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/ptyscan"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
+
+func TestPTYCreateDefersFirstTurnUntilRelayRegistration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell PTY fixture")
+	}
+	t.Setenv("HOME", t.TempDir())
+	cli := filepath.Join(t.TempDir(), "claude-fixture")
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\nexec sleep 300\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	output := make(chan protocol.DaemonEvent, 64)
+	sm := NewSessionManager(output)
+	allowCwdForTest(t, sm)
+	sm.createDeps.resolveAgentCLI = func(protocol.SessionConfig) (string, error) { return cli, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id, err := sm.CreateSession(ctx, protocol.SessionConfig{
+		Agent: adapter.AgentClaude, Cwd: t.TempDir(), Prompt: "exact first task", DeferInitialPrompt: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sm.KillSession(id)
+	select {
+	case event := <-output:
+		if event.Type == "user_text" || event.Type == "turn_status" {
+			t.Fatalf("first turn published before registration: %+v", event)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+	if prompt, ok := sm.TakeDeferredInitialPrompt(id); !ok || prompt != "exact first task" {
+		t.Fatalf("deferred prompt = %q, %v", prompt, ok)
+	}
+	if _, ok := sm.TakeDeferredInitialPrompt(id); ok {
+		t.Fatal("initial prompt can be dispatched twice")
+	}
+	cancel()
+	if err := sm.SendDeferredInitialPrompt(ctx, UserMessageInput{SessionID: id, Content: "exact first task"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled startup dispatched first task: %v", err)
+	}
+}
 
 func TestPTYInitialPromptWaitsForOwnerAndCancellation(t *testing.T) {
 	scanner := ptyscan.NewScanner("startup")

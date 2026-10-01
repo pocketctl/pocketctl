@@ -40,6 +40,7 @@ export interface TeamRouteDependencies {
   verifyAccessToken(token: string): Promise<{ userId: number } | null>
   getDatabaseReady?: () => boolean
   revalidateTeamSubscriptions?: () => Promise<void>
+  isDaemonOnline?: (daemonId: string, ownerUserId: number) => boolean
 }
 
 type Reply = { code(status: number): unknown }
@@ -135,6 +136,11 @@ async function actorForRead(request: { headers: { authorization?: string } }, re
 }
 
 export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRouteDependencies): void {
+  const live = <T extends TeamAgentCandidate | CollaborationAgentOfferView>(value: T, ownerUserId: number): T => {
+    if (!dependencies.isDaemonOnline || dependencies.isDaemonOnline(value.daemon_id, ownerUserId)) return value
+    return { ...value, online: false, managed_callable: false,
+      availability: value.availability === 'online' ? 'offline' : value.availability }
+  }
   app.get('/api/team/teams', async (request, reply) => {
     const actor = await actorForRead(request, reply, dependencies)
     if ('error' in actor) return actor.error
@@ -290,7 +296,7 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
   app.get('/api/team/teams/:teamId/agent-candidates', async (request, reply) => {
     const actor = await actorForRead(request, reply, dependencies)
     if ('error' in actor) return actor.error
-    try { return { agents: await dependencies.service.listAgentCandidates(pathId(request.params, 'teamId'), actor.userId) } }
+    try { return { agents: (await dependencies.service.listAgentCandidates(pathId(request.params, 'teamId'), actor.userId)).map(value => live(value, actor.userId)) } }
     catch (error) { return mapError(error, reply) }
   })
 
@@ -300,13 +306,13 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
     if (!dependencies.service.listMyAgentCandidates) {
       return failure(reply, 503, 'team_feature_disabled', 'Agent candidate discovery is unavailable', { retryable: true })
     }
-    return { agents: await dependencies.service.listMyAgentCandidates(actor.userId) }
+    return { agents: (await dependencies.service.listMyAgentCandidates(actor.userId)).map(value => live(value, actor.userId)) }
   })
 
   app.get('/api/team/teams/:teamId/agent-offers', async (request, reply) => {
     const actor = await actorForRead(request, reply, dependencies)
     if ('error' in actor) return actor.error
-    try { return { offers: await dependencies.service.listAgentOffers(pathId(request.params, 'teamId'), actor.userId) } }
+    try { return { offers: (await dependencies.service.listAgentOffers(pathId(request.params, 'teamId'), actor.userId)).map(value => live(value, value.owner_user_id)) } }
     catch (error) { return mapError(error, reply) }
   })
 
@@ -328,7 +334,7 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
     try {
       const offer = await dependencies.service.addAgentOffer({ teamId: pathId(request.params, 'teamId'), actorUserId: actor.userId, daemonId, provider, runtimeProfileId, expectedRevision: parsed.expectedRevision, requestId: parsed.requestId })
       reply.code(201)
-      return { offer }
+      return { offer: live(offer, offer.owner_user_id) }
     } catch (error) { return mapError(error, reply) }
   })
 

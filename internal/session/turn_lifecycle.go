@@ -166,7 +166,7 @@ func (sm *SessionManager) MemoryContextCapability(ctx context.Context, sessionID
 			return memorycontext.ResolveCapability(memorycontext.RuntimeOpenCodeServer, memorycontext.ProbeSupported)
 		}
 	}
-	if agent == adapter.AgentClaude && (ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted) {
+	if agent == adapter.AgentClaude && (ps.ClaudePrintSession || ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted) {
 		binary, err := findAgentCLI(adapter.AgentClaude)
 		if err == nil {
 			return memorycontext.ResolveCapability(memorycontext.RuntimeClaudePrintResume, memorycontext.ProbeClaudeRuntime(ctx, binary))
@@ -265,7 +265,7 @@ func (sm *SessionManager) cwdFor(sessionID string) string {
 	return ""
 }
 
-// TakeDeferredInitialPrompt claims the managed-session prompt exactly once
+// TakeDeferredInitialPrompt claims the initial prompt exactly once
 // after session_created has been sent to Relay.
 func (sm *SessionManager) TakeDeferredInitialPrompt(sessionID string) (string, bool) {
 	sm.mu.Lock()
@@ -277,6 +277,38 @@ func (sm *SessionManager) TakeDeferredInitialPrompt(sessionID string) (string, b
 	prompt := ps.DeferredInitialPrompt
 	ps.DeferredInitialPrompt = ""
 	return prompt, true
+}
+
+// SendDeferredInitialPrompt runs after Relay registration. Interactive Claude
+// must also finish startup and any owner trust prompt before accepting text.
+func (sm *SessionManager) SendDeferredInitialPrompt(ctx context.Context, input UserMessageInput) error {
+	sm.mu.RLock()
+	ps := sm.sessions[input.SessionID]
+	isPTY := ps != nil && ps.PTY != nil
+	var startedAt time.Time
+	if isPTY {
+		startedAt = ps.StartedAt
+	}
+	sm.mu.RUnlock()
+	if isPTY {
+		timer := time.NewTimer(time.Until(startedAt.Add(10 * time.Second)))
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+		sm.mu.RLock()
+		scanner, done := ps.PTYScanner, ps.PTYDone
+		sm.mu.RUnlock()
+		if scanner == nil || !waitForPTYPromptReady(ctx, done, scanner) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("interactive session exited before initial prompt")
+		}
+	}
+	return sm.SendMessageWithInput(ctx, input)
 }
 
 // SendMessage keeps the legacy signature: it forwards through the turn-aware

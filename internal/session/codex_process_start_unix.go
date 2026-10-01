@@ -83,6 +83,12 @@ func startCodexAppServerWithFactory(ctx context.Context, binary, _ string, gener
 }
 
 func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string, generation uint64, homeID, home string, timeout time.Duration, factory codexCommandFactory) (*codexAppServerRuntime, error) {
+	return startCodexAppServerWithIdentity(ctx, binary, generation, homeID, home, timeout, factory, platform.ProcessStartIdentity)
+}
+
+// The identity seam lets tests exercise a kernel identity-query failure without
+// racing a short-lived process or changing global process-control behavior.
+func startCodexAppServerWithIdentity(ctx context.Context, binary string, generation uint64, homeID, home string, timeout time.Duration, factory codexCommandFactory, identify func(int) (string, error)) (*codexAppServerRuntime, error) {
 	dir, err := codexRuntimeDir()
 	if err != nil {
 		return nil, err
@@ -111,15 +117,22 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 	cmd.Env = codexCommandEnvironment(os.Environ(), cmd.Env)
 	cmd.Env = codexAppServerEnv(cmd.Env)
 	cmd.Env = append(cmd.Env, "POCKETCTL_CODEX_SOCKET="+socketPath)
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	stderr := &codexStartupStderr{}
+	phase := "start"
+	defer func() { stderr.finish(phase, generation) }()
+	cmd.Stdout, cmd.Stderr = io.Discard, stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start Codex app-server: %w", err)
 	}
-	processIdentity, err := platform.ProcessStartIdentity(cmd.Process.Pid)
+	phase = "process_identity"
+	processIdentity, err := identify(cmd.Process.Pid)
 	if err != nil || processIdentity == "" {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		if err == nil {
+			err = errors.New("empty process start identity")
+		}
 		return nil, fmt.Errorf("identify Codex app-server process: %w", err)
 	}
 	wait := make(chan error, 1)
@@ -150,8 +163,13 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 	for client == nil {
 		select {
 		case processErr := <-wait:
+			phase = "early_exit"
+			if processErr == nil {
+				return nil, errors.New("Codex app-server exited before ready")
+			}
 			return nil, fmt.Errorf("Codex app-server exited before ready: %w", processErr)
 		case <-readyCtx.Done():
+			phase = "readiness_timeout"
 			_ = stop()
 			return nil, fmt.Errorf("Codex app-server readiness timeout: %w", readyCtx.Err())
 		case <-time.After(20 * time.Millisecond):
@@ -161,6 +179,7 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 			continue
 		}
 		if info.Mode()&os.ModeSocket == 0 {
+			phase = "endpoint_type"
 			_ = stop()
 			return nil, fmt.Errorf("Codex app-server endpoint is not a Unix socket")
 		}
@@ -170,6 +189,7 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 		// socket mode here before making the endpoint reachable to any client.
 		if info.Mode().Perm() != 0o600 {
 			if chmodErr := os.Chmod(socketPath, 0o600); chmodErr != nil {
+				phase = "socket_permissions"
 				_ = stop()
 				return nil, fmt.Errorf("make Codex app-server socket private: %w", chmodErr)
 			}
@@ -185,6 +205,8 @@ func startCodexAppServerWithFactoryForHome(ctx context.Context, binary, _ string
 			client = nil
 		}
 	}
+	phase = ""
+	stderr.finish("", generation)
 	runtime := &codexAppServerRuntime{PID: cmd.Process.Pid, ProcessStartIdentity: processIdentity, Endpoint: socketPath, RemoteURI: "unix://" + socketPath, Client: client}
 	runtime.Stop = func() error {
 		_ = client.Close()

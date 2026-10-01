@@ -3985,7 +3985,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if config.Agent == "" {
 					config.Agent = "claude-code"
 				}
-				if config.Prompt != "" && (config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged) {
+				if config.Prompt != "" && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged) {
 					config.DeferInitialPrompt = true
 				}
 				sessionID, err := sm.CreateSession(ctx, config)
@@ -4038,7 +4038,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					// registration ACK that this goroutine is waiting for.
 					daemon.Go("memory-context-initial-prompt", logger, func() {
 						if err := deliverDeferredInitialPrompt(ctx, memoryContextGrants, sessionID, prompt, cmd.RequestID,
-							func(input session.UserMessageInput) error { return sm.SendMessageWithInput(ctx, input) }); err != nil {
+							func(input session.UserMessageInput) error { return sm.SendDeferredInitialPrompt(ctx, input) }); err != nil {
 							logger.Warn("managed initial prompt dispatch failed", "session", sessionID, "error", err)
 						}
 					})

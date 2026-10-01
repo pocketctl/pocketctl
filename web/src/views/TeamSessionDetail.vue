@@ -1,7 +1,7 @@
 <template>
   <div class="team-session-layout" data-testid="team-session-detail">
     <aside class="session-panel">
-      <TeamSessionBrowser v-if="browseScope.type === 'team'" ref="teamBrowser" :key="browseScope.teamId" :team-id="browseScope.teamId" :current-session-id="sessionID" :current-team-id="teamID" @update:scope="changeScope" @filtered="outsideBrowse = $event" />
+      <TeamSessionBrowser v-if="browseScope.type === 'team'" ref="teamBrowser" :key="browseScope.teamId" :team-id="browseScope.teamId" :current-session-id="sessionID" :current-team-id="teamID" @update:scope="changeScope" @filtered="outsideBrowse = $event" @updated="applyBrowserUpdate" />
       <PersonalSessionBrowser v-else @update:scope="changeScope" />
     </aside>
 
@@ -58,7 +58,7 @@
         <div class="composer-row">
           <textarea v-model="draft" :style="{height:textareaHeight + 'px'}" :disabled="!!readOnlyReason" rows="1" :placeholder="readOnlyReason || '补充信息，提出问题，或请 Agent 继续工作…'" data-testid="team-session-composer" @keydown.enter.exact.prevent="send" />
         </div>
-        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" /><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false">材料</button>
+        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" :members="members" /><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false">材料</button>
           <button type="button" class="send-button" :disabled="!canSend || !draft.trim() || !!targetUnavailableReason" data-testid="team-session-send" @click="send">{{ sending ? '…' : '↑' }}</button>
         </div>
         </div>
@@ -112,7 +112,7 @@ import { useAuth } from '../composables/useAuth'
 import { getScopedReadingPosition, setScopedReadingPosition, type SessionScope } from '../composables/useScopedSessionState'
 import { useTeamSession } from '../composables/useTeamSession'
 import { getTeamContext, listTeamAgentOffers, listTeamMembers, listTeams, updateTeamSession } from '../services/teamClient'
-import type { TeamContextSnapshot, TeamCallSummary, TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSummary } from '../types/team'
+import type { TeamSession, TeamContextSnapshot, TeamCallSummary, TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSummary } from '../types/team'
 
 const route = useRoute(), { user } = useAuth(), teamAccess=useTeamAccess()
 const teamID = computed(() => String(route.params.teamId ?? '')), sessionID = computed(() => String(route.params.id ?? ''))
@@ -129,6 +129,9 @@ const {
   autorunEnabled, readOnlyReason, canSend, sendMessage, createRun, controlRun, supplementRunInput,
   suggestRunPause, withdrawAgent,
 } = useTeamSession(teamID, sessionID)
+function applyBrowserUpdate(updated: TeamSession) {
+  if (updated.id === sessionID.value && updated.team_id === teamID.value) session.value = updated
+}
 const historyContext = ref<TeamContextSnapshot|null>(null)
 let historyGeneration = 0
 async function openContextVersion(version:number) {

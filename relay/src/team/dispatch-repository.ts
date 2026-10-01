@@ -53,6 +53,9 @@ export function dispatchAuthorizationMatches(
 }
 
 export function dispatchProjectionKind(message: Record<string, unknown>): 'agent_message' | 'status' | null {
+  // Native subagent streams remain private. Only the selected receiver's
+  // root answer and lifecycle can settle its shared Team call.
+  if (message.is_subagent === true || (typeof message.agent_id === 'string' && message.agent_id.length > 0)) return null
   if (message.type === 'agent_text' && typeof message.text === 'string' && message.text.length > 0) return 'agent_message'
   if (dispatchTerminalStatus(message) || message.type === 'interactive_prompt' || message.type === 'approval_request') return 'status'
   return null
@@ -271,7 +274,11 @@ export class TeamDispatchRepository {
       )).rows[0]
       if (!call) return null
       const projectionKey = `${daemonId}:${seq}`
-      const duplicate = await client.query(`SELECT * FROM collaboration_events WHERE call_id = $1 AND request_id = $2`, [call.call_id, projectionKey])
+      // A reconnect can replay an old turn after a new call is dispatched to
+      // the same native session. Sequence identity belongs to the daemon,
+      // so an event already projected for any earlier call must stay there.
+      const duplicate = await client.query(`SELECT 1 FROM collaboration_events
+        WHERE team_session_id = $1 AND request_id = $2 AND call_id IS NOT NULL`, [call.team_session_id, projectionKey])
       if (duplicate.rows[0]) return null
       const sequence = await client.query<{ latest_event_seq: string }>(
         `UPDATE collaboration_sessions SET latest_event_seq = latest_event_seq + 1, updated_at = NOW()

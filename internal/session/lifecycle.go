@@ -228,6 +228,18 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		}
 	}
 
+	if config.Agent == adapter.AgentClaude && config.ClaudePrintSession {
+		now := time.Now()
+		ps := &ProcessState{SessionID: sessionID, Status: protocol.StatusIdle,
+			StartedAt: now, LastActivityAt: now, Cwd: resolvedCwd, Agent: config.Agent,
+			Source: "daemon", Permission: clonePermission(config.Permission), Model: displayModel,
+			ClaudePrintSession: true, ClaudePrintEnv: append(os.Environ(), extraEnv...)}
+		sm.mu.Lock()
+		sm.sessions[sessionID] = ps
+		sm.mu.Unlock()
+		sm.registerCwd(sessionID, resolvedCwd)
+		return sessionID, nil
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	ptmx, cmd, err := startPTYCli(sm.ptyProvider, cliPath, args, resolvedCwd, extraEnv, config.Agent)
 	if err != nil {
@@ -257,6 +269,11 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		InitialPrompt:   config.Prompt,
 		JSONLExcludeIDs: jsonlExcludeIDs,
 	}
+	startupPrompt := config.Prompt
+	if config.DeferInitialPrompt {
+		ps.DeferredInitialPrompt = config.Prompt
+		startupPrompt = ""
+	}
 	sm.mu.Lock()
 	sm.sessions[sessionID] = ps
 	if cmd.Process != nil {
@@ -282,13 +299,13 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 	// Emit the initial prompt as user_text for immediate Web/iOS UI feedback.
 	// (PTY claude also writes the user record to JSONL; emitting early gives
 	// instant UI render while the PTY settles.)
-	if config.Prompt != "" {
+	if startupPrompt != "" {
 		sm.emitInitialPrompt(sessionID, config.Agent, config.Prompt)
 	}
 
 	// Background lifecycle: wait for JSONL → tailer (output) → initial prompt →
 	// crash monitor.
-	go sm.servePTYSession(ctx, ps, config.Prompt)
+	go sm.servePTYSession(ctx, ps, startupPrompt)
 	return sessionID, nil
 }
 
@@ -385,13 +402,16 @@ func (sm *SessionManager) servePTYSession(ctx context.Context, ps *ProcessState,
 	// the bytes to a PTY menu scanner so inline selection prompts the TUI draws
 	// (e.g. a host PreToolUse hook's "Do you want to proceed? ❶ Yes ❷ No") are
 	// surfaced to clients as interactive_prompt cards instead of being lost.
+	done := make(chan struct{})
+	sm.mu.Lock()
 	ps.PTYScanner = ptyscan.NewScanner(ps.SessionID)
+	ps.PTYDone = done
+	sm.mu.Unlock()
 	go sm.drainPTY(ctx, ps)
 
 	// Monitor process exit immediately. Some CLIs can fail during startup before
 	// the prompt delay elapses; waiting to call Wait until after the delay makes
 	// the logs look like the prompt write caused the crash.
-	done := make(chan struct{})
 	go func() {
 		_ = ps.Cmd.Wait()
 		close(done)

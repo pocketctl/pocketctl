@@ -46,6 +46,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   let disposers: Array<() => void> = []
   let runPollTimer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
+  let sessionPollTimer: ReturnType<typeof setTimeout> | undefined
   let callPollTimer: ReturnType<typeof setTimeout> | undefined
 
   const callableBindings = computed(() => session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? [])
@@ -78,6 +79,37 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       mergeEvents(page.events)
       cursor = page.next_cursor
     } while (cursor !== null)
+  }
+
+  function clearSessionPoll(): void {
+    if (sessionPollTimer) clearTimeout(sessionPollTimer)
+    sessionPollTimer = undefined
+  }
+
+  function scheduleSessionPoll(): void {
+    clearSessionPoll()
+    if (disposed || accessRevoked.value) return
+    const currentGeneration = generation
+    const currentSessionID = sessionID.value
+    sessionPollTimer = setTimeout(async () => {
+      sessionPollTimer = undefined
+      try {
+        const nextSession = await getTeamSession(currentSessionID)
+        if (disposed || accessRevoked.value || currentGeneration !== generation) return
+        // A sidebar mutation or another participant can change metadata without
+        // appending a discussion event. Do not overwrite a newer local mutation.
+        if (!session.value || nextSession.revision >= session.value.revision) session.value = nextSession
+        if (context.value?.version !== session.value.current_context_version) {
+          const nextContext = await getTeamContext(currentSessionID)
+          if (!disposed && !accessRevoked.value && currentGeneration === generation
+            && nextContext?.version === session.value?.current_context_version) context.value = nextContext
+        }
+      } catch (failure) {
+        if (!disposed && !accessRevoked.value && currentGeneration === generation) error.value = errorMessage(failure)
+      } finally {
+        if (currentGeneration === generation) scheduleSessionPoll()
+      }
+    }, 5_000)
   }
 
   function clearCallPoll(): void {
@@ -170,6 +202,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     events.value = []
     calls.value = []
     clearCallPoll()
+    clearSessionPoll()
     runs.value = []
     runContext.value = null
     task.value = null
@@ -198,6 +231,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       connect()
       subscribeTeamSession(sessionID.value)
       scheduleRunPoll()
+      scheduleSessionPoll()
       void refreshCalls()
     } catch (failure) {
       if (currentGeneration === generation) error.value = errorMessage(failure)
@@ -339,6 +373,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
         if (message.team_session_id !== sessionID.value) return
         generation++
         clearCallPoll()
+        clearSessionPoll()
         clearRunPoll()
         calls.value = []
         events.value = []
@@ -369,6 +404,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     disposed = true
     generation++
     clearCallPoll()
+    clearSessionPoll()
     clearRunPoll()
     unsubscribeTeamSession(sessionID.value)
     disposers.forEach(dispose => dispose())

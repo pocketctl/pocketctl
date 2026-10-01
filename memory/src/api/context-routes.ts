@@ -79,25 +79,32 @@ function positiveRevision(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
 }
 
-function decodePackCursor(value: string | undefined): { createdAt: Date; packId: string } | null {
+function decodePackCursor(value: string | undefined): { createdAt: string; packId: string } | null {
   if (value === undefined) return null
   try {
     const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as {
       created_at?: unknown
       pack_id?: unknown
     }
-    if (typeof parsed.created_at !== 'string' || typeof parsed.pack_id !== 'string'
+    if (typeof parsed.created_at !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/.test(parsed.created_at)
+      || parsed.created_at.startsWith('0000-')
+      || typeof parsed.pack_id !== 'string'
       || !UUID_RE.test(parsed.pack_id)) return null
     const createdAt = new Date(parsed.created_at)
-    return Number.isFinite(createdAt.getTime()) ? { createdAt, packId: parsed.pack_id } : null
+    // Keep PostgreSQL microseconds in the cursor. JavaScript Date truncates
+    // them and can skip packs created within the same millisecond.
+    return Number.isFinite(createdAt.getTime())
+      && createdAt.toISOString().slice(0, 19) === parsed.created_at.slice(0, 19)
+      ? { createdAt: parsed.created_at, packId: parsed.pack_id } : null
   } catch {
     return null
   }
 }
 
-function encodePackCursor(row: { created_at: Date; pack_id: string }): string {
+function encodePackCursor(row: { created_at: Date; created_at_cursor?: string; pack_id: string }): string {
   return Buffer.from(JSON.stringify({
-    created_at: row.created_at.toISOString(), pack_id: row.pack_id,
+    created_at: row.created_at_cursor ?? row.created_at.toISOString(), pack_id: row.pack_id,
   })).toString('base64url')
 }
 
@@ -480,10 +487,10 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     `, [grant.installationId, sessionId])
     const deliveryByPack = Object.fromEntries(injections.rows.map(row => [row.pack_id, row]))
     return {
-      packs: page.map(row => ({
-        ...row,
-        delivery: deliveryByPack[row.pack_id] ?? null,
-      })),
+      packs: page.map(row => {
+        const { created_at_cursor, ...pack } = row
+        return { ...pack, delivery: deliveryByPack[row.pack_id] ?? null }
+      }),
       next_cursor: rows.length > pageSize && page.length > 0
         ? encodePackCursor(page[page.length - 1]) : null,
     }

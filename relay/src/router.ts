@@ -3603,6 +3603,11 @@ export class Router {
     return true;
   }
 
+  isTeamDaemonOnline(daemonId: string, ownerUserId: number): boolean {
+    const daemon = this.daemons.get(daemonId);
+    return Boolean(daemon && daemon.ws.readyState === 1 && daemon.userId === ownerUserId);
+  }
+
   /** Broadcast a message to all clients of the given user. */
   broadcastToUser(userId: number, data: any): void {
     for (const [ws, c] of this.clients) {

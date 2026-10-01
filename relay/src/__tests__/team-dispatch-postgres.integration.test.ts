@@ -136,6 +136,23 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     })
     expect(terminal?.event).toMatchObject({ kind: 'status', content: 'completed' })
     expect((await pool.query(`SELECT state FROM collaboration_calls WHERE call_id = $1`, [first!.callId])).rows[0].state).toBe('completed')
+    const continuation = await sessions.appendMessage({
+      sessionId: shared.id, actorUserId: ownerUserId, requestId: 'dispatch-after-reconnect', content: 'Continue',
+      targetMode: 'all', targetOfferIds: [], referenceEventId: null,
+    })
+    const next = await repository.claim(continuation.call_ids[0])
+    expect(next?.nativeSessionId).toBe('native-team-session')
+    // Spool replay belongs to the original call even when a continuation is
+    // now active. It must neither copy the old answer nor finish the new call.
+    expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, {
+      type: 'agent_text', session_id: 'native-team-session', seq: 10, text: 'Shared answer',
+    })).toBeNull()
+    expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, {
+      type: 'turn_status', session_id: 'native-team-session', seq: 12, turn_status: 'completed',
+    })).toBeNull()
+    expect((await pool.query(`SELECT state FROM collaboration_calls WHERE call_id = $1`, [next!.callId])).rows[0].state).toBe('dispatched')
+    expect((await pool.query(`SELECT count(*)::int AS n FROM collaboration_events WHERE call_id = $1`, [next!.callId])).rows[0].n).toBe(0)
+    await repository.stop(next!.callId, 'failed', 'test_cleanup')
     // Actual PostgreSQL parameter inference, not a mocked query result.
     for (const state of ['blocked', 'failed', 'uncertain'] as const) {
       await pool.query(`UPDATE collaboration_calls SET state = 'dispatched', finished_at = NULL WHERE call_id = $1`, [first!.callId])

@@ -281,9 +281,10 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	if source == "daemon" {
 		sm.mu.RLock()
 		ptyFile := ps.PTY
+		claudePrint := ps.ClaudePrintSession
 		sm.mu.RUnlock()
 		if ptyFile == nil {
-			if agentType != adapter.AgentCodex {
+			if agentType != adapter.AgentCodex && !claudePrint {
 				return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
 			}
 		} else if !isProcessAlive(pid) {
@@ -338,10 +339,26 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	if err != nil {
 		return err
 	}
-	resumeConfig := protocol.SessionConfig{Permission: clonePermission(ps.Permission)}
+	sm.mu.RLock()
+	resumeConfig := protocol.SessionConfig{Permission: clonePermission(ps.Permission), Model: ps.Model}
+	claudePrint, firstPrint := ps.ClaudePrintSession, ps.ClaudePrintSession && !ps.ClaudePrintStarted
+	printEnv := append([]string(nil), ps.ClaudePrintEnv...)
+	sm.mu.RUnlock()
 	var args []string
-	if agentType == adapter.AgentClaude && hidden != nil {
-		args = adapter.BuildClaudeArgsWithContext(content, sessionID, resumeConfig, hidden)
+	if agentType == adapter.AgentClaude && (hidden != nil || claudePrint) {
+		resumeID := sessionID
+		if firstPrint {
+			resumeID = ""
+		}
+		args = adapter.BuildClaudeArgsWithContext(content, resumeID, resumeConfig, hidden)
+		if firstPrint {
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--session-id" {
+					args[i+1] = sessionID
+					break
+				}
+			}
+		}
 	} else {
 		launcher := adapter.NewLauncher(agentType)
 		args = launcher.BuildResumeArgs(content, sessionID, resumeConfig)
@@ -352,7 +369,11 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		cancel()
 		return err
 	}
-	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd})
+	spec := resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd}
+	if claudePrint {
+		spec.Env = printEnv
+	}
+	proc, err := sm.startResumeProcess(ctx, spec)
 	if err != nil {
 		cancel()
 		sm.finishOwnedResume(entry, err)
@@ -369,6 +390,13 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	sm.mu.Lock()
 	ps.Cmd = resumeProcessCmd(proc)
+	if claudePrint {
+		ps.ClaudePrintStarted = true
+		ps.Pid = proc.PID()
+		if ps.Pid > 0 {
+			sm.childPids[ps.Pid] = true
+		}
+	}
 	ps.Cancel = cancel
 	ps.Status = protocol.StatusRunning
 	ps.Source = source // Keep original source

@@ -176,13 +176,14 @@ export function createPackRepository(pool: pg.Pool) {
       installationId: string
       sessionId: string
       limit?: number
-      beforeCreatedAt?: Date | null
+      beforeCreatedAt?: Date | string | null
       beforePackId?: string | null
     }): Promise<Array<{
       pack_id: string
       state: string
       client_request_id: string
       created_at: Date
+      created_at_cursor: string
       mode: string
       agent: string
       stable_text: string
@@ -218,13 +219,14 @@ export function createPackRepository(pool: pg.Pool) {
       }
     }>> {
       const result = await pool.query<{
-        pack_id: string; state: string; client_request_id: string; created_at: Date
+        pack_id: string; state: string; client_request_id: string; created_at: Date; created_at_cursor: string
         mode: string; agent: string; stable_text: string; dynamic_text: string
         stable_tokens: number; dynamic_tokens: number; error_code: string | null
         policy_revision: string; settings_revision: string; loadout_revision: string
         trajectory_id: string | null; result_state: string | null; degraded_components: string[] | null
       }>(`
         SELECT p.pack_id::text, p.state, p.client_request_id, p.created_at,
+               to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
                p.mode, p.agent, p.stable_text, p.dynamic_text,
                p.stable_tokens, p.dynamic_tokens, p.error_code,
                p.policy_revision::text, p.settings_revision::text, p.loadout_revision::text,
@@ -290,6 +292,7 @@ export function createPackRepository(pool: pg.Pool) {
         state: row.state,
         client_request_id: row.client_request_id,
         created_at: row.created_at,
+        created_at_cursor: row.created_at_cursor,
         mode: row.mode,
         agent: row.agent,
         stable_text: row.stable_text,

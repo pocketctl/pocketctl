@@ -3,7 +3,7 @@ import { describe, expect, test, vi } from 'vitest'
 
 import { candidateForProvider } from '../team/agent-offers.js'
 import { resolveTeamCollaborationConfig } from '../team/config.js'
-import { TeamRepositoryError } from '../team/repository.js'
+import { TeamRepositoryError, type CollaborationAgentOfferView } from '../team/repository.js'
 import { registerTeamRoutes, type TeamRouteService } from '../team/routes.js'
 
 function service(overrides: Partial<TeamRouteService> = {}): TeamRouteService {
@@ -30,18 +30,41 @@ function service(overrides: Partial<TeamRouteService> = {}): TeamRouteService {
   }
 }
 
-function register(testService: TeamRouteService, enabled = true) {
+function register(testService: TeamRouteService, enabled = true, live?: (daemonId: string, ownerUserId: number) => boolean) {
   const app = Fastify()
   registerTeamRoutes(app, {
     config: resolveTeamCollaborationConfig(enabled ? { TEAM_COLLABORATION: 'on' } : {}),
     service: testService,
     verifyAccessToken: async token => token.startsWith('user-') ? { userId: Number(token.slice(5)) } : null,
     getDatabaseReady: () => true,
+    isDaemonOnline: live,
   })
   return app
 }
 
 describe('Team membership routes', () => {
+  test('does not advertise persisted online Agents before their live socket reconnects', async () => {
+    const candidate = candidateForProvider({ daemon_id: 'd-stale', hostname: 'host', status: 'online',
+      agents: ['claude-code'], collaboration_capabilities: ['team_collaboration_dispatch_v1', 'team_collaboration_context_v1'] }, 'claude-code', 't')
+    const offer: CollaborationAgentOfferView = { ...candidate, id: 'o', team_id: 't', owner_user_id: 8,
+      runtime_profile_id: null, capability_revision: 1, state: 'active', revision: 1,
+      created_at: '2026-09-30T00:00:00Z', updated_at: '2026-09-30T00:00:00Z' }
+    let connected = false
+    const live = vi.fn(() => connected)
+    const app = register(service({ listMyAgentCandidates: async () => [candidate],
+      listAgentCandidates: async () => [candidate], listAgentOffers: async () => [offer] }), true, live)
+    for (const route of ['/api/team/agent-candidates', '/api/team/teams/t/agent-candidates', '/api/team/teams/t/agent-offers']) {
+      const response = await app.inject({ method:'GET',url:route,headers:{authorization:'Bearer user-7'} })
+      expect(response.statusCode).toBe(200)
+      const item = (response.json().agents ?? response.json().offers)[0]
+      expect(item).toMatchObject({ online:false, managed_callable:false, availability:'offline' })
+    }
+    expect(live).toHaveBeenCalledWith('d-stale',8)
+    connected = true
+    const recovered = await app.inject({method:'GET',url:'/api/team/teams/t/agent-offers',headers:{authorization:'Bearer user-7'}})
+    expect(recovered.json().offers[0]).toMatchObject({online:true,managed_callable:true,availability:'online'})
+    await app.close()
+  })
   test('keeps writes disabled by default without calling the service', async () => {
     const createTeam = vi.fn()
     const app = register(service({ createTeam }), false)

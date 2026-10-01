@@ -11,11 +11,11 @@
         type="button"
         :class="{ active: modelValue.mode === 'offers' && modelValue.offerIDs.includes(binding.offer_id) }"
         :disabled="binding.availability !== 'online'"
-        :title="binding.availability === 'online' ? '发送给此 Agent' : availabilityLabel(binding.availability)"
+        :title="`${bindingLabel(binding)} · ${binding.availability === 'online' ? '发送给此 Agent' : availabilityLabel(binding.availability)}`"
         :data-offer-id="binding.offer_id"
         @click="toggleOffer(binding.offer_id)"
       >
-        {{ binding.provider === 'codex' ? 'Codex' : 'Claude Code' }}
+        {{ bindingLabel(binding) }}
         <span :class="['target-dot', binding.availability]"></span>
       </button>
     </div>
@@ -25,21 +25,27 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
-import type { TeamSessionAgentBinding } from '../../types/team'
+import type { TeamMember, TeamSessionAgentBinding } from '../../types/team'
 
 export interface TeamAgentTargetValue {
   mode: 'all' | 'offers' | 'discussion'
   offerIDs: string[]
 }
 
-const props = defineProps<{ modelValue: TeamAgentTargetValue; bindings: TeamSessionAgentBinding[] }>()
+const props = withDefaults(defineProps<{ modelValue: TeamAgentTargetValue; bindings: TeamSessionAgentBinding[]; members?: TeamMember[] }>(), { members: () => [] })
 const emit = defineEmits<{ 'update:modelValue': [value: TeamAgentTargetValue] }>()
 const root=ref<HTMLElement|null>(null),trigger=ref<HTMLButtonElement|null>(null),open=ref(false)
 function closeMenu(){open.value=false;trigger.value?.focus()}
 function outside(event:MouseEvent){if(!root.value?.contains(event.target as Node))open.value=false}
 onMounted(()=>document.addEventListener('click',outside));onBeforeUnmount(()=>document.removeEventListener('click',outside))
-const selectionLabel=computed(()=>props.modelValue.mode==='discussion'?'仅补充讨论':props.modelValue.mode==='all'?`所有可用 Agent（${callableBindings.value.length}）`:props.bindings.filter(binding=>props.modelValue.offerIDs.includes(binding.offer_id)).map(binding=>binding.provider==='codex'?'Codex':'Claude Code').join(' + '))
+const selectionLabel=computed(()=>props.modelValue.mode==='discussion'?'仅补充讨论':props.modelValue.mode==='all'?`所有可用 Agent（${callableBindings.value.length}）`:props.bindings.filter(binding=>props.modelValue.offerIDs.includes(binding.offer_id)).map(bindingLabel).join(' + '))
 const callableBindings = computed(() => props.bindings.filter(binding => binding.availability === 'online'))
+
+function bindingLabel(binding: TeamSessionAgentBinding): string {
+  const provider = binding.provider === 'codex' ? 'Codex' : 'Claude Code'
+  const owner = props.members.find(member => member.user_id === binding.owner_user_id)?.display_label ?? `成员 ${binding.owner_user_id}`
+  return `${provider} · ${owner} · ${binding.daemon_id}`
+}
 
 function availabilityLabel(value: TeamSessionAgentBinding['availability']): string {
   return ({ offline: '离线', unsupported: '不支持团队调用', unmanaged: '未托管', occupied: '被其他团队占用', online: '在线', access_disabled: '账号未开通 Team' })[value]

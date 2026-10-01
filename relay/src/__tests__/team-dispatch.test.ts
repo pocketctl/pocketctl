@@ -34,6 +34,8 @@ describe('Team dispatch contract', () => {
     expect(dispatchProjectionKind({ type: 'interactive_prompt', input: { prompt: 'private' } })).toBe('status')
     expect(dispatchProjectionKind({ type: 'tool_call', text: 'rm -rf' })).toBeNull()
     expect(dispatchProjectionKind({ type: 'agent_reasoning', text: 'hidden' })).toBeNull()
+    expect(dispatchProjectionKind({ type: 'agent_text', text: 'private child', agent_id: 'child' })).toBeNull()
+    expect(dispatchProjectionKind({ type: 'turn_status', turn_status: 'completed', is_subagent: true })).toBeNull()
     expect(dispatchProjectionKind({ type: 'turn_status', status: 'running' })).toBeNull()
   })
 

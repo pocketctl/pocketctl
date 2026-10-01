@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
-const api = vi.hoisted(() => ({ getTeamSession:vi.fn(),getTeamContext:vi.fn(async()=>null),createTeamContext:vi.fn(async()=>({})),listTeamTasks:vi.fn(async()=>[]),listTeamMembers:vi.fn(async()=>[]),listTeamAgentCandidates: vi.fn(), listTeams: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), createTeamSession: vi.fn() }))
+const api = vi.hoisted(() => ({ updateTeamSession:vi.fn(),getTeamSession:vi.fn(),getTeamContext:vi.fn(async()=>null),createTeamContext:vi.fn(async()=>({})),listTeamTasks:vi.fn(async()=>[]),listTeamMembers:vi.fn(async()=>[]),listTeamAgentCandidates: vi.fn(), listTeams: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), createTeamSession: vi.fn() }))
 vi.mock('../../services/teamClient', () => api)
 
 vi.mock('../../composables/useAuth', async()=>{const {ref}=await import('vue');return {useAuth:()=>({user:ref({id:7}),accessToken:ref('token')})}})
@@ -43,6 +43,22 @@ beforeEach(() => {
 })
 
 describe('team session list', () => {
+  test('archives using the current revision after bindings changed outside the sidebar', async () => {
+    const current = { ...session, revision: 4 }
+    api.getTeamSession.mockResolvedValue(current)
+    api.updateTeamSession.mockResolvedValue({ ...current, state: 'archived', revision: 5 })
+    const { wrapper } = await render()
+    await wrapper.get('.row-more').trigger('click')
+    await wrapper.findAll('[role="menuitem"]').find(button => button.text() === '归档会话')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '确认归档')!.trigger('click')
+    await flushPromises()
+    expect(api.getTeamSession).toHaveBeenCalledWith(session.id)
+    expect(api.updateTeamSession).toHaveBeenCalledWith(current, { state: 'archived' })
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'TeamSessionBrowser' }).emitted('updated')?.[0]?.[0]).toMatchObject({ state: 'archived', revision: 5 })
+    wrapper.unmount()
+  })
+
   test('keeps copy available to readers without exposing creator write actions', async () => {
     writesEnabled = false
     const { wrapper } = await render()

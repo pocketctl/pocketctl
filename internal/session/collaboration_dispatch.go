@@ -292,11 +292,12 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	}
 	selectedMemory := collaborationHasSelectedMemory(teamContext)
 	initialPrompt := prompt
-	if selectedMemory || register != nil {
+	if selectedMemory || register != nil || agent == adapter.AgentClaude {
 		initialPrompt = ""
 	}
 	nativeSessionID, err := sm.CreateSession(ctx, protocol.SessionConfig{
 		Agent: agent, Cwd: workspace, Prompt: initialPrompt, AutoCreateDir: true,
+		ClaudePrintSession: agent == adapter.AgentClaude,
 	})
 	if nativeSessionID == "" && err == nil {
 		err = ErrCollaborationBinding
@@ -320,6 +321,11 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err != nil {
 		return "", err
 	}
+	if agent == adapter.AgentClaude {
+		if err := persistCollaborationClaude(binding, workspace); err != nil {
+			return "", err
+		}
+	}
 	if register != nil && selectedMemory && sm.MemoryContextCapability(ctx, nativeSessionID, agent) != memorycontext.CapabilityNativeHiddenV1 {
 		return "", fmt.Errorf("team_memory_context_unsupported_adapter")
 	}
@@ -328,7 +334,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 			return "", err
 		}
 	}
-	if selectedMemory || register != nil {
+	if selectedMemory || register != nil || agent == adapter.AgentClaude {
 		base, baseErr := prepareCollaborationContext(teamContext)
 		if baseErr != nil {
 			return "", baseErr
@@ -365,6 +371,11 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 	sm.mu.RLock()
 	process := sm.sessions[nativeSessionID]
 	policy := sm.cwdPolicy
+	sm.mu.RUnlock()
+	if restored := sm.restoreCollaborationClaude(auth, nativeSessionID, process, policy); restored != nil {
+		process = restored
+	}
+	sm.mu.RLock()
 	busy := process == nil || process.Status == protocol.StatusRunning || process.Status == protocol.StatusBusy ||
 		process.Status == protocol.StatusRetry || process.Status == protocol.StatusWaitingApproval || process.Status == protocol.StatusWaitingQuestion
 	sm.mu.RUnlock()

@@ -20,6 +20,9 @@ import (
 )
 
 type ProcessState struct {
+	ClaudePrintSession   bool
+	ClaudePrintStarted   bool
+	ClaudePrintEnv       []string
 	SessionID            string
 	Cmd                  *exec.Cmd
 	Cancel               context.CancelFunc
@@ -43,6 +46,7 @@ type ProcessState struct {
 	Tailer               *watcher.JSONLTailer // terminal session 的 JSONL tailer（D2: sendToIdleTerminal 期间 pause）
 	PTY                  platform.PTY         // interactive-web-session D1: daemon session 的 PTY master（写 stdin 驱动 interactive claude）。PR2: platform.PTY interface (was *os.File)
 	PTYScanner           *ptyscan.Scanner     // daemon session 的 PTY 菜单扫描器（捕获 TUI 选择提示，转成 interactive_prompt 事件）
+	PTYDone              <-chan struct{}      // closed when the interactive process exits
 	Permission           *protocol.PermissionConfig
 	Model                string // resolved model name (for session_created, surfaced to web /model)
 	CurrentAgent         string // selected OpenCode Agent profile; Agent remains the CLI type
@@ -53,7 +57,7 @@ type ProcessState struct {
 	PendingPermissions      map[string]PendingOpenCodePermission
 	PendingQuestions        map[string]PendingOpenCodeQuestion
 	InitialPrompt           string              // prompt submitted when a daemon PTY session starts
-	DeferredInitialPrompt   string              // managed-only prompt waiting for Relay registration ACK
+	DeferredInitialPrompt   string              // prompt waiting for Relay registration ACK
 	JSONLExcludeIDs         map[string]struct{} // rollout/session ids that existed before this PTY launch
 	PTYOutputTail           []byte              // recent raw PTY output for startup diagnostics
 	WorktreePath            string              // Scheme D: non-empty when the session runs inside a git worktree

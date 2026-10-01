@@ -2547,7 +2547,7 @@ function resyncInteractionState() {
 
 function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject' | 'cancel') {
   if (!msg.request_id) return
-  const supportsActions = interactionCapabilities.value.includes('permission_actions') || Array.isArray(msg.availableDecisions)
+  const supportsActions = interactionCapabilities.value.includes('permission_actions') || (Array.isArray(msg.availableDecisions) && msg.availableDecisions.length > 0)
   const trustedPolicy = currentSessionCapabilities.value.includes('trusted_action_policy_v1')
   if (!trustedApprovalActions(msg, supportsActions, trustedPolicy).includes(action)) return
   if (!markInteractionSubmitting(msg, 'Approval')) return

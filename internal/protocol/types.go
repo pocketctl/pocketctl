@@ -745,6 +745,9 @@ type SessionConfig struct {
 	// runtimes create their native session first; Relay registration completes
 	// before the exact prompt enters the ordinary turn path. Never wire-visible.
 	DeferInitialPrompt bool `json:"-"`
+	// ClaudePrintSession is daemon-internal: Team receivers use the native
+	// print/resume system-context channel instead of an interactive startup UI.
+	ClaudePrintSession bool `json:"-"`
 }
 
 // Session states
