@@ -36,54 +36,69 @@
       @update:model-value="emit('update:scope', $event)"
     />
     <div class="filters">
-      <div class="filter-wrap">
+      <div v-if="daemons.length > 1 || host" class="filter-wrap host-filter-popover">
         <button
+          type="button"
           class="filter-trigger host-trigger"
           :aria-expanded="menu === 'host'"
           @click="menu = menu === 'host' ? '' : 'host'"
         >
-          <svg viewBox="0 0 24 24">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
             <rect x="3" y="3" width="18" height="13" rx="2" />
             <path d="M8 21h8M12 16v5" /></svg
-          ><span
-            ><small>主机</small><strong>{{ hostName(host) }}</strong></span
-          ><span>⌄</span>
+          ><span class="host-filter-copy"
+            ><small>{{ t('session.host_filter_label') }}</small><span>{{ hostName(host) }}</span></span
+          ><svg class="filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
         </button>
-        <div v-if="menu === 'host'" class="filter-menu">
+        <div v-if="menu === 'host'" class="filter-menu host-filter-menu">
           <input
             v-model="hostQuery"
-            aria-label="搜索主机"
-            placeholder="搜索主机名称"
-          /><button
+            class="host-filter-search"
+            type="search"
+            :aria-label="t('session.host_filter_search')"
+            :placeholder="t('session.host_filter_search')"
+          />
+          <div class="host-filter-options">
+          <button
             v-for="item in hostOptions"
             :key="item.daemon_id"
+            type="button"
+            class="filter-option host-filter-option"
+            :aria-pressed="host === item.daemon_id"
             @click="
               host = item.daemon_id;
               menu = '';
             "
           >
-            <i :class="['dot', { online: item.status === 'online' }]"></i
-            ><span>{{
-              item.alias || item.hostname || item.daemon_id || "全部主机"
-            }}</span>
+            <i :class="['dot', { online: item.status === 'online' }]" aria-hidden="true"></i>
+            <span class="host-filter-copy"><span>{{ hostName(item.daemon_id) }}</span>
+              <small>{{ item.daemon_id ? `${item.status === 'online' ? t('dashboard.online') : t('dashboard.offline')} · ${item.daemon_id}` : t('session.host_filter_all_hint') }}</small>
+            </span>
+            <span class="filter-count">{{ item.count }}</span>
+            <span class="host-filter-check" aria-hidden="true">{{ host === item.daemon_id ? '✓' : '' }}</span>
           </button>
+          <p v-if="!hostOptions.length" class="host-filter-empty">{{ t('session.host_filter_no_match') }}</p>
+          </div>
         </div>
       </div>
-      <div class="filter-wrap">
+      <div v-if="allRows.length" class="filter-wrap agent-filter-popover">
         <button
+          type="button"
           class="filter-trigger"
           aria-haspopup="menu"
           :aria-expanded="menu === 'agent'"
           @click="menu = menu === 'agent' ? '' : 'agent'"
         >
-          <svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4" /></svg
-          ><strong>{{ agentLabel(agent) }}（{{ filtered.length }}）</strong
-          ><span>⌄</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" /></svg
+          ><span class="filter-trigger-label">{{ agentLabel(agent) }}（{{ filtered.length }}）</span>
+          <svg class="filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
         </button>
-        <div v-if="menu === 'agent'" class="filter-menu" role="menu">
+        <div v-if="menu === 'agent'" class="filter-menu" role="menu" :aria-label="t('session.agent_filter_label')">
           <button
             v-for="item in agentOptions"
             :key="item"
+            type="button"
+            class="filter-option"
             role="menuitemradio"
             :aria-checked="agent === item"
             @click="
@@ -91,10 +106,11 @@
               menu = '';
             "
           >
-            {{ agent === item ? "✓ " : "" }}{{ agentLabel(item)
-            }}<small>{{
+            <svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"/></svg>
+            <span class="filter-option-label">{{ agentLabel(item) }}</span>
+            <span class="filter-count">{{
               allRows.filter((row) => !item || row.agent_type === item).length
-            }}</small>
+            }}</span>
           </button>
         </div>
       </div>
@@ -275,6 +291,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch, toRefs } from "vue";
 import { useSessionBrowserFilters } from "../../composables/useSessionBrowserFilters";
+import { useLocale } from "../../composables/useLocale";
+import { agentDisplayName } from "../../utils/agentDisplay";
 import SessionScopeSwitcher from "./SessionScopeSwitcher.vue";
 import SessionActions from "../SessionActions.vue";
 import SessionPinBadge from "../SessionPinBadge.vue";
@@ -295,6 +313,7 @@ import {
   type SessionProject,
 } from "../../services/sessionOrganization";
 const root = ref<HTMLElement | null>(null);
+const { t } = useLocale();
 function closeMenus(event: MouseEvent) {
   if (!(event.target as HTMLElement).closest(".filter-wrap,.project-heading")) {
     menu.value = "";
@@ -334,16 +353,10 @@ let generation = 0;
 const cleanups: (() => void)[] = [];
 function hostName(id: string) {
   const daemon = daemons.value.find((item) => item.daemon_id === id);
-  return daemon?.alias || daemon?.hostname || id || "全部主机";
+  return daemon?.daemon_alias || daemon?.alias || daemon?.hostname || id || t('session.host_filter_all');
 }
 function agentLabel(value: string) {
-  return value === "codex"
-    ? "Codex"
-    : value === "claude-code"
-      ? "Claude Code"
-      : value === "opencode"
-        ? "OpenCode"
-        : value || "全部 Agent";
+  return value ? agentDisplayName(value) : t('session.agent_filter_all');
 }
 function formatTime(value: string) {
   const date = new Date(value);
@@ -377,17 +390,22 @@ const hostOptions = computed(() =>
   [
     {
       daemon_id: "",
-      hostname: "全部主机",
+      hostname: t('session.host_filter_all'),
       status: daemons.value.some((item) => item.status === "online")
         ? "online"
         : "offline",
     },
     ...daemons.value,
   ].filter((item) =>
-    `${item.alias || ""} ${item.hostname} ${item.daemon_id}`
+    `${item.daemon_alias || item.alias || ""} ${item.hostname} ${item.daemon_id}`
       .toLowerCase()
-      .includes(hostQuery.value.toLowerCase()),
-  ),
+      .includes(hostQuery.value.trim().toLowerCase()),
+  ).map(item => ({
+    ...item,
+    count: item.daemon_id
+      ? Number(item.total_sessions ?? allRows.value.filter(row => row.daemon_id === item.daemon_id).length)
+      : daemons.value.reduce((count, daemon) => count + Number(daemon.total_sessions ?? allRows.value.filter(row => row.daemon_id === daemon.daemon_id).length), 0),
+  })),
 );
 const scopedHosts = computed(() =>
   daemons.value.filter((item) => !host.value || item.daemon_id === host.value),
@@ -601,43 +619,39 @@ header > button {
   font-size: 19px;
 }
 .filters {
-  padding: 10px 10px 8px;
-  display: grid;
-  gap: 8px;
+  min-width: 0;
 }
 .filter-wrap {
   position: relative;
 }
+.host-filter-popover { padding: 10px 10px 0; }
+.agent-filter-popover { padding: 8px 10px; border-bottom: 1px solid var(--sidebar-border); }
 .filter-trigger {
   width: 100%;
-  display: flex;
+  min-width: 0;
+  height: 34px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 8px;
-  padding: 8px 9px;
+  padding: 0 10px;
+  overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg);
+  border-radius: var(--radius-md);
+  background: var(--surface);
   color: var(--fg-secondary);
-  text-align: left;
-  font: 11px var(--font-body);
+  text-align: center;
   cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
 }
-.filter-trigger > span:first-of-type,
-.filter-trigger > strong {
-  flex: 1;
-  min-width: 0;
-}
-.filter-trigger strong {
-  font-weight: 550;
-  color: var(--fg);
-  display: block;
-}
-.filter-trigger small {
-  display: block;
-  color: var(--fg-tertiary);
-  font-size: 9px;
-  margin-bottom: 3px;
-}
+.filter-trigger:hover,
+.filter-trigger[aria-expanded="true"] { border-color: var(--border-light); color: var(--fg); background: var(--surface-hover); }
+.filter-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.host-trigger { height: 52px; text-align: left; }
+.filter-trigger > svg { stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.filter-trigger-label { min-width: 0; overflow: hidden; font-size: 11.5px; font-weight: 600; line-height: 1; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.filter-chevron { justify-self: end; transition: transform .15s ease; }
+.filter-trigger[aria-expanded="true"] .filter-chevron { transform: rotate(180deg); }
 svg {
   width: 15px;
   height: 15px;
@@ -646,7 +660,6 @@ svg {
   stroke-width: 1.5;
   flex: none;
 }
-.filter-menu,
 .project-menu {
   position: absolute;
   z-index: 30;
@@ -659,7 +672,6 @@ svg {
   border-radius: 8px;
   box-shadow: var(--shadow-lg);
 }
-.filter-menu button,
 .project-menu button {
   width: 100%;
   display: flex;
@@ -673,10 +685,6 @@ svg {
   font: 11px var(--font-body);
   cursor: pointer;
 }
-.filter-menu button > span {
-  flex: 1;
-}
-.filter-menu input,
 .search {
   padding: 8px;
   background: var(--bg);
@@ -685,9 +693,29 @@ svg {
   border-radius: 6px;
   font: 11px var(--font-body);
 }
-.filter-menu input {
-  width: 100%;
-}
+.filter-menu { position: absolute; z-index: 60; top: calc(100% - 3px); right: 10px; left: 10px; display: flex; flex-direction: column; gap: 2px; padding: 5px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); }
+.filter-option { width: 100%; min-width: 0; min-height: 34px; display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 8px; overflow: hidden; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); background: transparent; font: 12px/1.2 var(--font-body); text-align: left; cursor: pointer; }
+.filter-option:hover,
+.filter-option:focus-visible { color: var(--fg); background: var(--surface-hover); outline: none; }
+.filter-option[aria-checked="true"] { color: var(--fg); background: var(--accent-muted); }
+.filter-check { width: 14px; height: 14px; opacity: 0; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.filter-option[aria-checked="true"] .filter-check { opacity: 1; }
+.filter-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-count { min-width: 20px; color: var(--fg-tertiary); font: 10.5px/1 var(--font-mono); text-align: right; }
+.host-filter-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.host-filter-copy > span,
+.host-filter-copy > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-filter-copy > span { color: var(--fg); font-size: 12px; }
+.host-filter-copy > small { color: var(--fg-tertiary); font-size: 10px; font-weight: 400; }
+.host-filter-menu { top: calc(100% + 5px); padding: 7px; }
+.host-filter-search { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--border-light); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: 12px var(--font-body); }
+.host-filter-search:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.host-filter-options { max-height: min(360px, 45dvh); overflow-y: auto; margin-top: 5px; }
+.host-filter-option { grid-template-columns: 7px minmax(0, 1fr) auto 12px; min-height: 53px; }
+.host-filter-option[aria-pressed="true"] { background: var(--accent-muted); }
+.host-filter-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.host-filter-check { color: var(--accent); }
+.host-filter-empty { padding: 20px 10px; color: var(--fg-secondary); text-align: center; font-size: 12px; }
 .search {
   margin: 0 12px 8px;
 }
@@ -860,27 +888,6 @@ svg {
 .session-row small {
   font-size: 11px;
   line-height: 15px;
-}
-.filter-trigger {
-  min-height: 34px;
-  border-radius: 8px;
-  background: var(--surface);
-  padding: 0 10px;
-  font: 11.5px/1.5 var(--font-body);
-}
-.host-trigger {
-  height: 52px;
-}
-.filter-trigger small {
-  font-size: 10px;
-  margin-bottom: 4px;
-}
-.host-trigger strong {
-  font-size: 12px;
-  font-weight: 500;
-}
-.filter-trigger:not(.host-trigger) > strong {
-  text-align: center;
 }
 @media(max-width:768px) { .panel-head,header { padding-left:52px; } }
 </style>

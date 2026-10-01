@@ -158,13 +158,18 @@ func resolveLauncherCodex() (string, error) {
 func resolveLauncherCodexWithResolver(resolver BinaryResolver) (string, error) {
 	cfg, err := LoadConfig()
 	if err == nil && cfg.Codex.RealBinary != "" {
-		if resolved, ok := validatedRealAgentPath(cfg.Codex.RealBinary); ok &&
+		// Stored release paths are remapped to the standalone `current`
+		// alias so deployments enabled before a Codex self-update follow
+		// the active release without any config write-back.
+		if resolved, ok := validatedRealAgentPath(normalizeCodexStandaloneBinary(cfg.Codex.RealBinary)); ok &&
 			!sameResolvedPath(resolved, cfg.Codex.ShimPath) && !sameResolvedPath(resolved, defaultCodexShimPath()) {
 			return resolved, nil
 		}
 	}
 	if hint, ok := validatedLauncherRealBinaryHint(); ok {
-		return hint, nil
+		if resolved, ok := validatedRealAgentPath(normalizeCodexStandaloneBinary(hint)); ok {
+			return resolved, nil
+		}
 	}
 	if err != nil {
 		path, _, resolveErr := ResolveConfiguredCodex()

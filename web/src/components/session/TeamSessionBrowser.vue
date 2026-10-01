@@ -47,30 +47,34 @@
             <path d="m7 10 5 5 5-5" />
           </svg>
         </button>
-        <div v-if="menu === 'host'" class="filter-menu">
+        <div v-if="menu === 'host'" class="filter-menu host-filter-menu">
           <input
             v-model="hostQuery"
             type="search"
             aria-label="搜索主机"
             placeholder="搜索主机名称"
-          /><button
+          />
+          <div class="host-filter-options">
+          <button
             v-for="host in hostOptions"
             :key="host.id"
+            type="button"
+            class="filter-option host-filter-option"
             :aria-pressed="daemon === host.id"
             @click="
               daemon = host.id;
               menu = '';
             "
           >
-            <i :class="['dot', { offline: !host.online }]"></i
-            ><span
-              ><strong>{{ host.name }}</strong
+            <i :class="['dot', { offline: !host.online }]" aria-hidden="true"></i
+            ><span class="host-filter-copy"
+              ><span>{{ host.name }}</span
               ><small>{{
                 host.id
                   ? `${host.online ? "在线" : "离线"} · ${host.id}`
                   : "当前范围内的主机"
               }}</small></span
-            ><small>{{
+            ><span class="filter-count">{{
               rows.filter(
                 (item) =>
                   !host.id ||
@@ -78,8 +82,11 @@
                     (binding) => binding.daemon_id === host.id,
                   ),
               ).length
-            }}</small>
+            }}</span>
+            <svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"/></svg>
           </button>
+          <p v-if="!hostOptions.length" class="host-filter-empty">未找到匹配主机</p>
+          </div>
         </div>
       </div>
       <div class="filter-wrap">
@@ -90,16 +97,18 @@
           @click="menu = menu === 'agent' ? '' : 'agent'"
         >
           <svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4" /></svg
-          ><strong
-            >{{ providerLabel(provider) }}（{{ filtered.length }}）</strong
+          ><span class="filter-trigger-label"
+            >{{ providerLabel(provider) }}（{{ filtered.length }}）</span
           ><svg class="chevron" viewBox="0 0 24 24">
             <path d="m7 10 5 5 5-5" />
           </svg>
         </button>
-        <div v-if="menu === 'agent'" class="filter-menu" role="menu">
+        <div v-if="menu === 'agent'" class="filter-menu" role="menu" aria-label="按 Agent 类型筛选会话">
           <button
             v-for="agent in ['', 'codex', 'claude-code']"
             :key="agent"
+            type="button"
+            class="filter-option"
             role="menuitemradio"
             :aria-checked="provider === agent"
             @click="
@@ -107,12 +116,12 @@
               menu = '';
             "
           >
-            <span>{{ provider === agent ? "✓" : "" }}</span
-            ><strong>{{ providerLabel(agent) }}</strong
-            ><small>{{
+            <svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"/></svg>
+            <span class="filter-option-label">{{ providerLabel(agent) }}</span
+            ><span class="filter-count">{{
               hostRows.filter((item) => !agent || matches(item, daemon, agent))
                 .length
-            }}</small>
+            }}</span>
           </button>
         </div>
       </div>
@@ -558,18 +567,27 @@ onBeforeUnmount(() => {
 }
 .filter-trigger {
   width: 100%;
-  display: flex;
+  min-width: 0;
+  height: 34px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 8px;
-  padding: 8px 9px;
+  padding: 0 10px;
+  overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   color: var(--fg-secondary);
-  background: var(--bg);
+  background: var(--surface);
   cursor: pointer;
   text-align: left;
-  font: 11px var(--font-body);
+  font: 12px var(--font-body);
+  transition: color .15s, border-color .15s, background .15s;
 }
+.filter-trigger:hover,
+.filter-trigger[aria-expanded="true"] { border-color: var(--border-light); color: var(--fg); background: var(--surface-hover); }
+.filter-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.host-trigger { height: 52px; }
 svg {
   fill: none;
   stroke: currentColor;
@@ -582,11 +600,11 @@ svg {
 }
 .filter-trigger > span,
 .filter-trigger > strong {
-  flex: 1;
   min-width: 0;
 }
+.filter-trigger > svg { stroke-width: 1.8; }
 .filter-trigger strong {
-  font-weight: 550;
+  font-weight: 500;
   color: var(--fg);
   display: block;
   overflow: hidden;
@@ -595,68 +613,84 @@ svg {
 }
 .filter-trigger small {
   display: block;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   color: var(--fg-tertiary);
-  font-size: 9px;
+  font-size: 10px;
 }
+.filter-trigger-label { overflow: hidden; font-size: 11.5px; font-weight: 600; line-height: 1; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
 .chevron {
-  width: 12px;
+  justify-self: end;
+  transition: transform .15s ease;
 }
+.filter-trigger[aria-expanded="true"] .chevron { transform: rotate(180deg); }
 .filter-menu {
   position: absolute;
-  z-index: 30;
+  z-index: 60;
   top: calc(100% + 5px);
   left: 0;
   right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 5px;
   background: var(--surface);
-  border: 1px solid var(--border-light);
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
-  max-height: 280px;
-  overflow: auto;
 }
+.host-filter-menu { padding: 7px; }
 .filter-menu input {
   width: 100%;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 9px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
   color: var(--fg);
   background: var(--bg);
-  font: 11px var(--font-body);
+  font: 12px var(--font-body);
 }
-.filter-menu button {
+.filter-menu input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.filter-option {
   width: 100%;
-  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
+  padding: 6px 8px;
+  overflow: hidden;
   text-align: left;
   border: 0;
-  background: none;
-  color: var(--fg);
-  padding: 9px 6px;
-  font: 11px var(--font-body);
+  background: transparent;
+  color: var(--fg-secondary);
+  font: 12px/1.2 var(--font-body);
   cursor: pointer;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
-.filter-menu button:hover {
+.filter-option:hover,
+.filter-option:focus-visible {
+  color: var(--fg);
   background: var(--surface-hover);
+  outline: none;
 }
-.filter-menu button > span,
-.filter-menu button > strong {
-  flex: 1;
-  min-width: 0;
-}
-.filter-menu strong {
-  font-weight: 500;
-  display: block;
-}
-.filter-menu small {
-  display: block;
-  font-size: 9px;
-  color: var(--fg-tertiary);
-  margin-top: 3px;
-}
+.filter-option[aria-checked="true"],
+.filter-option[aria-pressed="true"] { color: var(--fg); background: var(--accent-muted); }
+.filter-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-check { width: 14px; height: 14px; opacity: 0; stroke: var(--accent); stroke-width: 2; }
+.filter-option[aria-checked="true"] .filter-check,
+.filter-option[aria-pressed="true"] .filter-check { opacity: 1; }
+.filter-count { min-width: 20px; color: var(--fg-tertiary); font: 10.5px/1 var(--font-mono); text-align: right; }
+.host-filter-options { max-height: min(360px, 45dvh); overflow-y: auto; margin-top: 5px; }
+.host-filter-option { grid-template-columns: 7px minmax(0, 1fr) auto 14px; min-height: 53px; }
+.host-filter-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.host-filter-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.host-filter-copy > span,
+.host-filter-copy > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-filter-copy > span { color: var(--fg); font-size: 12px; }
+.host-filter-copy > small { color: var(--fg-tertiary); font-size: 10px; font-weight: 400; }
+.host-filter-empty { padding: 20px 10px; color: var(--fg-secondary); text-align: center; font-size: 12px; }
 .dot {
   width: 6px;
   height: 6px;

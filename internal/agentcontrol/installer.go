@@ -137,6 +137,13 @@ func (i Installer) EnableAgentDetected(ctx context.Context, agent, realBinary st
 	// detect and enable steps cannot be persisted by stale path. The latest
 	// successful resolution is authoritative.
 	realBinary = detectedPath
+	// Persist the standalone `current` alias instead of the versioned
+	// release path so later Codex self-updates (which repoint current and
+	// keep old releases on disk) keep the shim on the active binary.
+	// Compatibility probing below still targets the resolved binary.
+	if agent == AgentCodex {
+		realBinary = normalizeCodexStandaloneBinary(realBinary)
+	}
 	if err := i.checkCompatibility(ctx, agent, detectedPath, version); err != nil {
 		return Status{}, err
 	}

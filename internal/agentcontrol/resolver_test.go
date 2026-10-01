@@ -270,3 +270,38 @@ func sameFile(left, right string) bool {
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
+
+func TestResolveCodexFollowsStandaloneCurrentForStoredReleasePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink layout")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	codexHome := filepath.Join(home, ".codex")
+
+	oldRelease := writeStandaloneRelease(t, codexHome, "0.155.1-aarch64-apple-darwin")
+	newRelease := writeStandaloneRelease(t, codexHome, "0.159.2-aarch64-apple-darwin")
+	pointStandaloneCurrent(t, codexHome, "0.159.2-aarch64-apple-darwin")
+
+	resolver := BinaryResolver{
+		Timeout: time.Second,
+		ResolveAgent: func(string, ...string) (string, bool, bool) {
+			t.Fatal("fallback discovery should not run")
+			return "", false, false
+		},
+		RunVersion: func(_ context.Context, path string) (string, error) {
+			if !sameFile(path, newRelease) {
+				t.Fatalf("version path=%q want current target %q", path, newRelease)
+			}
+			return "codex-cli 0.159.2", nil
+		},
+	}
+	got, version, err := resolver.ResolveCodex(AgentConfig{RealBinary: oldRelease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(got, newRelease) || version != "0.159.2" {
+		t.Fatalf("got path=%q version=%q, want current target %q version 0.159.2", got, version, newRelease)
+	}
+}
