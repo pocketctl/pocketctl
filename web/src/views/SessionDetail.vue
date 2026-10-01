@@ -14,7 +14,7 @@
         </button>
       </div>
       <SessionScopeSwitcher v-if="teamAccess.enabled.value" :model-value="browseScope" :teams="browseTeams" class="personal-scope-switcher" @update:model-value="browseScope = $event" />
-      <div v-if="uniqueHosts.length > 1 || selectedHostId" ref="hostFilterEl" class="host-filter-popover">
+      <div v-if="uniqueHosts.length || selectedHostId" ref="hostFilterEl" class="host-filter-popover">
         <button ref="hostFilterTrigger" type="button" class="agent-filter-trigger host-filter-trigger"
           :aria-expanded="hostFilterOpen" aria-controls="session-host-filter" @click.stop="toggleHostFilter">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>

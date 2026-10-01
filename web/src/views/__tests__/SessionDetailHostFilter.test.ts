@@ -49,6 +49,17 @@ beforeEach(() => { mocks.handlers.clear(); vi.clearAllMocks() })
 afterEach(() => { wrapper?.unmount() })
 
 describe('SessionDetail host filtering', () => {
+  test('keeps host scope available when the personal account has only one host', async () => {
+    await openPage()
+    mocks.handlers.get('session_list')!({ sessions: [sessions[0]] })
+    mocks.handlers.get('daemon_list')!({ daemons: [{ daemon_id: 'h1', hostname: 'MacBook', daemon_online: true }] })
+    await flushPromises()
+    await chooseHost('h1')
+    expect(wrapper.get('.host-filter-trigger').text()).toContain('MacBook')
+    await chooseHost('')
+    expect(wrapper.find('.host-filter-trigger').exists()).toBe(true)
+    expect(wrapper.get('.host-filter-trigger').text()).toContain('session.host_filter_all')
+  })
   test('searches titles while retaining the current conversation and draft route', async () => {
     await openPage()
     const initialReplayCount = mocks.send.mock.calls.filter((args: any[]) => args[0]?.type === 'replay').length

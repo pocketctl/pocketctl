@@ -2,18 +2,15 @@
   <aside
     ref="root"
     class="personal-session-browser"
-    @keydown.esc="
-      menu = '';
-      projectMenu = '';
-    "
+    @keydown.esc="closeWithEscape"
   >
     <header>
       <div>
         <h3>会话</h3>
         <small
-          >{{ allRows.length }} 个会话 ·
+          >{{ scopedSessions.length }} 个会话 ·
           {{
-            allRows.filter((item) =>
+            scopedSessions.filter((item) =>
               ["running", "busy", "retry"].includes(item.status),
             ).length
           }}
@@ -36,12 +33,14 @@
       @update:model-value="emit('update:scope', $event)"
     />
     <div class="filters">
-      <div v-if="daemons.length > 1 || host" class="filter-wrap host-filter-popover">
+      <div v-if="personalHosts.length || host" class="filter-wrap host-filter-popover">
         <button
+          ref="hostFilterTrigger"
           type="button"
           class="filter-trigger host-trigger"
           :aria-expanded="menu === 'host'"
-          @click="menu = menu === 'host' ? '' : 'host'"
+          aria-controls="personal-session-host-filter"
+          @click="toggleHostFilter"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <rect x="3" y="3" width="18" height="13" rx="2" />
@@ -50,8 +49,9 @@
             ><small>{{ t('session.host_filter_label') }}</small><span>{{ hostName(host) }}</span></span
           ><svg class="filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
         </button>
-        <div v-if="menu === 'host'" class="filter-menu host-filter-menu">
+        <div v-if="menu === 'host'" id="personal-session-host-filter" class="filter-menu host-filter-menu">
           <input
+            ref="hostFilterSearch"
             v-model="hostQuery"
             class="host-filter-search"
             type="search"
@@ -64,11 +64,9 @@
             :key="item.daemon_id"
             type="button"
             class="filter-option host-filter-option"
+            :data-host-filter="item.daemon_id"
             :aria-pressed="host === item.daemon_id"
-            @click="
-              host = item.daemon_id;
-              menu = '';
-            "
+            @click="selectHostFilter(item.daemon_id)"
           >
             <i :class="['dot', { online: item.status === 'online' }]" aria-hidden="true"></i>
             <span class="host-filter-copy"><span>{{ hostName(item.daemon_id) }}</span>
@@ -81,7 +79,7 @@
           </div>
         </div>
       </div>
-      <div v-if="allRows.length" class="filter-wrap agent-filter-popover">
+      <div v-if="browserSessions.length" class="filter-wrap agent-filter-popover">
         <button
           type="button"
           class="filter-trigger"
@@ -90,7 +88,7 @@
           @click="menu = menu === 'agent' ? '' : 'agent'"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4" /></svg
-          ><span class="filter-trigger-label">{{ agentLabel(agent) }}（{{ filtered.length }}）</span>
+          ><span class="filter-trigger-label">{{ agentLabel(agent) }}（{{ agentCount(agent) }}）</span>
           <svg class="filter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
         </button>
         <div v-if="menu === 'agent'" class="filter-menu" role="menu" :aria-label="t('session.agent_filter_label')">
@@ -109,7 +107,7 @@
             <svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"/></svg>
             <span class="filter-option-label">{{ agentLabel(item) }}</span>
             <span class="filter-count">{{
-              allRows.filter((row) => !item || row.agent_type === item).length
+              agentCount(item)
             }}</span>
           </button>
         </div>
@@ -216,7 +214,7 @@
                 { online: ['running', 'busy', 'retry'].includes(item.status) },
               ]"
             ></i>
-            <RouterLink :to="`/session/${item.session_id}`"
+            <RouterLink :to="{ path: `/session/${item.session_id}`, query: host ? { host } : {} }"
               ><strong
                 ><SessionPinBadge v-if="item.pinned" /><input
                   v-if="renamingId === item.session_id"
@@ -251,7 +249,7 @@
               <RouterLink
                 v-for="child in item.children"
                 :key="child.agentId"
-                :to="`/session/${item.session_id}?subagent=${child.agentId}`"
+                :to="{ path: `/session/${item.session_id}`, query: { subagent: child.agentId, ...(host ? { host } : {}) } }"
                 >↳ {{ child.title || child.agentId.slice(0, 8) }}</RouterLink
               >
             </div>
@@ -289,7 +287,7 @@
   </aside>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref, watch, toRefs } from "vue";
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch, toRefs } from "vue";
 import { useSessionBrowserFilters } from "../../composables/useSessionBrowserFilters";
 import { useLocale } from "../../composables/useLocale";
 import { agentDisplayName } from "../../utils/agentDisplay";
@@ -313,6 +311,8 @@ import {
   type SessionProject,
 } from "../../services/sessionOrganization";
 const root = ref<HTMLElement | null>(null);
+const hostFilterTrigger = ref<HTMLButtonElement | null>(null);
+const hostFilterSearch = ref<HTMLInputElement | null>(null);
 const { t } = useLocale();
 function closeMenus(event: MouseEvent) {
   if (!(event.target as HTMLElement).closest(".filter-wrap,.project-heading")) {
@@ -327,6 +327,7 @@ const { renamingId, renameInput, startRename, commitRename, cancelRename } =
 const teams = ref<TeamSummary[]>([]),
   projects = ref<SessionProject[]>([]),
   daemons = ref<any[]>([]),
+  sessionSnapshot = ref<any[] | null>(null),
   buckets = ref<Record<string, any[]>>({}),
   cursors = ref<Record<string, string | null>>({}),
   revisions = ref<Record<string, number>>({}),
@@ -352,8 +353,27 @@ const hostQuery = ref(""),
 let generation = 0;
 const cleanups: (() => void)[] = [];
 function hostName(id: string) {
-  const daemon = daemons.value.find((item) => item.daemon_id === id);
+  const daemon = personalHosts.value.find((item) => item.daemon_id === id);
   return daemon?.daemon_alias || daemon?.alias || daemon?.hostname || id || t('session.host_filter_all');
+}
+async function toggleHostFilter() {
+  menu.value = menu.value === "host" ? "" : "host";
+  if (menu.value === "host") {
+    hostQuery.value = "";
+    await nextTick();
+    hostFilterSearch.value?.focus();
+  }
+}
+function selectHostFilter(id: string) {
+  host.value = id;
+  menu.value = "";
+  hostFilterTrigger.value?.focus();
+}
+function closeWithEscape() {
+  const wasHostMenu = menu.value === "host";
+  menu.value = "";
+  projectMenu.value = "";
+  if (wasHostMenu) hostFilterTrigger.value?.focus();
 }
 function agentLabel(value: string) {
   return value ? agentDisplayName(value) : t('session.agent_filter_all');
@@ -370,45 +390,77 @@ function formatTime(value: string) {
       });
 }
 const allRows = computed(() => Object.values(buckets.value).flat());
+// The organized list is paginated and host-scoped. Use the personal Relay
+// snapshot for host options and counts so switching hosts never loses options.
+const browserSessions = computed(() => sessionSnapshot.value ?? allRows.value);
+const scopedSessions = computed(() => browserSessions.value.filter(
+  item => (!host.value || item.daemon_id === host.value) &&
+    (archived.value ? !!item.archived_at : !item.archived_at),
+));
+function sessionAgent(item: any): string {
+  const value = String(item.agent_type || item.agent || "claude-code");
+  return value === "claude" ? "claude-code" : value;
+}
+function agentCount(value: string) {
+  return scopedSessions.value.filter(item => !value || sessionAgent(item) === value).length;
+}
 const agentOptions = computed(
   () =>
     [
       "",
-      ...new Set(allRows.value.map((item) => item.agent_type).filter(Boolean)),
+      ...new Set(scopedSessions.value.map(sessionAgent)),
     ] as string[],
 );
 const filtered = computed(() =>
   allRows.value.filter(
     (item) =>
-      (!agent.value || item.agent_type === agent.value) &&
+      (!agent.value || sessionAgent(item) === agent.value) &&
       `${item.title} ${item.cwd} ${item.session_id}`
         .toLowerCase()
         .includes(query.value.trim().toLowerCase()),
   ),
 );
+const personalHosts = computed(() => {
+  const hosts = new Map<string, any>();
+  for (const daemon of daemons.value) {
+    hosts.set(daemon.daemon_id, { ...daemon, count: 0 });
+  }
+  for (const session of browserSessions.value) {
+    if (!session.daemon_id) continue;
+    let daemon = hosts.get(session.daemon_id);
+    if (!daemon) {
+      daemon = {
+        daemon_id: session.daemon_id,
+        daemon_alias: session.daemon_alias,
+        hostname: session.hostname,
+        status: session.daemon_online ? "online" : "offline",
+        count: 0,
+      };
+      hosts.set(session.daemon_id, daemon);
+    }
+    daemon.count++;
+  }
+  return [...hosts.values()];
+});
 const hostOptions = computed(() =>
   [
     {
       daemon_id: "",
       hostname: t('session.host_filter_all'),
-      status: daemons.value.some((item) => item.status === "online")
+      count: browserSessions.value.length,
+      status: personalHosts.value.some((item) => item.status === "online")
         ? "online"
         : "offline",
     },
-    ...daemons.value,
+    ...personalHosts.value,
   ].filter((item) =>
     `${item.daemon_alias || item.alias || ""} ${item.hostname} ${item.daemon_id}`
       .toLowerCase()
       .includes(hostQuery.value.trim().toLowerCase()),
-  ).map(item => ({
-    ...item,
-    count: item.daemon_id
-      ? Number(item.total_sessions ?? allRows.value.filter(row => row.daemon_id === item.daemon_id).length)
-      : daemons.value.reduce((count, daemon) => count + Number(daemon.total_sessions ?? allRows.value.filter(row => row.daemon_id === daemon.daemon_id).length), 0),
-  })),
+  ),
 );
 const scopedHosts = computed(() =>
-  daemons.value.filter((item) => !host.value || item.daemon_id === host.value),
+  personalHosts.value.filter((item) => !host.value || item.daemon_id === host.value),
 );
 const groups = computed(() =>
   archived.value
@@ -546,12 +598,29 @@ async function dropSession(bucket: string, before: string) {
   );
 }
 watch(host, () => void load());
+watch(agentOptions, options => {
+  if (sessionSnapshot.value && agent.value && !options.includes(agent.value)) agent.value = "";
+});
 onMounted(() => {
   document.addEventListener("click", closeMenus);
   connect();
   cleanups.push(
     onEvent("daemon_list", (message: any) => {
-      daemons.value = message.daemons || [];
+      daemons.value = (message.daemons || []).map((daemon: any) => ({
+        ...daemon,
+        status: (daemon.daemon_online ?? daemon.online ?? (daemon.status === "online"))
+          ? "online" : "offline",
+      }));
+    }),
+    onEvent("session_list", (message: any) => {
+      sessionSnapshot.value = message.sessions || [];
+    }),
+    onEvent("daemon_status", (message: any) => {
+      const daemon = daemons.value.find(item => item.daemon_id === message.daemon_id);
+      if (daemon) daemon.status = message.status;
+      for (const session of sessionSnapshot.value || []) {
+        if (session.daemon_id === message.daemon_id) session.daemon_online = message.status === "online";
+      }
     }),
   );
   for (const name of [
@@ -564,9 +633,11 @@ onMounted(() => {
       onEvent(name, () => {
         void load();
         send({ type: "list_daemons" });
+        send({ type: "list_sessions" });
       }),
     );
   send({ type: "list_daemons" });
+  send({ type: "list_sessions" });
   void listTeams()
     .then((value) => (teams.value = value))
     .catch(() => {});
