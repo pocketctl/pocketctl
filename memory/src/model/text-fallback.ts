@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { MimoBatchTextSettings, TextAdapterSettings } from '../config.js'
+import type { MimoTextSettings, TextAdapterSettings } from '../config.js'
 import type { TextGenerator } from '../ports/text-generator.js'
 
 export interface ExtractionTextRoute {
@@ -17,7 +17,7 @@ export interface ExtractionTextRoute {
 
 /** Shared disclosure/consent identity for the API and worker enforcement. */
 export function createExtractionTextRoute(
-  preferred: MimoBatchTextSettings | undefined,
+  preferred: MimoTextSettings | undefined,
   fallback: TextAdapterSettings | undefined,
 ): ExtractionTextRoute | undefined {
   if (!preferred && !fallback) return undefined

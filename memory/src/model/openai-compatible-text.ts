@@ -11,6 +11,7 @@ export interface OpenAICompatibleTextOptions {
   baseUrl: string
   model: string
   apiKey: string
+  apiKeyHeader?: 'authorization' | 'api-key'
   timeoutMs: number
   maxResponseBytes?: number
   fetchImpl?: typeof fetch
@@ -18,6 +19,8 @@ export interface OpenAICompatibleTextOptions {
   inputCostMicrosPerMillionTokens?: number
   outputCostMicrosPerMillionTokens?: number
   maxOutputTokens?: number
+  maxOutputTokensParameter?: 'max_tokens' | 'max_completion_tokens'
+  stream?: false
   maxAttempts?: number
   thinking?: 'enabled' | 'disabled'
 }
@@ -40,6 +43,7 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
   const client = createModelHttpClient({
     baseUrl: options.baseUrl,
     apiKey: options.apiKey,
+    apiKeyHeader: options.apiKeyHeader,
     timeoutMs: options.timeoutMs,
     maxResponseBytes: options.maxResponseBytes,
     fetchImpl: options.fetchImpl,
@@ -67,8 +71,11 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
           ],
           response_format: { type: 'json_object' },
           temperature: 0,
+          ...(options.stream === undefined ? {} : { stream: options.stream }),
           ...(options.thinking === undefined ? {} : { thinking: { type: options.thinking } }),
-          ...(options.maxOutputTokens === undefined ? {} : { max_tokens: options.maxOutputTokens }),
+          ...(options.maxOutputTokens === undefined ? {} : {
+            [options.maxOutputTokensParameter ?? 'max_tokens']: options.maxOutputTokens,
+          }),
         }, { signal: input.signal, timeoutMs: input.timeoutMs })
       } catch (error) {
         if (error instanceof ModelHttpError) {

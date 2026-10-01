@@ -174,7 +174,7 @@ async function main(): Promise<void> {
             .digest('hex'),
         }
       : undefined
-    const extractionAdapter = createExtractionTextRoute(config.mimoBatchTextModel, config.textModel)
+    const extractionAdapter = createExtractionTextRoute(config.mimoTextModel, config.textModel)
     const embeddingAdapter = config.embeddingModel
       ? {
           ...disclosure(config.embeddingModel)!,

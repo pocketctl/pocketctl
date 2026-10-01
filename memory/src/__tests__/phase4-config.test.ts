@@ -32,29 +32,60 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('phase4 configuration', () => {
-  test('accepts a complete MiMo Batch text group and defaults it to disabled thinking', () => {
+  test('accepts a complete MiMo realtime text group and defaults it to disabled thinking', () => {
     const config = loadMemoryConfig(baseEnv({
       MEMORY_TEXT_MODEL_MIMO: 'mimo-v2.6-flash',
-      MEMORY_TEXT_BASE_URL_MIMO_BATCH: 'https://batch-api-cn.xiaomimimo.com/v1',
+      MEMORY_TEXT_BASE_URL_MIMO: 'https://api.xiaomimimo.com/v1',
       MEMORY_TEXT_API_KEY_MIMO: 'mimo-secret',
     }))
-    expect(config.mimoBatchTextModel).toEqual({
-      provider: 'mimo-batch',
+    expect(config.mimoTextModel).toEqual({
+      provider: 'mimo-realtime',
       model: 'mimo-v2.6-flash',
-      baseUrl: 'https://batch-api-cn.xiaomimimo.com/v1',
+      baseUrl: 'https://api.xiaomimimo.com/v1',
       apiKey: 'mimo-secret',
       thinking: 'disabled',
     })
   })
 
-  test('rejects a partial MiMo Batch text group and keeps an absent group disabled', () => {
-    expect(loadMemoryConfig(baseEnv()).mimoBatchTextModel).toBeUndefined()
+  test('migrates the official legacy Batch setting to the realtime origin', () => {
+    const config = loadMemoryConfig(baseEnv({
+      MEMORY_TEXT_MODEL_MIMO: 'mimo-v2.6-flash',
+      MEMORY_TEXT_BASE_URL_MIMO_BATCH: 'https://batch-api-cn.xiaomimimo.com/v1/',
+      MEMORY_TEXT_API_KEY_MIMO: 'mimo-secret',
+    }))
+    expect(config.mimoTextModel).toMatchObject({
+      provider: 'mimo-realtime', baseUrl: 'https://api.xiaomimimo.com/v1', thinking: 'disabled',
+    })
+  })
+
+  test('an explicit realtime origin takes precedence over the deprecated Batch setting', () => {
+    const config = loadMemoryConfig(baseEnv({
+      MEMORY_TEXT_MODEL_MIMO: 'mimo-v2.6-flash',
+      MEMORY_TEXT_BASE_URL_MIMO: 'https://realtime.example/v1/',
+      MEMORY_TEXT_BASE_URL_MIMO_BATCH: 'https://legacy.example/v1',
+      MEMORY_TEXT_API_KEY_MIMO: 'mimo-secret',
+    }))
+    expect(config.mimoTextModel?.baseUrl).toBe('https://realtime.example/v1')
+  })
+
+  test('rejects ambiguous custom legacy URLs and Batch URLs in the realtime setting', () => {
+    const group = { MEMORY_TEXT_MODEL_MIMO: 'mimo-v2.6-flash', MEMORY_TEXT_API_KEY_MIMO: 'mimo-secret' }
+    expect(() => loadMemoryConfig(baseEnv({ ...group,
+      MEMORY_TEXT_BASE_URL_MIMO_BATCH: 'https://legacy.example/v1',
+    }))).toThrow(/MEMORY_TEXT_BASE_URL_MIMO/)
+    expect(() => loadMemoryConfig(baseEnv({ ...group,
+      MEMORY_TEXT_BASE_URL_MIMO: 'https://batch-api-cn.xiaomimimo.com/v1',
+    }))).toThrow(/realtime endpoint/)
+  })
+
+  test('rejects a partial MiMo real-time text group and keeps an absent group disabled', () => {
+    expect(loadMemoryConfig(baseEnv()).mimoTextModel).toBeUndefined()
     expect(() => loadMemoryConfig(baseEnv({
       MEMORY_TEXT_MODEL_MIMO: 'mimo-v2.6-flash',
-    }))).toThrow(/MEMORY_TEXT_BASE_URL_MIMO_BATCH/)
+    }))).toThrow(/MEMORY_TEXT_BASE_URL_MIMO/)
     expect(() => loadMemoryConfig(baseEnv({
       MEMORY_TEXT_MODEL_MIMO: 'mimo-v2.6-flash',
-      MEMORY_TEXT_BASE_URL_MIMO_BATCH: 'https://batch.example/v1',
+      MEMORY_TEXT_BASE_URL_MIMO: 'https://mimo.example/v1',
     }))).toThrow(/MEMORY_TEXT_API_KEY_MIMO/)
   })
 
@@ -192,7 +223,7 @@ describe('phase4 configuration', () => {
     })
     const compose = JSON.parse(output) as { services: Record<string, { environment: Record<string, string> }> }
     const required = [
-      'MEMORY_TEXT_MODEL_MIMO', 'MEMORY_TEXT_BASE_URL_MIMO_BATCH', 'MEMORY_TEXT_API_KEY_MIMO',
+      'MEMORY_TEXT_MODEL_MIMO', 'MEMORY_TEXT_BASE_URL_MIMO', 'MEMORY_TEXT_API_KEY_MIMO',
       'MEMORY_CODEGRAPH_MODE', 'MEMORY_WIKI_MODE',
       'MEMORY_CODEGRAPH_MAX_CONCURRENCY', 'MEMORY_WIKI_MAX_CONCURRENCY',
       'MEMORY_WIKI_MAX_PAGES', 'MEMORY_WIKI_MAX_SECTIONS',

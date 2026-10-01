@@ -30,7 +30,7 @@ import { createCandidateExtractor } from './extraction/extractor.js'
 import { createCandidateDeduper } from './extraction/deduper.js'
 import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleTextGenerator } from './model/openai-compatible-text.js'
-import { createMimoBatchTextGenerator } from './model/mimo-batch-text.js'
+import { createMimoRealtimeTextGenerator } from './model/mimo-realtime-text.js'
 import { createExtractionTextRoute, withTimeoutFallback } from './model/text-fallback.js'
 import { createClaimRepository } from './claims/repository.js'
 import { createLifecycleService } from './claims/lifecycle-service.js'
@@ -367,11 +367,11 @@ async function main(): Promise<void> {
           thinking: config.textModel.thinking,
         })
       : undefined
-    const rawMimoBatchTextGenerator = config.mimoBatchTextModel
-      ? createMimoBatchTextGenerator({
-          baseUrl: config.mimoBatchTextModel.baseUrl,
-          model: config.mimoBatchTextModel.model,
-          apiKey: config.mimoBatchTextModel.apiKey,
+    const rawMimoTextGenerator = config.mimoTextModel
+      ? createMimoRealtimeTextGenerator({
+          baseUrl: config.mimoTextModel.baseUrl,
+          model: config.mimoTextModel.model,
+          apiKey: config.mimoTextModel.apiKey,
           timeoutMs: config.modelTimeoutMs,
           maxOutputTokens: config.providerBudget?.textMaxOutputTokensPerRequest,
         })
@@ -389,12 +389,12 @@ async function main(): Promise<void> {
     const deepSeekTextGenerator = rawDeepSeekTextGenerator && textBudgetOptions && providerBudgetStore
       ? withTextProviderBudget(rawDeepSeekTextGenerator, providerBudgetStore, textBudgetOptions)
       : rawDeepSeekTextGenerator
-    const mimoBatchTextGenerator = rawMimoBatchTextGenerator && textBudgetOptions && providerBudgetStore
-      ? withTextProviderBudget(rawMimoBatchTextGenerator, providerBudgetStore, textBudgetOptions)
-      : rawMimoBatchTextGenerator
-    const textGenerator = mimoBatchTextGenerator && deepSeekTextGenerator
-      ? withTimeoutFallback(mimoBatchTextGenerator, deepSeekTextGenerator)
-      : (mimoBatchTextGenerator ?? deepSeekTextGenerator)
+    const mimoTextGenerator = rawMimoTextGenerator && textBudgetOptions && providerBudgetStore
+      ? withTextProviderBudget(rawMimoTextGenerator, providerBudgetStore, textBudgetOptions)
+      : rawMimoTextGenerator
+    const textGenerator = mimoTextGenerator && deepSeekTextGenerator
+      ? withTimeoutFallback(mimoTextGenerator, deepSeekTextGenerator)
+      : (mimoTextGenerator ?? deepSeekTextGenerator)
     const rawWikiTextGenerator = config.textModel && config.wikiProviderBudget
       ? createOpenAICompatibleTextGenerator({
           baseUrl: config.textModel.baseUrl,
@@ -461,7 +461,7 @@ async function main(): Promise<void> {
     })
     jobWorker.register('build_wiki', wikiBuild.handleBuildWiki)
 
-    const extractionTextRoute = createExtractionTextRoute(config.mimoBatchTextModel, config.textModel)
+    const extractionTextRoute = createExtractionTextRoute(config.mimoTextModel, config.textModel)
     if (extractionTextRoute && textGenerator) {
       const extractionConsentFingerprint = extractionTextRoute.fingerprint
       const extractionStore = createExtractionRepository(pool)

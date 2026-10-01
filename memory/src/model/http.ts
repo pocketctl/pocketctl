@@ -39,6 +39,7 @@ export class ModelHttpError extends Error {
 export interface ModelHttpClientOptions {
   baseUrl: string
   apiKey: string
+  apiKeyHeader?: 'authorization' | 'api-key'
   timeoutMs: number
   maxResponseBytes?: number
   fetchImpl?: typeof fetch
@@ -125,7 +126,9 @@ export function createModelHttpClient(options: ModelHttpClientOptions): ModelHtt
             method: 'POST',
             headers: {
               'content-type': 'application/json',
-              authorization: `Bearer ${options.apiKey}`,
+              ...(options.apiKeyHeader === 'api-key'
+                ? { 'api-key': options.apiKey }
+                : { authorization: `Bearer ${options.apiKey}` }),
             },
             body: JSON.stringify(body),
             signal: controller.signal,
