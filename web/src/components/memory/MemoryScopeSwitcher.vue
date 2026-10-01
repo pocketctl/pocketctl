@@ -15,7 +15,8 @@ const grouped = computed(() => ({
   organization: props.scopes.filter(scope => scope.owner_scope_kind === 'organization'),
 }))
 function label(scope: MemoryGovernanceScope): string {
-  return `${t('memory.governance.scope.' + scope.owner_scope_kind)} · ${scope.owner_scope_id.slice(0, 8)}`
+  const kind = t('memory.governance.scope.' + scope.owner_scope_kind)
+  return scope.owner_scope_kind === 'personal' ? kind : `${kind} · ${scope.name || scope.owner_scope_id.slice(0, 8)}`
 }
 </script>
 

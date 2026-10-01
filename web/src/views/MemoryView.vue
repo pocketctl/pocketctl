@@ -1,26 +1,11 @@
 <template>
-  <div class="memory-workbench" :class="{ 'is-mobile': isMobile }">
+  <div class="memory-workbench memory-layout-v2" :class="{ 'is-mobile': isMobile }">
     <header class="memory-page-head">
-      <div class="memory-page-copy">
-        <p class="memory-eyebrow">{{ t('memory.overline') }}</p>
-        <h1>{{ t('memory.title') }}</h1>
-        <p class="memory-subtitle">{{ t('memory.subtitle') }}</p>
+      <div class="memory-page-brand">
+        <span class="memory-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-6 .5A4 4 0 0 0 4 12a4 4 0 0 0 2 6.5A3 3 0 0 0 12 19zM12 5a3 3 0 1 1 6 .5A4 4 0 0 1 20 12a4 4 0 0 1-2 6.5A3 3 0 0 1 12 19zM12 7v10"/></svg></span>
+        <div class="memory-page-copy"><h1>Memory</h1><p class="memory-subtitle">{{ t('memory.subtitle') }}</p></div>
       </div>
-
-      <dl v-if="installation && servicesEnabled" class="memory-summary" aria-label="Memory status summary">
-        <div>
-          <dt>{{ t('memory.summary_status') }}</dt>
-          <dd><span class="memory-status-dot"></span>{{ t('memory.status_online') }}</dd>
-        </div>
-        <div data-testid="memory-summary-services">
-          <dt>{{ t('memory.summary_services') }}</dt>
-          <dd>{{ installation.enabled_services.length }}</dd>
-        </div>
-        <div data-testid="memory-summary-review">
-          <dt>{{ t('memory.summary_review') }}</dt>
-          <dd>{{ reviewCount ?? '—' }}</dd>
-        </div>
-      </dl>
+      <span v-if="installation && servicesEnabled" class="memory-page-status"><span class="memory-status-dot"></span>{{ t('memory.services_enabled') }}</span>
     </header>
 
     <section v-if="loading" class="memory-gate memory-loading-gate" data-testid="memory-loading">
@@ -55,57 +40,27 @@
     </section>
 
     <section v-else class="memory-workspace" data-testid="memory-workspace">
-      <header class="memory-workspace-toolbar" :aria-label="t('memory.workspace_label')"
-        data-testid="memory-workspace-toolbar">
-        <nav class="memory-tabs" role="tablist" aria-orientation="horizontal" data-testid="memory-tabs">
-          <button v-for="tab in tabs" :key="tab" :id="`memory-tab-${tab}`" type="button"
-            class="memory-tab" :class="{ active: active === tab }" role="tab"
-            :aria-selected="active === tab" :aria-controls="`memory-panel-${tab}`"
-            :data-testid="`memory-tab-${tab}`" @click="active = tab">
-            <span class="memory-tab-icon" aria-hidden="true">
-              <svg v-if="tab === 'search'" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg>
-              <svg v-else-if="tab === 'review'" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="m8 12 2.5 2.5L16 9"/></svg>
-              <svg v-else-if="tab === 'claims'" viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
-              <svg v-else-if="tab === 'wiki'" viewBox="0 0 24 24"><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H12v18H7.5A3.5 3.5 0 0 0 4 23z"/><path d="M20 5.5A3.5 3.5 0 0 0 16.5 2H12v18h4.5A3.5 3.5 0 0 1 20 23z"/></svg>
-              <svg v-else-if="tab === 'codegraph'" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="19" cy="18" r="2"/><path d="m7 11 9.2-5M7 13l10 4"/></svg>
-              <svg v-else viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
-            </span>
-            <span class="memory-tab-copy"><strong>{{ t(`memory.tab_${tab}`) }}</strong><small>{{ t(`memory.tab_${tab}_desc`) }}</small></span>
-            <span v-if="tab === 'review' && reviewCount !== null" class="memory-tab-badge">{{ reviewCount > 99 ? '99+' : reviewCount }}</span>
-          </button>
-        </nav>
-
-        <span class="memory-workspace-separator" aria-hidden="true"></span>
-        <p class="memory-workspace-description" data-testid="memory-workspace-description">
-          {{ t(`memory.module_${active}_copy`) }}
-        </p>
-
-        <div class="memory-workspace-actions" data-testid="memory-workspace-actions">
-          <button v-if="active === 'search'" type="button" class="memory-button"
-            data-testid="memory-filter-scope" :title="t('memory.filter_scope_unavailable')" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4"/></svg>{{ t('memory.filter_scope') }}
-          </button>
-          <template v-else-if="active === 'review'">
-            <button type="button" class="memory-button" :title="t('memory.skip_low_confidence_unavailable')" disabled>
-              {{ t('memory.skip_low_confidence') }}
-            </button>
-            <button type="button" class="memory-button memory-mobile-essential"
-              :title="t('memory.review_history_unavailable')" disabled>
-              {{ t('memory.review_history') }}
-            </button>
-          </template>
-          <button v-else-if="active === 'claims'" type="button" class="memory-button memory-claim-create"
-            data-testid="memory-claim-create" :title="t('memory.new_claim_unavailable')" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>{{ t('memory.new_claim') }}
-          </button>
-        </div>
-        <span class="memory-workspace-health" data-testid="memory-workspace-health">
-          <span class="memory-status-dot"></span>{{ t('memory.health_title') }}
-        </span>
-      </header>
+      <div class="memory-workspace-shell" data-testid="memory-workbench-frame">
+        <MemoryModuleNavigation v-model="active" :review-count="reviewCount" />
+        <div class="memory-workspace-main">
+          <div class="memory-module-picker">
+            <label for="memory-module-select">{{ t('memory.module') }}
+              <select id="memory-module-select" v-model="active" :aria-label="t('memory.choose_module')" data-testid="memory-module-select">
+                <optgroup v-for="group in MEMORY_MODULE_GROUPS" :key="group.id" :label="t(`memory.group_${group.id}`)">
+                  <option v-for="module in group.modules" :key="module" :value="module">{{ t(`memory.tab_${module}`) }}</option>
+                </optgroup>
+              </select>
+            </label>
+          </div>
+          <header class="memory-module-header" :aria-label="t('memory.workspace_label')" data-testid="memory-workspace-toolbar">
+            <p :id="`memory-description-${active}`" data-testid="memory-workspace-description">{{ t(`memory.module_${active}_copy`) }}</p>
+          </header>
+          <div v-if="active === 'claims'" class="memory-knowledge-heading"><h3>{{ t('memory.knowledge_versions') }}</h3>
+            <button type="button" class="memory-button" data-testid="memory-claim-create" :title="t('memory.new_claim_unavailable')" disabled>+ {{ t('memory.new_claim') }}</button>
+          </div>
 
       <div class="memory-module-stage" data-testid="memory-module-stage">
-        <div :id="`memory-panel-${active}`" class="memory-module-body" role="tabpanel" :aria-labelledby="`memory-tab-${active}`">
+        <div :id="`memory-panel-${active}`" class="memory-module-body" role="tabpanel" :aria-label="t(`memory.tab_${active}`)" :aria-describedby="`memory-description-${active}`">
           <MemorySearchPanel v-if="active === 'search'" :scopes="governanceScopes" @select-claim="selectClaim"/>
           <template v-if="active === 'review'">
             <MemoryScopeSwitcher v-if="governanceScopes.length > 0" v-model="governanceTarget"
@@ -136,13 +91,17 @@
               </button>
             </div>
             <p v-else-if="governanceError" class="memory-error" role="alert">{{ governanceError }}</p>
+            <section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
             <CandidateReviewList ref="reviewList" @accepted="rememberAcceptedClaim"
               @changed="refreshReview" @count="reviewCount = $event"/>
+            </section>
           </template>
           <ClaimDetailPanel v-if="active === 'claims'" :claim-id="claimId"
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
             @propose="openPromotion"/>
           <MemoryWikiPanel v-if="active === 'wiki'" v-model:repository-id="phase4RepositoryId"
+            v-model:installation-id="wikiTarget" :scopes="wikiScopes"
+            :legacy-grant="wikiUsesLegacyGrant"
             :can-contribute="canContributePhase4" :can-publish="canPublishPhase4" />
           <MemoryCodeGraphPanel v-if="active === 'codegraph'" v-model:repository-id="phase4RepositoryId" />
           <template v-if="active === 'skills'">
@@ -165,28 +124,23 @@
               <p v-else role="status">{{ t('memory.git.shared_scope_required') }}</p>
             </template>
           </template>
+          <section v-if="active === 'context'" data-testid="memory-panel-context">
+            <MemoryContextSettings />
+            <ContextPackList @select="selectedContextPack = $event" />
+            <ContextPackDetail :pack="selectedContextPack" />
+          </section>
+          <MemoryPersonaPanel v-if="active === 'persona'" data-testid="memory-panel-persona" />
+          <MemoryPolicyEditor v-if="active === 'policies'" data-testid="memory-panel-policies" />
+          <MemoryLoadoutEditor v-if="active === 'loadouts'" data-testid="memory-panel-loadouts" />
           <MemorySettingsCard v-if="active === 'settings'" :services="installation.enabled_services"
             :installation-status="installation.status" @changed="reload"/>
         </div>
       </div>
+          <details class="memory-scope-help"><summary>{{ t('memory.scope_help_title') }}</summary><p>{{ t('memory.scope_help_copy') }}</p></details>
+        </div>
+      </div>
     </section>
   </div>
-
-  <!-- Phase 2 tabs (plan section 13): context, persona, policies, loadouts -->
-  <section id="memory-panel-context" role="tabpanel" aria-labelledby="memory-tab-context" :hidden="active !== 'context'" data-testid="memory-panel-context">
-    <MemoryContextSettings />
-		<ContextPackList @select="selectedContextPack = $event" />
-		<ContextPackDetail :pack="selectedContextPack" />
-  </section>
-  <section id="memory-panel-persona" role="tabpanel" aria-labelledby="memory-tab-persona" :hidden="active !== 'persona'" data-testid="memory-panel-persona">
-    <MemoryPersonaPanel />
-  </section>
-  <section id="memory-panel-policies" role="tabpanel" aria-labelledby="memory-tab-policies" :hidden="active !== 'policies'" data-testid="memory-panel-policies">
-    <MemoryPolicyEditor />
-  </section>
-  <section id="memory-panel-loadouts" role="tabpanel" aria-labelledby="memory-tab-loadouts" :hidden="active !== 'loadouts'" data-testid="memory-panel-loadouts">
-    <MemoryLoadoutEditor />
-  </section>
   <MemoryPromotionDialog :claim="promotionClaim" :evidence="promotionEvidence"
     :targets="promotionTargets" @confirm="confirmPromotion" @cancel="closePromotion" />
   <div v-if="pendingLifecycleState && selectedGovernanceScope" class="memory-modal-backdrop"
@@ -245,6 +199,8 @@ import MemoryWikiPanel from '../components/memory/MemoryWikiPanel.vue'
 import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 import MemorySkillsView from './MemorySkillsView.vue'
 import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
+import MemoryModuleNavigation from '../components/memory/MemoryModuleNavigation.vue'
+import { MEMORY_MODULE_GROUPS, type MemoryModule } from '../components/memory/memoryModules'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
@@ -254,7 +210,7 @@ const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const active = ref<'search' | 'review' | 'claims' | 'wiki' | 'codegraph' | 'skills' | 'git' | 'context' | 'persona' | 'policies' | 'loadouts' | 'settings'>('search')
+const active = ref<MemoryModule>('search')
 const phase4RepositoryId = ref('')
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
@@ -264,6 +220,7 @@ const governanceScopes = ref<MemoryGovernanceScope[]>([])
 const governanceScopesLoading = ref(false)
 const governanceScopesError = ref('')
 const governanceTarget = ref('')
+const wikiTarget = ref('')
 const governanceQueue = ref<MemoryGovernanceQueueEntry[]>([])
 const governanceLoading = ref(false)
 const governanceError = ref<string | null>(null)
@@ -276,7 +233,6 @@ const promotionEvidence = ref<MemoryEvidence[]>([])
 const promotionSourceInstallationId = ref<string | null>(null)
 const pendingLifecycleState = ref<'suspended' | 'dissolving' | null>(null)
 
-const tabs = ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'git', 'context', 'persona', 'policies', 'loadouts', 'settings'] as const
 const gitScopes=computed(()=>governanceScopes.value.filter(scope=>scope.owner_scope_kind!=='personal'&&scope.state==='active'&&scope.permissions.includes('read')))
 const gitTarget=computed({get:()=>gitScopes.value.some(scope=>scope.installation_id===governanceTarget.value)?governanceTarget.value:gitScopes.value[0]?.installation_id??'',set:(value:string)=>{governanceTarget.value=value}})
 const requiredServices = ['memory.search', 'memory.recall', 'memory.manage', 'memory.context']
@@ -285,11 +241,27 @@ const selectedGovernanceScope = computed(() => governanceScopes.value.find(
   scope => scope.installation_id === governanceTarget.value) ?? null)
 const canManageScope = computed(() => selectedGovernanceScope.value?.permissions.includes('scope_admin') === true)
 const canEditReviewPolicy = computed(() => selectedGovernanceScope.value?.permissions.includes('policy_admin') === true)
-const primaryGovernanceScope = computed(() => governanceScopes.value.find(
-  scope => scope.installation_id === installation.value?.installation_id,
-))
-const canContributePhase4 = computed(() => primaryGovernanceScope.value?.permissions.includes('contribute') === true)
-const canPublishPhase4 = computed(() => primaryGovernanceScope.value?.permissions.includes('publish') === true)
+const wikiScopes = computed<MemoryGovernanceScope[]>(() => {
+  const readable = governanceScopes.value.filter(scope =>
+    (scope.state ?? 'active') === 'active' && scope.permissions.includes('read'))
+  if (readable.length > 0) return readable
+  const personal = installation.value
+  return personal ? [{
+    installation_id: personal.installation_id,
+    owner_scope_kind: 'personal',
+    owner_scope_id: personal.installation_id,
+    authorization_epoch: String(personal.config_version),
+    permissions: ['read', 'contribute', 'publish'],
+    state: 'active',
+    name: 'Personal',
+  }] : []
+})
+const selectedWikiScope = computed(() => wikiScopes.value.find(
+  scope => scope.installation_id === wikiTarget.value) ?? null)
+const wikiUsesLegacyGrant = computed(() => !governanceScopes.value.some(
+  scope => scope.installation_id === wikiTarget.value))
+const canContributePhase4 = computed(() => selectedWikiScope.value?.permissions.includes('contribute') === true)
+const canPublishPhase4 = computed(() => selectedWikiScope.value?.permissions.includes('publish') === true)
 const conflictCandidates = computed(() => governanceQueue.value
   .filter(entry => entry.candidate.state === 'conflict')
   .map(entry => ({
@@ -360,11 +332,17 @@ async function loadGovernanceScopes(): Promise<void> {
       ?? governanceScopes.value.find(scope => scope.owner_scope_kind === 'personal')
       ?? governanceScopes.value[0]
     governanceTarget.value = preferred?.installation_id ?? ''
+    const previousWiki = wikiTarget.value
+    const wikiPreferred = wikiScopes.value.find(scope => scope.installation_id === previousWiki)
+      ?? wikiScopes.value.find(scope => scope.owner_scope_kind === 'personal')
+      ?? wikiScopes.value[0]
+    wikiTarget.value = wikiPreferred?.installation_id ?? ''
   } catch (err) {
     governanceError.value = err instanceof Error ? err.message : 'governance unavailable'
     const status = err && typeof err === 'object' && 'status' in err ? Number(err.status) : 0
     const kind = status === 403 ? 'forbidden' : status === 503 ? 'off' : 'request_failed'
     governanceScopesError.value = `${t(`memory.skills.${kind}`)} · ${governanceError.value}`
+    wikiTarget.value = installation.value?.installation_id ?? ''
   } finally {
     governanceScopesLoading.value = false
   }

@@ -176,3 +176,37 @@ func TestClaudeTurnSidechainActorScope(t *testing.T) {
 		t.Fatalf("sidechain reply = %+v", batches[1][0])
 	}
 }
+
+func TestClaudeInteractiveTurnDurationCompletesAfterEndTurn(t *testing.T) {
+	p := NewJSONLStreamParser()
+	batches := parseClaudeLines(t, p,
+		`{"type":"user","sessionId":"interactive","uuid":"user","message":{"role":"user","content":"task"}}`,
+		`{"type":"assistant","sessionId":"interactive","uuid":"part1","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"part 1"}]}}`,
+		`{"type":"assistant","sessionId":"interactive","uuid":"part2","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"part 2"}]}}`,
+		`{"type":"system","sessionId":"interactive","subtype":"turn_duration","uuid":"end","durationMs":1000}`)
+	for _, batch := range batches[1:3] {
+		for _, event := range batch {
+			if event.TurnStatus == "completed" {
+				t.Fatal("completed before final content block")
+			}
+		}
+	}
+	if len(batches[3]) != 2 || batches[3][0].TurnStatus != "completed" || batches[3][1].Status != "completed" {
+		t.Fatalf("terminal=%+v", batches[3])
+	}
+	again, _ := p.Parse(`{"type":"system","sessionId":"interactive","subtype":"turn_duration","uuid":"end"}`)
+	if len(again) != 0 {
+		t.Fatalf("duplicate duration: %+v", again)
+	}
+}
+
+func TestClaudeDurationWithoutEndTurnDoesNotGuessSuccess(t *testing.T) {
+	p := NewJSONLStreamParser()
+	batches := parseClaudeLines(t, p,
+		`{"type":"user","sessionId":"s","uuid":"u","message":{"role":"user","content":"task"}}`,
+		`{"type":"assistant","sessionId":"s","uuid":"a","message":{"role":"assistant","stop_reason":"tool_use","content":[]}}`,
+		`{"type":"system","sessionId":"s","subtype":"turn_duration","uuid":"d"}`)
+	if len(batches[2]) != 0 {
+		t.Fatalf("invented completion: %+v", batches[2])
+	}
+}

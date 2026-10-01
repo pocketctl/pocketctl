@@ -299,7 +299,7 @@ describeWithDatabase('context API end to end (PostgreSQL)', () => {
 
   test('context pack management list exposes bounded pagination', async () => {
     for (let index = 0; index < 51; index += 1) {
-      await packs.persist({
+      const packId = await packs.persist({
         installationId: INSTALLATION,
         generationRunId: null,
         trajectoryId: null,
@@ -318,6 +318,11 @@ describeWithDatabase('context API end to end (PostgreSQL)', () => {
         items: [],
         state: 'empty',
       })
+      // All 51 timestamps share a JavaScript millisecond. The second page
+      // must retain PostgreSQL precision rather than truncating the cursor.
+      await pool.query(`UPDATE memory_context_packs
+        SET created_at = '2026-09-30T12:00:00Z'::timestamptz + $2::int * INTERVAL '1 microsecond'
+        WHERE pack_id = $1`, [packId, index])
     }
     const first = await app.inject({
       method: 'GET',
@@ -335,6 +340,16 @@ describeWithDatabase('context API end to end (PostgreSQL)', () => {
     })
     expect(second.statusCode, second.body).toBe(200)
     expect(second.json().packs).toHaveLength(1)
+    expect(new Set([...first.json().packs, ...second.json().packs].map((pack: { pack_id: string }) => pack.pack_id)).size).toBe(51)
     expect(second.json().next_cursor).toBeNull()
+    for (const created_at of ['2026-02-31T12:00:00.000001Z', '0000-01-01T00:00:00Z']) {
+      const invalid = Buffer.from(JSON.stringify({ created_at, pack_id: first.json().packs[0].pack_id })).toString('base64url')
+      const rejected = await app.inject({
+        method: 'GET',
+        url: `/api/v1/memory/context/packs?session_id=ses-api&cursor=${invalid}`,
+        headers: { host: 'memory.test', authorization: 'Bearer g' },
+      })
+      expect(rejected.statusCode, rejected.body).toBe(400)
+    }
   })
 })

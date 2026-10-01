@@ -1,5 +1,5 @@
 <template>
-  <section v-if="pack" class="context-pack-detail" data-testid="context-pack-detail">
+  <section v-if="pack" class="context-pack-detail memory-config-card" data-testid="context-pack-detail">
     <h3>{{ t('memory.context.detailTitle') }} {{ pack.pack_id.slice(0, 8) }}</h3>
     <dl>
       <dt>{{ t('memory.context.state') }}</dt>

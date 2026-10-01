@@ -52,6 +52,24 @@ func TestHandleSDKSpawnedSessionDropsWithoutHost(t *testing.T) {
 	}
 }
 
+func TestHandleSDKSpawnedSessionDoesNotAttachHostToItself(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	out := make(chan protocol.DaemonEvent, 8)
+	sm := session.NewSessionManager(out)
+	cwd := t.TempDir()
+	sm.RegisterTerminalSession("same-native-id", cwd, 0, "", protocol.StatusIdle, "claude-code")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handleSDKSpawnedSession(ctx, sm, watcher.SessionEvent{Session: watcher.DiscoveredSession{
+		SessionID: "same-native-id", Cwd: cwd, Entrypoint: "sdk-cli",
+	}}, logger, out)
+	select {
+	case event := <-out:
+		t.Fatalf("host was attached to itself: %s", event.Type)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
 func TestAttachSDKSession(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	const cwd = "/repo"

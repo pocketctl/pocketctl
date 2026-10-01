@@ -4,6 +4,7 @@ import { createContextSettingsRepository, effectiveContextSettingsFingerprint } 
 import { createLoadoutRepository, resolvedLoadoutFingerprint } from './loadout-repository.js'
 import { createPolicyRepository } from '../policies/repository.js'
 import { createPolicyResolver } from '../policies/resolver.js'
+import { resolveSelectedContextReferences, type SelectedContextReference } from './compiler.js'
 
 /**
  * Admission is the linearization point for mode-off and revocation
@@ -48,6 +49,7 @@ export function createAdmissionService(deps: {
       agent: string
       adapter: string
       grantConfigVersion: string
+      sharedGrantAuthorized?: boolean
     }): Promise<AdmissionResult> {
       const client = await deps.pool.connect()
       try {
@@ -77,22 +79,6 @@ export function createAdmissionService(deps: {
           || installationRow.relay_status !== 'active'
           || installationRow.local_status !== 'ready'
           || installationRow.config_version !== input.grantConfigVersion) {
-          await client.query('COMMIT')
-          return { ok: false, error: 'mode_off' }
-        }
-
-        // ADR-P3-10 hard fence: a pack compiled from shared-scope knowledge is
-        // evaluation-only (`shared_scope_shadow`) and can never pass
-        // admission while the Phase 2 Product Effect Gate is deferred.
-        const sharedItems = await client.query<{ n: number }>(`
-          SELECT COUNT(*)::int AS n
-          FROM memory_context_pack_items i
-          JOIN knowledge_claims c
-            ON c.installation_id = i.installation_id AND c.claim_id = i.claim_id
-          WHERE i.pack_id = $1 AND i.installation_id = $2
-            AND c.owner_scope_kind <> 'personal'
-        `, [input.packId, input.installationId])
-        if (Number(sharedItems.rows[0]?.n ?? 0) > 0) {
           await client.query('COMMIT')
           return { ok: false, error: 'mode_off' }
         }
@@ -130,9 +116,11 @@ export function createAdmissionService(deps: {
           settings_fingerprint: Buffer | null
           loadout_fingerprint: Buffer | null
           loadout_revision: string
+          selected_references: SelectedContextReference[]
         }>(`
           SELECT state, agent, mode, repository_id::text, effective_policy_hash,
-                 settings_fingerprint, loadout_fingerprint, loadout_revision::text
+                 settings_fingerprint, loadout_fingerprint, loadout_revision::text,
+                 selected_references
           FROM memory_context_packs
           WHERE pack_id = $1 AND installation_id = $2 AND session_id = $3
             AND client_request_id = $4
@@ -142,6 +130,28 @@ export function createAdmissionService(deps: {
         if (!packRow || packRow.state !== 'ready') {
           await client.query('COMMIT')
           return { ok: false, error: 'pack_not_ready' }
+        }
+        const selectedReferences = Array.isArray(packRow.selected_references)
+          ? packRow.selected_references : []
+        const sharedItems = await client.query<{ n: number }>(`
+          SELECT COUNT(*)::int AS n
+          FROM memory_context_pack_items i
+          JOIN knowledge_claims c
+            ON c.installation_id = i.installation_id AND c.claim_id = i.claim_id
+          WHERE i.pack_id = $1 AND i.installation_id = $2
+            AND c.owner_scope_kind <> 'personal'
+        `, [input.packId, input.installationId])
+        if (Number(sharedItems.rows[0]?.n ?? 0) > 0 && selectedReferences.length === 0) {
+          await client.query('COMMIT')
+          return { ok: false, error: 'mode_off' }
+        }
+        if (selectedReferences.length > 0) {
+          if (!input.sharedGrantAuthorized || !await resolveSelectedContextReferences(
+            transactionPoolFromClient(client), input.installationId, selectedReferences,
+          )) {
+            await client.query('COMMIT')
+            return { ok: false, error: 'claim_invalid' }
+          }
         }
 
         const adapterForAgent: Record<string, string> = {
@@ -364,6 +374,10 @@ export function createAdmissionService(deps: {
       return { ok: true, state: row.state }
     },
   }
+}
+
+function transactionPoolFromClient(client: pg.PoolClient): pg.Pool {
+  return { query: client.query.bind(client) } as unknown as pg.Pool
 }
 
 export type AdmissionService = ReturnType<typeof createAdmissionService>

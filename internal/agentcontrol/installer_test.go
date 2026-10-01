@@ -397,6 +397,59 @@ func TestCodexInstallerRejectsOldVersionBeforeInstallingShim(t *testing.T) {
 	}
 }
 
+func TestCodexInstallerEnablePersistsStandaloneCurrentAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink layout")
+	}
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	codexHome := filepath.Join(home, ".codex")
+
+	release := writeStandaloneRelease(t, codexHome, "0.155.1-aarch64-apple-darwin")
+	alias := pointStandaloneCurrent(t, codexHome, "0.155.1-aarch64-apple-darwin")
+
+	installer := Installer{
+		PocketctlPath: testExecutable(t, "pocketctl"),
+		Shell:         "/bin/zsh",
+		ResolveCodex: func(context.Context) (string, string, error) {
+			return release, "0.155.1", nil
+		},
+		ProbeCodex: func(context.Context, string, string) (CodexCapabilities, error) {
+			return CodexCapabilities{Core: true, TerminalRemote: true}, nil
+		},
+	}
+	status, err := installer.EnableAgent(context.Background(), AgentCodex, EnableOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RealBinary != alias {
+		t.Fatalf("status real binary=%q, want alias %q", status.RealBinary, alias)
+	}
+
+	shimPath := filepath.Join(home, ".pocketctl", "bin", "codex")
+	data, err := os.ReadFile(shimPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The v3 wrapper records the alias in the depth-fuse exec, the
+	// REAL_BINARY hint, and the fallback exec — three occurrences.
+	if count := strings.Count(string(data), alias); count != 3 {
+		t.Fatalf("alias occurrences in shim=%d, want 3; shim=%q", count, data)
+	}
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Codex.RealBinary != alias {
+		t.Fatalf("config real binary=%q, want alias %q", cfg.Codex.RealBinary, alias)
+	}
+}
+
 func writeShimV3TestExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {

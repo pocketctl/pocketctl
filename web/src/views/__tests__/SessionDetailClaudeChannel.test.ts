@@ -38,6 +38,19 @@ function mountSession() {
 }
 
 describe('SessionDetail Claude Channel approval', () => {
+  test.each([['once', true], ['reject', false]] as const)('legacy Hook %s keeps the boolean approval protocol', (action, approved) => {
+    const wrapper = mountSession()
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'approval_request', session_id: 'claude-session', request_id: 'hook-request', tool: 'Bash', input: { command: 'echo test' } })
+    const card = vm.messages.find((message: any) => message.request_id === 'hook-request')
+    expect(card.availableDecisions).toEqual([])
+    vm.onApprovalRespond(card, action)
+    expect(websocketMock.send).toHaveBeenLastCalledWith({
+      type: 'approval_response', session_id: 'claude-session', request_id: 'hook-request', approved,
+    })
+    wrapper.unmount()
+  })
+
   test('submitted result neutrally closes the card and a stale timer cannot reopen it', () => {
     vi.useFakeTimers()
     const wrapper = mountSession()

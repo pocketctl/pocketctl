@@ -24,6 +24,15 @@ export interface PackItemInput {
   evidenceIds: readonly string[]
 }
 
+export interface ExternalPackItemInput {
+  itemId: string
+  versionId: string
+  statement: string
+  scopeKind: string
+  section: 'stable' | 'dynamic'
+  evidenceIds: readonly string[]
+}
+
 export interface PersistPackInput {
   installationId: string
   generationRunId: string | null
@@ -41,6 +50,8 @@ export interface PersistPackInput {
   settingsRevision: number
   loadoutRevision: number
   items: readonly PackItemInput[]
+  externalItems?: readonly ExternalPackItemInput[]
+  selectedReferences?: readonly unknown[]
   state: 'ready' | 'shadow' | 'empty'
   errorCode?: string | null
 }
@@ -51,9 +62,15 @@ export function createPackRepository(pool: pg.Pool) {
       const stableItems: RenderItem[] = input.items
         .filter(item => item.section === 'stable')
         .map(item => ({ ...item, evidenceIds: item.evidenceIds }))
+      stableItems.push(...(input.externalItems ?? [])
+        .filter(item => item.section === 'stable')
+        .map(item => ({ ...item, claimId: item.itemId, evidenceIds: item.evidenceIds })))
       const dynamicItems: RenderItem[] = input.items
         .filter(item => item.section === 'dynamic')
         .map(item => ({ ...item, evidenceIds: item.evidenceIds }))
+      dynamicItems.push(...(input.externalItems ?? [])
+        .filter(item => item.section === 'dynamic')
+        .map(item => ({ ...item, claimId: item.itemId, evidenceIds: item.evidenceIds })))
       const packDigest = createHash('sha256')
         .update([
           input.installationId, input.sessionId, input.clientRequestId,
@@ -78,16 +95,16 @@ export function createPackRepository(pool: pg.Pool) {
              agent, repository_id, mode, effective_policy_hash, settings_fingerprint,
              loadout_fingerprint, input_digest, policy_revision, settings_revision, loadout_revision, stable_text, dynamic_text,
              stable_hash, dynamic_hash, stable_tokens, dynamic_tokens,
-             stable_cache_hit, state, error_code, generated_at)
+             stable_cache_hit, state, error_code, selected_references, generated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                  $16, $17, $18, $19, $20, $21, $22, FALSE, $23, $24, NOW())
+                  $16, $17, $18, $19, $20, $21, $22, FALSE, $23, $24, $25::jsonb, NOW())
           ON CONFLICT DO NOTHING
         `, [packId, input.installationId, input.generationRunId, input.trajectoryId, input.sessionId,
           input.clientRequestId, input.agent, input.repositoryId, input.mode, input.effectivePolicyHash,
           input.settingsFingerprint, input.loadoutFingerprint, input.inputDigest, input.policyRevision, input.settingsRevision,
           input.loadoutRevision, stable, dynamic, hashPackText(stable),
           hashPackText(dynamic), estimateTokens(stable), estimateTokens(dynamic),
-          input.state, input.errorCode ?? null])
+          input.state, input.errorCode ?? null, JSON.stringify(input.selectedReferences ?? [])])
         for (const [index, item] of input.items.entries()) {
           await client.query(`
             INSERT INTO memory_context_pack_items
@@ -144,8 +161,10 @@ export function createPackRepository(pool: pg.Pool) {
         SELECT p.state, p.mode, p.stable_text, p.dynamic_text,
                p.stable_tokens, p.dynamic_tokens, p.error_code,
                t.degraded_components,
-               (SELECT COUNT(*)::int FROM memory_context_pack_items i
-                WHERE i.pack_id = p.pack_id) AS item_count
+               ((SELECT COUNT(*)::int FROM memory_context_pack_items i
+                 WHERE i.pack_id = p.pack_id)
+                + (SELECT COUNT(*)::int FROM jsonb_array_elements(p.selected_references) reference
+                   WHERE reference->>'source_kind' = 'wiki_section')) AS item_count
         FROM memory_context_packs p
         LEFT JOIN memory_retrieval_trajectories t ON t.trajectory_id = p.trajectory_id
         WHERE p.pack_id = $1
@@ -157,13 +176,14 @@ export function createPackRepository(pool: pg.Pool) {
       installationId: string
       sessionId: string
       limit?: number
-      beforeCreatedAt?: Date | null
+      beforeCreatedAt?: Date | string | null
       beforePackId?: string | null
     }): Promise<Array<{
       pack_id: string
       state: string
       client_request_id: string
       created_at: Date
+      created_at_cursor: string
       mode: string
       agent: string
       stable_text: string
@@ -199,13 +219,14 @@ export function createPackRepository(pool: pg.Pool) {
       }
     }>> {
       const result = await pool.query<{
-        pack_id: string; state: string; client_request_id: string; created_at: Date
+        pack_id: string; state: string; client_request_id: string; created_at: Date; created_at_cursor: string
         mode: string; agent: string; stable_text: string; dynamic_text: string
         stable_tokens: number; dynamic_tokens: number; error_code: string | null
         policy_revision: string; settings_revision: string; loadout_revision: string
         trajectory_id: string | null; result_state: string | null; degraded_components: string[] | null
       }>(`
         SELECT p.pack_id::text, p.state, p.client_request_id, p.created_at,
+               to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
                p.mode, p.agent, p.stable_text, p.dynamic_text,
                p.stable_tokens, p.dynamic_tokens, p.error_code,
                p.policy_revision::text, p.settings_revision::text, p.loadout_revision::text,
@@ -271,6 +292,7 @@ export function createPackRepository(pool: pg.Pool) {
         state: row.state,
         client_request_id: row.client_request_id,
         created_at: row.created_at,
+        created_at_cursor: row.created_at_cursor,
         mode: row.mode,
         agent: row.agent,
         stable_text: row.stable_text,

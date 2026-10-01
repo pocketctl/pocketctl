@@ -1,5 +1,5 @@
 <template>
-  <section class="memory-persona" data-testid="memory-persona">
+  <section class="memory-persona memory-config-card" data-testid="memory-persona">
     <h3>{{ t('memory.persona.title') }}</h3>
     <p class="hint">{{ t('memory.persona.hint') }}</p>
 		<ul v-if="items.length > 0" data-testid="memory-persona-items">

@@ -2165,6 +2165,37 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
                 AND source_event_id IS NULL AND artifact_id IS NULL))`,
     ],
   },
+  {
+    // Team collaboration sources remain personal raw evidence until the
+    // existing promotion/review/publication workflow creates shared copies.
+    version: 49,
+    statements: [
+      `ALTER TABLE source_events DROP CONSTRAINT source_events_origin_check`,
+      `ALTER TABLE source_events ADD CONSTRAINT source_events_origin_check
+         CHECK (origin IN ('feed','snapshot','team'))`,
+      `ALTER TABLE source_events
+         ADD COLUMN source_provenance JSONB NOT NULL DEFAULT '{}'::jsonb`,
+      `ALTER TABLE memory_promotion_evidence
+         ALTER COLUMN sanitized_locator TYPE JSONB
+         USING CASE
+           WHEN sanitized_locator IS NULL THEN NULL
+           ELSE sanitized_locator::jsonb
+         END`,
+      `CREATE INDEX source_events_team_source_idx
+         ON source_events (installation_id, canonical_event_key)
+         WHERE origin = 'team'`,
+    ],
+  },
+  {
+    version: 50,
+    statements: [
+      `ALTER TABLE memory_context_packs
+         ADD COLUMN selected_references JSONB NOT NULL DEFAULT '[]'::jsonb`,
+      `ALTER TABLE memory_context_packs
+         ADD CONSTRAINT memory_context_packs_selected_references_array
+         CHECK (jsonb_typeof(selected_references) = 'array')`,
+    ],
+  },
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

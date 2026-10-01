@@ -373,6 +373,7 @@ type JSONLStreamParser struct {
 	compactStatus string
 	compactError  string
 	turns         claudeTurnTracker
+	sawEndTurn    bool
 }
 
 // NewJSONLStreamParser creates a parser with empty state.
@@ -407,6 +408,9 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 
 	switch entry.Type {
 	case "assistant":
+		if entry.Message != nil {
+			p.sawEndTurn = entry.Message.StopReason == "end_turn"
+		}
 		events, err := p.parseAssistant(entry, sid)
 		p.stampTurns(events, entry.IsSidechain)
 		return events, err
@@ -415,6 +419,7 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 			return nil, nil
 		}
 		if isEntryPureInterruptMarker(entry) {
+			p.sawEndTurn = false
 			// Interruption marker: terminal evidence, not user input.
 			if ev, ok := p.turns.end(sid, protocol.TurnStateInterrupted, "request_interrupted_record", entry.IsSidechain); ok {
 				return []protocol.DaemonEvent{ev}, nil
@@ -425,14 +430,25 @@ func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 		started, startedOK := p.beginTurn(sid, entry, entry.IsSidechain)
 		p.stampTurns(events, entry.IsSidechain)
 		if startedOK {
+			p.sawEndTurn = false
 			events = append([]protocol.DaemonEvent{started}, events...)
 		}
 		return events, err
 	case "system":
+		// Interactive Claude emits turn_duration after the final assistant
+		// blocks, rather than a stream-json result. Require both native pieces
+		// of evidence; end_turn alone may appear on multiple content blocks.
+		if entry.Subtype == "turn_duration" && p.sawEndTurn {
+			p.sawEndTurn = false
+			if done, ok := p.turns.end(sid, protocol.TurnStateCompleted, "turn_duration_record", entry.IsSidechain); ok {
+				return []protocol.DaemonEvent{done, {Type: "session_status", SessionID: sid, Status: protocol.StatusCompleted}}, nil
+			}
+		}
 		events, err := p.parseSystem(entry, sid)
 		p.stampTurns(events, entry.IsSidechain)
 		return events, err
 	case "result":
+		p.sawEndTurn = false
 		// End-of-turn summary with aggregated cost/turns. Previously the PTY
 		// path dropped this — forwarding it lets daemon sessions report cost.
 		events := []protocol.DaemonEvent{{

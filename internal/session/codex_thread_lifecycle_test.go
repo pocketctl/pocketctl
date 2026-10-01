@@ -377,3 +377,25 @@ func TestCodexReleaseFailureKeepsSubscriptionRetryable(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexShutdownPreservesDetachedOwnership(t *testing.T) {
+	b, _ := lifecycleBackend(t)
+	if err := b.Close("a"); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	b.coord.runtime.Stop = func() error { stopped = true; return nil }
+	if err := b.coord.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped {
+		t.Fatal("idle runtime was not stopped")
+	}
+	state, err := daemon.ReadCodexAppServerStateAt(b.coord.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.OwnerPID != 0 || len(state.Threads) != 1 || len(state.DetachedThreads) != 1 || state.DetachedThreads[0] != "a" {
+		t.Fatalf("lost detached ownership on shutdown: %+v", state)
+	}
+}

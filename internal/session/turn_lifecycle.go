@@ -68,7 +68,8 @@ type UserMessageInput struct {
 	// HiddenContext is the Phase 2 native hidden-context payload for this
 	// new turn. Content stays the exact user input for echo, receipts,
 	// titles, Relay events and turn identity.
-	HiddenContext *memorycontext.PreparedContext
+	HiddenContext          *memorycontext.PreparedContext
+	SuppressContextReceipt bool
 	// SkipMemoryContext is internal fail-open state for an initial prompt whose
 	// Relay session-registration ACK timed out. The prompt still dispatches.
 	SkipMemoryContext bool
@@ -165,7 +166,7 @@ func (sm *SessionManager) MemoryContextCapability(ctx context.Context, sessionID
 			return memorycontext.ResolveCapability(memorycontext.RuntimeOpenCodeServer, memorycontext.ProbeSupported)
 		}
 	}
-	if agent == adapter.AgentClaude && (ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted) {
+	if agent == adapter.AgentClaude && (ps.ClaudePrintSession || ps.Status == protocol.StatusExited || ps.Status == protocol.StatusCompleted) {
 		binary, err := findAgentCLI(adapter.AgentClaude)
 		if err == nil {
 			return memorycontext.ResolveCapability(memorycontext.RuntimeClaudePrintResume, memorycontext.ProbeClaudeRuntime(ctx, binary))
@@ -264,7 +265,7 @@ func (sm *SessionManager) cwdFor(sessionID string) string {
 	return ""
 }
 
-// TakeDeferredInitialPrompt claims the managed-session prompt exactly once
+// TakeDeferredInitialPrompt claims the initial prompt exactly once
 // after session_created has been sent to Relay.
 func (sm *SessionManager) TakeDeferredInitialPrompt(sessionID string) (string, bool) {
 	sm.mu.Lock()
@@ -276,6 +277,38 @@ func (sm *SessionManager) TakeDeferredInitialPrompt(sessionID string) (string, b
 	prompt := ps.DeferredInitialPrompt
 	ps.DeferredInitialPrompt = ""
 	return prompt, true
+}
+
+// SendDeferredInitialPrompt runs after Relay registration. Interactive Claude
+// must also finish startup and any owner trust prompt before accepting text.
+func (sm *SessionManager) SendDeferredInitialPrompt(ctx context.Context, input UserMessageInput) error {
+	sm.mu.RLock()
+	ps := sm.sessions[input.SessionID]
+	isPTY := ps != nil && ps.PTY != nil
+	var startedAt time.Time
+	if isPTY {
+		startedAt = ps.StartedAt
+	}
+	sm.mu.RUnlock()
+	if isPTY {
+		timer := time.NewTimer(time.Until(startedAt.Add(10 * time.Second)))
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+		sm.mu.RLock()
+		scanner, done := ps.PTYScanner, ps.PTYDone
+		sm.mu.RUnlock()
+		if scanner == nil || !waitForPTYPromptReady(ctx, done, scanner) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("interactive session exited before initial prompt")
+		}
+	}
+	return sm.SendMessageWithInput(ctx, input)
 }
 
 // SendMessage keeps the legacy signature: it forwards through the turn-aware
@@ -361,10 +394,14 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 			in.HiddenContext = sm.prepareMemoryContext(ctx, in, requestID, agent)
 		}
 		if err := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); err != nil {
-			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+			if !in.SuppressContextReceipt {
+				sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+			}
 			return err
 		}
-		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
+		if !in.SuppressContextReceipt {
+			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
+		}
 		return nil
 	}
 
@@ -404,7 +441,9 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
-		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+		if !in.SuppressContextReceipt {
+			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
+		}
 		sm.outputCh <- protocol.DaemonEvent{
 			Type:           "error",
 			SessionID:      rec.Actor.SessionID,
@@ -418,7 +457,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		sm.terminalizeTurn(key, rec, protocol.TurnStateFailed, protocol.TurnReasonInputDispatchFailed, protocol.TurnConfidenceDerived)
 		return dispatchErr
 	}
-	if !sm.defersMemoryContextReceipt(in.SessionID) {
+	if !in.SuppressContextReceipt && !sm.defersMemoryContextReceipt(in.SessionID) {
 		sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
 	}
 	return nil

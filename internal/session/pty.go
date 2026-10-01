@@ -1,11 +1,14 @@
 package session
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
@@ -183,4 +186,22 @@ func ensureEnvDefault(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+// Paste task text atomically so embedded newlines are not interpreted as menu
+// keys. Submit in a later read batch after the TUI has consumed the paste.
+func writePTYPrompt(ctx context.Context, target io.Writer, content string) (int, error) {
+	n, err := target.Write([]byte("\x1b[200~" + content + "\x1b[201~"))
+	if err != nil {
+		return n, err
+	}
+	timer := time.NewTimer(150 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return n, ctx.Err()
+	case <-timer.C:
+	}
+	written, err := target.Write([]byte("\r"))
+	return n + written, err
 }

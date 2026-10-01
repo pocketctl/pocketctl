@@ -42,6 +42,12 @@ function relayAndProviderFetch(options: {
   const fetchImpl = vi.fn(async (input: string | URL, init: RequestInit = {}) => {
     const url = String(input)
     calls.push({ origin: new URL(url).origin, path: new URL(url).pathname, search: new URL(url).search, init })
+    if (url.includes('/api/extensions/v2/grants')) {
+      return new Response(JSON.stringify({
+        grant: 'scoped-grant-token', expires_in: 300,
+        provider_public_origin: 'https://memory.example',
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }
     if (url.includes('/api/extensions/v1/')) {
       if (url.includes('/grants')) {
         if (options.grantResponse instanceof Response) return options.grantResponse
@@ -306,6 +312,44 @@ describe('memoryClient', () => {
     expect(JSON.parse(String(lock.init.body))).toEqual({ expected_lock_version: 4 })
     expect(calls.filter(call => call.origin === 'https://memory.example').every(call =>
       (call.init.headers as Record<string, string>).Authorization === 'Bearer grant-token-1')).toBe(true)
+  })
+
+  test('scoped Wiki calls bind every request to installation, repository, and active version', async () => {
+    const { calls } = relayAndProviderFetch({
+      providerHandler: () => new Response(JSON.stringify({}), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }),
+    })
+    const client = await import('../../services/memoryClient')
+    const scope = {
+      installationId: '11111111-1111-4111-8111-111111111111',
+      repositoryId: '22222222-2222-4222-8222-222222222222',
+      wikiVersionId: '33333333-3333-4333-8333-333333333333',
+    }
+    await client.getMemoryWiki(scope.repositoryId, { ...scope, wikiVersionId: null })
+    await client.listMemoryWikiBuilds('wiki-1', null, 20, scope)
+    await client.getMemoryWikiCandidate('wiki-1', 'build-1', scope)
+    await client.scheduleMemoryWikiBuild('wiki-1', 4, scope)
+    await client.publishMemoryWikiCandidate('wiki-1', 'build-1', 4, 2, scope)
+    await client.editMemoryWikiSection('wiki-1', 'operations', 'Manual runbook', 3, scope)
+    await client.setMemoryWikiSectionLock('wiki-1', 'operations', 'lock', 4, scope)
+
+    const grants = calls.filter(call => call.path === '/api/extensions/v2/grants')
+    expect(grants.map(call => JSON.parse(String(call.init.body)))).toEqual([
+      { installation_ids: [scope.installationId], caller_type: 'web', services: ['memory.search'] },
+      { installation_ids: [scope.installationId], caller_type: 'web', services: ['memory.manage'] },
+    ])
+    const wikiCalls = calls.filter(call => call.origin === 'https://memory.example')
+    expect(wikiCalls).toHaveLength(7)
+    for (const call of wikiCalls) {
+      const query = new URLSearchParams(call.search)
+      expect(query.get('installation_id')).toBe(scope.installationId)
+      expect(query.get('repository_id')).toBe(scope.repositoryId)
+      if (!call.path.includes(`/repositories/${scope.repositoryId}/wiki`)) {
+        expect(query.get('wiki_version_id')).toBe(scope.wikiVersionId)
+      }
+      expect(new Headers(call.init.headers).get('authorization')).toBe('Bearer scoped-grant-token')
+    }
   })
 
 	test('policy diff uses a browser-compatible POST body', async () => {

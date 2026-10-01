@@ -39,6 +39,23 @@ function clientFor(row: Record<string, unknown>) {
 }
 
 describe('Relay v2 installation inventory parsing', () => {
+  test('preserves a complete opaque membership snapshot and decimal revisions', async () => {
+    const scope_snapshot = { state: 'active', memberships: [{ membership_id: INSTALLATION_ID,
+      membership_revision: '9007199254740993', state: 'active', roles: ['scope_administrator'] }] }
+    const page = await clientFor(inventoryRow({ scope_snapshot })).listInstallationsV2()
+    expect(page.installations[0]).toHaveProperty('scope_snapshot', scope_snapshot)
+  })
+
+  test.each([
+    null,
+    { state: 'unknown', memberships: [] },
+    { state: 'active', memberships: [{ membership_id: INSTALLATION_ID, membership_revision: '0', state: 'active', roles: ['reader'] }] },
+    { state: 'active', memberships: [{ membership_id: INSTALLATION_ID, membership_revision: '1', state: 'active', roles: ['root'] }] },
+    { state: 'active', memberships: [1] },
+  ])('rejects a malformed authority snapshot before committing discovery: %j', async scope_snapshot => {
+    await expect(clientFor(inventoryRow({ scope_snapshot })).listInstallationsV2()).rejects.toThrow(/malformed scope snapshot/)
+  })
+
   test('preserves a Team parent Organization needed for hierarchy and transfer checks', async () => {
     const page = await clientFor(inventoryRow()).listInstallationsV2()
     expect(page.installations[0]).toMatchObject({

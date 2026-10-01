@@ -2,6 +2,8 @@
   <div class="session-layout">
     <!-- Session List Panel -->
     <div class="session-panel">
+      <TeamSessionBrowser v-if="browseScope.type === 'team' && teamAccess.enabled.value" :team-id="browseScope.teamId" @update:scope="browseScope = $event" />
+      <template v-else>
       <div class="session-panel-header">
         <div class="session-panel-heading-copy">
           <h3>{{ uniqueHosts.length > 1 ? t('nav.sessions') : daemonName }}</h3>
@@ -11,7 +13,8 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
         </button>
       </div>
-      <div v-if="uniqueHosts.length > 1 || selectedHostId" ref="hostFilterEl" class="host-filter-popover">
+      <SessionScopeSwitcher v-if="teamAccess.enabled.value" :model-value="browseScope" :teams="browseTeams" class="personal-scope-switcher" @update:model-value="browseScope = $event" />
+      <div v-if="uniqueHosts.length || selectedHostId" ref="hostFilterEl" class="host-filter-popover">
         <button ref="hostFilterTrigger" type="button" class="agent-filter-trigger host-filter-trigger"
           :aria-expanded="hostFilterOpen" aria-controls="session-host-filter" @click.stop="toggleHostFilter">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
@@ -66,7 +69,9 @@
       <div v-if="!hasNoSessions" class="session-panel-presence">
         <span :class="['status-dot', { online: scopedOnlineHostCount > 0 }]"></span>
         <span class="session-panel-presence-copy">{{ t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
+        <button type="button" class="session-search-toggle" aria-label="搜索会话" :aria-expanded="sessionSearchOpen" @click="sessionSearchOpen = !sessionSearchOpen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg></button>
       </div>
+      <div v-if="sessionSearchOpen" class="session-browser-search"><input v-model="sessionSearch" type="search" aria-label="搜索会话标题" placeholder="搜索会话…" /></div>
       <div class="session-list">
         <button v-if="archivedView" type="button" class="archive-back" @click="archivedView = false">‹ <span>返回会话</span></button>
         <div v-else class="project-section-label">
@@ -120,17 +125,14 @@
         <button v-if="!archivedView" class="archived-entry" type="button" @click="openArchived()">已归档 <span>{{ archivedCount }}</span></button>
         <div v-if="!hasNoSessions && !visibleSessions.length" class="host-filter-empty" role="status">
           <p>{{ t('session.host_filter_empty') }}</p>
-          <button type="button" @click="selectedHostId = ''; selectedAgentType = 'all'">{{ t('session.host_filter_reset') }}</button>
+          <button type="button" @click="selectedHostId = ''; selectedAgentType = 'all'; sessionSearch = ''">{{ t('session.host_filter_reset') }}</button>
         </div>
       </div>
+      </template>
     </div>
 
     <!-- Chat Main Area -->
     <div class="chat-area">
-      <div v-if="currentSessionOutsideFilter" class="session-filter-notice" role="status">
-        <span>{{ t('session.host_filter_retained') }}</span>
-        <button type="button" @click="showCurrentSessionInList">{{ t('session.host_filter_show_current') }}</button>
-      </div>
       <!-- The session list can arrive after the replay request on a direct URL. -->
       <div
         v-if="hasNoSessions && isLoading"
@@ -198,6 +200,11 @@
         </div>
       </div>
 
+      <div v-if="currentSessionOutsideFilter || browseScope.type === 'team'" class="session-filter-notice" role="status">
+        <span>{{ t('session.host_filter_retained') }}</span>
+        <button type="button" @click="showCurrentSessionInList">{{ t('session.host_filter_show_current') }}</button>
+      </div>
+
       <div ref="toolbarOverflowEl" :class="['toolbar-overflow', { 'mobile-session-toolbar-overflow': isMobile }]">
         <button type="button" class="toolbar-more-btn" :aria-label="t('session.actions.more')" :aria-expanded="toolbarOverflowOpen" @click.stop="toolbarOverflowOpen = !toolbarOverflowOpen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
@@ -249,6 +256,9 @@
         :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
         @scroll="onMessagesScroll"
       >
+        <button v-if="returnTeamSessionID && returnTeamID" type="button" class="banner banner-info team-return-banner" @click="returnToTeamSession">
+          ‹ 返回共享会话
+        </button>
         <div v-if="!isComposerVisible" class="messages-bottom-spacer" aria-hidden="true"></div>
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
@@ -322,20 +332,22 @@
           </div>
           <template v-if="!isHiddenAuxiliary(msg) && !isToolGroupContinuation(msg)">
           <!-- User message (right bubble) -->
+          <article v-if="msg.role === 'user'" class="session-message-row member"><span class="message-avatar">{{ (user?.display_name || user?.email || '我').slice(0,1).toUpperCase() }}</span><div class="message-body"><div class="message-byline">{{ user?.display_name || user?.email?.split('@')[0] || '我' }}</div>
           <MessageUser
-            v-if="msg.role === 'user'"
             :content="cleanContent(msg.content)"
             :data-delivery-status="msg.deliveryStatus || undefined"
           />
 
-          <!-- Agent text message (full-width block) -->
+          </div></article>
+          <!-- Agent text message -->
+          <article v-else-if="msg.type === 'agent_text'" class="session-message-row"><span class="message-avatar agent">C</span><div class="message-body"><div class="message-byline">{{ (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'claude-code' ? 'Claude Code' : (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'codex' ? 'Codex' : currentSessionAgent || 'Agent' }}</div>
           <MessageAgent
-            v-else-if="msg.type === 'agent_text'"
             :content="cleanContent(msg.content)"
             :streaming="msg.streaming"
             :agent-type="focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent"
           />
 
+          </div></article>
           <OpenCodeReasoningCard
             v-else-if="msg.type === 'agent_reasoning'"
             :content="msg.content"
@@ -489,6 +501,7 @@
           :documents="sessionDocuments"
           :list-status="sessionDocumentListStatus"
           @open="openSessionDocument"
+          @refresh="refreshSessionDocuments"
         />
       </div>
 
@@ -780,6 +793,12 @@ import SessionDocumentViewer from '../components/session-documents/SessionDocume
 import { useSessionDocuments } from '../composables/useSessionDocuments'
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
+import SessionScopeSwitcher from '../components/session/SessionScopeSwitcher.vue'
+import TeamSessionBrowser from '../components/session/TeamSessionBrowser.vue'
+import { listTeams } from '../services/teamClient'
+import type { TeamSummary } from '../types/team'
+import { useTeamAccess } from '../composables/useTeamAccess'
+import { useScopedSessionDraft, type SessionScope } from '../composables/useScopedSessionState'
 import { listProjects, renameProject, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject } from '../services/sessionOrganization'
 import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
@@ -794,7 +813,23 @@ const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = use
 const { t } = useLocale()
 const { user } = useAuth()
 
-const sessionId = computed(() => route.params.id as string)
+const sessionId = computed(() => String(route.params.id || 'default'))
+const returnTeamSessionID = computed(() => typeof route.query.return_team_session === 'string' ? route.query.return_team_session : '')
+const returnTeamID = computed(() => typeof route.query.team === 'string' ? route.query.team : '')
+function returnToTeamSession(): void {
+  if (!returnTeamSessionID.value || !returnTeamID.value) return
+  void router.push({ name: 'team-session', params: { teamId: returnTeamID.value, id: returnTeamSessionID.value }, query: { from_native: '1' } })
+}
+const sessionScope = computed<SessionScope>(() => ({ type: 'personal' }))
+const browseScope = ref<SessionScope>({type:'personal'})
+const browseTeams = ref<TeamSummary[]>([])
+const teamAccess = useTeamAccess()
+watch([teamAccess.enabled, teamAccess.denied, () => user.value?.id], async ([enabled, denied], previous, cleanup) => {
+  let stale=false;cleanup(()=>{stale=true})
+  if(!enabled) {if(denied || !user.value?.id || previous?.[2] !== user.value?.id) {browseTeams.value=[];browseScope.value={type:'personal'}};return}
+  try {const teams=await listTeams();if(!stale)browseTeams.value=teams} catch {if(!stale)browseTeams.value=[]}
+},{immediate:true})
+
 const sessionDocumentState = useSessionDocuments(sessionId)
 const {
   documents: sessionDocuments,
@@ -915,7 +950,7 @@ const explicitlyRoutedLiveEventTypes = new Set<string>([
   'tool_call', 'tool_result', 'approval_request', 'approval_resolved',
   'question_request', 'question_resolved', 'mcp_elicitation_request',
   'mcp_elicitation_resolved', 'interactive_prompt', 'turn_status', 'error',
-  'command_receipt', 'interaction_result', 'subagent_discovered',
+  'command_receipt', 'interaction_result', 'interactive_resolved', 'subagent_discovered',
   'subagent_title_update', 'subagent_usage', 'permission_config_changed',
   'session_status', 'session_title_update', 'session_deleted', 'session_pinned',
   'session_id_changed', 'session_documents_changed',
@@ -980,7 +1015,7 @@ function handleInvocationResult(msg: any) {
   if(!['choose','input'].includes(result.kind)&&messageInput.value===invocationDraft) {messageInput.value='';invocationSelection.value=null}
 }
 watch(sessionId,()=>{for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer);nativeCommandMessages.clear();invocationEnabled.value=false;invocationFilter.value='all';invocationSelection.value=null;invocationDialog.value=null;invocationRequest='';invocationError.value='';clearTimeout(invocationTimer)})
-const messageInput = ref('')
+const { draft: messageInput } = useScopedSessionDraft(sessionScope, sessionId)
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
 const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
@@ -1217,10 +1252,12 @@ const agentFilterOptions = computed(() => {
   ]
 })
 const activeAgentFilter = computed(() => agentFilterOptions.value.find(option => option.value === selectedAgentType.value) || agentFilterOptions.value[0])
-const visibleSessions = computed(() => {
-  if (selectedAgentType.value === 'all') return hostScopedSessions.value
-  return hostScopedSessions.value.filter((session: any) => normalizedAgentType(session) === selectedAgentType.value)
-})
+const sessionSearch = ref(''), sessionSearchOpen = ref(false)
+function matchesSessionSearch(session: any): boolean {
+  return !sessionSearch.value.trim() || `${session.title || ''} ${session.session_id || ''}`.toLocaleLowerCase().includes(sessionSearch.value.trim().toLocaleLowerCase())
+}
+const visibleSessions = computed(() => hostScopedSessions.value.filter((session: any) =>
+  (selectedAgentType.value === 'all' || normalizedAgentType(session) === selectedAgentType.value) && matchesSessionSearch(session)))
 const projects = ref<SessionProject[]>([])
 const projectOrderRevision = ref(0)
 const ungroupedRevision = ref(0)
@@ -1277,10 +1314,10 @@ function sortBucket(sessions: any[], mode: string) {
         - Math.max(new Date(a.last_activity_at || 0).getTime(),new Date(a.membership_changed_at || 0).getTime(),new Date(a.created_at || 0).getTime())))
 }
 const sidebarEntries = computed<any[]>(() => {
-  if (archivedView.value) return [...archivedSessions.value.map(s => ({ ...s, kind: 'session' })),...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
+  if (archivedView.value) return [...archivedSessions.value.filter(matchesSessionSearch).map(s => ({ ...s, kind: 'session' })),...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
   const out: any[] = []
   const live = new Map(allSessions.value.map((s:any) => [s.session_id,s]))
-  const enriched = (rows: any[]) => rows.map(s => ({ ...s, status:live.get(s.session_id)?.status || s.status,
+  const enriched = (rows: any[]) => rows.filter(matchesSessionSearch).map(s => ({ ...s, status:live.get(s.session_id)?.status || s.status,
     children:live.get(s.session_id)?.children || s.children, kind:'session' }))
   for (const project of projects.value) {
     const members = organizationLoaded.value ? (sidebarBuckets.value[project.id] || []) : sortBucket(visibleSessions.value.filter((s:any) => s.project_id === project.id),project.order_mode).slice(0,5)
@@ -1369,8 +1406,10 @@ async function openArchived(cursor?: string) {
 }
 const currentSessionOutsideFilter = computed(() => !!currentSession.value && !visibleSessions.value.some(s => s.session_id === sessionId.value))
 function showCurrentSessionInList() {
+  browseScope.value={type:'personal'}
   selectedHostId.value = currentSession.value?.daemon_id || ''
   selectedAgentType.value = 'all'
+  sessionSearch.value = ''
 }
 const runningSessionCount = computed(() => hostScopedSessions.value.filter((session: any) => ['running', 'busy', 'retry'].includes(session.statusEffective || session.status)).length)
 function selectAgentFilter(agent: string) {
@@ -2354,7 +2393,7 @@ const LOCAL_COMMANDS = POCKETCTL_LOCAL_COMMANDS.map(command => command.name)
 // already flipped its local status optimistically; here we just dispatch the
 // approval_response command, which the relay forwards to the owning daemon.
 const interactionSubmitTimers = new Map<string, ReturnType<typeof setTimeout>>()
-type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request'
+type InteractionCardType = 'approval_request' | 'question_request' | 'mcp_elicitation_request' | 'interactive_prompt'
 const interactionResolutions = new Map<string, { type: InteractionCardType; resolution: Record<string, unknown>; metadata: Record<string, unknown> }>()
 
 function uniqueBuckets(buckets: any[][]): any[][] {
@@ -2445,6 +2484,9 @@ function consumeInteractionResolution(type: InteractionCardType, requestId: stri
 }
 
 function interactionResultResolution(evt: any): { type: InteractionCardType; resolution: Record<string, unknown> } | null {
+  if (evt.operation === 'interactive_response' && evt.status === 'submitted') {
+    return { type: 'interactive_prompt', resolution: { selectedChoice: evt.choice, reason: 'submitted', resultUnknown: false } }
+  }
   let type: InteractionCardType
   if (evt.operation === 'approval_response') type = 'approval_request'
   else if (evt.operation === 'question_response' || evt.operation === 'question_reject') type = 'question_request'
@@ -2506,7 +2548,7 @@ function resyncInteractionState() {
 
 function onApprovalRespond(msg: any, action: 'once' | 'always' | 'reject' | 'cancel') {
   if (!msg.request_id) return
-  const supportsActions = interactionCapabilities.value.includes('permission_actions') || Array.isArray(msg.availableDecisions)
+  const supportsActions = interactionCapabilities.value.includes('permission_actions') || (Array.isArray(msg.availableDecisions) && msg.availableDecisions.length > 0)
   const trustedPolicy = currentSessionCapabilities.value.includes('trusted_action_policy_v1')
   if (!trustedApprovalActions(msg, supportsActions, trustedPolicy).includes(action)) return
   if (!markInteractionSubmitting(msg, 'Approval')) return
@@ -3531,6 +3573,10 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (!requestId) return
     const resolution = { action: evt.action || evt.payload?.action, reason: evt.reason || evt.payload?.reason, redacted: !!(evt.redacted ?? evt.payload?.redacted) }
     recordInteractionResolution('mcp_elicitation_request', requestId, resolution, evt, rootTarget, interactionBuckets)
+  } else if (type === 'interactive_resolved') {
+    const payload = evt.payload ?? evt
+    const requestId = evt.request_id || payload.request_id
+    if (requestId) recordInteractionResolution('interactive_prompt', requestId, { selectedChoice: payload.choice, reason: 'submitted', resultUnknown: false }, evt, rootTarget, interactionBuckets)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
     // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that
@@ -3556,6 +3602,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       prompt: promptText, options, status: 'pending', selectedChoice: '',
       ...eventWithTurnMetadata(evt),
     })
+    consumeInteractionResolution('interactive_prompt', requestId, target[target.length - 1], target)
   } else {
     const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
     const stableIdentity = unknownTimelineEventIdentity(evt, type)
@@ -4045,6 +4092,9 @@ onMounted(() => {
   cleanups.push(onEvent('interaction_result', (msg: any) => {
     if (msg.session_id !== sessionId.value || !msg.request_id) return
     processImmediateLiveEvent(msg)
+  }))
+  cleanups.push(onEvent('interactive_resolved', (msg: any) => {
+    if (msg.session_id === sessionId.value) processImmediateLiveEvent(msg)
   }))
   cleanups.push(onEvent('interactive_prompt', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
@@ -4714,8 +4764,8 @@ onMounted(() => {
 @media (max-width: 768px) {
   .session-layout { height: calc(var(--visual-viewport-bottom, 100dvh) - var(--mobile-topbar-h)); }
   .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
-  .session-panel,
-  .chat-toolbar { display: none; }
+  .session-layout > .session-panel,
+  .session-layout .chat-toolbar { display: none; }
   .mobile-session-toolbar-overflow {
     position: fixed;
     z-index: 82;
@@ -4950,8 +5000,29 @@ onMounted(() => {
   .session-history-spinner { animation-duration: 1.8s; }
   .request-deep-link-target { animation: none; outline: 2px solid var(--warning); }
 }
+
+.personal-scope-switcher { margin:0; }
 </style>
 
 <style scoped>
+.session-search-toggle { margin-left:auto; padding:4px; border:0; background:none; color:var(--fg-tertiary); cursor:pointer; }
+.session-search-toggle svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.5; }
+.session-browser-search { padding:4px 10px 8px; }
+.session-browser-search input { width:100%; padding:9px; border:1px solid var(--border-light); border-radius:6px; background:var(--bg); color:var(--fg); font:12px var(--font-body); }
+.team-return-banner { width: 100%; font: inherit; text-align: left; cursor: pointer; }
 .invocation-hint{pointer-events:auto;font-size:12px;color:var(--fg-secondary);margin:0 12px 6px;overflow-wrap:anywhere}.invocation-hint button{background:none;border:0;color:var(--accent);cursor:pointer}
+.chat-messages > .session-message-row { width:100%; max-width:none; align-self:stretch; }
+
+.session-message-row { display:flex; gap:11px; width:100%; min-width:0; align-self:stretch; }
+.message-avatar { width:27px; height:27px; flex:0 0 27px; display:grid; place-items:center; border:1px solid var(--border-light); border-radius:50%; color:var(--accent); background:var(--accent-muted); font-size:11px; }
+.message-avatar.agent { border-radius:7px; color:var(--fg); background:var(--surface-active); font-family:var(--font-mono); }
+.message-body { flex:1; min-width:0; }
+.message-byline { margin:1px 0 8px; color:var(--fg); font:550 12px/1.5 var(--font-body); }
+:deep(.msg-user) { width:100%; max-width:none; box-sizing:border-box; color:var(--fg); background:var(--surface); border:1px solid var(--border); border-radius:0 8px 8px 8px; padding:12px 15px; font-size:13px; line-height:1.85; }
+:deep(.msg-user.collapsed .msg-text::after) { background:linear-gradient(transparent,var(--surface)); }
+:deep(.block-role) { display:none; }
+:deep(.agent-body) { font-size:13px; line-height:1.85; }
+@media(max-width:768px) { .session-message-row {gap:8px} :deep(.msg-user),:deep(.agent-body) {font-size:12px} }
+
+@media(min-width:769px) { .session-toolbar-back { display:none; } }
 </style>

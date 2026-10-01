@@ -110,6 +110,9 @@ func (sm *SessionManager) rememberPTYOutput(ps *ProcessState, chunk []byte) {
 // sessions (--continue — PID/status updated in-place, but no new tailer needed since
 // the old one still tails the same JSONL file).
 func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int, ttyPath string, status string, agent string) bool {
+	if sm.isRetiredCollaborationSession(sessionID, agent, cwd) {
+		return false
+	}
 	processIdentity := ""
 	if agent == adapter.AgentClaude && pid > 0 {
 		processIdentity, _ = platform.ProcessStartIdentity(pid)
@@ -119,6 +122,9 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		sm.mu.Unlock()
 		sm.bindClaudeChannelForSession(sessionID)
 	}()
+	if sm.retiredCollaborationSessionLocked(sessionID, agent, cwd) {
+		return false
+	}
 
 	// Don't register if this is a daemon-spawned process
 	if sm.childPids[pid] {

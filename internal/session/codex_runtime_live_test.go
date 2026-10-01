@@ -63,12 +63,12 @@ func TestInstalledCodexRuntimeAcquireAndSecondClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalHome, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
+	// TestMain has already replaced HOME; its .codex need not exist. An
+	// explicit CODEX_HOME must exist, and must not reuse developer credentials.
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CODEX_HOME", originalHome+"/.codex")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("POCKETCTL_CODEX_HOMES", "")
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", shortCodexRuntimeDir(t))
 	cfg := agentcontrol.DefaultConfig()
 	cfg.Codex.State = agentcontrol.StateEnabled
 	cfg.Codex.RealBinary = binary

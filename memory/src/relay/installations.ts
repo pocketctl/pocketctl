@@ -1,4 +1,4 @@
-import type { ProviderInstallationItem, ProviderInstallationItemV2, ProviderInstallationPage } from './contracts.js'
+import type { ProviderInstallationItem, ProviderInstallationItemV2, ProviderInstallationPage, ScopeAuthoritySnapshot } from './contracts.js'
 import type { RelayHttpClient } from './http-client.js'
 import type { ProviderTokenClient } from './token-client.js'
 import { withProviderAuthRetry } from './token-client.js'
@@ -10,6 +10,28 @@ export interface InstallationsClientOptions {
 
 const INSTALLATION_STATUSES = new Set(['pending', 'active', 'paused', 'revoking', 'revoked'])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const SCOPE_ROLES = new Set(['reader', 'contributor', 'reviewer', 'publisher', 'policy_administrator', 'scope_administrator'])
+
+function parseScopeSnapshot(input: unknown): ScopeAuthoritySnapshot | null {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null
+  const row = input as Record<string, unknown>
+  if (!['active', 'suspended', 'dissolving', 'dissolved'].includes(String(row.state)) || !Array.isArray(row.memberships)) return null
+  const memberships: ScopeAuthoritySnapshot['memberships'] = []
+  const seen = new Set<string>()
+  for (const value of row.memberships) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+    const member = value as Record<string, unknown>
+    if (typeof member.membership_id !== 'string' || !UUID_PATTERN.test(member.membership_id)
+      || seen.has(member.membership_id.toLowerCase())
+      || typeof member.membership_revision !== 'string' || !/^[1-9][0-9]*$/.test(member.membership_revision)
+      || !['active', 'suspended', 'revoked'].includes(String(member.state))
+      || !Array.isArray(member.roles) || member.roles.some(role => typeof role !== 'string' || !SCOPE_ROLES.has(role))) return null
+    seen.add(member.membership_id.toLowerCase())
+    memberships.push({ membership_id: member.membership_id, membership_revision: member.membership_revision,
+      state: member.state as ScopeAuthoritySnapshot['memberships'][number]['state'], roles: member.roles as string[] })
+  }
+  return { state: row.state as ScopeAuthoritySnapshot['state'], memberships }
+}
 
 function parseInstallationItem(input: unknown): ProviderInstallationItem | null {
   if (typeof input !== 'object' || input === null) return null
@@ -127,7 +149,15 @@ export function createInstallationsClient(options: InstallationsClientOptions) {
         if (!parsedItem) throw new Error('list_installations_v2 returned a malformed item')
         const ownerScope = parseOwnerScopeFields(entry as Record<string, unknown>)
         if (!ownerScope) throw new Error('list_installations_v2 returned malformed owner-scope metadata')
-        installations.push({ ...parsedItem, ...ownerScope })
+        const rawSnapshot = (entry as Record<string, unknown>).scope_snapshot
+        const scopeSnapshot = rawSnapshot == null ? null : parseScopeSnapshot(rawSnapshot)
+        if ((rawSnapshot != null && !scopeSnapshot)
+          || (rawSnapshot === null && ownerScope.owner_scope_kind !== 'personal')
+          || (ownerScope.owner_scope_kind === 'personal' && scopeSnapshot)) {
+          throw new Error('list_installations_v2 returned malformed scope snapshot')
+        }
+        installations.push({ ...parsedItem, ...ownerScope,
+          ...(rawSnapshot === undefined ? {} : { scope_snapshot: scopeSnapshot }) })
       }
       return {
         installations,

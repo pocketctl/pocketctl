@@ -40,7 +40,7 @@ assert_share_route() {
 assert_share_route landing/nginx.conf http://127.0.0.1:8080
 assert_share_route landing/nginx-online.conf http://127.0.0.1:8080
 assert_share_route deploy/nginx/pocketctl.conf http://127.0.0.1:8080
-assert_share_route landing/nginx-docker.conf http://relay:8080
+assert_share_route landing/nginx-docker.conf '$relay_upstream$request_uri'
 assert_share_route nginx/nginx.conf http://relay:8080
 
 generated_block=$(share_location "$repo_root/deploy/deploy.sh")

@@ -1,7 +1,8 @@
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { getRelayOrigin, getRelayWs } from './useEnv'
 import { isTokenExpired, useAuth } from './useAuth'
 import { applyQuotaPayload } from './useQuota'
+import type { TeamEvent } from '../types/team'
 
 export interface DaemonEvent {
   type: string
@@ -57,6 +58,10 @@ export interface DaemonEvent {
   classifier_version?: string
   retryable?: boolean
   resync?: boolean
+  team_session_id?: string
+  subscribed?: boolean
+  protocol?: string
+  event?: TeamEvent
 }
 
 export type InputMode = 'new_turn' | 'steer' | 'auto'
@@ -69,6 +74,11 @@ export interface UserMessageCommand {
   content: string
   msg_id: string
   input_mode?: InputMode
+}
+
+export interface TeamCollaborationSubscriptionCommand {
+  type: 'team_collaboration_subscribe' | 'team_collaboration_unsubscribe'
+  team_session_id: string
 }
 
 // CommandItem represents a slash command or skill available for autocompletion.
@@ -113,11 +123,33 @@ let hasOpened = false
 // pendingMessages，等 onopen flush——否则 DashboardView 的 `connect(); send()` 在 async
 // 刷新窗口内 ws.value 尚未就绪，list_sessions/list_daemons 请求会丢失。
 let connecting = false
+let connectionGeneration = 0
 
-const { accessToken, doRefreshToken, logout } = useAuth()
+const { user, accessToken, doRefreshToken, logout } = useAuth()
 
 // Daemon online tracking
 const daemons = ref<Map<string, DaemonInfo>>(new Map())
+
+// A socket ticket belongs to one account for its entire lifetime. Token refresh
+// for that account can keep the socket, but logout/account switching cannot.
+watch(() => user?.value?.id ?? null, () => {
+  connectionGeneration++
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  const previous = ws.value
+  ws.value = null
+  if (previous) {
+    previous.onopen = previous.onmessage = previous.onclose = previous.onerror = null
+    previous.close()
+  }
+  connected.value = false
+  reconnecting.value = false
+  connecting = false
+  reconnectAttempt = 0
+  hasOpened = false
+  pendingMessages = []
+  daemons.value = new Map()
+}, { flush: 'sync' })
 
 function withWsQuery(base: string, params: Record<string, string>): string {
   try {
@@ -172,10 +204,13 @@ async function connect(url?: string) {
   if (connecting || (ws.value && ws.value.readyState === WebSocket.OPEN)) return
   connecting = true
   reconnecting.value = true
+  const generation = connectionGeneration
   try {
     await ensureFreshToken()
+    if (generation !== connectionGeneration) return
     currentBaseUrl = url || currentBaseUrl || getRelayWs()
     currentUrl = await getRelayWsUrl(currentBaseUrl)
+    if (generation !== connectionGeneration) return
     ws.value = new WebSocket(currentUrl)
 
 		ws.value.onopen = () => {
@@ -223,7 +258,7 @@ async function connect(url?: string) {
     }
     ws.value.onerror = () => { ws.value?.close() }
   } catch {
-    connecting = false
+    if (generation === connectionGeneration) connecting = false
   }
 }
 
@@ -307,6 +342,14 @@ function sendUserMessage(data: Omit<UserMessageCommand, 'type'>): boolean {
   return send({ type: 'user_message', ...data })
 }
 
+function subscribeTeamSession(teamSessionID: string): boolean {
+  return send({ type: 'team_collaboration_subscribe', team_session_id: teamSessionID } satisfies TeamCollaborationSubscriptionCommand)
+}
+
+function unsubscribeTeamSession(teamSessionID: string): boolean {
+  return send({ type: 'team_collaboration_unsubscribe', team_session_id: teamSessionID } satisfies TeamCollaborationSubscriptionCommand)
+}
+
 function reportLocale() {
   const locale = localStorage.getItem('pocketctl-locale') || 'zh'
   send({ type: 'set_locale', locale })
@@ -335,5 +378,5 @@ function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandl
 }
 
 export function useWebSocket() {
-  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, sendUserMessage, onEvent, reportLocale }
+  return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, sendUserMessage, subscribeTeamSession, unsubscribeTeamSession, onEvent, reportLocale }
 }

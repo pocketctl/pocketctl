@@ -1,13 +1,16 @@
 <template>
   <section class="memory-phase4-workspace memory-wiki-workspace" data-testid="memory-wiki-panel">
     <header class="memory-phase4-commandbar">
+      <MemoryScopeSwitcher v-if="scopes.length" :model-value="installationId"
+        :scopes="scopes" data-testid="memory-wiki-scope-switcher"
+        @update:model-value="emit('update:installationId', $event)" />
       <label class="memory-phase4-repository-field">
         <span>{{ t('memory.phase4.repository_id') }}</span>
         <input v-model="repositoryDraft" data-testid="memory-wiki-repository"
           :placeholder="t('memory.phase4.repository_placeholder')"
           @change="commitRepository" @keyup.enter="commitRepository" />
       </label>
-      <button type="button" class="memory-button" :disabled="loading || !repositoryDraft.trim()"
+      <button type="button" class="memory-button" :disabled="loading || !repositoryDraft.trim() || scopeUnavailable"
         data-testid="memory-wiki-retry" @click="commitRepository">
         {{ loading ? t('memory.phase4.loading') : t('memory.phase4.refresh') }}
       </button>
@@ -17,7 +20,12 @@
       </button>
     </header>
 
-    <div v-if="loading && !wiki" class="memory-phase4-state" data-testid="memory-wiki-loading">
+    <div v-if="scopeUnavailable" class="memory-phase4-state is-error" role="alert"
+      data-testid="memory-wiki-scope-error">
+      <strong>{{ t('memory.phase4.scope_unavailable') }}</strong>
+      <p>{{ t('memory.phase4.scope_unavailable_copy') }}</p>
+    </div>
+    <div v-else-if="loading && !wiki" class="memory-phase4-state" data-testid="memory-wiki-loading">
       <span class="memory-spinner" aria-hidden="true"></span>{{ t('memory.phase4.wiki_loading') }}
     </div>
     <div v-else-if="error" class="memory-phase4-state is-error" role="alert" data-testid="memory-wiki-error">
@@ -26,6 +34,11 @@
     <div v-else-if="loaded && !wiki" class="memory-phase4-state" data-testid="memory-wiki-empty">
       <strong>{{ t('memory.phase4.wiki_empty') }}</strong><p>{{ t('memory.phase4.wiki_empty_copy') }}</p>
     </div>
+
+    <section v-if="!repositoryId && !scopeUnavailable" class="memory-wiki-layout memory-wiki-intro" data-testid="memory-wiki-intro">
+      <aside><h3>{{ t('memory.wiki_index') }}</h3><p>{{ t('memory.wiki_index_empty') }}</p></aside>
+      <article><h3>{{ t('memory.wiki_choose_repository') }}</h3><p>{{ t('memory.wiki_choose_repository_copy') }}</p></article>
+    </section>
 
     <template v-if="wiki">
       <div class="memory-provenance-spine" data-testid="memory-wiki-provenance">
@@ -109,13 +122,31 @@ import {
   editMemoryWikiSection, getMemoryWiki, getMemoryWikiCandidate, listMemoryWikiBuilds,
   publishMemoryWikiCandidate, scheduleMemoryWikiBuild, setMemoryWikiSectionLock,
 } from '../../services/memoryClient'
-import type { MemoryActiveWiki, MemoryWikiBuild, MemoryWikiCandidate, MemoryWikiSection } from '../../types/memory'
+import type { MemoryWikiScopeContext } from '../../services/memoryClient'
+import type {
+  MemoryActiveWiki, MemoryGovernanceScope, MemoryWikiBuild, MemoryWikiCandidate, MemoryWikiSection,
+} from '../../types/memory'
 import MarkdownRenderer from '../MarkdownRenderer.vue'
+import MemoryScopeSwitcher from './MemoryScopeSwitcher.vue'
 import MemoryWikiCandidateView from './MemoryWikiCandidate.vue'
 import MemoryWikiEditor from './MemoryWikiEditor.vue'
 
-const props = defineProps<{ repositoryId: string; canContribute: boolean; canPublish: boolean }>()
-const emit = defineEmits<{ 'update:repositoryId': [value: string] }>()
+const props = withDefaults(defineProps<{
+  repositoryId: string
+  installationId?: string
+  scopes?: MemoryGovernanceScope[]
+  canContribute: boolean
+  canPublish: boolean
+  legacyGrant?: boolean
+}>(), {
+  installationId: '',
+  scopes: () => [],
+  legacyGrant: false,
+})
+const emit = defineEmits<{
+  'update:repositoryId': [value: string]
+  'update:installationId': [value: string]
+}>()
 const { t } = useLocale()
 const wiki = ref<MemoryActiveWiki | null>(null)
 const repositoryDraft = ref(props.repositoryId)
@@ -130,8 +161,19 @@ const loadingBuilds = ref(false)
 const error = ref('')
 const mutationError = ref('')
 const activeSections = computed(() => wiki.value?.pages.flatMap(page => page.sections) ?? [])
+const scopeUnavailable = computed(() => props.scopes.length > 0
+  && !props.scopes.some(scope => scope.installation_id === props.installationId))
+let loadRevision = 0
+let loadController: AbortController | null = null
 
-watch(() => props.repositoryId, repositoryId => {
+watch([
+  () => props.installationId,
+  () => props.repositoryId,
+  () => props.scopes.map(scope => `${scope.installation_id}:${scope.state}:${scope.permissions.join(',')}`).join('|'),
+], ([, repositoryId]) => {
+  loadRevision += 1
+  loadController?.abort()
+  loadController = null
   repositoryDraft.value = repositoryId
   wiki.value = null
   builds.value = []
@@ -139,7 +181,8 @@ watch(() => props.repositoryId, repositoryId => {
   candidate.value = null
   loaded.value = false
   error.value = ''
-  if (repositoryId) void loadWiki()
+  mutationError.value = ''
+  if (repositoryId && !scopeUnavailable.value) void loadWiki(loadRevision)
 }, { immediate: true })
 
 function commitRepository(): void {
@@ -152,14 +195,51 @@ function commitRepository(): void {
   emit('update:repositoryId', value)
 }
 
-async function loadWiki(): Promise<void> {
+function requestKey(): string {
+  return `${props.installationId || 'legacy'}:${props.repositoryId}`
+}
+
+function requestScope(
+  wikiVersionId?: string | null,
+  signal?: AbortSignal,
+): MemoryWikiScopeContext | undefined {
+  if (!props.installationId) return undefined
+  return {
+    installationId: props.installationId,
+    repositoryId: props.repositoryId,
+    wikiVersionId,
+    signal,
+    legacyGrant: props.legacyGrant,
+  }
+}
+
+function currentRequest(revision: number, key: string): boolean {
+  return revision === loadRevision && key === requestKey()
+}
+
+async function loadWiki(revision = ++loadRevision): Promise<void> {
   if (!props.repositoryId) return
+  const key = requestKey()
+  loadController?.abort()
+  const controller = new AbortController()
+  loadController = controller
   loading.value = true
+  loaded.value = false
   error.value = ''
+  wiki.value = null
+  builds.value = []
+  nextBuildCursor.value = null
+  candidate.value = null
+  candidateBuildId.value = ''
   try {
-    wiki.value = await getMemoryWiki(props.repositoryId)
-    if (wiki.value) {
-      const page = await listMemoryWikiBuilds(wiki.value.wiki_id)
+    const nextWiki = await getMemoryWiki(props.repositoryId, requestScope(null, controller.signal))
+    if (!currentRequest(revision, key)) return
+    wiki.value = nextWiki
+    if (nextWiki) {
+      const page = await listMemoryWikiBuilds(
+        nextWiki.wiki_id, null, 20, requestScope(nextWiki.wiki_version_id, controller.signal),
+      )
+      if (!currentRequest(revision, key)) return
       builds.value = page.builds
       nextBuildCursor.value = page.next_cursor
     } else {
@@ -168,19 +248,25 @@ async function loadWiki(): Promise<void> {
     }
     loaded.value = true
   } catch (cause) {
+    if (!currentRequest(revision, key) || controller.signal.aborted) return
     error.value = cause instanceof Error ? cause.message : t('memory.phase4.request_failed')
     loaded.value = true
   } finally {
-    loading.value = false
+    if (currentRequest(revision, key)) loading.value = false
   }
 }
 
 async function loadMoreBuilds(): Promise<void> {
   if (!wiki.value || !nextBuildCursor.value) return
+  const key = requestKey()
+  const versionId = wiki.value.wiki_version_id
   loadingBuilds.value = true
   mutationError.value = ''
   try {
-    const page = await listMemoryWikiBuilds(wiki.value.wiki_id, nextBuildCursor.value)
+    const page = await listMemoryWikiBuilds(
+      wiki.value.wiki_id, nextBuildCursor.value, 20, requestScope(versionId),
+    )
+    if (key !== requestKey() || wiki.value?.wiki_version_id !== versionId) return
     builds.value.push(...page.builds)
     nextBuildCursor.value = page.next_cursor
   } catch (cause) {
@@ -192,9 +278,15 @@ async function loadMoreBuilds(): Promise<void> {
 
 async function openCandidate(buildId: string): Promise<void> {
   if (!wiki.value) return
+  const key = requestKey()
+  const versionId = wiki.value.wiki_version_id
   mutationError.value = ''
   try {
-    candidate.value = await getMemoryWikiCandidate(wiki.value.wiki_id, buildId)
+    const nextCandidate = await getMemoryWikiCandidate(
+      wiki.value.wiki_id, buildId, requestScope(versionId),
+    )
+    if (key !== requestKey() || wiki.value?.wiki_version_id !== versionId) return
+    candidate.value = nextCandidate
     candidateBuildId.value = buildId
   } catch (cause) {
     mutationError.value = message(cause)
@@ -204,7 +296,9 @@ async function openCandidate(buildId: string): Promise<void> {
 async function scheduleBuild(): Promise<void> {
   if (!wiki.value || !props.canContribute) return
   await mutate(async () => {
-    await scheduleMemoryWikiBuild(wiki.value!.wiki_id, wiki.value!.generation)
+    await scheduleMemoryWikiBuild(
+      wiki.value!.wiki_id, wiki.value!.generation, requestScope(wiki.value!.wiki_version_id),
+    )
     await loadWiki()
   })
 }
@@ -214,6 +308,7 @@ async function publishCandidate(): Promise<void> {
   await mutate(async () => {
     await publishMemoryWikiCandidate(
       wiki.value!.wiki_id, candidateBuildId.value, Number(candidate.value!.generation), wiki.value!.revision,
+      requestScope(wiki.value!.wiki_version_id),
     )
     candidate.value = null
     candidateBuildId.value = ''
@@ -224,7 +319,10 @@ async function publishCandidate(): Promise<void> {
 async function saveSection(section: MemoryWikiSection, markdown: string): Promise<void> {
   if (!wiki.value) return
   await mutate(async () => {
-    await editMemoryWikiSection(wiki.value!.wiki_id, section.section_key, markdown, section.lock_version ?? 0)
+    await editMemoryWikiSection(
+      wiki.value!.wiki_id, section.section_key, markdown, section.lock_version ?? 0,
+      requestScope(wiki.value!.wiki_version_id),
+    )
     await loadWiki()
   })
 }
@@ -232,7 +330,10 @@ async function saveSection(section: MemoryWikiSection, markdown: string): Promis
 async function changeLock(section: MemoryWikiSection, action: 'lock' | 'unlock'): Promise<void> {
   if (!wiki.value) return
   await mutate(async () => {
-    await setMemoryWikiSectionLock(wiki.value!.wiki_id, section.section_key, action, section.lock_version ?? 0)
+    await setMemoryWikiSectionLock(
+      wiki.value!.wiki_id, section.section_key, action, section.lock_version ?? 0,
+      requestScope(wiki.value!.wiki_version_id),
+    )
     await loadWiki()
   })
 }

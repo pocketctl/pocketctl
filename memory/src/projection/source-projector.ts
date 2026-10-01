@@ -2,6 +2,7 @@ import type pg from 'pg'
 import { classifyArtifact } from './artifact-classifier.js'
 import { extractCanonicalEventKey } from './event-identity.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
+import { adaptTeamSource, type TeamSourceProvenance } from '../episodes/team-source-adapter.js'
 
 const TERMINAL_TURN_STATES = new Set(['completed', 'interrupted', 'failed', 'abandoned'])
 const TURN_STATES = new Set([
@@ -12,6 +13,8 @@ const COMMIT_SHA_PATTERN = /^[0-9a-f]{7,64}$/i
 interface InboxRow {
   feed_id: string | number
   topic: string
+  source_kind: string
+  source_id: string
   session_id: string | null
   turn_id: string | null
   event_type: string
@@ -57,7 +60,7 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
       await client.query('BEGIN')
       try {
         const claimed = await client.query<InboxRow>(`
-          SELECT feed_id::text, topic, session_id, turn_id, event_type, recorded_at,
+          SELECT feed_id::text, topic, source_kind, source_id, session_id, turn_id, event_type, recorded_at,
                  classification, data
           FROM memory_feed_inbox
           WHERE installation_id = $1 AND projection_state = 'pending'
@@ -120,12 +123,32 @@ async function projectRow(
     )
     return invalidated
   }
+  const adapted = adaptTeamSource(row)
+  const sourceRow: InboxRow & {
+    origin?: 'team'
+    originPosition?: string
+    canonicalEventKey?: string
+    sourceProvenance?: TeamSourceProvenance
+  } = adapted ? {
+    ...row,
+    session_id: adapted.sessionId,
+    turn_id: adapted.turnId,
+    event_type: adapted.eventType,
+    recorded_at: adapted.occurredAt,
+    classification: adapted.classification,
+    data: adapted.payload,
+    origin: adapted.origin,
+    originPosition: adapted.originPosition,
+    canonicalEventKey: adapted.canonicalEventKey,
+    sourceProvenance: adapted.provenance,
+  } : row
+
   // Tombstone fence first: a deleted session must never resurrect.
-  if (row.session_id) {
+  if (sourceRow.session_id) {
     const tombstone = await client.query(
       `SELECT 1 FROM memory_session_tombstones
        WHERE installation_id = $1 AND session_id = $2`,
-      [installationId, row.session_id],
+      [installationId, sourceRow.session_id],
     )
     if (tombstone.rowCount) {
       await client.query(
@@ -135,14 +158,23 @@ async function projectRow(
       )
       return 0
     }
-    await upsertSession(client, installationId, row)
+    await upsertSession(client, installationId, sourceRow)
   }
 
-  const eventId = await insertSourceEvent(client, installationId, row)
-  const data = row.data ?? {}
+  const event = await insertSourceEvent(client, installationId, sourceRow)
+  if (!event.inserted) {
+    await client.query(
+      `UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
+       WHERE installation_id = $1 AND feed_id = $2`,
+      [installationId, row.feed_id],
+    )
+    return 0
+  }
+  const eventId = event.sourceEventId
+  const data = sourceRow.data ?? {}
 
-  if (row.turn_id) {
-    await upsertTurn(client, installationId, row, eventId)
+  if (sourceRow.turn_id) {
+    await upsertTurn(client, installationId, sourceRow, eventId)
     // Terminal or late same-turn events (re)schedule episode compilation;
     // every event pushes availability past its own stabilization window, so
     // a late arrival re-delays the compile.
@@ -177,10 +209,10 @@ async function projectRow(
           WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL
           ELSE memory_jobs.completed_at
         END
-    `, [installationId, `compile_episode:${row.turn_id}`, stabilizationMs])
+    `, [installationId, `compile_episode:${sourceRow.turn_id}`, stabilizationMs])
   }
 
-  const artifact = classifyArtifact(row.event_type, data)
+  const artifact = classifyArtifact(sourceRow.event_type, data)
   if (artifact) {
     await client.query(`
       INSERT INTO source_artifacts
@@ -189,13 +221,13 @@ async function projectRow(
       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
       ON CONFLICT (installation_id, source_event_id, artifact_type, identity_key) DO NOTHING
     `, [
-      installationId, row.session_id, row.turn_id, eventId, artifact.artifact_type,
+      installationId, sourceRow.session_id, sourceRow.turn_id, eventId, artifact.artifact_type,
       artifact.identity_key, artifact.path, artifact.call_id, artifact.status,
-      JSON.stringify(artifact.details), row.recorded_at,
+      JSON.stringify(artifact.details), sourceRow.recorded_at,
     ])
   }
 
-  await observeRepository(client, installationId, data, row.recorded_at)
+  await observeRepository(client, installationId, data, sourceRow.recorded_at)
   await client.query(
     `UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
      WHERE installation_id = $1 AND feed_id = $2`,
@@ -242,22 +274,32 @@ async function insertSourceEvent(
   client: Pick<pg.PoolClient, 'query'>,
   installationId: string,
   row: InboxRow,
-): Promise<string> {
-  const result = await client.query<{ source_event_id: string }>(`
+): Promise<{ sourceEventId: string; inserted: boolean }> {
+  const extended = row as InboxRow & {
+    origin?: 'team'
+    originPosition?: string
+    canonicalEventKey?: string
+    sourceProvenance?: TeamSourceProvenance
+  }
+  const result = await client.query<{ source_event_id: string; inserted: boolean }>(`
     INSERT INTO source_events
       (source_event_id, installation_id, origin, origin_position, canonical_event_key,
-       session_id, turn_id, event_type, occurred_at, classification, payload, payload_hash)
-    VALUES (gen_random_uuid(), $1, 'feed', $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)
+       session_id, turn_id, event_type, occurred_at, classification, payload, payload_hash,
+       source_provenance)
+    VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11,
+            $12::jsonb)
     ON CONFLICT (installation_id, origin, origin_position) DO UPDATE SET
       payload_hash = source_events.payload_hash
-    RETURNING source_event_id
+    RETURNING source_event_id, (xmax = 0) AS inserted
   `, [
-    installationId, String(row.feed_id), extractCanonicalEventKey(row.data ?? {}),
+    installationId, extended.origin ?? 'feed', extended.originPosition ?? String(row.feed_id),
+    extended.canonicalEventKey ?? extractCanonicalEventKey(row.data ?? {}),
     row.session_id, row.turn_id, row.event_type, row.recorded_at,
     JSON.stringify(row.classification ?? {}), JSON.stringify(row.data ?? {}),
     canonicalPayloadHash(row.data ?? {}),
+    JSON.stringify(extended.sourceProvenance ?? {}),
   ])
-  return result.rows[0].source_event_id
+  return { sourceEventId: result.rows[0].source_event_id, inserted: result.rows[0].inserted }
 }
 
 async function upsertTurn(

@@ -146,7 +146,7 @@ async function ensurePolicyHead(
 async function readPolicyHead(
   client: PolicyQueryClient,
   installationId: string,
-): Promise<{ activeVersionId: string; document: ReviewPolicyDocument }> {
+): Promise<{ activeVersionId: string; document: ReviewPolicyDocument } | null> {
   const result = await client.query<{
     active_version_id: string
     document: Record<string, unknown>
@@ -159,7 +159,7 @@ async function readPolicyHead(
     FOR SHARE OF h
   `, [installationId])
   const row = result.rows[0]
-  if (!row) throw new Error('review policy head missing')
+  if (!row) return null
   const document = parseReviewPolicyDocument(row.document)
   if (!document) throw new Error('review policy document invalid')
   return { activeVersionId: row.active_version_id, document }
@@ -194,6 +194,7 @@ export async function loadEffectiveReviewPolicySnapshot(
     : DEFAULT_TEAM_REVIEW_POLICY
   if (options.ensure) await ensurePolicyHead(client, installationId, targetDefault)
   const target = await readPolicyHead(client, installationId)
+  if (!target) throw new Error('review policy head missing')
   const targetPolicy = resolveEffectivePolicy(targetDefault, target.document)
 
   if (scopeKind === 'organization' || !row.parent_organization_id) {
@@ -212,16 +213,22 @@ export async function loadEffectiveReviewPolicySnapshot(
     FOR SHARE
   `, [row.parent_organization_id])
   const parentInstallationId = parentScope.rows[0]?.installation_id
-  if (!parentInstallationId) throw new Error('parent organization review policy scope missing')
-  if (options.ensure) {
+  if (parentInstallationId && options.ensure) {
     await ensurePolicyHead(client, parentInstallationId, DEFAULT_ORGANIZATION_REVIEW_POLICY)
   }
-  const parent = await readPolicyHead(client, parentInstallationId)
-  const parentPolicy = resolveEffectivePolicy(DEFAULT_ORGANIZATION_REVIEW_POLICY, parent.document)
+  // A Team's Organization need not have Memory installed or a policy head yet.
+  // Reads inherit its code-owned floor without creating an installation/head.
+  // Null provenance fences this revision once a real parent head appears.
+  const parent = parentInstallationId
+    ? await readPolicyHead(client, parentInstallationId)
+    : null
+  const parentPolicy = parent
+    ? resolveEffectivePolicy(DEFAULT_ORGANIZATION_REVIEW_POLICY, parent.document)
+    : DEFAULT_ORGANIZATION_REVIEW_POLICY
   return {
     scopeKind,
     activeVersionId: target.activeVersionId,
-    parentActiveVersionId: parent.activeVersionId,
+    parentActiveVersionId: parent?.activeVersionId ?? null,
     policy: resolveEffectivePolicy(parentPolicy, targetPolicy),
   }
 }

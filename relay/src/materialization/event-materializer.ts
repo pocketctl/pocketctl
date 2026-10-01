@@ -397,7 +397,7 @@ export class EventMaterializer {
     }
     if (input.eventType === 'interaction_result'
       || (input.eventType === 'error'
-        && ['approval_response', 'question_response', 'question_reject'].includes(String(input.payload.operation ?? '')))) {
+        && ['approval_response', 'question_response', 'question_reject', 'interactive_response'].includes(String(input.payload.operation ?? '')))) {
       return {
         eventId: null,
         inserted: false,

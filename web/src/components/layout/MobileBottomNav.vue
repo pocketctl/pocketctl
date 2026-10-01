@@ -8,6 +8,11 @@
       <span>{{ t('nav.sessions') }}</span>
       <span v-if="sessionCount > 0" class="mobile-nav-badge">{{ sessionCount }}</span>
     </router-link>
+    <router-link to="/inbox" class="mobile-nav-link" :aria-label="t('attention.title')" data-testid="mobile-nav-inbox">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+      <span>{{ t('attention.title') }}</span>
+      <span v-if="attentionCount > 0" class="mobile-nav-badge">{{ attentionCount > 99 ? '99+' : attentionCount }}</span>
+    </router-link>
     <router-link to="/hosts" class="mobile-nav-link" :aria-label="t('nav.hosts')">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <rect x="3" y="3" width="18" height="7" rx="2" />
@@ -15,17 +20,6 @@
         <path d="M7 6.5h.01M7 17.5h.01" />
       </svg>
       <span>{{ t('nav.hosts') }}</span>
-    </router-link>
-    <router-link to="/memory" class="mobile-nav-link" :aria-label="t('memory.title')" data-testid="mobile-nav-memory">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
-        <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
-        <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
-        <path d="M17.599 6.5a3 3 0 0 0 .399-1.375M6.003 5.125A3 3 0 0 0 6.401 6.5" />
-        <path d="M3.477 10.896a4 4 0 0 1 .585-.396M19.938 10.5a4 4 0 0 1 .585.396" />
-        <path d="M6 18a4 4 0 0 1-1.967-.516M19.967 17.484A4 4 0 0 1 18 18" />
-      </svg>
-      <span>{{ t('memory.title') }}</span>
     </router-link>
     <router-link to="/settings" class="mobile-nav-link" :aria-label="t('nav.settings')">
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -40,7 +34,7 @@
 <script setup lang="ts">
 import { useLocale } from '../../composables/useLocale'
 
-defineProps<{ sessionCount: number }>()
+withDefaults(defineProps<{ sessionCount: number; attentionCount?: number }>(), { attentionCount: 0 })
 const { t } = useLocale()
 </script>
 
@@ -52,7 +46,8 @@ const { t } = useLocale()
   min-height: var(--mobile-bottom-nav-h);
   padding: 6px 16px max(6px, env(safe-area-inset-bottom));
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(14px);

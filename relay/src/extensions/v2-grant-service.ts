@@ -75,7 +75,7 @@ export interface V2GrantServiceDeps {
 
 export function createV2GrantService(deps: V2GrantServiceDeps) {
   return {
-    async mint(input: V2GrantMintInput): Promise<V2GrantMintResult> {
+    async mint(input: V2GrantMintInput, database: Pick<pg.PoolClient, 'query'> = deps.pool): Promise<V2GrantMintResult> {
       if (deps.v2Mode !== 'enabled') {
         return {
           ok: false,
@@ -108,7 +108,7 @@ export function createV2GrantService(deps: V2GrantServiceDeps) {
       {
         {
           const providers = EXTENSION_PROVIDER_CATALOG.map(entry => entry.provider_id)
-          const rows = await deps.pool.query<BindingCandidateRow>(`
+          const rows = await database.query<BindingCandidateRow>(`
             SELECT i.installation_id, i.provider_id, i.owner_user_id, i.status,
                    i.enabled_services, i.config_version,
                    i.owner_scope_kind, i.owner_scope_id, i.authorization_epoch,
@@ -182,7 +182,7 @@ export function createV2GrantService(deps: V2GrantServiceDeps) {
                 : `SELECT 'organization' AS scope_kind, organization_id AS scope_id, state, authorization_epoch
                    FROM extension_organizations WHERE organization_id = ANY($${paramIndex}::uuid[])`)
             }
-            const scopeRows = await deps.pool.query<ScopeStateRow>(
+            const scopeRows = await database.query<ScopeStateRow>(
               unionParts.join(' UNION ALL '),
               params,
             )
@@ -232,7 +232,7 @@ export function createV2GrantService(deps: V2GrantServiceDeps) {
           })
           // Bounded audit: provider allowlist id and a binding-count category
           // only — never the grant, jti, installation ids, or service list.
-          await deps.pool.query(
+          await database.query(
             `INSERT INTO audit_log (user_id, action, details) VALUES ($1, $2, $3::jsonb)`,
             [input.userId, 'extension_capability_grant_v2', JSON.stringify({
               provider_id: primary.provider_id,

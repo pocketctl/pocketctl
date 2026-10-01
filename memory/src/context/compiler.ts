@@ -7,7 +7,7 @@ import type { LoadoutRepository } from './loadout-repository.js'
 import { resolvedLoadoutFingerprint } from './loadout-repository.js'
 import type { ContextSettingsRepository } from './settings-repository.js'
 import { effectiveContextSettingsFingerprint } from './settings-repository.js'
-import type { PackRepository, PackItemInput } from './pack-repository.js'
+import type { PackRepository, PackItemInput, ExternalPackItemInput } from './pack-repository.js'
 import type { GenerationRunRepository } from '../generation/repository.js'
 import type { PolicyResolver } from '../policies/resolver.js'
 import type { ContextPolicyDocument, RankingPolicyDocument } from '../policies/schemas.js'
@@ -40,6 +40,119 @@ export interface CompileRequest {
   branch?: string | null
   query: string
   requestKey: { keyId: string; hmacKey: Buffer }
+  selectedReferences?: readonly SelectedContextReference[]
+}
+
+export interface SelectedContextReference {
+  source_kind: 'memory_claim' | 'memory_evidence' | 'wiki_section'
+  source_id: string
+  source_version: string
+  owner_scope_id: string
+  installation_id: string
+}
+
+export type ResolvedSelectedReference =
+  | {
+      kind: 'claim'
+      reference: SelectedContextReference
+      claimId: string
+      versionId: string
+      claimType: string
+      statement: string
+      scopeKind: string
+      evidenceIds: string[]
+    }
+  | {
+      kind: 'wiki'
+      reference: SelectedContextReference
+      versionId: string
+      statement: string
+      scopeKind: string
+    }
+
+export async function resolveSelectedContextReferences(
+  pool: pg.Pool,
+  installationId: string,
+  references: readonly SelectedContextReference[],
+): Promise<ResolvedSelectedReference[] | null> {
+  const resolved: ResolvedSelectedReference[] = []
+  for (const reference of references) {
+    if (reference.installation_id !== installationId) return null
+    if (reference.source_kind === 'wiki_section') {
+      const result = await pool.query<{
+        wiki_version_id: string
+        heading: string
+        markdown: string
+        owner_scope_kind: string
+        owner_scope_id: string
+      }>(`
+        SELECT section.wiki_version_id::text, section.heading, section.markdown,
+               scope.owner_scope_kind, scope.owner_scope_id::text
+        FROM memory_wiki_sections section
+        JOIN memory_wiki_versions version
+          ON version.installation_id = section.installation_id
+         AND version.wiki_version_id = section.wiki_version_id
+        JOIN memory_owner_scopes scope ON scope.installation_id = section.installation_id
+        WHERE section.installation_id = $1 AND section.section_id = $2
+          AND section.wiki_version_id = $3 AND version.state = 'active'
+      `, [installationId, reference.source_id, reference.source_version])
+      const row = result.rows[0]
+      if (!row || row.owner_scope_id !== reference.owner_scope_id) return null
+      resolved.push({
+        kind: 'wiki', reference, versionId: row.wiki_version_id,
+        statement: `${row.heading}\n${row.markdown}`.slice(0, 8_000),
+        scopeKind: row.owner_scope_kind,
+      })
+      continue
+    }
+    const result = await pool.query<{
+      claim_id: string
+      version_id: string
+      claim_type: string
+      statement: string
+      owner_scope_kind: string
+      owner_scope_id: string
+      evidence_ids: string[]
+    }>(reference.source_kind === 'memory_claim' ? `
+      SELECT claim.claim_id::text, version.version_id::text, claim.claim_type,
+             version.statement, claim.owner_scope_kind, claim.owner_scope_id::text,
+             ARRAY(SELECT evidence_id::text FROM knowledge_evidence evidence
+                   WHERE evidence.installation_id = claim.installation_id
+                     AND evidence.version_id = version.version_id
+                   ORDER BY ordinal LIMIT 4) AS evidence_ids
+      FROM knowledge_claims claim
+      JOIN knowledge_versions version
+        ON version.installation_id = claim.installation_id
+       AND version.version_id = claim.current_version_id
+      WHERE claim.installation_id = $1 AND claim.claim_id = $2
+        AND version.version_id = $3 AND claim.state = 'active'
+        AND EXISTS (SELECT 1 FROM knowledge_evidence evidence
+                    WHERE evidence.installation_id = claim.installation_id
+                      AND evidence.version_id = version.version_id)
+    ` : `
+      SELECT claim.claim_id::text, version.version_id::text, claim.claim_type,
+             version.statement, claim.owner_scope_kind, claim.owner_scope_id::text,
+             ARRAY[evidence.evidence_id::text] AS evidence_ids
+      FROM knowledge_evidence evidence
+      JOIN knowledge_versions version
+        ON version.installation_id = evidence.installation_id
+       AND version.version_id = evidence.version_id
+      JOIN knowledge_claims claim
+        ON claim.installation_id = version.installation_id
+       AND claim.claim_id = version.claim_id
+      WHERE evidence.installation_id = $1 AND evidence.evidence_id = $2
+        AND version.version_id = $3 AND claim.current_version_id = version.version_id
+        AND claim.state = 'active'
+    `, [installationId, reference.source_id, reference.source_version])
+    const row = result.rows[0]
+    if (!row || row.owner_scope_id !== reference.owner_scope_id) return null
+    resolved.push({
+      kind: 'claim', reference, claimId: row.claim_id, versionId: row.version_id,
+      claimType: row.claim_type, statement: row.statement,
+      scopeKind: row.owner_scope_kind, evidenceIds: row.evidence_ids,
+    })
+  }
+  return resolved
 }
 
 function deterministicItemId(parts: readonly string[]): string {
@@ -118,6 +231,7 @@ export function createContextCompiler(deps: {
         .update(rankingPolicy.effectivePolicyHash)
         .digest()
       const minimizedQuery = redactSensitive(input.query).trim()
+      const selectedReferences = input.selectedReferences ?? []
       const compileNow = new Date()
       const freshnessEpochDay = compileNow.toISOString().slice(0, 10)
       const freshnessAsOf = new Date(`${freshnessEpochDay}T00:00:00.000Z`)
@@ -128,6 +242,7 @@ export function createContextCompiler(deps: {
           repositoryId ?? '', repositoryId ? (input.branch ?? '') : '', minimizedQuery,
           settingsFingerprint.toString('hex'), loadoutFingerprint.toString('hex'),
           corpusFingerprint,
+          JSON.stringify(selectedReferences),
           freshnessEpochDay,
         ].join('\n'))
         .digest()
@@ -166,12 +281,12 @@ export function createContextCompiler(deps: {
       })
 
       // L3 Persona stable pool: active user-reviewed work_method only.
-      const persona = !resolvedScope.repositoryKnown
+      const persona = selectedReferences.length > 0 ? [] : !resolvedScope.repositoryKnown
         && policyDoc.unknown_repository_behavior === 'empty'
         ? []
         : await deps.scope.personaVersions({ installationId: input.installationId })
       // Dynamic pool: replayable retrieval over the transient query.
-      const retrieval = resolvedScope.repositoryKnown && minimizedQuery.length > 0
+      const retrieval = selectedReferences.length === 0 && resolvedScope.repositoryKnown && minimizedQuery.length > 0
         ? await deps.retrieval.retrieve({
             installationId: input.installationId,
             query: minimizedQuery,
@@ -204,6 +319,46 @@ export function createContextCompiler(deps: {
         rank: number
       }
       const drafts: DraftItem[] = []
+      const externalItems: ExternalPackItemInput[] = []
+
+      if (selectedReferences.length > 0) {
+        const selected = await resolveSelectedContextReferences(deps.pool, input.installationId, selectedReferences)
+        if (!selected) {
+          await deps.generation.complete({ runId: run.runId, state: 'failed', errorCode: 'missing_source' })
+          return { kind: 'empty', reason: 'missing_source', degradedComponents: [] }
+        }
+        for (const entry of selected) {
+          if (entry.kind === 'wiki') {
+            externalItems.push({
+              itemId: deterministicItemId([inputDigest.toString('hex'), entry.reference.source_id, entry.versionId, 'wiki']),
+              versionId: entry.versionId,
+              statement: redactSensitive(entry.statement),
+              scopeKind: entry.scopeKind,
+              section: 'stable',
+              evidenceIds: [],
+            })
+            continue
+          }
+          drafts.push({
+            itemId: deterministicItemId([
+              inputDigest.toString('hex'), entry.claimId, entry.versionId,
+              entry.reference.source_kind, entry.reference.source_id,
+            ]),
+            claimId: entry.claimId,
+            versionId: entry.versionId,
+            claimType: entry.claimType,
+            layer: 'L2',
+            section: 'stable',
+            representation: 'reference',
+            statement: redactSensitive(entry.statement),
+            scopeKind: entry.scopeKind,
+            reasonCodes: ['team_context_selected', entry.reference.source_kind],
+            evidenceIds: entry.evidenceIds,
+            normalizedKey: `selected:${entry.claimId}`,
+            rank: 1_000,
+          })
+        }
+      }
 
       const evidenceFor = async (versionId: string): Promise<string[]> => {
         const rows = await deps.pool.query<{ evidence_id: string }>(`
@@ -305,7 +460,7 @@ export function createContextCompiler(deps: {
       })
       const keptItems = deduped.filter(draft => budget.kept.includes(draft.itemId))
 
-      if (keptItems.length === 0) {
+      if (keptItems.length === 0 && externalItems.length === 0) {
         const emptyReason = budget.kept.length === 0 && drafts.length > 0
           ? 'token_budget' : 'no_candidates'
         const packId = await deps.packs.persist({
@@ -325,6 +480,7 @@ export function createContextCompiler(deps: {
           settingsRevision: effectiveSettings.revisions[0] ?? 1,
           loadoutRevision: loadout.revision,
           items: [],
+          selectedReferences,
           state: 'empty',
           errorCode: emptyReason,
         })
@@ -353,6 +509,8 @@ export function createContextCompiler(deps: {
         settingsRevision: effectiveSettings.revisions[0] ?? 1,
         loadoutRevision: loadout.revision,
         items: keptItems,
+        externalItems,
+        selectedReferences,
         state: mode === 'enabled' ? 'ready' : 'shadow',
       })
 
@@ -363,7 +521,7 @@ export function createContextCompiler(deps: {
         packId,
         stableTokens: stored?.stable_tokens ?? 0,
         dynamicTokens: stored?.dynamic_tokens ?? 0,
-        itemCount: keptItems.length,
+        itemCount: keptItems.length + externalItems.length,
       }
     },
   }

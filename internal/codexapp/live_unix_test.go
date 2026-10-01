@@ -21,6 +21,9 @@ func TestInstalledCodexAppServerUnixInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Never load the developer's auth/config/MCP servers during this smoke.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
 	socketPath := filepath.Join(shortUnixTempDir(t), "a.sock")
 	cmd := exec.Command(binary, "app-server", "--listen", "unix://"+socketPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

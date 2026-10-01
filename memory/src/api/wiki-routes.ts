@@ -36,10 +36,21 @@ export const WikiManualLockRequestSchema = z.object({
   reason_code: z.string().min(1).max(64).optional(),
 }).strict()
 
+const WikiScopeQueryFields = {
+  installation_id: UUIDSchema.optional(),
+  repository_id: UUIDSchema.optional(),
+  wiki_version_id: UUIDSchema.optional(),
+}
+
+const WikiScopeQuerySchema = z.object(WikiScopeQueryFields).strict()
+
 const WikiListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional(),
   cursor: z.string().min(1).max(2048).optional(),
+  ...WikiScopeQueryFields,
 }).strict()
+
+type WikiScopeQuery = z.infer<typeof WikiScopeQuerySchema>
 
 export interface WikiRouteDeps {
   pool: pg.Pool
@@ -81,13 +92,15 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
 
   const targetGrant = async (
     grant: VerifiedMemoryGrant,
+    targetInstallationId: string,
     permission: 'contribute' | 'publish',
   ): Promise<ValidatedV2Grant | null> => {
     if ('version' in grant && grant.version === 'v2') {
-      const binding = grant.scopeBindings.find(item => item.installation_id === grant.installationId)
+      const binding = grant.scopeBindings.find(item => item.installation_id === targetInstallationId)
       if (!binding?.permissions.includes(permission)) return null
       return grant
     }
+    if (grant.installationId !== targetInstallationId) return null
     const scope = await deps.pool.query<{
       owner_scope_kind: string
       owner_scope_id: string
@@ -114,10 +127,13 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     }
   }
 
-  const effectiveMode = (grant: VerifiedMemoryGrant): SharedScopesMode => {
+  const effectiveMode = (
+    grant: VerifiedMemoryGrant,
+    targetInstallationId: string,
+  ): SharedScopesMode => {
     let ownerScopeKind: 'personal' | 'shared' = 'personal'
     if ('version' in grant && grant.version === 'v2') {
-      const binding = grant.scopeBindings.find(item => item.installation_id === grant.installationId)
+      const binding = grant.scopeBindings.find(item => item.installation_id === targetInstallationId)
       if (!binding) return 'off'
       ownerScopeKind = binding.owner_scope_kind === 'personal' ? 'personal' : 'shared'
     }
@@ -131,9 +147,10 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
   const requireMode = (
     reply: ReplyLike,
     grant: VerifiedMemoryGrant,
+    targetInstallationId: string,
     required: 'shadow' | 'enabled',
   ): boolean => {
-    const mode = effectiveMode(grant)
+    const mode = effectiveMode(grant, targetInstallationId)
     if (mode === 'off' || (required === 'enabled' && mode !== 'enabled')) {
       reply.code(503).send(errorBody(new MemoryApiError('feature_disabled', 'wiki mutation disabled')))
       return false
@@ -141,24 +158,86 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     return true
   }
 
+  const requestInstallation = (
+    grant: VerifiedMemoryGrant,
+    query: WikiScopeQuery,
+    reply: ReplyLike,
+  ): string | null => {
+    const installationId = query.installation_id ?? grant.installationId
+    if ('version' in grant && grant.version === 'v2') {
+      const binding = grant.scopeBindings.find(item => item.installation_id === installationId)
+      if (!binding || !binding.permissions.includes('read')) {
+        reply.code(403).send(errorBody(new MemoryApiError(
+          'forbidden', 'current Memory scope is not authorized',
+        )))
+        return null
+      }
+      return installationId
+    }
+    if (installationId !== grant.installationId) {
+      reply.code(404).send(errorBody(new MemoryApiError(
+        'not_found', 'resource not found in the selected Memory scope',
+      )))
+      return null
+    }
+    return installationId
+  }
+
+  const repositoryMatches = (
+    query: WikiScopeQuery,
+    repositoryId: string,
+    reply: ReplyLike,
+  ): boolean => {
+    if (!query.repository_id || query.repository_id === repositoryId) return true
+    reply.code(404).send(errorBody(new MemoryApiError(
+      'not_found', 'repository not found in the selected Memory scope',
+    )))
+    return false
+  }
+
   const resourceWiki = async (installationId: string, wikiId: string) => {
-    const result = await deps.pool.query<{ wiki_id: string; repository_id: string; generation: string }>(`
-      SELECT wiki_id::text, repository_id::text, generation::text
-      FROM memory_wikis WHERE installation_id = $1 AND wiki_id = $2
+    const result = await deps.pool.query<{
+      wiki_id: string
+      repository_id: string
+      generation: string
+      wiki_version_id: string | null
+    }>(`
+      SELECT w.wiki_id::text, w.repository_id::text, w.generation::text,
+             h.active_version_id::text AS wiki_version_id
+      FROM memory_wikis w
+      LEFT JOIN memory_wiki_heads h
+        ON h.installation_id = w.installation_id AND h.wiki_id = w.wiki_id
+      WHERE w.installation_id = $1 AND w.wiki_id = $2
     `, [installationId, wikiId])
     return result.rows[0] ?? null
+  }
+
+  const resourceMatches = (
+    query: WikiScopeQuery,
+    wiki: { repository_id: string; wiki_version_id: string | null },
+    reply: ReplyLike,
+  ): boolean => {
+    if (!repositoryMatches(query, wiki.repository_id, reply)) return false
+    if (!query.wiki_version_id || query.wiki_version_id === wiki.wiki_version_id) return true
+    reply.code(409).send(errorBody(new MemoryApiError(
+      'revision_conflict', 'Wiki version changed in the selected Memory scope',
+    )))
+    return false
   }
 
   app.get('/api/v1/memory/repositories/:repositoryId/wiki', async (request, reply) => {
     const grant = await authenticate(request, reply, 'memory.search')
     if (!grant) return reply
     const repositoryId = UUIDSchema.safeParse((request.params as { repositoryId?: string }).repositoryId)
-    if (!repositoryId.success) {
+    const query = WikiScopeQuerySchema.safeParse(request.query)
+    if (!repositoryId.success || !query.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid repository id')))
       return reply
     }
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId || !repositoryMatches(query.data, repositoryId.data, reply)) return reply
     const result = await reads.getActiveWiki({
-      installationId: grant.installationId,
+      installationId,
       repositoryId: repositoryId.data,
     })
     if (!result) {
@@ -173,14 +252,17 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
   app.post('/api/v1/memory/repositories/:repositoryId/wiki/builds', { bodyLimit: 4 * 1024 }, async (request, reply) => {
     const grant = await authenticate(request, reply, 'memory.manage')
     if (!grant) return reply
-    if (!requireMode(reply, grant, 'shadow')) return reply
     const repositoryId = UUIDSchema.safeParse((request.params as { repositoryId?: string }).repositoryId)
+    const query = WikiScopeQuerySchema.safeParse(request.query)
     const parsed = WikiBuildRequestSchema.safeParse(request.body)
-    if (!repositoryId.success || !parsed.success) {
+    if (!repositoryId.success || !query.success || !parsed.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid build request')))
       return reply
     }
-    const governed = await targetGrant(grant, 'contribute')
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId || !repositoryMatches(query.data, repositoryId.data, reply)) return reply
+    if (!requireMode(reply, grant, installationId, 'shadow')) return reply
+    const governed = await targetGrant(grant, installationId, 'contribute')
     if (!governed) {
       reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'build rejected')))
       return reply
@@ -188,7 +270,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     let scheduled
     try {
       scheduled = await builds.scheduleBuild({
-        installationId: grant.installationId,
+        installationId,
         repositoryId: repositoryId.data,
         expectedGeneration: parsed.data.expected_generation,
       })
@@ -213,19 +295,24 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     if (!grant) return reply
     const wikiId = UUIDSchema.safeParse((request.params as { wikiId?: string }).wikiId)
     const query = WikiListQuerySchema.safeParse(request.query)
-    if (!wikiId.success || !query.success || !await resourceWiki(grant.installationId, wikiId.data)) {
-      reply.code(wikiId.success && query.success ? 404 : 400).send(errorBody(new MemoryApiError(
-        wikiId.success && query.success ? 'not_found' : 'invalid_request',
-        wikiId.success && query.success ? 'resource not found' : 'invalid build query',
-      )))
+    if (!wikiId.success || !query.success) {
+      reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid build query')))
       return reply
     }
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId) return reply
+    const wiki = await resourceWiki(installationId, wikiId.data)
+    if (!wiki) {
+      reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
+      return reply
+    }
+    if (!resourceMatches(query.data, wiki, reply)) return reply
     const limit = query.data.limit ?? 20
     let beforeGeneration: number | null
     try {
       beforeGeneration = decodeBuildCursor(
         query.data.cursor ?? null,
-        grant.installationId,
+        installationId,
         wikiId.data,
         deps.cursorSigningKey,
       )
@@ -242,14 +329,14 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       WHERE installation_id = $1 AND wiki_id = $2
         AND ($3::bigint IS NULL OR generation < $3)
       ORDER BY generation DESC LIMIT $4
-    `, [grant.installationId, wikiId.data, beforeGeneration, limit + 1])
+    `, [installationId, wikiId.data, beforeGeneration, limit + 1])
     const hasMore = result.rows.length > limit
     const page = hasMore ? result.rows.slice(0, limit) : result.rows
     return {
       builds: page,
       next_cursor: hasMore
         ? encodeBuildCursor(
-            grant.installationId,
+            installationId,
             wikiId.data,
             Number(page.at(-1)!.generation),
             deps.cursorSigningKey,
@@ -261,19 +348,23 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
   app.post('/api/v1/memory/wikis/:wikiId/builds', { bodyLimit: 4 * 1024 }, async (request, reply) => {
     const grant = await authenticate(request, reply, 'memory.manage')
     if (!grant) return reply
-    if (!requireMode(reply, grant, 'shadow')) return reply
     const wikiId = UUIDSchema.safeParse((request.params as { wikiId?: string }).wikiId)
+    const query = WikiScopeQuerySchema.safeParse(request.query)
     const parsed = WikiBuildRequestSchema.safeParse(request.body)
-    if (!wikiId.success || !parsed.success) {
+    if (!wikiId.success || !query.success || !parsed.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid build request')))
       return reply
     }
-    const wiki = await resourceWiki(grant.installationId, wikiId.data)
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId) return reply
+    if (!requireMode(reply, grant, installationId, 'shadow')) return reply
+    const wiki = await resourceWiki(installationId, wikiId.data)
     if (!wiki) {
       reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
       return reply
     }
-    const governed = await targetGrant(grant, 'contribute')
+    if (!resourceMatches(query.data, wiki, reply)) return reply
+    const governed = await targetGrant(grant, installationId, 'contribute')
     if (Number(wiki.generation) !== parsed.data.expected_generation || !governed) {
       reply.code(Number(wiki.generation) !== parsed.data.expected_generation ? 409 : 403)
         .send(errorBody(new MemoryApiError(
@@ -285,7 +376,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     let scheduled
     try {
       scheduled = await builds.scheduleBuild({
-        installationId: grant.installationId,
+        installationId,
         repositoryId: wiki.repository_id,
         expectedGeneration: parsed.data.expected_generation,
       })
@@ -306,11 +397,20 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     const params = request.params as { wikiId?: string; buildId?: string }
     const wikiId = UUIDSchema.safeParse(params.wikiId)
     const buildId = UUIDSchema.safeParse(params.buildId)
-    if (!wikiId.success || !buildId.success) {
+    const query = WikiScopeQuerySchema.safeParse(request.query)
+    if (!wikiId.success || !buildId.success || !query.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid candidate id')))
       return reply
     }
-    const governed = await targetGrant(grant, 'contribute') ?? await targetGrant(grant, 'publish')
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId) return reply
+    const wiki = await resourceWiki(installationId, wikiId.data)
+    if (!wiki || !resourceMatches(query.data, wiki, reply)) {
+      if (!wiki) reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
+      return reply
+    }
+    const governed = await targetGrant(grant, installationId, 'contribute')
+      ?? await targetGrant(grant, installationId, 'publish')
     if (!governed) {
       reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'candidate access rejected')))
       return reply
@@ -325,7 +425,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       JOIN memory_source_snapshots s
         ON s.installation_id = r.installation_id AND s.snapshot_id = r.source_snapshot_id
       WHERE c.installation_id = $1 AND c.wiki_id = $2 AND c.run_id = $3
-    `, [grant.installationId, wikiId.data, buildId.data])
+    `, [installationId, wikiId.data, buildId.data])
     if (!candidate.rows[0]) {
       reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
       return reply
@@ -336,16 +436,24 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
   app.post('/api/v1/memory/wikis/:wikiId/candidates/:buildId/publish', { bodyLimit: 4 * 1024 }, async (request, reply) => {
     const grant = await authenticate(request, reply, 'memory.manage')
     if (!grant) return reply
-    if (!requireMode(reply, grant, 'enabled')) return reply
     const params = request.params as { wikiId?: string; buildId?: string }
     const wikiId = UUIDSchema.safeParse(params.wikiId)
     const buildId = UUIDSchema.safeParse(params.buildId)
+    const query = WikiScopeQuerySchema.safeParse(request.query)
     const parsed = WikiPublishRequestSchema.safeParse(request.body)
-    const governed = await targetGrant(grant, 'publish')
-    if (!wikiId.success || !buildId.success || !parsed.success) {
+    if (!wikiId.success || !buildId.success || !query.success || !parsed.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid publish request')))
       return reply
     }
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId) return reply
+    if (!requireMode(reply, grant, installationId, 'enabled')) return reply
+    const wiki = await resourceWiki(installationId, wikiId.data)
+    if (!wiki || !resourceMatches(query.data, wiki, reply)) {
+      if (!wiki) reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
+      return reply
+    }
+    const governed = await targetGrant(grant, installationId, 'publish')
     if (!governed) {
       await recordSharedPhase4MutationDenied(deps.pool, grant, 'publish')
       deps.phase4Metrics?.wikiPublications.inc({ result: 'unauthorized' })
@@ -354,7 +462,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     }
     try {
       return await publication.publish({
-        grant: governed, targetInstallationId: grant.installationId,
+        grant: governed, targetInstallationId: installationId,
         wikiId: wikiId.data, runId: buildId.data,
         expectedGeneration: parsed.data.expected_generation,
         expectedHeadRevision: parsed.data.expected_head_revision,
@@ -368,15 +476,23 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
   app.put('/api/v1/memory/wikis/:wikiId/manual-sections/:sectionKey', { bodyLimit: 256 * 1024 }, async (request, reply) => {
     const grant = await authenticate(request, reply, 'memory.manage')
     if (!grant) return reply
-    if (!requireMode(reply, grant, 'enabled')) return reply
     const params = request.params as { wikiId?: string; sectionKey?: string }
     const wikiId = UUIDSchema.safeParse(params.wikiId)
+    const query = WikiScopeQuerySchema.safeParse(request.query)
     const parsed = WikiManualEditRequestSchema.safeParse(request.body)
-    const governed = await targetGrant(grant, 'contribute')
-    if (!wikiId.success || !parsed.success || typeof params.sectionKey !== 'string') {
+    if (!wikiId.success || !query.success || !parsed.success || typeof params.sectionKey !== 'string') {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid manual edit')))
       return reply
     }
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId) return reply
+    if (!requireMode(reply, grant, installationId, 'enabled')) return reply
+    const wiki = await resourceWiki(installationId, wikiId.data)
+    if (!wiki || !resourceMatches(query.data, wiki, reply)) {
+      if (!wiki) reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
+      return reply
+    }
+    const governed = await targetGrant(grant, installationId, 'contribute')
     if (!governed) {
       await recordSharedPhase4MutationDenied(deps.pool, grant, 'manual_edit')
       deps.phase4Metrics?.wikiManualActions.inc({ action: 'edit', result: 'unauthorized' })
@@ -385,7 +501,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     }
     try {
       return await manual.edit({
-        grant: governed, targetInstallationId: grant.installationId,
+        grant: governed, targetInstallationId: installationId,
         wikiId: wikiId.data, sectionKey: params.sectionKey,
         markdown: parsed.data.markdown,
         expectedLockVersion: parsed.data.expected_lock_version,
@@ -401,15 +517,23 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     app.post(`/api/v1/memory/wikis/:wikiId/manual-sections/:sectionKey/${action}`, { bodyLimit: 4 * 1024 }, async (request, reply) => {
       const grant = await authenticate(request, reply, 'memory.manage')
       if (!grant) return reply
-      if (!requireMode(reply, grant, 'enabled')) return reply
       const params = request.params as { wikiId?: string; sectionKey?: string }
       const wikiId = UUIDSchema.safeParse(params.wikiId)
+      const query = WikiScopeQuerySchema.safeParse(request.query)
       const parsed = WikiManualLockRequestSchema.safeParse(request.body)
-      const governed = await targetGrant(grant, 'contribute')
-      if (!wikiId.success || !parsed.success || typeof params.sectionKey !== 'string') {
+      if (!wikiId.success || !query.success || !parsed.success || typeof params.sectionKey !== 'string') {
         reply.code(400).send(errorBody(new MemoryApiError('invalid_request', `invalid ${action} request`)))
         return reply
       }
+      const installationId = requestInstallation(grant, query.data, reply)
+      if (!installationId) return reply
+      if (!requireMode(reply, grant, installationId, 'enabled')) return reply
+      const wiki = await resourceWiki(installationId, wikiId.data)
+      if (!wiki || !resourceMatches(query.data, wiki, reply)) {
+        if (!wiki) reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
+        return reply
+      }
+      const governed = await targetGrant(grant, installationId, 'contribute')
       if (!governed) {
         if (action === 'unlock') {
           await recordSharedPhase4MutationDenied(deps.pool, grant, 'unlock')
@@ -420,7 +544,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       }
       try {
         return await manual[action]({
-          grant: governed, targetInstallationId: grant.installationId,
+          grant: governed, targetInstallationId: installationId,
           wikiId: wikiId.data, sectionKey: params.sectionKey,
           expectedLockVersion: parsed.data.expected_lock_version,
           reasonCode: parsed.data.reason_code,
@@ -436,11 +560,14 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     const grant = await authenticate(request, reply, 'memory.manage')
     if (!grant) return reply
     const repositoryId = UUIDSchema.safeParse((request.params as { repositoryId?: string }).repositoryId)
-    const governed = await targetGrant(grant, 'publish')
-    if (!repositoryId.success) {
+    const query = WikiScopeQuerySchema.safeParse(request.query)
+    if (!repositoryId.success || !query.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid repository id')))
       return reply
     }
+    const installationId = requestInstallation(grant, query.data, reply)
+    if (!installationId || !repositoryMatches(query.data, repositoryId.data, reply)) return reply
+    const governed = await targetGrant(grant, installationId, 'publish')
     if (!governed) {
       reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'purge rejected')))
       return reply
@@ -453,9 +580,9 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
         ON s.installation_id = r.installation_id AND s.repository_id = r.repository_id
       LEFT JOIN memory_owner_scopes os ON os.installation_id = r.installation_id
       WHERE r.installation_id = $1 AND r.repository_id = $2
-    `, [grant.installationId, repositoryId.data])
+    `, [installationId, repositoryId.data])
     const result = await purge.purgeRepository({
-      installationId: grant.installationId,
+      installationId,
       repositoryId: repositoryId.data,
       reasonCode: 'explicit_repository_delete',
     })

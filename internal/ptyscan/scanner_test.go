@@ -276,3 +276,34 @@ func decodeInput(t *testing.T, ev protocol.DaemonEvent, v any) {
 		t.Fatalf("decode input: %v", err)
 	}
 }
+
+func TestClaudeWorkspaceTrustMenuWithoutNumberedOptions(t *testing.T) {
+	s := NewScanner("claude-team")
+	events := s.Feed([]byte("Accessing workspace:\n/tmp/team-owned\nQuick safety check: Is this a project you created or one you trust?\nClaude Code'll be able to read, edit, and execute files here.\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel"))
+	if len(events) != 1 {
+		t.Fatalf("trust prompt events=%d, want owner-visible choice", len(events))
+	}
+	prompt := s.ActivePrompt()
+	if prompt == nil || len(prompt.Options) != 2 {
+		t.Fatalf("prompt=%+v", prompt)
+	}
+	if len(s.Feed([]byte("\n"))) != 0 {
+		t.Fatal("redraw emitted another prompt")
+	}
+}
+
+func TestClaudeTrustChoiceUsesArrowAndRejectsReplay(t *testing.T) {
+	s := NewScanner("trust")
+	s.Feed([]byte("Accessing workspace:\n/tmp/test\nIs this a project you created or one you trust?\n❯ No, exit\nYes, I trust this folder\nEnter to confirm"))
+	id := s.ActiveRequestID()
+	if _, err := s.ClaimChoice(id, "invalid"); err == nil {
+		t.Fatal("invalid choice accepted")
+	}
+	keys, err := s.ClaimChoice(id, "2")
+	if err != nil || keys != "\x1b[B\r" {
+		t.Fatalf("keys=%q err=%v", keys, err)
+	}
+	if _, err := s.ClaimChoice(id, "2"); err == nil {
+		t.Fatal("replay accepted")
+	}
+}

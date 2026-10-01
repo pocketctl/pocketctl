@@ -45,28 +45,27 @@ func (sm *SessionManager) ResolveInteractivePrompt(sessionID, requestID, choice 
 	}
 	scanner := ps.PTYScanner
 	ptyFile := ps.PTY
-	// Validate and claim the pending prompt atomically: a matching requestID
-	// clears the scanner's active state so a concurrent/duplicate answer can't
-	// write twice.
-	if ok && (scanner == nil || scanner.ActiveRequestID() != requestID) {
-		active := ""
-		if scanner != nil {
-			active = scanner.ActiveRequestID()
-		}
+	if scanner == nil || ptyFile == nil {
 		sm.mu.Unlock()
-		return fmt.Errorf("interactive prompt %q not pending (active=%q)", requestID, active)
+		return fmt.Errorf("session %s has no pending PTY prompt", sessionID)
 	}
-	if scanner != nil {
-		scanner.Reset()
+	keys, err := scanner.ClaimChoice(requestID, choice)
+	if err != nil {
+		sm.mu.Unlock()
+		return err
 	}
+	// Keep the session lock until the choice is written, before the startup
+	// goroutine can submit its task into this same PTY.
+	_, writeErr := ptyFile.Write([]byte(keys))
 	sm.mu.Unlock()
-
-	if ptyFile == nil {
-		return fmt.Errorf("session %s PTY already closed", sessionID)
-	}
-	if _, err := ptyFile.Write([]byte(choice + "\r")); err != nil {
+	if err := writeErr; err != nil {
 		return fmt.Errorf("write choice to PTY: %w", err)
 	}
+	sm.outputCh <- protocol.DaemonEvent{Type: "interaction_result", SessionID: sessionID, RequestID: requestID,
+		Operation: "interactive_response", Status: "submitted", Choice: choice}
+	// Persist a neutral closure for refresh/replay and other owner devices.
+	sm.outputCh <- protocol.DaemonEvent{Type: "interactive_resolved", SessionID: sessionID, RequestID: requestID,
+		Status: "submitted", Choice: choice}
 	return nil
 }
 
@@ -282,9 +281,10 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	if source == "daemon" {
 		sm.mu.RLock()
 		ptyFile := ps.PTY
+		claudePrint := ps.ClaudePrintSession
 		sm.mu.RUnlock()
 		if ptyFile == nil {
-			if agentType != adapter.AgentCodex {
+			if agentType != adapter.AgentCodex && !claudePrint {
 				return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
 			}
 		} else if !isProcessAlive(pid) {
@@ -309,7 +309,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 				Status:         protocol.StatusRunning,
 				LastActivityAt: time.Now().UTC().Format(time.RFC3339),
 			}
-			if _, err := ptyFile.Write([]byte(content + "\r")); err != nil {
+			if _, err := writePTYPrompt(ctx, ptyFile, content); err != nil {
 				// B: stdin write failed — roll back so web doesn't sit on "running" forever.
 				sm.mu.Lock()
 				ps.Status = protocol.StatusError
@@ -339,10 +339,26 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	if err != nil {
 		return err
 	}
-	resumeConfig := protocol.SessionConfig{Permission: clonePermission(ps.Permission)}
+	sm.mu.RLock()
+	resumeConfig := protocol.SessionConfig{Permission: clonePermission(ps.Permission), Model: ps.Model}
+	claudePrint, firstPrint := ps.ClaudePrintSession, ps.ClaudePrintSession && !ps.ClaudePrintStarted
+	printEnv := append([]string(nil), ps.ClaudePrintEnv...)
+	sm.mu.RUnlock()
 	var args []string
-	if agentType == adapter.AgentClaude && hidden != nil {
-		args = adapter.BuildClaudeArgsWithContext(content, sessionID, resumeConfig, hidden)
+	if agentType == adapter.AgentClaude && (hidden != nil || claudePrint) {
+		resumeID := sessionID
+		if firstPrint {
+			resumeID = ""
+		}
+		args = adapter.BuildClaudeArgsWithContext(content, resumeID, resumeConfig, hidden)
+		if firstPrint {
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--session-id" {
+					args[i+1] = sessionID
+					break
+				}
+			}
+		}
 	} else {
 		launcher := adapter.NewLauncher(agentType)
 		args = launcher.BuildResumeArgs(content, sessionID, resumeConfig)
@@ -353,7 +369,11 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		cancel()
 		return err
 	}
-	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd})
+	spec := resumeLaunchSpec{Path: cliPath, Args: args, Dir: cwd}
+	if claudePrint {
+		spec.Env = printEnv
+	}
+	proc, err := sm.startResumeProcess(ctx, spec)
 	if err != nil {
 		cancel()
 		sm.finishOwnedResume(entry, err)
@@ -370,6 +390,13 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	sm.mu.Lock()
 	ps.Cmd = resumeProcessCmd(proc)
+	if claudePrint {
+		ps.ClaudePrintStarted = true
+		ps.Pid = proc.PID()
+		if ps.Pid > 0 {
+			sm.childPids[ps.Pid] = true
+		}
+	}
 	ps.Cancel = cancel
 	ps.Status = protocol.StatusRunning
 	ps.Source = source // Keep original source

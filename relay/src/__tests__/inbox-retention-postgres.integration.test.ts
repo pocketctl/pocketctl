@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { deleteSession, deleteUserAccount, initDB } from '../db.js'
+import { LostClaimError } from '../ingress/inbox-repository.js'
 import { InboxRetention } from '../inbox-retention.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import { RealtimeOutboxWriter } from '../materialization/realtime-outbox.js'
@@ -192,6 +194,7 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
       `INSERT INTO users (email, password_hash) VALUES ('retention-race@example.test', '') RETURNING id`,
     )
     const userId = user.rows[0].id
+    const reservationId = randomUUID()
     await pool.query(`INSERT INTO daemons (daemon_id, user_id) VALUES ('retention-race-daemon', $1)`, [userId])
     const inbox = await pool.query<{ inbox_id: string }>(`
       INSERT INTO event_inbox
@@ -201,9 +204,10 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
               'retention-race-session', 'session_created', 0,
               '{"type":"session_created","session_id":"retention-race-session"}',
               1, 1, NOW(), 'race-worker',
-              '{"agentType":"codex","cwd":"/repo","hostname":"host","reservationId":"pause","quotaOperation":"create","requestId":"retention-race-request"}')
+              $2::jsonb)
       RETURNING inbox_id
-    `, [userId])
+    `, [userId, JSON.stringify({ agentType: 'codex', cwd: '/repo', hostname: 'host',
+      reservationId, quotaOperation: 'create', requestId: 'retention-race-request' })])
     let entered!: () => void
     let resume!: () => void
     const paused = new Promise<void>((resolve) => { entered = resolve })
@@ -225,17 +229,20 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
       eventType: 'session_created',
       payload: { type: 'session_created', session_id: 'retention-race-session' },
       context: {
-        agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId: 'pause',
+        agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId,
         quotaOperation: 'create', requestId: 'retention-race-request',
       },
     })
-    await paused
+    await failureGuard(
+      Promise.race([paused, materializing.then(() => { throw new Error('materialization did not enter the durable effect gate') })]),
+      'materialization entering durable effect',
+    )
     const deleting = deleteSession(pool, 'retention-race-session')
     resume()
     const result = await materializing
     await new RealtimeOutboxWriter(pool).complete(
       Number(inbox.rows[0].inbox_id), result.eventId, result.deliveries, 'race-worker', 1,
-    ).catch(() => undefined)
+    ).catch(error => { if (!(error instanceof LostClaimError)) throw error })
     await deleting
 
     const ghosts = await pool.query(`
@@ -262,6 +269,7 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
          RETURNING id`,
       )
       const userId = user.rows[0].id
+      const reservationId = randomUUID()
       await poolOne.query(
         `INSERT INTO daemons (daemon_id, user_id) VALUES ('retention-pool-one-daemon', $1)
          ON CONFLICT (daemon_id) DO UPDATE SET user_id = EXCLUDED.user_id`,
@@ -275,9 +283,10 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
                 'retention-pool-one-session', 'session_created', 0,
                 '{"type":"session_created","session_id":"retention-pool-one-session"}',
                 1, 1, NOW(), 'pool-one-worker',
-                '{"agentType":"codex","cwd":"/repo","hostname":"host","reservationId":"pause","quotaOperation":"create","requestId":"retention-pool-one-request"}')
+                $2::jsonb)
         RETURNING inbox_id
-      `, [userId])
+      `, [userId, JSON.stringify({ agentType: 'codex', cwd: '/repo', hostname: 'host',
+        reservationId, quotaOperation: 'create', requestId: 'retention-pool-one-request' })])
       let entered!: () => void
       let resume!: () => void
       const paused = new Promise<void>((resolve) => { entered = resolve })
@@ -299,17 +308,20 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
         eventType: 'session_created',
         payload: { type: 'session_created', session_id: 'retention-pool-one-session' },
         context: {
-          agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId: 'pause',
+          agentType: 'codex', cwd: '/repo', hostname: 'host', reservationId,
           quotaOperation: 'create', requestId: 'retention-pool-one-request',
         },
       })
-      await failureGuard(paused, 'materialization entering durable effect')
+      await failureGuard(
+        Promise.race([paused, materializing.then(() => { throw new Error('materialization did not enter the durable effect gate') })]),
+        'materialization entering durable effect',
+      )
       const deleting = deleteSession(poolOne, 'retention-pool-one-session')
       resume()
       const result = await failureGuard(materializing, 'materialization')
       await new RealtimeOutboxWriter(poolOne).complete(
         Number(inbox.rows[0].inbox_id), result.eventId, result.deliveries, 'pool-one-worker', 1,
-      ).catch(() => undefined)
+      ).catch(error => { if (!(error instanceof LostClaimError)) throw error })
       await failureGuard(deleting, 'deletion')
 
       const ghosts = await poolOne.query(`

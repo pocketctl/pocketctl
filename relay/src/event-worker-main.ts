@@ -23,6 +23,8 @@ import { SessionDocumentArtifactMaterializer } from './session-documents/materia
 import { SessionDocumentRepository } from './session-documents/repository.js'
 import { assertSessionDocumentSchema } from './session-documents/schema.js'
 import { sessionDocumentBytes, sessionDocumentRecords } from './metrics.js'
+import { resolveTeamCollaborationConfig } from './team/config.js'
+import { createTeamRunWorker } from './team/run-worker.js'
 
 const EXTENSION_PROJECTOR_INTERVAL_MS = 500
 
@@ -99,6 +101,7 @@ interface WorkerRuntimeDeps {
   retention: { start(): void; stop(): Promise<void> };
   /** ADR-0003 feed projector; absent in off mode. */
   extensionProjector?: { start(): void; stop(): Promise<void> };
+  teamRunWorker?: { start(): void; stop(): Promise<void> };
   pool: { end(): Promise<void> };
 }
 
@@ -125,12 +128,14 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
         deps.retention.start()
         retentionStarted = true
         deps.extensionProjector?.start()
+        deps.teamRunWorker?.start()
         started = true
       } catch (error) {
         await Promise.allSettled([
           ...(workerStarted ? [deps.worker.stop()] : []),
           ...(retentionStarted ? [deps.retention.stop()] : []),
           ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
+          ...(deps.teamRunWorker ? [deps.teamRunWorker.stop()] : []),
         ])
         workerStarted = false
         retentionStarted = false
@@ -147,6 +152,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
             deps.worker.stop(),
             deps.retention.stop(),
             ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
+            ...(deps.teamRunWorker ? [deps.teamRunWorker.stop()] : []),
           ])
           drainFailure = drained.find((result) => result.status === 'rejected')?.reason
           started = false
@@ -224,6 +230,7 @@ export async function main(): Promise<void> {
   // numeric bounds must validate at startup like the API server's.
   const extensionConfig = resolveExtensionConfig(process.env)
   const sessionDocumentConfig = resolveSessionDocumentConfig(process.env)
+  const teamConfig = resolveTeamCollaborationConfig(process.env)
   const pool = createPool(parseDBUrl(databaseUrl), {
     name: 'event-worker',
     max: strictPositiveEnvInt('DB_WORKER_POOL_MAX', 8),
@@ -231,6 +238,7 @@ export async function main(): Promise<void> {
     statementTimeoutMillis: EVENT_WORKER_STATEMENT_TIMEOUT_MS,
   })
   const repository = new InboxRepository(pool)
+  const workerId = process.env.RELAY_WORKER_ID || `${hostname()}:${process.pid}`
   const worker = createInboxWorker({
     repository,
     materializer: new EventMaterializer({
@@ -253,7 +261,7 @@ export async function main(): Promise<void> {
       ),
     } : {}),
     outboxWriter: new RealtimeOutboxWriter(pool),
-    workerId: process.env.RELAY_WORKER_ID || `${hostname()}:${process.pid}`,
+    workerId,
     shardCount,
     shardIndex,
   })
@@ -287,16 +295,27 @@ export async function main(): Promise<void> {
       })
     },
   })
+  const teamRunWorker = teamConfig.autorun === 'on'
+    ? createTeamRunWorker(pool, { workerId: `${workerId}:team-run` })
+    : undefined
   const runtime = createWorkerRuntime({
     assertSchemaReady: async () => {
       await assertDurableIngressSchema(pool)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
       if (sessionDocumentConfig.captureMode === 'on') await assertSessionDocumentSchema(pool)
       if (extensionConfig.mode !== 'off') await assertExtensionSchema(pool)
+      if (teamConfig.autorun === 'on') {
+        const result = await pool.query<{ ready: boolean }>(
+          `SELECT to_regclass('collaboration_runs') IS NOT NULL
+             AND to_regclass('uq_collaboration_run_step') IS NOT NULL AS ready`,
+        )
+        if (result.rows[0]?.ready !== true) throw new Error('team automatic collaboration schema not ready')
+      }
     },
     worker,
     retention,
     extensionProjector,
+    teamRunWorker,
     pool,
   })
   await runtime.start()

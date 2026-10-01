@@ -1,6 +1,7 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import {
+  DeletedDaemonSessionError,
   deleteSession,
   deleteUserAccount,
   initDB,
@@ -116,7 +117,7 @@ describeWithDatabase('extension session deletion tombstone (PostgreSQL)', () => 
     expect(tombstoneFeed.rows[0].topic).toBe('session.deleted.v1')
   })
 
-  test('a concurrent persist racing the delete ends in one of the two legal outcomes', async () => {
+  test('a durable tombstone rejects late daemon events even if session metadata reappears', async () => {
     await journal('before')
 
     // Outcome 1: the event commits first, then the delete removes it and
@@ -137,7 +138,7 @@ describeWithDatabase('extension session deletion tombstone (PostgreSQL)', () => 
       pool,
       extensionJournalSink: createPostgresExtensionJournalSink(),
     })
-    await expect(materializer.materialize({
+    const lateEvent = materializer.materialize({
       inboxId: 0,
       userId,
       daemonId: 'delete-daemon',
@@ -145,7 +146,15 @@ describeWithDatabase('extension session deletion tombstone (PostgreSQL)', () => 
       eventType: 'agent_text',
       payload: { type: 'agent_text', session_id: 'delete-session', text: 'late' },
       receivedAt: new Date(),
-    })).rejects.toMatchObject({ name: 'UnknownDaemonSessionError' })
+    })
+    await expect(lateEvent).rejects.toBeInstanceOf(DeletedDaemonSessionError)
+    await expect(lateEvent).rejects.toMatchObject({ code: 'unknown_daemon_session', permanent: true })
+    const retained = await pool.query(`SELECT
+      (SELECT COUNT(*)::int FROM events WHERE session_id = 'delete-session') AS events,
+      (SELECT COUNT(*)::int FROM extension_source_outbox WHERE session_id = 'delete-session'
+        AND source_kind = '${CANONICAL_EVENT_SOURCE_KIND}') AS source_events,
+      (SELECT COUNT(*)::int FROM deleted_sessions WHERE session_id = 'delete-session') AS tombstones`)
+    expect(retained.rows[0]).toEqual({ events: 0, source_events: 0, tombstones: 1 })
   })
 
   test('account deletion creates purge evidence and clears extension rows', async () => {

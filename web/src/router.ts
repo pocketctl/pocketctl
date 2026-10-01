@@ -4,12 +4,16 @@ import DeviceAuthView from './views/DeviceAuthView.vue'
 import HostsView from './views/HostsView.vue'
 import LoginView from './views/LoginView.vue'
 import SessionDetail from './views/SessionDetail.vue'
-import SessionList from './views/SessionList.vue'
+import SessionWorkspace from './views/SessionWorkspace.vue'
 import SettingsView from './views/SettingsView.vue'
 import TokenUsage from './views/TokenUsage.vue'
 import AttentionInboxView from './views/AttentionInboxView.vue'
 import MemoryView from './views/MemoryView.vue'
+import TeamsView from './views/TeamsView.vue'
+import TeamSessionDetail from './views/TeamSessionDetail.vue'
+import TeamSessionListView from './views/TeamSessionListView.vue'
 import { useAuth } from './composables/useAuth'
+import { useTeamAccess } from './composables/useTeamAccess'
 import { isPwaMobileShellEnabled } from './composables/useEnv'
 import { isMobileViewport } from './composables/useResponsiveLayout'
 
@@ -17,13 +21,16 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/login', component: LoginView },
   { path: '/login/cli', component: DeviceAuthView },
   { path: '/', component: DashboardView, meta: { requiresAuth: true } },
-  { path: '/sessions', component: SessionList, meta: { requiresAuth: true } },
+  { path: '/sessions', component: SessionWorkspace, meta: { requiresAuth: true } },
   { path: '/session/:id', component: SessionDetail, props: true, meta: { requiresAuth: true } },
   { path: '/tokens', component: TokenUsage, meta: { requiresAuth: true } },
   { path: '/settings', component: SettingsView, meta: { requiresAuth: true } },
   { path: '/hosts', component: HostsView, meta: { requiresAuth: true } },
   { path: '/inbox', component: AttentionInboxView, meta: { requiresAuth: true } },
   { path: '/memory', component: MemoryView, meta: { requiresAuth: true } },
+  { path: '/teams', component: TeamsView, meta: { requiresAuth: true, requiresTeam: true } },
+  { path: '/team/:teamId/sessions', name: 'team-sessions', component: TeamSessionListView, props: true, meta: { requiresAuth: true, requiresTeam: true, sessionScope: 'team' } },
+  { path: '/team/:teamId/session/:id', name: 'team-session', component: TeamSessionDetail, props: true, meta: { requiresAuth: true, requiresTeam: true, sessionScope: 'team' } },
 ]
 
 export function resolveAuthenticatedLanding(
@@ -44,6 +51,7 @@ export function createPocketctlRouter() {
     const { accessToken, doRefreshToken } = useAuth()
     if (!accessToken.value) await doRefreshToken()
     if (to.meta.requiresAuth && !accessToken.value) return '/login'
+    if (to.meta.requiresTeam && !await useTeamAccess().refresh()) return '/sessions'
     if (to.path === '/login' && accessToken.value) {
       return resolveAuthenticatedLanding('/') || '/'
     }

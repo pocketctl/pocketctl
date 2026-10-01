@@ -3903,6 +3903,54 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 			case "memory_mcp_grant_result", "memory_mcp_grant_error":
 				memoryMcpBroker.Dispatch(cmd)
 				continue
+			case "collaboration_session_create":
+				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())
+				if grantErr != nil || duplicate || session.ValidateCollaborationAuthorization(cmd.Collaboration, "create") != nil {
+					reason := "collaboration_authorization_invalid"
+					if duplicate {
+						reason = "duplicate_request"
+					} else if grantErr != nil {
+						reason = "quota_grant_invalid"
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", RequestID: cmd.RequestID,
+						MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
+					continue
+				}
+				createCommand := cmd
+				daemon.Go("team-session-create", logger, func() {
+					runCollaborationSessionCreate(ctx, client, sm, createCommand, stateDirty, memoryContextGrants)
+				})
+				continue
+			case "collaboration_user_message":
+				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "resume", time.Now())
+				if grantErr != nil || duplicate || session.ValidateCollaborationAuthorization(cmd.Collaboration, "message") != nil {
+					reason := "collaboration_authorization_invalid"
+					if duplicate {
+						reason = "duplicate_request"
+					} else if grantErr != nil {
+						reason = "quota_grant_invalid"
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
+					continue
+				}
+				if err := sm.DispatchCollaborationMessage(ctx, cmd.Collaboration, cmd.TeamContext, cmd.SessionID, cmd.Content, cmd.RequestID, cmd.MsgID); err != nil {
+					if cmd.TeamContext != nil {
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
+							RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: cmd.Collaboration})
+					continue
+				}
+				stateDirty.Store(true)
+				if cmd.TeamContext != nil {
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
+						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+				}
+				client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
+					RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
+				continue
 			case "session_create":
 				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())
 				if grantErr != nil || duplicate {
@@ -3937,7 +3985,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if config.Agent == "" {
 					config.Agent = "claude-code"
 				}
-				if config.Prompt != "" && (config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged) {
+				if config.Prompt != "" && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged) {
 					config.DeferInitialPrompt = true
 				}
 				sessionID, err := sm.CreateSession(ctx, config)
@@ -3990,7 +4038,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					// registration ACK that this goroutine is waiting for.
 					daemon.Go("memory-context-initial-prompt", logger, func() {
 						if err := deliverDeferredInitialPrompt(ctx, memoryContextGrants, sessionID, prompt, cmd.RequestID,
-							func(input session.UserMessageInput) error { return sm.SendMessageWithInput(ctx, input) }); err != nil {
+							func(input session.UserMessageInput) error { return sm.SendDeferredInitialPrompt(ctx, input) }); err != nil {
 							logger.Warn("managed initial prompt dispatch failed", "session", sessionID, "error", err)
 						}
 					})

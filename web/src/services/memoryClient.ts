@@ -221,6 +221,41 @@ export async function searchMemory(
   return result
 }
 
+export interface TeamContextClaimReferenceOption {
+  sourceKind: 'memory_claim'
+  sourceId: string
+  sourceVersion: string
+  installationId: string
+  ownerScopeId: string
+  label: string
+  provenance: string
+}
+
+export async function searchTeamContextClaimReferences(
+  installationId: string,
+  ownerScopeId: string,
+  query: string,
+  signal?: AbortSignal,
+): Promise<TeamContextClaimReferenceOption[]> {
+  const result = await searchMemory(query, {
+    scopeInstallationIds: [installationId],
+    limit: 20,
+  }, signal)
+  return result.hits
+    .filter(hit => hit.installationId === installationId
+      && hit.ownerScopeId === ownerScopeId
+      && Boolean(hit.claimId) && Boolean(hit.versionId))
+    .map(hit => ({
+      sourceKind: 'memory_claim' as const,
+      sourceId: hit.claimId,
+      sourceVersion: hit.versionId,
+      installationId,
+      ownerScopeId,
+      label: hit.statement,
+      provenance: `${hit.claimType} · ${hit.versionId}`,
+    }))
+}
+
 export function recallMemory(query: string, maxClaims = 5): Promise<MemoryRecallBundle> {
   return memoryJson<MemoryRecallBundle>('memory.recall', '/api/v1/memory/recall', {
     method: 'POST', body: JSON.stringify({ query, max_claims: maxClaims }),
@@ -388,6 +423,37 @@ export function sendMemoryFeedback(
 
 // --- Phase 4 source graph and Living Wiki client surface ---
 
+export interface MemoryWikiScopeContext {
+  installationId: string
+  repositoryId: string
+  wikiVersionId?: string | null
+  signal?: AbortSignal
+  legacyGrant?: boolean
+}
+
+function wikiRequestPath(path: string, scope?: MemoryWikiScopeContext, query?: URLSearchParams): string {
+  const params = query ?? new URLSearchParams()
+  if (scope) {
+    params.set('installation_id', scope.installationId)
+    params.set('repository_id', scope.repositoryId)
+    if (scope.wikiVersionId) params.set('wiki_version_id', scope.wikiVersionId)
+  }
+  const suffix = params.toString()
+  return suffix ? `${path}?${suffix}` : path
+}
+
+function wikiJson<T>(
+  service: 'memory.search' | 'memory.manage',
+  path: string,
+  scope?: MemoryWikiScopeContext,
+  init: RequestInit = {},
+): Promise<T> {
+  const scopedInit = scope?.signal ? { ...init, signal: scope.signal } : init
+  return scope && !scope.legacyGrant
+    ? scopedMemoryJson<T>(scope.installationId, service, path, scopedInit)
+    : memoryJson<T>(service, path, scopedInit)
+}
+
 export function getMemoryCodeGraph(
   repositoryId: string,
   cursor?: string | null,
@@ -417,10 +483,14 @@ export function analyzeMemoryChangeImpact(
   )
 }
 
-export function getMemoryWiki(repositoryId: string): Promise<MemoryActiveWiki> {
-  return memoryJson(
+export function getMemoryWiki(
+  repositoryId: string,
+  scope?: MemoryWikiScopeContext,
+): Promise<MemoryActiveWiki> {
+  return wikiJson(
     'memory.search',
-    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/wiki`,
+    wikiRequestPath(`/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/wiki`, scope),
+    scope,
   )
 }
 
@@ -428,27 +498,40 @@ export function listMemoryWikiBuilds(
   wikiId: string,
   cursor?: string | null,
   limit = 20,
+  scope?: MemoryWikiScopeContext,
 ): Promise<MemoryWikiBuildList> {
   const query = new URLSearchParams({ limit: String(limit) })
   if (cursor) query.set('cursor', cursor)
-  return memoryJson(
+  return wikiJson(
     'memory.search',
-    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/builds?${query.toString()}`,
+    wikiRequestPath(`/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/builds`, scope, query),
+    scope,
   )
 }
 
-export function getMemoryWikiCandidate(wikiId: string, buildId: string): Promise<MemoryWikiCandidate> {
-  return memoryJson(
+export function getMemoryWikiCandidate(
+  wikiId: string,
+  buildId: string,
+  scope?: MemoryWikiScopeContext,
+): Promise<MemoryWikiCandidate> {
+  return wikiJson(
     'memory.search',
-    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/candidates/${encodeURIComponent(buildId)}`,
+    wikiRequestPath(
+      `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/candidates/${encodeURIComponent(buildId)}`,
+      scope,
+    ),
+    scope,
   )
 }
 
 export function scheduleMemoryWikiBuild(
   wikiId: string,
   expectedGeneration: number,
+  scope?: MemoryWikiScopeContext,
 ): Promise<{ run_id: string; generation: number }> {
-  return memoryJson('memory.manage', `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/builds`, {
+  return wikiJson('memory.manage', wikiRequestPath(
+    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/builds`, scope,
+  ), scope, {
     method: 'POST', body: JSON.stringify({ expected_generation: expectedGeneration }),
   })
 }
@@ -458,10 +541,15 @@ export function publishMemoryWikiCandidate(
   buildId: string,
   expectedGeneration: number,
   expectedHeadRevision: number,
+  scope?: MemoryWikiScopeContext,
 ): Promise<{ wikiVersionId: string; revision: number }> {
-  return memoryJson(
+  return wikiJson(
     'memory.manage',
-    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/candidates/${encodeURIComponent(buildId)}/publish`,
+    wikiRequestPath(
+      `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/candidates/${encodeURIComponent(buildId)}/publish`,
+      scope,
+    ),
+    scope,
     {
       method: 'POST',
       body: JSON.stringify({
@@ -477,10 +565,15 @@ export function editMemoryWikiSection(
   sectionKey: string,
   markdown: string,
   expectedLockVersion: number,
+  scope?: MemoryWikiScopeContext,
 ): Promise<{ manualVersionId: string; lockVersion: number }> {
-  return memoryJson(
+  return wikiJson(
     'memory.manage',
-    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/manual-sections/${encodeURIComponent(sectionKey)}`,
+    wikiRequestPath(
+      `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/manual-sections/${encodeURIComponent(sectionKey)}`,
+      scope,
+    ),
+    scope,
     {
       method: 'PUT',
       body: JSON.stringify({ markdown, expected_lock_version: expectedLockVersion }),
@@ -493,10 +586,15 @@ export function setMemoryWikiSectionLock(
   sectionKey: string,
   action: 'lock' | 'unlock',
   expectedLockVersion: number,
+  scope?: MemoryWikiScopeContext,
 ): Promise<{ lockVersion: number }> {
-  return memoryJson(
+  return wikiJson(
     'memory.manage',
-    `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/manual-sections/${encodeURIComponent(sectionKey)}/${action}`,
+    wikiRequestPath(
+      `/api/v1/memory/wikis/${encodeURIComponent(wikiId)}/manual-sections/${encodeURIComponent(sectionKey)}/${action}`,
+      scope,
+    ),
+    scope,
     {
       method: 'POST',
       body: JSON.stringify({ expected_lock_version: expectedLockVersion }),
@@ -643,6 +741,11 @@ interface V2GrantState {
   services: string[]
 }
 let v2Grant: V2GrantState | null = null
+
+export function resetScopedMemoryAuthorization(): void {
+  v2Grant = null
+  state.latestSearchId++
+}
 
 async function mintV2Grant(installationIds: string[], services: string[] = []): Promise<V2GrantState> {
   if (v2Grant && v2Grant.expiresAt > Date.now() + 5_000

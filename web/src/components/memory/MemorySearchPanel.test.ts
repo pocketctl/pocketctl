@@ -97,7 +97,7 @@ describe('MemorySearchPanel', () => {
     expect(wrapper.get('[data-testid="memory-search-input"]').attributes('disabled')).toBeUndefined()
   })
 
-  test('search results use the design split layout and open a claim only from the preview action', async () => {
+  test('search stays full width until a result opens the detail, then restores result focus on close', async () => {
     memoryClient.searchMemory.mockResolvedValueOnce({
       hits: [
         {
@@ -115,12 +115,13 @@ describe('MemorySearchPanel', () => {
       ],
       nextCursor: null, degradedComponents: [], poolSizes: {},
     })
-    const wrapper = mount(MemorySearchPanel)
+    const wrapper = mount(MemorySearchPanel, { attachTo: document.body })
     await wrapper.get('[data-testid="memory-search-input"]').setValue('phase gate')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
     expect(wrapper.get('[data-testid="memory-search-workspace"]').classes()).toContain('memory-search-workspace')
+    expect(wrapper.get('[data-testid="memory-search-workspace"]').classes()).not.toContain('has-preview')
     expect(wrapper.get('[data-testid="memory-search-detail"]').text()).toContain('Detail claim-1')
     expect(wrapper.get('[data-testid="memory-search-detail"]').text()).toContain('Verified source evidence')
     expect(wrapper.get('[data-testid="memory-hit-claim-1"]').attributes('aria-current')).toBe('true')
@@ -128,9 +129,19 @@ describe('MemorySearchPanel', () => {
     await wrapper.get('[data-testid="memory-hit-claim-2"]').trigger('click')
     await flushPromises()
 
+    expect(wrapper.get('[data-testid="memory-search-workspace"]').classes()).toContain('has-preview')
+    expect(wrapper.get('[data-testid="memory-search-detail"]').attributes('aria-hidden')).toBe('false')
     expect(wrapper.get('[data-testid="memory-search-detail"]').text()).toContain('Detail claim-2')
     expect(wrapper.emitted('select-claim')).toBeUndefined()
+    await wrapper.get('.memory-search-detail-close').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="memory-search-workspace"]').classes()).not.toContain('has-preview')
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="memory-hit-claim-2"]').element)
+
+    await wrapper.get('[data-testid="memory-hit-claim-2"]').trigger('click')
+    await flushPromises()
     await wrapper.get('[data-testid="memory-open-claim-claim-2"]').trigger('click')
     expect(wrapper.emitted('select-claim')?.[0]?.[0]).toBe('claim-2')
+    wrapper.unmount()
   })
 })

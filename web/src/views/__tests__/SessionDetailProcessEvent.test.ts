@@ -1577,6 +1577,15 @@ describe('SessionDetail processEvent integration', () => {
     expect(vm.messages.find((message: any) => message.request_id === 'mcp_1')).toMatchObject({ status: 'resolved', action: 'accept', redacted: true })
   })
 
+  test.each(['interaction_result', 'interactive_resolved'])('closes a PTY choice on %s including receipt-before-prompt replay', (receiptType) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get(receiptType)?.({ type: receiptType, session_id: 'ses_1', request_id: 'trust', operation: 'interactive_response', status: 'submitted', choice: '2' })
+    websocketMock.handlers.get('interactive_prompt')?.({ type: 'interactive_prompt', session_id: 'ses_1', request_id: 'trust', input: { prompt: 'Trust folder?', options: [{ index: '1', label: 'No' }, { index: '2', label: 'Yes' }] } })
+    expect(vm.messages.find((message: any) => message.request_id === 'trust')).toMatchObject({ status: 'resolved', selectedChoice: '2', submitting: false })
+    wrapper.unmount()
+  })
+
   test.each(['live', 'replay'] as const)(
     'routes %s interaction_result to the canonical root/child owner before or after every request kind',
     async (delivery) => {

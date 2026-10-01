@@ -12,6 +12,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
+	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
 )
@@ -27,16 +28,60 @@ type CodexAppServerBackend struct {
 
 const codexEmptySessionInitializer = "Pocketctl initialized this session."
 
+var errNativeSessionCreateUncertain = errors.New("native_session_create_uncertain")
+
+// Only JSON-RPC's request/method/parameter rejection proves that a creation
+// request did not execute. Transport failures and server errors are uncertain.
+func codexCreateRejected(err error) bool {
+	var reply *codexapp.RPCError
+	return errors.As(err, &reply) && (reply.Code == -32600 || reply.Code == -32601 || reply.Code == -32602)
+}
+
+func (b *CodexAppServerBackend) cleanupFailedStart(id string, newlyCreated bool) error {
+	if !newlyCreated {
+		return fmt.Errorf("native thread ownership is not exclusive to this create")
+	}
+	lock := b.coord.threadOperationLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	if b.sm != nil {
+		b.sm.mu.RLock()
+		foreign := b.sm.sessions[id] != nil
+		b.sm.mu.RUnlock()
+		if foreign {
+			return fmt.Errorf("native thread already has a session owner")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := b.coord.releaseThread(ctx, id, b.client, b.generation); err != nil {
+		return err
+	}
+	// This failed creation never became a SessionManager session. Do not
+	// restore it as an owned managed thread on a later runtime reconnect.
+	b.coord.subscribeMu.Lock()
+	delete(b.coord.managedThreads, id)
+	delete(b.coord.subscribed, id)
+	delete(b.coord.subscribing, id)
+	delete(b.coord.detachedThreads, id)
+	delete(b.coord.idleThreads, id)
+	b.coord.threadStateVersion++
+	b.coord.subscribeMu.Unlock()
+	return b.coord.persist()
+}
+
 func newCodexAppServerBackend(sm *SessionManager, coord *codexCoordinator, client codexRuntimeClient, generation uint64) *CodexAppServerBackend {
 	return &CodexAppServerBackend{sm: sm, coord: coord, client: client, generation: generation}
 }
 
-func (b *CodexAppServerBackend) memoryContextNativeSupported(context.Context) bool {
-	// The managed-runtime probe currently proves the ordinary turn/start surface,
-	// but not a native hidden developer/history item with persistence and replay
-	// filtering guarantees. Stay fail-closed until that exact mechanism is
-	// represented in the generated schema and proven by a runtime canary.
-	return false
+func (b *CodexAppServerBackend) memoryContextNativeSupported(ctx context.Context) bool {
+	if b == nil || b.coord == nil || ctx.Err() != nil {
+		return false
+	}
+	b.coord.mu.Lock()
+	defer b.coord.mu.Unlock()
+	return !b.coord.shuttingDown && b.coord.hiddenContextSupportedLocked() && b.generation == b.coord.generation &&
+		b.coord.runtime.Client == b.client
 }
 
 // tryCreateManagedCodexSession selects app-server only after enablement and a
@@ -91,7 +136,7 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 	if err != nil {
 		// thread/start may have crossed the process boundary, so do not create a
 		// second exec-json thread after an ambiguous RPC failure.
-		return "", true, err
+		return sessionID, true, err
 	}
 	now := time.Now()
 	status := protocol.StatusIdle
@@ -159,11 +204,35 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 			},
 		}}
 	}
+	// A cancellation observed before the native write proves no creation was
+	// attempted; callers may release the reservation and retry safely.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := b.client.Call(ctx, method, params, &response); err != nil {
-		return "", fmt.Errorf("Codex thread/start: %w", err)
+		createErr := fmt.Errorf("Codex thread/start: %w", err)
+		if !codexCreateRejected(err) {
+			createErr = errors.Join(createErr, errNativeSessionCreateUncertain)
+		}
+		return "", createErr
 	}
 	if response.Thread.ID == "" {
-		return "", fmt.Errorf("Codex thread/start returned no thread id")
+		return "", fmt.Errorf("%w: Codex thread/start returned no thread id", errNativeSessionCreateUncertain)
+	}
+	b.coord.subscribeMu.Lock()
+	_, previouslyManaged := b.coord.managedThreads[response.Thread.ID]
+	b.coord.subscribeMu.Unlock()
+	newlyCreated := !previouslyManaged && !b.coord.isCodexDesktopOrigin(response.Thread.ID)
+	if b.sm != nil {
+		b.sm.mu.RLock()
+		newlyCreated = newlyCreated && b.sm.sessions[response.Thread.ID] == nil
+		b.sm.mu.RUnlock()
+	}
+	failKnownCreate := func(createErr error) (string, error) {
+		if cleanupErr := b.cleanupFailedStart(response.Thread.ID, newlyCreated); cleanupErr != nil {
+			return response.Thread.ID, errors.Join(createErr, fmt.Errorf("%w: %w", errNativeSessionCreateUncertain, cleanupErr))
+		}
+		return "", createErr
 	}
 	// Codex does not create a rollout for thread/start alone. Persist a fixed,
 	// non-task developer item before announcing the session so an empty /new
@@ -176,13 +245,31 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 			"content": []any{map[string]any{"type": "input_text", "text": codexEmptySessionInitializer}},
 		}}
 		if err := b.client.Call(ctx, "thread/inject_items", map[string]any{"threadId": response.Thread.ID, "items": items}, nil); err != nil {
-			return "", fmt.Errorf("persist empty Codex thread: %w", err)
+			createErr := fmt.Errorf("persist empty Codex thread: %w", err)
+			if !codexCreateRejected(err) {
+				// A lost response can hide a persisted rollout. Preserve the
+				// exact known native identity until persistence is reconciled;
+				// detachment alone cannot justify clean collaboration replay.
+				if newlyCreated {
+					b.coord.markSubscribed(response.Thread.ID)
+				}
+				return response.Thread.ID, errors.Join(createErr, errNativeSessionCreateUncertain)
+			}
+			return failKnownCreate(createErr)
 		}
 	}
 	b.coord.markSubscribed(response.Thread.ID)
 	if config.Prompt != "" {
 		if err := b.startTurn(ctx, response.Thread.ID, config.Prompt, config); err != nil {
-			return "", err
+			if codexCreateRejected(err) {
+				return failKnownCreate(err)
+			}
+			// A task may already be executing despite a lost native response.
+			// Keep its identity; cleanup cannot prove it is safe to replay.
+			if errors.Is(err, errNativeSessionCreateUncertain) {
+				return response.Thread.ID, err
+			}
+			return response.Thread.ID, errors.Join(err, errNativeSessionCreateUncertain)
 		}
 	}
 	return response.Thread.ID, nil
@@ -205,8 +292,8 @@ func (b *CodexAppServerBackend) Resume(ctx context.Context, threadID string) err
 	return nil
 }
 
-// SendWithContext delivers the hidden developer item before the unchanged
-// user text in one ordered turn/start input array (plan 11.3).
+// SendWithContext injects native developer history before the unchanged user
+// turn. The thread operation lock orders both RPCs against sends and unloads.
 func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
 	current, release, err := b.beginThreadOperation(ctx, sessionID, true)
 	if err != nil {
@@ -274,16 +361,10 @@ func (b *CodexAppServerBackend) startTurn(ctx context.Context, threadID, content
 	return b.startTurnWithContext(ctx, threadID, content, config, nil)
 }
 
-// startTurnWithContext is the Phase 2 delivery path: a prepared hidden
-// context rides an ordered developer item BEFORE the unchanged user text.
+// startTurnWithContext is the Phase 2 native history delivery path.
 // Without a pack the wire shape is byte-identical to the legacy startTurn.
 func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, threadID, content string, config protocol.SessionConfig, hidden *memorycontext.PreparedContext) error {
-	var input []map[string]any
-	if hidden != nil {
-		input = memorycontext.BuildCodexInput(hidden, content)
-	} else {
-		input = []map[string]any{{"type": "text", "text": content}}
-	}
+	input := memorycontext.BuildCodexInput(nil, content)
 	if b.coord.projectCwd != "" && strings.HasPrefix(strings.TrimSpace(content), "/") {
 		id, _ := ctx.Value(codexInvocationKey{}).(string)
 		skill, err := b.sm.resolveCodexSkill(ctx, threadID, content, id)
@@ -323,13 +404,40 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if items := memorycontext.BuildCodexHistoryItems(hidden); len(items) != 0 {
+		if !b.memoryContextNativeSupported(ctx) {
+			return fmt.Errorf("Codex native hidden context is unavailable for this runtime")
+		}
+		// Do not submit or retry a task after a rejected or ambiguous history
+		// write. A lost ACK may hide persisted items; first-create callers must
+		// retain their exact native binding through the existing quarantine seam.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.client.Call(ctx, "thread/inject_items", map[string]any{"threadId": threadID, "items": items}, nil); err != nil {
+			injectErr := fmt.Errorf("Codex hidden history injection: %w", err)
+			if !codexCreateRejected(err) {
+				return errors.Join(injectErr, errNativeSessionCreateUncertain)
+			}
+			return injectErr
+		}
+	}
 	var response struct {
 		Turn struct {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
 	if err := b.client.Call(ctx, "turn/start", params, &response); err != nil {
-		return fmt.Errorf("Codex turn/start: %w", err)
+		turnErr := fmt.Errorf("Codex turn/start: %w", err)
+		if !codexCreateRejected(err) {
+			// The native turn may have started before its response was lost.
+			// Creation rollback must retain the exact thread and binding.
+			return errors.Join(turnErr, errNativeSessionCreateUncertain)
+		}
+		return turnErr
 	}
 	if response.Turn.ID != "" {
 		b.coord.setActiveTurn(threadID, response.Turn.ID)

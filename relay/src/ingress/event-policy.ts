@@ -5,7 +5,7 @@ const control = new Set([
   'session_create_failed',
   'session_meta', 'session_model_changed', 'session_agent_changed',
   'approval_request', 'approval_resolved', 'question_request', 'question_resolved',
-  'interactive_prompt', 'interaction_result', 'permission_config_changed',
+  'interactive_prompt', 'interactive_resolved', 'interaction_result', 'permission_config_changed',
   'command_receipt',
   // Turn lifecycle control frames: always durable, never droppable content.
   // Producers force a stable event_id (turn:<hash>:status:<state>) so the

@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年9月22日' : 'Updated: September 22, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月1日' : 'Updated: October 1, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -56,7 +56,7 @@
           <h4>八、终止与删除</h4>
           <ol>
             <li>退出登录只结束当前登录状态，不会删除账户。</li>
-            <li>您可通过“设置 → 账户 → 删除账户”永久删除账户和当前业务数据库中的关联数据。</li>
+            <li>您可通过“设置 → 账户 → 删除账户”发起账户删除。关联个人数据、Team 共享资料及可能影响账户删除的 Team 关联，按隐私政策所述范围处理。</li>
             <li>基础设施日志、第三方日志和备份按照隐私政策所述的独立周期清理。</li>
           </ol>
         </section>
@@ -112,7 +112,7 @@
           <h4>8. Termination and Deletion</h4>
           <ol>
             <li>Signing out ends the current login state; it does not delete the account.</li>
-            <li>You may permanently delete your account and associated current application-database data through Settings → Account → Delete Account.</li>
+            <li>You may initiate account deletion through Settings → Account → Delete Account. Associated personal data, Team shared content, and Team relationships that may affect account deletion are handled within the scope described in the Privacy Policy.</li>
             <li>Infrastructure logs, third-party logs, and backups are cleared on the separate cycles described in the Privacy Policy.</li>
           </ol>
         </section>

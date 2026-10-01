@@ -67,6 +67,35 @@ describe('sessionDocuments client', () => {
     expect(content.bytes).toEqual(new Uint8Array([104, 101, 108, 108, 111]))
   })
 
+  test.each([157, 256])('accepts a Relay source event ID of %i characters', async (length) => {
+    const sourceEventId = 'e'.repeat(length)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      schema_version: 1, html_rendering: false,
+      documents: [{
+        document_id: 'doc-1', version_id: 'ver-1', display_name: 'notes.md', format: 'markdown',
+        state: 'available', reason: null, byte_size: 5, sha256: digest,
+        source_turn_id: 'turn-1', source_event_id: sourceEventId,
+        captured_at: '2026-09-11T00:00:00.000Z', committed_at: '2026-09-11T00:00:01.000Z',
+      }],
+    }), { status: 200 }))
+
+    expect((await listSessionDocuments('session-1')).documents[0].sourceEventId).toBe(sourceEventId)
+  })
+
+  test('rejects a source event ID beyond the Relay protocol limit', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      schema_version: 1, html_rendering: false,
+      documents: [{
+        document_id: 'doc-1', version_id: 'ver-1', display_name: 'notes.md', format: 'markdown',
+        state: 'available', reason: null, byte_size: 5, sha256: digest,
+        source_turn_id: 'turn-1', source_event_id: 'e'.repeat(257),
+        captured_at: '2026-09-11T00:00:00.000Z', committed_at: '2026-09-11T00:00:01.000Z',
+      }],
+    }), { status: 200 }))
+
+    await expect(listSessionDocuments('session-1')).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
   test.each([
     ['metadata size', { body: 'hello!', size: '6', hash: digest, format: 'markdown' }],
     ['response size', { body: 'hello', size: '4', hash: digest, format: 'markdown' }],

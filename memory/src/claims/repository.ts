@@ -719,6 +719,9 @@ async function insertEvidenceForVersion(
         source_kind: evidence.manifest.kind,
         excerpt_hash: evidence.manifest.excerpt_hash ?? null,
         truncated: evidence.manifest.truncated ?? false,
+        ...(evidence.manifest.source_provenance
+          ? { source_provenance: evidence.manifest.source_provenance }
+          : {}),
         repository_id: input.repositoryId,
         repo_snapshot_id: input.repoSnapshotId,
         branch: input.branch,

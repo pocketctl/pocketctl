@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -261,5 +262,36 @@ func TestCodexLauncherRejectsOwnedShimFromDaemonManagedResponse(t *testing.T) {
 	}
 	if executed {
 		t.Fatal("owned daemon shim was executed")
+	}
+}
+
+func TestResolveLauncherCodexMapsStoredReleaseToCurrent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink layout")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	codexHome := filepath.Join(home, ".codex")
+
+	oldRelease := writeStandaloneRelease(t, codexHome, "0.155.1-aarch64-apple-darwin")
+	newRelease := writeStandaloneRelease(t, codexHome, "0.159.2-aarch64-apple-darwin")
+	pointStandaloneCurrent(t, codexHome, "0.159.2-aarch64-apple-darwin")
+
+	cfg := DefaultConfig()
+	cfg.Codex = AgentConfig{
+		State: StateEnabled, DecisionSource: SourceCommand,
+		RealBinary: oldRelease, ShimPath: filepath.Join(home, ".pocketctl", "bin", "codex"),
+	}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveLauncherCodexWithResolver(NewBinaryResolver())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(got, newRelease) {
+		t.Fatalf("launcher binary=%q, want current target %q", got, newRelease)
 	}
 }

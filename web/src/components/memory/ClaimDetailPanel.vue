@@ -1,6 +1,6 @@
 <template>
   <section class="memory-claim-workspace" data-testid="memory-claim-detail">
-    <div class="memory-claim-layout">
+    <div class="memory-claim-layout" :class="{ 'has-preview': detailOpen }">
       <section class="memory-claims-column">
         <div class="memory-claim-filterbar">
           <label class="memory-claim-filter-query">
@@ -20,7 +20,7 @@
             class="memory-claim-row" :class="{ selected: claim.claim_id === selectedClaimId }"
             :data-testid="`memory-claim-row-${claim.claim_id}`"
             :aria-current="claim.claim_id === selectedClaimId ? 'true' : undefined"
-            @click="selectClaim(claim.claim_id, true)">
+            @click="selectClaim(claim.claim_id, true, $event)">
             <span class="memory-claim-row-main">
               <strong>{{ claim.statement }}</strong>
               <span>{{ humanizeType(claim.claim_type) }}</span>
@@ -56,14 +56,14 @@
         </nav>
       </section>
 
-      <aside class="memory-claim-library-detail" :class="{ 'mobile-open': detailOpen }"
+      <aside class="memory-claim-library-detail" :class="{ 'mobile-open': detailOpen }" :aria-hidden="!detailOpen"
         data-testid="memory-claim-library-detail">
         <template v-if="detail">
           <div class="memory-claim-detail-toolbar">
             <span>{{ t('memory.knowledge_detail') }}</span>
             <button type="button" class="memory-claim-detail-close" :aria-label="t('memory.back_to_claims')"
               data-testid="memory-claim-detail-close" @click="closeDetail">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
             </button>
           </div>
 
@@ -132,7 +132,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { nextTick, computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { correctMemoryClaim, deleteMemoryClaim, getMemoryClaim, listMemoryClaims, listVersionEvidence, revokeMemoryClaim } from '../../services/memoryClient'
 import type { MemoryClaimDetail, MemoryClaimSummary, MemoryEvidence } from '../../types/memory'
@@ -206,9 +206,13 @@ watch(claimQuery, () => {
 })
 
 function humanizeType(value: string): string { return value.replace(/_/g, ' ') }
-function closeDetail(): void { detailOpen.value = false }
+let detailTrigger: HTMLElement | null = null
+function closeDetail(): void { detailOpen.value = false; void nextTick(() => detailTrigger?.focus()) }
 function summaryUpdatedAt(claim: MemoryClaimSummary): string {
-  return claim.freshness_at ?? claim.version_created_at ?? claim.updated_at ?? '—'
+  const value = claim.freshness_at ?? claim.version_created_at ?? claim.updated_at
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString()
 }
 
 async function synchronize(requestedClaimId: string | null): Promise<void> {
@@ -279,7 +283,8 @@ async function changePage(nextPage: number): Promise<void> {
   if (first) await selectClaim(first.claim_id, false)
 }
 
-async function selectClaim(claimId: string, openOnMobile: boolean): Promise<void> {
+async function selectClaim(claimId: string, openOnMobile: boolean, event?: MouseEvent): Promise<void> {
+  if (event?.currentTarget instanceof HTMLElement) detailTrigger = event.currentTarget
   if (selectedClaimId.value === claimId && detail.value?.claim.claim_id === claimId) {
     if (openOnMobile) detailOpen.value = true
     return

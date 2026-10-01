@@ -277,6 +277,10 @@ func (sm *SessionManager) finishOwnedResume(entry *ownedResume, waitErr error) {
 	sm.mu.Lock()
 	if current := sm.resumeProcesses[entry.sessionID]; current == entry {
 		delete(sm.resumeProcesses, entry.sessionID)
+		if ps := sm.sessions[entry.sessionID]; ps != nil && ps.ClaudePrintSession && entry.process != nil && ps.Pid == entry.process.PID() {
+			delete(sm.childPids, ps.Pid)
+			ps.Pid = 0
+		}
 	}
 	sm.mu.Unlock()
 }

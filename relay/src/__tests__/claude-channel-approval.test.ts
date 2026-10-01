@@ -35,6 +35,13 @@ describe('Claude Channel approval delivery contract', () => {
     })])
   })
 
+  test('persists the owner PTY choice closure for refresh and other devices', async () => {
+    const payload = { type: 'interactive_resolved', session_id: 'claude-session', request_id: 'trust', status: 'submitted', choice: '2' }
+    const result = await new EventMaterializer({ pool: pool() as never }).materialize(input(payload))
+    expect(result).toMatchObject({ eventId: 501, inserted: true })
+    expect(result.deliveries).toEqual([expect.objectContaining({ audience: 'session', type: 'interactive_resolved', payload })])
+  })
+
   test('broadcasts a neutral closure without inventing approved or action', async () => {
     const payload = {
       type: 'approval_resolved', session_id: 'claude-session',

@@ -124,8 +124,8 @@ func TestTurnIdleInputReservesRunningBeforeContent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := pty.String(); got != "hello\r" {
-		t.Errorf("pty wrote %q, want the message + CR", got)
+	if got := pty.String(); got != "\x1b[200~hello\x1b[201~\r" {
+		t.Errorf("pty wrote %q, want pasted message followed by CR", got)
 	}
 	evs := drainEvents(sm.outputCh)
 	statuses := findEvents(evs, protocol.EventTypeTurnStatus)
@@ -552,7 +552,7 @@ func TestTurnEnrichmentOffKeepsLegacyBehavior(t *testing.T) {
 	if _, ok := sm.ActiveTurn("turn-sess"); ok {
 		t.Error("off mode must not track turns")
 	}
-	if pty.String() != "x\r" {
+	if pty.String() != "\x1b[200~x\x1b[201~\r" {
 		t.Errorf("pty = %q", pty.String())
 	}
 }

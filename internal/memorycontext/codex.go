@@ -1,39 +1,37 @@
 package memorycontext
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 )
 
-// CodexDelivery renders the pack for the managed Codex app-server
-// developer-item path (plan 11.3): the hidden context rides an ordered
-// developer input item BEFORE the unchanged user text item, tagged with the
-// PocketCtl marker so projections can filter it by explicit type.
+// CodexDeveloperItemTag identifies native developer history owned by PocketCtl.
 const CodexDeveloperItemTag = "pocketctl-memory-context"
 
-// CodexContextItem is the developer-role input item carrying the pack.
-type CodexContextItem struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-	Role string `json:"role,omitempty"`
-	Tag  string `json:"tag,omitempty"`
+// BuildCodexInput preserves the normal UserInput contract. Hidden context
+// must be sent separately through thread/inject_items, which accepts raw
+// Responses items; turn/start text items do not support a developer role.
+func BuildCodexInput(_ *PreparedContext, userText string) []map[string]any {
+	return []map[string]any{{"type": "text", "text": userText}}
 }
 
-// BuildCodexInput orders the hidden developer item before the user item.
-// The user text is never modified — only preceded.
-func BuildCodexInput(pack *PreparedContext, userText string) []map[string]any {
-	items := []map[string]any{}
-	if pack != nil && (pack.StableText != "" || pack.DynamicText != "") {
-		items = append(items, map[string]any{
-			"type": "text",
-			"role": "developer",
-			"tag":  CodexDeveloperItemTag,
-			"text": RenderCodexEnvelope(pack),
-		})
+func BuildCodexHistoryItems(pack *PreparedContext) []map[string]any {
+	if pack == nil || (pack.StableText == "" && pack.DynamicText == "") {
+		return nil
 	}
-	items = append(items, map[string]any{"type": "text", "text": userText})
-	return items
+	envelope := RenderCodexEnvelope(pack)
+	id := pack.PackID
+	if id == "" {
+		hash := sha256.Sum256([]byte(envelope))
+		id = hex.EncodeToString(hash[:])
+	}
+	return []map[string]any{{
+		"type": "message", "id": CodexDeveloperItemTag + ":" + id, "role": "developer",
+		"content": []map[string]any{{"type": "input_text", "text": envelope}},
+	}}
 }
 
 // RenderCodexEnvelope renders the stable and dynamic sections with the
@@ -63,11 +61,14 @@ func RenderCodexEnvelope(pack *PreparedContext) string {
 // developer context — matched by explicit role+tag, never by text matching.
 func IsCodexContextItem(raw json.RawMessage) bool {
 	var probe struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
 		Role string `json:"role"`
 		Tag  string `json:"tag"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return false
 	}
-	return probe.Role == "developer" && probe.Tag == CodexDeveloperItemTag
+	return probe.Role == "developer" && (probe.Tag == CodexDeveloperItemTag ||
+		(probe.Type == "message" && strings.HasPrefix(probe.ID, CodexDeveloperItemTag+":") && len(probe.ID) > len(CodexDeveloperItemTag)+1))
 }

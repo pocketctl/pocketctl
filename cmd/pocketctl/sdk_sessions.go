@@ -73,6 +73,12 @@ func handleSDKSpawnedSession(
 			"session", sid, "cwd", evt.Session.Cwd)
 		return
 	}
+	// Claude print/resume reports an SDK entrypoint too. When the discovered
+	// native ID is the host itself, stdout already owns its output; tailing
+	// its complete JSONL as a child would replay prior turns into the new one.
+	if host == sid {
+		return
+	}
 
 	daemon.RunLoop(ctx, "sdk-attach:"+sid, logger, func() {
 		tailer, attached := attachSDKSession(ctx, sid, evt.Session.Cwd, host, logger, outputCh, defaultSDKAttachOptions())

@@ -18,7 +18,7 @@
       @new-session="$emit('new-session')"
       @open-plan="openPlan"
     />
-    <MobileBottomNav v-if="showBottomNav" :session-count="sessionCount" />
+    <MobileBottomNav v-if="showBottomNav" :session-count="sessionCount" :attention-count="attentionCount" />
     <PlanBottomSheet
       v-if="plan && planOpen"
       :plan="plan"
@@ -45,6 +45,7 @@ const props = defineProps<{
   showBottomNav: boolean
   showNewSession: boolean
   sessionCount: number
+  attentionCount?: number
   plan?: AgentPlanSnapshot
   sessionHost?: string
   sessionHostId?: string

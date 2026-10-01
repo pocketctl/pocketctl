@@ -1,27 +1,29 @@
 <template>
-  <section class="memory-policy-editor" data-testid="memory-policy-editor">
+  <section class="memory-policy-editor memory-config-card" data-testid="memory-policy-editor">
     <h3>{{ t('memory.policy.title') }}</h3>
-    <label>
-      {{ t('memory.policy.kind') }}
-      <select v-model="kind" data-testid="policy-kind">
-        <option value="extraction">extraction</option>
-        <option value="context">context</option>
-        <option value="ranking">ranking</option>
-      </select>
-    </label>
-    <button data-testid="policy-load" :disabled="busy" @click="load">{{ t('memory.policy.load') }}</button>
+    <div class="memory-config-toolbar">
+      <label>
+        {{ t('memory.policy.kind') }}
+        <select v-model="kind" data-testid="policy-kind">
+          <option value="extraction">extraction</option>
+          <option value="context">context</option>
+          <option value="ranking">ranking</option>
+        </select>
+      </label>
+      <button class="memory-button" data-testid="policy-load" :disabled="busy" @click="load">{{ t('memory.policy.load') }}</button>
+    </div>
     <pre v-if="effective" class="document" data-testid="policy-effective">{{ JSON.stringify(effective.document, null, 2) }}</pre>
     <p v-if="effective" class="hash" data-testid="policy-hash">{{ effective.effective_policy_hash.slice(0, 16) }}…</p>
-		<textarea v-model="draft" rows="12" data-testid="policy-draft" :disabled="busy" />
+		<textarea v-model="draft" rows="12" :aria-label="t('memory.policy.title')" data-testid="policy-draft" :disabled="busy" />
 		<div class="actions">
-			<button data-testid="policy-preview" :disabled="busy" @click="preview">{{ t('memory.policy.preview') }}</button>
-			<button data-testid="policy-create" :disabled="busy" @click="create">{{ t('memory.policy.create') }}</button>
+			<button class="memory-button" data-testid="policy-preview" :disabled="busy" @click="preview">{{ t('memory.policy.preview') }}</button>
+			<button class="memory-button" data-testid="policy-create" :disabled="busy" @click="create">{{ t('memory.policy.create') }}</button>
 		</div>
 		<pre v-if="diff.length > 0" data-testid="policy-diff">{{ JSON.stringify(diff, null, 2) }}</pre>
 		<ul v-if="versions.length > 0" data-testid="policy-versions">
 			<li v-for="version in versions" :key="version.policy_version_id">
 				<span>v{{ version.version_number }} {{ version.active ? t('memory.policy.active') : '' }}</span>
-				<button v-if="!version.active && activeVersion" :disabled="busy" @click="activate(version.policy_version_id)">
+				<button class="memory-button" v-if="!version.active && activeVersion" :disabled="busy" @click="activate(version.policy_version_id)">
 					{{ t('memory.policy.activate') }}
 				</button>
 			</li>

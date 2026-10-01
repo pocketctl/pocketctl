@@ -188,10 +188,19 @@ func (r BinaryResolver) ResolveClaude(cfg AgentConfig, excluded ...string) (stri
 func (r BinaryResolver) resolve(agent string, cfg AgentConfig, notFound, versionError, timeoutError error, defaultShim string, excluded ...string) (string, string, error) {
 	r = r.withDefaults()
 	excluded = append(excluded, cfg.ShimPath, defaultShim)
+	// A Codex standalone install self-updates by repointing its `current`
+	// symlink while old release directories stay valid on disk, so a stored
+	// release path must be remapped to the alias before validation or it
+	// would keep pinning the enable-time version. Other agents resolve
+	// replace-in-place binaries and stay untouched.
+	normalize := func(path string) string { return path }
+	if agent == AgentCodex {
+		normalize = normalizeCodexStandaloneBinary
+	}
 
 	var storedErr error
 	if cfg.RealBinary != "" {
-		if path, version, err := r.validate(cfg.RealBinary, excluded, notFound, versionError, timeoutError); err == nil {
+		if path, version, err := r.validate(normalize(cfg.RealBinary), excluded, notFound, versionError, timeoutError); err == nil {
 			return path, version, nil
 		} else {
 			storedErr = err
@@ -202,7 +211,7 @@ func (r BinaryResolver) resolve(agent string, cfg AgentConfig, notFound, version
 	// time. The hint is validated exactly like a configured path and never
 	// overrides a working configuration.
 	if hint, ok := validatedLauncherRealBinaryHint(); ok {
-		if path, version, err := r.validate(hint, excluded, notFound, versionError, timeoutError); err == nil {
+		if path, version, err := r.validate(normalize(hint), excluded, notFound, versionError, timeoutError); err == nil {
 			return path, version, nil
 		}
 	}

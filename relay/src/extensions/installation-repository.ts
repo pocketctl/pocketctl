@@ -18,6 +18,15 @@ export interface ExtensionInstallation {
   updated_at: Date
 }
 
+export interface ScopedExtensionInstallation {
+  installation_id: string
+  provider_id: string
+  status: InstallationStatus
+  enabled_services: string[]
+  owner_scope_kind: 'personal' | 'team' | 'organization'
+  owner_scope_id: string
+}
+
 export class ExtensionInstallationConflictError extends Error {
   constructor() {
     super('provider already installed for this user')
@@ -289,5 +298,17 @@ export class ExtensionInstallationRepository {
     )
     const row = result.rows[0]
     return row ? toInstallation(row) : null
+  }
+
+  async getScopedInstallation(installationId: string, database: Pick<pg.PoolClient, 'query'> = this.pool): Promise<ScopedExtensionInstallation | null> {
+    const result = await database.query<ScopedExtensionInstallation>(
+      `SELECT installation_id, provider_id, status, enabled_services,
+              owner_scope_kind, owner_scope_id
+       FROM extension_installations
+       WHERE installation_id = $1`,
+      [installationId],
+    )
+    const row = result.rows[0]
+    return row ? { ...row, enabled_services: row.enabled_services ?? [] } : null
   }
 }

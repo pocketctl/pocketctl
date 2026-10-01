@@ -12,7 +12,8 @@ func TestCodexAppServerStateRoundTripIsPrivate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	want := &CodexAppServerState{
 		PID: os.Getpid(), OwnerPID: 42, Endpoint: "/private/tmp/pocketctl/codex.sock",
-		RemoteURI: "unix:///private/tmp/pocketctl/codex.sock", Binary: "/opt/codex",
+		ProcessStartIdentity: "linux:123456789",
+		RemoteURI:            "unix:///private/tmp/pocketctl/codex.sock", Binary: "/opt/codex",
 		Version: "0.144.1", SchemaHash: "abc", Generation: 7,
 		Threads:   []string{"thr_1", "thr_2"},
 		Leases:    map[string]agentcontrol.Lease{"lease-1": {ID: "lease-1", PID: os.Getpid(), Generation: 7}},
@@ -32,7 +33,7 @@ func TestCodexAppServerStateRoundTripIsPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PID != want.PID || got.Endpoint != want.Endpoint || got.RemoteURI != want.RemoteURI || got.Generation != 7 || got.Version != "0.144.1" || got.Leases["lease-1"].ID != "lease-1" || len(got.Threads) != 2 || got.Threads[0] != "thr_1" {
+	if got.PID != want.PID || got.ProcessStartIdentity != want.ProcessStartIdentity || got.Endpoint != want.Endpoint || got.RemoteURI != want.RemoteURI || got.Generation != 7 || got.Version != "0.144.1" || got.Leases["lease-1"].ID != "lease-1" || len(got.Threads) != 2 || got.Threads[0] != "thr_1" {
 		t.Fatalf("state=%+v want=%+v", got, want)
 	}
 	if err := RemoveCodexAppServerState(); err != nil {

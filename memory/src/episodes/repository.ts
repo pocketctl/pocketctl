@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import type { JobClaim } from '../jobs/types.js'
-import { compileEpisode, summarizeEvents, type TerminalOutcome } from './compiler.js'
+import { compileEpisode, sourceReferenceFromEvents, summarizeEvents, type TerminalOutcome } from './compiler.js'
 import {
   buildEpisodePacket,
   canonicalPacketJson,
@@ -69,9 +69,10 @@ export function createEpisodeRepository(
             payload_hash: Buffer
             classification: Record<string, unknown>
             payload: Record<string, unknown>
+            source_provenance: Record<string, unknown>
           }>(`
             SELECT source_event_id::text, event_type, occurred_at, payload_hash,
-                   classification, payload
+                   classification, payload, source_provenance
             FROM source_events
             WHERE installation_id = $1 AND turn_id = $2
             ORDER BY occurred_at, source_event_id
@@ -119,6 +120,7 @@ export function createEpisodeRepository(
             retryCount: counts.retryCount,
             correctionCount: counts.correctionCount,
             stabilizationMs,
+            sourceReference: sourceReferenceFromEvents(events.rows),
           })
 
           // Repository identity reuses only explicit Phase 0 facts — never
@@ -190,6 +192,7 @@ export function createEpisodeRepository(
               payload_hash: eventRow.payload_hash,
               payload: eventRow.payload ?? {},
               classification: eventRow.classification ?? {},
+              source_provenance: eventRow.source_provenance ?? {},
             })),
             artifacts: artifacts.rows.map((artifact): PacketSourceArtifact => ({
               artifact_id: artifact.artifact_id,

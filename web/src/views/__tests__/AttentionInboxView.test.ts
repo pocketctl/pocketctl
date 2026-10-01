@@ -3,7 +3,11 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { ref } from 'vue'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { AttentionInboxItem, AttentionInboxSnapshot, AttentionRecoveryItem } from '../../types/attentionInbox'
+import type { TeamInvitation } from '../../types/team'
 import { createAttentionInboxStore } from '../../composables/useAttentionInbox'
+
+const teamApi = vi.hoisted(() => ({ listMyInvitations: vi.fn(async (): Promise<TeamInvitation[]> => []), respondToTeamInvitation: vi.fn(async () => undefined) }))
+vi.mock('../../services/teamClient', () => teamApi)
 
 const mobile = ref(false)
 vi.mock('../../composables/useResponsiveLayout', () => ({
@@ -120,6 +124,7 @@ async function render(mode: 'off' | 'observe' | 'on' = 'on') {
       { path: '/inbox', component: { template: '<div />' } },
       { path: '/session/:id', component: { template: '<div />' } },
       { path: '/hosts', component: { template: '<div />' } },
+      { path: '/teams', component: { template: '<div />' } },
     ],
   })
   await router.push('/inbox')
@@ -133,9 +138,24 @@ async function render(mode: 'off' | 'observe' | 'on' = 'on') {
 beforeEach(() => {
   mobile.value = false
   vi.clearAllMocks()
+  teamApi.listMyInvitations.mockResolvedValue([])
 })
 
 describe('AttentionInboxView', () => {
+  test('shows and accepts a team invitation even when the daemon attention pipeline is off', async () => {
+    teamApi.listMyInvitations.mockResolvedValueOnce([{
+      id: 'cin_1', team_id: 'ctm_1', team_name: 'Research', invited_by_user_id: 9,
+      invited_by_label: 'Lin', recipient_user_id: 1, recipient_email: 'member@example.test',
+      state: 'pending', revision: 1, expires_at: '2026-10-01T00:00:00Z', created_at: '2026-09-25T00:00:00Z',
+    }])
+    const { wrapper, router } = await render('off')
+    expect(wrapper.find('[data-testid="attention-disabled"]').exists()).toBe(false)
+    await wrapper.get('[data-invitation-id="cin_1"]').trigger('click')
+    await wrapper.get('[data-testid="team-invitation-accept"]').trigger('click'); await flushPromises()
+    expect(teamApi.respondToTeamInvitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'cin_1' }), 'accept')
+    expect(router.currentRoute.value.path).toBe('/teams')
+  })
+
   test('renders risk-prioritized active rows and filters loaded kinds', async () => {
     const { wrapper } = await render()
 

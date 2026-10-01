@@ -46,6 +46,21 @@ func TestSendControlPayloadReportsDisconnectedTransport(t *testing.T) {
 	}
 }
 
+func TestCollaborationLifecycleAndReceiptsAreSequencedForReplay(t *testing.T) {
+	c := newTestClient("ws://example")
+	for _, kind := range []string{"session_created", "collaboration_context_receipt", "collaboration_dispatch_receipt"} {
+		c.SendMsg(protocol.DaemonEvent{Type: kind, SessionID: "native-team", Collaboration: &protocol.CollaborationAuthorization{CallID: "call-1"}})
+	}
+	if len(c.outBuf) != 3 {
+		t.Fatalf("buffered events=%d, want lifecycle and both receipts retained while disconnected", len(c.outBuf))
+	}
+	for i, event := range c.outBuf {
+		if event.seq != int64(i+1) {
+			t.Fatalf("event %d seq=%d", i, event.seq)
+		}
+	}
+}
+
 func TestControlMessageHandlerBypassesCommandQueue(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	sent := make(chan struct{}, 1)
