@@ -343,6 +343,7 @@
   "session.documents.offline": "当前离线；已打开且验证通过的快照仍可查看。",
   "session.documents.offline_snapshot": "离线快照",
   "session.documents.unavailable_note": "未上传正文的文档仅显示名称、大小和失败原因。",
+  "session.documents.list_failed": "暂时无法加载会话文档，请重试。",
   "session.documents.state.loading": "处理中",
   "session.documents.state.verified": "SHA-256 已校验",
   "session.documents.state.unavailable": "不可用",

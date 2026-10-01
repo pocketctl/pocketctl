@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年9月30日' : 'Updated: September 30, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月1日' : 'Updated: October 1, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -20,6 +20,7 @@
             <li>设备与推送信息：设备型号、操作系统版本、设备标识符、推送令牌和应用环境。</li>
             <li>主机与连接信息：主机名、Daemon 标识、在线状态、网络地址、IP 地址和 User-Agent。</li>
             <li>会话内容与元数据：工作目录、会话标题、提示词、回复、命令、路径、差异内容、工具输入输出、审批与问题、错误、状态、时间和用量信息。</li>
+            <li>远程文档信息：开启文档采集后上传的受支持文档正文、文件名、格式、大小、内容摘要、来源和版本等元数据，具体见“远程文档上传与阅读”。</li>
             <li>Memory 信息：在您显式开启 Memory 后，我们会从已同步的会话事件生成有界且按规则筛选的 Episode Packet，并处理由此提取的记忆候选、您审核接受的记忆、证据引用、向量表示、反馈和功能设置。</li>
             <li>Team 协作信息：Team 名称、邀请邮箱、成员身份与权限、共享的主机与 Agent 信息、任务及负责人、共享会话消息与 Agent 回复、Context（目标、共识、待解决问题和引用）的版本、Agent 调用与自动协作 Run 的状态、用量及审计记录。</li>
             <li>候补名单信息：您主动提交的 iOS Beta 通知邮箱。</li>
@@ -49,7 +50,18 @@
           </ol>
         </section>
         <section>
-          <h4>四、第三方处理者</h4>
+          <h4>四、远程文档上传与阅读</h4>
+          <p>当您在主机上开启文档采集且服务端启用相应功能时，Daemon 会读取授权会话工作目录或工作树内、符合采集规则的 Markdown 和 HTML 文档，将文档正文及文件名、格式、大小、内容摘要、来源会话和生成操作等元数据上传到 Relay，以供您在 Web 和 iOS 客户端远程查看。文档可能包含代码、业务资料、个人信息或其他敏感内容，请在开启采集前确认您有权上传这些内容。</p>
+          <ol>
+            <li>采集对象是已完成且可归属于该会话的文件生成或修改记录所指向的受支持文档，并受目录、文件类型和大小限制。开启后首次符合条件的同步也可能采集已有记录对应文件的当前内容；快照不保证与原始生成时刻一致。</li>
+            <li>远程查看使用已上传的文档快照，读取需要通过身份验证及会话归属校验。快照不是实时远程文件浏览；文档正文不会自动加入公开分享、会话导出或普通会话重放。HTML 按静态隔离方式预览，脚本和外部资源受限制。</li>
+            <li>文档通过 TLS 加密传输，但服务端存储不是端到端加密；Relay 及获授权的运维人员可访问存储的文档。文档预览本身不会将正文发送给额外的模型服务。</li>
+            <li>您可关闭主机上的文档采集功能以停止后续采集。关闭预览、退出查看、删除主机上的源文件或关闭采集，不会删除已上传快照。快照可在来源主机离线时继续供获授权客户端查看。</li>
+            <li>快照及其版本按文档配额和历史版本清理规则保存。删除对应会话或成功删除账户，会删除当前业务数据库中关联的文档快照和元数据；基础设施日志与备份按本政策所述的独立周期处理。已经在其他设备保存、复制或下载的副本不会随服务端删除而自动消失。</li>
+          </ol>
+        </section>
+        <section>
+          <h4>五、第三方处理者</h4>
           <ol>
             <li>腾讯云邮件服务（SES）：处理收件邮箱、验证码和必要的服务邮件内容。</li>
             <li>Xiaomi MiMo：在服务配置了 API Key 且触发标题生成时，优先处理用于生成标题的用户消息和助手回复；在您对 Memory 模型出口显式同意并开启提取后，还会通过 Batch API 处理经筛选、截断和脱敏规则生成的有界 Episode Packet，用于记忆候选提取。Batch 输入和结果文件按供应商规则默认保留 30 天；未配置或未开启相应功能时不会执行该调用。</li>
@@ -61,7 +73,7 @@
           <p>第三方服务依据其自身条款处理数据，其处理地域可能不同于我们的主要服务地域。</p>
         </section>
         <section>
-          <h4>五、存储与传输安全</h4>
+          <h4>六、存储与传输安全</h4>
           <ol>
             <li>生产环境客户端与服务之间使用 HTTPS/WSS（TLS）传输。</li>
             <li>iOS 认证令牌存储于 Keychain，Web 访问令牌仅保存在当前页面内存中，刷新令牌使用 HttpOnly Cookie。</li>
@@ -71,7 +83,7 @@
           </ol>
         </section>
         <section>
-          <h4>六、保存与删除</h4>
+          <h4>七、保存与删除</h4>
           <ol>
             <li>个人账户、主机、个人会话、事件及已接受的个人 Memory 记忆通常在账户有效期间保存，直至您删除相关数据、安装或账户；待审核候选和技术作业数据按产品与运维清理规则处理。Team 共享数据按下述共享范围另行处理。</li>
             <li>成功完成账户删除后，当前业务数据库中的关联个人账户数据会被删除。Team 关联可能影响账户删除的完成；如无法完成，请通过“帮助与反馈”或下方联系方式申请处理。</li>
@@ -82,7 +94,7 @@
           </ol>
         </section>
         <section>
-          <h4>七、您的权利</h4>
+          <h4>八、您的权利</h4>
           <ol>
             <li>在应用中查看和更新账户资料。</li>
             <li>导出当前产品支持导出的账户和会话数据。</li>
@@ -93,11 +105,11 @@
           </ol>
         </section>
         <section>
-          <h4>八、未成年人和政策更新</h4>
+          <h4>九、未成年人和政策更新</h4>
           <p>本服务不面向 14 岁以下未成年人。我们更新本政策时会修改版本和生效日期；重大变更将通过应用内通知、网站或电子邮件告知。</p>
         </section>
         <section>
-          <h4>九、联系我们</h4>
+          <h4>十、联系我们</h4>
           <p>如需行使权利或咨询本政策，请通过应用内“帮助与反馈”或邮箱 james_2001_2001@163.com 联系我们。</p>
         </section>
         </template>
@@ -112,6 +124,7 @@
             <li>Device and push information: device model, operating-system version, device identifiers, push token, and app environment.</li>
             <li>Host and connection information: hostname, Daemon identifier, online state, network address, IP address, and User-Agent.</li>
             <li>Session content and metadata: working directory, title, prompts, responses, commands, paths, diffs, tool inputs and outputs, approvals, questions, errors, status, timestamps, and usage.</li>
+            <li>Remote document information: supported document bodies uploaded after document capture is enabled, and metadata such as file name, format, size, content digest, source, and version, as described under Remote Document Upload and Viewing.</li>
             <li>Memory information: after you explicitly enable Memory, we generate a bounded, policy-filtered Episode Packet from synchronized session events and process extracted memory candidates, memories you accept, evidence references, vector representations, feedback, and feature settings.</li>
             <li>Team collaboration information: Team names, invitation email addresses, member identities and permissions, shared host and Agent information, tasks and holders, shared-session messages and Agent replies, versions of Context (goals, consensus, open questions, and references), and Agent-call and automated Run status, usage, and audit records.</li>
             <li>Waitlist information: an email address you submit for iOS Beta notifications.</li>
@@ -141,7 +154,18 @@
           </ol>
         </section>
         <section>
-          <h4>4. Third-Party Processors</h4>
+          <h4>4. Remote Document Upload and Viewing</h4>
+          <p>When you enable document capture on a host and the corresponding server features are enabled, the Daemon reads eligible Markdown and HTML documents within the authorized session working directory or worktree and uploads their contents and metadata, including file name, format, size, content digest, source session, and generating operation, to Relay for remote viewing in Web and iOS clients. Documents may contain code, business materials, personal information, or other sensitive content. Before enabling capture, ensure that you are authorized to upload this content.</p>
+          <ol>
+            <li>Capture applies to supported documents identified by completed file creation or modification records attributable to the session, subject to directory, file type, and size limits. The first eligible synchronization after enabling capture may also capture the current contents of files identified by existing records; a snapshot is not guaranteed to match the original generation time.</li>
+            <li>Remote viewing uses uploaded snapshots and requires authentication and session ownership checks. Snapshots are not a live remote-file browser. Document bodies are not automatically included in public shares, session exports, or ordinary session replay. HTML uses an isolated static preview with restrictions on scripts and external resources.</li>
+            <li>Documents are encrypted in transit using TLS, but server-side storage is not end-to-end encrypted. Relay and authorized operators can access stored documents. Document preview itself does not send document bodies to additional model services.</li>
+            <li>You can disable document capture on the host to stop future capture. Disabling preview, closing the viewer, deleting the source file on the host, or disabling capture does not delete uploaded snapshots. Authorized clients may continue viewing snapshots while the source host is offline.</li>
+            <li>Snapshots and their versions are retained under document quotas and historical-version cleanup rules. Deleting the corresponding session or successfully deleting the account removes associated document snapshots and metadata from the current business database. Infrastructure logs and backups follow the separate retention cycles described in this policy. Copies already saved, copied, or downloaded on other devices are not automatically removed by server-side deletion.</li>
+          </ol>
+        </section>
+        <section>
+          <h4>5. Third-Party Processors</h4>
           <ol>
             <li>Tencent Cloud Simple Email Service (SES): processes recipient email addresses, verification codes, and necessary service-email content.</li>
             <li>Xiaomi MiMo: when an API key is configured and title generation is triggered, preferentially processes user messages and assistant responses used to create a title. After your explicit consent to Memory model egress and activation of extraction, it also processes a bounded Episode Packet through its Batch API for memory candidate extraction. Batch input and result files are retained for 30 days by default under the provider's rules; the applicable call is not made when unconfigured or disabled.</li>
@@ -153,7 +177,7 @@
           <p>Third parties process data under their own terms, and their processing regions may differ from our primary service region.</p>
         </section>
         <section>
-          <h4>5. Storage and Transport Security</h4>
+          <h4>6. Storage and Transport Security</h4>
           <ol>
             <li>Production client-to-service traffic uses HTTPS/WSS (TLS).</li>
             <li>iOS authentication tokens are stored in Keychain. Web access tokens stay in page memory, while refresh tokens use an HttpOnly cookie.</li>
@@ -163,7 +187,7 @@
           </ol>
         </section>
         <section>
-          <h4>6. Retention and Deletion</h4>
+          <h4>7. Retention and Deletion</h4>
           <ol>
             <li>Personal account, host, personal-session, event, and accepted personal Memory data is generally retained while your account is active, until you delete applicable data, the installation, or the account. Pending candidates and technical job data follow product and operational cleanup rules. Team shared data is handled separately within the shared scope described below.</li>
             <li>When account deletion completes successfully, associated personal account data is deleted from the current application database. Team relationships may prevent account deletion from completing; if it cannot be completed, request assistance through Help &amp; Feedback or the contact details below.</li>
@@ -174,7 +198,7 @@
           </ol>
         </section>
         <section>
-          <h4>7. Your Rights</h4>
+          <h4>8. Your Rights</h4>
           <ol>
             <li>View and update account profile information in the app.</li>
             <li>Export account and session data supported by the current product.</li>
@@ -185,11 +209,11 @@
           </ol>
         </section>
         <section>
-          <h4>8. Minors and Policy Updates</h4>
+          <h4>9. Minors and Policy Updates</h4>
           <p>The service is not directed to children under 14. When this policy changes, we update its version and effective date; material changes will be communicated in the app, on the website, or by email.</p>
         </section>
         <section>
-          <h4>9. Contact</h4>
+          <h4>10. Contact</h4>
           <p>To exercise your rights or ask about this policy, use Help &amp; Feedback in the app or email james_2001_2001@163.com.</p>
         </section>
         </template>

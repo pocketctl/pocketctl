@@ -501,6 +501,7 @@
           :documents="sessionDocuments"
           :list-status="sessionDocumentListStatus"
           @open="openSessionDocument"
+          @refresh="refreshSessionDocuments"
         />
       </div>
 

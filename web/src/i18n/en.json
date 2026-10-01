@@ -343,6 +343,7 @@
   "session.documents.offline": "Offline. An open, verified snapshot remains available.",
   "session.documents.offline_snapshot": "Offline snapshot",
   "session.documents.unavailable_note": "Documents without uploaded content show only their name, size, and failure reason.",
+  "session.documents.list_failed": "Unable to load session documents. Please try again.",
   "session.documents.state.loading": "Processing",
   "session.documents.state.verified": "SHA-256 verified",
   "session.documents.state.unavailable": "Unavailable",

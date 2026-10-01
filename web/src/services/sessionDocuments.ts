@@ -115,7 +115,7 @@ function parseMetadata(value: unknown): SessionDocumentMetadata | null {
     ? item.byte_size : null
   const sha256 = typeof item.sha256 === 'string' && /^[a-f0-9]{64}$/.test(item.sha256) ? item.sha256 : null
   const sourceTurnId = requiredString(item.source_turn_id, 128)
-  const sourceEventId = requiredString(item.source_event_id, 128)
+  const sourceEventId = requiredString(item.source_event_id, 256)
   const capturedAt = requiredString(item.captured_at, 64)
   const committedAt = item.committed_at === null ? null : requiredString(item.committed_at, 64)
   const reason = item.reason === null ? null : requiredString(item.reason, 64)

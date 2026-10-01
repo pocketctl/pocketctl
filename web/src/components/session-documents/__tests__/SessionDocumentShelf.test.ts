@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, test } from 'vitest'
 
 import SessionDocumentShelf from '../SessionDocumentShelf.vue'
+import { useLocale } from '../../../composables/useLocale'
 
 const available = {
   documentId: 'doc-1', versionId: 'ver-1', displayName: 'notes.md', format: 'markdown' as const,
@@ -30,5 +31,16 @@ describe('SessionDocumentShelf', () => {
     })
     expect(wrapper.find('.session-document-list').exists()).toBe(true)
     expect(wrapper.find('[role="status"]').exists()).toBe(true)
+  })
+
+  test('exposes a retry when metadata loading fails instead of hiding the shelf', async () => {
+    const wrapper = mount(SessionDocumentShelf, {
+      props: { documents: [], listStatus: 'unavailable' },
+    })
+    expect(wrapper.find('.session-document-shelf').exists()).toBe(true)
+    expect(wrapper.find('[role="status"]').text()).toContain(useLocale().t('session.documents.list_failed'))
+    await wrapper.find('button').trigger('click')
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    wrapper.unmount()
   })
 })

@@ -1,6 +1,6 @@
 <template>
   <section
-    v-if="documents.length || listStatus === 'loading' || listStatus === 'offline'"
+    v-if="documents.length || listStatus === 'loading' || listStatus === 'offline' || listStatus === 'unavailable'"
     class="session-document-shelf"
     aria-labelledby="session-document-shelf-title"
   >
@@ -39,6 +39,10 @@
     <p v-if="listStatus === 'offline'" class="document-shelf-note" role="status">
       {{ t('session.documents.offline') }}
     </p>
+    <p v-if="listStatus === 'unavailable'" class="document-shelf-note warning" role="status">
+      {{ t('session.documents.list_failed') }}
+      <button type="button" @click="$emit('refresh')">{{ t('common.retry') }}</button>
+    </p>
     <p v-if="hasUnavailable" class="document-shelf-note warning">
       {{ t('session.documents.unavailable_note') }}
     </p>
@@ -55,7 +59,7 @@ const props = defineProps<{
   documents: SessionDocumentMetadata[]
   listStatus: SessionDocumentListStatus
 }>()
-const emit = defineEmits<{ open: [document: SessionDocumentMetadata, opener: HTMLButtonElement] }>()
+const emit = defineEmits<{ open: [document: SessionDocumentMetadata, opener: HTMLButtonElement]; refresh: [] }>()
 const { t } = useLocale()
 const hasUnavailable = computed(() => props.documents.some((item) => item.state !== 'available'))
 
