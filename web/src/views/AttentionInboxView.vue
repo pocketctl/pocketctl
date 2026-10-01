@@ -2,15 +2,12 @@
   <div class="attention-inbox-view" :class="{ 'is-mobile': isMobile }">
     <div v-if="!store.isAvailable.value && !teamInvitations.length" class="attention-disabled" data-testid="attention-disabled">
       <div class="empty-mark">P</div>
-      <h1>{{ t('attention.unavailable_title') }}</h1>
       <p>{{ t('attention.unavailable_copy') }}</p>
     </div>
     <template v-else>
       <header v-if="!isMobile || !selectedEntry" class="inbox-head">
         <div>
-          <p class="overline">{{ t('attention.overline') }}</p>
-          <h1>{{ t('attention.title') }}</h1>
-          <p>{{ scopeCopy }}</p>
+          <p class="inbox-scope">{{ scopeCopy }}</p>
         </div>
         <div class="head-count"><span>{{ t('attention.needs_attention') }}</span><strong>{{ totalAttentionCount }}</strong></div>
       </header>
@@ -232,10 +229,7 @@ onMounted(async () => {
 <style scoped>
 .attention-inbox-view { width: min(1280px, calc(100% - 48px)); min-height: calc(100dvh - 118px); margin: 0 auto; padding: 31px 0 44px; color: var(--fg); }
 .inbox-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 21px; }
-.overline { margin: 0 0 8px; color: var(--accent); font: 750 10px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; }
-.overline::before { display: inline-block; width: 21px; height: 1px; margin: 0 8px 3px 0; background: currentColor; content: ''; }
-.inbox-head h1 { margin: 0; font-size: clamp(32px, 4vw, 52px); font-weight: 680; line-height: 1; letter-spacing: -.055em; }
-.inbox-head > div > p:last-child { margin: 12px 0 0; color: var(--fg-secondary); font-size: 13px; }
+.inbox-scope { margin: 0; color: var(--fg-secondary); font-size: 13px; }
 .head-count { display: flex; align-items: baseline; gap: 9px; color: var(--fg-tertiary); font-size: 11px; }
 .head-count strong { color: var(--warning); font: 680 34px/1 var(--font-display, var(--font-body)); }
 .filter-deck { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
@@ -252,13 +246,13 @@ onMounted(async () => {
 .queue-empty strong, .detail-placeholder strong { color: var(--fg-secondary); font-size: 13px; }.queue-empty small, .detail-placeholder small { max-width: 280px; }
 .load-more { margin: auto 14px 14px; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: var(--surface-hover); }
 .detail-placeholder { min-height: 100%; }.attention-disabled { min-height: 70dvh; }.empty-mark { display: grid; width: 54px; height: 54px; place-items: center; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 16px; color: var(--accent); background: var(--accent-muted); font-size: 23px; font-weight: 800; }
-.attention-disabled h1 { margin: 10px 0 0; color: var(--fg); }.attention-disabled p { max-width: 420px; margin: 0; }
+.attention-disabled p { max-width: 420px; margin: 0; }
 .inbox-error { margin: 12px 0 0; color: var(--error); font-size: 12px; }
 .invitation-row { width: 100%; min-height: 76px; display: flex; align-items: center; gap: 11px; padding: 12px; border: 1px solid transparent; border-radius: var(--radius-md); color: var(--fg); background: transparent; text-align: left; cursor: pointer; }.invitation-row:hover, .invitation-row.selected { border-color: var(--accent-muted); background: var(--accent-subtle); }.invite-mark, .invite-detail-mark { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; color: var(--accent); background: var(--accent-muted); font-weight: 800; }.invitation-row > span:nth-child(2) { min-width: 0; display: grid; gap: 6px; flex: 1; }.invitation-row strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; }.invitation-row small { color: var(--fg-tertiary); font-size: 10px; }.invite-arrow { color: var(--fg-tertiary); font-size: 22px; }
 .invitation-detail { min-height: 100%; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; padding: clamp(28px, 6vw, 70px); }.invite-detail-mark { width: 48px; height: 48px; margin-bottom: 20px; font-size: 19px; }.invitation-detail > p { max-width: 520px; color: var(--fg-secondary); font-size: 12px; line-height: 1.7; }.invitation-detail > p:first-of-type { margin: 0 0 8px; color: var(--accent); font: 700 10px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }.invitation-detail h2 { margin: 0; font-size: 24px; line-height: 1.35; }.invitation-detail > div { display: flex; gap: 8px; margin-top: 22px; }.invite-back { margin-bottom: 24px; border: 0; color: var(--fg-secondary); background: transparent; }
 @media (max-width: 820px) {
   .attention-inbox-view { width: 100%; min-height: 100dvh; padding: 18px 14px max(28px, env(safe-area-inset-bottom)); }
-  .inbox-head { align-items: flex-start; }.inbox-head h1 { font-size: 31px; }.head-count { flex-direction: column; align-items: flex-end; gap: 3px; }
+  .inbox-head { align-items: flex-start; }.head-count { flex-direction: column; align-items: flex-end; gap: 3px; }
   .filter-deck { align-items: stretch; flex-direction: column; }.lifecycle-tabs { display: grid; grid-template-columns: repeat(3, 1fr); border-radius: var(--radius-md); }.kind-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-radius: var(--radius-md); }
   .filter-deck button { border-radius: var(--radius-sm); }.kind-tabs { grid-template-columns: repeat(5, 1fr); overflow-x: auto; }
   .inbox-stage { min-height: calc(100dvh - 245px); display: block; border-radius: var(--radius-md); }
