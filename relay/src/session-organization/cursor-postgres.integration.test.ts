@@ -2,10 +2,16 @@ import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 import Fastify from 'fastify'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
-import { initDB } from '../db.js'
-import { signAccessToken } from '../auth.js'
-import { registerSessionOrganizationRoutes } from './routes.js'
-import { assertDurableIngressTestDatabase } from '../__tests__/durable-ingress-test-db.js'
+
+// auth.ts (pulled in through routes.ts) validates JWT_SECRET at module load
+// and exits without it. CI and the release preflight run this suite with a
+// bare environment, so seed the fixture before the dynamic imports below.
+process.env.JWT_SECRET ||= 'cursor-postgres-integration-test-secret'
+
+const { initDB } = await import('../db.js')
+const { signAccessToken } = await import('../auth.js')
+const { registerSessionOrganizationRoutes } = await import('./routes.js')
+const { assertDurableIngressTestDatabase } = await import('../__tests__/durable-ingress-test-db.js')
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const integration = databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
