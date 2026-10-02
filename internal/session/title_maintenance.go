@@ -17,7 +17,8 @@ func (sm *SessionManager) ObserveNativeTitle(event protocol.DaemonEvent) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if ps := sm.sessions[event.SessionID]; ps != nil {
-		if ps.NativeTitle != nil && event.TitleSource == "codex" && ps.NativeTitle.TitleSource == "codex" {
+		if ps.NativeTitle != nil && event.TitleSource == ps.NativeTitle.TitleSource &&
+			(event.TitleSource == "codex" || event.TitleSource == "codex-desktop") {
 			previous, _ := time.Parse(time.RFC3339Nano, ps.NativeTitle.TitleUpdatedAt)
 			incoming, _ := time.Parse(time.RFC3339Nano, event.TitleUpdatedAt)
 			if incoming.Before(previous) {
@@ -44,14 +45,7 @@ func (sm *SessionManager) RunTitleMaintenance(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			for _, s := range sm.ListSessions() {
-				if s.Agent != adapter.AgentCodex {
-					continue
-				}
-				if title, ok := index.Lookup(s.SessionID); ok {
-					sm.ObserveNativeTitle(protocol.DaemonEvent{Type: "session_title_update", SessionID: s.SessionID, Title: title.Name, TitleSource: "codex", TitleUpdatedAt: title.UpdatedAt.UTC().Format(time.RFC3339Nano)})
-				}
-			}
+			sm.syncNativeCodexTitles(index)
 			for _, event := range sm.pendingTitleEvents(now) {
 				select {
 				case sm.outputCh <- event:
@@ -61,6 +55,31 @@ func (sm *SessionManager) RunTitleMaintenance(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// syncNativeCodexTitles applies the freshest session_index.jsonl name to every
+// Codex session. Desktop observers are included so a paused tail loop still
+// converges on renames; relay updates stay idempotent.
+func (sm *SessionManager) syncNativeCodexTitles(index *watcher.CodexTitleIndex) {
+	for _, s := range sm.ListSessions() {
+		source := nativeCodexTitleSource(s.Agent)
+		if source == "" {
+			continue
+		}
+		if title, ok := index.Lookup(s.SessionID); ok {
+			sm.ObserveNativeTitle(protocol.DaemonEvent{Type: "session_title_update", SessionID: s.SessionID, Title: title.Name, TitleSource: source, TitleUpdatedAt: title.UpdatedAt.UTC().Format(time.RFC3339Nano)})
+		}
+	}
+}
+
+func nativeCodexTitleSource(agent string) string {
+	switch agent {
+	case adapter.AgentCodex:
+		return "codex"
+	case adapter.AgentCodexDesktop:
+		return "codex-desktop"
+	}
+	return ""
 }
 
 func (sm *SessionManager) pendingTitleEvents(now time.Time) []protocol.DaemonEvent {
