@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
 import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
 import { createExtractionTextRoute, withTimeoutFallback } from '../model/text-fallback.js'
@@ -42,6 +43,22 @@ describe('timeout-only text fallback', () => {
 })
 
 describe('extraction text route disclosure', () => {
+  test('invalidates Batch consent when switching to the realtime endpoint', () => {
+    const route = createExtractionTextRoute({
+      provider: 'mimo-realtime', baseUrl: 'https://api.xiaomimimo.com/v1',
+      model: 'mimo-v2.6-flash', apiKey: 'synthetic', thinking: 'disabled',
+    }, undefined)
+    const oldFingerprint = createHash('sha256').update(
+      'mimo-batch\nhttps://batch-api-cn.xiaomimimo.com/v1\nmimo-v2.6-flash\nfallback:none',
+    ).digest('hex')
+    expect(route?.fingerprint).toBeDefined()
+    expect(route?.fingerprint).not.toBe(oldFingerprint)
+    expect(route?.fingerprint).toBe(createExtractionTextRoute({
+      provider: 'mimo-realtime', baseUrl: 'https://api.xiaomimimo.com/v1',
+      model: 'mimo-v2.6-flash', apiKey: 'rotated-synthetic', thinking: 'disabled',
+    }, undefined)?.fingerprint)
+  })
+
   test('uses one fingerprint for the MiMo primary and DeepSeek timeout fallback', () => {
     const route = createExtractionTextRoute(
       {

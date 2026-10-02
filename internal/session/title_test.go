@@ -1,10 +1,13 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/watcher"
 )
 
 func TestGenerateTitleAttemptCap(t *testing.T) {
@@ -63,5 +66,50 @@ func TestCodexNativeTitleIgnoresStaleIndex(t *testing.T) {
 	}
 	if got := sm.sessions["sid"].NativeTitle.Title; got != "new" {
 		t.Fatalf("stale index replaced name: %s", got)
+	}
+}
+
+func TestCodexDesktopNativeTitleIgnoresStaleIndex(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	sm.sessions["desk"] = &ProcessState{SessionID: "desk"}
+	for i, stamp := range []string{"2026-10-01T10:00:00Z", "2026-10-01T09:00:00Z"} {
+		sm.ObserveNativeTitle(protocol.DaemonEvent{Type: "session_title_update", SessionID: "desk", Title: []string{"new", "old"}[i], TitleSource: "codex-desktop", TitleUpdatedAt: stamp})
+	}
+	if got := sm.sessions["desk"].NativeTitle.Title; got != "new" {
+		t.Fatalf("stale desktop index replaced name: %s", got)
+	}
+}
+
+// Desktop observers rely on the tail loop for names; the maintenance pass must
+// still cover them so a paused tail converges on renames within a tick.
+func TestTitleMaintenanceSyncsCodexDesktopObserver(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+	if err := os.WriteFile(filepath.Join(dir, "session_index.jsonl"), []byte(
+		`{"id":"desk","thread_name":"桌面标题","updated_at":"2026-10-01T10:00:00Z"}`+"\n"+
+			`{"id":"cli","thread_name":"命令行标题","updated_at":"2026-10-01T10:00:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	sm.sessions["cli"] = &ProcessState{SessionID: "cli", Agent: "codex"}
+	sm.sessions["desk"] = &ProcessState{SessionID: "desk", Agent: "codex-desktop", Source: "observer"}
+	sm.sessions["cc"] = &ProcessState{SessionID: "cc", Agent: "claude-code"}
+	sm.syncNativeCodexTitles(watcher.NewCodexTitleIndex())
+	if ps := sm.sessions["cc"]; ps.NativeTitle != nil {
+		t.Fatalf("claude session must not consume codex names: %+v", ps.NativeTitle)
+	}
+	bySource := map[string]protocol.DaemonEvent{}
+	for _, ev := range sm.pendingTitleEvents(time.Now()) {
+		if ev.Type != "session_title_update" {
+			continue
+		}
+		bySource[ev.TitleSource] = ev
+	}
+	if ev := bySource["codex"]; ev.Title != "命令行标题" || ev.SessionID != "cli" {
+		t.Fatalf("codex native title missing: %+v", ev)
+	}
+	ev, ok := bySource["codex-desktop"]
+	if !ok || ev.Title != "桌面标题" || ev.SessionID != "desk" || ev.TitleUpdatedAt != "2026-10-01T10:00:00Z" {
+		t.Fatalf("desktop observer title missing: ok=%v %+v", ok, ev)
 	}
 }

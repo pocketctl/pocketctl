@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { createMimoRealtimeTextGenerator } from '../model/mimo-realtime-text.js'
 import { withTimeoutFallback } from '../model/text-fallback.js'
 import { withTextProviderBudget, type ProviderBudgetStore } from '../model/provider-budget.js'
+import type { TextGenerator } from '../ports/text-generator.js'
 
 const options = {
   baseUrl: 'https://api.xiaomimimo.com/v1/',
@@ -61,7 +62,7 @@ describe('MiMo realtime text adapter', () => {
       error: { message: 'sensitive provider response', api_key: options.apiKey },
     }), { status }))
     const fallback = { generateJson: vi.fn(async () => ({ ok: true as const,
-      value: {}, usage: { inputTokens: 1, outputTokens: 1, model: 'deepseek-flash' } })) }
+      value: {}, usage: { inputTokens: 1, outputTokens: 1, model: 'deepseek-flash' } })) } as TextGenerator
     const result = await withTimeoutFallback(
       createMimoRealtimeTextGenerator({ ...options, fetchImpl }), fallback,
     ).generateJson(input())
@@ -84,7 +85,7 @@ describe('MiMo realtime text adapter', () => {
     const limits = { key: 'synthetic', maxRequests: 2, maxInputTokens: 10_000,
       maxOutputTokens: 256, maxOutputTokensPerRequest: 128 }
     const fallback = { generateJson: vi.fn(async () => ({ ok: true as const,
-      value: { fallback: true }, usage: { inputTokens: 2, outputTokens: 3, model: 'deepseek-flash' } })) }
+      value: { fallback: true }, usage: { inputTokens: 2, outputTokens: 3, model: 'deepseek-flash' } })) } as TextGenerator
     const provider = withTimeoutFallback(
       withTextProviderBudget(createMimoRealtimeTextGenerator({ ...options, fetchImpl }), store, limits),
       withTextProviderBudget(fallback, store, limits),
