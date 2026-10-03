@@ -1,19 +1,19 @@
 <template>
-  <div class="attention-inbox-view" :class="{ 'is-mobile': isMobile }">
+  <div class="attention-inbox-view design-surface content attention-page" :class="{ 'is-mobile': isMobile }">
     <div v-if="!store.isAvailable.value && !teamInvitations.length" class="attention-disabled" data-testid="attention-disabled">
       <div class="empty-mark">P</div>
       <p>{{ t('attention.unavailable_copy') }}</p>
     </div>
     <template v-else>
-      <header v-if="!isMobile || !selectedEntry" class="inbox-head">
+      <header v-if="!isMobile || !selectedEntry" class="inbox-head page-tools">
         <div>
           <p class="inbox-scope">{{ scopeCopy }}</p>
         </div>
         <div class="head-count"><span>{{ t('attention.needs_attention') }}</span><strong>{{ totalAttentionCount }}</strong></div>
       </header>
 
-      <div v-if="!isMobile || !selectedEntry" class="filter-deck">
-        <div class="lifecycle-tabs" role="tablist" :aria-label="t('attention.lifecycle_filters')">
+      <div v-if="!isMobile || !selectedEntry" class="filter-deck toolbar">
+        <div class="lifecycle-tabs segments" role="tablist" :aria-label="t('attention.lifecycle_filters')">
           <button v-for="value in lifecycleOptions" :key="value" type="button"
             :class="{ active: lifecycle === value }" :data-testid="`attention-lifecycle-${value}`"
             @click="setLifecycle(value)">{{ lifecycleLabel(value) }}</button>
@@ -27,8 +27,8 @@
         </div>
       </div>
 
-      <div class="inbox-stage" :class="{ 'detail-only': isMobile && selectedEntry }">
-        <section v-if="!isMobile || !selectedEntry" class="queue-panel" :aria-label="t('attention.queue')">
+      <div class="inbox-stage card list-detail" :class="{ 'detail-only': isMobile && selectedEntry }">
+        <section v-if="!isMobile || !selectedEntry" class="queue-panel queue" :aria-label="t('attention.queue')">
           <header><strong>{{ queueTitle }}</strong><span>{{ t('attention.risk_sorted') }}</span></header>
           <div v-if="visibleEntries.length" class="queue-list">
             <template v-for="entry in visibleEntries" :key="entry.key">
@@ -45,7 +45,7 @@
           <button v-if="hasMoreHint" type="button" class="load-more" @click="store.loadMore(scope)">{{ t('attention.load_more') }}</button>
         </section>
 
-        <section v-if="!isMobile && !selectedEntry" class="detail-placeholder">
+        <section v-if="!isMobile && !selectedEntry" class="detail-placeholder queue-detail">
           <span>⌁</span><strong>{{ t('attention.select_item') }}</strong><small>{{ t('attention.select_item_copy') }}</small>
         </section>
         <AttentionInboxDetail v-else-if="selectedItem" :item="selectedItem" :actions="store.allowedActions(selectedItem)"

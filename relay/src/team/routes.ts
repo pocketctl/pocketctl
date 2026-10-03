@@ -11,7 +11,7 @@ import {
   type CollaborationMembershipView,
   type CollaborationTeamView,
 } from './repository.js'
-import type { TeamProvider } from './types.js'
+import type { TeamProvider, TeamRole } from './types.js'
 
 export interface TeamRouteService {
   listTeams(actorUserId: number): Promise<CollaborationTeamView[]>
@@ -19,12 +19,13 @@ export interface TeamRouteService {
   createTeam(input: { actorUserId: number; name: string; description?: string; requestId: string }): Promise<unknown>
   renameTeam(input: { teamId: string; actorUserId: number; name: string; expectedRevision: number; requestId: string }): Promise<CollaborationTeamView>
   listMembers(teamId: string, actorUserId: number): Promise<CollaborationMembershipView[]>
-  invite(input: { teamId: string; actorUserId: number; email: string; expectedRevision: number; requestId: string }): Promise<CollaborationInvitationView>
+  invite(input: { teamId: string; actorUserId: number; email: string; role?: TeamRole; expectedRevision: number; requestId: string }): Promise<CollaborationInvitationView>
   listInvitations(teamId: string, actorUserId: number): Promise<CollaborationInvitationView[]>
   listMyInvitations(actorUserId: number): Promise<CollaborationInvitationView[]>
   respondToInvitation(input: { invitationId: string; actorUserId: number; action: 'accepted' | 'declined'; expectedRevision: number; requestId: string }): Promise<unknown>
   revokeInvitation(input: { invitationId: string; actorUserId: number; expectedRevision: number; requestId: string }): Promise<CollaborationInvitationView>
   leaveTeam(input: { teamId: string; actorUserId: number; expectedRevision: number; requestId: string }): Promise<CollaborationMembershipView>
+  changeMemberRole(input: { teamId: string; membershipId: string; actorUserId: number; role: TeamRole; expectedRevision: number; requestId: string }): Promise<CollaborationMembershipView>
   removeMember(input: { teamId: string; membershipId: string; actorUserId: number; expectedRevision: number; requestId: string }): Promise<CollaborationMembershipView>
   dissolveTeam(input: { teamId: string; actorUserId: number; expectedRevision: number; requestId: string }): Promise<CollaborationTeamView>
   listAgentCandidates(teamId: string, actorUserId: number): Promise<TeamAgentCandidate[]>
@@ -221,6 +222,21 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
     catch (error) { return mapError(error, reply) }
   })
 
+  app.patch('/api/team/teams/:teamId/members/:membershipId/role', async (request, reply) => {
+    const actor = await authenticate(request.headers.authorization, reply, dependencies)
+    if ('error' in actor) return actor.error
+    const disabled = requireWrites(reply, dependencies)
+    if (disabled) return disabled
+    const parsed = parseMutation(request.body, reply)
+    if ('error' in parsed) return parsed.error
+    if (typeof parsed.body.role !== 'string' || !['admin', 'member', 'viewer'].includes(parsed.body.role)) return failure(reply, 400, 'invalid_request', 'role must be admin, member or viewer')
+    try {
+      const membership = await dependencies.service.changeMemberRole({ teamId: pathId(request.params, 'teamId'), membershipId: pathId(request.params, 'membershipId'), actorUserId: actor.userId, role: parsed.body.role as TeamRole, expectedRevision: parsed.expectedRevision, requestId: parsed.requestId })
+      await dependencies.revalidateTeamSubscriptions?.()
+      return { membership }
+    } catch (error) { return mapError(error, reply) }
+  })
+
   app.delete('/api/team/teams/:teamId/members/:membershipId', async (request, reply) => {
     const actor = await authenticate(request.headers.authorization, reply, dependencies)
     if ('error' in actor) return actor.error
@@ -258,10 +274,11 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
     if (disabled) return disabled
     const parsed = parseMutation(request.body, reply)
     if ('error' in parsed) return parsed.error
+    if (parsed.body.role !== undefined && (typeof parsed.body.role !== 'string' || !['admin', 'member', 'viewer'].includes(parsed.body.role))) return failure(reply, 400, 'invalid_request', 'invalid role')
     const email = typeof parsed.body.email === 'string' ? parsed.body.email.trim() : ''
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) return failure(reply, 400, 'invalid_request', 'valid email is required')
     try {
-      const invitation = await dependencies.service.invite({ teamId: pathId(request.params, 'teamId'), actorUserId: actor.userId, email, expectedRevision: parsed.expectedRevision, requestId: parsed.requestId })
+      const invitation = await dependencies.service.invite({ teamId: pathId(request.params, 'teamId'), actorUserId: actor.userId, email, ...(parsed.body.role !== undefined ? { role: parsed.body.role as TeamRole } : {}), expectedRevision: parsed.expectedRevision, requestId: parsed.requestId })
       reply.code(201)
       return { invitation }
     } catch (error) { return mapError(error, reply) }

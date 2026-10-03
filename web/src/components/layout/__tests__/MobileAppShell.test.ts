@@ -1,4 +1,4 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { describe, expect, test, vi } from 'vitest'
 import { computed, ref } from 'vue'
@@ -12,13 +12,15 @@ import { resetAgentPlanProgressForTests, useAgentPlanProgress } from '../../../c
 const mobile = ref(true)
 const loggedIn = ref(true)
 const connected = ref(true)
+const sidebarDaemons = ref(new Map<string, { online: boolean }>())
+const send = vi.fn()
 const teamEnabled = ref(false)
 const accessToken = ref('fixture-token')
 let realTeamAccess: ReturnType<typeof createTeamAccessController> | undefined
 
 vi.mock('../../../composables/useTeamAccess', async importOriginal => ({
   ...await importOriginal<typeof import('../../../composables/useTeamAccess')>(),
-  useTeamAccess: () => realTeamAccess ?? ({ enabled: teamEnabled, denied: computed(() => !teamEnabled.value), refresh: async () => teamEnabled.value }),
+  useTeamAccess: () => realTeamAccess ?? ({ enabled: teamEnabled, capabilities: computed(()=>({writes_enabled:teamEnabled.value})),denied: computed(() => !teamEnabled.value), refresh: async () => teamEnabled.value }),
 }))
 
 vi.mock('../../../composables/useResponsiveLayout', () => ({
@@ -35,7 +37,7 @@ vi.mock('../../../composables/useAuth', () => ({
   }),
 }))
 vi.mock('../../../composables/useWebSocket', () => ({
-  useWebSocket: () => ({ connected, reconnecting: ref(false) }),
+  useWebSocket: () => ({ connected, reconnecting: ref(false), daemons: sidebarDaemons, send }),
 }))
 
 function testRouter(path = '/sessions') {
@@ -54,6 +56,41 @@ function testRouter(path = '/sessions') {
 }
 
 describe('mobile application shell', () => {
+  test('loads sidebar host counts on connection and refreshes them after reconnecting on Settings', async () => {
+    const previousMobile = mobile.value
+    mobile.value = false
+    connected.value = false
+    sidebarDaemons.value = new Map()
+    send.mockClear()
+    const router = testRouter('/settings')
+    await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    try {
+      expect(send).not.toHaveBeenCalledWith({ type: 'list_daemons' })
+      connected.value = true
+      await flushPromises()
+      expect(send).toHaveBeenCalledWith({ type: 'list_daemons' })
+      sidebarDaemons.value.set('online-host', { online: true })
+      sidebarDaemons.value.set('offline-host', { online: false })
+      await flushPromises()
+      expect(wrapper.get('.sidebar-user .user-plan').text()).toContain(useLocale().t('workspace.online_hosts_count', { count: 1 }))
+      connected.value = false
+      await flushPromises()
+      send.mockClear()
+      connected.value = true
+      await flushPromises()
+      expect(send).toHaveBeenCalledWith({ type: 'list_daemons' })
+      sidebarDaemons.value.set('online-host', { online: false })
+      await flushPromises()
+      expect(wrapper.get('.sidebar-user .user-plan').text()).toContain(useLocale().t('workspace.online_hosts_count', { count: 0 }))
+    } finally {
+      wrapper.unmount()
+      mobile.value = previousMobile
+      connected.value = true
+      sidebarDaemons.value = new Map()
+    }
+  })
   test.each(['light', 'dark'])('keeps the sidebar logo in sync with %s theme across sessions, Memory and Team', async theme => {
     const previousTheme = document.documentElement.getAttribute('data-theme')
     const previousPreference = localStorage.getItem('pocketctl-theme')
@@ -110,11 +147,11 @@ describe('mobile application shell', () => {
     const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [router] } })
     try {
-      expect(wrapper.find('.mobile-topbar').exists()).toBe(false)
+      expect(wrapper.find('.mobile-topbar').exists()).toBe(true)
       expect(wrapper.find('.mobile-bottom-nav').exists()).toBe(false)
-      await wrapper.get('[aria-label="打开导航"]').trigger('click')
+      await wrapper.get('.mobile-menu-trigger').trigger('click')
       await flushPromises()
-      expect(wrapper.get('[role="dialog"]').attributes('aria-label')).toBe('主导航')
+      expect(wrapper.get('[role="dialog"]').attributes('aria-label')).toBe(useLocale().t('workspace.main_navigation'))
       await wrapper.get('.sidebar a[href="/hosts"]').trigger('click')
       await flushPromises()
       expect(router.currentRoute.value.path).toBe('/hosts')
@@ -177,20 +214,21 @@ describe('mobile application shell', () => {
 
     expect(wrapper.find('.mobile-app-shell').exists()).toBe(true)
     expect(wrapper.find('.sidebar').exists()).toBe(false)
-    expect(wrapper.get('a[href="/sessions"]').attributes('aria-label')).toBeTruthy()
-    expect(wrapper.get('a[href="/settings"]').attributes('aria-label')).toBeTruthy()
+    await wrapper.get('.mobile-menu-trigger').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.sidebar a[href="/sessions?view=active"]').attributes('title')).toBeTruthy()
+    expect(wrapper.get('.sidebar a[href="/settings"]').attributes('title')).toBeTruthy()
     expect(wrapper.get('[role="status"]').text()).not.toBe('')
   })
 
-  test('mobile bottom navigation only contains sessions, inbox, hosts and settings', async () => {
+  test('mobile navigation uses the drawer and leaves the working area free of bottom tabs', async () => {
     const router = testRouter('/settings')
     await router.isReady()
     const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
-      expect(wrapper.findAll('.mobile-bottom-nav a').map(link => link.attributes('href'))).toEqual([
-        '/sessions', '/inbox', '/hosts', '/settings',
-      ])
+      expect(wrapper.find('.mobile-bottom-nav').exists()).toBe(false)
+      expect(wrapper.find('.mobile-menu-trigger').exists()).toBe(true)
     } finally { wrapper.unmount() }
   })
 
@@ -234,11 +272,13 @@ describe('mobile application shell', () => {
     await wrapper.vm.$nextTick()
 
     expect(document.activeElement).not.toBe(input)
-    expect(wrapper.get('.plan-bottom-sheet').classes()).not.toContain('expanded')
+    const body = new DOMWrapper(document.body)
+    expect(body.get('.plan-bottom-sheet').classes()).not.toContain('expanded')
 
     window.dispatchEvent(new PopStateEvent('popstate'))
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('.plan-bottom-sheet').exists()).toBe(false)
+    expect(body.find('.plan-bottom-sheet').exists()).toBe(false)
+    wrapper.unmount()
     input.remove()
   })
 

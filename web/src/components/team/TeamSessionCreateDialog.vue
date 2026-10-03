@@ -1,40 +1,40 @@
 <template>
-  <TeamOverlay title="新建共享会话" @close="emit('close')">
+  <TeamOverlay large :title="t('workspace.new_shared_session')" @close="emit('close')">
     <form
+      id="team-shared-session-create-form"
       class="create-session"
       data-testid="team-session-create"
       @submit.prevent="create"
     >
-      <label class="field"
-        >会话名称<input
+      <label class="team-form-field"
+        >{{ t('replica.session_name') }}<input
           v-model.trim="title"
           data-testid="team-session-title"
           required
           maxlength="240"
           :disabled="!!created"
       /></label>
-      <label class="field"
-        >本轮目标<textarea
+      <label class="team-form-field"
+        >{{ t('workspace.context_goal') }}<textarea
           v-model.trim="goal"
           data-testid="team-session-goal"
           rows="3"
           required
           maxlength="16000"
-          placeholder="这次希望一起讨论什么？"
+          :placeholder="t('replica.session_goal_placeholder')"
           :disabled="!!created"
         />
       </label>
-      <label v-if="!taskId && tasks.length" class="field"
-        >关联任务 <small>可选</small
-        ><select v-model="selectedTask" :disabled="!!created">
-          <option value="">不关联任务</option>
+      <label v-if="!taskId && tasks.length" class="team-form-field"
+        ><span>{{ t('replica.linked_task') }} <small>{{ t('team.optional') }}</small></span><ActionSelect><select v-model="selectedTask" :aria-label="t('replica.linked_task')" :disabled="!!created">
+          <option value="">{{ t('workspace.no_linked_task') }}</option>
           <option v-for="task in tasks" :key="task.id" :value="task.id">
             {{ task.title }}
           </option>
-        </select></label
+        </select></ActionSelect></label
       >
-      <h3>参与成员</h3>
-      <p>Agent 的所有者自动参与；也可以邀请其他团队成员一起讨论。</p>
+      <h3>{{ t('replica.session_members') }}</h3>
+      <p>{{ t('replica.session_members_copy') }}</p>
       <label v-for="member in members" :key="member.id" class="person-choice"
         ><input
           v-model="selectedMembers"
@@ -43,8 +43,8 @@
           :disabled="!!created"
         />{{ member.display_label }}</label
       >
-      <h3>参与 Agent</h3>
-      <p>选择团队成员提供的在线 Agent，每个 Agent 对应独立会话。</p>
+      <h3>{{ t('replica.session_agents') }}</h3>
+      <p>{{ t('replica.session_agents_copy') }}</p>
       <label
         v-for="offer in offers"
         :key="offer.id"
@@ -58,47 +58,50 @@
           :disabled="!offer.managed_callable || !!created"
         />
         <span
-          ><strong>{{
-            offer.provider === "codex" ? "Codex" : "Claude Code"
-          }}</strong
-          ><small
+          ><AgentBadge :agent="offer.provider" size="md" />
+          <small
             >{{
               members.find((member) => member.user_id === offer.owner_user_id)
-                ?.display_label || "成员"
+                ?.display_label || t('team.member')
             }}
             · {{ offer.daemon_id }}</small
           ></span
         >
-        <small>{{ offer.managed_callable ? "在线" : "当前不可调用" }}</small>
+        <small>{{ t(offer.managed_callable ? 'team.online' : 'replica.agent_not_callable') }}</small>
       </label>
       <p v-if="!loading && !offers.some((offer) => offer.managed_callable)">
-        当前没有可调用的 Agent。请在团队中添加自己的 Agent，或等待主机上线。
+        {{ t('replica.no_callable_agents') }}
       </p>
       <p v-if="error" role="alert">
-        {{ created ? "会话已创建，以下设置尚未完成：" : "" }}{{ error }}
+        {{ created ? t('replica.session_setup_incomplete') : '' }}{{ error }}
       </p>
       <RouterLink
         v-if="created && error"
         :to="{ name: 'team-session', params: { teamId, id: created.id } }"
-        >打开已创建的会话</RouterLink
+        >{{ t('replica.open_created_session') }}</RouterLink
       >
-      <footer>
-        <button type="button" :disabled="busy" @click="emit('close')">
-          取消</button
+
+    </form>
+      <template #footer>
+        <button type="button" class="btn" :disabled="busy" @click="emit('close')">
+          {{ t('common.cancel') }}</button
         ><button
-          class="primary"
+          class="btn primary"
+          type="submit" form="team-shared-session-create-form"
           :disabled="busy || loading || !title || !goal || !selected.length"
         >
-          {{ busy ? "创建中…" : created ? "重试剩余设置" : "创建会话" }}
+          {{ t(busy ? 'common.loading' : created ? 'replica.retry_session_setup' : 'replica.create_session') }}
         </button>
-      </footer>
-    </form>
+      </template>
   </TeamOverlay>
 </template>
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import TeamOverlay from "./TeamOverlay.vue";
+import ActionSelect from "../ActionSelect.vue";
+import AgentBadge from "../AgentBadge.vue";
+import {useLocale} from "../../composables/useLocale";
 import {
   createTeamContext,
   createTeamSession,
@@ -115,6 +118,7 @@ import type {
   TeamSession,
   TeamTask,
 } from "../../types/team";
+const {t}=useLocale();
 const props = defineProps<{ teamId: string; taskId?: string }>();
 const emit = defineEmits<{ close: [] }>(),
   router = useRouter();
@@ -144,7 +148,7 @@ onMounted(async () => {
       (task) => !["archived", "deleted"].includes(task.state),
     );
   } catch (failure) {
-    error.value = failure instanceof Error ? failure.message : "加载失败";
+    error.value = failure instanceof Error ? failure.message : t('team.load_failed');
   } finally {
     loading.value = false;
   }
@@ -185,7 +189,7 @@ async function create() {
         references: [],
       });
     else if (snapshot.goal !== goal.value)
-      throw new Error("会话已存在不同目标，请打开会话查看。");
+      throw new Error(t('replica.session_existing_goal'));
     emit("close");
     await router.push({
       name: "team-session",
@@ -193,7 +197,7 @@ async function create() {
     });
   } catch (failure) {
     retrying = true;
-    error.value = failure instanceof Error ? failure.message : "创建失败";
+    error.value = failure instanceof Error ? failure.message : t('replica.session_create_failed');
   } finally {
     busy.value = false;
   }
@@ -205,7 +209,7 @@ async function create() {
   gap: 12px;
   font-size: 12px;
 }
-.field {
+.team-form-field {
   display: grid;
   gap: 7px;
   color: var(--fg-secondary);

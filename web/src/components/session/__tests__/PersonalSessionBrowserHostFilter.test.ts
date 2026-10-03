@@ -1,3 +1,4 @@
+import { useLocale } from '../../../composables/useLocale'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
@@ -11,9 +12,6 @@ const mocks = vi.hoisted(() => ({
 }))
 vi.mock('../../../composables/useAuth', () => ({
   useAuth: () => ({ user: ref({ id: 8801 }) }),
-}))
-vi.mock('../../../composables/useLocale', () => ({
-  useLocale: () => ({ t: (key: string) => key, locale: ref('zh') }),
 }))
 vi.mock('../../../composables/useSessionBrowserFilters', async () => {
   const { reactive } = await import('vue')
@@ -38,6 +36,7 @@ const sessions = [
 ]
 let wrapper: ReturnType<typeof shallowMount>
 beforeEach(() => {
+  useLocale().setLocale('zh')
   mocks.handlers.clear()
   vi.clearAllMocks()
   mocks.listProjects.mockImplementation(async (host?: string) => ({ projects: [], ungrouped_count: host === 'remote' ? 1 : 34, archived_count: 0, project_order_revision: 0 }))
@@ -82,7 +81,7 @@ test('keeps offline personal session hosts and all-host counts while filtering a
   await wrapper.findAll('[role="menuitemradio"]').find(el => el.text().includes('Claude Code'))!.trigger('click')
   await selectHost('remote')
   expect(wrapper.get('header small').text()).toContain('1 个会话')
-  expect(wrapper.get('.agent-filter-popover .filter-trigger').text()).toContain('session.agent_filter_all')
+  expect(wrapper.get('.agent-filter-popover .filter-trigger').text()).toContain(useLocale().t('session.agent_filter_all'))
   expect(wrapper.get('nav').text()).toContain('Remote session')
   expect(wrapper.get('nav').text()).not.toContain('Mac 0')
   await wrapper.get('.host-trigger').trigger('click')

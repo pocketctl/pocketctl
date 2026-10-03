@@ -245,7 +245,7 @@ describe('read-only observer session fail-closed gate', () => {
   test('Codex Desktop keeps Relay pin and delete actions available', async () => {
     vi.useFakeTimers()
     const session = observerSession()
-    const wrapper = mount(SessionActions, { props: { session } })
+    const wrapper = mount(SessionActions, { global: { stubs: { Teleport:true } }, props: { session } })
 
     await wrapper.get('.ss-more-btn').trigger('click')
     const menuItems = wrapper.findAll('.ss-menu-item')
@@ -255,7 +255,7 @@ describe('read-only observer session fail-closed gate', () => {
 
     await wrapper.get('.ss-more-btn').trigger('click')
     await wrapper.get('.ss-menu-item.danger').trigger('click')
-    await wrapper.get('.ss-confirm').trigger('click')
+    await wrapper.get('.workspace-action-list>footer .danger').trigger('click')
     await vi.advanceTimersByTimeAsync(5700)
     expect(websocketMock.send).toHaveBeenCalledWith({ type: 'session_delete', session_id: 'desktop-1' })
     wrapper.unmount()
@@ -263,13 +263,13 @@ describe('read-only observer session fail-closed gate', () => {
 
   test('archived session hides pin and resume command but keeps restore', async () => {
     const session = { ...observerSession(), agent_type: 'codex', pinned: true, archived_at: new Date().toISOString() }
-    const wrapper = mount(SessionActions, { props: { session, archivedView: true } })
+    const wrapper = mount(SessionActions, { global: { stubs: { Teleport:true } }, props: { session, archivedView: true } })
 
     await wrapper.get('.ss-more-btn').trigger('click')
     const labels = wrapper.findAll('.ss-menu-item').map(item => item.text())
     expect(labels).not.toContain('session.actions.unpin')
     expect(labels).not.toContain('session.actions.resume')
-    expect(labels).toContain('恢复会话')
+    expect(labels).toContain('workspace.restore_session')
     wrapper.unmount()
   })
 })

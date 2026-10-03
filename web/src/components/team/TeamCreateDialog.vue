@@ -3,14 +3,15 @@
     <form ref="panel" class="dialog-card" role="dialog" aria-modal="true" :aria-label="t('team.create')" tabindex="-1" @keydown.esc.stop.prevent="emit('close')" @keydown.tab="trapFocus" @submit.prevent="submit">
       <header>
         <div><p>{{ t('team.create_kicker') }}</p><h2>{{ t('team.create') }}</h2></div>
-        <button type="button" class="icon-button" :aria-label="t('common.close')" @click="emit('close')">×</button>
+        <button type="button" class="icon-button icon-btn flat" :aria-label="t('common.close')" @click="emit('close')"><WorkspaceIcon name="close" /></button>
       </header>
       <div class="dialog-scroll">
-        <label class="field">
+        <label class="team-form-field">
           <span>{{ t('team.name') }}</span>
           <input v-model.trim="name" maxlength="120" required data-testid="team-create-name" />
         </label>
-        <label class="field team-description"><span>{{ t('team.description') }} <small>{{ t('team.optional') }}</small></span><textarea v-model.trim="description" maxlength="2000" rows="2" :placeholder="t('team.description_placeholder')" /></label>
+        <label class="team-form-field team-description"><span>{{ t('team.description') }} <small>{{ t('team.optional') }}</small></span><textarea v-model.trim="description" maxlength="2000" rows="3" :placeholder="t('team.description_placeholder')" /></label>
+        <details class="team-optional-fields"><summary>{{ t('replica.optional_team_setup') }}<WorkspaceIcon name="down" class="icon small" /></summary>
         <section>
           <h3>{{ t('team.add_my_agents') }} <small>{{ t('team.optional') }}</small></h3>
           <p>{{ t('team.create_agents_copy') }}</p>
@@ -19,16 +20,17 @@
         <section>
           <h3>{{ t('team.invite_members') }} <small>{{ t('team.optional') }}</small></h3>
           <p>{{ t('team.invite_accounts_copy') }}</p>
-          <label class="field">
+          <label class="team-form-field">
             <span>{{ t('team.invite_emails') }}</span>
             <textarea v-model="emails" rows="3" :placeholder="t('team.invite_emails_placeholder')" data-testid="team-create-emails" />
           </label>
           <p class="boundary-copy">{{ t('team.no_email_delivery') }}</p>
         </section>
+        <p class="notice">{{ t('team.one_person_team_copy') }}</p>
+        </details>
       </div>
       <p v-if="error" class="dialog-error" role="alert">{{ error }}</p>
       <footer>
-        <span>{{ t('team.one_person_team_copy') }}</span>
         <div><button type="button" class="btn btn-secondary" :disabled="busy" @click="emit('close')">{{ t('common.cancel') }}</button><button class="btn btn-primary" :disabled="busy || !name">{{ busy ? t('common.loading') : t('team.create') }}</button></div>
       </footer>
     </form>
@@ -40,6 +42,7 @@ import { nextTick, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { TeamAgentCandidate } from '../../types/team'
 import TeamAgentPicker from './TeamAgentPicker.vue'
+import WorkspaceIcon from '../WorkspaceIcon.vue'
 
 const props = withDefaults(defineProps<{
   open: boolean
@@ -56,7 +59,7 @@ const { t } = useLocale()
 const panel = ref<HTMLElement|null>(null)
 let previousFocus: HTMLElement|null = null
 function trapFocus(event:KeyboardEvent) {
-  const nodes=Array.from(panel.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled)') ?? [])
+  const nodes=Array.from(panel.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),textarea:not(:disabled)') ?? []).filter(node=>!node.closest('details:not([open])'))
   if(event.shiftKey && document.activeElement === nodes[0]) {event.preventDefault();nodes.at(-1)?.focus()}
   else if(!event.shiftKey && document.activeElement === nodes.at(-1)) {event.preventDefault();nodes[0]?.focus()}
 }

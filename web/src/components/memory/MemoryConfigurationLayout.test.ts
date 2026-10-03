@@ -23,7 +23,7 @@ test.each([
 ] as const)('%s configuration uses the Memory surface and styled controls', async (_name, component) => {
   const style = document.createElement('style')
   style.dataset.memoryConfigurationTest = ''
-  style.textContent = css
+  style.textContent = css + readFileSync(resolve(process.cwd(), 'src/assets/action-select.css'), 'utf8')
   document.head.append(style)
   const host = document.createElement('div')
   host.className = 'memory-workbench memory-layout-v2'

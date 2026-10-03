@@ -297,7 +297,8 @@ describe('MemoryView', () => {
     await view.find('[data-testid="memory-tab-settings"]').trigger('click')
     await flushPromises()
     expect(view.get('[data-testid="memory-settings-card"]').classes()).toContain('memory-settings-workspace')
-    expect(view.get('[data-testid="memory-extraction-segments"]').attributes('role')).toBe('radiogroup')
+    expect(view.get('[data-testid="memory-extraction-mode"]').attributes('tabindex')).toBe('-1')
+    expect(view.get('[data-testid="memory-extraction-mode"]').element.closest('.action-select')?.querySelector('.action-select-trigger')?.getAttribute('aria-haspopup')).toBe('listbox')
     const mode = view.find('[data-testid="memory-extraction-mode"]').element as HTMLSelectElement
     mode.value = 'shadow'
     await view.find('[data-testid="memory-extraction-mode"]').trigger('change')

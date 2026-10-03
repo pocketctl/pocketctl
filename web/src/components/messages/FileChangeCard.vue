@@ -6,7 +6,6 @@
       class="file-change-trigger"
       data-testid="file-change-trigger"
       :aria-expanded="isMobile ? undefined : expanded"
-      :aria-haspopup="isMobile ? 'dialog' : undefined"
       :aria-controls="ariaControls"
       @click="toggle"
       @keydown.enter.prevent="toggle"

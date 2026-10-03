@@ -2620,3 +2620,16 @@ func TestDaemonCwdPolicyInvalidExplicitRootDoesNotFallBack(t *testing.T) {
 		t.Fatal("explicit empty root unexpectedly authorized home")
 	}
 }
+
+func TestClassifyCreateErrorCodexConfiguration(t *testing.T) {
+	for message, want := range map[string]string{
+		`unsupported Codex reasoning effort "high" for model "model"`: "unsupported_effort",
+		"permission requires --allow-dangerous-remote-permissions":    "remote_permission_denied",
+		"codex remote approval requires native approval capabilities": "codex_managed_required",
+		"invalid codex approval policy":                               "invalid_permission",
+	} {
+		if got := classifyCreateError(message); got != want {
+			t.Errorf("classifyCreateError(%q) = %q, want %q", message, got, want)
+		}
+	}
+}

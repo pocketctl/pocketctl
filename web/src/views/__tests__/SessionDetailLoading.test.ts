@@ -2,6 +2,7 @@ import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { reactive, ref } from 'vue'
 import SessionDetail from '../SessionDetail.vue'
+import * as organization from '../../services/sessionOrganization'
 
 const websocketMock = vi.hoisted(() => ({
   handlers: new Map<string, (message: any) => void>(),
@@ -43,9 +44,16 @@ vi.mock('../../composables/useSessionRename', () => ({
 vi.mock('../../composables/useResponsiveLayout', () => ({
   useResponsiveLayout: () => ({ isMobile: ref(true) }),
 }))
+vi.mock('../../services/sessionOrganization', () => ({
+  listProjects: vi.fn(async () => ({ projects: [], ungrouped_count: 0, archived_count: 0, project_order_revision: 0, ungrouped_revision: 0, ungrouped_order_mode: 'activity' })),
+  listOrganizedSessions: vi.fn(async () => ({ sessions: [], has_more: false, next_cursor: null, revision: 0, order_mode: 'activity' })),
+  markSessionSeen: vi.fn(async () => undefined),
+  getSessionSummary: vi.fn(async () => { throw new Error('No summary in this history fixture') }),
+}))
 
 describe('SessionDetail history loading', () => {
   beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })))
     routeMock.current = reactive({ params: { id: 'session-http-lan' }, query: {} as Record<string, string> })
     websocketMock.handlers.clear()
     routeMock.replace.mockClear()
@@ -58,6 +66,7 @@ describe('SessionDetail history loading', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
@@ -81,6 +90,22 @@ describe('SessionDetail history loading', () => {
     wrapper.unmount()
   })
 
+  test('direct archive entry selects an archived session and preserves its filter during navigation', async () => {
+    routeMock.current.params.id = 'default'
+    routeMock.current.query.view = 'archived'
+    vi.spyOn(organization, 'listOrganizedSessions').mockResolvedValue({
+      sessions: [{ session_id: 'active-session', daemon_id: 'd1' }, { session_id: 'archived-session', daemon_id: 'd1', archived_at: '2026-10-02T00:00:00Z' }],
+      has_more: false, next_cursor: null, revision: 1, order_mode: 'activity',
+    })
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'active-session', daemon_id: 'd1' }] })
+    await flushPromises()
+    expect(routeMock.replace).toHaveBeenCalledWith({ path: '/session/archived-session', query: { view: 'archived' } })
+    expect(routeMock.replace.mock.calls.every(([location]) => location.path !== '/session/active-session')).toBe(true)
+    expect((wrapper.vm as any).sidebarEntries.map((item: any) => item.session_id)).toEqual(['archived-session'])
+    wrapper.unmount()
+  })
+
   test('resolves a reused detail route from cached sessions without replaying default', async () => {
     const wrapper = shallowMount(SessionDetail)
     websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
@@ -90,6 +115,21 @@ describe('SessionDetail history loading', () => {
     await flushPromises()
     expect(routeMock.replace).toHaveBeenCalledWith({ path: '/session/session-http-lan' })
     expect(websocketMock.send.mock.calls.some(([msg]) => msg.session_id === 'default')).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('keeps a new-session form open when the initial session list arrives', async () => {
+    routeMock.current.params.id = 'default'
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    ;(wrapper.vm as any).showNewSession = true
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'real-session', daemon_id: 'd1' }] })
+    await flushPromises()
+    expect(routeMock.replace).not.toHaveBeenCalled()
+    expect((wrapper.vm as any).showNewSession).toBe(true)
+    ;(wrapper.vm as any).showNewSession = false
+    await flushPromises()
+    expect(routeMock.replace).toHaveBeenCalledWith({ path: '/session/real-session' })
     wrapper.unmount()
   })
 

@@ -7,7 +7,7 @@ export function usePanelFocus() {
   let previousFocus: HTMLElement | null = null
 
   function trapFocus(event: KeyboardEvent): void {
-    const nodes = Array.from(panel.value?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])
+    const nodes = Array.from(panel.value?.querySelectorAll<HTMLElement>(focusableSelector) ?? []).filter(node => node.tabIndex !== -1 && !node.closest('[aria-hidden="true"],[hidden]'))
     const first = nodes[0]
     const last = nodes.at(-1)
     if (!first) { event.preventDefault(); panel.value?.focus(); return }
@@ -21,7 +21,8 @@ export function usePanelFocus() {
   onMounted(async () => {
     previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     await nextTick()
-    ;(panel.value?.querySelector<HTMLElement>(focusableSelector) ?? panel.value)?.focus()
+    const first = Array.from(panel.value?.querySelectorAll<HTMLElement>(focusableSelector) ?? []).find(node => node.tabIndex !== -1 && !node.closest('[aria-hidden="true"],[hidden]'))
+    ;(first ?? panel.value)?.focus()
   })
   onBeforeUnmount(() => previousFocus?.focus())
 

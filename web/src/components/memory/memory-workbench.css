@@ -908,6 +908,7 @@
 .memory-settings-section > header h3 { margin: 0; color: var(--fg); font-size: 12.5px; }
 .memory-settings-section > header p { margin: 4px 0 0; color: var(--fg-tertiary); font-size: 9.5px; line-height: 1.55; }
 .memory-setting-card { position: relative; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-hover); }
+.memory-setting-card > .action-select { min-width: 110px; }
 .memory-setting-card + .memory-setting-card { margin-top: 8px; }
 .memory-setting-icon { width: 37px; height: 37px; display: grid; place-items: center; border-radius: var(--radius-md); color: var(--accent); background: var(--accent-muted); }
 .memory-setting-icon.is-violet { color: var(--sub-agent); background: var(--sub-agent-bg); }
@@ -1053,6 +1054,7 @@
   .memory-claim-row-updated { display: none; }
   .memory-settings-content { padding: 14px 12px 82px; }
   .memory-setting-card { grid-template-columns: 36px minmax(0, 1fr); }
+  .memory-setting-card > .action-select { grid-column: 1 / -1; width: 100%; }
   .memory-mode-segments { grid-column: 1 / -1; justify-self: stretch; }
   .memory-mode-segments button { min-width: 0; flex: 1; }
   .memory-provider-grid { grid-template-columns: 1fr; }
@@ -1398,12 +1400,13 @@
   .memory-layout-v2 .memory-workspace-shell { grid-template-columns:minmax(0,1fr); gap:0; }
   .memory-layout-v2 .memory-module-navigation { display:none; }
   .memory-module-picker { display:block; margin-bottom:16px; }
-  .memory-module-picker label { display:flex; gap:12px; align-items:center; color:var(--fg-secondary); font-size:11px; }
+  .memory-module-picker label { display:flex; gap:12px; align-items:center; color:var(--fg-secondary); font-size:11px; white-space:nowrap; }
+  .memory-module-picker .action-select { flex:1; }
   .memory-layout-v2 .memory-module-picker select { min-width:200px; max-width:100%; padding:9px 12px; color:var(--fg); background:var(--surface); border:1px solid var(--border); border-radius:6px; font-size:12px; }
 }
 @media(max-width:768px) {
   .memory-layout-v2.memory-workbench { padding:0 18px 28px; }
-  .memory-layout-v2 .memory-page-head { min-height:82px; margin-left:33px; gap:8px; }
+  .memory-layout-v2 .memory-page-head { display:none; }
   .memory-layout-v2 .memory-page-copy h1 { font-size:18px; }
   .memory-layout-v2 .memory-subtitle,.memory-brand-mark,.memory-page-status { display:none; }
   .memory-layout-v2 .memory-workspace-main { padding-top:20px; }

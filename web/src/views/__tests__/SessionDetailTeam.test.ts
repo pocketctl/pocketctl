@@ -1,4 +1,5 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { useLocale } from '../../composables/useLocale'
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { computed, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -47,6 +48,7 @@ async function render(attachTo?: HTMLElement) {
 }
 
 beforeEach(() => {
+  useLocale().setLocale('zh')
   extraEvents.length = 0; calls.value = []
   vi.clearAllMocks(); sendMessage.mockResolvedValue(true)
   api.listTeams.mockResolvedValue([{ id: 'ctm_1', name: 'Alpha' }])
@@ -108,9 +110,9 @@ describe('team session detail', () => {
   test('only exposes native sessions owned by the current user', async () => {
     const { wrapper } = await render()
     await wrapper.findAll('.people-strip button').find(button => button.text().includes('位参与者'))!.trigger('click')
-    const links = wrapper.findAll('[data-testid="team-session-participants"] a')
+    const links = Array.from(document.querySelectorAll('[data-testid="team-session-participants"] a'))
     expect(links).toHaveLength(1)
-    expect(links[0].attributes('href')).toContain('/session/native-1')
+    expect(links[0].getAttribute('href')).toContain('/session/native-1')
     expect(wrapper.text()).not.toContain('native-2')
   })
 
@@ -121,10 +123,11 @@ describe('team session detail', () => {
     const opener = wrapper.findAll<HTMLButtonElement>('.people-strip button').find(button => button.text().startsWith('Context v'))!
     opener.element.focus()
     await opener.trigger('click')
-    const panel = wrapper.get('[data-testid="team-context-panel"]')
-    expect(document.activeElement).toBe(panel.get('button[aria-label="关闭 Context"]').element)
+    await flushPromises()
+    const panel = new DOMWrapper(document.querySelector('.workspace-action-list')!)
+    expect(document.activeElement).toBe(panel.get('header button').element)
     await panel.trigger('keydown', { key: 'Escape' })
-    expect(wrapper.find('[data-testid="team-context-panel"]').exists()).toBe(false)
+    expect(document.querySelector('[data-testid="team-context-panel"]')).toBeNull()
     expect(document.activeElement).toBe(opener.element)
   })
   test('opens the exact historical Context version as read-only', async()=>{
@@ -132,8 +135,9 @@ describe('team session detail', () => {
     const {wrapper}=await render()
     await wrapper.findAll('.context-receipt').find(button=>button.text()==='Context v1')!.trigger('click');await flushPromises()
     expect(api.getTeamContext).toHaveBeenCalledWith('css_1',1)
-    expect(wrapper.get('[data-testid="team-context-panel"]').text()).toContain('Historical goal')
-    expect(wrapper.find('.context-editor').exists()).toBe(false)
+    const panel = new DOMWrapper(document.querySelector('[data-testid="team-context-panel"]')!)
+    expect(panel.text()).toContain('Historical goal')
+    expect(panel.find('.context-editor').exists()).toBe(false)
   })
 
 })

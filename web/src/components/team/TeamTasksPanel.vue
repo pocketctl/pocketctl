@@ -1,52 +1,49 @@
 <template>
   <section class="tasks-panel" data-testid="team-tasks-panel">
-    <div class="panel-toolbar">
-      <div class="filter-tabs" role="tablist" :aria-label="t('team.task_filters')">
-        <button v-for="filter in filters" :key="filter" type="button" :class="{ active: activeFilter === filter }" @click="activeFilter = filter">{{ t(`team.task_filter.${filter}`) }}</button>
-      </div>
-      <button v-if="writesEnabled" type="button" class="btn btn-primary" data-testid="team-new-task" @click="showCreate = !showCreate">+ {{ t('team.new_task') }}</button>
-    </div>
+    <div class="module-intro"><div><h2><button class="task-filter-title" @click="openTaskFilters($event)">{{ activeFilter==='active'?t('replica.team_tasks'):t(`team.task_filter.${activeFilter}`) }}<WorkspaceIcon name="down" class="icon small" /></button></h2><p>{{ t('replica.team_tasks_copy') }}</p></div><button v-if="writesEnabled" type="button" class="btn primary" data-testid="team-new-task" @click="showCreate=!showCreate"><WorkspaceIcon name="plus" class="icon small" />{{ t('team.new_task') }}</button></div>
+    <ActionList v-if="taskFiltersOpen" :anchor="taskFilterAnchor" :title="t('team.task_filters')" @close="taskFiltersOpen=false"><button v-for="filter in filters" :key="filter" class="action-item" :class="{selected:activeFilter===filter}" @click="activeFilter=filter;taskFiltersOpen=false">{{ t(`team.task_filter.${filter}`) }}<WorkspaceIcon v-if="activeFilter===filter" name="check" class="icon small" /></button></ActionList>
 
     <div v-if="loading" class="panel-empty">{{ t('common.loading') }}</div>
-    <div v-else-if="!visibleTasks.length" class="panel-empty"><strong>{{ t('team.tasks_empty') }}</strong><span>{{ t('team.tasks_empty_copy') }}</span></div>
-    <div v-else class="task-grid">
-      <article v-for="task in visibleTasks" :key="task.id" class="task-card" :data-task-id="task.id" role="button" tabindex="0" :aria-label="`打开任务：${task.title}`" @click="selectedTaskID = task.id" @keydown.enter="selectedTaskID = task.id" @keydown.space.prevent="selectedTaskID = task.id">
-        <div class="task-card-head"><span class="task-state" :class="task.state">{{ t(`team.task_state.${task.state}`) }}</span><span>{{ task.session_ids.length }} {{ t('team.sessions_unit') }}</span></div>
-        <h3>{{ task.title }}</h3><p>{{ task.background || t('team.no_background') }}</p>
-        <div class="card-foot"><span>{{ holderLabels(task) }}</span><span>查看 →</span></div>
-      </article>
+    <div v-else class="kanban task-columns" :class="{'single-column':activeFilter!=='active'}">
+      <section v-for="column in taskColumns" :key="column.state" class="kanban-column task-column"><h3 class="row between">{{ t(`team.task_state.${column.state}`) }}<span class="faint">{{ column.tasks.length }}</span></h3>
+        <article v-for="task in column.tasks" :key="task.id" class="task-card card" :data-task-id="task.id" role="button" tabindex="0" :aria-label="task.title" @click="selectedTaskID=task.id" @keydown.enter.self="selectedTaskID=task.id" @keydown.space.self.prevent="selectedTaskID=task.id">
+          <div class="row between"><span class="badge" :class="task.state==='completed'?'green':task.state==='in_progress'?'blue':''">{{ t(`team.task_state.${task.state}`) }}</span><button type="button" class="icon-btn flat" :aria-label="t('replica.task_details')" @click.stop="selectedTaskID=task.id"><WorkspaceIcon name="more" class="icon small" /></button></div>
+          <h3>{{ task.title }}</h3><p>{{ task.background || t('team.no_background') }}</p>
+          <div class="task-foot card-foot"><div class="avatars" :aria-label="holderLabels(task)"><span v-for="(holder,index) in task.holder_user_ids.slice(0,4)" :key="holder" class="avatar" :class="index%3===1?'purple':index%3===2?'green':''" :title="memberLabel(holder)">{{ memberLabel(holder).charAt(0).toUpperCase() }}</span><span v-if="task.holder_user_ids.length>4" class="avatar">+{{ task.holder_user_ids.length-4 }}</span><span v-if="!task.holder_user_ids.length" class="faint">{{ t('team.unclaimed') }}</span></div><button type="button" class="text-btn" @click.stop="selectedTaskID=task.id">{{ task.session_ids.length ? t('workspace.sessions_count',{count:task.session_ids.length}) : t('replica.view_task') }}<WorkspaceIcon name="chevron" class="icon small" /></button></div>
+        </article>
+        <div v-if="!column.tasks.length" class="compact-empty">{{ t('team.tasks_empty') }}</div>
+      </section>
     </div>
-    <TeamOverlay v-if="showCreate" :title="t('team.new_task')" @close="showCreate = false">
-    <form class="task-create" data-testid="team-task-create" @submit.prevent="createTask">
-      <input v-model.trim="draftTitle" maxlength="160" required :placeholder="t('team.task_title')" />
-      <textarea v-model="draftBackground" rows="3" :placeholder="t('team.task_background')" />
-      <div><button type="button" class="btn btn-secondary" @click="showCreate = false">{{ t('common.cancel') }}</button><button class="btn btn-primary" :disabled="busy">{{ t('team.create_task') }}</button></div>
+    <TeamOverlay v-if="showCreate" :title="t('replica.new_team_task')" @close="showCreate = false">
+    <form id="team-task-create-form" class="task-create" data-testid="team-task-create" @submit.prevent="createTask">
+      <label class="team-form-field"><span>{{ t('replica.task_title') }}</span><input v-model.trim="draftTitle" maxlength="160" required :placeholder="t('team.task_title')" /></label>
+      <label class="team-form-field"><span>{{ t('replica.task_description') }}</span><textarea v-model="draftBackground" rows="4" :placeholder="t('team.task_background')" /></label>
+      <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
     </form>
 
-    </TeamOverlay>
-    <TeamOverlay v-if="selectedTask" title="任务" drawer @close="selectedTaskID = ''; editingTaskID = ''">
+    <template #footer><button type="button" class="btn" :disabled="busy" @click="showCreate=false">{{ t('common.cancel') }}</button><button type="submit" form="team-task-create-form" class="btn primary" :disabled="busy">{{ t('team.create_task') }}</button></template></TeamOverlay>
+    <TeamOverlay v-if="selectedTask" :title="t('replica.task_details')" @close="selectedTaskID = ''; editingTaskID = ''">
       <template v-for="task in [selectedTask]" :key="task.id">
         <span class="task-state" :class="task.state">{{ t(`team.task_state.${task.state}`) }}</span>
         <h2 class="task-detail-title">{{ task.title }}</h2>
-        <form v-if="editingTaskID === task.id" class="task-edit" @submit.prevent="saveEdit(task)">
-          <input v-model.trim="editTitle" maxlength="240" required />
-          <textarea v-model="editBackground" rows="4" />
-          <div><button type="button" @click="editingTaskID = ''">{{ t('common.cancel') }}</button><button :disabled="busy">{{ t('common.save') }}</button></div>
+        <form v-if="editingTaskID === task.id" id="team-task-edit-form" class="task-edit" @submit.prevent="saveEdit(task)">
+          <label class="team-form-field"><span>{{ t('replica.task_title') }}</span><input v-model.trim="editTitle" maxlength="240" required /></label>
+          <label class="team-form-field"><span>{{ t('replica.task_description') }}</span><textarea v-model="editBackground" rows="4" /></label>
         </form>
         <div v-else class="task-description">{{ task.background || t('team.no_background') }}</div>
-        <div class="holder-row"><span>共同持有</span><span v-for="holder in task.holder_user_ids" :key="holder" class="holder-pill">{{ members.find(member => member.user_id === holder)?.display_label || `成员 ${holder}` }}</span><span v-if="!task.holder_user_ids.length">{{ t('team.unclaimed') }}</span></div>
+        <div class="holder-row"><span>{{ t('replica.task_holders') }}</span><span v-for="holder in task.holder_user_ids" :key="holder" class="holder-pill">{{ memberLabel(holder) }}</span><span v-if="!task.holder_user_ids.length">{{ t('team.unclaimed') }}</span></div>
         <div v-if="writesEnabled && currentUserId === teamCreatorId && !['archived','deleted'].includes(task.state)" class="holder-editor"><label v-for="member in members" :key="member.id"><input type="checkbox" :checked="task.holder_user_ids.includes(member.user_id)" :disabled="busy" @change="mutate(() => setTeamTaskHolder(task, member.user_id, ($event.target as HTMLInputElement).checked))" />{{ member.display_label }}</label></div>
-        <h3 class="detail-section-title">关联会话</h3>
-        <div v-for="session in sessions.filter(item => item.task_id === task.id)" :key="session.id" class="linked-session"><div><strong>{{ session.title }}</strong><p>{{ session.participants.length }} 人 · {{ session.agent_bindings.length }} Agents</p></div><RouterLink :to="{name:'team-session',params:{teamId:teamId,id:session.id}}">打开</RouterLink></div>
-        <p v-if="!sessions.some(item => item.task_id === task.id)" class="detail-empty">暂无关联会话。准备好后，带上 Agent 开始讨论。</p>
-        <h3 class="detail-section-title">任务状态</h3>
+        <h3 class="detail-section-title">{{ t('replica.linked_sessions') }}</h3>
+        <div v-for="session in sessions.filter(item => item.task_id === task.id)" :key="session.id" class="linked-session"><div><strong>{{ session.title }}</strong><p>{{ t('replica.session_participation',{participants:session.participants.length,agents:session.agent_bindings.length}) }}</p></div><RouterLink :to="{name:'team-session',params:{teamId:teamId,id:session.id}}">{{ t('replica.open') }}</RouterLink></div>
+        <p v-if="!sessions.some(item => item.task_id === task.id)" class="detail-empty">{{ t('replica.no_linked_sessions') }}</p>
+        <button v-if="writesEnabled && task.state !== 'deleted' && task.state !== 'archived'" class="text-btn task-linked-action" @click="startSession(task.id)"><WorkspaceIcon name="plus" class="icon small" />{{ t('workspace.new_shared_session') }}</button>
+        <h3 class="detail-section-title">{{ t('team.task_state_label') }}</h3>
         <div v-if="writesEnabled" class="task-actions">
           <template v-if="task.state !== 'archived' && task.state !== 'deleted'">
             <button type="button" @click="toggleClaim(task)">{{ task.holder_user_ids.includes(currentUserId) ? t('team.unclaim') : t('team.claim') }}</button>
-            <button type="button" @click="startEdit(task)">{{ t('team.edit_task') }}</button>
-            <select :value="task.state" :aria-label="t('team.task_state_label')" @change="changeState(task, $event)">
+            <ActionSelect><select :value="task.state" :aria-label="t('team.task_state_label')" @change="changeState(task, $event)">
               <option v-for="state in nextStates(task)" :key="state" :value="state">{{ t(`team.task_state.${state}`) }}</option>
-            </select>
+            </select></ActionSelect>
             <button v-if="canManage(task)" type="button" @click="archiveTask(task)">{{ t('team.archive') }}</button>
             <button v-if="canManage(task)" type="button" class="danger" @click="removeTask(task)">{{ t('common.delete') }}</button>
           </template>
@@ -54,15 +51,18 @@
         </div>
         <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
       </template>
-      <template #footer><button v-if="writesEnabled && selectedTask.state !== 'deleted' && selectedTask.state !== 'archived'" class="btn btn-primary" @click="startSession(selectedTask.id)">+ 新建共享会话</button></template>
+      <template #footer><button type="button" class="btn" :disabled="busy" @click="editingTaskID?editingTaskID='':selectedTaskID=''">{{ t(editingTaskID?'common.cancel':'common.close') }}</button><button v-if="editingTaskID===selectedTask.id" type="submit" form="team-task-edit-form" class="btn primary" :disabled="busy">{{ t('common.save') }}</button><button v-else-if="writesEnabled && selectedTask.state!=='deleted' && selectedTask.state!=='archived'" class="btn primary" @click="startEdit(selectedTask)">{{ t('team.edit_task') }}</button></template>
     </TeamOverlay>
-    <p v-if="error" class="panel-error" role="status">{{ error }}</p>
+    <p v-if="error && !showCreate && !selectedTask" class="panel-error" role="status">{{ error }}</p>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import TeamOverlay from './TeamOverlay.vue'
+import ActionList from '../ActionList.vue'
+import ActionSelect from '../ActionSelect.vue'
+import WorkspaceIcon from '../WorkspaceIcon.vue'
 import { useLocale } from '../../composables/useLocale'
 import {
   createTeamTask,
@@ -77,9 +77,12 @@ import type { TeamTask, TeamMember, TeamSessionSummary } from '../../types/team'
 
 const emit = defineEmits<{'create-session':[taskID:string]}>()
 const props = withDefaults(defineProps<{ teamId: string; teamCreatorId: number; currentUserId: number; writesEnabled: boolean; members?: TeamMember[]; sessions?: TeamSessionSummary[] }>(), {members:()=>[],sessions:()=>[]})
+const taskFiltersOpen=ref(false),taskFilterAnchor=ref<HTMLElement|null>(null)
+function openTaskFilters(event:MouseEvent){taskFilterAnchor.value=event.currentTarget as HTMLElement;taskFiltersOpen.value=true}
 const selectedTaskID = ref('')
 const selectedTask = computed(() => tasks.value.find(task => task.id === selectedTaskID.value))
-function holderLabels(task: TeamTask): string {return task.holder_user_ids.map(id => props.members.find(member => member.user_id === id)?.display_label || `成员 ${id}`).join('、') || t('team.unclaimed')}
+function memberLabel(id:number):string{return props.members.find(member=>member.user_id===id)?.display_label || t('replica.member_id',{id})}
+function holderLabels(task: TeamTask): string {return task.holder_user_ids.map(memberLabel).join('、') || t('team.unclaimed')}
 const { t } = useLocale()
 const filters = ['active', 'archived', 'deleted'] as const
 const activeFilter = ref<typeof filters[number]>('active')
@@ -96,6 +99,8 @@ const editBackground = ref('')
 const visibleTasks = computed(() => tasks.value.filter(task => activeFilter.value === 'active'
   ? task.state !== 'archived' && task.state !== 'deleted'
   : task.state === activeFilter.value))
+
+const taskColumns=computed(()=> (activeFilter.value==='active' ? ['open','in_progress','completed'] : [activeFilter.value]).map(state=>({state,tasks:visibleTasks.value.filter(task=>task.state===state)})))
 
 async function load(): Promise<void> {
   loading.value = true

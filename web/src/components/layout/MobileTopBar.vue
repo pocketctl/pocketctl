@@ -11,13 +11,16 @@
         <path d="m15 18-6-6 6-6" />
       </svg>
     </button>
-    <div v-else class="mobile-brand" aria-label="PocketCtl">P</div>
+    <button v-else type="button" class="mobile-topbar-back mobile-menu-trigger" :aria-label="t('workspace.open_navigation')" @click="$emit('open-nav')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg></button>
 
     <div class="mobile-topbar-title">
       <span class="mobile-topbar-title-text">{{ title }}</span>
+      <span v-if="!isSession && subtitle" class="mobile-topbar-host">{{ subtitle }}</span>
       <span v-if="isSession && sessionHost" class="mobile-topbar-host" :title="sessionHost">{{ sessionHost }}</span>
     </div>
 
+    <button v-if="moduleAction" class="mobile-topbar-action module-action" :aria-label="t(moduleAction==='register'?'dashboard.register_host':moduleAction==='team'?'team.create':'common.retry')" @click="$emit('module-action')"><WorkspaceIcon :name="moduleAction==='register'?'host-add':moduleAction==='team'?'plus':'refresh'" /></button>
+    <TopbarGithubLink />
     <div :class="['mobile-connection', { 'is-session-status': isSession && sessionStatus }]" role="status" aria-live="polite">
       <span :class="['mobile-connection-dot', displayStatusClass]"></span>
       <span>{{ displayStatusLabel }}</span>
@@ -50,12 +53,16 @@
 </template>
 
 <script setup lang="ts">
+import TopbarGithubLink from '../TopbarGithubLink.vue'
+import WorkspaceIcon from '../WorkspaceIcon.vue'
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { hostSessionsLocation } from '../../utils/hostNavigation'
 
 const props = defineProps<{
+  subtitle?: string
+  moduleAction?: 'register'|'team'|'refresh'
   title: string
   connected: boolean
   reconnecting: boolean
@@ -71,7 +78,7 @@ const props = defineProps<{
   sessionStatusLabel?: string
 }>()
 
-defineEmits<{ (event: 'new-session'): void; (event: 'open-plan'): void }>()
+defineEmits<{ (event: 'new-session'): void; (event: 'open-plan'): void; (event: 'open-nav'): void; (event: 'module-action'):void }>()
 
 const router = useRouter()
 const { t } = useLocale()

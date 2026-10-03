@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 
@@ -35,10 +36,10 @@ watch(selectedCandidateId, () => {
     <p class="memory-governance-muted">{{ t('memory.governance.conflict.copyBoundary') }}</p>
     <label v-if="candidates.length > 1" class="memory-conflict-candidate">
       <span>{{ t('memory.governance.conflict.title') }}</span>
-      <select v-model="selectedCandidateId">
+      <ActionSelect><select v-model="selectedCandidateId">
         <option v-for="candidate in candidates" :key="candidate.candidate_id"
           :value="candidate.candidate_id">{{ candidate.normalized_key }}</option>
-      </select>
+      </select></ActionSelect>
     </label>
     <div class="memory-conflict-options">
       <label>

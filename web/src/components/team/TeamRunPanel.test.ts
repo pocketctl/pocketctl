@@ -1,5 +1,6 @@
+import { useLocale } from '../../composables/useLocale'
 import { mount } from '@vue/test-utils'
-import { describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test } from 'vitest'
 
 import type { TeamContextSnapshot, TeamMember, TeamRun, TeamSession, TeamTask } from '../../types/team'
 import TeamRunPanel from './TeamRunPanel.vue'
@@ -38,7 +39,7 @@ const run: TeamRun = {
 }
 
 function render(overrides: Record<string, unknown> = {}) {
-  return mount(TeamRunPanel, { props: {
+  return mount(TeamRunPanel, { global: { stubs: { Teleport: true } }, props: {
     session, run, context, currentContext: context, task, members, currentUserId: 7,
     autorunEnabled: true, busy: false, error: '', ...overrides,
   } as any })
@@ -96,3 +97,5 @@ describe('TeamRunPanel', () => {
     expect(wrapper.emitted('start')).toEqual([['offer-codex']])
   })
 })
+
+beforeEach(() => useLocale().setLocale('zh'))

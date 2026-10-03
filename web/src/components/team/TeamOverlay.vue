@@ -1,5 +1,6 @@
 <template>
-  <div
+  <ActionList v-if="actions" :title="title" :width="470" @close="emit('close')"><slot /><template v-if="$slots.footer" #footer><slot name="footer" /></template></ActionList>
+  <div v-else
     class="team-overlay"
     @mousedown.self="emit('close')"
     @keydown.esc.stop.prevent="emit('close')"
@@ -7,7 +8,7 @@
   >
     <section
       ref="panel"
-      :class="['team-overlay-panel', { drawer }]"
+      :class="['team-overlay-panel', { drawer, large }]"
       role="dialog"
       aria-modal="true"
       :aria-label="title"
@@ -15,9 +16,7 @@
     >
       <header>
         <h2>{{ title }}</h2>
-        <button type="button" aria-label="关闭" @click="emit('close')">
-          ×
-        </button>
+        <button type="button" class="icon-btn flat" :aria-label="t('common.close')" @click="emit('close')"><WorkspaceIcon name="close" /></button>
       </header>
       <div class="team-overlay-content"><slot /></div>
       <footer v-if="$slots.footer"><slot name="footer" /></footer>
@@ -25,9 +24,13 @@
   </div>
 </template>
 <script setup lang="ts">
+import ActionList from '../ActionList.vue';
+import WorkspaceIcon from '../WorkspaceIcon.vue';
+import { useLocale } from '../../composables/useLocale';
 import { nextTick, onMounted, onBeforeUnmount, ref } from "vue";
-defineProps<{ title: string; drawer?: boolean }>();
+const props = defineProps<{ title: string; drawer?: boolean; large?: boolean; actions?: boolean }>();
 const emit = defineEmits<{ close: [] }>();
+const {t}=useLocale();
 const panel = ref<HTMLElement | null>(null);
 let opener: HTMLElement | null = null;
 const controls = () =>
@@ -35,7 +38,7 @@ const controls = () =>
     panel.value?.querySelectorAll<HTMLElement>(
       'button:not(:disabled),input:not(:disabled),textarea:not(:disabled),select:not(:disabled),a[href],[tabindex="0"]',
     ) ?? [],
-  );
+  ).filter(node=>node.tabIndex>=0 && !node.closest('details:not([open])'));
 function trapFocus(event: KeyboardEvent) {
   const list = controls(),
     first = list[0],
@@ -56,6 +59,7 @@ function trapFocus(event: KeyboardEvent) {
   }
 }
 onMounted(async () => {
+  if (props.actions) return;
   opener = document.activeElement as HTMLElement;
   await nextTick();
   panel.value?.focus();

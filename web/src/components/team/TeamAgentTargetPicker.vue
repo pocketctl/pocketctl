@@ -1,17 +1,17 @@
 <template>
   <div ref="root" class="target-picker" data-testid="team-agent-target-picker" @keydown.esc.stop="closeMenu">
     <button ref="trigger" type="button" class="target-trigger" aria-haspopup="menu" :aria-expanded="open" @click="open = !open"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg><span>{{ selectionLabel }}</span><span>⌄</span></button>
-    <div v-show="open" class="target-menu" role="menu" aria-label="回复 Agent">
-    <button type="button" :class="{ active: modelValue.mode === 'all' }" :disabled="!callableBindings.length" @click="selectAll">全部 Agent</button>
-    <button type="button" :class="{ active: modelValue.mode === 'discussion' }" @click="selectDiscussion">仅补充讨论</button>
-    <div class="target-agents" aria-label="定向 Agent">
+    <div v-show="open" class="target-menu" role="menu" :aria-label="t('workspace.reply_agent')">
+    <button type="button" :class="{ active: modelValue.mode === 'all' }" :disabled="!callableBindings.length" @click="selectAll"> {{ t('session.agent_filter_all') }} </button>
+    <button type="button" :class="{ active: modelValue.mode === 'discussion' }" @click="selectDiscussion"> {{ t('workspace.discussion_only') }} </button>
+    <div class="target-agents" :aria-label="t('workspace.target_agents')">
       <button
         v-for="binding in bindings"
         :key="binding.id"
         type="button"
         :class="{ active: modelValue.mode === 'offers' && modelValue.offerIDs.includes(binding.offer_id) }"
         :disabled="binding.availability !== 'online'"
-        :title="`${bindingLabel(binding)} · ${binding.availability === 'online' ? '发送给此 Agent' : availabilityLabel(binding.availability)}`"
+        :title="`${bindingLabel(binding)} · ${binding.availability === 'online' ? t('workspace.send_this_agent') : availabilityLabel(binding.availability)}`"
         :data-offer-id="binding.offer_id"
         @click="toggleOffer(binding.offer_id)"
       >
@@ -24,6 +24,8 @@
 </template>
 
 <script setup lang="ts">
+import { useLocale } from "../../composables/useLocale"
+const { t } = useLocale()
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import type { TeamMember, TeamSessionAgentBinding } from '../../types/team'
 
@@ -38,17 +40,17 @@ const root=ref<HTMLElement|null>(null),trigger=ref<HTMLButtonElement|null>(null)
 function closeMenu(){open.value=false;trigger.value?.focus()}
 function outside(event:MouseEvent){if(!root.value?.contains(event.target as Node))open.value=false}
 onMounted(()=>document.addEventListener('click',outside));onBeforeUnmount(()=>document.removeEventListener('click',outside))
-const selectionLabel=computed(()=>props.modelValue.mode==='discussion'?'仅补充讨论':props.modelValue.mode==='all'?`所有可用 Agent（${callableBindings.value.length}）`:props.bindings.filter(binding=>props.modelValue.offerIDs.includes(binding.offer_id)).map(bindingLabel).join(' + '))
+const selectionLabel=computed(()=>props.modelValue.mode==='discussion'?t('workspace.discussion_only'):props.modelValue.mode==='all'?t('workspace.available_agents_count', {count:callableBindings.value.length}):props.bindings.filter(binding=>props.modelValue.offerIDs.includes(binding.offer_id)).map(bindingLabel).join(' + '))
 const callableBindings = computed(() => props.bindings.filter(binding => binding.availability === 'online'))
 
 function bindingLabel(binding: TeamSessionAgentBinding): string {
   const provider = binding.provider === 'codex' ? 'Codex' : 'Claude Code'
-  const owner = props.members.find(member => member.user_id === binding.owner_user_id)?.display_label ?? `成员 ${binding.owner_user_id}`
+  const owner = props.members.find(member => member.user_id === binding.owner_user_id)?.display_label ?? t('workspace.member_id', {id:binding.owner_user_id})
   return `${provider} · ${owner} · ${binding.daemon_id}`
 }
 
 function availabilityLabel(value: TeamSessionAgentBinding['availability']): string {
-  return ({ offline: '离线', unsupported: '不支持团队调用', unmanaged: '未托管', occupied: '被其他团队占用', online: '在线', access_disabled: '账号未开通 Team' })[value]
+  return ({ offline: t('team.availability.offline'), unsupported: t('team.availability.unsupported'), unmanaged: t('team.availability.unmanaged'), occupied: t('team.availability.occupied'), online: t('team.online'), access_disabled: t('team.availability.access_disabled') })[value]
 }
 function selectAll(): void { emit('update:modelValue', { mode: 'all', offerIDs: [] }); closeMenu() }
 function selectDiscussion(): void { emit('update:modelValue', { mode: 'discussion', offerIDs: [] }); closeMenu() }

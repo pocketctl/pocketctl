@@ -105,9 +105,9 @@ export async function listTeamInvitations(teamID: string): Promise<TeamInvitatio
   return (await teamRequest<{ invitations: TeamInvitation[] }>(`/api/team/teams/${encodeURIComponent(teamID)}/invitations`)).invitations
 }
 
-export async function inviteTeamMember(teamID: string, email: string, expectedRevision: number): Promise<TeamInvitation> {
+export async function inviteTeamMember(teamID: string, email: string, expectedRevision: number, role: import('../types/team').TeamRole = 'member'): Promise<TeamInvitation> {
   return (await teamRequest<{ invitation: TeamInvitation }>(`/api/team/teams/${encodeURIComponent(teamID)}/invitations`, {
-    method: 'POST', body: { request_id: requestID(), expected_revision: expectedRevision, email },
+    method: 'POST', body: { request_id: requestID(), expected_revision: expectedRevision, email, role },
   })).invitation
 }
 
@@ -397,4 +397,8 @@ export async function createTeamWorkspace(input: CreateTeamWorkspaceInput): Prom
     }
   }
   return { team, warnings }
+}
+
+export async function changeTeamMemberRole(teamID: string, member: TeamMember, role: import('../types/team').TeamRole): Promise<TeamMember> {
+  return (await teamRequest<{ membership: TeamMember }>(`/api/team/teams/${encodeURIComponent(teamID)}/members/${encodeURIComponent(member.id)}/role`, {method:'PATCH',body:{request_id:requestID(),expected_revision:member.revision,role}})).membership
 }

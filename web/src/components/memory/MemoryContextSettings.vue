@@ -2,6 +2,12 @@
   <section class="memory-context-settings memory-config-card" data-testid="memory-context-settings">
     <h3>{{ t('memory.context.settingsTitle') }}</h3>
     <p class="hint">{{ t('memory.context.settingsHint') }}</p>
+    <div v-if="loadFailed" class="memory-notice is-error" role="alert" data-testid="context-settings-load-error">
+      <p>{{ t('workspace.load_failed') }}</p>
+      <button class="memory-button" :disabled="loading" @click="refresh">{{ t('common.retry') }}</button>
+    </div>
+    <p v-else-if="loading" role="status">{{ t('common.loading') }}</p>
+    <template v-else>
     <div v-for="row in settings" :key="row.settingId" class="row" :data-testid="`context-setting-${row.scopeKind}`">
       <span class="scope">{{ row.scopeKind }}:{{ row.scopeKey }}{{ row.agent ? `@${row.agent}` : '' }}</span>
       <span class="modes">
@@ -29,6 +35,7 @@
 			</span>
 			<span v-if="failed === 'initial'" class="error" data-testid="context-settings-create-error">{{ t('memory.context.casConflict') }}</span>
 		</div>
+    </template>
   </section>
 </template>
 
@@ -42,10 +49,20 @@ const { t } = useLocale()
 const settings = ref<ContextSettings[]>([])
 const busy = ref(false)
 const failed = ref('')
+const loading = ref(false)
+const loadFailed = ref(false)
 
 async function refresh(): Promise<void> {
-  const result = await listContextSettings()
-  settings.value = result.settings
+  loading.value = true
+  loadFailed.value = false
+  try {
+    const result = await listContextSettings()
+    settings.value = result.settings
+  } catch {
+    loadFailed.value = true
+  } finally {
+    loading.value = false
+  }
 }
 
 function setMode(row: ContextSettings, mode: 'off' | 'shadow' | 'enabled'): void {

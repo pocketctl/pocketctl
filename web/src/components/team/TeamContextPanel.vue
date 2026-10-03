@@ -1,58 +1,61 @@
 <template>
-  <aside ref="panel" class="context-panel" data-testid="team-context-panel" role="dialog" aria-modal="true" aria-label="共享 Context" tabindex="-1" @keydown.esc.stop.prevent="emit('close')" @keydown.tab="trapFocus">
-    <header><div><span>共享 Context</span><strong>{{ context ? `v${context.version}` : '未建立' }}</strong></div><button type="button" aria-label="关闭 Context" @click="$emit('close')">×</button></header>
+  <ActionList :title="t('workspace.shared_context')" :width="480" @close="emit('close')">
+    <div class="team-action-body" data-testid="team-context-panel">
+    <p class="panel-version">{{ context ? `v${context.version}` : t('workspace.not_created') }}</p>
     <div v-if="context" class="context-body">
-      <section><small>目标</small><p>{{ context.goal }}</p></section>
-      <section><small>共识</small><ul v-if="context.consensus.length"><li v-for="item in context.consensus" :key="item">{{ item }}</li></ul><p v-else>暂无</p></section>
-      <section><small>开放问题</small><ul v-if="context.open_questions.length"><li v-for="item in context.open_questions" :key="item">{{ item }}</li></ul><p v-else>暂无</p></section>
-      <section><small>引用</small>
+      <section><small> {{ t('workspace.context_goal') }} </small><p>{{ context.goal }}</p></section>
+      <section><small> {{ t('workspace.context_consensus') }} </small><ul v-if="context.consensus.length"><li v-for="item in context.consensus" :key="item">{{ item }}</li></ul><p v-else> {{ t('workspace.none_yet') }} </p></section>
+      <section><small> {{ t('workspace.open_questions') }} </small><ul v-if="context.open_questions.length"><li v-for="item in context.open_questions" :key="item">{{ item }}</li></ul><p v-else> {{ t('workspace.none_yet') }} </p></section>
+      <section><small> {{ t('workspace.references') }} </small>
         <div v-for="reference in context.references" :key="`${reference.source_kind}:${reference.source_id}:${reference.source_version}`" class="reference-row">
           <strong>{{ referenceLabel(reference.source_kind) }}</strong><code>{{ reference.source_id.slice(0, 8) }}@{{ reference.source_version.slice(0, 8) }}</code>
         </div>
-        <p v-if="!context.references.length">暂无</p>
+        <p v-if="!context.references.length"> {{ t('workspace.none_yet') }} </p>
       </section>
     </div>
-    <div v-else class="context-empty">此会话还没有 Context 快照。消息仍会按当前事件历史发送给 Agent。</div>
+    <div v-else class="context-empty"> {{ t('workspace.no_context_snapshot') }} </div>
     <form v-if="canEdit" class="context-editor" @submit.prevent="save">
-      <small>编辑快照</small>
-      <label>目标<textarea v-model="goal" rows="3" required /></label>
-      <label>共识（每行一条）<textarea v-model="consensusText" rows="3" /></label>
-      <label>开放问题（每行一条）<textarea v-model="questionsText" rows="3" /></label>
-      <section class="selected-references" data-testid="selected-context-references" aria-label="待发布引用">
-        <small>待发布引用 · {{ selected.length }}</small>
+      <small> {{ t('workspace.edit_snapshot') }} </small>
+      <label> {{ t('workspace.context_goal') }} <textarea v-model="goal" rows="3" required /></label>
+      <label> {{ t('workspace.consensus_lines') }} <textarea v-model="consensusText" rows="3" /></label>
+      <label> {{ t('workspace.question_lines') }} <textarea v-model="questionsText" rows="3" /></label>
+      <section class="selected-references" data-testid="selected-context-references" :aria-label="t('workspace.pending_references')">
+        <small>{{ t('workspace.pending_reference_count', {count:selected.length}) }}</small>
         <div v-for="(reference, index) in selected" :key="referenceKey(reference)" class="selected-reference" data-testid="selected-context-reference">
           <div class="reference-row">
             <strong>{{ referenceLabel(reference.source_kind) }}</strong>
             <p v-if="selectedLabels[referenceKey(reference)]">{{ selectedLabels[referenceKey(reference)] }}</p>
             <code>{{ reference.source_id }}@{{ reference.source_version }}</code>
           </div>
-          <button type="button" class="remove-reference" :aria-label="`移除${referenceLabel(reference.source_kind)}引用 ${reference.source_id}`" :disabled="busy" @click="removeReference(index)">移除</button>
+          <button type="button" class="remove-reference" :aria-label="t('workspace.reference_remove', {kind:referenceLabel(reference.source_kind), id:reference.source_id})" :disabled="busy" @click="removeReference(index)"> {{ t('memory.loadout.remove') }} </button>
         </div>
-        <p class="reference-hint">{{ selected.length ? '引用失效时，可移除对应项后再发布新版本。' : '暂无引用' }}</p>
+        <p class="reference-hint">{{ selected.length ? t('workspace.invalid_reference_hint') : t('workspace.no_references') }}</p>
       </section>
       <div v-if="binding?.access_state === 'available'" class="memory-picker">
-        <label>团队知识<input v-model="query" type="search" placeholder="搜索已发布 Claim…" @input="scheduleSearch" /></label>
+        <label> {{ t('workspace.team_knowledge') }} <input v-model="query" type="search" :placeholder="t('workspace.search_published_claims')" @input="scheduleSearch" /></label>
         <button v-for="option in options" :key="`${option.sourceId}:${option.sourceVersion}`" type="button" class="memory-option" @click="addReference(option)">
           <span>{{ option.label }}</span><code>{{ option.provenance }}</code>
         </button>
       </div>
-      <p v-else-if="binding" class="panel-error">当前成员无权读取绑定的团队 Memory。</p>
+      <p v-else-if="binding" class="panel-error"> {{ t('workspace.team_memory_denied') }} </p>
       <p v-if="error" class="panel-error" role="status">{{ error }}</p>
-      <button type="submit" class="save-context" :disabled="busy || !goal.trim()">{{ busy ? '保存中…' : '发布新版本' }}</button>
+      <button type="submit" class="save-context" :disabled="busy || !goal.trim()">{{ busy ? t('workspace.saving') : t('workspace.publish_version') }}</button>
     </form>
-  </aside>
+    </div>
+  </ActionList>
 </template>
 
 <script setup lang="ts">
+import { useLocale } from "../../composables/useLocale"
+const { t } = useLocale()
 import { computed, onMounted, ref, watch } from 'vue'
-import { usePanelFocus } from '../../composables/usePanelFocus'
+import ActionList from '../ActionList.vue'
 import { searchTeamContextClaimReferences, type TeamContextClaimReferenceOption } from '../../services/memoryClient'
 import { createTeamContext, getTeamMemoryBinding } from '../../services/teamClient'
 import type { TeamContextReference, TeamContextSnapshot, TeamMemoryBinding, TeamSession } from '../../types/team'
 
 const props = defineProps<{ context: TeamContextSnapshot | null; session: TeamSession; currentUserId: number; readOnly?: boolean }>()
 const emit = defineEmits<{ close: []; saved: [context: TeamContextSnapshot] }>()
-const { panel, trapFocus } = usePanelFocus()
 const goal = ref(''), consensusText = ref(''), questionsText = ref(''), query = ref('')
 const binding = ref<TeamMemoryBinding | null>(null), options = ref<TeamContextClaimReferenceOption[]>([])
 const selected = ref<TeamContextReference[]>([]), busy = ref(false), error = ref('')
@@ -77,7 +80,7 @@ onMounted(async () => {
 })
 function lines(value: string): string[] { return value.split('\n').map(item => item.trim()).filter(Boolean) }
 function referenceLabel(kind: TeamContextReference['source_kind']): string {
-  return ({ team_event: '共享事件', memory_claim: '团队 Claim', memory_evidence: '证据', wiki_section: 'Wiki 章节' })[kind]
+  return ({ team_event: t('workspace.shared_event'), memory_claim: t('workspace.team_claim'), memory_evidence: t('memory.evidence_title'), wiki_section: t('workspace.wiki_section') })[kind]
 }
 function referenceKey(reference: TeamContextReference): string {
   return `${reference.source_kind}:${reference.source_id}:${reference.source_version}`
@@ -94,7 +97,7 @@ function scheduleSearch(): void {
         binding.value!.installation_id, binding.value!.owner_scope_id, query.value.trim(), controller.signal,
       )
     } catch (failure) {
-      if (!(failure instanceof DOMException && failure.name === 'AbortError')) error.value = failure instanceof Error ? failure.message : '团队知识搜索失败'
+      if (!(failure instanceof DOMException && failure.name === 'AbortError')) error.value = failure instanceof Error ? failure.message : t('workspace.team_knowledge_search_failed')
     }
   }, 250)
 }
@@ -119,7 +122,7 @@ async function save(): Promise<void> {
       references: selected.value,
     })
     emit('saved', context)
-  } catch (failure) { error.value = failure instanceof Error ? failure.message : 'Context 保存失败' }
+  } catch (failure) { error.value = failure instanceof Error ? failure.message : t('workspace.context_save_failed') }
   finally { busy.value = false }
 }
 </script>
@@ -130,4 +133,8 @@ async function save(): Promise<void> {
 .selected-references { display: grid; gap: 6px; }.selected-references > small { color: var(--fg-secondary); font-size: 9px; }.selected-reference { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }.selected-reference .reference-row { flex: 1; min-width: 0; padding: 0; border: 0; }.selected-reference p { margin: 2px 0; color: var(--fg-secondary); font-size: 10px; line-height: 1.4; }.selected-reference code { overflow-wrap: anywhere; }.remove-reference { flex-shrink: 0; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--fg-secondary); background: var(--surface); font-size: 9px; cursor: pointer; }.remove-reference:disabled { opacity: .5; cursor: default; }.reference-hint { margin: 0; color: var(--fg-tertiary); font-size: 9px; line-height: 1.5; }
 @media (max-width: 900px) { .context-panel { position: absolute; inset: 62px 0 0 auto; z-index: 80; width: min(330px, 88vw); box-shadow: -12px 0 30px rgba(0,0,0,.18); } }
 .context-panel { position:fixed; inset:0 0 0 auto; z-index:110; width:470px; max-width:100vw; min-width:0; box-shadow:var(--shadow-lg); box-sizing:border-box; background:var(--bg); }.context-panel header { padding:20px 24px; min-height:70px; }.context-panel header span { font-size:14px; color:var(--fg); }.context-panel header strong { font-size:12px; }.context-panel :deep(p),.context-panel :deep(li) { font-size:12px; line-height:1.8; }
+</style>
+
+<style scoped>
+.team-action-body{min-width:0}.panel-version{margin:0 0 12px;color:var(--fg-tertiary);font-size:11px}.context-body,.context-editor,.run-body{padding:0}.team-action-body section{margin-bottom:16px}.team-action-body section>small{font:550 12px var(--font-body);color:var(--fg-secondary)}.team-action-body code{overflow-wrap:anywhere}.team-action-body .memory-option{max-width:100%}
 </style>

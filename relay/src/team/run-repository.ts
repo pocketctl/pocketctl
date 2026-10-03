@@ -127,7 +127,7 @@ export class TeamRunRepository {
     await requireTeamAccess(client, actorUserId, true)
     // Keep lifecycle and authorization stable until the mutation/receipt commits.
     const result = await client.query(
-      `SELECT session.* FROM collaboration_sessions session
+      `SELECT session.*, member.role AS actor_team_role FROM collaboration_sessions session
        JOIN collaboration_teams team ON team.team_id = session.team_id AND team.state = 'active'
        JOIN collaboration_team_memberships member ON member.team_id = session.team_id
          AND member.user_id = $2 AND member.state = 'active'
@@ -137,6 +137,7 @@ export class TeamRunRepository {
        FOR UPDATE OF session FOR SHARE OF team, member, participant`, [sessionId, actorUserId],
     )
     if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'shared session not found')
+    if (result.rows[0].actor_team_role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only team member')
     return result.rows[0]
   }
 

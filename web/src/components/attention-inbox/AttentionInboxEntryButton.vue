@@ -4,15 +4,22 @@
     type="button"
     :class="[
       'attention-entry-button',
-      { 'attention-entry-button--nav': variant === 'nav', 'has-attention': count > 0 },
+      { 'attention-entry-button--nav': variant === 'nav', 'attention-entry-button--bell': icon === 'bell', 'has-attention': count > 0 },
     ]"
     data-testid="attention-inbox-entry"
     :aria-label="ariaLabel"
     @click="openInbox"
   >
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 4h16v14H4z" />
-      <path d="M4 13h5l2 2h2l2-2h5" />
+      <template v-if="icon === 'bell'">
+        <path class="bell-body" d="M5 17h14l-2-4V9a5 5 0 0 0-10 0v4Z" />
+        <path d="M10 21h4" />
+        <circle v-if="count > 0" cx="18" cy="5" r="3.5" fill="currentColor" stroke="var(--surface)" stroke-width="2" />
+      </template>
+      <template v-else>
+        <path d="M4 4h16v14H4z" />
+        <path d="M4 13h5l2 2h2l2-2h5" />
+      </template>
     </svg>
     <span v-if="showLabel">{{ t('attention.title') }}</span>
     <b v-if="count > 0">{{ badge }}</b>
@@ -31,7 +38,8 @@ const props = withDefaults(defineProps<{
   store?: AttentionInboxStore
   showLabel?: boolean
   variant?: 'default' | 'nav'
-}>(), { showLabel: false, variant: 'default' })
+  icon?: 'inbox' | 'bell'
+}>(), { showLabel: false, variant: 'default', icon: 'inbox' })
 const store = props.store ?? useAttentionInbox()
 const router = useRouter()
 const { t } = useLocale()
@@ -67,6 +75,8 @@ watch([
 <style scoped>
 .attention-entry-button { position: relative; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border)); border-radius: var(--radius-full); color: var(--accent); background: var(--accent-muted); cursor: pointer; }
 .attention-entry-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.attention-entry-button--bell svg { width: 15px; height: 15px; }
+.attention-entry-button--bell.has-attention .bell-body { fill: currentColor; }
 .attention-entry-button > span { font-size: 11px; font-weight: 680; }
 .attention-entry-button b { display: grid; min-width: 18px; height: 18px; place-items: center; padding: 0 5px; border-radius: 99px; color: #1d1404; background: var(--warning); font-size: 9px; font-weight: 800; }
 .attention-entry-button--nav { width: 32px; height: 32px; min-width: 32px; min-height: 32px; overflow: visible; padding: 0; }

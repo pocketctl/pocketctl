@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { ref, computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { MemoryClaimDetail } from '../../types/memory'
@@ -32,12 +33,12 @@ const canConfirm = computed(() => selectedTarget.value !== '' && selectedEvidenc
     <p class="memory-governance-muted">{{ t('memory.governance.promotion.copyBoundary') }}</p>
     <label class="memory-promotion-target">
       {{ t('memory.governance.promotion.target') }}
-      <select v-model="selectedTarget">
+      <ActionSelect><select v-model="selectedTarget">
         <option value="" disabled>{{ t('memory.governance.promotion.selectTarget') }}</option>
         <option v-for="target in targets" :key="target.installation_id" :value="target.installation_id">
           {{ target.owner_scope_kind }} · {{ target.installation_id.slice(0, 8) }}
         </option>
-      </select>
+      </select></ActionSelect>
     </label>
     <fieldset class="memory-promotion-evidence">
       <legend>{{ t('memory.governance.promotion.evidence') }}</legend>

@@ -1,8 +1,12 @@
-import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import MobileSessionCard from '../MobileSessionCard.vue'
+import { useLocale } from '../../composables/useLocale'
+
+enableAutoUnmount(afterEach)
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
 const session = {
   session_id: 'session-1234',
@@ -22,6 +26,7 @@ const session = {
 
 describe('MobileSessionCard', () => {
   beforeEach(() => {
+    useLocale().setLocale('zh')
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
@@ -75,7 +80,7 @@ describe('MobileSessionCard', () => {
     })
 
     await wrapper.get('.mobile-session-card').trigger('pointerdown', { clientX: 10, clientY: 10 })
-    vi.advanceTimersByTime(460)
+    vi.advanceTimersByTime(560)
     await Promise.resolve()
 
     expect(wrapper.emitted('long-press')?.[0]?.[0]).toMatchObject({ agent: 'codex-desktop', status: 'exited' })
@@ -110,7 +115,7 @@ describe('MobileSessionCard', () => {
 
     const card = wrapper.get('.mobile-session-card')
     await card.trigger('pointerdown', { clientX: 10, clientY: 10 })
-    vi.advanceTimersByTime(460)
+    vi.advanceTimersByTime(560)
     await Promise.resolve()
     await card.trigger('pointerup', { clientX: 10, clientY: 10 })
     await card.trigger('click')
@@ -136,7 +141,7 @@ describe('MobileSessionCard', () => {
     const card = wrapper.get('.mobile-session-card')
     await card.trigger('pointerdown', { clientX: 10, clientY: 10 })
     await card.trigger('pointermove', { clientX: 30, clientY: 12 })
-    vi.advanceTimersByTime(460)
+    vi.advanceTimersByTime(560)
     await Promise.resolve()
     await card.trigger('pointerup', { clientX: 30, clientY: 12 })
 
@@ -144,20 +149,62 @@ describe('MobileSessionCard', () => {
     vi.useRealTimers()
   })
 
-  test('no longer carries swipe action buttons or clipboard feedback', () => {
-    const wrapper = mount(MobileSessionCard, {
-      props: {
-        session: { ...session, status: 'completed' },
-        effectiveStatus: 'completed',
-        relativeTime: '1 小时前',
-        expanded: false,
-      },
-    })
+  test('swiping reveals contextual actions, blocks accidental navigation and closes after pinning', async () => {
+    const wrapper = mount(MobileSessionCard, { props: { session, effectiveStatus:'running', relativeTime:'刚刚', expanded:false } })
+    const card = wrapper.get('.mobile-session-card')
+    expect(wrapper.get('.mobile-card-tray').attributes('inert')).toBeDefined()
+    await card.trigger('touchstart', { touches:[{ clientX:240, clientY:100 }] })
+    await card.trigger('touchmove', { touches:[{ clientX:100, clientY:103 }] })
+    await card.trigger('touchend', { changedTouches:[{ clientX:100, clientY:103 }] })
+    expect(wrapper.classes()).toContain('tray-open')
+    expect(wrapper.get('.mobile-card-tray').attributes('inert')).toBeUndefined()
+    expect(wrapper.find('.tray-delete').exists()).toBe(false)
+    await card.trigger('click')
+    expect(wrapper.emitted('open')).toBeUndefined()
+    await wrapper.get('.tray-pin').trigger('click')
+    expect(wrapper.emitted('pin')).toHaveLength(1)
+    expect(wrapper.classes()).not.toContain('tray-open')
+  })
 
-    expect(wrapper.find('.mobile-card-actions').exists()).toBe(false)
-    expect(wrapper.find('.mobile-action-pin').exists()).toBe(false)
-    expect(wrapper.find('.mobile-action-delete').exists()).toBe(false)
-    expect(wrapper.find('.mobile-copy-feedback').exists()).toBe(false)
+  test('archive hides pin and resume, keeps more and terminal delete, and supports keyboard actions', async () => {
+    const wrapper = mount(MobileSessionCard, { props: { session:{ ...session,status:'exited' }, effectiveStatus:'exited',relativeTime:'刚刚',expanded:false,archived:true } })
+    expect(wrapper.find('.tray-pin').exists()).toBe(false)
+    expect(wrapper.find('.mobile-resume').exists()).toBe(false)
+    expect(wrapper.find('.tray-delete').exists()).toBe(true)
+    await wrapper.get('.mobile-exit-card button').trigger('click')
+    expect(wrapper.emitted('show-children')).toHaveLength(1)
+    await wrapper.get('.mobile-session-card').trigger('keydown',{ key:'ArrowLeft' })
+    expect(wrapper.classes()).toContain('tray-open')
+    await wrapper.get('.tray-more').trigger('click')
+    expect(wrapper.emitted('long-press')?.[0][0]).toMatchObject({ session_id: session.session_id })
+  })
+
+  test('opening a second tray closes the first one', async () => {
+    const props = { session,effectiveStatus:'running',relativeTime:'刚刚',expanded:false }
+    const first = mount(MobileSessionCard,{ props })
+    const second = mount(MobileSessionCard,{ props:{ ...props,session:{ ...session,session_id:'second' } } })
+    await first.get('.mobile-session-card').trigger('keydown',{ key:'ArrowLeft' })
+    await second.get('.mobile-session-card').trigger('keydown',{ key:'ArrowLeft' })
+    expect(first.classes()).not.toContain('tray-open')
+    expect(second.classes()).toContain('tray-open')
+  })
+
+  test('long hold drags to a drop target instead of opening the context menu', async () => {
+    vi.useFakeTimers()
+    const target = document.createElement('div')
+    target.dataset.projectDrop = 'project'; target.dataset.daemonDrop = 'host'
+    vi.spyOn(document,'elementFromPoint').mockReturnValue(target)
+    const wrapper = mount(MobileSessionCard,{ props:{session:{...session,daemon_id:'host'},effectiveStatus:'running',relativeTime:'刚刚',expanded:false,reorderable:true} })
+    const card = wrapper.get('.mobile-session-card')
+    await card.trigger('touchstart',{touches:[{clientX:100,clientY:150}]})
+    vi.advanceTimersByTime(560)
+    await card.trigger('touchmove',{touches:[{clientX:110,clientY:220}]})
+    expect(wrapper.classes()).toContain('drag-placeholder')
+    expect(target.classList.contains('mobile-drop-active')).toBe(true)
+    await card.trigger('touchend')
+    expect(wrapper.emitted('drop')?.[0][0]).toBe(target)
+    expect(wrapper.emitted('long-press')).toBeUndefined()
+    expect(wrapper.classes()).not.toContain('drag-placeholder')
   })
 
   test('opens the session from the card and expands subagents independently', async () => {

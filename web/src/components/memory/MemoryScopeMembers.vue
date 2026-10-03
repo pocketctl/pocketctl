@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { useLocale } from '../../composables/useLocale'
 import type { MemoryScopeMember } from '../../types/memory'
 
@@ -31,10 +32,10 @@ const ROLE_OPTIONS = ['reader', 'contributor', 'reviewer', 'publisher', 'policy_
         <tr v-for="member in members" :key="member.membership_id">
           <td>{{ member.display_label }}</td>
           <td>
-            <select v-if="canManage" :value="member.roles[0]"
+            <ActionSelect v-if="canManage"><select :value="member.roles[0]"
                     @change="emit('changeRole', member.membership_id, [($event.target as HTMLSelectElement).value])">
               <option v-for="role in ROLE_OPTIONS" :key="role" :value="role">{{ role }}</option>
-            </select>
+            </select></ActionSelect>
             <template v-else>{{ member.roles.join(', ') }}</template>
           </td>
           <td>{{ member.state }}</td>

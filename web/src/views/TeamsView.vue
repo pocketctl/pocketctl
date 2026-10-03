@@ -1,34 +1,34 @@
 <template>
-  <div class="teams-view" data-testid="teams-view">
-    <header class="page-head">
-      <div><p class="overline">TEAM / {{ selectedTeam?.name || t('team.title') }}</p><h1>{{ t('team.title') }}</h1><p>{{ t('team.workspace_copy') }}</p></div>
-      <button v-if="capabilities?.writes_enabled" type="button" class="btn btn-primary" data-testid="team-create-open" @click="openCreate">+ {{ t('team.create') }}</button>
-    </header>
+  <div class="teams-view design-surface content teams-page" data-testid="teams-view">
+    <div class="page-tools"><button v-if="capabilities?.writes_enabled" type="button" class="btn primary" data-testid="team-create-open" @click="openCreate"><WorkspaceIcon name="plus" class="icon small" />{{ t('team.create') }}</button></div>
 
     <div v-if="capabilities && !capabilities.collaboration" class="capability-banner" data-testid="team-disabled">{{ t('team.disabled_copy') }}</div>
     <div v-if="warning" class="capability-banner warning" role="status">{{ warning }}</div>
     <div v-if="loading" class="workspace-empty">{{ t('common.loading') }}</div>
     <div v-else-if="error && !teams.length" class="workspace-empty"><strong>{{ t('team.load_failed') }}</strong><span>{{ error }}</span><button type="button" class="btn btn-secondary" @click="loadTeams">{{ t('team.retry') }}</button></div>
     <template v-else-if="capabilities?.collaboration">
-      <div v-if="teams.length" class="team-switcher" role="list" :aria-label="t('team.switcher')">
-        <button v-for="team in teams" :key="team.id" type="button" :class="{ active: team.id === selectedTeamID }" :data-team-id="team.id" @click="selectTeam(team.id)">{{ team.name }}</button>
-      </div>
+      <div v-if="teams.length" class="row team-picker-row"><ActionSelect><select v-model="selectedTeamID" :aria-label="t('team.switcher')"><option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></ActionSelect><span class="sub">{{ t(isTeamAdmin ? 'replica.team_admin_hint' : 'replica.team_member_hint') }}</span></div>
 
       <div v-if="selectedTeam" class="team-workspace">
-        <section class="team-overview">
-          <div><h2>{{ selectedTeam.name }}</h2><p>{{ selectedTeam.description || t('team.workspace_copy') }}</p></div>
-          <div class="summary-badges"><span>{{ members.length || selectedTeam.member_count }} {{ t('team.people_unit') }}</span><span>{{ activeOffers.length }} Agents</span><span class="online">{{ onlineOfferCount }} {{ t('team.online') }}</span></div>
+        <section class="team-overview team-summary card">
+          <span class="team-mark"><WorkspaceIcon name="teams" class="icon" /></span><div class="grow"><h2>{{ selectedTeam.name }}</h2><p>{{ selectedTeam.description || t('team.workspace_copy') }}</p></div>
+          <div class="summary-badges team-meta"><span><strong>{{ members.length || selectedTeam.member_count }}</strong> {{ t('team.people_unit') }}</span><span><strong>{{ activeOffers.length }}</strong> Agents</span><span class="online"><strong>{{ onlineOfferCount }}</strong> {{ t('team.online') }}</span></div>
         </section>
-        <div class="team-tabs" role="tablist" :aria-label="t('team.workspace_tabs')">
-          <button v-for="tab in tabs" :id="`team-tab-${tab}`" :key="tab" type="button" role="tab" :aria-selected="activeTab === tab" :class="{ active: activeTab === tab }" :data-testid="`team-tab-${tab}`" @click="setTab(tab)">{{ t(`team.tab.${tab}`) }}</button>
+        <div class="team-tabs tabs" role="tablist" :aria-label="t('team.workspace_tabs')">
+          <button v-for="tab in tabs" :id="`team-tab-${tab}`" :key="tab" type="button" role="tab" :aria-selected="activeTab === tab" :class="{ active: activeTab === tab }" :data-testid="`team-tab-${tab}`" @click="setTab(tab)">{{ t(tab==='sessions'?'replica.shared_sessions':`team.tab.${tab}`) }}</button>
         </div>
 
         <div v-if="workspaceLoading" class="workspace-empty compact">{{ t('common.loading') }}</div>
-        <TeamTasksPanel v-else-if="activeTab === 'tasks'" :key="selectedTeam.id" :team-id="selectedTeam.id" :team-creator-id="selectedTeam.creator_user_id" :current-user-id="currentUserID" :writes-enabled="capabilities?.writes_enabled === true" :members="members" :sessions="sessions" @create-session="newSessionTaskID = $event; newSessionOpen = true" />
+        <TeamTasksPanel v-else-if="activeTab === 'tasks'" :key="selectedTeam.id" :team-id="selectedTeam.id" :team-creator-id="selectedTeam.creator_user_id" :current-user-id="currentUserID" :writes-enabled="teamWritesEnabled" :members="members" :sessions="sessions" @create-session="newSessionTaskID = $event; newSessionOpen = true" />
         <section v-else-if="activeTab === 'sessions'" class="sessions-panel" data-testid="team-sessions-panel">
-          <div class="panel-intro"><span>围绕任务，把人与 Agent 带到同一条讨论里。</span><button v-if="capabilities?.writes_enabled" class="btn btn-primary" @click="newSessionTaskID = undefined; newSessionOpen = true">+ 新建共享会话</button></div>
-          <div v-if="sessions.length" class="session-list">
-            <RouterLink v-for="session in sessions" :key="session.id" :to="{ name: 'team-session', params: { teamId: selectedTeam.id, id: session.id } }" class="team-session-link"><div><strong>{{ session.title }}</strong><span>{{ t(`team.session_state.${session.state}`) }} · {{ session.participants.length }} {{ t('team.people_unit') }} · {{ session.agent_bindings.length }} Agents</span></div><small>{{ members.find(member => member.user_id === session.creator_user_id)?.display_label || '成员' }} 创建 <span class="session-open">打开 →</span></small></RouterLink>
+          <div class="panel-intro module-intro"><div><h2>{{ t('replica.shared_sessions') }}</h2><p>{{ t('replica.team_sessions_copy') }}</p></div><button v-if="teamWritesEnabled" class="btn primary" @click="newSessionTaskID = undefined; newSessionOpen = true"><WorkspaceIcon name="plus" class="icon small" />{{ t('workspace.new_shared_session') }}</button></div>
+          <div v-if="sessions.length" class="session-list card">
+            <RouterLink v-for="session in sessions" :key="session.id" :to="{ name: 'team-session', params: { teamId: selectedTeam.id, id: session.id } }" class="team-session-link setting-row">
+              <span class="state-icon blue"><WorkspaceIcon name="sessions" class="icon" /></span>
+              <div class="grow"><strong>{{ session.title }}</strong><p>{{ t('replica.team_session_meta', { creator: members.find(member => member.user_id === session.creator_user_id)?.display_label || t('team.member'), participants: session.participants.filter(member => member.state === 'active').length, agents: session.agent_bindings.filter(binding => binding.state === 'active').length }) }}</p></div>
+              <span class="badge" :class="session.state==='active'?'green':session.state==='paused'?'amber':''">{{ t(`team.session_state.${session.state}`) }}</span>
+              <span class="icon-btn flat session-open" :aria-label="t('replica.open_shared_session')"><WorkspaceIcon name="chevron" class="icon small" /></span>
+            </RouterLink>
           </div>
           <div v-else class="workspace-empty compact"><strong>{{ t('team.sessions_empty') }}</strong><span>{{ t('team.sessions_empty_copy') }}</span></div>
         </section>
@@ -40,7 +40,7 @@
           :invitations="invitations"
           :candidates="candidates"
           :current-user-id="currentUserID"
-          :writes-enabled="capabilities?.writes_enabled === true"
+          :writes-enabled="teamWritesEnabled"
           @refresh="loadWorkspace"
           @removed="handleTeamRemoved"
         />
@@ -52,13 +52,15 @@
       </div>
     </template>
 
-    <TeamSessionCreateDialog v-if="newSessionOpen && selectedTeam" :team-id="selectedTeam.id" :task-id="newSessionTaskID" @close="newSessionOpen = false" />
+    <TeamSessionCreateDialog v-if="newSessionOpen && selectedTeam && teamWritesEnabled" :team-id="selectedTeam.id" :task-id="newSessionTaskID" @close="newSessionOpen = false" />
     <TeamCreateDialog :open="createOpen" :candidates="createCandidates" :candidates-loading="createCandidatesLoading" :busy="creating" :error="createError" @close="createOpen = false" @submit="submitCreate" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import ActionSelect from '../components/ActionSelect.vue'
+import WorkspaceIcon from '../components/WorkspaceIcon.vue'
+import { computed, onMounted, ref, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TeamSessionCreateDialog from '../components/team/TeamSessionCreateDialog.vue'
 import TeamCreateDialog from '../components/team/TeamCreateDialog.vue'
@@ -83,6 +85,8 @@ import type { TeamAgentCandidate, TeamAgentOffer, TeamCapabilities, TeamInvitati
 const newSessionOpen = ref(false), newSessionTaskID = ref<string>()
 const tabs = ['tasks', 'sessions', 'members'] as const
 type TeamTab = typeof tabs[number]
+const triggerTeamCreate=inject<{value:number}>('triggerTeamCreate',{value:0})
+watch(()=>triggerTeamCreate.value,value=>{if(value>0 && capabilities.value?.writes_enabled)void openCreate()})
 const route = useRoute(), router = useRouter(), { user } = useAuth(), { t } = useLocale()
 const capabilities = ref<TeamCapabilities | null>(null), teams = ref<TeamSummary[]>([]), selectedTeamID = ref(''), activeTab = ref<TeamTab>('tasks')
 const members = ref<TeamMember[]>([]), offers = ref<TeamAgentOffer[]>([]), invitations = ref<TeamInvitation[]>([]), candidates = ref<TeamAgentCandidate[]>([]), sessions = ref<TeamSessionSummary[]>([])
@@ -90,6 +94,8 @@ const loading = ref(true), workspaceLoading = ref(false), error = ref(''), warni
 let workspaceGeneration = 0
 const currentUserID = computed(() => user.value?.id ?? 0)
 const selectedTeam = computed(() => teams.value.find(team => team.id === selectedTeamID.value) ?? null)
+const teamWritesEnabled=computed(()=>capabilities.value?.writes_enabled===true && !workspaceLoading.value && members.value.find(member=>member.user_id===currentUserID.value)?.role!=='viewer')
+const isTeamAdmin = computed(() => selectedTeam.value?.creator_user_id === currentUserID.value || members.value.find(member => member.user_id === currentUserID.value)?.role === 'admin')
 const activeOffers = computed(() => offers.value.filter(offer => offer.state === 'active'))
 const onlineOfferCount = computed(() => activeOffers.value.filter(offer => offer.online).length)
 function message(failure: unknown): string { return failure instanceof Error ? failure.message : t('common.error') }
@@ -120,8 +126,11 @@ async function loadWorkspace(): Promise<void> {
       getTeam(teamID), listTeamMembers(teamID), listTeamAgentOffers(teamID), canManageInvitations ? listTeamInvitations(teamID) : Promise.resolve([]), listTeamAgentCandidates(teamID), listTeamSessions(teamID),
     ])
     if (generation !== workspaceGeneration || selectedTeamID.value !== teamID) return
+    const managedInvitations = !canManageInvitations && nextMembers.find(member => member.user_id === currentUserID.value)?.role === 'admin'
+      ? await listTeamInvitations(teamID) : nextInvitations
+    if (generation !== workspaceGeneration || selectedTeamID.value !== teamID) return
     teams.value = teams.value.map(current => current.id === team.id ? team : current)
-    members.value = nextMembers; offers.value = nextOffers; invitations.value = nextInvitations; candidates.value = nextCandidates; sessions.value = nextSessions
+    members.value = nextMembers; offers.value = nextOffers; invitations.value = managedInvitations; candidates.value = nextCandidates; sessions.value = nextSessions
   } catch (failure) { if (generation === workspaceGeneration) error.value = message(failure) }
   finally { if (generation === workspaceGeneration) workspaceLoading.value = false }
 }
@@ -178,6 +187,6 @@ onMounted(() => {
 :deep(.btn-primary) { color:var(--bg-secondary); background:var(--accent); border-color:var(--accent); }
 :deep(.btn:hover) { border-color:var(--fg-tertiary); }:deep(.btn-primary:hover) { background:var(--accent); border-color:var(--accent); }
 @media(max-width:1024px) { .teams-view { padding:28px 24px; } }
-@media(max-width:768px) { .teams-view { padding:75px 18px 35px; }.page-head h1 { font-size:21px; }.team-overview { flex-direction:row; align-items:center; }.panel-intro { flex-wrap:wrap; } }
+@media(max-width:768px) { .teams-view { padding:12px 10px 28px; }.page-head h1 { font-size:21px; }.team-overview { flex-direction:row; align-items:center; }.panel-intro { flex-wrap:wrap; } }
 .panel-intro { font-size:14px; align-items:center; }.session-list { padding:20px; border-radius:9px; }.team-session-link { padding:16px 0; min-height:0; }.session-list strong { font-size:13px; font-weight:550; }.session-list span,.session-list small { font:11px var(--font-body); line-height:1.65; }.session-open { display:inline-block; margin-left:16px; color:var(--accent)!important; }
 </style>

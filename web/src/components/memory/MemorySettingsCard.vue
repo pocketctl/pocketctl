@@ -7,25 +7,17 @@
         <article class="memory-setting-card">
           <span class="memory-setting-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5"/></svg></span>
           <div class="memory-setting-copy"><strong>{{ t('memory.extraction_mode') }}</strong><span>{{ t('memory.extraction_mode_copy') }}</span></div>
-          <div class="memory-mode-segments" data-testid="memory-extraction-segments" role="radiogroup" :aria-label="t('memory.extraction_mode')">
-            <button v-for="mode in modes" :key="mode" type="button" role="radio" :aria-checked="extractionMode === mode"
-              :class="{ active: extractionMode === mode }" :disabled="busy || (mode !== 'off' && !extractionReady)" @click="extractionMode = mode">{{ mode }}</button>
-          </div>
-          <select v-model="extractionMode" class="memory-native-select" aria-hidden="true" tabindex="-1" :disabled="busy" data-testid="memory-extraction-mode">
+          <ActionSelect><select v-model="extractionMode" :aria-label="t('memory.extraction_mode')" :disabled="busy" data-testid="memory-extraction-mode">
             <option value="off">off</option><option value="shadow" :disabled="!extractionReady">shadow</option><option value="enabled" :disabled="!extractionReady">enabled</option>
-          </select>
+          </select></ActionSelect>
         </article>
 
         <article class="memory-setting-card">
           <span class="memory-setting-icon is-violet" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.2 3.8 4.8 3.8 8S14.5 17.8 12 20c-2.5-2.2-3.8-4.8-3.8-8S9.5 6.2 12 4z"/></svg></span>
           <div class="memory-setting-copy"><strong>{{ t('memory.embedding_mode') }}</strong><span>{{ t('memory.embedding_mode_copy') }}</span></div>
-          <div class="memory-mode-segments" data-testid="memory-embedding-segments" role="radiogroup" :aria-label="t('memory.embedding_mode')">
-            <button v-for="mode in modes" :key="mode" type="button" role="radio" :aria-checked="embeddingMode === mode"
-              :class="{ active: embeddingMode === mode }" :disabled="busy || (mode !== 'off' && !embeddingReady)" @click="embeddingMode = mode">{{ mode }}</button>
-          </div>
-          <select v-model="embeddingMode" class="memory-native-select" aria-hidden="true" tabindex="-1" :disabled="busy" data-testid="memory-embedding-mode">
+          <ActionSelect><select v-model="embeddingMode" :aria-label="t('memory.embedding_mode')" :disabled="busy" data-testid="memory-embedding-mode">
             <option value="off">off</option><option value="shadow" :disabled="!embeddingReady">shadow</option><option value="enabled" :disabled="!embeddingReady">enabled</option>
-          </select>
+          </select></ActionSelect>
         </article>
 
         <div v-if="!extractionReady || !embeddingReady" class="memory-notice is-warning" data-testid="memory-adapter-hint">{{ t('memory.adapter_not_configured') }}</div>
@@ -74,6 +66,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import ActionSelect from '../ActionSelect.vue'
 import { useLocale } from '../../composables/useLocale'
 import { getMemorySettings, patchMemorySettings } from '../../services/memoryClient'
 import type { MemoryFeatureSettings } from '../../types/memory'

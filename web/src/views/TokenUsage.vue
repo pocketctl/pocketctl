@@ -1,20 +1,19 @@
 <template>
-  <div class="page-wrap">
-    <div class="page-header">
+  <div class="page-wrap design-surface content tokens-page">
+    <div class="page-header page-tools">
       <div>
-        <h2 class="page-title">{{ t('token.title') }}</h2>
         <div class="page-subtitle">{{ t('token.recent_days', { n: dailySeries.length, host: hostLabel }) }}</div>
       </div>
       <div class="host-select-wrap">
-        <button class="host-select-btn" @click="hostMenuOpen = !hostMenuOpen">
+        <button ref="hostTrigger" class="host-select-btn" :aria-expanded="hostMenuOpen" @click="hostMenuOpen = !hostMenuOpen">
           {{ hostLabel }} <span class="chevron">▾</span>
         </button>
-        <div class="host-select-menu" :class="{ open: hostMenuOpen }">
-          <button :class="{ active: selectedHost === 'all' }" @click="selectHost('all')">{{ t('token.all_hosts') }}</button>
-          <button v-for="d in byDaemon" :key="d.daemon_id" :class="{ active: selectedHost === d.daemon_id }" @click="selectHost(d.daemon_id)">
-            {{ d.alias || d.hostname || d.daemon_id.slice(0, 8) }}
+        <ActionList v-if="hostMenuOpen" :anchor="hostTrigger" :title="t('token.host')" @close="hostMenuOpen = false">
+          <button class="action-item" :class="{ selected: selectedHost === 'all' }" @click="selectHost('all')">{{ t('token.all_hosts') }}<WorkspaceIcon v-if="selectedHost === 'all'" name="check" class="host-check" /></button>
+          <button v-for="d in byDaemon" :key="d.daemon_id" class="action-item" :class="{ selected: selectedHost === d.daemon_id }" @click="selectHost(d.daemon_id)">
+            {{ d.alias || d.hostname || d.daemon_id.slice(0, 8) }}<WorkspaceIcon v-if="selectedHost === d.daemon_id" name="check" class="host-check" />
           </button>
-        </div>
+        </ActionList>
       </div>
     </div>
 
@@ -32,27 +31,17 @@
 
     <template v-if="!error">
 
-    <div class="token-summary">
-      <div class="tk-item"><div class="tk-num">{{ fmt(totalTokens) }}</div><div class="tk-label">{{ t('token.total') }} <span class="tk-sub" :title="t('token.incl_subagent')">·{{ t('token.incl_subagent_short') }}</span></div></div>
-      <div class="tk-item"><div class="tk-num">{{ fmt(summary.today) }}</div><div class="tk-label">{{ t('token.today') }}</div></div>
-      <div class="tk-item"><div class="tk-num">{{ fmt(summary.thisWeek) }}</div><div class="tk-label">{{ t('token.last_7d') }}</div></div>
-      <div class="tk-item"><div class="tk-num">{{ fmt(summary.thisMonth) }}</div><div class="tk-label">{{ t('token.last_30d') }}</div></div>
+    <div class="metrics token-summary">
+      <WorkspaceMetric :label="t('token.total')" :value="fmt(totalTokens)" :foot="t('token.incl_subagent')" icon="tokens" />
+      <WorkspaceMetric :label="t('token.today')" :value="fmt(summary.today)" :foot="t('replica.in_out',{input:fmt(todayInput),output:fmt(todayOutput)})" icon="clock" />
+      <WorkspaceMetric :label="t('token.last_7d')" :value="fmt(summary.thisWeek)" :foot="t('replica.last_week')" icon="tokens" />
+      <WorkspaceMetric :label="t('token.last_30d')" :value="fmt(last30Days)" :foot="t('replica.last_month')" icon="tokens" />
     </div>
-
-    <div class="metric-grid">
-      <div class="metric-card"><div class="mc-label">{{ t('token.input') }}</div><div class="mc-value">{{ fmt(totalInput) }}</div><div class="mc-sub">{{ t('token.with_cache', { n: fmt(totalCache) }) }}</div></div>
-      <div class="metric-card"><div class="mc-label">{{ t('token.output') }}</div><div class="mc-value">{{ fmt(totalOutput) }}</div><div class="mc-sub">{{ t('token.per_request', { n: fmt(avgOutputPerReq) }) }}</div></div>
-      <div class="metric-card"><div class="mc-label">{{ t('token.cache') }}</div><div class="mc-value">{{ fmt(totalCache) }}</div><div class="mc-sub">{{ t('token.cache_rate', { n: cacheRate }) }}</div></div>
-      <div class="metric-card"><div class="mc-label">{{ t('token.requests') }}</div><div class="mc-value">{{ fmt(totalRequests) }}</div><div class="mc-sub">{{ t('token.daily_avg', { n: fmt(dailyAvgReq) }) }}</div></div>
-      <div class="metric-card"><div class="mc-label">{{ t('token.hosts_count') }}</div><div class="mc-value">{{ byDaemon.length }}</div><div class="mc-sub">{{ t('token.hosts_usage') }}</div></div>
-      <div class="metric-card"><div class="mc-label">{{ t('token.top_model') }}</div><div class="mc-value">{{ topModel?.model || '—' }}</div><div class="mc-sub">{{ t('token.share_pct', { n: topModel?.pct || 0 }) }}</div></div>
-    </div>
-
-    <div class="chart-section">
-      <div class="chart-section-title">{{ t('token.daily_chart') }}
-        <div class="chart-section-legend"><span class="le-dot" style="background:var(--accent);opacity:0.7;"></span> {{ t('token.input') }} <span class="le-dot" style="background:var(--success);opacity:0.7;"></span> {{ t('token.output') }}</div>
+    <div class="chart-section card sx-usage-chart">
+      <div class="chart-section-title card-head"><h3>{{ t('replica.daily_usage') }}</h3>
+        <div class="chart-section-legend"><span class="le-dot" style="background:var(--accent);opacity:0.7;"></span> {{ t('token.input') }} <span class="le-dot" style="background:#a0b6ec;opacity:0.7;"></span> {{ t('token.output') }}</div><div class="segments"><button v-for="days in [14,30]" :key="days" :class="{active:chartDays===days}" @click="chartDays=days">{{ t('replica.days',{count:days}) }}</button></div>
       </div>
-      <div class="chart-container">
+      <div class="chart-container card-body">
         <div class="bar-chart">
           <div v-for="d in barData" :key="d.date" class="bar-day" @mouseleave="tooltip = null">
             <div class="bar-col output" :style="{ height: barHeight(d.output) + 'px' }"
@@ -67,59 +56,20 @@
       </div>
     </div>
 
-    <div class="two-col">
-      <div class="chart-section">
-        <div class="chart-section-title">{{ t('token.model_dist') }}</div>
-        <div class="chart-container">
-          <div class="donut-wrap">
-            <div class="donut-ring" :style="{ background: donutGradient }">
-              <div class="donut-center"><div class="dc-total">{{ fmt(donutTotal) }}</div><div class="dc-label">{{ t('token.token_total') }}</div></div>
-            </div>
-            <div class="donut-legend">
-              <div v-for="(m, i) in topModels" :key="m.model" class="dl-item">
-                <span class="dl-swatch" :style="{ background: rankColor(i) }"></span>{{ m.model }} {{ m.pct }}%
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="chart-section">
-        <div class="chart-section-title">{{ t('token.heatmap_title') }}</div>
-        <div class="chart-container">
-          <div class="heatmap-legend-bar"><span class="hm-label">{{ t('token.less') }}</span><div class="hm-gradient"><span></span><span></span><span></span><span></span><span></span></div><span class="hm-label">{{ t('token.more') }}</span></div>
-          <div class="heatmap-wrap" @mouseleave="tooltip = null">
-            <div v-for="col in heatmapCols" :key="col.key" class="heatmap-col">
-              <div v-for="cell in col.cells" :key="cell.date || cell.key"
-                   class="heatmap-cell" :class="cell.level ? 'l' + cell.level : ''"
-                   :data-date="cell.date || null"
-                   @mouseenter="cell.date && showTooltip($event, heatmapCellData(cell))"></div>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div class="equal-cols reference-distributions">
+      <section class="card"><header class="card-head"><h3>{{ t('replica.agent_distribution') }}</h3><span class="sub">{{ t('token.account_session_totals') }}</span></header><div class="card-body row distribution-body"><div class="donut" :style="{background:agentGradient}"><div class="donut-label">{{ fmt(agentTotal) }}<small>{{ t('token.token_total') }}</small></div></div><div class="stack"><div v-for="(agent,index) in agentDistribution" :key="agent.name" class="row between"><span class="sub">{{ agent.name }}</span><span class="mono">{{ agent.pct }}%</span></div><span v-if="!agentDistribution.length" class="sub">{{ t('token.empty') }}</span></div></div></section>
+      <section class="card"><header class="card-head"><h3>{{ t('replica.host_distribution') }}</h3><RouterLink class="text-btn" to="/hosts">{{ t('dashboard.my_hosts') }}<WorkspaceIcon name="chevron" class="icon small" /></RouterLink></header><div class="card-body bar-stack"><div v-for="host in byDaemon" :key="host.daemon_id" class="bar-line"><button class="text-btn" @click="selectHost(host.daemon_id)">{{ host.alias || host.hostname || host.daemon_id.slice(0,8) }}</button><div class="progress-track"><span :style="{width:(totalTokens?host.total/totalTokens*100:0)+'%'}" /></div><span class="mono faint">{{ fmt(host.total) }}</span></div><span v-if="!byDaemon.length" class="sub">{{ t('token.empty') }}</span></div></section>
     </div>
-
+    <div class="section-head"><h2>{{ t('replica.session_usage') }}</h2><label class="search"><WorkspaceIcon name="search" class="icon small" /><input v-model="sessionSearch" :placeholder="t('workspace.search_sessions')" /></label></div>
+    <p v-if="partialSessions" class="notice amber">{{ t('replica.sessions_partial') }}</p>
     <div class="chart-section">
-      <div class="chart-section-title">{{ selectedHost === 'all' ? t('token.host_dim') : t('token.session_detail') }}</div>
-      <div v-if="selectedHost === 'all'" class="usage-table">
-        <div class="usage-table-header"><span>{{ t('token.host') }}</span><span>{{ t('token.input') }}</span><span>{{ t('token.output') }}</span><span>{{ t('token.cache') }}</span><span>{{ t('token.requests') }}</span><span style="text-align:right;">{{ t('token.amount') }}</span></div>
-        <div v-for="h in byDaemon" :key="h.daemon_id" class="usage-table-row">
-          <span class="ut-host">{{ h.alias || h.hostname || h.daemon_id.slice(0, 8) }}</span>
-          <span class="ut-num">{{ fmt(h.input) }}</span><span class="ut-num">{{ fmt(h.output) }}</span>
-          <span class="ut-num">{{ fmt(h.cache_read) }}</span><span class="ut-num">{{ fmt(h.requests) }}</span>
-          <span class="ut-total" style="text-align:right;">{{ fmt(h.total) }}</span>
-        </div>
-        <div v-if="!byDaemon.length" class="st-empty">{{ t('token.empty') }}</div>
-      </div>
-      <div v-else class="session-table">
-        <div class="session-table-header"><span>{{ t('token.session') }}</span><span>{{ t('token.model') }}</span><span>{{ t('token.amount') }}</span><span>{{ t('token.in_out') }}</span><span style="text-align:right;">{{ t('token.time') }}</span></div>
+
+      <div class="session-table">
+        <div class="session-table-header"><span>{{ t('token.session') }}</span><span>Agent</span><span>{{ t('dashboard.column_status') }}</span><span>{{ t('token.amount') }}</span><span>{{ t('replica.last_activity') }}</span></div>
         <template v-for="s in pagedSessions" :key="s.session_id">
           <div class="session-row" :class="{ expanded: expanded === s.session_id }" @click="toggleSession(s)">
-            <span class="st-name"><span class="st-expand">▶</span>{{ s.title || s.session_id.slice(0, 8) }}<AgentBadge :agent="s.agent_type" size="sm" /></span>
-            <span class="st-num"><span class="st-model-dot" :style="{ background: modelColor(s.model) }"></span>{{ s.model || '—' }}</span>
-            <span class="st-total">{{ fmt(s.total_tokens) }}</span>
-            <span class="st-num">{{ fmt(s.tok_input) }} / {{ fmt(s.tok_output) }}</span>
-            <span class="st-num" style="text-align:right;">{{ formatDate(s.created_at) }}</span>
+            <span class="st-name"><span class="st-expand">▶</span>{{ s.title || s.session_id.slice(0, 8) }}</span>
+            <span><AgentBadge :agent="s.agent_type" size="sm" /></span><span><span class="badge" :class="s.status==='running'?'green':''">{{ statusLabel(s.status) }}</span></span><span class="st-total mono">{{ fmt(s.total_tokens) }}</span><span class="st-num">{{ formatDate(s.created_at) }}</span>
           </div>
           <div v-if="expanded === s.session_id" class="session-expand-row open">
             <div v-if="trendArchived" class="se-label" style="color:var(--fg-tertiary);">{{ t('token.archived') }}</div>
@@ -154,14 +104,13 @@
             </template>
           </div>
         </template>
-        <div v-if="!sessions.length" class="st-empty">{{ t('token.empty_host') }}</div>
-      </div>
-      <div v-if="selectedHost !== 'all' && (totalPages > 1 || pageSize < sessions.length)" class="sess-pagination">
-        <span class="page-total">{{ t('dashboard.page_total', { count: sessions.length }) }}</span>
+        <div v-if="!searchedSessions.length" class="st-empty">{{ t('token.empty_host') }}</div>
+      <div v-if="searchedSessions.length" class="sess-pagination">
+        <span class="page-total">{{ t('dashboard.page_total', { count: sessionCount }) }}</span>
         <span class="page-sep">·</span>
-        <select v-model.number="pageSize" class="page-size-select" @change="currentPage = 1">
+        <ActionSelect><select v-model.number="pageSize" class="page-size-select" :aria-label="t('dashboard.page_size')" @change="currentPage = 1">
           <option v-for="n in pageSizes" :key="n" :value="n">{{ n }} {{ t('dashboard.page_size_unit') }}</option>
-        </select>
+        </select></ActionSelect>
         <div class="page-controls">
           <button class="st-page-btn" :disabled="currentPage === 1" @click="goPage(1)" :title="t('dashboard.page_first')">«</button>
           <button class="st-page-btn" :disabled="currentPage === 1" @click="goPage(currentPage - 1)">‹</button>
@@ -170,8 +119,61 @@
           <button class="st-page-btn" :disabled="currentPage === totalPages" @click="goPage(totalPages)" :title="t('dashboard.page_last')">»</button>
         </div>
       </div>
+      </div>
     </div>
 
+    <details class="reference-token-details"><summary>{{ t('replica.more_analytics') }}</summary>      <div v-if="selectedHost === 'all'" class="usage-table">
+        <div class="usage-table-header"><span>{{ t('token.host') }}</span><span>{{ t('token.input') }}</span><span>{{ t('token.output') }}</span><span>{{ t('token.cache') }}</span><span>{{ t('token.requests') }}</span><span style="text-align:right;">{{ t('token.amount') }}</span></div>
+        <div v-for="h in byDaemon" :key="h.daemon_id" class="usage-table-row">
+          <span class="ut-host">{{ h.alias || h.hostname || h.daemon_id.slice(0, 8) }}</span>
+          <span class="ut-num">{{ fmt(h.input) }}</span><span class="ut-num">{{ fmt(h.output) }}</span>
+          <span class="ut-num">{{ fmt(h.cache_read) }}</span><span class="ut-num">{{ fmt(h.requests) }}</span>
+          <span class="ut-total" style="text-align:right;">{{ fmt(h.total) }}</span>
+        </div>
+        <div v-if="!byDaemon.length" class="st-empty">{{ t('token.empty') }}</div>
+      </div>
+    <div class="metric-grid">
+      <div class="metric-card"><div class="mc-label">{{ t('token.input') }}</div><div class="mc-value">{{ fmt(totalInput) }}</div><div class="mc-sub">{{ t('token.with_cache', { n: fmt(totalCache) }) }}</div></div>
+      <div class="metric-card"><div class="mc-label">{{ t('token.output') }}</div><div class="mc-value">{{ fmt(totalOutput) }}</div><div class="mc-sub">{{ t('token.per_request', { n: fmt(avgOutputPerReq) }) }}</div></div>
+      <div class="metric-card"><div class="mc-label">{{ t('token.cache') }}</div><div class="mc-value">{{ fmt(totalCache) }}</div><div class="mc-sub">{{ t('token.cache_rate', { n: cacheRate }) }}</div></div>
+      <div class="metric-card"><div class="mc-label">{{ t('token.requests') }}</div><div class="mc-value">{{ fmt(totalRequests) }}</div><div class="mc-sub">{{ t('token.daily_avg', { n: fmt(dailyAvgReq) }) }}</div></div>
+      <div class="metric-card"><div class="mc-label">{{ t('token.hosts_count') }}</div><div class="mc-value">{{ byDaemon.length }}</div><div class="mc-sub">{{ t('token.hosts_usage') }}</div></div>
+      <div class="metric-card"><div class="mc-label">{{ t('token.top_model') }}</div><div class="mc-value">{{ topModel?.model || '—' }}</div><div class="mc-sub">{{ t('token.share_pct', { n: topModel?.pct || 0 }) }}</div></div>
+    </div>
+
+    <div class="two-col">
+      <div class="chart-section">
+        <div class="chart-section-title">{{ t('token.model_dist') }}</div>
+        <div class="chart-container">
+          <div class="donut-wrap">
+            <div class="donut-ring" :style="{ background: donutGradient }">
+              <div class="donut-center"><div class="dc-total">{{ fmt(donutTotal) }}</div><div class="dc-label">{{ t('token.token_total') }}</div></div>
+            </div>
+            <div class="donut-legend">
+              <div v-for="(m, i) in topModels" :key="m.model" class="dl-item">
+                <span class="dl-swatch" :style="{ background: rankColor(i) }"></span>{{ m.model }} {{ m.pct }}%
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="chart-section">
+        <div class="chart-section-title">{{ t('token.heatmap_title') }}</div>
+        <div class="chart-container">
+          <div class="heatmap-legend-bar"><span class="hm-label">{{ t('token.less') }}</span><div class="hm-gradient"><span></span><span></span><span></span><span></span><span></span></div><span class="hm-label">{{ t('token.more') }}</span></div>
+          <div class="heatmap-wrap" @mouseleave="tooltip = null">
+            <div v-for="col in heatmapCols" :key="col.key" class="heatmap-col">
+              <div v-for="cell in col.cells" :key="cell.date || cell.key"
+                   class="heatmap-cell" :class="cell.level ? 'l' + cell.level : ''"
+                   :data-date="cell.date || null"
+                   @mouseenter="cell.date && showTooltip($event, heatmapCellData(cell))"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+</details>
     <div v-if="tooltip" class="chart-tooltip show" :style="{ left: tooltip.x + 'px', top: tooltip.y + 'px' }">
       <div class="ct-date">{{ tooltip.data.date }}</div>
       <div class="ct-row" v-if="tooltip.data.input"><span class="ct-label">{{ t('token.input') }}</span><span class="ct-val">{{ fmt(tooltip.data.input) }}</span></div>
@@ -184,7 +186,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import WorkspaceMetric from '../components/workspace/WorkspaceMetric.vue'
+import { agentDisplayName } from '../utils/agentDisplay'
+import ActionSelect from '../components/ActionSelect.vue'
+import ActionList from '../components/ActionList.vue'
+import WorkspaceIcon from '../components/WorkspaceIcon.vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
@@ -196,7 +203,7 @@ const { accessToken, apiGetAuth } = useAuth()
 const route = useRoute()
 
 // 柱状图单柱最大像素高度（双柱：input + output，需与 .bar-chart 容器高度协调）
-const BAR_CHART_MAX_H = 90
+const BAR_CHART_MAX_H = 170
 
 async function apiGet(url: string) {
   if (!accessToken.value) throw new Error('no_token')
@@ -215,9 +222,12 @@ const dailySeries = ref<any[]>([])
 const byModel = ref<any[]>([])
 const byDaemon = ref<any[]>([])
 const sessions = ref<any[]>([])
+const sessionCount=ref(0), byAgent=ref<Array<{agent_type:string;total:number;pct:number}>>([])
+let sessionGeneration=0,searchTimer:ReturnType<typeof setTimeout>|undefined
 const requestedHost = typeof route.query.daemon === 'string' ? route.query.daemon.trim() : ''
 const selectedHost = ref<string>(requestedHost || 'all')
 const hostMenuOpen = ref(false)
+const hostTrigger = ref<HTMLButtonElement | null>(null)
 const expanded = ref<string | null>(null)
 const sessionTrend = ref<any[]>([])
 const trendArchived = ref(false)
@@ -233,33 +243,36 @@ function fmt(n: number) {
   return formatTokenCount(n)
 }
 
+let dashboardGeneration=0
 async function loadDashboard() {
-  loading.value = true; error.value = ''; errorDetail.value = ''
+  const generation=++dashboardGeneration,hostID=selectedHost.value
+  loading.value=true;error.value='';errorDetail.value='';partialSessions.value=false
   try {
-    const d = await apiGet(`/api/tokens/dashboard?daemon=${encodeURIComponent(selectedHost.value)}&days=270`)
-    summary.value = d.summary || { total: 0, today: 0, thisWeek: 0, thisMonth: 0 }
-    dailySeries.value = Array.isArray(d?.dailySeries) ? d.dailySeries : []
-    byModel.value = Array.isArray(d?.byModel) ? d.byModel : []
-    byDaemon.value = Array.isArray(d?.byDaemon) ? d.byDaemon : []
-  } catch (e: any) {
-    const msg = e?.message || ''
-    if (msg === 'no_token') error.value = t('token.error_no_token')
-    else if (msg === 'auth_expired') error.value = t('token.error_auth_expired')
-    else error.value = t('token.error_load_failed')
-    errorDetail.value = msg
-    console.error('[TokenUsage] dashboard load failed', e)
-  } finally { loading.value = false }
-  if (selectedHost.value !== 'all') await loadSessions(selectedHost.value)
-  else sessions.value = []
+    const d=await apiGet(`/api/tokens/dashboard?daemon=${encodeURIComponent(hostID)}&days=270`)
+    if(generation!==dashboardGeneration)return
+    summary.value=d.summary||{total:0,today:0,thisWeek:0,thisMonth:0}
+    dailySeries.value=Array.isArray(d?.dailySeries)?d.dailySeries:[]
+    byModel.value=Array.isArray(d?.byModel)?d.byModel:[]
+    byDaemon.value=Array.isArray(d?.byDaemon)?d.byDaemon:[]
+    byAgent.value=Array.isArray(d.byAgent)?d.byAgent:[]
+    await loadSessionPage()
+  } catch(failure:any){
+    if(generation!==dashboardGeneration)return
+    const message=failure?.message||''
+    error.value=t(message==='no_token'?'token.error_no_token':message==='auth_expired'?'token.error_auth_expired':'token.error_load_failed');errorDetail.value=message
+  } finally {if(generation===dashboardGeneration)loading.value=false}
 }
-async function loadSessions(daemonId: string) {
-  try {
-    const d = await apiGet(`/api/tokens/by-daemon/${daemonId}`)
-    sessions.value = d.sessions || []
-  } catch (e) { sessions.value = [] }
+async function loadSessionPage(){
+  const generation=++sessionGeneration
+  const query=new URLSearchParams({daemon:selectedHost.value,page:String(currentPage.value),limit:String(pageSize.value),q:sessionSearch.value.trim()})
+  try{
+    const result=await apiGet('/api/tokens/sessions?'+query)
+    if(generation!==sessionGeneration)return
+    sessions.value=Array.isArray(result.sessions)?result.sessions:[];sessionCount.value=Number(result.total||0);partialSessions.value=false
+  }catch{if(generation===sessionGeneration){sessions.value=[];sessionCount.value=0;partialSessions.value=true}}
 }
 function selectHost(id: string) {
-  selectedHost.value = id; hostMenuOpen.value = false; expanded.value = null; currentPage.value = 1
+  sessionGeneration++; sessions.value=[]; sessionCount.value=0; selectedHost.value = id; hostMenuOpen.value = false; expanded.value = null; currentPage.value = 1
   loadDashboard()
 }
 async function toggleSession(s: any) {
@@ -279,7 +292,10 @@ const hostLabel = computed(() => {
   const d = byDaemon.value.find((x) => x.daemon_id === selectedHost.value)
   return d?.alias || d?.hostname || selectedHost.value.slice(0, 8)
 })
+const last30Days=computed(()=>{const since=new Date();since.setUTCDate(since.getUTCDate()-29);const first=since.toISOString().slice(0,10),last=new Date().toISOString().slice(0,10);return dailySeries.value.filter(day=>String(day.date).slice(0,10)>=first && String(day.date).slice(0,10)<=last).reduce((sum,day)=>sum+Number(day.input||0)+Number(day.output||0)+Number(day.cache_read||0)+Number(day.cache_create||0),0)})
 const totalTokens = computed(() => summary.value.total)
+const todayInput=computed(()=>Number(dailySeries.value.find(day=>day.date.slice(0,10)===new Date().toISOString().slice(0,10))?.input||0))
+const todayOutput=computed(()=>Number(dailySeries.value.find(day=>day.date.slice(0,10)===new Date().toISOString().slice(0,10))?.output||0))
 const totalInput = computed(() => dailySeries.value.reduce((s, d) => s + (+d.input || 0), 0))
 const totalOutput = computed(() => dailySeries.value.reduce((s, d) => s + (+d.output || 0), 0))
 const totalCache = computed(() => dailySeries.value.reduce((s, d) => s + (+d.cache_read || 0), 0))
@@ -292,10 +308,11 @@ const cacheRate = computed(() => {
   return denom ? Math.round((totalCache.value / denom) * 100) : 0
 })
 const topModel = computed(() => byModel.value[0])
-const barData = computed(() => dailySeries.value.slice(-30))
+const chartDays=ref(14),sessionSearch=ref(''),partialSessions=ref(false)
+const barData = computed(()=>{const days=new Map(dailySeries.value.map(day=>[String(day.date).slice(0,10),day]));return Array.from({length:chartDays.value},(_,index)=>{const date=new Date();date.setUTCDate(date.getUTCDate()-chartDays.value+1+index);const key=date.toISOString().slice(0,10);return days.get(key)||{date:key,input:0,output:0,cache_read:0,requests:0}})})
 // 按单日 input+output 之和的最大值缩放，保证堆叠双柱总高不超过图表高度
 const barMax = computed(() => Math.max(1, ...barData.value.map((d) => (+d.input || 0) + (+d.output || 0))))
-function barHeight(v: number) { return Math.max(2, ((+v || 0) / barMax.value) * BAR_CHART_MAX_H) }
+function barHeight(v: number) { return Math.max(0, ((+v || 0) / barMax.value) * BAR_CHART_MAX_H) }
 function labelDate(d: string) { const dt = new Date(d); return (dt.getMonth() + 1) + '/' + dt.getDate() }
 const donutTotal = computed(() => byModel.value.reduce((s, m) => s + (+m.total || 0), 0))
 // 模型分布：用量前 6 单独显示并各配一种调色板颜色，其余合并为"其他"段（仅在饼图呈现用量）
@@ -360,16 +377,23 @@ const sessionTrendMax = computed(() => Math.max(1, ...sessionTrend.value.map((tr
 
 // Pagination (single-host session detail)
 const currentPage = ref(1)
-const pageSize = ref(10)
-const pageSizes = [10, 20, 50]
-const totalPages = computed(() => Math.max(1, Math.ceil(sessions.value.length / pageSize.value)))
-const pagedSessions = computed(() => sessions.value.slice((currentPage.value - 1) * pageSize.value, currentPage.value * pageSize.value))
+const pageSize = ref(5)
+const pageSizes = [5, 10, 20, 50]
+const totalPages = computed(() => Math.max(1, Math.ceil(sessionCount.value / pageSize.value)))
+const searchedSessions=computed(()=>sessions.value)
+const agentDistribution=computed(()=>byAgent.value.map(agent=>({name:agentDisplayName(agent.agent_type),value:agent.total,pct:agent.pct})))
+const agentTotal=computed(()=>agentDistribution.value.reduce((total,agent)=>total+agent.value,0))
+const agentGradient=computed(()=>{if(!agentTotal.value)return 'var(--soft)';let start=0;return 'conic-gradient('+agentDistribution.value.map((agent,index)=>{const end=start+agent.value/agentTotal.value*360;const part=`${rankColor(index)} ${start}deg ${end}deg`;start=end;return part}).join(',')+')'})
+const pagedSessions = computed(() => sessions.value)
 const trendBars = computed(() => sessionTrend.value.slice(-30))
-function goPage(n: number) { currentPage.value = Math.max(1, Math.min(totalPages.value, n)); expanded.value = null }
+function goPage(n: number) { currentPage.value = Math.max(1, Math.min(totalPages.value, n)); expanded.value = null; void loadSessionPage() }
 function formatDate(d: any) { if (!d) return ''; try { return new Date(d).toISOString().slice(0, 10) } catch { return '' } }
 function statusLabel(s: string) { const k = 'session.status.' + (s || 'idle'); const v = t(k); return v === k ? (s || '—') : v }
 function pct(a: number, b: number) { return b ? Math.round(((a || 0) / b) * 100) : 0 }
 
+watch(sessionSearch,()=>{sessionGeneration++;currentPage.value=1;if(searchTimer)clearTimeout(searchTimer);searchTimer=setTimeout(()=>void loadSessionPage(),250)})
+watch(pageSize,()=>{currentPage.value=1;void loadSessionPage()})
+onBeforeUnmount(()=>{sessionGeneration++;dashboardGeneration++;if(searchTimer)clearTimeout(searchTimer)})
 onMounted(loadDashboard)
 </script>
 
@@ -411,8 +435,10 @@ onMounted(loadDashboard)
 .chart-section-legend { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--fg-tertiary); text-transform: none; letter-spacing: 0; }
 .chart-section-legend .le-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 .chart-container { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px; }
-.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 32px; }
-.two-col .chart-section { margin-bottom: 0; }
+.two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-bottom: 32px; }
+.two-col .chart-section { min-width: 0; margin-bottom: 0; }
+.chart-container { min-width: 0; overflow-x: auto; }
+.host-check { margin-left: auto; }
 
 .bar-chart { display: flex; align-items: flex-end; gap: 3px; height: 200px; padding: 0 2px; overflow: hidden; }
 .bar-day { flex: 1; display: flex; flex-direction: column; gap: 2px; justify-content: flex-end; }
@@ -424,7 +450,7 @@ onMounted(loadDashboard)
 .bar-label-row span { flex: 1; text-align: center; font-size: 10px; color: var(--fg-tertiary); font-family: var(--font-mono); display: none; }
 .bar-label-row span.show { display: block; }
 
-.donut-wrap { display: flex; align-items: center; gap: 20px; justify-content: center; }
+.donut-wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; justify-content: center; }
 .donut-ring { width: 120px; height: 120px; border-radius: 50%; position: relative; flex-shrink: 0; }
 .donut-center { position: absolute; inset: 22px; border-radius: 50%; background: var(--surface); display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .donut-center .dc-total { font-size: 16px; font-weight: 700; color: var(--fg); }
@@ -500,8 +526,25 @@ onMounted(loadDashboard)
 .chart-tooltip .ct-val { font-family: var(--font-mono); color: var(--fg); font-weight: 600; }
 
 @media (max-width: 900px) {
-  .two-col { grid-template-columns: 1fr; }
+  .two-col { grid-template-columns: minmax(0, 1fr); }
   .token-summary { grid-template-columns: repeat(2, 1fr); }
   .token-summary .tk-item:nth-child(3), .token-summary .tk-item:nth-child(4) { border-top: 1px solid var(--border); }
+}
+@media (max-width: 767px) {
+  .page-wrap { padding: 12px 10px 28px; min-width: 0; }
+  .page-header { align-items: flex-start; gap: 10px; }
+  .page-subtitle { overflow-wrap: anywhere; }
+  .host-select-btn { max-width: 160px; white-space: normal; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .metric-card { min-width: 0; padding: 16px 14px; }
+  .metric-card .mc-value { font-size: 22px; overflow-wrap: anywhere; }
+  .token-summary .tk-item { min-width: 0; padding: 16px 14px; }
+  .token-summary .tk-item:nth-child(3) { border-left: 0; }
+  .chart-section-title, .chart-section-legend { flex-wrap: wrap; }
+  .chart-container { padding: 14px; }
+  .heatmap-col { flex: 0 0 auto; }
+  .session-table, .usage-table { overflow-x: auto; }
+  .session-table-header, .session-row, .session-expand-row, .usage-table-header, .usage-table-row { min-width: 620px; box-sizing: border-box; }
+  .sess-pagination { flex-wrap: wrap; padding: 12px 0; }
 }
 </style>

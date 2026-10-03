@@ -69,13 +69,13 @@
       <div v-if="!hasNoSessions" class="session-panel-presence">
         <span :class="['status-dot', { online: scopedOnlineHostCount > 0 }]"></span>
         <span class="session-panel-presence-copy">{{ t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
-        <button type="button" class="session-search-toggle" aria-label="搜索会话" :aria-expanded="sessionSearchOpen" @click="sessionSearchOpen = !sessionSearchOpen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg></button>
+        <button type="button" class="session-search-toggle" :aria-label="t('workspace.search_sessions')" :aria-expanded="sessionSearchOpen" @click="sessionSearchOpen = !sessionSearchOpen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg></button>
       </div>
-      <div v-if="sessionSearchOpen" class="session-browser-search"><input v-model="sessionSearch" type="search" aria-label="搜索会话标题" placeholder="搜索会话…" /></div>
+      <div v-if="sessionSearchOpen" class="session-browser-search"><input v-model="sessionSearch" type="search" :aria-label="t('workspace.search_session_titles')" :placeholder="t('workspace.search_sessions_placeholder')" /></div>
       <div class="session-list">
-        <button v-if="archivedView" type="button" class="archive-back" @click="archivedView = false">‹ <span>返回会话</span></button>
+        <button v-if="archivedView" type="button" class="archive-back" @click="leaveArchived">‹ <span> {{ t('mobile.back_to_sessions') }} </span></button>
         <div v-else class="project-section-label">
-          <span>项目</span>
+          <span> {{ t('workspace.projects') }} </span>
           <CreateProjectControl @created="refreshProjects" />
         </div>
         <template v-for="s in sidebarEntries" :key="s.kind === 'session' ? s.session_id : `${s.kind}-${s.id}`">
@@ -85,19 +85,19 @@
               <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M3 10V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2M4 10h17l-3 10H2z"/></svg>
               <span>{{ s.name }}</span><small>{{ s.count }}</small>
             </button>
-            <button type="button" class="project-menu-button" title="项目操作" @click="projectMenuId = projectMenuId === s.id ? null : s.id">···</button>
+            <button type="button" class="project-menu-button" :title="t('workspace.project_actions')" @click="projectMenuId = projectMenuId === s.id ? null : s.id">···</button>
             <div v-if="projectMenuId === s.id" class="project-menu">
-              <button @click="newSessionProjectId = s.id; emitNewSession(); projectMenuId = null">在项目中新建会话</button>
-              <button @click="editProjectName(s)">重命名</button>
-              <button @click="shiftProject(s.id, -1)">上移</button>
-              <button @click="shiftProject(s.id, 1)">下移</button>
+              <button @click="newSessionProjectId = s.id; emitNewSession(); projectMenuId = null"> {{ t('workspace.create_in_project') }} </button>
+              <button @click="editProjectName(s)"> {{ t('workspace.rename') }} </button>
+              <button @click="shiftProject(s.id, -1)"> {{ t('workspace.move_up') }} </button>
+              <button @click="shiftProject(s.id, 1)"> {{ t('workspace.move_down') }} </button>
             </div>
           </div>
-          <div v-else-if="s.kind === 'ungrouped'" class="project-heading ungrouped-heading" @dragover.prevent @drop.prevent="dropOnProject(null)">未分组 <small>{{ s.count }}</small></div>
-          <button v-else-if="s.kind === 'loadMore'" type="button" :class="['archive-back', { 'project-load-more': s.id !== 'ungrouped' }]" :data-project-load-more="s.id" @click="loadMoreSidebar(s.id)">加载更多</button>
+          <div v-else-if="s.kind === 'ungrouped'" class="project-heading ungrouped-heading" @dragover.prevent @drop.prevent="dropOnProject(null)"> {{ t('workspace.ungrouped') }} <small>{{ s.count }}</small></div>
+          <button v-else-if="s.kind === 'loadMore'" type="button" :class="['archive-back', { 'project-load-more': s.id !== 'ungrouped' }]" :data-project-load-more="s.id" @click="loadMoreSidebar(s.id)"> {{ t('attention.load_more') }} </button>
           <div v-else :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete, 'has-children': s.children && s.children.length, 'in-project': !!s.project_id }]"
             draggable="true" @dragstart="dragSessionId = s.session_id" @dragend="dragSessionId = null" @dragover.prevent @drop.prevent="dropOnSession(s)"
-            @click="!(s as any).__pendingDelete && $router.push(`/session/${s.session_id}`)">
+            @click="!(s as any).__pendingDelete && $router.push(archivedView ? {path:`/session/${s.session_id}`, query:{...route.query, view:'archived'}} : `/session/${s.session_id}`)">
             <span v-if="s.children && s.children.length" class="sl-fold" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
             <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
             <div class="sl-info">
@@ -122,7 +122,7 @@
             </div>
           </div>
         </template>
-        <button v-if="!archivedView" class="archived-entry" type="button" @click="openArchived()">已归档 <span>{{ archivedCount }}</span></button>
+        <button v-if="!archivedView" class="archived-entry" type="button" @click="openArchived()"> {{ t('team.task_filter.archived') }} <span>{{ archivedCount }}</span></button>
         <div v-if="!hasNoSessions && !visibleSessions.length" class="host-filter-empty" role="status">
           <p>{{ t('session.host_filter_empty') }}</p>
           <button type="button" @click="selectedHostId = ''; selectedAgentType = 'all'; sessionSearch = ''">{{ t('session.host_filter_reset') }}</button>
@@ -133,6 +133,7 @@
 
     <!-- Chat Main Area -->
     <div class="chat-area">
+      <TopbarGithubLink v-if="hasNoSessions" class="session-empty-github" />
       <!-- The session list can arrive after the replay request on a direct URL. -->
       <div
         v-if="hasNoSessions && isLoading"
@@ -189,6 +190,7 @@
           </div>
         </div>
         <div class="session-toolbar-actions">
+          <TopbarGithubLink />
           <span :class="['status-pill', statusClass]"><span class="pulse"></span><span class="status-pill-label">{{ statusLabel }}</span></span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
@@ -256,9 +258,7 @@
         :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
         @scroll="onMessagesScroll"
       >
-        <button v-if="returnTeamSessionID && returnTeamID" type="button" class="banner banner-info team-return-banner" @click="returnToTeamSession">
-          ‹ 返回共享会话
-        </button>
+        <button v-if="returnTeamSessionID && returnTeamID" type="button" class="banner banner-info team-return-banner" @click="returnToTeamSession"> {{ t('workspace.return_shared_session') }} </button>
         <div v-if="!isComposerVisible" class="messages-bottom-spacer" aria-hidden="true"></div>
         <!-- Exit Banner -->
         <div v-if="status === 'exited'" class="banner banner-info" style="flex-shrink:0;">
@@ -325,14 +325,14 @@
         <template v-for="msg in renderMessages" :key="msg.id">
           <div v-if="turnHeaderFor(msg)" class="turn-group-header" :data-turn-id="msg.turn_id" :data-turn-segment-id="turnHeaderFor(msg)?.id">
             <span class="turn-group-label">Turn</span>
-            <span v-if="turnHeaderFor(msg)?.interrupted" class="turn-group-state">已中断</span>
+            <span v-if="turnHeaderFor(msg)?.interrupted" class="turn-group-state"> {{ t('workspace.interrupted') }} </span>
             <span v-else-if="turnHeaderFor(msg)?.status" class="turn-group-state">{{ turnHeaderFor(msg)?.status }}</span>
-            <span v-if="turnHeaderFor(msg)?.continuedAfterInterrupt" class="turn-group-continuation">中断后继续</span>
-            <button v-if="turnHeaderFor(msg)?.auxiliary.length" type="button" class="turn-group-aux-toggle" :aria-expanded="isAuxiliaryExpanded(turnHeaderFor(msg)?.id)" :aria-label="`Turn ${msg.turn_id} 辅助流`" @click="toggleAuxiliary(turnHeaderFor(msg)?.id)">辅助流（{{ turnHeaderFor(msg)?.auxiliary.length }}）</button>
+            <span v-if="turnHeaderFor(msg)?.continuedAfterInterrupt" class="turn-group-continuation"> {{ t('workspace.continued_after_interrupt') }} </span>
+            <button v-if="turnHeaderFor(msg)?.auxiliary.length" type="button" class="turn-group-aux-toggle" :aria-expanded="isAuxiliaryExpanded(turnHeaderFor(msg)?.id)" :aria-label="t('workspace.turn_auxiliary_stream', {id:msg.turn_id})" @click="toggleAuxiliary(turnHeaderFor(msg)?.id)">{{ t('workspace.auxiliary_streams', {count:turnHeaderFor(msg)?.auxiliary.length || 0}) }}</button>
           </div>
           <template v-if="!isHiddenAuxiliary(msg) && !isToolGroupContinuation(msg)">
           <!-- User message (right bubble) -->
-          <article v-if="msg.role === 'user'" class="session-message-row member"><span class="message-avatar">{{ (user?.display_name || user?.email || '我').slice(0,1).toUpperCase() }}</span><div class="message-body"><div class="message-byline">{{ user?.display_name || user?.email?.split('@')[0] || '我' }}</div>
+          <article v-if="msg.role === 'user'" class="session-message-row member"><span class="message-avatar">{{ (user?.display_name || user?.email || t('team.me')).slice(0,1).toUpperCase() }}</span><div class="message-body"><div class="message-byline">{{ user?.display_name || user?.email?.split('@')[0] || t('team.me') }}</div>
           <MessageUser
             :content="cleanContent(msg.content)"
             :data-delivery-status="msg.deliveryStatus || undefined"
@@ -515,8 +515,8 @@
           </button>
         </Transition>
         <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
-        <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations">刷新</button></div>
-        <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button aria-label="清除选择" @click="invocationSelection=null">×</button></div>
+        <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations"> {{ t('memory.git.refresh') }} </button></div>
+        <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button :aria-label="t('workspace.clear_selection')" @click="invocationSelection=null">×</button></div>
         <template v-if="isComposerVisible">
           <div class="chat-input-container" :class="{ focused: isInputFocused }" @transitionend.self="handleComposerTransitionEnd">
             <!-- Slash command popover -->
@@ -657,38 +657,26 @@
       :connected="connected !== false"
       @close="closePlanPanel"
     />
-    <button
+    <ActionList
       v-if="fileChangeMessages.length && fileChangePanelOpen && !focusedSubAgentId"
-      type="button"
-      class="file-change-panel-backdrop"
-      :aria-label="t('session.file_change_close')"
-      @click="closeFileChangePanel"
-    />
-    <aside
-      v-if="fileChangeMessages.length && fileChangePanelOpen && !focusedSubAgentId"
-      class="file-change-side-panel"
-      role="dialog"
-      aria-modal="true"
-      :aria-label="t('session.file_change_edited_files', { n: fileChangeFileCount })"
+      :title="fileChangeButtonLabel"
+      :close-label="t('session.file_change_close')"
+      :width="1000"
+      @close="closeFileChangePanel"
     >
-      <header class="file-change-panel-heading">
-        <div>
-          <h2>{{ t('session.file_change_edited_files', { n: fileChangeFileCount }) }}</h2>
-          <span>+{{ fileChangeAdditions }} −{{ fileChangeDeletions }}</span>
+      <section class="file-change-side-panel" role="region" :aria-label="fileChangeButtonLabel">
+        <p class="file-change-panel-summary">+{{ fileChangeAdditions }} −{{ fileChangeDeletions }}</p>
+        <div class="file-change-panel-list">
+          <FileChangeCard
+            v-for="message in fileChangeMessages"
+            :key="message.id"
+            :message="message"
+            @open-mobile="openFileChangeSheet(message, $event)"
+          />
         </div>
-        <button type="button" class="file-change-panel-close" :aria-label="t('session.file_change_close')" @click="closeFileChangePanel">
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
-        </button>
-      </header>
-      <div class="file-change-panel-list">
-        <FileChangeCard
-          v-for="message in fileChangeMessages"
-          :key="message.id"
-          :message="message"
-          @open-mobile="openFileChangeSheet(message, $event)"
-        />
-      </div>
-    </aside>
+      </section>
+    </ActionList>
+    <RenameProjectAction v-if="editingProject" :project="editingProject" @close="editingProject = null" @saved="refreshProjects" />
     <FileChangeBottomSheet
       v-if="mobileFileChange"
       :message="mobileFileChange"
@@ -724,6 +712,9 @@ import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
+import ActionList from '../components/ActionList.vue'
+import TopbarGithubLink from '../components/TopbarGithubLink.vue'
+import RenameProjectAction from '../components/RenameProjectAction.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { normalizeEffort, shouldShowEffort } from '../utils/effort'
 import NewSessionDialog from '../components/NewSessionDialog.vue'
@@ -799,7 +790,7 @@ import { listTeams } from '../services/teamClient'
 import type { TeamSummary } from '../types/team'
 import { useTeamAccess } from '../composables/useTeamAccess'
 import { useScopedSessionDraft, type SessionScope } from '../composables/useScopedSessionState'
-import { listProjects, renameProject, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject } from '../services/sessionOrganization'
+import { listProjects, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject } from '../services/sessionOrganization'
 import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
@@ -841,8 +832,8 @@ const {
 const sessionDocumentOpener = ref<HTMLElement | null>(null)
 
 function openSessionDocument(document: SessionDocumentMetadata, opener: HTMLButtonElement): void {
-  sessionDocumentOpener.value = opener
-  void sessionDocumentState.open(document)
+  const target = router.resolve({ name: 'session-document', params: { id: sessionId.value, documentId: document.documentId, versionId: document.versionId } })
+  window.open(target.href, '_blank', 'noopener,noreferrer')
 }
 function closeSessionDocument(): void {
   sessionDocumentState.close()
@@ -1263,13 +1254,14 @@ const projectOrderRevision = ref(0)
 const ungroupedRevision = ref(0)
 const archivedCount = ref(0)
 const ungroupedCount = ref(0)
-const archivedView = ref(false)
+const archivedView = ref(route.query.view === 'archived')
 const archivedSessions = ref<any[]>([])
 const archivedCursor = ref<string | null>(null)
 const sidebarBuckets = ref<Record<string, any[]>>({})
 const sidebarCursors = ref<Record<string, string | null>>({})
 const organizationLoaded = ref(false)
 const projectMenuId = ref<string | null>(null)
+const editingProject = ref<SessionProject | null>(null)
 const newSessionProjectId = ref<string | null>(null)
 const dragSessionId = ref<string | null>(null)
 const dragProjectId = ref<string | null>(null)
@@ -1303,7 +1295,7 @@ async function loadSidebarBucket(bucket: string, cursor?: string) {
 async function loadMoreSidebar(id: string) {
   if (id === 'archived') return openArchived(archivedCursor.value || undefined)
   try { await loadSidebarBucket(id,sidebarCursors.value[id] || undefined) }
-  catch (error) { window.alert(error instanceof Error ? error.message : '加载失败') }
+  catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.load_failed')) }
 }
 watch(selectedHostId, () => { void refreshProjects() })
 function sortBucket(sessions: any[], mode: string) {
@@ -1314,10 +1306,10 @@ function sortBucket(sessions: any[], mode: string) {
         - Math.max(new Date(a.last_activity_at || 0).getTime(),new Date(a.membership_changed_at || 0).getTime(),new Date(a.created_at || 0).getTime())))
 }
 const sidebarEntries = computed<any[]>(() => {
-  if (archivedView.value) return [...archivedSessions.value.filter(matchesSessionSearch).map(s => ({ ...s, kind: 'session' })),...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
+  if (archivedView.value) return [...archivedSessions.value.filter(s => !!s.archived_at && matchesSessionSearch(s)).map(s => ({ ...s, kind: 'session' })),...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
   const out: any[] = []
   const live = new Map(allSessions.value.map((s:any) => [s.session_id,s]))
-  const enriched = (rows: any[]) => rows.filter(matchesSessionSearch).map(s => ({ ...s, status:live.get(s.session_id)?.status || s.status,
+  const enriched = (rows: any[]) => rows.filter(s => !s.archived_at && matchesSessionSearch(s)).map(s => ({ ...s, status:live.get(s.session_id)?.status || s.status,
     children:live.get(s.session_id)?.children || s.children, kind:'session' }))
   for (const project of projects.value) {
     const members = organizationLoaded.value ? (sidebarBuckets.value[project.id] || []) : sortBucket(visibleSessions.value.filter((s:any) => s.project_id === project.id),project.order_mode).slice(0,5)
@@ -1328,17 +1320,14 @@ const sidebarEntries = computed<any[]>(() => {
   }
   const ungrouped = organizationLoaded.value ? (sidebarBuckets.value.ungrouped || []) : visibleSessions.value.filter((s:any) => !s.project_id)
   const filteredUngrouped = selectedAgentType.value === 'all' ? ungrouped : ungrouped.filter((s:any) => normalizedAgentType(s) === selectedAgentType.value)
-  out.push({ kind: 'ungrouped', id: 'ungrouped', name: '未分组', count: organizationLoaded.value ? ungroupedCount.value : ungrouped.length })
+  out.push({ kind: 'ungrouped', id: 'ungrouped', name: t('workspace.ungrouped'), count: organizationLoaded.value ? ungroupedCount.value : ungrouped.length })
   out.push(...enriched(filteredUngrouped))
   if (sidebarCursors.value.ungrouped) out.push({kind:'loadMore',id:'ungrouped'})
   return out
 })
-async function editProjectName(project: SessionProject) {
+function editProjectName(project: SessionProject) {
   projectMenuId.value = null
-  const name = window.prompt('项目名称', project.name)
-  if (name === null || name.trim() === project.name) return
-  try { await renameProject(project.id, name, Number(project.revision)); await refreshProjects() }
-  catch (error) { window.alert(error instanceof Error ? error.message : '重命名失败') }
+  editingProject.value = project
 }
 async function shiftProject(id: string, direction: number) {
   projectMenuId.value = null
@@ -1347,7 +1336,7 @@ async function shiftProject(id: string, direction: number) {
   if (next < 0 || next >= ids.length) return
   ;[ids[index], ids[next]] = [ids[next], ids[index]]
   try { await reorderProjects(ids, projectOrderRevision.value); await refreshProjects() }
-  catch (error) { window.alert(error instanceof Error ? error.message : '排序失败') }
+  catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.reorder_failed')) }
 }
 async function dropOnProject(id: string | null) {
   if (dragProjectId.value && id && dragProjectId.value !== id) {
@@ -1361,7 +1350,7 @@ async function dropOnProject(id: string | null) {
   dragSessionId.value = null
   if (!sessionId) return
   try { await moveSession(sessionId,id); onMoved(sessionId,id) }
-  catch (error) { window.alert(error instanceof Error ? error.message : '移动失败') }
+  catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.move_failed')) }
 }
 async function dropOnSession(target: any) {
   const movingId = dragSessionId.value; dragSessionId.value = null
@@ -1370,7 +1359,7 @@ async function dropOnSession(target: any) {
   if (!moving) return
   if (moving.project_id !== target.project_id) {
     try { await moveSession(movingId,target.project_id || null); onMoved(movingId,target.project_id || null) }
-    catch (error) { window.alert(error instanceof Error ? error.message : '移动失败') }
+    catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.move_failed')) }
     return
   }
   const project = projects.value.find(p => p.id === target.project_id)
@@ -1378,7 +1367,7 @@ async function dropOnSession(target: any) {
     await reorderSession(target.project_id || 'ungrouped',movingId,target.session_id,Number(project?.revision ?? ungroupedRevision.value))
     await refreshProjects()
     send({ type: 'list_sessions' })
-  } catch (error) { window.alert(error instanceof Error ? error.message : '排序失败') }
+  } catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.reorder_failed')) }
 }
 function onMoved(id: string, projectId: string | null) {
   const s = allSessions.value.find((row:any) => row.session_id === id)
@@ -1401,9 +1390,21 @@ async function openArchived(cursor?: string) {
     const page = await listOrganizedSessions({ view:'archived', daemonId:selectedHostId.value || undefined, limit:100, cursor })
     archivedSessions.value = cursor ? [...archivedSessions.value,...page.sessions.filter(s => !archivedSessions.value.some(old => old.session_id === s.session_id))] : page.sessions
     archivedCursor.value = page.next_cursor
+    if (sessionId.value === 'default') resolveDefaultSession()
   }
-  catch (error) { window.alert(error instanceof Error ? error.message : '读取归档失败') }
+  catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.archive_read_failed')) }
 }
+function leaveArchived() {
+  archivedView.value = false
+  if (route.query.view === 'archived') {
+    const { view: _view, ...query } = route.query
+    void router.replace({ path: route.path, query })
+  }
+}
+watch(() => route.query.view, view => {
+  if (view === 'archived') void openArchived()
+  else archivedView.value = false
+})
 const currentSessionOutsideFilter = computed(() => !!currentSession.value && !visibleSessions.value.some(s => s.session_id === sessionId.value))
 function showCurrentSessionInList() {
   browseScope.value={type:'personal'}
@@ -2004,7 +2005,7 @@ function cleanContent(text: string): string {
 }
 
 function exitReasonLabel(reason: string): string {
-  const labels: Record<string, string> = { user_interrupt: '用户中断', normal_exit: '正常退出', process_crash: '异常退出', signal_kill: '被终止', unknown: '已退出' }
+  const labels: Record<string, string> = { user_interrupt: t('workspace.user_interrupted'), normal_exit: t('workspace.normal_exit'), process_crash: t('workspace.process_crash'), signal_kill: t('workspace.terminated'), unknown: t('session.status.exited') }
   return labels[reason] || reason
 }
 
@@ -2115,10 +2116,12 @@ function replaySessionTrustContext(): ReplaySessionTrustContext {
 // Shared by onMounted and the loadKey watcher so every entry/exit/switch path
 // is consistent.
 function resolveDefaultSession() {
-  const first = visibleSessions.value[0]
-  if (first) router.replace({ path: `/session/${first.session_id}` })
+  if (showNewSession.value) return false
+  const first = archivedView.value ? archivedSessions.value.find(item => !!item.archived_at) : visibleSessions.value[0]
+  if (first) router.replace({ path: `/session/${first.session_id}`, ...(archivedView.value ? {query:{...route.query,view:'archived'}} : {}) })
   return !!first
 }
+watch(showNewSession, open => { if (!open && sessionId.value === 'default') resolveDefaultSession() })
 
 function loadHistory() {
   clearHistorySlowTimer()
@@ -2825,7 +2828,7 @@ function buildCostMessage(): string {
 function buildStatusMessage(): string {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId.value) as any
   if (!s) return '当前会话状态未知'
-  const online = s.daemon_online ? '在线' : '离线'
+  const online = s.daemon_online ? t('team.online') : t('team.availability.offline')
   const parts = [`主机 ${online}`]
   if (s.daemon_version) parts.push(`daemon v${s.daemon_version}`)
   const agentVer = s.agent_version || s.agentVersion
@@ -3727,6 +3730,7 @@ watch(loadKey, (newKey, oldKey) => {
 const cleanups: (() => void)[] = []
 
 onMounted(() => {
+	if (archivedView.value) void openArchived()
 	void refreshProjects()
 	cleanups.push(onEvent('session_organization_changed', () => {
 		void refreshProjects()
@@ -3789,7 +3793,7 @@ onMounted(() => {
       }
     }
     // default 哨兵 → 自动落到首个会话（避免停在空白的 default 占位）：
-    //   - 带 host query（从主机"查看全部"跳来）：该主机的首个会话
+    //   - 带 host query（从主机t('dashboard.view_all')跳来）：该主机的首个会话
     //   - 无 host query（sidebar 直接进入会话模块）：整个列表的首个会话
     // 落定后 daemonName 按当前 sessionId 解析，session-panel-header 与 chat-toolbar
     // 都会显示这个会话所属的主机名。
@@ -4253,7 +4257,7 @@ onMounted(() => {
     if (msg.event_id || msg.message_id || msg.payload?.event_id || msg.payload?.message_id) {
       processImmediateLiveEvent(msg)
     } else {
-      messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || '未知错误' })
+      messages.value.push({ id: nextId('e'), type: 'error', content: msg.error || t('dashboard.unknown_error') })
     }
   }))
 
@@ -4472,18 +4476,10 @@ onMounted(() => {
 .file-change-toolbar-button:hover { color: var(--fg); background: var(--surface-hover); }
 .file-change-toolbar-button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
 .file-change-toolbar-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.file-change-panel-backdrop { position: absolute; z-index: 44; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: rgba(1, 4, 9, .48); backdrop-filter: blur(2px); cursor: default; }
-.file-change-side-panel { position: absolute; z-index: 45; inset: 0 0 0 auto; width: clamp(760px, 72vw, 1180px); min-width: 0; max-width: calc(100% - 72px); height: 100%; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--border-light); background: var(--surface); box-shadow: -24px 0 72px rgba(0, 0, 0, .42); }
-.file-change-panel-heading { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: 0 0 auto; padding: 10px 10px 10px 18px; border-bottom: 1px solid var(--border); }
-.file-change-panel-heading h2 { margin: 0; color: var(--fg); font-size: 14px; font-weight: 650; }
-.file-change-panel-heading span { display: block; margin-top: 4px; color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
-.file-change-panel-close { width: 44px; height: 44px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
-.file-change-panel-close:hover { color: var(--fg); background: var(--surface-hover); }
-.file-change-panel-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.file-change-panel-close svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.file-change-side-panel { min-width: 0; display: flex; flex-direction: column; overflow: hidden; height: min(70dvh, 740px); }
+.file-change-panel-summary { margin: 0; padding: 8px 14px; color: var(--fg-tertiary); font: 11px/1.4 var(--font-mono); }
 .file-change-panel-list { min-height: 0; display: flex; flex: 1; flex-direction: column; gap: 10px; overflow-y: auto; padding: 12px 14px 18px; background: var(--bg); scrollbar-gutter: stable; }
 .file-change-panel-list .file-change-card { width: 100%; flex: 0 0 auto; }
-@media (max-width: 1120px) and (min-width: 769px) { .file-change-side-panel { width: 94vw; max-width: 94vw; } }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; }
 .status-pill.running { background: var(--success-bg); color: var(--success); }
 .status-pill .pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-green 1.5s infinite; }
@@ -4558,6 +4554,7 @@ onMounted(() => {
 
 /* Welcome empty state — fills entire chat-area when no sessions exist */
 .chat-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 16px; padding: 40px 20px; text-align: center; }
+.session-empty-github { position: absolute; z-index: 2; top: 14px; right: 18px; }
 .chat-welcome .welcome-icon { color: var(--fg-tertiary); opacity: 0.3; }
 .chat-welcome .welcome-title { font-size: 20px; font-weight: 600; color: var(--fg-secondary); margin: 0; }
 .chat-welcome .welcome-desc { font-size: 14px; color: var(--fg-tertiary); line-height: 1.6; max-width: 380px; margin: 0; }
@@ -4798,21 +4795,6 @@ onMounted(() => {
   .mobile-session-toolbar-overflow .toolbar-overflow-metrics { gap: 6px; padding: 6px 6px 10px; }
   .mobile-session-toolbar-overflow .toolbar-overflow-item { min-height: 44px; padding: 10px 11px; font-size: 14px; }
   .mobile-session-toolbar-overflow .toolbar-overflow-item code { font-size: 11px; }
-  .file-change-panel-backdrop { position: fixed; z-index: 88; inset: 0; display: block; background: rgba(0, 0, 0, .42); backdrop-filter: blur(2px); }
-  .file-change-side-panel {
-    position: fixed;
-    z-index: 89;
-    inset: auto 0 0;
-    width: 100%;
-    max-width: none;
-    height: min(72%, 680px);
-    display: flex;
-    border: 1px solid var(--border-light);
-    border-bottom: 0;
-    border-radius: 18px 18px 0 0;
-    box-shadow: 0 -14px 42px rgba(0, 0, 0, .34);
-  }
-  .file-change-panel-heading { min-height: 58px; padding: 8px 8px 8px 16px; }
   .file-change-panel-list { padding: 10px 10px max(18px, env(safe-area-inset-bottom)); }
   .chat-messages { padding: 14px var(--session-content-gutter) calc(14px + var(--composer-float-clearance)); gap: 12px; }
   .chat-input-area {

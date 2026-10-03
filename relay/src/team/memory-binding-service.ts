@@ -296,8 +296,8 @@ export class TeamMemoryBindingService {
     lock = false,
   ): Promise<void> {
     await requireTeamAccess(client, actorUserId, lock)
-    const result = await client.query<{ creator_user_id: string | number; state: string }>(
-      `SELECT team.creator_user_id, team.state
+    const result = await client.query<{ creator_user_id: string | number; state: string; role: string }>(
+      `SELECT team.creator_user_id, team.state, membership.role
        FROM collaboration_teams team
        JOIN collaboration_team_memberships membership
          ON membership.team_id = team.team_id
@@ -309,7 +309,7 @@ export class TeamMemoryBindingService {
     const team = result.rows[0]
     if (!team) throw new TeamRepositoryError('team_not_found', 'team not found')
     if (team.state !== 'active') throw new TeamRepositoryError('invalid_state', 'team is not active')
-    if (creator && Number(team.creator_user_id) !== actorUserId) {
+    if (creator && Number(team.creator_user_id) !== actorUserId && team.role !== 'admin') {
       throw new TeamRepositoryError('creator_required', 'team creator authority required')
     }
   }

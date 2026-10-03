@@ -1,18 +1,23 @@
 <template>
-  <div class="overlay" @click.self="$emit('close')">
-    <div class="modal">
+  <div class="overlay" :class="{'workspace-about-overlay':workspace}" @click.self="$emit('close')" @keydown.esc.stop.prevent="$emit('close')">
+    <div ref="panel" class="modal" :class="{'workspace-about-modal':workspace}" role="dialog" aria-modal="true" :aria-label="t(workspace?'settings.about_pocketctl':'about.title')" tabindex="-1" @keydown.tab="trapFocus">
       <div class="modal-header">
-        <h3>{{ t('about.title') }}</h3>
-        <button class="close-btn" @click="$emit('close')">
+        <h3>{{ t(workspace?'settings.about_pocketctl':'about.title') }}</h3>
+        <button type="button" class="close-btn" :aria-label="t('common.close')" @click="$emit('close')">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
-      <div class="about-content">
+      <div v-if="workspace" class="workspace-about-content">
+        <p class="sub">PocketCtl · v{{ APP_VERSION }}</p>
+        <p class="sub about-description">{{ t('replica.about_workspace_copy') }}</p>
+        <div v-if="relayUrl" class="workspace-about-server"><span class="status-dot" :class="connected ? 'online' : 'offline'"></span><span>{{ t('about.server') }}: {{ relayUrl }}</span></div>
+      </div>
+      <div v-else class="about-content">
         <div class="about-icon">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
         </div>
         <h2 class="about-name">pocketctl</h2>
-        <div class="about-version">v1.0.1</div>
+        <div class="about-version">v{{ APP_VERSION }}</div>
         <div class="about-tagline">{{ t('about.tagline') }}</div>
         <div class="about-server" v-if="relayUrl">
           <span class="status-dot" :class="connected ? 'online' : 'offline'"></span>
@@ -26,9 +31,13 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { APP_VERSION } from '../utils/appInfo'
+import { usePanelFocus } from '../composables/usePanelFocus'
 
+defineProps<{workspace?:boolean}>()
 defineEmits<{ close: [] }>()
 const { t } = useLocale()
+const { panel, trapFocus } = usePanelFocus()
 
 const relayUrl = ref('')
 const connected = ref(false)

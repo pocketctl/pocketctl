@@ -9,12 +9,12 @@
   >
     <header class="panel-head">
       <div>
-        <h3>团队会话</h3>
-        <small>{{ hostRows.length }} 个会话</small>
+        <h3> {{ t('workspace.team_sessions') }} </h3>
+        <small>{{ t('workspace.sessions_count', {count:hostRows.length}) }}</small>
       </div>
       <button
         class="new-button"
-        aria-label="新建共享会话"
+        :aria-label="t('workspace.new_shared_session')"
         :disabled="
           !teamId || teamAccess.capabilities.value?.writes_enabled !== true
         "
@@ -39,9 +39,9 @@
             <rect x="3" y="3" width="18" height="13" rx="2" />
             <path d="M8 21h8M12 16v5" /></svg
           ><span
-            ><small>参与主机</small
+            ><small> {{ t('workspace.participating_hosts') }} </small
             ><strong>{{
-              hosts.find((host) => host.id === daemon)?.name || "全部主机"
+              hosts.find((host) => host.id === daemon)?.name || t('session.host_filter_all')
             }}</strong></span
           ><svg class="chevron" viewBox="0 0 24 24">
             <path d="m7 10 5 5 5-5" />
@@ -51,8 +51,8 @@
           <input
             v-model="hostQuery"
             type="search"
-            aria-label="搜索主机"
-            placeholder="搜索主机名称"
+            :aria-label="t('hosts.search_hosts')"
+            :placeholder="t('workspace.search_host_names')"
           />
           <div class="host-filter-options">
           <button
@@ -71,8 +71,8 @@
               ><span>{{ host.name }}</span
               ><small>{{
                 host.id
-                  ? `${host.online ? "在线" : "离线"} · ${host.id}`
-                  : "当前范围内的主机"
+                  ? `${host.online ? t('team.online') : t('team.availability.offline')} · ${host.id}`
+                  : t('workspace.hosts_in_scope')
               }}</small></span
             ><span class="filter-count">{{
               rows.filter(
@@ -85,7 +85,7 @@
             }}</span>
             <svg class="filter-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4 10-10"/></svg>
           </button>
-          <p v-if="!hostOptions.length" class="host-filter-empty">未找到匹配主机</p>
+          <p v-if="!hostOptions.length" class="host-filter-empty"> {{ t('session.host_filter_no_match') }} </p>
           </div>
         </div>
       </div>
@@ -103,7 +103,7 @@
             <path d="m7 10 5 5 5-5" />
           </svg>
         </button>
-        <div v-if="menu === 'agent'" class="filter-menu" role="menu" aria-label="按 Agent 类型筛选会话">
+        <div v-if="menu === 'agent'" class="filter-menu" role="menu" :aria-label="t('session.agent_filter_label')">
           <button
             v-for="agent in ['', 'codex', 'claude-code']"
             :key="agent"
@@ -132,8 +132,8 @@
       ></i
       ><span
         >{{ scopedHosts.filter((host) => host.online).length }} /
-        {{ scopedHosts.length }} 台主机在线</span
-      ><button aria-label="搜索会话" @click="searchOpen = !searchOpen">
+        {{ t('workspace.online_hosts_count', {count:scopedHosts.length}) }}</span
+      ><button :aria-label="t('workspace.search_sessions')" @click="searchOpen = !searchOpen">
         <svg viewBox="0 0 24 24">
           <circle cx="11" cy="11" r="7" />
           <path d="m16 16 4 4" />
@@ -145,14 +145,12 @@
       v-model="query"
       class="session-search"
       type="search"
-      aria-label="搜索共享会话"
-      placeholder="搜索已加载会话"
+      :aria-label="t('workspace.search_shared_sessions')"
+      :placeholder="t('workspace.search_loaded_sessions')"
     />
-    <nav class="browser-list" aria-label="共享会话列表">
-      <button v-if="archived" class="archive-toggle" @click="archived = false">
-        ‹ 返回会话
-      </button>
-      <div class="list-heading">{{ archived ? "已归档" : "共享会话" }}</div>
+    <nav class="browser-list" :aria-label="t('workspace.shared_session_list')">
+      <button v-if="archived" class="archive-toggle" @click="archived = false"> {{ t('workspace.back_to_sessions') }} </button>
+      <div class="list-heading">{{ archived ? t('team.task_filter.archived') : t('memory.search_suggestion_shared') }}</div>
       <div
         v-for="item in filtered"
         :key="item.id"
@@ -167,21 +165,12 @@
           ><i :class="['dot', { offline: item.state !== 'active' }]"></i>
           <div>
             <strong>{{ item.title }}</strong
-            ><small
-              >{{ item.participants.length }} 人 ·
-              {{ item.agent_bindings.length }} Agents ·
-              {{ new Date(item.updated_at).toLocaleDateString() }} ·
-              {{
-                new Set(item.agent_bindings.map((binding) => binding.daemon_id))
-                  .size
-              }}
-              台主机</small
-            >
+> <small>{{ t('workspace.shared_session_meta', {people:item.participants.length, agents:item.agent_bindings.length, date:new Date(item.updated_at).toLocaleDateString(), hosts:new Set(item.agent_bindings.map(binding => binding.daemon_id)).size}) }}</small>
           </div></RouterLink
         >
         <button
           class="row-more"
-          :aria-label="`${item.title}的操作`"
+          :aria-label="t('workspace.session_named_actions', {title:item.title})"
           aria-haspopup="menu"
           :aria-expanded="rowMenu === item.id"
           @click="rowMenu = rowMenu === item.id ? '' : item.id"
@@ -189,7 +178,7 @@
           ···
         </button>
         <div v-if="rowMenu === item.id" class="row-menu" role="menu">
-          <button role="menuitem" @click="copySessionID(item.id)">复制会话 ID</button>
+          <button role="menuitem" @click="copySessionID(item.id)"> {{ t('session.actions.copy_id') }} </button>
           <button
             v-if="item.creator_user_id === user?.id && teamAccess.capabilities.value?.writes_enabled"
             role="menuitem"
@@ -198,8 +187,7 @@
               renameTitle = item.title;
               rowMenu = '';
             "
-          >
-            重命名</button
+          > {{ t('workspace.rename') }} </button
           ><button
             v-if="item.state !== 'archived' && item.creator_user_id === user?.id && teamAccess.capabilities.value?.writes_enabled"
             role="menuitem"
@@ -207,17 +195,15 @@
               archiveTarget = item;
               rowMenu = '';
             "
-          >
-            归档会话
-          </button>
+          > {{ t('workspace.archive_session') }} </button>
         </div>
       </div>
-      <p v-if="loading" class="empty">加载中…</p>
+      <p v-if="loading" class="empty"> {{ t('common.loading') }} </p>
       <p v-else-if="error" class="empty" role="alert">
-        {{ error }} <button @click="load">重试</button>
+        {{ error }} <button @click="load"> {{ t('common.retry') }} </button>
       </p>
       <p v-else-if="!filtered.length" class="empty">
-        {{ teamId ? "当前筛选下没有会话。" : "加入团队后可查看共享会话。"
+        {{ teamId ? t('workspace.no_filtered_sessions') : t('workspace.join_team_hint')
         }}<button
           v-if="teamId"
           @click="
@@ -226,18 +212,15 @@
             query = '';
             archived = false;
           "
-        >
-          重置筛选</button
-        ><RouterLink v-else to="/teams">打开团队</RouterLink>
+        > {{ t('workspace.reset_filters') }} </button
+        ><RouterLink v-else to="/teams"> {{ t('workspace.open_team') }} </RouterLink>
       </p>
-      <button v-if="!archived" class="archive-toggle" @click="archived = true">
-        已归档
-        <span>{{
+      <button v-if="!archived" class="archive-toggle" @click="archived = true"> {{ t('team.task_filter.archived') }} <span>{{
           sessions.filter((item) => item.state === "archived").length
         }}</span>
       </button>
     </nav>
-    <TeamOverlay v-if="editing" title="重命名共享会话" @close="editing = null"
+    <TeamOverlay actions v-if="editing" :title="t('workspace.rename_shared_session')" @close="editing = null"
       ><form
         class="rename-form"
         @submit.prevent="mutate(editing, { title: renameTitle })"
@@ -246,27 +229,23 @@
           v-model.trim="renameTitle"
           maxlength="240"
           required
-          aria-label="会话名称"
+          :aria-label="t('workspace.session_name')"
         />
         <p v-if="error" role="alert">{{ error }}</p>
-        <button :disabled="mutationBusy || !renameTitle">保存</button>
+        <button :disabled="mutationBusy || !renameTitle"> {{ t('common.save') }} </button>
       </form></TeamOverlay
     >
-    <TeamOverlay
+    <TeamOverlay actions
       v-if="archiveTarget"
-      title="归档会话"
+      :title="t('workspace.archive_session')"
       @close="archiveTarget = null"
-      ><p class="archive-note">
-        归档后仍可在“已归档”中查看历史记录，新共享调用将停止。
-      </p>
+      ><p class="archive-note"> {{ t('workspace.archive_shared_hint') }} </p>
       <p v-if="error" role="alert">{{ error }}</p>
       <template #footer
         ><button
           :disabled="mutationBusy"
           @click="mutate(archiveTarget, { state: 'archived' })"
-        >
-          确认归档
-        </button></template
+        > {{ t('workspace.confirm_archive') }} </button></template
       ></TeamOverlay
     >
     <TeamSessionCreateDialog
@@ -277,6 +256,8 @@
   </aside>
 </template>
 <script setup lang="ts">
+import { useLocale } from "../../composables/useLocale"
+const { t } = useLocale()
 import { computed, onBeforeUnmount, onMounted, ref, watch, toRefs } from "vue";
 import { useSessionBrowserFilters } from "../../composables/useSessionBrowserFilters";
 import { useAuth } from "../../composables/useAuth";
@@ -337,7 +318,7 @@ async function copySessionID(id: string) {
     await navigator.clipboard.writeText(id);
     rowMenu.value = "";
   } catch {
-    error.value = "复制失败，请在会话顶部复制 ID。";
+    error.value = t('workspace.copy_id_failed');
   }
 }
 async function mutate(
@@ -378,7 +359,7 @@ function providerLabel(value: string) {
     ? "Codex"
     : value === "claude-code"
       ? "Claude Code"
-      : "全部 Agent";
+      : t('session.agent_filter_all');
 }
 function matches(item: TeamSessionSummary, host: string, agent: string) {
   return (
@@ -414,7 +395,7 @@ const hostOptions = computed(() =>
   [
     {
       id: "",
-      name: "全部主机",
+      name: t('session.host_filter_all'),
       online: hosts.value.some((host) => host.online),
     },
     ...hosts.value,
@@ -472,7 +453,7 @@ async function load() {
     candidates.value = nextCandidates;
   } catch (failure) {
     if (current === generation)
-      error.value = failure instanceof Error ? failure.message : "加载失败";
+      error.value = failure instanceof Error ? failure.message : t('workspace.load_failed');
   } finally {
     if (current === generation) loading.value = false;
   }

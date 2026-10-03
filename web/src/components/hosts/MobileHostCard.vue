@@ -81,6 +81,7 @@
     <footer v-if="lastActivityLabel" class="mobile-host-footer">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
       <span>{{ t('mobile.host_last_active') }} · {{ lastActivityLabel }}</span>
+      <span class="mobile-host-session-count">{{ t('workspace.sessions_count', { count: totalSessions }) }}</span>
     </footer>
   </article>
 </template>

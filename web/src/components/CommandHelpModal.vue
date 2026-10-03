@@ -1,12 +1,5 @@
 <template>
-  <div class="overlay" @click.self="$emit('close')">
-    <div class="modal">
-      <div class="modal-header">
-        <h3>可用命令</h3>
-        <button class="close-btn" @click="$emit('close')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
-      </div>
+  <ActionList :title="t('workspace.available_commands')" :width="600" @close="$emit('close')">
       <div class="modal-body">
         <div v-for="c in commands" :key="c.name" :class="['cmd-row', `is-${c.kind}`]">
           <span class="cmd-icon" v-html="commandIcon(c)"></span>
@@ -16,11 +9,13 @@
           <span class="cmd-source" v-if="c.source === 'plugin'">{{ c.namespace }}</span>
         </div>
       </div>
-    </div>
-  </div>
+  </ActionList>
 </template>
 
 <script setup lang="ts">
+import ActionList from './ActionList.vue'
+import { useLocale } from '../composables/useLocale'
+const { t } = useLocale()
 import type { CommandItem } from '../composables/useWebSocket'
 
 defineProps<{

@@ -1,5 +1,6 @@
 <template>
   <a
+    v-if="!isMobile || (route.path === '/hosts' && route.query.view !== 'agents')"
     class="theme-toggle topbar-github-link"
     href="https://github.com/pocketctl/pocketctl"
     target="_blank"
@@ -13,6 +14,13 @@
     </svg>
   </a>
 </template>
+
+<script setup lang="ts">
+import { useRoute } from 'vue-router'
+import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+const route = useRoute()
+const { isMobile } = useResponsiveLayout()
+</script>
 
 <style scoped>
 .topbar-github-link {

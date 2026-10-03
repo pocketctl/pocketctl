@@ -49,6 +49,7 @@ type codexProjection struct {
 	activeTurn     map[string]string
 	completedTurn  map[string]struct{}
 	threadStatus   map[string]string
+	threadCwd      map[string]string
 	threadRevision map[string]uint64
 	parts          map[string]codexProjectedPart
 	turnDiff       map[string]string
@@ -109,6 +110,7 @@ func newCodexProjection(generation uint64) *codexProjection {
 		activeTurn:     make(map[string]string),
 		completedTurn:  make(map[string]struct{}),
 		threadStatus:   make(map[string]string),
+		threadCwd:      make(map[string]string),
 		threadRevision: make(map[string]uint64),
 		parts:          make(map[string]codexProjectedPart),
 		turnDiff:       make(map[string]string),
@@ -183,6 +185,9 @@ func (p *codexProjection) projectThreadStarted(raw json.RawMessage) []protocol.D
 	}
 	if json.Unmarshal(raw, &params) != nil || params.Thread.ID == "" {
 		return nil
+	}
+	if params.Thread.Cwd != "" {
+		p.threadCwd[params.Thread.ID] = params.Thread.Cwd
 	}
 	key := p.key("thread/started", params.Thread.ID, digest(raw))
 	if !p.mark(key) {

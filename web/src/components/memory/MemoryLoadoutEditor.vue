@@ -10,9 +10,9 @@
 			</li>
 		</ul>
 		<div class="loadout-form">
-			<select v-model="assetKind" data-testid="loadout-kind">
+			<ActionSelect><select v-model="assetKind" data-testid="loadout-kind">
 				<option value="claim">claim</option><option value="persona">persona</option><option value="runbook">runbook</option>
-			</select>
+			</select></ActionSelect>
 			<input v-model.trim="claimId" data-testid="loadout-claim-id" :placeholder="t('memory.loadout.claimPlaceholder')">
 			<input v-model.number="priority" type="number" min="0" max="100" data-testid="loadout-priority">
 			<button class="memory-button" data-testid="loadout-add" :disabled="busy || !claimId" @click="add">{{ t('memory.loadout.add') }}</button>
@@ -22,6 +22,7 @@
 </template>
 
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { getContextLoadout, replaceContextLoadout } from '../../services/memoryClient'

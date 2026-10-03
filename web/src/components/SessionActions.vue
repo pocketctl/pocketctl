@@ -1,121 +1,78 @@
 <template>
   <div class="ss-wrap">
-    <button class="ss-more-btn" :title="t('session.actions.more')" @click.stop.prevent="toggleMenu($event)">
+    <button ref="trigger" type="button" :aria-label="t('session.actions.more')" :aria-expanded="menuOpen || moveOpen || archiveOpen || exportOpen || deleteOpen" class="ss-more-btn" :title="t('session.actions.more')" @click.stop.prevent="toggleMenu($event)">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
     </button>
 
-    <div v-if="menuOpen" class="ss-menu" :style="{ left: menuX + 'px', top: menuY + 'px' }" @click.stop>
-      <button class="ss-menu-item" @click="copyId">
+    <ActionList v-if="menuOpen || moveOpen || archiveOpen || exportOpen || deleteOpen" :anchor="trigger" :title="panelTitle" :back="!menuOpen" @back="backToMenu" @close="closeAll"><template v-if="menuOpen">
+      <button class="ss-menu-item action-item" @click="copyId">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         <span>{{ copied ? t('common.copied') : t('session.actions.copy_id') }}</span>
         <em v-if="!copied" class="ss-menu-hint">{{ session.session_id?.slice(0, 12) }}…</em>
       </button>
       <div class="ss-menu-sep"></div>
-      <button v-if="!archivedView" class="ss-menu-item" :class="{ active: session.pinned }" @click="togglePin">
+      <button v-if="!archivedView" class="ss-menu-item action-item" :class="{ active: session.pinned }" @click="togglePin">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.8V4h6v6.8l3 3.2v2H6v-2l3-3.2z"/></svg>
         <span>{{ session.pinned ? t('session.actions.unpin') : t('session.actions.pin') }}</span>
       </button>
-      <button class="ss-menu-item" @click="emit('startRename', props.session.session_id, props.session.title || props.session.session_id?.slice(0, 8) || '')">
+      <button class="ss-menu-item action-item" @click="emit('startRename', props.session.session_id, props.session.title || props.session.session_id?.slice(0, 8) || '')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         <span>{{ t('session.actions.rename') }}</span>
       </button>
-      <button class="ss-menu-item" @click="openExport">
+      <button class="ss-menu-item action-item" @click="openExport">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
         <span>{{ t('session.actions.export') }}</span>
       </button>
-      <button v-if="!archivedView && resumeCommand" class="ss-menu-item" @click="copyResumeCmd">
+      <button v-if="!archivedView && resumeCommand" class="ss-menu-item action-item" @click="copyResumeCmd">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
         <span>{{ t('session.actions.resume') }}</span>
       </button>
       <div class="ss-menu-sep"></div>
-      <button class="ss-menu-item" @click.stop="moveOpen = true; closeMenu()">
+      <button class="ss-menu-item action-item" @click.stop="moveOpen = true; closeMenu()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <span>移动到项目</span>
+        <span>{{ t('workspace.move_to_project') }}</span>
       </button>
-      <button class="ss-menu-item" @click.stop="archivedView ? restoreArchive() : openArchive()">
+      <button class="ss-menu-item action-item" @click.stop="archivedView ? restoreArchive() : openArchive()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v12h14V8M10 13h4"/></svg>
-        <span>{{ archivedView ? '恢复会话' : '归档会话' }}</span>
+        <span>{{ archivedView ? t('workspace.restore_session') : t('workspace.archive_session') }}</span>
       </button>
       <div class="ss-menu-sep"></div>
-      <button class="ss-menu-item danger" @click="openDelete">
+      <button class="ss-menu-item action-item danger" @click="openDelete">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
         <span>{{ t('session.actions.delete') }}</span>
       </button>
-    </div>
+    </template>
 
-    <div v-if="moveOpen" class="ss-overlay" @click.self.stop="moveOpen = false">
-      <div class="ss-dialog ss-choice-dialog" @click.stop>
-        <h3 class="ss-dialog-title">移动到项目</h3>
-        <p class="ss-dialog-desc">{{ displayTitle() }}</p>
-        <div class="ss-choice-list">
-          <button class="ss-menu-item" :disabled="moving" @click.stop="moveTo(null)">未分组</button>
-          <button v-for="project in projects" :key="project.id" class="ss-menu-item" :disabled="moving" @click.stop="moveTo(project.id)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>{{ project.name }}
-          </button>
-        </div>
-        <div class="ss-dialog-footer"><button class="ss-btn-cancel" @click="moveOpen = false">取消</button></div>
-      </div>
-    </div>
-    <div v-if="archiveOpen" class="ss-overlay" @click.self.stop="archiveOpen = false">
-      <div class="ss-dialog" @click.stop>
-        <h3 class="ss-dialog-title">归档会话</h3>
-        <p class="ss-dialog-desc">归档后会话仍可在“已归档”中查看和恢复，运行中的会话不会停止。</p>
-        <p class="ss-dialog-target">{{ displayTitle() }}</p>
-        <div class="ss-dialog-footer">
-          <button class="ss-btn-cancel" @click="archiveOpen = false">取消</button>
-          <button class="ss-export-confirm" :disabled="archiving" @click.stop="confirmArchive">确认归档</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Export dialog -->
-    <div v-if="exportOpen" class="ss-overlay" @click.self.stop="exportOpen = false">
-      <div class="ss-dialog ss-export-dialog" @click.stop>
-        <div class="ss-export-icon">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
-        </div>
-        <h3 class="ss-dialog-title">{{ t('session.export_dialog_title') }}</h3>
-        <p class="ss-dialog-desc">{{ displayTitle() }}</p>
-        <div class="ss-format-group">
-          <button v-for="f in ['md','json','txt']" :key="f" :class="['ss-format', { selected: exportFmt === f }]" @click="exportFmt = f">
-            {{ f === 'md' ? t('session.export_markdown') : f === 'json' ? t('session.export_json') : t('session.export_text') }}
-          </button>
-        </div>
-        <div class="ss-dialog-footer">
-          <button class="ss-btn-cancel" @click="exportOpen = false">{{ t('common.cancel') }}</button>
-          <button class="ss-export-confirm" @click="doExport">{{ t('session.export_confirm') }}</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Delete confirm dialog -->
-    <div v-if="deleteOpen" class="ss-overlay" @click.self.stop="deleteOpen = false">
-      <div class="ss-dialog" @click.stop>
-        <div class="ss-dialog-icon">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
-        </div>
-        <h3 class="ss-dialog-title">{{ t('session.delete_dialog_title') }}</h3>
-        <p class="ss-dialog-desc">{{ t('session.delete_dialog_desc') }}</p>
-        <p class="ss-dialog-target">{{ displayTitle() }}</p>
-        <div class="ss-dialog-footer">
-          <button class="ss-btn-cancel" @click="deleteOpen = false">{{ t('common.cancel') }}</button>
-          <button class="ss-confirm" :disabled="deleting" @click="confirmDelete">
-            <span v-if="deleting" class="ss-mini-spinner"></span>{{ deleting ? t('session.actions.deleting') : t('session.actions.delete_confirm') }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <template v-else-if="moveOpen">
+      <p>{{ displayTitle() }}</p>
+      <button class="action-item" :class="{selected: !session.project_id}" :disabled="moving" @click.stop="moveTo(null)">{{ t('workspace.ungrouped') }}<WorkspaceIcon v-if="!session.project_id" name="check" /></button>
+      <button v-for="project in projects" :key="project.id" class="action-item" :class="{selected:session.project_id===project.id}" :disabled="moving" @click.stop="moveTo(project.id)">{{ project.name }}<WorkspaceIcon v-if="session.project_id===project.id" name="check" /></button>
+    </template>
+    <template v-else-if="archiveOpen"><p>{{ t('workspace.archive_hint') }}</p><p>{{ displayTitle() }}</p></template>
+    <template v-else-if="exportOpen"><p>{{ displayTitle() }}</p><button v-for="f in ['md','json','txt']" :key="f" class="action-item" :class="{selected:exportFmt===f}" @click="exportFmt=f">{{ f === 'md' ? t('session.export_markdown') : f === 'json' ? t('session.export_json') : t('session.export_text') }}<WorkspaceIcon v-if="exportFmt===f" name="check" /></button></template>
+    <template v-else-if="deleteOpen"><p>{{ t('session.delete_dialog_desc') }}</p><p>{{ displayTitle() }}</p></template>
+    <template v-if="!menuOpen" #footer>
+      <button type="button" @click="backToMenu">{{ t('common.cancel') }}</button>
+      <button v-if="archiveOpen" type="button" class="primary" :disabled="archiving" @click="confirmArchive">{{ t('workspace.confirm_archive') }}</button>
+      <button v-if="exportOpen" type="button" class="primary" :disabled="exporting" @click="doExport">{{ t('session.export_confirm') }}</button>
+      <button v-if="deleteOpen" type="button" class="danger" :disabled="deleting" @click="confirmDelete">{{ deleting ? t('session.actions.deleting') : t('session.actions.delete_confirm') }}</button>
+    </template>
+    </ActionList>
 
     <!-- Toast (undo) -->
+    <Teleport to="body">
     <div v-if="toast.show" class="ss-toast" @click.stop>
       <span class="ss-toast-msg">{{ toast.msg }}</span>
       <button v-if="toast.undo" class="ss-toast-undo" @click="toast.undo()">{{ toast.undoLabel || t('session.actions.undo') }}</button>
     </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, nextTick, onUnmounted } from 'vue'
+import { computed, ref, onUnmounted } from 'vue'
+import ActionList from './ActionList.vue'
+import WorkspaceIcon from './WorkspaceIcon.vue'
 import { useWebSocket } from '../composables/useWebSocket'
 import { useAuth } from '../composables/useAuth'
 import { useLocale } from '../composables/useLocale'
@@ -137,9 +94,9 @@ const { send, onEvent } = useWebSocket()
 const { accessToken } = useAuth()
 const { t } = useLocale()
 
+const trigger = ref<HTMLButtonElement | null>(null)
+const exporting = ref(false)
 const menuOpen = ref(false)
-const menuX = ref(0)
-const menuY = ref(0)
 const copied = ref(false)
 const exportOpen = ref(false)
 const exportFmt = ref('md')
@@ -152,30 +109,23 @@ const deleting = ref(false)
 const toast = ref<{ show: boolean; msg: string; undo?: () => void; undoLabel?: string }>({ show: false, msg: '' })
 let deleteTimer: ReturnType<typeof setTimeout> | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
+let mounted = true
 
 const displayTitle = () => props.session.title || props.session.session_id?.slice(0, 8) || t('session.title_default')
 const resumeCommand = computed(() => buildResumeCommand(props.session))
 
 function toggleMenu(e: MouseEvent) {
   if (menuOpen.value) { menuOpen.value = false; return }
-  const btn = e.currentTarget as HTMLElement
-  const r = btn.getBoundingClientRect()
-  menuX.value = r.right - 188; menuY.value = r.bottom + 6
-  if (menuX.value < 8) menuX.value = 8
+  const btn = e.currentTarget as HTMLButtonElement
+  trigger.value = btn
   menuOpen.value = true
 }
 function closeMenu() { menuOpen.value = false }
-const onDocClick = () => { if (menuOpen.value) closeMenu() }
-const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') { closeMenu(); exportOpen.value = false; deleteOpen.value = false; moveOpen.value = false; archiveOpen.value = false } }
-const onScroll = () => closeMenu()
-document.addEventListener('click', onDocClick)
-document.addEventListener('keydown', onEsc)
-window.addEventListener('scroll', onScroll, true)
+const panelTitle = computed(() => moveOpen.value ? t('workspace.move_to_project') : archiveOpen.value ? t('workspace.archive_session') : exportOpen.value ? t('session.export_dialog_title') : deleteOpen.value ? t('session.delete_dialog_title') : t('session.actions.more'))
+function closeAll() { menuOpen.value=false; exportOpen.value=false; deleteOpen.value=false; moveOpen.value=false; archiveOpen.value=false }
+function backToMenu() { closeAll(); menuOpen.value=true }
 onUnmounted(() => {
-  document.removeEventListener('click', onDocClick)
-  document.removeEventListener('keydown', onEsc)
-  window.removeEventListener('scroll', onScroll, true)
-  if (deleteTimer) clearTimeout(deleteTimer)
+  mounted = false
   if (toastTimer) clearTimeout(toastTimer)
 })
 
@@ -218,10 +168,12 @@ function togglePin() {
 // 4. Export
 function openExport() { closeMenu(); exportFmt.value = 'md'; exportOpen.value = true }
 async function doExport() {
+  if (exporting.value) return
+  exporting.value = true
   const origin = getRelayOrigin()
   try {
     const res = await fetch(`${origin}/api/sessions/${props.session.session_id}/export?format=${exportFmt.value}`, { headers: { Authorization: `Bearer ${accessToken.value}` } })
-    if (!res.ok) return
+    if (!res.ok) throw new Error(t('workspace.export_failed'))
     const blob = await res.blob()
     const cd = res.headers.get('Content-Disposition') || ''
     const m = cd.match(/filename="?(.+?)"?$/)
@@ -231,7 +183,8 @@ async function doExport() {
     URL.revokeObjectURL(url)
     exportOpen.value = false
     showToast(t('session.actions.exported_toast', { filename }))
-  } catch {}
+  } catch (error) { showToast(error instanceof Error ? error.message : t('workspace.export_failed')) }
+  finally { exporting.value = false }
 }
 
 // 5. Delete
@@ -242,7 +195,7 @@ async function moveTo(projectId: string | null) {
     props.session.project_id = projectId
     emit('moved', props.session.session_id, projectId)
     moveOpen.value = false
-  } catch (error) { showToast(error instanceof Error ? error.message : '移动失败') }
+  } catch (error) { showToast(error instanceof Error ? error.message : t('workspace.move_failed')) }
   finally { moving.value = false }
 }
 function openArchive() { closeMenu(); archiveOpen.value = true }
@@ -252,7 +205,7 @@ async function confirmArchive() {
     await archiveSession(props.session.session_id, true)
     emit('archived', props.session.session_id, true)
     archiveOpen.value = false
-  } catch (error) { showToast(error instanceof Error ? error.message : '归档失败') }
+  } catch (error) { showToast(error instanceof Error ? error.message : t('workspace.archive_failed')) }
   finally { archiving.value = false }
 }
 async function restoreArchive() {
@@ -260,16 +213,22 @@ async function restoreArchive() {
   try {
     await archiveSession(props.session.session_id, false)
     emit('archived', props.session.session_id, false)
-  } catch (error) { showToast(error instanceof Error ? error.message : '恢复失败') }
+  } catch (error) { showToast(error instanceof Error ? error.message : t('workspace.restore_failed')) }
 }
 function openDelete() { closeMenu(); deleteOpen.value = true }
 function confirmDelete() {
+  if (deleting.value || props.session.__pendingDelete) return
+  // A confirmed operation belongs to its original session, even if navigation
+  // removes this row or reuses it before the undo window expires.
+  const session = props.session
+  const sessionId = session.session_id
+  const title = displayTitle()
   deleting.value = true
   setTimeout(() => {
     deleting.value = false; deleteOpen.value = false
-    props.session.__pendingDelete = true
-    deleteTimer = setTimeout(() => { send({ type: 'session_delete', session_id: props.session.session_id }) }, 5000)
-    showToast(`已删除「${displayTitle()}」`, () => { if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null }; props.session.__pendingDelete = false }, t('session.actions.undo'))
+    session.__pendingDelete = true
+    deleteTimer = setTimeout(() => { deleteTimer = null; send({ type: 'session_delete', session_id: sessionId }) }, 5000)
+    if (mounted) showToast(t('workspace.deleted_session', {title}), () => { if (deleteTimer) { clearTimeout(deleteTimer); deleteTimer = null }; session.__pendingDelete = false }, t('session.actions.undo'))
   }, 700)
 }
 
@@ -282,7 +241,7 @@ function showToast(msg: string, undo?: () => void, undoLabel?: string) {
 
 <style scoped>
 .ss-wrap { display: inline-flex; align-items: center; position: relative; }
-.ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
+.ss-more-btn { width: 28px; height: 28px; border: none; background: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 6px; display: flex; align-items: center; justify-content: center; opacity: 1; transition: opacity 0.15s, background 0.15s, color 0.15s; flex-shrink: 0; }
 .ss-more-btn:hover, .ss-wrap:hover .ss-more-btn { opacity: 1; background: var(--surface-active); color: var(--fg); }
 .ss-menu { position: fixed; z-index: 200; min-width: 188px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 4px; }
 .ss-menu-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: none; background: none; color: var(--fg-secondary); font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); text-align: left; transition: background 0.1s, color 0.1s; }

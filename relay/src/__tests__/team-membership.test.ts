@@ -19,6 +19,7 @@ function service(overrides: Partial<TeamRouteService> = {}): TeamRouteService {
     respondToInvitation: vi.fn(),
     revokeInvitation: vi.fn(),
     leaveTeam: vi.fn(),
+    changeMemberRole: vi.fn(),
     removeMember: vi.fn(),
     dissolveTeam: vi.fn(),
     listAgentCandidates: vi.fn(async () => []),
@@ -43,6 +44,29 @@ function register(testService: TeamRouteService, enabled = true, live?: (daemonI
 }
 
 describe('Team membership routes', () => {
+  test('validates role mutations and forwards authenticated revision and invitation role', async () => {
+    const changeMemberRole = vi.fn().mockResolvedValue({ role: 'viewer', revision: 3 })
+    const invite = vi.fn().mockResolvedValue({ role: 'admin' })
+    const app = register(service({ changeMemberRole, invite }))
+    const headers = { authorization: 'Bearer user-7' }
+    const url = '/api/team/teams/t/members/m/role'
+    for (const role of ['owner', ['admin'], null]) {
+      expect((await app.inject({ method: 'PATCH', url, headers,
+        payload: { request_id: 'role-invalid', expected_revision: 2, role } })).statusCode).toBe(400)
+    }
+    expect(changeMemberRole).not.toHaveBeenCalled()
+    const response = await app.inject({ method: 'PATCH', url, headers,
+      payload: { request_id: 'role-valid', expected_revision: 2, role: 'viewer' } })
+    expect(response.statusCode).toBe(200)
+    expect(changeMemberRole).toHaveBeenCalledWith({ teamId: 't', membershipId: 'm', actorUserId: 7,
+      role: 'viewer', expectedRevision: 2, requestId: 'role-valid' })
+    const invitation = await app.inject({ method: 'POST', url: '/api/team/teams/t/invitations', headers,
+      payload: { request_id: 'invite-admin', expected_revision: 2, email: 'admin@example.test', role: 'admin' } })
+    expect(invitation.statusCode).toBe(201)
+    expect(invite).toHaveBeenCalledWith({ teamId: 't', actorUserId: 7, email: 'admin@example.test', role: 'admin', expectedRevision: 2, requestId: 'invite-admin' })
+    await app.close()
+  })
+
   test('does not advertise persisted online Agents before their live socket reconnects', async () => {
     const candidate = candidateForProvider({ daemon_id: 'd-stale', hostname: 'host', status: 'online',
       agents: ['claude-code'], collaboration_capabilities: ['team_collaboration_dispatch_v1', 'team_collaboration_context_v1'] }, 'claude-code', 't')

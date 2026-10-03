@@ -1,9 +1,9 @@
 <template>
-  <div class="memory-workbench memory-layout-v2" :class="{ 'is-mobile': isMobile }">
-    <header class="memory-page-head">
+  <div class="memory-workbench memory-layout-v2 design-surface content memory-page" :class="{ 'is-mobile': isMobile }">
+    <header class="memory-page-head page-tools">
       <div class="memory-page-brand">
         <span class="memory-brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5a3 3 0 1 0-6 .5A4 4 0 0 0 4 12a4 4 0 0 0 2 6.5A3 3 0 0 0 12 19zM12 5a3 3 0 1 1 6 .5A4 4 0 0 1 20 12a4 4 0 0 1-2 6.5A3 3 0 0 1 12 19zM12 7v10"/></svg></span>
-        <div class="memory-page-copy"><h1>Memory</h1><p class="memory-subtitle">{{ t('memory.subtitle') }}</p></div>
+        <div class="memory-page-copy"><p class="memory-subtitle">{{ t('memory.subtitle') }}</p></div>
       </div>
       <span v-if="installation && servicesEnabled" class="memory-page-status"><span class="memory-status-dot"></span>{{ t('memory.services_enabled') }}</span>
     </header>
@@ -40,20 +40,21 @@
     </section>
 
     <section v-else class="memory-workspace" data-testid="memory-workspace">
-      <div class="memory-workspace-shell" data-testid="memory-workbench-frame">
+      <div v-if="isMobile" class="memory-scope"><WorkspaceIcon name="memory" class="icon" /><span class="grow">{{ t('replica.personal_memory') }}</span><span class="badge green">{{ t('memory.services_enabled') }}</span></div>
+      <div class="memory-workspace-shell memory-grid" data-testid="memory-workbench-frame">
         <MemoryModuleNavigation v-model="active" :review-count="reviewCount" />
-        <div class="memory-workspace-main">
+        <div class="memory-workspace-main memory-stage">
           <div class="memory-module-picker">
             <label for="memory-module-select">{{ t('memory.module') }}
-              <select id="memory-module-select" v-model="active" :aria-label="t('memory.choose_module')" data-testid="memory-module-select">
+              <ActionSelect><select id="memory-module-select" v-model="active" :aria-label="t('memory.choose_module')" data-testid="memory-module-select">
                 <optgroup v-for="group in MEMORY_MODULE_GROUPS" :key="group.id" :label="t(`memory.group_${group.id}`)">
                   <option v-for="module in group.modules" :key="module" :value="module">{{ t(`memory.tab_${module}`) }}</option>
                 </optgroup>
-              </select>
+              </select></ActionSelect>
             </label>
           </div>
           <header class="memory-module-header" :aria-label="t('memory.workspace_label')" data-testid="memory-workspace-toolbar">
-            <p :id="`memory-description-${active}`" data-testid="memory-workspace-description">{{ t(`memory.module_${active}_copy`) }}</p>
+            <h2>{{ t(`memory.tab_${active}`) }}</h2><p :id="`memory-description-${active}`" data-testid="memory-workspace-description">{{ t(`memory.module_${active}_copy`) }}</p>
           </header>
           <div v-if="active === 'claims'" class="memory-knowledge-heading"><h3>{{ t('memory.knowledge_versions') }}</h3>
             <button type="button" class="memory-button" data-testid="memory-claim-create" :title="t('memory.new_claim_unavailable')" disabled>+ {{ t('memory.new_claim') }}</button>
@@ -164,6 +165,8 @@
 </template>
 
 <script setup lang="ts">
+import ActionSelect from '../components/ActionSelect.vue'
+import WorkspaceIcon from '../components/WorkspaceIcon.vue'
 import MemoryContextSettings from '../components/memory/MemoryContextSettings.vue'
 import ContextPackList from '../components/memory/ContextPackList.vue'
 import ContextPackDetail from '../components/memory/ContextPackDetail.vue'
