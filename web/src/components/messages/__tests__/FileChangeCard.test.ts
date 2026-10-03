@@ -154,7 +154,7 @@ describe('FileChangeCard', () => {
 
     expect(wrapper.emitted('open-mobile')).toHaveLength(1)
     expect(wrapper.find('[data-testid="file-change-detail"]').exists()).toBe(false)
-    expect(trigger.attributes('aria-haspopup')).toBe('dialog')
+    expect(trigger.attributes('aria-haspopup')).toBeUndefined()
     expect(trigger.attributes('aria-expanded')).toBeUndefined()
     expect(trigger.attributes('aria-controls')).toBe('file-change-mobile-sheet')
   })

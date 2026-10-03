@@ -1,89 +1,29 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <h1 class="page-title">{{ t('settings.title') }}</h1>
+  <div class="page-container design-surface content settings-page">
+    <p v-if="userPreferences.error.value" class="notice amber" role="alert">{{ t('common.error') }}: {{ userPreferences.error.value }}</p>
+    <div v-if="!isMobile" class="settings-grid"><nav class="subnav" :aria-label="t('replica.settings_categories')"><button v-for="tab in settingsTabs" :key="tab.id" :class="{active:activeSetting===tab.id}" @click="activeSetting=tab.id"><WorkspaceIcon :name="tab.icon" class="icon small" />{{ t(tab.label) }}</button></nav><div class="settings-stage">
+      <template v-if="activeSetting==='profile'">
+        <section class="card"><header class="card-head"><h3>{{ t('replica.account_profile') }}</h3><button class="btn small" @click="showEditProfile=true">{{ t('settings.edit_profile') }}</button></header><div class="card-body row reference-profile"><span class="avatar">{{ userInitial }}</span><div><h2>{{ userDisplayName }}</h2><p class="sub">{{ userMasked }}</p></div><span class="grow" /><span class="badge blue">{{ user?.plan && user.plan!=='free'?'PRO':'FREE' }}</span></div><div class="setting-row"><WorkspaceIcon name="mail" class="icon" /><div class="grow"><strong>{{ t('login.email_label') }}</strong><p>{{ userEmail }}</p></div><button class="btn small" @click="showBindEmail=true">{{ t('replica.change_email') }}</button></div><div class="setting-row"><WorkspaceIcon name="shield" class="icon" /><div class="grow"><strong>{{ t('replica.account_plan') }}</strong><p>{{ t(user?.plan && user.plan!=='free'?'user.pro_plan':'user.free_plan') }}</p></div><button class="btn small" @click="openPlan($event)">{{ t('replica.manage_plan') }}</button></div></section>
+        <section class="card settings-account-actions"><header class="card-head"><h3>{{ t('replica.account_actions') }}</h3></header><div class="setting-row"><div class="grow"><strong>{{ t('settings.logout') }}</strong><p>{{ t('replica.logout_copy') }}</p></div><button class="btn danger small" @click="handleLogout">{{ t('settings.logout') }}</button></div></section>
+      </template>
+      <template v-if="activeSetting==='appearance'"><section class="card"><header class="card-head"><h3>{{ t('settings.appearance') }}</h3><span class="sub">{{ t('replica.appearance_copy') }}</span></header><div class="theme-options"><button v-for="theme in themes" :key="theme.id" class="theme-option" :class="{active:currentTheme===theme.id}" @click="setTheme(theme.id)"><div class="theme-sample" :class="theme.id==='system'?'auto':theme.id"><span /><span /></div>{{ t(theme.label) }}</button></div></section><section class="card settings-account-actions"><header class="card-head"><h3>{{ t('replica.language') }}</h3></header><div class="setting-row"><WorkspaceIcon name="globe" class="icon" /><div class="grow"><strong>{{ t('replica.interface_language') }}</strong><p>{{ t('replica.language_copy') }}</p></div><ActionSelect><select :value="locale" :aria-label="t('replica.interface_language')" @change="setLocale(($event.target as HTMLSelectElement).value as 'zh'|'en')"><option value="zh">中文</option><option value="en">English</option></select></ActionSelect></div></section></template>
+      <section v-if="activeSetting==='notifications'" class="card"><header class="card-head"><h3>{{ t('settings.notif_pref') }}</h3></header><div class="setting-row"><div class="grow"><button class="text-setting-label" @click="notificationsOpen=true"><strong>{{ t('replica.browser_notifications') }}</strong></button><p>{{ t('replica.browser_notifications_copy') }}</p></div><button class="switch" :class="{on:browserNotifications}" :aria-pressed="browserNotifications" :aria-label="t('replica.browser_notifications')" @click="toggleBrowserNotifications" /></div><div v-for="notice in noticePreferences.filter(notice=>!['errors','updates'].includes(notice.id))" :key="notice.id" class="setting-row"><div class="grow"><strong>{{ t(notice.label) }}</strong></div><button class="switch" :class="{on:notice.value}" :aria-pressed="notice.value" :aria-label="t(notice.label)" @click="setNotice(notice.id,!notice.value)" /></div><div class="card-body"><button class="btn" @click="sendTestNotification">{{ t('replica.send_test_notice') }}</button></div></section>
+      <section v-if="activeSetting==='hosts'" class="card"><header class="card-head"><h3>{{ t('dashboard.my_hosts') }}</h3><button class="btn small" @click="showRegisterDaemon=true">{{ t('dashboard.register_host') }}</button></header><div v-for="daemon in daemons" :key="daemon.daemon_id" class="setting-row"><span class="dot" :class="{off:!daemon.daemon_online}" /><div class="grow"><strong>{{ daemon.daemon_alias || daemon.hostname || daemon.daemon_id.slice(0,8) }}</strong><p>{{ daemon.os }}</p></div><span class="badge" :class="daemon.daemon_online?'green':''">{{ t(daemon.daemon_online?'dashboard.online':'dashboard.offline') }}</span><button class="btn small" @click="router.push({path:'/hosts',query:{daemon_id:daemon.daemon_id}})">{{ t('dashboard.manage_all') }}</button><button v-if="daemon.daemon_online" class="btn danger small" :disabled="kickRateLimited" @click="startKickDaemon(daemon)">{{ t('settings.force_kick') }}</button></div></section>
+      <section v-if="activeSetting==='install'" class="card"><header class="card-head"><h3>{{ t('pwa.section_title') }}</h3></header><div class="card-body"><InstallPwaCard /></div></section>
+      <section v-if="activeSetting==='about'" class="card settings-about" data-testid="settings-about"><header class="card-head"><h3>{{ t('settings.about_pocketctl') }}</h3><span class="badge">v{{ APP_VERSION }}</span></header><div class="card-body"><div class="row about-brand"><span class="logo-mark"><img class="brand-dark" :src="logoDark" alt="" /><img class="brand-light" :src="logoLight" alt="" /></span><h2>PocketCtl</h2></div><p class="sub about-description">{{ t('replica.about_workspace_copy') }}</p></div><div v-for="link in appLinks.filter(link=>!['install','about'].includes(link.id))" :key="link.id" class="setting-row setting-link" @click="openAppLink(link.id)"><strong class="grow">{{ t(link.label) }}</strong><button type="button" class="icon-btn flat" :aria-label="t(link.label)" @click.stop="openAppLink(link.id)"><WorkspaceIcon name="chevron" class="icon small" /></button></div></section>
+    </div></div>
+    <div v-else class="ios-settings">
+      <div class="ios-profile"><span class="avatar">{{ userInitial }}</span><strong>{{ userDisplayName }}</strong><button class="text-btn" @click="showEditProfile=true">{{ t('settings.edit_profile') }}</button></div>
+      <RouterLink class="card ios-signature" to="/tokens"><div class="ios-heatmap" :aria-label="t('replica.usage_history')"><i v-for="cell in signatureCells" :key="cell.date" :class="'level-'+cell.level" :title="cell.date+' · '+cell.total" /></div><p>{{ t('replica.usage_history') }} · <strong>{{ formatTokenCount(signatureTotal) }}</strong> tokens</p></RouterLink>
+      <h3 class="ios-section-label">{{ t('replica.account') }}</h3><section class="card"><button class="ios-settings-row" @click="showBindEmail=true"><WorkspaceIcon name="mail" class="icon" /><span class="grow">{{ t('login.email_label') }}</span><span class="value">{{ userEmail }}</span><WorkspaceIcon name="chevron" class="icon small" /></button><button class="ios-settings-row" @click="openPlan($event)"><WorkspaceIcon name="user" class="icon" /><span class="grow">{{ t('replica.account_plan') }}</span><span class="value">{{ user?.plan && user.plan!=='free'?'PRO':'FREE' }}</span><WorkspaceIcon name="chevron" class="icon small" /></button><button class="ios-settings-row" @click="router.push('/hosts')"><WorkspaceIcon name="hosts" class="icon" /><span class="grow">{{ t('dashboard.my_hosts') }}</span><span class="value">{{ daemons.length }} {{ t('hosts.host_unit') }}</span><WorkspaceIcon name="chevron" class="icon small" /></button></section>
+      <h3 class="ios-section-label">{{ t('replica.preferences') }}</h3><section class="card"><div class="ios-settings-row"><WorkspaceIcon name="sun" class="icon" /><span class="grow">{{ t('settings.appearance') }}</span><div class="segments"><button v-for="theme in themes" :key="theme.id" :class="{active:currentTheme===theme.id}" @click="setTheme(theme.id)">{{ t(theme.id==='system'?'replica.auto':theme.label) }}</button></div></div><div class="ios-settings-row"><WorkspaceIcon name="inbox" class="icon" /><button class="grow text-setting-label" @click="notificationsOpen=true">{{ t('replica.browser_notifications') }}</button><button class="switch" :class="{on:browserNotifications}" :aria-label="t('replica.browser_notifications')" :aria-pressed="browserNotifications" @click="toggleBrowserNotifications" /></div><div v-for="notice in noticePreferences.filter(notice=>!['errors','updates'].includes(notice.id))" :key="notice.id" class="ios-settings-row"><WorkspaceIcon :name="notice.id==='completed'?'check':notice.id==='daemon'?'hosts':'inbox'" class="icon" /><span class="grow">{{ t(notice.label) }}</span><button class="switch" :class="{on:notice.value}" :aria-label="t(notice.label)" :aria-pressed="notice.value" @click="setNotice(notice.id,!notice.value)" /></div><button class="ios-settings-row" @click="sendTestNotification"><WorkspaceIcon name="inbox" class="icon" /><span class="grow">{{ t('replica.send_test_notice') }}</span><WorkspaceIcon name="chevron" class="icon small" /></button><div class="ios-settings-row"><WorkspaceIcon name="globe" class="icon" /><span class="grow">{{ t('replica.interface_language') }}</span><ActionSelect><select :value="locale" :aria-label="t('replica.interface_language')" @change="setLocale(($event.target as HTMLSelectElement).value as 'zh'|'en')"><option value="zh">中文</option><option value="en">English</option></select></ActionSelect></div></section>
+      <h3 class="ios-section-label">{{ t('replica.application') }}</h3><section class="card"><button v-for="link in appLinks" :key="link.id" class="ios-settings-row" @click="openAppLink(link.id)"><WorkspaceIcon :name="link.icon" class="icon" /><span class="grow">{{ t(link.label) }}</span><WorkspaceIcon name="chevron" class="icon small" /></button></section><button class="btn danger" @click="handleLogout">{{ t('settings.logout') }}</button>
     </div>
-
-    <div class="settings-grid">
-      <!-- Settings Nav -->
-      <div class="settings-nav">
-        <div class="settings-nav-item active" @click="scrollTo('profile')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-          {{ t('settings.profile') }}
-        </div>
-        <div class="settings-nav-item" @click="scrollTo('daemons')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
-          {{ t('nav.hosts') }}
-        </div>
-        <div class="settings-nav-item" @click="scrollTo('appearance')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42"/></svg>
-          {{ t('settings.appearance') }}
-        </div>
-        <div class="settings-nav-item" @click="scrollTo('notifications')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
-          {{ t('settings.notifications') }}
-        </div>
-        <div class="settings-nav-item" @click="scrollTo('about')">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-          {{ t('settings.about') }}
-        </div>
-      </div>
-
-      <!-- Settings Content -->
-      <div>
-        <div id="section-pwa" class="settings-section">
-          <div class="settings-section-title">{{ t('pwa.section_title') }}</div>
-          <InstallPwaCard />
-        </div>
-
-        <!-- Profile -->
-        <div id="section-profile" class="settings-section">
-          <div class="profile-card">
-            <div class="profile-avatar">{{ userInitial }}</div>
-            <div class="profile-info">
-              <div class="profile-name">{{ userDisplayName }}</div>
-              <div class="profile-email">{{ userMasked }}</div>
-              <button class="profile-edit" @click="showEditProfile = true">{{ t('settings.edit_profile') }}</button>
-            </div>
-          </div>
-          <div class="settings-row" @click="showBindEmail = true">
-            <div class="row-icon" style="background:rgba(88,166,255,0.1);color:var(--accent);">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 4L12 13 2 4"/></svg>
-            </div>
-            <span class="row-label">{{ t('login.email_label') }}</span>
-            <span class="row-value">{{ userEmail }} <span class="chevron">›</span></span>
-          </div>
-        </div>
-
-        <!-- Edit Profile Modal -->
-        <EditProfileModal v-if="showEditProfile" @close="showEditProfile = false" @saved="onProfileSaved" />
-
-        <!-- Bind Email Modal -->
-        <BindEmailModal v-if="showBindEmail" @close="showBindEmail = false" @saved="onEmailSaved" />
-
-        <!-- Upgrade -->
-        <div class="upgrade-card">
-          <div class="upgrade-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01L12 2z"/></svg>
-          </div>
-          <div class="upgrade-text">
-            <div class="upgrade-title">{{ t('settings.upgrade_pro') }}</div>
-            <div class="upgrade-desc">{{ t('settings.upgrade_desc') }}</div>
-          </div>
-          <button class="btn btn-accent">{{ t('settings.upgrade_btn') }}</button>
-        </div>
-
-        <!-- Daemons -->
-        <div id="section-daemons" class="settings-section">
-          <div class="settings-section-title">{{ t('dashboard.my_hosts') }}</div>
-          <div class="daemon-settings-row" v-for="d in daemons" :key="d.daemon_id">
-            <span :class="['status-dot', d.daemon_online ? 'online' : 'offline']" style="width:7px;height:7px;"></span>
-            <span class="daemon-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8) }}</span>
-            <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']" style="font-size:11px;">{{ d.daemon_online ? t('dashboard.online') : t('dashboard.offline') }}</span>
-            <button v-if="d.daemon_online" class="kick-btn" @click.stop="startKickDaemon(d)" :disabled="kickRateLimited" :title="kickRateLimited ? t('settings.rate_limited') : t('settings.force_kick')">{{ t('settings.force_kick') }}</button>
-            <span class="chevron">›</span>
-          </div>
-          <!-- Force Kick Modal -->
+    <p v-if="noticeMessage" class="notice" role="status">{{ noticeMessage }}</p>
+    <ActionList v-if="notificationsOpen" :title="t('settings.notif_pref')" @close="notificationsOpen=false"><div v-for="notice in noticePreferences" :key="notice.id" class="notification-preference"><strong>{{ t(notice.label) }}</strong><button class="switch" :class="{on:notice.value}" :aria-pressed="notice.value" :aria-label="t(notice.label)" @click="setNotice(notice.id,!notice.value)" /></div></ActionList>
+    <ActionList v-if="planOpen" :anchor="planAnchor" :title="t('replica.account_plan')" @close="planOpen=false"><p class="plan-copy">{{ t(user?.plan && user.plan!=='free'?'user.pro_plan':'user.free_plan') }}</p><p class="sub">{{ t('settings.upgrade_desc') }}</p></ActionList>
+    <ActionList v-if="installOpen" :anchor="installAnchor" :title="t('pwa.section_title')" @close="installOpen=false"><InstallPwaCard /></ActionList>
+    <AboutModal v-if="showAbout" workspace @close="showAbout=false" /><HelpModal v-if="showHelp" @close="showHelp=false" /><PrivacyModal v-if="showPrivacy" @close="showPrivacy=false" /><AgreementModal v-if="showAgreement" @close="showAgreement=false" /><EditProfileModal v-if="showEditProfile" @close="showEditProfile=false" @saved="onProfileSaved" /><BindEmailModal v-if="showBindEmail" @close="showBindEmail=false" @saved="onEmailSaved" /><RegisterDaemonDialog v-if="showRegisterDaemon" @close="showRegisterDaemon=false" />
           <div v-if="kickTarget" class="modal-overlay" @click.self="kickTarget = null">
             <div class="modal-card kick-modal">
               <div class="modal-title">⚠️ {{ t('settings.force_kick_confirm') }}</div>
@@ -103,112 +43,22 @@
               </div>
             </div>
           </div>
-          <div class="daemon-settings-row add-daemon" @click="showRegisterDaemon = true">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-            {{ t('settings.register_new') }}
-          </div>
-        </div>
-
-        <RegisterDaemonDialog v-if="showRegisterDaemon" @close="showRegisterDaemon = false" />
-
-        <!-- Appearance -->
-        <div id="section-appearance" class="settings-section">
-          <div class="settings-section-title">{{ t('settings.appearance') }}</div>
-          <div class="theme-options">
-            <div :class="['theme-option', { active: currentTheme === 'dark' }]" @click="setTheme('dark')">
-              <div class="theme-preview dark-preview"></div>
-              <div class="theme-label">{{ t('settings.theme_dark') }}</div>
-              <div class="theme-desc">{{ t('settings.theme_dark_desc') }}</div>
-            </div>
-            <div :class="['theme-option', { active: currentTheme === 'light' }]" @click="setTheme('light')">
-              <div class="theme-preview light-preview"></div>
-              <div class="theme-label">{{ t('settings.theme_light') }}</div>
-              <div class="theme-desc">{{ t('settings.theme_light_desc') }}</div>
-            </div>
-            <div :class="['theme-option', { active: currentTheme === 'system' }]" @click="setTheme('system')">
-              <div class="theme-preview" style="background:linear-gradient(135deg, #0d1117 50%, #ffffff 50%);"></div>
-              <div class="theme-label">{{ t('settings.theme_auto') }}</div>
-              <div class="theme-desc">{{ t('settings.theme_auto_desc') }}</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Notifications -->
-        <div id="section-notifications" class="settings-section">
-          <div class="settings-section-title">{{ t('settings.notif_pref') }}</div>
-          <div class="settings-row">
-            <span class="row-label">{{ t('settings.notif_session') }}</span>
-            <div :class="['toggle-switch', { on: notifyCompleted }]" @click="notifyCompleted = !notifyCompleted"></div>
-          </div>
-          <div class="settings-row">
-            <span class="row-label">{{ t('settings.notif_error') }}</span>
-            <div :class="['toggle-switch', { on: notifyErrors }]" @click="notifyErrors = !notifyErrors"></div>
-          </div>
-          <div class="settings-row">
-            <span class="row-label">{{ t('settings.notif_host') }}</span>
-            <div :class="['toggle-switch', { on: notifyDaemon }]" @click="notifyDaemon = !notifyDaemon"></div>
-          </div>
-          <div class="settings-row">
-            <span class="row-label">{{ t('settings.notif_product') }}</span>
-            <div :class="['toggle-switch', { on: notifyUpdates }]" @click="notifyUpdates = !notifyUpdates"></div>
-          </div>
-        </div>
-
-        <!-- About -->
-        <div id="section-about" class="settings-section">
-          <div class="settings-section-title">{{ t('settings.other') }}</div>
-          <div class="settings-row" @click="showAbout = true">
-            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
-            </div>
-            <span class="row-label">{{ t('settings.about_pocketctl') }}</span>
-            <span class="row-value">v1.0.1 <span class="chevron">›</span></span>
-          </div>
-          <div class="settings-row" @click="showHelp = true">
-            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
-            </div>
-            <span class="row-label">{{ t('settings.help_feedback') }}</span>
-            <span class="row-value"><span class="chevron">›</span></span>
-          </div>
-          <div class="settings-row" @click="showPrivacy = true">
-            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
-            </div>
-            <span class="row-label">{{ t('settings.privacy_policy') }}</span>
-            <span class="row-value"><span class="chevron">›</span></span>
-          </div>
-          <div class="settings-row" @click="showAgreement = true">
-            <div class="row-icon" style="background:var(--accent-muted);color:var(--accent);">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
-            </div>
-            <span class="row-label">{{ t('settings.user_agreement') }}</span>
-            <span class="row-value"><span class="chevron">›</span></span>
-          </div>
-        </div>
-
-        <!-- Modals -->
-        <AboutModal v-if="showAbout" @close="showAbout = false" />
-        <HelpModal v-if="showHelp" @close="showHelp = false" />
-        <PrivacyModal v-if="showPrivacy" @close="showPrivacy = false" />
-        <AgreementModal v-if="showAgreement" @close="showAgreement = false" />
-
-        <!-- Logout -->
-        <div class="settings-section">
-          <div class="settings-row danger" style="justify-content:center;">
-            <span class="row-label" style="text-align:center;" @click="handleLogout" role="button">{{ t('settings.logout') }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
-
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import WorkspaceIcon from '../components/WorkspaceIcon.vue'
+import logoDark from '../assets/logo-github-org.svg'
+import logoLight from '../assets/logo-github-org-light.svg'
+import { APP_VERSION } from '../utils/appInfo'
+import ActionSelect from '../components/ActionSelect.vue'
+import ActionList from '../components/ActionList.vue'
+import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+import { formatTokenCount } from '../utils/tokenFormat'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useWebSocket } from '../composables/useWebSocket'
+import { useUserPreferences } from '../composables/useUserPreferences'
 import { useLocale } from '../composables/useLocale'
 import AboutModal from '../components/AboutModal.vue'
 import HelpModal from '../components/HelpModal.vue'
@@ -220,16 +70,41 @@ import RegisterDaemonDialog from '../components/RegisterDaemonDialog.vue'
 import InstallPwaCard from '../components/pwa/InstallPwaCard.vue'
 
 const router = useRouter()
-const { user, logout, sendEmailCode, forceKickDaemon } = useAuth()
+const { user, logout, sendEmailCode, forceKickDaemon, apiGetAuth } = useAuth()
 const { connect, send, onEvent } = useWebSocket()
-const { t } = useLocale()
+const { t,locale } = useLocale()
+const userPreferences=useUserPreferences()
+const setLocale=(locale:'zh'|'en')=>void userPreferences.save({locale})
+onMounted(()=>void userPreferences.load())
+const { isMobile } = useResponsiveLayout()
 
+const activeSetting=ref('profile')
+const settingsTabs=[{id:'profile',label:'replica.account_profile',icon:'user'},{id:'appearance',label:'replica.appearance_language',icon:'sun'},{id:'notifications',label:'settings.notifications',icon:'inbox'},{id:'hosts',label:'replica.host_management',icon:'hosts'},{id:'install',label:'replica.install_app',icon:'laptop'},{id:'about',label:'settings.about',icon:'help'}]
+const themes=[{id:'light',label:'settings.theme_light'},{id:'dark',label:'settings.theme_dark'},{id:'system',label:'settings.theme_auto'}]
+async function handleLogout(){await logout();await router.replace('/login')}
+const appLinks=[{id:'install',label:'replica.add_home_screen',icon:'laptop'},{id:'help',label:'replica.help_guide',icon:'help'},{id:'commands',label:'replica.command_reference',icon:'terminal'},{id:'privacy',label:'settings.privacy_policy',icon:'lock'},{id:'agreement',label:'settings.user_agreement',icon:'file'},{id:'about',label:'settings.about_pocketctl',icon:'help'}]
+const noticePreferences=computed(()=>[{id:'completed',label:'settings.notif_session',value:notifyCompleted.value},{id:'daemon',label:'settings.notif_host',value:notifyDaemon.value},{id:'errors',label:'settings.notif_error',value:notifyErrors.value},{id:'updates',label:'settings.notif_product',value:notifyUpdates.value}])
+function setNotice(id:string,value:boolean){void userPreferences.save({notifications:{[id]:value}})}
+const notificationsOpen=ref(false)
+const planOpen=ref(false),planAnchor=ref<HTMLElement|null>(null),installOpen=ref(false),installAnchor=ref<HTMLElement|null>(null),noticeMessage=ref('')
+function openPlan(event:MouseEvent){planAnchor.value=event.currentTarget as HTMLElement;planOpen.value=true}
+function openAppLink(id:string){if(id==='help'||id==='commands')showHelp.value=true;else if(id==='privacy')showPrivacy.value=true;else if(id==='agreement')showAgreement.value=true;else if(id==='about')showAbout.value=true;else if(id==='install'){installAnchor.value=document.activeElement as HTMLElement;installOpen.value=true}}
+const browserNotifications=computed(()=>userPreferences.preferences.value.notifications.browser && typeof Notification!=='undefined' && Notification.permission==='granted')
+async function toggleBrowserNotifications(){
+  if(browserNotifications.value){await userPreferences.save({notifications:{browser:false}});return}
+  if(typeof Notification==='undefined'){noticeMessage.value=t('replica.notifications_unavailable');return}
+  try{if(await Notification.requestPermission()==='granted')await userPreferences.save({notifications:{browser:true}});else noticeMessage.value=t('replica.notifications_unavailable')}catch{noticeMessage.value=t('replica.notifications_unavailable')}
+}
+async function sendTestNotification(){if(!browserNotifications.value)await toggleBrowserNotifications();if(browserNotifications.value)new Notification('PocketCtl',{body:t('replica.test_notice')})}
+const signatureTotal=ref(0),signatureSeries=ref<any[]>([])
+const signatureCells=computed(()=>{const byDate=new Map(signatureSeries.value.map(day=>[String(day.date).slice(0,10),Number(day.input||0)+Number(day.output||0)])),max=Math.max(1,...byDate.values());return Array.from({length:140},(_,index)=>{const date=new Date();date.setUTCDate(date.getUTCDate()-139+index);const key=date.toISOString().slice(0,10),total=byDate.get(key)||0;return {date:key,total,level:total?Math.min(4,Math.max(1,Math.ceil(total/max*4))):0}})})
+onMounted(async()=>{if(!apiGetAuth)return;const result=await apiGetAuth('/api/tokens/dashboard?daemon=all&days=150');if(result.ok){signatureSeries.value=result.data.dailySeries||[];signatureTotal.value=result.data.summary?.total||0}})
 const daemons = ref<any[]>([])
-const currentTheme = ref(localStorage.getItem('pocketctl-theme') || 'dark')
-const notifyCompleted = ref(true)
-const notifyErrors = ref(true)
-const notifyDaemon = ref(true)
-const notifyUpdates = ref(false)
+const currentTheme = computed(()=>userPreferences.preferences.value.theme)
+const notifyCompleted = computed(()=>userPreferences.preferences.value.notifications.completed)
+const notifyErrors = computed(()=>userPreferences.preferences.value.notifications.errors)
+const notifyDaemon = computed(()=>userPreferences.preferences.value.notifications.daemon)
+const notifyUpdates = computed(()=>userPreferences.preferences.value.notifications.updates)
 const showAbout = ref(false)
 const showHelp = ref(false)
 const showPrivacy = ref(false)
@@ -265,32 +140,8 @@ const userEmail = computed(() => {
   return t('settings.not_bound')
 })
 
-function setTheme(t: string) {
-  if (t === 'system') {
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light')
-  } else {
-    document.documentElement.setAttribute('data-theme', t)
-  }
-  localStorage.setItem('pocketctl-theme', t)
-  currentTheme.value = t
-}
+function setTheme(theme: string) {void userPreferences.save({theme:theme as 'system'|'light'|'dark'})}
 
-function scrollTo(id: string) {
-  const el = document.getElementById('section-' + id)
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  // Update active nav
-  document.querySelectorAll('.settings-nav-item').forEach(n => n.classList.remove('active'))
-  const navItems = document.querySelectorAll('.settings-nav-item')
-  const navLabels = ['profile', 'daemons', 'appearance', 'notifications', 'about']
-  const idx = navLabels.indexOf(id)
-  if (idx >= 0 && navItems[idx]) navItems[idx].classList.add('active')
-}
-
-async function handleLogout() {
-  await logout()
-  router.push('/login')
-}
 
 function onProfileSaved(name: string) {
   if (user.value) user.value.display_name = name
@@ -302,11 +153,15 @@ function onEmailSaved(email: string) {
   showBindEmail.value = false
 }
 
+const settingsCleanups:Array<()=>void>=[]
+onBeforeUnmount(()=>{settingsCleanups.forEach(cleanup=>cleanup());if(kickTimer)clearInterval(kickTimer)})
 onMounted(() => {
   connect()
   send({ type: 'list_sessions' })
+  send({ type: 'list_daemons' })
+  settingsCleanups.push(onEvent('daemon_list',(message:any)=>{daemons.value=message.daemons||[]}))
 
-  onEvent('daemon_status', (msg: any) => {
+  settingsCleanups.push(onEvent('daemon_status', (msg: any) => {
     const idx = daemons.value.findIndex((d: any) => d.daemon_id === msg.daemon_id)
     if (msg.status === 'online') {
       if (idx >= 0) { daemons.value[idx].daemon_online = true }
@@ -314,7 +169,7 @@ onMounted(() => {
     } else if (msg.status === 'offline') {
       if (idx >= 0) daemons.value[idx].daemon_online = false
     }
-  })
+  }))
 })
 // Force-kick functions
 function startKickDaemon(d: any) {
@@ -352,79 +207,3 @@ async function doKickDaemon() {
 }
 
 </script>
-
-<style>
-.settings-grid { display: grid; grid-template-columns: 240px 1fr; gap: 32px; }
-.settings-nav { position: sticky; top: calc(var(--topbar-h) + 24px); align-self: start; }
-.settings-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius-md); font-size: 14px; color: var(--fg-secondary); cursor: pointer; transition: background 0.15s, color 0.15s; margin-bottom: 2px; }
-.settings-nav-item:hover { background: var(--surface-hover); color: var(--fg); }
-.settings-nav-item.active { background: var(--sidebar-active); color: var(--accent); font-weight: 500; }
-.settings-nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
-
-.settings-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; margin-bottom: 16px; transition: background var(--transition), border-color var(--transition); }
-.settings-section-title { font-size: 16px; font-weight: 600; color: var(--fg); padding: 16px 20px; border-bottom: 1px solid var(--border); }
-.settings-row { display: flex; align-items: center; padding: 14px 20px; gap: 12px; border-bottom: 1px solid var(--border); transition: background 0.1s; }
-.settings-row:last-child { border-bottom: none; }
-.settings-row:hover { background: var(--surface-hover); }
-.settings-row .row-icon { width: 32px; height: 32px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
-.settings-row .row-label { flex: 1; font-size: 14px; color: var(--fg); }
-.settings-row .row-value { font-size: 14px; color: var(--fg-secondary); display: flex; align-items: center; gap: 6px; }
-.settings-row .row-value .bound { color: var(--success); }
-.settings-row .row-value .unbound { color: var(--fg-tertiary); }
-.settings-row .chevron { color: var(--fg-tertiary); font-size: 13px; }
-.settings-row.danger .row-label { color: var(--error); font-weight: 500; }
-
-.profile-card { display: flex; align-items: center; gap: 20px; padding: 24px 20px; border-bottom: 1px solid var(--border); }
-.profile-avatar { width: 64px; height: 64px; border-radius: 50%; background: var(--surface-active); border: 2px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 600; color: var(--fg-secondary); flex-shrink: 0; }
-.profile-info { flex: 1; }
-.profile-info .profile-name { font-size: 18px; font-weight: 600; color: var(--fg); }
-.profile-info .profile-email { font-size: 14px; color: var(--fg-secondary); margin-top: 2px; }
-.profile-info .profile-edit { font-size: 13px; color: var(--accent); background: none; border: none; cursor: pointer; margin-top: 4px; padding: 0; }
-
-.upgrade-card { background: var(--accent-subtle); border: 1px solid rgba(88,166,255,0.2); border-radius: var(--radius-lg); padding: 20px; display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
-.upgrade-card .upgrade-icon { width: 40px; height: 40px; border-radius: var(--radius-md); background: var(--accent-muted); display: flex; align-items: center; justify-content: center; color: var(--accent); flex-shrink: 0; }
-.upgrade-card .upgrade-text { flex: 1; }
-.upgrade-card .upgrade-title { font-size: 15px; font-weight: 600; color: var(--accent); }
-.upgrade-card .upgrade-desc { font-size: 13px; color: var(--fg-secondary); margin-top: 4px; }
-
-.daemon-settings-row { display: flex; align-items: center; padding: 12px 20px; gap: 10px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.1s; }
-.daemon-settings-row:last-child { border-bottom: none; }
-.daemon-settings-row:hover { background: var(--surface-hover); }
-.daemon-settings-row .daemon-name { flex: 1; font-size: 14px; color: var(--fg); }
-.daemon-settings-row.add-daemon { color: var(--accent); font-size: 14px; justify-content: center; border-bottom: none; }
-
-.theme-options { display: flex; gap: 12px; padding: 16px 20px; }
-.theme-option { flex: 1; padding: 16px; border: 2px solid var(--border); border-radius: var(--radius-lg); cursor: pointer; text-align: center; transition: border-color 0.15s, background 0.15s; }
-.theme-option:hover { border-color: var(--border-light); }
-.theme-option.active { border-color: var(--accent); background: var(--accent-subtle); }
-.theme-option .theme-preview { width: 48px; height: 48px; border-radius: var(--radius-md); margin: 0 auto 8px; border: 1px solid var(--border); }
-.theme-preview.dark-preview { background: linear-gradient(135deg, #0d1117, #161b22); }
-.theme-preview.light-preview { background: linear-gradient(135deg, #ffffff, #f6f8fa); }
-.theme-option .theme-label { font-size: 13px; font-weight: 500; color: var(--fg); }
-.theme-option .theme-desc { font-size: 11px; color: var(--fg-tertiary); margin-top: 2px; }
-
-.toggle-switch { width: 44px; height: 24px; border-radius: 12px; background: var(--border); cursor: pointer; position: relative; transition: background 0.2s; flex-shrink: 0; }
-.toggle-switch.on { background: var(--accent); }
-.toggle-switch::after { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
-.toggle-switch.on::after { transform: translateX(20px); }
-
-@media (max-width: 768px) {
-  .settings-grid { grid-template-columns: 1fr; }
-  .settings-nav { position: static; display: flex; gap: 4px; overflow-x: auto; padding-bottom: 8px; }
-  .settings-nav-item { white-space: nowrap; }
-}
-.kick-btn { padding: 4px 10px; background: none; border: 1px solid var(--error); color: var(--error); border-radius: var(--radius-sm); font-size: 12px; cursor: pointer; transition: background 0.15s; }
-.kick-btn:hover:not(:disabled) { background: var(--error-bg); }
-.kick-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.kick-modal { max-width: 400px; }
-.kick-modal p { margin: 4px 0; font-size: 14px; }
-.btn-danger { padding: 10px 20px; background: var(--error); color: #fff; border: none; border-radius: var(--radius-md); font-size: 14px; font-weight: 500; cursor: pointer; }
-.btn-danger:hover:not(:disabled) { opacity: 0.9; }
-.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
-.code-row { display: flex; gap: 8px; }
-.code-row .input-field { flex: 1; }
-.code-input { font-family: var(--font-mono) !important; letter-spacing: 4px; font-size: 18px !important; text-align: center; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--fg); }
-.form-label { font-size: 13px; font-weight: 500; color: var(--fg-secondary); margin-bottom: 6px; }
-.get-code-btn { white-space: nowrap; padding: 10px 16px; background: none; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--accent); font-size: 13px; cursor: pointer; }
-.get-code-btn:disabled { color: var(--fg-tertiary); cursor: not-allowed; }
-</style>

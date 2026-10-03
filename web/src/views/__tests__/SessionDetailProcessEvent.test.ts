@@ -1,4 +1,4 @@
-import { shallowMount } from '@vue/test-utils'
+import { config, shallowMount } from '@vue/test-utils'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { reactive, ref } from 'vue'
 import { readFileSync } from 'node:fs'
@@ -11,6 +11,8 @@ import OpenCodePartCard from '../../components/messages/OpenCodePartCard.vue'
 import FileChangeCard from '../../components/messages/FileChangeCard.vue'
 import FileChangeBottomSheet from '../../components/messages/FileChangeBottomSheet.vue'
 import ToolCallGroup from '../../components/messages/ToolCallGroup.vue'
+
+config.global.stubs = { ...config.global.stubs, ActionList: false, Teleport: true }
 
 const websocketMock = vi.hoisted(() => ({
   handlers: new Map<string, (message: any) => void>(),
@@ -367,7 +369,7 @@ describe('SessionDetail processEvent integration', () => {
 
     await mobileOverflow.get('.toolbar-more-btn').trigger('click')
     await mobileOverflow.get('[data-toolbar-action="edited-files"]').trigger('click')
-    expect(wrapper.get('.file-change-side-panel').attributes('aria-modal')).toBe('true')
+    expect(wrapper.get('.file-change-side-panel').attributes('aria-modal')).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -554,7 +556,7 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
   })
 
-  test('opens Edited files as a modal review workspace and closes from its backdrop', async () => {
+  test('opens Edited files in an action list and closes from its close control', async () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
     vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running' }]
@@ -569,11 +571,11 @@ describe('SessionDetail processEvent integration', () => {
     await openToolbarOverflow(wrapper)
     await wrapper.get('.file-change-toolbar-button').trigger('click')
     const panel = wrapper.get('.file-change-side-panel')
-    expect(panel.attributes('role')).toBe('dialog')
-    expect(panel.attributes('aria-modal')).toBe('true')
-    expect(wrapper.get('.file-change-panel-backdrop').attributes('aria-label')).toBe('session.file_change_close')
+    expect(panel.attributes('role')).toBe('region')
+    expect(panel.attributes('aria-modal')).toBeUndefined()
+    expect(wrapper.find('.file-change-panel-backdrop').exists()).toBe(false)
 
-    await wrapper.get('.file-change-panel-backdrop').trigger('click')
+    await wrapper.get('.workspace-action-list > header button').trigger('click')
     expect(wrapper.find('.file-change-side-panel').exists()).toBe(false)
     await openToolbarOverflow(wrapper)
     expect(wrapper.get('.file-change-toolbar-button').attributes('aria-expanded')).toBe('false')

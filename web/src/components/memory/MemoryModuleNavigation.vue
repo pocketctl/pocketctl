@@ -1,5 +1,5 @@
 <template>
-  <nav class="memory-module-navigation" :aria-label="t('memory.workspace_label')"
+  <nav class="memory-module-navigation subnav" :aria-label="t('memory.workspace_label')"
     data-testid="memory-module-rail">
     <p class="memory-rail-title">{{ t('memory.workbench') }}</p>
     <section v-for="group in MEMORY_MODULE_GROUPS" :key="group.id" class="memory-module-group"

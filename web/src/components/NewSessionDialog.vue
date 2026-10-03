@@ -1,14 +1,15 @@
 <template>
-  <div class="modal-overlay" @click.self="showDirectory ? showDirectory = false : $emit('close')">
+  <div class="modal-overlay new-session-overlay" @click.self="showDirectory ? showDirectory = false : $emit('close')">
     <DirectoryPicker v-if="showDirectory" :key="form.daemonId" :daemon-id="form.daemonId" :host-name="selectedDaemonName" :initial-path="form.cwd" :online="selectedHostOnline" @close="showDirectory = false" @select="selectDirectory" />
-    <div v-else class="modal-dialog">
+    <div v-else ref="panel" class="modal-dialog" role="dialog" aria-modal="true" :aria-label="t('new_session.title')" tabindex="-1" @keydown.esc.stop.prevent="$emit('close')" @keydown.tab="trapFocus">
+      <div class="mobile-sheet-handle" aria-hidden="true"></div>
       <div class="modal-header">
         <h2 class="modal-title">{{ t('new_session.title') }}</h2>
-        <button class="modal-close" @click="$emit('close')" :title="t('common.close')">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        <button class="modal-close" :disabled="creating" @click="$emit('close')" :title="t('common.close')">
+          <span class="mobile-close-label">{{ t('common.cancel') }}</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
         </button>
       </div>
-        <div :class="['quota-banner', { reached: sessionQuotaReached, over: concurrentSessions?.over_limit }]" role="status">
+        <div :class="['quota-banner desktop-quota', { reached: sessionQuotaReached, over: concurrentSessions?.over_limit }]" role="status">
           <span>{{ t('quota.concurrent_sessions') }}</span>
           <strong v-if="concurrentSessions">{{ concurrentSessions.used + (concurrentSessions.reserved || 0) }}/{{ concurrentSessions.limit ?? '∞' }}</strong>
           <span v-else>{{ t(quotaLoading ? 'common.loading' : 'quota.load_failed') }}</span>
@@ -16,6 +17,8 @@
           <span v-if="sessionQuotaReached">{{ t('quota.session_reached_hint') }}</span>
         </div>
       <div class="modal-body">
+        <div class="creation-destination">
+        <div class="creation-host">
         <!-- Host Selector -->
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 2v20"/></svg>
@@ -24,9 +27,19 @@
         <button class="host-summary" :aria-expanded="showHosts" @click="showHosts = !showHosts">
           <span>{{ selectedDaemonName }}</span><span :class="selectedHostOnline ? 'host-online' : 'host-unavailable'">{{ form.daemonId ? t(selectedHostOnline ? 'dashboard.online' : 'directory.error.daemon_offline') : t('new_session.select_host') }} ⌄</span>
         </button>
+        </div>
+        <div class="mobile-create-project">
+          <div class="field-label">{{ t('mobile.new_session_project') }}</div>
+          <ActionSelect><select v-model="selectedProjectId" :disabled="creating" :aria-label="t('mobile.new_session_project')">
+            <option value="">{{ t('workspace.ungrouped') }}</option>
+            <option v-if="selectedProjectId && !availableProjects.some(project => project.id === selectedProjectId)" :value="selectedProjectId">{{ t('mobile.new_session_current_project') }}</option>
+            <option v-for="project in availableProjects" :key="project.id" :value="project.id">{{ project.name }}</option>
+          </select></ActionSelect>
+        </div>
+        </div>
         <div v-show="showHosts || !form.daemonId" class="host-selector">
           <div v-if="!daemons || daemons.length === 0" class="host-empty">{{ t('new_session.no_hosts') }}</div>
-          <div v-for="d in daemons" :key="d.daemon_id"
+          <button v-for="d in daemons" :key="d.daemon_id" type="button" :disabled="!d.daemon_online" :aria-pressed="form.daemonId === d.daemon_id"
             :class="['host-option', { selected: form.daemonId === d.daemon_id, disabled: !d.daemon_online }]"
             @click="selectHost(d)">
             <div class="host-radio"></div>
@@ -44,28 +57,35 @@
             <div class="host-status">
               <span :class="['chip', d.daemon_online ? 'chip-online' : 'chip-offline']">{{ d.daemon_online ? t('dashboard.online') : t('dashboard.offline') + ' · ' + t('common.unavailable') }}</span>
             </div>
-          </div>
+          </button>
         </div>
 
         <!-- Agent Type Pills -->
+        <div :class="['quota-banner mobile-quota', { reached: sessionQuotaReached, over: concurrentSessions?.over_limit }]" role="status">
+          <span>{{ t('quota.concurrent_sessions') }}</span>
+          <strong v-if="concurrentSessions">{{ concurrentSessions.used + (concurrentSessions.reserved || 0) }}/{{ concurrentSessions.limit ?? '∞' }}</strong>
+          <span v-else>{{ t(quotaLoading ? 'common.loading' : 'quota.load_failed') }}</span>
+          <button v-if="quotaLoadFailed" class="quota-retry" :disabled="quotaLoading" @click="refreshQuota">{{ t('directory.retry') }}</button>
+          <span v-if="sessionQuotaReached">{{ t('quota.session_reached_hint') }}</span>
+        </div>
         <div class="field-label">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 000 20 14.5 14.5 0 000-20"/><path d="M2 12h20"/></svg>
           {{ t('new_session.agent_label') }}
         </div>
         <div class="agent-pills">
-          <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" @click="selectAgent('claude-code')">Claude Code</button>
-          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" @click="selectAgent('codex')">Codex CLI</button>
-          <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" @click="selectAgent('opencode')">OpenCode</button>
-          <button :class="['agent-pill', { selected: form.agent === 'zcode-managed' }]" @click="selectAgent('zcode-managed')">ZCode Runtime</button>
+          <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" :aria-pressed="form.agent === 'claude-code'" @click="selectAgent('claude-code')"><WorkspaceIcon v-if="form.agent === 'claude-code'" name="check" />Claude Code</button>
+          <button :class="['agent-pill', { selected: form.agent === 'codex' }]" :aria-pressed="form.agent === 'codex'" @click="selectAgent('codex')"><WorkspaceIcon v-if="form.agent === 'codex'" name="check" />Codex CLI</button>
+          <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" :aria-pressed="form.agent === 'opencode'" @click="selectAgent('opencode')"><WorkspaceIcon v-if="form.agent === 'opencode'" name="check" />OpenCode</button>
+          <button :class="['agent-pill', { selected: form.agent === 'zcode-managed' }]" :aria-pressed="form.agent === 'zcode-managed'" @click="selectAgent('zcode-managed')"><WorkspaceIcon v-if="form.agent === 'zcode-managed'" name="check" />ZCode Runtime</button>
         </div>
 
         <div v-if="form.agent === 'codex' && codexHomes.length > 1" class="form-group">
           <div class="field-label">{{ t('new_session.codex_account_label') }}</div>
-          <select v-model="form.codexHomeId" class="input-field" @change="selectCodexHome">
+          <ActionSelect><select v-model="form.codexHomeId" class="input-field" @change="selectCodexHome">
             <option v-for="home in codexHomes" :key="home.id" :value="home.id">
               {{ home.label }}{{ home.primary ? ` · ${t('new_session.codex_account_primary')}` : '' }}
             </option>
-          </select>
+          </select></ActionSelect>
           <div class="field-hint">{{ t('new_session.codex_account_hint') }}</div>
         </div>
 
@@ -77,10 +97,19 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             {{ t('new_session.model_label') }}
           </div>
-          <select v-model="form.model" class="model-select">
+          <ActionSelect><select v-model="form.model" class="model-select">
             <option value="">{{ !modelsLoaded ? t('new_session.model_loading') : (models.length ? t('new_session.model_default') : t('new_session.model_none')) }}</option>
             <option v-for="m in models" :key="m.alias" :value="m.alias">{{ m.name }}</option>
-          </select>
+          </select></ActionSelect>
+        </div>
+
+        <div v-if="form.agent === 'codex'" class="form-group codex-effort-field">
+          <div class="field-label">{{ t('session.effort_level') }}</div>
+          <ActionSelect><select v-model="form.effort" class="input-field" :disabled="!effortOptions.length" :aria-label="t('session.effort_level')">
+            <option value="">{{ t('workspace.follow_host_effort') }}</option>
+            <option v-for="effort in effortOptions" :key="effort" :value="effort">{{ effortLabel(effort) }}</option>
+          </select></ActionSelect>
+          <p class="field-hint">{{ t(effortOptions.length ? 'workspace.effort_capability_hint' : 'workspace.effort_unavailable') }}</p>
         </div>
 
         <!-- Working Directory -->
@@ -102,27 +131,25 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             {{ t('new_session.permission_label') }}
           </div>
-          <select v-model="permissionValue" class="input-field">
+          <ActionSelect><select v-model="permissionValue" class="input-field">
             <option v-for="option in creationPermissionOptions" :key="option.value" :value="option.value" :disabled="option.disabled">
               {{ t(option.titleKey) }} — {{ t(option.descriptionKey) }}
             </option>
-          </select>
+          </select></ActionSelect>
           <div v-if="codexPermission?.preset === 'custom'" class="permission-custom-grid">
-            <select v-model="codexPermission.approval_policy" class="input-field">
-              <option :value="undefined">{{ t('session.permission.inherit') }}</option>
-              <option value="never">never</option>
-            </select>
-            <select v-model="codexPermission.sandbox_mode" class="input-field">
-              <option :value="undefined">{{ t('session.permission.inherit') }}</option>
-              <option value="read-only">read-only</option>
-              <option value="workspace-write">workspace-write</option>
-              <option value="danger-full-access">danger-full-access</option>
-            </select>
+            <ActionSelect><select v-model="codexPermission.approval_policy" class="input-field">
+              <option v-for="policy in creationCapabilities?.approval_policies || ['on-request','untrusted','never']" :key="policy" :value="policy">{{ policy }}</option>
+            </select></ActionSelect>
+            <ActionSelect><select v-model="codexPermission.sandbox_mode" class="input-field">
+              <option v-for="sandbox in creationCapabilities?.sandbox_modes || ['read-only','workspace-write','danger-full-access']" :key="sandbox" :value="sandbox">{{ sandbox }}</option>
+            </select></ActionSelect>
           </div>
         </div>
 
         </div>
 
+        <p v-if="form.agent==='codex' && (creationCapabilities?.supported===false || codexConfigUnavailable)" class="field-hint" role="alert">{{ t('new_session.remote_permission_denied') }}</p>
+        <p v-else-if="form.agent==='codex' && modelsLoaded && !creationCapabilities" class="field-hint">{{ t('new_session.legacy_capabilities') }}</p>
         <!-- Initial Prompt -->
         <div class="form-group">
           <div class="field-label">
@@ -203,7 +230,13 @@
 </template>
 
 <script setup lang="ts">
+import WorkspaceIcon from './WorkspaceIcon.vue'
+import { listProjects, type SessionProject } from '../services/sessionOrganization'
+import { useResponsiveLayout } from '../composables/useResponsiveLayout'
+import ActionSelect from './ActionSelect.vue'
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { usePanelFocus } from '../composables/usePanelFocus'
+const { panel, trapFocus } = usePanelFocus()
 import DirectoryPicker from './DirectoryPicker.vue'
 import { useAuth } from '../composables/useAuth'
 import { useRouter } from 'vue-router'
@@ -213,8 +246,12 @@ import { useQuota } from '../composables/useQuota'
 import { createClientId } from '../utils/clientId'
 import { defaultPermission, expandCodexPreset, permissionOptions, type AgentType, type ClaudeMode, type CodexPreset, type PermissionConfig } from '../types/permission'
 
-const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string; projectId?: string | null }>()
+const props = defineProps<{ daemons?: any[]; preSelectedDaemonId?: string; projectId?: string | null; projects?: Pick<SessionProject, 'id' | 'name'>[] }>()
 const emit = defineEmits<{ close: [] }>()
+const { isMobile } = useResponsiveLayout()
+const selectedProjectId = ref(props.projectId || '')
+const availableProjects = ref<Pick<SessionProject, 'id' | 'name'>[]>(props.projects || [])
+watch(() => props.projects, value => { if (value) availableProjects.value = value })
 
 const router = useRouter()
 const { connect, send, onEvent } = useWebSocket()
@@ -246,6 +283,7 @@ const form = reactive({
   cwd: '~/',
   prompt: '',
   permission: defaultPermission('claude-code') as PermissionConfig | undefined,
+  effort: '',
   model: '',  // '' = follow host default | opus | sonnet | haiku alias
 	 codexHomeId: '',
   // Scheme A/C/D advanced options
@@ -261,7 +299,7 @@ function codexHomeKey(host: string) { return `pocketctl_codex_home:${host}` }
 function selectDirectory(path: string) { form.cwd = path; showDirectory.value = false }
 let modelRequestId = ''
 function requestModels() {
-  models.value = []; modelsLoaded.value = false; form.model = ''
+  models.value = []; modelsLoaded.value = false; creationCapabilities.value = null; form.effort = ''; form.model = ''
   modelRequestId = createClientId()
   if (form.daemonId && selectedHostOnline.value) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent, codex_home_id: form.agent === 'codex' ? form.codexHomeId || undefined : undefined, request_id: modelRequestId })
 }
@@ -284,7 +322,12 @@ function selectCodexHome() {
 const showAdvanced = ref(false)  // 高级选项折叠状态
 const cwdInUse = ref(false)      // 是否处于 cwd_in_use 确认状态
 // Available models for the selected host (populated by list_models → model_list)
-const models = ref<Array<{ alias: string; name: string }>>([])
+const models = ref<Array<{ alias: string; name: string; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string }>>([])
+type CreationCapabilities={version:number;supported:boolean;managed_runtime:boolean;default_model?:string;permission_presets:string[];approval_policies:string[];sandbox_modes:string[];reason?:string}
+const creationCapabilities=ref<CreationCapabilities|null>(null)
+const effortOptions = computed(() => form.agent === 'codex' ? models.value.find(model => model.alias === (form.model || creationCapabilities.value?.default_model))?.supported_reasoning_efforts || [] : [])
+function effortLabel(effort: string) { const key = `session.effort.${effort}`; const value = t(key); return value === key ? effort : value }
+watch([() => form.model, () => form.agent, () => form.codexHomeId], () => { form.effort = '' })
 const modelsLoaded = ref(false)  // true once model_list response received (even if empty)
 const creating = ref(false)
 const phase = ref<'submitting' | 'connecting'>('submitting')
@@ -302,15 +345,19 @@ function isCreateCapableAgent(agent: string): agent is AgentType {
 }
 
 const canStart = computed(() => selectedHostOnline.value && isCreateCapableAgent(form.agent)
-  && (form.agent !== 'codex' || (codexHomesLoaded.value && !!form.codexHomeId)))
-const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true))
+  && (form.agent !== 'codex' || (codexHomesLoaded.value && !!form.codexHomeId && creationCapabilities.value?.supported!==false && !codexConfigUnavailable.value)))
+const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true).map(option=>({...option,disabled:form.agent==='codex' && !!creationCapabilities.value && !creationCapabilities.value.permission_presets.includes(option.value)})))
+const codexConfigUnavailable=computed(()=>{
+  const cap=creationCapabilities.value,config=codexPermission.value
+  return !!cap && !!config && (!cap.permission_presets.includes(config.preset) || (!!config.approval_policy && !cap.approval_policies.includes(config.approval_policy)) || (!!config.sandbox_mode && !cap.sandbox_modes.includes(config.sandbox_mode)))
+})
 const codexPermission = computed(() => form.permission?.agent === 'codex' ? form.permission : undefined)
 const permissionValue = computed({
   get: () => form.permission?.agent === 'claude-code' ? form.permission.mode : form.permission?.preset || '',
   set: (value: string) => {
     form.permission = form.agent === 'claude-code'
       ? { agent: 'claude-code', mode: value as ClaudeMode }
-      : expandCodexPreset(value as CodexPreset)
+      : value==='custom' ? {agent:'codex',preset:'custom',approval_policy: (creationCapabilities.value?.approval_policies[0] || 'on-request') as 'on-request'|'untrusted'|'never',sandbox_mode:'workspace-write'} : expandCodexPreset(value as CodexPreset)
   },
 })
 function selectHost(d: any) {
@@ -347,6 +394,7 @@ function hideError() {
 function showError(reason: string, err?: string) {
   const host = selectedDaemonName.value
   const map: Record<string, { title: string; desc: string }> = {
+    ...Object.fromEntries(['unsupported_effort','remote_permission_denied','codex_managed_required','invalid_permission'].map(code=>[code,{title:t('new_session.error_title',{host}),desc:t('new_session.'+code)}])),
     no_cli: { title: t('new_session.error_title', { host }), desc: t('new_session.failed_no_cli_desc') },
     bad_cwd: { title: t('new_session.error_title', { host }), desc: err ? `${t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' })}\n${err}` : t('new_session.failed_bad_cwd_desc', { cwd: form.cwd || '/' }) },
     cwd_in_use: { title: t('new_session.error_title', { host }), desc: err || t('new_session.failed_cwd_in_use_desc', { cwd: form.cwd || '/' }) },
@@ -441,12 +489,13 @@ function startSession() {
     type: 'session_create',
     request_id: currentRequestId,
     daemon_id: form.daemonId,
-    project_id: props.projectId || undefined,
+    project_id: (isMobile.value ? selectedProjectId.value : props.projectId) || undefined,
     agent: form.agent,
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,
     permission: form.permission,
     model: form.model || undefined,
+    effort: form.agent === 'codex' ? form.effort || undefined : undefined,
     codex_home_id: form.agent === 'codex' ? form.codexHomeId : undefined,
     worktree: form.worktree || undefined,
     auto_create_dir: form.autoCreateDir || undefined,
@@ -492,12 +541,15 @@ watch(() => form.daemonId, (id) => {
 })
 
 onMounted(() => {
+  if (isMobile.value && !props.projects) void listProjects().then(result => { if (!quotaDisposed) availableProjects.value = result.projects }).catch(() => {})
   void refreshQuota()
   connect()
   // Receive available models for the selected host (model picker)
   cleanupFns.push(onEvent('model_list', (msg: any) => {
     if (msg.daemon_id !== form.daemonId || msg.agent !== form.agent) return
     if (msg.request_id && msg.request_id !== modelRequestId) return
+    if (form.agent==='codex' && msg.codex_home_id && msg.codex_home_id!==form.codexHomeId) return
+    creationCapabilities.value = msg.creation_capabilities?.version===1 ? msg.creation_capabilities : null
     models.value = msg.models || []
     modelsLoaded.value = true
   }))
@@ -628,6 +680,7 @@ onUnmounted(() => {
   display: flex; align-items: center; justify-content: center; gap: 6px;
 }
 .agent-pill:hover { border-color: var(--border-light); color: var(--fg); }
+.agent-pill svg{width:14px;height:14px;flex:none}.agent-pill{display:inline-flex;align-items:center;justify-content:center;gap:5px}
 .agent-pill.selected { border-color: var(--accent); background: var(--accent-subtle, rgba(88,166,255,0.06)); color: var(--accent); }
 .coming-badge { font-size: 10px; font-weight: 500; color: var(--warning, #d29922); background: rgba(210,153,34,0.15); padding: 1px 6px; border-radius: 4px; }
 
@@ -731,7 +784,7 @@ onUnmounted(() => {
 .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.35); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.configuration-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;grid-template-areas:"model permission" "cwd cwd"}.model-field{grid-area:model;min-width:0}.permission-field{grid-area:permission;min-width:0}.cwd-field{grid-area:cwd;min-width:0}
+.configuration-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;grid-template-areas:"model permission" "effort effort" "cwd cwd"}.model-field{grid-area:model;min-width:0}.permission-field{grid-area:permission;min-width:0}.codex-effort-field{grid-area:effort;min-width:0}.cwd-field{grid-area:cwd;min-width:0}
 .host-summary { display:flex; justify-content:space-between; gap:12px; width:100%; margin-bottom:16px; padding:10px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--fg); cursor:pointer; text-align:left; }
 .host-online {color:var(--success);font-size:12px}.host-unavailable {color:var(--fg-secondary);font-size:12px}
 .browse-directory {align-self:stretch;border:0;border-left:1px solid var(--border);padding:0 12px;background:none;color:var(--accent);cursor:pointer;white-space:nowrap}.browse-directory:disabled{opacity:.4;cursor:not-allowed}
@@ -749,4 +802,49 @@ onUnmounted(() => {
   .agent-pill{border-radius:999px;padding:9px 6px}.agent-pill.selected{background:var(--accent);color:var(--bg)}
 }
 
+
+.mobile-sheet-handle,.mobile-close-label,.mobile-create-project,.mobile-quota { display: none; }
+.creation-host { min-width: 0; }
+.modal-body .quota-banner { margin: 0 0 16px; }
+@media (max-width: 768px) {
+  .desktop-quota { display: none; }.mobile-quota { display: flex; }
+  .modal-overlay.new-session-overlay { padding: max(12px, env(safe-area-inset-top)) 0 0; background: #0007; backdrop-filter: none; }
+  .new-session-overlay .modal-dialog { max-height: calc(100dvh - max(16px, env(safe-area-inset-top))); border-radius: 24px 24px 0 0; border-bottom: 0; padding-bottom: 0; }
+  .mobile-sheet-handle { display: block; width: 32px; height: 4px; flex: 0 0 4px; margin: 12px auto 4px; border-radius: 3px; background: var(--border-light); }
+  .modal-header { flex-shrink: 0; padding: 8px 24px 12px; }
+  .modal-title { font: 600 21px/1.4 var(--font-body); letter-spacing: -.5px; }
+  .modal-close { width: auto; min-width: 44px; height: 44px; border: 0; background: none; border-radius: 8px; color: var(--fg-secondary); font-size: 13px; }
+  .modal-close svg { display: none; }
+  .mobile-close-label { display: inline; }
+  .modal-body { padding: 12px 24px max(16px, env(safe-area-inset-bottom)); overscroll-behavior: contain; scroll-padding-bottom: 90px; }
+  .creation-destination { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+  .mobile-create-project { display: block; min-width: 0; }
+  .creation-destination .field-label { min-height: 18px; font-size: 11px; margin-bottom: 8px; }
+  .host-summary { min-height: 44px; margin-bottom: 18px; padding: 10px 12px; align-items: center; gap: 6px; font-size: 12px; border-radius: 10px; }
+  .host-summary > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host-summary > span:last-child { flex-shrink: 0; font-size: 10px; }
+  .field-label { text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 400; margin-bottom: 9px; color: var(--fg-secondary); }
+  .field-label > svg { display: none; }
+  .modal-body > .field-label { display: none; }
+  .modal-body .quota-banner { padding: 9px 12px; margin-bottom: 20px; font-size: 11px; border: 0; border-radius: 10px; }
+  .agent-pills { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; scrollbar-width: none; margin-bottom: 22px; padding: 1px 0; }
+  .agent-pill { flex: 0 0 auto; min-height: 40px; padding: 8px 14px; border-radius: 12px; font-size: 13px; border-color: transparent; }
+  .agent-pill.selected { color: var(--bg); background: var(--accent); border-color: var(--accent); box-shadow: none; }
+  .agent-pill svg { width: 13px; height: 13px; }
+  .configuration-grid { display: flex; gap: 0; }
+  .model-field { order: 0; }.codex-effort-field { order: 1; }.cwd-field { order: 2; }.permission-field { order: 3; }
+  .form-group,.model-field,.permission-field { margin-bottom: 20px; }
+  .model-field :deep(.action-select-trigger),.permission-field :deep(.action-select-trigger),.mobile-create-project :deep(.action-select-trigger),.codex-effort-field :deep(.action-select-trigger) { min-height: 44px; background: var(--bg); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+  .dir-input { min-height: 44px; padding: 0 0 0 12px; border-radius: 10px; }
+  .dir-input > svg { display: none; }
+  .dir-input input { min-width: 0; font-size: 16px; }
+  .browse-directory { border-left: 0; min-width: 44px; }
+  .prompt-area { min-height: 88px; border-radius: 10px; }
+  .permission-custom-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .permission-custom-grid :deep(.action-select-trigger) { font-size: 12px; }
+  .field-hint { line-height: 1.6; font-size: 11px; }
+  .modal-footer { bottom: calc(-1 * max(16px, env(safe-area-inset-bottom))); padding: 12px 0 max(12px, env(safe-area-inset-bottom)); margin-top: 12px; border-top: 1px solid var(--border); }
+  .modal-footer .btn-cancel { display: none; }
+  .modal-footer .btn-start { flex: 1; min-height: 48px; border-radius: 12px; }
+}
 </style>

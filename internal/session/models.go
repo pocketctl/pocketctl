@@ -172,8 +172,12 @@ func readCodexModelCatalogFile(path string) []protocol.ModelOption {
 	}
 	var catalog struct {
 		Models []struct {
-			Slug       string `json:"slug"`
-			Visibility string `json:"visibility"`
+			Slug                     string `json:"slug"`
+			Visibility               string `json:"visibility"`
+			DefaultReasoningLevel    string `json:"default_reasoning_level"`
+			SupportedReasoningLevels []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &catalog); err != nil {
@@ -184,7 +188,16 @@ func readCodexModelCatalogFile(path string) []protocol.ModelOption {
 		if m.Visibility != "list" {
 			continue
 		}
+		before := len(out)
 		out = appendModelOption(out, m.Slug)
+		if len(out) > before {
+			for _, level := range m.SupportedReasoningLevels {
+				if effort := strings.TrimSpace(level.Effort); effort != "" && indexOfString(out[before].SupportedReasoningEfforts, effort) < 0 {
+					out[before].SupportedReasoningEfforts = append(out[before].SupportedReasoningEfforts, effort)
+				}
+			}
+			out[before].DefaultReasoningEffort = m.DefaultReasoningLevel
+		}
 	}
 	return out
 }
@@ -208,9 +221,19 @@ func movePreferredFirst(models []protocol.ModelOption, preferred string) []proto
 		return models
 	}
 	out := make([]protocol.ModelOption, 0, len(models)+1)
-	out = appendModelOption(out, preferred)
 	for _, model := range models {
-		out = appendModelOption(out, model.Alias)
+		if model.Alias == preferred {
+			out = append(out, model)
+			break
+		}
+	}
+	if len(out) == 0 {
+		out = appendModelOption(out, preferred)
+	}
+	for _, model := range models {
+		if model.Alias != preferred {
+			out = append(out, model)
+		}
 	}
 	return out
 }

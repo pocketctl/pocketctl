@@ -1,3 +1,4 @@
+import { initPreferenceSchema } from './user-preferences.js';
 import pg from 'pg';
 import { createHash } from 'crypto';
 import type { SupportedLanguage } from './config/language.js';
@@ -830,6 +831,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initExtensionSchema(pool);
   // Team Memory bindings reference pre-existing Extension installations.
   await initTeamSchema(pool);
+  await initPreferenceSchema(pool);
 }
 
 export interface EmailChallengeSendDecision {
@@ -4601,22 +4603,23 @@ export async function getTokenDailySeries(pool: pg.Pool, userId: number, daemonI
   const dEvt = useD ? 'AND s.daemon_id = $2' : '';
   const dp = useD ? '$3' : '$2';
   const result = await pool.query(`
-    SELECT date, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(requests) AS requests
+    SELECT date, SUM(input) AS input, SUM(output) AS output, SUM(cache_read) AS cache_read, SUM(cache_create) AS cache_create, SUM(requests) AS requests
     FROM (
-      SELECT date, input, output, cache_read, requests FROM token_daily_stats
+      SELECT date, input, output, cache_read, cache_create, requests FROM token_daily_stats
       WHERE user_id = $1 ${dStats} AND date >= CURRENT_DATE - (${dp}::int) AND date <= CURRENT_DATE
       UNION ALL
       SELECT date_trunc('day', e.created_at)::date,
              SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
              SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
              SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
+             SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint,0)),
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
       WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${dEvt}
         AND date_trunc('day', e.created_at) = CURRENT_DATE
       GROUP BY 1
     ) t GROUP BY date ORDER BY date`, params);
-  return result.rows.map((r: any) => ({ date: r.date, input: +r.input, output: +r.output, cache_read: +r.cache_read, requests: +r.requests }));
+  return result.rows.map((r: any) => ({ date: r.date, input: +r.input, output: +r.output, cache_read: +r.cache_read, cache_create: +r.cache_create, requests: +r.requests }));
 }
 
 export async function getTokenByModel(pool: pg.Pool, userId: number, daemonId: string | null): Promise<any[]> {

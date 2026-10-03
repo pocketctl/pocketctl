@@ -110,6 +110,9 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 		logCodexManagedFallback(binary, version, err)
 		return "", false, nil
 	}
+	if config.Permission != nil && !config.Permission.DangerousBypass && config.Permission.ApprovalPolicy != "never" && !capabilities.Approvals {
+		return "", true, fmt.Errorf("codex remote approval requires native approval capabilities")
+	}
 	if !capabilities.ThreadInjection {
 		return "", true, fmt.Errorf("Codex %s 不支持空会话持久化，请升级 Codex 后重试", version)
 	}
@@ -146,7 +149,7 @@ func (sm *SessionManager) tryCreateManagedCodexSession(ctx context.Context, conf
 	ps := &ProcessState{
 		SessionID: sessionID, Status: status, StartedAt: now, LastActivityAt: now,
 		Cwd: cwd, Agent: adapter.AgentCodex, Source: "daemon", Permission: clonePermission(config.Permission),
-		Model: model, WorktreePath: worktreePath, WorktreeBranch: worktreeBranch,
+		Model: model, Effort: config.Effort, WorktreePath: worktreePath, WorktreeBranch: worktreeBranch,
 		Backend: backend, ControlMode: protocol.ControlManaged,
 		CodexHomeID: coord.codexHomeID, CodexHomeLabel: coord.codexHomeLabel,
 	}
@@ -173,6 +176,9 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 	params := map[string]any{"cwd": config.Cwd}
 	if config.Model != "" {
 		params["model"] = config.Model
+	}
+	if config.Effort != "" {
+		params["config"] = map[string]any{"model_reasoning_effort": config.Effort}
 	}
 	applyCodexPermissionParams(params, config.Permission)
 	var response struct {

@@ -1,12 +1,10 @@
 <template>
-  <div class="file-change-sheet-layer">
-    <button type="button" class="file-change-backdrop" data-testid="file-change-backdrop" :aria-label="t('session.file_change_close')" @click="emit('close')" />
+  <ActionList :title="title" :width="640" :anchor="returnFocusTo" @close="emit('close')">
     <section
       id="file-change-mobile-sheet"
       :class="['file-change-bottom-sheet', { expanded, 'reduced-motion': reducedMotion }]"
       data-testid="file-change-sheet"
-      role="dialog"
-      aria-modal="true"
+      role="region"
       :aria-label="title"
     >
       <button
@@ -29,7 +27,7 @@
         <FileChangeDetail :message="message" />
       </div>
     </section>
-  </div>
+  </ActionList>
 </template>
 
 <script setup lang="ts">
@@ -38,6 +36,7 @@ import { useLocale } from '../../composables/useLocale'
 import { useVisualViewport } from '../../composables/useVisualViewport'
 import type { AgentFileChangeMessage } from '../../utils/agentFileChange'
 import FileChangeDetail from './FileChangeDetail.vue'
+import ActionList from '../ActionList.vue'
 
 const props = defineProps<{ message: AgentFileChangeMessage; returnFocusTo?: HTMLElement | null }>()
 const emit = defineEmits<{ (event: 'close'): void }>()
@@ -105,10 +104,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.file-change-sheet-layer { position: fixed; z-index: 92; inset: 0; height: var(--visual-viewport-height, 100dvh); }
-.file-change-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: rgba(0, 0, 0, .42); }
-.file-change-bottom-sheet { position: absolute; inset: auto 0 0; height: 70%; min-height: 360px; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-bottom: 0; border-radius: 18px 18px 0 0; background: var(--surface); box-shadow: 0 -12px 36px rgba(0, 0, 0, .28); transition: height 200ms ease; }
-.file-change-bottom-sheet.expanded { height: calc(100% - max(12px, env(safe-area-inset-top))); }
+.file-change-bottom-sheet { height: min(60dvh, 550px); min-height: 240px; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); transition: height 200ms ease; }
+.file-change-bottom-sheet.expanded { height: min(75dvh, 700px); }
 .file-change-bottom-sheet.reduced-motion { transition: none; }
 .file-change-grabber { width: 100%; min-height: 32px; display: grid; place-items: center; flex: 0 0 32px; padding: 0; border: 0; background: transparent; cursor: ns-resize; touch-action: none; }
 .file-change-grabber > span { width: 38px; height: 5px; border-radius: var(--radius-full); background: var(--border-light); }

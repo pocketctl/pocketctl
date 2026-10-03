@@ -3,6 +3,8 @@
     <MobileTopBar
       v-if="showTopBar"
       :title="title"
+      :subtitle="subtitle"
+      :module-action="moduleAction"
       :connected="connected"
       :reconnecting="reconnecting"
       :is-session="isSession"
@@ -17,6 +19,8 @@
       :session-status-label="sessionStatusLabel"
       @new-session="$emit('new-session')"
       @open-plan="openPlan"
+      @open-nav="$emit('open-nav')"
+      @module-action="$emit('module-action')"
     />
     <MobileBottomNav v-if="showBottomNav" :session-count="sessionCount" :attention-count="attentionCount" />
     <PlanBottomSheet
@@ -37,6 +41,8 @@ import { useLocale } from '../../composables/useLocale'
 import { completedPlanItemCount, type AgentPlanSnapshot } from '../../utils/agentPlanMerge'
 
 const props = defineProps<{
+  subtitle?: string
+  moduleAction?: 'register'|'team'|'refresh'
   title: string
   connected: boolean
   reconnecting: boolean
@@ -53,7 +59,7 @@ const props = defineProps<{
   sessionStatusLabel?: string
 }>()
 
-defineEmits<{ (event: 'new-session'): void }>()
+defineEmits<{ (event: 'new-session'): void; (event: 'open-nav'): void; (event: 'module-action'):void }>()
 const { t } = useLocale()
 const planOpen = ref(false)
 const completed = computed(() => props.plan ? completedPlanItemCount(props.plan) : 0)

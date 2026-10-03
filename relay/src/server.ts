@@ -1,3 +1,5 @@
+import { registerPreferenceRoutes } from './user-preferences.js';
+import { getTokenSessionAnalytics, parseTokenSessionQuery, TokenQueryError } from './token-usage/session-analytics.js';
 import { isTeamEnabled, registerTeamAccessGuard } from './team/access.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
@@ -1828,6 +1830,16 @@ async function main() {
     return { success: true };
   });
 
+  registerPreferenceRoutes(app, { pool, verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool), ready: () => databaseReady })
+  app.get('/api/tokens/sessions', async (req, reply) => {
+    const header = req.headers.authorization
+    const actor = header?.startsWith('Bearer ') ? await verifyAccessTokenWithRevocation(header.slice(7), pool) : null
+    if (!actor) return reply.code(401).send({ error: 'authorization_required' })
+    if (!databaseReady) return reply.code(503).send({ error: 'database_unavailable' })
+    try { return await getTokenSessionAnalytics(pool, actor.userId, parseTokenSessionQuery(req.query as Record<string, unknown>), tokenFeatures.dashboardV2) }
+    catch (error) { if (error instanceof TokenQueryError) return reply.code(400).send({error:'invalid_query',message:error.message}); throw error }
+  })
+
   // ---- Token Usage Tracking ----
 
   // User-level token usage summary: total / today / thisWeek / thisMonth
@@ -1880,7 +1892,10 @@ async function main() {
     if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     const daemon = ((req.query as any).daemon as string) || 'all';
     const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
-    return await readTokenDashboard(
+    let sessionQuery
+    try { sessionQuery = parseTokenSessionQuery({ ...(req.query as Record<string,unknown>), limit: 1 }) }
+    catch (error) { return reply.code(400).send({error:'invalid_query',message:(error as Error).message}) }
+    const dashboard = await readTokenDashboard(
       tokenFeatures,
       async () => {
         const [summary, dailySeries, byModel, byDaemon] = await Promise.all([
@@ -1902,6 +1917,8 @@ async function main() {
         }
       },
     );
+    const analytics = await getTokenSessionAnalytics(pool,payload.userId,sessionQuery,tokenFeatures.dashboardV2,true)
+    return {...dashboard,byAgent:analytics.byAgent,sessionUsageScope:analytics.scope};
   });
 
   // Per-session daily token trend: legacy reads retained events; V2 reads only

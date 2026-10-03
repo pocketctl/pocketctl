@@ -1,3 +1,4 @@
+import { useLocale } from '../../composables/useLocale'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { useAuth } from '../../composables/useAuth'
@@ -53,7 +54,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 function render(context: TeamContextSnapshot | null = snapshot, props: Partial<{ session: TeamSession; currentUserId: number }> = {}): VueWrapper {
-  const wrapper = mount(TeamContextPanel, { props: { context, session, currentUserId: 7, ...props } })
+  const wrapper = mount(TeamContextPanel, { global: { stubs: { Teleport: true } }, props: { context, session, currentUserId: 7, ...props } })
   wrappers.push(wrapper)
   return wrapper
 }
@@ -68,6 +69,7 @@ async function selectSearchResult(wrapper: VueWrapper): Promise<void> {
 
 describe('TeamContextPanel selected references', () => {
   beforeEach(() => {
+  useLocale().setLocale('zh')
     vi.useFakeTimers()
     resetMemoryClient()
     useAuth().accessToken.value = 'test-user-token'

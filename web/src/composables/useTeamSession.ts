@@ -17,12 +17,14 @@ import {
 import type { TeamCallSummary, TeamCapabilities, TeamContextSnapshot, TeamEvent, TeamMessageTargetMode, TeamRun, TeamSession, TeamTask } from '../types/team'
 import { useScopedSessionDraft } from './useScopedSessionState'
 import { useWebSocket } from './useWebSocket'
+import { useLocale } from './useLocale'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '共享会话请求失败'
 }
 
 export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonly<Ref<string>>) {
+  const { t } = useLocale()
   const scope = computed(() => ({ type: 'team' as const, teamId: teamID.value }))
   const { draft, clearDraft } = useScopedSessionDraft(scope, sessionID)
   const session = ref<TeamSession | null>(null)
@@ -51,8 +53,9 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
 
   const callableBindings = computed(() => session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? [])
   const latestRun = computed(() => runs.value[0] ?? null)
-  const autorunEnabled = computed(() => capabilities.value?.autorun === true && capabilities.value.writes_enabled === true)
+  const autorunEnabled = computed(() => session.value?.current_user_role !== 'viewer' && capabilities.value?.autorun === true && capabilities.value.writes_enabled === true)
   const readOnlyReason = computed(() => {
+    if (session.value?.current_user_role === 'viewer') return t('team.viewer_read_only')
     if (accessRevoked.value) return '你已无权访问此共享会话'
     if (!session.value) return '共享会话尚未加载'
     if (session.value.state === 'paused') return '共享会话已暂停'

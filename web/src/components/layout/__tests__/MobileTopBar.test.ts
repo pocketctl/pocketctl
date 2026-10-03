@@ -6,6 +6,7 @@ const push = vi.fn()
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push }),
+  useRoute: () => ({ path: '/sessions', query: {} }),
 }))
 
 vi.mock('../../composables/useLocale', () => ({

@@ -89,10 +89,11 @@ export class TeamTaskService {
       )
       if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
       const member = await client.query(
-        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
+        `SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
         [teamId, actorUserId],
       )
       if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      if (member.rows[0].role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only team member')
       return team.rows[0]
     }
     const result = await client.query<{ creator_user_id: number }>(
@@ -246,10 +247,11 @@ export class TeamTaskService {
         throw new TeamRepositoryError('creator_required', 'team creator authority required to change another holder')
       }
       const member = await client.query(
-        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active'`,
+        `SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
         [task.team_id, input.holderUserId],
       )
       if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'member not found')
+      if (input.active && member.rows[0].role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only member cannot hold a task')
       await client.query(
         `INSERT INTO team_task_holders (task_id, user_id, state, released_at)
          VALUES ($1, $2, $3::varchar, CASE WHEN $3::varchar = 'released' THEN NOW() ELSE NULL END)

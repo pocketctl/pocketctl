@@ -3,6 +3,9 @@ import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import NewSessionDialog from '../NewSessionDialog.vue'
 
+const mobile = vi.hoisted(() => ({ enabled: false }))
+vi.mock('../../composables/useResponsiveLayout', () => ({ useResponsiveLayout: () => ({ isMobile: { value: mobile.enabled } }) }))
+
 const quota = vi.hoisted(() => ({ value: undefined as any, current: undefined as any, api: vi.fn(async () => ({ ok: false, data: null as any })) }))
 vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ apiGetAuth: quota.api }) }))
 
@@ -46,7 +49,58 @@ vi.mock('vue-router', () => ({
 }))
 
 describe('NewSessionDialog permission serialization', () => {
+  test('disables forbidden permissions and keeps default-model effort options scoped to host capabilities', async () => {
+    const wrapper=mount(NewSessionDialog,{props:{daemons:[{daemon_id:'daemon-1',daemon_online:true}]}})
+    await wrapper.findAll('button.agent-pill')[1].trigger('click')
+    ws.handlers.get('codex_home_list')?.({daemon_id:'daemon-1',codex_homes:[{id:'primary',label:'Primary'}]})
+    await nextTick()
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'codex',models:[{alias:'default',name:'Default',supported_reasoning_efforts:['high']}],creation_capabilities:{version:1,supported:true,managed_runtime:true,default_model:'default',permission_presets:['request_approval','custom'],approval_policies:['on-request'],sandbox_modes:['read-only','workspace-write']}})
+    await nextTick()
+    expect(wrapper.get('.permission-field option[value="full_access"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.codex-effort-field select').findAll('option').map(option=>option.attributes('value'))).toEqual(['','high'])
+    await wrapper.get('.permission-field select').setValue('custom')
+    expect(wrapper.get('.permission-custom-grid select').findAll('option').map(option=>option.attributes('value'))).toEqual(['on-request'])
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'codex',models:[],creation_capabilities:{version:1,supported:false,managed_runtime:false,permission_presets:[],approval_policies:[],sandbox_modes:[]}})
+    await nextTick()
+    expect(wrapper.get('.btn-start').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  test('uses host model effort capabilities and sends the selected effort with native permissions', async () => {
+    const wrapper = mount(NewSessionDialog, { props: { daemons: [{ daemon_id:'daemon-1', daemon_online:true, hostname:'host' }] } })
+    await wrapper.findAll('button.agent-pill')[1].trigger('click')
+    ws.handlers.get('codex_home_list')?.({ daemon_id:'daemon-1',codex_homes:[{id:'primary',label:'primary',primary:true}] })
+    await nextTick()
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'codex',models:[
+      {alias:'reasoning',name:'Reasoning model',supported_reasoning_efforts:['low','high'],default_reasoning_effort:'low'},
+      {alias:'limited',name:'Limited model',supported_reasoning_efforts:['low']},
+    ]})
+    await nextTick()
+    await wrapper.get('.model-field select').setValue('reasoning')
+    expect(wrapper.get('button.agent-pill[aria-pressed="true"]').text()).toBe('Codex CLI')
+    expect(wrapper.get('.codex-effort-field select').findAll('option').map(option=>option.attributes('value'))).toEqual(['','low','high'])
+    await wrapper.get('.codex-effort-field select').setValue('high')
+    await wrapper.get('.btn-start').trigger('click')
+    expect(ws.send).toHaveBeenCalledWith(expect.objectContaining({type:'session_create',agent:'codex',model:'reasoning',effort:'high',codex_home_id:'primary',permission:expect.objectContaining({agent:'codex'})}))
+    wrapper.unmount()
+  })
+
+  test('clears effort when switching to a model with different capabilities', async () => {
+    const wrapper = mount(NewSessionDialog, { props: { daemons:[{daemon_id:'daemon-1',daemon_online:true}] } })
+    await wrapper.findAll('button.agent-pill')[1].trigger('click')
+    ws.handlers.get('codex_home_list')?.({daemon_id:'daemon-1',codex_homes:[{id:'primary',label:'primary',primary:true}]})
+    await nextTick()
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'codex',models:[{alias:'a',name:'A',supported_reasoning_efforts:['high']},{alias:'b',name:'B',supported_reasoning_efforts:['low']}]})
+    await nextTick()
+    await wrapper.get('.model-field select').setValue('a')
+    await wrapper.get('.codex-effort-field select').setValue('high')
+    await wrapper.get('.model-field select').setValue('b')
+    expect((wrapper.get('.codex-effort-field select').element as HTMLSelectElement).value).toBe('')
+    expect(wrapper.get('.codex-effort-field select').findAll('option').map(option=>option.attributes('value'))).toEqual(['','low'])
+    wrapper.unmount()
+  })
   beforeEach(() => {
+    mobile.enabled = false
     quota.value = undefined
     localStorage.clear()
     ws.send.mockClear()
@@ -57,6 +111,20 @@ describe('NewSessionDialog permission serialization', () => {
   })
 
   afterEach(() => vi.unstubAllGlobals())
+
+  test('mobile project selection is included in the existing create command', async () => {
+    mobile.enabled = true
+    const wrapper = mount(NewSessionDialog, { props: {
+      daemons: [{daemon_id:'mobile-host',daemon_online:true}], projectId:'project-one',
+      projects:[{id:'project-one',name:'One'},{id:'project-two',name:'Two'}],
+    } })
+    await flushPromises()
+    expect((wrapper.get('.mobile-create-project select').element as HTMLSelectElement).value).toBe('project-one')
+    await wrapper.get('.mobile-create-project select').setValue('project-two')
+    await wrapper.get('.btn-start').trigger('click')
+    expect(ws.send).toHaveBeenCalledWith(expect.objectContaining({type:'session_create',daemon_id:'mobile-host',project_id:'project-two'}))
+    wrapper.unmount()
+  })
 
   test('offers Codex CLI only and sends the codex wire value', async () => {
     const wrapper = mount(NewSessionDialog, {

@@ -1,3 +1,4 @@
+import { useLocale } from '../../composables/useLocale'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
@@ -24,12 +25,13 @@ async function render() {
     { path: '/sessions', component: { template: '<div />' } },
   ] })
   await router.push('/team/ctm_1/sessions'); await router.isReady()
-  const wrapper = mount(View, { global: { plugins: [router] } })
+  const wrapper = mount(View, { global: { plugins: [router], stubs: {Teleport:true} } })
   await flushPromises()
   return { wrapper, router }
 }
 
 beforeEach(() => {
+  useLocale().setLocale('zh')
   writesEnabled = true
   vi.clearAllMocks()
   api.listTeams.mockResolvedValue([{ id: 'ctm_1', name: 'Alpha' }, { id: 'ctm_2', name: 'Beta' }])

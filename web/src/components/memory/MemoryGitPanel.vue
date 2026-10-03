@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import {computed,onBeforeUnmount,ref,watch} from 'vue'
 import {useLocale} from '../../composables/useLocale'
 import {memoryGit} from '../../services/memoryGit'
@@ -187,12 +188,12 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
             <button class="memory-button" :disabled="busy || !entry.cleanup_pending || !connection.capabilities.can_sync" @click="sync('recover',entry.export_id)">{{ t('memory.git.reconcile') }}</button></div>
           <button v-if="cleanupContinued" class="memory-button" data-testid="git-cleanup-first" :disabled="cleanupPageLoading" @click="loadChildren('cleanup')">{{ t('memory.git.first_page') }}</button>
           <button v-if="connection.cleanup_next_cursor" class="memory-button" data-testid="git-cleanup-next" :disabled="cleanupPageLoading" @click="loadChildren('cleanup',connection.cleanup_next_cursor)">{{ t('memory.git.next_cleanup') }}</button></div>
-        <div class="memory-git-actions"><label>{{ t('memory.git.export') }}<select v-model="exportId"><option v-for="e in connection.exports" :key="e.export_id" :value="e.export_id">{{ e.export_id }}</option></select></label>
+        <div class="memory-git-actions"><label>{{ t('memory.git.export') }}<ActionSelect><select v-model="exportId"><option v-for="e in connection.exports" :key="e.export_id" :value="e.export_id">{{ e.export_id }}</option></select></ActionSelect></label>
           <button class="memory-button" :disabled="busy || !exportId || !connection.capabilities.can_sync" @click="sync('enroll')">{{ t('memory.git.enroll') }}</button>
           <button class="memory-button" :disabled="busy || !exportId || !connection.capabilities.can_sync" @click="sync('poll')">{{ t('memory.git.sync') }}</button></div>
         <p class="memory-git-muted">{{ t('memory.git.enrollment_description') }}</p>
         <details v-if="connection.capabilities.can_preview" class="memory-git-preview"><summary>{{ t('memory.git.preview') }}</summary><form class="memory-git-actions" @submit.prevent="preview">
-          <label>{{ t('memory.git.asset_kind') }}<select v-model="assetKind"><option>claim</option><option>rule</option><option>wiki</option><option>skill</option></select></label>
+          <label>{{ t('memory.git.asset_kind') }}<ActionSelect><select v-model="assetKind"><option>claim</option><option>rule</option><option>wiki</option><option>skill</option></select></ActionSelect></label>
           <label>{{ t('memory.git.asset_id') }}<input v-model="assetId" required /></label><button class="memory-button" :disabled="busy || !assetId">{{ t('memory.git.preview') }}</button></form></details>
         <nav class="memory-git-proposals" :aria-label="t('memory.git.proposals')"><button v-for="p in connection.proposals" :key="p.proposal_id" class="memory-button" :aria-pressed="detail?.proposal_id===p.proposal_id" @click="loadProposal(p.proposal_id)">{{ p.state }} · {{ p.revision }}</button></nav>
         <p>{{ t('memory.git.proposal_total') }}: {{ connection.proposal_total ?? connection.proposals.length }}</p>

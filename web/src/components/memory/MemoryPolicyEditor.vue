@@ -4,11 +4,11 @@
     <div class="memory-config-toolbar">
       <label>
         {{ t('memory.policy.kind') }}
-        <select v-model="kind" data-testid="policy-kind">
+        <ActionSelect><select v-model="kind" data-testid="policy-kind">
           <option value="extraction">extraction</option>
           <option value="context">context</option>
           <option value="ranking">ranking</option>
-        </select>
+        </select></ActionSelect>
       </label>
       <button class="memory-button" data-testid="policy-load" :disabled="busy" @click="load">{{ t('memory.policy.load') }}</button>
     </div>
@@ -34,6 +34,7 @@
 </template>
 
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { computed, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { EffectivePolicy, PolicyVersionSummary } from '../../types/memory'

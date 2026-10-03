@@ -5,13 +5,15 @@
 </template>
 
 <script setup lang="ts">
+import { useLocale } from "../../composables/useLocale"
+const { t } = useLocale()
 import { computed } from 'vue'
 import type { TeamRunState } from '../../types/team'
 
 const props = defineProps<{ state: TeamRunState; stopRequested?: boolean }>()
-const label = computed(() => props.stopRequested ? '停止处理中' : ({
-  ready: '准备中', running: '运行中', waiting_input: '等待补充', blocked: '已阻塞', paused: '已暂停',
-  completed: '已完成', failed: '失败退出', cancelled: '已取消',
+const label = computed(() => props.stopRequested ? t('workspace.stopping') : ({
+  ready: t('workspace.preparing'), running: t('session.status.running'), waiting_input: t('workspace.waiting_supplement'), blocked: t('workspace.blocked'), paused: t('team.session_state.paused'),
+  completed: t('team.task_state.completed'), failed: t('workspace.run_failed'), cancelled: t('memory.skills.cancelled'),
 } as Record<TeamRunState, string>)[props.state])
 </script>
 

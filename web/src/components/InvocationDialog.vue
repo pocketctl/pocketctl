@@ -1,16 +1,14 @@
 <template>
-  <Teleport to="body">
-    <div v-if="value" class="invocation-backdrop" @click.self="$emit('close')" @keydown.esc="$emit('close')">
-      <section ref="dialog" tabindex="-1" @keydown.tab="trapFocus" class="invocation-dialog" role="dialog" aria-modal="true" :aria-label="value.title || 'Codex'">
-        <header><strong>{{ value.title || 'Codex' }}</strong><button aria-label="关闭" @click="$emit('close')">×</button></header>
+  <ActionList v-if="value" :title="value.title || 'Codex'" :width="480" @close="$emit('close')">
+    <div ref="dialog" class="invocation-dialog">
         <template v-if="value.kind === 'choose'"><button v-for="(option, i) in value.options" :key="i" class="invocation-option" @click="$emit('choose', option.arguments)">{{ option.label }}</button></template>
         <form v-else-if="value.kind === 'input'" @submit.prevent="$emit('choose', input)"><input v-model="input" autofocus aria-label="命令参数"/><button type="submit">确认</button></form>
         <template v-else><pre>{{ value.text }}</pre><button v-if="value.kind === 'copy'" @click="copy">复制回复</button><a v-if="value.kind === 'export'" :href="downloadURL" :download="value.filename">下载 Markdown</a><p role="status">{{ feedback }}</p></template>
-      </section>
     </div>
-  </Teleport>
+  </ActionList>
 </template>
 <script setup lang="ts">
+import ActionList from './ActionList.vue'
 import { ref, nextTick, onUnmounted, watch } from 'vue'
 const props = defineProps<{ value: any }>()
 defineEmits<{ close: []; choose: [argumentsText: string] }>()
@@ -38,5 +36,5 @@ async function copy() { try { await navigator.clipboard.writeText(props.value.te
 onUnmounted(() => { revokeDownload(); previousFocus?.focus() })
 </script>
 <style scoped>
-.invocation-backdrop{position:fixed;inset:0;z-index:1000;background:#0009;display:flex;align-items:center;justify-content:center;padding:20px}.invocation-dialog{width:480px;max-width:100%;max-height:75vh;overflow:auto;background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:16px;padding:18px}.invocation-dialog header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}.invocation-dialog button,.invocation-dialog input{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;cursor:pointer}.invocation-option{display:block;width:100%;text-align:left;margin:6px 0;min-height:44px}.invocation-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.invocation-dialog a{color:var(--accent)}@media(max-width:768px){.invocation-backdrop{align-items:flex-end;padding:0}.invocation-dialog{width:100%;border-radius:24px 24px 0 0;padding-bottom:max(24px,env(safe-area-inset-bottom))}}
+.invocation-backdrop{position:fixed;inset:0;z-index:1000;background:#0009;display:flex;align-items:center;justify-content:center;padding:20px}.invocation-dialog{min-width:0;max-width:100%;color:var(--fg)}.invocation-dialog header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}.invocation-dialog button,.invocation-dialog input{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;cursor:pointer}.invocation-option{display:block;width:100%;text-align:left;margin:6px 0;min-height:44px}.invocation-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}.invocation-dialog a{color:var(--accent)}
 </style>

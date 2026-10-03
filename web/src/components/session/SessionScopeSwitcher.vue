@@ -7,25 +7,29 @@
     <button type="button" :class="{ active: modelValue.type === 'team' }" :aria-pressed="modelValue.type === 'team'" @click="selectTeam(modelValue.type === 'team' ? modelValue.teamId : teams[0]?.id || '')">{{ t('session.scope_team') }}</button>
     </div>
     <div v-if="modelValue.type === 'team'" class="browser-team-select">
-      <label class="browser-team-field">
+      <div class="browser-team-field">
         <svg class="browser-team-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M21 20v-2a6 6 0 0 0-4-5.65"/></svg>
         <span class="browser-team-caption" aria-hidden="true">{{ t('session.scope_team') }}</span>
-        <select :value="modelValue.teamId" :disabled="!teams.length" aria-label="筛选团队"
-          @change="selectTeam(($event.target as HTMLSelectElement).value)">
-          <option v-if="!teams.length" value="">尚未加入团队</option>
-          <option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option>
-        </select>
+        <button ref="trigger" type="button" class="team-filter-trigger" :disabled="!teams.length" :aria-label="t('workspace.select_team')" :aria-expanded="open" @click="open=!open; query=''">{{ selectedTeamName || t('workspace.no_team') }}</button>
         <svg class="browser-team-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
-      </label>
+      </div>
+      <ActionList v-if="open" :anchor="trigger" :title="t('workspace.select_team')" @close="open=false">
+        <input v-model="query" type="search" :aria-label="t('workspace.team_search')" :placeholder="t('workspace.team_search')" />
+        <button v-for="team in filteredTeams" :key="team.id" type="button" class="action-item" :class="{selected: team.id === modelValue.teamId}" :aria-pressed="team.id === modelValue.teamId" @click="selectTeam(team.id); open=false"><WorkspaceIcon name="teams" /><span>{{ team.name }}</span><WorkspaceIcon v-if="team.id===modelValue.teamId" name="check" /></button>
+        <p v-if="!filteredTeams.length">{{ t('workspace.team_no_match') }}</p>
+      </ActionList>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import { computed, ref } from 'vue'
+import ActionList from '../ActionList.vue'
+import WorkspaceIcon from '../WorkspaceIcon.vue'
 import { useLocale } from '../../composables/useLocale'
 import type { SessionScope } from '../../composables/useScopedSessionState'
 
-defineProps<{
+const props = defineProps<{
   modelValue: SessionScope
   teams: Array<{ id: string; name: string }>
 }>()
@@ -35,6 +39,9 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useLocale()
+const open = ref(false), query = ref(''), trigger = ref<HTMLButtonElement | null>(null)
+const selectedTeamName = computed(() => props.modelValue.type === 'team' ? props.teams.find(team => team.id === (props.modelValue as {teamId:string}).teamId)?.name : '')
+const filteredTeams = computed(() => props.teams.filter(team => team.name.toLowerCase().includes(query.value.trim().toLowerCase())))
 
 function selectPersonal(): void {
   emit('update:modelValue', { type: 'personal' })
@@ -56,8 +63,8 @@ function selectTeam(teamId: string): void {
 .browser-team-icon { left:11px; }
 .browser-team-field .browser-team-chevron { right:11px; }
 .browser-team-caption { position:absolute; z-index:1; top:8px; left:35px; color:var(--fg-tertiary); font:400 10px/14px var(--font-body); pointer-events:none; }
-.browser-team-select select { appearance:none; display:block; width:100%; min-width:0; height:52px; box-sizing:border-box; padding:23px 34px 8px 35px; overflow:hidden; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--surface); color:var(--fg); font:500 12px/18px var(--font-body); text-overflow:ellipsis; white-space:nowrap; cursor:pointer; transition:border-color .15s,background .15s; }
-.browser-team-select select:hover:not(:disabled) { border-color:var(--border-light); background:var(--surface-hover); }
-.browser-team-select select:disabled { color:var(--fg-tertiary); cursor:default; }
-button:focus-visible,select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.browser-team-select .team-filter-trigger { appearance:none; display:block; width:100%; min-width:0; height:52px; box-sizing:border-box; padding:23px 34px 8px 35px; overflow:hidden; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--surface); color:var(--fg); font:500 12px/18px var(--font-body); text-overflow:ellipsis; white-space:nowrap; cursor:pointer; transition:border-color .15s,background .15s; }
+.browser-team-select .team-filter-trigger:hover:not(:disabled) { border-color:var(--border-light); background:var(--surface-hover); }
+.browser-team-select .team-filter-trigger:disabled { color:var(--fg-tertiary); cursor:default; }
+button:focus-visible,.team-filter-trigger:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 </style>

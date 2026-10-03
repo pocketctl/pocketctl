@@ -9,7 +9,7 @@ const plan = {
 
 describe('PlanBottomSheet', () => {
   test('opens at the medium detent and can expand toward full screen', async () => {
-    const wrapper = mount(PlanBottomSheet, { props: { plan, connected: true } })
+    const wrapper = mount(PlanBottomSheet, { global: { stubs: { Teleport: true } }, props: { plan, connected: true } })
 
     expect(wrapper.get('.plan-bottom-sheet').classes()).not.toContain('expanded')
     await wrapper.get('.plan-sheet-grabber').trigger('click')
@@ -17,7 +17,7 @@ describe('PlanBottomSheet', () => {
   })
 
   test('an upward drag stays expanded when the pointer sequence emits a click', async () => {
-    const wrapper = mount(PlanBottomSheet, { props: { plan, connected: true } })
+    const wrapper = mount(PlanBottomSheet, { global: { stubs: { Teleport: true } }, props: { plan, connected: true } })
     const grabber = wrapper.get('.plan-sheet-grabber')
 
     await grabber.trigger('pointerdown', { clientY: 600 })
@@ -27,10 +27,11 @@ describe('PlanBottomSheet', () => {
     expect(wrapper.get('.plan-bottom-sheet').classes()).toContain('expanded')
   })
 
-  test('closes from the backdrop and close button', async () => {
-    const wrapper = mount(PlanBottomSheet, { props: { plan, connected: true } })
-    await wrapper.get('.plan-sheet-backdrop').trigger('click')
-    await wrapper.get('.plan-sheet-close').trigger('click')
-    expect(wrapper.emitted('close')).toHaveLength(2)
+  test('opens without a modal backdrop and closes from its action list', async () => {
+    const wrapper = mount(PlanBottomSheet, { global: { stubs: { Teleport: true } }, props: { plan, connected: true } })
+    expect(wrapper.find('[aria-modal]').exists()).toBe(false)
+    expect(wrapper.find('.plan-sheet-backdrop').exists()).toBe(false)
+    await wrapper.get('.workspace-action-list > header button').trigger('click')
+    expect(wrapper.emitted('close')).toHaveLength(1)
   })
 })

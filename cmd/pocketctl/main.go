@@ -3886,6 +3886,7 @@ func deliverDeferredInitialPrompt(
 func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker, memoryContextGrants *memorycontext.GrantClient) {
 	quotaGrants := session.NewQuotaGrantValidator()
 	directorySlots := make(chan struct{}, 2)
+	modelSlots := make(chan struct{}, 2)
 	var directoryRequests sync.Map
 	for {
 		select {
@@ -3977,6 +3978,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					Prompt:        cmd.Prompt,
 					Permission:    cmd.Permission,
 					Model:         cmd.Model,
+					Effort:        cmd.Effort,
 					Worktree:      cmd.Worktree,
 					AutoCreateDir: cmd.AutoCreateDir,
 					Force:         cmd.Force,
@@ -4008,6 +4010,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					SessionID:     sessionID,
 					Title:         config.Prompt,
 					Model:         model,
+					Effort:        sm.GetSessionEffort(sessionID),
 					RequestID:     cmd.RequestID,
 					ReservationID: quotaReservationID(cmd.QuotaGrant),
 				}
@@ -4252,15 +4255,26 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(protocol.DaemonEvent{Type: "directory_result", RequestID: cmd.RequestID, Reason: "busy"})
 				}
 			case "list_models":
-				// Web client queries the host's available models to populate the
-				// session-creation picker. Claude reads ~/.claude/settings.json;
-				// codex returns its own model list.
-				client.SendMsg(protocol.DaemonEvent{
-					Type:        "model_list",
-					RequestID:   cmd.RequestID,
-					Agent:       cmd.Agent,
-					Models:      sm.ModelsForAgentHome(cmd.Agent, cmd.CodexHomeID),
-					CodexHomeID: cmd.CodexHomeID,
+				modelCommand := cmd
+				select {
+				case modelSlots <- struct{}{}:
+				default:
+					client.SendMsg(protocol.DaemonEvent{Type: "model_list", RequestID: cmd.RequestID, Agent: cmd.Agent, Reason: "busy"})
+					continue
+				}
+				daemon.Go("model-query", logger, func() {
+					defer func() { <-modelSlots }()
+					queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					var capabilities *protocol.CodexCreationCapabilities
+					if modelCommand.Agent == adapter.AgentCodex {
+						capabilities = sm.CodexCreationCapabilities(queryCtx, modelCommand.CodexHomeID)
+					}
+					client.SendMsg(protocol.DaemonEvent{
+						Type: "model_list", RequestID: modelCommand.RequestID, Agent: modelCommand.Agent,
+						Models: sm.ModelsForAgentHome(modelCommand.Agent, modelCommand.CodexHomeID), CodexHomeID: modelCommand.CodexHomeID,
+						CreationCapabilities: capabilities,
+					})
 				})
 			case "list_codex_homes":
 				profiles := adapter.CodexHomeProfiles()
@@ -4605,12 +4619,22 @@ func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent s
 	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)
 }
 
-// readJSONLLines reads up to maxLines from a JSONL file and returns them as a slice.
-// classifyCreateError maps a CreateSession error message to a reason code
-// for the session_create_failed event (no_cli, bad_cwd, start_fail).
 // classifyCreateError maps a CreateSession error message to a reason code
 // for the session_create_failed event (no_cli, bad_cwd, cwd_in_use, start_fail).
 func classifyCreateError(msg string) string {
+	if strings.Contains(msg, "unsupported Codex reasoning effort") {
+		return "unsupported_effort"
+	}
+	if strings.Contains(msg, "--allow-dangerous-remote-permissions") {
+		return "remote_permission_denied"
+	}
+	if strings.Contains(msg, "codex remote approval requires") || strings.Contains(msg, "不支持空会话持久化") {
+		return "codex_managed_required"
+	}
+	if strings.Contains(msg, "invalid codex") || strings.Contains(msg, "permission agent") {
+		return "invalid_permission"
+	}
+
 	if strings.Contains(msg, "cwd_not_authorized") {
 		return "cwd_not_authorized"
 	}

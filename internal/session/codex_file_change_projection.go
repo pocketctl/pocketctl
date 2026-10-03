@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -51,6 +52,21 @@ type projectedManagedFileChange struct {
 	diff      string
 	additions int
 	deletions int
+}
+
+// Current Codex item notifications use absolute paths while turn diffs use
+// paths relative to the thread cwd. Keep one identity for files inside the
+// thread root, without converting outside paths into capture-eligible ones.
+func (p *codexProjection) managedFilePath(threadID, nativePath string) string {
+	root := p.threadCwd[threadID]
+	if root == "" || !filepath.IsAbs(nativePath) {
+		return nativePath
+	}
+	relative, err := filepath.Rel(root, nativePath)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nativePath
+	}
+	return filepath.ToSlash(relative)
 }
 
 func (p *codexProjection) projectTurnDiff(raw json.RawMessage, historical bool) []protocol.DaemonEvent {
@@ -301,14 +317,16 @@ func (p *codexProjection) projectManagedFileChanges(
 		if movePath == "" {
 			movePath = source.MovePath
 		}
+		filePath := p.managedFilePath(threadID, source.Path)
+		movePath = p.managedFilePath(threadID, movePath)
 		kind, ok := normalizeManagedFileChangeKind(source.Kind.Type, movePath)
 		if !ok {
 			continue
 		}
-		diff := normalizeManagedFileChangeDiff(source.Path, kind, source.Diff)
+		diff := normalizeManagedFileChangeDiff(filePath, kind, source.Diff)
 		additions, deletions := protocol.CountUnifiedDiffChanges(diff)
 		changes = append(changes, projectedManagedFileChange{
-			path: source.Path, kind: kind, movePath: movePath, diff: diff,
+			path: filePath, kind: kind, movePath: movePath, diff: diff,
 			additions: additions, deletions: deletions,
 		})
 	}

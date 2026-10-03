@@ -28,6 +28,7 @@
           <span>{{ displayName }}</span>
           <small>{{ t('mobile.host_actions') }}</small>
         </div>
+        <template v-if="isMobile"><button v-for="entry in destinations" :key="entry.id" type="button" role="menuitem" :data-host-action="entry.id" :disabled="!daemon.daemon_online && ['new-session','agent'].includes(entry.id)" @click="$emit('action',entry.id)"><WorkspaceIcon :name="entry.icon" /><span>{{ t(entry.label) }}</span><b>›</b></button><div class="host-actions-separator" /></template>
         <button type="button" role="menuitem" data-host-action="refresh" @click="$emit('action', 'refresh')">
           <svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.5 9A7 7 0 0 0 6.1 6.1L4 11M5.5 15A7 7 0 0 0 17.9 17.9L20 13"/></svg>
           <span>{{ t('hosts.menu_refresh') }}</span><b>›</b>
@@ -57,6 +58,8 @@
 </template>
 
 <script setup lang="ts">
+import WorkspaceIcon from '../WorkspaceIcon.vue'
+import { useResponsiveLayout } from '../../composables/useResponsiveLayout'
 import { computed, nextTick, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { HostActionId } from '../../utils/hostActions'
@@ -73,6 +76,8 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useLocale()
+const { isMobile } = useResponsiveLayout()
+const destinations: Array<{id:HostActionId;icon:string;label:string}> = [{id:'sessions',icon:'sessions',label:'mobile.host_sessions'},{id:'new-session',icon:'plus',label:'session.new_session'},{id:'token',icon:'tokens',label:'mobile.host_token_usage'},{id:'agent',icon:'agent',label:'mobile.host_agent_manage'}]
 const isEditingAlias = ref(false)
 const aliasText = ref('')
 const aliasInput = ref<HTMLInputElement | null>(null)

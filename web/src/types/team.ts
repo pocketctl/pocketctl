@@ -7,6 +7,8 @@ export type TeamSessionID = string
 export type TeamEventID = string
 export type TeamRunID = string
 
+export type TeamRole = 'admin' | 'member' | 'viewer'
+
 export type TeamState = 'active' | 'dissolved'
 export type TeamInvitationState = 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired'
 export type TeamAgentAvailability = 'online' | 'offline' | 'unsupported' | 'unmanaged' | 'occupied' | 'access_disabled'
@@ -39,6 +41,7 @@ export interface TeamSummary {
 }
 
 export interface TeamMember {
+  role?: TeamRole
   id: string
   team_id: TeamID
   user_id: number
@@ -50,6 +53,7 @@ export interface TeamMember {
 }
 
 export interface TeamInvitation {
+  role?: TeamRole
   id: string
   team_id: TeamID
   invited_by_user_id: number
@@ -130,6 +134,7 @@ export interface TeamSessionAgentBinding {
 }
 
 export interface TeamSessionSummary {
+  current_user_role?: TeamRole
   id: TeamSessionID
   team_id: TeamID
   creator_user_id: number

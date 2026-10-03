@@ -1,24 +1,26 @@
 <template>
-  <button ref="trigger" type="button" class="project-create-trigger" title="创建项目" aria-label="创建项目" @click="open">＋</button>
-  <Teleport to="body">
-    <div v-if="visible" class="project-modal-backdrop" @click.self="close">
-      <form class="project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title" @submit.prevent="submit" @keydown.esc.stop.prevent="close">
-        <h2 id="project-modal-title">创建项目</h2>
-        <p>把同一件工作的会话放在一起。</p>
-        <label for="project-name-input">项目名称</label>
+  <button ref="trigger" type="button" class="project-create-trigger" :class="{ labeled }" :title="t('workspace.create_project')" :aria-label="t('workspace.create_project')" @click="open"><template v-if="labeled"><WorkspaceIcon name="folder" />{{ t('workspace.create_project') }}</template><template v-else>＋</template></button>
+  <ActionList v-if="visible" :mobile-sheet="labeled" :anchor="trigger" :title="t('workspace.create_project')" @close="close">
+      <form id="create-project-form" @submit.prevent="submit">
+        <p>{{ t('workspace.project_hint') }}</p>
+        <label for="project-name-input">{{ t('workspace.project_name') }}</label>
         <input id="project-name-input" ref="nameInput" v-model="name" maxlength="36" autocomplete="off" :disabled="saving" />
         <span v-if="error" class="project-modal-error" role="alert">{{ error }}</span>
-        <div class="project-modal-actions">
-          <button type="button" :disabled="saving" @click="close">取消</button>
-          <button type="submit" class="primary" :disabled="saving || !name.trim()">{{ saving ? '创建中…' : '创建项目' }}</button>
-        </div>
       </form>
-    </div>
-  </Teleport>
+      <template #footer>
+        <button type="button" :disabled="saving" @click="close">{{ t('common.cancel') }}</button>
+        <button type="submit" form="create-project-form" class="primary" :disabled="saving || !name.trim()">{{ saving ? t('workspace.creating') : t('workspace.create_project') }}</button>
+      </template>
+  </ActionList>
 </template>
 
 <script setup lang="ts">
 import { nextTick, ref } from 'vue'
+import ActionList from './ActionList.vue'
+import WorkspaceIcon from './WorkspaceIcon.vue'
+defineProps<{ labeled?: boolean }>()
+import { useLocale } from '../composables/useLocale'
+const { t } = useLocale()
 import { createProject } from '../services/sessionOrganization'
 
 const emit = defineEmits<{ (event: 'created'): void }>()
@@ -53,7 +55,7 @@ async function submit() {
     close()
     emit('created')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '创建项目失败'
+    error.value = cause instanceof Error ? cause.message : t('workspace.create_project_failed')
   } finally {
     saving.value = false
   }
@@ -62,6 +64,8 @@ async function submit() {
 
 <style scoped>
 .project-create-trigger { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--fg-secondary); font-size: 19px; line-height: 1; cursor: pointer; }
+.project-create-trigger.labeled { display: flex; gap: 5px; width: auto; min-height: 44px; font-size: 12px; color: var(--accent); white-space: nowrap; }
+.project-create-trigger.labeled svg { width: 12px; height: 12px; }
 .project-create-trigger:hover { background: var(--surface-active); color: var(--accent); }
 .project-create-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .project-modal-backdrop { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 18px; background: rgba(0, 0, 0, .65); }

@@ -180,9 +180,11 @@ what leaves the development host.
 Team collaboration turns PocketCtl from a personal cross-device cockpit into a
 small human-and-Agent workspace. In the Web client you can:
 
-- **Create Teams and manage membership** — invite members by email, gate
-  joining per account, and remove members; removal revokes future reads and
-  execution, and retained history never transfers native-session ownership.
+- **Create Teams and manage membership** — invite members by email as admins,
+  members, or read-only viewers; gate joining per account, change and audit
+  roles with revision checks, and remove members. Removal revokes future reads
+  and execution, and retained history never transfers native-session
+  ownership.
 - **Maintain lightweight tasks** — assign holders and track progress, separate
   from shared sessions and automatic runs.
 - **Share sessions with frozen Context** — explicit collaboration events and

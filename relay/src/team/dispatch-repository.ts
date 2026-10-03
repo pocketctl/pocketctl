@@ -180,7 +180,7 @@ export class TeamDispatchRepository {
   // context/quota preparation that started earlier. Receipts never use this gate.
   async sendIfEnabled(callId: string, send: () => boolean): Promise<'sent' | 'unavailable' | 'access_denied'> {
     return this.transaction(async client => {
-      const row = (await client.query(`SELECT call.state, offer.owner_user_id,
+      const row = (await client.query(`SELECT call.state, offer.owner_user_id, offer.team_id,
           COALESCE(run.initiator_user_id, event.author_user_id) AS initiator_user_id
         FROM collaboration_calls call
         JOIN team_agent_offers offer ON offer.offer_id = call.offer_id
@@ -189,6 +189,8 @@ export class TeamDispatchRepository {
         WHERE call.call_id = $1 FOR UPDATE OF call`, [callId])).rows[0]
       if (!row || row.state !== 'dispatched') return 'unavailable'
       if (!await teamAccountsEnabled(client, [Number(row.initiator_user_id), Number(row.owner_user_id)], true)) return 'access_denied'
+      const members = await client.query(`SELECT user_id, role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = ANY($2::int[]) AND state = 'active' ORDER BY user_id FOR SHARE`, [row.team_id, [...new Set([Number(row.initiator_user_id), Number(row.owner_user_id)])]])
+      if (members.rows.length !== new Set([Number(row.initiator_user_id), Number(row.owner_user_id)]).size || members.rows.some(member => member.role === 'viewer')) return 'access_denied'
       return send() ? 'sent' : 'unavailable'
     })
   }

@@ -22,11 +22,11 @@
               data-testid="memory-review-filter-query" @input="applyFilters"/>
           </label>
           <label class="memory-review-filter-type">
-            <select v-model="filterType" :aria-label="t('memory.filter_candidate_type')"
+            <ActionSelect><select v-model="filterType" :aria-label="t('memory.filter_candidate_type')"
               data-testid="memory-review-filter-type" @change="applyFilters">
               <option value="all">{{ t('memory.all_types') }}</option>
               <option v-for="type in candidateTypes" :key="type" :value="type">{{ humanizeType(type) }}</option>
-            </select>
+            </select></ActionSelect>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
           </label>
         </div>
@@ -135,6 +135,7 @@
 </template>
 
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { acceptMemoryCandidate, listMemoryCandidates, MemoryClientError, rejectMemoryCandidate } from '../../services/memoryClient'

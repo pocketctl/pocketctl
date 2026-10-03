@@ -1,17 +1,17 @@
 <template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="standalone">
     <div
       v-if="viewer.status !== 'closed'"
       class="session-document-viewer-layer"
-      :class="{ compact }"
+      :class="{ compact, standalone }"
       @click.self="emitClose"
       @keydown.esc.prevent="emitClose"
     >
       <section
         ref="dialog"
         class="session-document-viewer"
-        role="dialog"
-        aria-modal="true"
+        :role="standalone ? 'region' : 'dialog'"
+        :aria-modal="standalone ? undefined : true"
         :aria-labelledby="titleId"
         tabindex="-1"
         @keydown.tab="trapFocus"
@@ -66,7 +66,7 @@ import type { SessionDocumentMetadata } from '../../services/sessionDocuments'
 import type { SessionDocumentViewerState } from '../../composables/useSessionDocuments'
 import { buildStaticDocumentSrcdoc } from '../../utils/staticHtmlSnapshot'
 
-const props = defineProps<{ viewer: SessionDocumentViewerState; htmlRendering: boolean; compact: boolean; returnFocusTo?: HTMLElement | null }>()
+const props = defineProps<{ viewer: SessionDocumentViewerState; htmlRendering: boolean; compact: boolean; standalone?: boolean; returnFocusTo?: HTMLElement | null }>()
 const emit = defineEmits<{ close: []; download: [document: SessionDocumentMetadata] }>()
 const { t } = useLocale()
 const dialog = ref<HTMLElement | null>(null)
@@ -92,6 +92,7 @@ function formatTime(value: string): string {
 }
 function emitClose(): void { emit('close') }
 function trapFocus(event: KeyboardEvent): void {
+  if (props.standalone) return
   const nodes = Array.from(dialog.value?.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],iframe,[tabindex]:not([tabindex="-1"])') ?? [])
   const first = nodes[0]
   const last = nodes.at(-1)
@@ -130,4 +131,5 @@ onUnmounted(() => previousFocus?.focus())
 .document-viewer-body{min-height:0;flex:1;overflow:auto;background:color-mix(in srgb,var(--bg-secondary) 70%,var(--bg))}.document-markdown,.document-source{width:min(820px,calc(100% - 48px));min-height:calc(100% - 48px);margin:24px auto;padding:38px;border:1px solid var(--border);border-radius:5px;background:var(--surface);box-shadow:0 12px 40px #0002}.document-source{box-sizing:border-box;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg-secondary);font:12px/1.7 var(--font-mono)}.document-html-frame{display:block;width:min(980px,calc(100% - 48px));height:calc(100% - 48px);min-height:420px;margin:24px auto;border:1px solid var(--border);border-radius:6px;background:white}.viewer-state{margin:40px auto;padding:20px;max-width:520px;color:var(--fg-secondary);text-align:center}.viewer-state.error{color:var(--danger)}
 @keyframes document-viewer-in{from{opacity:0;transform:translateY(10px) scale(.985)}}
 @media(max-width:768px){.session-document-viewer-layer,.session-document-viewer-layer.compact{padding:0;align-items:stretch;background:var(--bg);backdrop-filter:none}.session-document-viewer{width:100%;height:100%;height:100dvh;border:0;border-radius:0;box-shadow:none;animation:compact-viewer-in .22s cubic-bezier(.2,.8,.2,1) both}.document-viewer-header{min-height:calc(54px + env(safe-area-inset-top));display:grid;grid-template-columns:38px minmax(0,1fr) 38px;gap:4px;padding:env(safe-area-inset-top) 8px 0}.viewer-document-icon,.viewer-safety-badge{display:none}.viewer-title{grid-column:2;grid-row:1;text-align:center}.viewer-title strong{font-family:var(--font-sans);font-size:12px}.viewer-title small{display:none}.viewer-button.close{grid-column:1;grid-row:1}.viewer-button.download{grid-column:3;grid-row:1}.viewer-button{width:34px;padding:0;border:0;color:var(--accent);background:transparent;font-size:20px}.desktop-label{display:none}.compact-label{display:inline}.document-viewer-toolbar{min-height:42px;justify-content:center;padding:0 10px}.offline-badge{position:absolute;right:10px}.document-markdown,.document-source{box-sizing:border-box;width:100%;min-height:100%;margin:0;padding:28px 18px calc(48px + env(safe-area-inset-bottom));border:0;border-radius:0;box-shadow:none}.document-html-frame{width:100%;height:100%;min-height:0;margin:0;border:0;border-radius:0}@keyframes compact-viewer-in{from{opacity:.6;transform:translateX(24px)}}}
+.session-document-viewer-layer.standalone{position:relative;z-index:auto;display:block;padding:0;background:var(--bg);backdrop-filter:none}.standalone .session-document-viewer{width:100%;height:100dvh;max-width:none;border:0;border-radius:0;box-shadow:none;animation:none}
 </style>

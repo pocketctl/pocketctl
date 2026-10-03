@@ -1,8 +1,12 @@
 <template>
-  <div class="page-container">
+  <div class="page-container design-surface content hosts-page">
+    <section v-if="isMobile && route.query.view === 'agents'" class="workspace-agent-list">
+      <ActionSelect><select v-model="selectedId" :aria-label="t('token.host')"><option v-for="daemon in daemons" :key="daemon.daemon_id" :value="daemon.daemon_id">{{ daemon.daemon_alias || daemon.hostname || daemon.daemon_id }}</option></select></ActionSelect>
+      <section v-if="selectedDaemon" class="card mobile-agent-installations"><div v-for="agent in agentCards(selectedDaemon)" :key="agentRawName(agent)" class="setting-row"><div class="grow"><AgentBadge :agent="agentRawName(agent)" size="md" /><p>{{ agentVersionLabel(agent) }} · {{ agentMetaLabel(agent) }}</p></div><button class="btn small" :disabled="!selectedDaemon.daemon_online" @click="openMobileAgentManager(selectedDaemon)">{{ t('mobile.host_agent_manage') }}</button></div><div v-if="!agentCards(selectedDaemon).length" class="card-body sub">{{ t('hosts.agent_none') }}</div></section>
+      <p v-else class="empty-state">{{ t('hosts.no_match') }}</p>
+    </section>
     <div class="mobile-hosts-heading">
       <div class="mobile-host-title-row">
-        <h1>{{ t('mobile.my_hosts') }}</h1>
         <AttentionInboxEntryButton :scope="{ type: 'global' }" />
       </div>
       <p :class="{ 'quota-over-limit': boundHosts?.over_limit }">
@@ -21,37 +25,15 @@
       <div data-metric="active-sessions"><strong>{{ mobileActiveSessions }}</strong><span>{{ t('dashboard.active_sessions') }}</span></div>
     </div>
 
-    <!-- Page Header -->
-    <div class="page-header">
-      <div>
-        <h2 class="page-title">{{ t('nav.hosts') }}</h2>
-        <div class="page-subtitle">{{ t('hosts.count_prefix') }} <span class="text-mono">{{ daemons.length }}</span> {{ t('hosts.host_unit') }} · <span class="text-success text-mono">{{ onlineCount }}</span> {{ t('dashboard.online') }} · <span class="text-tertiary text-mono">{{ offlineCount }}</span> {{ t('dashboard.offline') }} <template v-if="boundHosts">· <span :class="{ 'text-danger': boundHosts.over_limit }">{{ t('quota.bound_hosts') }} {{ boundHosts.used }}/{{ boundHosts.limit ?? '∞' }}</span></template></div>
-      </div>
-      <button class="btn btn-secondary" @click="showRegister = true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-        {{ t('dashboard.register_host') }}
-      </button>
-    </div>
-
-    <!-- 全局 Token 概览条（占位，待 C2/C3 接真实数据） -->
-    <div class="token-global-strip">
-              <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.total) }}</span><span class="tg-label">{{ t('dashboard.token_total') }}</span></div>
-      <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.today) }}</span><span class="tg-label">{{ t('dashboard.token_today') }}</span></div>
-      <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.thisWeek) }}</span><span class="tg-label">{{ t('dashboard.token_week') }}</span></div>
-      <div class="tg-sep"></div>
-      <div class="tg-item"><span class="tg-num">{{ formatTokenCount(tokenGlobal?.thisMonth) }}</span><span class="tg-label">{{ t('dashboard.token_month') }}</span></div>
-    </div>
-
+    <div class="page-tools"><button class="btn primary" @click="showRegister=true"><WorkspaceIcon name="plus" class="icon small" />{{ t('dashboard.register_host') }}</button></div>
     <!-- 筛选 + 搜索 -->
-    <div class="host-controls">
-      <div class="host-filter" role="tablist" :aria-label="t('hosts.filter_by_status')">
+    <div class="host-controls toolbar">
+      <div class="host-filter segments" role="tablist" :aria-label="t('hosts.filter_by_status')">
         <button :class="{ active: filter === 'all' }" @click="filter = 'all'">{{ t('common.all') }}<span class="count">{{ daemons.length }}</span></button>
         <button :class="{ active: filter === 'online' }" @click="filter = 'online'">{{ t('dashboard.online') }}<span class="count">{{ onlineCount }}</span></button>
         <button :class="{ active: filter === 'offline' }" @click="filter = 'offline'">{{ t('dashboard.offline') }}<span class="count">{{ offlineCount }}</span></button>
       </div>
-      <div class="host-search">
+      <div class="host-search search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         <input type="text" v-model="searchQuery" :placeholder="t('hosts.search_placeholder')" :aria-label="t('hosts.search_hosts')" />
       </div>
@@ -60,7 +42,7 @@
     <!-- 主机布局（单栏：卡片网格 ↔ 胶囊横向 + 全宽详情） -->
     <div class="hosts-layout">
       <div class="hosts-grid-wrap">
-        <div class="host-cards-grid" id="host-cards">
+        <div class="host-cards-grid hosts-grid" id="host-cards">
           <template v-if="isMobile">
             <MobileHostCard
               v-for="d in filteredDaemons"
@@ -77,39 +59,14 @@
               @more="openMenu($event, d)"
             />
           </template>
-          <template v-else>
-            <div v-for="d in filteredDaemons" :key="d.daemon_id"
-              class="host-card desktop-host-card"
-              :data-id="d.daemon_id"
-              tabindex="0"
-              role="button"
-              :aria-label="(d.daemon_alias || d.hostname || d.daemon_id?.slice(0,8)) + ' ' + statusLabel(d)"
-              @click="selectHost(d.daemon_id)"
-              @keydown.enter.prevent="selectHost(d.daemon_id)">
-              <div class="hc-head">
-                <span :class="['status-dot', d.daemon_online ? 'online' : 'offline', { reconnecting: d.status === 'reconnecting' }]"></span>
-                <span class="hc-icon" v-html="hostIcon(d, 18)"></span>
-                <div class="hc-info">
-                  <div class="hc-name">{{ d.daemon_alias || d.hostname || d.daemon_id?.slice(0, 8) }}</div>
-                  <div class="hc-meta">{{ d.ip && d.ip !== 'unknown' ? d.ip : '—' }} · {{ d.os || 'unknown' }}</div>
-                </div>
-              </div>
-              <div class="hc-foot">
-                <div><span class="hc-sessions">{{ d.active_sessions || 0 }}</span> <span class="hc-sess-label">{{ t('dashboard.active_sessions') }}</span></div>
-                <span :class="['status-pill', 'mini', statusPillClass(d)]" :style="statusPillStyle(d)">{{ statusLabel(d) }}</span>
-              </div>
-              <button class="ss-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openMenu($event, d)">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
-              </button>
-            </div>
-          </template>
+          <template v-else><WorkspaceHostCard v-for="d in filteredDaemons" :key="d.daemon_id" :daemon="d" :selected="selectedId===d.daemon_id" :active-sessions="d.active_sessions || 0" :activity-label="hostLastActivityLabel(d)" @select="selectHost(d.daemon_id)" @more="openMenu($event,d)" /></template>
           <div v-if="filteredDaemons.length === 0" class="host-cards-empty">{{ t('hosts.no_match') }}</div>
         </div>
       </div>
 
       <!-- 详情面板（全宽） -->
-      <div v-if="selectedDaemon" class="host-detail-panel">
-        <div class="hd-header">
+      <div v-if="selectedDaemon" class="host-detail-panel card">
+        <div class="hd-header card-head">
           <button class="hd-more-btn" type="button" :title="t('session.actions.more')" :aria-label="t('session.actions.more')" @click.stop="openDetailMenu($event)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg>
           </button>
@@ -126,6 +83,9 @@
         </div>
 
         <div class="hd-actions">
+          <button class="btn primary" :disabled="!selectedDaemon.daemon_online" @click="openMobileNewSession(selectedDaemon)"><WorkspaceIcon name="plus" class="icon small" />{{ t('session.new_session') }}</button>
+          <button class="btn" @click="goSessionWithHost(selectedDaemon)">{{ t('dashboard.view_all') }}</button>
+          <button class="btn" @click="openDetailMenu($event)">{{ t('hosts.menu_edit_alias') }}</button>
           <template v-if="selectedDaemon.status === 'reconnecting'">
             <button class="btn btn-secondary" disabled><span class="mini-spinner"></span>{{ t('hosts.restarting') }}</button>
           </template>
@@ -144,7 +104,35 @@
           </template>
         </div>
 
-        <div class="host-detail-grid">
+        <dl class="detail-grid host-reference-meta"><div><dt>{{ t('hosts.daemon_version') }}</dt><dd class="mono">{{ selectedDaemon.version ? 'v'+selectedDaemon.version : '—' }}</dd></div><div><dt>{{ t('dashboard.total_sessions') }}</dt><dd>{{ detailSessionTotal }}</dd></div><div><dt>{{ t('dashboard.token_total') }}</dt><dd>{{ formatTokenCount(daemonCost?.total) }}</dd></div><div><dt>{{ t('hosts.last_heartbeat') }}</dt><dd>{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</dd></div></dl>
+        <div class="host-reference-agents">          <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
+          <div class="hd-section">
+            <div class="hd-section-title">{{ t('hosts.agent_status') }}</div>
+            <template v-if="agentCards(selectedDaemon).length">
+              <div class="agent-card" v-for="(a, i) in agentCards(selectedDaemon)" :key="i">
+                <div :class="['ag-icon', agentIconClass(a)]">{{ agentShort(a) }}</div>
+                <div class="ag-info">
+                  <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
+                  <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
+                </div>
+                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && agentManageable(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
+                  {{ t('settings.upgrade_btn') }}
+                </button>
+                <span v-else-if="isReadOnlyObserver(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
+                <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t('hosts.agent_system_install') }}</span>
+                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
+              </div>
+            </template>
+            <div v-else class="agent-card">
+              <div class="ag-icon claude">CC</div>
+              <div class="ag-info">
+                <div class="ag-name">Claude Code <span class="ag-version">{{ t('settings.version_pending') }}</span></div>
+                <div class="ag-meta">{{ t('hosts.agent_none') }}</div>
+              </div>
+            </div>
+          </div>
+
+</div><details class="host-extra-details"><summary>{{ t('replica.host_details') }}</summary>        <div class="host-detail-grid">
           <!-- 资源占用 -->
           <div class="hd-section">
             <div class="hd-section-title">{{ selectedDaemon.daemon_online ? t('hosts.resource_usage') : t('hosts.resource_offline') }}</div>
@@ -174,33 +162,6 @@
               <div class="conn-item"><div class="c-label">{{ t('hosts.os') }}</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.uptime') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.last_heartbeat') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
-            </div>
-          </div>
-
-          <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
-          <div class="hd-section">
-            <div class="hd-section-title">{{ t('hosts.agent_status') }}</div>
-            <template v-if="agentCards(selectedDaemon).length">
-              <div class="agent-card" v-for="(a, i) in agentCards(selectedDaemon)" :key="i">
-                <div :class="['ag-icon', agentIconClass(a)]">{{ agentShort(a) }}</div>
-                <div class="ag-info">
-                  <div class="ag-name">{{ agentName(a) }} <span class="ag-version">{{ agentVersionLabel(a) }}</span></div>
-                  <div class="ag-meta">{{ agentMetaLabel(a) }}</div>
-                </div>
-                <button v-if="selectedDaemon?.daemon_online && !isAgentLatest(a) && agentManageable(a)" class="ag-upgrade-btn" :class="{ upgrading: upgrading === agentRawName(a) }" :disabled="upgrading === agentRawName(a)" @click="upgradeAgent(agentRawName(a))">
-                  {{ t('settings.upgrade_btn') }}
-                </button>
-                <span v-else-if="isReadOnlyObserver(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
-                <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t('hosts.agent_system_install') }}</span>
-                <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
-              </div>
-            </template>
-            <div v-else class="agent-card">
-              <div class="ag-icon claude">CC</div>
-              <div class="ag-info">
-                <div class="ag-name">Claude Code <span class="ag-version">{{ t('settings.version_pending') }}</span></div>
-                <div class="ag-meta">{{ t('hosts.agent_none') }}</div>
-              </div>
             </div>
           </div>
 
@@ -254,7 +215,7 @@
               <a class="btn btn-ghost ss-link" @click="goSessionWithHost(selectedDaemon)">{{ t('dashboard.view_all') }} →</a>
             </div>
           </div>
-        </div>
+        </div></details>
       </div>
 
       <!-- Empty Detail -->
@@ -265,6 +226,7 @@
       </div>
     </div>
 
+    <section v-if="isMobile && route.query.view !== 'agents' && allSessions.length" class="mobile-recent-sessions"><div class="section-head"><h2 class="faint">{{ t('dashboard.recent_sessions') }}</h2></div><RouterLink v-for="session in allSessions.slice(0,3)" :key="session.session_id" class="ios-recent-session" :to="'/session/'+session.session_id"><span class="dot" /><div><strong>{{ session.title || session.session_id.slice(0,8) }}</strong><p>{{ session.hostname || session.daemon_id.slice(0,8) }} · {{ formatRelativeTime(session.last_activity_at || session.created_at) }}</p></div></RouterLink></section>
     <HostActionsMenu
       v-if="menuOpen && menuTarget"
       :daemon="menuTarget"
@@ -316,6 +278,8 @@
 </template>
 
 <script setup lang="ts">
+import WorkspaceHostCard from '../components/workspace/WorkspaceHostCard.vue'
+import WorkspaceIcon from '../components/WorkspaceIcon.vue'
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWebSocket } from '../composables/useWebSocket'
@@ -331,6 +295,7 @@ import MobileHostCard from '../components/hosts/MobileHostCard.vue'
 import HostActionsMenu from '../components/hosts/HostActionsMenu.vue'
 import MobileAgentManager from '../components/hosts/MobileAgentManager.vue'
 import AgentBadge from '../components/AgentBadge.vue'
+import ActionSelect from '../components/ActionSelect.vue'
 import { getRelayOrigin } from '../composables/useEnv'
 import { formatTokenCount } from '../utils/tokenFormat'
 import { hostSessionsLocation } from '../utils/hostNavigation'
@@ -645,7 +610,11 @@ function onMenuAct(act: HostActionId, alias?: string | null) {
   if (!d) return
   const id = d.daemon_id
   setTimeout(() => {
-    if (act === 'refresh') refreshHost(d)
+    if (act === 'sessions') goSessionWithHost(d)
+    else if (act === 'new-session') openMobileNewSession(d)
+    else if (act === 'token') goTokenUsage(d)
+    else if (act === 'agent') openMobileAgentManager(d)
+    else if (act === 'refresh') refreshHost(d)
     else if (act === 'alias') { selectedId.value = id; updateAlias(d, alias ?? null) }
     else if (act === 'restart') confirmRestart(d)
     else if (act === 'kick') confirmKick(d)

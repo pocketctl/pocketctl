@@ -23,9 +23,9 @@ describe('FileChangeBottomSheet', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  test.each(['backdrop', 'close'])('closes from the %s control', async control => {
-    const wrapper = mount(FileChangeBottomSheet, { props: { message } })
-    await wrapper.get(`[data-testid="file-change-${control}"]`).trigger('click')
+  test('closes from the close control', async () => {
+    const wrapper = mount(FileChangeBottomSheet, { global: { stubs: { Teleport: true } }, props: { message } })
+    await wrapper.get('[data-testid="file-change-close"]').trigger('click')
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 
@@ -33,7 +33,7 @@ describe('FileChangeBottomSheet', () => {
     const opener = document.createElement('button')
     document.body.append(opener)
     opener.focus()
-    const wrapper = mount(FileChangeBottomSheet, { props: { message, returnFocusTo: opener }, attachTo: document.body })
+    const wrapper = mount(FileChangeBottomSheet, { global: { stubs: { Teleport: true } }, props: { message, returnFocusTo: opener }, attachTo: document.body })
     await wrapper.vm.$nextTick()
     expect(document.activeElement).toBe(wrapper.get('[data-testid="file-change-close"]').element)
 
@@ -44,14 +44,15 @@ describe('FileChangeBottomSheet', () => {
     opener.remove()
   })
 
-  test('closes after a downward drag and uses an independent dialog state', async () => {
-    const wrapper = mount(FileChangeBottomSheet, { props: { message } })
+  test('closes after a downward drag within an action list', async () => {
+    const wrapper = mount(FileChangeBottomSheet, { global: { stubs: { Teleport: true } }, props: { message } })
     const grabber = wrapper.get('[data-testid="file-change-grabber"]')
     await grabber.trigger('pointerdown', { clientY: 100 })
     window.dispatchEvent(new PointerEvent('pointermove', { clientY: 190 }))
 
     expect(wrapper.emitted('close')).toHaveLength(1)
-    expect(wrapper.get('[role="dialog"]').attributes('aria-modal')).toBe('true')
+    expect(wrapper.find('[aria-modal]').exists()).toBe(false)
+    expect(wrapper.find('.workspace-action-list').exists()).toBe(true)
     expect(wrapper.get('[data-testid="file-change-sheet"]').classes()).toContain('reduced-motion')
   })
 })

@@ -41,7 +41,7 @@ export class TeamContextService {
   private async accessible(db: Pick<pg.Pool, 'query'>, sessionId: string, actorUserId: number, lock = false): Promise<any> {
     await requireTeamAccess(db, actorUserId, lock)
     const result = await db.query(
-      `SELECT session.* FROM collaboration_sessions session
+      `SELECT session.*, member.role AS actor_team_role FROM collaboration_sessions session
        JOIN collaboration_session_participants participant
          ON participant.team_session_id = session.team_session_id AND participant.user_id = $2 AND participant.state = 'active'
        JOIN collaboration_team_memberships member
@@ -51,6 +51,7 @@ export class TeamContextService {
       [sessionId, actorUserId],
     )
     if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'shared session not found')
+    if (lock && result.rows[0].actor_team_role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only team member')
     return result.rows[0]
   }
 

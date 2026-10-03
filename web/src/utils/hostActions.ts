@@ -6,4 +6,4 @@ export const IOS_HOST_ACTIONS = [
   { id: 'unregister', danger: true },
 ] as const
 
-export type HostActionId = typeof IOS_HOST_ACTIONS[number]['id']
+export type HostActionId = typeof IOS_HOST_ACTIONS[number]['id'] | 'sessions' | 'new-session' | 'token' | 'agent'

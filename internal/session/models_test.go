@@ -96,3 +96,18 @@ func TestManagedZcodeDoesNotReceiveClaudeModelAliases(t *testing.T) {
 		t.Fatalf("managed ZCode models = %v, want native default only", got)
 	}
 }
+
+func TestCodexCatalogEffortCapabilitiesSurvivePreferredOrdering(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(`model = "preferred"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := `{"models":[{"slug":"other","visibility":"list"},{"slug":"preferred","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}`
+	if err := os.WriteFile(filepath.Join(home, "models_cache.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	models := listCodexModelsAt(home)
+	if len(models) != 2 || models[0].Alias != "preferred" || models[0].DefaultReasoningEffort != "medium" || !reflect.DeepEqual(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("model capabilities lost: %+v", models)
+	}
+}

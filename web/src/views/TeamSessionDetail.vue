@@ -6,72 +6,72 @@
     </aside>
 
     <main class="conversation">
-      <div v-if="browseScope.type === 'personal' || outsideBrowse" class="session-filter-notice" role="status"><span>当前会话不在此筛选范围内，仍保留打开。</span><button @click="revealCurrent">在列表中显示</button></div>
+      <div v-if="browseScope.type === 'personal' || outsideBrowse" class="session-filter-notice" role="status"><span> {{ t('workspace.outside_filter_hint') }} </span><button @click="revealCurrent"> {{ t('workspace.reveal_in_list') }} </button></div>
       <header class="conversation-header">
-        <RouterLink class="mobile-back" aria-label="返回会话列表" :to="listLink">‹</RouterLink>
-        <div class="title-copy"><strong>{{ session?.title || '加载中…' }}</strong><span>{{ members.find(member => member.user_id === session?.creator_user_id)?.display_label || '成员' }} 创建 · {{ session?.agent_bindings.length || 0 }} Agents</span></div>
+        <RouterLink class="mobile-back" :aria-label="t('workspace.return_session_list')" :to="listLink">‹</RouterLink>
+        <div class="title-copy"><strong>{{ session?.title || t('common.loading') }}</strong><span>{{ t('workspace.created_by_agents', {creator:members.find(member => member.user_id === session?.creator_user_id)?.display_label || t('team.member'), count:session?.agent_bindings.length || 0}) }}</span></div>
         <div class="header-actions">
+          <TopbarGithubLink />
           <span v-if="session" :class="['session-state', session.state]">{{ stateLabel(session.state) }}</span>
-          <div class="session-id-box"><span>{{ sessionID.slice(0,8) }}</span><button type="button" aria-label="复制会话 ID" @click="copySessionID"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
-          <div ref="moreRoot" class="session-more" @keydown.esc.stop="moreOpen = false"><button aria-label="会话更多操作" :aria-expanded="moreOpen" @click="moreOpen = !moreOpen">···</button><div v-if="moreOpen" class="session-more-menu"><button v-if="isCreator && session" @click="togglePaused(); moreOpen = false">{{ session.state === 'paused' ? '恢复' : '暂停' }}</button><button @click="copySessionID(); moreOpen = false">复制会话 ID</button></div></div>
+          <div class="session-id-box"><span>{{ sessionID.slice(0,8) }}</span><button type="button" :aria-label="t('session.actions.copy_id')" @click="copySessionID"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
+          <div ref="moreRoot" class="session-more" @keydown.esc.stop="moreOpen = false"><button :aria-label="t('workspace.more_session_actions')" :aria-expanded="moreOpen" @click="moreOpen = !moreOpen">···</button><div v-if="moreOpen" class="session-more-menu"><button v-if="isCreator && session" @click="togglePaused(); moreOpen = false">{{ session.state === 'paused' ? t('workspace.resume') : t('workspace.pause') }}</button><button @click="copySessionID(); moreOpen = false"> {{ t('session.actions.copy_id') }} </button></div></div>
         </div>
       </header>
-      <div v-if="task" class="task-strip"><button @click="showTask = true">{{ task.title }}</button><span>{{ ({open:'待开始',in_progress:'进行中',completed:'已完成',archived:'已归档',deleted:'已删除'})[task.state] }}</span></div>
+      <div v-if="task" class="task-strip"><button @click="showTask = true">{{ task.title }}</button><span>{{ ({open:t('team.task_state.open'),in_progress:t('team.task_state.in_progress'),completed:t('team.task_state.completed'),archived:t('team.task_filter.archived'),deleted:t('workspace.deleted')})[task.state] }}</span></div>
       <div class="people-strip">
         <div class="participant-avatars"><span v-for="member in members.filter(item => session?.participants.some(participant => participant.user_id === item.user_id && participant.state === 'active'))" :key="member.id">{{ member.display_label.slice(0,1) }}</span></div>
-        <button @click="showParticipants = !showParticipants; showContext = false; showRun = false">{{ session?.participants.filter(item => item.state === 'active').length || 0 }} 位参与者</button>
-        <span class="strip-divider"></span><button v-for="binding in session?.agent_bindings.filter(item => item.state === 'active')" :key="binding.id" class="agent-chip" @click="showParticipants = true; showContext = false; showRun = false"><i :class="{online:binding.availability === 'online'}"></i>{{ binding.provider === 'codex' ? 'Codex' : 'Claude Code' }} · {{ members.find(member => member.user_id === binding.owner_user_id)?.display_label || '成员' }}</button>
+        <button @click="showParticipants = !showParticipants; showContext = false; showRun = false">{{ t('workspace.participants_count', {count:session?.participants.filter(item => item.state === 'active').length || 0}) }}</button>
+        <span class="strip-divider"></span><button v-for="binding in session?.agent_bindings.filter(item => item.state === 'active')" :key="binding.id" class="agent-chip" @click="showParticipants = true; showContext = false; showRun = false"><i :class="{online:binding.availability === 'online'}"></i>{{ binding.provider === 'codex' ? 'Codex' : 'Claude Code' }} · {{ members.find(member => member.user_id === binding.owner_user_id)?.display_label || t('team.member') }}</button>
         <span class="strip-divider"></span>
           <button type="button" :class="{ active: showContext }" @click="historyContext = null; showContext = !showContext; showParticipants = false; showRun = false">Context v{{ session?.current_context_version || 0 }}</button>
-          <button v-if="autorunEnabled || latestRun" type="button" :class="{ active: showRun }" @click="showRun = !showRun; showContext = false; showParticipants = false">自动协作</button>
-          <button type="button" :class="{ active: showParticipants }" @click="showParticipants = !showParticipants; showContext = false; showRun = false">我的 Agent</button>
+          <button v-if="autorunEnabled || latestRun" type="button" :class="{ active: showRun }" @click="showRun = !showRun; showContext = false; showParticipants = false"> {{ t('workspace.autorun') }} </button>
+          <button type="button" :class="{ active: showParticipants }" @click="showParticipants = !showParticipants; showContext = false; showRun = false"> {{ t('workspace.my_agents') }} </button>
       </div>
-      <div v-if="returnNotice" class="return-notice">已返回共享会话，原生会话关联保持不变。</div>
+      <div v-if="returnNotice" class="return-notice"> {{ t('workspace.returned_shared_session') }} </div>
       <div v-if="error" class="error-banner" role="status">{{ error }}</div>
       <section ref="messagesElement" :style="{'--composer-reserve':composerHeight + 'px'}" class="messages" @scroll="saveReadingPosition">
-        <div v-if="loading && !events.length" class="empty">正在加载真实协作记录…</div>
-        <div v-else-if="!events.length" class="empty"><strong>开始团队讨论</strong><span>选择全部、定向 Agent 或仅补充讨论后发送。事件会写入共享会话。</span></div>
+        <div v-if="loading && !events.length" class="empty"> {{ t('workspace.loading_collaboration') }} </div>
+        <div v-else-if="!events.length" class="empty"><strong> {{ t('workspace.start_team_discussion') }} </strong><span> {{ t('workspace.team_discussion_hint') }} </span></div>
         <article v-for="event in displayEvents" :id="`team-event-${event.id}`" :key="event.id" :class="['event', event.kind]">
           <span v-if="event.kind === 'member_message' || event.kind === 'agent_message'" :class="['message-avatar',{agent:event.kind === 'agent_message'}]">{{ event.kind === 'member_message' ? authorLabel(event).slice(0,1) : 'C' }}</span>
           <div class="event-body">
           <div class="event-meta">
-            <span>{{ authorLabel(event) }}</span><small v-if="event.author_offer_id">{{ members.find(member => member.user_id === offers.find(offer => offer.id === event.author_offer_id)?.owner_user_id)?.display_label }}的 Agent</small><time>{{ formatTime(event.created_at) }}</time>
+            <span>{{ authorLabel(event) }}</span><small v-if="event.author_offer_id">{{ t('workspace.owners_agent', {owner:members.find(member => member.user_id === offers.find(offer => offer.id === event.author_offer_id)?.owner_user_id)?.display_label || t('team.member')}) }}</small><time>{{ formatTime(event.created_at) }}</time>
           </div>
-          <button v-if="event.reference" type="button" class="reference" @click="scrollToEvent(event.reference.event_id)">↪ 引用 #{{ event.reference.event_seq }}</button>
+          <button v-if="event.reference" type="button" class="reference" @click="scrollToEvent(event.reference.event_id)">{{ t('workspace.reference_event', {seq:event.reference.event_seq}) }}</button>
           <MessageUser v-if="event.kind === 'member_message'" :content="event.content" />
           <MessageAgent v-else-if="event.kind === 'agent_message'" :content="event.content" :agent-type="agentProvider(event.author_offer_id)" />
           <div v-else class="system-event"><strong>{{ kindLabel(event.kind) }}</strong><span>{{ event.kind === 'status' ? statusLabel(event.content) : teamSystemEventText(event) }}</span></div>
           <div v-for="call in callsByEvent.get(event.id) ?? []" :key="call.id" :class="['call-status', call.state]" role="status">
             <span>{{ agentProvider(call.offer_id) }} · {{ callLabel(call) }}</span>
-            <small v-if="call.state === 'uncertain'">结果尚未确认，请勿重复发送。</small>
-            <RouterLink v-if="ownerNativeLink(call.offer_id)" :to="ownerNativeLink(call.offer_id)!">打开我的原生会话</RouterLink>
+            <small v-if="call.state === 'uncertain'"> {{ t('workspace.call_result_unknown') }} </small>
+            <RouterLink v-if="ownerNativeLink(call.offer_id)" :to="ownerNativeLink(call.offer_id)!"> {{ t('workspace.open_own_native_session') }} </RouterLink>
           </div>
-          <div class="event-actions"><span v-if="event.target_mode">{{ targetLabel(event) }}</span><button v-if="event.context_version" class="context-receipt" @click="openContextVersion(event.context_version)">Context v{{ event.context_version }}</button><button type="button" @click="referenceEvent = event">引用</button></div>
+          <div class="event-actions"><span v-if="event.target_mode">{{ targetLabel(event) }}</span><button v-if="event.context_version" class="context-receipt" @click="openContextVersion(event.context_version)">Context v{{ event.context_version }}</button><button type="button" @click="referenceEvent = event"> {{ t('workspace.references') }} </button></div>
           </div>
         </article>
       </section>
 
       <footer ref="composerElement" class="composer-shell">
         <div class="composer-container">
-        <div class="textarea-resize-handle" role="separator" aria-label="调整输入框高度" aria-orientation="horizontal" @pointerdown="beginResize"></div>
-        <div v-if="referenceEvent" class="reply-preview"><span>回复 #{{ referenceEvent.event_seq }} · {{ referenceEvent.content.slice(0, 80) }}</span><button type="button" @click="referenceEvent = null">×</button></div>
+        <div class="textarea-resize-handle" role="separator" :aria-label="t('workspace.resize_composer')" aria-orientation="horizontal" @pointerdown="beginResize"></div>
+        <div v-if="referenceEvent" class="reply-preview"><span>{{ t('workspace.reply_event', {seq:referenceEvent.event_seq, content:referenceEvent.content.slice(0,80)}) }}</span><button type="button" @click="referenceEvent = null">×</button></div>
         <div class="composer-row">
-          <textarea v-model="draft" :style="{height:textareaHeight + 'px'}" :disabled="!!readOnlyReason" rows="1" :placeholder="readOnlyReason || '补充信息，提出问题，或请 Agent 继续工作…'" data-testid="team-session-composer" @keydown.enter.exact.prevent="send" />
+          <textarea v-model="draft" :style="{height:textareaHeight + 'px'}" :disabled="!!readOnlyReason" rows="1" :placeholder="readOnlyReason || t('workspace.team_composer_placeholder')" data-testid="team-session-composer" @keydown.enter.exact.prevent="send" />
         </div>
-        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" :members="members" /><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false">材料</button>
+        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" :members="members" /><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false"> {{ t('workspace.materials') }} </button>
           <button type="button" class="send-button" :disabled="!canSend || !draft.trim() || !!targetUnavailableReason" data-testid="team-session-send" @click="send">{{ sending ? '…' : '↑' }}</button>
         </div>
         </div>
         <p v-if="readOnlyReason" class="composer-status">{{ readOnlyReason }}</p>
         <p v-else-if="targetUnavailableReason" class="composer-status">{{ targetUnavailableReason }}</p>
-        <p v-else class="composer-status">{{ target.mode === 'discussion' ? '仅记录讨论，不触发 Agent 调用。' : '仅将本轮相关 Context 和引用发送给选中的 Agent' }}</p>
+        <p v-else class="composer-status">{{ target.mode === 'discussion' ? t('workspace.discussion_only_hint') : t('workspace.agent_context_hint') }}</p>
       </footer>
     </main>
 
-    <TeamOverlay v-if="showTask && task" title="任务" drawer @close="showTask = false"><h2>{{ task.title }}</h2><p style="white-space:pre-wrap;line-height:1.8;font-size:12px;color:var(--fg-secondary)">{{ task.background }}</p></TeamOverlay>
-    <div v-if="showContext || showParticipants || showRun" class="side-panel-backdrop" @mousedown.self="showContext = false; showParticipants = false; showRun = false"></div>
-    <TeamContextPanel v-if="showContext && session" :context="historyContext || context" :read-only="!!historyContext || teamAccess.capabilities.value?.writes_enabled !== true" :session="session" :current-user-id="currentUserID" @saved="context = $event" @close="showContext = false; historyContext = null" />
-    <TeamSessionParticipants v-if="showParticipants && session" :session="session" :members="members" :offers="offers" :writes-enabled="teamAccess.capabilities.value?.writes_enabled === true" :current-user-id="currentUserID" @updated="session = $event" @close="showParticipants = false" />
+    <TeamOverlay actions v-if="showTask && task" :title="t('team.tab.tasks')" drawer @close="showTask = false"><h2>{{ task.title }}</h2><p style="white-space:pre-wrap;line-height:1.8;font-size:12px;color:var(--fg-secondary)">{{ task.background }}</p></TeamOverlay>
+    <TeamContextPanel v-if="showContext && session" :context="historyContext || context" :read-only="!!historyContext || session.current_user_role === 'viewer' || teamAccess.capabilities.value?.writes_enabled !== true" :session="session" :current-user-id="currentUserID" @saved="context = $event" @close="showContext = false; historyContext = null" />
+    <TeamSessionParticipants v-if="showParticipants && session" :session="session" :members="members" :offers="offers" :writes-enabled="teamAccess.capabilities.value?.writes_enabled === true && session.current_user_role!=='viewer'" :current-user-id="currentUserID" @updated="session = $event" @close="showParticipants = false" />
     <TeamRunPanel
       v-if="showRun && session"
       :session="session"
@@ -95,6 +95,9 @@
 </template>
 
 <script setup lang="ts">
+import TopbarGithubLink from '../components/TopbarGithubLink.vue'
+import { useLocale } from "../composables/useLocale"
+const { t } = useLocale()
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import MessageAgent from '../components/messages/MessageAgent.vue'
@@ -123,7 +126,7 @@ function closeMore(event:MouseEvent){if(!moreRoot.value?.contains(event.target a
 const outsideBrowse = ref(false), moreOpen = ref(false), showTask = ref(false)
 const teamBrowser = ref<InstanceType<typeof TeamSessionBrowser>|null>(null)
 function revealCurrent(){browseScope.value={type:'team',teamId:teamID.value};outsideBrowse.value=false;void nextTick(()=>teamBrowser.value?.revealCurrent())}
-async function copySessionID(){try{await navigator.clipboard.writeText(sessionID.value)}catch{error.value='复制失败'}}
+async function copySessionID(){try{await navigator.clipboard.writeText(sessionID.value)}catch{error.value=t('workspace.copy_failed')}}
 const {
   session, events, calls, context, runContext, latestRun, task, draft, loading, sending, runBusy, error, runError,
   autorunEnabled, readOnlyReason, canSend, sendMessage, createRun, controlRun, supplementRunInput,
@@ -150,11 +153,11 @@ const target = ref<TeamAgentTargetValue>({ mode: 'all', offerIDs: [] }), message
 const targetUnavailableReason = computed(() => {
   if (target.value.mode === 'discussion') return ''
   const callable = session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? []
-  if (!callable.length) return '当前没有可调用的 Agent，可选择“仅补充讨论”发送。'
-  if (target.value.mode === 'offers' && (!target.value.offerIDs.length || target.value.offerIDs.some(id => !callable.some(binding => binding.offer_id === id)))) return '请选择可调用的 Agent，或切换为“仅补充讨论”。'
+  if (!callable.length) return t('workspace.no_callable_agents')
+  if (target.value.mode === 'offers' && (!target.value.offerIDs.length || target.value.offerIDs.some(id => !callable.some(binding => binding.offer_id === id)))) return t('workspace.choose_callable_agent')
   return ''
 })
-const currentUserID = computed(() => user.value?.id ?? 0), isCreator = computed(() => session.value?.creator_user_id === currentUserID.value)
+const currentUserID = computed(() => user.value?.id ?? 0), isCreator = computed(() => session.value?.creator_user_id === currentUserID.value && session.value?.current_user_role !== 'viewer' && teamAccess.capabilities.value?.writes_enabled === true)
 // Keep immutable source events for references and cursors; only coalesce display.
 const displayEvents = computed(() => {
   const result: TeamEvent[] = [], replies = new Map<string, TeamEvent>()
@@ -175,9 +178,9 @@ const callsByEvent = computed(() => {
   return byEvent
 })
 function callLabel(call: TeamCallSummary): string {
-  if (call.state === 'failed' && call.outcome === 'memory_adapter_unsupported') return '当前 Agent 不支持共享 Memory 注入'
-  if (call.outcome === 'waiting_owner' && ['accepted', 'dispatched'].includes(call.state)) return '等待 Agent 所有者在原生会话中确认'
-  return ({ pending: '等待调度', dispatched: '已派发', accepted: '执行中', completed: '已完成', failed: '执行失败', blocked: '调用受阻', uncertain: '结果未知' })[call.state]
+  if (call.state === 'failed' && call.outcome === 'memory_adapter_unsupported') return t('workspace.shared_memory_unsupported')
+  if (call.outcome === 'waiting_owner' && ['accepted', 'dispatched'].includes(call.state)) return t('workspace.waiting_agent_owner')
+  return ({ pending: t('workspace.call_pending'), dispatched: t('workspace.call_dispatched'), accepted: t('session.tool_group_running'), completed: t('team.task_state.completed'), failed: t('session.execution_failed'), blocked: t('workspace.call_blocked'), uncertain: t('attention.state_unknown') })[call.state]
 }
 function ownerNativeLink(offerID: string) {
   const binding = session.value?.agent_bindings.find(item => item.offer_id === offerID && item.owner_user_id === currentUserID.value)
@@ -188,20 +191,20 @@ const listLink = computed(() => ({ name: 'team-sessions', params: { teamId: brow
 let listGeneration = 0
 let restoredSessionID = ''
 
-function stateLabel(state: string): string { return ({ active: '进行中', paused: '已暂停', ended: '已结束', archived: '已归档' } as Record<string,string>)[state] ?? state }
-function statusLabel(status: string): string { return ({ waiting_owner: '等待 Agent 所有者在原生会话中确认', completed: '已完成', failed: '执行失败', interrupted: '已中断', abandoned: '已放弃' } as Record<string, string>)[status] ?? status }
-function kindLabel(kind: string): string { return ({ status: 'Agent 状态', context: 'Context 更新', run: '协作运行', system: '系统事件' } as Record<string,string>)[kind] ?? kind }
+function stateLabel(state: string): string { return ({ active: t('team.task_state.in_progress'), paused: t('team.session_state.paused'), ended: t('team.session_state.ended'), archived: t('team.task_filter.archived') } as Record<string,string>)[state] ?? state }
+function statusLabel(status: string): string { return ({ waiting_owner: t('workspace.waiting_agent_owner'), completed: t('team.task_state.completed'), failed: t('session.execution_failed'), interrupted: t('workspace.interrupted'), abandoned: t('workspace.abandoned') } as Record<string, string>)[status] ?? status }
+function kindLabel(kind: string): string { return ({ status: t('workspace.agent_status'), context: t('workspace.context_updated'), run: t('workspace.collaboration_run'), system: t('workspace.system_event') } as Record<string,string>)[kind] ?? kind }
 function formatTime(value: string): string { return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
 function authorLabel(event: TeamEvent): string {
-  if (event.author_user_id) return members.value.find(member => member.user_id === event.author_user_id)?.display_label ?? `成员 ${event.author_user_id}`
+  if (event.author_user_id) return members.value.find(member => member.user_id === event.author_user_id)?.display_label ?? t('workspace.member_id', {id:event.author_user_id})
   if (event.author_offer_id) return agentProvider(event.author_offer_id) === 'codex' ? 'Codex' : 'Claude Code'
-  return '系统'
+  return t('hosts.os')
 }
 function agentProvider(offerID: string | null): string { return offers.value.find(offer => offer.id === offerID)?.provider ?? 'agent' }
 function targetLabel(event: TeamEvent): string {
-  if (event.target_mode === 'discussion') return '仅讨论'
-  if (event.target_mode === 'all') return '发送给全部可用 Agent'
-  return `定向 ${event.target_offer_ids.length} 个 Agent`
+  if (event.target_mode === 'discussion') return t('workspace.discussion_only_short')
+  if (event.target_mode === 'all') return t('workspace.send_all_agents')
+  return t('workspace.target_agents_count', {count:event.target_offer_ids.length})
 }
 function changeScope(next: SessionScope): void { browseScope.value=next }
 
@@ -213,12 +216,12 @@ async function loadList(): Promise<void> {
     ])
     if (current !== listGeneration) return
     teams.value = nextTeams; members.value = nextMembers; offers.value = nextOffers
-  } catch (failure) { if (!error.value) error.value = failure instanceof Error ? failure.message : '会话列表加载失败' }
+  } catch (failure) { if (!error.value) error.value = failure instanceof Error ? failure.message : t('workspace.session_list_load_failed') }
 }
 async function togglePaused(): Promise<void> {
   if (!session.value || !isCreator.value || !['active', 'paused'].includes(session.value.state)) return
   try { session.value = await updateTeamSession(session.value, { state: session.value.state === 'paused' ? 'active' : 'paused' }) }
-  catch (failure) { error.value = failure instanceof Error ? failure.message : '状态更新失败' }
+  catch (failure) { error.value = failure instanceof Error ? failure.message : t('workspace.state_update_failed') }
 }
 async function send(): Promise<void> {
   const sent = await sendMessage({ targetMode: target.value.mode, targetOfferIDs: target.value.offerIDs, referenceEventID: referenceEvent.value?.id ?? null })

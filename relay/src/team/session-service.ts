@@ -10,6 +10,7 @@ import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js
 import type { TeamMemoryContextBridge } from './memory-context-bridge.js'
 
 export interface TeamSessionView {
+  current_user_role?: import('./types.js').TeamRole
   id: string
   team_id: string
   creator_user_id: number
@@ -93,18 +94,19 @@ export class TeamSessionService {
 
   private async requireMember(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number, lock = false): Promise<void> {
     await requireTeamAccess(db, userId, lock)
-    await this.requireActiveMembership(db, teamId, userId, lock)
+    const role = await this.requireActiveMembership(db, teamId, userId, lock)
+    if (lock && role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only team member')
   }
 
-  private async requireActiveMembership(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number, lock = false): Promise<void> {
+  private async requireActiveMembership(db: Pick<pg.Pool, 'query'>, teamId: string, userId: number, lock = false): Promise<string | undefined> {
     if (lock) {
       const team = await db.query(`SELECT 1 FROM collaboration_teams WHERE team_id = $1 AND state = 'active' FOR SHARE`, [teamId])
       if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
       const member = await db.query(
-        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`, [teamId, userId],
+        `SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`, [teamId, userId],
       )
       if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
-      return
+      return member.rows[0].role
     }
     const result = await db.query(
       `SELECT 1 FROM collaboration_teams team
@@ -118,7 +120,7 @@ export class TeamSessionService {
   private async sessionFor(db: Pick<pg.Pool, 'query'>, sessionId: string, actorUserId: number, lock = false): Promise<any> {
     await requireTeamAccess(db, actorUserId, lock)
     const result = await db.query(
-      `SELECT session.* FROM collaboration_sessions session
+      `SELECT session.*, member.role AS actor_team_role FROM collaboration_sessions session
        JOIN collaboration_teams team ON team.team_id = session.team_id AND team.state = 'active'
        JOIN collaboration_team_memberships member
          ON member.team_id = session.team_id AND member.user_id = $2 AND member.state = 'active'
@@ -129,6 +131,7 @@ export class TeamSessionService {
       [sessionId, actorUserId],
     )
     if (!result.rows[0]) throw new TeamRepositoryError('team_not_found', 'shared session not found')
+    if (lock && result.rows[0].actor_team_role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only team member')
     return result.rows[0]
   }
 
@@ -510,6 +513,7 @@ export class TeamSessionService {
     ])
     return {
       id: row.team_session_id,
+      current_user_role: row.actor_team_role,
       team_id: row.team_id,
       creator_user_id: Number(row.creator_user_id),
       task_id: row.task_id,

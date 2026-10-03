@@ -57,6 +57,22 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 			return "", err
 		}
 		config.CodexHomeID = profile.ID
+		if config.Effort != "" {
+			effectiveModel := config.Model
+			if effectiveModel == "" {
+				effectiveModel = codexConfigModelAt(profile.Home)
+			}
+			valid := false
+			for _, model := range listCodexModelsAt(profile.Home) {
+				if model.Alias == effectiveModel && indexOfString(model.SupportedReasoningEfforts, config.Effort) >= 0 {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return "", fmt.Errorf("unsupported Codex reasoning effort %q for model %q", config.Effort, config.Model)
+			}
+		}
 	}
 
 	// --- Working directory authorization (H-7) -----------------------------
@@ -323,6 +339,9 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 	if config.Model != "" {
 		args = append(args, "-m", config.Model)
 	}
+	if config.Effort != "" {
+		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", config.Effort))
+	}
 	if config.Prompt != "" {
 		args = append(args, config.Prompt)
 	}
@@ -363,6 +382,7 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 		Source:         "daemon",
 		Permission:     clonePermission(config.Permission),
 		Model:          displayModel,
+		Effort:         config.Effort,
 		WorktreePath:   worktreePath,
 		WorktreeBranch: worktreeBranch,
 		CodexPlanState: adapter.NewCodexPlanState(),

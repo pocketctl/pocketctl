@@ -28,15 +28,16 @@ const offlineAgent = { daemon_id: 'daemon-offline', hostname: 'Mac mini', provid
 const occupiedAgent = { ...offlineAgent, daemon_id: 'daemon-used', hostname: 'Studio', online: true, availability: 'occupied', occupied_team_id: 'ctm_other' } as const
 
 async function render() {
+  const triggerTeamCreate=ref(0)
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/teams', component: { template: '<div />' } }] })
   await router.push('/teams'); await router.isReady()
   const View = (await import('../TeamsView.vue')).default
-  const wrapper = mount(View, { global: { plugins: [router], stubs: {
+  const wrapper = mount(View, { global: { provide:{triggerTeamCreate},plugins: [router], stubs: {
     TeamTasksPanel: { props: ['teamId'], template: '<div data-testid="tasks-stub">{{ teamId }}</div>' },
     TeamMembersPanel: { props: ['team'], template: '<div data-testid="members-stub">{{ team.id }}</div>' },
   } } })
   await flushPromises()
-  return { wrapper, router }
+  return { wrapper, router, triggerTeamCreate }
 }
 
 beforeEach(() => {
@@ -63,7 +64,7 @@ describe('TeamsView', () => {
     const { wrapper } = await render()
     expect(wrapper.findAll('[role="tab"]')).toHaveLength(3)
     expect(wrapper.get('[data-testid="tasks-stub"]').text()).toBe('ctm_a')
-    await wrapper.get('[data-team-id="ctm_b"]').trigger('click'); await flushPromises()
+    await wrapper.get('select[aria-label="切换团队"]').setValue('ctm_b'); await flushPromises()
     await wrapper.get('[data-testid="team-tab-members"]').trigger('click'); await flushPromises()
     expect(wrapper.get('[data-testid="members-stub"]').text()).toBe('ctm_b')
     expect(api.listTeamMembers).toHaveBeenLastCalledWith('ctm_b')
@@ -95,4 +96,13 @@ describe('TeamsView', () => {
     }))
     expect(wrapper.find('[data-testid="team-create-dialog"]').exists()).toBe(false)
   })
+  test('does not open the mobile creation flow when team writes are disabled', async () => {
+    api.getTeamCapabilities.mockResolvedValue({collaboration:true,writes_enabled:false,sessions_enabled:true})
+    const {triggerTeamCreate,wrapper}=await render()
+    triggerTeamCreate.value++
+    await flushPromises()
+    expect(api.listMyTeamAgentCandidates).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
 })

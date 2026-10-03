@@ -15,6 +15,8 @@ export type TeamRunID = string
 export type TeamCallID = string
 export type TeamMemoryBindingID = string
 
+export type TeamRole = 'admin' | 'member' | 'viewer'
+
 export type TeamState = 'active' | 'dissolved'
 export type TeamMembershipState = 'active' | 'left' | 'removed'
 export type TeamInvitationState = 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired'
@@ -49,6 +51,7 @@ export interface TeamRecord {
 }
 
 export interface TeamMembership {
+  role?: TeamRole
   id: TeamMembershipID
   team_id: TeamID
   user_id: number
@@ -59,6 +62,7 @@ export interface TeamMembership {
 }
 
 export interface TeamInvitation {
+  role?: TeamRole
   id: TeamInvitationID
   team_id: TeamID
   invited_by_user_id: number

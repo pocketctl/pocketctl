@@ -2,7 +2,7 @@ import type pg from 'pg'
 
 export interface TokenDashboardV2 {
   summary: { total: number; today: number; thisWeek: number; thisMonth: number }
-  dailySeries: Array<{ date: string; input: number; output: number; cache_read: number; requests: number }>
+  dailySeries: Array<{ date: string; input: number; output: number; cache_read: number; cache_create: number; requests: number }>
   byModel: Array<{ model: string; input: number; output: number; cache_read: number; requests: number; total: number; pct: number }>
   byDaemon: Array<{ daemon_id: string; hostname: string; alias: string; input: number; output: number; cache_read: number; requests: number; total: number }>
 }
@@ -59,7 +59,7 @@ export async function getTokenDashboardV2(
      ), scoped AS (
        SELECT * FROM all_buckets WHERE ($2::text IS NULL OR daemon_id = $2)
      ), daily AS (
-       SELECT date, SUM(input) AS input, SUM(output) AS output,
+       SELECT date, SUM(input) AS input, SUM(output) AS output, SUM(cache_create) AS cache_create,
               SUM(cache_read) AS cache_read, SUM(requests) AS requests
        FROM scoped CROSS JOIN utc
        WHERE date >= utc.today - ($3::int - 1)
@@ -82,7 +82,7 @@ export async function getTokenDashboardV2(
        ) AS summary,
        COALESCE((
          SELECT jsonb_agg(jsonb_build_object(
-           'date', date, 'input', input, 'output', output,
+           'date', date, 'input', input, 'output', output, 'cache_create', cache_create,
            'cache_read', cache_read, 'requests', requests
          ) ORDER BY date) FROM daily
        ), '[]'::jsonb) AS daily_series,
@@ -108,6 +108,7 @@ export async function getTokenDashboardV2(
   const summary = row.summary ?? {}
   const dailySeries: TokenDashboardV2['dailySeries'] = (Array.isArray(row.daily_series) ? row.daily_series : []).map((item: any) => ({
     date: dateString(item.date),
+    cache_create: amount(item.cache_create),
     input: amount(item.input),
     output: amount(item.output),
     cache_read: amount(item.cache_read),

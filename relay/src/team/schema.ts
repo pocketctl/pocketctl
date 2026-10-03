@@ -54,6 +54,16 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_collaboration_invitations_recipient
       ON collaboration_team_invitations(recipient_user_id, state, created_at DESC);
 
+    ALTER TABLE collaboration_team_memberships ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member', 'viewer'));
+    ALTER TABLE collaboration_team_invitations ADD COLUMN IF NOT EXISTS role VARCHAR(16) NOT NULL DEFAULT 'member' CHECK (role IN ('admin', 'member', 'viewer'));
+    UPDATE collaboration_team_memberships m SET role = 'admin'
+      FROM collaboration_teams t WHERE m.team_id = t.team_id AND m.user_id = t.creator_user_id AND m.role <> 'admin';
+    CREATE TABLE IF NOT EXISTS collaboration_role_audit (
+      id BIGSERIAL PRIMARY KEY, team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,
+      membership_id TEXT NOT NULL, actor_user_id INT NOT NULL, previous_role VARCHAR(16) NOT NULL,
+      role VARCHAR(16) NOT NULL, request_id TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS collaboration_team_daemon_bindings (
       daemon_id VARCHAR(64) PRIMARY KEY REFERENCES daemons(daemon_id) ON DELETE RESTRICT,
       team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,

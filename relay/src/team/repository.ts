@@ -8,7 +8,7 @@ import {
   type DaemonAgentEvidence,
   type TeamAgentCandidate,
 } from './agent-offers.js'
-import type { TeamErrorCode, TeamProvider } from './types.js'
+import type { TeamErrorCode, TeamProvider, TeamRole } from './types.js'
 
 type Queryable = Pick<pg.PoolClient, 'query'>
 
@@ -40,6 +40,7 @@ export interface CollaborationTeamView {
 }
 
 export interface CollaborationMembershipView {
+  role?: TeamRole
   id: string
   team_id: string
   user_id: number
@@ -51,6 +52,7 @@ export interface CollaborationMembershipView {
 }
 
 export interface CollaborationInvitationView {
+  role?: TeamRole
   id: string
   team_id: string
   invited_by_user_id: number
@@ -178,13 +180,17 @@ export class TeamRepository {
     )
     if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
     const membership = await client.query(
-      `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
+      `SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
       [teamId, actorUserId],
     )
     if (!membership.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
     if (Number(team.rows[0].creator_user_id) !== actorUserId) {
       throw new TeamRepositoryError('creator_required', 'team creator authority required')
     }
+  }
+
+  private async authorizeAdminReplay(client: Queryable, teamId: string, actorUserId: number): Promise<void> {
+    await this.requireTeam(client, teamId, actorUserId, { admin: true, lock: true })
   }
 
   private async lockInvitation(client: Queryable, invitationId: string, actorUserId: number, authority: 'recipient' | 'creator') {
@@ -204,7 +210,7 @@ export class TeamRepository {
       throw new TeamRepositoryError('team_not_found', 'invitation not found')
     }
     if (authority === 'creator' && Number(identity.creator_user_id) !== actorUserId) {
-      await this.requireTeam(client, identity.team_id, actorUserId, { creator: true })
+      await this.requireTeam(client, identity.team_id, actorUserId, { admin: true })
     }
     // Match dissolution's Team -> invitation order. Locking a dissolved Team
     // is allowed here so repeats of an existing terminal action still work.
@@ -236,7 +242,7 @@ export class TeamRepository {
     client: Queryable,
     teamId: string,
     actorUserId: number,
-    options: { creator?: boolean; lock?: boolean } = {},
+    options: { creator?: boolean; admin?: boolean; write?: boolean; lock?: boolean } = {},
   ): Promise<{ team_id: string; creator_user_id: number; state: string; revision: number }> {
     await requireTeamAccess(client, actorUserId, options.lock === true)
     const result = await client.query<{
@@ -255,7 +261,14 @@ export class TeamRepository {
     const row = result.rows[0]
     if (!row) throw new TeamRepositoryError('team_not_found', 'team not found')
     if (row.state !== 'active') throw new TeamRepositoryError('invalid_state', 'team is not active')
-    if (options.creator && row.creator_user_id !== actorUserId) {
+    if (options.admin || options.write) {
+      const member = await client.query(`SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active'${options.lock ? ' FOR SHARE' : ''}`, [teamId, actorUserId])
+      if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
+      if (Number(row.creator_user_id) !== actorUserId && (options.admin ? member.rows[0].role !== 'admin' : member.rows[0].role === 'viewer')) {
+        throw new TeamRepositoryError('team_access_denied', options.admin ? 'team administrator authority required' : 'read-only team member')
+      }
+    }
+    if (options.creator && Number(row.creator_user_id) !== actorUserId) {
       throw new TeamRepositoryError('creator_required', 'team creator authority required')
     }
     return { ...row, revision: Number(row.revision) }
@@ -312,8 +325,8 @@ export class TeamRepository {
         [teamId, input.name, input.actorUserId, input.description ?? ''],
       )
       const membership = await client.query(
-        `INSERT INTO collaboration_team_memberships (membership_id, team_id, user_id)
-         VALUES ($1, $2, $3) RETURNING *`,
+        `INSERT INTO collaboration_team_memberships (membership_id, team_id, user_id, role)
+         VALUES ($1, $2, $3, 'admin') RETURNING *`,
         [membershipId, teamId, input.actorUserId],
       )
       return {
@@ -334,7 +347,7 @@ export class TeamRepository {
       name: input.name,
       expected_revision: input.expectedRevision,
     }, async client => {
-      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { creator: true, lock: true })
+      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { admin: true, lock: true })
       this.expectRevision(team.revision, input.expectedRevision)
       const updated = await client.query(
         `UPDATE collaboration_teams
@@ -348,7 +361,7 @@ export class TeamRepository {
         [input.teamId],
       )
       return this.teamView({ ...updated.rows[0], member_count: count.rows[0].member_count })
-    }, client => this.authorizeCreatorReplay(client, input.teamId, input.actorUserId))
+    }, client => this.authorizeAdminReplay(client, input.teamId, input.actorUserId))
   }
 
   async listMembers(teamId: string, actorUserId: number): Promise<CollaborationMembershipView[]> {
@@ -368,15 +381,19 @@ export class TeamRepository {
     teamId: string
     actorUserId: number
     email: string
+    role?: TeamRole
     expectedRevision: number
     requestId: string
   }): Promise<CollaborationInvitationView> {
     const email = input.email.trim().toLowerCase()
+    const role = input.role ?? 'member'
+    if (!['admin', 'member', 'viewer'].includes(role)) throw new TeamRepositoryError('invalid_state', 'invalid team role')
     return this.idempotent(input.actorUserId, `team.invite:${input.teamId}`, input.requestId, {
       email,
+      ...(role !== 'member' ? { role } : {}),
       expected_revision: input.expectedRevision,
     }, async client => {
-      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { creator: true, lock: true })
+      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { admin: true, lock: true })
       this.expectRevision(team.revision, input.expectedRevision)
       const recipient = await client.query<{ id: number }>(
         `SELECT id FROM users WHERE lower(email) = $1`,
@@ -409,23 +426,26 @@ export class TeamRepository {
          FOR UPDATE`,
         [input.teamId, recipientUserId, email],
       )
-      if (existing.rows[0]) return this.invitationView(existing.rows[0])
+      if (existing.rows[0]) {
+        if ((existing.rows[0].role ?? 'member') !== role) throw new TeamRepositoryError('invalid_state', 'revoke the pending invitation before changing its role')
+        return this.invitationView(existing.rows[0])
+      }
       const invitation = await client.query(
         `INSERT INTO collaboration_team_invitations
-           (invitation_id, team_id, invited_by_user_id, recipient_user_id, recipient_email, expires_at)
-         VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '7 days') RETURNING *`,
-        [id('cin_'), input.teamId, input.actorUserId, recipientUserId, email],
+           (invitation_id, team_id, invited_by_user_id, recipient_user_id, recipient_email, role, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '7 days') RETURNING *`,
+        [id('cin_'), input.teamId, input.actorUserId, recipientUserId, email, role],
       )
       await client.query(
         `UPDATE collaboration_teams SET revision = revision + 1, updated_at = NOW() WHERE team_id = $1`,
         [input.teamId],
       )
       return this.invitationView(invitation.rows[0])
-    }, client => this.authorizeCreatorReplay(client, input.teamId, input.actorUserId))
+    }, client => this.authorizeAdminReplay(client, input.teamId, input.actorUserId))
   }
 
   async listInvitations(teamId: string, actorUserId: number): Promise<CollaborationInvitationView[]> {
-    await this.requireTeam(this.pool, teamId, actorUserId, { creator: true })
+    await this.requireTeam(this.pool, teamId, actorUserId, { admin: true })
     const result = await this.pool.query(
       `SELECT i.*, CASE WHEN i.state = 'pending' AND i.expires_at <= clock_timestamp() THEN 'expired' ELSE i.state END AS state,
               t.name AS team_name, inviter.display_name AS inviter_display_name,
@@ -485,7 +505,7 @@ export class TeamRepository {
         throw new TeamRepositoryError('invalid_state', `invitation is already ${invitation.state}`)
       }
       this.expectRevision(Number(invitation.revision), input.expectedRevision)
-      await this.requireTeam(client, invitation.team_id, invitation.invited_by_user_id, { lock: true })
+      await this.requireTeam(client, invitation.team_id, invitation.invited_by_user_id, { admin: true, lock: true })
       if (invitation.expired) return this.expireInvitation(client, input.invitationId)
       const updated = await client.query(
         `UPDATE collaboration_team_invitations
@@ -497,10 +517,10 @@ export class TeamRepository {
       let membership: CollaborationMembershipView | undefined
       if (input.action === 'accepted') {
         const inserted = await client.query(
-          `INSERT INTO collaboration_team_memberships (membership_id, team_id, user_id)
-           VALUES ($1, $2, $3)
+          `INSERT INTO collaboration_team_memberships (membership_id, team_id, user_id, role)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (team_id, user_id) DO NOTHING RETURNING *`,
-          [id('cmb_'), invitation.team_id, input.actorUserId],
+          [id('cmb_'), invitation.team_id, input.actorUserId, invitation.role ?? 'member'],
         )
         if (!inserted.rows[0]) {
           const current = await client.query(
@@ -538,7 +558,7 @@ export class TeamRepository {
         throw new TeamRepositoryError('invalid_state', `invitation is already ${invitation.state}`)
       }
       this.expectRevision(Number(invitation.revision), input.expectedRevision)
-      await this.requireTeam(client, invitation.team_id, input.actorUserId, { creator: true, lock: true })
+      await this.requireTeam(client, invitation.team_id, input.actorUserId, { admin: true, lock: true })
       if (invitation.expired) return this.expireInvitation(client, input.invitationId)
       const updated = await client.query(
         `UPDATE collaboration_team_invitations
@@ -589,6 +609,30 @@ export class TeamRepository {
     })
   }
 
+  async changeMemberRole(input: { teamId: string; membershipId: string; actorUserId: number; role: TeamRole; expectedRevision: number; requestId: string }): Promise<CollaborationMembershipView> {
+    if (!['admin', 'member', 'viewer'].includes(input.role)) throw new TeamRepositoryError('invalid_state', 'invalid team role')
+    return this.idempotent(input.actorUserId, `team.member.role:${input.teamId}:${input.membershipId}`, input.requestId, {
+      role: input.role, expected_revision: input.expectedRevision,
+    }, async client => {
+      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { admin: true, lock: true })
+      const current = (await client.query(`SELECT * FROM collaboration_team_memberships WHERE team_id = $1 AND membership_id = $2 FOR UPDATE`, [input.teamId, input.membershipId])).rows[0]
+      if (!current) throw new TeamRepositoryError('team_not_found', 'membership not found')
+      if (Number(current.user_id) === Number(team.creator_user_id)) throw new TeamRepositoryError('invalid_state', 'team creator role cannot be changed')
+      if (current.state !== 'active') throw new TeamRepositoryError('invalid_state', 'membership is not active')
+      this.expectRevision(Number(current.revision), input.expectedRevision)
+      if (current.role === input.role) return this.membershipView(client, current)
+      const updated = (await client.query(`UPDATE collaboration_team_memberships SET role = $2, revision = revision + 1, updated_at = NOW() WHERE membership_id = $1 RETURNING *`, [input.membershipId, input.role])).rows[0]
+      if (input.role !== 'admin') await client.query(`UPDATE collaboration_team_invitations SET state = 'revoked', revision = revision + 1, updated_at = NOW(), responded_at = NOW() WHERE team_id = $1 AND invited_by_user_id = $2 AND state = 'pending'`, [input.teamId, current.user_id])
+      if (input.role === 'viewer') {
+        await this.revokeOwnerOffers(client, input.teamId, Number(current.user_id))
+        await this.releaseTaskHolders(client, input.teamId, Number(current.user_id))
+      }
+      await client.query(`INSERT INTO collaboration_role_audit(team_id,membership_id,actor_user_id,previous_role,role,request_id) VALUES($1,$2,$3,$4,$5,$6)`, [input.teamId,input.membershipId,input.actorUserId,current.role,input.role,input.requestId])
+      await client.query(`UPDATE collaboration_teams SET revision = revision + 1, updated_at = NOW() WHERE team_id = $1`, [input.teamId])
+      return this.membershipView(client, updated)
+    }, client => this.authorizeAdminReplay(client, input.teamId, input.actorUserId))
+  }
+
   async removeMember(input: {
     teamId: string
     membershipId: string
@@ -599,7 +643,7 @@ export class TeamRepository {
     return this.idempotent(input.actorUserId, `team.member.remove:${input.teamId}:${input.membershipId}`, input.requestId, {
       expected_revision: input.expectedRevision,
     }, async client => {
-      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { creator: true, lock: true })
+      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { admin: true, lock: true })
       const membership = await client.query(
         `SELECT * FROM collaboration_team_memberships
          WHERE team_id = $1 AND membership_id = $2 FOR UPDATE`,
@@ -733,7 +777,7 @@ export class TeamRepository {
       runtime_profile_id: input.runtimeProfileId,
       expected_revision: input.expectedRevision,
     }, async client => {
-      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { lock: true })
+      const team = await this.requireTeam(client, input.teamId, input.actorUserId, { write: true, lock: true })
       this.expectRevision(team.revision, input.expectedRevision)
       const daemonResult = await client.query<DaemonAgentEvidence & { user_id: number }>(
         `SELECT daemon_id, hostname, status, agents, collaboration_capabilities, user_id FROM daemons
@@ -790,9 +834,10 @@ export class TeamRepository {
       )
       if (!team.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
       const member = await client.query(
-        `SELECT 1 FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
+        `SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active' FOR SHARE`,
         [input.teamId, input.actorUserId],
       )
+      if (member.rows[0]?.role === 'viewer') throw new TeamRepositoryError('team_access_denied', 'read-only team member')
       if (!member.rows[0] || response.owner_user_id !== input.actorUserId) {
         throw new TeamRepositoryError('team_not_found', 'offer not found')
       }
@@ -814,7 +859,7 @@ export class TeamRepository {
       )
       if (!identity.rows[0]) throw new TeamRepositoryError('team_not_found', 'offer not found')
       // Session creation and membership revocation also lock Team before offer.
-      await this.requireTeam(client, identity.rows[0].team_id, input.actorUserId, { lock: true })
+      await this.requireTeam(client, identity.rows[0].team_id, input.actorUserId, { write: true, lock: true })
       const result = await client.query(
         `SELECT o.*, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id AS occupied_team_id, owner.team_enabled AS owner_team_enabled
          FROM team_agent_offers o
@@ -927,6 +972,7 @@ export class TeamRepository {
   private membershipViewFromJoined(row: any): CollaborationMembershipView {
     return {
       id: row.membership_id,
+      role: row.role ?? 'member',
       team_id: row.team_id,
       user_id: Number(row.user_id),
       state: row.state,
@@ -940,6 +986,7 @@ export class TeamRepository {
   private invitationView(row: any): CollaborationInvitationView {
     return {
       id: row.invitation_id,
+      role: row.role ?? 'member',
       team_id: row.team_id,
       invited_by_user_id: Number(row.invited_by_user_id),
       recipient_user_id: row.recipient_user_id === null ? null : Number(row.recipient_user_id),

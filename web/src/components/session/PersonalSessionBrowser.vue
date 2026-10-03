@@ -6,19 +6,11 @@
   >
     <header>
       <div>
-        <h3>会话</h3>
-        <small
-          >{{ scopedSessions.length }} 个会话 ·
-          {{
-            scopedSessions.filter((item) =>
-              ["running", "busy", "retry"].includes(item.status),
-            ).length
-          }}
-          个运行中</small
-        >
+        <h3> {{ t('nav.sessions') }} </h3>
+        <small>{{ t('session.count_summary', {total:scopedSessions.length, running:scopedSessions.filter(item => ['running','busy','retry'].includes(item.status)).length}) }}</small>
       </div>
       <button
-        aria-label="新建会话"
+        :aria-label="t('session.new_session')"
         @click="
           newProject = null;
           newOpen = true;
@@ -122,8 +114,8 @@
       ></i
       ><span
         >{{ scopedHosts.filter((item) => item.status === "online").length }} /
-        {{ scopedHosts.length }} 台主机在线</span
-      ><button aria-label="搜索会话" @click="searchOpen = !searchOpen">
+        {{ t('workspace.online_hosts_count', {count:scopedHosts.length}) }}</span
+      ><button :aria-label="t('workspace.search_sessions')" @click="searchOpen = !searchOpen">
         ⌕
       </button>
     </div>
@@ -131,10 +123,10 @@
       v-if="searchOpen"
       v-model="query"
       class="search"
-      aria-label="搜索已加载会话"
-      placeholder="搜索已加载会话"
+      :aria-label="t('workspace.search_loaded_sessions')"
+      :placeholder="t('workspace.search_loaded_sessions')"
     />
-    <nav class="list" aria-label="个人会话列表">
+    <nav class="list" :aria-label="t('workspace.personal_session_list')">
       <button
         v-if="archived"
         class="archive"
@@ -142,11 +134,9 @@
           archived = false;
           load();
         "
-      >
-        ‹ 返回会话
-      </button>
+      > {{ t('workspace.back_to_sessions') }} </button>
       <div v-else class="project-label">
-        <span>项目</span><CreateProjectControl @created="load" />
+        <span> {{ t('workspace.projects') }} </span><CreateProjectControl @created="load" />
       </div>
       <section
         v-for="group in groups"
@@ -166,12 +156,12 @@
           >
             <svg viewBox="0 0 24 24">
               <path
-                d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+                :d="collapsed[group.id] ? 'M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' : 'M3 10V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2M4 10h17l-3 10H2z'"
               /></svg
             >{{ group.name }} <small>{{ group.count }}</small></button
           ><button
             v-if="group.id !== 'ungrouped'"
-            aria-label="项目操作"
+            :aria-label="t('workspace.project_actions')"
             @click="projectMenu = projectMenu === group.id ? '' : group.id"
           >
             ···
@@ -183,11 +173,10 @@
                 newOpen = true;
                 projectMenu = '';
               "
-            >
-              在项目中新建会话</button
-            ><button @click="renameGroup(group.id)">重命名</button
-            ><button @click="shiftGroup(group.id, -1)">上移</button
-            ><button @click="shiftGroup(group.id, 1)">下移</button>
+            > {{ t('workspace.create_in_project') }} </button
+            ><button @click="renameGroup(group.id)"> {{ t('workspace.rename') }} </button
+            ><button @click="shiftGroup(group.id, -1)"> {{ t('workspace.move_up') }} </button
+            ><button @click="shiftGroup(group.id, 1)"> {{ t('workspace.move_down') }} </button>
           </div>
         </div>
         <template v-if="archived || !collapsed[group.id]">
@@ -258,14 +247,12 @@
             v-if="cursors[group.id]"
             class="archive"
             @click="loadBucket(group.id, cursors[group.id]!)"
-          >
-            加载更多
-          </button>
+          > {{ t('attention.load_more') }} </button>
         </template>
       </section>
       <p v-if="error" role="alert">{{ error }}</p>
-      <p v-else-if="loading" class="empty">加载中…</p>
-      <p v-else-if="!filtered.length" class="empty">当前筛选下没有会话。</p>
+      <p v-else-if="loading" class="empty"> {{ t('common.loading') }} </p>
+      <p v-else-if="!filtered.length" class="empty"> {{ t('workspace.no_filtered_sessions') }} </p>
       <button
         v-if="!archived"
         class="archive"
@@ -273,10 +260,10 @@
           archived = true;
           load();
         "
-      >
-        已归档 <span>{{ archivedCount }}</span>
+      > {{ t('team.task_filter.archived') }} <span>{{ archivedCount }}</span>
       </button>
     </nav>
+    <RenameProjectAction v-if="editingProject" :project="editingProject" @close="editingProject = null" @saved="load" />
     <NewSessionDialog
       v-if="newOpen"
       :daemons="daemons"
@@ -295,6 +282,7 @@ import SessionScopeSwitcher from "./SessionScopeSwitcher.vue";
 import SessionActions from "../SessionActions.vue";
 import SessionPinBadge from "../SessionPinBadge.vue";
 import CreateProjectControl from "../CreateProjectControl.vue";
+import RenameProjectAction from "../RenameProjectAction.vue";
 import NewSessionDialog from "../NewSessionDialog.vue";
 import { useSessionRename } from "../../composables/useSessionRename";
 import { useWebSocket } from "../../composables/useWebSocket";
@@ -305,12 +293,12 @@ import {
   listProjects,
   listOrganizedSessions,
   moveSession,
-  renameProject,
   reorderProjects,
   reorderSession,
   type SessionProject,
 } from "../../services/sessionOrganization";
 const root = ref<HTMLElement | null>(null);
+const editingProject = ref<SessionProject | null>(null);
 const hostFilterTrigger = ref<HTMLButtonElement | null>(null);
 const hostFilterSearch = ref<HTMLInputElement | null>(null);
 const { t } = useLocale();
@@ -414,6 +402,7 @@ const agentOptions = computed(
 const filtered = computed(() =>
   allRows.value.filter(
     (item) =>
+      (archived.value ? !!item.archived_at : !item.archived_at) &&
       (!agent.value || sessionAgent(item) === agent.value) &&
       `${item.title} ${item.cwd} ${item.session_id}`
         .toLowerCase()
@@ -467,7 +456,7 @@ const groups = computed(() =>
     ? [
         {
           id: "archived",
-          name: "已归档",
+          name: t('team.task_filter.archived'),
           count: archivedCount.value,
           rows: filtered.value,
         },
@@ -481,7 +470,7 @@ const groups = computed(() =>
         })),
         {
           id: "ungrouped",
-          name: "未分组",
+          name: t('workspace.ungrouped'),
           count: ungroupedCount.value,
           rows: filtered.value.filter((item) => !item.project_id),
         },
@@ -531,7 +520,7 @@ async function load() {
     );
   } catch (failure) {
     if (current === generation)
-      error.value = failure instanceof Error ? failure.message : "加载失败";
+      error.value = failure instanceof Error ? failure.message : t('workspace.load_failed');
   } finally {
     if (current === generation) loading.value = false;
   }
@@ -541,16 +530,12 @@ async function mutation(run: () => Promise<unknown>) {
     await run();
     await load();
   } catch (failure) {
-    error.value = failure instanceof Error ? failure.message : "操作失败";
+    error.value = failure instanceof Error ? failure.message : t('workspace.operation_failed');
   }
 }
-async function renameGroup(id: string) {
-  const project = projects.value.find((item) => item.id === id);
-  if (!project) return;
-  const name = prompt("项目名称", project.name)?.trim();
+function renameGroup(id: string) {
+  editingProject.value = projects.value.find(item => item.id === id) || null;
   projectMenu.value = "";
-  if (name && name !== project.name)
-    await mutation(() => renameProject(id, name, Number(project.revision)));
 }
 async function shiftGroup(id: string, direction: number) {
   const ids = projects.value.map((item) => item.id),

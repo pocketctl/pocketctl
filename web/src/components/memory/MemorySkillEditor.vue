@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ActionSelect from '../ActionSelect.vue'
 import { ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { MemorySkillDocument } from '../../types/memorySkills'
@@ -32,7 +33,7 @@ function save() { emit('save', JSON.parse(JSON.stringify(draft.value))) }
       <label>{{ t('memory.skills.instruction') }}<textarea v-model="step.instruction" required maxlength="4000" rows="3" /></label>
       <div class="memory-skill-fields">
         <label>{{ t('memory.skills.tool') }}<input v-model="step.tool" required maxlength="128" /></label>
-        <label>{{ t('memory.skills.operation') }}<select v-model="step.operation"><option v-for="operation in operations" :key="operation">{{ operation }}</option></select></label>
+        <label>{{ t('memory.skills.operation') }}<ActionSelect><select v-model="step.operation"><option v-for="operation in operations" :key="operation">{{ operation }}</option></select></ActionSelect></label>
       </div>
       <label>{{ t('memory.skills.permissions') }}<input :value="step.permissions.join(', ')" required
         @change="step.permissions = ($event.target as HTMLInputElement).value.split(',').map(value => value.trim()).filter(Boolean)" /></label>

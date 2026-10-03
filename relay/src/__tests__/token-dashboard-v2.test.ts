@@ -12,7 +12,7 @@ describe('token dashboard V2', () => {
     const pool: any = {
       query: vi.fn(async () => ({ rows: [{
         summary: { total: '120', today: '20', this_week: '70', this_month: '100' },
-        daily_series: [{ date: '2026-08-08', input: '60', output: '20', cache_read: '10', requests: '2' }],
+        daily_series: [{ date: '2026-08-08', input: '60', output: '20', cache_create: '7', cache_read: '10', requests: '2' }],
         by_model: [
           { model: 'gpt-5', input: '30', output: '10', cache_read: '5', requests: '1' },
           { model: 'claude', input: '20', output: '10', cache_read: '2', requests: '1' },
@@ -23,7 +23,7 @@ describe('token dashboard V2', () => {
 
     await expect(getTokenDashboardV2(pool, 42, 'all', 150)).resolves.toEqual({
       summary: { total: 120, today: 20, thisWeek: 70, thisMonth: 100 },
-      dailySeries: [{ date: '2026-08-08', input: 60, output: 20, cache_read: 10, requests: 2 }],
+      dailySeries: [{ date: '2026-08-08', input: 60, output: 20, cache_create: 7, cache_read: 10, requests: 2 }],
       byModel: [
         { model: 'gpt-5', input: 30, output: 10, cache_read: 5, requests: 1, total: 40, pct: 57.1 },
         { model: 'claude', input: 20, output: 10, cache_read: 2, requests: 1, total: 30, pct: 42.9 },

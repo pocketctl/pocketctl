@@ -91,6 +91,23 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
     })
   }
 
+  test('roles persist through invitation and reject read-only writes after downgrade', async () => {
+    const owner=await user('role-owner@example.test'), admin=await user('role-admin@example.test')
+    const created=(await createTeam(owner,'Roles','role-create')).json()
+    const team=created.team
+    const invitation=(await app.inject({method:'POST',url:`/api/team/teams/${team.id}/invitations`,headers:headers(owner),payload:{request_id:'role-invite',expected_revision:team.revision,email:'role-admin@example.test',role:'admin'}})).json().invitation
+    expect(invitation.role).toBe('admin')
+    const accepted=await app.inject({method:'POST',url:`/api/team/invitations/${invitation.id}/accept`,headers:headers(admin),payload:{request_id:'role-accept',expected_revision:invitation.revision}})
+    expect(accepted.statusCode).toBe(200)
+    const member=accepted.json().membership
+    expect(member.role).toBe('admin')
+    const changed=await app.inject({method:'PATCH',url:`/api/team/teams/${team.id}/members/${member.id}/role`,headers:headers(owner),payload:{request_id:'role-downgrade',expected_revision:member.revision,role:'viewer'}})
+    expect(changed.statusCode).toBe(200);expect(changed.json().membership.role).toBe('viewer')
+    const task=await app.inject({method:'POST',url:`/api/team/teams/${team.id}/tasks`,headers:headers(admin),payload:{request_id:'viewer-task',title:'Denied',background:''}})
+    expect(task.statusCode).toBe(403)
+    expect((await app.inject({url:`/api/team/teams/${team.id}/members`,headers:headers(admin)})).statusCode).toBe(200)
+  })
+
   test('persists descriptions in create, list and detail while protecting idempotent replay', async () => {
     const actor = await user('description@example.test')
     const request = {method:'POST' as const,url:'/api/team/teams',headers:headers(actor),payload:{request_id:'create-description',name:'Team',description:'A shared goal'}}

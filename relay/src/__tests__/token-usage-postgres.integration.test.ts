@@ -188,7 +188,7 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
 
     const dashboard = await getTokenDashboardV2(pool, userId, 'all', 30)
     expect(dashboard.dailySeries).toContainEqual({
-      date, input: 9, output: 5, cache_read: 3, requests: 3,
+      date, input: 9, output: 5, cache_read: 3, cache_create: 1, requests: 3,
     })
     await expect(getSessionTokenTrendV2(pool, userId, 'close-session', 30)).resolves.toContainEqual({
       date, input: 9, output: 5, cache_read: 3, requests: 3,

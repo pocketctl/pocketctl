@@ -702,3 +702,21 @@ func TestCreateSessionDoesNotFallbackApprovalPromptToExecJSON(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestCodexCreationAppliesEffortAndPermissionAtThreadStart(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/start"] = json.RawMessage(`{"thread":{"id":"effort-create"}}`)
+	backend := newCodexAppServerBackend(sm, newVerifiedTestCodexCoordinator(sm), rpc, 1)
+	_, err := backend.Start(context.Background(), protocol.SessionConfig{Agent: "codex", Cwd: t.TempDir(), Model: "fixture", Effort: "high", Permission: &protocol.PermissionConfig{Agent: "codex", Preset: "custom", ApprovalPolicy: "on-request", SandboxMode: "workspace-write"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(rpc.calls[0].params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params["model"] != "fixture" || params["config"].(map[string]any)["model_reasoning_effort"] != "high" || params["approvalPolicy"] != "on-request" || params["sandbox"] != "workspace-write" {
+		t.Fatalf("native creation settings: %+v", params)
+	}
+}

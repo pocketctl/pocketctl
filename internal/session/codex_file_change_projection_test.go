@@ -7,7 +7,29 @@ import (
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/sessiondocument"
 )
+
+func TestManagedAbsoluteFilePathsConvergeWithTurnDiffAndKeepCaptureBoundary(t *testing.T) {
+	t.Setenv("POCKETCTL_CODEX_EDITED_FILES", "1")
+	p := newCodexProjection(23)
+	p.Project(codexNotification("thread/started", `{"thread":{"id":"thr_1","cwd":"/workspace/project"}}`))
+	startManagedFileChangeTurn(t, p)
+	events := p.Project(codexNotification("item/completed", `{"threadId":"thr_1","turnId":"turn_1","item":{"id":"patch_absolute","type":"fileChange","status":"completed","changes":[{"path":"/workspace/project/report.md","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"},{"path":"/workspace/private.md","kind":{"type":"update"},"diff":"@@ -1 +1 @@\n-old\n+new\n"}]}}`))
+	if len(events) != 3 || events[1].Path != "report.md" || events[2].Path != "/workspace/private.md" {
+		t.Fatalf("unexpected file paths: %+v", events)
+	}
+	if _, ok := sessiondocument.CandidateFromEvent(events[1]); !ok {
+		t.Fatal("in-root document must remain eligible for secure capture")
+	}
+	if _, ok := sessiondocument.CandidateFromEvent(events[2]); ok {
+		t.Fatal("outside-root document became eligible for capture")
+	}
+	p.Project(codexNotification("turn/diff/updated", `{"threadId":"thr_1","turnId":"turn_1","diff":"diff --git a/report.md b/report.md\n--- a/report.md\n+++ b/report.md\n@@ -1 +1 @@\n-old\n+new\n"}`))
+	if remaining := p.projectManagedTurnDiff("thr_1", "turn_1"); len(remaining) != 0 {
+		t.Fatalf("same file emitted again from turn diff: %+v", remaining)
+	}
+}
 
 const managedFileChangeParams = `{
 	"threadId":"thr_1","turnId":"turn_1","completedAtMs":4,
