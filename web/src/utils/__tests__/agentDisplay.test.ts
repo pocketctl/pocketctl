@@ -28,7 +28,7 @@ describe('agentDisplay', () => {
     expect(agentIconClass('claude-code')).toBe('claude')
   })
 
-  test('publishes all five supported agent display names', () => {
-    expect(Object.keys(AGENT_DISPLAY_NAMES).sort()).toEqual(['claude-code', 'codex', 'codex-desktop', 'opencode', 'zcode', 'zcode-managed'])
+  test('publishes all supported agent display names', () => {
+    expect(Object.keys(AGENT_DISPLAY_NAMES).sort()).toEqual(['claude-code', 'codex', 'codex-desktop', 'dsh', 'opencode', 'zcode', 'zcode-managed'])
   })
 })

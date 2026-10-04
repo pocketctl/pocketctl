@@ -63,6 +63,31 @@ describe('SessionDetail processEvent integration', () => {
     websocketMock.send.mockClear()
   })
 
+  test('DSH settings use native catalogs, preserve off, clear defaults and report failures', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'dsh', control_mode: 'managed', status: 'idle', daemon_online: true }]
+    await wrapper.vm.$nextTick()
+    const meta = { type: 'session_meta', session_id: 'ses_1', model: 'p/native', effort: 'high', models: [{alias:'p/native', name:'Native', supported_reasoning_efforts:['off','high']}], permission: {agent:'dsh', preset:'workspace-write'}, permission_mutable:true, permission_mutable_modes:['read-only','workspace-write'], capabilities:['shared_runtime'] }
+    websocketMock.handlers.get('session_meta')!(meta)
+    await wrapper.vm.$nextTick()
+    expect(vm.dshEfforts).toEqual(['off', 'high'])
+    expect(vm.runtimePermissionOptions.map((x:any) => x.value)).toEqual(['read-only','workspace-write'])
+    vm.changeDSHModel('p/native', 'off')
+    expect(websocketMock.send).toHaveBeenCalledWith(expect.objectContaining({type:'set_session_model', model:'p/native', effort:'off'}))
+    const request = vm.dshSettingsPending
+    websocketMock.handlers.get('session_model_changed')!({session_id:'ses_1', model:'p/native', effort:'off', request_id:request})
+    expect(vm.currentEffort).toBe('off')
+    expect(vm.dshSettingsPending).toBe('')
+    websocketMock.handlers.get('session_meta')!({...meta, effort:undefined})
+    expect(vm.currentEffort).toBe('')
+    vm.changeDSHModel('p/native', 'high')
+    websocketMock.handlers.get('error')!({session_id:'ses_1', operation:'set_session_model', request_id:vm.dshSettingsPending, error:'native unavailable'})
+    expect(vm.dshSettingsError).toBe('native unavailable')
+    expect(vm.dshSettingsPending).toBe('')
+    wrapper.unmount()
+  })
+
   test('continues initial replay when the rendered timeline underfills the current viewport', async () => {
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(performance.now())

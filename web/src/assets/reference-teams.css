@@ -139,7 +139,7 @@
  .design-shell .design-surface.teams-page .team-optional-fields>summary{font-size:13px}
 }
 
-.design-shell .design-surface.teams-page .agent-badge:is(.codex,.codex-desktop,.claude,.opencode,.zcode,.zcode-managed){color:var(--muted);background:none;box-shadow:none}
+.design-shell .design-surface.teams-page .agent-badge:is(.codex,.codex-desktop,.claude,.opencode,.zcode,.zcode-managed,.dsh){color:var(--muted);background:none;box-shadow:none}
 .design-shell .design-surface.teams-page .member-intro h2{margin:0}
 .design-shell .design-surface.teams-page .members-panel,.design-shell .design-surface.teams-page .team-workspace{min-width:0}
 .design-shell .design-surface.teams-page .reference-members{min-width:0;max-width:100%}

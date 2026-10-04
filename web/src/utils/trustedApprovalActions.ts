@@ -21,9 +21,9 @@ function nativeActions(message: ApprovalMessage, supportsActions: boolean): Trus
   if (Array.isArray(message.availableDecisions) && message.availableDecisions.length > 0) {
     const mapped: TrustedApprovalAction[] = []
     for (const value of message.availableDecisions) {
-      const action = value === 'accept' ? 'once'
+      const action = value === 'accept' || value === 'once' ? 'once'
         : value === 'acceptForSession' ? 'always'
-          : value === 'decline' ? 'reject'
+          : value === 'decline' || value === 'reject' ? 'reject'
             : value === 'cancel' ? 'cancel'
               : null
       if (action && !mapped.includes(action)) mapped.push(action)

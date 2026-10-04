@@ -49,6 +49,24 @@ vi.mock('vue-router', () => ({
 }))
 
 describe('NewSessionDialog permission serialization', () => {
+  test.each([false,true])('DSH creation cards serialize default model effort and native permission (mobile=%s)', async isMobile => {
+    mobile.enabled=isMobile
+    const wrapper=mount(NewSessionDialog,{props:{daemons:[{daemon_id:'daemon-1',daemon_online:true}]},global:{stubs:{Teleport:true}}})
+    await wrapper.findAll('button.agent-pill').find(b=>b.text()==='DeepSeek Harness')!.trigger('click')
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'dsh',models:[{alias:'p/flash',name:'Flash',is_default:true,supported_reasoning_efforts:['off','low','high','max']}],permission_mutable_modes:['read-only','workspace-write']})
+    await nextTick()
+    await wrapper.findAll('.selection-row')[0]!.trigger('click')
+    await wrapper.findAll('.effort-choices button').find(b=>b.text()==='max')!.trigger('click')
+    await wrapper.find('.selection-panel .done').trigger('click')
+    await wrapper.findAll('.selection-row')[1]!.trigger('click')
+    expect(wrapper.find('.selection-panel').text()).not.toContain('danger-full-access')
+    await wrapper.findAll('.selection-panel .choice')[1]!.trigger('click')
+    await wrapper.find('.selection-panel .done').trigger('click')
+    await wrapper.find('.btn-start').trigger('click')
+    expect(ws.send).toHaveBeenCalledWith(expect.objectContaining({type:'session_create',agent:'dsh',model:'p/flash',effort:'max',permission:{agent:'dsh',preset:'read-only'},worktree:undefined}))
+    wrapper.unmount()
+  })
+
   test('disables forbidden permissions and keeps default-model effort options scoped to host capabilities', async () => {
     const wrapper=mount(NewSessionDialog,{props:{daemons:[{daemon_id:'daemon-1',daemon_online:true}]}})
     await wrapper.findAll('button.agent-pill')[1].trigger('click')
@@ -134,7 +152,7 @@ describe('NewSessionDialog permission serialization', () => {
     })
 
     const agentButtons = wrapper.findAll('button.agent-pill')
-    expect(agentButtons.map(button => button.text())).toEqual(['Claude Code', 'Codex CLI', 'OpenCode', 'ZCode Runtime'])
+    expect(agentButtons.map(button => button.text())).toEqual(['Claude Code', 'Codex CLI', 'OpenCode', 'DeepSeek Harness', 'ZCode Runtime'])
     expect(wrapper.text()).not.toContain('Codex Desktop')
 
     await agentButtons[1].trigger('click')

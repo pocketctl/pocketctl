@@ -4,6 +4,7 @@
 // so every surface renders observer agents consistently.
 
 export const AGENT_DISPLAY_NAMES: Record<string, string> = {
+  dsh: 'DeepSeek Harness',
   'claude-code': 'Claude Code',
   opencode: 'OpenCode',
   codex: 'Codex CLI',
@@ -19,6 +20,7 @@ export function agentDisplayName(raw: string): string {
 export function agentReplyLabel(raw?: string): string {
   switch (raw?.trim().toLowerCase()) {
     case 'claude-code': return 'claude'
+    case 'dsh': return 'deepseek'
     case 'codex': return 'codex'
     case 'codex-desktop': return 'codex desktop'
     case 'opencode': return 'opencode'
@@ -33,6 +35,7 @@ export function agentShortLabel(raw: string): string {
   if (n === 'codex-desktop') return 'CD'
   if (n === 'zcode-managed') return 'ZR'
   if (n === 'zcode') return 'ZD'
+  if (n === 'dsh') return 'DS'
   if (/codex/.test(n)) return 'Cx'
   if (/opencode/.test(n)) return 'OC'
   return 'CC'
@@ -40,6 +43,7 @@ export function agentShortLabel(raw: string): string {
 
 export function agentIconClass(raw: string): string {
   const n = raw.toLowerCase()
+  if (n === 'dsh') return 'dsh'
   if (n === 'codex-desktop') return 'codex-desktop'
   if (n === 'zcode-managed') return 'zcode-managed'
   if (/codex/.test(n)) return 'codex'

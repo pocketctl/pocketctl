@@ -1,4 +1,4 @@
-export type AgentType = 'claude-code' | 'codex' | 'opencode' | 'zcode-managed'
+export type AgentType = 'claude-code' | 'codex' | 'opencode' | 'zcode-managed' | 'dsh'
 export type ClaudeMode = 'manual' | 'auto' | 'acceptEdits' | 'dontAsk' | 'plan' | 'bypassPermissions'
 export type CodexPreset = 'request_approval' | 'agent_managed' | 'full_access' | 'custom'
 export type ApprovalPolicy = 'untrusted' | 'on-request' | 'never'
@@ -6,7 +6,8 @@ export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 export type ClaudePermission = { agent: 'claude-code'; mode: ClaudeMode }
 export type CodexPermission = { agent: 'codex'; preset: CodexPreset; approval_policy?: ApprovalPolicy; sandbox_mode?: SandboxMode; dangerously_bypass?: boolean }
-export type PermissionConfig = ClaudePermission | CodexPermission
+export type DSHPermission = { agent: 'dsh'; preset: string }
+export type PermissionConfig = ClaudePermission | CodexPermission | DSHPermission
 
 export interface PermissionOption { value: string; titleKey: string; descriptionKey: string; icon: string; dangerous?: boolean; disabled?: boolean }
 
@@ -32,12 +33,14 @@ export function permissionOptions(agent: AgentType, creation = false, mutableMod
     const modes = creation ? claudeModes : claudeModes.filter(mode => mutableModes.includes(mode))
     return modes.map(value => ({ value, titleKey: `session.permission.claude.${value}.title`, descriptionKey: `session.permission.claude.${value}.description`, icon: value === 'plan' ? 'list' : value === 'bypassPermissions' ? 'warning' : 'shield', dangerous: value === 'bypassPermissions' }))
   }
+  if (agent === 'dsh') return mutableModes.map(value => ({ value, titleKey: ['read-only','workspace-write','danger-full-access'].includes(value) ? `session.permission.dsh.${value}.title` : value, descriptionKey: ['read-only','workspace-write','danger-full-access'].includes(value) ? `session.permission.dsh.${value}.description` : value, icon: 'shield', dangerous: !['read-only', 'workspace-write'].includes(value) }))
   if (agent === 'codex') return codexPresets.map(value => ({ value, titleKey: `session.permission.codex.${value}.title`, descriptionKey: `session.permission.codex.${value}.description`, icon: value === 'custom' ? 'gear' : value === 'full_access' ? 'warning' : 'shield', dangerous: value === 'full_access' }))
   return []
 }
 
 export function permissionTitleKey(permission?: PermissionConfig): string {
   if (!permission) return 'session.permission.unavailable'
+  if (permission.agent === 'dsh') return ['read-only','workspace-write','danger-full-access'].includes(permission.preset) ? `session.permission.dsh.${permission.preset}.title` : permission.preset
   return permission.agent === 'claude-code' ? `session.permission.claude.${permission.mode}.title` : `session.permission.codex.${permission.preset}.title`
 }
 

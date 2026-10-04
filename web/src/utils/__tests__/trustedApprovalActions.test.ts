@@ -3,6 +3,9 @@ import { describe, expect, test } from 'vitest'
 import { trustedApprovalActions } from '../trustedApprovalActions'
 
 describe('trusted approval action rendering', () => {
+  test('renders stored DSH canonical one-shot decisions', () => {
+    expect(trustedApprovalActions({ availableDecisions: ['once', 'reject'] }, true, false)).toEqual(['once', 'reject'])
+  })
   test('intersects native decisions with a valid enforced context', () => {
     expect(trustedApprovalActions({
       availableDecisions: ['accept', 'acceptForSession', 'decline', 'cancel'],

@@ -21,6 +21,7 @@
         <polyline points="5,8 10,12 5,16" />
         <line x1="13" y1="16" x2="19" y2="16" />
       </g>
+      <text v-else-if="kind === 'dsh'" x="12" y="16" text-anchor="middle" fill="currentColor" font-size="12" font-weight="700">DS</text>
       <!-- ZCode: read-only eye (observer sync) -->
       <g v-else-if="kind === 'zcode'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
@@ -50,8 +51,9 @@ const props = withDefaults(defineProps<{
 })
 
 // normalized visual kind
-const kind = computed<'claude' | 'codex' | 'codex-desktop' | 'opencode' | 'zcode' | 'zcode-managed'>(() => {
+const kind = computed<'claude' | 'codex' | 'codex-desktop' | 'opencode' | 'zcode' | 'zcode-managed' | 'dsh'>(() => {
   const a = (props.agent || '').toLowerCase()
+  if (a === 'dsh') return 'dsh'
   if (a === 'codex') return 'codex'
   if (a === 'codex-desktop') return 'codex-desktop'
   if (a === 'opencode') return 'opencode'
@@ -88,6 +90,7 @@ const iconSize = computed(() => props.size === 'md' ? 14 : 12)
 .agent-badge.codex { background: rgba(63, 185, 80, 0.14); color: #3fb950; }
 /* Codex Desktop — green family with a distinct framed icon/badge */
 .agent-badge.codex-desktop { background: rgba(63, 185, 80, 0.2); color: #2ea043; box-shadow: inset 0 0 0 1px rgba(63, 185, 80, 0.18); }
+.agent-badge.dsh { background: rgba(77, 107, 254, 0.14); color: #4d6bfe; }
 /* OpenCode — purple */
 .agent-badge.opencode { background: rgba(167, 139, 250, 0.14); color: #a78bfa; }
 /* ZCode — teal (read-only observer) */

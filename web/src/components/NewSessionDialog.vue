@@ -76,6 +76,7 @@
           <button :class="['agent-pill', { selected: form.agent === 'claude-code' }]" :aria-pressed="form.agent === 'claude-code'" @click="selectAgent('claude-code')"><WorkspaceIcon v-if="form.agent === 'claude-code'" name="check" />Claude Code</button>
           <button :class="['agent-pill', { selected: form.agent === 'codex' }]" :aria-pressed="form.agent === 'codex'" @click="selectAgent('codex')"><WorkspaceIcon v-if="form.agent === 'codex'" name="check" />Codex CLI</button>
           <button :class="['agent-pill', { selected: form.agent === 'opencode' }]" :aria-pressed="form.agent === 'opencode'" @click="selectAgent('opencode')"><WorkspaceIcon v-if="form.agent === 'opencode'" name="check" />OpenCode</button>
+          <button :class="['agent-pill', { selected: form.agent === 'dsh' }]" :aria-pressed="form.agent === 'dsh'" @click="selectAgent('dsh')"><WorkspaceIcon v-if="form.agent === 'dsh'" name="check" />DeepSeek Harness</button>
           <button :class="['agent-pill', { selected: form.agent === 'zcode-managed' }]" :aria-pressed="form.agent === 'zcode-managed'" @click="selectAgent('zcode-managed')"><WorkspaceIcon v-if="form.agent === 'zcode-managed'" name="check" />ZCode Runtime</button>
         </div>
 
@@ -89,10 +90,13 @@
           <div class="field-hint">{{ t('new_session.codex_account_hint') }}</div>
         </div>
 
+        <DSHCreationSettings v-if="form.agent === 'dsh'" :models="models" :model="form.model" :effort="form.effort"
+          :permission="form.permission?.agent === 'dsh' ? form.permission.preset : ''"
+          :presets="dshPermissionModes" :loaded="modelsLoaded" :disabled="creating" @change="updateDSHCreation" />
         <div class="configuration-grid">
         <!-- Model (dynamic: host's available models). All agents — including
              opencode — surface their models via list_models → model_list. -->
-        <div class="model-field">
+        <div v-if="form.agent !== 'dsh'" class="model-field">
           <div class="field-label">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
             {{ t('new_session.model_label') }}
@@ -178,7 +182,7 @@
               </span>
             </label>
             <label class="advanced-option">
-              <input type="checkbox" v-model="form.worktree" :disabled="form.agent === 'opencode'" />
+              <input type="checkbox" v-model="form.worktree" :disabled="form.agent === 'opencode' || form.agent === 'dsh'" />
               <span class="option-text">
                 <span class="option-label">{{ t('new_session.option_worktree') }}</span>
                 <span class="option-hint">{{ t('new_session.option_worktree_hint') }}</span>
@@ -231,6 +235,7 @@
 
 <script setup lang="ts">
 import WorkspaceIcon from './WorkspaceIcon.vue'
+import DSHCreationSettings from './DSHCreationSettings.vue'
 import { listProjects, type SessionProject } from '../services/sessionOrganization'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import ActionSelect from './ActionSelect.vue'
@@ -299,7 +304,7 @@ function codexHomeKey(host: string) { return `pocketctl_codex_home:${host}` }
 function selectDirectory(path: string) { form.cwd = path; showDirectory.value = false }
 let modelRequestId = ''
 function requestModels() {
-  models.value = []; modelsLoaded.value = false; creationCapabilities.value = null; form.effort = ''; form.model = ''
+  models.value = []; modelsLoaded.value = false; creationCapabilities.value = null; dshPermissionModes.value = []; form.effort = ''; form.model = ''
   modelRequestId = createClientId()
   if (form.daemonId && selectedHostOnline.value) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent, codex_home_id: form.agent === 'codex' ? form.codexHomeId || undefined : undefined, request_id: modelRequestId })
 }
@@ -322,12 +327,18 @@ function selectCodexHome() {
 const showAdvanced = ref(false)  // 高级选项折叠状态
 const cwdInUse = ref(false)      // 是否处于 cwd_in_use 确认状态
 // Available models for the selected host (populated by list_models → model_list)
-const models = ref<Array<{ alias: string; name: string; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string }>>([])
+const models = ref<Array<{ alias: string; name: string; is_default?: boolean; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string }>>([])
 type CreationCapabilities={version:number;supported:boolean;managed_runtime:boolean;default_model?:string;permission_presets:string[];approval_policies:string[];sandbox_modes:string[];reason?:string}
 const creationCapabilities=ref<CreationCapabilities|null>(null)
-const effortOptions = computed(() => form.agent === 'codex' ? models.value.find(model => model.alias === (form.model || creationCapabilities.value?.default_model))?.supported_reasoning_efforts || [] : [])
+const dshPermissionModes = ref<string[]>([])
+const effortOptions = computed(() => ['codex','dsh'].includes(form.agent) ? models.value.find(model => model.alias === (form.model || creationCapabilities.value?.default_model || models.value.find(m => m.is_default)?.alias))?.supported_reasoning_efforts || [] : [])
+function updateDSHCreation(value: {model:string;effort:string;permission:string}) {
+ form.model = value.model
+ form.effort = value.effort
+ form.permission = value.permission ? {agent:'dsh',preset:value.permission} : undefined
+}
 function effortLabel(effort: string) { const key = `session.effort.${effort}`; const value = t(key); return value === key ? effort : value }
-watch([() => form.model, () => form.agent, () => form.codexHomeId], () => { form.effort = '' })
+watch([() => form.model, () => form.agent, () => form.codexHomeId], () => { form.effort = '' }, {flush:'sync'})
 const modelsLoaded = ref(false)  // true once model_list response received (even if empty)
 const creating = ref(false)
 const phase = ref<'submitting' | 'connecting'>('submitting')
@@ -339,7 +350,7 @@ const selectedDaemonName = computed(() => {
   return d?.daemon_alias || d?.hostname || t('nav.hosts')
 })
 
-const CREATE_CAPABLE_AGENTS = new Set<AgentType>(['claude-code', 'codex', 'opencode', 'zcode-managed'])
+const CREATE_CAPABLE_AGENTS = new Set<AgentType>(['claude-code', 'codex', 'opencode', 'zcode-managed', 'dsh'])
 function isCreateCapableAgent(agent: string): agent is AgentType {
   return CREATE_CAPABLE_AGENTS.has(agent as AgentType)
 }
@@ -376,7 +387,7 @@ function selectAgent(agent: string) {
   models.value = []
   modelsLoaded.value = false
   form.model = ''
-  if (agent === 'opencode') form.worktree = false
+  if (agent === 'opencode' || agent === 'dsh') form.worktree = false
   form.cwd = localStorage.getItem(cwdKey(form.daemonId, agent)) || '~/'
   if (agent === 'codex') requestCodexHomes()
   else requestModels()
@@ -494,10 +505,10 @@ function startSession() {
     cwd: form.cwd || undefined,
     prompt: form.prompt || undefined,
     permission: form.permission,
-    model: form.model || undefined,
-    effort: form.agent === 'codex' ? form.effort || undefined : undefined,
+    model: form.model || (form.agent === 'dsh' && form.effort ? models.value.find(m => m.is_default)?.alias : undefined),
+    effort: ['codex','dsh'].includes(form.agent) && effortOptions.value.includes(form.effort) ? form.effort : undefined,
     codex_home_id: form.agent === 'codex' ? form.codexHomeId : undefined,
-    worktree: form.worktree || undefined,
+    worktree: !['opencode','dsh'].includes(form.agent) && form.worktree || undefined,
     auto_create_dir: form.autoCreateDir || undefined,
     force: form.force || undefined,
   })
@@ -550,6 +561,8 @@ onMounted(() => {
     if (msg.request_id && msg.request_id !== modelRequestId) return
     if (form.agent==='codex' && msg.codex_home_id && msg.codex_home_id!==form.codexHomeId) return
     creationCapabilities.value = msg.creation_capabilities?.version===1 ? msg.creation_capabilities : null
+    dshPermissionModes.value = msg.permission_mutable_modes || []
+    if (form.permission?.agent === 'dsh' && !dshPermissionModes.value.includes(form.permission.preset)) form.permission = undefined
     models.value = msg.models || []
     modelsLoaded.value = true
   }))
@@ -846,5 +859,16 @@ onUnmounted(() => {
   .modal-footer { bottom: calc(-1 * max(16px, env(safe-area-inset-bottom))); padding: 12px 0 max(12px, env(safe-area-inset-bottom)); margin-top: 12px; border-top: 1px solid var(--border); }
   .modal-footer .btn-cancel { display: none; }
   .modal-footer .btn-start { flex: 1; min-height: 48px; border-radius: 12px; }
+}
+
+@media (max-width: 768px) {
+  .new-session-overlay .host-summary,
+  .new-session-overlay .quota-banner,
+  .new-session-overlay .agent-pill:not(.selected),
+  .new-session-overlay .dir-input,
+  .new-session-overlay .prompt-area,
+  .new-session-overlay :deep(.action-select-trigger) {
+    background: var(--surface); color: var(--fg); border: 1px solid var(--border);
+  }
 }
 </style>

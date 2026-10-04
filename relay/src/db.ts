@@ -4348,10 +4348,11 @@ export async function updateSessionModel(pool: pg.Pool, sessionId: string, model
 }
 
 /** Sparse metadata must not erase fields omitted by a model-only refresh. */
-export async function updateSessionMetadata(pool: pg.Pool, sessionId: string, model?: string, effort?: string): Promise<void> {
+// A null effort explicitly restores a native default; undefined preserves sparse metadata.
+export async function updateSessionMetadata(pool: pg.Pool, sessionId: string, model?: string, effort?: string | null): Promise<void> {
   await pool.query(
     `UPDATE sessions SET model = COALESCE($2, model), effort = COALESCE($3, effort) WHERE session_id = $1`,
-    [sessionId, model?.trim() || null, effort?.trim() || null],
+    [sessionId, model?.trim() || null, effort === null ? '' : effort?.trim() || null],
   );
 }
 

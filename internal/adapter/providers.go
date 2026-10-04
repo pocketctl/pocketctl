@@ -4,6 +4,16 @@ package adapter
 // like this with an init() that calls Register.
 
 func init() {
+	// DSH uses the existing native Web Host. Generic subprocess factories
+	// fail closed so this provider cannot silently launch Claude instead.
+	Register(Provider{
+		Type: AgentDSH, CLIName: "dsh", Package: "@deepseek-ai/dsh",
+		Discovery: DiscoveryCLI, Backend: BackendServer,
+		NewAdapter:  func(string) AgentAdapter { return observerAdapter{} },
+		NewParser:   func() JSONLParser { return observerParser{} },
+		NewLauncher: func() SessionLauncher { return observerLauncher{} },
+		NewStorage:  func() SessionStorage { return observerStorage{} },
+	})
 	// Claude Code — subprocess backend, full runtime capabilities.
 	Register(Provider{
 		Type:      AgentClaude,

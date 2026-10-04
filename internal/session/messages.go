@@ -225,7 +225,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		// the SSE demux skips the user echo, so we supply it here. Terminal
 		// sessions get their user_text from DirWatch (storage), so echoing here
 		// would duplicate.
-		if src != "terminal" && agent != adapter.AgentCodex {
+		if src != "terminal" && agent != adapter.AgentCodex && agent != adapter.AgentDSH {
 			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content}
 		}
 		if hidden != nil {

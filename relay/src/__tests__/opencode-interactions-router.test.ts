@@ -58,6 +58,20 @@ describe('OpenCode interaction router', () => {
     ]))
   })
 
+  test('routes DSH model effort and native permission preset without dropping fields', async () => {
+    const router = new Router(pool())
+    const daemon = ws()
+    await router.registerDaemon(daemon, { type: 'register', daemon_id: 'd1', hostname: 'host', agents: ['dsh'] }, 1)
+    const client = ws()
+    router.registerClient(client, 7)
+    ;(router as any).sessionToDaemon.set('dsh-session', 'd1')
+    const selection = { type:'set_session_model', session_id:'dsh-session', model:'deepseek-account/deepseek-flash', effort:'off', request_id:'dsh-model' }
+    const permission = { type:'set_permission_config', session_id:'dsh-session', permission:{agent:'dsh',preset:'read-only'} }
+    await router.handleClientMessage(client, selection)
+    await router.handleClientMessage(client, permission)
+    expect(daemon._sent).toEqual(expect.arrayContaining([expect.objectContaining(selection),expect.objectContaining(permission)]))
+  })
+
   test('persists confirmed agent change and broadcasts to subscribed clients', async () => {
     const db = pool()
     const router = new Router(db)

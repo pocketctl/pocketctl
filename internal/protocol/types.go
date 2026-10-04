@@ -401,6 +401,7 @@ type CodexCreationCapabilities struct {
 
 // ModelOption is one selectable model surfaced by a daemon for session creation.
 type ModelOption struct {
+	IsDefault                 bool     `json:"is_default,omitempty"`
 	Alias                     string   `json:"alias"` // claude alias (opus/sonnet/haiku) — passed to --model
 	Name                      string   `json:"name"`  // concrete display name (e.g. glm-5.2) — shown in the picker
 	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`

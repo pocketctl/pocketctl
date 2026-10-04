@@ -77,6 +77,7 @@ var (
 		AgentCodex:        {},
 		AgentOpencode:     {},
 		AgentZcodeManaged: {},
+		AgentDSH:          {},
 	}
 )
 

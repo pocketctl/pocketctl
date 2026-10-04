@@ -1004,16 +1004,16 @@ func (c *opencodeCoordinator) discoverOnce(ctx context.Context) {
 			c.sm.SetSessionModel(s.ID, model)
 		}
 		c.sm.outputCh <- protocol.DaemonEvent{
-			Type:         "session_discovered",
+			Type:             "session_discovered",
 			SessionStartedAt: time.UnixMilli(s.Time.Created).UTC().Format(time.RFC3339Nano),
-			SessionID:    s.ID,
-			Cwd:          s.Directory(),
-			Status:       protocol.StatusIdle,
-			Source:       "terminal",
-			Agent:        adapter.AgentOpencode,
-			Model:        model,
-			ControlMode:  c.sm.SessionControlMode(s.ID),
-			Capabilities: c.sm.OpenCodeInteractionCapabilities(s.ID),
+			SessionID:        s.ID,
+			Cwd:              s.Directory(),
+			Status:           protocol.StatusIdle,
+			Source:           "terminal",
+			Agent:            adapter.AgentOpencode,
+			Model:            model,
+			ControlMode:      c.sm.SessionControlMode(s.ID),
+			Capabilities:     c.sm.OpenCodeInteractionCapabilities(s.ID),
 		}
 		// emitUser=true: terminal sessions have no other source of user_text.
 		c.startSync(s.ID, true)
@@ -2048,12 +2048,19 @@ func (sm *SessionManager) SetSessionAgent(ctx context.Context, sessionID, agentN
 // it to subsequent native prompt requests. OpenCode accepts model identity per
 // prompt, so the manager cache is the authoritative selection for this managed
 // session rather than a terminal-only /model interaction.
-func (sm *SessionManager) SwitchSessionModel(ctx context.Context, sessionID, model, requestID string) error {
+func (sm *SessionManager) SwitchSessionModel(ctx context.Context, sessionID, model, requestID string, effort ...string) error {
 	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	defer release()
+	if b := sm.dshBackendFor(sessionID); b != nil {
+		if err := b.selectModel(ctx, sessionID, model, effort...); err != nil {
+			return err
+		}
+		sm.outputCh <- protocol.DaemonEvent{Type: "session_model_changed", SessionID: sessionID, Model: model, Effort: sm.GetSessionEffort(sessionID), RequestID: requestID, Reason: protocol.TurnReasonUserRequested}
+		return nil
+	}
 
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -2116,6 +2123,9 @@ func (sm *SessionManager) ModelsForAgent(agentType string) []protocol.ModelOptio
 }
 
 func (sm *SessionManager) ModelsForAgentHome(agentType, homeID string) []protocol.ModelOption {
+	if agentType == adapter.AgentDSH {
+		return sm.ensureDSH().models()
+	}
 	if agentType != adapter.AgentOpencode {
 		if agentType == adapter.AgentCodex {
 			profile, err := sm.CodexRuntimeProvider().profileForHomeID(homeID)

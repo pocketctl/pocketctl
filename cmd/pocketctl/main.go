@@ -53,7 +53,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.5.0"
+var version = "0.5.1"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -2134,6 +2134,8 @@ func cmdDaemonStart(args []string) {
 	// the daemonize gate — so only the real daemon process spawns `opencode
 	// serve`; otherwise the short-lived launcher process would orphan a second
 	// serve (PPID=1) that races the shared SQLite DB.
+	sm.StartDSHDiscovery()
+	defer sm.ShutdownDSH()
 	if err := sm.StartOpencodeDiscovery(); err != nil {
 		logger.Warn("opencode discovery not started", "error", err)
 	}
@@ -3671,6 +3673,12 @@ func buildSessionMeta(ctx context.Context, sm *session.SessionManager, sessionID
 	if permission, mutable, modes, ok := sm.GetPermissionMeta(sessionID); ok {
 		meta.Permission, meta.PermissionMutable, meta.PermissionMutableModes = permission, mutable, modes
 	}
+	if agentType == adapter.AgentDSH {
+		if settings, err := sm.DSHSettings(ctx, sessionID); err == nil {
+			settings.RequestID = requestID
+			return settings
+		}
+	}
 	return meta
 }
 
@@ -3987,7 +3995,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if config.Agent == "" {
 					config.Agent = "claude-code"
 				}
-				if config.Prompt != "" && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged) {
+				if config.Prompt != "" && (config.Agent == adapter.AgentClaude || config.Agent == adapter.AgentCodex || config.Agent == adapter.AgentOpencode || config.Agent == adapter.AgentZcodeManaged || config.Agent == adapter.AgentDSH) {
 					config.DeferInitialPrompt = true
 				}
 				sessionID, err := sm.CreateSession(ctx, config)
@@ -4212,7 +4220,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 
 			case "set_session_model":
 				modelCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				err := sm.SwitchSessionModel(modelCtx, cmd.SessionID, cmd.Model, cmd.RequestID)
+				err := sm.SwitchSessionModel(modelCtx, cmd.SessionID, cmd.Model, cmd.RequestID, cmd.Effort)
 				cancel()
 				if err != nil {
 					logger.Error("set session model failed", "session", cmd.SessionID, "model", cmd.Model, "error", err)
@@ -4267,13 +4275,17 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 					defer cancel()
 					var capabilities *protocol.CodexCreationCapabilities
+					var dshPermissionModes []string
+					if modelCommand.Agent == adapter.AgentDSH {
+						dshPermissionModes, _ = sm.DSHCreationPermissionModes(queryCtx)
+					}
 					if modelCommand.Agent == adapter.AgentCodex {
 						capabilities = sm.CodexCreationCapabilities(queryCtx, modelCommand.CodexHomeID)
 					}
 					client.SendMsg(protocol.DaemonEvent{
 						Type: "model_list", RequestID: modelCommand.RequestID, Agent: modelCommand.Agent,
 						Models: sm.ModelsForAgentHome(modelCommand.Agent, modelCommand.CodexHomeID), CodexHomeID: modelCommand.CodexHomeID,
-						CreationCapabilities: capabilities,
+						CreationCapabilities: capabilities, PermissionMutableModes: dshPermissionModes,
 					})
 				})
 			case "list_codex_homes":

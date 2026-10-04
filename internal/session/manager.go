@@ -165,6 +165,7 @@ type SessionManager struct {
 	// opencode coordinates the shared `opencode serve` process and its SSE demux
 	// for server-kind (opencode) sessions. Lazily created on first use.
 	opencode                    *opencodeCoordinator
+	dsh                         *dshCoordinator
 	zcodeManaged                *zcodeCoordinator
 	codexProvider               *CodexRuntimeProvider
 	leases                      *agentcontrol.LeaseRegistry

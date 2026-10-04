@@ -50,6 +50,7 @@ automatically advertised as remotely controllable.
 | **Codex CLI 0.144.1+** | Threads, turns, items, plans, and interactions | Managed sessions support shared input, steer/interrupt, approvals, questions, standard MCP elicitation, and explicit `/` command/skill invocation with autocomplete. | Optional launcher connects the official TUI and daemon to one app-server. See [Codex managed terminal control](docs/codex-managed-terminal.md). |
 | **Codex Desktop** | Incremental rollout history, status, model, token usage, tools, plans, and file changes | Read-only: no remote input, approval, interrupt, kill, resume, or session creation. | Automatically discovered observer; displayed separately from Codex CLI as `codex-desktop`. |
 | **OpenCode 1.17.11+** | Sessions, content, status, commands, and interactions | Managed sessions support shared input, permissions, and questions. Existing independent processes stay read-only until safely resumed through the launcher. | Optional launcher connects the official TUI and daemon to one shared server. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md). |
+| **DeepSeek Harness 0.2.0-rc.2 (preview)** | Native session history, streaming output, tools and turns | Shared input, queue/steer, cancellation, one-time approvals and questions. | Explicit attachment to the same `dsh web` Host used by the native browser client. |
 | **ZCode Desktop** | Incremental history sync from the local SQLite store | Read-only: no remote input, approval, resume, or control. | Explicit opt-in observer for Desktop-owned sessions. |
 | **ZCode Runtime** | Live events and turn state of native ZCode sessions | PocketCtl-created sessions support remote creation, shared input, and interrupting active turns; other reverse interaction requests stay unsupported. | Daemon-owned `zcode app-server --stdio` runtime, listed separately from the ZCode Desktop observer. |
 
@@ -146,6 +147,36 @@ opencode
 
 Use `opencode --native ...` for a one-off bypass, or
 `pocketctl agent opencode disable` to remove the PocketCtl launcher.
+
+### DeepSeek Harness (preview)
+
+Start the native Host, then attach PocketCtl using its printed launch URL:
+
+```bash
+dsh web --no-open
+# In another terminal, paste the actual URL printed above:
+pocketctl agent dsh enable --url 'http://127.0.0.1:PORT/?token=TOKEN'
+pocketctl agent dsh status
+```
+
+Open that launch URL for local interaction. The daemon discovers sessions under
+its `--allowed-cwd-root` directories; select the same session in PocketCtl Web
+for remote interaction. Both clients share one Host and session ID. Keep the
+Host running; `pocketctl agent dsh disable` detaches PocketCtl without stopping
+DSH. After restarting the Host, enable again with its new launch URL.
+
+The bootstrap credential stays in `~/.pocketctl/dsh.json` with mode `0600` and is
+not sent to Relay. Only loopback Host URLs are accepted. This integration targets
+DSH's existing Host; it does not start a separate ACP runtime. Electron Desktop
+0.2.0-rc.2 has also passed local-daemon/Docker-Relay acceptance for shared input,
+questions, approvals, cancellation, and bidirectional model/effort/permission
+selection. Web (including mobile layout) and iOS expose the native settings.
+Model and effort changes affect subsequent requests and also save the Host's
+default model. Full-access/custom permission presets require the daemon-local
+`--allow-dangerous-remote-permissions` opt-in. Desktop currently requires an explicit
+local bridge plugin to export its Host launch URL; automatic Desktop attachment
+is not implemented. See the [Desktop acceptance setup and evidence](scripts/verification/dsh-docker/README.md#native-electron-desktop-acceptance).
+Remote worktree/fork creation and attachment uploads are not covered.
 
 ## Memory (experimental)
 

@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -61,6 +62,10 @@ func ValidateRemotePermissionConfigWithPolicy(agent string, cfg *protocol.Permis
 		return nil
 	}
 	switch agent {
+	case AgentDSH:
+		if cfg.Preset != "read-only" && cfg.Preset != "workspace-write" {
+			return fmt.Errorf("DSH permission preset %q requires the daemon-local --allow-dangerous-remote-permissions switch", cfg.Preset)
+		}
 	case AgentClaude:
 		if cfg.Mode == "bypassPermissions" || cfg.Mode == "dontAsk" {
 			return fmt.Errorf("permission mode %q requires the daemon-local --allow-dangerous-remote-permissions switch", cfg.Mode)
@@ -87,6 +92,10 @@ func ValidatePermissionConfig(agent string, cfg *protocol.PermissionConfig) erro
 		return fmt.Errorf("permission agent %q does not match %q", cfg.Agent, agent)
 	}
 	switch agent {
+	case AgentDSH:
+		if cfg.Preset == "" || strings.ContainsAny(cfg.Preset, " \t\r\n") || cfg.Mode != "" || cfg.ApprovalPolicy != "" || cfg.SandboxMode != "" || cfg.DangerousBypass {
+			return fmt.Errorf("DSH permission requires only agent and a native preset")
+		}
 	case AgentClaude:
 		if cfg.Preset != "" || cfg.ApprovalPolicy != "" || cfg.SandboxMode != "" || cfg.DangerousBypass {
 			return fmt.Errorf("codex permission fields are invalid for claude-code")

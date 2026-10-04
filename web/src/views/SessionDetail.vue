@@ -584,8 +584,13 @@
                   @select="requestSessionAgentSwitch"
                   @retry="requestSessionAgents"
                 />
+                <DSHModelSettings v-if="currentSessionAgent === 'dsh'"
+                  :models="dshModels" :model="currentModel" :effort="currentEffort"
+                  :disabled="dshSettingsDisabled" :disabled-reason="dshSettingsDisabledReason"
+                  :pending="!!dshSettingsPending" :error="dshSettingsError"
+                  @select="changeDSHModel" />
                 <!-- Current model (resolved from session_meta) -->
-                <span v-if="currentModel" class="model-pill" :title="t('session.current_model') + ': ' + currentModel">
+                <span v-if="currentModel && currentSessionAgent !== 'dsh'" class="model-pill" :title="t('session.current_model') + ': ' + currentModel">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
                   <span class="model-name">{{ currentModel }}</span>
                 </span>
@@ -729,6 +734,7 @@ import SessionPinBadge from '../components/SessionPinBadge.vue'
 import AgentBadge from '../components/AgentBadge.vue'
 import CommandPopover from '../components/CommandPopover.vue'
 import SessionAgentPicker from '../components/SessionAgentPicker.vue'
+import DSHModelSettings from '../components/DSHModelSettings.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import CommandHelpModal from '../components/CommandHelpModal.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
@@ -1010,6 +1016,37 @@ const { draft: messageInput } = useScopedSessionDraft(sessionScope, sessionId)
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
 const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
+const dshModels = ref<Array<{alias: string; name: string; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string}>>([])
+const dshSettingsPending = ref('')
+const dshSettingsError = ref('')
+const dshEfforts = computed(() => dshModels.value.find(m => m.alias === currentModel.value)?.supported_reasoning_efforts || [])
+const dshSettingsDisabled = computed(() => isReadOnlyObserverSession.value || isDisconnected.value || isExecuting.value || !!dshSettingsPending.value || !dshModels.value.length)
+const dshSettingsDisabledReason = computed(() => {
+  if (isDisconnected.value) return t('session.dsh.offline')
+  if (isReadOnlyObserverSession.value) return t('session.dsh.readOnly')
+  if (isExecuting.value) return t('session.dsh.running')
+  if (!dshModels.value.length) return t('session.dsh.noModels')
+  return ''
+})
+function changeDSHModel(model: string, effort?: string) {
+  if (dshSettingsDisabled.value || !dshModels.value.some(m => m.alias === model)) return
+  const requestId = crypto.randomUUID()
+  dshSettingsPending.value = requestId
+  dshSettingsError.value = ''
+  const selectedEffort = effort ?? dshModels.value.find(m => m.alias === model)?.default_reasoning_effort ?? ''
+  if (!send({type: 'set_session_model', session_id: sessionId.value, request_id: requestId, model, effort: selectedEffort})) {
+    dshSettingsPending.value = ''
+    dshSettingsError.value = t('session.dsh.failed')
+    return
+  }
+  setTimeout(() => {
+    if (dshSettingsPending.value !== requestId) return
+    dshSettingsPending.value = ''
+    dshSettingsError.value = t('session.dsh.failed')
+    requestSessionMeta()
+  }, 16000)
+}
+
 const interactionCapabilities = ref<string[]>([])
 const sessionAgents = ref<SessionAgentOption[]>([])
 const currentOpenCodeAgent = ref('')
@@ -1439,13 +1476,13 @@ watch(() => sessionId.value, (sid) => {
 })
 
 const statusClass = computed(() => {
-  const map: Record<string, string> = { running: 'running', busy: 'running', retry: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
+  const map: Record<string, string> = { running: 'running', busy: 'running', retry: 'running', waiting_approval: 'running', waiting_question: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
   return map[status.value] || ''
 })
 
 const statusLabel = computed(() => {
   if (!runtimeSnapshotReady.value || !statusReady.value) return t('session.loading_history')
-  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', retry: 'session.status.retry', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
+  const STATUS_KEYS: Record<string, string> = { running: 'session.status.running', busy: 'session.status.busy', retry: 'session.status.retry', waiting_approval: 'session.status.waiting_approval', waiting_question: 'session.status.waiting_question', idle: 'session.status.idle', completed: 'session.status.completed', error: 'session.status.error', killed: 'session.status.killed', disconnected: 'session.status.disconnected', exited: 'session.status.exited' }
   return t(STATUS_KEYS[status.value] || 'session.status.idle')
 })
 
@@ -2301,7 +2338,7 @@ function requestPermission(value: string) {
   if (option.dangerous && !window.confirm(t('session.permission.dangerous_confirm'))) return
   const permission: PermissionConfig = currentSessionAgent.value === 'codex'
     ? expandCodexPreset(value as any)
-    : { agent: 'claude-code', mode: value as ClaudeMode }
+    : currentSessionAgent.value === 'dsh' ? { agent: 'dsh', preset: value } : { agent: 'claude-code', mode: value as ClaudeMode }
   pendingPermission.value = permission
   permissionError.value = ''
   send({ type: 'set_permission_config', session_id: sessionId.value, permission })
@@ -3713,6 +3750,7 @@ watch(loadKey, (newKey, oldKey) => {
     commandsCache.value = []
     const nextSession = allSessions.value.find((item: any) => item.session_id === sessionId.value)
     currentModel.value = nextSession?.model || '' // immediate persisted fallback; refreshed by get_session_meta below
+    dshModels.value = []; dshSettingsPending.value = ''; dshSettingsError.value = ''
     currentEffort.value = '' // clear; refilled by authoritative get_session_meta
     interactionCapabilities.value = []
     sessionAgents.value = []
@@ -3880,7 +3918,10 @@ onMounted(() => {
   cleanups.push(onEvent('session_meta', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.model) currentModel.value = msg.model
-    if (msg.effort) currentEffort.value = msg.effort
+    if (currentSessionAgent.value === 'dsh') {
+      currentEffort.value = msg.effort || ''
+      dshModels.value = msg.models || []
+    } else if (msg.effort) currentEffort.value = msg.effort
     interactionCapabilities.value = Array.isArray(msg.capabilities) ? msg.capabilities : []
     const session = allSessions.value.find((item: any) => item.session_id === msg.session_id)
     if (session) {
@@ -3900,6 +3941,7 @@ onMounted(() => {
   // (from the next assistant message's model field). Refresh the badge live.
   cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (currentSessionAgent.value === 'dsh') { currentEffort.value = msg.effort || ''; if (msg.request_id === dshSettingsPending.value) dshSettingsPending.value = '' }
     if (msg.model) currentModel.value = msg.model
     processImmediateLiveEvent(msg, { scroll: true })
   }))
@@ -4207,6 +4249,7 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    if (msg.operation === 'set_session_model' && msg.request_id === dshSettingsPending.value) { dshSettingsPending.value = ''; dshSettingsError.value = msg.error || t('session.dsh.failed'); requestSessionMeta(); return }
     if (msg.operation === 'user_message' && (msg.msg_id || msg.request_id)) {
       const message = findMessageByCorrelation(eventCorrelation(msg))
       if (message) {
@@ -5007,4 +5050,12 @@ onMounted(() => {
 @media(max-width:768px) { .session-message-row {gap:8px} :deep(.msg-user),:deep(.agent-body) {font-size:12px} }
 
 @media(min-width:769px) { .session-toolbar-back { display:none; } }
+</style>
+
+<style scoped>
+.input-meta:has(.dsh-model-settings) { min-width:0; }
+@media (max-width:640px) {
+  .input-meta:has(.dsh-model-settings) { max-width:calc(100% - 112px); }
+  .input-meta:has(.dsh-model-settings) .ctx-indicator { display:none; }
+}
 </style>

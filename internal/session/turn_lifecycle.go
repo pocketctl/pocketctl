@@ -78,6 +78,7 @@ type UserMessageInput struct {
 var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
 
 type userMessageCorrelation struct {
+	InputMode string
 	RequestID string
 	MsgID     string
 	TurnID    string
@@ -106,7 +107,7 @@ func (sm *SessionManager) executionAgent(sessionID string) (string, error) {
 		return "", fmt.Errorf("%w: session %s", ErrSessionExecutionIdentityUnavailable, sessionID)
 	}
 	switch agent {
-	case adapter.AgentClaude, adapter.AgentCodex, adapter.AgentOpencode, adapter.AgentZcodeManaged:
+	case adapter.AgentClaude, adapter.AgentCodex, adapter.AgentOpencode, adapter.AgentZcodeManaged, adapter.AgentDSH:
 		return agent, nil
 	default:
 		return "", fmt.Errorf("%w: unsupported agent %q", ErrSessionExecutionIdentityUnavailable, agent)
@@ -330,7 +331,7 @@ func (sm *SessionManager) deferTurnReserveToBackend(sessionID string) bool {
 	if !ok || ps.Backend == nil {
 		return false
 	}
-	return ps.Agent == "codex" && ps.ControlMode == protocol.ControlManaged
+	return (ps.Agent == "codex" || ps.Agent == adapter.AgentDSH) && ps.ControlMode == protocol.ControlManaged
 }
 
 // SendMessageWithInput reserves the turn before dispatch so the agent's fast
@@ -348,7 +349,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		return err
 	}
 	ctx = context.WithValue(ctx, codexInvocationKey{}, in.InvocationID)
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode})
 	if agent == adapter.AgentCodex && (in.InvocationID == "command:review" || in.InvocationID == "command:compact") {
 		_, err := sm.invokeCodexCommand(ctx, in.SessionID, in.Content, in.InvocationID, true)
 		return err
@@ -988,6 +989,9 @@ func (sm *SessionManager) EnrichOutgoingEvent(ev *protocol.DaemonEvent) {
 			// may bind only when it matches the reserved outbound source identity;
 			// bare daemon-originated content remains eligible.
 			canStamp := true
+			if sm.agentForTurn(rec) == adapter.AgentDSH && ev.SourceTurnID != "" {
+				canStamp = rec.SourceTurnID == ev.SourceTurnID
+			}
 			if sm.agentForTurn(rec) == adapter.AgentOpencode && ev.SourceTurnID != "" {
 				canStamp = rec.SourceTurnID == ev.SourceTurnID ||
 					rec.SourceTurnID == "" && sm.openCodeProjectedSourceCanBind(rec, *ev)
