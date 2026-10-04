@@ -162,8 +162,7 @@ Electron Desktop 0.2.0-rc.2 已通过本机 daemon + Docker Relay 的共享输�
 和 iOS 均提供原生设置入口。模型与强度用于后续请求，同时保存为 Host 默认模型；
 完全权限及自定义权限预设仍需 daemon 本地开启 `--allow-dangerous-remote-permissions`。
 Desktop 目前需要显式安装本地桥接插件，导出
-Host 启动 URL，尚未实现自动接入。详见 [Desktop 验收配置与证据](scripts/verification/dsh-docker/README.md#native-electron-desktop-acceptance)。
-远程创建 worktree/fork 和附件上传尚不在支持范围内。
+Host 启动 URL，尚未实现自动接入。远程创建 worktree/fork 和附件上传尚不在支持范围内。
 
 ## Memory（实验性）
 

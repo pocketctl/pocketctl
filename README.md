@@ -175,8 +175,8 @@ Model and effort changes affect subsequent requests and also save the Host's
 default model. Full-access/custom permission presets require the daemon-local
 `--allow-dangerous-remote-permissions` opt-in. Desktop currently requires an explicit
 local bridge plugin to export its Host launch URL; automatic Desktop attachment
-is not implemented. See the [Desktop acceptance setup and evidence](scripts/verification/dsh-docker/README.md#native-electron-desktop-acceptance).
-Remote worktree/fork creation and attachment uploads are not covered.
+is not implemented. Remote worktree/fork creation and attachment uploads are
+not covered.
 
 ## Memory (experimental)
 
