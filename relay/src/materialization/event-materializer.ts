@@ -564,7 +564,7 @@ export class EventMaterializer {
         await effect.step(() => db.updateSessionMetadata(
           this.effectPool, sessionId,
           typeof payload.model === 'string' ? payload.model : undefined,
-          typeof payload.effort === 'string' ? payload.effort : undefined,
+          typeof payload.effort === 'string' ? payload.effort : payload.agent === 'dsh' ? null : undefined,
         ))
       }
       return true

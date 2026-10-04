@@ -169,6 +169,9 @@ func (sm *SessionManager) setPermissionConfig(ctx context.Context, sessionID str
 		return err
 	}
 	defer release()
+	if b := sm.dshBackendFor(sessionID); b != nil {
+		return b.setPermission(ctx, sessionID, cfg)
+	}
 	if cfg == nil {
 		return fmt.Errorf("permission config is required")
 	}

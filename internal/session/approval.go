@@ -412,6 +412,13 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 		return err
 	}
 	defer release()
+	if b := sm.dshBackendFor(sessionID); b != nil {
+		action := "reject"
+		if approved {
+			action = "once"
+		}
+		return b.resolveApproval(ctx, sessionID, requestID, action)
+	}
 	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsApproval(sessionID, requestID) {
 		action := "reject"
 		if approved {
@@ -483,6 +490,9 @@ func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action str
 }
 
 func (sm *SessionManager) resolveApprovalAction(ctx context.Context, sessionID, requestID, action string) error {
+	if b := sm.dshBackendFor(sessionID); b != nil {
+		return b.resolveApproval(ctx, sessionID, requestID, action)
+	}
 	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsApproval(sessionID, requestID) {
 		return broker.ResolveApproval(ctx, sessionID, requestID, action)
 	}
@@ -605,6 +615,9 @@ func (sm *SessionManager) ResolveQuestion(sessionID, requestID string, answers [
 	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
 		return broker.ResolveQuestion(ctx, sessionID, requestID, answers)
 	}
+	if b := sm.dshBackendFor(sessionID); b != nil {
+		return b.resolveQuestion(ctx, sessionID, requestID, answers)
+	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {
 		return fmt.Errorf("opencode session not found")
@@ -706,6 +719,9 @@ func (sm *SessionManager) RejectQuestion(sessionID, requestID string) error {
 	defer release()
 	if broker := sm.codexInteractionBroker(sessionID); broker != nil && broker.KnowsQuestion(sessionID, requestID) {
 		return broker.RejectQuestion(ctx, sessionID, requestID)
+	}
+	if b := sm.dshBackendFor(sessionID); b != nil {
+		return b.rejectQuestion(ctx, sessionID, requestID)
 	}
 	b := sm.opencodeBackendFor(sessionID)
 	if b == nil || b.coord == nil || b.coord.srv() == nil {

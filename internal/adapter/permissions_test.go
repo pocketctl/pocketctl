@@ -130,3 +130,26 @@ func TestValidateRemotePermissionHonorsLocalDangerousSwitch(t *testing.T) {
 		}
 	}
 }
+
+func TestDSHCreationPermissionPolicy(t *testing.T) {
+	for _, preset := range []string{"read-only", "workspace-write"} {
+		if err := ValidateRemotePermissionConfig(AgentDSH, &protocol.PermissionConfig{Agent: AgentDSH, Preset: preset}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, preset := range []string{"danger-full-access", "custom-unconfined"} {
+		cfg := &protocol.PermissionConfig{Agent: AgentDSH, Preset: preset}
+		if ValidateRemotePermissionConfig(AgentDSH, cfg) == nil {
+			t.Fatal("unconfined preset accepted without local opt-in")
+		}
+		if err := ValidateRemotePermissionConfigWithPolicy(AgentDSH, cfg, RemotePermissionPolicy{AllowDangerous: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ValidatePermissionConfig(AgentDSH, &protocol.PermissionConfig{Agent: AgentDSH, Preset: "read-only\ninjected"}) == nil {
+		t.Fatal("malformed preset accepted")
+	}
+	if ValidatePermissionConfig(AgentDSH, &protocol.PermissionConfig{Agent: AgentDSH, Preset: "read-only", Mode: "manual"}) == nil {
+		t.Fatal("mixed agent fields accepted")
+	}
+}

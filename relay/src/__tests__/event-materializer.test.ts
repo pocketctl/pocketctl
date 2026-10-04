@@ -38,6 +38,13 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test('DSH authoritative default effort clears a previously stored effort', async () => {
+    const update = vi.spyOn(db, 'updateSessionMetadata').mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({ pool: pools() as never })
+    await materializer.materialize(inputFor({ type:'session_meta', session_id:'ses-1', agent:'dsh', model:'p/model' }))
+    expect(update).toHaveBeenLastCalledWith(expect.anything(), 'ses-1', 'p/model', null)
+  })
+
   test('session metadata persists model and effort, including sparse refreshes', async () => {
     const update = vi.spyOn(db, 'updateSessionMetadata').mockResolvedValue(undefined)
     const materializer = new EventMaterializer({ pool: pools() as never })

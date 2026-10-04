@@ -370,7 +370,7 @@ describe('Codex Desktop observer Relay boundary', () => {
     },
   )
 
-  test.each(['claude-code', 'codex', 'opencode', ''])(
+  test.each(['claude-code', 'codex', 'opencode', 'dsh', ''])(
     'keeps create-capable and empty legacy agent %j routable',
     async (agent) => {
       const { router, daemon, client } = routerFixture()

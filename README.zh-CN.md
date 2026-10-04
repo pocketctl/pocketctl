@@ -45,6 +45,7 @@ PocketCtl 按真实能力开放控制。发现一个会话，并不代表它会�
 | **Codex CLI 0.144.1+** | Thread、Turn、Item、计划与交互 | 受管会话支持共享输入、Steer/Interrupt、审批、问题、标准 MCP Elicitation，以及带自动补全的 `/` 命令与技能显式调用。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个 App Server。详见 [Codex 受管终端控制](docs/codex-managed-terminal.md)。 |
 | **Codex Desktop** | 增量同步 rollout 历史、状态、模型、Token、工具、计划和文件改动 | 只读，不支持远程输入、审批、中断、终止、恢复或创建会话。 | 自动发现的 Observer；以 `codex-desktop` 与 Codex CLI 分开显示。 |
 | **OpenCode 1.17.11+** | 会话、内容、状态、命令与交互 | 受管会话支持共享输入、Permission 和 Question；已独立运行的进程保持只读，直到通过 Launcher 安全恢复。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个共享 Server。详见 [OpenCode 受管终端控制](docs/opencode-managed-terminal.md)。 |
+| **DeepSeek Harness 0.2.0-rc.2（预览）** | 原生会话历史、流式输出、工具和 Turn | 共享输入、排队/steer、取消、单次审批与提问 | 显式接入本地 DSH Web 客户端使用的同一个 `dsh web` Host。 |
 | **ZCode Desktop** | 从本地 SQLite 增量同步历史 | 只读，不支持远程输入、审批、恢复或控制。 | 针对 Desktop 拥有会话、显式启用的 Observer。 |
 | **ZCode Runtime** | 原生 ZCode 会话的实时事件与 Turn 状态 | PocketCtl 创建的会话支持远程创建、共享输入和中断活动 Turn；其余反向交互请求保持不支持。 | Daemon 拥有的 `zcode app-server --stdio` 运行时，与 ZCode Desktop Observer 分开显示。 |
 
@@ -137,6 +138,31 @@ opencode
 
 单次绕过 PocketCtl 可使用 `opencode --native ...`；执行
 `pocketctl agent opencode disable` 可移除 PocketCtl Launcher。
+
+### DeepSeek Harness（预览）
+
+先启动原生 Host，再用它打印的启动 URL 接入 PocketCtl：
+
+```bash
+dsh web --no-open
+# 在另一个终端中填入上一步实际输出的 URL：
+pocketctl agent dsh enable --url 'http://127.0.0.1:PORT/?token=TOKEN'
+pocketctl agent dsh status
+```
+
+打开该 URL 使用本地 DSH 客户端。Daemon 自动发现 `--allowed-cwd-root`
+授权目录内的会话，在 PocketCtl Web 选择同一会话即可远程操作。两端共享
+同一个 Host 和会话 ID。请保持 Host 运行；`pocketctl agent dsh disable`
+只解除 PocketCtl 接入，不停止 DSH。Host 重启后需用新的启动 URL 再次启用。
+
+启动凭据仅保存在权限为 `0600` 的 `~/.pocketctl/dsh.json`，不会发送至 Relay，
+只接受回环地址。本接入复用 DSH 已有 Host，不会另起 ACP 运行时。
+Electron Desktop 0.2.0-rc.2 已通过本机 daemon + Docker Relay 的共享输入、
+提问、审批、双向取消及模型／思考强度／权限双向同步验收。Web（含手机网页）
+和 iOS 均提供原生设置入口。模型与强度用于后续请求，同时保存为 Host 默认模型；
+完全权限及自定义权限预设仍需 daemon 本地开启 `--allow-dangerous-remote-permissions`。
+Desktop 目前需要显式安装本地桥接插件，导出
+Host 启动 URL，尚未实现自动接入。远程创建 worktree/fork 和附件上传尚不在支持范围内。
 
 ## Memory（实验性）
 

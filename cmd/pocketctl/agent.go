@@ -111,6 +111,9 @@ func runAgentCommand(args []string, stdout, stderr io.Writer, manager any) error
 		return nil
 	}
 	agent := args[0]
+	if agent == "dsh" {
+		return runDSHCommand(args[1:], stdout, stderr)
+	}
 	// ZCode is a read-only observer, not a managed (launcher-shim) agent. It has
 	// its own `sync` subcommand and must NOT be routed through the opencode/codex
 	// launcher manager. Dispatch it before the managed-agent gate below.

@@ -91,6 +91,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, config protocol.Ses
 		}
 	}
 
+	if config.Agent == adapter.AgentDSH {
+		return sm.createDSHSession(ctx, config)
+	}
+
 	cliPath, err := sm.createDeps.resolveAgentCLI(config)
 	if err != nil {
 		return "", err

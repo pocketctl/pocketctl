@@ -90,6 +90,7 @@ const (
 	AgentCodex        = "codex"
 	AgentCodexDesktop = "codex-desktop"
 	AgentOpencode     = "opencode"
+	AgentDSH          = "dsh"
 	// AgentZcodeManaged is deliberately distinct from AgentZcode: the latter is
 	// a read-only Desktop observer, while this identity is daemon-owned.
 	AgentZcodeManaged = "zcode-managed"
