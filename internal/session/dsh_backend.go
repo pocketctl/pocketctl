@@ -262,13 +262,23 @@ func (c *dshCoordinator) attach(s dshSummary, source string) {
 	if s.Projections.Values.Title != "" {
 		c.updateTitle(s.SessionID, s.Projections.Values.Title)
 	}
-	c.mu.Lock()
-	if _, ok := c.following[s.SessionID]; !ok {
-		ctx, cancel := context.WithCancel(c.ctx)
-		c.following[s.SessionID] = cancel
-		go c.follow(ctx, s.SessionID)
+	// Daemon-created sessions apply their initial model/permission settings
+	// right after attach; following may start only afterwards so a failing
+	// first WebSocket attempt cannot race the creation flow into a
+	// disconnected (non-idle) status.
+	if source != "daemon" {
+		c.startFollowing(s.SessionID)
 	}
-	c.mu.Unlock()
+}
+
+func (c *dshCoordinator) startFollowing(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.following[id]; !ok {
+		ctx, cancel := context.WithCancel(c.ctx)
+		c.following[id] = cancel
+		go c.follow(ctx, id)
+	}
 }
 
 type dshBackend struct{ coord *dshCoordinator }
@@ -336,6 +346,9 @@ func (b *dshBackend) Start(ctx context.Context, cfg protocol.SessionConfig) (str
 		return "", err
 	}
 	b.coord.attach(dshSummary{SessionID: result.SessionID, Cwd: cfg.Cwd}, "daemon")
+	// Settings must settle before the follow stream can observe the session;
+	// defer keeps the ordering on early error returns as well.
+	defer b.coord.startFollowing(result.SessionID)
 	if cfg.Model != "" {
 		if err := b.selectModel(ctx, result.SessionID, cfg.Model, cfg.Effort); err != nil {
 			return result.SessionID, err
