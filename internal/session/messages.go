@@ -226,7 +226,8 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		// sessions get their user_text from DirWatch (storage), so echoing here
 		// would duplicate.
 		if src != "terminal" && agent != adapter.AgentCodex && agent != adapter.AgentDSH {
-			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content}
+			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content,
+				RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID}
 		}
 		if hidden != nil {
 			if aware, ok := ps.Backend.(interface {
@@ -295,6 +296,9 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 				Type:      "user_text",
 				SessionID: ps.SessionID,
 				Text:      content,
+				RequestID: correlation.RequestID,
+				MsgID:     correlation.MsgID,
+				TurnID:    correlation.TurnID,
 			}
 			sm.mu.Lock()
 			ps.Status = protocol.StatusRunning

@@ -1059,7 +1059,7 @@ func TestReviewOpenCodeInitialDispatchUsesTurnAwareSendPath(t *testing.T) {
 		Status: protocol.StatusIdle, Backend: backend, ControlMode: protocol.ControlManaged,
 	}
 	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{
-		SessionID: "opencode-initial", Content: "hello opencode",
+		SessionID: "opencode-initial", Content: "hello opencode", RequestID: "echo-request", MsgID: "echo-message",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1067,7 +1067,7 @@ func TestReviewOpenCodeInitialDispatchUsesTurnAwareSendPath(t *testing.T) {
 	if first.Type != protocol.EventTypeTurnStatus || first.TurnStatus != protocol.TurnStateRunning {
 		t.Fatalf("first event = %+v, want running lifecycle", first)
 	}
-	if second.Type != "user_text" || second.Text != "hello opencode" {
+	if second.Type != "user_text" || second.Text != "hello opencode" || second.RequestID != "echo-request" || second.MsgID != "echo-message" || second.TurnID == "" {
 		t.Fatalf("second event = %+v, want optimistic echo", second)
 	}
 	if backend.sentSession != "opencode-initial" || backend.sentContent != "hello opencode" {
