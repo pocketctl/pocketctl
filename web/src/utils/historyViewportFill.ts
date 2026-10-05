@@ -23,9 +23,11 @@ interface HistoryViewportFillStart {
   baselineContentHeight: number
   requestedCursor?: number
   now?: number
+  targetVisibleMessages?: number
 }
 
 interface HistoryViewportPageMeasurement {
+  visibleMessages?: number
   viewportHeight: number
   contentHeight: number
   hasMore: boolean
@@ -49,6 +51,7 @@ interface ActiveHistoryViewportFill {
   requestedCursor?: number
   startedAt: number
   completedPages: number
+  targetVisibleMessages?: number
 }
 
 const DEFAULT_MAX_PAGES = 5
@@ -99,6 +102,7 @@ export class HistoryViewportFillCoordinator {
       requestedCursor: input.requestedCursor,
       startedAt: input.now ?? Date.now(),
       completedPages: 0,
+      targetVisibleMessages: input.targetVisibleMessages,
     }
   }
 
@@ -111,11 +115,13 @@ export class HistoryViewportFillCoordinator {
     if (!active) return { kind: 'finish', reason: 'invalid_geometry' }
     active.completedPages += 1
 
-    if (!finitePositive(input.viewportHeight) || !Number.isFinite(input.contentHeight)) {
+    if (!active.targetVisibleMessages && (!finitePositive(input.viewportHeight) || !Number.isFinite(input.contentHeight))) {
       return this.finish('invalid_geometry')
     }
 
-    const targetReached = active.mode === 'older'
+    const targetReached = active.targetVisibleMessages
+      ? (input.visibleMessages ?? 0) >= active.targetVisibleMessages
+      : active.mode === 'older'
       ? input.contentHeight - active.baselineContentHeight >= historyOlderTargetHeight(input.viewportHeight)
       : input.contentHeight >= historyInitialTargetHeight(input.viewportHeight)
     if (targetReached) return this.finish('target_reached')
@@ -128,8 +134,9 @@ export class HistoryViewportFillCoordinator {
     if (active.requestedCursor !== undefined && cursor >= active.requestedCursor) {
       return this.finish('cursor_did_not_advance')
     }
-    if (active.completedPages >= this.maxPages) return this.finish('page_limit_reached')
-    if ((input.now ?? Date.now()) - active.startedAt > this.maxElapsedMs) {
+    if (active.completedPages >= (active.targetVisibleMessages ? 10 : this.maxPages)) return this.finish('page_limit_reached')
+    const elapsed = (input.now ?? Date.now()) - active.startedAt
+    if (active.targetVisibleMessages ? elapsed >= 3_000 : elapsed > this.maxElapsedMs) {
       return this.finish('time_limit_reached')
     }
 

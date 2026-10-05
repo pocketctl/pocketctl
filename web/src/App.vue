@@ -221,8 +221,8 @@ const navigationItems = computed(() => {
   ].filter(item => item.id !== 'teams' || teamAccess.enabled.value)
   if (!showMobileShell.value) return items
   return [
-    { id: 'hosts', to: '/hosts', label: 'mobile.my_hosts', icon: 'hosts' },
     { id: 'sessions', to: '/sessions?view=active', label: 'mobile.host_sessions', icon: 'sessions' },
+    { id: 'hosts', to: '/hosts', label: 'mobile.my_hosts', icon: 'hosts' },
     { id: 'inbox', to: '/inbox', label: 'attention.title', icon: 'inbox' },
     { id: 'agents', to: '/hosts?view=agents', label: 'mobile.host_agent_manage', icon: 'agent' },
     ...items.filter(item => ['memory', 'teams'].includes(item.id)).map(item => ({ ...item, section: undefined })),

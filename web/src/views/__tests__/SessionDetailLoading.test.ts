@@ -53,6 +53,7 @@ vi.mock('../../services/sessionOrganization', () => ({
 
 describe('SessionDetail history loading', () => {
   beforeEach(() => {
+    localStorage.removeItem('pocketctl.mobile.showToolCalls')
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })))
     routeMock.current = reactive({ params: { id: 'session-http-lan' }, query: {} as Record<string, string> })
     websocketMock.handlers.clear()
@@ -69,6 +70,46 @@ describe('SessionDetail history loading', () => {
     vi.restoreAllMocks()
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  test('mobile skips hidden-tool pages, excludes live messages from the history target, and stops at visible history', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const vm = wrapper.vm as any
+    function page(events: any[], cursor: number) {
+      const request = websocketMock.send.mock.calls.map(([msg]) => msg).filter(msg => msg.type === 'replay').at(-1)!
+      websocketMock.handlers.get('replay_batch')?.({ session_id: 'session-http-lan', req_id: request.req_id, direction: 'backward', events })
+      websocketMock.handlers.get('replay_end')?.({ session_id: 'session-http-lan', req_id: request.req_id, last_seq: cursor, has_more: true, status: 'running' })
+    }
+    page([{ type: 'tool_call', session_id: 'session-http-lan', tool: 'Read', call_id: 'hidden', input: '{}' }], 100)
+    await flushPromises()
+    expect(websocketMock.send.mock.calls.filter(([m]) => m.type === 'replay')).toHaveLength(2)
+    expect(vm.renderMessages).toHaveLength(0)
+    for (let n = 0; n < 20; n++) vm.processEvent({ type: 'user_text', session_id: 'session-http-lan', text: `live-${n}`, msg_id: `live-${n}` })
+    page([{ type: 'tool_call', session_id: 'session-http-lan', tool: 'Bash', call_id: 'hidden2', input: '{}' }], 80)
+    await flushPromises()
+    expect(websocketMock.send.mock.calls.filter(([m]) => m.type === 'replay')).toHaveLength(3)
+    page(Array.from({length: 20}, (_, n) => ({ type: 'user_text', session_id: 'session-http-lan', text: `history-${n}`, msg_id: `history-${n}` })), 40)
+    await flushPromises()
+    expect(websocketMock.send.mock.calls.filter(([m]) => m.type === 'replay')).toHaveLength(3)
+    expect(vm.isLoadingBackward).toBe(false)
+    expect(vm.messages.filter((m: any) => m.type === 'tool_call')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  test('mobile timeout releases loading and rejects a late page without advancing its cursor', async () => {
+    vi.useFakeTimers()
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const request = websocketMock.send.mock.calls.map(([msg]) => msg).find(msg => msg.type === 'replay')!
+    await vi.advanceTimersByTimeAsync(10_001)
+    const vm = wrapper.vm as any
+    expect(vm.isLoading).toBe(false)
+    websocketMock.handlers.get('replay_end')?.({ session_id: 'session-http-lan', req_id: request.req_id, last_seq: 100, has_more: true })
+    expect(vm.loadedMinId).toBe(0)
+    expect(vm.historyFeedback).toBe('session.history_partial_failure')
+    wrapper.unmount()
   })
 
   test('resolves default from the arriving list without requesting a placeholder session', async () => {

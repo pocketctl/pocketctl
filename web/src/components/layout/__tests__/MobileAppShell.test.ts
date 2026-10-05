@@ -152,6 +152,7 @@ describe('mobile application shell', () => {
       await wrapper.get('.mobile-menu-trigger').trigger('click')
       await flushPromises()
       expect(wrapper.get('[role="dialog"]').attributes('aria-label')).toBe(useLocale().t('workspace.main_navigation'))
+      expect(wrapper.findAll('.sidebar-nav a.sidebar-link').slice(0, 2).map(link => link.attributes('href'))).toEqual(['/sessions?view=active', '/hosts'])
       await wrapper.get('.sidebar a[href="/hosts"]').trigger('click')
       await flushPromises()
       expect(router.currentRoute.value.path).toBe('/hosts')

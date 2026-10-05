@@ -212,6 +212,11 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
+          <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
+            :aria-checked="mobileShowToolCalls" data-toolbar-action="show-tool-calls" @click="toggleMobileToolCalls">
+            <span><span>{{ t('session.show_tool_calls') }}</span><small class="tool-visibility-hint">{{ t('session.tool_visibility_hint') }}</small></span>
+            <span class="tool-visibility-switch" :class="{ enabled: mobileShowToolCalls }" aria-hidden="true"></span>
+          </button>
           <div v-if="contextTokens || focusedSubAgentTokenTotal > 0 || parentTotalTokens !== null || currentModel || effortVisible" class="toolbar-overflow-metrics">
             <span v-if="!focusedSubAgentId && currentModel" class="toolbar-overflow-metric">{{ currentModel }}</span>
             <span v-if="!focusedSubAgentId && effortVisible" class="toolbar-overflow-metric">{{ effortLabel }}</span>
@@ -312,8 +317,13 @@
           </template>
         </div>
 
+        <div v-if="isMobile && !isLoading && !isLoadingBackward && (historyFeedback || hasMore)" class="mobile-history-feedback" role="status">
+          <span>{{ historyFeedback }}</span>
+          <button v-if="hasMore" type="button" @click="loadMoreMobileHistory">{{ t('attention.load_more') }}</button>
+          <button v-else-if="historyFeedback" type="button" @click="retryHistory">{{ t('common.retry') }}</button>
+        </div>
         <!-- Empty state when no messages -->
-        <div v-else-if="renderMessages.length === 0" class="chat-empty-state">
+        <div v-if="!isLoading && renderMessages.length === 0" class="chat-empty-state">
           <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -322,7 +332,7 @@
         </div>
 
         <!-- Messages -->
-        <template v-for="msg in renderMessages" :key="msg.id">
+        <div v-for="msg in renderMessages" :key="msg.id" class="session-timeline-entry" :data-history-message-id="msg.id">
           <div v-if="turnHeaderFor(msg)" class="turn-group-header" :data-turn-id="msg.turn_id" :data-turn-segment-id="turnHeaderFor(msg)?.id">
             <span class="turn-group-label">Turn</span>
             <span v-if="turnHeaderFor(msg)?.interrupted" class="turn-group-state"> {{ t('workspace.interrupted') }} </span>
@@ -340,7 +350,7 @@
 
           </div></article>
           <!-- Agent text message -->
-          <article v-else-if="msg.type === 'agent_text'" class="session-message-row"><span class="message-avatar agent">C</span><div class="message-body"><div class="message-byline">{{ (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'claude-code' ? 'Claude Code' : (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'codex' ? 'Codex' : currentSessionAgent || 'Agent' }}</div>
+          <article v-else-if="msg.type === 'agent_text'" class="session-message-row" :class="{ 'tool-followup': isMobile && toolFollowupIDs.has(msg.id) }"><span class="message-avatar agent">C</span><div class="message-body"><div class="message-byline">{{ (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'claude-code' ? 'Claude Code' : (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'codex' ? 'Codex' : currentSessionAgent || 'Agent' }}</div>
           <MessageAgent
             :content="cleanContent(msg.content)"
             :streaming="msg.streaming"
@@ -380,7 +390,7 @@
             :desc="msg.input"
             :agent-type="msg.agentType || ''"
             :token-usage="msg.tokenUsage || childrenToken[msg.tool]"
-            :messages="subagentMessages[msg.tool] || []"
+            :messages="(subagentMessages[msg.tool] || []).filter((message: any) => showsMobileMessage(message, showToolCalls))"
             :parent-title="sessionTitle || ''"
           />
           <ToolCallGroup
@@ -467,7 +477,7 @@
           />
           <div v-else-if="msg.type !== 'turn_status' && msg.type !== 'agent_file_change'" class="turn-unknown-event">{{ msg.content || msg.error || msg.type }}</div>
           </template>
-        </template>
+        </div>
 
         <!-- Turn status bar: lives inside the message stream (visually part of
              it), below the last message. Live timer while working; on completion
@@ -784,6 +794,7 @@ import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../ut
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
 import { createClientId } from '../utils/clientId'
+import { readMobileToolVisibility, saveMobileToolVisibility, showsMobileMessage } from '../utils/mobileToolVisibility'
 import { HistoryViewportFillCoordinator, shouldStartHistoryResizeFill } from '../utils/historyViewportFill'
 import SessionDocumentShelf from '../components/session-documents/SessionDocumentShelf.vue'
 import SessionDocumentViewer from '../components/session-documents/SessionDocumentViewer.vue'
@@ -805,6 +816,9 @@ const route = useRoute()
 const router = useRouter()
 useVisualViewport()
 const { isMobile } = useResponsiveLayout()
+const mobileShowToolCalls = ref(readMobileToolVisibility())
+const showToolCalls = computed(() => !isMobile.value || mobileShowToolCalls.value)
+
 const { setSessionHeader, clearSessionHeader } = useSessionHeader()
 const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
@@ -1060,7 +1074,7 @@ const isSlowLoading = ref(false)
 const HISTORY_SLOW_THRESHOLD_MS = 8_000
 let historySlowTimer: ReturnType<typeof setTimeout> | null = null
 // session-history-pagination: backward pagination state
-const pageSize = computed(() => 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
+const pageSize = computed(() => isMobile.value ? 20 : 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
@@ -1079,6 +1093,74 @@ function resetReplayTrustBuffers() {
 }
 let olderReplayScrollHeight = 0
 let olderReplayScrollTop = 0
+let olderReadingAnchor: { id: string; top: number } | undefined
+const historyFeedback = ref('')
+let historyPageTimer: ReturnType<typeof setTimeout> | undefined
+let mobileHistoryNeedsGesture = false
+const loadedHistoryIDs = new Set<string>()
+
+function historyReadingAnchor(allowed?: Set<string>): { id: string; top: number } | undefined {
+  const parent = messagesEl.value
+  if (!parent) return
+  const top = parent.getBoundingClientRect().top
+  for (const row of parent.querySelectorAll<HTMLElement>('[data-history-message-id]')) {
+    const id = row.dataset.historyMessageId!
+    if (allowed && !allowed.has(id)) continue
+    const element = Array.from(row.children).find(child => child.getBoundingClientRect().height > 0)
+    if (!element) continue
+    const rect = element.getBoundingClientRect()
+    if (rect.bottom > top) return { id, top: rect.top - top }
+  }
+}
+function restoreHistoryReadingAnchor(anchor: typeof olderReadingAnchor): boolean {
+  const parent = messagesEl.value
+  if (!parent || !anchor) return false
+  const row = Array.from(parent.querySelectorAll<HTMLElement>('[data-history-message-id]')).find(row => row.dataset.historyMessageId === anchor.id)
+  const element = row && Array.from(row.children).find(child => child.getBoundingClientRect().height > 0)
+  if (!element) return false
+  parent.scrollTop += element.getBoundingClientRect().top - parent.getBoundingClientRect().top - anchor.top
+  return true
+}
+async function toggleMobileToolCalls() {
+  mobileShowToolCalls.value = !mobileShowToolCalls.value
+  saveMobileToolVisibility(mobileShowToolCalls.value)
+}
+watch(showToolCalls, async (value) => {
+  const parent = messagesEl.value
+  const context = loadKey.value
+  const atBottom = parent ? parent.scrollHeight - parent.scrollTop - parent.clientHeight < 60 : true
+  const anchor = historyReadingAnchor(new Set(sourceMessages.value.filter(message => showsMobileMessage(message, value)).map(message => String(message.id))))
+  // Keep the same operation budget and cursor; its visible total is recomputed at replay_end.
+  mobileHistoryNeedsGesture = true
+  await nextTick()
+  if (context !== loadKey.value) return
+  if (atBottom) scrollToBottom()
+  else restoreHistoryReadingAnchor(anchor)
+  if (isLoadingBackward.value) olderReadingAnchor = historyReadingAnchor()
+}, { flush: 'pre' })
+function beginHistoryFill(input: Parameters<HistoryViewportFillCoordinator['begin']>[0]) {
+  loadedHistoryIDs.clear()
+  historyFeedback.value = ''
+  mobileHistoryNeedsGesture = false
+  historyViewportFill.begin({ ...input, targetVisibleMessages: isMobile.value ? 20 : undefined })
+}
+function loadMoreMobileHistory() {
+  if (!hasMore.value || isLoading.value || isLoadingBackward.value || historyViewportFill.mode || loadedMinId.value <= 0) return
+  beginHistoryFill({ mode: 'older', baselineContentHeight: messagesEl.value?.scrollHeight ?? 0, requestedCursor: loadedMinId.value })
+  requestOlderHistoryPage(loadedMinId.value)
+}
+function armMobileHistoryTimeout() {
+  if (historyPageTimer) clearTimeout(historyPageTimer)
+  if (!isMobile.value) return
+  const request = replayReqId.value
+  historyPageTimer = setTimeout(() => {
+    if (request !== replayReqId.value) return
+    replayReqId.value++
+    resetReplayTrustBuffers()
+    finishHistoryViewportFill()
+    historyFeedback.value = t('session.history_partial_failure')
+  }, 10_000)
+}
 
 // PostgreSQL bigint values arrive from the Relay as JSON strings. Keep the
 // component's pagination state numeric so cursor comparisons and the viewport
@@ -1572,9 +1654,11 @@ const focusedSubAgentTokenTotal = computed(() => {
   return (c.tokenIn || 0) + (c.tokenOut || 0) + (c.tokenCache || 0) + (c.tokenCacheCreate || 0)
 })
 // Render source: the focused sub-agent's bucket when focusing, else parent messages.
-const renderMessages = computed(() =>
+const sourceMessages = computed<any[]>(() =>
   focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
 )
+const renderMessages = computed(() => sourceMessages.value.filter(message => showsMobileMessage(message, showToolCalls.value)))
+
 const toolGrouping = computed(() => buildToolCallGrouping(renderMessages.value))
 function toolGroupFor(message: any): any[] | undefined {
   return toolGrouping.value.groups.get(message)
@@ -1621,6 +1705,18 @@ function isHiddenAuxiliary(message: any): boolean {
   const entry = turnMessageProjection.value.get(message)
   return !!entry && !entry.main && !isAuxiliaryExpanded(entry.row.id)
 }
+// Adjacent physical rows, rather than raw tool continuations, determine the reply gap.
+const toolFollowupIDs = computed(() => {
+  const result = new Set<string>()
+  let previous: any
+  for (const message of renderMessages.value) {
+    if (isHiddenAuxiliary(message) || isToolGroupContinuation(message)) continue
+    if (message.type === 'agent_text' && previous?.type === 'tool_call'
+      && previous.tool !== 'AskUserQuestion' && !turnHeaderFor(message)) result.add(message.id)
+    previous = message
+  }
+  return result
+})
 const requestDeepLinkId = computed(() => normalizeRequestId(route.query.request_id))
 watch(
   [
@@ -2133,8 +2229,10 @@ function prependOlderReplayEvents(events: any[]) {
     if (!subagentMessages.value[agentId]) subagentMessages.value[agentId] = []
     subagentMessages.value[agentId] = [...withoutExistingUserMessages(bucket, subagentMessages.value[agentId]), ...subagentMessages.value[agentId]]
   }
+  const readingAnchor = olderReadingAnchor
   nextTick(() => {
     if (!messagesEl.value) return
+    if (isMobile.value && restoreHistoryReadingAnchor(readingAnchor)) return
     const delta = messagesEl.value.scrollHeight - olderReplayScrollHeight
     messagesEl.value.scrollTop = olderReplayScrollTop + delta
   })
@@ -2161,6 +2259,7 @@ function resolveDefaultSession() {
 watch(showNewSession, open => { if (!open && sessionId.value === 'default') resolveDefaultSession() })
 
 function loadHistory() {
+  if (historyPageTimer) clearTimeout(historyPageTimer)
   clearHistorySlowTimer()
   isSlowLoading.value = false
   if (sessionId.value === 'default') {
@@ -2181,7 +2280,8 @@ function loadHistory() {
   isLoadingBackward.value = false
   hasMore.value = false
   resetReplayTrustBuffers()
-  historyViewportFill.begin({ mode: 'initial', baselineContentHeight: 0 })
+  beginHistoryFill({ mode: 'initial', baselineContentHeight: 0 })
+  armMobileHistoryTimeout()
   if (focusedSubAgentId.value) {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
@@ -2205,6 +2305,8 @@ function retryHistory() {
 }
 
 function finishHistoryViewportFill(mode = historyViewportFill.mode): void {
+  if (historyPageTimer) clearTimeout(historyPageTimer)
+  if (isMobile.value) mobileHistoryNeedsGesture = true
   historyViewportFill.cancel()
   isLoading.value = false
   isLoadingBackward.value = false
@@ -2215,6 +2317,7 @@ function finishHistoryViewportFill(mode = historyViewportFill.mode): void {
 
 function requestOlderHistoryPage(cursor: number): boolean {
   const element = messagesEl.value
+  olderReadingAnchor = isMobile.value ? historyReadingAnchor() : undefined
   if (element) {
     olderReplayScrollHeight = element.scrollHeight
     olderReplayScrollTop = element.scrollTop
@@ -2230,7 +2333,10 @@ function requestOlderHistoryPage(cursor: number): boolean {
         type: 'replay', session_id: sessionId.value, direction: 'backward',
         last_seq: cursor, limit: pageSize.value, req_id: replayReqId.value,
       })
-  if (!sent) finishHistoryViewportFill()
+  if (!sent) {
+    finishHistoryViewportFill()
+    if (isMobile.value) historyFeedback.value = t('session.history_partial_failure')
+  } else armMobileHistoryTimeout()
   return sent
 }
 
@@ -2254,10 +2360,16 @@ async function settleHistoryReplayPage(msg: any): Promise<void> {
     contentHeight: element?.scrollHeight ?? 0,
     hasMore: hasMore.value,
     cursor: replayCursor,
+    visibleMessages: renderMessages.value.filter(message => loadedHistoryIDs.has(String(message.id)) && !isHiddenAuxiliary(message) && !isToolGroupContinuation(message)).length,
   })
   if (decision.kind === 'continue') {
     requestOlderHistoryPage(decision.cursor)
     return
+  }
+  if (isMobile.value && ['page_limit_reached', 'time_limit_reached'].includes(decision.reason)) {
+    historyFeedback.value = t('session.history_continue')
+  } else if (isMobile.value && ['invalid_cursor', 'cursor_did_not_advance'].includes(decision.reason)) {
+    historyFeedback.value = t('session.history_partial_failure')
   }
   finishHistoryViewportFill(mode)
 }
@@ -2286,10 +2398,10 @@ watch(messagesEl, (element) => {
         scrollTop: element.scrollTop,
         hasMore: hasMore.value,
         hasCursor: loadedMinId.value > 0,
-        isLoading: isLoading.value || isLoadingBackward.value,
+        isLoading: isLoading.value || isLoadingBackward.value || (isMobile.value && !!historyViewportFill.mode),
       })
       if (!eligible) return
-      historyViewportFill.begin({
+      beginHistoryFill({
         mode: 'resize',
         baselineContentHeight: element.scrollHeight,
         requestedCursor: loadedMinId.value,
@@ -2318,9 +2430,14 @@ function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
   autoScroll.value = scrollHeight - scrollTop - clientHeight < 60
+  if (isMobile.value && historyViewportFill.mode) return
+  if (isMobile.value && mobileHistoryNeedsGesture) {
+    if (scrollTop >= 60) mobileHistoryNeedsGesture = false
+    return
+  }
   // session-history-pagination: scrolled to top → fetch older page (backward)
   if (scrollTop < 60 && hasMore.value && !isLoadingBackward.value && !isLoading.value && loadedMinId.value > 0) {
-    historyViewportFill.begin({
+    beginHistoryFill({
       mode: 'older',
       baselineContentHeight: scrollHeight,
       requestedCursor: loadedMinId.value,
@@ -3959,13 +4076,17 @@ onMounted(() => {
       // Initial backward page and forward replay can render progressively.
       const replayContext = replaySessionTrustContext()
       progressiveReplayEvents.append(replayContext, evts)
+      const previousIDs = new Set(sourceMessages.value.map(message => message.id))
       for (const evt of progressiveReplayEvents.takeReady(replayContext)) processEvent(evt)
+      for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
       nextTick(scrollToBottom)
     }
   }))
   cleanups.push(onEvent('replay_end', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
+    if (historyPageTimer) clearTimeout(historyPageTimer)
+    const previousIDs = new Set(sourceMessages.value.map(message => message.id))
     const wasLoadingBackward = isLoadingBackward.value
     const replayContext = replaySessionTrustContext()
     if (wasLoadingBackward) {
@@ -3974,6 +4095,8 @@ onMounted(() => {
       for (const evt of progressiveReplayEvents.takeFinal(replayContext)) processEvent(evt)
       nextTick(scrollToBottom)
     }
+    for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
+    if (isMobile.value && renderMessages.value.length) isLoading.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
     const replayCursor = normalizeReplayCursor(msg.last_seq)
@@ -4353,6 +4476,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  if (historyPageTimer) clearTimeout(historyPageTimer)
   clearTimeout(invocationTimer)
   for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer)
   nativeCommandMessages.clear()
@@ -5030,6 +5154,15 @@ onMounted(() => {
 </style>
 
 <style scoped>
+.session-timeline-entry { display: contents; }
+.tool-visibility-hint { display: block; margin-top: 4px; font-size: 11px; color: var(--fg-tertiary); }
+.tool-visibility-switch { flex-shrink: 0; width: 36px; height: 22px; border-radius: 12px; background: var(--border); padding: 3px; }
+.tool-visibility-switch::after { content: ''; display: block; width: 16px; height: 16px; border-radius: 50%; background: white; transition: transform .15s; }
+.tool-visibility-switch.enabled { background: var(--accent); }
+.tool-visibility-switch.enabled::after { transform: translateX(14px); }
+.mobile-history-feedback { display: flex; justify-content: center; gap: 8px; align-items: center; font-size: 11px; color: var(--fg-tertiary); }
+.mobile-history-feedback button { color: var(--accent); background: none; border: 0; min-height: 36px; cursor: pointer; }
+
 .session-search-toggle { margin-left:auto; padding:4px; border:0; background:none; color:var(--fg-tertiary); cursor:pointer; }
 .session-search-toggle svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.5; }
 .session-browser-search { padding:4px 10px 8px; }
@@ -5047,7 +5180,11 @@ onMounted(() => {
 :deep(.msg-user.collapsed .msg-text::after) { background:linear-gradient(transparent,var(--surface)); }
 :deep(.block-role) { display:none; }
 :deep(.agent-body) { font-size:13px; line-height:1.85; }
-@media(max-width:768px) { .session-message-row {gap:8px} :deep(.msg-user),:deep(.agent-body) {font-size:12px} }
+@media(max-width:768px) {
+  /* The parent supplies 12px; reduce only tool → assistant transitions to 8px. */
+  .session-message-row.tool-followup { margin-top: -4px; }
+  .message-byline { margin: 0 0 4px; }
+  .session-message-row {gap:8px} :deep(.msg-user),:deep(.agent-body) {font-size:12px} }
 
 @media(min-width:769px) { .session-toolbar-back { display:none; } }
 </style>

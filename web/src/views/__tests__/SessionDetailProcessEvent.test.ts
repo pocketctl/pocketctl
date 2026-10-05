@@ -60,7 +60,75 @@ describe('SessionDetail processEvent integration', () => {
   beforeEach(() => {
     routeMock.current = reactive({ params: { id: 'ses_1' }, query: {} as Record<string, string> })
     responsiveMock.isMobile.value = false
+    localStorage.removeItem('pocketctl.mobile.showToolCalls')
     websocketMock.send.mockClear()
+  })
+
+  test('mobile hides tools by default, retains interactions and persists the menu preference', async () => {
+    responsiveMock.isMobile.value = true
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running' }]
+    vm.messages = [
+      { id: 'tool', type: 'tool_call', tool: 'Read', input: 'file', call_id: 'r' },
+      { id: 'question', type: 'tool_call', tool: 'AskUserQuestion', input: '{}' },
+      { id: 'approval', type: 'approval_request', request_id: 'a', status: 'pending' },
+      { id: 'text', type: 'agent_text', content: 'Visible reply' },
+    ]
+    await wrapper.vm.$nextTick()
+    expect(vm.renderMessages.map((m: any) => m.id)).toEqual(['question', 'approval', 'text'])
+    await openToolbarOverflow(wrapper)
+    const toggle = wrapper.get('[data-toolbar-action="show-tool-calls"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    expect(vm.renderMessages.map((m: any) => m.id)).toEqual(['tool', 'question', 'approval', 'text'])
+    expect(localStorage.getItem('pocketctl.mobile.showToolCalls')).toBe('true')
+    routeMock.current.query.subagent = 'child'
+    await wrapper.vm.$nextTick()
+    vm.subagentMessages = { child: [{ id: 'child-tool', type: 'tool_call', tool: 'Bash' }, { id: 'child-text', type: 'agent_text', content: 'child' }] }
+    await wrapper.vm.$nextTick()
+    await toggle.trigger('click')
+    expect(vm.renderMessages.map((m: any) => m.id)).toEqual(['child-text'])
+    wrapper.unmount()
+    const restored = shallowMount(SessionDetail)
+    expect((restored.vm as any).mobileShowToolCalls).toBe(false)
+    restored.unmount()
+  })
+
+  test('mobile compacts only replies following visible tool groups', async () => {
+    responsiveMock.isMobile.value = true
+    localStorage.setItem('pocketctl.mobile.showToolCalls', 'true')
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running' }]
+    vm.messages = [
+      { id: 't1', type: 'tool_call', tool: 'Read' },
+      { id: 't2', type: 'tool_call', tool: 'Bash' },
+      { id: 'reply', type: 'agent_text', content: 'After tools' },
+      { id: 'question', type: 'tool_call', tool: 'AskUserQuestion', input: '{}' },
+      { id: 'reply2', type: 'agent_text', content: 'After question' },
+    ]
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.tool-followup')).toHaveLength(1)
+    expect([...vm.toolFollowupIDs]).toEqual(['reply'])
+    vm.mobileShowToolCalls = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.tool-followup').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('desktop continues showing tools regardless of the saved mobile preference', async () => {
+    localStorage.setItem('pocketctl.mobile.showToolCalls', 'false')
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'codex', status: 'running' }]
+    vm.messages = [{ id: 'tool', type: 'tool_call', tool: 'Bash' }]
+    await wrapper.vm.$nextTick()
+    await openToolbarOverflow(wrapper)
+    expect(vm.renderMessages).toHaveLength(1)
+    expect(wrapper.find('[data-toolbar-action="show-tool-calls"]').exists()).toBe(false)
+    expect(vm.pageSize).toBe(50)
+    wrapper.unmount()
   })
 
   test('DSH settings use native catalogs, preserve off, clear defaults and report failures', async () => {
@@ -381,7 +449,7 @@ describe('SessionDetail processEvent integration', () => {
 
     expect(mobileOverflow.get('.toolbar-overflow-menu').attributes('role')).toBe('menu')
     expect(mobileOverflow.findAll('[data-toolbar-action]').map(item => item.attributes('data-toolbar-action'))).toEqual([
-      'plan', 'edited-files', 'copy-id', 'resume',
+      'show-tool-calls', 'plan', 'edited-files', 'copy-id', 'resume',
     ])
 
     let planRequests = 0
