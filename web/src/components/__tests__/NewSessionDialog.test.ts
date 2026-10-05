@@ -67,6 +67,24 @@ describe('NewSessionDialog permission serialization', () => {
     wrapper.unmount()
   })
 
+  test('DSH blocks creation until connected and recovers after retry', async () => {
+    const wrapper = mount(NewSessionDialog, {props:{daemons:[{daemon_id:'daemon-1',daemon_online:true}]}})
+    await wrapper.findAll('button.agent-pill').find(b=>b.text()==='DeepSeek Harness')!.trigger('click')
+    expect(wrapper.get('.btn-start').attributes('disabled')).toBeDefined()
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'dsh',reason:'dsh_not_configured'})
+    await nextTick()
+    expect(wrapper.text()).toContain('new_session.dsh_not_configured')
+    await wrapper.get('.btn-start').trigger('click')
+    expect(ws.send.mock.calls.some(([msg])=>msg.type==='session_create')).toBe(false)
+    await wrapper.get('[role="alert"] button').trigger('click')
+    expect(ws.send).toHaveBeenLastCalledWith(expect.objectContaining({type:'list_models',agent:'dsh'}))
+    ws.handlers.get('model_list')?.({daemon_id:'daemon-1',agent:'dsh',models:[{alias:'p/model',name:'Model'}],permission_mutable_modes:['read-only']})
+    await nextTick()
+    expect(wrapper.get('.btn-start').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('new_session.dsh_not_configured')
+    wrapper.unmount()
+  })
+
   test('disables forbidden permissions and keeps default-model effort options scoped to host capabilities', async () => {
     const wrapper=mount(NewSessionDialog,{props:{daemons:[{daemon_id:'daemon-1',daemon_online:true}]}})
     await wrapper.findAll('button.agent-pill')[1].trigger('click')

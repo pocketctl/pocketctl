@@ -1835,5 +1835,8 @@
   "session.dsh.running": "Wait for the current turn to finish or stop it to change settings.",
   "session.dsh.searchOptions": "Search options",
   "session.dsh.creationPermissionHint": "Applies before the first message. Only modes allowed by the host are shown.",
-  "session.dsh.noCreationPermissions": "No permission options provided. The host default will be used."
+  "session.dsh.noCreationPermissions": "No permission options provided. The host default will be used.",
+  "new_session.dsh_not_configured": "This host is not connected to DeepSeek Harness. Run pocketctl agent dsh enable --url <native Host launch URL> on the host, then retry.",
+  "new_session.dsh_host_unavailable": "Unable to read DeepSeek Harness settings. Check that the native Host is running and its connection URL is valid, then retry.",
+  "new_session.dsh_retry": "Retry"
 }
