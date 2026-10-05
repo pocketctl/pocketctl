@@ -104,6 +104,10 @@ func TestDSHSettingsNativeAuthorityAndPermissionGate(t *testing.T) {
 	if err != nil || len(modes) != 2 {
 		t.Fatalf("unsafe creation catalog: %v %v", modes, err)
 	}
+	options := sm.DSHCreationOptions(ctx)
+	if options.Reason != "" || len(options.Models) != 1 || len(options.PermissionMutableModes) != 2 {
+		t.Fatalf("creation options unavailable: %+v", options)
+	}
 	cwd := t.TempDir()
 	cwdPolicy, err := NewCwdPolicy([]string{cwd})
 	if err != nil {
@@ -128,5 +132,23 @@ func TestDSHSettingsNativeAuthorityAndPermissionGate(t *testing.T) {
 	defer mu.Unlock()
 	if commands != 2 {
 		t.Fatalf("blocked requests reached native command: %d", commands)
+	}
+}
+
+func TestDSHCreationOptionsReportsUnavailableHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("POCKETCTL_DSH_URL", "")
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 64))
+	defer sm.ShutdownDSH()
+	if got := sm.DSHCreationOptions(context.Background()); got.Reason != "dsh_not_configured" {
+		t.Fatalf("missing setup must be explicit: %+v", got)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private native error", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	t.Setenv("POCKETCTL_DSH_URL", server.URL)
+	if got := sm.DSHCreationOptions(context.Background()); got.Reason != "dsh_host_unavailable" || len(got.Models) != 0 {
+		t.Fatalf("host error must be sanitized and explicit: %+v", got)
 	}
 }

@@ -1835,5 +1835,8 @@
   "session.dsh.running": "本轮任务执行中，结束或停止后可修改。",
   "session.dsh.searchOptions": "搜索选项",
   "session.dsh.creationPermissionHint": "创建后、执行首条消息前应用所选权限；仅展示主机允许的模式。",
-  "session.dsh.noCreationPermissions": "主机尚未提供可选权限，将使用主机默认配置。"
+  "session.dsh.noCreationPermissions": "主机尚未提供可选权限，将使用主机默认配置。",
+  "new_session.dsh_not_configured": "此主机尚未连接 DeepSeek Harness。请在主机运行 pocketctl agent dsh enable --url <原生 Host 启动地址>，然后重试。",
+  "new_session.dsh_host_unavailable": "无法读取 DeepSeek Harness 配置。请确认原生 Host 正在运行、连接地址仍有效，然后重试。",
+  "new_session.dsh_retry": "重新获取"
 }

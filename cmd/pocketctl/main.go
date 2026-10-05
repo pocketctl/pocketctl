@@ -4275,9 +4275,11 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 					defer cancel()
 					var capabilities *protocol.CodexCreationCapabilities
-					var dshPermissionModes []string
 					if modelCommand.Agent == adapter.AgentDSH {
-						dshPermissionModes, _ = sm.DSHCreationPermissionModes(queryCtx)
+						event := sm.DSHCreationOptions(queryCtx)
+						event.RequestID = modelCommand.RequestID
+						client.SendMsg(event)
+						return
 					}
 					if modelCommand.Agent == adapter.AgentCodex {
 						capabilities = sm.CodexCreationCapabilities(queryCtx, modelCommand.CodexHomeID)
@@ -4285,7 +4287,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(protocol.DaemonEvent{
 						Type: "model_list", RequestID: modelCommand.RequestID, Agent: modelCommand.Agent,
 						Models: sm.ModelsForAgentHome(modelCommand.Agent, modelCommand.CodexHomeID), CodexHomeID: modelCommand.CodexHomeID,
-						CreationCapabilities: capabilities, PermissionMutableModes: dshPermissionModes,
+						CreationCapabilities: capabilities,
 					})
 				})
 			case "list_codex_homes":

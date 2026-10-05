@@ -471,9 +471,14 @@ func (b *dshBackend) selectModel(ctx context.Context, id, model string, efforts 
 func (c *dshCoordinator) models() []protocol.ModelOption {
 	ctx, cancel := context.WithTimeout(c.ctx, 15*time.Second)
 	defer cancel()
+	models, _ := c.modelsWithContext(ctx)
+	return models
+}
+
+func (c *dshCoordinator) modelsWithContext(ctx context.Context) ([]protocol.ModelOption, error) {
 	client, err := c.connect(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var catalog struct {
 		Default dshModelSelection `json:"default"`
@@ -491,8 +496,8 @@ func (c *dshCoordinator) models() []protocol.ModelOption {
 			} `json:"models"`
 		} `json:"groups"`
 	}
-	if client.Call(ctx, "session/modelCatalog", map[string]any{}, &catalog) != nil {
-		return nil
+	if err := client.Call(ctx, "session/modelCatalog", map[string]any{}, &catalog); err != nil {
+		return nil, err
 	}
 	var models []protocol.ModelOption
 	for _, group := range catalog.Groups {
@@ -504,7 +509,7 @@ func (c *dshCoordinator) models() []protocol.ModelOption {
 			models = append(models, option)
 		}
 	}
-	return models
+	return models, nil
 }
 
 type dshEvent struct {

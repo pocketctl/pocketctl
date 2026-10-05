@@ -93,6 +93,10 @@
         <DSHCreationSettings v-if="form.agent === 'dsh'" :models="models" :model="form.model" :effort="form.effort"
           :permission="form.permission?.agent === 'dsh' ? form.permission.preset : ''"
           :presets="dshPermissionModes" :loaded="modelsLoaded" :disabled="creating" @change="updateDSHCreation" />
+        <p v-if="form.agent === 'dsh' && dshCreationHint" class="field-hint" role="alert">
+          {{ t(dshCreationHint) }}
+          <button v-if="modelsLoaded" type="button" :disabled="creating" @click="requestModels">{{ t('new_session.dsh_retry') }}</button>
+        </p>
         <div class="configuration-grid">
         <!-- Model (dynamic: host's available models). All agents — including
              opencode — surface their models via list_models → model_list. -->
@@ -304,7 +308,7 @@ function codexHomeKey(host: string) { return `pocketctl_codex_home:${host}` }
 function selectDirectory(path: string) { form.cwd = path; showDirectory.value = false }
 let modelRequestId = ''
 function requestModels() {
-  models.value = []; modelsLoaded.value = false; creationCapabilities.value = null; dshPermissionModes.value = []; form.effort = ''; form.model = ''
+  models.value = []; modelsLoaded.value = false; creationCapabilities.value = null; dshPermissionModes.value = []; dshCreationReason.value = ''; form.effort = ''; form.model = ''
   modelRequestId = createClientId()
   if (form.daemonId && selectedHostOnline.value) send({ type: 'list_models', daemon_id: form.daemonId, agent: form.agent, codex_home_id: form.agent === 'codex' ? form.codexHomeId || undefined : undefined, request_id: modelRequestId })
 }
@@ -331,6 +335,14 @@ const models = ref<Array<{ alias: string; name: string; is_default?: boolean; su
 type CreationCapabilities={version:number;supported:boolean;managed_runtime:boolean;default_model?:string;permission_presets:string[];approval_policies:string[];sandbox_modes:string[];reason?:string}
 const creationCapabilities=ref<CreationCapabilities|null>(null)
 const dshPermissionModes = ref<string[]>([])
+const dshCreationReason = ref('')
+const dshCreationHint = computed(() => {
+  if (!modelsLoaded.value) return 'new_session.model_loading'
+  if (dshCreationReason.value === 'dsh_not_configured') return 'new_session.dsh_not_configured'
+  if (dshCreationReason.value) return 'new_session.dsh_host_unavailable'
+  if (!models.value.length) return 'session.dsh.noModels'
+  return ''
+})
 const effortOptions = computed(() => ['codex','dsh'].includes(form.agent) ? models.value.find(model => model.alias === (form.model || creationCapabilities.value?.default_model || models.value.find(m => m.is_default)?.alias))?.supported_reasoning_efforts || [] : [])
 function updateDSHCreation(value: {model:string;effort:string;permission:string}) {
  form.model = value.model
@@ -356,6 +368,7 @@ function isCreateCapableAgent(agent: string): agent is AgentType {
 }
 
 const canStart = computed(() => selectedHostOnline.value && isCreateCapableAgent(form.agent)
+  && (form.agent !== 'dsh' || (modelsLoaded.value && !dshCreationHint.value))
   && (form.agent !== 'codex' || (codexHomesLoaded.value && !!form.codexHomeId && creationCapabilities.value?.supported!==false && !codexConfigUnavailable.value)))
 const creationPermissionOptions = computed(() => permissionOptions(form.agent as AgentType, true).map(option=>({...option,disabled:form.agent==='codex' && !!creationCapabilities.value && !creationCapabilities.value.permission_presets.includes(option.value)})))
 const codexConfigUnavailable=computed(()=>{
@@ -561,6 +574,7 @@ onMounted(() => {
     if (msg.request_id && msg.request_id !== modelRequestId) return
     if (form.agent==='codex' && msg.codex_home_id && msg.codex_home_id!==form.codexHomeId) return
     creationCapabilities.value = msg.creation_capabilities?.version===1 ? msg.creation_capabilities : null
+    dshCreationReason.value = msg.reason || ''
     dshPermissionModes.value = msg.permission_mutable_modes || []
     if (form.permission?.agent === 'dsh' && !dshPermissionModes.value.includes(form.permission.preset)) form.permission = undefined
     models.value = msg.models || []

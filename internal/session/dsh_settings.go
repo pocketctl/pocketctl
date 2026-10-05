@@ -171,3 +171,25 @@ func (sm *SessionManager) DSHCreationPermissionModes(ctx context.Context) ([]str
 	}
 	return modes, nil
 }
+
+// DSHCreationOptions distinguishes a disconnected Host from an empty catalog.
+// Only stable reason codes cross the relay; native errors may contain secrets.
+func (sm *SessionManager) DSHCreationOptions(ctx context.Context) protocol.DaemonEvent {
+	event := protocol.DaemonEvent{Type: "model_list", Agent: adapter.AgentDSH}
+	if _, err := dshapp.LoadConfig(); err != nil {
+		event.Reason = "dsh_not_configured"
+		return event
+	}
+	models, err := sm.ensureDSH().modelsWithContext(ctx)
+	if err != nil {
+		event.Reason = "dsh_host_unavailable"
+		return event
+	}
+	modes, err := sm.DSHCreationPermissionModes(ctx)
+	if err != nil {
+		event.Reason = "dsh_host_unavailable"
+		return event
+	}
+	event.Models, event.PermissionMutableModes = models, modes
+	return event
+}
