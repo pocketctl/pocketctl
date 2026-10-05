@@ -1,4 +1,9 @@
 {
+  "session.show_tool_calls": "Show tool calls",
+  "session.tool_visibility_hint": "Approvals and questions always remain visible",
+  "session.history_continue": "Loading limit reached. Continue to load more.",
+  "session.history_partial_failure": "History loading was interrupted. You can retry.",
+
   "memory.git.first_page": "First page",
   "memory.git.next_proposals": "Next proposals",
   "memory.git.next_cleanup": "Next cleanup records",

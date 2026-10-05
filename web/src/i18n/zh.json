@@ -1,4 +1,9 @@
 {
+  "session.show_tool_calls": "显示工具调用",
+  "session.tool_visibility_hint": "审批与提问始终显示",
+  "session.history_continue": "已达到本次加载上限，可继续加载",
+  "session.history_partial_failure": "后续历史加载未完成，可重试",
+
   "memory.git.first_page": "回到首页",
   "memory.git.next_proposals": "下一页提案",
   "memory.git.next_cleanup": "下一页清理记录",
