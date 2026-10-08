@@ -24,7 +24,9 @@ off your development machine.
 - **Recover context after a disconnect** — the Relay persists normalized events
   for replay, and the daemon reconciles supported managed sessions after restart.
 - **Browse session documents remotely** — capture secure snapshots of a
-  session's key documents and view or download them from Web or iOS.
+  session's key documents and view or download them from Web or iOS,
+  including clicking HTML/Markdown document links directly in conversation
+  history.
 - **Organize sessions with projects** — group sessions into projects, pin the
   ones that matter, and archive finished sessions to keep the active list
   focused, from Web or iOS.
