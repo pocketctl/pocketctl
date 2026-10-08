@@ -120,7 +120,7 @@ func TestHandleCommandsDispatchesMemoryContextControlReplies(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go handleCommands(ctx, client, sm, slog.New(slog.NewTextHandler(io.Discard, nil)),
-		&atomic.Bool{}, memorymcp.NewWsBroker(client), grantClient)
+		&atomic.Bool{}, memorymcp.NewWsBroker(client), grantClient, nil)
 
 	resultCh := make(chan *protocol.MemoryContextGrantResult, 1)
 	errCh := make(chan error, 1)

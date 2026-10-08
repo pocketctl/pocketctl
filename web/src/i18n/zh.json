@@ -1844,5 +1844,12 @@
   "session.dsh.noCreationPermissions": "主机尚未提供可选权限，将使用主机默认配置。",
   "new_session.dsh_not_configured": "此主机尚未连接 DeepSeek Harness。请在主机运行 pocketctl agent dsh enable --url <原生 Host 启动地址>，然后重试。",
   "new_session.dsh_host_unavailable": "无法读取 DeepSeek Harness 配置。请确认原生 Host 正在运行、连接地址仍有效，然后重试。",
-  "new_session.dsh_retry": "重新获取"
+  "new_session.dsh_retry": "重新获取",
+  "session.documents.resolving_link": "正在从会话主机读取文档快照…",
+  "session.documents.resolve.daemon_offline": "会话主机离线，请连接主机后重试。",
+  "session.documents.resolve.unsupported": "文档链接预览需要更新主机端和 Relay，并开启文档采集。",
+  "session.documents.resolve.timeout": "文档快照尚未就绪，请稍后重试。",
+  "session.documents.resolve.busy": "主机正忙，请稍后重试。",
+  "session.documents.resolve.rate_limited": "请求过于频繁，请稍后重试。",
+  "session.documents.resolve.unavailable": "无法读取此文档。请确认文件仍在会话工作目录中，且为有效的 Markdown 或 HTML 文件。"
 }

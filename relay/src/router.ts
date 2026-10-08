@@ -1,3 +1,4 @@
+import { SessionDocumentReadLimiter } from './session-documents/routes.js';
 import type { WebSocket } from 'ws';
 import {
   handleMemoryContextGrantMessage,
@@ -85,7 +86,7 @@ function daemonAgentInventory(msg: any): { agents: any[]; collaborationCapabilit
     return { agents, collaborationCapabilities };
 }
 
-interface DaemonConnection { supportsDirectoryBrowse?: boolean; collaborationCapabilities: string[]; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
+interface DaemonConnection { supportsDocumentResolve?: boolean; supportsDirectoryBrowse?: boolean; collaborationCapabilities: string[]; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; subscribedTeamSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
@@ -282,6 +283,8 @@ export class Router {
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; reply?: any; timer: ReturnType<typeof setTimeout> }>();
+  private documentResolveLimiter = new SessionDocumentReadLimiter(20, 10);
+  private documentRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private pendingSessionCreate = new Map<string, WebSocket>();
   private pendingSessionMeta = new Map<string, { agent_type: string; cwd: string }>();
@@ -1320,7 +1323,7 @@ export class Router {
     if (previousDaemon && previousDaemon.ws !== ws) {
       this.cancelDaemonRevocationGate(previousDaemon.registrationId);
     }
-    this.daemons.set(daemonId, { supportsDirectoryBrowse: msg.supports_directory_browse === true, collaborationCapabilities, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
+    this.daemons.set(daemonId, { supportsDocumentResolve: msg.supports_document_resolve === true, supportsDirectoryBrowse: msg.supports_directory_browse === true, collaborationCapabilities, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
     if (tokenJti) this.authLeases.confirm(registrationId);
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     if (previousDaemon && previousDaemon.ws !== ws) {
@@ -1622,6 +1625,7 @@ export class Router {
   }
   unregisterClient(ws: WebSocket): void {
     this.clients.delete(ws);
+    for (const [id, pending] of this.documentRequests) { if (pending.client === ws) { clearTimeout(pending.timer); this.documentRequests.delete(id); } }
     for (const [id,pending] of this.invocationRequests) { if(pending.client === ws) {clearTimeout(pending.timer);this.invocationRequests.delete(id);} }
     for (const [id, pending] of this.directoryRequests) {
       if (pending.client !== ws) continue;
@@ -2370,6 +2374,20 @@ export class Router {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
       return;
     }
+    if (msg.type === 'session_document_resolved') {
+      const pending = this.documentRequests.get(msg.request_id);
+      const daemon = this.daemons.get(daemonId);
+      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws) {
+        clearTimeout(pending.timer); this.documentRequests.delete(msg.request_id);
+        const client = this.clients.get(pending.client);
+        if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
+          this.send(pending.client, { type: 'session_document_resolved', request_id: pending.requestId,
+            session_id: pending.sessionId, document_id: msg.document_id, version_id: msg.version_id, reason: msg.reason });
+        }
+      }
+      if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+      return;
+    }
     if (!sessionId) {
       if (msg.type === 'session_create_failed') {
         this.persistAndAck(daemonId, msg.seq, '', msg.type, msg, messageState, receivedAt);
@@ -2546,7 +2564,7 @@ export class Router {
         }
         return;
       }
-      if (msg.type !== 'user_message') client.subscribedSessions.add(msg.session_id);
+      if (msg.type !== 'user_message' && msg.type !== 'session_document_resolve') client.subscribedSessions.add(msg.session_id);
     }
     if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
     if (msg.type === 'replay_subagent') { this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit, msg.direction); return; }
@@ -2671,6 +2689,30 @@ export class Router {
       // Update status to reconnecting
       db.setDaemonReconnecting?.(this.pool, daemonId).catch(() => {});
       this.broadcastToUser(client.userId!, { type: 'daemon_status', daemon_id: daemonId, status: 'reconnecting' });
+      return;
+    }
+
+    if (msg.type === 'session_document_resolve') {
+      const reject = (reason: string) => this.send(clientWs, { type: 'session_document_resolved', request_id: msg.request_id, session_id: msg.session_id, reason });
+      if (client.userId == null || typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128
+        || !normalizeSessionId(msg.session_id) || typeof msg.path !== 'string' || !msg.path || msg.path.length > 4096 || msg.path.includes('\0')) { reject('invalid_request'); return; }
+      if (this.sessionDocumentsMode !== 'on') { reject('unsupported'); return; }
+      if (!this.documentResolveLimiter.allow(client.userId, msg.session_id)) { reject('rate_limited'); return; }
+      // Runtime policy was loaded by the session ownership gate above. Never
+      // trust a client-supplied daemon_id or workspace root for document reads.
+      const daemonId = sessionRuntimePolicy?.daemonId;
+      const daemon = daemonId ? this.daemons.get(daemonId) : undefined;
+      if (!daemonId || !daemon || daemon.ws.readyState !== 1 || !this.sameUser(client.userId, daemon.userId)) { reject('daemon_offline'); return; }
+      if (!daemon.supportsDocumentResolve) { reject('unsupported'); return; }
+      if (this.documentRequests.size >= 512 || [...this.documentRequests.values()].filter(p => p.client === clientWs).length >= 2) { reject('busy'); return; }
+      const id = randomUUID();
+      const timer = setTimeout(() => {
+        this.documentRequests.delete(id);
+        if (clientWs.readyState === 1) reject('timeout');
+      }, 15_000);
+      timer.unref?.();
+      this.documentRequests.set(id, { client: clientWs, daemonId, daemonWs: daemon.ws, sessionId: msg.session_id, requestId: msg.request_id, timer });
+      this.send(daemon.ws, { type: 'session_document_resolve', session_id: msg.session_id, request_id: id, path: msg.path });
       return;
     }
 

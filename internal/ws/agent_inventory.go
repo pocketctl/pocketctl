@@ -51,6 +51,6 @@ func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 		Agents: append([]string(nil), c.agents...), AgentVersions: maps.Clone(c.agentVersions),
 		AgentLatests: maps.Clone(c.agentLatests), AgentManageable: maps.Clone(c.agentManageable),
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-		SupportsQuotaGrant: true, SupportsDirectoryBrowse: true, Capabilities: capabilities,
+		SupportsQuotaGrant: true, SupportsDirectoryBrowse: true, SupportsDocumentResolve: true, Capabilities: capabilities,
 	}
 }

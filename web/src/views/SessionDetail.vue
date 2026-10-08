@@ -725,7 +725,7 @@
 <script setup lang="ts">
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch, provide } from 'vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
 import ActionList from '../components/ActionList.vue'
 import TopbarGithubLink from '../components/TopbarGithubLink.vue'
@@ -798,6 +798,7 @@ import { readMobileToolVisibility, saveMobileToolVisibility, showsMobileMessage 
 import { HistoryViewportFillCoordinator, shouldStartHistoryResizeFill } from '../utils/historyViewportFill'
 import SessionDocumentShelf from '../components/session-documents/SessionDocumentShelf.vue'
 import SessionDocumentViewer from '../components/session-documents/SessionDocumentViewer.vue'
+import { sessionDocumentLinkKey } from '../utils/sessionDocumentLinks'
 import { useSessionDocuments } from '../composables/useSessionDocuments'
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
@@ -825,6 +826,7 @@ const { t } = useLocale()
 const { user } = useAuth()
 
 const sessionId = computed(() => String(route.params.id || 'default'))
+provide(sessionDocumentLinkKey, path => router.resolve({ name: 'session-document-link', params: { id: sessionId.value } }).href + '#path=' + encodeURIComponent(path))
 const returnTeamSessionID = computed(() => typeof route.query.return_team_session === 'string' ? route.query.return_team_session : '')
 const returnTeamID = computed(() => typeof route.query.team === 'string' ? route.query.team : '')
 function returnToTeamSession(): void {
