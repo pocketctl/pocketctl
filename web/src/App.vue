@@ -1,7 +1,8 @@
 <template>
   <div
-    class="app-layout reference-shell"
+    class="app-layout"
     :class="{
+      'reference-shell': isLoggedIn && !route.meta.standalone,
       'design-shell': isLoggedIn && !isSessionRoute && !route.meta.standalone,
       'standalone-route': !!route.meta.standalone,
       'sidebar-collapsed': sidebarCollapsed,
@@ -379,7 +380,7 @@ if (typeof window !== 'undefined') {
 .sidebar-collapsed .sidebar .sidebar-user { justify-content: center; padding: 12px 8px; }
 .sidebar-collapsed .sidebar .sidebar-user .user-avatar { margin: 0; }
 .sidebar-collapsed .sidebar .sidebar-toggle-btn { justify-content: center; padding: 8px; }
-.sidebar-collapsed .main-content { margin-left: 72px; }
+/* The Grid sidebar column owns the offset in both expanded and collapsed states. */
 
 /* Sidebar toggle button — 双箭头折叠/展开（对齐设计稿） */
 .sidebar-toggle-btn {
