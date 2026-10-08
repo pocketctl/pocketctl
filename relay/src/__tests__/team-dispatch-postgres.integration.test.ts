@@ -1,5 +1,5 @@
 import pg from 'pg'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { initDB } from '../db.js'
 import { TeamDispatchRepository } from '../team/dispatch-repository.js'
@@ -40,11 +40,13 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     }
   })
 
+  beforeEach(async () => { await pool.query(`TRUNCATE users, daemons RESTART IDENTITY CASCADE`) })
+
   test.each(['blocked', 'failed', 'uncertain'] as const)('can prepare stop SQL for %s', async state => {
     await expect(new TeamDispatchRepository(pool).stop('ccl_nonexistent', state, 'probe')).resolves.toBeUndefined()
   })
 
-  test('claims once, serializes a binding, and projects only allowlisted events', async () => {
+  test.each(['codex', 'dsh'] as const)('%s claims once, serializes a binding, and projects only allowlisted events', async provider => {
     const user = await pool.query<{ id: number }>(
       `INSERT INTO users (email, password_hash, team_enabled) VALUES ('dispatch.owner@example.test', 'x',true) RETURNING id`,
     )
@@ -53,12 +55,12 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     const created = await teams.createTeam({ actorUserId: ownerUserId, name: 'Dispatch team', requestId: 'dispatch-team' })
     await pool.query(
       `INSERT INTO daemons (daemon_id, hostname, agents, status, user_id, collaboration_capabilities)
-       VALUES ('dispatch-daemon', 'dispatch-host', '[{"type":"codex","manageable":true}]'::jsonb,
-               'online', $1, '["team_collaboration_dispatch_v1","team_collaboration_context_v1","team_collaboration_reconcile_v1"]'::jsonb)`,
-      [ownerUserId],
+       VALUES ('dispatch-daemon', 'dispatch-host', $2::jsonb,
+               'online', $1, '["team_collaboration_dispatch_v1","team_collaboration_context_v1","team_collaboration_reconcile_v1","team_collaboration_dsh_v1"]'::jsonb)`,
+      [ownerUserId, JSON.stringify([{ type: provider, manageable: true }])],
     )
     const offer = await teams.addAgentOffer({
-      teamId: created.team.id, actorUserId: ownerUserId, daemonId: 'dispatch-daemon', provider: 'codex',
+      teamId: created.team.id, actorUserId: ownerUserId, daemonId: 'dispatch-daemon', provider,
       runtimeProfileId: null, expectedRevision: 1, requestId: 'dispatch-offer',
     })
     const sessions = new TeamSessionService(pool)
@@ -85,7 +87,7 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     const repository = new TeamDispatchRepository(pool)
     const first = await repository.claim(firstMessage.call_ids[0])
     expect(first).toMatchObject({
-      provider: 'codex', nativeSessionId: null,
+      provider, nativeSessionId: null,
       authorization: { owner_user_id: ownerUserId, daemon_id: 'dispatch-daemon', operation: 'create' },
     })
     const deliveries = new TeamContextDeliveryService(pool)
@@ -152,7 +154,37 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     })).toBeNull()
     expect((await pool.query(`SELECT state FROM collaboration_calls WHERE call_id = $1`, [next!.callId])).rows[0].state).toBe('dispatched')
     expect((await pool.query(`SELECT count(*)::int AS n FROM collaboration_events WHERE call_id = $1`, [next!.callId])).rows[0].n).toBe(0)
-    await repository.stop(next!.callId, 'failed', 'test_cleanup')
+    if (provider === 'dsh') {
+      // A new process can reuse seq=10/12 without losing its real answer or
+      // completion. Native history remains deduplicated under new sequences.
+      const answer = { type: 'agent_text', session_id: 'native-team-session', seq: 10, event_id: 'dsh:reply:2', text: 'Restarted answer' }
+      const finished = { type: 'turn_status', session_id: 'native-team-session', seq: 12, event_id: 'turn:dsh:2:completed', turn_status: 'completed' }
+      expect((await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, answer, 200))?.event.call_id).toBe(next!.callId)
+      expect((await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, finished, 200))?.event.call_id).toBe(next!.callId)
+      const message = await sessions.appendMessage({
+        sessionId: shared.id, actorUserId: ownerUserId, requestId: 'dsh-next-generation', content: 'After restart',
+        targetMode: 'all', targetOfferIds: [], referenceEventId: null,
+      })
+      const resumed = await repository.claim(message.call_ids[0])
+      expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, { ...answer, seq: 50 }, 300)).toBeNull()
+      expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, { ...finished, seq: 51 }, 300)).toBeNull()
+      expect((await pool.query(`SELECT state FROM collaboration_calls WHERE call_id = $1`, [resumed!.callId])).rows[0].state).toBe('dispatched')
+      // Transport-only events use the trusted generation, not just the seq.
+      expect((await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, {
+        type: 'interactive_prompt', session_id: 'native-team-session', seq: 13,
+      }, 300))?.event.content).toBe('waiting_owner')
+      await repository.stop(resumed!.callId, 'failed', 'test_cleanup')
+      const unavailable = await sessions.appendMessage({
+        sessionId: shared.id, actorUserId: ownerUserId, requestId: 'dsh-host-offline', content: 'Offline',
+        targetMode: 'all', targetOfferIds: [], referenceEventId: null,
+      })
+      await pool.query(`UPDATE daemons SET collaboration_capabilities = '["team_collaboration_dispatch_v1","team_collaboration_context_v1"]'::jsonb WHERE daemon_id = 'dispatch-daemon'`)
+      expect(await repository.claim(unavailable.call_ids[0])).toBeNull()
+      expect((await pool.query(`SELECT state, outcome FROM collaboration_calls WHERE call_id = $1`, [unavailable.call_ids[0]])).rows[0])
+        .toMatchObject({ state: 'blocked', outcome: 'agent_unavailable' })
+    } else {
+      await repository.stop(next!.callId, 'failed', 'test_cleanup')
+    }
     // Actual PostgreSQL parameter inference, not a mocked query result.
     for (const state of ['blocked', 'failed', 'uncertain'] as const) {
       await pool.query(`UPDATE collaboration_calls SET state = 'dispatched', finished_at = NULL WHERE call_id = $1`, [first!.callId])

@@ -818,6 +818,7 @@
   "dashboard.offline": "离线",
   "hosts.status_online": "在线",
   "hosts.status_offline": "离线",
+  "hosts.dsh_native_host": "原生 Host 接入，CLI 升级请在主机处理",
   "hosts.agent_system_install": "系统安装，pocketctl 无法自动升级，请在主机手动 sudo-free 升级",
   "hosts.agent_readonly_sync": "只读观察同步",
   "hosts.agent_none": "未检测到 coding agent，请在主机安装 Claude Code 等后重试",

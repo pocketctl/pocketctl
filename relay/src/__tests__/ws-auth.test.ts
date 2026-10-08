@@ -139,3 +139,33 @@ describe('WebSocket authentication without the legacy API key identity', () => {
     expect(dependencies.router.registerClient).not.toHaveBeenCalled()
   })
 })
+
+test('registered sockets refresh inventory after admission deadline without reactivating identity', async () => {
+  let active = true
+  const {socket, dependencies, handler} = makeHandler({createRegistrationDeadline:()=>({isActive:()=>active,complete:()=>{const previous=active;active=false;return previous}})})
+  dependencies.registerDaemon.mockImplementation(async (_router:any, identities:Map<any,any>, ws:any, msg:any)=>{
+    identities.set(ws,{daemonId:msg.daemon_id,startedAt:msg.started_at});return true
+  })
+  dependencies.router.refreshDaemonAgents=vi.fn(async()=>true)
+  connect(handler,socket,{type:'daemon'},{authorization:'Bearer valid-token'})
+  socket.emitMessage(JSON.stringify({type:'register',daemon_id:'host',started_at:123,agents:['codex']}))
+  await vi.waitFor(()=>expect(dependencies.registerDaemon).toHaveBeenCalledTimes(1))
+  const refreshed={type:'register',daemon_id:'host',started_at:123,agents:['codex','dsh']}
+  socket.emitMessage(JSON.stringify(refreshed))
+  await vi.waitFor(()=>expect(dependencies.router.refreshDaemonAgents).toHaveBeenCalledWith(socket,refreshed,42))
+  expect(dependencies.registerDaemon).toHaveBeenCalledTimes(1)
+  socket.emitMessage(JSON.stringify({...refreshed,daemon_id:'foreign'}))
+  socket.emitMessage(JSON.stringify({...refreshed,started_at:456}))
+  await new Promise(resolve=>setTimeout(resolve,20))
+  expect(dependencies.router.refreshDaemonAgents).toHaveBeenCalledTimes(1)
+})
+
+test('an expired initial registration cannot use the inventory refresh path', async()=>{
+ const {socket,dependencies,handler}=makeHandler({createRegistrationDeadline:()=>({isActive:()=>false,complete:()=>false})})
+ dependencies.router.refreshDaemonAgents=vi.fn()
+ connect(handler,socket,{type:'daemon'},{authorization:'Bearer valid-token'})
+ socket.emitMessage(JSON.stringify({type:'register',daemon_id:'host',started_at:123,agents:['dsh']}))
+ await new Promise(resolve=>setTimeout(resolve,20))
+ expect(dependencies.registerDaemon).not.toHaveBeenCalled()
+ expect(dependencies.router.refreshDaemonAgents).not.toHaveBeenCalled()
+})

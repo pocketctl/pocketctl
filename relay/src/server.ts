@@ -802,7 +802,17 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
         const msg = JSON.parse(raw.toString());
         if (connType === 'daemon') {
           if (msg.type === 'register') {
-            if (!registrationDeadline?.isActive()) return;
+            if (!registrationDeadline?.isActive()) {
+              // The deadline applies only to initial admission. Established
+              // sockets may refresh inventory, but cannot change identity or
+              // reincarnate a replaced/expired connection through this path.
+              const identity = dependencies.wsDaemonMap.get(socket);
+              if (identity && identity.daemonId === msg.daemon_id
+                && identity.startedAt === (msg.started_at || 0)) {
+                await dependencies.router.refreshDaemonAgents(socket, msg, userId);
+              }
+              return;
+            }
             let registered = false;
             try {
               registered = await dependencies.registerDaemon(
@@ -1012,7 +1022,7 @@ async function main() {
   router = new Router(pools, {
     teamSubscriptionAuthorizer: { canSubscribe: (userId, sessionId) => teamConfig.collaboration === 'on' ? teamSessionService.canSubscribe(userId, sessionId) : Promise.resolve(false) },
     teamDispatchBroker: {
-      observeDaemonEvent: (daemonId, ownerUserId, message) => teamDispatchService?.observeDaemonEvent(daemonId, ownerUserId, message),
+      observeDaemonEvent: (daemonId, ownerUserId, message, generation) => teamDispatchService?.observeDaemonEvent(daemonId, ownerUserId, message, generation),
       handleDaemonDisconnected: daemonId => teamDispatchService?.handleDaemonDisconnected(daemonId) ?? Promise.resolve(),
     },
     transport: {

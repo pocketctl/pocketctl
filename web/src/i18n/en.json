@@ -818,6 +818,7 @@
   "dashboard.offline": "Offline",
   "hosts.status_online": "Online",
   "hosts.status_offline": "Offline",
+  "hosts.dsh_native_host": "Native Host integration; manage CLI upgrades on the host",
   "hosts.agent_system_install": "System install — pocketctl can't auto-upgrade. Reinstall sudo-free on the host.",
   "hosts.agent_readonly_sync": "Read-only observer sync",
   "hosts.agent_none": "No coding agent detected. Install one (e.g. Claude Code) on the host and retry.",

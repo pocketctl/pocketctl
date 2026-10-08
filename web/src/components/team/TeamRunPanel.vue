@@ -82,6 +82,7 @@
 </template>
 
 <script setup lang="ts">
+import { teamProviderLabel } from '../../utils/teamProvider'
 import { useLocale } from "../../composables/useLocale"
 const { t } = useLocale()
 import { computed, ref, watch } from 'vue'
@@ -150,7 +151,7 @@ watch(() => props.busy, busy => { if (!busy && props.run?.state === 'waiting_inp
 
 function shortID(value: string): string { return value.replace(/^crn_/, '').slice(0, 8) }
 function memberLabel(userID: number): string { return props.members.find(member => member.user_id === userID)?.display_label ?? t('workspace.member_id', {id:userID}) }
-function bindingLabel(binding: TeamSessionAgentBinding): string { return `${binding.provider === 'codex' ? 'Codex' : 'Claude Code'} · ${binding.daemon_id}` }
+function bindingLabel(binding: TeamSessionAgentBinding): string { return `${teamProviderLabel(binding.provider)} · ${binding.daemon_id}` }
 function formatDate(value: string): string { return new Date(value).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function taskStateLabel(state: TeamTask['state']): string { return ({ open: t('team.task_state.open'), in_progress: t('team.task_state.in_progress'), completed: t('team.task_state.completed'), archived: t('team.task_filter.archived'), deleted: t('workspace.deleted') } as Record<TeamTask['state'], string>)[state] }
 function submitSupplement(): void {

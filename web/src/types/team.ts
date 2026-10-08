@@ -16,7 +16,11 @@ export type TeamTaskState = 'open' | 'in_progress' | 'completed' | 'archived' | 
 export type TeamSessionState = 'active' | 'paused' | 'ended' | 'archived'
 export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | 'paused' | 'completed' | 'failed' | 'cancelled'
 export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
-export type TeamProvider = 'codex' | 'claude-code'
+export const TEAM_PROVIDERS = ['codex', 'claude-code', 'dsh'] as const
+export type TeamProvider = typeof TEAM_PROVIDERS[number]
+export function isTeamProvider(value: unknown): value is TeamProvider {
+  return typeof value === 'string' && (TEAM_PROVIDERS as readonly string[]).includes(value)
+}
 export type TeamMemoryAccessState = 'available' | 'forbidden' | 'installation_paused' | 'feature_disabled'
 
 export interface TeamCapabilities {
@@ -89,6 +93,7 @@ export interface TeamAgentOffer {
 export interface TeamAgentCandidate {
   daemon_id: string
   hostname: string | null
+  alias?: string | null
   provider: TeamProvider
   installed: boolean
   online: boolean

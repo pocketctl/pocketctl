@@ -725,7 +725,7 @@ export class TeamRepository {
   async listAgentCandidates(teamId: string, actorUserId: number): Promise<TeamAgentCandidate[]> {
     await this.requireTeam(this.pool, teamId, actorUserId)
     const result = await this.pool.query<DaemonAgentEvidence>(
-      `SELECT d.daemon_id, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id
+      `SELECT d.daemon_id, d.hostname, d.alias, d.status, d.agents, d.collaboration_capabilities, b.team_id
        FROM daemons d
        LEFT JOIN collaboration_team_daemon_bindings b ON b.daemon_id = d.daemon_id
        WHERE d.user_id = $1 ORDER BY d.hostname, d.daemon_id`,
@@ -738,7 +738,7 @@ export class TeamRepository {
   async listMyAgentCandidates(actorUserId: number): Promise<TeamAgentCandidate[]> {
     await requireTeamAccess(this.pool, actorUserId)
     const result = await this.pool.query<DaemonAgentEvidence>(
-      `SELECT d.daemon_id, d.hostname, d.status, d.agents, d.collaboration_capabilities, b.team_id
+      `SELECT d.daemon_id, d.hostname, d.alias, d.status, d.agents, d.collaboration_capabilities, b.team_id
        FROM daemons d
        LEFT JOIN collaboration_team_daemon_bindings b ON b.daemon_id = d.daemon_id
        WHERE d.user_id = $1 ORDER BY d.hostname, d.daemon_id`,

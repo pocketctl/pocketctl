@@ -248,7 +248,18 @@ function saveTokens(data: any) {
   localStorage.setItem('pocketctl_user', JSON.stringify(data.user))
 }
 
-async function doRefreshToken(): Promise<boolean> {
+// Router admission and WebSocket startup can restore the same cookie at once.
+// Share that request so Team capability checks do not see two token generations
+// during one page load and redirect an authorized user out of their session.
+let pendingRefresh: Promise<boolean> | undefined
+function doRefreshToken(): Promise<boolean> {
+  if (!pendingRefresh) {
+    pendingRefresh = refreshAuthToken().finally(() => { pendingRefresh = undefined })
+  }
+  return pendingRefresh
+}
+
+async function refreshAuthToken(): Promise<boolean> {
   const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
   const body = legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {}
   const { ok, data } = await apiRequest('/api/auth/refresh', body)

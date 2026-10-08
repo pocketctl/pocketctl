@@ -19,6 +19,7 @@ const (
 	CapabilityTeamDispatchV1      = "team_collaboration_dispatch_v1"
 	CapabilityTeamContextV1       = "team_collaboration_context_v1"
 	CapabilityTeamReconcileV1     = "team_collaboration_reconcile_v1"
+	CapabilityTeamDSHV1           = "team_collaboration_dsh_v1"
 )
 
 // Turn lifecycle vocabulary (plan §3.2/§3.4/§4). All values are optional wire

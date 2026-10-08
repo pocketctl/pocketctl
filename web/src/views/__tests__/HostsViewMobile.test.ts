@@ -87,6 +87,21 @@ describe('HostsView mobile iOS parity', () => {
     vi.unstubAllGlobals()
   })
 
+  test('renders DSH added by a daemon inventory refresh without reloading', async () => {
+    isMobile.value = false
+    const wrapper = mountView()
+    handlers.get('daemon_list')?.({daemons:[{...online, agents:[{type:'codex',version:'1.0',manageable:true}]}]})
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('DeepSeek Harness')
+    handlers.get('daemon_status')?.({daemon_id:online.daemon_id,status:'online',agents:[{type:'dsh',version:'',manageable:false}]})
+    await flushPromises()
+    expect(wrapper.text()).toContain('DeepSeek Harness')
+    expect(wrapper.text()).toContain('Native Host integration')
+    handlers.get('daemon_status')?.({daemon_id:online.daemon_id,status:'online',agents:[]})
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('DeepSeek Harness')
+  })
+
   test('shows the four-metric overview and sorts online hosts first', async () => {
     const wrapper = mountView()
     handlers.get('daemon_list')?.({ daemons: [offline, online] })

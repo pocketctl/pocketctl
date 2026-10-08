@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/pocketctl/pocketctl/internal/discovery"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2633,3 +2634,5 @@ func TestClassifyCreateErrorCodexConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func (*recordingDaemonMessageSender) SetAgentInventory([]discovery.AgentInfo) bool { return true }

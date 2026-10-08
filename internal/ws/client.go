@@ -145,6 +145,8 @@ type Client struct {
 	logger                     *slog.Logger
 	daemonID                   string
 	hostname                   string
+	agentMu                    sync.RWMutex
+	dshTeamCallable            bool
 	agents                     []string
 	agentVersions              map[string]string
 	agentLatests               map[string]string
@@ -386,13 +388,25 @@ func envInt(key string, def int) int {
 func (c *Client) SetVersion(v string) { c.version = v }
 
 // SetAgentVersions updates the agent version map (e.g. after an agent upgrade).
-func (c *Client) SetAgentVersions(v map[string]string) { c.agentVersions = v }
+func (c *Client) SetAgentVersions(v map[string]string) {
+	c.agentMu.Lock()
+	defer c.agentMu.Unlock()
+	c.agentVersions = v
+}
 
 // SetAgentLatests updates the agent latest-version map (e.g. after re-checking npm registry).
-func (c *Client) SetAgentLatests(v map[string]string) { c.agentLatests = v }
+func (c *Client) SetAgentLatests(v map[string]string) {
+	c.agentMu.Lock()
+	defer c.agentMu.Unlock()
+	c.agentLatests = v
+}
 
 // SetAgentManageable updates the per-agent manageable flag map (user-owned install).
-func (c *Client) SetAgentManageable(m map[string]bool) { c.agentManageable = m }
+func (c *Client) SetAgentManageable(m map[string]bool) {
+	c.agentMu.Lock()
+	defer c.agentMu.Unlock()
+	c.agentManageable = m
+}
 
 // ResendRegister re-sends the register message to push updated info (e.g. new agent versions after upgrade).
 func (c *Client) ResendRegister() {
@@ -402,16 +416,7 @@ func (c *Client) ResendRegister() {
 	if conn == nil {
 		return
 	}
-	register := protocol.RegisterMessage{
-		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
-		AgentVersions:   c.agentVersions,
-		AgentLatests:    c.agentLatests,
-		AgentManageable: c.agentManageable,
-		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-		SupportsQuotaGrant:      true,
-		SupportsDirectoryBrowse: true,
-		Capabilities:            []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1},
-	}
+	register := c.agentRegisterMessage()
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
 	}
@@ -696,16 +701,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
-	register := protocol.RegisterMessage{
-		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname, Agents: c.agents,
-		AgentVersions:   c.agentVersions,
-		AgentLatests:    c.agentLatests,
-		AgentManageable: c.agentManageable,
-		OS:              c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
-		SupportsQuotaGrant:      true,
-		SupportsDirectoryBrowse: true,
-		Capabilities:            []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1},
-	}
+	register := c.agentRegisterMessage()
 	if c.activeSessionIDsFn != nil {
 		register.ActiveSessionIDs = c.activeSessionIDsFn()
 	}

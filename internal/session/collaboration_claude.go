@@ -16,22 +16,29 @@ import (
 
 // Ownership lives outside the agent workspace. Native history alone never
 // grants authority to turn a terminal conversation into a Team receiver.
-type collaborationClaudeRecord struct {
+type collaborationNativeRecord struct {
 	Version int
 	Binding collaborationNativeBinding
 	Cwd     string
 }
 
 func collaborationClaudePath(id string) (string, error) {
+	return collaborationRecordPath(adapter.AgentClaude, id)
+}
+
+func collaborationRecordPath(agent, id string) (string, error) {
+	if agent == adapter.AgentClaude {
+		agent = "claude"
+	}
 	home, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".pocketctl", "collaboration-claude", fmt.Sprintf("%x.json", sha256.Sum256([]byte(id)))), nil
+	return filepath.Join(home, ".pocketctl", "collaboration-"+agent, fmt.Sprintf("%x.json", sha256.Sum256([]byte(id)))), nil
 }
 
-func persistCollaborationClaude(binding collaborationNativeBinding, cwd string) error {
-	p, err := collaborationClaudePath(binding.NativeSessionID)
+func persistCollaborationNative(binding collaborationNativeBinding, cwd string) error {
+	p, err := collaborationRecordPath(binding.Agent, binding.NativeSessionID)
 	if err != nil {
 		return err
 	}
@@ -42,7 +49,7 @@ func persistCollaborationClaude(binding collaborationNativeBinding, cwd string) 
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return ErrCollaborationBinding
 	}
-	data, err := json.Marshal(collaborationClaudeRecord{1, binding, cwd})
+	data, err := json.Marshal(collaborationNativeRecord{1, binding, cwd})
 	if err != nil {
 		return err
 	}
@@ -89,7 +96,7 @@ func (sm *SessionManager) restoreCollaborationClaude(auth *protocol.Collaboratio
 	if err != nil {
 		return nil
 	}
-	var record collaborationClaudeRecord
+	var record collaborationNativeRecord
 	if json.Unmarshal(data, &record) != nil || record.Version != 1 || record.Cwd != cwd {
 		return nil
 	}

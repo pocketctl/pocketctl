@@ -245,7 +245,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err := ValidateCollaborationAuthorization(auth, "create"); err != nil {
 		return "", err
 	}
-	if agent != adapter.AgentCodex && agent != adapter.AgentClaude {
+	if agent != adapter.AgentCodex && agent != adapter.AgentClaude && agent != adapter.AgentDSH {
 		return "", fmt.Errorf("%w: unsupported provider", ErrCollaborationAuthorization)
 	}
 	sm.mu.RLock()
@@ -292,7 +292,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	}
 	selectedMemory := collaborationHasSelectedMemory(teamContext)
 	initialPrompt := prompt
-	if selectedMemory || register != nil || agent == adapter.AgentClaude {
+	if selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
 		initialPrompt = ""
 	}
 	nativeSessionID, err := sm.CreateSession(ctx, protocol.SessionConfig{
@@ -321,8 +321,8 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err != nil {
 		return "", err
 	}
-	if agent == adapter.AgentClaude {
-		if err := persistCollaborationClaude(binding, workspace); err != nil {
+	if agent == adapter.AgentClaude || agent == adapter.AgentDSH {
+		if err := persistCollaborationNative(binding, workspace); err != nil {
 			return "", err
 		}
 	}
@@ -334,7 +334,7 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 			return "", err
 		}
 	}
-	if selectedMemory || register != nil || agent == adapter.AgentClaude {
+	if selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
 		base, baseErr := prepareCollaborationContext(teamContext)
 		if baseErr != nil {
 			return "", baseErr
@@ -347,9 +347,10 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 				return "", fmt.Errorf("team_memory_context_%s", outcome.Reason)
 			}
 		}
+		prompt, hidden := collaborationDelivery(agent, content, mergeCollaborationContext(base, selected))
 		if err := sm.SendMessageWithInput(ctx, UserMessageInput{
-			SessionID: nativeSessionID, Content: content, RequestID: auth.CallID, MsgID: auth.CallID,
-			InputMode: protocol.InputModeNewTurn, HiddenContext: mergeCollaborationContext(base, selected),
+			SessionID: nativeSessionID, Content: prompt, RequestID: auth.CallID, MsgID: auth.CallID,
+			InputMode: protocol.InputModeNewTurn, HiddenContext: hidden,
 			SkipMemoryContext: true,
 		}); err != nil {
 			sm.recordMemoryContextReceipt(ctx, selected, false, "dispatch_failed")
@@ -382,6 +383,9 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 	if process == nil {
 		return ErrCollaborationBinding
 	}
+	if process.Agent == adapter.AgentDSH && !sm.restoreCollaborationDSH(auth, nativeSessionID, process, policy) {
+		return ErrCollaborationBinding
+	}
 
 	sm.collaborationMu.Lock()
 	if sm.collaborationBindings == nil {
@@ -393,7 +397,7 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		roots := policy.Roots()
 		canonicalCwd, cwdErr := policy.AuthorizeProposed(process.Cwd)
 		if len(roots) == 0 || cwdErr != nil || process.Source != "daemon" || canonicalCwd != collaborationWorkspace(roots[0], auth.BindingID) ||
-			(process.Agent != adapter.AgentCodex && process.Agent != adapter.AgentClaude) {
+			(process.Agent != adapter.AgentCodex && process.Agent != adapter.AgentClaude && process.Agent != adapter.AgentDSH) {
 			sm.collaborationMu.Unlock()
 			return ErrCollaborationBinding
 		}
@@ -436,9 +440,10 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		sm.collaborationMu.Unlock()
 		return fmt.Errorf("team_memory_context_%s", outcome.Reason)
 	}
+	prompt, hidden := collaborationDelivery(process.Agent, content, mergeCollaborationContext(preparedContext, selectedContext))
 	err = sm.SendMessageWithInput(ctx, UserMessageInput{
-		SessionID: nativeSessionID, Content: content, RequestID: requestID, MsgID: msgID,
-		InputMode: protocol.InputModeNewTurn, HiddenContext: mergeCollaborationContext(preparedContext, selectedContext),
+		SessionID: nativeSessionID, Content: prompt, RequestID: requestID, MsgID: msgID,
+		InputMode: protocol.InputModeNewTurn, HiddenContext: hidden,
 		SkipMemoryContext: true,
 	})
 	if err != nil {

@@ -98,7 +98,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,
       owner_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       daemon_id VARCHAR(64) NOT NULL REFERENCES daemons(daemon_id) ON DELETE RESTRICT,
-      provider VARCHAR(32) NOT NULL CHECK (provider IN ('codex', 'claude-code')),
+      provider VARCHAR(32) NOT NULL CHECK (provider IN ('codex', 'claude-code', 'dsh')),
       runtime_profile_id TEXT,
       capability_revision BIGINT NOT NULL DEFAULT 1,
       state VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'revoked')),
@@ -107,6 +107,11 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       revoked_at TIMESTAMPTZ
     );
+    -- Upgrade existing installations as well as fresh schemas. One ALTER keeps
+    -- replacement of the provider constraint atomic.
+    ALTER TABLE team_agent_offers
+      DROP CONSTRAINT IF EXISTS team_agent_offers_provider_check,
+      ADD CONSTRAINT team_agent_offers_provider_check CHECK (provider IN ('codex', 'claude-code', 'dsh'));
     CREATE UNIQUE INDEX IF NOT EXISTS uq_team_agent_offer_active_runtime
       ON team_agent_offers(team_id, owner_user_id, daemon_id, provider, COALESCE(runtime_profile_id, ''))
       WHERE state = 'active';
