@@ -160,6 +160,23 @@ describe('useAuth — Email Verification Code', () => {
 })
 
 describe('useAuth — authenticated GET', () => {
+  test('shares cookie restoration between router and WebSocket startup', async () => {
+    const { doRefreshToken, accessToken } = useAuth()
+    let respond!: (value: Response) => void
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(resolve => { respond = resolve }))
+    const router = doRefreshToken()
+    const websocket = doRefreshToken()
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    respond({ ok: true, status: 200, json: async () => ({ access_token: 'shared-token', user: { id: 1 } }) } as Response)
+    expect(await Promise.all([router, websocket])).toEqual([true, true])
+    expect(accessToken.value).toBe('shared-token')
+    const later = doRefreshToken()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    respond({ ok: false, status: 401, json: async () => ({ error: 'expired' }) } as Response)
+    expect(await later).toBe(false)
+    expect(accessToken.value).toBe('')
+  })
+
   test('refreshes an expired access token once before returning a daemon snapshot', async () => {
     const { apiGetAuth, accessToken } = useAuth()
     accessToken.value = 'expired-token'

@@ -24,11 +24,11 @@
         <small> {{ t('workspace.agent_bindings') }} </small>
         <div v-for="binding in session.agent_bindings" :key="binding.id" class="agent-row">
           <span :class="['availability-dot', binding.availability]"></span>
-          <div><strong>{{ binding.provider === 'codex' ? 'Codex' : 'Claude Code' }}</strong><em>{{ binding.daemon_id }} · {{ binding.availability }}</em></div>
+          <div><strong>{{ teamProviderLabel(binding.provider) }}</strong><em>{{ binding.daemon_id }} · {{ binding.availability }}</em></div>
           <RouterLink v-if="binding.owner_user_id === currentUserId && binding.native_session_id" :to="nativeSessionLink(binding.native_session_id)"> {{ t('workspace.native_session') }} </RouterLink>
         </div>
       </section>
-      <section v-if="mode==='summary' && ownOffers.length"><small> {{ t('workspace.my_agents') }} </small><p class="owner-boundary"> {{ t('workspace.own_agent_hint') }} </p><div v-for="offer in ownOffers" :key="offer.id" class="agent-row"><div><strong>{{ offer.provider === 'codex' ? 'Codex' : 'Claude Code' }}</strong><em>{{ offer.daemon_id }}</em></div><button :disabled="busy || !writesEnabled || !['active','paused'].includes(session.state) || (!isBound(offer.id) && !offer.managed_callable)" @click="toggleBinding(offer.id)">{{ isBound(offer.id) ? t('workspace.withdraw') : t('workspace.join_session') }}</button></div></section>
+      <section v-if="mode==='summary' && ownOffers.length"><small> {{ t('workspace.my_agents') }} </small><p class="owner-boundary"> {{ t('workspace.own_agent_hint') }} </p><div v-for="offer in ownOffers" :key="offer.id" class="agent-row"><div><strong>{{ teamProviderLabel(offer.provider) }}</strong><em>{{ offer.daemon_id }}</em></div><button :disabled="busy || !writesEnabled || !['active','paused'].includes(session.state) || (!isBound(offer.id) && !offer.managed_callable)" @click="toggleBinding(offer.id)">{{ isBound(offer.id) ? t('workspace.withdraw') : t('workspace.join_session') }}</button></div></section>
       <p v-if="error" class="panel-error">{{ error }}</p>
       <p class="owner-boundary"> {{ t('workspace.agent_owner_boundary') }} </p>
     </div>
@@ -37,6 +37,7 @@
 </template>
 
 <script setup lang="ts">
+import { teamProviderLabel } from '../../utils/teamProvider'
 import { computed, ref } from 'vue'
 import ActionList from '../ActionList.vue'
 import { useLocale } from '../../composables/useLocale'

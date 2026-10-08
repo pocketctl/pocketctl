@@ -51,7 +51,7 @@ func readCollaborationRetirement(path, id string) (*collaborationRetirement, err
 		return nil, err
 	}
 	if record.SchemaVersion != 1 || record.NativeSessionID != id || record.BindingID == "" ||
-		(record.Agent != adapter.AgentCodex && record.Agent != adapter.AgentClaude) ||
+		(record.Agent != adapter.AgentCodex && record.Agent != adapter.AgentClaude && record.Agent != adapter.AgentDSH) ||
 		!filepath.IsAbs(record.WorkspaceRoot) || record.Cwd != collaborationWorkspace(record.WorkspaceRoot, record.BindingID) {
 		return nil, fmt.Errorf("invalid collaboration retirement identity")
 	}

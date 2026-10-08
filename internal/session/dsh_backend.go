@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -231,7 +232,7 @@ func (c *dshCoordinator) attach(s dshSummary, source string) {
 	c.sm.mu.RLock()
 	policy := c.sm.cwdPolicy
 	c.sm.mu.RUnlock()
-	if policy == nil || policy.Allows(s.Cwd) != nil {
+	if policy == nil || policy.Allows(s.Cwd) != nil || c.sm.isRetiredCollaborationSession(s.SessionID, adapter.AgentDSH, s.Cwd) {
 		return
 	}
 	c.mu.Lock()
@@ -242,6 +243,10 @@ func (c *dshCoordinator) attach(s dshSummary, source string) {
 	c.mu.Unlock()
 	now := time.Now()
 	c.sm.mu.Lock()
+	if c.sm.retiredCollaborationSessionLocked(s.SessionID, adapter.AgentDSH, s.Cwd) {
+		c.sm.mu.Unlock()
+		return
+	}
 	ps, exists := c.sm.sessions[s.SessionID]
 	if exists && (ps.Agent != adapter.AgentDSH || ps.Cwd != s.Cwd) {
 		c.sm.mu.Unlock()
@@ -312,7 +317,7 @@ func (sm *SessionManager) createDSHSession(ctx context.Context, cfg protocol.Ses
 	b := &dshBackend{coord: sm.ensureDSH()}
 	id, err := b.Start(ctx, cfg)
 	if err != nil {
-		return "", err
+		return id, err
 	}
 	if cfg.DeferInitialPrompt {
 		sm.mu.Lock()
@@ -342,10 +347,28 @@ func (b *dshBackend) Start(ctx context.Context, cfg protocol.SessionConfig) (str
 	var result struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := client.Call(ctx, "session/create", dshapp.Request(map[string]any{"cwd": cfg.Cwd}), &result); err != nil {
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if err := client.Call(ctx, "session/create", dshapp.Request(map[string]any{"cwd": cfg.Cwd}), &result); err != nil {
+		var rejected *dshapp.RPCError
+		if errors.As(err, &rejected) {
+			return "", err
+		}
+		return "", errors.Join(err, errNativeSessionCreateUncertain)
+	}
+	if result.SessionID == "" {
+		return "", fmt.Errorf("%w: DSH create returned no session identity", errNativeSessionCreateUncertain)
+	}
 	b.coord.attach(dshSummary{SessionID: result.SessionID, Cwd: cfg.Cwd}, "daemon")
+	b.coord.sm.mu.Lock()
+	ps := b.coord.sm.sessions[result.SessionID]
+	if ps == nil || ps.Agent != adapter.AgentDSH || ps.Cwd != cfg.Cwd {
+		b.coord.sm.mu.Unlock()
+		return result.SessionID, ErrCollaborationBinding
+	}
+	ps.Source = "daemon"
+	b.coord.sm.mu.Unlock()
 	// Settings must settle before the follow stream can observe the session;
 	// defer keeps the ordering on early error returns as well.
 	defer b.coord.startFollowing(result.SessionID)

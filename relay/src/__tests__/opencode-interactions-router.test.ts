@@ -286,3 +286,36 @@ describe('OpenCode interaction router', () => {
     expect(client._sent).toContainEqual(metadata)
   })
 })
+
+test('inventory refresh preserves live registration/cursors and broadcasts DSH additions and removals', async()=>{
+ const db=pool(),router=new Router(db),daemon=ws(),client=ws()
+ await router.registerDaemon(daemon,{type:'register',daemon_id:'d1',started_at:123,agents:['codex']},1)
+ router.registerClient(client,1)
+ const before=(router as any).daemons.get('d1'), cursor=(router as any).daemonSeq.get('d1')
+ const start=db._calls.length
+ const message={type:'register',daemon_id:'d1',started_at:123,agents:['dsh'],agent_manageable:{dsh:false},
+   capabilities:['team_collaboration_dispatch_v1','team_collaboration_context_v1','team_collaboration_dsh_v1','unknown']}
+ expect(await router.refreshDaemonAgents(daemon,message,1)).toBe(true)
+ expect((router as any).daemons.get('d1')).toBe(before)
+ expect((router as any).daemonSeq.get('d1')).toBe(cursor)
+ expect(before.collaborationCapabilities).toContain('team_collaboration_dsh_v1')
+ expect(before.collaborationCapabilities).not.toContain('unknown')
+ expect(client._sent).toContainEqual(expect.objectContaining({type:'daemon_status',agents:[{type:'dsh',version:'',latest:'',manageable:false}]}))
+ expect(db._calls.slice(start).find((call:any)=>/UPDATE daemons SET agents/.test(call.sql))).toMatchObject({params:expect.arrayContaining([before.registrationId])})
+ expect(await router.refreshDaemonAgents(ws(),message,1)).toBe(false)
+ expect(await router.refreshDaemonAgents(daemon,{...message,started_at:456},1)).toBe(false)
+ expect(await router.refreshDaemonAgents(daemon,message,2)).toBe(false)
+ expect(await router.refreshDaemonAgents(daemon,{...message,agents:[],capabilities:[]},1)).toBe(true)
+ expect(client._sent.at(-1)).toMatchObject({type:'daemon_status',agents:[]})
+})
+
+test('inventory refresh cannot bypass an expired authentication lease', async () => {
+  const db = pool(), router = new Router(db), daemon = ws()
+  const message = { type: 'register', daemon_id: 'd1', started_at: 123, agents: ['dsh'] }
+  await router.registerDaemon(daemon, message, 1)
+  ;(router as any).daemons.get('d1').tokenJti = 'expired-lease'
+  vi.spyOn((router as any).authLeases, 'isUsable').mockReturnValue(false)
+  const start = db._calls.length
+  expect(await router.refreshDaemonAgents(daemon, message, 1)).toBe(false)
+  expect(db._calls.slice(start).some((call: any) => /UPDATE daemons SET agents/.test(call.sql))).toBe(false)
+})

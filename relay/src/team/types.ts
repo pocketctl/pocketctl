@@ -28,7 +28,11 @@ export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | '
 export type TeamCallState = 'pending' | 'dispatched' | 'accepted' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'uncertain'
 export type TeamEventKind = 'member_message' | 'agent_message' | 'status' | 'context' | 'run' | 'system'
 export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
-export type TeamProvider = 'codex' | 'claude-code'
+export const TEAM_PROVIDERS = ['codex', 'claude-code', 'dsh'] as const
+export type TeamProvider = typeof TEAM_PROVIDERS[number]
+export function isTeamProvider(value: unknown): value is TeamProvider {
+  return typeof value === 'string' && (TEAM_PROVIDERS as readonly string[]).includes(value)
+}
 export type TeamMemoryAccessState = 'available' | 'forbidden' | 'installation_paused' | 'feature_disabled'
 
 export const TEAM_DAEMON_CAPABILITIES = Object.freeze([

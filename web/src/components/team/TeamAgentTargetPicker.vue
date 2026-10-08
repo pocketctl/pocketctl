@@ -24,6 +24,7 @@
 </template>
 
 <script setup lang="ts">
+import { teamProviderLabel } from '../../utils/teamProvider'
 import { useLocale } from "../../composables/useLocale"
 const { t } = useLocale()
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
@@ -44,7 +45,7 @@ const selectionLabel=computed(()=>props.modelValue.mode==='discussion'?t('worksp
 const callableBindings = computed(() => props.bindings.filter(binding => binding.availability === 'online'))
 
 function bindingLabel(binding: TeamSessionAgentBinding): string {
-  const provider = binding.provider === 'codex' ? 'Codex' : 'Claude Code'
+  const provider = teamProviderLabel(binding.provider)
   const owner = props.members.find(member => member.user_id === binding.owner_user_id)?.display_label ?? t('workspace.member_id', {id:binding.owner_user_id})
   return `${provider} · ${owner} · ${binding.daemon_id}`
 }

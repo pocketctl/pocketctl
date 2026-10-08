@@ -119,7 +119,7 @@
                   {{ t('settings.upgrade_btn') }}
                 </button>
                 <span v-else-if="isReadOnlyObserver(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
-                <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t('hosts.agent_system_install') }}</span>
+                <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t(agentRawName(a) === 'dsh' ? 'hosts.dsh_native_host' : 'hosts.agent_system_install') }}</span>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
               </div>
             </template>

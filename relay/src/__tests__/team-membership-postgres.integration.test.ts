@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
+import { initTeamSchema } from '../team/schema.js'
 import { initDB } from '../db.js'
 import { resolveTeamCollaborationConfig } from '../team/config.js'
 import { createTeamRouteService, registerTeamRoutes } from '../team/routes.js'
@@ -210,6 +211,30 @@ describeWithDatabase('Team membership and Agent offers (PostgreSQL)', () => {
     expect((await pool.query(`SELECT revision FROM team_tasks WHERE task_id = $1`, [taskId])).rows[0].revision).toBe('3')
     const hiddenAfterRemoval = await app.inject({ method: 'GET', url: `/api/team/teams/${teamId}`, headers: headers(memberId) })
     expect(hiddenAfterRemoval.statusCode).toBe(404)
+  })
+
+  test('migrates existing provider constraint and supports idempotent DSH sharing', async () => {
+    const ownerId = await user('dsh.owner@example.test')
+    await pool.query(`ALTER TABLE team_agent_offers DROP CONSTRAINT team_agent_offers_provider_check,
+      ADD CONSTRAINT team_agent_offers_provider_check CHECK (provider IN ('codex','claude-code'))`)
+    await pool.query(`INSERT INTO daemons (daemon_id,hostname,agents,status,user_id,collaboration_capabilities)
+      VALUES ('dsh-host','DSH', $1::jsonb,'online',$2,$3::jsonb)`,
+      [JSON.stringify([{type:'codex',manageable:true},{type:'dsh',manageable:false}]),ownerId,
+       JSON.stringify(['team_collaboration_dispatch_v1','team_collaboration_context_v1','team_collaboration_dsh_v1'])])
+    const team = (await createTeam(ownerId,'DSH team','dsh-team')).json().team
+    const share = (provider: string, revision: number) => app.inject({method:'POST',url:`/api/team/teams/${team.id}/agent-offers`,headers:headers(ownerId),
+      payload:{request_id:'share-'+provider,expected_revision:revision,daemon_id:'dsh-host',provider}})
+    const previous = await share('codex',1)
+    expect(previous.statusCode,previous.body).toBe(201)
+    await initTeamSchema(pool)
+    await initTeamSchema(pool)
+    expect((await pool.query(`SELECT offer_id FROM team_agent_offers WHERE provider='codex'`)).rows[0].offer_id).toBe(previous.json().offer.id)
+    const dsh = await share('dsh',2)
+    expect(dsh.statusCode,dsh.body).toBe(201)
+    expect(dsh.json().offer).toMatchObject({provider:'dsh',managed_callable:true,availability:'online'})
+    const replay = await share('dsh',2)
+    expect(replay.json().offer.id).toBe(dsh.json().offer.id)
+    expect((await pool.query(`SELECT count(*)::int AS n FROM team_agent_offers WHERE provider='dsh'`)).rows[0].n).toBe(1)
   })
 
   test('locks a daemon to one team until every active offer is revoked', async () => {

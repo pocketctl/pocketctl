@@ -17,12 +17,13 @@ import (
 )
 
 type AgentInfo struct {
-	Type       string `json:"type"`
-	CLIName    string `json:"cli_name"`
-	Path       string `json:"path"`
-	Version    string `json:"version,omitempty"`
-	Latest     string `json:"latest,omitempty"`
-	Manageable bool   `json:"manageable"`
+	Type         string `json:"type"`
+	CLIName      string `json:"cli_name"`
+	Path         string `json:"path"`
+	Version      string `json:"version,omitempty"`
+	Latest       string `json:"latest,omitempty"`
+	Manageable   bool   `json:"manageable"`
+	TeamCallable bool   `json:"-"`
 }
 
 // Known agents (CLI name, npm package, upgrade command) come from the adapter
@@ -36,7 +37,12 @@ const (
 	versionProbeWaitDelay = time.Second
 )
 
-func DiscoverAgents() []AgentInfo {
+func DiscoverAgents() []AgentInfo { return discoverAgents(true) }
+
+// DiscoverLocalAgents refreshes installations without querying a package registry.
+func DiscoverLocalAgents() []AgentInfo { return discoverAgents(false) }
+
+func discoverAgents(latest bool) []AgentInfo {
 	var agents []AgentInfo
 	for _, a := range adapter.All() {
 		// Session-only observers (codex-desktop) are valid session identities but
@@ -55,16 +61,28 @@ func DiscoverAgents() []AgentInfo {
 			continue
 		}
 		path, manageable, found := ResolveAgent(a.CLIName)
-		if !found {
+		configured, callable := false, false
+		if a.Type == adapter.AgentDSH {
+			configured, callable = discoverDSHHost()
+		}
+		if !found && !configured {
 			continue
 		}
+		version, newest := "", ""
+		if found {
+			version = cachedVersion(path, latest)
+		}
+		if found && latest {
+			newest = detectLatest(a.Package)
+		}
 		agents = append(agents, AgentInfo{
-			Type:       a.Type,
-			CLIName:    a.CLIName,
-			Path:       path,
-			Version:    detectVersion(path),
-			Latest:     detectLatest(a.Package),
-			Manageable: manageable && (a.Package != "" || a.UpdateCmd != ""),
+			Type:         a.Type,
+			CLIName:      a.CLIName,
+			Path:         path,
+			Version:      version,
+			Latest:       newest,
+			TeamCallable: callable,
+			Manageable:   manageable && (a.Package != "" || a.UpdateCmd != ""),
 		})
 	}
 	return agents
@@ -96,6 +114,11 @@ func candidatePaths(cliName, home, pathEnv, npmPrefix string) []string {
 			continue
 		}
 		addPath(dir, cliName)
+	}
+	if cliName == "dsh" && home != "" {
+		addPath(filepath.Join(home, ".bun", "bin"), cliName)
+		addPath(filepath.Join(home, "Library", "pnpm"), cliName)
+		addPath(filepath.Join(home, ".local", "share", "pnpm"), cliName)
 	}
 	if cliName == "zcode" {
 		ordered = append(ordered, zcodeDesktopCandidatePaths(runtime.GOOS, home)...)

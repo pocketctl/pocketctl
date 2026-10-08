@@ -91,7 +91,7 @@ const myOffers = computed(() => activeOffers.value.filter(offer => offer.owner_u
 const key = (candidate: Pick<TeamAgentCandidate, 'daemon_id' | 'provider'>) => `${candidate.daemon_id}:${candidate.provider}`
 type MyAgent = { key:string; hostname:string; provider:TeamAgentCandidate['provider']; candidate?:TeamAgentCandidate; offer?:TeamAgentOffer }
 const myAgents = computed<MyAgent[]>(() => {
-  const rows = props.candidates.map(candidate => ({ key:key(candidate), hostname:candidate.hostname || candidate.daemon_id, provider:candidate.provider, candidate, offer:myOffers.value.find(offer=>key(offer)===key(candidate)) })) as MyAgent[]
+  const rows = props.candidates.map(candidate => ({ key:key(candidate), hostname:candidate.alias?.trim() || candidate.hostname || candidate.daemon_id, provider:candidate.provider, candidate, offer:myOffers.value.find(offer=>key(offer)===key(candidate)) })) as MyAgent[]
   for (const offer of myOffers.value) if (!rows.some(row=>row.key===key(offer))) rows.push({key:key(offer),hostname:offer.daemon_id,provider:offer.provider,offer})
   return rows
 })

@@ -1566,6 +1566,7 @@ func cmdDaemonStart(args []string) {
 		return sm.DispatchMemoryContextControl(message)
 	}
 	client.SetAgentManageable(agentManageable)
+	client.SetAgentInventory(agents)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
 	if zcodeObserver != nil && documentCaptureEnabled && documentCaptureConfigErr == nil {
@@ -2041,6 +2042,21 @@ func cmdDaemonStart(args []string) {
 	// Start process monitor
 	daemon.RunLoop(ctx, "process-monitor", logger, func() { pm.Run(ctx) })
 
+	// Installation changes and native Host availability must not require a restart.
+	daemon.RunLoop(ctx, "agent-inventory", logger, func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if client.SetAgentInventory(discovery.DiscoverLocalAgents()) {
+					client.ResendRegister()
+				}
+			}
+		}
+	})
 	// Start WebSocket client
 	daemon.RunLoop(ctx, "ws-client", logger, func() {
 		if err := client.Run(ctx); err != nil && ctx.Err() == nil {
@@ -4552,6 +4568,7 @@ func upgradeGateDecision(found, manageable bool, agentName, path string) (procee
 
 type daemonMessageSender interface {
 	SendMsg(any)
+	SetAgentInventory([]discovery.AgentInfo) bool
 	SetAgentVersions(map[string]string)
 	SetAgentLatests(map[string]string)
 	SetAgentManageable(map[string]bool)
@@ -4609,25 +4626,14 @@ func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent s
 		return
 	}
 
-	agentVersions := make(map[string]string)
-	agentLatests := make(map[string]string)
-	agentManageable := make(map[string]bool)
 	newVer := ""
-	for _, a := range discovery.DiscoverAgents() {
-		if a.Version != "" {
-			agentVersions[a.Type] = a.Version
-		}
-		if a.Latest != "" {
-			agentLatests[a.Type] = a.Latest
-		}
-		agentManageable[a.Type] = a.Manageable
+	agents := discovery.DiscoverAgents()
+	for _, a := range agents {
 		if a.Type == agentName {
 			newVer = a.Version
 		}
 	}
-	client.SetAgentVersions(agentVersions)
-	client.SetAgentLatests(agentLatests)
-	client.SetAgentManageable(agentManageable)
+	client.SetAgentInventory(agents)
 	client.ResendRegister()
 	client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "success", Message: newVer})
 	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)

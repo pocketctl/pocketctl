@@ -131,6 +131,7 @@ export class TeamDispatchRepository {
         || Number(row.binding_owner_user_id) !== Number(row.owner_user_id)
         || !hasCapability(row.collaboration_capabilities, TEAM_DISPATCH_CAPABILITY)
         || !hasCapability(row.collaboration_capabilities, 'team_collaboration_context_v1')
+        || (row.provider === 'dsh' && !hasCapability(row.collaboration_capabilities, 'team_collaboration_dsh_v1'))
       if (unavailable) {
         await client.query(`UPDATE collaboration_calls SET state = 'blocked', outcome = 'agent_unavailable', updated_at = NOW(), finished_at = NOW() WHERE call_id = $1`, [callId])
         return null
@@ -258,7 +259,7 @@ export class TeamDispatchRepository {
     return Boolean(result.rows[0])
   }
 
-  async projectDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>): Promise<ProjectedDispatchEvent | null> {
+  async projectDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): Promise<ProjectedDispatchEvent | null> {
     const sessionId = typeof message.session_id === 'string' ? message.session_id : ''
     const seq = Number(message.seq)
     if (!sessionId || !Number.isSafeInteger(seq) || seq <= 0) return null
@@ -268,14 +269,23 @@ export class TeamDispatchRepository {
     const agentText = projectionKind === 'agent_message'
     return this.transaction(async client => {
       const call = (await client.query(
-        `SELECT call.*, offer.owner_user_id, offer.daemon_id
+        `SELECT call.*, offer.owner_user_id, offer.daemon_id, offer.provider
          FROM collaboration_calls call JOIN team_agent_offers offer ON offer.offer_id = call.offer_id
          WHERE call.native_session_id = $1 AND offer.daemon_id = $2 AND offer.owner_user_id = $3
            AND call.state IN ('dispatched', 'accepted')
          ORDER BY call.dispatched_at DESC LIMIT 1 FOR UPDATE OF call`, [sessionId, daemonId, ownerUserId],
       )).rows[0]
       if (!call) return null
-      const projectionKey = `${daemonId}:${seq}`
+      // DSH replays native history after restart with new transport sequences,
+      // while new turns can reuse the previous process's sequences. Use native
+      // identity across generations, and the authenticated generation for
+      // transport-only events. Keep existing providers' persisted keys intact.
+      const nativeEventId = typeof message.event_id === 'string' ? message.event_id : ''
+      const projectionKey = call.provider === 'dsh'
+        ? `dsh:${createHash('sha256').update(JSON.stringify([daemonId, sessionId,
+          nativeEventId ? ['native', nativeEventId] : ['transport', daemonGeneration ?? 0, seq],
+        ])).digest('hex')}`
+        : `${daemonId}:${seq}`
       // A reconnect can replay an old turn after a new call is dispatched to
       // the same native session. Sequence identity belongs to the daemon,
       // so an event already projected for any earlier call must stay there.

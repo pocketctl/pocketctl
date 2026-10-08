@@ -1,3 +1,4 @@
+import { isTeamProvider } from './types.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 
@@ -345,7 +346,7 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
     const runtimeProfileId = parsed.body.runtime_profile_id === undefined || parsed.body.runtime_profile_id === null
       ? null
       : typeof parsed.body.runtime_profile_id === 'string' ? parsed.body.runtime_profile_id.trim() : undefined
-    if (!daemonId || daemonId.length > 64 || (provider !== 'codex' && provider !== 'claude-code') || runtimeProfileId === undefined || (runtimeProfileId?.length ?? 0) > 255) {
+    if (!daemonId || daemonId.length > 64 || !isTeamProvider(provider) || runtimeProfileId === undefined || (runtimeProfileId?.length ?? 0) > 255) {
       return failure(reply, 400, 'invalid_request', 'valid daemon_id, provider, and runtime_profile_id are required')
     }
     try {

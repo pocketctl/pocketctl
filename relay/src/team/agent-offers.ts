@@ -1,4 +1,4 @@
-import type { TeamAgentAvailability, TeamProvider } from './types.js'
+import { TEAM_PROVIDERS, type TeamAgentAvailability, type TeamProvider } from './types.js'
 
 export interface InstalledAgentEvidence {
   type?: unknown
@@ -9,6 +9,7 @@ export interface InstalledAgentEvidence {
 export interface DaemonAgentEvidence {
   daemon_id: string
   hostname: string | null
+  alias?: string | null
   status: string
   agents: unknown
   collaboration_capabilities?: unknown
@@ -18,6 +19,7 @@ export interface DaemonAgentEvidence {
 export interface TeamAgentCandidate {
   daemon_id: string
   hostname: string | null
+  alias?: string | null
   provider: TeamProvider
   installed: boolean
   online: boolean
@@ -52,10 +54,12 @@ export function candidateForProvider(
   const online = daemon.status === 'online'
   const occupiedTeamId = daemon.team_id ?? null
   const occupied = Boolean(occupiedTeamId && occupiedTeamId !== requestedTeamId)
-  const manageable = installed?.manageable !== false
+  // DSH attaches to a native Host; package upgrade ownership is unrelated to calling it.
+  const manageable = provider === 'dsh' || installed?.manageable !== false
   const dispatchSupported = Array.isArray(daemon.collaboration_capabilities)
     && daemon.collaboration_capabilities.includes('team_collaboration_dispatch_v1')
     && daemon.collaboration_capabilities.includes('team_collaboration_context_v1')
+    && (provider !== 'dsh' || daemon.collaboration_capabilities.includes('team_collaboration_dsh_v1'))
   const managedCallable = Boolean(installed && online && manageable && dispatchSupported && !occupied)
   const availability: TeamAgentAvailability = occupied
     ? 'occupied'
@@ -71,6 +75,7 @@ export function candidateForProvider(
   return {
     daemon_id: daemon.daemon_id,
     hostname: daemon.hostname,
+    alias: daemon.alias ?? null,
     provider,
     installed: Boolean(installed),
     online,
@@ -83,7 +88,7 @@ export function candidateForProvider(
 
 export function offeredProviders(agents: unknown): TeamProvider[] {
   const providers: TeamProvider[] = []
-  for (const provider of ['codex', 'claude-code'] as const) {
+  for (const provider of TEAM_PROVIDERS) {
     if (installedAgent(agents, provider)) providers.push(provider)
   }
   return providers

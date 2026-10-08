@@ -1,3 +1,4 @@
+import { isTeamProvider } from './types.js'
 import type { FastifyInstance } from 'fastify'
 
 import type { TeamCollaborationConfig } from './config.js'
@@ -58,7 +59,7 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
   app.get('/api/team/teams/:teamId/sessions', async (request, reply) => {
     const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
     const query = request.query as { daemon_id?: string; provider?: string } | null
-    const provider = query?.provider === 'codex' || query?.provider === 'claude-code' ? query.provider as TeamProvider : undefined
+    const provider = isTeamProvider(query?.provider) ? query.provider : undefined
     try { return { sessions: await deps.service.listSessions(param(request.params, 'teamId'), identity.userId, { daemonId: query?.daemon_id, provider }) } }
     catch (error) { return mapError(error, reply) }
   })

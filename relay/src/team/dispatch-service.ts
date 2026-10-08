@@ -310,8 +310,8 @@ export class TeamDispatchService {
     }, 'grant_timeout').catch(() => {})
   }
 
-  async handleDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>): Promise<void> {
-    const projected = await this.repository.projectDaemonEvent(daemonId, ownerUserId, message)
+  async handleDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): Promise<void> {
+    const projected = await this.repository.projectDaemonEvent(daemonId, ownerUserId, message, daemonGeneration)
     if (projected) {
       if (projected.event.call_id) this.clearReceiptTimer(projected.event.call_id)
       this.notifier.event?.(projected.event.team_session_id, projected.participantUserIds, projected.event)
@@ -375,9 +375,9 @@ export class TeamDispatchService {
     this.receiptTimers.delete(callId)
   }
 
-  observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>): void {
+  observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): void {
     const previous = this.daemonEventChains.get(daemonId) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.handleDaemonEvent(daemonId, ownerUserId, message))
+    const current = previous.catch(() => undefined).then(() => this.handleDaemonEvent(daemonId, ownerUserId, message, daemonGeneration))
     this.daemonEventChains.set(daemonId, current)
     void current.catch(error => console.error('[team-dispatch] daemon event failed', { daemonId, error })).finally(() => {
       if (this.daemonEventChains.get(daemonId) === current) this.daemonEventChains.delete(daemonId)

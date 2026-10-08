@@ -27,6 +27,7 @@
 </template>
 
 <script setup lang="ts">
+import { teamProviderLabel } from '../../utils/teamProvider'
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { TeamAgentCandidate, TeamProvider } from '../../types/team'
@@ -44,7 +45,7 @@ const hosts = computed(() => {
   const grouped = new Map<string, { id:string; name:string; online:boolean; agents:TeamAgentCandidate[] }>()
   for(const candidate of props.candidates) {
     let host=grouped.get(candidate.daemon_id)
-    if(!host) {host={id:candidate.daemon_id,name:candidate.hostname||candidate.daemon_id,online:candidate.online,agents:[]};grouped.set(candidate.daemon_id,host)}
+    if(!host) {host={id:candidate.daemon_id,name:candidate.alias?.trim()||candidate.hostname||candidate.daemon_id,online:candidate.online,agents:[]};grouped.set(candidate.daemon_id,host)}
     host.agents.push(candidate)
   }
   return [...grouped.values()]
@@ -59,7 +60,7 @@ function selectable(candidate: TeamAgentCandidate): boolean {
 }
 
 function providerLabel(provider: TeamProvider): string {
-  return provider === 'claude-code' ? 'Claude Code' : 'Codex'
+  return teamProviderLabel(provider)
 }
 
 function availabilityCopy(candidate: TeamAgentCandidate): string {

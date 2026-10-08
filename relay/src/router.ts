@@ -67,6 +67,24 @@ import {
 } from './session-history-read.js';
 import type { TeamSubscriptionAuthorizer } from './team/subscription.js';
 
+function daemonAgentInventory(msg: any): { agents: any[]; collaborationCapabilities: string[] } {
+    const agentTypes: string[] = Array.isArray(msg.agents) ? msg.agents.filter((value: unknown) => typeof value === 'string') : [];
+    const agentVersions: Record<string, string> = msg.agent_versions || {};
+    const agentLatests: Record<string, string> = msg.agent_latests || {};
+    const agentManageable: Record<string, boolean> = msg.agent_manageable || {};
+    const agents = agentTypes.map((t: string) => ({
+      type: t,
+      version: agentVersions[t] || '',
+      latest: agentLatests[t] || '',
+      manageable: agentManageable[t] !== false, // 缺省 true，兼容旧 daemon
+    }));
+
+    const collaborationCapabilities = Array.isArray(msg.capabilities)
+      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1' || capability === 'team_collaboration_dsh_v1'))] as string[]
+      : [];
+    return { agents, collaborationCapabilities };
+}
+
 interface DaemonConnection { supportsDirectoryBrowse?: boolean; collaborationCapabilities: string[]; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; subscribedTeamSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
@@ -162,7 +180,7 @@ interface DaemonRevocationGateState {
 export interface RouterOptions {
   teamSubscriptionAuthorizer?: TeamSubscriptionAuthorizer;
   teamDispatchBroker?: {
-    observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>): void;
+    observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): void;
     handleDaemonDisconnected(daemonId: string): Promise<void>;
   };
   /** Session-bound context grant broker (Phase 2); absent disables the leg. */
@@ -983,6 +1001,45 @@ export class Router {
     }
   }
 
+  /** Refresh metadata on the current socket without resetting registration,
+   * authentication leases, event cursors, or active Team dispatches. */
+  refreshDaemonAgents(ws: WebSocket, msg: any, userId: number | null): Promise<boolean> {
+    return this.withDaemonRegistrationLock(msg.daemon_id, async () => {
+      const daemon = this.daemons.get(msg.daemon_id);
+      if (!daemon || daemon.ws !== ws || ws.readyState !== 1 || !userId || daemon.userId !== userId
+        || (daemon.startedAt || 0) !== (msg.started_at || 0)) return false;
+      if (daemon.tokenJti && !this.authLeases.isUsable(daemon.registrationId)) {
+        this.failClosedExpiredAuthLease(daemon.daemonId, daemon);
+        return false;
+      }
+      try {
+        if (daemon.tokenJti && await db.isTokenRevoked(this.controlPool, daemon.tokenJti)) {
+          this.rejectDaemonConnection(daemon.daemonId, 'token_revoked');
+          return false;
+        }
+        const { agents, collaborationCapabilities } = daemonAgentInventory(msg);
+        const updated = await this.controlPool.query(
+          `UPDATE daemons SET agents = $1::jsonb, collaboration_capabilities = $2::jsonb
+           WHERE daemon_id = $3 AND user_id = $4 AND registration_id = $5 AND status = 'online'`,
+          [JSON.stringify(agents), JSON.stringify(collaborationCapabilities), daemon.daemonId, userId, daemon.registrationId],
+        );
+        if (updated.rowCount !== 1 || this.daemons.get(daemon.daemonId) !== daemon || ws.readyState !== 1) return false;
+        daemon.agents = agents;
+        daemon.collaborationCapabilities = collaborationCapabilities;
+        const alias = await db.getDaemonAlias(this.controlPool, daemon.daemonId);
+        if (this.daemons.get(daemon.daemonId) !== daemon || ws.readyState !== 1) return false;
+        this.broadcastToUser(userId, { type: 'daemon_status', daemon_id: daemon.daemonId, status: 'online',
+          hostname: daemon.hostname, agents, alias, os: daemon.os, ip: daemon.ip });
+        return true;
+      } catch (error) {
+        // Reconnect resends the latest snapshot if persistence/broadcast fails.
+        if (this.daemons.get(daemon.daemonId) === daemon) this.sendRetryableDisconnect(daemon.daemonId, 'agent_inventory_unavailable', 1000);
+        console.error('refresh daemon inventory:', error);
+        return false;
+      }
+    });
+  }
+
   registerDaemon(ws: WebSocket, msg: any, userId: number | null, tokenJti?: string, machineId?: string): Promise<boolean> {
     const daemonId = msg.daemon_id;
     return this.withDaemonRegistrationLock(daemonId, () =>
@@ -1036,17 +1093,7 @@ export class Router {
     // grace window, so it must not be flapped offline (no push, no broadcast).
     const pendingOffline = this.pendingOfflineTimers.get(daemonId);
     if (pendingOffline) { clearTimeout(pendingOffline); this.pendingOfflineTimers.delete(daemonId); }
-    // Compose agents as [{type, version, latest, manageable}] objects.
-    const agentTypes: string[] = msg.agents || [];
-    const agentVersions: Record<string, string> = msg.agent_versions || {};
-    const agentLatests: Record<string, string> = msg.agent_latests || {};
-    const agentManageable: Record<string, boolean> = msg.agent_manageable || {};
-    const agents = agentTypes.map((t: string) => ({
-      type: t,
-      version: agentVersions[t] || '',
-      latest: agentLatests[t] || '',
-      manageable: agentManageable[t] !== false, // 缺省 true，兼容旧 daemon
-    }));
+    const { agents, collaborationCapabilities } = daemonAgentInventory(msg);
 
     const daemonOS = msg.os || 'unknown';
     const daemonIP = msg.ip || 'unknown';
@@ -1054,9 +1101,7 @@ export class Router {
     const daemonArch = msg.arch || '';
     const daemonVersion = msg.version || '';
     const daemonStartedAt = msg.started_at || 0;
-    const collaborationCapabilities = Array.isArray(msg.capabilities)
-      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1'))] as string[]
-      : [];
+
     const registrationId = randomUUID();
 
     // Count every persisted binding, including offline hosts. Claiming the row
@@ -2026,8 +2071,9 @@ export class Router {
       }
     }
     msg = sanitizeJSONBPayload(msg);
-    const collaborationOwner = (originDaemon ?? this.daemons.get(daemonId))?.userId;
-    if (collaborationOwner) this.teamDispatchBroker?.observeDaemonEvent(daemonId, collaborationOwner, msg);
+    const collaborationDaemon = originDaemon ?? this.daemons.get(daemonId);
+    const collaborationOwner = collaborationDaemon?.userId;
+    if (collaborationOwner) this.teamDispatchBroker?.observeDaemonEvent(daemonId, collaborationOwner, msg, collaborationDaemon?.startedAt);
     if (msg.type === 'user_message_receipt') {
       logMessageReceipt(this.daemons.get(daemonId)?.userId ?? null, daemonId, msg);
     }

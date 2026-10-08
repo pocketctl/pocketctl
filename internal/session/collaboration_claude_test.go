@@ -111,7 +111,7 @@ func TestCollaborationClaudeRestoreRequiresExactDurableOwnership(t *testing.T) {
 	}
 	binding := collaborationNativeBinding{NativeSessionID: id, TeamSessionID: auth.TeamSessionID, BindingID: auth.BindingID,
 		BindingRevision: auth.BindingRevision, OfferID: auth.OfferID, OfferRevision: auth.OfferRevision, OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: adapter.AgentClaude}
-	if err := persistCollaborationClaude(binding, cwd); err != nil {
+	if err := persistCollaborationNative(binding, cwd); err != nil {
 		t.Fatal(err)
 	}
 	if sm.restoreCollaborationClaude(auth, id, ps, policy) != nil {

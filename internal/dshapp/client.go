@@ -110,6 +110,12 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }
 
+// RPCError is a definitive native rejection. Transport or malformed-response
+// errors carry no proof that a mutating operation was rejected.
+type RPCError struct{ Method, Code, Message string }
+
+func (e *RPCError) Error() string { return fmt.Sprintf("DSH %s: %s: %s", e.Method, e.Code, e.Message) }
+
 func (c *Client) Call(ctx context.Context, method string, args, result any) error {
 	body, err := json.Marshal(map[string]any{"type": "client-request", "rpcId": uuid.NewString(), "method": method, "payload": map[string]any{"args": args}})
 	if err != nil {
@@ -131,7 +137,7 @@ func (c *Client) Call(ctx context.Context, method string, args, result any) erro
 	}
 	var envelope struct {
 		Result struct {
-			OK    bool            `json:"ok"`
+			OK    *bool           `json:"ok"`
 			Value json.RawMessage `json:"value"`
 			Error struct {
 				Code    string `json:"code"`
@@ -142,8 +148,11 @@ func (c *Client) Call(ctx context.Context, method string, args, result any) erro
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&envelope); err != nil {
 		return fmt.Errorf("invalid DSH %s response", method)
 	}
-	if !envelope.Result.OK {
-		return fmt.Errorf("DSH %s: %s: %s", method, envelope.Result.Error.Code, envelope.Result.Error.Message)
+	if envelope.Result.OK == nil {
+		return fmt.Errorf("invalid DSH %s response", method)
+	}
+	if !*envelope.Result.OK {
+		return &RPCError{method, envelope.Result.Error.Code, envelope.Result.Error.Message}
 	}
 	if result != nil {
 		return json.Unmarshal(envelope.Result.Value, result)

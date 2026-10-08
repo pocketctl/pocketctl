@@ -203,3 +203,30 @@ describe('Team Agent evidence', () => {
     }, 'codex', 'ctm_a')).toMatchObject({ managed_callable: true, dispatch_supported: true, availability: 'online' })
   })
 })
+
+ describe('DSH Team offers', () => {
+  test('requires DSH-specific live runtime support independently of package upgrade ownership', async () => {
+    const { offeredProviders } = await import('../team/agent-offers.js')
+    const daemon = { daemon_id: 'dsh-host', hostname: 'DSH', status: 'online', agents: [{ type: 'dsh', manageable: false }],
+      collaboration_capabilities: ['team_collaboration_dispatch_v1', 'team_collaboration_context_v1'] }
+    expect(offeredProviders(daemon.agents)).toEqual(['dsh'])
+    expect(candidateForProvider(daemon, 'dsh', 'team')).toMatchObject({installed: true, managed_callable: false, availability: 'unsupported'})
+    daemon.collaboration_capabilities.push('team_collaboration_dsh_v1')
+    expect(candidateForProvider(daemon, 'dsh', 'team')).toMatchObject({managed_callable: true, availability: 'online'})
+    expect(candidateForProvider({...daemon, status:'offline'}, 'dsh', 'team')).toMatchObject({managed_callable:false,availability:'offline'})
+    expect(candidateForProvider({...daemon, team_id:'another'}, 'dsh', 'team')).toMatchObject({managed_callable:false,availability:'occupied'})
+  })
+
+  test('accepts DSH sharing and continues rejecting unknown providers', async () => {
+    const addAgentOffer = vi.fn(async input => ({...input, owner_user_id:7}))
+    const app = register(service({addAgentOffer: addAgentOffer as any}))
+    for (const provider of ['dsh', 'unknown']) {
+      const response = await app.inject({method:'POST',url:'/api/team/teams/t/agent-offers',headers:{authorization:'Bearer user-7'},
+        payload:{request_id:'share-'+provider,expected_revision:1,daemon_id:'dsh-host',provider}})
+      expect(response.statusCode).toBe(provider === 'dsh' ? 201 : 400)
+    }
+    expect(addAgentOffer).toHaveBeenCalledTimes(1)
+    expect(addAgentOffer).toHaveBeenCalledWith(expect.objectContaining({provider:'dsh',daemonId:'dsh-host',actorUserId:7}))
+    await app.close()
+  })
+ })

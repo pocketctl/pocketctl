@@ -21,7 +21,7 @@
       <div class="people-strip">
         <div class="participant-avatars"><span v-for="member in members.filter(item => session?.participants.some(participant => participant.user_id === item.user_id && participant.state === 'active'))" :key="member.id">{{ member.display_label.slice(0,1) }}</span></div>
         <button @click="showParticipants = !showParticipants; showContext = false; showRun = false">{{ t('workspace.participants_count', {count:session?.participants.filter(item => item.state === 'active').length || 0}) }}</button>
-        <span class="strip-divider"></span><button v-for="binding in session?.agent_bindings.filter(item => item.state === 'active')" :key="binding.id" class="agent-chip" @click="showParticipants = true; showContext = false; showRun = false"><i :class="{online:binding.availability === 'online'}"></i>{{ binding.provider === 'codex' ? 'Codex' : 'Claude Code' }} · {{ members.find(member => member.user_id === binding.owner_user_id)?.display_label || t('team.member') }}</button>
+        <span class="strip-divider"></span><button v-for="binding in session?.agent_bindings.filter(item => item.state === 'active')" :key="binding.id" class="agent-chip" @click="showParticipants = true; showContext = false; showRun = false"><i :class="{online:binding.availability === 'online'}"></i>{{ teamProviderLabel(binding.provider) }} · {{ members.find(member => member.user_id === binding.owner_user_id)?.display_label || t('team.member') }}</button>
         <span class="strip-divider"></span>
           <button type="button" :class="{ active: showContext }" @click="historyContext = null; showContext = !showContext; showParticipants = false; showRun = false">Context v{{ session?.current_context_version || 0 }}</button>
           <button v-if="autorunEnabled || latestRun" type="button" :class="{ active: showRun }" @click="showRun = !showRun; showContext = false; showParticipants = false"> {{ t('workspace.autorun') }} </button>
@@ -33,7 +33,7 @@
         <div v-if="loading && !events.length" class="empty"> {{ t('workspace.loading_collaboration') }} </div>
         <div v-else-if="!events.length" class="empty"><strong> {{ t('workspace.start_team_discussion') }} </strong><span> {{ t('workspace.team_discussion_hint') }} </span></div>
         <article v-for="event in displayEvents" :id="`team-event-${event.id}`" :key="event.id" :class="['event', event.kind]">
-          <span v-if="event.kind === 'member_message' || event.kind === 'agent_message'" :class="['message-avatar',{agent:event.kind === 'agent_message'}]">{{ event.kind === 'member_message' ? authorLabel(event).slice(0,1) : 'C' }}</span>
+          <span v-if="event.kind === 'member_message' || event.kind === 'agent_message'" :class="['message-avatar',{agent:event.kind === 'agent_message'}]">{{ authorLabel(event).slice(0,1) }}</span>
           <div class="event-body">
           <div class="event-meta">
             <span>{{ authorLabel(event) }}</span><small v-if="event.author_offer_id">{{ t('workspace.owners_agent', {owner:members.find(member => member.user_id === offers.find(offer => offer.id === event.author_offer_id)?.owner_user_id)?.display_label || t('team.member')}) }}</small><time>{{ formatTime(event.created_at) }}</time>
@@ -95,6 +95,7 @@
 </template>
 
 <script setup lang="ts">
+import { teamProviderLabel } from '../utils/teamProvider'
 import TopbarGithubLink from '../components/TopbarGithubLink.vue'
 import { useLocale } from "../composables/useLocale"
 const { t } = useLocale()
@@ -115,6 +116,7 @@ import { useAuth } from '../composables/useAuth'
 import { getScopedReadingPosition, setScopedReadingPosition, type SessionScope } from '../composables/useScopedSessionState'
 import { useTeamSession } from '../composables/useTeamSession'
 import { getTeamContext, listTeamAgentOffers, listTeamMembers, listTeams, updateTeamSession } from '../services/teamClient'
+import { isTeamProvider } from '../types/team'
 import type { TeamSession, TeamContextSnapshot, TeamCallSummary, TeamAgentOffer, TeamEvent, TeamMember, TeamProvider, TeamSummary } from '../types/team'
 
 const route = useRoute(), { user } = useAuth(), teamAccess=useTeamAccess()
@@ -197,7 +199,7 @@ function kindLabel(kind: string): string { return ({ status: t('workspace.agent_
 function formatTime(value: string): string { return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
 function authorLabel(event: TeamEvent): string {
   if (event.author_user_id) return members.value.find(member => member.user_id === event.author_user_id)?.display_label ?? t('workspace.member_id', {id:event.author_user_id})
-  if (event.author_offer_id) return agentProvider(event.author_offer_id) === 'codex' ? 'Codex' : 'Claude Code'
+  if (event.author_offer_id) return teamProviderLabel(agentProvider(event.author_offer_id))
   return t('hosts.os')
 }
 function agentProvider(offerID: string | null): string { return offers.value.find(offer => offer.id === offerID)?.provider ?? 'agent' }
@@ -246,7 +248,7 @@ watch(sessionID, () => { historyGeneration++; historyContext.value=null; restore
 watch([loading, () => events.value.length], restoreReadingPosition)
 onMounted(() => {
   daemonID.value = typeof route.query.daemon === 'string' ? route.query.daemon : ''
-  provider.value = route.query.provider === 'codex' || route.query.provider === 'claude-code' ? route.query.provider : ''
+  provider.value = isTeamProvider(route.query.provider) ? route.query.provider : ''
   void loadList()
 })
 onMounted(()=>document.addEventListener('click',closeMore))
