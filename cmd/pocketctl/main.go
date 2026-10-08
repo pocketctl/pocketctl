@@ -4287,7 +4287,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				}
 				daemon.Go("document-request", logger, func() {
 					defer func() { <-documentSlots }()
-					root, ok := sm.GetDocumentCaptureRoot(request.SessionID)
+					root, ok := sm.GetRequestedDocumentCaptureRoot(request.SessionID)
 					if !ok {
 						reply("unavailable", "", "")
 						return
