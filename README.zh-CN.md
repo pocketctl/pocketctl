@@ -29,8 +29,8 @@ PocketCtl 是面向 Claude Code、Codex、OpenCode 和 ZCode 的跨设备控制�
 - **只关注真正需要处理的事项** — 可选的 Attention Inbox 会聚合待回答问题、
   审批、高风险操作和恢复信号，并保留对应会话上下文。
 - **与成员及其 Agent 协作（实验性）** — Web 客户端可创建 Team、共享任务和
-  会话，把有界工作定向给成员明确提供的 Codex 或 Claude Code Agent，并可
-  选运行有预算的多 Agent 协作。
+  会话，把有界工作定向给成员明确提供的 Codex、Claude Code 或 DeepSeek
+  Harness Agent，并可选运行有预算的多 Agent 协作。
 - **沉淀受治理的项目知识（实验性）** — 可选的 Memory 工作台将仓库源码转化
   为经评审才发布的 Wiki 和带影响分析的依赖代码图谱，并对 Skill 文档保持
   显式治理。
@@ -199,8 +199,8 @@ Web 客户端中你可以：
 - **共享会话与冻结 Context** — 显式协作事件和带版本的 Context 快照（目标、
   共识、待解决问题、引用）经认证回执后共享；原生私有会话日志永远不会
   自动共享。
-- **调用成员提供的 Agent** — Codex 与 Claude Code Agent 均可作为成员明确
-  提供的可调用接收方加入 Team，实时展示在线与占用状态；严格的
+- **调用成员提供的 Agent** — Codex、Claude Code 与 DeepSeek Harness Agent
+  均可作为成员明确提供的可调用接收方加入 Team，实时展示在线与占用状态；严格的
   owner/daemon/offer/binding 授权与既有配额、审批规则继续生效。
 - **运行有预算的多 Agent 协作（可选）** — 冻结的调用数、并发与时长预算，
   并为不确定结局提供恢复机制；不确定的工作不会被盲目重试。

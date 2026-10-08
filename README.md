@@ -32,7 +32,8 @@ off your development machine.
   approvals, high-risk actions, and recovery signals with their session context.
 - **Collaborate with people and their Agents (experimental)** — the Web client
   can create Teams, shared tasks and sessions, route bounded work to
-  member-contributed Codex or Claude Code Agents, and optionally run budgeted
+  member-contributed Codex, Claude Code, or DeepSeek Harness Agents, and
+  optionally run budgeted
   multi-Agent coordination.
 - **Grow governed project knowledge (experimental)** — the optional Memory
   workbench turns repository sources into a review-gated wiki and a dependency
@@ -222,8 +223,9 @@ small human-and-Agent workspace. In the Web client you can:
   versioned Context snapshots (goals, consensus, open questions, references)
   are shared with authenticated receipts; native private session logs are
   never shared automatically.
-- **Call member-contributed Agents** — both Codex and Claude Code agents can
-  join a Team as explicitly contributed, callable receivers with live
+- **Call member-contributed Agents** — Codex, Claude Code, and DeepSeek
+  Harness agents can join a Team as explicitly contributed, callable
+  receivers with live
   presence and occupancy; narrow owner/daemon/offer/binding authorization and
   the existing quota and approval rules still apply.
 - **Run bounded multi-Agent coordination (optional)** — frozen call,
