@@ -39,6 +39,7 @@ export const OBSERVER_READ_ONLY_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new
   'list_session_agents',
   'get_session_meta',
   'session_pin',
+  'session_document_resolve', // Explicit document read; never an agent input.
   'session_delete',
 ])
 

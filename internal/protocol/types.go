@@ -597,6 +597,7 @@ type RegisterMessage struct {
 	// lingering running/busy rows) from a legacy daemon that never reports it.
 	ActiveSessionIDs        []string `json:"active_session_ids"`
 	SupportsQuotaGrant      bool     `json:"supports_quota_grant,omitempty"`
+	SupportsDocumentResolve bool     `json:"supports_document_resolve,omitempty"`
 	SupportsDirectoryBrowse bool     `json:"supports_directory_browse,omitempty"`
 	Capabilities            []string `json:"capabilities,omitempty"`
 }

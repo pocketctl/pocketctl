@@ -1370,6 +1370,7 @@ func cmdDaemonStart(args []string) {
 	sm.SetRemotePermissionPolicy(adapter.RemotePermissionPolicy{AllowDangerous: *allowDangerousRemotePermissions})
 	documentCaptureEnabled, documentCaptureConfigErr := sessiondocument.CaptureEnabled(os.Getenv("POCKETCTL_SESSION_DOCUMENT_CAPTURE"))
 	var documentCaptureQueue *sessiondocument.CaptureQueue
+	var documentRecordPump *sessiondocument.RecordPump
 
 	// ZCode read-only observer (only when the user has explicitly enabled the
 	// sync). It is fully isolated from the SessionManager: it never enters
@@ -1904,7 +1905,7 @@ func cmdDaemonStart(args []string) {
 	if documentCaptureConfigErr != nil {
 		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
 	} else if documentCaptureEnabled {
-		documentRecordPump := sessiondocument.NewRecordPump(sessiondocument.RecordPumpOptions{
+		documentRecordPump = sessiondocument.NewRecordPump(sessiondocument.RecordPumpOptions{
 			BatchDepth: 16,
 			CanEmit: func() bool {
 				return len(outputCh) <= outputCap/4
@@ -2113,7 +2114,7 @@ func cmdDaemonStart(args []string) {
 			daemon.Go("session-mcp-server", logger, func() { sessionMcpServer.Serve(ctx, ln) })
 		}
 
-		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker, memoryContextGrants)
+		handleCommands(ctx, client, sm, logger, &stateDirty, memoryMcpBroker, memoryContextGrants, documentRecordPump)
 	})
 
 	// Periodic state update. Always refresh the session snapshot as well as
@@ -3907,8 +3908,9 @@ func deliverDeferredInitialPrompt(
 	})
 }
 
-func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker, memoryContextGrants *memorycontext.GrantClient) {
+func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker, memoryContextGrants *memorycontext.GrantClient, documentRecordPump *sessiondocument.RecordPump) {
 	quotaGrants := session.NewQuotaGrantValidator()
+	documentSlots := make(chan struct{}, 2)
 	directorySlots := make(chan struct{}, 2)
 	modelSlots := make(chan struct{}, 2)
 	var directoryRequests sync.Map
@@ -4266,6 +4268,43 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				if cancel, ok := directoryRequests.Load(cmd.RequestID); ok {
 					cancel.(context.CancelFunc)()
 				}
+			case "session_document_resolve":
+				request := cmd
+				reply := func(reason, documentID, versionID string) {
+					client.SendMsg(protocol.DaemonEvent{Type: "session_document_resolved", RequestID: request.RequestID,
+						Reason: reason, DocumentID: documentID, VersionID: versionID})
+				}
+				enabled, maxEventBytes, maxChunkBytes := client.SessionDocumentTransport()
+				if !enabled || documentRecordPump == nil {
+					reply("unsupported", "", "")
+					continue
+				}
+				select {
+				case documentSlots <- struct{}{}:
+				default:
+					reply("busy", "", "")
+					continue
+				}
+				daemon.Go("document-request", logger, func() {
+					defer func() { <-documentSlots }()
+					root, ok := sm.GetDocumentCaptureRoot(request.SessionID)
+					if !ok {
+						reply("unavailable", "", "")
+						return
+					}
+					result := sessiondocument.CaptureRequestedDocument(root, request.SessionID, request.RequestID, request.Path, 2<<20)
+					if result.Reason != "" {
+						reply(result.Reason, "", "")
+						return
+					}
+					records, err := sessiondocument.BuildRecords(request.SessionID, result, sessiondocument.TransportLimits{MaxEventBytes: maxEventBytes, MaxChunkBytes: maxChunkBytes})
+					if err != nil || !documentRecordPump.Submit(records) {
+						reply("busy", "", "")
+						return
+					}
+					// IDs only: document bytes continue through the durable artifact channel.
+					reply("", result.DocumentID, result.VersionID)
+				})
 			case "list_directories", "validate_directory":
 				select {
 				case directorySlots <- struct{}{}:

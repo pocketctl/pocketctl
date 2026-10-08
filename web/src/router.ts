@@ -23,6 +23,7 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/login/cli', component: DeviceAuthView },
   { path: '/', component: DashboardView, meta: { requiresAuth: true } },
   { path: '/sessions', component: SessionWorkspace, meta: { requiresAuth: true } },
+  { path: '/session/:id/documents/open', name: 'session-document-link', component: SessionDocumentPage, meta: { requiresAuth: true, standalone: true } },
   { path: '/session/:id/documents/:documentId/:versionId', name: 'session-document', component: SessionDocumentPage, meta: { requiresAuth: true, standalone: true } },
   { path: '/session/:id', component: SessionDetail, props: true, meta: { requiresAuth: true } },
   { path: '/tokens', component: TokenUsage, meta: { requiresAuth: true } },

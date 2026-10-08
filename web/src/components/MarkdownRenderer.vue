@@ -27,12 +27,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, inject } from 'vue'
 import { parseMarkdownSegments } from '../utils/markdownRenderer'
+import { sessionDocumentLinkKey, rewriteSessionDocumentLinks } from '../utils/sessionDocumentLinks'
 
 const props = defineProps<{ content: string }>()
 
-const segments = computed(() => parseMarkdownSegments(props.content))
+const resolveDocumentLink = inject(sessionDocumentLinkKey, undefined)
+const segments = computed(() => parseMarkdownSegments(props.content).map(segment =>
+  resolveDocumentLink && segment.type !== 'code'
+    ? { ...segment, html: rewriteSessionDocumentLinks(segment.html, resolveDocumentLink) } : segment))
 
 // ---- copy button ----
 const copiedIdx = ref<number>(-1)

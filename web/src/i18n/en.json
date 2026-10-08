@@ -1844,5 +1844,12 @@
   "session.dsh.noCreationPermissions": "No permission options provided. The host default will be used.",
   "new_session.dsh_not_configured": "This host is not connected to DeepSeek Harness. Run pocketctl agent dsh enable --url <native Host launch URL> on the host, then retry.",
   "new_session.dsh_host_unavailable": "Unable to read DeepSeek Harness settings. Check that the native Host is running and its connection URL is valid, then retry.",
-  "new_session.dsh_retry": "Retry"
+  "new_session.dsh_retry": "Retry",
+  "session.documents.resolving_link": "Reading a document snapshot from the session host…",
+  "session.documents.resolve.daemon_offline": "The session host is offline. Connect it and retry.",
+  "session.documents.resolve.unsupported": "Document links require an updated host and Relay with document capture enabled.",
+  "session.documents.resolve.timeout": "The document snapshot is not ready yet. Please retry.",
+  "session.documents.resolve.busy": "The host is busy. Please retry shortly.",
+  "session.documents.resolve.rate_limited": "Too many requests. Please retry shortly.",
+  "session.documents.resolve.unavailable": "This document cannot be read. Check that it still exists in the session workspace and is a valid Markdown or HTML file."
 }
