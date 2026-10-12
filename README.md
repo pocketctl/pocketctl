@@ -32,6 +32,8 @@ off your development machine.
   focused, from Web or iOS.
 - **Focus attention** — the optional Attention Inbox groups pending questions,
   approvals, high-risk actions, and recovery signals with their session context.
+  System notifications show session maintenance results separately, with unread
+  status and cleanup progress for each affected session.
 - **Collaborate with people and their Agents (experimental)** — the Web client
   can create Teams, shared tasks and sessions, route bounded work to
   member-contributed Codex, Claude Code, or DeepSeek Harness Agents, and
@@ -265,6 +267,15 @@ Run `pocketctl help` or the relevant subcommand with `--help` for all options.
 
 PocketCtl keeps repositories and agent processes on the development host, but
 that does **not** mean session content stays local.
+
+The experimental personal-session lifecycle has passed local Docker acceptance:
+eligible sessions archive and move to private cold storage after more than 60
+days of verified inactivity, and purge after more than 90 days. Business activity
+restores an inactivity archive; reading a session does not renew its lifetime.
+Lifecycle and system-notification configuration defaults are enabled, but new
+automatic lifecycle actions remain blocked in production pending the storage,
+backup, policy, client-release, and capacity gates. This source release does not
+activate a new retention policy on the hosted service.
 
 - Production transport uses HTTPS/WSS.
 - Session and tool content is **not end-to-end encrypted**. The configured Relay
