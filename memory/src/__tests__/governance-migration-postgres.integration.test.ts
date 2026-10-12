@@ -53,6 +53,19 @@ suite('v50 durable backfill and cutover',()=>{
   expect((await pool.query("SELECT to_regclass('knowledge_claims_active_identity_variant_idx') IS NOT NULL AS present")).rows[0].present).toBe(true)
   expect((await pool.query('SELECT bool_and(identity_generation=1) AS old FROM memory_governance_v2_states')).rows[0].old).toBe(true)
  })
+ test('index catalog validation supports PostgreSQL 13/14 and rejects NULLS NOT DISTINCT on newer catalogs',async()=>{
+  await expect(ensureGovernanceIndexes(pool)).resolves.toBeUndefined()
+  const version=Number((await pool.query('SHOW server_version_num')).rows[0].server_version_num)
+  if(version<150000){
+   expect((await pool.query("SELECT to_jsonb(i) ? 'indnullsnotdistinct' present FROM pg_index i WHERE indexrelid=to_regclass('knowledge_claims_active_identity_v2_idx')")).rows[0].present).toBe(false)
+   return
+  }
+  await pool.query('ALTER INDEX knowledge_claims_active_identity_v2_idx RENAME TO knowledge_claims_saved_v2_idx')
+  try{
+   await pool.query("CREATE UNIQUE INDEX knowledge_claims_active_identity_v2_idx ON knowledge_claims(installation_id,duplicate_digest_v2,conflict_variant) NULLS NOT DISTINCT WHERE state='active' AND identity_generation=2")
+   await expect(ensureGovernanceIndexes(pool)).rejects.toThrow('index_build_failed')
+  }finally{await pool.query('DROP INDEX IF EXISTS knowledge_claims_active_identity_v2_idx');await pool.query('ALTER INDEX knowledge_claims_saved_v2_idx RENAME TO knowledge_claims_active_identity_v2_idx')}
+ })
  test('wrong state or OR predicate cannot substitute for the active unique domain',async()=>{
   for(const predicate of ["state='revoked' AND identity_generation=2","state='active' OR identity_generation=2"]){
    await pool.query('ALTER INDEX knowledge_claims_active_identity_v2_idx RENAME TO knowledge_claims_saved_v2_idx')
@@ -95,7 +108,7 @@ suite('v50 durable backfill and cutover',()=>{
   try{await blocker.query('BEGIN');await blocker.query("SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");await blocker.query('UPDATE knowledge_claims SET revision=revision+1 WHERE claim_id=$1',[V50_IDS.knownClaim])
    const pid=(await blocker.query('SELECT pg_backend_pid() pid')).rows[0].pid
    const running=backfillGovernance(pool,{runId,batchSize:200})
-   let blocked=false;for(let i=0;i<50;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))}
+   let blocked=false;for(let i=0;i<50;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))}
    expect(blocked).toBe(true);await blocker.query('COMMIT');await running
    expect((await pool.query("SELECT COUNT(*)::int n FROM memory_governance_migration_actions WHERE run_id=$1 AND action='retry'",[runId])).rows[0].n).toBeGreaterThan(0)
    await reconcileGovernanceChanges(pool,{runId})

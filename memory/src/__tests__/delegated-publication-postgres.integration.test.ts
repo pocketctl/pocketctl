@@ -56,7 +56,7 @@ suite('A3 exact human delegation and independent executor',()=>{
   try{await blocker.query('SELECT pg_advisory_lock($1)',[key]);const pid=(await blocker.query('SELECT pg_backend_pid() pid')).rows[0].pid
    await pool.query("UPDATE memory_publication_delegations SET valid_until=clock_timestamp()+interval '500 milliseconds' WHERE delegation_id=$1",[delegated.delegationId])
    const work=createPublicationExecutor(deps).execute(delegated.delegationId)
-   let blocked=false;for(let i=0;i<40;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))};expect(blocked).toBe(true)
+   let blocked=false;for(let i=0;i<40;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))};expect(blocked).toBe(true)
    for(let i=0;i<80;i++){if((await pool.query('SELECT valid_until<=clock_timestamp() expired FROM memory_publication_delegations WHERE delegation_id=$1',[delegated.delegationId])).rows[0].expired)break;await new Promise(r=>setTimeout(r,10))}
    await blocker.query('SELECT pg_advisory_unlock($1)',[key]);expect(await work).toMatchObject({published:false,reason:'publication_delegation_expired'})
    expect((await pool.query('SELECT COUNT(*)::int n FROM memory_authority_records')).rows[0].n).toBe(0)

@@ -35,7 +35,7 @@ suite('A2 closed gate and exact personal facts',()=>{
   const policy=await createAutomationRepository(pool).setPolicy({installationId:f.personal,grant:own,expectedRevision:0,document:{mode:'assist',model:'no-model-rule',promptVersion:'review-v1',personalAutoAccept:true}})
   await pool.query(`INSERT INTO memory_governance_executor_principals(principal_id,installation_id,provider_client_id,state,permissions,authorization_epoch,valid_until,max_accepts_per_day,authorized_by_owner_id) VALUES($1,$2,'fixture-executor','active',ARRAY['auto_accept_personal'],1,NOW()+interval '1 hour',5,$2)`,[principalId,f.personal])
   await pool.query(`INSERT INTO memory_governance_v2_states(installation_id,identity_generation,phase,writer_floor) VALUES($1,2,'active','identity_v2') ON CONFLICT(installation_id) DO UPDATE SET identity_generation=2,phase='active',writer_floor='identity_v2'`,[f.personal])
-  const row=(await pool.query('SELECT to_jsonb(c) row FROM memory_candidates c WHERE candidate_id=$1',[candidateId])).rows[0].row
+  const row=(await pool.query('SELECT to_jsonb(c) AS row FROM memory_candidates c WHERE candidate_id=$1',[candidateId])).rows[0].row
   const input={installationId:f.personal,candidateId,expectedRevision:1,principalId,expectedDigest:personalAcceptanceDigest({candidate:row,sourceDigest:'78',policyHash:(await pool.query('SELECT policy_hash FROM memory_review_automation_policies WHERE policy_id=$1',[policy.policyId])).rows[0].policy_hash,snapshot:{commit_sha:sha,path,blob_hash:blob},authorizationEpoch:'1'})}
   const deps={pool,mode:'canary' as const,executorGrant:{providerClientId:'fixture-executor',installationId:f.personal,authorizationEpoch:'1',permissionRevision:'1',expiresAt:Math.floor(Date.now()/1000)+3600},canaryGate:async()=>({approved:true,reason:'fixture-only',proofHash:'d'.repeat(64)})}
   return {f,input,deps,principalId,event}
@@ -51,11 +51,11 @@ suite('A2 closed gate and exact personal facts',()=>{
  })
  test('incremental backfill preserves populated independent machine authority',async()=>{
   const {input,deps}=await eligibleFixture();expect((await createAutomationAcceptanceService(deps).accept(input)).accepted).toBe(true)
-  const before=(await pool.query('SELECT to_jsonb(a) row FROM memory_automation_authority_records a')).rows
+  const before=(await pool.query('SELECT to_jsonb(a) AS row FROM memory_automation_authority_records a')).rows
   const runId=await startGovernanceBackfill(pool,{installationIds:[input.installationId],environmentFingerprint:await governanceEnvironmentFingerprint(pool)})
   await backfillGovernance(pool,{runId,batchSize:2});await backfillGovernance(pool,{runId,batchSize:2});await ensureGovernanceIndexes(pool)
   expect((await validateGovernanceMigration(pool,runId)).violations).toEqual([])
-  expect((await pool.query('SELECT to_jsonb(a) row FROM memory_automation_authority_records a')).rows).toEqual(before)
+  expect((await pool.query('SELECT to_jsonb(a) AS row FROM memory_automation_authority_records a')).rows).toEqual(before)
   expect((await pool.query("SELECT COUNT(*)::int n FROM memory_governance_migration_actions WHERE run_id=$1 AND entity_kind='memory_automation_authority_records'",[runId])).rows[0].n).toBe(1)
  })
  test('automatic admission waits for the session fence before owning the installation purge fence',async()=>{
@@ -64,7 +64,7 @@ suite('A2 closed gate and exact personal facts',()=>{
    await blocker.query('BEGIN');await blocker.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':fact-session',0))",[input.installationId])
    const pid=(await blocker.query('SELECT pg_backend_pid() pid')).rows[0].pid
    const work=createAutomationAcceptanceService(deps).accept(input)
-   let blocked=false;for(let i=0;i<80;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))};expect(blocked).toBe(true)
+   let blocked=false;for(let i=0;i<80;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))};expect(blocked).toBe(true)
    const available=(await blocker.query("SELECT pg_try_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0)) available",[input.installationId])).rows[0].available
    await blocker.query('ROLLBACK');await work
    expect(available).toBe(true)
@@ -77,7 +77,7 @@ suite('A2 closed gate and exact personal facts',()=>{
   try{await blocker.query('SELECT pg_advisory_lock($1)',[key]);const pid=(await blocker.query('SELECT pg_backend_pid() pid')).rows[0].pid
    await pool.query("UPDATE memory_governance_executor_principals SET valid_until=clock_timestamp()+interval '500 milliseconds' WHERE principal_id=$1",[principalId])
    const work=createAutomationAcceptanceService(deps).accept(input)
-   let blocked=false;for(let i=0;i<40;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))};expect(blocked).toBe(true)
+   let blocked=false;for(let i=0;i<40;i++){blocked=(await pool.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS yes',[pid])).rows[0].yes;if(blocked)break;await new Promise(r=>setTimeout(r,10))};expect(blocked).toBe(true)
    for(let i=0;i<80;i++){if((await pool.query('SELECT valid_until<=clock_timestamp() expired FROM memory_governance_executor_principals WHERE principal_id=$1',[principalId])).rows[0].expired)break;await new Promise(r=>setTimeout(r,10))}
    await blocker.query('SELECT pg_advisory_unlock($1)',[key])
    expect(await work).toMatchObject({accepted:false,reason:'automation_actor_expired'})

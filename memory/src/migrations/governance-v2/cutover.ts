@@ -6,7 +6,10 @@ import {reconcileGovernanceChanges} from './reconcile.js'
 export async function ensureGovernanceIndexes(pool:pg.Pool){
  const specs=[{name:'knowledge_claims_active_identity_v1_idx',columns:'installation_id,claim_type,scope_key,normalized_key,conflict_variant',generation:1},{name:'knowledge_claims_active_identity_v2_idx',columns:'installation_id,duplicate_digest_v2,conflict_variant',generation:2}]
  for(const s of specs){
-  const row=(await pool.query(`SELECT i.indisvalid,i.indisunique,i.indnkeyatts,i.indnatts,i.indrelid='knowledge_claims'::regclass AS target,i.indnullsnotdistinct,am.amname,
+  // PostgreSQL 13/14 indexes always use NULLS DISTINCT. Read the PostgreSQL 15+
+  // catalog flag through JSON so the same query works on both catalog shapes.
+  const row=(await pool.query(`SELECT i.indisvalid,i.indisunique,i.indnkeyatts,i.indnatts,i.indrelid='knowledge_claims'::regclass AS target,
+    (to_jsonb(i)->>'indnullsnotdistinct')::boolean IS TRUE AS indnullsnotdistinct,am.amname,
     pg_get_expr(i.indpred,i.indrelid) predicate,ARRAY(SELECT pg_get_indexdef(i.indexrelid,n,true) FROM generate_series(1,i.indnkeyatts) n) keys
     FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid JOIN pg_am am ON am.oid=x.relam WHERE i.indexrelid=to_regclass($1)`,[s.name])).rows[0]
   const normalize=(v:string)=>v.replace(/::text/g,'').replace(/[()\s]/g,'')

@@ -55,7 +55,7 @@ suite('revision intervals remain separate from fact validity',()=>{
  })
  test('one microsecond before and exactly at the boundary select different revisions',async()=>{
   const f=await governanceFixture(pool),result=await correct(f);expect(result.ok).toBe(true);if(!result.ok)return
-  const boundary=(await pool.query('SELECT effective_from::text at FROM knowledge_versions WHERE version_id=$1',[result.versionId])).rows[0].at
+  const boundary=(await pool.query('SELECT effective_from::text AS at FROM knowledge_versions WHERE version_id=$1',[result.versionId])).rows[0].at
   async function selected(delta:string){return(await pool.query(`SELECT v.version_id FROM knowledge_claims c JOIN knowledge_versions v USING(installation_id,claim_id)
    WHERE c.claim_id=$1 AND ${asOfClaimVersionSql('c','v',"($2::timestamptz+$3::interval)")}`,[f.claim,boundary,delta])).rows.map(r=>r.version_id)}
   expect(await selected('-1 microsecond')).toEqual([f.version]);expect(await selected('0 microseconds')).toEqual([result.versionId])
