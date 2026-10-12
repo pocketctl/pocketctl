@@ -4,7 +4,9 @@ import {applyMemorySchema} from '../schema.js'
 import {applyMemoryV50Fixture,V50_IDS} from '../testing/fixtures/memory-v50.js'
 import {seedMemoryV50UpgradeScenarios} from '../testing/fixtures/memory-v50-upgrade.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
-import {migrationRows} from '../migrations/governance-v2/backfill.js'
+import {decodeMigrationBaseline} from '../migrations/governance-v2/baseline-snapshot.js'
+import {validateGovernanceMigration} from '../migrations/governance-v2/validate.js'
+import {startGovernanceBackfill,backfillGovernance,governanceEnvironmentFingerprint,migrationRows} from '../migrations/governance-v2/backfill.js'
 const url=process.env.MEMORY_TEST_DATABASE_URL
 const suite=url&&process.env.RUN_MEMORY_POSTGRES_INTEGRATION==='1'?describe:describe.skip
 suite('migration UUID pagination preserves legacy checkpoints and primary-key access',()=>{
@@ -37,4 +39,17 @@ suite('migration UUID pagination preserves legacy checkpoints and primary-key ac
   expect(got).toEqual(expected);expect(new Set(got).size).toBe(got.length)
   expect((await migrationRows(pool as any,'source_events',[V50_IDS.personal],expected[1999],200)).map(r=>r.id)).toEqual(expected.slice(2000,2200))
  },60000)
+ test('compressed database baseline validates every source row and rejects tampering',async()=>{
+  const runId=await startGovernanceBackfill(pool,{installationIds:[V50_IDS.personal,V50_IDS.team],environmentFingerprint:await governanceEnvironmentFingerprint(pool)})
+  const stored=(await pool.query('SELECT manifest FROM memory_governance_migration_runs WHERE run_id=$1',[runId])).rows[0].manifest
+  expect(stored.snapshot.encoding).toBe('gzip-json-v1')
+  expect(Object.keys(decodeMigrationBaseline(stored).rows.source_events).length).toBeGreaterThanOrEqual(6000)
+  await backfillGovernance(pool,{runId,batchSize:200})
+  expect((await validateGovernanceMigration(pool,runId)).violations).toEqual([])
+  await pool.query('UPDATE memory_governance_migration_runs SET manifest=$2 WHERE run_id=$1',[runId,{...stored,snapshot:{...stored.snapshot,sha256:'0'.repeat(64)}}])
+  await expect(validateGovernanceMigration(pool,runId)).rejects.toThrow('migration_snapshot_integrity')
+  await pool.query('UPDATE memory_governance_migration_runs SET manifest=$2 WHERE run_id=$1',[runId,stored])
+  expect((await validateGovernanceMigration(pool,runId)).invariants.every(i=>i.passed)).toBe(true)
+ },60000)
+
 })
