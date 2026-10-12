@@ -27,7 +27,9 @@ docker run --rm -d \
 
 ready=false
 for _ in $(seq 1 30); do
-  if docker exec "$container_name" pg_isready -U postgres >/dev/null 2>&1; then
+  # The entrypoint's temporary initialization server accepts Unix sockets but
+  # shuts down before the final server starts. Wait for the final TCP listener.
+  if docker exec "$container_name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then
     ready=true
     break
   fi
