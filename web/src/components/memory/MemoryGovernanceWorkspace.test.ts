@@ -60,6 +60,44 @@ describe('MemoryGovernanceQueue', () => {
     expect(wrapper.emitted('publish')?.[0]).toEqual([entry.candidate.candidate_id, 'new'])
   })
 
+  test('bulk binds each selected immutable revision and does not publish',async()=>{
+    const hashed={...entry,current_revision:{...entry.current_revision,bundle_hash:'a'.repeat(64)},automation_mode:'assist' as const,automation_advice:{recommendation:'needs_human',reason:'risk'},evidence:[{ordinal:1,excerpt:'sanitized proof',excerpt_hash:'b'.repeat(64)}]}
+    const wrapper=mount(MemoryGovernanceQueue,{props:{entries:[hashed],loading:false,error:null}})
+    expect(wrapper.text()).toContain('memory.governance.automation.adviceOnly')
+    expect(wrapper.text()).toContain('assist')
+    await wrapper.get('input[type=checkbox]').setValue(true)
+    await wrapper.findAll('button').find(b=>b.text().includes('bulkApprove'))!.trigger('click')
+    const items=wrapper.emitted('bulk')?.[0][0] as any[]
+    expect(items[0]).toMatchObject({candidate_id:entry.candidate.candidate_id,expected_revision:1,expected_hash:'a'.repeat(64),decision:'approve'})
+    expect(items[0].review_duration_ms).toBeUndefined()
+    expect(wrapper.emitted('publish')).toBeUndefined()
+    await wrapper.setProps({entries:[{...hashed,candidate:{...hashed.candidate,revision:2}}]})
+    expect((wrapper.get('input[type=checkbox]').element as HTMLInputElement).checked).toBe(false)
+  })
+  test('human edits explicitly retain evidence and request a fresh revision',async()=>{
+    const hashed={...entry,current_revision:{...entry.current_revision,bundle_hash:'a'.repeat(64)},evidence:[{ordinal:1,excerpt:'proof',excerpt_hash:'b'.repeat(64)}]}
+    const wrapper=mount(MemoryGovernanceQueue,{props:{entries:[hashed],loading:false,error:null}})
+    await wrapper.get('textarea').setValue('Edited candidate statement')
+    await wrapper.findAll('details').at(-1)!.get('button').trigger('click')
+    expect(wrapper.emitted('revise')?.[0]).toEqual([{candidateId:entry.candidate.candidate_id,statement:'Edited candidate statement',retainedOrdinals:[1]}])
+    expect(wrapper.emitted('decide')).toBeUndefined()
+  })
+
+  test('delegated publication is visibly off and does not borrow review votes',async()=>{
+    const hashed={...entry,current_revision:{...entry.current_revision,bundle_hash:'a'.repeat(64)},delegated_publish_mode:'off' as const}
+    const wrapper=mount(MemoryGovernanceQueue,{props:{entries:[hashed],loading:false,error:null,executors:[]}})
+    const button=wrapper.findAll('details')[0].get('button')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('details')[0].text()).toContain('memory.governance.delegation.copy')
+    await button.trigger('click');expect(wrapper.emitted('delegate')).toBeUndefined()
+  })
+  test('evidence filter preserves actionable missing-proof state',async()=>{
+    const wrapper=mount(MemoryGovernanceQueue,{props:{entries:[{...entry,evidence:[]}],loading:false,error:null}})
+    await wrapper.get('select').setValue('evidence')
+    expect(wrapper.findAll('article')).toHaveLength(1)
+    expect(wrapper.find('input[type=checkbox]').exists()).toBe(false)
+  })
+
   test('distinguishes provider failure from an empty queue', () => {
     const failed = mount(MemoryGovernanceQueue, {
       props: { entries: [], loading: false, error: 'governance queue unavailable' },

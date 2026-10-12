@@ -17,6 +17,16 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('memory config', () => {
+  test('delegated publishing has a distinct switch, defaulting off',()=>{
+    expect(loadMemoryConfig(baseEnv()).delegatedPublishMode).toBe('off')
+    expect(loadMemoryConfig(baseEnv({MEMORY_REVIEW_AUTOMATION_MODE:'assist'})).delegatedPublishMode).toBe('off')
+    expect(loadMemoryConfig(baseEnv({MEMORY_DELEGATED_PUBLISH_MODE:'enabled'})).delegatedPublishMode).toBe('enabled')
+  })
+  test('automatic personal acceptance remains off/assist until a calibrated canary release',()=>{
+    expect(loadMemoryConfig(baseEnv()).personalAutoAcceptMode).toBe('off')
+    expect(loadMemoryConfig(baseEnv({MEMORY_PERSONAL_AUTO_ACCEPT_MODE:'assist'})).personalAutoAcceptMode).toBe('assist')
+    expect(()=>loadMemoryConfig(baseEnv({MEMORY_PERSONAL_AUTO_ACCEPT_MODE:'canary'}))).toThrow('MEMORY_PERSONAL_AUTO_ACCEPT_MODE')
+  })
   test('active Git requires two pool slots and off retains the one-slot configuration',()=>{
     for(const mode of ['shadow','enabled'])expect(()=>loadMemoryConfig(baseEnv({MEMORY_GIT_SYNC_MODE:mode,MEMORY_DB_POOL_MAX:'1'}))).toThrow(/at least 2.*Git/)
     expect(loadMemoryConfig(baseEnv({MEMORY_GIT_SYNC_MODE:'shadow',MEMORY_DB_POOL_MAX:'2'})).dbPoolMax).toBe(2)

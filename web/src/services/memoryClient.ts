@@ -325,12 +325,14 @@ export function acceptMemoryCandidate(
   expectedRevision: number,
   editedStatement: string | null,
   idempotencyKey: string,
+  proof?:{expectedHash:string;reviewDurationMs?:number},
 ): Promise<{ claim_id: string; version_id: string }> {
   return memoryJson('memory.manage', `/api/v1/memory/candidates/${candidateId}/accept`, {
     method: 'POST',
     headers: { 'idempotency-key': idempotencyKey },
     body: JSON.stringify({
       expected_revision: expectedRevision,
+      ...(proof?{expected_hash:proof.expectedHash,review_duration_ms:proof.reviewDurationMs}:{}),
       ...(editedStatement ? { edited_statement: editedStatement } : {}),
     }),
   })
@@ -341,12 +343,14 @@ export function rejectMemoryCandidate(
   expectedRevision: number,
   reasonCode: string | null,
   idempotencyKey: string,
+  proof?:{expectedHash:string;reviewDurationMs?:number},
 ): Promise<{ candidate_id: string }> {
   return memoryJson('memory.manage', `/api/v1/memory/candidates/${candidateId}/reject`, {
     method: 'POST',
     headers: { 'idempotency-key': idempotencyKey },
     body: JSON.stringify({
       expected_revision: expectedRevision,
+      ...(proof?{expected_hash:proof.expectedHash,review_duration_ms:proof.reviewDurationMs}:{}),
       ...(reasonCode ? { reason_code: reasonCode } : {}),
     }),
   })
@@ -1010,6 +1014,8 @@ export async function decideGovernanceCandidate(input: {
   targetInstallationId: string
   expectedRevision: number
   decision: 'approve' | 'request_changes' | 'reject'
+  expectedHash?:string
+  reviewDurationMs?:number
 }): Promise<void> {
   const response = await governanceFetch(
     `/api/v1/memory/governance/proposals/${encodeURIComponent(input.candidateId)}/decisions`,
@@ -1020,6 +1026,7 @@ export async function decideGovernanceCandidate(input: {
         target_installation_id: input.targetInstallationId,
         expected_revision: input.expectedRevision,
         decision: input.decision,
+        expected_hash:input.expectedHash,review_duration_ms:input.reviewDurationMs,
       }),
     })
   if (!response.ok) {
@@ -1051,3 +1058,21 @@ export async function publishGovernanceCandidate(input: {
     throw new MemoryClientError(response.status, 'publish_failed', 'publish failed')
   }
 }
+
+export function getAutomationReviewPolicy(targetInstallationId:string):Promise<import('../types/memory').MemoryAutomationPolicyState>{
+ return governanceJson(`/api/v1/memory/governance/automation-policy?target_installation_id=${encodeURIComponent(targetInstallationId)}`,[targetInstallationId])
+}
+export function saveAutomationReviewPolicy(input:{targetInstallationId:string;expectedRevision:number;document:NonNullable<import('../types/memory').MemoryAutomationPolicyState['document']>}):Promise<unknown>{
+ return governanceJson('/api/v1/memory/governance/automation-policy',[input.targetInstallationId],{method:'PATCH',headers:{'idempotency-key':phase2IdempotencyKey('automation-policy')},body:JSON.stringify({target_installation_id:input.targetInstallationId,expected_revision:input.expectedRevision,document:input.document})})
+}
+export function bulkDecideGovernance(input:{targetInstallationId:string;items:import('../types/memory').MemoryBulkDecisionItem[]}):Promise<{results:import('../types/memory').MemoryBulkDecisionResult[]}>{
+ return governanceJson('/api/v1/memory/governance/bulk-decisions',[input.targetInstallationId],{method:'POST',headers:{'idempotency-key':phase2IdempotencyKey('bulk-review')},body:JSON.stringify({target_installation_id:input.targetInstallationId,items:input.items})})
+}
+
+export function reviseGovernanceCandidate(input:{targetInstallationId:string;candidateId:string;expectedRevision:number;statement:string;structuredContent:unknown;retainedOrdinals:number[];removedOrdinals:number[]}):Promise<unknown>{
+ return governanceJson(`/api/v1/memory/governance/proposals/${encodeURIComponent(input.candidateId)}/revise`,[input.targetInstallationId],{method:'POST',headers:{'idempotency-key':phase2IdempotencyKey('governance-revise')},body:JSON.stringify({target_installation_id:input.targetInstallationId,expected_revision:input.expectedRevision,statement:input.statement,structured_content:input.structuredContent,evidence_selection:{retained_ordinals:input.retainedOrdinals,removed_ordinals:input.removedOrdinals,new_evidence_ids:[]}})})
+}
+
+export function listPublicationExecutors(targetInstallationId:string):Promise<{principals:import('../types/memory').MemoryExecutorPrincipal[];mode:'off'|'enabled'}>{return governanceJson(`/api/v1/memory/governance/executor-principals?target_installation_id=${encodeURIComponent(targetInstallationId)}`,[targetInstallationId])}
+export function delegatePublication(input:{targetInstallationId:string;candidateId:string;expectedRevision:number;expectedHash:string;principalId:string;expiresAt:string}):Promise<{delegationId:string}>{return governanceJson('/api/v1/memory/governance/publication-delegations',[input.targetInstallationId],{method:'POST',headers:{'idempotency-key':phase2IdempotencyKey('publication-delegation')},body:JSON.stringify({target_installation_id:input.targetInstallationId,candidate_id:input.candidateId,expected_revision:input.expectedRevision,expected_hash:input.expectedHash,principal_id:input.principalId,expires_at:input.expiresAt})})}
+export function revokePublicationDelegation(targetInstallationId:string,delegationId:string):Promise<unknown>{return governanceJson(`/api/v1/memory/governance/publication-delegations/${encodeURIComponent(delegationId)}/revoke`,[targetInstallationId],{method:'POST',headers:{'idempotency-key':phase2IdempotencyKey('delegation-revoke')},body:JSON.stringify({target_installation_id:targetInstallationId})})}

@@ -1,3 +1,4 @@
+import {confirmRepositoryApplicabilityFixture} from '../testing/governance-applicability-fixture.js'
 import { createHash } from 'crypto'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
@@ -28,8 +29,8 @@ const PUBLISHER = 'eeeeeeee-0000-4000-8000-000000000024'
 function bindingFor(installationId: string, membershipId: string | null, permissions: string[]) {
   return {
     installation_id: installationId,
-    owner_scope_kind: installationId === PERSONAL ? 'personal' as const : 'team' as const,
-    owner_scope_id: installationId === PERSONAL ? PERSONAL : 'eeeeeeee-0000-4000-8000-000000000031',
+    owner_scope_kind: installationId === PERSONAL ? 'personal' as const : installationId === ORG ? 'organization' as const : 'team' as const,
+    owner_scope_id: installationId,
     membership_id: membershipId,
     membership_revision: membershipId === null ? '0' : '2',
     authorization_epoch: '1',
@@ -154,6 +155,7 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
       `, [TEAM, membershipId, roles])
     }
 
+    await confirmRepositoryApplicabilityFixture(pool,PERSONAL,SOURCE_CLAIM,[TEAM])
     const proposed = await promotion.propose({
       grant: {
         primaryInstallationId: TEAM,
@@ -259,13 +261,14 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
   })
 
   test('copies redacted event evidence as synthetic episode evidence', async () => {
-    await pool.query(`
-      UPDATE memory_promotion_evidence SET evidence_kind = 'event'
-      WHERE candidate_revision_id = (
-        SELECT candidate_revision_id FROM memory_promotion_candidate_versions
-        WHERE candidate_id = $1 ORDER BY revision_number DESC LIMIT 1
-      )
-    `, [candidateId])
+    // Model a real event source before proposing; do not mutate an immutable copy.
+    const event=(await pool.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash)
+      VALUES(gen_random_uuid(),$1,'feed','event-copy-source','pub-session','pub-turn','agent_text',NOW(),'{}'::jsonb,'hash'::bytea) RETURNING source_event_id`,[PERSONAL])).rows[0].source_event_id
+    await pool.query("UPDATE knowledge_evidence SET evidence_kind='event',source_event_id=$2 WHERE evidence_id=$1",[EVIDENCE,event])
+    const eventProposal=await promotion.propose({grant:{primaryInstallationId:TEAM,configVersion:'1',scopeBindings:[bindingFor(PERSONAL,null,['read']),bindingFor(TEAM,PROPOSER,['read','contribute'])]},
+      sourceInstallationId:PERSONAL,sourceClaimId:SOURCE_CLAIM,evidenceIds:[EVIDENCE],idempotencyDigest:'event-copy-proposal'})
+    candidateId=eventProposal.candidate.candidate_id
+    candidateRevision=eventProposal.candidate.revision
     await approve(REVIEWER)
 
     const result = await publication.publish({
@@ -292,7 +295,8 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
   })
 
   test('fails quorum without independent review and on pending change requests', async () => {
-    // Proposer self-approval only → missing independent reviewer.
+    // A contributor who also has reviewer authority cannot be their own independent reviewer.
+    await pool.query("UPDATE memory_scope_memberships SET roles=ARRAY['contributor','reviewer'] WHERE installation_id=$1 AND membership_id=$2",[TEAM,PROPOSER])
     await approve(PROPOSER)
     await expect(publication.publish({
       grant: grantFor({ installationId: TEAM, membershipId: PUBLISHER, permissions: ['read', 'review', 'publish'] }),
@@ -351,6 +355,50 @@ describeWithDatabase('governance publication transaction (PostgreSQL)', () => {
       grant: grantFor({ installationId: TEAM, membershipId: PUBLISHER, permissions: ['read', 'review', 'publish'] }),
       targetInstallationId: TEAM, candidateId, expectedCandidateRevision: candidateRevision, resolution: 'new',
     })).rejects.toMatchObject({ code: 'expired' })
+  })
+
+  test('publisher approval cannot satisfy a no-publisher-count policy', async () => {
+    await pool.query(`UPDATE memory_review_policy_versions SET document=jsonb_set(document,'{publisher_may_count_as_reviewer}','false')
+      WHERE policy_version_id=(SELECT review_policy_version_id FROM memory_promotion_candidate_versions WHERE candidate_id=$1)`,[candidateId])
+    await approve(PUBLISHER)
+    await expect(publication.publish({grant:grantFor({installationId:TEAM,membershipId:PUBLISHER,permissions:['read','review','publish']}),targetInstallationId:TEAM,candidateId,expectedCandidateRevision:candidateRevision,resolution:'new'})).rejects.toMatchObject({code:'quorum_failed'})
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_authority_records')).rows[0].n).toBe(0)
+  })
+
+  test('parallel conflicts are refused by the effective policy', async () => {
+    await pool.query(`UPDATE memory_review_policy_versions SET document=jsonb_set(document,'{allow_parallel_conflicts}','false')
+      WHERE policy_version_id=(SELECT review_policy_version_id FROM memory_promotion_candidate_versions WHERE candidate_id=$1)`,[candidateId])
+    await pool.query("UPDATE memory_promotion_candidates SET state='conflict',conflict_group_id=gen_random_uuid() WHERE candidate_id=$1",[candidateId])
+    await approve(REVIEWER)
+    await expect(publication.publish({grant:grantFor({installationId:TEAM,membershipId:PUBLISHER,permissions:['read','review','publish']}),targetInstallationId:TEAM,candidateId,expectedCandidateRevision:candidateRevision,resolution:'parallel'})).rejects.toMatchObject({code:'invalid_resolution'})
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_authority_records')).rows[0].n).toBe(0)
+  })
+
+  test('a previously validated publisher grant cannot publish after membership revocation', async () => {
+    await approve(REVIEWER)
+    const grant=grantFor({installationId:TEAM,membershipId:PUBLISHER,permissions:['read','review','publish']})
+    await pool.query("UPDATE memory_scope_memberships SET state='revoked',membership_revision=membership_revision+1 WHERE installation_id=$1 AND membership_id=$2",[TEAM,PUBLISHER])
+    await expect(publication.publish({grant,targetInstallationId:TEAM,candidateId,expectedCandidateRevision:candidateRevision,resolution:'new'})).rejects.toMatchObject({code:'forbidden'})
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_authority_records')).rows[0].n).toBe(0)
+  })
+
+  test('a previously validated reviewer cannot append a decision after role removal', async () => {
+    const grant=grantFor({installationId:TEAM,membershipId:REVIEWER,permissions:['read','review']})
+    await pool.query("UPDATE memory_scope_memberships SET roles=ARRAY['reader'],membership_revision=membership_revision+1 WHERE installation_id=$1 AND membership_id=$2",[TEAM,REVIEWER])
+    await expect(publication.decide({grant,targetInstallationId:TEAM,candidateId,expectedCandidateRevision:candidateRevision,decision:'approve'})).rejects.toMatchObject({code:'forbidden'})
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_review_decisions')).rows[0].n).toBe(0)
+  })
+
+  test('stale authorization rolls back before releasing the pooled publisher connection', async () => {
+    await approve(REVIEWER)
+    const single=new pg.Pool({connectionString:databaseUrl,max:1})
+    try {
+      const grant=grantFor({installationId:TEAM,membershipId:PUBLISHER,permissions:['read','review','publish']})
+      await pool.query("UPDATE memory_scope_memberships SET state='revoked' WHERE installation_id=$1 AND membership_id=$2",[TEAM,PUBLISHER])
+      await expect(createPublicationService(single).publish({grant,targetInstallationId:TEAM,candidateId,expectedCandidateRevision:candidateRevision,resolution:'new'})).rejects.toMatchObject({code:'forbidden'})
+      const state=await single.query('SELECT txid_current_if_assigned()::text AS transaction_id')
+      expect(state.rows[0].transaction_id).toBeNull()
+    } finally {await single.end()}
   })
 
   test('pure quorum evaluation enforces the organization floor', () => {

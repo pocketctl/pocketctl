@@ -1,10 +1,12 @@
 import { createHash } from 'crypto'
 import type { TextGenerator, ModelJsonResult } from '../ports/text-generator.js'
-import type { JobFence } from '../jobs/types.js'
+import { JobDeferredError, type JobFence } from '../jobs/types.js'
 import type { ExtractionRepository } from './repository.js'
 import type { CandidateDeduper } from './deduper.js'
 import { validateCandidate, type ValidationContext } from './validator.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
+import {claimIdentityV2,normalizedIdentityStatementV2,ClaimIdentityUnavailableError,type ClaimDuplicateInput} from '../claims/identity.js'
+import type {ClaimApplicability} from '../governance/revision-bundle.js'
 import {
   EXTRACTION_EXTRACTOR_VERSION,
   EXTRACTION_PROMPT_VERSION,
@@ -35,6 +37,7 @@ export interface CandidateExtractorDeps {
   timeoutMs: number
   extractionNotBefore?: Date | null
   maxRunsPerEpisode?: number
+  expectedConsentFingerprint?: string
   /** Optional deterministic validator/deduper for enabled-mode runs. */
   deduper?: CandidateDeduper
   /** Effective extraction policy per installation; defaults to system V1. */
@@ -53,7 +56,17 @@ export type ExtractionOutcome =
   | { kind: 'episode_missing' }
   | { kind: 'quarantined'; runId: string }
   | { kind: 'failed'; runId: string; errorCode: string; retryable: boolean }
+  | { kind: 'deferred_budget'; runId: string; errorCode: 'budget_exceeded' | 'budget_unavailable'; retryAt: Date | null }
+  | { kind: 'deferred_source' }
   | { kind: 'not_configured' }
+
+/** Share the real worker boundary with integration tests: a budget wait must
+ * leave through the queue's deferral path, never its completion path. */
+export function deferBudgetOutcome(outcome:ExtractionOutcome):void {
+  if(outcome.kind==='deferred_source')throw new JobDeferredError('source_not_ready',new Date(Date.now()+5*60_000))
+  if(outcome.kind==='deferred_budget')throw new JobDeferredError(outcome.errorCode,
+    outcome.retryAt??new Date(Date.now()+5*60_000))
+}
 
 export function createCandidateExtractor(deps: CandidateExtractorDeps) {
   const modelConfigHash = createHash('sha256')
@@ -67,9 +80,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       signal: AbortSignal
       /** Owning job fence; side-effect writes reject on ownership loss. */
       fence?: JobFence
+      expectedSourceDigest?: string
     }): Promise<ExtractionOutcome> {
       const episode = await deps.store.loadEpisodeForExtraction(input.installationId, input.turnId)
       if (!episode) return { kind: 'episode_missing' }
+      if(input.expectedSourceDigest&&episode.sourceDigest.toString('hex')!==input.expectedSourceDigest)return {kind:'episode_missing'}
       if (episode.extractionMode === 'off') return { kind: 'skipped_mode_off' }
       if (deps.extractionNotBefore
         && episode.sessionFirstRecordedAt.getTime() < deps.extractionNotBefore.getTime()
@@ -101,7 +116,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         staleAfterMs: deps.timeoutMs * 3 + 70_000,
         effectivePolicyHash: policy.effectivePolicyHash,
         maxRunsPerEpisode: deps.maxRunsPerEpisode,
+        fence: input.fence,
+        expectedConsentFingerprint:deps.expectedConsentFingerprint,
       })
+      if(reserved.sourceWaiting)return {kind:'deferred_source'}
+      if(reserved.sourceUnavailable)return {kind:'episode_missing'}
       if (reserved.limitReached) return { kind: 'skipped_run_limit' }
       if (!reserved.owner) {
         if (reserved.existingState === 'running') {
@@ -123,10 +142,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         operation: 'candidate_extract' | 'candidate_repair',
         system: string,
       ): Promise<
-        { ok: true; candidates: ExtractionCandidate[] } | { ok: false; errorCode: string; retryable: boolean }
+        { ok: true; candidates: ExtractionCandidate[] } | { ok: false; errorCode: string; retryable: boolean; retryAt?: Date | null }
       > => {
         const result: ModelJsonResult<unknown> = await deps.textGenerator.generateJson({
           operation,
+          requestKey: `extraction:${reserved.runId}:${operation}`,
           system,
           document: episode.document,
           schema: { type: 'object', properties: { candidates: { type: 'array' } } },
@@ -153,7 +173,8 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
             && /^http_status_[1-5]\d{2}$/.test(result.detail ?? '')
             ? `${result.code}:${result.detail}`
             : result.code
-          return { ok: false, errorCode, retryable: result.retryable }
+          return { ok: false, errorCode, retryable: result.retryable,
+            retryAt:result.retryAt ? new Date(result.retryAt) : null }
         }
         usage = {
           inputTokens: usage.inputTokens + result.usage.inputTokens,
@@ -184,10 +205,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         if ((outcome.errorCode === 'budget_exceeded' || outcome.errorCode === 'budget_unavailable')
           && providerCallsObserved === 0) {
           await deps.store.discardRun({ runId: reserved.runId, fence: input.fence })
-          return {
-            kind: 'failed', runId: reserved.runId,
-            errorCode: outcome.errorCode, retryable: outcome.retryable,
-          }
+          return { kind:'deferred_budget',runId:reserved.runId,errorCode:outcome.errorCode,retryAt:outcome.retryAt??null }
         }
         const quarantined = outcome.errorCode.startsWith('invalid_output')
         await deps.store.markRun({
@@ -199,6 +217,9 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           costMicros: totalCostMicros,
           fence: input.fence,
         })
+        if (outcome.errorCode==='budget_exceeded'||outcome.errorCode==='budget_unavailable') {
+          return {kind:'deferred_budget',runId:reserved.runId,errorCode:outcome.errorCode,retryAt:outcome.retryAt??null}
+        }
         return quarantined
           ? { kind: 'quarantined', runId: reserved.runId }
           : { kind: 'failed', runId: reserved.runId, errorCode: outcome.errorCode, retryable: outcome.retryable }
@@ -221,7 +242,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         // Do not collapse differing validity/structured facts just because
         // their prose matches. Exact repeats need only one review item.
         const key = canonicalPacketJson({
-          claimType: candidate.claim_type, statement: candidate.statement.trim().replace(/\s+/g, ' '),
+          claimType: candidate.claim_type, statement: normalizedIdentityStatementV2(candidate.statement),
           scopeKind: candidate.scope_kind, scopeKey: candidate.scope_key,
           repositoryId: candidate.repository_id ?? null, repoSnapshotId: candidate.repo_snapshot_id ?? null,
           branch: candidate.branch ?? null, content: candidate.structured_content ?? {},
@@ -251,17 +272,39 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
 
       // Validate in both modes for diagnostics; shadow never enters review.
       const verdicts = new Map<number, ReturnType<typeof validateCandidate>>()
+      const applicabilityByOrdinal = new Map<number, ClaimApplicability>()
       {
-        const tombstonedKeys = deps.deduper ? await deps.deduper.tombstonedKeys({
-          installationId: input.installationId,
-          candidateKeys: baseRows.map(row => row.normalizedKey),
-        }) : new Set<string>()
         for (const row of baseRows) {
-          const family = deps.deduper ? await deps.deduper.activeFamilyFor({
+          const applicability:ClaimApplicability = deps.deduper?.identityFor
+            ? await deps.deduper.identityFor({installationId:input.installationId,scopeKind:row.candidate.scope_kind,
+              scopeKey:row.candidate.scope_key,repositoryId:row.repositoryId,snapshotId:row.repoSnapshotId,branch:row.branch})
+            : {scopeKind:row.candidate.scope_kind,scopeKey:row.candidate.scope_key,repositoryId:row.repositoryId,
+              snapshotId:row.repoSnapshotId,branch:row.branch,canonicalRepositoryKey:null,
+              status:!row.repositoryId&&!row.repoSnapshotId&&!row.branch
+                && ((row.candidate.scope_kind==='installation'&&row.candidate.scope_key==='global')
+                  ||(row.candidate.scope_kind==='task'&&row.candidate.scope_key===episode.turnId))?'verified':'requires_review'}
+          applicabilityByOrdinal.set(row.index,applicability)
+          const identity:Omit<ClaimDuplicateInput,'statement'|'claimType'>={...applicability,
+            structuredContent:row.candidate.structured_content??{},validFrom:row.validFrom,validUntil:row.validUntil}
+          // Query one candidate at a time: distinct v2 identities can share a legacy alias.
+          // A v2-only tombstone must reject only its own identity; a v1 hit remains deliberately broad.
+          let identityKey:string|null=null
+          if(applicability.status==='verified')try{
+            identityKey=claimIdentityV2({...identity,claimType:row.candidate.claim_type,statement:row.candidate.statement}).key
+          }catch(error){
+            if(!(error instanceof ClaimIdentityUnavailableError))throw error
+            applicability.status='requires_review'
+          }
+          const tombstonedKeys = deps.deduper ? await deps.deduper.tombstonedKeys({
+            installationId:input.installationId,candidateKeys:[row.normalizedKey],
+            identityV2ByNormalizedKey:identityKey?{[row.normalizedKey]:[identityKey]}:undefined,
+          }):new Set<string>()
+          const family = deps.deduper && applicability.status==='verified' ? await deps.deduper.activeFamilyFor({
             installationId: input.installationId,
             claimType: row.candidate.claim_type,
             scopeKey: row.candidate.scope_key,
             statement: row.candidate.statement,
+            identity,
           }) : { exactClaimId: null, family: [] }
           const context: ValidationContext = {
             manifestHandles: manifestHandleSet,
@@ -278,9 +321,9 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
             evidenceRoles,
             now: new Date(),
             tombstonedKeys,
-            activeFamily: family.exactClaimId
-              ? [{ claimId: family.exactClaimId, statement: row.candidate.statement }, ...family.family]
-              : family.family,
+            activeFamily: family.family,
+            exactClaimId: family.exactClaimId,
+            identityStatus: applicability.status,
           }
           verdicts.set(row.index, validateCandidate({
             claimType: row.candidate.claim_type,
@@ -315,6 +358,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           repositoryId: row.repositoryId,
           repoSnapshotId: row.repoSnapshotId,
           branch: row.branch,
+          applicability:applicabilityByOrdinal.get(row.index),
           evidenceHandles: row.candidate.evidence_handles,
           confidence: row.candidate.confidence.toFixed(4),
           freshnessAt: evidenceFreshness(row.candidate.evidence_handles, episode),

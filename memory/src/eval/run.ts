@@ -17,13 +17,16 @@ async function main(): Promise<void> {
     throw new Error('usage: npm run eval -- --dataset <path> --output <report.json>')
   }
   const raw = await readFile(datasetPath, 'utf8')
-  const cases = raw.trim().split('\n').map(line => JSON.parse(line))
-  const parsed = GoldenDatasetSchema.safeParse({
-    schema_version: 1,
-    dataset_version: process.env.MEMORY_GOLDEN_SET_VERSION ?? 'unversioned',
-    created_at: new Date().toISOString(),
-    cases,
-  } as GoldenDataset)
+  let content:unknown
+  try{
+    const decoded=JSON.parse(raw)
+    content=decoded&&typeof decoded==='object'&&'cases' in decoded?decoded:{schema_version:1,
+      dataset_version:process.env.MEMORY_GOLDEN_SET_VERSION??'unversioned',created_at:new Date().toISOString(),cases:Array.isArray(decoded)?decoded:[decoded]}
+  }catch{
+    content={schema_version:1,dataset_version:process.env.MEMORY_GOLDEN_SET_VERSION??'unversioned',created_at:new Date().toISOString(),
+      cases:raw.trim().split('\n').map(line=>JSON.parse(line))}
+  }
+  const parsed=GoldenDatasetSchema.safeParse(content)
   if (!parsed.success) {
     throw new Error(`invalid golden dataset: ${parsed.error.issues.length} issues`)
   }
@@ -32,6 +35,7 @@ async function main(): Promise<void> {
   try {
     const runner = createEvalRunner({
       pool,
+      variant:args.includes('--memory-off')?'memory_off':'governance_v2',
       recallEmbeddingTimeoutMs: config.recallEmbeddingTimeoutMs,
       cursorSigningKey: config.hmacKey,
       ...(config.embeddingModel ? {

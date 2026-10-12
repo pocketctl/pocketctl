@@ -56,6 +56,36 @@ function workerOptions(overrides: Partial<JobWorkerOptions> = {}): JobWorkerOpti
 }
 
 describe('job worker per-claim lease renewal', () => {
+  test('an idle slot starts the next short job while an earlier slow job is still running',async()=>{
+    let release!:()=>void
+    const gate=new Promise<void>(resolve=>{release=resolve})
+    const batches=[[claim({job_id:'slow'}),claim({job_id:'short-1'})],[claim({job_id:'short-2'})]]
+    const {jobs}=fakeJobs([])
+    jobs.claimJobs=async()=>batches.shift()??[]
+    const worker=createJobWorker(workerOptions({jobs,claimLimit:2}))
+    let secondStarted!:()=>void
+    const second=new Promise<void>(resolve=>{secondStarted=resolve})
+    worker.register('compile_episode',async job=>{
+      if(job.job_id==='slow')await gate
+      if(job.job_id==='short-2')secondStarted()
+    })
+    worker.start()
+    try{
+      const ready=await Promise.race([second.then(()=>true),new Promise<boolean>(resolve=>setTimeout(()=>resolve(false),350))])
+      expect(ready).toBe(true)
+    }finally{release();await worker.stop()}
+  })
+
+  test('a handler returning after renewal loss cannot complete or reschedule the lost claim',async()=>{
+    const {jobs}=fakeJobs([claim()],{renewResult:()=>false})
+    let completed=0,retried=0
+    jobs.completeJob=async()=>{completed++;return true}
+    jobs.rescheduleJob=async()=>{retried++;return false}
+    const worker=createJobWorker(workerOptions({jobs,leaseMs:90}))
+    worker.register('compile_episode',async(_job,signal)=>{await new Promise<void>(resolve=>signal.addEventListener('abort',()=>resolve(),{once:true}))})
+    worker.start();await new Promise(resolve=>setTimeout(resolve,350));await worker.stop()
+    expect(completed).toBe(0);expect(retried).toBe(0)
+  })
   test('serializes Phase 4 handlers by configured job-type concurrency', async () => {
     const claims = [
       claim({ job_id: 'parse-a', job_type: 'parse_code_snapshot' }),

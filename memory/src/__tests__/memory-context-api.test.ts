@@ -64,6 +64,7 @@ describe('context route contracts (unit)', () => {
     const query = vi.fn(async () => ({ rows: [{
       claim_id: claim, version_id: version, claim_type: 'implementation_map',
       statement: 'published', owner_scope_kind: 'team', owner_scope_id: scope,
+      scope_kind:'installation',scope_key:'global',current:true,time_eligible:true,source_metadata_owned:true,
       evidence_ids: ['44444444-4444-4444-8444-444444444444'],
     }] }))
     const app = appWith({
@@ -84,6 +85,20 @@ describe('context route contracts (unit)', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({ valid: true })
     expect(guardV2).toHaveBeenCalledWith(expect.objectContaining({ requiredService: 'memory.context' }))
+  })
+
+  test.each(['matching','missing','different'])('v2 Context requires the signed Session (%s)',async mode=>{
+    const grant={version:'v2',installationId:INSTALLATION,primaryInstallationId:INSTALLATION,services:['memory.context'],configVersion:'1',callerType:'daemon',scopeBindings:[],...(mode==='missing'?{}:{sessionId:mode==='matching'?'ses-1':'other-session'})}
+    const compile=vi.fn(async()=>({kind:'off'})),app=appWith({guard:{guard:async()=>grant} as never,compiler:{compile} as never})
+    const response=await app.inject({method:'POST',url:'/api/v1/memory/context/compile',headers:{host:'memory.test',authorization:'Bearer v2'},payload:{schema_version:1,client_request_id:'signed-session',session_id:'ses-1',agent:'codex',adapter_capability:'native_hidden_v1',query:'q'}})
+    expect(response.statusCode).toBe(mode==='matching'?200:401)
+    expect(compile).toHaveBeenCalledTimes(mode==='matching'?1:0)
+  })
+  test('consume carries only server-verified scope grant facts',async()=>{
+    const grant={version:'v2',installationId:INSTALLATION,primaryInstallationId:INSTALLATION,services:['memory.context'],configVersion:'1',callerType:'daemon',sessionId:'ses-1',scopeBindings:[]}
+    const consume=vi.fn(async()=>({ok:false,error:'expired'})),app=appWith({sharedScopesEnabled:true,guard:{guard:async()=>grant} as never,admission:{consume} as never})
+    const response=await app.inject({method:'GET',url:'/api/v1/memory/context/packs/11111111-1111-4111-8111-111111111111/text?session_id=ses-1&injection_id=22222222-2222-4222-8222-222222222222&nonce=one-time',headers:{host:'memory.test',authorization:'Bearer v2'}})
+    expect(response.statusCode).toBe(410);expect(consume).toHaveBeenCalledWith(expect.objectContaining({selectedScopeGrant:grant}))
   })
 
   test('compile rejects a malformed body with a bounded error', async () => {
@@ -112,6 +127,13 @@ describe('context route contracts (unit)', () => {
       },
     })
     expect(response.statusCode).toBe(403)
+  })
+
+  test('concurrent consumption changes preserve the degraded reason on the wire', async () => {
+    const app=appWith({compiler:{compile:vi.fn(async()=>({kind:'degraded',reason:'context_consumption_changed'}))} as never})
+    const response=await app.inject({method:'POST',url:'/api/v1/memory/context/compile',headers:{host:'memory.test',authorization:'Bearer g'},payload:{schema_version:1,client_request_id:'cr-race',session_id:'ses-1',agent:'codex',adapter_capability:'native_hidden_v1',query:'hello'}})
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({outcome:'degraded',reason:'context_consumption_changed'})
   })
 
   test('an off compile outcome maps to the frozen wire shape', async () => {

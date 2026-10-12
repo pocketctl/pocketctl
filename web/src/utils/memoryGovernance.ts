@@ -1,4 +1,4 @@
-import type { MemoryGovernanceScope } from '../types/memory'
+import type { MemoryGovernanceScope,MemoryGovernanceQueueEntry } from '../types/memory'
 
 /** The only product-supported promotion edges are Personal -> Team and Team -> parent Organization. */
 export function promotionTargetsForSource(
@@ -20,3 +20,8 @@ export function promotionTargetsForSource(
   }
   return []
 }
+
+export function governanceEvidenceNeeds(entry:MemoryGovernanceQueueEntry):boolean{
+ return !entry.current_revision?.bundle_hash||(entry.evidence!==undefined&&entry.evidence.length===0)||entry.automation_advice?.reason==='no_evidence'
+}
+export function boundedReviewDuration(start:number,now=performance.now()):number{return Math.min(86400000,Math.max(0,Math.round(now-start)))}

@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
-import type { SkillSourceContext } from './source-resolver.js'
+import { SkillWorkError, type SkillSourceContext } from './source-resolver.js'
 import type { SkillReplayCaseRegistry } from './replay-service.js'
 import { replayTextHash } from './replay-runner.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
-import { validateSkillPublicationTarget } from './publication-validation.js'
+import { assertSkillPublicationGrantClock, validateSkillPublicationTarget } from './publication-validation.js'
 import { authorizeSkillExecution, requireSkillExecutionFixture, SkillExecutionError, withSkillTransaction, type SkillIdentity } from './execution-context.js'
 import { skillAssignmentBucket } from './rollout-service.js'
 
@@ -23,6 +23,10 @@ function response(row: ExecutionRow) {
     provenance:'fixture' as const,startedAt:row.started_at,completedAt:row.completed_at,naturalExecutionCount:0}
 }
 export function createSkillExecutionService(deps:{pool:pg.Pool;context:SkillSourceContext;cases:SkillReplayCaseRegistry;fixtureCapability?:object}) {
+  async function publicationClock(client:pg.PoolClient,identity:SkillIdentity,membershipIds:readonly string[],versionId:string|null,originPolicyStamp?:string) {
+    try { await assertSkillPublicationGrantClock(client,identity,membershipIds,versionId,originPolicyStamp) }
+    catch(error) { if(error instanceof SkillWorkError) throw new SkillExecutionError('source_invalid'); throw error }
+  }
   async function validate(client:pg.PoolClient,identity:SkillIdentity,input:{skillId:string;versionId:string;sessionId:string}) {
     const head = (await client.query<{revision:string}>(`SELECT revision::text FROM memory_skill_heads WHERE installation_id=$1 AND skill_id=$2`,[identity.installationId,input.skillId])).rows[0]
     if (!head) throw new SkillExecutionError('not_found')
@@ -41,10 +45,14 @@ export function createSkillExecutionService(deps:{pool:pg.Pool;context:SkillSour
       const parsed=Start.safeParse(raw)
       if (!parsed.success) throw new SkillExecutionError('invalid_request')
       const request=parsed.data
-      return withSkillTransaction(deps.pool,async client=>{
+      let sourceVersionId:string|null=null,originPolicyStamp:string|undefined
+      let authorizationMembershipIds:readonly string[]=[]
+      return withSkillTransaction(deps.pool,identity,async client=>{
         const binding=await authorizeSkillExecution(client,identity,deps.context,'read',false)
         requireSkillExecutionFixture(deps.fixtureCapability)
         const validated=await validate(client,identity,request)
+        sourceVersionId=validated.sourceVersionId;originPolicyStamp=validated.originPolicyStamp
+        authorizationMembershipIds=validated.authorizationMembershipIds
         const rollout=await active(client,identity,request)
         const actorKind=binding.owner_scope_kind==='personal'?'personal':'membership',actorId=actorKind==='personal'?binding.owner_scope_id:binding.membership_id!
         const bucket=skillAssignmentBucket(identity.installationId,binding.owner_scope_id,actorId,validated.archive.repository_id,request.skillId)
@@ -70,19 +78,23 @@ export function createSkillExecutionService(deps:{pool:pg.Pool;context:SkillSour
           validated.version.document_hash,validated.version.source_digest,validated.version.policy_hash,request.expectedPublicationRevision,Number(rollout.revision),
           actorKind,actorId,binding.membership_revision,binding.authorization_epoch,bucket,request.idempotencyKey,hash])
         return {...response(inserted.rows[0]),document:validated.version.document}
-      })
+      },client=>publicationClock(client,identity,authorizationMembershipIds,sourceVersionId,originPolicyStamp))
     },
     async complete(identity:SkillIdentity,raw:unknown) {
       const parsed=Complete.safeParse(raw)
       if (!parsed.success) throw new SkillExecutionError('invalid_request')
       const request=parsed.data
-      return withSkillTransaction(deps.pool,async client=>{
+      let sourceVersionId:string|null=null,originPolicyStamp:string|undefined
+      let authorizationMembershipIds:readonly string[]=[]
+      return withSkillTransaction(deps.pool,identity,async client=>{
         const binding=await authorizeSkillExecution(client,identity,deps.context,'read',false)
         requireSkillExecutionFixture(deps.fixtureCapability)
         const observed=(await client.query<ExecutionRow>(`SELECT * FROM memory_skill_executions WHERE installation_id=$1 AND execution_id=$2`,[identity.installationId,request.executionId])).rows[0]
         const actorKind=binding.owner_scope_kind==='personal'?'personal':'membership',actorId=actorKind==='personal'?binding.owner_scope_id:binding.membership_id!
         if (!observed || observed.actor_kind!==actorKind || observed.actor_id!==actorId) throw new SkillExecutionError('not_found')
-        await validate(client,identity,{skillId:observed.skill_id,versionId:observed.version_id,sessionId:observed.session_id})
+        const validated=await validate(client,identity,{skillId:observed.skill_id,versionId:observed.version_id,sessionId:observed.session_id})
+        sourceVersionId=validated.sourceVersionId;originPolicyStamp=validated.originPolicyStamp
+        authorizationMembershipIds=validated.authorizationMembershipIds
         const rollout=await active(client,identity,{skillId:observed.skill_id,versionId:observed.version_id,expectedPublicationRevision:Number(observed.publication_revision)})
         if (rollout.revision!==observed.rollout_revision || String(binding.membership_revision)!==observed.membership_revision || String(binding.authorization_epoch)!==observed.authorization_epoch) throw new SkillExecutionError('revision_conflict')
         const row=(await client.query<ExecutionRow>(`SELECT * FROM memory_skill_executions WHERE installation_id=$1 AND execution_id=$2 FOR UPDATE`,[identity.installationId,request.executionId])).rows[0]
@@ -96,12 +108,12 @@ export function createSkillExecutionService(deps:{pool:pg.Pool;context:SkillSour
           WHERE installation_id=$1 AND execution_id=$2 AND revision=$5 AND state='started' RETURNING *`,[identity.installationId,request.executionId,request.outcome,request.idempotencyKey,request.expectedRevision])
         if (updated.rowCount!==1) throw new SkillExecutionError('revision_conflict')
         return response(updated.rows[0])
-      })
+      },client=>publicationClock(client,identity,authorizationMembershipIds,sourceVersionId,originPolicyStamp))
     },
     async list(identity:SkillIdentity,raw:unknown) {
       const parsed=z.object({skillId:z.uuid()}).strict().safeParse(raw)
       if (!parsed.success) throw new SkillExecutionError('invalid_request')
-      return withSkillTransaction(deps.pool,async client=>{
+      return withSkillTransaction(deps.pool,identity,async client=>{
         await authorizeSkillExecution(client,identity,deps.context,'read')
         const rows=await client.query<ExecutionRow>(`SELECT * FROM memory_skill_executions WHERE installation_id=$1 AND skill_id=$2 ORDER BY started_at DESC,execution_id LIMIT 100`,[identity.installationId,parsed.data.skillId])
         const counts={started:0,succeeded:0,failed:0,taken_over:0,cancelled:0}

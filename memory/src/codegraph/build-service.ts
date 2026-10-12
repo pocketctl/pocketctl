@@ -1,4 +1,6 @@
+import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import type pg from 'pg'
+import {requireSourceAuthority,lockSourceSnapshot,SourceLifecycleFenceError} from './lifecycle.js'
 
 import type { JobClaim, JobFence } from '../jobs/types.js'
 import { createSourceRepository } from './source-repository.js'
@@ -53,15 +55,9 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
     parseCodeSnapshot({ files: input.files, parserVersion: PARSER_VERSION }))
 
   async function recheckFence(client: pg.PoolClient, fence: JobFence): Promise<void> {
-    const row = await client.query<{ state: string; claimed_by: string | null; claim_epoch: string }>(`
-      SELECT state, claimed_by, claim_epoch::text FROM memory_jobs WHERE job_id = $1
-    `, [fence.jobId])
-    const job = row.rows[0]
-    if (!job
-      || job.state !== 'running'
-      || job.claimed_by !== fence.claimedBy
-      || Number(job.claim_epoch) !== fence.claimEpoch) {
-      throw new GraphBuildFenceError('job_fence_lost')
+    try{await assertJobFence(client,fence)}catch(error){
+      if(error instanceof StaleJobFenceError)throw new GraphBuildFenceError('job_fence_lost')
+      throw error
     }
   }
 
@@ -77,59 +73,40 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
         const fence = ctx?.fence
         if (!fence) throw new GraphBuildFenceError('job_fence_missing')
 
-        const client = await pool.connect()
-        try {
-        await client.query('BEGIN')
-
-        // Fence rechecks happen first and inside every transaction: a late
-        // worker, tombstone, or stale state can never publish.
-        await recheckFence(client, fence)
         const snapshotId = typeof claim.payload?.snapshot_id === 'string'
-          ? claim.payload.snapshot_id
-          : claim.idempotency_key.split(':')[1]
-        if (!snapshotId) throw new GraphBuildFenceError('payload_missing')
-        const snapshot = await sources.getSnapshot({
-          installationId: claim.installation_id!,
-          snapshotId,
-        }, client)
-        if (!snapshot) throw new GraphBuildFenceError('not_found')
-        const repoTombstone = await client.query(`
-          SELECT 1 FROM memory_repository_tombstones
-          WHERE installation_id = $1 AND repository_id = $2
-        `, [claim.installation_id!, snapshot.repositoryId])
-        if ((repoTombstone.rowCount ?? 0) > 0) {
-          throw new GraphBuildFenceError('repository_tombstoned')
+          ? claim.payload.snapshot_id : claim.idempotency_key.split(':')[1]
+        if(!snapshotId){
+          // Malformed payloads cannot write. Preserve the lost-job result for stale replays.
+          const current=await pool.query(`SELECT 1 FROM memory_jobs WHERE job_id=$1 AND state='running' AND claimed_by=$2 AND claim_epoch=$3`,[fence.jobId,fence.claimedBy,fence.claimEpoch])
+          if(!current.rows[0])throw new GraphBuildFenceError('job_fence_lost')
+          throw new GraphBuildFenceError('payload_missing')
         }
-        const snapshotTombstone = await client.query(`
-          SELECT 1 FROM memory_source_snapshot_tombstones
-          WHERE installation_id = $1 AND snapshot_id = $2
-        `, [claim.installation_id!, snapshotId])
-        if ((snapshotTombstone.rowCount ?? 0) > 0) {
-          throw new GraphBuildFenceError('snapshot_tombstoned')
+        const withSource = async <T>(work:(client:pg.PoolClient,snapshot:NonNullable<Awaited<ReturnType<typeof sources.getSnapshot>>>)=>Promise<T>):Promise<T> => {
+          const client=await pool.connect()
+          try {
+            await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+            await requireSourceAuthority(client,{installationId:claim.installation_id!})
+            // Serialize repository activation before the source/job/head row families.
+            await lockSourceSnapshot(client,{installationId:claim.installation_id!,snapshotId},true)
+            await recheckFence(client,fence)
+            const snapshot=await sources.getSnapshot({installationId:claim.installation_id!,snapshotId},client)
+            if(!snapshot)throw new GraphBuildFenceError('not_found')
+            if(!['ready','parsing','active'].includes(snapshot.state))throw new GraphBuildFenceError('not_ready')
+            const result=await work(client,snapshot)
+            await recheckFence(client,fence)
+            await client.query('COMMIT')
+            return result
+          }catch(error){await client.query('ROLLBACK');if(error instanceof SourceLifecycleFenceError)throw new GraphBuildFenceError(error.code);throw error}
+          finally{client.release()}
         }
-        if (snapshot.state !== 'ready' && snapshot.state !== 'parsing' && snapshot.state !== 'active') {
-          throw new GraphBuildFenceError('not_ready')
-        }
-
-        // Idempotent replay: an existing active version for this generation
-        // means the work already committed.
-        const existing = await client.query<{ graph_version_id: string }>(`
-          SELECT graph_version_id::text FROM memory_code_graph_versions
-          WHERE installation_id = $1 AND snapshot_id = $2 AND parser_version = $3
-        `, [claim.installation_id!, snapshotId, PARSER_VERSION])
-        if ((existing.rowCount ?? 0) > 0) {
-          await client.query('COMMIT')
-          deps.metrics?.codegraphRuns.inc({ mode, result: 'skipped', incremental: 'false' })
-          return
-        }
-
-        await graphs.markSnapshotState({
-          installationId: claim.installation_id!,
-          snapshotId,
-          state: 'parsing',
-          client,
+        const admission=await withSource(async(client,snapshot)=>{
+          const existing=await client.query('SELECT 1 FROM memory_code_graph_versions WHERE installation_id=$1 AND snapshot_id=$2 AND parser_version=$3',[claim.installation_id!,snapshotId,PARSER_VERSION])
+          if(existing.rows[0])return {snapshot,skipped:true}
+          await graphs.markSnapshotState({installationId:claim.installation_id!,snapshotId,state:'parsing',client})
+          return {snapshot,skipped:false}
         })
-        await client.query('COMMIT')
+        if(admission.skipped){deps.metrics?.codegraphRuns.inc({mode,result:'skipped',incremental:'false'});return}
+        const snapshot=admission.snapshot
 
         // Parsing happens outside the transaction: it is pure computation
         // over committed snapshot blobs.
@@ -166,57 +143,17 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           ? 'partial' as const
           : 'complete' as const
 
-        const activation = await pool.connect()
-        try {
-          await activation.query('BEGIN')
-          await recheckFence(activation, fence)
-          const generation = await graphs.nextGeneration({
-            installationId: claim.installation_id!,
-            repositoryId: snapshot.repositoryId,
-            client: activation,
-          })
-          const candidate = await graphs.persistCandidate({
-            installationId: claim.installation_id!,
-            repositoryId: snapshot.repositoryId,
-            snapshotId,
-            generation,
-            graph,
-            coverage,
-            client: activation,
-          })
-          await wikiStale.markForGraphActivation({
-            installationId: claim.installation_id!,
-            repositoryId: snapshot.repositoryId,
-            graphVersionId: candidate.graphVersionId,
-            snapshotId,
-            client: activation,
-          })
-          await graphs.activateHead({
-            installationId: claim.installation_id!,
-            repositoryId: snapshot.repositoryId,
-            graphVersionId: candidate.graphVersionId,
-            client: activation,
-          })
-          await graphs.markSnapshotState({
-            installationId: claim.installation_id!,
-            snapshotId,
-            state: 'active',
-            client: activation,
-          })
-          await activation.query('COMMIT')
-        } catch (error) {
-          await activation.query('ROLLBACK')
-          throw error
-        } finally {
-          activation.release()
-        }
-        deps.metrics?.codegraphRuns.inc({ mode, result: 'succeeded', incremental })
-        } catch (error) {
-          await client.query('ROLLBACK').catch(() => undefined)
-          throw error
-        } finally {
-          client.release()
-        }
+        await withSource(async(activation,current)=>{
+          if(current.repositoryId!==snapshot.repositoryId)throw new GraphBuildFenceError('source_changed')
+          const existing=await activation.query('SELECT 1 FROM memory_code_graph_versions WHERE installation_id=$1 AND snapshot_id=$2 AND parser_version=$3',[claim.installation_id!,snapshotId,PARSER_VERSION])
+          if(existing.rows[0])return
+          const generation=await graphs.nextGeneration({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,client:activation})
+          const candidate=await graphs.persistCandidate({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,snapshotId,generation,graph,coverage,client:activation})
+          await wikiStale.markForGraphActivation({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,graphVersionId:candidate.graphVersionId,snapshotId,client:activation})
+          await graphs.activateHead({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,graphVersionId:candidate.graphVersionId,client:activation})
+          await graphs.markSnapshotState({installationId:claim.installation_id!,snapshotId,state:'active',client:activation})
+        })
+        deps.metrics?.codegraphRuns.inc({mode,result:'succeeded',incremental})
       } catch (error) {
         deps.metrics?.codegraphRuns.inc({ mode, result: 'failed', incremental })
         throw error

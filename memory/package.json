@@ -12,7 +12,8 @@
     "start:worker": "node dist/worker-main.js",
     "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
-    "eval": "tsx src/eval/run.ts"
+    "eval": "tsx src/eval/run.ts",
+    "migration:plan": "tsx src/migrations/governance-v2/cli.ts plan"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0",

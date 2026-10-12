@@ -15,6 +15,12 @@ export interface RecallInput {
   repositoryId?: string | null
   repoSnapshotId?: string | null
   branch?: string | null
+  taskScopeKey?: string | null
+  canonicalRepositoryKey?:string|null
+  snapshotCommitSha?:string|null
+  requireUniqueCanonicalRepository?:boolean
+  repositoryContextValidated?:boolean
+  sourceRepositoryContext?:SearchInput['sourceRepositoryContext']
   claimTypes?: readonly string[] | null
   asOf?: Date | null
   maxClaims?: number
@@ -77,6 +83,10 @@ export function createRecallService(
         repositoryId: input.repositoryId,
         repoSnapshotId: input.repoSnapshotId,
         branch: input.branch,
+        taskScopeKey: input.taskScopeKey,
+        canonicalRepositoryKey:input.canonicalRepositoryKey,snapshotCommitSha:input.snapshotCommitSha,
+        requireUniqueCanonicalRepository:input.requireUniqueCanonicalRepository,repositoryContextValidated:input.repositoryContextValidated,
+        sourceRepositoryContext:input.sourceRepositoryContext,
         claimTypes: input.claimTypes,
         asOf: input.asOf,
         limit: maxClaims,

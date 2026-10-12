@@ -38,7 +38,7 @@ export function createGitRecoveryService(deps:GitQueueDeps&{recoveryReads?:GitRe
     const s=request.parse(raw),facts=factsSchema.parse(grant) as V2GrantFacts
     return gitQueueTransaction(deps.pool,async client=>{
       await lockGitPolicyScopes(client,facts,s.installationId)
-      const stamp=await requireGitPermission(client,facts,s.installationId,'contribute')
+      const stamp=await requireGitPermission(client,{...facts,expiresAt:grant.expiresAt},s.installationId,'contribute')
       const c=await lockGitConnection(client,s.installationId,s.connectionId,s.expectedGeneration),mode=await gitAdmissionMode(deps,c)
       const metadata=await loadGitRecoveryMetadata(client,s.installationId,s.connectionId,s.exportId)
       const cap=await deps.recoveryReads?.resolve(c)
@@ -60,6 +60,6 @@ export function createGitRecoveryService(deps:GitQueueDeps&{recoveryReads?:GitRe
         VALUES($1,$2,$3,$4,$5,$5,$6,'received')`,[s.installationId,s.connectionId,s.expectedGeneration,runId,hash,deps.outcomeKind??'fixture'])
       await requireCurrentGitAuthorization(client,stamp,'contribute')
       return {runId,jobId,duplicate:false}
-    })
+    },grant,[s.installationId])
   }}
 }

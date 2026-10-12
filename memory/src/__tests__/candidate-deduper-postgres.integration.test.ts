@@ -219,6 +219,7 @@ describeWithDatabase('candidate deduper and validation (PostgreSQL)', () => {
             ...claimTypeRow(),
             statement: 'Vitest test files live next to sources and cover every module',
           },
+          {...claimTypeRow(),statement:'Vitest files never live next to sources'},
           {
             ...claimTypeRow(),
             evidence_handles: ['h0-aaaaaaaa'],
@@ -239,14 +240,16 @@ describeWithDatabase('candidate deduper and validation (PostgreSQL)', () => {
     }>(`
       SELECT status, validation, claim_type FROM memory_candidates ORDER BY ordinal
     `)
-    expect(candidates.rows.length).toBe(4)
+    expect(candidates.rows.length).toBe(5)
     expect(candidates.rows.some(row => row.status === 'validated')).toBe(true)
     expect(candidates.rows.some(row => row.status === 'duplicate')).toBe(true)
     expect(candidates.rows.some(row => row.status === 'conflict')).toBe(true)
     expect(candidates.rows.some(row => row.status === 'rejected_by_validator')).toBe(true)
-    // Verdict details carry bounded codes only.
+    // Verdict details carry bounded codes and at most eight exact version references; no target body.
     for (const row of candidates.rows) {
-      expect(JSON.stringify(row.validation).length).toBeLessThan(512)
+      expect(JSON.stringify(row.validation).length).toBeLessThan(4096)
+      expect(((row.validation.relationships??[]) as unknown[]).length).toBeLessThanOrEqual(8)
+      expect(JSON.stringify(row.validation)).not.toContain('Vitest files live next to sources')
     }
   })
 

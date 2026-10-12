@@ -59,13 +59,14 @@ describe('Phase 6 portable contracts', () => {
     const extended = structuredClone(base.asset) as any
     extended.immutable.authority = 'organization_published'
     Object.assign(extended.serverOnly, { conflictGroupId: fixtureId(40), conflictVariant: 3,
-      sourcePromotionCandidateId: fixtureId(41), claimCreatedAt: '2026-08-01T00:00:00.000Z' })
+      sourcePromotionCandidateId: fixtureId(41),topicKeyV2:'a'.repeat(64),duplicateDigestV2:'b'.repeat(64),claimCreatedAt: '2026-08-01T00:00:00.000Z' })
     Object.assign(extended.serverOnly.evidence[0], { contributorMembershipId: fixtureId(42), sourceEvidenceHash: 'b'.repeat(64) })
     expect(decodeAsset(encodeAsset(extended), { ...base, asset: extended })).toEqual(extended)
     expect(Object.keys(DOMAIN_FIELD_MAPPING.knowledge_claims).sort()).toEqual([
       'claim_id', 'installation_id', 'claim_type', 'scope_kind', 'scope_key', 'normalized_key', 'state',
       'current_version_id', 'superseded_by_claim_id', 'revision', 'created_at', 'updated_at', 'owner_scope_kind',
       'owner_scope_id', 'conflict_group_id', 'conflict_variant',
+      'identity_generation', 'normalized_key_v2', 'topic_key_v2', 'duplicate_digest_v2', 'canonical_repository_key', 'consumption_hold_reason',
     ].sort())
   })
   it('preserves Wiki row positions, generation, source timestamps and manual head metadata', () => {

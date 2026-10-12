@@ -37,7 +37,7 @@ db('Phase 6 lossless authorized Ledger exports', () => {
     const rule = first.assets.find(a=>a.asset.key.kind==='rule')!.asset
     expect(rule).toMatchObject({ editable:{ statement:'Synthetic statement',structuredContent:{value:null,flags:['strict'],retries:7} },
       immutable:{confidence:'0.8723',freshnessAt:'2026-01-02T03:04:05.000Z',evidence:[{ordinal:4,visibility:'shared'}]},
-      serverOnly:{repositoryId:null,branch:'private-branch',evidence:[{locator:{privatePath:'/private/source'},sourceEvidenceHash:'b'.repeat(64),contributorMembershipId:f.membershipId}]} })
+      serverOnly:{identityGeneration:1,normalizedKeyV2:null,topicKeyV2:null,duplicateDigestV2:null,canonicalRepositoryKey:null,consumptionHoldReason:null,applicability:null,effectiveFrom:null,effectiveUntil:null,repositoryId:null,branch:'private-branch',evidence:[{locator:{privatePath:'/private/source'},sourceEvidenceHash:'b'.repeat(64),contributorMembershipId:f.membershipId}]} })
     const wiki = first.assets.find(a=>a.asset.key.kind==='wiki')!.asset
     expect(wiki).toMatchObject({baseRevision:'9007199254740993',immutable:{evidence:[],pages:[{sections:[{authority:'generated'},{authority:'locked',manualVersionId:f.manualVersionId,lockVersion:'9007199254740995',sourceBindings:[]}]}]},
       editable:{pages:[{title:'Complete overview',sections:[{coverage:'partial'},{markdown:'  Keep CRLF\r\n'}]}]},serverOnly:{manualVersions:[{reasonCode:'fixture',manualVersionId:f.manualVersionId}]}})

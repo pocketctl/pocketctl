@@ -86,7 +86,7 @@ describeWithDatabase('phase4 code graph build fences', () => {
     // stages its own ownership and skips this.
     if (simulateClaim) {
       await pool.query(`
-        UPDATE memory_jobs SET state = 'running', claimed_by = $2, claim_epoch = $3
+        UPDATE memory_jobs SET state = 'running', claim_expires_at=clock_timestamp()+interval '1 minute', claimed_by = $2, claim_epoch = $3
         WHERE job_id = $1
       `, [effectiveJobId, overrides.claimedBy ?? 'worker-fence', overrides.claimEpoch ?? 1])
     }
@@ -109,7 +109,7 @@ describeWithDatabase('phase4 code graph build fences', () => {
 
   test('a lost job lease refuses to activate', async () => {
     await pool.query(`
-      UPDATE memory_jobs SET state = 'running', claimed_by = 'someone-else', claim_epoch = 7 WHERE job_id = $1
+      UPDATE memory_jobs SET state = 'running', claim_expires_at=clock_timestamp()+interval '1 minute', claimed_by = 'someone-else', claim_epoch = 7 WHERE job_id = $1
     `, [jobId])
     await expect(run({ claimedBy: 'worker-fence', claimEpoch: 1, simulateClaim: false })).rejects.toThrow(/fence/)
     const heads = await pool.query(`

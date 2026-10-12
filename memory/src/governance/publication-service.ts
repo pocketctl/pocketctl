@@ -1,10 +1,26 @@
+import {classifyClaimConflict} from '../claims/conflict-classifier.js'
+import {claimIdentityV2} from '../claims/identity.js'
+import {originPolicyProofDecision,transferredOriginDecision} from './origin-policy.js'
+import {findClaimTopicFamily} from '../claims/identity-lookup.js'
 import { randomUUID } from 'crypto'
 import type pg from 'pg'
 
+import {publicationApplicability,PublicationApplicabilityError} from './publication-applicability.js'
+import {normalizedClaimKey} from '../retrieval/query-normalizer.js'
+import type {TombstoneHmacKey} from '../config.js'
+import {projectClaimIdentity,assertIdentityNotTombstoned,assertClaimIdentityAvailable,ClaimIdentityWriteError} from '../claims/identity-writer.js'
+import {verifyRevisionBundle,type RevisionBundle,type SharedRevisionEvidence} from './revision-bundle.js'
 import { currentReviewDecisions, evaluateQuorum } from './authority.js'
-import type { ValidatedV2Grant } from './authorization.js'
-import { loadEffectiveReviewPolicySnapshot } from './review-policy.js'
+import { assertCurrentMembershipWindows, assertCurrentGrantClock, requireCurrentScopePermission, TargetBindingError, type ValidatedV2Grant } from './authorization.js'
+import { loadEffectiveReviewPolicySnapshot, ReviewPolicyScopeStaleError } from './review-policy.js'
 import type { PromotionCandidateRow, ReviewDecisionKind } from './types.js'
+
+async function assertOriginPolicy(client:pg.PoolClient,candidate:{source_scope_kind:unknown;source_installation_id:unknown;candidate_id?:unknown},bundle:RevisionBundle|null):Promise<void>{
+ if(candidate.source_scope_kind!=='team')return
+ const transfer=typeof candidate.candidate_id==='string'?await transferredOriginDecision(client,candidate.candidate_id,bundle):null
+ const decision=transfer??await originPolicyProofDecision(client,typeof candidate.source_installation_id==='string'?candidate.source_installation_id:null,bundle?.originPolicyHash??null)
+ if(!decision.eligible)throw new PublicationError('state_conflict','source policy proof requires remediation',{reason:decision.reason})
+}
 
 /**
  * ADR-P3-07 review decisions and the §4.3 publication transaction. Decisions
@@ -43,17 +59,33 @@ export interface ReviewDecisionInput {
   targetInstallationId: string
   candidateId: string
   expectedCandidateRevision: number
+  expectedBundleHash?: string
+  reviewDurationMs?: number
   decision: ReviewDecisionKind
   reasonCode?: string
 }
 
 export interface PublishInput {
+  /** Server executor context; never parsed from the human publish body. */
+  executorPrincipalId?:string
+  publicationDelegationId?:string
   grant: ValidatedV2Grant
   targetInstallationId: string
   candidateId: string
   expectedCandidateRevision: number
   resolution: 'new' | 'parallel' | 'supersede'
   supersedeClaimIds?: string[]
+}
+
+async function currentPolicySnapshot(client: pg.PoolClient, installationId: string) {
+  try {
+    return await loadEffectiveReviewPolicySnapshot(client, installationId)
+  } catch (error) {
+    if (error instanceof ReviewPolicyScopeStaleError) {
+      throw new PublicationError('forbidden', 'current review policy scope required')
+    }
+    throw error
+  }
 }
 
 function toCandidate(row: Record<string, unknown>): PromotionCandidateRow {
@@ -80,7 +112,14 @@ function toCandidate(row: Record<string, unknown>): PromotionCandidateRow {
   }
 }
 
-export function createPublicationService(pool: pg.Pool) {
+async function assertCandidateTtl(client:pg.PoolClient,candidateId:string):Promise<void>{
+  const live=await client.query(`SELECT expires_at::text AS expires_at FROM memory_promotion_candidates
+    WHERE candidate_id=$1 AND expires_at>clock_timestamp()`,[candidateId])
+  if(!live.rows[0])throw new PublicationError('expired','candidate TTL elapsed')
+  await client.query("SELECT set_config('pocketctl.candidate_ttl',$1,true)",[JSON.stringify({candidateId,expiresAt:live.rows[0].expires_at})])
+}
+
+export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKeys?:readonly TombstoneHmacKey[]}={}) {
   return {
     /** Append one review decision; a new candidate revision invalidates nothing retroactively. */
     async decide(input: ReviewDecisionInput): Promise<{ decisionId: string }> {
@@ -95,6 +134,9 @@ export function createPublicationService(pool: pg.Pool) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        try {
+          await requireCurrentScopePermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'review'})
+        } catch (error) { if (error instanceof TargetBindingError) throw new PublicationError('forbidden','current review permission required'); throw error }
         const candidate = await client.query<Record<string, unknown>>(`
           SELECT * FROM memory_promotion_candidates
           WHERE target_installation_id = $1 AND candidate_id = $2 FOR UPDATE
@@ -109,22 +151,34 @@ export function createPublicationService(pool: pg.Pool) {
         if (!['proposed', 'changes_requested', 'conflict', 'approved'].includes(String(row.state))) {
           throw new PublicationError('state_conflict', `candidate state ${row.state} is not reviewable`)
         }
-        const revision = await client.query<{ candidate_revision_id: string; created_by_membership_id: string | null }>(`
-          SELECT candidate_revision_id, created_by_membership_id
+        await assertCandidateTtl(client,input.candidateId)
+        const revision = await client.query<{ candidate_revision_id: string; created_by_membership_id: string | null;statement:string;structured_content:Record<string,unknown>;revision_bundle:RevisionBundle|null;revision_bundle_hash:string|null;review_policy_version_id:string;parent_review_policy_version_id:string|null }>(`
+          SELECT candidate_revision_id, created_by_membership_id,statement,structured_content,revision_bundle,revision_bundle_hash,review_policy_version_id,parent_review_policy_version_id
           FROM memory_promotion_candidate_versions
           WHERE candidate_id = $1 ORDER BY revision_number DESC LIMIT 1
         `, [input.candidateId])
         const latest = revision.rows[0]
         if (!latest) throw new PublicationError('state_conflict', 'candidate has no revisions')
+        if(input.expectedBundleHash!==undefined&&latest.revision_bundle_hash!==input.expectedBundleHash)throw new PublicationError('revision_conflict','candidate bundle mismatch')
+        const evidence=(await client.query<SharedRevisionEvidence>('SELECT ordinal,evidence_kind,excerpt,excerpt_hash,source_evidence_hash,occurred_at,sanitized_locator FROM memory_promotion_evidence WHERE candidate_revision_id=$1 ORDER BY ordinal FOR SHARE',[latest.candidate_revision_id])).rows
+        if(!verifyRevisionBundle(latest,evidence))throw new PublicationError('state_conflict','revision bundle integrity mismatch')
+        // A vote belongs to the immutable revision's policy, not whichever
+        // head became active since proposal. Retain prior votes as history.
+        const policySnapshot = await currentPolicySnapshot(client, input.targetInstallationId)
+        if (policySnapshot.activeVersionId !== latest.review_policy_version_id
+          || policySnapshot.parentActiveVersionId !== latest.parent_review_policy_version_id) {
+          throw new PublicationError('policy_head_changed', 'review policy changed after this candidate revision')
+        }
+        if(row.source_scope_kind==='team'&&/^[a-f0-9]{64}$/.test(latest.revision_bundle?.originPolicyHash??''))await assertOriginPolicy(client,row as {source_scope_kind:unknown;source_installation_id:unknown},latest.revision_bundle)
         const decisionId = randomUUID()
         try {
           await client.query(`
             INSERT INTO memory_review_decisions
-              (decision_id, candidate_revision_id, membership_id, membership_revision, decision, reason_code)
-            VALUES ($1, $2, $3, $4, $5, $6)
+              (decision_id, candidate_revision_id, membership_id, membership_revision, decision, reason_code,review_duration_ms)
+            VALUES ($1, $2, $3, $4, $5, $6,$7)
           `, [
             decisionId, latest.candidate_revision_id, binding.membership_id,
-            binding.membership_revision, input.decision, input.reasonCode ?? null,
+            binding.membership_revision, input.decision, input.reasonCode ?? null,input.reviewDurationMs??null,
           ])
         } catch (error) {
           if ((error as { code?: string }).code === '23505') {
@@ -141,10 +195,17 @@ export function createPublicationService(pool: pg.Pool) {
           randomUUID(), input.targetInstallationId, binding.membership_id,
           input.candidateId, String(row.state), JSON.stringify({ reason_code: input.decision }),
         ])
+        try { await assertCurrentGrantClock(client, input.grant,[input.targetInstallationId]) } catch (error) {
+          if (error instanceof TargetBindingError) throw new PublicationError('forbidden', 'grant expired before commit')
+          throw error
+        }
+        if(row.source_scope_kind==='team'&&/^[a-f0-9]{64}$/.test(latest.revision_bundle?.originPolicyHash??''))await assertOriginPolicy(client,row as {source_scope_kind:unknown;source_installation_id:unknown},latest.revision_bundle)
+        await assertCandidateTtl(client,input.candidateId)
         await client.query('COMMIT')
         return { decisionId }
       } catch (error) {
         await client.query('ROLLBACK')
+        if((error as {message?:string}).message==='candidate_ttl_expired')throw new PublicationError('expired','candidate TTL elapsed at commit')
         throw error
       } finally {
         client.release()
@@ -174,6 +235,12 @@ export function createPublicationService(pool: pg.Pool) {
       try {
         await client.query('BEGIN')
         try {
+          try {
+            await requireCurrentScopePermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'publish'})
+          } catch (error) {
+            if (error instanceof TargetBindingError) throw new PublicationError('forbidden','current publish permission required')
+            throw error
+          }
           const candidateResult = await client.query<Record<string, unknown>>(`
             SELECT * FROM memory_promotion_candidates
             WHERE target_installation_id = $1 AND candidate_id = $2 FOR UPDATE
@@ -192,15 +259,7 @@ export function createPublicationService(pool: pg.Pool) {
           if (!['proposed', 'approved', 'conflict'].includes(candidate.state)) {
             throw new PublicationError('state_conflict', `candidate state ${candidate.state} is not publishable`)
           }
-          if (candidate.expires_at.getTime() <= Date.now()) {
-            throw new PublicationError('expired', 'candidate TTL elapsed')
-          }
-          if (candidate.state === 'conflict' && input.resolution === 'new') {
-            throw new PublicationError('invalid_resolution', 'conflicted candidates require parallel or supersede')
-          }
-          if (candidate.state !== 'conflict' && input.resolution !== 'new') {
-            throw new PublicationError('invalid_resolution', 'resolution only applies to conflicted candidates')
-          }
+          await assertCandidateTtl(client,input.candidateId)
 
           // Lock the current revision, its evidence, the policy head, and decisions.
           const revision = await client.query<{
@@ -209,12 +268,14 @@ export function createPublicationService(pool: pg.Pool) {
             statement: string
             structured_content: Record<string, unknown>
             content_hash: string
+            revision_bundle:RevisionBundle|null
+            revision_bundle_hash:string|null
             review_policy_version_id: string
             parent_review_policy_version_id: string | null
             created_by_membership_id: string | null
           }>(`
             SELECT candidate_revision_id, revision_number, statement, structured_content,
-                   content_hash, review_policy_version_id,
+                   content_hash, revision_bundle,revision_bundle_hash,review_policy_version_id,
                    parent_review_policy_version_id, created_by_membership_id
             FROM memory_promotion_candidate_versions
             WHERE candidate_id = $1 ORDER BY revision_number DESC LIMIT 1 FOR UPDATE
@@ -236,13 +297,14 @@ export function createPublicationService(pool: pg.Pool) {
             FROM memory_promotion_evidence WHERE candidate_revision_id = $1
             ORDER BY ordinal ASC FOR UPDATE
           `, [latest.candidate_revision_id])
+          if(!verifyRevisionBundle(latest,evidence.rows))throw new PublicationError('state_conflict','revision bundle integrity mismatch')
           if (evidence.rows.length === 0) {
             throw new PublicationError('evidence_missing', 'candidate revision has no shared evidence package')
           }
 
           // Re-resolve both policy layers under the publication transaction.
           // Any head change invalidates approvals on this immutable revision.
-          const policySnapshot = await loadEffectiveReviewPolicySnapshot(
+          const policySnapshot = await currentPolicySnapshot(
             client,
             input.targetInstallationId,
           )
@@ -253,6 +315,9 @@ export function createPublicationService(pool: pg.Pool) {
               'review policy changed after this candidate revision')
           }
           const policy = policySnapshot.policy
+          if (input.resolution === 'parallel' && !policy.allow_parallel_conflicts) {
+            throw new PublicationError('invalid_resolution', 'parallel conflicts are disabled by the effective policy')
+          }
           if (evidence.rows.length > policy.max_shared_evidence) {
             throw new PublicationError('evidence_missing',
               'candidate evidence exceeds the active policy maximum')
@@ -277,7 +342,8 @@ export function createPublicationService(pool: pg.Pool) {
           }>(`
             SELECT membership_id, membership_revision, state, roles
             FROM memory_scope_memberships
-            WHERE installation_id = $1
+            WHERE installation_id = $1 AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())
+            ORDER BY membership_id FOR SHARE
           `, [input.targetInstallationId])
           const countedDecisions = currentReviewDecisions(
             decisions.rows.map(row => ({
@@ -309,6 +375,38 @@ export function createPublicationService(pool: pg.Pool) {
             })
           }
 
+          if(candidate.source_scope_kind==='team' && !/^[a-f0-9]{64}$/.test(latest.revision_bundle?.originPolicyHash??'')) {
+            throw new PublicationError('state_conflict','source policy proof requires remediation',{reason:'origin_policy_proof_required'})
+          }
+          await assertOriginPolicy(client,candidate,latest.revision_bundle)
+          let applicability:RevisionBundle['applicability']
+          try {applicability=await publicationApplicability(client,latest.revision_bundle,input.targetInstallationId)}
+          catch(error){if(error instanceof PublicationApplicabilityError)throw new PublicationError('state_conflict','publication applicability requires remediation',{reason:error.reason});throw error}
+          const publishedScopeKey=applicability.scopeKey
+          const projection=await projectClaimIdentity(client,{installationId:input.targetInstallationId,claimType:candidate.target_claim_type,statement:latest.statement,
+            structuredContent:latest.structured_content,applicability,validFrom:latest.revision_bundle!.sourceValidFrom,validUntil:latest.revision_bundle!.sourceValidUntil})
+          // Serialize empty-topic publication races before acquiring Claim locks.
+          // Git corrections own Claims but never wait for this publication mutex.
+          await client.query("SELECT pg_advisory_xact_lock(hashtextextended('claim-publish-topic:'||$1||':'||$2,0))",
+            [input.targetInstallationId,claimIdentityV2({...applicability,claimType:candidate.target_claim_type,statement:latest.statement}).topicKey])
+          const proposed={...applicability,claimType:candidate.target_claim_type,statement:latest.statement,
+            structuredContent:latest.structured_content,validFrom:latest.revision_bundle!.sourceValidFrom,validUntil:latest.revision_bundle!.sourceValidUntil}
+          const topicFamily=await findClaimTopicFamily(client,{installationId:input.targetInstallationId,claimType:candidate.target_claim_type,
+            applicability,statement:latest.statement,lockClaims:true})
+          if(topicFamily.some(row=>classifyClaimConflict(proposed,row.facts).relation==='duplicate'))throw new PublicationError('state_conflict','latest revision is already published')
+          const family=topicFamily.filter(row=>claimIdentityV2(row.facts).key===claimIdentityV2(proposed).key
+            ||classifyClaimConflict(proposed,row.facts).relation==='potential_conflict')
+          if(family.length>0&&input.resolution==='new')throw new PublicationError('invalid_resolution','current identity conflicts require parallel or supersede')
+          if(family.length===0&&input.resolution!=='new')throw new PublicationError('invalid_resolution','resolution requires a current identity conflict')
+          const currentConflictGroupId=family.find(row=>row.conflict_group_id)?.conflict_group_id??candidate.conflict_group_id??randomUUID()
+          const publishedNormalizedKey=projection.legacyKey
+          try{
+            await assertIdentityNotTombstoned(client,{installationId:input.targetInstallationId,projection,keys:options.tombstoneHmacKeys??[]})
+            // Publication may subsequently lock existing conflict Claims. Do
+            // not hold a new identity mutex ahead of a Git writer's Claim lock;
+            // the staged DB unique indexes serialize competing new inserts.
+            await assertClaimIdentityAvailable(client,{installationId:input.targetInstallationId,claimType:candidate.target_claim_type,scopeKey:publishedScopeKey,projection,allowConflicts:input.resolution!=='new',variant:input.resolution==='new'?0:-1,lockIdentity:false})
+          }catch(error){if(error instanceof ClaimIdentityWriteError)throw new PublicationError('state_conflict','identity admission requires remediation',{reason:error.code});throw error}
           // Conflict resolution bookkeeping.
           const targetScope = await client.query<{ owner_scope_id: string }>(`
             SELECT owner_scope_id::text FROM memory_owner_scopes WHERE installation_id = $1
@@ -322,7 +420,7 @@ export function createPublicationService(pool: pg.Pool) {
           const authorityKind = targetKind === 'organization' ? 'organization_published' : 'team_published'
 
           if (input.resolution === 'parallel') {
-            conflictGroupId = candidate.conflict_group_id ?? randomUUID()
+            conflictGroupId = currentConflictGroupId
             // A first conflict starts from an ungrouped canonical incumbent.
             // Lock and attach every matching ungrouped active row before
             // choosing the new variant, so both sides become visible in one
@@ -335,12 +433,12 @@ export function createPublicationService(pool: pg.Pool) {
               SELECT claim_id::text, conflict_group_id::text, conflict_variant
               FROM knowledge_claims
               WHERE installation_id = $1 AND claim_type = $2 AND scope_key = $3
-                AND normalized_key = $4 AND state = 'active'
+                AND claim_id=ANY($4::uuid[]) AND state = 'active'
                 AND (conflict_group_id IS NULL OR conflict_group_id = $5)
               ORDER BY claim_id
               FOR UPDATE
             `, [input.targetInstallationId, candidate.target_claim_type,
-              candidate.scope_key, candidate.normalized_key, conflictGroupId])
+              publishedScopeKey, family.map(row=>row.claim_id), conflictGroupId])
             let maxVariant = existingVariants.rows
               .filter(row => row.conflict_group_id === conflictGroupId)
               .reduce((max, row) => Math.max(max, Number(row.conflict_variant)), -1)
@@ -358,7 +456,7 @@ export function createPublicationService(pool: pg.Pool) {
             if (supersedeIds.length === 0 || new Set(supersedeIds).size !== supersedeIds.length) {
               throw new PublicationError('invalid_resolution', 'supersede must name the affected claims')
             }
-            conflictGroupId = candidate.conflict_group_id ?? randomUUID()
+            conflictGroupId = currentConflictGroupId
             const selected = await client.query<{
               claim_id: string
               conflict_variant: string | number
@@ -366,11 +464,11 @@ export function createPublicationService(pool: pg.Pool) {
               SELECT claim_id::text, conflict_variant
               FROM knowledge_claims
               WHERE installation_id = $1 AND claim_id = ANY($2::uuid[]) AND state = 'active'
-                AND claim_type = $3 AND scope_key = $4 AND normalized_key = $5
+                AND claim_type = $3 AND scope_key = $4 AND claim_id=ANY($5::uuid[])
                 AND (conflict_group_id IS NULL OR conflict_group_id = $6)
               FOR UPDATE
             `, [input.targetInstallationId, supersedeIds, candidate.target_claim_type,
-              candidate.scope_key, candidate.normalized_key, conflictGroupId])
+              publishedScopeKey, family.map(row=>row.claim_id), conflictGroupId])
             if (selected.rows.length !== supersedeIds.length) {
               throw new PublicationError('invalid_resolution',
                 'supersede target must be an active claim in the same conflict group')
@@ -391,25 +489,29 @@ export function createPublicationService(pool: pg.Pool) {
 
           // Append the shared Claim, Version, and Evidence copies. The new
           // claim must exist before the supersession FK can point at it.
+          try{await assertClaimIdentityAvailable(client,{installationId:input.targetInstallationId,claimType:candidate.target_claim_type,scopeKey:publishedScopeKey,
+            projection,variant:conflictVariant??0,lockIdentity:false})}
+          catch(error){if(error instanceof ClaimIdentityWriteError)throw new PublicationError('state_conflict','identity admission requires remediation',{reason:error.code});throw error}
           await client.query(`
             INSERT INTO knowledge_claims
               (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key,
                state, current_version_id, owner_scope_kind, owner_scope_id,
-               conflict_group_id, conflict_variant)
-            VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11)
+               conflict_group_id, conflict_variant,canonical_repository_key,identity_generation,normalized_key_v2,topic_key_v2,duplicate_digest_v2)
+            VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11,$12,$13,$14,$15,$16)
           `, [
             claimId, input.targetInstallationId, candidate.target_claim_type,
-            candidate.scope_kind, candidate.scope_key, `${candidate.normalized_key}`,
-            versionId, targetKind, targetScopeId, conflictGroupId, conflictVariant ?? 0,
+            applicability.scopeKind, publishedScopeKey, publishedNormalizedKey,
+            versionId, targetKind, targetScopeId, conflictGroupId, conflictVariant ?? 0,applicability.canonicalRepositoryKey,
+            projection.generation,projection.keyV2,projection.topicKeyV2,projection.duplicateDigestV2,
           ])
           await client.query(`
             INSERT INTO knowledge_versions
               (version_id, installation_id, claim_id, version_number, statement,
-               structured_content, authority, confidence, source_promotion_candidate_id)
-            VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6, 1.0, $7)
+               structured_content, authority, confidence, source_promotion_candidate_id,repository_id,repo_snapshot_id,branch,valid_from,valid_until,freshness_at,applicability,effective_from)
+            VALUES ($1, $2, $3, 1, $4, $5::jsonb, $6, 1.0, $7,$8,$9,$10,$11,$12,$13,$14::jsonb,clock_timestamp())
           `, [
             versionId, input.targetInstallationId, claimId, latest.statement,
-            JSON.stringify(latest.structured_content ?? {}), authorityKind, input.candidateId,
+            JSON.stringify(latest.structured_content ?? {}), authorityKind, input.candidateId,applicability.repositoryId,applicability.snapshotId,applicability.branch,latest.revision_bundle!.sourceValidFrom,latest.revision_bundle!.sourceValidUntil,latest.revision_bundle!.sourceFreshnessAt,JSON.stringify(applicability),
           ])
           if (supersededClaimIds.length > 0) {
             await client.query(`
@@ -448,15 +550,15 @@ export function createPublicationService(pool: pg.Pool) {
               (authority_id, installation_id, version_id, candidate_revision_id,
                review_policy_version_id, parent_review_policy_version_id,
                counted_decision_ids, publisher_membership_id,
-               source_scope_kind, source_content_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::uuid[], $8, $9, $10)
+               source_scope_kind, source_content_hash,executor_principal_id,publication_delegation_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::uuid[], $8, $9, $10,$11,$12)
           `, [
             randomUUID(), input.targetInstallationId, versionId, latest.candidate_revision_id,
             latest.review_policy_version_id, latest.parent_review_policy_version_id,
             countedDecisions
               .filter(decision => quorum.countedDecisionMemberships.includes(decision.membershipId))
               .map(decision => decision.decisionId),
-            binding.membership_id, candidate.source_scope_kind, candidate.source_content_hash,
+            binding.membership_id, candidate.source_scope_kind, candidate.source_content_hash,input.executorPrincipalId??null,input.publicationDelegationId??null,
           ])
           await client.query(`
             INSERT INTO memory_jobs (job_id, installation_id, job_type, idempotency_key, priority, payload)
@@ -482,10 +584,19 @@ export function createPublicationService(pool: pg.Pool) {
             throw new PublicationError('revision_conflict', 'candidate revision mismatch')
           }
 
-          await client.query('COMMIT')
+          try {await assertCurrentMembershipWindows(client,quorum.countedDecisionMemberships.map(membershipId=>({installationId:input.targetInstallationId,membershipId})))}
+          catch(error){if(error instanceof TargetBindingError)throw new PublicationError('quorum_failed','reviewer validity elapsed before publication');throw error}
+          try { await assertCurrentGrantClock(client, input.grant,[input.targetInstallationId]) } catch (error) {
+          if (error instanceof TargetBindingError) throw new PublicationError('forbidden', 'grant expired before commit')
+          throw error
+        }
+        await assertOriginPolicy(client,candidate,latest.revision_bundle)
+        await assertCandidateTtl(client,input.candidateId)
+        await client.query('COMMIT')
           return { claimId, versionId, conflictGroupId, conflictVariant, resolution: input.resolution }
         } catch (error) {
           await client.query('ROLLBACK')
+          if((error as {message?:string}).message==='candidate_ttl_expired')throw new PublicationError('expired','candidate TTL elapsed at commit')
           throw error
         }
       } finally {
@@ -523,6 +634,9 @@ export function createSharedClaimLifecycle(pool: pg.Pool) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        try {
+          await requireCurrentScopePermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'publish'})
+        } catch (error) { if (error instanceof TargetBindingError) throw new PublicationError('forbidden','current publish permission required'); throw error }
         const claim = await client.query<{ revision: string; owner_scope_kind: string; state: string }>(`
           SELECT revision::text, owner_scope_kind, state FROM knowledge_claims
           WHERE installation_id = $1 AND claim_id = $2 FOR UPDATE
@@ -550,10 +664,15 @@ export function createSharedClaimLifecycle(pool: pg.Pool) {
           randomUUID(), input.targetInstallationId, binding.membership_id,
           input.claimId, JSON.stringify({ reason_code: input.reason.slice(0, 128) }),
         ])
+        try { await assertCurrentGrantClock(client, input.grant,[input.targetInstallationId]) } catch (error) {
+          if (error instanceof TargetBindingError) throw new PublicationError('forbidden', 'grant expired before commit')
+          throw error
+        }
         await client.query('COMMIT')
         return { state: 'revoked' }
       } catch (error) {
         await client.query('ROLLBACK')
+        if((error as {message?:string}).message==='candidate_ttl_expired')throw new PublicationError('expired','candidate TTL elapsed at commit')
         throw error
       } finally {
         client.release()
@@ -562,14 +681,21 @@ export function createSharedClaimLifecycle(pool: pg.Pool) {
 
     /** expire_promotion_candidates job body: TTL-elapsed candidates expire. */
     async expirePromotionCandidates(installationId: string): Promise<number> {
-      const result = await pool.query(`
-        UPDATE memory_promotion_candidates
-        SET state = 'expired', updated_at = NOW()
-        WHERE target_installation_id = $1
-          AND state IN ('proposed', 'changes_requested', 'approved', 'conflict')
-          AND expires_at <= NOW()
-      `, [installationId])
-      return result.rowCount ?? 0
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN')
+        await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[installationId])
+        const result=await client.query(`WITH due AS(
+          SELECT candidate_id,state FROM memory_promotion_candidates WHERE target_installation_id=$1
+          AND state IN('proposed','changes_requested','approved','conflict') AND expires_at<=clock_timestamp()
+          ORDER BY candidate_id LIMIT 100 FOR UPDATE SKIP LOCKED),changed AS(
+          UPDATE memory_promotion_candidates c SET state='expired',updated_at=clock_timestamp(),revision=c.revision+1
+          FROM due WHERE c.candidate_id=due.candidate_id AND c.expires_at<=clock_timestamp()
+          RETURNING c.candidate_id,due.state)
+          INSERT INTO memory_governance_events(event_id,installation_id,action,target_kind,target_id,previous_state,next_state)
+          SELECT gen_random_uuid(),$1,'candidate_expired','promotion_candidate',candidate_id,state,'expired' FROM changed`,[installationId])
+        await client.query('COMMIT');return result.rowCount??0
+      }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
   }
 }

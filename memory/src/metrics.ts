@@ -1,3 +1,4 @@
+import {JOB_TYPES} from './jobs/types.js'
 import { Registry, Counter, Gauge, Histogram } from 'prom-client'
 import type pg from 'pg'
 
@@ -75,6 +76,12 @@ export function createMemoryMetrics() {
     registers: [registry],
   })
 
+  const jobQueueAge=new Gauge({name:'pocketctl_memory_job_queue_oldest_seconds',help:'Age since eligibility of oldest pending job',labelNames:['type'] as const,registers:[registry]})
+  const jobStarved=new Gauge({name:'pocketctl_memory_job_starved',help:'Eligible pending jobs waiting over ten minutes',labelNames:['type'] as const,registers:[registry]})
+  const jobWaiting=new Gauge({name:'pocketctl_memory_job_waiting',help:'Retained pending jobs waiting for budget or source readiness',labelNames:['type','reason'] as const,registers:[registry]})
+  const jobRuntime=new Histogram({name:'pocketctl_memory_job_runtime_seconds',help:'Handler duration including terminal ownership outcome',labelNames:['type','result'] as const,buckets:[.1,1,5,15,60,300],registers:[registry]})
+  const jobRepeatClaims=new Counter({name:'pocketctl_memory_job_repeat_claims_total',help:'Repeated job claims including expected waits',labelNames:['type'] as const,registers:[registry]})
+
   const snapshot = new Counter({
     name: 'pocketctl_memory_snapshot_total',
     help: 'Snapshot reconcile runs by result',
@@ -119,7 +126,7 @@ export function createMemoryMetrics() {
     feedLag,
     inboxRows,
     projection,
-    jobs,
+    jobs, jobQueueAge, jobStarved, jobWaiting, jobRuntime, jobRepeatClaims,
     snapshot,
     purge,
     relayRequests,
@@ -387,6 +394,7 @@ function labelAllowed(set: Set<string>, value: string): boolean {
  */
 export function createPhase1Metrics(registry = new Registry()) {
 
+  const sourceWork = new Counter({name:'pocketctl_memory_source_work_total',help:'Same-domain extraction reservation owner, reuse, or invalidated source; reuse is not a billed provider execution',labelNames:['result'] as const,registers:[registry]})
   const extractionRuns = new Counter({
     name: 'pocketctl_memory_extraction_runs_total',
     help: 'Candidate extraction runs by result',
@@ -443,6 +451,11 @@ export function createPhase1Metrics(registry = new Registry()) {
     buckets: [0, 1, 3, 5, 10, 20],
     registers: [registry],
   })
+  const retrievalRows=new Histogram({name:'pocketctl_memory_retrieval_rows',help:'Eligible SQL corpus cardinality and bounded hydrated candidate count',labelNames:['stage'] as const,buckets:[0,1,20,200,600,2000,10000,20000],registers:[registry]})
+  const retrievalOutcomes=new Counter({name:'pocketctl_memory_retrieval_outcomes_total',help:'Recall outcomes with bounded diagnostic flags',labelNames:['degraded','truncated'] as const,registers:[registry]})
+  const retrievalIndexLag=new Gauge({name:'pocketctl_memory_retrieval_index_oldest_seconds',help:'Oldest current claim waiting for search projection or requested vector index',registers:[registry]})
+  const retrievalIndexPending=new Gauge({name:'pocketctl_memory_retrieval_index_pending',help:'Current claims missing projection or requested ready vector',registers:[registry]})
+  const processResidentBytes=new Gauge({name:'pocketctl_memory_process_resident_bytes',help:'Resident bytes of the collecting Memory process, not per-query allocation',registers:[registry]})
   const recallFeedback = new Counter({
     name: 'pocketctl_memory_recall_feedback_total',
     help: 'Recall feedback actions',
@@ -458,6 +471,7 @@ export function createPhase1Metrics(registry = new Registry()) {
 
   return {
     registry,
+    sourceWork,
     extractionRuns,
     extractionLatency,
     extractionTokens,
@@ -466,7 +480,7 @@ export function createPhase1Metrics(registry = new Registry()) {
     reviewDecisions,
     indexJobs,
     searchLatency,
-    searchResults,
+    searchResults, retrievalRows, retrievalOutcomes, retrievalIndexLag, retrievalIndexPending, processResidentBytes,
     recallFeedback,
     purgeInvalidations,
     extractionLabelAllowed(name: string, value: string): boolean {
@@ -708,4 +722,43 @@ export function createPhase2ContextMetrics(): Phase2ContextMetrics {
     },
     contextInvalidations: { inc: (labels) => bump(counters, `invalidate:${labels.reason}`) },
   }
+}
+
+/** Only frozen job types become labels; no tenant IDs, payloads or errors. */
+export async function updateJobSchedulingGauges(pool:Pick<pg.Pool,'query'>,metrics:MemoryMetrics):Promise<void>{
+  const result=await pool.query<{job_type:string;age:string;starved:string;budget_wait:string;source_wait:string}>(`
+    SELECT job_type,
+      COALESCE(MAX(EXTRACT(EPOCH FROM clock_timestamp()-available_at)) FILTER(WHERE available_at<=clock_timestamp()),0)::text AS age,
+      COUNT(*) FILTER(WHERE available_at<clock_timestamp()-interval '10 minutes')::text AS starved,
+      COUNT(*) FILTER(WHERE last_error_code IN('budget_exceeded','budget_unavailable'))::text AS budget_wait,
+      COUNT(*) FILTER(WHERE last_error_code='source_not_ready')::text AS source_wait
+    FROM memory_jobs WHERE state='pending' GROUP BY job_type`)
+  const rows=new Map(result.rows.map(row=>[row.job_type,row]))
+  for(const type of JOB_TYPES){
+    const row=rows.get(type)
+    metrics.jobQueueAge.set({type},Math.max(0,Number(row?.age??0)))
+    metrics.jobStarved.set({type},Number(row?.starved??0))
+    metrics.jobWaiting.set({type,reason:'budget'},Number(row?.budget_wait??0))
+    metrics.jobWaiting.set({type,reason:'source'},Number(row?.source_wait??0))
+  }
+}
+
+export function recordRecallMetrics(metrics:Phase1Metrics,input:{eligible:number;hydrated:number;returned:number;truncated:boolean;degraded:boolean;durationMs:number}):void{
+ metrics.retrievalRows.observe({stage:'eligible'},input.eligible)
+ metrics.retrievalRows.observe({stage:'hydrated'},input.hydrated)
+ metrics.retrievalOutcomes.inc({degraded:String(input.degraded),truncated:String(input.truncated)})
+ metrics.searchLatency.observe({degraded:input.degraded?'embedding':'none'},input.durationMs/1000)
+ metrics.processResidentBytes.set(process.memoryUsage().rss)
+}
+export async function updateRetrievalIndexGauges(pool:Pick<pg.Pool,'query'>,metrics:Phase1Metrics):Promise<void>{
+ const result=await pool.query<{pending:string;age:string}>(`SELECT count(*)::text AS pending,
+   COALESCE(MAX(EXTRACT(EPOCH FROM clock_timestamp()-v.created_at)),0)::text AS age
+   FROM knowledge_claims c JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.version_id=c.current_version_id
+   LEFT JOIN claim_search_documents d ON d.installation_id=v.installation_id AND d.version_id=v.version_id
+   LEFT JOIN memory_feature_settings f ON f.installation_id=c.installation_id
+   WHERE c.state='active' AND c.consumption_hold_reason IS NULL
+     AND (d.version_id IS NULL OR(f.embedding_mode IN('enabled','shadow') AND d.embedding_status<>'ready'))`)
+ metrics.retrievalIndexPending.set(Number(result.rows[0]?.pending??0))
+ metrics.retrievalIndexLag.set(Math.max(0,Number(result.rows[0]?.age??0)))
+ metrics.processResidentBytes.set(process.memoryUsage().rss)
 }

@@ -21,6 +21,7 @@ export interface VerifiedMemoryGrantV1 {
   installationId: string
   services: string[]
   configVersion: string
+  expiresAt?: number
   /** 'web' | 'daemon' | ... as minted by Relay; agent routes require daemon. */
   callerType: string
   sessionId?: string
@@ -75,6 +76,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         installationId: verified.installationId,
         services: verified.services,
         configVersion: verified.configVersion,
+        expiresAt: verified.expiresAt,
         callerType: verified.callerType,
         ...(verified.sessionId ? { sessionId: verified.sessionId } : {}),
       }
@@ -98,6 +100,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       const validated = await scopeAuthorization.validateV2Grant({
         primaryInstallationId: verified.installationId,
         configVersion: verified.configVersion,
+        expiresAt: verified.expiresAt,
         scopeBindings: verified.scopeBindings,
       })
       if (!validated) throw reject()
@@ -107,7 +110,9 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         primaryInstallationId: validated.primaryInstallationId,
         services: verified.services,
         configVersion: validated.configVersion,
+        expiresAt: validated.expiresAt,
         callerType: verified.callerType,
+        ...(verified.sessionId?{sessionId:verified.sessionId}:{}),
         scopeBindings: validated.scopeBindings,
       }
     },
@@ -125,6 +130,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       const validated = await scopeAuthorization.validateV2Grant({
         primaryInstallationId: verified.installationId,
         configVersion: verified.configVersion,
+        expiresAt: verified.expiresAt,
         scopeBindings: verified.scopeBindings,
       }, { allowedSharedStates: ['active', 'dissolving'] })
       if (!validated) throw reject()
@@ -134,7 +140,9 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         primaryInstallationId: validated.primaryInstallationId,
         services: verified.services,
         configVersion: validated.configVersion,
+        expiresAt: validated.expiresAt,
         callerType: verified.callerType,
+        ...(verified.sessionId?{sessionId:verified.sessionId}:{}),
         scopeBindings: validated.scopeBindings,
       }
     },
@@ -153,6 +161,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         const validated = await scopeAuthorization.validateV2Grant({
           primaryInstallationId: verifiedV2.installationId,
           configVersion: verifiedV2.configVersion,
+          expiresAt: verifiedV2.expiresAt,
           scopeBindings: verifiedV2.scopeBindings,
         })
         if (!validated) throw reject()
@@ -162,7 +171,9 @@ export function createGrantGuard(deps: GrantGuardDeps) {
           primaryInstallationId: validated.primaryInstallationId,
           services: verifiedV2.services,
           configVersion: validated.configVersion,
+          expiresAt: validated.expiresAt,
           callerType: verifiedV2.callerType,
+          ...(verifiedV2.sessionId?{sessionId:verifiedV2.sessionId}:{}),
           scopeBindings: validated.scopeBindings,
         }
       }
@@ -172,6 +183,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         installationId: verified.installationId,
         services: verified.services,
         configVersion: verified.configVersion,
+        expiresAt: verified.expiresAt,
         callerType: verified.callerType,
         ...(verified.sessionId ? { sessionId: verified.sessionId } : {}),
       }

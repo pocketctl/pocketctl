@@ -55,6 +55,7 @@ function defaultInstallation(overrides: Record<string, unknown> = {}) {
     installation_id: INSTALLATION,
     provider_id: 'pocketctl-memory',
     owner_user_id: 42,
+    owner_scope_kind: 'personal',
     status: 'active',
     granted_scopes: ['session:events:read'],
     subscriptions: ['session.event.v1'],

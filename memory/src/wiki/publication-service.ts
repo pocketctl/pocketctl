@@ -1,9 +1,10 @@
+import {contextWikiBuildSourcesEligible} from '../context/consumption.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
 import { canonicalJsonStringify } from '../codegraph/types.js'
 import type { ValidatedV2Grant } from '../governance/authorization.js'
-import { requireCurrentWikiPermission } from './authorization.js'
+import {assertCurrentWikiGrantClock, lockWikiRepository, requireCurrentWikiPermission } from './authorization.js'
 import type { WikiBuildSource } from './repository.js'
 import { wikiCandidateContentHash } from './skeleton-builder.js'
 import type { WikiCandidateDocumentV1, WikiCoverage } from './types.js'
@@ -65,6 +66,7 @@ export function createWikiPublicationService(
         const approved=input.governed.proposal.proposed_document.result
         if(approved.kind!=='proposal'||!approved.asset.deleted||canonicalJsonString(input.governed.current.asset)!==canonicalJsonString(current))throw new Error('git_governance_required')
         const actor=await requireCurrentWikiPermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'publish'})
+        await lockWikiRepository(client,input.targetInstallationId,current.key.id)
         await assertImportApproval(client,input.governed,actor.membership_id)
         if(current.immutable.installationId!==input.targetInstallationId||current.immutable.ownerScopeKind!==actor.owner_scope_kind
           ||current.immutable.ownerScopeId!==actor.owner_scope_id||!Number.isSafeInteger(Number(current.baseRevision)))throw new WikiPublicationError('revision_conflict')
@@ -77,6 +79,7 @@ export function createWikiPublicationService(
         await client.query("UPDATE memory_wiki_versions SET state='revoked' WHERE installation_id=$1 AND wiki_version_id=$2",[input.targetInstallationId,current.baseVersionId])
         await client.query('UPDATE memory_wiki_heads SET active_version_id=NULL,revision=revision+1,updated_at=NOW() WHERE installation_id=$1 AND wiki_id=$2',[input.targetInstallationId,current.key.id])
         await client.query("UPDATE memory_wikis SET state='revoked',generation=generation+1,updated_at=NOW() WHERE installation_id=$1 AND wiki_id=$2",[input.targetInstallationId,current.key.id])
+        await assertCurrentWikiGrantClock(client,input.grant,[input.targetInstallationId])
         await client.query('COMMIT');return {wikiVersionId:current.baseVersionId,revision}
       }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
     },
@@ -95,6 +98,7 @@ export function createWikiPublicationService(
         if(approved.kind==='conflict'||canonicalJsonString(input.governed.current.asset)!==canonicalJsonString(current)
           ||canonicalJsonString(approved.asset.asset)!==canonicalJsonString(proposed))throw new Error('git_governance_required')
         const actor=await requireCurrentWikiPermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission:'publish'})
+        await lockWikiRepository(client,input.targetInstallationId,current.key.id)
         await assertImportApproval(client,input.governed,actor.membership_id)
         if(input.sourceContext.connection.installationId!==input.targetInstallationId||current.immutable.installationId!==input.targetInstallationId
           ||current.immutable.ownerScopeKind!==actor.owner_scope_kind||current.immutable.ownerScopeId!==actor.owner_scope_id
@@ -140,6 +144,7 @@ export function createWikiPublicationService(
         if(switched.rowCount!==1)throw new WikiPublicationError('revision_conflict')
         await client.query(`INSERT INTO memory_wiki_audit_events(audit_id,installation_id,wiki_id,action,result,old_content_hash,new_content_hash,actor_scope_kind,actor_scope_id,head_revision)
           VALUES($1,$2,$3,'publish','success',$4,$5,$6,$7,$8)`,[randomUUID(),input.targetInstallationId,current.key.id,current.serverOnly.contentHash,contentHash,actor.owner_scope_kind,actor.owner_scope_id,revision])
+        await assertCurrentWikiGrantClock(client,input.grant,[input.targetInstallationId])
         await client.query('COMMIT');return {wikiVersionId,revision}
       }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
     },
@@ -155,6 +160,7 @@ export function createWikiPublicationService(
           client, grant: input.grant, targetInstallationId: input.targetInstallationId,
           permission: 'publish',
         })
+        await lockWikiRepository(client,input.targetInstallationId,input.wikiId)
         const buildResult = await client.query<{
           repository_id: string
           generation: string
@@ -260,6 +266,7 @@ export function createWikiPublicationService(
           || sourceResult.rows.some(row => !row.graph_source_exists)) {
           throw new WikiPublicationError('source_missing')
         }
+        if(!await contextWikiBuildSourcesEligible(client,input.targetInstallationId,input.runId,{repositoryId:build.repository_id,repoSnapshotId:null,branch:null,taskScopeKey:null,commitSha:build.commit_sha}))throw new WikiPublicationError('source_missing')
         const sources: WikiBuildSource[] = sourceResult.rows.map(row => ({
           sourceToken: row.source_token,
           ordinal: row.ordinal,
@@ -435,6 +442,8 @@ export function createWikiPublicationService(
         `, [randomUUID(), input.targetInstallationId, input.wikiId,
           head?.content_hash ?? null, contentHash, binding.owner_scope_kind,
           binding.owner_scope_id, revision])
+        await assertCurrentWikiGrantClock(client,input.grant,[input.targetInstallationId])
+        if(!await contextWikiBuildSourcesEligible(client,input.targetInstallationId,input.runId,{repositoryId:build.repository_id,repoSnapshotId:null,branch:null,taskScopeKey:null,commitSha:build.commit_sha}))throw new WikiPublicationError('source_missing')
         await client.query('COMMIT')
         options.metrics?.wikiPublications.inc({ result: 'published' })
         return { wikiVersionId, revision }

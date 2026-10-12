@@ -9,7 +9,8 @@ import type { RepositoryFile } from '../git-sync/types.js'
 
 /** Entirely synthetic exact-edit provider identity. No real person or provider
  * provenance is claimed; production readers deliberately produce actorId=null. */
-export async function gitImportFixture(pool:pg.Pool,kinds=['rule'],unlockedWiki=false) {
+export async function gitImportFixture(pool:pg.Pool,kinds=['rule'],unlockedWiki=false,
+  beforeExport?: (fixture:Awaited<ReturnType<typeof gitExportFixture>>)=>Promise<void>) {
   const f=await gitExportFixture(pool),keys=attestationFixture(),deps={pool,keys:keys.registry,skill:{context:f.skill.context,cases:f.skill.cases}}
   await pool.query('UPDATE memory_wiki_heads SET revision=1 WHERE wiki_id=$1',[f.wiki.wikiId])
   await pool.query('UPDATE memory_wiki_manual_section_heads SET lock_version=1 WHERE wiki_id=$1',[f.wiki.wikiId])
@@ -20,6 +21,7 @@ export async function gitImportFixture(pool:pg.Pool,kinds=['rule'],unlockedWiki=
   const originalAuthor=await f.skill.actor(['contributor','reviewer'],['read','contribute','review'])
   await pool.query(`INSERT INTO memory_git_actor_mappings(installation_id,connection_id,provider_actor_id,membership_id,membership_revision,authorization_epoch)
     VALUES($1,$2,'synthetic-exact-edit-author',$3,1,1)`,[f.installationId,f.connectionId,originalAuthor.membershipId])
+  await beforeExport?.(f)
   const bundle=await createGitExportService(deps).export(f.grant,{installationId:f.installationId,connectionId:f.connectionId,expectedGeneration:'1',
     baseCommit:'a'.repeat(40),purpose:'external_export',assets:f.keys.filter(k=>kinds.includes(k.kind))})
   const service=createGitProposalService(deps)

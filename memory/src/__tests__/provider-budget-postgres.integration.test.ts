@@ -33,6 +33,33 @@ describeWithDatabase('provider budget reservations (PostgreSQL)', () => {
     expect(results.filter(result => !result.ok)).toHaveLength(3)
   })
 
+  test('daily rejection exposes the next Shanghai budget boundary for deferred work', async () => {
+    const input = { key: 'daily-resume', kind: 'text' as const, window: 'daily-asia-shanghai' as const,
+      inputTokens: 1, outputTokens: 1, maxRequests: 1, maxInputTokens: 100, maxOutputTokens: 100 }
+    const store = createProviderBudgetStore(pool)
+    expect((await store.reserve(input)).ok).toBe(true)
+    const boundary = (await pool.query("SELECT (date_trunc('day',clock_timestamp() AT TIME ZONE 'Asia/Shanghai')+interval '1 day') AT TIME ZONE 'Asia/Shanghai' AS next_day")).rows[0].next_day
+    await expect(store.reserve(input)).resolves.toMatchObject({ ok: false, dimension: 'text_requests', retryAt: boundary })
+    // Move only the isolated fixture reservation into yesterday's window.
+    await pool.query("UPDATE memory_provider_budget_reservations SET created_at=$2::timestamptz-interval '1 day 1 second' WHERE budget_key=$1", [input.key, boundary])
+    expect((await store.reserve(input)).ok).toBe(true)
+  })
+
+  test('lifetime budget exhaustion cannot advertise a daily reset', async () => {
+    await expect(createProviderBudgetStore(pool).reserve({ key: 'lifetime-resume', kind: 'text', window: 'lifetime',
+      inputTokens: 1, outputTokens: 1, maxRequests: 0, maxInputTokens: 100, maxOutputTokens: 100 }))
+      .resolves.toMatchObject({ ok: false, dimension: 'text_requests', retryAt: null })
+  })
+
+  test('a stable local request key retains one reservation and refuses an unknown replay result', async () => {
+    const store = createProviderBudgetStore(pool)
+    const input = { key: 'request-ledger', kind: 'text' as const, requestKey: 'run-1:candidate_extract',
+      inputTokens: 1, outputTokens: 1, maxRequests: 10, maxInputTokens: 100, maxOutputTokens: 100 }
+    expect((await store.reserve(input)).ok).toBe(true)
+    await expect(store.reserve(input)).resolves.toMatchObject({ ok: false, reason: 'provider_result_unknown' })
+    expect((await pool.query("SELECT count(*)::int n FROM memory_provider_budget_reservations WHERE budget_key='request-ledger'")).rows[0].n).toBe(1)
+  })
+
   test('an unsettled reservation survives and keeps consuming the cap', async () => {
     const store = createProviderBudgetStore(pool)
     await expect(store.reserve({
@@ -42,7 +69,7 @@ describeWithDatabase('provider budget reservations (PostgreSQL)', () => {
     await expect(store.reserve({
       key: 'crash-test', kind: 'text', inputTokens: 1, outputTokens: 1,
       maxRequests: 1, maxInputTokens: 100, maxOutputTokens: 100,
-    })).resolves.toEqual({ ok: false, dimension: 'text_requests' })
+    })).resolves.toMatchObject({ ok: false, dimension: 'text_requests' })
   })
 
   test('Shanghai daily text cap ignores yesterday and fences concurrent requests today', async () => {
@@ -62,7 +89,7 @@ describeWithDatabase('provider budget reservations (PostgreSQL)', () => {
     const results = await Promise.all(Array.from({ length: 4 }, reserve))
     expect(results.filter(result => result.ok)).toHaveLength(2)
     expect(results.filter(result => !result.ok)).toHaveLength(2)
-    expect(await reserve()).toEqual({ ok: false, dimension: 'text_requests' })
+    expect(await reserve()).toMatchObject({ ok: false, dimension: 'text_requests' })
     expect((await pool.query(`SELECT count(*)::int AS count FROM memory_provider_budget_reservations
       WHERE budget_key = $1`, [key])).rows[0].count).toBe(3)
   })

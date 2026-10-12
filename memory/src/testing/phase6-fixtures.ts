@@ -19,7 +19,7 @@ export function phase6Snapshot(kind: AssetKind = 'claim'): AssetSnapshot {
       versionNumber: 2, state: 'active', authority: 'user_accepted', confidence: '0.9500',
       freshnessAt: null, validFrom: null, validUntil: null },
     editable: { statement: '保留 Evidence 与精确版本。', structuredContent: { value: null, flags: ['a'], retries: 2, enabled: true } },
-    serverOnly: { scopeKind: 'repository', scopeKey: '/private/repository', normalizedKey: 'normalized',
+    serverOnly: { scopeKind: 'repository', scopeKey: '/private/repository', identityGeneration:1,normalizedKeyV2:null,topicKeyV2:null,duplicateDigestV2:null,canonicalRepositoryKey:null,consumptionHoldReason:null,applicability:null,effectiveFrom:null,effectiveUntil:null,normalizedKey: 'normalized',
       repositoryId: fixtureId(8), repoSnapshotId: fixtureId(9), branch: 'private-branch',
       sourceCandidateId: null, supersededByClaimId: null, createdAt: '2026-09-02T00:00:00.000Z',
       sourcePromotionCandidateId: null, conflictGroupId: null, conflictVariant: 0, claimCreatedAt: '2026-08-01T00:00:00.000Z',

@@ -352,4 +352,19 @@ describeWithDatabase('context API end to end (PostgreSQL)', () => {
       expect(rejected.statusCode, rejected.body).toBe(400)
     }
   })
+  test('evidence capability acknowledgement requires known frozen proof and preserves the legacy response',async()=>{
+    const compile=async(id:string,capability?:string)=>app.inject({method:'POST',url:'/api/v1/memory/context/compile',
+      headers:{host:'memory.test',authorization:'Bearer g'},payload:{schema_version:1,client_request_id:id,session_id:'ses-api',agent:'codex',
+        adapter_capability:'native_hidden_v1',repository_hint:{repository_id:repositoryId},query:'api integration statement about grants',
+        ...(capability?{evidence_read_capability:capability}:{})}})
+    const legacy=await compile('evidence-legacy')
+    expect(legacy.statusCode).toBe(200);expect(legacy.json().outcome).toBe('ready')
+    expect(legacy.json()).not.toHaveProperty('evidence_read_capability')
+    const known=await compile('evidence-known','on_demand_v1')
+    expect(known.statusCode).toBe(200);expect(known.json()).toMatchObject({outcome:'ready',evidence_read_capability:'on_demand_v1'})
+    await pool.query("UPDATE knowledge_evidence SET excerpt_hash=decode(md5('unknown-legacy-proof'),'hex') WHERE installation_id=$1",[INSTALLATION])
+    const missing=await compile('evidence-unproven','on_demand_v1')
+    expect(missing.statusCode).toBe(200);expect(missing.json()).toMatchObject({outcome:'ready',evidence_read_capability:'bounded_excerpt_v1'})
+  })
+
 })

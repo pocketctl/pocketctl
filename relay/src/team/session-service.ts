@@ -312,7 +312,10 @@ export class TeamSessionService {
           })
         }
         await client.query(
-          `UPDATE collaboration_session_participants SET state = $3::varchar, revision = revision + 1,
+          // Reader generation changes only when access changes. Re-adding an
+          // active reader must retain the identity of its existing sources.
+          `UPDATE collaboration_session_participants SET state = $3::varchar,
+             revision = CASE WHEN state = $3::varchar THEN revision ELSE revision + 1 END,
              updated_at = NOW(), removed_at = CASE WHEN $3::varchar = 'removed' THEN NOW() ELSE NULL END
            WHERE team_session_id = $1 AND user_id = $2`,
           [input.sessionId, input.userId, input.active ? 'active' : 'removed'],
@@ -380,7 +383,10 @@ export class TeamSessionService {
           `INSERT INTO collaboration_session_participants
             (participant_id, team_session_id, user_id, added_by_user_id)
            VALUES ($1, $2, $3, $4)
-           ON CONFLICT (team_session_id, user_id) DO UPDATE SET state = 'active', revision = collaboration_session_participants.revision + 1, updated_at = NOW(), removed_at = NULL`,
+           ON CONFLICT (team_session_id, user_id) DO UPDATE SET state = 'active',
+             revision = CASE WHEN collaboration_session_participants.state = 'active'
+               THEN collaboration_session_participants.revision ELSE collaboration_session_participants.revision + 1 END,
+             updated_at = NOW(), removed_at = NULL`,
           [`csp_${randomUUID()}`, input.sessionId, offer.owner_user_id, input.actorUserId],
         )
       }
@@ -492,7 +498,7 @@ export class TeamSessionService {
   }
 
   private async view(db: Pick<pg.Pool, 'query'>, row: any, actorUserId: number): Promise<TeamSessionView> {
-    const [participants, bindings] = await Promise.all([
+    const [participants, bindings, actorRole] = await Promise.all([
       db.query(`SELECT participant.participant_id, participant.user_id, participant.state, participant.revision
         FROM collaboration_session_participants participant
         JOIN collaboration_team_memberships member ON member.team_id = $2
@@ -510,10 +516,15 @@ export class TeamSessionService {
          WHERE binding.team_session_id = $1 AND binding.state = 'active' ORDER BY binding.created_at`,
         [row.team_session_id],
       ),
+      row.actor_team_role !== undefined
+        ? Promise.resolve({ rows: [{ role: row.actor_team_role }] })
+        : db.query<{role: string}>(`SELECT role FROM collaboration_team_memberships
+            WHERE team_id = $1 AND user_id = $2 AND state = 'active'`, [row.team_id, actorUserId]),
     ])
+    if (!actorRole.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
     return {
       id: row.team_session_id,
-      current_user_role: row.actor_team_role,
+      current_user_role: actorRole.rows[0].role,
       team_id: row.team_id,
       creator_user_id: Number(row.creator_user_id),
       task_id: row.task_id,

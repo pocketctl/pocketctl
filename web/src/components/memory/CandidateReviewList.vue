@@ -30,8 +30,13 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
           </label>
         </div>
+        <p class="memory-governance-muted">{{ t('memory.governance.automation.adviceOnly') }}</p>
+        <label class="memory-policy-field"><input v-model="evidenceFilter" type="checkbox" @change="applyFilters"/>{{ t('memory.governance.automation.needsEvidence') }}</label>
+        <div v-if="bulkSelected.length" class="memory-governance-actions"><span>{{ bulkSelected.length }}/20</span><button type="button" :disabled="bulkBusy" @click="bulkReview('accept')">{{ t('memory.governance.automation.bulkAccept') }}</button><button type="button" :disabled="bulkBusy" @click="bulkReview('reject')">{{ t('memory.governance.automation.bulkReject') }}</button></div>
+        <ul v-if="bulkResults.length" aria-live="polite"><li v-for="r in bulkResults" :key="r.id">{{ r.id }} · {{ t(`memory.governance.automation.result.${r.status}`) }}</li></ul>
         <ul class="memory-candidate-list" data-testid="memory-review-items">
           <li v-for="candidate in pageCandidates" :key="candidate.candidate_id">
+            <label v-if="candidate.content_hash" class="memory-policy-field"><input v-model="bulkSelected" type="checkbox" :value="candidate.candidate_id" :disabled="bulkBusy||(!bulkSelected.includes(candidate.candidate_id)&&bulkSelected.length>=20)"/>{{ t('memory.governance.automation.select') }}</label>
             <button type="button" class="memory-candidate-row"
               :class="{ selected: candidate.candidate_id === selectedCandidateId }"
               :aria-current="candidate.candidate_id === selectedCandidateId ? 'true' : undefined"
@@ -78,6 +83,7 @@
           </div>
         </header>
 
+        <p class="memory-governance-muted">{{ t('memory.governance.automation.mode') }}: {{ selectedCandidate.automation_mode??'off' }} · {{ selectedCandidate.automation_advice?.reason??t('memory.governance.automation.notEvaluated') }}</p>
         <div class="memory-section-label"><span>{{ t('memory.scope_context') }}</span></div>
         <dl class="memory-fact-grid">
           <div><dt>{{ t('memory.scope') }}</dt><dd>{{ selectedCandidate.scope_kind }}</dd></div>
@@ -158,6 +164,23 @@ const currentPage = ref(1)
 const filterQuery = ref('')
 const filterType = ref('all')
 const pageSize = 5
+const bulkSelected=ref<string[]>([]),bulkBusy=ref(false),reviewStarted=ref(performance.now())
+const evidenceFilter=ref(false)
+const bulkResults=ref<Array<{id:string;status:string}>>([])
+async function bulkReview(action:'accept'|'reject'){
+ if(bulkBusy.value)return
+ const snapshots=candidates.value.filter(c=>bulkSelected.value.includes(c.candidate_id)&&c.content_hash).slice(0,20).map(c=>({...c}))
+ bulkBusy.value=true;bulkResults.value=[]
+ for(const c of snapshots){
+  const proof={expectedHash:c.content_hash!}
+  try{if(action==='accept')await acceptMemoryCandidate(c.candidate_id,Number(c.revision),null,`bulk-accept-${crypto.randomUUID()}`,proof)
+  else await rejectMemoryCandidate(c.candidate_id,Number(c.revision),null,`bulk-reject-${crypto.randomUUID()}`,proof)
+  bulkResults.value.push({id:c.candidate_id,status:'success'})}
+  catch(e){bulkResults.value.push({id:c.candidate_id,status:e instanceof MemoryClientError?(e.status===403||e.status===401?'revoked':e.status===409?'conflict':'unavailable'):'unknown'})}
+ }
+ bulkSelected.value=[];bulkBusy.value=false;await refresh();emit('changed')
+}
+
 
 const selectedCandidate = computed(() => candidates.value.find(candidate => candidate.candidate_id === selectedCandidateId.value) ?? null)
 const structuredEntries = computed(() => Object.entries(selectedCandidate.value?.structured_content ?? {}))
@@ -165,6 +188,7 @@ const candidateTypes = computed(() => [...new Set(candidates.value.map(candidate
 const filteredCandidates = computed(() => {
   const query = filterQuery.value.trim().toLocaleLowerCase()
   return candidates.value.filter(candidate => {
+    if(evidenceFilter.value&&candidate.evidence.length)return false
     if (filterType.value !== 'all' && candidate.claim_type !== filterType.value) return false
     if (!query) return true
     return [
@@ -188,6 +212,7 @@ async function refresh(): Promise<void> {
   try {
     const result = await listMemoryCandidates()
     candidates.value = result.candidates
+    bulkSelected.value=[];reviewStarted.value=performance.now()
     currentPage.value = Math.min(currentPage.value, totalPages.value)
     if (!pageCandidates.value.some(candidate => candidate.candidate_id === selectedCandidateId.value)) {
       selectedCandidateId.value = pageCandidates.value[0]?.candidate_id ?? null
@@ -228,6 +253,7 @@ function applyFilters(): void {
 }
 function selectCandidate(candidateId: string): void {
   selectedCandidateId.value = candidateId
+  reviewStarted.value=performance.now()
   editingId.value = null
 }
 function errorFor(id: string): string { return errors.value[id] ?? '' }
@@ -249,7 +275,7 @@ function toggleEdit(candidate: MemoryCandidate): void {
 async function accept(candidate: MemoryCandidate, edited: boolean): Promise<void> {
   errors.value[candidate.candidate_id] = ''
   try {
-    const accepted = await acceptMemoryCandidate(candidate.candidate_id, Number(candidate.revision), edited ? editedStatement.value.trim() || candidate.statement : null, `web-accept-${candidate.candidate_id}-${Date.now()}`)
+    const accepted = await acceptMemoryCandidate(candidate.candidate_id, Number(candidate.revision), edited ? editedStatement.value.trim() || candidate.statement : null, `web-accept-${candidate.candidate_id}-${Date.now()}`,...(candidate.content_hash?[{expectedHash:candidate.content_hash,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value)))}]:[]))
     emit('accepted', accepted.claim_id)
     editingId.value = null
     await refresh()
@@ -262,7 +288,7 @@ async function accept(candidate: MemoryCandidate, edited: boolean): Promise<void
 async function reject(candidate: MemoryCandidate): Promise<void> {
   errors.value[candidate.candidate_id] = ''
   try {
-    await rejectMemoryCandidate(candidate.candidate_id, Number(candidate.revision), null, `web-reject-${candidate.candidate_id}-${Date.now()}`)
+    await rejectMemoryCandidate(candidate.candidate_id, Number(candidate.revision), null, `web-reject-${candidate.candidate_id}-${Date.now()}`,...(candidate.content_hash?[{expectedHash:candidate.content_hash,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value)))}]:[]))
     await refresh()
     emit('changed')
   } catch (err) {

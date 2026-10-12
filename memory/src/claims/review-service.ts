@@ -1,3 +1,4 @@
+import {candidateReviewHash} from './review-hash.js'
 import type pg from 'pg'
 import type { ClaimRepository } from './repository.js'
 import { resolvePacketEvidence } from './evidence-resolver.js'
@@ -12,6 +13,8 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
     async acceptCandidate(input: {
       installationId: string
       candidateId: string
+      expectedHash?:string
+      reviewDurationMs?:number
       expectedRevision: number
       editedStatement?: string
     }) {
@@ -21,6 +24,8 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
     async rejectCandidate(input: {
       installationId: string
       candidateId: string
+      expectedHash?:string
+      reviewDurationMs?:number
       expectedRevision: number
       reasonCode?: string
     }) {
@@ -48,6 +53,7 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
         LIMIT $2
       `, [input.installationId, limit])
       return result.rows.map(row => ({
+        content_hash:candidateReviewHash(row),
         ...row,
         evidence: resolvePacketEvidence(
           row.episode_document,

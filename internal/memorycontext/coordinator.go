@@ -28,6 +28,7 @@ type Coordinator struct {
 
 // TurnRequest describes one new-turn enrichment decision.
 type TurnRequest struct {
+	EvidenceReadProbe    ProbeEvidence
 	ClientRequestID      string
 	SessionID            string
 	Agent                string
@@ -148,6 +149,9 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		RequestedAt:        started.UTC(),
 		SelectedReferences: req.SelectedReferences,
 	}
+	if ResolveEvidenceReadCapability(req.Capability, req.EvidenceReadProbe) == "on_demand_v1" {
+		compileReq.EvidenceReadCapability = "on_demand_v1"
+	}
 	compiled, err := c.Memory.Compile(ctx, grant.ProviderPublicOrigin, grant.Grant, compileReq)
 	if err != nil {
 		return nil, Outcome{Kind: "dispatched", Reason: "memory_unavailable"}
@@ -199,18 +203,23 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		}
 		return nil, Outcome{Kind: "dispatched", Reason: "pack_unavailable"}
 	}
+	evidenceCapability := "bounded_excerpt_v1"
+	if compileReq.EvidenceReadCapability == "on_demand_v1" && compiled.EvidenceReadCapability == "on_demand_v1" {
+		evidenceCapability = "on_demand_v1"
+	}
 	return &PreparedContext{
-		PackID:         compiled.Pack.PackID,
-		InjectionID:    admitted.InjectionID,
-		Nonce:          admitted.Nonce,
-		ExpiresAt:      admitted.ExpiresAt,
-		StableText:     text.StableText,
-		DynamicText:    text.DynamicText,
-		StableDigest:   text.StableDigest,
-		DynamicDigest:  text.DynamicDigest,
-		sessionID:      req.SessionID,
-		providerOrigin: grant.ProviderPublicOrigin,
-		grant:          grant.Grant,
+		EvidenceReadCapability: evidenceCapability,
+		PackID:                 compiled.Pack.PackID,
+		InjectionID:            admitted.InjectionID,
+		Nonce:                  admitted.Nonce,
+		ExpiresAt:              admitted.ExpiresAt,
+		StableText:             text.StableText,
+		DynamicText:            text.DynamicText,
+		StableDigest:           text.StableDigest,
+		DynamicDigest:          text.DynamicDigest,
+		sessionID:              req.SessionID,
+		providerOrigin:         grant.ProviderPublicOrigin,
+		grant:                  grant.Grant,
 	}, Outcome{Kind: "injected", Pack: nil}
 }
 

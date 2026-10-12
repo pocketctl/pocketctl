@@ -29,3 +29,20 @@ describe('publication decision fences', () => {
     expect(current).toEqual([])
   })
 })
+
+import {evaluateQuorum} from '../governance/authority.js'
+import {DEFAULT_TEAM_REVIEW_POLICY,DEFAULT_ORGANIZATION_REVIEW_POLICY} from '../governance/review-policy.js'
+describe('quorum policy enforcement',()=>{
+ test('excludes actual publisher approval when policy forbids publisher counting',()=>{
+  const result=evaluateQuorum({decisions:[{membershipId:'publisher',decision:'approve'}],policy:{...DEFAULT_TEAM_REVIEW_POLICY,publisher_may_count_as_reviewer:false},proposerMembershipId:'author',publisherMembershipId:'publisher'})
+  expect(result.ok).toBe(false);expect(result.countedDecisionMemberships).toEqual([])
+ })
+ test('another publisher-role reviewer may count because they are not the publishing actor',()=>{
+  const result=evaluateQuorum({decisions:[{membershipId:'other-publisher',decision:'approve'}],policy:{...DEFAULT_TEAM_REVIEW_POLICY,publisher_may_count_as_reviewer:false},proposerMembershipId:'author',publisherMembershipId:'publisher'})
+  expect(result.ok).toBe(true);expect(result.countedDecisionMemberships).toEqual(['other-publisher'])
+ })
+ test('duplicate approvals from one reviewer cannot meet organization quorum',()=>{
+  const result=evaluateQuorum({decisions:[{membershipId:'reviewer',decision:'approve'},{membershipId:'reviewer',decision:'approve'}],policy:DEFAULT_ORGANIZATION_REVIEW_POLICY,proposerMembershipId:'author',publisherMembershipId:'publisher'})
+  expect(result.ok).toBe(false)
+ })
+})

@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import type { SearchService, SearchHit } from '../retrieval/search-service.js'
-import { fuseRanks } from '../retrieval/rrf.js'
+import {diversifyRecall} from '../retrieval/recall-pools.js'
 import type {
   TrajectoryRepository,
   TrajectoryCandidateInput,
@@ -77,6 +77,8 @@ export function createContextRetrieval(deps: {
       installationId: string
       query: string
       repositoryId?: string | null
+      repoSnapshotId?:string|null
+      taskScopeKey?:string|null
       branch?: string | null
       limit?: number
       claimTypes?: readonly string[] | null
@@ -94,16 +96,21 @@ export function createContextRetrieval(deps: {
       let hits: SearchHit[]
       let degradedComponents: string[]
       let failed = false
+      let poolTruncated=false
       try {
-        const searched = await deps.search.search({
+        const recall=deps.search.internalRecall?.bind(deps.search)??deps.search.search.bind(deps.search)
+        const searched = await recall({
           installationId: input.installationId,
           query: input.query,
           repositoryId: input.repositoryId ?? null,
+          repoSnapshotId:input.repoSnapshotId??null,
+          taskScopeKey:input.taskScopeKey??null,
           branch: input.branch ?? null,
           claimTypes: input.claimTypes ?? null,
           limit: 50,
         })
         hits = searched.hits
+        poolTruncated=searched.candidatePoolTruncated??false
         degradedComponents = searched.degradedComponents
         stages.push(
           { stage: 'pools', outcome: 'ok', candidateCount: hits.length, durationMs: Date.now() - started,
@@ -131,15 +138,13 @@ export function createContextRetrieval(deps: {
         .filter(hit => hit.sources.includes('vector'))
         .map(hit => hit.versionId)
       const rankOf = (pool: string[]) => new Map(pool.map((id, index) => [id, index + 1]))
-      const metadataRank = rankOf(metadataPool)
-      const lexicalRank = rankOf(lexicalPool)
-      const vectorRank = rankOf(vectorPool)
+      const metadataFallback=rankOf(metadataPool),lexicalFallback=rankOf(lexicalPool),vectorFallback=rankOf(vectorPool)
+      const metadataRank = new Map(hits.map(h=>[h.versionId,h.poolRanks?.metadata??metadataFallback.get(h.versionId)]))
+      const lexicalRank = new Map(hits.map(h=>[h.versionId,h.poolRanks?.lexical??lexicalFallback.get(h.versionId)]))
+      const vectorRank = new Map(hits.map(h=>[h.versionId,h.poolRanks?.vector??vectorFallback.get(h.versionId)]))
 
-      const fused = fuseRanks([
-        { name: 'metadata', ranked: metadataPool },
-        { name: 'lexical', ranked: lexicalPool },
-        { name: 'vector', ranked: vectorPool },
-      ], 200)
+      // Search owns the sole RRF fusion. Preserve its scores and raw pool ranks.
+      const fused=hits.map(hit=>({versionId:hit.versionId,score:hit.score,sources:hit.sources}))
 
       const pinned = new Set(input.pinnedVersionIds ?? [])
       const scored = fused.map(entry => {
@@ -198,7 +203,11 @@ export function createContextRetrieval(deps: {
       }
       const candidates: ContextRetrievalCandidate[] = []
       const trajectoryCandidates: TrajectoryCandidateInput[] = []
-      for (const item of scored) {
+      const admitted=scored.filter(item=>item.relevanceAdmitted
+        &&(SCOPE_SPECIFICITY[item.hit.scopeKind]??0)>=(maxSpecificity.get(statementKey(item.hit.statement))??0))
+      const diversified=diversifyRecall(admitted,{score:item=>item.composite,text:item=>item.hit.statement,id:item=>item.entry.versionId,limit})
+      const ordered=[...diversified,...scored.filter(item=>!admitted.includes(item))]
+      for (const item of ordered) {
         if (!item.relevanceAdmitted) {
           trajectoryCandidates.push({
             versionId: item.entry.versionId,
@@ -306,6 +315,9 @@ export function createContextRetrieval(deps: {
           pools: ['metadata', 'lexical', ...(degradedComponents.includes('embedding') ? [] : ['vector'])],
           degraded: degradedComponents,
           limit,
+          internalPoolTruncated:poolTruncated,
+          fusionCount:1,
+          diversity:'bounded_text_mmr',
           admission: rankingPolicy.admission,
         },
         resultState: outcome,

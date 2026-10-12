@@ -105,6 +105,17 @@ describe('extension v2 grant routes', () => {
     return { authorization: 'Bearer user-token' }
   }
 
+  test.each(['owned','foreign','missing','malformed'])('daemon Context v2 grants require an owned signed Session (%s)',async mode=>{
+    const app=makeApp({queries:[
+      {match:/FROM extension_installations i/,rows:[{...INSTALLATION_ROW,enabled_services:['memory.context']},{...TEAM_ROW,enabled_services:['memory.context']}]},
+      {match:/FROM extension_teams/,rows:[{scope_kind:'team',scope_id:TEAM_ROW.owner_scope_id,state:'active',authorization_epoch:'4'}]},
+      {match:/FROM sessions/,rows:mode==='owned'?[{'?column?':1}]:[]},
+    ]})
+    const response=await app.inject({method:'POST',url:'/api/extensions/v2/grants',headers:headers(),payload:{installation_ids:[PERSONAL_INSTALL,TEAM_INSTALL],caller_type:'daemon',services:['memory.context'],...(mode==='missing'?{}:{session_id:mode==='malformed'?42:'signed-session'})}})
+    expect(response.statusCode).toBe(mode==='owned'?200:mode==='foreign'?404:400)
+    if(mode==='owned')expect(verifyCapabilityGrantV2(MATERIAL.publicKeyPem,response.json().grant,ISSUER)).toMatchObject({sessionId:'signed-session',primaryInstallationId:PERSONAL_INSTALL,scopeBindings:[expect.objectContaining({installation_id:PERSONAL_INSTALL}),expect.objectContaining({installation_id:TEAM_INSTALL})]})
+  })
+
   test('mints a bounded v2 grant for explicitly requested installations', async () => {
     const app = makeApp()
     const response = await app.inject({

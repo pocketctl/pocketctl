@@ -11,15 +11,16 @@ import (
 
 // CompileRequest is the POST /api/v1/memory/context/compile body.
 type CompileRequest struct {
-	SchemaVersion      int                 `json:"schema_version"`
-	ClientRequestID    string              `json:"client_request_id"`
-	SessionID          string              `json:"session_id"`
-	Agent              string              `json:"agent"`
-	AdapterCapability  string              `json:"adapter_capability"`
-	RepositoryHint     *RepositoryHint     `json:"repository_hint,omitempty"`
-	Query              string              `json:"query"`
-	RequestedAt        time.Time           `json:"requested_at"`
-	SelectedReferences []SelectedReference `json:"selected_references,omitempty"`
+	EvidenceReadCapability string              `json:"evidence_read_capability,omitempty"`
+	SchemaVersion          int                 `json:"schema_version"`
+	ClientRequestID        string              `json:"client_request_id"`
+	SessionID              string              `json:"session_id"`
+	Agent                  string              `json:"agent"`
+	AdapterCapability      string              `json:"adapter_capability"`
+	RepositoryHint         *RepositoryHint     `json:"repository_hint,omitempty"`
+	Query                  string              `json:"query"`
+	RequestedAt            time.Time           `json:"requested_at"`
+	SelectedReferences     []SelectedReference `json:"selected_references,omitempty"`
 }
 
 type SelectedReference struct {
@@ -39,13 +40,14 @@ type RepositoryHint struct {
 
 // CompileResponse is the frozen outcome union (plan 10.2).
 type CompileResponse struct {
-	Outcome            string    `json:"outcome"`
-	RunID              string    `json:"run_id,omitempty"`
-	Reason             string    `json:"reason,omitempty"`
-	DegradedComponents []string  `json:"degraded_components,omitempty"`
-	Pack               *WirePack `json:"pack,omitempty"`
-	AdmissionRequired  bool      `json:"admission_required"`
-	EffectiveMode      string    `json:"effective_mode,omitempty"`
+	EvidenceReadCapability string    `json:"evidence_read_capability,omitempty"`
+	Outcome                string    `json:"outcome"`
+	RunID                  string    `json:"run_id,omitempty"`
+	Reason                 string    `json:"reason,omitempty"`
+	DegradedComponents     []string  `json:"degraded_components,omitempty"`
+	Pack                   *WirePack `json:"pack,omitempty"`
+	AdmissionRequired      bool      `json:"admission_required"`
+	EffectiveMode          string    `json:"effective_mode,omitempty"`
 }
 
 // WirePack is the bounded pack summary returned to the daemon. Full stable
@@ -84,14 +86,15 @@ type ReceiptRequest struct {
 // PreparedContext is what one admission/delivery attempt holds in memory.
 // It is never persisted, journalled, or logged by the daemon.
 type PreparedContext struct {
-	PackID        string
-	InjectionID   string
-	Nonce         string
-	ExpiresAt     time.Time
-	StableText    string
-	DynamicText   string
-	StableDigest  string
-	DynamicDigest string
+	EvidenceReadCapability string
+	PackID                 string
+	InjectionID            string
+	Nonce                  string
+	ExpiresAt              time.Time
+	StableText             string
+	DynamicText            string
+	StableDigest           string
+	DynamicDigest          string
 
 	sessionID      string
 	providerOrigin string

@@ -12,7 +12,7 @@ import { createGitImportService } from './import-service.js'
 import { requireCanonicalImportRun, type ImportProposalRow } from './governance-adapter.js'
 
 export interface GitIdentity { installationId: string; grant: V2GrantFacts }
-export type GitReadDeps = GitQueueDeps & Partial<Pick<Parameters<typeof createGitExportService>[0], 'keys'>> & Pick<Parameters<typeof createGitExportService>[0], 'skill'> & { targets: GitTargetRegistry }
+export type GitReadDeps = GitQueueDeps & Partial<Pick<Parameters<typeof createGitExportService>[0], 'keys'>> & Pick<Parameters<typeof createGitExportService>[0], 'skill'|'tombstoneHmacKeys'> & { targets: GitTargetRegistry }
 export const GitListQuery = z.object({ limit: z.coerce.number().int().min(1).max(50).default(20), cursor: z.uuid().optional() }).strict()
 const errorCodes = {
   invalid_request:400, signature_invalid:400, forbidden:403, not_found:404, conflict:409,

@@ -538,4 +538,28 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
     })
     expect(fresh.hits.map(hit => hit.versionId)).toContain(late.versionId)
   })
+  test('an empty query vector has an explicit bounded text degradation',async()=>{
+    await pool.query("UPDATE memory_feature_settings SET embedding_mode='enabled' WHERE installation_id=$1",[INSTALLATION])
+    const claim=await seedClaim({installationId:INSTALLATION,key:'empty-vector',statement:'Empty vector retains relevant lexical evidence'})
+    const embed={provider:'test',model:'empty',dimensions:2,embed:async()=>({vectors:[[0,0]],model:'empty',tokens:1,costMicros:0})}
+    const result=await createSearchService({pool,embed,recallEmbeddingTimeoutMs:500,cursorSigningKey:'k'}).search({installationId:INSTALLATION,query:'relevant lexical evidence'})
+    expect(result.hits.map(h=>h.versionId)).toContain(claim.versionId)
+    expect(result.degradedComponents).toContain('empty_vector')
+    expect(result.poolSizes.vector??0).toBe(0)
+  })
+  test('internal recall preserves a Context-relevant tail outside the public top twenty',async()=>{
+    for(let i=0;i<30;i++)await seedClaim({installationId:INSTALLATION,key:`pool-${i}`,statement:`Known relevant fact ordinal ${i}`,freshnessAt:new Date('2020-01-01')})
+    const tail=await seedClaim({installationId:INSTALLATION,key:'pool-tail',statement:'Known relevant fact pinned tail',freshnessAt:new Date('2019-01-01')})
+    const search=service(),publicResult=await search.search({installationId:INSTALLATION,query:'known relevant fact',limit:50})
+    expect(publicResult.hits.length).toBe(20)
+    expect(publicResult.hits.map(h=>h.versionId)).not.toContain(tail.versionId)
+    const internal=await search.internalRecall({installationId:INSTALLATION,query:'known relevant fact'})
+    expect(internal.hits.map(h=>h.versionId)).toContain(tail.versionId)
+    expect(internal.hits.find(h=>h.versionId===tail.versionId)?.poolRanks?.lexical).toBeGreaterThan(20)
+    const {createContextRetrieval}=await import('../context/retrieval.js')
+    const recalled=await createContextRetrieval({pool,search,trajectory:{record:async()=>'internal-trajectory'} as never}).retrieve({
+      installationId:INSTALLATION,query:'known relevant fact',limit:1,pinnedVersionIds:[tail.versionId],requestKey:{keyId:'k',hmacKey:Buffer.alloc(32,1)}})
+    expect(recalled.candidates[0]?.versionId).toBe(tail.versionId)
+  })
+
 })

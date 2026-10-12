@@ -12,6 +12,7 @@ export interface VerifiedGrant {
   sessionId?: string
   services: string[]
   configVersion: string
+  expiresAt: number
 }
 
 export interface VerifiedScopeBinding {
@@ -25,6 +26,8 @@ export interface VerifiedScopeBinding {
 }
 
 export interface VerifiedGrantV2 {
+  sessionId?:string
+  expiresAt: number
   userId: number
   installationId: string
   callerType: string
@@ -191,6 +194,7 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
         ...(typeof grantSession === 'string' ? { sessionId: grantSession } : {}),
         services: payload.services as string[],
         configVersion: payload.config_version,
+        expiresAt: payload.exp,
       }
     },
 
@@ -225,6 +229,7 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
       }
 
       if (payload.token_type !== 'extension_capability_v2') return null
+      if(payload.session_id!==undefined&&(typeof payload.session_id!=='string'||!payload.session_id.length||payload.session_id.length>64))return null
       const currentEpochSeconds = Math.floor(Date.now() / 1000)
       if (typeof payload.iat !== 'number' || !Number.isFinite(payload.iat)
         || typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)
@@ -246,11 +251,13 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
       if (!installationIds.has(payload.primary_installation_id)) return null
 
       return {
+        ...(typeof payload.session_id==='string'?{sessionId:payload.session_id}:{}),
         userId: Number(subject[1]),
         installationId: payload.primary_installation_id,
         callerType: typeof payload.caller_type === 'string' ? payload.caller_type : '',
         services: payload.services as string[],
         configVersion: payload.config_version,
+        expiresAt: payload.exp,
         scopeBindings: bindings,
       }
     },

@@ -13,8 +13,17 @@ db('Phase 6 governed import atomic application',()=>{
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await applyMemorySchema(pool)},60_000)
   beforeEach(async()=>{await pool.query('TRUNCATE memory_installations CASCADE')})
   afterAll(async()=>{await pool?.end()})
-  async function setup(kinds=['rule'],unlockedWiki=false) {
-    const s=await gitImportFixture(pool,kinds,unlockedWiki)
+  async function setup(kinds=['rule'],unlockedWiki=false,verifiedRenameFrame=false) {
+    const s=await gitImportFixture(pool,kinds,unlockedWiki,verifiedRenameFrame?async f=>{
+      const canonical='github.com/fixture/rename-repository'
+      await pool.query("UPDATE repositories SET canonical_remote=$2 WHERE repository_id=$1",[f.repositoryId,'https://'+canonical+'.git'])
+      const ids=f.keys.filter(k=>kinds.includes(k.kind)&&(k.kind==='rule'||k.kind==='claim')).map(k=>k.id)
+      await pool.query('UPDATE knowledge_claims SET canonical_repository_key=$2 WHERE claim_id=ANY($1::uuid[])',[ids,canonical])
+      await pool.query(`UPDATE knowledge_versions v SET repository_id=COALESCE(v.repository_id,$3::uuid),applicability=jsonb_build_object(
+        'scopeKind',c.scope_kind,'scopeKey',c.scope_key,'canonicalRepositoryKey',$2::text,'repositoryId',COALESCE(v.repository_id,$3::uuid),
+        'snapshotId',v.repo_snapshot_id,'branch',v.branch,'status','verified')
+        FROM knowledge_claims c WHERE c.claim_id=v.claim_id AND c.installation_id=v.installation_id AND c.claim_id=ANY($1::uuid[])`,[ids,canonical,f.repositoryId])
+    }:undefined)
     await pool.query("UPDATE memory_git_connections SET sync_mode='enabled' WHERE connection_id=$1",[s.f.connectionId])
     // Loading happens after the real fixtures, so initial RED demonstrates the
     // missing application boundary without preventing existing tests collecting.
@@ -52,7 +61,7 @@ db('Phase 6 governed import atomic application',()=>{
     await expect(s.f.skill.review.execute(s.f.skill.reviewer,request)).resolves.toMatchObject({versionId:result.versionId,state:'reviewed'})
   })
   test.each(['rule','claim','wiki'])('applied %s rename is retained by signed re-export and dedupe',async kind=>{
-    const s=await setup([kind]),{encodeAsset}=await import('../git-sync/codec.js'),{createGitExportService}=await import('../git-sync/export-service.js')
+    const s=await setup([kind],false,kind!=='wiki'),{encodeAsset}=await import('../git-sync/codec.js'),{createGitExportService}=await import('../git-sync/export-service.js')
     const asset=structuredClone(s.bundle.assets[0].asset),oldFiles=encodeAsset(asset),oldPaths=new Set(oldFiles.map(f=>f.path))
     asset.path=kind==='wiki'?'.pocketctl/knowledge/wiki/renamed/wiki.yaml':`.pocketctl/knowledge/claims/renamed-${kind}.yaml`
     const files=[...s.bundle.files.filter(f=>!oldPaths.has(f.path)),...encodeAsset(asset)],{proposals:[p]}=await s.plan(files)

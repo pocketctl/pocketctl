@@ -3,7 +3,7 @@ import type pg from 'pg'
 import { z } from 'zod'
 import type { V2GrantFacts } from '../governance/authorization.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
-import { requireGitPermission,requireCurrentGitAuthorization,type GitAuthorizationStamp } from './authorization.js'
+import { assertGitGrantClock,requireGitPermission,requireCurrentGitAuthorization,type GitAuthorizationStamp } from './authorization.js'
 import { lockGitConnection,type GitConnection } from './repository.js'
 import type { GitSyncConfig,GitSyncMode } from './config.js'
 
@@ -26,9 +26,9 @@ export async function gitAdmissionMode(deps:GitQueueDeps,c:GitConnection):Promis
   if(c.state!=='active'||modes.includes('off'))throw new Error('git_feature_disabled')
   return modes.includes('shadow')?'shadow':'enabled'
 }
-export async function gitQueueTransaction<T>(pool:pg.Pool,run:(client:pg.PoolClient)=>Promise<T>):Promise<T> {
+export async function gitQueueTransaction<T>(pool:pg.Pool,run:(client:pg.PoolClient)=>Promise<T>,requestGrant?:V2GrantFacts,selectedInstallationIds:readonly string[]=[]):Promise<T> {
   const client=await pool.connect()
-  try{await client.query('BEGIN');const result=await run(client);await client.query('COMMIT');return result}
+  try{await client.query('BEGIN');const result=await run(client);if(requestGrant)await assertGitGrantClock(client,requestGrant,selectedInstallationIds);await client.query('COMMIT');return result}
   catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
 }
 /** Internal primitive for authenticated inbox and authoritative poll children;
@@ -83,14 +83,14 @@ export function createGitInboxService(deps:GitQueueDeps) {
     async enroll(grant:V2GrantFacts,raw:unknown) {
       const s=GitQueueSubject.parse(raw),facts=Facts.parse(grant) as V2GrantFacts
       return gitQueueTransaction(deps.pool,async client=>{
-        const stamp=await requireGitPermission(client,facts,s.installationId,'contribute'),c=await lockGitConnection(client,s.installationId,s.connectionId,s.expectedGeneration)
+        const stamp=await requireGitPermission(client,{...facts,expiresAt:grant.expiresAt},s.installationId,'contribute'),c=await lockGitConnection(client,s.installationId,s.connectionId,s.expectedGeneration)
         await gitAdmissionMode(deps,c)
         const valid=await client.query(`SELECT 1 FROM memory_git_snapshots WHERE installation_id=$1 AND connection_id=$2 AND export_id=$3
           AND generation=$4 AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE`,[s.installationId,s.connectionId,s.exportId,s.expectedGeneration])
         if(!valid.rowCount)throw new Error('git_export_unregistered')
         await client.query(`INSERT INTO memory_git_sync_principals(installation_id,connection_id,export_id,generation,membership_id,grant_facts,authorization_stamp)
           VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,[s.installationId,s.connectionId,s.exportId,s.expectedGeneration,stamp.membershipId,facts,stamp])
-      })
+      },grant,[s.installationId])
     },
     async receive(raw:unknown,event:unknown) {
       const s=GitQueueSubject.parse(raw),trigger=Trigger.parse(event)

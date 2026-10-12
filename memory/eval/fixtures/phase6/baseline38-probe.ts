@@ -1,3 +1,4 @@
+import {MEMORY_MIGRATIONS} from '../../../src/schema.js'
 /** Bounded old-source execution only. Never starts an API/worker/provider. */
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
@@ -17,7 +18,7 @@ async function runProbe() {
   const schemaBefore = (await pool.query('SELECT version, applied_at FROM memory_schema_migrations ORDER BY version')).rows
   // The old migrator must leave every additive migration and its original
   // application timestamp intact, including the current Context Pack schema.
-  assert.deepEqual(schemaBefore.map(row => row.version), Array.from({ length: 50 }, (_, index) => index + 1))
+  assert.deepEqual(schemaBefore.map(row => row.version), MEMORY_MIGRATIONS.map(m=>m.version))
   await applyMemorySchema(pool)
   const schemaAfter = (await pool.query('SELECT version, applied_at FROM memory_schema_migrations ORDER BY version')).rows
   assert.deepEqual(schemaAfter, schemaBefore)

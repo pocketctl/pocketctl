@@ -1,8 +1,10 @@
+import {recordRecallMetrics,updateRetrievalIndexGauges} from './metrics.js'
 import Fastify from 'fastify'
 import { createHash } from 'node:crypto'
 import { loadMemoryConfig } from './config.js'
 import { createMemoryPool } from './db.js'
 import { applyMemorySchema } from './schema.js'
+import {assertMemoryRuntimeCompatibility,MEMORY_BRIDGE_COMPATIBILITY} from './migrations/governance-v2/compatibility.js'
 import { createCapabilityVerifier } from './relay/capability-verifier.js'
 import { createMemoryMetrics, updatePhase6Gauges } from './metrics.js'
 import { createGrantGuard } from './auth/grant-guard.js'
@@ -64,6 +66,7 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await applyMemorySchema(pool)
+  await assertMemoryRuntimeCompatibility(pool)
   const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const schemaReady = true
@@ -78,7 +81,7 @@ async function main(): Promise<void> {
     }
     try {
       await pool.query('SELECT 1')
-      return { status: 'ready' }
+      return { status: 'ready',compatibility:MEMORY_BRIDGE_COMPATIBILITY }
     } catch {
       reply.code(503)
       return { status: 'unavailable' }
@@ -88,7 +91,7 @@ async function main(): Promise<void> {
   // Bounded Prometheus metrics with the frozen label allowlists.
   const metrics = createMemoryMetrics()
   app.get('/metrics', async (_req, reply) => {
-    if(schemaReady)await updatePhase6Gauges(pool,metrics.phase6)
+    if(schemaReady){await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
     reply.header('content-type', metrics.registry.contentType)
     return metrics.registry.metrics()
   })
@@ -130,6 +133,7 @@ async function main(): Promise<void> {
       // build; the probe reports it only once migrations actually applied.
       phase: schemaReady ? 1 : 0,
       state: 'ready',
+      compatibility:MEMORY_BRIDGE_COMPATIBILITY,
     }
   })
 
@@ -137,7 +141,7 @@ async function main(): Promise<void> {
   const skillCases = createFileSkillCaseRegistry(process.env.MEMORY_SKILL_REPLAY_REGISTRY_PATH)
   const gitConfig=config.gitSync??loadGitSyncConfig({})
   const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode})
-  const gitDeps={pool,config:gitConfig,targets:gitRuntime.targets,keys:gitRuntime.keys,scopeMode:gitRuntime.scopeMode,
+  const gitDeps={tombstoneHmacKeys:config.tombstoneHmacKeys,pool,config:gitConfig,targets:gitRuntime.targets,keys:gitRuntime.keys,scopeMode:gitRuntime.scopeMode,
     recoveryReads:gitRuntime.recoveryReads,webhookRegistration:gitRuntime.webhookRegistration,skill:{context:skillContext,cases:skillCases},outcomeKind:'natural' as const}
   const gitReads=createGitReadService(gitDeps)
   // Internal services for Task9 foreground routes. No Git write capability exists
@@ -243,8 +247,11 @@ async function main(): Promise<void> {
       ...(embeddingProvider ? { embed: embeddingProvider } : {}),
     })
     registerGovernanceRoutes(app, {
+      delegatedPublishMode:config.delegatedPublishMode??'off',
+      automationMode:config.reviewAutomationMode??'off',
       pool,
       guard,
+      tombstoneHmacKeys:config.tombstoneHmacKeys,
       sharedScopesEnabled: config.sharedScopesMode === 'enabled',
       cursorSigningKey: config.hmacKey,
     })
@@ -276,6 +283,7 @@ async function main(): Promise<void> {
         pool,
         search: createSearchService({
           pool,
+          onRecallMetrics:input=>recordRecallMetrics(metrics.phase1,input),
           recallEmbeddingTimeoutMs: config.recallEmbeddingTimeoutMs,
           cursorSigningKey: config.hmacKey,
           ...(embeddingProvider ? { embed: embeddingProvider } : {}),
@@ -296,6 +304,7 @@ async function main(): Promise<void> {
       policy,
       rateLimiter,
       compiler: contextCompiler,
+      sharedScopesEnabled:config.sharedScopesMode==='enabled',
       admission: createAdmissionService({ pool, nonceHmacKey: Buffer.from(config.hmacKey) }),
       feedback: createFeedbackService({ pool }),
       packs: contextPacks,
@@ -323,6 +332,7 @@ async function main(): Promise<void> {
       },
     })
     registerMcpRoute(app, {
+      onRecallMetrics:input=>recordRecallMetrics(metrics.phase1,input),
       gitReads,
       skillContext,
       pool,

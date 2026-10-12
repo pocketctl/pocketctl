@@ -76,7 +76,7 @@ async function ingestAndBuild(pool: pg.Pool, installationId: string, files: type
 async function runBuild(pool: pg.Pool, jobId: string, installationId: string, claimedBy = 'worker-inc'): Promise<void> {
   const build = createCodeGraphBuildService({ pool })
   await pool.query(`
-    UPDATE memory_jobs SET state = 'running', claimed_by = $2, claim_epoch = 1 WHERE job_id = $1
+    UPDATE memory_jobs SET state = 'running', claim_expires_at=clock_timestamp()+interval '1 minute', claimed_by = $2, claim_epoch = 1 WHERE job_id = $1
   `, [jobId, claimedBy])
   const job = await pool.query<{ idempotency_key: string; payload: Record<string, unknown> }>(`
     SELECT idempotency_key, payload FROM memory_jobs WHERE job_id = $1

@@ -1,3 +1,4 @@
+import {confirmRepositoryApplicabilityFixture} from '../testing/governance-applicability-fixture.js'
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
@@ -40,10 +41,10 @@ function grant(overrides: Partial<ValidatedV2Grant> = {}): ValidatedV2Grant {
       {
         installation_id: TEAM,
         owner_scope_kind: 'team',
-        owner_scope_id: 'dddddddd-0000-4000-8000-000000000031',
+        owner_scope_id: TEAM,
         membership_id: MEMBERSHIP,
         membership_revision: '2',
-        authorization_epoch: '3',
+        authorization_epoch: '1',
         permissions: ['read', 'contribute'],
       },
     ],
@@ -297,6 +298,7 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
       evidenceIds: [EVIDENCE_1], idempotencyDigest: 'edge-1',
     })).rejects.toMatchObject({ code: 'invalid_edge' })
 
+    await pool.query("INSERT INTO memory_scope_memberships(installation_id,membership_id,roles,state,membership_revision) VALUES($1,$2,ARRAY['contributor'],'active',2)",[ORG,MEMBERSHIP])
     const orgGrant = grant({
       primaryInstallationId: ORG,
       scopeBindings: [
@@ -304,7 +306,7 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
         {
           installation_id: ORG,
           owner_scope_kind: 'organization',
-          owner_scope_id: 'dddddddd-0000-4000-8000-000000000032',
+          owner_scope_id: ORG,
           membership_id: MEMBERSHIP,
           membership_revision: '2',
           authorization_epoch: '1',
@@ -346,8 +348,9 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
     })).rejects.toMatchObject({ code: 'evidence_not_owned' })
   })
 
-  test('classifies identical content as duplicate and divergent content as conflict', async () => {
+  test('classifies identical full content as duplicate and distinct conditions as related with an identity conflict', async () => {
     await resetGovernance()
+    await confirmRepositoryApplicabilityFixture(pool,PERSONAL,SOURCE_CLAIM,[TEAM])
     const first = await service.propose({
       grant: grant(), sourceInstallationId: PERSONAL, sourceClaimId: SOURCE_CLAIM,
       evidenceIds: [EVIDENCE_1], idempotencyDigest: 'classify-1',
@@ -372,6 +375,11 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
       WHERE installation_id = $1 AND claim_id = 'dddddddd-0000-4000-8000-000000000081'
     `, [TEAM])
 
+    const source=(await pool.query('SELECT c.canonical_repository_key,v.structured_content FROM knowledge_claims c JOIN knowledge_versions v ON v.version_id=c.current_version_id WHERE c.claim_id=$1',[SOURCE_CLAIM])).rows[0]
+    const targetRepo=(await pool.query("SELECT repository_id FROM repositories WHERE installation_id=$1 AND repository_key='/repo'",[TEAM])).rows[0].repository_id
+    const app={scopeKind:'repository',scopeKey:'/repo',canonicalRepositoryKey:source.canonical_repository_key,repositoryId:targetRepo,snapshotId:null,branch:null,status:'verified'}
+    await pool.query('UPDATE knowledge_claims SET canonical_repository_key=$2 WHERE claim_id=$1',['dddddddd-0000-4000-8000-000000000081',source.canonical_repository_key])
+    await pool.query('UPDATE knowledge_versions SET repository_id=$2,structured_content=$3,applicability=$4 WHERE version_id=$1',['dddddddd-0000-4000-8000-000000000082',targetRepo,source.structured_content,app])
     const duplicate = await service.propose({
       grant: grant(), sourceInstallationId: PERSONAL, sourceClaimId: SOURCE_CLAIM,
       evidenceIds: [EVIDENCE_1], idempotencyDigest: 'classify-duplicate',
@@ -381,14 +389,15 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
 
     // Divergent target content, same identity → conflict.
     await pool.query(`
-      UPDATE knowledge_versions SET statement = 'deploy without any gate at all'
+      UPDATE knowledge_versions SET structured_content = '{"condition":"different-environment"}'
       WHERE installation_id = $1 AND version_id = 'dddddddd-0000-4000-8000-000000000082'
     `, [TEAM])
     const conflict = await service.propose({
       grant: grant(), sourceInstallationId: PERSONAL, sourceClaimId: SOURCE_CLAIM,
       evidenceIds: [EVIDENCE_1], idempotencyDigest: 'classify-conflict',
     })
-    expect(conflict.classification).toBe('conflict')
+    expect(conflict.classification).toBe('related')
+    expect(conflict.candidate.state).toBe('conflict')
     expect(conflict.candidate.state).toBe('conflict')
     expect(conflict.candidate.conflict_group_id).not.toBeNull()
 
@@ -400,6 +409,7 @@ describeWithDatabase('promotion proposal transaction (PostgreSQL)', () => {
       statement: 'deploy with migrations gated by tests, revised',
       structuredContent: {},
       contentHash: 'revised-hash',
+      evidenceSelection:{retainedOrdinals:[1],removedOrdinals:[],newEvidenceIds:[]},
       createdByMembershipId: MEMBERSHIP,
     })
     expect(revised.revisionNumber).toBe(2)

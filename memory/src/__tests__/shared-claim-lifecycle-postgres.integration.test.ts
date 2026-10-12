@@ -1,3 +1,4 @@
+import {confirmRepositoryApplicabilityFixture} from '../testing/governance-applicability-fixture.js'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
@@ -37,7 +38,7 @@ function grantFor(membershipId: string, permissions: string[]): ValidatedV2Grant
       {
         installation_id: TEAM,
         owner_scope_kind: 'team',
-        owner_scope_id: 'fffffff1-0000-4000-8000-000000000031',
+        owner_scope_id: TEAM,
         membership_id: membershipId,
         membership_revision: '2',
         authorization_epoch: '1',
@@ -138,6 +139,7 @@ describeWithDatabase('shared claim lifecycle visibility (PostgreSQL)', () => {
   test('a personal claim never appears in team recall before publication, then does after', async () => {
     expect(await activeTeamStatements()).toEqual([])
 
+    await confirmRepositoryApplicabilityFixture(pool,PERSONAL,SOURCE_CLAIM,[TEAM])
     const proposed = await promotion.propose({
       grant: grantFor(PROPOSER, ['read', 'contribute']),
       sourceInstallationId: PERSONAL, sourceClaimId: SOURCE_CLAIM,

@@ -1,4 +1,5 @@
 import pg from 'pg'
+import {queryHookPool} from './helpers/query-hook-pool.js'
 import { createHash } from 'crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
@@ -154,6 +155,57 @@ describeWithDatabase('context admission fence (PostgreSQL)', () => {
   const admitFor = (packId: string, clientRequestId = lastClientRequestId) => admission.admit({
     installationId: INSTALLATION, sessionId: 'ses-a', clientRequestId,
     packId, agent: 'codex', adapter: 'codex-app-server', grantConfigVersion: '1',
+  })
+  test.each(['fact','revision'])('owned %s validity is checked after an injection lock wait',async clock=>{
+    await pool.query(clock==='fact'?"UPDATE knowledge_versions SET valid_until=clock_timestamp()+INTERVAL '0.5 seconds' WHERE version_id=$1":
+      "UPDATE knowledge_versions SET effective_from=created_at,effective_until=clock_timestamp()+INTERVAL '0.5 seconds' WHERE version_id=$1",[versionIds[0]])
+    const packId=await persistReadyPack('owned-fact-lock'),ticket=await admitFor(packId);if(!ticket.ok||!('nonce'in ticket))throw Error('nonce required')
+    const locker=await pool.connect();await locker.query('BEGIN');await locker.query('SELECT 1 FROM memory_context_injections WHERE injection_id=$1 FOR UPDATE',[ticket.injectionId])
+    let signal!:()=>void;const started=new Promise<void>(resolve=>{signal=resolve})
+    const hooked=queryHookPool(pool,async(sql)=>{if(sql.includes('FOR UPDATE OF j'))signal()})
+    const consume=createAdmissionService({pool:hooked,nonceHmacKey:NONCE_KEY}).consume({installationId:INSTALLATION,sessionId:'ses-a',packId,injectionId:ticket.injectionId,nonce:ticket.nonce})
+    try{await started;await pool.query('SELECT pg_sleep(0.7)');await locker.query('COMMIT');expect(await consume).toEqual({ok:false,error:'expired'})}
+    finally{await locker.query('ROLLBACK');locker.release()}
+  })
+
+  test.each(['hold','legacy_unknown','requires_review','malformed','projection_mismatch'])('changed %s consumption metadata cannot mint a nonce for an old ready pack',async change=>{
+    const packId=await persistReadyPack('cr-consumption-'+change)
+    if(change==='hold')await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='identity_requires_review' WHERE claim_id=$1",[claimIds[0]])
+    else{
+      const app=change==='malformed'?{}:{scopeKind:'installation',scopeKey:change==='projection_mismatch'?'wrong-key':'global',canonicalRepositoryKey:null,repositoryId:null,snapshotId:null,branch:null,status:change==='projection_mismatch'?'verified':change}
+      await pool.query('UPDATE knowledge_versions SET applicability=$2 WHERE version_id=$1',[versionIds[0],app])
+    }
+    expect(await admitFor(packId)).toMatchObject({ok:false})
+    expect((await pool.query('SELECT 1 FROM memory_context_injections WHERE pack_id=$1',[packId])).rowCount).toBe(0)
+    expect((await pool.query('SELECT state FROM memory_context_packs WHERE pack_id=$1',[packId])).rows[0].state).toBe('invalidated')
+  })
+  test('a changed consumption generation expires an unconsumed ticket with an explicit outcome',async()=>{
+    const packId=await persistReadyPack('cr-epoch-ticket'),admitted=await admitFor(packId)
+    if(!admitted.ok||!('nonce' in admitted))throw new Error('fixture admission failed')
+    await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='identity_requires_review' WHERE claim_id=$1",[claimIds[0]])
+    expect(await admission.consume({installationId:INSTALLATION,sessionId:'ses-a',packId,injectionId:admitted.injectionId,nonce:admitted.nonce})).toEqual({ok:false,error:'expired'})
+    expect((await pool.query('SELECT state,outcome_code FROM memory_context_injections WHERE injection_id=$1',[admitted.injectionId])).rows[0]).toEqual({state:'expired',outcome_code:'consumption_context_changed'})
+  })
+  test.each(['hold', 'revoke'])('a new ticket for a historical null-generation pack expires after %s', async change => {
+    const packId = await persistReadyPack('cr-legacy-' + change)
+    await pool.query('UPDATE memory_context_packs SET consumption_generation=NULL,query_context=NULL WHERE pack_id=$1', [packId])
+    const admitted = await admitFor(packId)
+    if (!admitted.ok || !('nonce' in admitted)) throw new Error('legacy bridge admission failed')
+    if (change === 'hold') await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='identity_requires_review' WHERE claim_id=$1", [claimIds[0]])
+    else await pool.query("UPDATE knowledge_claims SET state='revoked' WHERE claim_id=$1", [claimIds[0]])
+    expect(await admission.consume({installationId:INSTALLATION,sessionId:'ses-a',packId,injectionId:admitted.injectionId,nonce:admitted.nonce})).toEqual({ok:false,error:'expired'})
+    expect((await pool.query('SELECT consumption_generation,query_context FROM memory_context_packs WHERE pack_id=$1',[packId])).rows[0]).toEqual({consumption_generation:null,query_context:null})
+  })
+
+  test('delivered pack text and hashes are immutable after consumption metadata changes',async()=>{
+    const packId=await persistReadyPack('cr-epoch-history'),admitted=await admitFor(packId)
+    if(!admitted.ok||!('nonce' in admitted))throw new Error('fixture admission failed')
+    expect((await admission.consume({installationId:INSTALLATION,sessionId:'ses-a',packId,injectionId:admitted.injectionId,nonce:admitted.nonce})).ok).toBe(true)
+    await admission.receipt({installationId:INSTALLATION,sessionId:'ses-a',injectionId:admitted.injectionId,delivered:true})
+    const before=(await pool.query('SELECT stable_text,dynamic_text,stable_hash,dynamic_hash,state FROM memory_context_packs WHERE pack_id=$1',[packId])).rows[0]
+    await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='identity_requires_review' WHERE claim_id=$1",[claimIds[0]])
+    expect((await pool.query('SELECT stable_text,dynamic_text,stable_hash,dynamic_hash,state FROM memory_context_packs WHERE pack_id=$1',[packId])).rows[0]).toEqual(before)
+    expect((await pool.query('SELECT state FROM memory_context_injections WHERE injection_id=$1',[admitted.injectionId])).rows[0].state).toBe('delivered')
   })
 
   test('admits a ready pack with a single-use 5s ticket and stores only the nonce HMAC', async () => {

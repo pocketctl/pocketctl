@@ -21,9 +21,14 @@ import { createIdempotencyStore } from './idempotency.js'
 import { createSettingsRepository } from '../settings/repository.js'
 import type { TombstoneHmacKey } from '../config.js'
 import { insertKnowledgeTombstones } from '../claims/tombstones.js'
+import {claimIdentityV2,ClaimIdentityUnavailableError} from '../claims/identity.js'
+import {captureSourceApplicability} from '../governance/applicability.js'
+import type {ClaimApplicability} from '../governance/revision-bundle.js'
+import type {ScopeKind} from '../claims/types.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 import type { Phase1Metrics } from '../metrics.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
+import { assertCurrentGrantClock, requireCurrentInstallationAuthority, TargetBindingError } from '../governance/authorization.js'
 import { createInvalidationService } from '../context/invalidation-service.js'
 
 /**
@@ -59,6 +64,10 @@ export interface ModelDisclosure {
   }
 }
 
+interface ManageGrant { installationId: string; configVersion?: string; expiresAt?: number }
+
+class SourceDiscoveryChangedError extends Error {}
+
 interface ReplyLike {
   code(status: number): { send(body: unknown): void }
   send(body: unknown): void
@@ -74,7 +83,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     extractionConsentFingerprint: deps.extractionAdapter?.fingerprint,
     embeddingConsentFingerprint: deps.embeddingAdapter?.fingerprint,
   })
-  const authenticated = new WeakMap<object, { installationId: string }>()
+  const authenticated = new WeakMap<object, ManageGrant>()
 
   const settingsBody = (current: Awaited<ReturnType<typeof settings.get>>) => ({
     extraction_mode: current.extractionMode,
@@ -114,7 +123,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
   async function guardManage(
     request: { headers: { authorization?: string } },
     reply: ReplyLike,
-  ): Promise<{ installationId: string } | undefined> {
+  ): Promise<ManageGrant | undefined> {
     const cached = authenticated.get(request as object)
     if (cached) return cached
     try {
@@ -282,7 +291,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     reply: ReplyLike,
     operation: string,
     run: (
-      grant: { installationId: string },
+      grant: ManageGrant,
       transactionPool: pg.Pool,
       client: pg.PoolClient,
     ) => Promise<
@@ -298,7 +307,35 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       return undefined
     }
     let afterCommit: (() => void) | undefined
-    const outcome = await idempotency.execute({
+    let sourceSessions: Set<string> | undefined
+    let outcome: Awaited<ReturnType<typeof idempotency.execute>>
+    try { outcome = await idempotency.execute({
+      authorize: async client => {
+        // Subsequent callbacks already own installation/receipt locks. They may
+        // revalidate source discovery, but must never acquire a new Session key.
+        if (sourceSessions) await requireCurrentInstallationAuthority(client,grant)
+        // Acceptance/correction share session -> installation order with the legacy
+        // compiler/extractor. These reads expose no body and confer no authority.
+        let sessions: Array<{session_id:string}>=[]
+        if(operation==='accept_candidate'){
+          const candidateId=(request.params as {id?:string})?.id
+          sessions=(await client.query<{session_id:string}>(`SELECT e.session_id FROM memory_candidates c JOIN work_episodes e USING(installation_id,episode_id)
+            WHERE c.installation_id=$1 AND c.candidate_id=$2`,[grant.installationId,candidateId])).rows
+        }else if(operation==='correct_claim'){
+          const evidence=(request.body as {evidence?:Array<{episode_id:string}>})?.evidence??[]
+          sessions=(await client.query<{session_id:string}>('SELECT session_id FROM work_episodes WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])',[grant.installationId,evidence.map(e=>e.episode_id)])).rows
+        }
+        const discovered = new Set(sessions.map(row=>row.session_id))
+        if (sourceSessions) {
+          for (const session of discovered) if (!sourceSessions.has(session)) throw new SourceDiscoveryChangedError()
+        } else {
+          sourceSessions = discovered
+          for(const session of [...sourceSessions].sort())await client.query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))",[grant.installationId,session])
+          await requireCurrentInstallationAuthority(client,grant)
+        }
+      },
+      beforeCommit: client => assertCurrentGrantClock(client, grant),
       installationId: grant.installationId,
       operation,
       key,
@@ -309,6 +346,17 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         return result
       },
     })
+    } catch (error) {
+      if (error instanceof SourceDiscoveryChangedError) {
+        reply.code(409).send({error:{code:'revision_conflict',reason_code:'source_discovery_changed',message:'source changed; retry with fresh discovery'}})
+        return undefined
+      }
+      if (error instanceof TargetBindingError) {
+        reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'current authorization required')))
+        return undefined
+      }
+      throw error
+    }
     if (outcome.kind === 'replayed') return outcome.metadata
     if (outcome.kind === 'conflict') {
       reply.code(409).send(errorBody(new MemoryApiError('revision_conflict', 'idempotency key reuse with a different request')))
@@ -324,11 +372,13 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
         return undefined
       }
-      if (error?.code === 'candidate_evidence_stale' || error?.code === 'tombstoned_identity') {
+      if (error?.code === 'candidate_evidence_stale' || error?.code === 'tombstoned_identity' || error?.code === 'source_discovery_changed') {
         reply.code(409).send({ error: {
           code: 'revision_conflict',
           reason_code: error.code,
-          message: error.code === 'candidate_evidence_stale'
+          message: error.code === 'source_discovery_changed'
+            ? 'source changed; retry with fresh discovery'
+            : error.code === 'candidate_evidence_stale'
             ? 'candidate evidence changed; refresh the review queue'
             : 'deleted knowledge cannot be restored by accepting a candidate',
         } })
@@ -342,6 +392,14 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
             state: 'terminal',
           },
         })
+        return undefined
+      }
+      if(error?.code==='identity_requires_review'){
+        reply.code(409).send({error:{code:'revision_conflict',reason_code:'identity_requires_review',message:'claim identity requires review before correction'}})
+        return undefined
+      }
+      if(error?.code==='identity_migration_required'||error?.code==='tombstone_hmac_keyring_incomplete'){
+        reply.code(409).send({error:{code:'revision_conflict',reason_code:error.code,message:'identity admission requires migration or privacy-key remediation'}})
         return undefined
       }
       if (error?.code === 'identity_conflict') {
@@ -374,7 +432,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       const accepted = await transactionReview.acceptCandidate({
         installationId: grant.installationId,
         candidateId: id,
-        expectedRevision: parsed.data.expected_revision,
+        expectedRevision: parsed.data.expected_revision,expectedHash:parsed.data.expected_hash,reviewDurationMs:parsed.data.review_duration_ms,
         ...(parsed.data.edited_statement ? { editedStatement: parsed.data.edited_statement } : {}),
       })
       if (!accepted.ok) return { ok: false, error: accepted.error }
@@ -405,7 +463,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         installationId: grant.installationId,
         candidateId: id,
         expectedRevision: parsed.data.expected_revision,
-        reasonCode: parsed.data.reason_code ?? undefined,
+        reasonCode: parsed.data.reason_code ?? undefined,expectedHash:parsed.data.expected_hash,reviewDurationMs:parsed.data.review_duration_ms,
       })
       if (!rejected.ok) return { ok: false, error: rejected.error }
       return {
@@ -527,11 +585,14 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))`, [grant.installationId])
       const claim = await client.query<{
         claim_type: string
+        scope_kind:ScopeKind
+        canonical_repository_key:string|null
         scope_key: string
         normalized_key: string
+        normalized_key_v2: string|null
         revision: string
       }>(`
-          SELECT claim_type, scope_key, normalized_key, revision::text
+          SELECT claim_type,scope_kind,scope_key,canonical_repository_key,normalized_key,normalized_key_v2,revision::text
           FROM knowledge_claims
           WHERE installation_id = $1 AND claim_id = $2
           FOR UPDATE
@@ -545,22 +606,37 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
           code: 'revision_conflict', currentRevision: Number(row.revision), state: 'active',
         } }
       }
-      const versions = await client.query<{ statement: string }>(`
-        SELECT statement
+      const versions = await client.query<{ statement: string;repository_id:string|null;repo_snapshot_id:string|null;branch:string|null;applicability:ClaimApplicability|null }>(`
+        SELECT statement,repository_id::text,repo_snapshot_id::text,branch,applicability
         FROM knowledge_versions
         WHERE installation_id = $1 AND claim_id = $2
         ORDER BY version_number
       `, [grant.installationId, id])
+      const historicalFrames=versions.rows.map(version=>{
+        const app=version.applicability
+        const facts={scopeKind:app?.scopeKind??row.scope_kind,scopeKey:app?.scopeKey??row.scope_key,
+          canonicalRepositoryKey:app?app.canonicalRepositoryKey:row.canonical_repository_key,repositoryId:version.repository_id,snapshotId:version.repo_snapshot_id,branch:version.branch}
+        let frame:ClaimApplicability|null=null
+        try{frame=captureSourceApplicability({...facts,applicability:app??{...facts,status:'verified'}})}catch{/* Unprovable history must not block privacy cleanup. */}
+        return{version,frame}
+      })
+      const historicalV2=historicalFrames.flatMap(({version,frame})=>{
+        if(!frame)return[]
+        try{return [claimIdentityV2({...frame,claimType:row.claim_type,statement:version.statement}).key]}
+        catch(error){if(error instanceof ClaimIdentityUnavailableError)return[];throw error}
+      })
       await insertKnowledgeTombstones(client, {
         installationId: grant.installationId,
         normalizedKeys: [
           row.normalized_key,
+          ...historicalFrames.flatMap(({version,frame})=>frame?.status==='verified'?[normalizedClaimKey({claimType:row.claim_type,scopeKey:frame.scopeKey,statement:version.statement})]:[]),
           ...versions.rows.map(version => normalizedClaimKey({
             claimType: row.claim_type,
             scopeKey: row.scope_key,
             statement: version.statement,
           })),
         ],
+        normalizedKeysV2:[...(row.normalized_key_v2?[row.normalized_key_v2]:[]),...historicalV2],
         reason: 'privacy_delete',
         keys: deps.tombstoneHmacKeys,
       })

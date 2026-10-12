@@ -1,3 +1,4 @@
+import {assertSkillPublicationGrantClock} from './publication-validation.js'
 import {randomUUID} from 'node:crypto'
 import type pg from 'pg'
 import {z} from 'zod'
@@ -38,7 +39,7 @@ export function createSkillPublicationService(deps:SkillPublicationDeps){
         if(!hasSkillFixtureCapability(deps.fixtureCapability))publicationFailure('product_gate_closed')
         const publicationRevision=await changePublishedHead(client,{identity,...r,...facts})
         await appendSkillAudit(client,{installationId:identity.installationId,...facts.actor,action:'publish',outcome:'allowed',skillId:r.skillId,versionId:r.versionId,revision:publicationRevision,code:'ok'})
-        await client.query('COMMIT');return {skillId:r.skillId,versionId:r.versionId,revision:r.expectedRevision,publicationRevision,state:'active',provenance:'fixture'}
+        await assertSkillPublicationGrantClock(client,identity,facts.authorizationMembershipIds,facts.sourceVersionId,facts.originPolicyStamp);await client.query('COMMIT');return {skillId:r.skillId,versionId:r.versionId,revision:r.expectedRevision,publicationRevision,state:'active',provenance:'fixture'}
       }catch(error){await client.query('ROLLBACK');const domain=publicationDomainError(error)
         await appendSkillAudit(client,{installationId:identity.installationId,actorKind:null,actorId:null,action:'publish',outcome:'denied',skillId:parsed.success?parsed.data.skillId:null,versionId:parsed.success?parsed.data.versionId:null,revision:null,code:domain.code});throw domain
       }finally{client.release()}
@@ -51,7 +52,7 @@ export function createSkillPublicationService(deps:SkillPublicationDeps){
         const reasons:string[]=[]
         if(assessSkillRisk(facts.version.document).risk!=='low')reasons.push('risk_denied')
         if(facts.independentSuccesses<facts.requiredIndependentSuccesses)reasons.push('independent_successes_required')
-        await client.query('COMMIT')
+        await assertSkillPublicationGrantClock(client,identity,facts.authorizationMembershipIds,facts.sourceVersionId,facts.originPolicyStamp);await client.query('COMMIT')
         return {eligible:reasons.length===0,manualEligible:true,reasonCodes:reasons,independentSuccesses:facts.independentSuccesses,requiredIndependentSuccesses:facts.requiredIndependentSuccesses,productGate:'closed',policyHash:facts.policyHash,replayRunId:facts.replayRunId}
       }catch(error){await client.query('ROLLBACK');const domain=publicationDomainError(error)
         if(['invalid_request','forbidden','not_found','publication_failed'].includes(domain.code))throw domain

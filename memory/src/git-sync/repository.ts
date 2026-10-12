@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
 import type { V2GrantFacts } from '../governance/authorization.js'
-import { requireGitPermission, type GitAuthorizationStamp, type GitPermission } from './authorization.js'
+import {assertGitGrantClock, requireGitPermission, type GitAuthorizationStamp, type GitPermission } from './authorization.js'
 import { ASSET_KINDS, DigestSchema, PortableAssetSchema, RevisionSchema, type AssetKey, type PortableAsset } from './types.js'
 import type { GitSyncMode, GitWriteMode } from './config.js'
 import { validateAssetPaths, validateRepositoryPath } from './paths.js'
@@ -177,6 +177,7 @@ export function createGitRepository(options: { pool: pg.Pool; targets: GitTarget
       await client.query('BEGIN')
       const stamp = await requireGitPermission(client, grant, installationId, permission)
       const result = await run(client, stamp)
+      await assertGitGrantClock(client,grant,[installationId])
       await client.query('COMMIT')
       return result
     } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }

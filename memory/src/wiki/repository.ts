@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import type {ValidatedV2Grant} from '../governance/authorization.js'
+import {requireCurrentWikiPermission,assertCurrentWikiGrantClock} from './authorization.js'
 import { JOB_PRIORITIES } from '../jobs/types.js'
 import type { WikiSourceBindingKind } from './types.js'
 
@@ -36,10 +38,13 @@ export function createWikiRepository(pool: pg.Pool) {
       installationId: string
       repositoryId: string
       expectedGeneration?: number
+      /** Request-owned scheduling passes its verified grant; background scheduling has durable lifecycle fences. */
+      grant?: ValidatedV2Grant
     }): Promise<ScheduledWikiBuild> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        if(input.grant)await requireCurrentWikiPermission({client,grant:input.grant,targetInstallationId:input.installationId,permission:'contribute'})
         const repository = await client.query<{ repository_id: string }>(`
           SELECT repository_id::text FROM repositories r
           WHERE installation_id = $1 AND repository_id = $2
@@ -84,6 +89,7 @@ export function createWikiRepository(pool: pg.Pool) {
         `, [input.installationId, wiki.wiki_id])
         if (existing.rows[0]) {
           const row = existing.rows[0]
+          if(input.grant)await assertCurrentWikiGrantClock(client,input.grant,[input.installationId])
           await client.query('COMMIT')
           return {
             wikiId: wiki.wiki_id,
@@ -162,6 +168,7 @@ export function createWikiRepository(pool: pg.Pool) {
           `build_wiki:${wiki.wiki_id}:${generation}`,
           JOB_PRIORITIES.build_wiki,
           JSON.stringify({ run_id: runId, wiki_id: wiki.wiki_id, generation })])
+        if(input.grant)await assertCurrentWikiGrantClock(client,input.grant,[input.installationId])
         await client.query('COMMIT')
         return {
           wikiId: wiki.wiki_id,

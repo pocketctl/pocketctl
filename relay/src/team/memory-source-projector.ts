@@ -110,6 +110,8 @@ export function buildTeamMemorySourceRecords(
       participant_revision: reader.participantRevision,
     }
     const common = {
+      original_source_id: `team:${input.teamId}:${input.teamSessionId}:${input.callId}`,
+      reader_projection_id: `${input.binding.id}:${input.binding.revision}:${reader.userId}:${reader.participantRevision}`,
       team_source_version: TEAM_MEMORY_SOURCE_VERSION,
       team_id: input.teamId,
       team_session_id: input.teamSessionId,
@@ -187,7 +189,7 @@ export interface TeamMemorySourceProjectorLike {
     participantRevision: number
     bindingId?: string
     bindingRevision?: number
-    reason: 'participant_removed' | 'binding_removed'
+    reason: 'participant_removed' | 'binding_removed' | 'team_member_left' | 'team_member_removed' | 'team_dissolved'
   }): Promise<number>
   revokeTeamBinding?(client: Pick<pg.PoolClient, 'query'>, input: {
     teamId: string
@@ -330,10 +332,12 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
       participantRevision: number
       bindingId?: string
       bindingRevision?: number
-      reason: 'participant_removed' | 'binding_removed'
+      reason: 'participant_removed' | 'binding_removed' | 'team_member_left' | 'team_member_removed' | 'team_dissolved'
     },
   ): Promise<number> {
-    if (!this.enabled) return 0
+    // Capture can be disabled while previously delivered sources still need revocation.
+    // A paused (or revoking) recipient may still retain prior sources. Cleanup
+    // must be durable now so it is delivered when that installation resumes.
     const access = await client.query<{ team_id: string; binding_id: string; binding_revision: string | number }>(`
       SELECT session.team_id, memory.binding_id, memory.revision AS binding_revision
       FROM collaboration_sessions session
@@ -342,7 +346,6 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
         ON installation.owner_user_id = $2
        AND installation.provider_id = 'pocketctl-memory'
        AND installation.owner_scope_kind = 'personal'
-       AND installation.status IN ('pending', 'active')
       WHERE session.team_session_id = $1
         AND memory.revision = COALESCE($3::bigint, memory.revision)
         AND memory.binding_id = COALESCE($4::text, memory.binding_id)
@@ -390,7 +393,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
     client: Pick<pg.PoolClient, 'query'>,
     input: { teamId: string; bindingId: string; bindingRevision: number },
   ): Promise<number> {
-    if (!this.enabled) return 0
+    // Cleanup is a lifecycle obligation even after disabling new source capture.
     const readers = await client.query<{
       team_session_id: string
       user_id: string | number

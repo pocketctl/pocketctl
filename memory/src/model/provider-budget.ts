@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import type { EmbeddingProvider } from '../ports/embedding-provider.js'
 import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
@@ -12,11 +12,13 @@ export type ProviderBudgetDimension =
 
 export type ProviderBudgetReservation =
   | { ok: true; reservationId: string }
-  | { ok: false; dimension: ProviderBudgetDimension }
+  | { ok: false; dimension: ProviderBudgetDimension; retryAt?: Date | null; reason?: 'provider_result_unknown' }
 
 export interface ProviderBudgetStore {
   reserve(input: {
     key: string
+    /** Stable local call identity, not a promise of provider idempotency. */
+    requestKey?: string
     kind: 'text' | 'embedding'
     inputTokens: number
     outputTokens: number
@@ -41,6 +43,12 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
       try {
         await client.query('BEGIN')
         await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [input.key])
+        const digest = input.requestKey ? createHash('sha256').update(JSON.stringify([input.key,input.kind,input.requestKey])).digest('hex').slice(0,32) : null
+        const reservationId = digest ? `${digest.slice(0,8)}-${digest.slice(8,12)}-${digest.slice(12,16)}-${digest.slice(16,20)}-${digest.slice(20)}` : randomUUID()
+        if (digest && (await client.query('SELECT 1 FROM memory_provider_budget_reservations WHERE reservation_id=$1',[reservationId])).rowCount) {
+          await client.query('COMMIT')
+          return {ok:false,dimension:input.kind==='text'?'text_requests':'embedding_requests',reason:'provider_result_unknown'}
+        }
         const reservationTime = (await client.query<{ reserved_at: Date }>(
           'SELECT clock_timestamp() AS reserved_at',
         )).rows[0].reserved_at
@@ -76,9 +84,8 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
         const exceeded = dimensions.find(([condition]) => condition)?.[1]
         if (exceeded) {
           await client.query('COMMIT')
-          return { ok: false, dimension: exceeded }
+          return { ok: false, dimension: exceeded, retryAt: dayEnd }
         }
-        const reservationId = randomUUID()
         await client.query(`
           INSERT INTO memory_provider_budget_reservations
             (reservation_id, budget_key, provider_kind, reserved_input_tokens, reserved_output_tokens, created_at)
@@ -105,14 +112,6 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
   }
 }
 
-/**
- * Failure codes proving the request never reached a provider ledger entry
- * (no completion was returned, so nothing was spent). These settle at zero.
- * invalid_usage — the provider answered but its counters were untrustworthy —
- * deliberately keeps the worst-case reservation unsettled.
- */
-const TRANSPORT_FAILURE_CODES: ReadonlySet<string> = new Set(['http_error', 'aborted'])
-
 export function withTextProviderBudget(
   provider: TextGenerator,
   store: ProviderBudgetStore,
@@ -137,6 +136,7 @@ export function withTextProviderBudget(
       try {
         reservation = await store.reserve({
           key: limits.key,
+          requestKey: input.requestKey,
           kind: 'text',
           inputTokens,
           outputTokens: limits.maxOutputTokensPerRequest,
@@ -149,7 +149,9 @@ export function withTextProviderBudget(
         return { ok: false, code: 'budget_unavailable', retryable: true, detail: 'reservation_failed' }
       }
       if (!reservation.ok) {
-        return { ok: false, code: 'budget_exceeded', retryable: false, detail: reservation.dimension }
+        if (reservation.reason==='provider_result_unknown')return {ok:false,code:'provider_result_unknown',retryable:false,detail:'request_already_reserved'}
+        return { ok: false, code: 'budget_exceeded', retryable: false, detail: reservation.dimension,
+          ...(reservation.retryAt ? {retryAt:reservation.retryAt.toISOString()}: {}) }
       }
       const result = await provider.generateJson<T>(input)
       const usage = result.usage
@@ -158,13 +160,11 @@ export function withTextProviderBudget(
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
         })
-      } else if (!result.ok && TRANSPORT_FAILURE_CODES.has(result.code)) {
-        // The request never completed (http_error, aborted): no provider
-        // ledger entry exists, so settle at zero instead of permanently
-        // leaking the conservative reservation.
-        await store.settle(reservation.reservationId, { inputTokens: 0, outputTokens: 0 })
       }
-      return { ...result, budgetReservationId: reservation.reservationId }
+      // A missing response or aborted connection does not prove zero remote
+      // spend. Keep the durable worst-case reservation and expose uncertainty.
+      return { ...result, budgetReservationId: reservation.reservationId,
+        ...(!usage ? {billingUncertain:true}: {}) }
     },
   }
 }

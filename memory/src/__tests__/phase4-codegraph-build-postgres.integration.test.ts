@@ -103,7 +103,7 @@ async function runHandler(pool: pg.Pool, claim: { job_id: string }, installation
   // Simulate the worker claim that precedes dispatch.
   await pool.query(`
     UPDATE memory_jobs
-    SET state = 'running', claimed_by = $2, claim_epoch = $3
+    SET state = 'running', claim_expires_at=clock_timestamp()+interval '1 minute', claimed_by = $2, claim_epoch = $3
     WHERE job_id = $1
   `, [claim.job_id, overrides.claimedBy ?? 'worker-test', overrides.claimEpoch ?? 1])
   const job = await pool.query<{ idempotency_key: string; payload: Record<string, unknown> }>(`
@@ -222,7 +222,7 @@ describeWithDatabase('phase4 code graph build and activation', () => {
       },
     })
     await base.pool.query(`
-      UPDATE memory_jobs SET state = 'running', claimed_by = 'worker-test', claim_epoch = 1
+      UPDATE memory_jobs SET state = 'running', claim_expires_at=clock_timestamp()+interval '1 minute', claimed_by = 'worker-test', claim_epoch = 1
       WHERE job_id = $1
     `, [poisoned.jobId])
     const poisonedJob = await base.pool.query<{ idempotency_key: string; payload: Record<string, unknown> }>(`

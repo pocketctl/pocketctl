@@ -53,6 +53,70 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     `, [INSTALLATION])
   })
 
+  // Task13 contract: budget waits use pending/available_at and do not spend
+  // the ordinary failure retry allowance.
+  async function deferBudget(input: {
+    jobId: string; claimedBy: string; claimEpoch: number
+    reason: 'budget_exceeded' | 'budget_unavailable'; availableAt: Date
+  }): Promise<boolean> {
+    const repository = jobs as unknown as {
+      deferJob?: (request: typeof input) => Promise<boolean>
+    }
+    expect(repository.deferJob).toBeTypeOf('function')
+    return repository.deferJob!(input)
+  }
+
+  test('budget deferral preserves failure attempts and gates the next claim', async () => {
+    await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'extract_candidates', idempotencyKey: 'budget-wait' })
+    await pool.query("UPDATE memory_jobs SET attempts=11 WHERE idempotency_key='budget-wait'")
+    const [claim] = await jobs.claimJobs({ workerId: 'budget-worker', limit: 1, leaseMs: 60_000 })
+    const availableAt = new Date(Date.now() + 3_600_000)
+    await expect(deferBudget({ jobId: claim.job_id, claimedBy: 'budget-worker', claimEpoch: claim.claim_epoch,
+      reason: 'budget_exceeded', availableAt })).resolves.toBe(true)
+    const row = (await pool.query('SELECT state,attempts,available_at,last_error_code,claimed_by,completed_at FROM memory_jobs WHERE job_id=$1', [claim.job_id])).rows[0]
+    expect(row).toMatchObject({ state: 'pending', attempts: 11, last_error_code: 'budget_exceeded', claimed_by: null, completed_at: null })
+    expect(row.available_at.getTime()).toBe(availableAt.getTime())
+    expect(await jobs.claimJobs({ workerId: 'next', limit: 1, leaseMs: 60_000 })).toEqual([])
+    expect((await pool.query('SELECT count(*)::int n FROM memory_dead_letters')).rows[0].n).toBe(0)
+    await pool.query('UPDATE memory_jobs SET available_at=NOW() WHERE job_id=$1', [claim.job_id])
+    const [resumed] = await jobs.claimJobs({ workerId: 'next', limit: 1, leaseMs: 60_000 })
+    expect(resumed.attempts).toBe(12)
+    await expect(jobs.rescheduleJob({ jobId: resumed.job_id, claimedBy: 'next', claimEpoch: resumed.claim_epoch,
+      errorCode: 'ordinary_failure' })).resolves.toBe(true)
+  })
+
+  test('a stale owner cannot defer a budget-wait job reclaimed by another worker', async () => {
+    await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'extract_candidates', idempotencyKey: 'budget-stale' })
+    const [first] = await jobs.claimJobs({ workerId: 'old', limit: 1, leaseMs: 60_000 })
+    await pool.query("UPDATE memory_jobs SET claim_expires_at=NOW()-interval '1 second' WHERE job_id=$1", [first.job_id])
+    const [current] = await jobs.claimJobs({ workerId: 'current', limit: 1, leaseMs: 60_000 })
+    await expect(deferBudget({ jobId: first.job_id, claimedBy: 'old', claimEpoch: first.claim_epoch,
+      reason: 'budget_exceeded', availableAt: new Date(Date.now() + 3_600_000) })).resolves.toBe(false)
+    expect((await pool.query('SELECT state,claimed_by,claim_epoch FROM memory_jobs WHERE job_id=$1', [first.job_id])).rows[0])
+      .toMatchObject({ state: 'running', claimed_by: 'current', claim_epoch: String(current.claim_epoch) })
+  })
+
+  test('replaying one budget deferral does not decrement the retry allowance twice', async () => {
+    await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'extract_candidates', idempotencyKey: 'budget-replay' })
+    const [claim] = await jobs.claimJobs({ workerId: 'worker', limit: 1, leaseMs: 60_000 })
+    const request = { jobId: claim.job_id, claimedBy: 'worker', claimEpoch: claim.claim_epoch,
+      reason: 'budget_unavailable' as const, availableAt: new Date(Date.now() + 60_000) }
+    await expect(deferBudget(request)).resolves.toBe(true)
+    await expect(deferBudget(request)).resolves.toBe(false)
+    expect((await pool.query('SELECT attempts,state FROM memory_jobs WHERE job_id=$1', [claim.job_id])).rows[0])
+      .toEqual({ attempts: 0, state: 'pending' })
+  })
+
+  test('rerun_required abandons an obsolete budget wait without spending the new revision retry allowance',async()=>{
+    await jobs.enqueueJob({installationId:INSTALLATION,jobType:'extract_candidates',idempotencyKey:'budget-new-source'})
+    await pool.query("UPDATE memory_jobs SET attempts=5 WHERE idempotency_key='budget-new-source'")
+    const [claim]=await jobs.claimJobs({workerId:'worker',limit:1,leaseMs:60000})
+    await pool.query("UPDATE memory_jobs SET last_error_code='rerun_required' WHERE job_id=$1",[claim.job_id])
+    await deferBudget({jobId:claim.job_id,claimedBy:'worker',claimEpoch:claim.claim_epoch,reason:'budget_exceeded',availableAt:new Date(Date.now()+86400000)})
+    const row=(await pool.query("SELECT state,attempts,last_error_code,available_at<clock_timestamp()+interval '5 seconds' AS soon FROM memory_jobs WHERE job_id=$1",[claim.job_id])).rows[0]
+    expect(row).toMatchObject({state:'pending',attempts:0,last_error_code:'rerun_required',soon:true})
+  })
+
   test('renewClaim is fenced per job and a reclaimed neighbour cannot renew', async () => {
     await jobs.enqueueJob({
       installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'fence:a',
@@ -95,6 +159,40 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     })
     const count = await pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM memory_jobs`)
     expect(Number(count.rows[0].count)).toBe(1)
+  })
+
+  test('concurrent workers share the global and job-type claim ceilings',async()=>{
+    for(let n=0;n<4;n++)await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:`bounded:${n}`})
+    const input={limit:4,leaseMs:60000,globalLimit:2,typeLimits:{compile_episode:1},perInstallationLimit:2}
+    const results=await Promise.all([jobs.claimJobs({...input,workerId:'one'}),jobs.claimJobs({...input,workerId:'two'})])
+    expect(results.flat()).toHaveLength(1)
+  })
+
+  test('equal-priority installations share a claim batch instead of one old tenant taking it all',async()=>{
+    const other='22222222-2222-4222-8222-222222222222'
+    await pool.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[other])
+    for(let n=0;n<4;n++)await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:`first:${n}`})
+    await jobs.enqueueJob({installationId:other,jobType:'compile_episode',idempotencyKey:'second:0'})
+    const input={workerId:'fair',limit:2,leaseMs:60000,globalLimit:2,perInstallationLimit:2}
+    const claims=await jobs.claimJobs(input)
+    expect(new Set(claims.map(c=>c.installation_id))).toEqual(new Set([INSTALLATION,other]))
+  })
+
+  test('an expired lease without a new owner cannot complete or renew',async()=>{
+    await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:'expired-unreclaimed'})
+    const [c]=await jobs.claimJobs({workerId:'old',limit:1,leaseMs:60000})
+    await pool.query("UPDATE memory_jobs SET claim_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=$1",[c.job_id])
+    expect(await jobs.completeJob({jobId:c.job_id,claimedBy:'old',claimEpoch:c.claim_epoch})).toBe(false)
+    expect(await jobs.renewClaim({jobId:c.job_id,claimedBy:'old',claimEpoch:c.claim_epoch,leaseMs:60000})).toBe(false)
+  })
+  test('completion rechecks the lease clock after waiting for a job lock',async()=>{
+    await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:'expiry-lock-wait'})
+    const [c]=await jobs.claimJobs({workerId:'old',limit:1,leaseMs:300})
+    const blocker=await pool.connect()
+    await blocker.query('BEGIN');await blocker.query('SELECT 1 FROM memory_jobs WHERE job_id=$1 FOR UPDATE',[c.job_id])
+    const completing=jobs.completeJob({jobId:c.job_id,claimedBy:'old',claimEpoch:c.claim_epoch})
+    await new Promise(resolve=>setTimeout(resolve,350));await blocker.query('ROLLBACK');blocker.release()
+    expect(await completing).toBe(false)
   })
 
   test('phase one job types enqueue with their frozen default priorities', async () => {

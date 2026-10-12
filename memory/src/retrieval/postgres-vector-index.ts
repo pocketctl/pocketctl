@@ -38,6 +38,7 @@ export function createPostgresVectorIndex(pool: pg.Pool): VectorIndex {
       if (query.length !== input.dimensions) {
         throw new Error(`query dimension mismatch: expected ${input.dimensions}, got ${query.length}`)
       }
+      if(input.candidateVersionIds?.length===0)return []
       const candidateFilter = input.candidateVersionIds && input.candidateVersionIds.length > 0
         ? 'AND version_id = ANY($6::uuid[])'
         : ''

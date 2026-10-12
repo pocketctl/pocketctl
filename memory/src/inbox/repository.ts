@@ -94,11 +94,22 @@ export function createInboxRepository(pool: pg.Pool) {
               }
             }
 
-            if (input.envelopes.length > 0) {
+            if (inserted > 0) {
+              // Session cleanup can remove inbox rows while their stable
+              // project job remains completed. Same-ID redelivery must wake
+              // projection again; a running owner's fence stays intact and
+              // completeJob observes rerun_required after its current pass.
               await client.query(`
                 INSERT INTO memory_jobs (job_id, installation_id, job_type, idempotency_key, priority, payload)
                 VALUES (gen_random_uuid(), $1, 'project_feed', $2, 50, '{}'::jsonb)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
+                  state = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN 'pending' ELSE memory_jobs.state END,
+                  available_at = NOW(),
+                  attempts = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN 0 ELSE memory_jobs.attempts END,
+                  claimed_by = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL ELSE memory_jobs.claimed_by END,
+                  claim_expires_at = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL ELSE memory_jobs.claim_expires_at END,
+                  completed_at = CASE WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL ELSE memory_jobs.completed_at END,
+                  last_error_code = CASE WHEN memory_jobs.state = 'running' THEN 'rerun_required' ELSE NULL END
               `, [input.installationId, `project:${input.installationId}:${maxFeedId}`])
             }
             await client.query(`

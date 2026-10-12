@@ -2,15 +2,19 @@ import type pg from 'pg'
 import type { JobFence } from '../jobs/types.js'
 import { assertJobFence } from '../generation/fence.js'
 import { createHash } from 'crypto'
+import {claimDuplicateDigestV2,claimIdentityV2,ClaimIdentityUnavailableError} from '../claims/identity.js'
+import {resolveClaimApplicability} from '../claims/identity-writer.js'
+import type {ClaimApplicability} from '../governance/revision-bundle.js'
+import type {ScopeKind} from '../claims/types.js'
 
 /** Pre-policy default hash, identical to the v13/v14 migration constant. */
 const DEFAULT_POLICY_HASH = createHash('md5').update('phase1:no-policy').digest()
 
 /**
  * Persistence for candidate extraction runs. The run uniqueness key is
- * reserved BEFORE the model call so a redelivered or concurrent job can never
- * double-bill the provider; failed runs are retired so bounded job retries
- * may start a fresh attempt.
+ * reserved BEFORE the model call so concurrent owners cannot dispatch the
+ * same local attempt. Failed runs are retired for bounded retries, which may
+ * call the remote provider again: this is not provider exactly-once billing.
  */
 
 export type ExtractionRunState = 'running' | 'succeeded' | 'failed' | 'quarantined'
@@ -21,6 +25,8 @@ export interface ReservedRun {
   owner: boolean
   existingState: ExtractionRunState | null
   limitReached?: boolean
+  sourceUnavailable?: boolean
+  sourceWaiting?: boolean
 }
 
 export interface EpisodeForExtraction {
@@ -50,6 +56,7 @@ export interface CandidateRow {
   repositoryId: string | null
   repoSnapshotId: string | null
   branch: string | null
+  applicability?: ClaimApplicability
   evidenceHandles: readonly string[]
   confidence: string
   freshnessAt: Date
@@ -60,7 +67,7 @@ export interface CandidateRow {
   duplicateOfClaimId: string | null
 }
 
-export function createExtractionRepository(pool: pg.Pool) {
+export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:'owner'|'reuse'|'invalidated')=>void) {
   return {
     async loadEpisodeForExtraction(
       installationId: string,
@@ -138,36 +145,66 @@ export function createExtractionRepository(pool: pg.Pool) {
       /** Effective extraction policy hash (v14 uniqueness key member). */
       effectivePolicyHash?: Buffer
       maxRunsPerEpisode?: number
+      fence?: JobFence
+      expectedConsentFingerprint?: string
     }): Promise<ReservedRun> {
       const effectivePolicyHashValue = input.effectivePolicyHash ?? DEFAULT_POLICY_HASH
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
         try {
+          const source=(await client.query<{session_id:string}>('SELECT session_id FROM work_episodes WHERE installation_id=$1 AND episode_id=$2',[input.installationId,input.episodeId])).rows[0]
+          if(source)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0)),
+            pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`,[input.installationId,source.session_id])
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
             `extraction-run:${input.installationId}:${input.episodeId}`,
           ])
+          if(input.fence)await assertJobFence(client,input.fence)
+          const current=await client.query(`SELECT 1 FROM work_episodes e
+            JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
+            JOIN memory_feature_settings f ON f.installation_id=e.installation_id
+            JOIN memory_installations i ON i.installation_id=e.installation_id
+            WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3
+              AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL
+              AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id) AND f.extraction_mode IN('shadow','enabled')
+              AND i.relay_status='active' AND i.local_status='ready'
+              AND ($4::text IS NULL OR f.extraction_consent_fingerprint=$4)
+            FOR SHARE OF e,s,f,i`,[input.installationId,input.episodeId,input.sourceDigest,input.expectedConsentFingerprint??null])
+          if(!current.rowCount){
+            const waiting=await client.query(`SELECT 1 FROM work_episodes e
+              JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
+              JOIN memory_feature_settings f ON f.installation_id=e.installation_id
+              JOIN memory_installations i ON i.installation_id=e.installation_id
+              WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL
+                AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
+                AND f.extraction_mode IN('shadow','enabled') AND i.relay_status IN('pending','paused','active')
+                AND i.local_status NOT IN('purging','purged','integrity_error')`,[input.installationId,input.episodeId,input.sourceDigest])
+            await client.query('COMMIT')
+            observeWork?.('invalidated')
+            return {runId:'',owner:false,existingState:null,...(waiting.rowCount?{sourceWaiting:true}:{sourceUnavailable:true})}
+          }
           await client.query(`
             DELETE FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-              AND effective_policy_hash = $6
+              AND effective_policy_hash = $6 AND prompt_version=$8
               AND (state = 'failed'
                 OR (state = 'running'
                   AND started_at < NOW() - ($7 * INTERVAL '1 millisecond')))
           `, [input.installationId, input.episodeId, input.sourceDigest,
             input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,
-            Math.max(60_000, input.staleAfterMs)])
+            Math.max(60_000, input.staleAfterMs),input.promptVersion])
           const existing = await client.query<{ run_id: string; state: ExtractionRunState }>(`
             SELECT run_id::text, state FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-              AND effective_policy_hash = $6
+              AND effective_policy_hash = $6 AND prompt_version=$7
           `, [input.installationId, input.episodeId, input.sourceDigest,
-            input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue])
+            input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,input.promptVersion])
           if (existing.rows[0]) {
+            observeWork?.('reuse')
             await client.query('COMMIT')
             return { runId: existing.rows[0].run_id, owner: false,
               existingState: existing.rows[0].state }
@@ -200,6 +237,7 @@ export function createExtractionRepository(pool: pg.Pool) {
             effectivePolicyHashValue,
           ])
           if (inserted.rows[0]) {
+            observeWork?.('owner')
             await client.query('COMMIT')
             return { runId: inserted.rows[0].run_id, owner: true, existingState: null }
           }
@@ -208,10 +246,11 @@ export function createExtractionRepository(pool: pg.Pool) {
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-              AND effective_policy_hash = $6
-          `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue])
+              AND effective_policy_hash = $6 AND prompt_version=$7
+          `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,input.promptVersion])
           await client.query('COMMIT')
           const row = conflicted.rows[0]
+          if(row)observeWork?.('reuse')
           return {
             runId: row?.run_id ?? '',
             owner: false,
@@ -224,6 +263,37 @@ export function createExtractionRepository(pool: pg.Pool) {
       } finally {
         client.release()
       }
+    },
+
+    /** Only positive, retained budget-failure evidence can enqueue recovery.
+     * Absence of a run after the legacy discard is not proof of lost work. */
+    async recoverBudgetWaits(input:{consentFingerprint:string;limit?:number}):Promise<number> {
+      const limit=input.limit??50
+      if(!Number.isInteger(limit)||limit<1||limit>100)throw new Error('invalid_recovery_limit')
+      const result=await pool.query(`WITH missing AS (
+        SELECT DISTINCT ON(e.installation_id,e.episode_id) e.installation_id,e.turn_id,e.source_digest,r.run_id
+        FROM memory_extraction_runs r JOIN work_episodes e ON e.installation_id=r.installation_id AND e.episode_id=r.episode_id
+        JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
+        JOIN memory_feature_settings f ON f.installation_id=e.installation_id
+        JOIN memory_installations i ON i.installation_id=e.installation_id
+        WHERE r.state='failed' AND r.error_code IN('budget_exceeded','budget_unavailable')
+          AND r.episode_source_digest=e.source_digest AND e.compiled_at IS NOT NULL
+          AND f.extraction_mode IN('shadow','enabled') AND f.extraction_consent_fingerprint=$1
+          AND i.local_status='ready' AND i.relay_status='active'
+          AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs done WHERE done.installation_id=e.installation_id
+            AND done.episode_id=e.episode_id AND done.episode_source_digest=e.source_digest AND done.state IN('succeeded','quarantined'))
+          AND NOT EXISTS(SELECT 1 FROM memory_jobs j WHERE j.installation_id=e.installation_id
+            AND j.job_type='extract_candidates' AND j.payload->>'turn_id'=e.turn_id AND j.state IN('pending','running'))
+          AND NOT EXISTS(SELECT 1 FROM memory_jobs j WHERE j.installation_id=e.installation_id
+            AND j.job_type='extract_candidates' AND j.idempotency_key='budget-recovery:'||r.run_id::text)
+        ORDER BY e.installation_id,e.episode_id,r.started_at DESC LIMIT $2
+      ), inserted AS (INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
+      SELECT gen_random_uuid(),installation_id,'extract_candidates','budget-recovery:'||run_id::text,85,
+        jsonb_build_object('turn_id',turn_id,'recovery_run_id',run_id::text,'expected_source_digest',encode(source_digest,'hex'))
+      FROM missing ON CONFLICT DO NOTHING RETURNING payload->>'recovery_run_id' AS run_id)
+      UPDATE memory_extraction_runs r SET error_code='budget_recovery_queued:'||r.error_code
+      FROM inserted WHERE r.run_id::text=inserted.run_id`,[input.consentFingerprint,limit])
+      return result.rowCount??0
     },
 
     async markRun(input: {
@@ -346,12 +416,27 @@ export function createExtractionRepository(pool: pg.Pool) {
           for (const candidate of input.candidates) {
             let status = candidate.status
             let validation = candidate.validation
+            const applicability=await resolveClaimApplicability(client,{installationId:input.installationId,
+              scopeKind:candidate.scopeKind as ScopeKind,scopeKey:candidate.scopeKey,repositoryId:candidate.repositoryId,
+              snapshotId:candidate.repoSnapshotId,branch:candidate.branch,applicability:candidate.applicability})
+            const identity={...applicability,claimType:candidate.claimType,statement:candidate.statement,
+              structuredContent:candidate.structuredContent,validFrom:candidate.validFrom,validUntil:candidate.validUntil}
+            let digest:string|null=null
+            if(applicability.status==='verified')try{digest=claimDuplicateDigestV2(identity)}catch(error){
+              if(!(error instanceof ClaimIdentityUnavailableError))throw error
+              applicability.status='requires_review'
+            }
+            validation={...validation,applicability,
+              ...(digest?{normalized_key_v2:claimIdentityV2(identity).key,duplicate_digest_v2:digest}:{})}
             if (!revision.rows[0].current) {
               status = 'rejected_by_validator'
               validation = { ...validation, codes: ['obsolete_source_digest'] }
+            } else if (applicability.status!=='verified'&&(status==='validated'||status==='conflict'||status==='duplicate')) {
+              status='rejected_by_validator'
+              validation={...validation,codes:['identity_requires_review']}
             } else if (status === 'validated' || status === 'conflict') {
-              const pending = await client.query<{ candidate_id: string }>(`
-                SELECT c.candidate_id::text FROM memory_candidates c
+              const pending = await client.query<{ candidate_id:string;statement:string;validation:Record<string,unknown> }>(`
+                SELECT c.candidate_id::text,c.statement,c.validation FROM memory_candidates c
                 JOIN memory_extraction_runs r ON r.run_id = c.run_id AND r.installation_id = c.installation_id
                 JOIN work_episodes e ON e.episode_id = c.episode_id AND e.installation_id = c.installation_id
                 WHERE c.installation_id = $1 AND c.normalized_key = $2 AND c.scope_kind = $3
@@ -364,13 +449,27 @@ export function createExtractionRepository(pool: pg.Pool) {
                   AND c.status IN ('validated', 'conflict')
                   AND r.episode_source_digest = e.source_digest
                   AND NOT (c.run_id = $10 AND c.ordinal = $11)
-                ORDER BY c.created_at, c.candidate_id LIMIT 1
+                  AND c.claim_type = $12 AND c.scope_key = $13
+                ORDER BY c.created_at, c.candidate_id
               `, [input.installationId, candidate.normalizedKey, candidate.scopeKind,
                 JSON.stringify(candidate.structuredContent), candidate.repositoryId, candidate.repoSnapshotId,
-                candidate.branch, candidate.validFrom, candidate.validUntil, input.runId, candidate.ordinal])
-              if (pending.rows[0]) {
+                candidate.branch, candidate.validFrom, candidate.validUntil, input.runId, candidate.ordinal,
+                candidate.claimType,candidate.scopeKey])
+              // Legacy aliases collapse quoted/layout whitespace. Only a complete
+              // verified frame and unchanged structured/time facts establish a duplicate.
+              let duplicateCandidateId:string|null=null
+              for(const previous of pending.rows){
+                const previousApplicability=await resolveClaimApplicability(client,{installationId:input.installationId,
+                  scopeKind:candidate.scopeKind as ScopeKind,scopeKey:candidate.scopeKey,repositoryId:candidate.repositoryId,
+                  snapshotId:candidate.repoSnapshotId,branch:candidate.branch,applicability:previous.validation?.applicability})
+                if(previousApplicability.status!=='verified')continue
+                if(claimDuplicateDigestV2({...identity,...previousApplicability,statement:previous.statement})===digest){
+                  duplicateCandidateId=previous.candidate_id;break
+                }
+              }
+              if (duplicateCandidateId) {
                 status = 'duplicate'
-                validation = { ...validation, codes: ['duplicate_pending_candidate'], duplicate_of_candidate_id: pending.rows[0].candidate_id }
+                validation = { ...validation, codes: ['duplicate_pending_candidate'], duplicate_of_candidate_id: duplicateCandidateId }
               }
             }
             await client.query(`

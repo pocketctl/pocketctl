@@ -61,7 +61,7 @@ export function evaluateQuorum(input: {
   decisions: QuorumDecisionInput[]
   policy: ReviewPolicyDocument
   proposerMembershipId: string | null
-  publisherMembershipId: string
+  publisherMembershipId: string | null
 }): QuorumEvaluation {
   const { decisions, policy } = input
 
@@ -72,7 +72,13 @@ export function evaluateQuorum(input: {
     return { ok: false, reason: 'pending_change_request', countedDecisionMemberships: [] }
   }
 
-  const approvals = decisions.filter(decision => decision.decision === 'approve')
+  // Quorum counts distinct people, and only the actual publishing actor is
+  // excluded by this policy (not every member with a publisher role).
+  const approvals = [...new Map(decisions
+    .filter(decision => decision.decision === 'approve'
+      && (policy.publisher_may_count_as_reviewer
+        || decision.membershipId !== input.publisherMembershipId))
+    .map(decision => [decision.membershipId, decision])).values()]
   const counted = approvals.map(approval => approval.membershipId)
 
   if (policy.require_independent_reviewer) {

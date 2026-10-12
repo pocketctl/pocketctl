@@ -59,6 +59,18 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
     try {
       await client.query('BEGIN')
       try {
+        // Inbox rows must not be owned while waiting on a lifecycle fence:
+        // installation purge deletes them under that same fence. Discover all
+        // natural/adapted sessions first, lock the union in stable order, then
+        // claim and recheck the batch without taking a new session lock late.
+        const observed=await client.query<InboxRow>(`
+          SELECT feed_id::text,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,classification,data
+          FROM memory_feed_inbox WHERE installation_id=$1 AND projection_state='pending'
+          ORDER BY feed_id LIMIT $2`,[installationId,batchSize])
+        const rowSession=(row:InboxRow)=>adaptTeamSource(row)?.sessionId??row.session_id
+        const sessions=[...new Set(observed.rows.flatMap(row=>{const session=rowSession(row);return session?[session]:[]}))].sort()
+        for(const session of sessions)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,session])
+        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
         const claimed = await client.query<InboxRow>(`
           SELECT feed_id::text, topic, source_kind, source_id, session_id, turn_id, event_type, recorded_at,
                  classification, data
@@ -68,6 +80,9 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
           LIMIT $2
           FOR UPDATE SKIP LOCKED
         `, [installationId, batchSize])
+        if(claimed.rows.some(row=>{const session=rowSession(row);return session&&!sessions.includes(session)})) {
+          throw new Error('projection_source_changed')
+        }
 
         let projected = 0
         let invalidated = 0
@@ -151,8 +166,12 @@ async function projectRow(
       [installationId, sourceRow.session_id],
     )
     if (tombstone.rowCount) {
+      // Late Feed delivery may durably reintroduce the original body after
+      // purgeSession removed existing inbox rows. Keep the opaque replay hash
+      // for ACK retries, but clear content in the same projection transaction.
       await client.query(
-        `UPDATE memory_feed_inbox SET projection_state = 'purged', projected_at = NOW()
+        `UPDATE memory_feed_inbox SET projection_state = 'purged', projected_at = NOW(),
+           data = '{}'::jsonb, classification = '{}'::jsonb
          WHERE installation_id = $1 AND feed_id = $2`,
         [installationId, row.feed_id],
       )

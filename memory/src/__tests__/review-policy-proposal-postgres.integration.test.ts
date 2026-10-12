@@ -5,6 +5,7 @@ import { applyMemorySchema } from '../schema.js'
 import { createPromotionService } from '../governance/promotion-service.js'
 import { createPublicationService } from '../governance/publication-service.js'
 import type { ValidatedV2Grant } from '../governance/authorization.js'
+import {confirmRepositoryApplicabilityFixture} from '../testing/governance-applicability-fixture.js'
 import {
   DEFAULT_ORGANIZATION_REVIEW_POLICY,
   createReviewPolicyRepository,
@@ -115,6 +116,7 @@ describeWithDatabase('Team review policy with an optional parent Memory installa
       }
     }
     async function propose() {
+      await confirmRepositoryApplicabilityFixture(pool,personal,sourceClaim,[team])
       return promotion.propose({
         grant: grant(proposer, ['read', 'contribute']),
         sourceInstallationId: personal, sourceClaimId: sourceClaim,

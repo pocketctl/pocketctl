@@ -1,0 +1,309 @@
+{
+  "schema_version": 2,
+  "dataset_version": "governance-golden-v1",
+  "evaluator_version": "memory-governance-eval-v2",
+  "created_at": "2026-10-01T00:00:00Z",
+  "split_windows": {
+    "suggestions_end": "2026-08-01T00:00:00Z",
+    "calibration_end": "2026-09-01T00:00:00Z"
+  },
+  "cases": [
+    {
+      "id": "fixture_alpha",
+      "schema_version": 2,
+      "query": "fixture_alpha",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000001"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000001"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000001"
+        ]
+      },
+      "split": "suggestions",
+      "lineage": {
+        "source_task_id": "synthetic-task-1",
+        "repository_group": "synthetic-repo-1",
+        "source_digest": "025defc370f18eddedddb6e6c9dec1b10c6251cba9a80a52e03bbf7eb87fc797",
+        "observed_at": "2026-07-01T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_beta",
+      "schema_version": 2,
+      "query": "fixture_beta",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000002"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000002"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000002"
+        ]
+      },
+      "split": "suggestions",
+      "lineage": {
+        "source_task_id": "synthetic-task-2",
+        "repository_group": "synthetic-repo-2",
+        "source_digest": "e316da1aea9b081389ffa8674f00109f0f6111f2f8bdc26609dd10a9ef025ba2",
+        "observed_at": "2026-07-01T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_gamma",
+      "schema_version": 2,
+      "query": "fixture_gamma",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000003"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000003"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000003"
+        ]
+      },
+      "split": "calibration",
+      "lineage": {
+        "source_task_id": "synthetic-task-3",
+        "repository_group": "synthetic-repo-3",
+        "source_digest": "6c58500683a270dc819585101fd0030b7ef5ab446941e85d10a6218096cef254",
+        "observed_at": "2026-08-15T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_delta",
+      "schema_version": 2,
+      "query": "fixture_delta",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000004"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000004"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000004"
+        ]
+      },
+      "split": "calibration",
+      "lineage": {
+        "source_task_id": "synthetic-task-4",
+        "repository_group": "synthetic-repo-4",
+        "source_digest": "d43b64f54cabf17cf52b794367bdbb98de72f28d668b2453e0e3b8bdfa2657a1",
+        "observed_at": "2026-08-15T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_epsilon",
+      "schema_version": 2,
+      "query": "fixture_epsilon",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000005"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000005"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000005"
+        ]
+      },
+      "split": "holdout",
+      "lineage": {
+        "source_task_id": "synthetic-task-5",
+        "repository_group": "synthetic-repo-5",
+        "source_digest": "9f59b9e7c4fe4d49aab16046e8e56358ba0486eb4cd6b7c226c7f7b804dddea3",
+        "observed_at": "2026-09-10T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_zeta",
+      "schema_version": 2,
+      "query": "fixture_zeta",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000006"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000006"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000006"
+        ]
+      },
+      "split": "holdout",
+      "lineage": {
+        "source_task_id": "synthetic-task-6",
+        "repository_group": "synthetic-repo-6",
+        "source_digest": "63b33a1dc449a2f09f5f5940ce7f911b8a4da30512bf0adae02960cc79df19b3",
+        "observed_at": "2026-09-10T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_eta",
+      "schema_version": 2,
+      "query": "fixture_eta",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000007"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000007"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000007"
+        ]
+      },
+      "split": "holdout",
+      "lineage": {
+        "source_task_id": "synthetic-task-7",
+        "repository_group": "synthetic-repo-7",
+        "source_digest": "b56946e507c37c0ed40be1262c0b034a88ccb27597575de792974801849cdca1",
+        "observed_at": "2026-09-10T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_theta",
+      "schema_version": 2,
+      "query": "fixture_theta",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000008"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000008"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000008"
+        ]
+      },
+      "split": "holdout",
+      "lineage": {
+        "source_task_id": "synthetic-task-8",
+        "repository_group": "synthetic-repo-8",
+        "source_digest": "628ee851d64ca9e89d92a1920dc409f6462f511273eef59df7f8499da04f5c87",
+        "observed_at": "2026-09-10T00:00:00Z"
+      },
+      "label": {
+        "provenance": "synthetic_curated",
+        "evidence_support": "supported"
+      }
+    },
+    {
+      "id": "fixture_ambiguous",
+      "schema_version": 2,
+      "query": "fixture_ambiguous",
+      "installation_id": "11111111-1111-4111-8111-111111111111",
+      "allowed": {
+        "repository_ids": [],
+        "repo_snapshot_ids": [],
+        "branches": []
+      },
+      "expected": {
+        "claim_ids": [
+          "20000000-0000-4000-8000-000000000009"
+        ],
+        "evidence_claim_ids": [
+          "20000000-0000-4000-8000-000000000009"
+        ],
+        "current_version_ids": [
+          "30000000-0000-4000-8000-000000000009"
+        ]
+      },
+      "split": "holdout",
+      "lineage": {
+        "source_task_id": "synthetic-task-9",
+        "repository_group": "synthetic-repo-9",
+        "source_digest": "1381041c5eb1f79e414d1ad628eece2b0af6f4a77b0d668f4eb2767f67806f53",
+        "observed_at": "2026-09-10T00:00:00Z"
+      },
+      "label": {
+        "provenance": "uncalibrated",
+        "evidence_support": "ambiguous"
+      }
+    }
+  ]
+}

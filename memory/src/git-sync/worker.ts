@@ -1,3 +1,5 @@
+import {releaseJobFence} from '../generation/fence.js'
+import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import type pg from 'pg'
 import type { V2GrantFacts } from '../governance/authorization.js'
 import type { JobFence } from '../jobs/types.js'
@@ -42,9 +44,11 @@ function stamp(r:Run):GitAuthorizationStamp {
     membershipRevision:r.membership_revision,authorizationEpoch:r.authorization_epoch,configVersion:r.config_version}
 }
 async function jobFence(client:pg.PoolClient,r:Run,fence:JobFence) {
-  const valid=await client.query(`SELECT 1 FROM memory_jobs WHERE installation_id=$1 AND job_id=$2 AND claimed_by=$3
-    AND claim_epoch=$4 AND state='running' AND claim_expires_at>clock_timestamp() FOR UPDATE`,[r.installation_id,fence.jobId,fence.claimedBy,fence.claimEpoch])
-  if(fence.jobId!==r.job_id||!valid.rowCount)throw new GitReadError('lease_lost')
+  if(fence.jobId!==r.job_id)throw new GitReadError('lease_lost')
+  try{await assertJobFence(client,fence)}catch(error){
+    if(error instanceof StaleJobFenceError)throw new GitReadError('lease_lost')
+    throw error
+  }
 }
 async function lockRun(client:pg.PoolClient,r:Run) {
   const value=(await client.query<Run>(`SELECT ${columns} FROM memory_git_runs WHERE installation_id=$1 AND run_id=$2 FOR UPDATE`,[r.installation_id,r.run_id])).rows[0]
@@ -139,6 +143,7 @@ export function createGitSyncWorker(deps:GitWorkerDeps) {
       await client.query(`UPDATE memory_git_run_receipts SET state=$2,failures=GREATEST(failures,$3),reason_code=$4,updated_at=NOW() WHERE installation_id=$5 AND run_id=$1`,
         [r.run_id,state==='received'?'received':state,failures,code,r.installation_id])
       await client.query(`UPDATE memory_git_inbox SET state=$2 WHERE installation_id=$3 AND run_id=$1`,[r.run_id,state==='received'?'received':state==='cancelled'?'invalidated':'dead',r.installation_id])
+      await releaseJobFence(client,fence,state==='received'?'pending':'dead')
       await client.query(`UPDATE memory_jobs SET state=$2,claim_expires_at=NULL,claimed_by=NULL,available_at=clock_timestamp()+($3*interval '1 millisecond'),last_error_code=$4
         WHERE job_id=$1`,[fence.jobId,state==='received'?'pending':'dead',delay,code])
       void c

@@ -3,6 +3,8 @@ export const TEAM_SOURCE_VERSION = 1 as const
 
 export interface TeamSourceProvenance {
   source_kind: 'team_session'
+  original_source_id: string
+  reader_projection_id: string
   source_version: typeof TEAM_SOURCE_VERSION
   team_id: string
   team_session_id: string
@@ -143,6 +145,8 @@ export function adaptTeamSource(input: TeamSourceAdapterInput): AdaptedTeamSourc
 
   const provenance: TeamSourceProvenance = {
     source_kind: 'team_session',
+    original_source_id: `team:${teamId}:${teamSessionId}:${teamCallId}`,
+    reader_projection_id: `${bindingId}:${bindingRevision}:${participantUserId}:${participantRevision}`,
     source_version: TEAM_SOURCE_VERSION,
     team_id: teamId,
     team_session_id: teamSessionId,

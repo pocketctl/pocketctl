@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import type { JobClaim, JobFence } from '../jobs/types.js'
-import { assertJobFence } from '../generation/fence.js'
+import { assertJobFence,StaleJobFenceError } from '../generation/fence.js'
 import type { V2GrantFacts } from '../governance/authorization.js'
 import { buildResolvedSkillArchive } from './archive.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
-import { resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillSourceRequest } from './source-resolver.js'
+import { assertCurrentSkillSourceClock, resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillSourceRequest, type ResolvedSkillInput } from './source-resolver.js'
+import { assertCurrentGrantClock, TargetBindingError } from '../governance/authorization.js'
 import type { SkillGenerator } from './generator.js'
 interface LockedRun {
   run_id: string
@@ -25,13 +26,26 @@ interface LockedRun {
   current_generation: string
   generation_run_id: string | null
 }
+/** Generation persists reviewable candidates only; it never publishes or authorizes tools. */
 export function createSkillWorker(deps: {
   pool: pg.Pool
   context: SkillSourceContext
   generator?: SkillGenerator
 }) {
+  async function assertPositiveSourceClock(client:pg.PoolClient,grant:V2GrantFacts,source:ResolvedSkillInput) {
+    try { await assertCurrentGrantClock(client,grant,[source.installationId]) }
+    catch(error) { if(error instanceof TargetBindingError)throw new SkillWorkError('skill_forbidden'); throw error }
+    await assertCurrentSkillSourceClock(client,source)
+  }
   async function assertSkillFence(client: pg.PoolClient, fence: JobFence) {
-    await assertJobFence(client, fence)
+    try{await assertJobFence(client,fence)}catch(error){
+      if(error instanceof StaleJobFenceError){
+        const expired=await client.query(`SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2
+          AND claim_epoch=$3 AND state='running' AND claim_expires_at<=clock_timestamp()`,[fence.jobId,fence.claimedBy,fence.claimEpoch])
+        if(expired.rowCount)throw new SkillWorkError('skill_lease_expired','lost_lease')
+      }
+      throw error
+    }
     const live = await client.query(`SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claim_expires_at>clock_timestamp()`, [fence.jobId])
     if (!live.rowCount)
       throw new SkillWorkError('skill_lease_expired', 'lost_lease')
@@ -61,6 +75,10 @@ export function createSkillWorker(deps: {
     const client = await deps.pool.connect()
     try {
       await client.query('BEGIN')
+      // Restrictive cleanup needs no source/actor eligibility, but installation
+      // purge deletes Jobs before cascading task/run rows. Join its lifecycle
+      // fence before task -> Job locks so neither side can hold the other's row.
+      await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`,[claim.installation_id])
       const run = await load(client, claim)
       await assertSkillFence(client, fence)
       await client.query(`UPDATE memory_skill_task_runs SET state=$4,error_code=$5,completed_at=NOW()
@@ -132,6 +150,7 @@ export function createSkillWorker(deps: {
       await start.query(`UPDATE memory_skill_task_runs SET state='running',generation_run_id=$4,error_code=NULL
         WHERE installation_id=$1 AND task_id=$2 AND generation=$3`, [claim.installation_id, run.task_id, Number(run.generation), generationRunId])
       await start.query(`UPDATE memory_skill_tasks SET state='running',updated_at=NOW() WHERE installation_id=$1 AND task_id=$2`, [claim.installation_id, run.task_id])
+      await assertPositiveSourceClock(start,run.grant_snapshot,source)
       await start.query('COMMIT')
     }
     catch (e) {
@@ -165,6 +184,7 @@ export function createSkillWorker(deps: {
         if (generated.retryable) {
           await finish.query(`UPDATE memory_skill_task_runs SET state='pending',error_code=$4,generation_run_id=NULL
           WHERE installation_id=$1 AND task_id=$2 AND generation=$3`, [claim.installation_id, run.task_id, Number(run.generation), generated.code])
+          await assertPositiveSourceClock(finish,run.grant_snapshot,fresh)
           await finish.query('COMMIT')
           throw new SkillWorkError(generated.code, 'transient')
         }
@@ -208,6 +228,7 @@ export function createSkillWorker(deps: {
         throw new SkillWorkError('skill_aborted', 'lost_lease')
       await assertSkillFence(finish, ctx.fence)
       await finish.query(`UPDATE memory_jobs SET state='completed',completed_at=NOW(),claim_expires_at=NULL,last_error_code=NULL WHERE job_id=$1`, [claim.job_id])
+      await assertPositiveSourceClock(finish,run.grant_snapshot,fresh)
       await finish.query('COMMIT')
     }
     catch (e) {

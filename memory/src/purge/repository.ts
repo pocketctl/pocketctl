@@ -1,7 +1,16 @@
+import {rollupFeedbackBeforeInstallationPurge,minimizeSessionFeedback} from '../claims/feedback-policy.js'
+import {cleanupRevokedSharedClaims} from '../governance/retention-service.js'
 import { createHash, createHmac } from 'crypto'
 import type pg from 'pg'
+import {ZodError} from 'zod'
+import {assertSourceGrantClock,requireSourceAuthority,lockSourceInstallation,lockSourceRepository,lockSourceSnapshotId,SourceLifecycleFenceError,type SourceMutationGrant} from '../codegraph/lifecycle.js'
 import type { TombstoneHmacKey } from '../config.js'
-import { insertKnowledgeTombstones } from '../claims/tombstones.js'
+import {claimIdentityV2,ClaimIdentityUnavailableError} from '../claims/identity.js'
+import {assertClaimIdentityAvailable,projectClaimIdentity,resolveClaimApplicability,ClaimIdentityWriteError,type ClaimIdentityProjection} from '../claims/identity-writer.js'
+import {captureSourceApplicability} from '../governance/applicability.js'
+import type {ClaimApplicability} from '../governance/revision-bundle.js'
+import type {ScopeKind} from '../claims/types.js'
+import { findTombstonedNormalizedKeys, insertKnowledgeTombstones } from '../claims/tombstones.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 
 type QueryClient = Pick<pg.PoolClient, 'query'>
@@ -33,14 +42,18 @@ export function createPurgeRepository(
     : [{ version: 'legacy', key: options.hmacKey }]
   const codeSnapshotRetentionDays = options.codeSnapshotRetentionDays ?? 30
   return {
+    cleanupRevokedSharedClaims:(input:{limit:number})=>cleanupRevokedSharedClaims(pool,input),
     async purgeRepository(input: {
       installationId: string
       repositoryId: string
       reasonCode: string
+      grant?: SourceMutationGrant
     }): Promise<{ purged: boolean }> {
       const client = await pool.connect()
       try {
-        await client.query('BEGIN')
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        if(input.grant)await requireSourceAuthority(client,input,'publish')
+        else await lockSourceInstallation(client,input.installationId)
         await client.query(`
           SELECT pg_advisory_xact_lock(hashtextextended('purge:repository:' || $1 || ':' || $2, 0))
         `, [input.installationId, input.repositoryId])
@@ -49,6 +62,7 @@ export function createPurgeRepository(
           WHERE installation_id = $1 AND repository_id = $2
         `, [input.installationId, input.repositoryId])
         if (already.rows[0]) {
+          await assertSourceGrantClock(client,input)
           await client.query('COMMIT')
           return { purged: false }
         }
@@ -57,6 +71,7 @@ export function createPurgeRepository(
           WHERE installation_id = $1 AND repository_id = $2 FOR UPDATE
         `, [input.installationId, input.repositoryId])
         if (!repository.rows[0]) {
+          await assertSourceGrantClock(client,input)
           await client.query('COMMIT')
           return { purged: false }
         }
@@ -106,17 +121,12 @@ export function createPurgeRepository(
           DELETE FROM memory_source_snapshots
           WHERE installation_id = $1 AND repository_id = $2
         `, [input.installationId, input.repositoryId])
-        await client.query(`
-          DELETE FROM memory_source_blobs b
-          WHERE b.installation_id = $1 AND NOT EXISTS (
-            SELECT 1 FROM memory_source_snapshot_entries e
-            WHERE e.installation_id = b.installation_id AND e.blob_hash = b.blob_hash
-          )
-        `, [input.installationId])
+        await deleteOrphanSourceBlobs(client,[input.installationId])
         await client.query(`
           UPDATE repositories SET canonical_remote = NULL, last_observed_at = NOW()
           WHERE installation_id = $1 AND repository_id = $2
         `, [input.installationId, input.repositoryId])
+        await assertSourceGrantClock(client,input)
         await client.query('COMMIT')
         return { purged: true }
       } catch (error) {
@@ -134,7 +144,8 @@ export function createPurgeRepository(
     }): Promise<{ purged: boolean }> {
       const client = await pool.connect()
       try {
-        await client.query('BEGIN')
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await lockSourceInstallation(client,input.installationId)
         // Skill sources use the repository fence for their exact commit snapshot.
         // Acquire it before the snapshot row so purge and Skill completion share one order.
         const observed = await client.query<{ repository_id: string }>(`SELECT repository_id FROM memory_source_snapshots WHERE installation_id=$1 AND snapshot_id=$2`, [input.installationId,input.snapshotId])
@@ -162,6 +173,7 @@ export function createPurgeRepository(
           await client.query('COMMIT')
           return { purged: false }
         }
+        if(row.repository_id!==observed.rows[0]?.repository_id)throw new SourceLifecycleFenceError('source_changed')
         await client.query(`
           INSERT INTO memory_source_snapshot_tombstones
             (installation_id, snapshot_id, repository_id, commit_sha, reason_code)
@@ -189,13 +201,7 @@ export function createPurgeRepository(
           DELETE FROM memory_source_snapshots
           WHERE installation_id = $1 AND snapshot_id = $2
         `, [input.installationId, input.snapshotId])
-        await client.query(`
-          DELETE FROM memory_source_blobs b
-          WHERE b.installation_id = $1 AND NOT EXISTS (
-            SELECT 1 FROM memory_source_snapshot_entries e
-            WHERE e.installation_id = b.installation_id AND e.blob_hash = b.blob_hash
-          )
-        `, [input.installationId])
+        await deleteOrphanSourceBlobs(client,[input.installationId])
         await client.query('COMMIT')
         return { purged: true }
       } catch (error) {
@@ -206,59 +212,48 @@ export function createPurgeRepository(
       }
     },
 
-    async cleanupSupersededSnapshots(input: {
-      limit: number
-      now?: Date
-    }): Promise<{ snapshots: number; blobs: number }> {
-      const limit = Math.max(1, Math.min(1_000, Math.floor(input.limit)))
-      const client = await pool.connect()
-      try {
-        await client.query('BEGIN')
-        const deleted = await client.query<{ snapshot_id: string }>(`
-          WITH eligible AS (
-            SELECT s.snapshot_id
-            FROM memory_source_snapshots s
-            WHERE s.state = 'superseded'
-              AND s.created_at < COALESCE($1::timestamptz, NOW()) - ($3 * INTERVAL '1 day')
-              AND NOT EXISTS (
-                SELECT 1 FROM memory_code_graph_versions g
-                WHERE g.installation_id = s.installation_id AND g.snapshot_id = s.snapshot_id
-                  AND g.state IN ('candidate','active')
-              )
-              AND NOT EXISTS (
-                SELECT 1 FROM memory_wiki_versions v
-                WHERE v.installation_id = s.installation_id
-                  AND v.source_snapshot_id = s.snapshot_id AND v.state <> 'purged'
-              )
-              AND NOT EXISTS (
-                SELECT 1 FROM memory_wiki_build_runs r
-                WHERE r.installation_id = s.installation_id
-                  AND r.source_snapshot_id = s.snapshot_id
-                  AND r.state IN ('queued','running','validating','candidate','published')
-              )
-            ORDER BY s.created_at, s.snapshot_id
-            FOR UPDATE OF s SKIP LOCKED
-            LIMIT $2
-          )
-          DELETE FROM memory_source_snapshots s USING eligible e
-          WHERE s.snapshot_id = e.snapshot_id
-          RETURNING s.snapshot_id::text
-        `, [input.now ?? null, limit, codeSnapshotRetentionDays])
-        const orphaned = await client.query(`
-          DELETE FROM memory_source_blobs b
-          WHERE NOT EXISTS (
-            SELECT 1 FROM memory_source_snapshot_entries e
-            WHERE e.installation_id = b.installation_id AND e.blob_hash = b.blob_hash
-          )
-        `)
+    async cleanupSupersededSnapshots(input:{limit:number;now?:Date}):Promise<{snapshots:number;blobs:number}>{
+      const limit=Math.max(1,Math.min(1_000,Math.floor(input.limit)))
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        // Discovery does not authorize deletion. All scopes precede repository and snapshot fences.
+        const observed=await client.query<{installation_id:string;repository_id:string;snapshot_id:string}>(`
+          SELECT s.installation_id,s.repository_id,s.snapshot_id FROM memory_source_snapshots s
+          WHERE s.state='superseded' AND s.created_at<COALESCE($1::timestamptz,NOW())-($3*INTERVAL '1 day')
+            AND NOT EXISTS(SELECT 1 FROM memory_code_graph_versions g WHERE g.installation_id=s.installation_id AND g.snapshot_id=s.snapshot_id AND g.state IN ('candidate','active'))
+            AND NOT EXISTS(SELECT 1 FROM memory_wiki_versions v WHERE v.installation_id=s.installation_id AND v.source_snapshot_id=s.snapshot_id AND v.state<>'purged')
+            AND NOT EXISTS(SELECT 1 FROM memory_wiki_build_runs r WHERE r.installation_id=s.installation_id AND r.source_snapshot_id=s.snapshot_id AND r.state IN ('queued','running','validating','candidate','published'))
+          ORDER BY s.created_at,s.snapshot_id LIMIT $2
+        `,[input.now??null,limit,codeSnapshotRetentionDays])
+        const blobScopes=await client.query<{installation_id:string}>('SELECT DISTINCT installation_id FROM memory_source_blobs ORDER BY installation_id')
+        const installations=[...new Set([...observed.rows.map(row=>row.installation_id),...blobScopes.rows.map(row=>row.installation_id)])].sort()
+        for(const id of installations)await lockSourceInstallation(client,id)
+        const repositories=[...new Map(observed.rows.map(row=>[`${row.installation_id}:${row.repository_id}`,row])).values()].sort((a,b)=>`${a.installation_id}:${a.repository_id}`.localeCompare(`${b.installation_id}:${b.repository_id}`))
+        for(const row of repositories)await lockSourceRepository(client,row.installation_id,row.repository_id,true)
+        const snapshots=[...observed.rows].sort((a,b)=>`${a.installation_id}:${a.snapshot_id}`.localeCompare(`${b.installation_id}:${b.snapshot_id}`))
+        for(const row of snapshots)await lockSourceSnapshotId(client,row.installation_id,row.snapshot_id)
+        const ids=snapshots.map(row=>row.snapshot_id)
+        // Lock rows in one command; recheck all pins in a fresh READ COMMITTED command.
+        const locked=await client.query<{installation_id:string;repository_id:string;snapshot_id:string}>('SELECT installation_id,repository_id,snapshot_id FROM memory_source_snapshots WHERE snapshot_id=ANY($1::uuid[]) ORDER BY installation_id,snapshot_id FOR UPDATE',[ids])
+        const expected=new Map(snapshots.map(row=>[row.snapshot_id,row]))
+        for(const row of locked.rows){
+          const source=expected.get(row.snapshot_id)
+          if(row.installation_id!==source?.installation_id||row.repository_id!==source?.repository_id)throw new SourceLifecycleFenceError('source_changed')
+        }
+        const deleted=await client.query(`
+          DELETE FROM memory_source_snapshots s WHERE s.snapshot_id=ANY($1::uuid[])
+            AND s.state='superseded' AND s.created_at<COALESCE($2::timestamptz,NOW())-($3*INTERVAL '1 day')
+            AND NOT EXISTS(SELECT 1 FROM memory_code_graph_versions g WHERE g.installation_id=s.installation_id AND g.snapshot_id=s.snapshot_id AND g.state IN ('candidate','active'))
+            AND NOT EXISTS(SELECT 1 FROM memory_wiki_versions v WHERE v.installation_id=s.installation_id AND v.source_snapshot_id=s.snapshot_id AND v.state<>'purged')
+            AND NOT EXISTS(SELECT 1 FROM memory_wiki_build_runs r WHERE r.installation_id=s.installation_id AND r.source_snapshot_id=s.snapshot_id AND r.state IN ('queued','running','validating','candidate','published'))
+          RETURNING s.snapshot_id
+        `,[ids,input.now??null,codeSnapshotRetentionDays])
+        const blobs=await deleteOrphanSourceBlobs(client,installations)
         await client.query('COMMIT')
-        return { snapshots: deleted.rowCount ?? 0, blobs: orphaned.rowCount ?? 0 }
-      } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined)
-        throw error
-      } finally {
-        client.release()
-      }
+        return {snapshots:deleted.rowCount??0,blobs}
+      }catch(error){await client.query('ROLLBACK');throw error}
+      finally{client.release()}
     },
 
     async purgeSession(input: SessionPurgeInput, transactionClient?: QueryClient): Promise<number> {
@@ -339,6 +334,25 @@ export function createPurgeRepository(
   }
 }
 
+/** Blob FK locks and deletes share a stable order. A fresh command after the
+ * locks sees uploads committed during a wait; a losing upload rolls back its
+ * receipt and retries admission, never leaving an entry pointing at missing bytes. */
+async function deleteOrphanSourceBlobs(client:pg.PoolClient,installationIds:readonly string[]):Promise<number>{
+  const candidates=await client.query<{installation_id:string;blob_hash:string}>(`
+    SELECT b.installation_id,b.blob_hash FROM memory_source_blobs b
+    WHERE b.installation_id=ANY($1::uuid[]) AND NOT EXISTS(
+      SELECT 1 FROM memory_source_snapshot_entries e WHERE e.installation_id=b.installation_id AND e.blob_hash=b.blob_hash)
+    ORDER BY b.installation_id,b.blob_hash
+  `,[installationIds])
+  for(const row of candidates.rows)await client.query('SELECT 1 FROM memory_source_blobs WHERE installation_id=$1 AND blob_hash=$2 FOR UPDATE',[row.installation_id,row.blob_hash])
+  const removed=await client.query(`
+    DELETE FROM memory_source_blobs b USING jsonb_to_recordset($1::jsonb) AS selected(installation_id UUID,blob_hash TEXT)
+    WHERE b.installation_id=selected.installation_id AND b.blob_hash=selected.blob_hash AND NOT EXISTS(
+      SELECT 1 FROM memory_source_snapshot_entries e WHERE e.installation_id=b.installation_id AND e.blob_hash=b.blob_hash)
+  `,[JSON.stringify(candidates.rows)])
+  return removed.rowCount??0
+}
+
 async function purgeSessionRows(
   client: QueryClient,
   input: SessionPurgeInput,
@@ -350,6 +364,10 @@ async function purgeSessionRows(
   await client.query(`
     SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0))
   `, [input.installationId, input.sessionId])
+  // Session invalidation writes the shared consumption generation and Git
+  // connection before deleting Claims. Serialize with all installation
+  // writers at the existing session -> installation boundary, before triggers.
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`, [input.installationId])
   await client.query(`
     INSERT INTO memory_session_tombstones
       (installation_id, session_id, reason, source_feed_id, purged_at)
@@ -357,6 +375,7 @@ async function purgeSessionRows(
     ON CONFLICT (installation_id, session_id) DO NOTHING
   `, [input.installationId, input.sessionId, input.reason, input.sourceFeedId])
 
+  await minimizeSessionFeedback(client,input.installationId,input.sessionId)
   // Phase 2 purge order: stop session-scoped context generation and remove
   // every pack whose turn or Evidence source belongs to the purged Session
   // before deleting the Evidence/Version joins that make that dependency
@@ -402,17 +421,20 @@ async function purgeSessionRows(
       JOIN work_episodes w
         ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
       WHERE c.installation_id = $1 AND w.session_id = $2
+      ORDER BY c.claim_id::text
   `, [input.installationId, input.sessionId])
   for (const claim of impacted.rows) {
-    const locked = await client.query<{ current_version_id: string | null }>(`
-      SELECT current_version_id::text FROM knowledge_claims
+    const locked = await client.query<{ current_version_id: string | null; scope_kind: ScopeKind;
+      canonical_repository_key: string | null; normalized_key_v2: string | null }>(`
+      SELECT current_version_id::text,scope_kind,canonical_repository_key,normalized_key_v2 FROM knowledge_claims
       WHERE installation_id = $1 AND claim_id = $2 FOR UPDATE
     `, [input.installationId, claim.claim_id])
     const currentVersionId = locked.rows[0]?.current_version_id ?? null
     const dependent = await client.query<{
-      version_id: string; statement: string; valid_from: Date | null; valid_until: Date | null
+      version_id: string; statement: string; valid_from: Date | null; valid_until: Date | null; branch: string | null; repo_snapshot_id: string | null;
+      repository_id:string|null;applicability:unknown
     }>(`
-      SELECT v.version_id::text, v.statement, v.valid_from, v.valid_until
+      SELECT v.version_id::text, v.statement, v.valid_from, v.valid_until,v.branch,v.repo_snapshot_id::text,v.repository_id::text,v.applicability
       FROM knowledge_versions v
       WHERE v.installation_id = $1 AND v.claim_id = $2
         AND EXISTS (
@@ -438,13 +460,38 @@ async function purgeSessionRows(
       `, [input.installationId, claim.claim_id])
       continue
     }
+    const frame = locked.rows[0]
+    const removedIdentities = dependent.rows.flatMap(version => {
+      if (!frame) return []
+      try {
+        let historical:ClaimApplicability
+        if(version.applicability==null){
+          // Null legacy metadata alone permits the current Claim descriptor.
+          // Explicit unknown/review metadata must never be silently guessed.
+          historical={scopeKind:frame.scope_kind,scopeKey:claim.scope_key,canonicalRepositoryKey:frame.canonical_repository_key,
+            repositoryId:version.repository_id,snapshotId:version.repo_snapshot_id,branch:version.branch,status:'verified'}
+        }else{
+          const frozen=version.applicability as ClaimApplicability
+          historical=captureSourceApplicability({scopeKind:frozen.scopeKind,scopeKey:frozen.scopeKey,canonicalRepositoryKey:frozen.canonicalRepositoryKey,
+            repositoryId:version.repository_id,snapshotId:version.repo_snapshot_id,branch:version.branch,applicability:version.applicability})
+        }
+        const keyV2=claimIdentityV2({...historical,claimType:claim.claim_type,statement:version.statement}).key
+        return [{keyV2,legacyKey:normalizedClaimKey({claimType:claim.claim_type,scopeKey:historical.scopeKey,statement:version.statement})}]
+      }
+      catch(error) {if(error instanceof ClaimIdentityUnavailableError||error instanceof ZodError)return [];throw error}
+    })
+    const removedIdentityKeysV2=removedIdentities.map(identity=>identity.keyV2)
+    // Retain the persisted current alias as well as every provable removed version's alias.
+    if(currentVersionId && versionIds.includes(currentVersionId) && frame?.normalized_key_v2
+      && /^[a-f0-9]{64}$/.test(frame.normalized_key_v2)) removedIdentityKeysV2.push(frame.normalized_key_v2)
     await insertKnowledgeTombstones(client, {
       installationId: input.installationId,
-      normalizedKeys: dependent.rows.map(row => normalizedClaimKey({
+      normalizedKeysV2: removedIdentityKeysV2,
+      normalizedKeys: [...removedIdentities.map(identity=>identity.legacyKey),...dependent.rows.map(row => normalizedClaimKey({
         claimType: claim.claim_type,
         scopeKey: claim.scope_key,
         statement: row.statement,
-      })),
+      }))],
       reason: 'source_purge',
       keys: tombstoneHmacKeys,
     })
@@ -480,6 +527,7 @@ async function purgeSessionRows(
           scopeKey: claim.scope_key,
           versionId: replacement.rows[0].version_id,
           statement: replacement.rows[0].statement,
+          tombstoneHmacKeys,
           reopenValidity: correctionBoundaryClosedReplacement,
           reindex: true,
         })
@@ -504,6 +552,7 @@ async function purgeSessionRows(
           scopeKey: claim.scope_key,
           versionId: currentVersionId,
           statement: current.rows[0].statement,
+          tombstoneHmacKeys,
           reopenValidity: false,
           reindex: false,
         })
@@ -566,6 +615,7 @@ async function repointClaimAfterPurge(
     scopeKey: string
     versionId: string
     statement: string
+    tombstoneHmacKeys: readonly TombstoneHmacKey[]
     reopenValidity: boolean
     reindex: boolean
   },
@@ -575,38 +625,77 @@ async function repointClaimAfterPurge(
     scopeKey: input.scopeKey,
     statement: input.statement,
   })
-  // A surviving historical Version becomes current again after the purged
-  // Version disappears, so reopen its applicability window atomically with
-  // the pointer move.
-  if (input.reopenValidity) {
-    await client.query(`
-      UPDATE knowledge_versions SET valid_until = NULL
-      WHERE installation_id = $1 AND version_id = $2
-    `, [input.installationId, input.versionId])
+  const frame = (await client.query<{identity_generation:number;normalized_key_v2:string|null;consumption_hold_reason:string|null;
+    scope_kind:ScopeKind;conflict_variant:number;canonical_repository_key:string|null;branch:string|null;repository_id:string|null;repo_snapshot_id:string|null;
+    applicability:unknown;structured_content:Record<string,unknown>;valid_from:Date|null;valid_until:Date|null}>(`
+    SELECT c.identity_generation,c.normalized_key_v2,c.consumption_hold_reason,c.scope_kind,c.conflict_variant,c.canonical_repository_key,
+      v.branch,v.repository_id::text,v.repo_snapshot_id::text,v.applicability,v.structured_content,v.valid_from,v.valid_until
+    FROM knowledge_claims c JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.claim_id=c.claim_id
+    WHERE c.installation_id=$1 AND c.claim_id=$2 AND v.version_id=$3
+  `,[input.installationId,input.claimId,input.versionId])).rows[0]
+  let projection:ClaimIdentityProjection={generation:frame?.identity_generation===2?2:1,legacyKey:normalizedKey,
+    keyV2:frame?.normalized_key_v2??null,topicKeyV2:null,duplicateDigestV2:null}
+  let identityHold=frame?.consumption_hold_reason??null
+  let lookupIdentityV2:string|null=null
+  const applicability=frame?await resolveClaimApplicability(client,{installationId:input.installationId,scopeKind:frame.scope_kind,
+    scopeKey:input.scopeKey,repositoryId:frame.repository_id,snapshotId:frame.repo_snapshot_id,branch:frame.branch,
+    applicability:frame.applicability,canonicalRepositoryKey:frame.canonical_repository_key,consumptionHoldReason:frame.consumption_hold_reason}):null
+  if(frame && applicability) {
+    try {
+      const projected=await projectClaimIdentity(client,{installationId:input.installationId,claimType:input.claimType,statement:input.statement,
+        structuredContent:frame.structured_content??{},applicability,validFrom:frame.valid_from,validUntil:frame.valid_until})
+      if(projected.keyV2){projection=projected;lookupIdentityV2=projected.keyV2}
+      else identityHold??='identity_requires_review'
+    }catch(error) {
+      if(!(error instanceof ClaimIdentityWriteError)||error.code!=='identity_requires_review')throw error
+      // Privacy cleanup proceeds; keep the persisted key only as a held alias.
+      // Topic/duplicate mirrors cannot be proven from this historical frame.
+      identityHold??='identity_requires_review'
+    }
+  }else identityHold??='identity_requires_review'
+  // A historical pointer move is another admission of this identity. Retain
+  // the irreversible v1 fence, and check a provable v2 frame even while the
+  // surviving Claim still uses generation 1. Cleanup must finish, but a
+  // deleted replacement must not regain an open window or an index job.
+  const storedKeyVersions=(await client.query<{key_id:string}>(
+    'SELECT DISTINCT key_id FROM knowledge_tombstones WHERE installation_id=$1',[input.installationId])).rows
+  if(storedKeyVersions.some(row=>!input.tombstoneHmacKeys.some(key=>key.version===row.key_id))){
+    // Startup validation is not a lifetime guarantee: a retained writer may
+    // introduce an older key version later. Restrictive cleanup still commits,
+    // but incomplete privacy proof cannot reactivate the replacement.
+    identityHold='tombstone_hmac_keyring_incomplete'
   }
-  const collision = await client.query<{ claim_id: string }>(`
-    SELECT claim_id::text FROM knowledge_claims
-    WHERE installation_id = $1 AND claim_type = $2 AND scope_key = $3
-      AND normalized_key = $4 AND claim_id <> $5
-    LIMIT 1
-  `, [input.installationId, input.claimType, input.scopeKey, normalizedKey, input.claimId])
-  if (collision.rows[0]) {
-    const placeholder = `purged-rekey:${createHash('sha256').update(normalizedKey).digest('hex')}`
-    await client.query(`
-      UPDATE knowledge_claims
-      SET current_version_id = $3, normalized_key = $4, state = 'superseded',
-          superseded_by_claim_id = $5, revision = revision + 1, updated_at = NOW()
-      WHERE installation_id = $1 AND claim_id = $2
-    `, [input.installationId, input.claimId, input.versionId, placeholder, collision.rows[0].claim_id])
-    return
+  const tombstoned=await findTombstonedNormalizedKeys(client,{installationId:input.installationId,normalizedKeys:[normalizedKey],
+    identityV2ByNormalizedKey:lookupIdentityV2?{[normalizedKey]:[lookupIdentityV2]}:undefined,keys:input.tombstoneHmacKeys})
+  if(tombstoned.has(normalizedKey))identityHold='tombstoned_identity'
+  // Validate prospective reopened facts before altering validity. An alias
+  // collision is a migration limit, never permission to merge different facts.
+  if(input.reopenValidity&&!identityHold)projection=await projectClaimIdentity(client,{installationId:input.installationId,
+    claimType:input.claimType,statement:input.statement,structuredContent:frame!.structured_content??{},applicability:applicability!,validFrom:frame!.valid_from,validUntil:null})
+  let storedAlias=normalizedKey
+  try{
+    await assertClaimIdentityAvailable(client,{installationId:input.installationId,claimType:input.claimType,scopeKey:input.scopeKey,
+      projection,excludeClaimId:input.claimId,variant:frame?.conflict_variant??0})
+  }catch(error){
+    if(!(error instanceof ClaimIdentityWriteError)||!['identity_conflict','identity_migration_required','identity_requires_review'].includes(error.code))throw error
+    identityHold??=error.code
+    storedAlias=`purged-rekey:${input.claimId}:${createHash('sha256').update(normalizedKey).digest('hex')}`
+    // Held active rows remain in both staged indexes. Preserve the Version,
+    // withholding duplicate mirrors until remediation can admit it.
+    projection={...projection,topicKeyV2:null,duplicateDigestV2:null}
   }
+  if(input.reopenValidity&&!identityHold)await client.query('UPDATE knowledge_versions SET valid_until=NULL WHERE installation_id=$1 AND version_id=$2',
+    [input.installationId,input.versionId])
   await client.query(`
     UPDATE knowledge_claims
-    SET current_version_id = $3, normalized_key = $4,
+    SET current_version_id = $3, normalized_key = $4, normalized_key_v2=$5,
+        consumption_hold_reason=COALESCE($6,consumption_hold_reason),
+        identity_generation=GREATEST(identity_generation,$7),topic_key_v2=$8,duplicate_digest_v2=$9,
         revision = revision + 1, updated_at = NOW()
     WHERE installation_id = $1 AND claim_id = $2
-  `, [input.installationId, input.claimId, input.versionId, normalizedKey])
-  if (input.reindex) {
+  `, [input.installationId, input.claimId, input.versionId, storedAlias,projection.keyV2,identityHold,
+    projection.generation,projection.topicKeyV2,projection.duplicateDigestV2])
+  if (input.reindex && !identityHold) {
     await client.query(`
       INSERT INTO memory_jobs
         (job_id, installation_id, job_type, idempotency_key, priority, payload)
@@ -628,6 +717,7 @@ async function purgeInstallationRows(
   await client.query(`
     SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
   `, [input.installationId])
+  await rollupFeedbackBeforeInstallationPurge(client,input.installationId)
   // Phase 4 authoritative/derived content is removed before the generic
   // repository row and before the content-free installation receipt.
   for (const table of [
@@ -646,6 +736,8 @@ async function purgeInstallationRows(
     SELECT COUNT(*)::text AS count FROM knowledge_claims WHERE installation_id = $1
   `, [input.installationId])
   for (const table of [
+    'memory_authority_records','memory_publication_delegations','memory_automation_authority_records','memory_governance_executor_principals',
+    'memory_review_automation_runs','memory_review_automation_policy_heads','memory_review_automation_policies',
     'memory_session_tombstones', 'memory_dead_letters', 'memory_jobs', 'memory_usage_outbox',
     'memory_snapshot_runs', 'memory_snapshot_events', 'memory_feed_inbox',
     'knowledge_tombstones', 'memory_idempotency_keys', 'memory_feedback',

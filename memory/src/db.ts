@@ -1,4 +1,5 @@
 import pg from 'pg'
+import {MEMORY_WRITER_STARTUP_OPTIONS} from './migrations/governance-v2/compatibility.js'
 import type { MemoryConfig } from './config.js'
 
 /**
@@ -10,6 +11,9 @@ export function createMemoryPool(config: Pick<MemoryConfig, 'databaseUrl' | 'dbP
   return new pg.Pool({
     connectionString: config.databaseUrl,
     max: config.dbPoolMax,
+    // Startup packet applies to every connection before its first query;
+    // an asynchronous pool connect listener would race the first mutation.
+    options: MEMORY_WRITER_STARTUP_OPTIONS,
   })
 }
 

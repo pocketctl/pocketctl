@@ -31,6 +31,7 @@ export const SearchRequestSchema = z.strictObject({
   repository_id: UUID.nullish(),
   repo_snapshot_id: UUID.nullish(),
   branch: z.string().min(1).max(255).nullish(),
+  task_scope_key: z.string().min(1).max(512).nullish(),
   claim_types: z.array(z.enum([
     'architecture_decision', 'repository_convention', 'bug_root_cause',
     'rejected_hypothesis', 'test_invariant', 'implementation_map',
@@ -48,11 +49,15 @@ export const RecallRequestSchema = SearchRequestSchema.extend({
 })
 
 export const AcceptRequestSchema = z.strictObject({
+  expected_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  review_duration_ms:z.number().int().min(0).max(86400000).optional(),
   expected_revision: z.number().int().min(1),
   edited_statement: z.string().min(1).max(4000).nullish(),
 })
 
 export const RejectRequestSchema = z.strictObject({
+  expected_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  review_duration_ms:z.number().int().min(0).max(86400000).optional(),
   expected_revision: z.number().int().min(1),
   reason_code: z.string().min(1).max(128).nullish(),
 })
@@ -115,3 +120,15 @@ export const FeedbackRequestSchema = z.strictObject({
 
 export type SearchRequest = z.output<typeof SearchRequestSchema>
 export type RecallRequest = z.output<typeof RecallRequestSchema>
+
+const EvidenceUUID=UUID.transform(id=>id.toLowerCase())
+export const EvidenceReferenceQuerySchema=z.strictObject({
+ installation_id:EvidenceUUID.optional(),pack_id:EvidenceUUID.optional(),pack_installation_id:EvidenceUUID.optional(),
+ repository_id:EvidenceUUID.optional(),repo_snapshot_id:EvidenceUUID.optional(),branch:z.string().min(1).max(255).optional(),
+ task_scope_key:z.string().min(1).max(512).optional(),
+})
+export const EvidenceContentQuerySchema=EvidenceReferenceQuerySchema.extend({
+ version_id:EvidenceUUID,excerpt_hash:z.string().regex(/^[a-f0-9]{64}$/),source_version:EvidenceUUID.optional(),
+ source_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),page:z.coerce.number().int().min(0).max(3).default(0),
+ max_chars:z.coerce.number().int().min(1).max(4000).default(4000),
+}).refine(input=>!input.source_hash||Boolean(input.source_version),{message:'source version required for full material'})

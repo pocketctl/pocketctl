@@ -114,7 +114,7 @@ describeWithDatabase('Team source evidence lifecycle (PostgreSQL)', () => {
     `, [PERSONAL])
   })
 
-  test('projects a rebound binding while fencing legacy and removed binding replays', async () => {
+  test.each(['binding','participant'])('projects a new %s generation while fencing legacy and removed source replays', async dimension => {
     // Resolve the cross-component fixture at runtime, outside Memory's tsc rootDir.
     const relayProjectorPath = fileURLToPath(new URL('../../../relay/src/team/memory-source-projector.ts', import.meta.url))
     const { buildTeamMemorySourceRecords }: {
@@ -123,13 +123,13 @@ describeWithDatabase('Team source evidence lifecycle (PostgreSQL)', () => {
         occurredAt: Date; payload: Record<string, unknown>
       }>
     } = await import(relayProjectorPath)
-    const packet = (bindingId: string, callId: string) => buildTeamMemorySourceRecords({
+    const packet = (bindingId: string, callId: string, participantRevision=1) => buildTeamMemorySourceRecords({
       teamId: 'ctm_f20', teamSessionId: 'css_f20', callId, contextVersion: 0,
       binding: { id: bindingId, revision: 1, installationId: TEAM, ownerScopeKind: 'team', ownerScopeId: TEAM },
       goal: { eventId: callId + '_goal', eventSeq: 1, content: 'Check binding recovery', authorUserId: 7, occurredAt: new Date('2026-09-28T01:00:00Z') },
       reply: { eventIds: [callId + '_reply'], eventSeqs: [2], content: 'Binding recovery verified', authorOfferId: 'cao_1', occurredAt: new Date('2026-09-28T01:00:01Z') },
       outcome: { eventId: callId + '_done', eventSeq: 3, status: 'completed', occurredAt: new Date('2026-09-28T01:00:02Z') },
-      readers: [{ userId: 7, participantRevision: 1 }],
+      readers: [{ userId: 7, participantRevision }],
     })
     let feedId = 0
     const enqueue = async (records: ReturnType<typeof packet>) => {
@@ -147,7 +147,7 @@ describeWithDatabase('Team source evidence lifecycle (PostgreSQL)', () => {
     const legacySessionId = 'team_' + createHash('sha256').update('css_f20:1:1').digest('hex').slice(0, 32)
     const legacy = packet('cmbd_old', 'ccl_legacy').map(record => ({ ...record, sessionId: legacySessionId }))
     const original = packet('cmbd_old', 'ccl_old')
-    const rebound = packet('cmbd_new', 'ccl_new')
+    const rebound = dimension==='binding'?packet('cmbd_new','ccl_new'):packet('cmbd_old','ccl_new',3)
     const purge = createPurgeRepository(pool, { hmacKey: 'team-source-test-key' })
     const projector = createSourceProjector(pool, { stabilizationMs: 0, purge })
     await enqueue(legacy)

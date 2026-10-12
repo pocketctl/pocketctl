@@ -89,6 +89,7 @@ export interface InstallationWithCheckpointRow {
   installation_id: string
   provider_id: string
   owner_user_id: number | null
+  owner_scope_kind: 'personal' | 'team' | 'organization'
   status: string
   granted_scopes: string[]
   subscriptions: string[]
@@ -113,6 +114,7 @@ export async function getInstallationWithCheckpointForUpdate(
     installation_id: string
     provider_id: string
     owner_user_id: number
+    owner_scope_kind: 'personal' | 'team' | 'organization'
     status: string
     granted_scopes: string[]
     subscriptions: string[]
@@ -120,7 +122,7 @@ export async function getInstallationWithCheckpointForUpdate(
     start_feed_id: string | number
     config_version: string | number
   }>(`
-    SELECT installation_id, provider_id, owner_user_id, status, granted_scopes,
+    SELECT installation_id, provider_id, owner_user_id, owner_scope_kind, status, granted_scopes,
            subscriptions, event_filter, start_feed_id, config_version
     FROM extension_installations
     WHERE installation_id = $1 AND provider_id = $2
@@ -156,6 +158,8 @@ export interface FeedQueryOptions {
   limit: number
   daemonIds?: string[]
   agentTypes?: string[]
+  /** First-party personal Memory cleanup obligation, independent of capture. */
+  mandatoryTeamRevocations?: boolean
 }
 
 export interface FeedQueryRow {
@@ -181,7 +185,47 @@ export async function queryFeedRows(
       LEFT JOIN sessions s ON s.session_id = f.session_id
     ` : ''}
     WHERE f.owner_user_id = $1
-      AND f.topic = ANY($2)
+      AND (f.topic = ANY($2)${options.mandatoryTeamRevocations ? ` OR (
+        -- Only the exact content-free packet emitted by TeamMemorySourceProjector.
+        -- Ordinary Session tombstones and arbitrary provider payloads still need
+        -- their subscribed topic/scope; withdrawing capture must not strand cleanup.
+        f.topic = 'session.access.revoked.v1'
+        AND f.source_kind = 'session_access_revoked'
+        AND f.session_id ~ '^team_[0-9a-f]{32}$'
+        AND f.payload = jsonb_build_object(
+          'envelope_version', 1, 'topic', 'session.access.revoked.v1',
+          'source', jsonb_build_object('kind', f.source_kind, 'id', f.source_id,
+            'recorded_at', f.payload #> '{source,recorded_at}'),
+          'subject', jsonb_build_object('session_id', f.session_id, 'event_type', 'session_access_revoked'),
+          'classification', '{}'::jsonb, 'data', f.payload->'data')
+        AND f.payload #>> '{source,recorded_at}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
+        AND CASE WHEN jsonb_typeof(f.payload->'data') = 'object'
+          THEN (f.payload->'data') - ARRAY['reason','team_id','team_session_id','team_memory_binding_id',
+            'team_memory_binding_revision','participant_user_id','participant_revision']::text[]
+          ELSE NULL END = '{}'::jsonb
+        AND f.payload #>> '{data,reason}' IN ('participant_removed','binding_removed',
+          'team_member_left','team_member_removed','team_dissolved')
+        AND jsonb_typeof(f.payload #> '{data,team_id}') = 'string'
+        AND length(f.payload #>> '{data,team_id}') > 0
+        AND jsonb_typeof(f.payload #> '{data,team_session_id}') = 'string'
+        AND length(f.payload #>> '{data,team_session_id}') > 0
+        AND jsonb_typeof(f.payload #> '{data,team_memory_binding_id}') = 'string'
+        AND length(f.payload #>> '{data,team_memory_binding_id}') > 0
+        AND jsonb_typeof(f.payload #> '{data,team_memory_binding_revision}') = 'number'
+        AND f.payload #>> '{data,team_memory_binding_revision}' ~ '^[1-9][0-9]*$'
+        AND jsonb_typeof(f.payload #> '{data,participant_revision}') = 'number'
+        AND f.payload #>> '{data,participant_revision}' ~ '^[1-9][0-9]*$'
+        AND jsonb_typeof(f.payload #> '{data,participant_user_id}') = 'number'
+        AND f.payload #>> '{data,participant_user_id}' = f.owner_user_id::text
+        AND f.source_id IN (
+          'team-access:' || (f.payload #>> '{data,team_session_id}') || ':u' || f.owner_user_id::text
+            || ':b' || (f.payload #>> '{data,team_memory_binding_revision}')
+            || ':p' || (f.payload #>> '{data,participant_revision}'),
+          'team-access:' || (f.payload #>> '{data,team_session_id}') || ':u' || f.owner_user_id::text
+            || ':b' || (f.payload #>> '{data,team_memory_binding_revision}')
+            || ':p' || (f.payload #>> '{data,participant_revision}')
+            || ':i' || (f.payload #>> '{data,team_memory_binding_id}'))
+      )` : ''})
       AND f.feed_id > $3
       ${options.daemonIds?.length ? "AND (f.source_kind <> 'canonical_event' OR s.daemon_id = ANY($4))" : ''}
       ${options.agentTypes?.length

@@ -84,6 +84,7 @@ interface MirrorRow {
   scope_state: string
   authorization_epoch: string
   membership_id: string | null
+  membership_time_valid: boolean
   membership_state: string | null
   membership_revision: string | null
   roles: string[] | null
@@ -100,6 +101,7 @@ function mirrorRow(overrides: Partial<MirrorRow> = {}): MirrorRow {
     scope_state: 'active',
     authorization_epoch: '5',
     membership_id: MEMBERSHIP,
+    membership_time_valid: true,
     membership_state: 'active',
     membership_revision: '2',
     roles: ['reader', 'reviewer'],
@@ -112,7 +114,9 @@ function makeGuard(keys: ReturnType<typeof makeKeys>, rows: MirrorRow[]) {
     JSON.stringify(jwksFor(keys)), { status: 200, headers: { 'content-type': 'application/json' } },
   ))
   const pool = {
-    query: vi.fn(async () => ({ rows, rowCount: rows.length })),
+    query: vi.fn(async (sql:string,args?:unknown[]) => sql.includes('clock_timestamp() < to_timestamp')
+      ? {rows:[{alive:Number(args?.[0])*1000>Date.now()}],rowCount:1}
+      : { rows, rowCount: rows.length }),
   } as never as import('pg').Pool
   const guard = createGrantGuard({
     pool,
@@ -125,6 +129,14 @@ function makeGuard(keys: ReturnType<typeof makeKeys>, rows: MirrorRow[]) {
 
 describe('memory v2 grant guard', () => {
   const keys = makeKeys()
+
+  test('RS256 v2 verification preserves the signed Context Session',async()=>{
+    const {guard}=makeGuard(keys,[mirrorRow()])
+    const token=signV2(keys,{payload:{primary_installation_id:TEAM_INSTALL,caller_type:'daemon',services:['memory.context'],session_id:'signed-session'}})
+    expect(await guard.guardMcp({authorization:`Bearer ${token}`,requiredService:'memory.context'})).toMatchObject({version:'v2',sessionId:'signed-session'})
+    const bad=signV2(keys,{payload:{primary_installation_id:TEAM_INSTALL,caller_type:'daemon',services:['memory.context'],session_id:42}})
+    await expect(guard.guardMcp({authorization:`Bearer ${bad}`,requiredService:'memory.context'})).rejects.toMatchObject({code:'unauthorized'})
+  })
 
   test('verifies a valid v2 grant and returns validated bindings', async () => {
     const personal = mirrorRow({
@@ -165,6 +177,12 @@ describe('memory v2 grant guard', () => {
     expect(grant.scopeBindings[1].permissions).toEqual(['read', 'review'])
   })
 
+  test('preserves exact signed expiry for transaction fences',async()=>{
+    const {guard}=makeGuard(keys,[mirrorRow()])
+    const token=signV2(keys,{payload:{primary_installation_id:TEAM_INSTALL}})
+    const grant=await guard.guardV2({authorization:`Bearer ${token}`,requiredService:'memory.search'})
+    expect(grant.expiresAt).toBe((jwt.decode(token) as jwt.JwtPayload).exp)
+  })
   test('drops stale, revoked, and foreign bindings instead of failing the grant', async () => {
     const stale = mirrorRow({ authorization_epoch: '9' })
     const revokedMember = mirrorRow({

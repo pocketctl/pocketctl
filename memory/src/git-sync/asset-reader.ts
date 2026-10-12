@@ -1,3 +1,5 @@
+import {currentClaimVersionSql} from '../claims/version-selection.js'
+import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
 import type pg from 'pg'
 import { canonicalJsonString, canonicalPayloadHash } from '../inbox/canonical-json.js'
 import type { V2GrantFacts } from '../governance/authorization.js'
@@ -29,9 +31,9 @@ async function one(client: pg.PoolClient, sql: string, args: unknown[]): Promise
 
 export interface GitReaderInput {
   connection: GitConnection; grant: V2GrantFacts; exportId: string
-  purpose: 'local_preview' | 'external_export'; lifecycle: SkillPrelockedLifecycle
+  purpose: 'local_preview' | 'external_export'; managementComparison?:boolean; lifecycle: SkillPrelockedLifecycle
   skill: SkillPublicationValidationDeps
-  temporal?: { versionIds:Set<string>; membershipIds:Set<string> }
+  temporal?: { currentVersionIds?:Set<string>; versionIds:Set<string>; membershipIds:Set<string>; originPolicyStamps?:Map<string,string> }
 }
 
 /** Discovery is untrusted and bounded. Repeat after acquiring the entire sorted
@@ -73,22 +75,31 @@ export async function collectGitLifecycleSources(client: pg.PoolClient, installa
 
 async function readClaim(client: pg.PoolClient,input:GitReaderInput,key:AssetKey,versionId?:string) {
   const {connection:c}=input
-  const claim=await one(client,`SELECT c.*,v.version_id AS selected_version_id FROM knowledge_claims c JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.version_id=COALESCE($6::uuid,c.current_version_id) AND v.claim_id=c.claim_id
+  const claim=await one(client,`SELECT c.*,${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required,v.version_id AS selected_version_id FROM knowledge_claims c JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.version_id=COALESCE($6::uuid,c.current_version_id) AND v.claim_id=c.claim_id
     JOIN repositories r ON r.installation_id=c.installation_id AND r.repository_id=$3
     WHERE c.installation_id=$1 AND c.claim_id=$2 AND c.state='active' AND c.owner_scope_kind=$4 AND c.owner_scope_id=$5 AND c.conflict_group_id IS NULL
       AND (v.repository_id=r.repository_id OR (v.repository_id IS NULL AND c.scope_kind='repository' AND c.scope_key IN(r.repository_id::text,r.repository_key)))
+      AND (${versionId!==undefined||input.managementComparison?'TRUE':currentClaimVersionSql()})
       AND v.authority IN('team_published','organization_published') AND v.source_promotion_candidate_id IS NOT NULL
       AND (v.valid_from IS NULL OR v.valid_from<=clock_timestamp()) AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp())
     FOR SHARE OF c,v,r`,[c.installationId,key.id,c.repositoryId,c.ownerScopeKind,c.ownerScopeId,versionId??null])
   if(key.kind==='rule'&&!['repository_convention','test_invariant'].includes(claim.claim_type))stale()
+  // Saved B is verified for an authorized three-way comparison, never emitted
+  // as current eligible knowledge. A current hold does not erase its old bytes.
+  if(!input.managementComparison&&versionId===undefined&&claim.consumption_hold_reason)stale()
   const selectedVersionId=claim.selected_version_id
+  let originPolicyStamp:string|null=null
+  if(claim.origin_policy_required){const decision=(await originPolicyDecisions(client,c.installationId,[selectedVersionId])).get(selectedVersionId);if(!decision?.eligible)stale();originPolicyStamp=decision.stamp}
+  delete claim.origin_policy_required
   delete claim.selected_version_id
   const version=await one(client,'SELECT * FROM knowledge_versions WHERE installation_id=$1 AND version_id=$2 FOR SHARE',[c.installationId,selectedVersionId])
-  if(version.authority!==`${c.ownerScopeKind}_published`)stale()
+  if(version.authority!==`${c.ownerScopeKind}_published`||(!input.managementComparison&&versionId===undefined&&version.applicability!=null&&version.applicability.status!=='verified'))stale()
   const authority=await one(client,'SELECT * FROM memory_authority_records WHERE installation_id=$1 AND version_id=$2 FOR SHARE',[c.installationId,version.version_id])
   const evidence=await readEvidence(client,input,version.version_id)
   input.temporal?.versionIds.add(version.version_id)
-  return {claim,version,authority,evidence}
+  if(versionId===undefined&&!input.managementComparison)input.temporal?.currentVersionIds?.add(version.version_id)
+  if(originPolicyStamp)input.temporal?.originPolicyStamps?.set(version.version_id,originPolicyStamp)
+  return {claim,version,authority,evidence,...(originPolicyStamp?{originPolicyStamp}:{})}
 }
 
 async function readEvidence(client:pg.PoolClient,input:GitReaderInput,versionId:string) {
@@ -168,7 +179,9 @@ async function claimAsset(client:pg.PoolClient,input:GitReaderInput,key:AssetKey
   return PortableAssetSchema.parse({...common(input,key,v.version_id,c.revision,digest(facts)),
     immutable:{...identity(input,evidence),claimType:c.claim_type,versionNumber:v.version_number,state:c.state,authority:v.authority,confidence:v.confidence,
       freshnessAt:date(v.freshness_at),validFrom:date(v.valid_from),validUntil:date(v.valid_until)},
-    editable:{statement:v.statement,structuredContent:v.structured_content},serverOnly:{scopeKind:c.scope_kind,scopeKey:c.scope_key,normalizedKey:c.normalized_key,
+    editable:{statement:v.statement,structuredContent:v.structured_content},serverOnly:{identityGeneration:c.identity_generation??1,normalizedKeyV2:c.normalized_key_v2??null,topicKeyV2:c.topic_key_v2??null,duplicateDigestV2:c.duplicate_digest_v2??null,
+      canonicalRepositoryKey:c.canonical_repository_key??null,consumptionHoldReason:c.consumption_hold_reason??null,
+      applicability:v.applicability??null,effectiveFrom:date(v.effective_from??null),effectiveUntil:date(v.effective_until??null),scopeKind:c.scope_kind,scopeKey:c.scope_key,normalizedKey:c.normalized_key,
       repositoryId:v.repository_id,repoSnapshotId:v.repo_snapshot_id,branch:v.branch,sourceCandidateId:v.source_candidate_id,supersededByClaimId:c.superseded_by_claim_id,
       createdAt:date(v.created_at),updatedAt:date(c.updated_at),sourcePromotionCandidateId:v.source_promotion_candidate_id,conflictGroupId:c.conflict_group_id,
       conflictVariant:c.conflict_variant,claimCreatedAt:date(c.created_at),evidence:evidence.map(evidencePrivate)}})

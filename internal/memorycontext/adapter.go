@@ -10,14 +10,14 @@ package memorycontext
 type Runtime string
 
 const (
-	RuntimeCodexAppServer   Runtime = "codex-app-server"
-	RuntimeOpenCodeServer   Runtime = "opencode-server"
+	RuntimeCodexAppServer    Runtime = "codex-app-server"
+	RuntimeOpenCodeServer    Runtime = "opencode-server"
 	RuntimeClaudePrintResume Runtime = "claude-print-resume"
-	RuntimeClaudePTY        Runtime = "claude-pty"
-	RuntimeCodexCLITerminal Runtime = "codex-cli-terminal"
-	RuntimeTerminalObserved Runtime = "terminal-observed"
-	RuntimeZCode            Runtime = "zcode"
-	RuntimeUnknown          Runtime = "unknown"
+	RuntimeClaudePTY         Runtime = "claude-pty"
+	RuntimeCodexCLITerminal  Runtime = "codex-cli-terminal"
+	RuntimeTerminalObserved  Runtime = "terminal-observed"
+	RuntimeZCode             Runtime = "zcode"
+	RuntimeUnknown           Runtime = "unknown"
 )
 
 // Capability is the delivery capability resolved for one runtime instance.
@@ -62,4 +62,13 @@ func ResolveCapability(runtime Runtime, probe ProbeEvidence) Capability {
 		return CapabilityNativeHiddenV1
 	}
 	return CapabilityShadowOnly
+}
+
+// ResolveEvidenceReadCapability requires a successful read-tool probe as well
+// as native hidden delivery; absent or unsupported runtimes retain excerpts.
+func ResolveEvidenceReadCapability(hidden Capability, probe ProbeEvidence) string {
+	if hidden == CapabilityNativeHiddenV1 && probe.supported {
+		return "on_demand_v1"
+	}
+	return "bounded_excerpt_v1"
 }

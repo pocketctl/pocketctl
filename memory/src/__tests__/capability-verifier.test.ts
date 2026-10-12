@@ -91,7 +91,9 @@ describe('capability grant verification', () => {
   test('accepts a well-formed grant and returns its scope', async () => {
     const keys = makeKeys()
     const { verifier } = makeVerifier(keys)
-    const grant = await verifier.verify(signGrant(keys), 'memory.search')
+    const token=signGrant(keys)
+    const grant = await verifier.verify(token, 'memory.search')
+    expect(grant?.expiresAt).toBe((jwt.decode(token) as jwt.JwtPayload).exp)
     expect(grant).toMatchObject({
       installationId: INSTALLATION,
       callerType: 'web',

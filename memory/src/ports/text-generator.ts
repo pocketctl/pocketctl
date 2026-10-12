@@ -5,7 +5,7 @@
  * `../model/` and must never log prompts, documents, or outputs.
  */
 
-export type TextGeneratorOperation = 'candidate_extract' | 'candidate_repair' | 'wiki_build' | 'skill_extract'
+export type TextGeneratorOperation = 'review_shadow' | 'candidate_extract' | 'candidate_repair' | 'wiki_build' | 'skill_extract'
 
 /** A JSON Schema object describing the expected model output shape. */
 export type JsonSchema = Record<string, unknown>
@@ -18,10 +18,10 @@ export interface ModelUsage {
 }
 
 export type ModelJsonResult<T> =
-  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string }
+  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean }
   | {
       ok: false
-      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable'
+      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'provider_result_unknown'
       retryable: boolean
       /** Bounded machine code only — never raw provider text. */
       detail?: string
@@ -29,11 +29,14 @@ export type ModelJsonResult<T> =
       usage?: ModelUsage
       /** Opaque local reservation provenance; never a Provider credential. */
       budgetReservationId?: string
+      retryAt?: string
+      billingUncertain?: boolean
     }
 
 export interface TextGenerator {
   generateJson<T>(input: {
     operation: TextGeneratorOperation
+    requestKey?: string
     system: string
     document: unknown
     schema: JsonSchema

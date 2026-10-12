@@ -63,6 +63,8 @@ export function createPurgeWorker(options: PurgeWorkerOptions) {
         // never change a successfully committed/ACKed purge result.
         await options.purge.cleanupSupersededSnapshots({ limit: 100 })
           .catch(error => options.onError?.(error))
+        if(options.purge.cleanupRevokedSharedClaims)await options.purge.cleanupRevokedSharedClaims({limit:100})
+          .catch(error=>options.onError?.(error))
         return handled
       } finally {
         current = undefined

@@ -6,7 +6,7 @@ import {
   createMemoryMcpGrantBroker,
   handleMemoryMcpGrantMessage,
 } from '../extensions/grant-service.js'
-import { verifyCapabilityGrant, resolveGrantKeyMaterial } from '../extensions/capability-grant.js'
+import { verifyCapabilityGrant, verifyCapabilityGrantV2, resolveGrantKeyMaterial } from '../extensions/capability-grant.js'
 
 const ISSUER = 'https://relay.example.test'
 
@@ -210,6 +210,20 @@ describe('session-bound context grant broker (Phase 2)', () => {
     status: 'active',
     enabled_services: ['memory.search', 'memory.context'],
   }
+
+  test('explicit personal plus shared Context grants bind the owned Session in the signed token',async()=>{
+    const personal='11111111-1111-4111-8111-111111111111',shared='22222222-2222-4222-8222-222222222222',scope='33333333-3333-4333-8333-333333333333'
+    const pool={query:vi.fn(async(sql:string,args:unknown[])=>{
+      if(sql.includes('FROM sessions'))return{rows:args[0]==='owned-context'&&args[1]===42?[{'?column?':1}]:[]}
+      if(sql.includes('FROM extension_installations i'))return{rows:[{installation_id:personal,provider_id:'pocketctl-memory',owner_user_id:42,status:'active',enabled_services:['memory.context'],config_version:1,owner_scope_kind:'personal',owner_scope_id:personal,authorization_epoch:1,membership_id:null},{installation_id:shared,provider_id:'pocketctl-memory',owner_user_id:null,status:'active',enabled_services:['memory.context'],config_version:1,owner_scope_kind:'team',owner_scope_id:scope,authorization_epoch:1,membership_id:'44444444-4444-4444-8444-444444444444',membership_revision:1,membership_state:'active',roles:['reader']}]}
+      if(sql.includes('FROM extension_teams'))return{rows:[{scope_kind:'team',scope_id:scope,state:'active',authorization_epoch:1}]}
+      return{rows:[]}
+    })} as never
+    const broker=createMemoryContextGrantBroker({pool,issuer:ISSUER,mode:'enabled',v2Mode:'enabled',grantKeys:grantKeysMaterial,providerPublicOrigins:new Map()})
+    const result=await broker.requestGrant({userId:42},'owned-context',[personal,shared]);expect(result.type).toBe('memory_context_grant_result')
+    if(result.type==='memory_context_grant_result')expect(verifyCapabilityGrantV2(grantKeysMaterial.publicKeyPem,result.grant,ISSUER)).toMatchObject({sessionId:'owned-context',primaryInstallationId:personal,scopeBindings:expect.arrayContaining([expect.objectContaining({installation_id:shared})])})
+    expect(await broker.requestGrant({userId:42},'foreign-context',[personal,shared])).toMatchObject({type:'memory_context_grant_error',code:'session_not_owned'})
+  })
 
   test('a daemon owning the session gets a session-bound memory.context grant', async () => {
     const broker = contextBroker({

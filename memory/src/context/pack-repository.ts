@@ -1,8 +1,14 @@
+import {captureEvidenceReference} from '../claims/evidence-resolver.js'
+import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
+import {originPolicyFenceSql} from '../governance/origin-policy.js'
+import {originPolicyCorpusSnapshot} from '../governance/origin-policy.js'
+import {ContextConsumptionChangedError} from './consumption.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
 import type pgPool from 'pg'
 import { renderPackText, hashPackText, stableDynamicSplit, type RenderItem } from './renderer.js'
 import { estimateTokens } from './token-budget.js'
+import {fenceConsumptionGeneration,type ContextQueryFrame} from './consumption.js'
 
 /**
  * Immutable Context Pack persistence (plan 8.2/9.4). Packs are write-once:
@@ -25,6 +31,8 @@ export interface PackItemInput {
 }
 
 export interface ExternalPackItemInput {
+  ownerScopeId?:string
+  installationId?:string
   itemId: string
   versionId: string
   statement: string
@@ -41,6 +49,8 @@ export interface PersistPackInput {
   clientRequestId: string
   agent: string
   repositoryId: string | null
+  queryContext?:ContextQueryFrame
+  consumptionGeneration?:string
   mode: 'shadow' | 'enabled'
   effectivePolicyHash: Buffer
   settingsFingerprint: Buffer
@@ -55,6 +65,8 @@ export interface PersistPackInput {
   state: 'ready' | 'shadow' | 'empty'
   errorCode?: string | null
 }
+
+const FOREIGN_PACK_SQL="(p.query_context ? 'selectedScopeProof' OR EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(p.selected_references,'[]'::jsonb)) r WHERE r->>'installation_id' IS DISTINCT FROM p.installation_id::text))"
 
 export function createPackRepository(pool: pg.Pool) {
   return {
@@ -89,22 +101,23 @@ export function createPackRepository(pool: pg.Pool) {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
-        await client.query(`
+        const inserted=await client.query(`
           INSERT INTO memory_context_packs
             (pack_id, installation_id, generation_run_id, trajectory_id, session_id, client_request_id,
              agent, repository_id, mode, effective_policy_hash, settings_fingerprint,
              loadout_fingerprint, input_digest, policy_revision, settings_revision, loadout_revision, stable_text, dynamic_text,
              stable_hash, dynamic_hash, stable_tokens, dynamic_tokens,
-             stable_cache_hit, state, error_code, selected_references, generated_at)
+             stable_cache_hit, state, error_code, selected_references,query_context, generated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                  $16, $17, $18, $19, $20, $21, $22, FALSE, $23, $24, $25::jsonb, NOW())
-          ON CONFLICT DO NOTHING
+                  $16, $17, $18, $19, $20, $21, $22, FALSE, $23, $24, $25::jsonb,$26::jsonb, NOW())
+          ON CONFLICT DO NOTHING RETURNING pack_id
         `, [packId, input.installationId, input.generationRunId, input.trajectoryId, input.sessionId,
           input.clientRequestId, input.agent, input.repositoryId, input.mode, input.effectivePolicyHash,
           input.settingsFingerprint, input.loadoutFingerprint, input.inputDigest, input.policyRevision, input.settingsRevision,
           input.loadoutRevision, stable, dynamic, hashPackText(stable),
           hashPackText(dynamic), estimateTokens(stable), estimateTokens(dynamic),
-          input.state, input.errorCode ?? null, JSON.stringify(input.selectedReferences ?? [])])
+          input.state, input.errorCode ?? null, JSON.stringify(input.selectedReferences ?? []),
+          JSON.stringify(input.queryContext??{repositoryId:input.repositoryId,repoSnapshotId:null,branch:null,taskScopeKey:null})])
         for (const [index, item] of input.items.entries()) {
           await client.query(`
             INSERT INTO memory_context_pack_items
@@ -116,12 +129,13 @@ export function createPackRepository(pool: pg.Pool) {
             item.claimType, item.layer, item.section, item.representation,
             item.statement, item.reasonCodes, estimateTokens(item.statement), index])
           for (const evidenceId of item.evidenceIds) {
+            const reference=await captureEvidenceReference(client,input.installationId,evidenceId,item.versionId)
             await client.query(`
               INSERT INTO memory_context_pack_evidence
-                (pack_id, item_id, installation_id, evidence_id)
-              VALUES ($1, $2, $3, $4)
+                (pack_id, item_id, installation_id, evidence_id,evidence_version_id,excerpt_hash,source_hash,source_version)
+              VALUES ($1, $2, $3, $4,$5,$6,$7,$8)
               ON CONFLICT DO NOTHING
-            `, [packId, item.itemId, input.installationId, evidenceId])
+            `, [packId, item.itemId, input.installationId, evidenceId,reference?.versionId??null,reference?.excerptHash??null,reference?.sourceHash??null,reference?.sourceVersion??null])
           }
         }
         if (input.generationRunId) {
@@ -132,6 +146,18 @@ export function createPackRepository(pool: pg.Pool) {
             WHERE run_id = $1
           `, [input.generationRunId, packId])
         }
+        if(input.queryContext?.selectedScopeProof){
+          const proof=input.queryContext.selectedScopeProof
+          if(!await selectedScopeContextCurrent(client,proof))throw new ContextConsumptionChangedError()
+          const origins=await selectedScopeOriginFences(client,proof)
+          const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2')} AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences)])
+          if(!origins.matches||!valid.rows[0]?.valid)throw new ContextConsumptionChangedError()
+        }
+        const origin=await originPolicyCorpusSnapshot(client,input.installationId)
+        if(origin.stamp!==(input.queryContext?.originPolicyStamp??null))throw new ContextConsumptionChangedError()
+        // All source/FK dependencies precede the final generation fence.
+        const generation=await fenceConsumptionGeneration(client,input.installationId,input.consumptionGeneration)
+        if(inserted.rowCount)await client.query('UPDATE memory_context_packs SET consumption_generation=$2 WHERE pack_id=$1',[packId,generation])
         // Return the database-canonical UUID text so callers never compare
         // against a differently-formatted literal of the same id.
         const canonical = await client.query<{ pack_id: string }>(
@@ -164,7 +190,7 @@ export function createPackRepository(pool: pg.Pool) {
                ((SELECT COUNT(*)::int FROM memory_context_pack_items i
                  WHERE i.pack_id = p.pack_id)
                 + (SELECT COUNT(*)::int FROM jsonb_array_elements(p.selected_references) reference
-                   WHERE reference->>'source_kind' = 'wiki_section')) AS item_count
+                   WHERE reference->>'source_kind' = 'wiki_section' OR reference->>'installation_id' <> p.installation_id::text)) AS item_count
         FROM memory_context_packs p
         LEFT JOIN memory_retrieval_trajectories t ON t.trajectory_id = p.trajectory_id
         WHERE p.pack_id = $1
@@ -227,7 +253,9 @@ export function createPackRepository(pool: pg.Pool) {
       }>(`
         SELECT p.pack_id::text, p.state, p.client_request_id, p.created_at,
                to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
-               p.mode, p.agent, p.stable_text, p.dynamic_text,
+               p.mode, p.agent,
+               CASE WHEN ${FOREIGN_PACK_SQL} THEN '' ELSE p.stable_text END AS stable_text,
+               CASE WHEN ${FOREIGN_PACK_SQL} THEN '' ELSE p.dynamic_text END AS dynamic_text,
                p.stable_tokens, p.dynamic_tokens, p.error_code,
                p.policy_revision::text, p.settings_revision::text, p.loadout_revision::text,
                p.trajectory_id::text, t.result_state, t.degraded_components

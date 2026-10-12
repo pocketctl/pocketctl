@@ -66,6 +66,9 @@ export interface WikiProviderBudgetSettings {
 }
 
 export interface MemoryConfig {
+  delegatedPublishMode?: 'off'|'enabled'
+  personalAutoAcceptMode?: 'off'|'assist'
+  reviewAutomationMode?: 'off'|'shadow'|'assist'
   /** Always set by loadMemoryConfig; optional for historical explicit fixtures. */
   gitSync?: GitSyncConfig
   skill: SkillConfig
@@ -555,6 +558,9 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
 
   return {
     mode,
+    delegatedPublishMode:parseEnum('MEMORY_DELEGATED_PUBLISH_MODE',env.MEMORY_DELEGATED_PUBLISH_MODE,['off','enabled'] as const,'off'),
+    personalAutoAcceptMode:parseEnum('MEMORY_PERSONAL_AUTO_ACCEPT_MODE',env.MEMORY_PERSONAL_AUTO_ACCEPT_MODE,['off','assist'] as const,'off'),
+    reviewAutomationMode: parseEnum('MEMORY_REVIEW_AUTOMATION_MODE',env.MEMORY_REVIEW_AUTOMATION_MODE,['off','shadow','assist'] as const,'off'),
     skill,
     gitSync,
     sharedScopesMode,

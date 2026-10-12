@@ -22,6 +22,7 @@ function save() { emit('save', JSON.parse(JSON.stringify(draft.value))) }
 <template>
   <form class="memory-skill-editor" data-testid="skill-editor" @submit.prevent="save">
     <p class="memory-skill-muted">{{ t('memory.skills.immutable_edit') }}</p>
+    <p class="memory-skill-muted">{{ t('memory.assistance.productGate') }} · {{ t('memory.assistance.toolApproval') }}</p>
     <label>{{ t('memory.skills.title') }}<input v-model="draft.title" required maxlength="200" data-testid="skill-edit-title" /></label>
     <label>{{ t('memory.skills.trigger') }}<textarea v-model="draft.trigger" required maxlength="2000" rows="2" /></label>
     <label v-for="field in listFields" :key="field">

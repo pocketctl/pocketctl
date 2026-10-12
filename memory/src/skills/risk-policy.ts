@@ -1,3 +1,4 @@
+import {independentSourceCount} from '../episodes/source-lineage.js'
 import { redactSecrets } from '../episodes/content-policy.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
 import {
@@ -29,7 +30,7 @@ export interface SkillPublicationFacts {
   /** All facts come from ledger/replay queries, never from request/model JSON. */
   contentHash: string
   conflictingClaims: boolean
-  successes: Array<{ episodeId: string; sessionId: string; contentHash: string; verified: boolean }>
+  successes: Array<{ episodeId: string; sessionId: string; contentHash: string; verified: boolean; sourceRootIds?:readonly string[] }>
   deterministicValidation: { contentHash: string; passed: boolean }
   replays: Array<{ kind: 'historical_session' | 'golden_task'; contentHash: string; passed: boolean }>
   rollbackVerified: boolean
@@ -56,8 +57,7 @@ export function evaluateAutoPublication(input: SkillCandidateDocument, facts: Sk
   if (risk.risk !== 'low') reasons.push('risk_requires_review')
   const successes = facts.successes.filter(fact => fact.verified && fact.contentHash === facts.contentHash
     && fact.episodeId.length > 0 && fact.sessionId.length > 0)
-  if (new Set(successes.map(row => row.sessionId)).size < 2
-    || new Set(successes.map(row => row.episodeId)).size < 2) reasons.push('independent_successes_missing')
+  if (independentSourceCount(successes) < 2) reasons.push('independent_successes_missing')
   if (facts.conflictingClaims) reasons.push('claim_conflict')
   if (!facts.deterministicValidation.passed || facts.deterministicValidation.contentHash !== facts.contentHash) {
     reasons.push('deterministic_validation_missing')

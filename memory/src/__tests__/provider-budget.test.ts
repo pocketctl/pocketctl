@@ -60,14 +60,13 @@ describe('provider budget guard', () => {
     expect(store.settle).toHaveBeenCalledWith('r1', { inputTokens: 7, outputTokens: 3 })
   })
 
-  test('settles a usage-less terminal failure at zero so the reservation cannot leak', async () => {
+  test('a usage-less HTTP failure retains the reservation because remote billing is unknown', async () => {
     const store: ProviderBudgetStore = {
       reserve: vi.fn(async () => ({ ok: true as const, reservationId: 'r1' })),
       settle: vi.fn(async () => undefined),
     }
-    // Adapter failures such as http_error/timeout carry no usage; without a
-    // zero settle their conservative output reservation would permanently
-    // consume the budget (93 leaked reservations starved production).
+    // A missing completion cannot prove that the provider did not bill it.
+    // Reservations remain conservative until trustworthy usage is known.
     const generateJson = vi.fn(async () => ({
       ok: false as const,
       code: 'http_error' as const,
@@ -82,7 +81,7 @@ describe('provider budget guard', () => {
       operation: 'candidate_extract', system: 's', document: {}, schema: {},
       timeoutMs: 1000, signal: new AbortController().signal,
     })
-    expect(store.settle).toHaveBeenCalledWith('r1', { inputTokens: 0, outputTokens: 0 })
+    expect(store.settle).not.toHaveBeenCalled()
   })
 
   test('keeps the worst-case reservation unsettled for invalid_usage', async () => {

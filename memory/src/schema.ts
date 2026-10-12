@@ -1,3 +1,19 @@
+import {JOB_RELEASE_FENCE_MIGRATION} from './generation/job-release-fence-migration.js'
+import {GOVERNANCE_INCREMENTAL_MIGRATION} from './migrations/governance-v2/incremental-migration.js'
+import {SOURCE_LINEAGE_MIGRATION} from './episodes/source-lineage-migration.js'
+import {PUBLICATION_DELEGATION_MIGRATION} from './governance/publication-delegation-migration.js'
+import {AUTOMATION_ACCEPTANCE_MIGRATION} from './governance/automation-acceptance-migration.js'
+import {REVIEW_ASSIST_MIGRATION} from './governance/assist-migration.js'
+import {AUTOMATION_LEDGER_MIGRATION} from './governance/automation-migration.js'
+import {FEEDBACK_RETENTION_MIGRATION} from './eval/feedback-retention-migration.js'
+import {EVIDENCE_REFERENCE_MIGRATION} from './context/evidence-reference-migration.js'
+import {GOVERNANCE_TTL_MIGRATION} from './governance/retention-migration.js'
+import {JOB_COMMIT_FENCE_MIGRATION} from './generation/job-commit-fence-migration.js'
+import {CLAIM_VERSION_INTERVAL_MIGRATION} from './claims/version-interval-migration.js'
+import {GOVERNANCE_BRIDGE_MIGRATION} from './migrations/governance-v2/bridge-migration.js'
+import {GOVERNANCE_IDENTITY_MIGRATION} from './migrations/governance-v2/identity-migration.js'
+import { GOVERNANCE_V2_EXPAND_MIGRATION } from './migrations/governance-v2/migration.js'
+import {CONTEXT_CONSUMPTION_MIGRATION} from './context/consumption-migration.js'
 import type pg from 'pg'
 import { SKILL_ARCHIVE_MIGRATION } from './skills/migration.js'
 import { SKILL_TASK_MIGRATION } from './skills/task-migration.js'
@@ -2196,6 +2212,22 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
          CHECK (jsonb_typeof(selected_references) = 'array')`,
     ],
   },
+  GOVERNANCE_V2_EXPAND_MIGRATION,
+  CONTEXT_CONSUMPTION_MIGRATION,
+  GOVERNANCE_BRIDGE_MIGRATION,
+  GOVERNANCE_IDENTITY_MIGRATION,
+  CLAIM_VERSION_INTERVAL_MIGRATION,
+  JOB_COMMIT_FENCE_MIGRATION,
+  GOVERNANCE_TTL_MIGRATION,
+  EVIDENCE_REFERENCE_MIGRATION,
+  FEEDBACK_RETENTION_MIGRATION,
+  AUTOMATION_LEDGER_MIGRATION,
+  REVIEW_ASSIST_MIGRATION,
+  AUTOMATION_ACCEPTANCE_MIGRATION,
+  PUBLICATION_DELEGATION_MIGRATION,
+  SOURCE_LINEAGE_MIGRATION,
+  GOVERNANCE_INCREMENTAL_MIGRATION,
+  JOB_RELEASE_FENCE_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
@@ -2214,6 +2246,9 @@ export async function applyMemorySchema(pool: pg.Pool): Promise<void> {
         'SELECT version FROM memory_schema_migrations',
       )
       const done = new Set(applied.rows.map(row => Number(row.version)))
+      if ([...done].some(version=>!MEMORY_MIGRATIONS.some(m=>m.version===version))) {
+        throw new Error('memory_schema_incompatible')
+      }
       for (const migration of MEMORY_MIGRATIONS) {
         if (done.has(migration.version)) continue
         await client.query('BEGIN')

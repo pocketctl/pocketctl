@@ -1,5 +1,7 @@
 /** Frozen job types and claim shapes for the Memory background runtime. */
 export type JobType =
+  | 'execute_publication_delegation'
+  | 'evaluate_review_shadow'
   | 'git_ingest'
   | 'git_export'
   | 'git_reconcile'
@@ -27,6 +29,8 @@ export type JobType =
   | 'extract_skill_candidate'
 
 export const JOB_TYPES: readonly JobType[] = Object.freeze([
+  'execute_publication_delegation',
+  'evaluate_review_shadow',
   'git_ingest', 'git_export', 'git_reconcile',
   'expire_promotion_candidates',
   'index_shared_claim',
@@ -58,6 +62,8 @@ export const JOB_TYPES: readonly JobType[] = Object.freeze([
  * share the maintenance band (plan section 6.1).
  */
 export const JOB_PRIORITIES = Object.freeze({
+  execute_publication_delegation: 61,
+  evaluate_review_shadow: 86,
   git_ingest: 79, git_export: 79, git_reconcile: 79,
   expire_promotion_candidates: 40,
   index_shared_claim: 60,
@@ -104,4 +110,14 @@ export interface JobFence {
   jobId: string
   claimedBy: string
   claimEpoch: number
+}
+
+export type JobDeferReason = 'budget_exceeded' | 'budget_unavailable' | 'source_not_ready'
+
+/** An expected wait, separate from an execution failure or completion. */
+export class JobDeferredError extends Error {
+  constructor(readonly reason: JobDeferReason, readonly availableAt: Date) {
+    super(reason)
+    this.name = 'JobDeferredError'
+  }
 }
