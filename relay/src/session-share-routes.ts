@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Pool } from 'pg';
+import { withSessionHistoryScope } from './session-history/postgres-reader.js';
 import {
   signSessionShareToken as defaultSignSessionShareToken,
   verifyAccessTokenWithRevocation as defaultVerifyAccessToken,
@@ -174,7 +175,7 @@ export function registerSessionShareRoutes(
         share.sessionId,
       );
       if (!owned) return unavailable();
-      const events = await getSessionAllEvents(dependencies.pool, share.sessionId);
+      const events = await withSessionHistoryScope({ userId: share.userId }, () => getSessionAllEvents(dependencies.pool, share.sessionId));
       return shareViewerPage(events);
     } catch {
       return unavailable();

@@ -8,6 +8,8 @@ import {
   serializeAttentionRecovery,
 } from './dto.js'
 import type { AttentionInboxConfig, AttentionItemState } from './types.js'
+import type { AttentionNotificationRepository } from './notification-repository.js'
+import { serializeSystemNotification } from './notification-dto.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const ITEM_STATES = new Set<AttentionItemState>([
@@ -46,6 +48,7 @@ interface AttentionInboxRouteDependencies {
   repository: RouteRepository
   recoveryRepository: RecoveryRouteRepository
   service: RouteService
+  notifications?: { enabled: boolean; repository: AttentionNotificationRepository }
   verifyAccessToken: (token: string, pool: Pool) => Promise<{ userId: number } | null>
 }
 
@@ -155,7 +158,19 @@ export function registerAttentionInboxRoutes(
     }
     const limit = query.limit === undefined ? 50 : Number(query.limit)
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return fail(reply, 400, 'invalid_request', 'Invalid limit')
-    const capabilities = serializeAttentionConfigV2(dependencies.config)
+    const capabilities = {
+      ...serializeAttentionConfigV2(dependencies.config),
+      ...(dependencies.notifications?.enabled ? { system_notifications: true } : {}),
+    }
+    const notificationSnapshot = dependencies.notifications?.enabled
+      ? await dependencies.notifications.repository.list({
+        userId: access.userId, daemonId: scope === 'daemon' ? query.daemon_id! : null, limit: 50,
+      }) : null
+    const notificationFields = notificationSnapshot ? {
+      notifications: notificationSnapshot.notifications.map(serializeSystemNotification),
+      notification_counts: { unread: notificationSnapshot.unread },
+      notifications_next_cursor: notificationSnapshot.nextCursor,
+    } : {}
     if (!dependencies.config.enabled) {
       return {
         schema_version: 2, server_time: new Date().toISOString(), capabilities,
@@ -164,7 +179,7 @@ export function registerAttentionInboxRoutes(
           actionable: 0, open: 0, snoozed: 0, submitting: 0, result_unknown: 0,
           recovery_open: 0, recovery_snoozed: 0, attention_required: 0,
         },
-        items: [], recovery_items: [], next_cursor: null,
+        items: [], recovery_items: [], next_cursor: null, ...notificationFields,
       }
     }
     try {
@@ -181,6 +196,7 @@ export function registerAttentionInboxRoutes(
         : { items: [], counts: { open: 0, snoozed: 0 } }
       return {
         schema_version: 2, server_time: new Date().toISOString(), capabilities,
+        ...notificationFields,
         scope: { type: scope, daemon_id: daemonId },
         counts: {
           ...items.counts,

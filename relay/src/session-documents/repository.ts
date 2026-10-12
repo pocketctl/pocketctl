@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
 
 import { lockSessionMaterializationFence } from '../db.js'
+import { readDocumentBody, DocumentBodyAccessError } from './body-reader.js'
 
 export type SessionDocumentFormat = 'markdown' | 'html'
 
@@ -9,6 +10,9 @@ export class SessionDocumentNotFoundError extends Error {
     super('session document not found')
     this.name = 'SessionDocumentNotFoundError'
   }
+}
+export class SessionDocumentReadUnavailableError extends Error {
+  constructor() { super('session document temporarily unavailable'); this.name='SessionDocumentReadUnavailableError' }
 }
 
 export class SessionDocumentIntegrityError extends Error {
@@ -636,7 +640,8 @@ export class SessionDocumentRepository {
     displayName: string
   }> {
     const result = await this.pool.query<any>(
-      `SELECT v.content_bytes, v.byte_size, v.sha256, d.document_format, d.display_name
+      `SELECT v.content_bytes, v.byte_size, v.sha256, d.document_format, d.display_name,
+              v.body_storage,v.body_manifest_id,v.body_chunk_ordinal,v.body_activity_epoch
        FROM session_documents d
        JOIN session_document_versions v
          ON v.document_id = d.document_id AND v.version_id = $4
@@ -645,8 +650,14 @@ export class SessionDocumentRepository {
     )
     const row = result.rows[0]
     if (!row) throw new SessionDocumentNotFoundError()
+    let bytes: Buffer
+    try { bytes=await readDocumentBody(this.pool,{userId,sessionId,documentId,versionId},row) }
+    catch(error) {
+      if(error instanceof DocumentBodyAccessError) throw new SessionDocumentNotFoundError()
+      throw new SessionDocumentReadUnavailableError()
+    }
     return {
-      bytes: Buffer.from(row.content_bytes),
+      bytes,
       byteSize: Number(row.byte_size),
       sha256: row.sha256,
       format: row.document_format,

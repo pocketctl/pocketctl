@@ -80,11 +80,15 @@ export async function admitSessionMessage(pool: pg.Pool, input: {
     const active = ['running','busy','retry','idle','waiting','waiting_approval','waiting_question'].includes(policy.status ?? '')
     if (!active || reservation.rows[0]) {
       const decision = await reserveConcurrentSessionInTransaction(client, { ...input, operation: 'resume', commandHash: hash })
+      if (decision.allowed && !decision.reused) {
+        await client.query('UPDATE sessions SET activity_epoch=activity_epoch+1 WHERE session_id=$1', [input.sessionId])
+      }
       await client.query('COMMIT')
       return { kind: 'resume', decision }
     }
     const admission: ContinueAdmission = { id: randomUUID(), userId: input.userId, daemonId: input.daemonId, sessionId: input.sessionId, requestId: input.requestId, state: 'issued', expiresAt: new Date(Date.now() + 20_000) }
     await client.query(`INSERT INTO session_message_admissions(id,user_id,daemon_id,session_id,request_id,msg_id,command_hash,expires_at,canonical_session_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$4)`, [admission.id,input.userId,input.daemonId,input.sessionId,input.requestId,msgId,hash,admission.expiresAt])
+    await client.query('UPDATE sessions SET activity_epoch=activity_epoch+1 WHERE session_id=$1', [input.sessionId])
     await client.query('COMMIT')
     return { kind: 'continue', admission, reused: false }
   } catch (error) { await client.query('ROLLBACK'); throw error }

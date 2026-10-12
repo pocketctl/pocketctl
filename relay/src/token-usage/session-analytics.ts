@@ -42,12 +42,12 @@ export async function getTokenSessionAnalytics(pool: Pick<pg.Pool,'query'>, user
     SELECT f.session_id,f.input,f.output,f.cache_read,f.cache_create FROM token_usage_facts f
     WHERE f.user_id=$1 AND NOT f.session_attribution_revoked AND f.usage_date=(NOW() AT TIME ZONE 'UTC')::date AND f.usage_date BETWEEN $5::date AND $6::date
   ),` : `usage AS (
-    SELECT e.session_id, COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0) AS input,
-      COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0) AS output,
-      COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0) AS cache_read,
-      COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint,0) AS cache_create
+    SELECT e.session_id, COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint,0) AS input,
+      COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint,0) AS output,
+      COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint,0) AS cache_read,
+      COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint,0) AS cache_create
     FROM events e JOIN sessions own ON own.session_id=e.session_id AND own.user_id=$1
-    WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND (e.created_at AT TIME ZONE 'UTC')::date BETWEEN $5::date AND $6::date
+    WHERE e.event_type='agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND (e.created_at AT TIME ZONE 'UTC')::date BETWEEN $5::date AND $6::date
   ),`
   const ranged = !!query.from
   const base = `WITH ${usage} selected AS (

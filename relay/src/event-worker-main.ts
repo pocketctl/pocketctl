@@ -25,6 +25,10 @@ import { assertSessionDocumentSchema } from './session-documents/schema.js'
 import { sessionDocumentBytes, sessionDocumentRecords } from './metrics.js'
 import { resolveTeamCollaborationConfig } from './team/config.js'
 import { createTeamRunWorker } from './team/run-worker.js'
+import { sessionLifecycleConfig } from './session-lifecycle/config.js'
+import { assertSessionLifecycleSchema } from './session-lifecycle/schema.js'
+import { installConfiguredHistoryReader,configuredArchiveStorage } from './session-history/runtime.js'
+import { createSessionLifecycleWorker } from './session-lifecycle/worker.js'
 
 const EXTENSION_PROJECTOR_INTERVAL_MS = 500
 
@@ -102,6 +106,7 @@ interface WorkerRuntimeDeps {
   /** ADR-0003 feed projector; absent in off mode. */
   extensionProjector?: { start(): void; stop(): Promise<void> };
   teamRunWorker?: { start(): void; stop(): Promise<void> };
+  lifecycleWorker?: { start(): void; stop(): Promise<void> };
   pool: { end(): Promise<void> };
 }
 
@@ -129,6 +134,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
         retentionStarted = true
         deps.extensionProjector?.start()
         deps.teamRunWorker?.start()
+        deps.lifecycleWorker?.start()
         started = true
       } catch (error) {
         await Promise.allSettled([
@@ -136,6 +142,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
           ...(retentionStarted ? [deps.retention.stop()] : []),
           ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
           ...(deps.teamRunWorker ? [deps.teamRunWorker.stop()] : []),
+          ...(deps.lifecycleWorker ? [deps.lifecycleWorker.stop()] : []),
         ])
         workerStarted = false
         retentionStarted = false
@@ -153,6 +160,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
             deps.retention.stop(),
             ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
             ...(deps.teamRunWorker ? [deps.teamRunWorker.stop()] : []),
+            ...(deps.lifecycleWorker ? [deps.lifecycleWorker.stop()] : []),
           ])
           drainFailure = drained.find((result) => result.status === 'rejected')?.reason
           started = false
@@ -219,6 +227,7 @@ function nonNegativeEnvInt(name: string, fallback: number): number {
 }
 
 export async function main(): Promise<void> {
+  const lifecycleConfig=sessionLifecycleConfig(process.env)
   const databaseUrl = process.env.DATABASE_URL
   if (!databaseUrl) throw new Error('DATABASE_URL is required')
   const shardCount = strictPositiveEnvInt('RELAY_WORKER_SHARD_COUNT', 1)
@@ -238,7 +247,12 @@ export async function main(): Promise<void> {
     statementTimeoutMillis: EVENT_WORKER_STATEMENT_TIMEOUT_MS,
   })
   const repository = new InboxRepository(pool)
+  installConfiguredHistoryReader(pool,lifecycleConfig)
   const workerId = process.env.RELAY_WORKER_ID || `${hostname()}:${process.pid}`
+  const lifecycleWorker=createSessionLifecycleWorker(pool,lifecycleConfig,configuredArchiveStorage(pool),process.env.JWT_SECRET??'worker-internal-no-cursors',{
+    workerId:`${workerId}:lifecycle`,deleteOptions:{writeUsageFacts:tokenFeatures.writeFacts,usageFactsAuthoritative:tokenFeatures.dashboardV2,extensionMode:extensionConfig.mode},
+    onReport:report=>console.info('[session-lifecycle]',report),
+  })
   const worker = createInboxWorker({
     repository,
     materializer: new EventMaterializer({
@@ -301,6 +315,7 @@ export async function main(): Promise<void> {
   const runtime = createWorkerRuntime({
     assertSchemaReady: async () => {
       await assertDurableIngressSchema(pool)
+      await assertSessionLifecycleSchema(pool)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
       if (sessionDocumentConfig.captureMode === 'on') await assertSessionDocumentSchema(pool)
       if (extensionConfig.mode !== 'off') await assertExtensionSchema(pool)
@@ -316,6 +331,7 @@ export async function main(): Promise<void> {
     retention,
     extensionProjector,
     teamRunWorker,
+    lifecycleWorker,
     pool,
   })
   await runtime.start()

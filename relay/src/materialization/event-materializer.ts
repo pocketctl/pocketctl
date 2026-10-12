@@ -745,8 +745,8 @@ export class EventMaterializer {
       // effect-step ordinals remain compatible with rows created by older relays.
       const materializeActivity = async () => {
         const activityAt = resolveSessionActivityAt(input)
-        if (activityAt && input.sessionId) {
-          const writeActivity = input.eventType === 'session_discovered'
+        if (activityAt && input.sessionId && input.eventType !== 'user_message_receipt') {
+          const writeActivity = input.eventType === 'session_discovered' || input.eventType === 'session_status'
             ? db.restoreSessionActivity
             : db.advanceSessionActivity
           await effect.step(() => writeActivity(this.effectPool, input.sessionId!, activityAt))
@@ -758,6 +758,12 @@ export class EventMaterializer {
           if (input.eventType === 'user_message_receipt' && input.userId !== null) {
             await effect.step(() => this.options.hooks?.broadcastQuota?.(input.userId!))
           }
+        }
+        // Receipts did not have an activity effect in the old ordinal layout.
+        // Append after admission completion/quota broadcast, preserving replay
+        // of pending effects written by the previous Relay version.
+        if (activityAt && input.sessionId && input.eventType === 'user_message_receipt') {
+          await effect.step(() => db.advanceSessionActivity(this.effectPool, input.sessionId!, activityAt))
         }
       }
       // Preserve the legacy generic session accumulator for older payloads

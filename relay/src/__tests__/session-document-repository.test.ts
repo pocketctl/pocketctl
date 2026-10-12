@@ -136,7 +136,7 @@ describe('SessionDocumentRepository', () => {
       if (sql.includes('DELETE FROM session_document_uploads')) return { rows: [{ version_id: 'v1' }, { version_id: 'v2' }], rowCount: 2 }
       if (sql.includes('FROM session_documents d') && sql.includes('JOIN session_document_versions')) {
         expect(params).toEqual([7, 's', 'd', 'v'])
-        return { rows: [{ content_bytes: Buffer.from('safe'), byte_size: 4, sha256: 'a'.repeat(64), document_format: 'html', display_name: 'safe.html' }] }
+        return { rows: [{ content_bytes: Buffer.from('safe'), byte_size: 4, sha256: createHash('sha256').update('safe').digest('hex'), document_format: 'html', display_name: 'safe.html' }] }
       }
       return {}
     })
@@ -144,7 +144,7 @@ describe('SessionDocumentRepository', () => {
 
     await expect(repository.expireUploads(new Date('2026-09-11T01:00:00Z'))).resolves.toBe(2)
     await expect(repository.readCommittedContent(7, 's', 'd', 'v')).resolves.toEqual({
-      bytes: Buffer.from('safe'), byteSize: 4, sha256: 'a'.repeat(64), format: 'html', displayName: 'safe.html',
+      bytes: Buffer.from('safe'), byteSize: 4, sha256: createHash('sha256').update('safe').digest('hex'), format: 'html', displayName: 'safe.html',
     })
     expect(query.mock.calls.some(([, params]) => Array.isArray(params) && params.join(',') === '7,s,d,v')).toBe(true)
   })

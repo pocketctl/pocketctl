@@ -1,0 +1,106 @@
+import { timestampMicros } from './time.js'
+import type { SessionLifecycleConfig } from './types.js'
+
+const POLICY = {
+  version: 'session-lifecycle-v1',
+  archiveDays: 60,
+  purgeDays: 90,
+  notificationRetentionDays: 90,
+}
+
+export function sessionLifecycleConfig(
+  env: Record<string, string | undefined> = process.env,
+): SessionLifecycleConfig {
+  const mode = env.SESSION_LIFECYCLE_MODE?.trim() || 'enforce'
+  if (mode !== 'off' && mode !== 'observe' && mode !== 'enforce') {
+    throw new Error('SESSION_LIFECYCLE_MODE must be off, observe or enforce')
+  }
+  // Configuration defaults on per the user's 2026-10-12 instruction. Actual
+  // execution readiness is assessed separately and must not be inferred here.
+  const version = env.SESSION_LIFECYCLE_POLICY_VERSION ?? POLICY.version
+  if (version !== POLICY.version)
+    throw new Error('unsupported SESSION_LIFECYCLE_POLICY_VERSION')
+  const integer = (key: string, fallback: number, maximum: number): number => {
+    const raw = env[key]
+    if (raw === undefined) return fallback
+    if (!/^[1-9]\d*$/.test(raw)) throw new Error(`invalid ${key}`)
+    const value = Number(raw)
+    if (!Number.isSafeInteger(value) || value > maximum)
+      throw new Error(`invalid ${key}`)
+    return value
+  }
+  const archiveDays = integer(
+    'SESSION_LIFECYCLE_ARCHIVE_DAYS',
+    POLICY.archiveDays,
+    36500,
+  )
+  const purgeDays = integer(
+    'SESSION_LIFECYCLE_PURGE_DAYS',
+    POLICY.purgeDays,
+    36500,
+  )
+  if (archiveDays !== POLICY.archiveDays || purgeDays !== POLICY.purgeDays) {
+    throw new Error(
+      'lifecycle retention changes require a new implemented policy version',
+    )
+  }
+  const time = (key: string): string | null => {
+    const raw = env[key]
+    if (!raw) return null
+    try {
+      timestampMicros(raw)
+    } catch {
+      throw new Error(`invalid ${key}`)
+    }
+    return raw
+  }
+  const effectiveAt = time('SESSION_LIFECYCLE_EFFECTIVE_AT')
+  const transitionDeadline = time('SESSION_LIFECYCLE_TRANSITION_DEADLINE')
+  if (
+    effectiveAt &&
+    transitionDeadline &&
+    timestampMicros(transitionDeadline) < timestampMicros(effectiveAt)
+  ) {
+    throw new Error(
+      'lifecycle transition deadline precedes policy effective time',
+    )
+  }
+  return {
+    mode,
+    policyVersion: version,
+    archiveDays,
+    purgeDays,
+    effectiveAt,
+    transitionDeadline,
+    notificationRetentionDays: POLICY.notificationRetentionDays,
+    scanIntervalMs: integer(
+      'SESSION_LIFECYCLE_SCAN_INTERVAL_MS',
+      3_600_000,
+      86_400_000,
+    ),
+    batchSessions: integer('SESSION_LIFECYCLE_BATCH_SESSIONS', 20, 1000),
+    batchBytes: integer(
+      'SESSION_LIFECYCLE_BATCH_BYTES',
+      64 * 1024 * 1024,
+      1024 * 1024 * 1024,
+    ),
+    runBudgetMs: integer('SESSION_LIFECYCLE_RUN_BUDGET_MS', 60_000, 600_000),
+    transferConcurrency: integer(
+      'SESSION_LIFECYCLE_TRANSFER_CONCURRENCY',
+      1,
+      16,
+    ),
+    maxChunkBytes: integer(
+      'SESSION_LIFECYCLE_MAX_CHUNK_BYTES',
+      4 * 1024 * 1024,
+      64 * 1024 * 1024,
+    ),
+    maxCompressedBytes: integer(
+      'SESSION_LIFECYCLE_MAX_COMPRESSED_BYTES',
+      8 * 1024 * 1024,
+      128 * 1024 * 1024,
+    ),
+    objectBucket: env.SESSION_LIFECYCLE_OBJECT_BUCKET || null,
+    objectRegion: env.SESSION_LIFECYCLE_OBJECT_REGION || null,
+  }
+}

@@ -11,6 +11,10 @@ import type {
   AttentionMetadataOperation,
   AttentionRecoveryItem,
   AttentionRecoveryResponse,
+  SystemNotificationPage,
+  SystemNotification,
+  NotificationSubjectPage,
+  LifecycleNotificationSubject,
 } from '../types/attentionInbox'
 
 interface ErrorEnvelope {
@@ -21,6 +25,31 @@ interface ErrorEnvelope {
     current_item?: AttentionInboxItem
     current_recovery?: AttentionRecoveryItem
   }
+}
+
+function notificationQuery(scope: AttentionInboxScope, cursor?: string | null): string {
+  const query = new URLSearchParams({ limit: '50' })
+  if (scope.type === 'daemon') query.set('daemon_id', scope.daemonId)
+  if (cursor) query.set('cursor', cursor)
+  return query.toString()
+}
+
+export function listSystemNotifications(scope: AttentionInboxScope, cursor?: string | null): Promise<SystemNotificationPage> {
+  return request(`/api/attention/notifications?${notificationQuery(scope, cursor)}`, { method: 'GET' })
+}
+export function getSystemNotification(id: string, scope: AttentionInboxScope): Promise<{ notification: SystemNotification }> {
+  return request(`/api/attention/notifications/${encodeURIComponent(id)}?${notificationQuery(scope)}`, { method: 'GET' })
+}
+export function listNotificationSubjects(id: string, scope: AttentionInboxScope, cursor?: string | null): Promise<NotificationSubjectPage> {
+  return request(`/api/attention/notifications/${encodeURIComponent(id)}/subjects?${notificationQuery(scope, cursor)}`, { method: 'GET' })
+}
+export function getNotificationSubject(id: string, subjectId: string, scope: AttentionInboxScope): Promise<{ subject: LifecycleNotificationSubject }> {
+  return request(`/api/attention/notifications/${encodeURIComponent(id)}/subjects/${encodeURIComponent(subjectId)}?${notificationQuery(scope)}`, { method: 'GET' })
+}
+export function markSystemNotificationRead(id: string, revision: number, scope: AttentionInboxScope): Promise<{ status: 'read' }> {
+  return request(`/api/attention/notifications/${encodeURIComponent(id)}/read?${notificationQuery(scope)}`, {
+    method: 'POST', body: JSON.stringify({ expected_revision: revision }),
+  })
 }
 
 export class AttentionInboxApiError extends Error {

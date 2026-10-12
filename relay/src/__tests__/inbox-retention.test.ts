@@ -64,16 +64,12 @@ describe('InboxRetention', () => {
     expect(client.release).toHaveBeenCalledOnce()
   })
 
-  test('event retention cannot cascade-delete an undelivered realtime row', async () => {
+  test('retired event-age retention never removes canonical history', async () => {
     const pool = {
       query: vi.fn().mockResolvedValue({ rows: [], rowCount: 4 }),
     } as any
 
-    await expect(cleanStaleEvents(pool, 90)).resolves.toBe(4)
-
-    expect(pool.query).toHaveBeenCalledWith(
-      expect.stringMatching(/DELETE FROM events e.*NOT EXISTS.*realtime_outbox.*delivered_at IS NULL/is),
-      [90],
-    )
+    await expect(cleanStaleEvents(pool, 90)).resolves.toBe(0)
+    expect(pool.query).not.toHaveBeenCalled()
   })
 })

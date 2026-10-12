@@ -380,3 +380,9 @@ function onEvent(typeOrHandler: string | EventHandler, maybeHandler?: EventHandl
 export function useWebSocket() {
   return { ws, connected, reconnecting, daemons, isDaemonOnline, effectiveStatus, connect, send, sendUserMessage, subscribeTeamSession, unsubscribeTeamSession, onEvent, reportLocale }
 }
+/** Authoritative REST deletion reconciliation uses the same idempotent client
+ * invalidation path as live delivery; it is never persisted or sent upstream. */
+export function deliverReconciledSessionDeletion(sessionId:string){
+  const event={type:'session_deleted',session_id:sessionId,reason:'deletion_reconciliation'}
+  for(const handler of handlers)handler(event)
+}

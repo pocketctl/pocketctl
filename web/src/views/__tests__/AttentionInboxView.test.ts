@@ -2,12 +2,17 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { ref } from 'vue'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
-import type { AttentionInboxItem, AttentionInboxSnapshot, AttentionRecoveryItem } from '../../types/attentionInbox'
+import type { AttentionInboxItem, AttentionInboxSnapshot, AttentionRecoveryItem, SystemNotification } from '../../types/attentionInbox'
 import type { TeamInvitation } from '../../types/team'
 import { createAttentionInboxStore } from '../../composables/useAttentionInbox'
+import { createSystemNotificationStore } from '../../composables/useSystemNotifications'
+import { AttentionInboxApiError } from '../../services/attentionInboxClient'
+import { useLocale } from '../../composables/useLocale'
 
 const teamApi = vi.hoisted(() => ({ listMyInvitations: vi.fn(async (): Promise<TeamInvitation[]> => []), respondToTeamInvitation: vi.fn(async () => undefined) }))
 vi.mock('../../services/teamClient', () => teamApi)
+const noticesAPI = vi.hoisted(() => ({ listNotificationSubjects: vi.fn(), getNotificationSubject: vi.fn() }))
+vi.mock('../../services/attentionInboxClient', async importOriginal => ({ ...(await importOriginal<any>()), ...noticesAPI }))
 
 const mobile = ref(false)
 vi.mock('../../composables/useResponsiveLayout', () => ({
@@ -93,7 +98,7 @@ function snapshot(mode: 'off' | 'observe' | 'on' = 'on'): AttentionInboxSnapshot
   }
 }
 
-async function render(mode: 'off' | 'observe' | 'on' = 'on') {
+async function render(mode: 'off' | 'observe' | 'on' = 'on', notices: SystemNotification[] = []) {
   const list = vi.fn(async () => snapshot(mode))
   const mutate = vi.fn(async (input: any) => ({
     item: input.operation === 'restore'
@@ -130,18 +135,41 @@ async function render(mode: 'off' | 'observe' | 'on' = 'on') {
   await router.push('/inbox')
   await router.isReady()
   const View = (await import('../AttentionInboxView.vue')).default
-  const wrapper = mount(View, { props: { store }, global: { plugins: [router] } })
+  const notificationStore = createSystemNotificationStore({ list: vi.fn(async () => {
+    if (mode === 'off' && !notices.length) throw new AttentionInboxApiError(503, { error: { code: 'feature_disabled' } })
+    return { notifications: notices, next_cursor: null, notification_counts: { unread: notices.filter(item => !item.read_at).length } }
+  }), read: vi.fn() })
+  const wrapper = mount(View, { props: { store, notificationStore }, global: { plugins: [router] } })
   await flushPromises()
-  return { wrapper, store, router, list, mutate, mutateRecovery, submit }
+  return { wrapper, store, router, list, mutate, mutateRecovery, submit, notificationStore }
 }
 
 beforeEach(() => {
   mobile.value = false
   vi.clearAllMocks()
   teamApi.listMyInvitations.mockResolvedValue([])
+  noticesAPI.listNotificationSubjects.mockResolvedValue({ subjects: [], subject_count: 0, next_cursor: null })
 })
 
 describe('AttentionInboxView', () => {
+  test('system notices remain visible with approvals off and expose no approval actions', async () => {
+    const subject = { subject_id: 'subject-1', session_id: 'old-session', daemon_id: 'daemon-1', title: 'Deleted investigation', daemon_name: 'Mac Studio', action: 'purge' as const, result: 'succeeded' as const, last_activity_at: '2026-06-01T00:00:00Z', executed_at: '2026-10-12T00:00:00Z', effective_purge_at: null, reason_code: 'inactivity_90_days', navigation: { type: 'lifecycle_detail' as const, id: 'subject-1' } }
+    const notice: SystemNotification = { notification_id: 'notice-1', revision: 2, kind: 'system', topic: 'session_lifecycle', created_at: '2026-10-12T00:00:00Z', read_at: null, expires_at: '2027-01-10T00:00:00Z', subject_count: 1, subject_preview: [subject], subjects_next_cursor: null, requires_approval: false }
+    noticesAPI.listNotificationSubjects.mockResolvedValue({ subjects: [subject], subject_count: 1, next_cursor: null })
+    noticesAPI.getNotificationSubject.mockResolvedValue({ subject })
+    const result = await render('off', [notice])
+    expect(result.wrapper.find('[data-testid="attention-disabled"]').exists()).toBe(false)
+    expect(result.store.attentionCount({ type: 'global' })).toBe(0)
+    expect(result.wrapper.find('.notification-count').text()).toContain('1')
+    await result.wrapper.find('[data-testid="attention-kind-notification"]').trigger('click')
+    await flushPromises()
+    await result.wrapper.find('[data-notification-id="notice-1"]').trigger('click'); await flushPromises()
+    expect(result.wrapper.find('[data-testid="notification-detail"]').text()).toContain(useLocale().t('attention.notification.no_action'))
+    await result.wrapper.find('.subject-list button').trigger('click'); await flushPromises()
+    expect(result.wrapper.find('[data-testid="notification-operation-summary"]').text()).toContain(useLocale().t('attention.notification.deleted'))
+    expect(result.router.currentRoute.value.path).toBe('/inbox')
+    expect(result.submit).not.toHaveBeenCalled()
+  })
   test('shows and accepts a team invitation even when the daemon attention pipeline is off', async () => {
     teamApi.listMyInvitations.mockResolvedValueOnce([{
       id: 'cin_1', team_id: 'ctm_1', team_name: 'Research', invited_by_user_id: 9,

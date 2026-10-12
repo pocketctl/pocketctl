@@ -12,6 +12,16 @@ export function createPurgeClient(options: PurgeClientOptions) {
   const { http, tokens } = options
 
   return {
+    async listSessionDeletions():Promise<Array<Record<string,unknown>>>{
+      const body=await withProviderAuthRetry(tokens,'list_session_deletions',token=>http.request('GET','/api/extensions/v1/session-deletions',{operation:'list_session_deletions',token}))
+      const parsed=body as {deletions?:unknown}|null
+      if(!Array.isArray(parsed?.deletions))throw new Error('session deletion queue returned malformed page')
+      return parsed.deletions as Array<Record<string,unknown>>
+    },
+    async acknowledgeSessionDeletion(requestId:string,receipt:string):Promise<void>{
+      await withProviderAuthRetry(tokens,'acknowledge_session_deletion',token=>http.request('POST',`/api/extensions/v1/session-deletions/${requestId}/ack`,
+        {operation:'acknowledge_session_deletion',token,body:{provider_receipt:receipt}}))
+    },
     async listPurges(): Promise<Array<Record<string, unknown>>> {
       const body = await withProviderAuthRetry(tokens, 'list_purges', token =>
         http.request('GET', '/api/extensions/v1/purges', {

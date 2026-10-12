@@ -156,6 +156,10 @@
       </div>
 
       <!-- Full-area empty state when no sessions exist at all -->
+      <div v-else-if="hasNoSessions && historyReadFailed" class="session-history-loading" role="alert" data-testid="session-history-error">
+        <p>{{ historyFeedback }}</p>
+        <button type="button" class="session-history-retry" @click="retryHistory">{{ t('common.retry') }}</button>
+      </div>
       <div v-else-if="hasNoSessions" class="chat-welcome">
         <svg class="welcome-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
@@ -317,13 +321,13 @@
           </template>
         </div>
 
-        <div v-if="isMobile && !isLoading && !isLoadingBackward && (historyFeedback || hasMore)" class="mobile-history-feedback" role="status">
+        <div v-if="!isLoading && !isLoadingBackward && ((isMobile && (historyFeedback || hasMore)) || historyReadFailed)" class="mobile-history-feedback" role="status">
           <span>{{ historyFeedback }}</span>
-          <button v-if="hasMore" type="button" @click="loadMoreMobileHistory">{{ t('attention.load_more') }}</button>
+          <button v-if="hasMore && !historyReadFailed" type="button" @click="loadMoreMobileHistory">{{ t('attention.load_more') }}</button>
           <button v-else-if="historyFeedback" type="button" @click="retryHistory">{{ t('common.retry') }}</button>
         </div>
         <!-- Empty state when no messages -->
-        <div v-if="!isLoading && renderMessages.length === 0" class="chat-empty-state">
+        <div v-if="!isLoading && renderMessages.length === 0 && !historyReadFailed" class="chat-empty-state">
           <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -1097,6 +1101,7 @@ let olderReplayScrollHeight = 0
 let olderReplayScrollTop = 0
 let olderReadingAnchor: { id: string; top: number } | undefined
 const historyFeedback = ref('')
+const historyReadFailed = ref(false)
 let historyPageTimer: ReturnType<typeof setTimeout> | undefined
 let mobileHistoryNeedsGesture = false
 const loadedHistoryIDs = new Set<string>()
@@ -1143,6 +1148,7 @@ watch(showToolCalls, async (value) => {
 function beginHistoryFill(input: Parameters<HistoryViewportFillCoordinator['begin']>[0]) {
   loadedHistoryIDs.clear()
   historyFeedback.value = ''
+  historyReadFailed.value = false
   mobileHistoryNeedsGesture = false
   historyViewportFill.begin({ ...input, targetVisibleMessages: isMobile.value ? 20 : undefined })
 }
@@ -4088,6 +4094,13 @@ onMounted(() => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
     if (historyPageTimer) clearTimeout(historyPageTimer)
+    if (msg.error) {
+      resetReplayTrustBuffers()
+      finishHistoryViewportFill()
+      historyReadFailed.value = true
+      historyFeedback.value = t('session.history_read_failed')
+      return
+    }
     const previousIDs = new Set(sourceMessages.value.map(message => message.id))
     const wasLoadingBackward = isLoadingBackward.value
     const replayContext = replaySessionTrustContext()
@@ -4433,8 +4446,11 @@ onMounted(() => {
     sessionDocumentState.sessionDeleted(msg.session_id)
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
+      liveContentBatcher.reset(liveContentContextKey.value)
+      messages.value=[]
       const next = allSessions.value[0]
       if (next) router.push(`/session/${next.session_id}`)
+      else router.push('/sessions')
     }
   }))
 

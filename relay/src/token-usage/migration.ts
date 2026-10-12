@@ -116,17 +116,17 @@ export async function migrateTokenUsageAccounting(
                   event.session_id, COALESCE(NULLIF(session.agent_type, ''), 'unknown'),
                   COALESCE(NULLIF(session.model, ''), 'unknown'),
                   (event.created_at AT TIME ZONE 'UTC')::date, event.created_at,
-                  GREATEST(COALESCE((event.payload->'usage'->>'input_tokens')::bigint, 0), 0),
-                  GREATEST(COALESCE((event.payload->'usage'->>'output_tokens')::bigint, 0), 0),
-                  GREATEST(COALESCE((event.payload->'usage'->>'cache_read_tokens')::bigint, 0), 0),
-                  GREATEST(COALESCE((event.payload->'usage'->>'cache_create_tokens')::bigint, 0), 0),
-                  GREATEST(COALESCE((event.payload->'usage'->>'reasoning_tokens')::bigint, 0), 0),
-                  GREATEST(COALESCE((event.payload->'usage'->>'total_tokens')::bigint, 0), 0),
+                  GREATEST(COALESCE((COALESCE(event.payload,event.body_header)->'usage'->>'input_tokens')::bigint, 0), 0),
+                  GREATEST(COALESCE((COALESCE(event.payload,event.body_header)->'usage'->>'output_tokens')::bigint, 0), 0),
+                  GREATEST(COALESCE((COALESCE(event.payload,event.body_header)->'usage'->>'cache_read_tokens')::bigint, 0), 0),
+                  GREATEST(COALESCE((COALESCE(event.payload,event.body_header)->'usage'->>'cache_create_tokens')::bigint, 0), 0),
+                  GREATEST(COALESCE((COALESCE(event.payload,event.body_header)->'usage'->>'reasoning_tokens')::bigint, 0), 0),
+                  GREATEST(COALESCE((COALESCE(event.payload,event.body_header)->'usage'->>'total_tokens')::bigint, 0), 0),
                   1
            FROM page
            JOIN events event USING (id)
            JOIN sessions session ON session.session_id = event.session_id
-           WHERE event.event_type = 'agent_text' AND event.payload ? 'usage'
+           WHERE event.event_type = 'agent_text' AND COALESCE(event.payload,event.body_header) ? 'usage'
              AND session.user_id IS NOT NULL AND session.daemon_id IS NOT NULL
            ON CONFLICT DO NOTHING
            RETURNING 1
@@ -190,7 +190,7 @@ export async function migrateTokenUsageAccounting(
           FROM events event
           JOIN sessions session ON session.session_id = event.session_id
           LEFT JOIN token_usage_facts fact ON fact.source_event_id = event.id
-          WHERE event.event_type = 'agent_text' AND event.payload ? 'usage'
+          WHERE event.event_type = 'agent_text' AND COALESCE(event.payload,event.body_header) ? 'usage'
             AND session.user_id IS NOT NULL AND session.daemon_id IS NOT NULL
             AND fact.source_event_id IS NULL) AS missing_event_facts,
          (SELECT COUNT(*)

@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type pg from 'pg'
+import { EVENT_BODY_COLUMNS, hydratePostgresEventRows, withSessionHistoryScope } from './session-history/postgres-reader.js'
 
 const DEFAULT_PAGE_MAX_BYTES = 256 * 1024
 const FETCH_BATCH_SIZE = 256
@@ -266,6 +267,13 @@ export function createSessionHistoryReadBroker(options: SessionHistoryReadBroker
       }
 
       const authorization = authorized.rows[0]
+      const hydrateRows = (rows: EventRow[]) => withSessionHistoryScope({ userId: identity.userId!, authorize: async () => {
+        const current = await options.pool.query(`SELECT 1 FROM sessions source JOIN sessions target ON target.session_id=$3
+          WHERE source.session_id=$2 AND source.user_id=$1 AND source.daemon_id=$4 AND target.user_id=$1
+            AND source.content_state NOT IN ('deleting','deleted') AND target.content_state NOT IN ('deleting','deleted')`,
+          [identity.userId,request.sourceSessionId,request.targetSessionId,identity.daemonId])
+        return current.rows.length===1
+      } }, () => hydratePostgresEventRows(options.pool, request.targetSessionId, rows))
       const currentSnapshot = String(authorization.snapshot_max_event_id ?? '0')
       const snapshot = cursor?.snapshot ?? currentSnapshot
       if (BigInt(snapshot) > BigInt(currentSnapshot)) {
@@ -282,7 +290,7 @@ export function createSessionHistoryReadBroker(options: SessionHistoryReadBroker
 
       while (!exhausted && !nextCursor) {
         const rows = await options.pool.query<EventRow>(`
-          SELECT id::text, event_type, payload, created_at
+          SELECT id::text, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
           FROM events
           WHERE session_id = $1 AND id > $2::bigint AND id <= $3::bigint
           ORDER BY id ASC
@@ -293,7 +301,8 @@ export function createSessionHistoryReadBroker(options: SessionHistoryReadBroker
           break
         }
 
-        for (const row of rows.rows) {
+        const bodies = await hydrateRows(rows.rows)
+        for (const row of bodies) {
           const eventID = String(row.id)
           if (chunkEvent && eventID !== chunkEvent) {
             return { type: 'session_history_read_error', code: 'invalid_cursor' }
@@ -361,13 +370,14 @@ export function createSessionHistoryReadBroker(options: SessionHistoryReadBroker
         // Remaining rows may all be hidden event types. Probe through them on
         // this request so has_more describes visible transcript content only.
         const probe = await options.pool.query<EventRow>(`
-          SELECT id::text, event_type, payload, created_at
+          SELECT id::text, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
           FROM events
           WHERE session_id = $1 AND id > $2::bigint AND id <= $3::bigint
           ORDER BY id ASC
           LIMIT $4
         `, [request.targetSessionId, after, snapshot, FETCH_BATCH_SIZE])
-        const visible = probe.rows.find((row) => normalizedEvent(row) !== null)
+        const bodies = await hydrateRows(probe.rows)
+        const visible = bodies.find((row) => normalizedEvent(row) !== null)
         if (visible) {
           nextCursor = { v: 1, source: request.sourceSessionId, target: request.targetSessionId, after, snapshot }
         }

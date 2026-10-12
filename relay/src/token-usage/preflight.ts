@@ -113,9 +113,9 @@ export async function inspectTokenUsageMigration(
     const volumeResult = await client.query(
       `SELECT
          (SELECT COUNT(*) FROM events
-          WHERE event_type = 'agent_text' AND payload ? 'usage') AS retained_usage_events,
+          WHERE event_type = 'agent_text' AND COALESCE(payload,body_header) ? 'usage') AS retained_usage_events,
          (SELECT COUNT(DISTINCT (created_at AT TIME ZONE 'UTC')::date) FROM events
-          WHERE event_type = 'agent_text' AND payload ? 'usage') AS retained_usage_days,
+          WHERE event_type = 'agent_text' AND COALESCE(payload,body_header) ? 'usage') AS retained_usage_days,
          (SELECT COUNT(*) FROM token_daily_stats) AS legacy_daily_rows,
          (SELECT COUNT(DISTINCT date) FROM token_daily_stats) AS legacy_days,
          pg_total_relation_size('events') AS events_bytes,
@@ -134,13 +134,13 @@ export async function inspectTokenUsageMigration(
          SELECT (created_at AT TIME ZONE 'UTC')::date AS date,
                 COUNT(*)::bigint AS event_requests,
                 SUM(
-                  GREATEST(COALESCE((payload->'usage'->>'input_tokens')::bigint, 0), 0)
-                  + GREATEST(COALESCE((payload->'usage'->>'output_tokens')::bigint, 0), 0)
-                  + GREATEST(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint, 0), 0)
-                  + GREATEST(COALESCE((payload->'usage'->>'cache_create_tokens')::bigint, 0), 0)
+                  GREATEST(COALESCE((COALESCE(payload,body_header)->'usage'->>'input_tokens')::bigint, 0), 0)
+                  + GREATEST(COALESCE((COALESCE(payload,body_header)->'usage'->>'output_tokens')::bigint, 0), 0)
+                  + GREATEST(COALESCE((COALESCE(payload,body_header)->'usage'->>'cache_read_tokens')::bigint, 0), 0)
+                  + GREATEST(COALESCE((COALESCE(payload,body_header)->'usage'->>'cache_create_tokens')::bigint, 0), 0)
                 )::bigint AS event_total
          FROM events
-         WHERE event_type = 'agent_text' AND payload ? 'usage'
+         WHERE event_type = 'agent_text' AND COALESCE(payload,body_header) ? 'usage'
            AND (created_at AT TIME ZONE 'UTC')::date < $1::date
          GROUP BY (created_at AT TIME ZONE 'UTC')::date
        )

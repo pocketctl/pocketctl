@@ -4,6 +4,7 @@ import type pg from 'pg'
 import type { SessionDocumentConfig } from './config.js'
 import {
   SessionDocumentNotFoundError,
+  SessionDocumentReadUnavailableError,
   type SessionDocumentMetadata,
   type SessionDocumentRepository,
 } from './repository.js'
@@ -140,6 +141,7 @@ export function registerSessionDocumentRoutes(
       }
     } catch (caught) {
       if (caught instanceof SessionDocumentNotFoundError) return notFound(reply)
+      if (caught instanceof SessionDocumentReadUnavailableError) return error(reply,503,'document_read_unavailable','Document content is temporarily unavailable; retry')
       throw caught
     }
   })
@@ -167,6 +169,7 @@ export function registerSessionDocumentRoutes(
       return reply.send(content.bytes)
     } catch (caught) {
       if (caught instanceof SessionDocumentNotFoundError) return notFound(reply)
+      if (caught instanceof SessionDocumentReadUnavailableError) return error(reply,503,'document_read_unavailable','Document content is temporarily unavailable; retry')
       throw caught
     }
   })
@@ -203,6 +206,7 @@ export function registerSessionDocumentRoutes(
       return reply.send(content.bytes)
     } catch (caught) {
       if (caught instanceof SessionDocumentNotFoundError) return notFound(reply)
+      if (caught instanceof SessionDocumentReadUnavailableError) return error(reply,503,'document_read_unavailable','Document content is temporarily unavailable; retry')
       throw caught
     }
   })

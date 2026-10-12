@@ -11,7 +11,7 @@ interface NotificationClient extends Pick<pg.PoolClient, 'query' | 'release'> {
 }
 
 interface AttentionNotification {
-  entity: 'item' | 'recovery'
+  entity: 'item' | 'recovery' | 'notification' | 'lifecycle' | 'organization'
   userID: number
   itemID: string
   revision: number
@@ -23,6 +23,10 @@ export interface AttentionNotifierDependencies {
   loadItem(userId: number, itemId: string, revision: number): Promise<unknown | null>
   loadRecovery?: (userId: number, itemId: string, revision: number) => Promise<unknown | null>
   recoveryVisible?: boolean
+  notificationsVisible?: boolean
+  loadNotification?: (userId: number, id: string, revision: number) => Promise<unknown | null>
+  loadLifecycleDeletion?: (userId:number,sessionId:string)=>Promise<boolean>
+  loadLifecycleState?: (userId:number,sessionId:string)=>Promise<Record<string,unknown>|null>
   broadcast(userId: number, payload: unknown): void
 }
 
@@ -36,7 +40,7 @@ function parseNotification(message: NotificationMessage): AttentionNotification 
     const operation = value.operation
     const entity = value.entity === undefined || value.entity === 'item'
       ? 'item'
-      : value.entity === 'recovery' ? 'recovery' : null
+      : value.entity === 'recovery' ? 'recovery' : value.entity === 'notification' ? 'notification' : value.entity === 'lifecycle' ? 'lifecycle' : value.entity === 'organization' ? 'organization' : null
     if (typeof userID !== 'number' || !Number.isSafeInteger(userID) || userID <= 0) return null
     if (typeof itemID !== 'string' || !itemID) return null
     if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) return null
@@ -55,6 +59,34 @@ export function createAttentionNotifier(dependencies: AttentionNotifierDependenc
     const notification = parseNotification(message)
     if (!notification) return
     void (async () => {
+      if(notification.entity==='organization'){
+        const current=await dependencies.loadLifecycleState?.(notification.userID,notification.itemID)
+        if(current)dependencies.broadcast(notification.userID,{type:'session_organization_changed',session_id:notification.itemID,...current})
+        return
+      }
+      if(notification.entity==='lifecycle'){
+        if(await dependencies.loadLifecycleDeletion?.(notification.userID,notification.itemID))
+          dependencies.broadcast(notification.userID,{type:'session_deleted',session_id:notification.itemID,reason:'cloud_retention',schema_version:1})
+        return
+      }
+      if (notification.entity === 'notification') {
+        if (!dependencies.notificationsVisible || !dependencies.loadNotification) return
+        if (notification.operation === 'removed') {
+          dependencies.broadcast(notification.userID, {
+            type: 'attention_notification_removed', schema_version: 1,
+            notification_id: notification.itemID, last_revision: notification.revision,
+            reason: 'retention',
+          })
+          return
+        }
+        const current = await dependencies.loadNotification(notification.userID, notification.itemID, notification.revision)
+        if (current === null) return
+        dependencies.broadcast(notification.userID, {
+          type: 'attention_notification_changed', schema_version: 1,
+          notification_id: notification.itemID, revision: notification.revision,
+        })
+        return
+      }
       if (notification.entity === 'recovery') {
         if (!dependencies.recoveryVisible || !dependencies.loadRecovery) return
         if (notification.operation === 'removed') {

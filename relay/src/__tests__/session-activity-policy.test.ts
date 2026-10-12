@@ -52,6 +52,12 @@ describe('session activity policy', () => {
     expect(activity('tool_result', { output: 'done' })).toEqual(receivedAt)
   })
 
+  test('accepted message receipts count as activity while rejected/replayed receipts do not', () => {
+    expect(activity('user_message_receipt', { status: 'accepted' })).toEqual(receivedAt)
+    expect(activity('user_message_receipt', { status: 'rejected' })).toBeNull()
+    expect(activity('user_message_receipt', { status: 'accepted', resync: true })).toBeNull()
+  })
+
   test('ignores usage-only agent text', () => {
     expect(activity('agent_text', { content_class: 'telemetry' })).toBeNull()
     expect(activity('agent_text')).toBeNull()

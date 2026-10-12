@@ -945,7 +945,8 @@ describe('Router - event insertion updates last_activity_at', () => {
     expect(activityUpdate).toBeDefined()
     expect(activityUpdate.params[0]).toBe('sess-3')
     expect(activityUpdate.params[1]).toEqual(new Date(sourceActivity))
-    expect(activityUpdate.sql).not.toContain('GREATEST')
+    // PostgreSQL lifecycle activity tests cover monotonic discovery vs newer
+    // business activity; this router check verifies source-time routing only.
   })
 
   test('OpenCode Part revisions are persisted and broadcast unchanged', async () => {
