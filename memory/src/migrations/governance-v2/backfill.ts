@@ -4,6 +4,7 @@ import {automationHash} from '../../governance/automation-policy.js'
 import {resolveClaimApplicability} from '../../claims/identity-writer.js'
 import {claimIdentityV2,claimDuplicateDigestV2} from '../../claims/identity.js'
 import {MEMORY_MIGRATIONS} from '../../schema.js'
+import {encodeMigrationBaseline} from './baseline-snapshot.js'
 
 // Body/authority/history tables are observed, not rewritten to fabricate proof.
 export const BACKFILL_FAMILIES=Object.freeze([
@@ -79,7 +80,7 @@ export async function startGovernanceBackfill(pool:pg.Pool,input:{installationId
    await c.query(`INSERT INTO memory_governance_v2_states(installation_id,phase,writer_floor) VALUES($1,'bridge','identity_v2') ON CONFLICT(installation_id) DO UPDATE SET phase=CASE WHEN memory_governance_v2_states.identity_generation=2 THEN 'active' ELSE 'bridge' END,writer_floor='identity_v2',generation=memory_governance_v2_states.generation+1`,[id])
   }
   const manifest=await captureMigrationBaseline(c,input.installationIds),runId=randomUUID()
-  await c.query(`INSERT INTO memory_governance_migration_runs(run_id,environment_fingerprint,schema_version,manifest,state) VALUES($1,$2,$3,$4,'running')`,[runId,input.environmentFingerprint,version,manifest]);return runId
+  await c.query(`INSERT INTO memory_governance_migration_runs(run_id,environment_fingerprint,schema_version,manifest,state) VALUES($1,$2,$3,$4,'running')`,[runId,input.environmentFingerprint,version,encodeMigrationBaseline(manifest)]);return runId
  })
 }
 export async function recordMigrationAction(c:pg.PoolClient,input:{runId:string;installationId:string;table:string;id:string;row:Record<string,any>;action:'updated'|'unchanged'|'quarantined'|'retry';reason:string;afterHash?:string}){
