@@ -18,6 +18,7 @@ trap cleanup EXIT
 
 fail() {
   echo "relay production env integration failed: $*" >&2
+  [[ ! -f "$fixture/health.json" ]] || cat "$fixture/health.json" >&2
   [[ ! -f "$fixture/relay.log" ]] || tail -80 "$fixture/relay.log" >&2
   exit 1
 }
@@ -71,14 +72,19 @@ env -u DEV_EMAIL -u DEV_EMAIL_CODE \
 relay_pid=$!
 
 health="$fixture/health.json"
+health_ready=0
 for _ in $(seq 1 60); do
-  if curl -fsS "http://127.0.0.1:${relay_port}/health" -o "$health" 2>/dev/null; then
+  # The HTTP listener starts before asynchronous schema initialization. A 200
+  # response with status=not_ready is reachable, but is not healthy yet.
+  if curl -fsS "http://127.0.0.1:${relay_port}/health" -o "$health" 2>/dev/null \
+    && node -e 'const fs=require("node:fs"); try { process.exit(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).status === "ok" ? 0 : 1) } catch { process.exit(1) }' "$health"; then
+    health_ready=1
     break
   fi
   kill -0 "$relay_pid" >/dev/null 2>&1 || fail "Relay exited before becoming healthy"
   sleep 1
 done
-[[ -s "$health" ]] || fail "Relay health endpoint did not become ready"
+[[ "$health_ready" -eq 1 ]] || fail "Relay health endpoint did not become ready"
 
 EXPECTED_RELEASE="$release_version" EXPECTED_SHA="$git_sha" EXPECTED_BUILD_TIME="$build_time" \
   node - "$health" <<'NODE' || fail "health identity did not match the supplied production environment"
