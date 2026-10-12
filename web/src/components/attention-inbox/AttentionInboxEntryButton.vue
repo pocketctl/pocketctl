@@ -1,6 +1,6 @@
 <template>
   <button
-    v-if="store.isAvailable.value"
+    v-if="store.isAvailable.value || notifications.available.value"
     type="button"
     :class="[
       'attention-entry-button',
@@ -23,15 +23,17 @@
     </svg>
     <span v-if="showLabel">{{ t('attention.title') }}</span>
     <b v-if="count > 0">{{ badge }}</b>
+    <i v-if="notifications.unread.value > 0" class="notice-dot" :title="t('attention.notification.unread_count',{count:notifications.unread.value})" />
   </button>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted,onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAttentionInbox, type AttentionInboxStore } from '../../composables/useAttentionInbox'
 import { useLocale } from '../../composables/useLocale'
 import type { AttentionInboxScope } from '../../types/attentionInbox'
+import { createSystemNotificationStore,useSystemNotifications } from '../../composables/useSystemNotifications'
 
 const props = withDefaults(defineProps<{
   scope: AttentionInboxScope
@@ -41,6 +43,7 @@ const props = withDefaults(defineProps<{
   icon?: 'inbox' | 'bell'
 }>(), { showLabel: false, variant: 'default', icon: 'inbox' })
 const store = props.store ?? useAttentionInbox()
+const notifications=props.scope.type==='global'?useSystemNotifications():createSystemNotificationStore()
 const router = useRouter()
 const { t } = useLocale()
 const count = computed(() => store.attentionCount(props.scope))
@@ -65,14 +68,17 @@ function openInbox(): void {
       })
 }
 
-onMounted(refreshDaemonScope)
+onMounted(()=>{refreshDaemonScope();if(!props.store&&props.scope.type==='daemon')void notifications.start(props.scope)})
+onBeforeUnmount(()=>{if(props.scope.type==='daemon')notifications.stop()})
 watch([
   () => store.isAvailable.value,
   () => props.scope.type === 'daemon' ? props.scope.daemonId : '',
 ], refreshDaemonScope)
+watch(()=>props.scope,scope=>{if(!props.store&&scope.type==='daemon')void notifications.refresh(scope)})
 </script>
 
 <style scoped>
+.notice-dot { position:absolute;right:5px;bottom:5px;width:6px;height:6px;background:var(--accent);border-radius:50%;border:1px solid var(--surface); }
 .attention-entry-button { position: relative; min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border)); border-radius: var(--radius-full); color: var(--accent); background: var(--accent-muted); cursor: pointer; }
 .attention-entry-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .attention-entry-button--bell svg { width: 15px; height: 15px; }

@@ -295,6 +295,30 @@ describeWithDatabase('installation purge (PostgreSQL)', () => {
     expect(Number(receipts.rows[0].count)).toBe(1)
   })
 
+  test('durable session deletion survives feed loss and ACK failure without clearing another installation',async()=>{
+    await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version)
+      VALUES($1,'pocketctl-memory','active','ready',1)`,[OTHER_INSTALLATION])
+    await seedSession(pool,OTHER_INSTALLATION,'other-session')
+    await pool.query('DELETE FROM memory_feed_inbox')
+    let attempts=0
+    const errors:unknown[]=[]
+    const worker=createPurgeWorker({pool,purge,relay:{
+      listPurges:async()=>[],acknowledgePurge:async()=>undefined,
+      listSessionDeletions:async()=>[{request_id:'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',installation_id:INSTALLATION,session_id:'ses-1'}],
+      acknowledgeSessionDeletion:async()=>{
+        const current=(await pool.query('SELECT count(*)::int AS n FROM source_events WHERE installation_id=$1',[INSTALLATION])).rows[0].n
+        expect(current).toBe(0)
+        expect((await pool.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[INSTALLATION,'ses-1'])).rows).toHaveLength(1)
+        attempts++;if(attempts===1)throw new Error('fixture ACK outage')
+      },
+    },onError:error=>errors.push(error)})
+    await worker.runOnce()
+    expect(String(errors[0])).toContain('fixture ACK outage')
+    await worker.runOnce()
+    expect(attempts).toBe(2)
+    expect((await pool.query('SELECT count(*)::int AS n FROM source_events WHERE installation_id=$1',[OTHER_INSTALLATION])).rows[0].n).toBe(1)
+  })
+
   test('an ack failure retries without restoring any data', async () => {
     const requestId = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
     let attempts = 0

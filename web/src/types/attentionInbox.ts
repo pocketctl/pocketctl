@@ -136,6 +136,48 @@ export interface AttentionInboxSnapshot {
   next_cursor: string | null
 }
 
+export interface LifecycleNotificationSubject {
+  subject_id: string
+  session_id: string
+  daemon_id: string
+  title: string
+  daemon_name: string
+  action: 'archive' | 'cool' | 'resume' | 'purge'
+  result: 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
+  last_activity_at: string
+  executed_at: string | null
+  effective_purge_at: string | null
+  reason_code: string
+  stages?: Record<string,'pending'|'succeeded'|'failed'|'not_applicable'>
+  navigation: { type: 'session' | 'lifecycle_detail'; id: string }
+}
+
+export interface SystemNotification {
+  notification_id: string
+  revision: number
+  kind: 'system'
+  topic: 'session_lifecycle'
+  created_at: string
+  read_at: string | null
+  expires_at: string
+  subject_count: number
+  subject_preview: LifecycleNotificationSubject[]
+  subjects_next_cursor: string | null
+  requires_approval: false
+}
+
+export interface SystemNotificationPage {
+  notifications: SystemNotification[]
+  notification_counts: { unread: number }
+  next_cursor: string | null
+}
+
+export interface NotificationSubjectPage {
+  subjects: LifecycleNotificationSubject[]
+  subject_count: number
+  next_cursor: string | null
+}
+
 export interface AttentionInboxItemResponse { item: AttentionInboxItem }
 export interface AttentionRecoveryResponse { recovery: AttentionRecoveryItem }
 

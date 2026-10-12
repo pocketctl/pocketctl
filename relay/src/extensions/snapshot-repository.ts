@@ -1,6 +1,7 @@
 import { createHmac } from 'crypto'
 import type pg from 'pg'
 import { filterHashForInstallation } from './cursor.js'
+import { EVENT_BODY_COLUMNS, hydratePostgresEventRows, withSessionHistoryScope } from '../session-history/postgres-reader.js'
 
 /**
  * ADR-0003 Snapshot/inventory reads. Ownership is enforced inside the single
@@ -93,7 +94,7 @@ export async function getSnapshotEventPage(
   const params: unknown[] = [scope.installationId, scope.providerId, sessionId, options.afterEventId, options.limit]
   const scopeSql = sessionScopeClauses(scope.eventFilter ?? {}, params)
   const result = await pool.query<SnapshotEventRow>(`
-    SELECT e.id AS event_id, e.event_type, e.payload, e.created_at
+    SELECT e.id AS event_id, e.event_type, e.payload, e.created_at, ${EVENT_BODY_COLUMNS.split(', ').map(name => `e.${name}`).join(', ')}
     FROM extension_installations i
     JOIN sessions s ON s.user_id = i.owner_user_id AND s.session_id = $3
     JOIN events e ON e.session_id = s.session_id
@@ -104,7 +105,14 @@ export async function getSnapshotEventPage(
     ORDER BY e.id ASC
     LIMIT $5
   `, params)
-  return result.rows.map(row => ({
+  const hydrated = await withSessionHistoryScope({ userId: scope.ownerUserId, authorize: async () => {
+    const current = await pool.query(`SELECT 1 FROM extension_installations i JOIN extension_providers p USING(provider_id)
+      WHERE i.installation_id=$1 AND i.provider_id=$2 AND i.owner_user_id=$3 AND i.status='active' AND p.status='enabled'
+        AND 'session:snapshot:read'=ANY(i.granted_scopes) AND i.event_filter=$4::jsonb`,
+      [scope.installationId,scope.providerId,scope.ownerUserId,JSON.stringify(scope.eventFilter ?? {})])
+    return current.rows.length===1
+  } }, () => hydratePostgresEventRows(pool, sessionId, result.rows))
+  return hydrated.map(row => ({
     event_id: Number(row.event_id),
     event_type: row.event_type,
     payload: row.payload,

@@ -39,6 +39,10 @@ vi.mock('../../../composables/useAuth', () => ({
 vi.mock('../../../composables/useWebSocket', () => ({
   useWebSocket: () => ({ connected, reconnecting: ref(false), daemons: sidebarDaemons, send }),
 }))
+vi.mock('../../../composables/useSystemNotifications',()=>({
+  useSystemNotifications:()=>({unread:ref(0),available:ref(false),start:vi.fn(),stop:vi.fn()}),
+  reconcileSessionDeletions:vi.fn(),cancelDeletionReconciliation:vi.fn(),
+}))
 
 function testRouter(path = '/sessions') {
   const router = createRouter({

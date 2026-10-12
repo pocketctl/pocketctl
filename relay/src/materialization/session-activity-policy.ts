@@ -49,6 +49,9 @@ export function resolveSessionActivityAt(input: MaterializationInput): Date | nu
     return boundedSourceTime(payload.last_activity_at, input.receivedAt)
   }
   if (payload.resync === true) return null
+  if (input.eventType === 'user_message_receipt') {
+    return payload.status === 'accepted' ? input.receivedAt ?? null : null
+  }
   if (input.eventType === 'session_created') return input.receivedAt ?? null
   if (input.eventType === 'turn_status' && payload.turn_reason === 'daemon_restart_reconcile') return null
   if (input.eventType === 'agent_text') {

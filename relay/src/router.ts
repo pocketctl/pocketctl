@@ -12,6 +12,7 @@ import {
 import type pg from 'pg';
 import type { RelayPools } from './db-pools.js';
 import { randomUUID } from 'crypto';
+import { withSessionHistoryScope } from './session-history/postgres-reader.js';
 import { MessageRequestLog, logMessageReceipt } from './message-request-log.js';
 import { admitSessionMessage, isCollaborationManagedSession, resolveMessageSessionId, type MessageAdmissionDecision } from './session-message-admissions.js';
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from './config/app-review-demo.js';
@@ -2566,8 +2567,8 @@ export class Router {
       }
       if (msg.type !== 'user_message' && msg.type !== 'session_document_resolve') client.subscribedSessions.add(msg.session_id);
     }
-    if (msg.type === 'replay') { this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit); return; }
-    if (msg.type === 'replay_subagent') { this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit, msg.direction); return; }
+    if (msg.type === 'replay') { withSessionHistoryScope({ userId: client.userId! }, () => this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit)); return; }
+    if (msg.type === 'replay_subagent') { withSessionHistoryScope({ userId: client.userId! }, () => this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit, msg.direction)); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId, msg); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
     if (msg.type === 'set_locale') {
@@ -3280,7 +3281,7 @@ export class Router {
     } catch (err) {
       console.error('replay error:', err);
       // Always send replay_end so the client doesn't hang on isLoading
-      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false }));
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, error: 'history_unavailable', retryable: true }));
     }
   }
 
@@ -3364,7 +3365,7 @@ export class Router {
       }));
     } catch (err) {
       console.error('replay_subagent error:', err);
-      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false }));
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, agent_id: agentId, count: 0, last_seq: lastSeq ?? 0, has_more: false, error: 'history_unavailable', retryable: true }));
     }
   }
 

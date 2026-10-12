@@ -38,6 +38,7 @@
           <router-link v-else :to="item.to" class="sidebar-link" :class="{ active: navigationActive(item.id) }" :aria-current="navigationActive(item.id) ? 'page' : undefined" :title="t(item.label)">
             <span class="link-icon"><WorkspaceIcon :name="item.icon" /></span><span class="link-text">{{ t(item.label) }}</span>
             <span v-if="item.id === 'inbox' && attentionTotalCount" class="badge attention">{{ attentionTotalCount > 99 ? '99+' : attentionTotalCount }}</span>
+            <span v-if="item.id === 'inbox' && notifications.unread.value" class="notification-dot" :title="t('attention.notification.unread_count',{count:notifications.unread.value})" :aria-label="t('attention.notification.unread_count',{count:notifications.unread.value})">●</span>
             <span v-if="item.id === 'sessions' && !showMobileShell && sessionCount" class="badge">{{ sessionCount }}</span>
           </router-link>
         </template>
@@ -99,7 +100,7 @@
             {{ t('session.new_session') }}
           </button>
           <span class="topbar-status"><span class="dot" :class="{off:!connected}" />{{ t(connected?'workspace.all_normal':'replica.relay_connecting') }}</span>
-          <RouterLink class="theme-toggle" to="/inbox" :aria-label="t('attention.title')"><WorkspaceIcon name="inbox" /></RouterLink>
+          <RouterLink class="theme-toggle" to="/inbox" :aria-label="t('attention.title') + ' · ' + t('attention.notification.unread_count',{count:notifications.unread.value})"><WorkspaceIcon name="inbox" /><span v-if="notifications.unread.value" class="notification-dot">●</span></RouterLink>
           <TopbarGithubLink />
           <button class="theme-toggle" @click="toggleLocale" :title="locale === 'zh' ? 'English' : '中文'" ><WorkspaceIcon name="globe" /><span>{{ locale === 'zh' ? '中' : 'EN' }}</span></button>
           <button class="theme-toggle" @click="toggleTheme" :title="t('common.toggle_theme')">
@@ -139,6 +140,7 @@ import { useSessionHeader } from './composables/useSessionHeader'
 import { useUserPreferences } from './composables/useUserPreferences'
 import { workspaceNotification } from './utils/workspaceNotifications'
 import { useAttentionInbox } from './composables/useAttentionInbox'
+import { useSystemNotifications,reconcileSessionDeletions,cancelDeletionReconciliation } from './composables/useSystemNotifications'
 
 const shellHelpOpen=ref(false)
 const route = useRoute()
@@ -168,6 +170,7 @@ const notificationTimes=new Map<string,number>()
 onMounted(()=>{
   window.addEventListener('focus',refreshPreferences)
   if(onEvent)disposeNotifications=onEvent((message:any)=>{
+    if(message.type==='auth_ok')void reconcileSessionDeletions().catch(()=>{ /* Retry on next authenticated reconnect. */ })
     const item=workspaceNotification(message,userPreferences.preferences.value.notifications,String(route.params.id||''))
     if(!item || typeof Notification==='undefined' || Notification.permission!=='granted')return
     const now=Date.now();if(now-(notificationTimes.get(item.key)||0)<30000)return
@@ -194,6 +197,7 @@ const isSessionListRoute = computed(() => route.path === '/sessions' || route.na
 const { planForSession } = useAgentPlanProgress()
 const { sessionHeader } = useSessionHeader()
 const attentionInbox = useAttentionInbox()
+const notifications=useSystemNotifications()
 const attentionTotalCount = computed(() => attentionInbox.actionableCount({ type: 'global' }))
 const mobileCurrentPlan = planForSession(computed(() =>
   route.path.startsWith('/session/') && !route.query.subagent ? String(route.params.id || '') : '',
@@ -304,10 +308,10 @@ const pageTitle = computed(() => {
 })
 
 watch(isLoggedIn, loggedIn => {
-  if (loggedIn) void attentionInbox.start()
-  else attentionInbox.stop()
+  if (loggedIn) { void attentionInbox.start();void notifications.start({type:'global'}) }
+  else { attentionInbox.stop();notifications.stop();cancelDeletionReconciliation() }
 }, { immediate: true })
-onBeforeUnmount(() => attentionInbox.stop())
+onBeforeUnmount(() => {attentionInbox.stop();notifications.stop()})
 
 const mobileTopbarTitle = computed(() => route.path === '/hosts' ? t(route.query.view === 'agents' ? 'mobile.host_agent_manage' : 'mobile.my_hosts') : isSessionRoute.value && sessionHeader.value.title
   ? sessionHeader.value.title
@@ -360,6 +364,7 @@ if (typeof window !== 'undefined') {
 </script>
 
 <style>
+.notification-dot { color:var(--accent);font-size:10px;line-height:1; }
 /* Override main-content when no sidebar (login page) */
 .main-content.no-sidebar {
   margin-left: 0 !important;

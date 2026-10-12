@@ -52,6 +52,18 @@ vi.mock('../../services/sessionOrganization', () => ({
 }))
 
 describe('SessionDetail history loading', () => {
+  test('a failed body read shows retry and does not claim that the conversation is empty', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const request = websocketMock.send.mock.calls.map(([msg])=>msg).filter(msg=>msg.type==='replay').at(-1)!
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:request.req_id,error:'history_unavailable',retryable:true,count:0,has_more:false})
+    await flushPromises()
+    expect(wrapper.text()).toContain('session.history_read_failed')
+    expect(wrapper.find('.chat-empty-state').exists()).toBe(false)
+    const vm=wrapper.vm as any
+    expect(vm.isLoading).toBe(false)
+    wrapper.unmount()
+  })
   beforeEach(() => {
     localStorage.removeItem('pocketctl.mobile.showToolCalls')
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })))

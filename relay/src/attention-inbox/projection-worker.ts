@@ -69,7 +69,7 @@ export function createAttentionProjectionWorker(dependencies: AttentionProjectio
       }
       const lastEventID = Number(cursor.rows[0]?.last_event_id ?? 0)
       const events = await client.query(
-        `SELECT event.id, event.event_type, event.session_id, event.payload, event.created_at,
+        `SELECT event.id, event.event_type, event.session_id, event.payload, event.created_at, event.body_storage,
                 session.user_id, session.daemon_id, session.agent_type, session.control_mode,
                 session.capabilities, session.title AS session_title,
                 session.status AS session_status, daemon.alias AS daemon_alias,
@@ -83,6 +83,10 @@ export function createAttentionProjectionWorker(dependencies: AttentionProjectio
         [lastEventID, batchSize],
       )
       for (const rawRow of events.rows) {
+        // Never project an empty approximation of a cold body. Final lifecycle
+        // eligibility must keep this cursor ahead of a proposed cold range.
+        // A reset/lagging projection therefore stops explicitly for repair.
+        if (rawRow.body_storage === 'cold') throw new Error('attention projection cursor requires cold reconciliation')
         const projection = projectAttentionEvent(mapEventRow(rawRow))
         if (projection) await dependencies.repository.applyProjection(client, projection)
       }

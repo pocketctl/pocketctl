@@ -44,6 +44,11 @@ import { registerDaemonConnection, type DaemonSocketIdentity } from './daemon-re
 import { resolveAuthRateLimitConfig, resolveBuildInfo, resolveCorsOrigin, resolveEmailVerificationConfig, resolvePublicIssuer, resolveRelayListenHost, resolveTrustedProxyConfig, strictPositiveConfig } from './runtime-config.js';
 import { createAuthRateLimiter, applyAuthRateLimitDecision } from './auth-rate-limit.js';
 import { ConnectionAdmission } from './connection-admission.js';
+import { sessionLifecycleConfig } from './session-lifecycle/config.js';
+import { installConfiguredHistoryReader } from './session-history/runtime.js';
+import { enableSessionColdBodies } from './session-lifecycle/cold-schema.js';
+import { withSessionHistoryScope,invalidatePostgresHistoryBodies } from './session-history/postgres-reader.js';
+import { registerSessionLifecycleStatusRoutes } from './session-lifecycle/readiness.js';
 import { RegistrationDeadline } from './registration-deadline.js';
 import { canonicalClientAddress } from './remote-address.js';
 import {
@@ -111,6 +116,8 @@ import { createAttentionProjectionWorker } from './attention-inbox/projection-wo
 import { AttentionInboxRepository } from './attention-inbox/repository.js';
 import { AttentionRecoveryRepository } from './attention-inbox/recovery-repository.js';
 import { registerAttentionInboxRoutes } from './attention-inbox/routes.js';
+import { AttentionNotificationRepository } from './attention-inbox/notification-repository.js';
+import { registerAttentionNotificationRoutes, systemNotificationsEnabled } from './attention-inbox/notification-routes.js';
 import { createAttentionInboxRuntime } from './attention-inbox/runtime.js';
 import { AttentionInboxService } from './attention-inbox/service.js';
 import {
@@ -925,6 +932,7 @@ export function createRelayWebSocketHandler(dependencies: RelayWebSocketHandlerD
 }
 
 async function main() {
+  const lifecycleConfig = sessionLifecycleConfig(process.env)
   const tStart = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   const corsOrigin = resolveCorsOrigin(NODE_ENV, ALLOWED_ORIGINS)
   const publicIssuer = resolvePublicIssuer(
@@ -985,6 +993,8 @@ async function main() {
     pools.query,
     process.env.JWT_SECRET!,
   )
+  const notificationsEnabled = systemNotificationsEnabled(process.env)
+  const notificationRepository = new AttentionNotificationRepository(pools.query, process.env.JWT_SECRET!)
   const recoveryRepository = new AttentionRecoveryRepository(pools.query)
   const recoveryObserver = attentionConfig.recovery.projection ? {
     async confirmedOffline(input: {
@@ -1108,7 +1118,23 @@ async function main() {
   })
   const attentionNotifier = createAttentionNotifier({
     pool: pools.worker,
+    notificationsVisible: notificationsEnabled,
+    loadLifecycleDeletion:async(userId,sessionId)=>{
+      const deleted=Boolean((await pools.query.query('SELECT 1 FROM session_lifecycle_deletions WHERE user_id=$1 AND session_id=$2',[userId,sessionId])).rows[0])
+      if(deleted)invalidatePostgresHistoryBodies(pools.query,userId,sessionId)
+      return deleted
+    },
+    loadLifecycleState:async(userId,sessionId)=>{
+      const row=(await pools.query.query(`SELECT s.daemon_id,s.archived_at IS NOT NULL AS archived,s.content_state FROM sessions s
+        JOIN daemons d USING(daemon_id) WHERE s.session_id=$1 AND s.user_id=$2 AND d.user_id=$2`,[sessionId,userId])).rows[0]
+      return row??null
+    },
+    loadNotification: async (userId, id, revision) => {
+      const current = await notificationRepository.get(userId, id)
+      return current && current.revision >= revision ? current : null
+    },
     loadItem: async (userId, itemId, revision) => {
+      if (!attentionConfig.enabled) return null
       const item = await attentionRepository.getItem(userId, itemId, revision)
       return item ? serializeAttentionItem(item) : null
     },
@@ -1122,8 +1148,11 @@ async function main() {
   const recoveryBackfillNotBefore = Date.now() + positiveEnvInt('RELAY_LIST_GRACE_MS', 60_000)
   const attentionMaintenance = {
     async runMaintenance(): Promise<number> {
+      const notificationChanges = notificationsEnabled
+        ? await notificationRepository.expire(100) + await notificationRepository.deliverPending(100) : 0
+      if (!attentionConfig.enabled) return notificationChanges
       const itemChanges = await attentionRepository.runMaintenance()
-      if (!attentionConfig.recovery.projection) return itemChanges
+      if (!attentionConfig.recovery.projection) return itemChanges + notificationChanges
       const recovery = await recoveryRepository.runMaintenance({
         projectOffline: Date.now() >= recoveryBackfillNotBefore,
       })
@@ -1131,12 +1160,12 @@ async function main() {
       if (recovery.changed > 0) {
         attentionRecoveryTransitions.inc({ outcome: 'reconciled' }, recovery.changed)
       }
-      return itemChanges + recovery.changed
+      return itemChanges + recovery.changed + notificationChanges
     },
   }
   const attentionRuntime = createAttentionInboxRuntime({
-    mode: attentionConfig.mode,
-    projection: attentionProjection,
+    mode: attentionConfig.mode === 'off' && (notificationsEnabled||lifecycleConfig.mode!=='off') ? 'observe' : attentionConfig.mode,
+    projection: attentionConfig.enabled ? attentionProjection : { runOnce: async () => 0 },
     maintenance: attentionMaintenance,
     notifier: attentionNotifier,
     onError: (component, error) => {
@@ -1150,6 +1179,7 @@ async function main() {
   // 表可能短暂不存在，但生产不触发该路径。失败仍致命 → exit。
   initDB(pools.query)
     .then(async () => {
+      if(installConfiguredHistoryReader(pools.query, lifecycleConfig))await enableSessionColdBodies(pools.query)
       const catalogReady = await initializeExtensionProviderCatalog(pools.query, extensionConfig.mode)
       if (!catalogReady) console.warn('[extensions] provider catalog unavailable while extensions are off')
       await assertRelayMaterializationReady(runtimeConfig.materializationMode, pools.query)
@@ -1291,6 +1321,15 @@ async function main() {
     repository: attentionRepository,
     recoveryRepository,
     service: attentionService,
+    notifications: { enabled: notificationsEnabled, repository: notificationRepository },
+    verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
+  });
+  registerAttentionNotificationRoutes(app, {
+    pool, repository: notificationRepository, enabled: notificationsEnabled,
+    verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
+  });
+  registerSessionLifecycleStatusRoutes(app, {
+    pool, config: lifecycleConfig,
     verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
   });
   // ADR-0003 extension user control plane. Catalog initialization is awaited
@@ -2014,7 +2053,7 @@ async function main() {
     const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
     if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
 
-    const events = await getSessionAllEvents(pool, sessionId);
+    const events = await withSessionHistoryScope({ userId: payload.userId }, () => getSessionAllEvents(pool, sessionId));
     const sessRow = await pool.query('SELECT title, agent_type, created_at FROM sessions WHERE session_id = $1', [sessionId]);
     const rawTitle = sessRow.rows[0]?.title || sessionId.slice(0, 8);
     // ASCII-safe filename (fallback) + RFC 5987 for unicode
@@ -2611,10 +2650,10 @@ async function main() {
   process.on('SIGTERM', () => { shutdown('SIGTERM') })
   process.on('SIGINT', () => { shutdown('SIGINT') })
 
-  // Periodic cleanup: remove tombstones older than 30 days (every 6 hours)
+  // Token/auth housekeeping. Session tombstones have no time-based expiry.
   setInterval(async () => {
     try {
-      const tombstoneCount = await cleanStaleTombstones(pool);
+      const tombstoneCount = 0;
       const { accessPurged, refreshPurged } = await cleanRevokedTokens(pool);
       const challengeCount = await cleanExpiredEmailChallenges(pool);
       const rateLimitCount = await cleanStaleAuthRateLimits(pool);
@@ -2639,16 +2678,14 @@ async function main() {
     }, 5 * 60 * 1000)
   }
 
-  // Old events retention stays hourly. Legacy rollup remains active only while
-  // immutable fact writing is disabled.
+  // Legacy usage rollup remains hourly. Event-age deletion is retired even
+  // when lifecycle maintenance is off: retention follows session activity.
   setInterval(async () => {
     try {
       if (!tokenFeatures.writeFacts) {
         const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
         await aggregateDayIntoStats(pool, yesterday);
       }
-      const purged = await cleanStaleEvents(pool);
-      if (purged > 0) console.log(`[tokens] purged ${purged} events older than 90 days`);
     } catch (err) { console.error('[tokens] rollup error:', (err as Error).message); }
   }, 60 * 60 * 1000);
 

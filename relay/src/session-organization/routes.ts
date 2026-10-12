@@ -264,8 +264,9 @@ export function registerSessionOrganizationRoutes(app: FastifyInstance, options:
     if (typeof archived !== 'boolean') bad('archived must be boolean');
     const result = await transaction(pool,userId,async db => {
       const current = await session(db,userId,id);
-      if (!!current.archived_at === archived) return { archived, archived_at:current.archived_at, project_id:current.project_id };
-      const row = (await db.query(`UPDATE sessions SET archived_at=CASE WHEN $3 THEN NOW() ELSE NULL END,organization_revision=organization_revision+1
+      if (!!current.archived_at === archived && (!archived || current.archive_reason === 'manual')) return { archived, archived_at:current.archived_at, project_id:current.project_id };
+      const row = (await db.query(`UPDATE sessions SET archived_at=CASE WHEN $3 THEN COALESCE(archived_at,NOW()) ELSE NULL END,
+        archive_reason=CASE WHEN $3 THEN 'manual' ELSE NULL END,activity_epoch=activity_epoch+1,organization_revision=organization_revision+1
         WHERE user_id=$1 AND session_id=$2 RETURNING archived_at`,[userId,id,archived])).rows[0];
       await bumpBucket(db,userId,current.project_id);
       return { archived, archived_at:row.archived_at, project_id:current.project_id };

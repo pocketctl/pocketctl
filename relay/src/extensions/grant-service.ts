@@ -709,7 +709,7 @@ export async function handleSessionRegistrationMessage(
     INSERT INTO sessions (session_id, user_id, daemon_id, source, status, created_at, updated_at)
     VALUES ($1, $2, $3, 'daemon', 'active', NOW(), NOW())
     ON CONFLICT (session_id) DO UPDATE
-      SET updated_at = NOW(), last_activity_at = NOW()
+      SET updated_at = NOW()
       WHERE sessions.user_id = EXCLUDED.user_id
         AND sessions.daemon_id = EXCLUDED.daemon_id
     RETURNING session_id

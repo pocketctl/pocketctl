@@ -1,6 +1,6 @@
 <template>
   <div class="attention-inbox-view design-surface content attention-page" :class="{ 'is-mobile': isMobile }">
-    <div v-if="!store.isAvailable.value && !teamInvitations.length" class="attention-disabled" data-testid="attention-disabled">
+    <div v-if="!store.isAvailable.value && !notifications.available.value && !teamInvitations.length" class="attention-disabled" data-testid="attention-disabled">
       <div class="empty-mark">P</div>
       <p>{{ t('attention.unavailable_copy') }}</p>
     </div>
@@ -11,6 +11,11 @@
         </div>
         <div class="head-count"><span>{{ t('attention.needs_attention') }}</span><strong>{{ totalAttentionCount }}</strong></div>
       </header>
+
+      <div v-if="notifications.available.value && (!isMobile || !selectedEntry)" class="notification-count" role="status">
+        <span>{{ t('attention.needs_attention') }} {{ totalAttentionCount }}</span>
+        <span>{{ t('attention.notification.unread_count', { count: notifications.unread.value }) }}</span>
+      </div>
 
       <div v-if="!isMobile || !selectedEntry" class="filter-deck toolbar">
         <div class="lifecycle-tabs segments" role="tablist" :aria-label="t('attention.lifecycle_filters')">
@@ -24,25 +29,27 @@
           <button type="button" :class="{ active: kind === 'question' }" data-testid="attention-kind-question" @click="kind = 'question'">{{ t('attention.kind_question') }}</button>
           <button type="button" :class="{ active: kind === 'recovery' }" data-testid="attention-kind-recovery" @click="kind = 'recovery'">{{ t('attention.kind_recovery') }}</button>
           <button v-if="scope.type === 'global'" type="button" :class="{ active: kind === 'invitation' }" data-testid="attention-kind-invitation" @click="kind = 'invitation'">{{ t('team.inbox_invitation') }}</button>
+          <button v-if="notifications.available.value" type="button" :class="{ active: kind === 'notification' }" data-testid="attention-kind-notification" @click="kind = 'notification'; lifecycle = 'active'">{{ t('attention.notification.category') }}</button>
         </div>
       </div>
 
       <div class="inbox-stage card list-detail" :class="{ 'detail-only': isMobile && selectedEntry }">
         <section v-if="!isMobile || !selectedEntry" class="queue-panel queue" :aria-label="t('attention.queue')">
-          <header><strong>{{ queueTitle }}</strong><span>{{ t('attention.risk_sorted') }}</span></header>
+          <header><strong>{{ queueTitle }}</strong><span>{{ t(kind === 'notification' ? 'attention.notification.no_action' : 'attention.risk_sorted') }}</span></header>
           <div v-if="visibleEntries.length" class="queue-list">
             <template v-for="entry in visibleEntries" :key="entry.key">
               <AttentionInboxItemRow v-if="entry.type === 'item'" :item="entry.item"
                 :selected="selectedKey === entry.key" @select="selectItem(entry.item)" />
               <AttentionRecoveryItemRow v-else-if="entry.type === 'recovery'" :item="entry.item"
                 :selected="selectedKey === entry.key" @select="selectRecovery(entry.item)" />
+              <SystemNotificationRow v-else-if="entry.type === 'notification'" :item="entry.item" :selected="selectedKey === entry.key" @select="selectNotification(entry.item)" />
               <button v-else type="button" class="invitation-row" :class="{ selected: selectedKey === entry.key }" :data-invitation-id="entry.item.id" @click="selectInvitation(entry.item)">
                 <span class="invite-mark">T</span><span><strong>{{ t('team.invited_to', { team: entry.item.team_name || entry.item.team_id }) }}</strong><small>{{ entry.item.invited_by_label || t('team.inbox_invitation') }}</small></span><span class="invite-arrow">›</span>
               </button>
             </template>
           </div>
           <div v-else class="queue-empty"><span>✓</span><strong>{{ t('attention.empty') }}</strong><small>{{ t('attention.empty_copy') }}</small></div>
-          <button v-if="hasMoreHint" type="button" class="load-more" @click="store.loadMore(scope)">{{ t('attention.load_more') }}</button>
+          <button v-if="hasMoreHint" type="button" class="load-more" @click="loadMore">{{ t('attention.load_more') }}</button>
         </section>
 
         <section v-if="!isMobile && !selectedEntry" class="detail-placeholder queue-detail">
@@ -53,6 +60,7 @@
           @submit="submit" @snooze="snooze" @restore="restore" @open-session="openSession" @close="selectedKey = ''" />
         <AttentionRecoveryDetail v-else-if="selectedRecovery" :item="selectedRecovery" :mobile="isMobile" :busy="busy"
           @snooze="snoozeRecovery" @restore="restoreRecovery" @open-host="openHost" @close="selectedKey = ''" />
+        <SystemNotificationDetail v-else-if="selectedNotification" :item="selectedNotification" :scope="scope" :mobile="isMobile" @close="selectedKey = ''" />
         <section v-else-if="selectedInvitation" class="invitation-detail" data-testid="team-invitation-detail">
           <button v-if="isMobile" type="button" class="invite-back" @click="selectedKey = ''">← {{ t('attention.queue') }}</button>
           <span class="invite-detail-mark">T</span>
@@ -63,32 +71,37 @@
         </section>
       </div>
       <p v-if="store.errorMessage.value || invitationError" class="inbox-error" role="status">{{ invitationError || store.errorMessage.value }}</p>
+      <p v-if="notifications.error.value && notifications.available.value" class="inbox-error" role="status">{{ t('attention.notification.load_failed') }}</p>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AttentionInboxDetail from '../components/attention-inbox/AttentionInboxDetail.vue'
 import AttentionInboxItemRow from '../components/attention-inbox/AttentionInboxItemRow.vue'
 import AttentionRecoveryDetail from '../components/attention-inbox/AttentionRecoveryDetail.vue'
 import AttentionRecoveryItemRow from '../components/attention-inbox/AttentionRecoveryItemRow.vue'
+import SystemNotificationRow from '../components/attention-inbox/SystemNotificationRow.vue'
+import SystemNotificationDetail from '../components/attention-inbox/SystemNotificationDetail.vue'
+import { createSystemNotificationStore } from '../composables/useSystemNotifications'
 import { useAttentionInbox, type AttentionInboxStore, type AttentionLifecycleFilter } from '../composables/useAttentionInbox'
 import { useLocale } from '../composables/useLocale'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import { listMyInvitations, respondToTeamInvitation } from '../services/teamClient'
-import type { AttentionActionID, AttentionInboxDisplayKind, AttentionInboxItem, AttentionInboxScope, AttentionRecoveryItem } from '../types/attentionInbox'
+import type { AttentionActionID, AttentionInboxDisplayKind, AttentionInboxItem, AttentionInboxScope, AttentionRecoveryItem, SystemNotification } from '../types/attentionInbox'
 import type { TeamInvitation } from '../types/team'
 
-const props = defineProps<{ store?: AttentionInboxStore }>()
+const props = defineProps<{ store?: AttentionInboxStore; notificationStore?: ReturnType<typeof createSystemNotificationStore> }>()
 const store = props.store ?? useAttentionInbox()
+const notifications = props.notificationStore ?? createSystemNotificationStore()
 const route = useRoute()
 const router = useRouter()
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
 const lifecycle = ref<AttentionLifecycleFilter>('active')
-const kind = ref<'all' | AttentionInboxDisplayKind | 'invitation'>('all')
+const kind = ref<'all' | AttentionInboxDisplayKind | 'invitation' | 'notification'>('all')
 const selectedKey = ref('')
 const busy = ref(false)
 const teamInvitations = ref<TeamInvitation[]>([])
@@ -106,6 +119,7 @@ const visibleEntries = computed(() => {
     | { type: 'item'; key: string; item: AttentionInboxItem }
     | { type: 'recovery'; key: string; item: AttentionRecoveryItem }
     | { type: 'invitation'; key: string; item: TeamInvitation }
+    | { type: 'notification'; key: string; item: SystemNotification }
   > = []
   if (kind.value !== 'recovery' && kind.value !== 'invitation' && store.isAvailable.value) {
     entries.push(...store.itemsFor(scope.value, lifecycle.value)
@@ -119,6 +133,12 @@ const visibleEntries = computed(() => {
   if (scope.value.type === 'global' && lifecycle.value === 'active' && (kind.value === 'all' || kind.value === 'invitation')) {
     entries.push(...teamInvitations.value.map(item => ({ type: 'invitation' as const, key: `invitation:${item.id}`, item })))
   }
+  if (kind.value === 'all' || kind.value === 'notification') {
+    entries.push(...notifications.items.value.filter(item => kind.value === 'notification'
+      ? lifecycle.value === 'active' || (lifecycle.value === 'snoozed' ? !item.read_at : !!item.read_at)
+      : lifecycle.value === 'active' ? !item.read_at : lifecycle.value === 'handled' && !!item.read_at)
+      .map(item => ({ type: 'notification' as const, key: `notification:${item.notification_id}`, item })))
+  }
   return entries
 })
 const selectedItem = computed(() => selectedKey.value.startsWith('item:')
@@ -127,18 +147,28 @@ const selectedRecovery = computed(() => selectedKey.value.startsWith('recovery:'
   ? store.recoveryById(selectedKey.value.slice(9)) : undefined)
 const selectedInvitation = computed(() => selectedKey.value.startsWith('invitation:')
   ? teamInvitations.value.find(invitation => invitation.id === selectedKey.value.slice(11)) : undefined)
-const selectedEntry = computed(() => selectedItem.value ?? selectedRecovery.value ?? selectedInvitation.value)
+const selectedNotification = computed(() => selectedKey.value.startsWith('notification:') ? notifications.items.value.find(item => item.notification_id === selectedKey.value.slice(13)) : undefined)
+const selectedEntry = computed(() => selectedItem.value ?? selectedRecovery.value ?? selectedInvitation.value ?? selectedNotification.value)
 const totalAttentionCount = computed(() => store.attentionCount(scope.value) + (scope.value.type === 'global' ? teamInvitations.value.length : 0))
-const queueTitle = computed(() => lifecycle.value === 'active' ? t('attention.needs_action') : lifecycleLabel(lifecycle.value))
-const hasMoreHint = computed(() => store.hasMore(scope.value))
+const queueTitle = computed(() => kind.value === 'notification' ? t('attention.notification.category') : lifecycle.value === 'active' ? t('attention.needs_action') : lifecycleLabel(lifecycle.value))
+const hasMoreHint = computed(() => (kind.value !== 'notification' && store.hasMore(scope.value)) || ((kind.value === 'notification' || kind.value === 'all') && !!notifications.nextCursor.value))
+async function loadMore() {
+  await Promise.all([kind.value !== 'notification' ? store.loadMore(scope.value) : Promise.resolve(),
+    kind.value === 'notification' || kind.value === 'all' ? notifications.refresh(scope.value, true) : Promise.resolve()])
+}
 
 function lifecycleLabel(value: AttentionLifecycleFilter): string {
+  if (kind.value === 'notification') return t(`attention.notification.filter.${value}`)
   return t(`attention.lifecycle.${value}`)
 }
 function setLifecycle(value: AttentionLifecycleFilter): void {
   lifecycle.value = value
-  kind.value = 'all'
+  if (kind.value !== 'notification') kind.value = 'all'
   selectedKey.value = ''
+}
+async function selectNotification(item: SystemNotification) {
+  kind.value = 'notification'; lifecycle.value = 'active'; selectedKey.value = `notification:${item.notification_id}`
+  await notifications.markRead(item)
 }
 async function selectItem(item: AttentionInboxItem): Promise<void> {
   selectedKey.value = `item:${item.item_id}`
@@ -213,17 +243,19 @@ watch(visibleEntries, entries => {
   const selectedIsVisible = selectedKey.value && entries.some(entry => entry.key === selectedKey.value)
   if (!selectedIsVisible) selectedKey.value = !isMobile.value && entries.length ? entries[0].key : ''
 })
+watch(selectedKey, key => notifications.pin(key.startsWith('notification:') ? key.slice(13) : undefined))
 watch(scope, async nextScope => {
   selectedKey.value = ''
-  await store.refresh(nextScope)
+  await Promise.all([store.refresh(nextScope), notifications.refresh(nextScope)])
   if (!selectedKey.value && !isMobile.value && visibleEntries.value.length) selectedKey.value = visibleEntries.value[0].key
 })
 onMounted(async () => {
-  await Promise.all([store.refresh(scope.value), loadTeamInvitations()])
+  await Promise.all([store.refresh(scope.value), loadTeamInvitations(), props.notificationStore ? notifications.refresh(scope.value) : notifications.start(scope.value)])
   const invitationID = typeof route.query.invitation_id === 'string' ? route.query.invitation_id : ''
   if (invitationID && teamInvitations.value.some(invitation => invitation.id === invitationID)) selectedKey.value = `invitation:${invitationID}`
   if (!isMobile.value && visibleEntries.value.length) selectedKey.value = visibleEntries.value[0].key
 })
+onBeforeUnmount(() => { if (!props.notificationStore) notifications.stop() })
 </script>
 
 <style scoped>
@@ -232,6 +264,7 @@ onMounted(async () => {
 .inbox-scope { margin: 0; color: var(--fg-secondary); font-size: 13px; }
 .head-count { display: flex; align-items: baseline; gap: 9px; color: var(--fg-tertiary); font-size: 11px; }
 .head-count strong { color: var(--warning); font: 680 34px/1 var(--font-display, var(--font-body)); }
+.notification-count { display: flex; flex-wrap: wrap; gap: 16px; margin: 0 0 12px; color: var(--accent); font-size: 12px; }.notification-count > span:first-child { color: var(--fg-secondary); }
 .filter-deck { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
 .lifecycle-tabs, .kind-tabs { display: flex; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--surface); }
 .filter-deck button { min-height: 31px; padding: 0 12px; border: 0; border-radius: var(--radius-full); color: var(--fg-tertiary); background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; }
@@ -254,7 +287,7 @@ onMounted(async () => {
   .attention-inbox-view { width: 100%; min-height: 100dvh; padding: 18px 14px max(28px, env(safe-area-inset-bottom)); }
   .inbox-head { align-items: flex-start; }.head-count { flex-direction: column; align-items: flex-end; gap: 3px; }
   .filter-deck { align-items: stretch; flex-direction: column; }.lifecycle-tabs { display: grid; grid-template-columns: repeat(3, 1fr); border-radius: var(--radius-md); }.kind-tabs { display: grid; grid-template-columns: repeat(4, 1fr); border-radius: var(--radius-md); }
-  .filter-deck button { border-radius: var(--radius-sm); }.kind-tabs { grid-template-columns: repeat(5, 1fr); overflow-x: auto; }
+  .filter-deck button { border-radius: var(--radius-sm); }.kind-tabs { display: flex; flex-wrap: wrap; }
   .inbox-stage { min-height: calc(100dvh - 245px); display: block; border-radius: var(--radius-md); }
   .inbox-stage.detail-only { min-height: calc(100dvh - 36px); }.queue-panel { min-height: inherit; border-right: 0; }
 }

@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import type { PurgeRepository } from './repository.js'
+import { createHash } from 'node:crypto'
 
 export interface PurgeWorkerOptions {
   pool: pg.Pool
@@ -7,6 +8,8 @@ export interface PurgeWorkerOptions {
   relay: {
     listPurges(): Promise<Array<Record<string, unknown>>>
     acknowledgePurge(requestId: string, receipt: string): Promise<void>
+    listSessionDeletions?():Promise<Array<Record<string,unknown>>>
+    acknowledgeSessionDeletion?(requestId:string,receipt:string):Promise<void>
   }
   signal?: AbortSignal
   intervalMs?: number
@@ -58,6 +61,21 @@ export function createPurgeWorker(options: PurgeWorkerOptions) {
               WHERE installation_id = $1
             `, [installationId]).catch(() => undefined)
           }
+        }
+        // Account/uninstall purges take priority. One failed or undiscovered
+        // installation must not starve deletion work for other installations.
+        const sessionDeletions=await options.relay.listSessionDeletions?.()??[]
+        for(const request of sessionDeletions){
+          const requestId=String(request.request_id??''),installationId=String(request.installation_id??''),sessionId=String(request.session_id??'')
+          try{
+            if(!requestId||!installationId||!sessionId||!options.relay.acknowledgeSessionDeletion)throw new Error('invalid durable session deletion')
+            // Local tombstone/content deletion commits BEFORE ACK; a failed
+            // ACK retries idempotently regardless of ordinary feed retention.
+            await options.purge.purgeSession({installationId,sessionId,reason:'user_deleted',sourceFeedId:null})
+            const receipt=createHash('sha256').update(JSON.stringify(['session-deletion-v1',requestId,installationId,sessionId])).digest('hex')
+            await options.relay.acknowledgeSessionDeletion(requestId,receipt)
+            options.onPurgeResult?.('success');handled++
+          }catch(error){options.onError?.(error);options.onPurgeResult?.('failure')}
         }
         // Retention cleanup is local and bounded; failures are observable but
         // never change a successfully committed/ACKed purge result.

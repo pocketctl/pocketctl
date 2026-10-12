@@ -139,6 +139,30 @@ async function ackPurgeRequest(
  * and ack its own deletion requests — the rows carry no session content.
  */
 export function registerPurgeRoutes(app: FastifyInstance, deps: PurgeRouteDeps): void {
+  // Content-free per-session queue has no feed TTL or account FK. Provider
+  // ownership remains authoritative even after installation revocation.
+  app.get('/api/extensions/v1/session-deletions',async(req,reply)=>{
+    reply.header('Cache-Control','no-store, private')
+    if(deps.mode!=='enabled')return fail(reply,new ExtensionApiError('feature_disabled','session deletions require RELAY_EXTENSIONS=enabled'))
+    const identity=authenticateProvider(req,deps)
+    if(!identity)return fail(reply,new ExtensionApiError('unauthorized','provider token required'))
+    const rows=await deps.pool.query(`SELECT request_id,installation_id,session_id,status,requested_at FROM extension_session_deletions
+      WHERE provider_id=$1 AND status='pending' ORDER BY requested_at,request_id LIMIT 100`,[identity.providerId])
+    return {deletions:rows.rows}
+  })
+  app.post('/api/extensions/v1/session-deletions/:requestId/ack',{bodyLimit:2048},async(req,reply)=>{
+    reply.header('Cache-Control','no-store, private')
+    if(deps.mode!=='enabled')return fail(reply,new ExtensionApiError('feature_disabled','session deletions require RELAY_EXTENSIONS=enabled'))
+    const identity=authenticateProvider(req,deps)
+    if(!identity)return fail(reply,new ExtensionApiError('unauthorized','provider token required'))
+    const requestId=(req.params as {requestId?:string}).requestId??'',receipt=(req.body as {provider_receipt?:unknown}|null)?.provider_receipt
+    if(!REQUEST_ID_PATTERN.test(requestId)||typeof receipt!=='string'||!receipt.length||receipt.length>MAX_RECEIPT_LENGTH)
+      return fail(reply,new ExtensionApiError('invalid_request','bounded deletion receipt required'))
+    const row=await deps.pool.query(`UPDATE extension_session_deletions SET status='acked',acked_at=COALESCE(acked_at,NOW()),provider_receipt=COALESCE(provider_receipt,$3)
+      WHERE request_id=$1 AND provider_id=$2 RETURNING request_id`,[requestId,identity.providerId,receipt])
+    if(!row.rows[0])return fail(reply,new ExtensionApiError('not_found','session deletion not found'))
+    return {request_id:requestId,status:'acked'}
+  })
   app.get('/api/extensions/v1/purges', async (req, reply) => {
     if (deps.rateLimiter) {
       const decision = deps.rateLimiter.check(`purge:${String(req.ip ?? '-')}`)

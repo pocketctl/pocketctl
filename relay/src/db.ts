@@ -8,6 +8,16 @@ import { initAttentionInboxSchema } from './attention-inbox/schema.js';
 import { initExtensionSchema } from './extensions/schema.js';
 import { initSessionDocumentSchema } from './session-documents/schema.js';
 import { initSessionOrganizationSchema } from './session-organization/schema.js';
+import { initSessionLifecycleSchema } from './session-lifecycle/schema.js';
+import { initSessionHistoryBodySchema } from './session-history/schema.js';
+import { EVENT_BODY_COLUMNS, hydratePostgresEventRows } from './session-history/postgres-reader.js';
+import { initArchiveObjectJobSchema } from './session-archive/object-job-schema.js';
+import { initSessionDocumentBodySchema } from './session-documents/body-schema.js';
+import { initSessionUsageRetentionSchema, retainSessionUsageInTransaction } from './session-lifecycle/usage-retention.js';
+import { initAttentionNotificationSchema } from './attention-inbox/notification-schema.js';
+import { initLifecycleResumeSchema } from './session-lifecycle/resume-schema.js';
+import { initLifecycleDeletionSchema } from './session-lifecycle/deletion-schema.js';
+import { initLifecycleDependencyFenceSchema } from './session-lifecycle/dependency-fence-schema.js';
 import { initTeamSchema } from './team/schema.js';
 import { extensionModeFromEnv } from './extensions/config.js';
 import type { ExtensionMode } from './extensions/types.js';
@@ -826,11 +836,22 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initAttentionInboxSchema(pool);
   await initSessionDocumentSchema(pool);
   await initSessionOrganizationSchema(pool);
+  await initSessionLifecycleSchema(pool);
+  await initSessionHistoryBodySchema(pool);
+  await initArchiveObjectJobSchema(pool);
+  await initSessionDocumentBodySchema(pool);
+  await initSessionUsageRetentionSchema(pool);
+  await initAttentionNotificationSchema(pool);
+  await initLifecycleResumeSchema(pool);
+  await initLifecycleDeletionSchema(pool);
   // ADR-0003: extension tables exist in every flag mode so flipping
   // RELAY_EXTENSIONS never needs a schema deployment window.
   await initExtensionSchema(pool);
   // Team Memory bindings reference pre-existing Extension installations.
   await initTeamSchema(pool);
+  // The lifecycle fence trigger targets collaboration_session_agent_bindings,
+  // so it must run after the team schema has created that table.
+  await initLifecycleDependencyFenceSchema(pool);
   await initPreferenceSchema(pool);
 }
 
@@ -1975,22 +1996,32 @@ export interface PersistedEventEffect {
 }
 
 export async function advanceSessionActivity(pool: Pick<pg.Pool, 'query'>, sessionId: string, activityAt: Date): Promise<void> {
+  if (!Number.isFinite(activityAt.getTime())) throw new Error('invalid session activity time');
   await pool.query(
     `UPDATE sessions
      SET last_activity_at = GREATEST(COALESCE(last_activity_at, $2::timestamptz), $2::timestamptz),
+         last_business_activity_at = GREATEST(last_business_activity_at, $2::timestamptz),
+         activity_verified = true,
+         activity_epoch = activity_epoch + CASE
+           WHEN last_activity_at IS NULL OR last_activity_at < $2::timestamptz OR NOT activity_verified THEN 1 ELSE 0 END,
          updated_at = NOW()
      WHERE session_id = $1`,
     [sessionId, activityAt],
   );
 }
 
-// Discovery carries a source snapshot (normally JSONL mtime), not a new
-// activity edge. Exact replacement repairs timestamps previously polluted by
-// reconnect-time metadata while later live events still advance monotonically.
+// Discovery carries source time, not a business activity edge. Never move a
+// known newer time backwards. Older snapshots cannot verify ambiguous legacy
+// timestamps; those rows stay excluded until provenance is explicitly audited.
 export async function restoreSessionActivity(pool: Pick<pg.Pool, 'query'>, sessionId: string, activityAt: Date): Promise<void> {
+  if (!Number.isFinite(activityAt.getTime())) throw new Error('invalid session activity time');
   await pool.query(
     `UPDATE sessions
-     SET last_activity_at = $2::timestamptz,
+     SET last_activity_at = GREATEST(last_activity_at, $2::timestamptz),
+         activity_verified = activity_verified OR last_activity_at IS NULL OR last_activity_at <= $2::timestamptz,
+         activity_epoch = activity_epoch + CASE
+           WHEN last_activity_at IS NULL OR last_activity_at < $2::timestamptz
+             OR (NOT activity_verified AND last_activity_at <= $2::timestamptz) THEN 1 ELSE 0 END,
          updated_at = NOW()
      WHERE session_id = $1`,
     [sessionId, activityAt],
@@ -2213,47 +2244,47 @@ export async function recordTokenUsageFactForEvent(
 
 export async function getEventsAfter(pool: pg.Pool, sessionId: string, lastSeq: number): Promise<any[]> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id > $2 ORDER BY id ASC`,
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS} FROM events WHERE session_id = $1 AND id > $2 ORDER BY id ASC`,
     [sessionId, lastSeq]
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 // session-history-pagination: backward queries (recent N / cursor-before N).
 // Returns rows in id DESC order (newest first); client reverses for rendering.
 export async function getRecentEvents(pool: pg.Pool, sessionId: string, limit: number): Promise<any[]> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 ORDER BY id DESC LIMIT $2`,
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS} FROM events WHERE session_id = $1 ORDER BY id DESC LIMIT $2`,
     [sessionId, limit]
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 export async function getEventsBefore(pool: pg.Pool, sessionId: string, cursor: number, limit: number): Promise<any[]> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`,
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS} FROM events WHERE session_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`,
     [sessionId, cursor, limit]
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 export async function getLatestAgentPlan(pool: pg.Pool, sessionId: string): Promise<any | undefined> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
      WHERE session_id = $1 AND event_type = 'agent_plan'
      ORDER BY
        CASE
-         WHEN jsonb_typeof(payload->'revision') = 'number'
-          AND (payload->>'revision') ~ '^[1-9][0-9]*$'
-         THEN (payload->>'revision')::numeric
+         WHEN jsonb_typeof(COALESCE(payload,body_header)->'revision') = 'number'
+          AND (COALESCE(payload,body_header)->>'revision') ~ '^[1-9][0-9]*$'
+         THEN (COALESCE(payload,body_header)->>'revision')::numeric
          ELSE NULL
        END DESC NULLS LAST,
        id DESC
      LIMIT 1`,
     [sessionId],
   );
-  return result.rows[0];
+  return (await hydratePostgresEventRows(pool, sessionId, result.rows))[0];
 }
 
 export interface CompleteBackwardReplayPage {
@@ -2281,7 +2312,7 @@ function completeReplayFilter(sessionId: string, beforeId: number | undefined, a
   const clauses = ['session_id = $1'];
   if (agentId) {
     params.push(agentId);
-    clauses.push(`payload->>'agent_id' = $${params.length}`);
+    clauses.push(`COALESCE(payload,body_header)->>'agent_id' = $${params.length}`);
   }
   if (beforeId !== undefined && beforeId > 0) {
     params.push(beforeId);
@@ -2299,13 +2330,13 @@ async function scanBackwardReplayEvents(
 ): Promise<any[]> {
   const filter = completeReplayFilter(sessionId, beforeId, agentId);
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
      WHERE ${filter.where}
      ORDER BY id DESC LIMIT $${filter.params.length + 1}`,
     [...filter.params, limit],
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 async function hasOlderReplayEvent(
@@ -2405,7 +2436,7 @@ function completeForwardReplayFilter(sessionId: string, afterId: number, agentId
   const clauses = ['session_id = $1', 'id > $2'];
   if (agentId) {
     params.push(agentId);
-    clauses.push(`payload->>'agent_id' = $${params.length}`);
+    clauses.push(`COALESCE(payload,body_header)->>'agent_id' = $${params.length}`);
   }
   return { where: clauses.join(' AND '), params };
 }
@@ -2419,13 +2450,13 @@ async function scanForwardReplayEvents(
 ): Promise<any[]> {
   const filter = completeForwardReplayFilter(sessionId, afterId, agentId);
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
      WHERE ${filter.where}
      ORDER BY id ASC LIMIT $${filter.params.length + 1}`,
     [...filter.params, limit],
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 async function hasNewerReplayEvent(
@@ -2572,24 +2603,24 @@ export async function getSessionRuntime(pool: pg.Pool, sessionId: string): Promi
 
 export async function getRecentSubagentEvents(pool: pg.Pool, sessionId: string, agentId: string, limit: number): Promise<any[]> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
-     WHERE session_id = $1 AND payload->>'agent_id' = $2
+     WHERE session_id = $1 AND COALESCE(payload,body_header)->>'agent_id' = $2
      ORDER BY id DESC LIMIT $3`,
     [sessionId, agentId, limit]
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 export async function getSubagentEventsBefore(pool: pg.Pool, sessionId: string, agentId: string, cursor: number, limit: number): Promise<any[]> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
-     WHERE session_id = $1 AND payload->>'agent_id' = $2 AND id < $3
+     WHERE session_id = $1 AND COALESCE(payload,body_header)->>'agent_id' = $2 AND id < $3
      ORDER BY id DESC LIMIT $4`,
     [sessionId, agentId, cursor, limit]
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 export interface SessionListPage {
@@ -3094,8 +3125,8 @@ export async function reconcileSubagentInTransaction(
     await client.query(
       `DELETE FROM events
        WHERE session_id = $1
-         AND payload->>'agent_id' = $2
-         AND COALESCE(payload->>'event_id', '') = ''`,
+         AND COALESCE(payload,body_header)->>'agent_id' = $2
+         AND COALESCE(COALESCE(payload,body_header)->>'event_id', '') = ''`,
       [relation.parentSessionId, relation.agentId]
     );
   }
@@ -3710,11 +3741,28 @@ export async function deleteSession(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await deleteSessionInTransaction(client,sessionId,options);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/** Caller owns the transaction; shared by manual and lifecycle deletion. */
+export async function deleteSessionInTransaction(
+  client: pg.PoolClient,
+  sessionId: string,
+  options: NonNullable<Parameters<typeof deleteSession>[2]> = {},
+): Promise<void> {
     await lockSessionMaterializationFence(client, sessionId);
     if (options.writeUsageFacts) {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext('token-usage-accounting-global'))`);
     }
     await client.query(`SELECT session_id FROM sessions WHERE session_id = $1 FOR UPDATE`,[sessionId]);
+    await retainSessionUsageInTransaction(client,sessionId,!options.usageFactsAuthoritative);
     if (options.writeUsageFacts) await client.query(`
       INSERT INTO token_usage_facts (
         fact_key, source_event_id, user_id, daemon_id, session_id,
@@ -3758,13 +3806,13 @@ export async function deleteSession(
       INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
        SELECT s.user_id, s.daemon_id, (NOW() AT TIME ZONE 'UTC')::date,
              COALESCE(s.model, 'unknown'),
-             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
-             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint, 0)),
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.session_id = $1 AND e.event_type = 'agent_text' AND e.payload ? 'usage'
+      WHERE e.session_id = $1 AND e.event_type = 'agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage'
          AND (e.created_at AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date
         AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
       GROUP BY s.user_id, s.daemon_id, COALESCE(s.model, 'unknown')
@@ -3780,7 +3828,7 @@ export async function deleteSession(
        WHERE inbox_id IN (SELECT inbox_id FROM event_inbox WHERE session_id = $1)`,
       [sessionId],
     );
-    await client.query(`DELETE FROM event_inbox WHERE session_id = $1 AND status <> 3`, [sessionId]);
+    await client.query(`DELETE FROM event_inbox WHERE session_id = $1`, [sessionId]);
     await client.query(
       `DELETE FROM session_document_upload_chunks
        WHERE version_id IN (
@@ -3792,6 +3840,9 @@ export async function deleteSession(
     await client.query(`DELETE FROM session_document_versions WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM session_documents WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM attention_items WHERE session_id=$1`,[sessionId]);
+    await client.query(`DELETE FROM subagents WHERE parent_session_id=$1 OR agent_id=$1`,[sessionId]);
+    await client.query(`DELETE FROM session_archive_manifests WHERE session_id=$1`,[sessionId]);
     // ADR-0003: extension content is purged in the same fenced transaction;
     // shadow/enabled additionally journal a generic provider tombstone.
     const extensionMode = options.extensionMode ?? extensionModeFromEnv();
@@ -3807,13 +3858,6 @@ export async function deleteSession(
       `INSERT INTO deleted_sessions (session_id) VALUES ($1) ON CONFLICT (session_id) DO UPDATE SET deleted_at = NOW()`,
       [sessionId]
     );
-    await client.query('COMMIT');
-  } catch (e) {
-    await client.query('ROLLBACK');
-    throw e;
-  } finally {
-    client.release();
-  }
 }
 
 export async function isSessionDeleted(pool: pg.Pool, sessionId: string): Promise<boolean> {
@@ -3963,17 +4007,16 @@ export async function isSessionOwnedByUser(pool: pg.Pool, userId: number, sessio
 /** Get all events for a session (for export). */
 export async function getSessionAllEvents(pool: pg.Pool, sessionId: string): Promise<any[]> {
   const result = await pool.query(
-    `SELECT id, session_id, event_type, payload, created_at FROM events WHERE session_id = $1 ORDER BY id ASC`,
+    `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS} FROM events WHERE session_id = $1 ORDER BY id ASC`,
     [sessionId]
   );
-  return result.rows;
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 
-/// Clean up tombstones older than 30 days
+/// Minimal identities remain durable beyond offline resync and backup replay.
 export async function cleanStaleTombstones(pool: pg.Pool): Promise<number> {
-  const result = await pool.query(`DELETE FROM deleted_sessions WHERE deleted_at < NOW() - INTERVAL '30 days'`);
-  return result.rowCount ?? 0;
+  return 0;
 }
 
 // --- Phase 3: Device management for push notifications ---
@@ -4416,12 +4459,12 @@ export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
   const result = await pool.query(`
     WITH agg AS (
       SELECT session_id,
-             SUM(COALESCE((payload->'usage'->>'input_tokens')::bigint, 0)) AS inp,
-             SUM(COALESCE((payload->'usage'->>'output_tokens')::bigint, 0)) AS outp,
-             SUM(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint, 0)) AS cr,
-             SUM(COALESCE((payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS cc
+             SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'input_tokens')::bigint, 0)) AS inp,
+             SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'output_tokens')::bigint, 0)) AS outp,
+             SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'cache_read_tokens')::bigint, 0)) AS cr,
+             SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'cache_create_tokens')::bigint, 0)) AS cc
       FROM events
-      WHERE event_type = 'agent_text' AND payload ? 'usage'
+      WHERE event_type = 'agent_text' AND COALESCE(payload,body_header) ? 'usage'
       GROUP BY session_id
     )
     UPDATE sessions SET
@@ -4450,9 +4493,9 @@ export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
   // Relay versions never copied them into the list projection.
   await pool.query(`
     WITH latest AS (
-      SELECT DISTINCT ON (session_id) session_id, payload->>'effort' AS effort
+      SELECT DISTINCT ON (session_id) session_id, COALESCE(payload,body_header)->>'effort' AS effort
       FROM events WHERE event_type = 'session_meta'
-        AND NULLIF(BTRIM(payload->>'effort'), '') IS NOT NULL
+        AND NULLIF(BTRIM(COALESCE(payload,body_header)->>'effort'), '') IS NOT NULL
       ORDER BY session_id, id DESC
     )
     UPDATE sessions s SET effort = latest.effort FROM latest
@@ -4472,10 +4515,10 @@ export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
                         created_at DESC
              ) AS rn
       FROM (
-        SELECT session_id, payload->>'model' AS model, event_type AS source, created_at
+        SELECT session_id, COALESCE(payload,body_header)->>'model' AS model, event_type AS source, created_at
         FROM events
         WHERE event_type IN ('session_created', 'session_model_changed', 'session_meta', 'agent_text')
-          AND payload ? 'model' AND payload->>'model' <> ''
+          AND COALESCE(payload,body_header) ? 'model' AND COALESCE(payload,body_header)->>'model' <> ''
       ) e
     )
     UPDATE sessions s SET model = c.model
@@ -4493,13 +4536,13 @@ export async function backfillTokenDailyStats(pool: pg.Pool): Promise<number> {
     INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
     SELECT s.user_id, s.daemon_id, date_trunc('day', e.created_at)::date,
            COALESCE(s.model, 'unknown'),
-           SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
-           SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
-           SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0)),
-           SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)),
+           SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint, 0)),
+           SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint, 0)),
+           SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint, 0)),
+           SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint, 0)),
            COUNT(*)
     FROM events e JOIN sessions s ON s.session_id = e.session_id
-    WHERE e.event_type = 'agent_text' AND e.payload ? 'usage'
+    WHERE e.event_type = 'agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage'
       AND e.created_at < date_trunc('day', NOW())
       AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
     GROUP BY s.user_id, s.daemon_id, date_trunc('day', e.created_at)::date, COALESCE(s.model, 'unknown')
@@ -4519,13 +4562,13 @@ export async function aggregateDayIntoStats(pool: pg.Pool, date: Date): Promise<
       INSERT INTO token_daily_stats (user_id, daemon_id, date, model, input, output, cache_read, cache_create, requests)
       SELECT s.user_id, s.daemon_id, $1::date,
              COALESCE(s.model, 'unknown'),
-             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0)),
-             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint, 0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint, 0)),
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage'
+      WHERE e.event_type = 'agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage'
         AND date_trunc('day', e.created_at) = $1::date
         AND s.user_id IS NOT NULL AND s.daemon_id IS NOT NULL
       GROUP BY s.user_id, s.daemon_id, COALESCE(s.model, 'unknown')
@@ -4538,21 +4581,10 @@ export async function aggregateDayIntoStats(pool: pg.Pool, date: Date): Promise<
   }
 }
 
-/** Delete events older than the retention window (default 90 days). token_daily_stats
- *  preserves their rolled-up totals, so the dashboard stays complete. */
+/** Retired compatibility entry point. Switching lifecycle off must never
+ * reactivate event-age deletion; canonical history follows session activity. */
 export async function cleanStaleEvents(pool: pg.Pool, days = 90): Promise<number> {
-  const result = await pool.query(
-    `DELETE FROM events e
-     WHERE e.created_at < NOW() - ($1 || ' days')::interval
-       AND NOT EXISTS (
-         SELECT 1
-         FROM realtime_outbox o
-         WHERE o.event_id = e.id
-           AND o.delivered_at IS NULL
-       )`,
-    [days],
-  );
-  return result.rowCount ?? 0;
+  return 0;
 }
 
 // ---- Token dashboard aggregation ----
@@ -4610,13 +4642,13 @@ export async function getTokenDailySeries(pool: pg.Pool, userId: number, daemonI
       WHERE user_id = $1 ${dStats} AND date >= CURRENT_DATE - (${dp}::int) AND date <= CURRENT_DATE
       UNION ALL
       SELECT date_trunc('day', e.created_at)::date,
-             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint,0)),
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${dEvt}
+      WHERE e.event_type='agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND s.user_id = $1 ${dEvt}
         AND date_trunc('day', e.created_at) = CURRENT_DATE
       GROUP BY 1
     ) t GROUP BY date ORDER BY date`, params);
@@ -4635,12 +4667,12 @@ export async function getTokenByModel(pool: pg.Pool, userId: number, daemonId: s
       SELECT model, input, output, cache_read, requests FROM token_daily_stats WHERE user_id = $1 ${dStats}
       UNION ALL
       SELECT COALESCE(s.model,'unknown'),
-             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint,0)),
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${dEvt}
+      WHERE e.event_type='agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND s.user_id = $1 ${dEvt}
         AND date_trunc('day', e.created_at) = CURRENT_DATE
       GROUP BY 1
     ) t GROUP BY model ORDER BY SUM(input) DESC`, params);
@@ -4657,12 +4689,12 @@ export async function getTokenByDaemon(pool: pg.Pool, userId: number): Promise<a
       SELECT daemon_id, input, output, cache_read, requests FROM token_daily_stats WHERE user_id = $1
       UNION ALL
       SELECT s.daemon_id,
-             SUM(COALESCE((e.payload->'usage'->>'input_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'output_tokens')::bigint,0)),
-             SUM(COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint,0)),
+             SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint,0)),
              COUNT(*)
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type='agent_text' AND e.payload ? 'usage' AND s.user_id = $1
+      WHERE e.event_type='agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND s.user_id = $1
         AND date_trunc('day', e.created_at) = CURRENT_DATE
       GROUP BY 1
     ) t GROUP BY daemon_id`, [userId]);
@@ -4679,12 +4711,12 @@ export async function getTokenByDaemon(pool: pg.Pool, userId: number): Promise<a
 export async function getSessionTokenTrend(pool: pg.Pool, sessionId: string, days = 30): Promise<any[]> {
   const result = await pool.query(`
     SELECT date_trunc('day', created_at)::date AS date,
-           SUM(COALESCE((payload->'usage'->>'input_tokens')::bigint,0)) AS input,
-           SUM(COALESCE((payload->'usage'->>'output_tokens')::bigint,0)) AS output,
-           SUM(COALESCE((payload->'usage'->>'cache_read_tokens')::bigint,0)) AS cache_read,
+           SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'input_tokens')::bigint,0)) AS input,
+           SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'output_tokens')::bigint,0)) AS output,
+           SUM(COALESCE((COALESCE(payload,body_header)->'usage'->>'cache_read_tokens')::bigint,0)) AS cache_read,
            COUNT(*) AS requests
     FROM events
-    WHERE session_id = $1 AND event_type='agent_text' AND payload ? 'usage'
+    WHERE session_id = $1 AND event_type='agent_text' AND COALESCE(payload,body_header) ? 'usage'
       AND created_at >= NOW() - ($2 || ' days')::interval
     GROUP BY 1 ORDER BY 1`, [sessionId, days]);
   return result.rows.map((r: any) => ({ date: r.date, input: +r.input, output: +r.output, cache_read: +r.cache_read, requests: +r.requests }));
@@ -4708,12 +4740,15 @@ export async function getTokenSummary(
   const result = await pool.query(`
     WITH turn_tokens AS (
       SELECT e.created_at,
-             (COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
-              COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0) +
-              COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
-              COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
+             (COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint, 0) +
+              COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint, 0) +
+              COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint, 0) +
+              COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage' AND s.user_id = $1 ${daemonPredicate}
+      WHERE e.event_type = 'agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND s.user_id = $1 ${daemonPredicate}
+      UNION ALL
+      SELECT (date::timestamp AT TIME ZONE 'UTC'),input+output+cache_read+cache_create
+      FROM session_usage_retention_daily WHERE user_id=$1 ${useDaemon ? 'AND daemon_id=$2' : ''}
     )
     SELECT
       COALESCE(SUM(delta), 0) AS total,
@@ -4780,12 +4815,14 @@ export async function getTokensByDaemon(
     : await pool.query(`
     WITH turn_tokens AS (
       SELECT e.created_at,
-             (COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
-              COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0) +
-              COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
-              COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
+             (COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint, 0) +
+              COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint, 0) +
+              COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint, 0) +
+              COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint, 0)) AS delta
       FROM events e JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.event_type = 'agent_text' AND e.payload ? 'usage' AND s.user_id = $1 AND s.daemon_id = $2
+      WHERE e.event_type = 'agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND s.user_id = $1 AND s.daemon_id = $2
+      UNION ALL SELECT (date::timestamp AT TIME ZONE 'UTC'),input+output+cache_read+cache_create
+      FROM session_usage_retention_daily WHERE user_id=$1 AND daemon_id=$2
     )
     SELECT
       COALESCE(SUM(delta), 0) AS total,
@@ -4815,27 +4852,29 @@ export async function getTokensByDaemon(
            COALESCE(SUM(COALESCE(total_tokens, 0)), 0) AS total_tokens,
            COALESCE(SUM(COALESCE(tok_cache_read, 0)), 0) AS tok_cache_read,
            COALESCE(SUM(COALESCE(tok_cache_create, 0)), 0) AS tok_cache_create
-    FROM sessions
-    WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
+    FROM (
+      SELECT agent_type,total_tokens,tok_cache_read,tok_cache_create FROM sessions
+      WHERE user_id = $1 AND daemon_id = $2 AND session_id NOT LIKE 'pending-%'
+      UNION ALL SELECT agent_type,total_tokens,tok_cache_read,tok_cache_create FROM session_usage_retention_totals
+      WHERE user_id=$1 AND daemon_id=$2
+    ) retained_totals
     GROUP BY COALESCE(agent_type, '')
   `, [userId, daemonId]);
 
   const byAgentToday = accounting
     ? { rows: accounting.byAgentToday }
     : await pool.query(`
-    SELECT COALESCE(s.agent_type, '') AS agent_type,
-           COALESCE(SUM(
-             COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0) +
-             COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0) +
-             COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0) +
-             COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0)
-           ), 0) AS today
-    FROM events e
-    JOIN sessions s ON s.session_id = e.session_id
-    WHERE e.event_type = 'agent_text' AND e.payload ? 'usage'
-      AND s.user_id = $1 AND s.daemon_id = $2
-    GROUP BY COALESCE(s.agent_type, '')
-  `, [userId, daemonId]);
+    SELECT COALESCE(agent_type, '') AS agent_type,COALESCE(SUM(delta),0) AS today FROM (
+      SELECT s.agent_type,
+        COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint,0)
+        + COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint,0)
+        + COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint,0)
+        + COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint,0) AS delta
+      FROM events e JOIN sessions s ON s.session_id=e.session_id
+      WHERE e.event_type='agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage' AND s.user_id=$1 AND s.daemon_id=$2
+      UNION ALL SELECT agent_type,input+output+cache_read+cache_create FROM session_usage_retention_daily
+      WHERE user_id=$1 AND daemon_id=$2
+    ) retained_turns GROUP BY COALESCE(agent_type,'')`,[userId,daemonId]);
 
   const byAgentMap = new Map<string, { agent_type: string; total: number; today: number; cache_read: number; cache_create: number }>();
   for (const r of byAgentTotals.rows as any[]) {
@@ -4953,14 +4992,14 @@ export async function getUserDailyTokens(pool: pg.Pool, userId: number, dateStr:
       FROM token_daily_stats WHERE user_id = $1 AND date = $2::date
       UNION ALL
       SELECT
-        COALESCE((e.payload->'usage'->>'input_tokens')::bigint, 0),
-        COALESCE((e.payload->'usage'->>'output_tokens')::bigint, 0),
-        COALESCE((e.payload->'usage'->>'cache_read_tokens')::bigint, 0),
-        COALESCE((e.payload->'usage'->>'cache_create_tokens')::bigint, 0),
+        COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint, 0),
+        COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'output_tokens')::bigint, 0),
+        COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_read_tokens')::bigint, 0),
+        COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'cache_create_tokens')::bigint, 0),
         1
       FROM events e JOIN sessions s ON s.session_id = e.session_id
       WHERE s.user_id = $1
-        AND e.event_type = 'agent_text' AND e.payload ? 'usage'
+        AND e.event_type = 'agent_text' AND COALESCE(e.payload,e.body_header) ? 'usage'
         AND date_trunc('day', e.created_at) = $2::date
     ) merged
   `, [userId, dateStr]);

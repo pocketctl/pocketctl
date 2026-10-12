@@ -3,6 +3,20 @@ import { describe, expect, test, vi } from 'vitest'
 import { createAttentionNotifier } from '../attention-inbox/notifier.js'
 
 describe('Attention Inbox cross-instance notifier', () => {
+  test('system notification deltas are compact, independently gated and never approval items', async () => {
+    let listener: ((message: {channel:string;payload?:string}) => void) | undefined
+    const client = {query:vi.fn().mockResolvedValue({rows:[]}),on:vi.fn((_event:string,fn:typeof listener)=>{listener=fn}),off:vi.fn(),release:vi.fn()}
+    const broadcast=vi.fn(),loadItem=vi.fn(),loadNotification=vi.fn().mockResolvedValue({revision:3})
+    const notifier=createAttentionNotifier({pool:{connect:async()=>client} as never,
+      loadItem,loadNotification,notificationsVisible:true,broadcast})
+    await notifier.start()
+    listener?.({channel:'pocketctl_attention',payload:JSON.stringify({entity:'notification',user_id:7,item_id:'notification-1',revision:3,operation:'changed'})})
+    await vi.waitFor(()=>expect(broadcast).toHaveBeenCalledWith(7,{type:'attention_notification_changed',schema_version:1,notification_id:'notification-1',revision:3}))
+    expect(loadItem).not.toHaveBeenCalled()
+    listener?.({channel:'pocketctl_attention',payload:JSON.stringify({entity:'notification',user_id:7,item_id:'notification-1',revision:4,operation:'removed'})})
+    await vi.waitFor(()=>expect(broadcast).toHaveBeenCalledWith(7,{type:'attention_notification_removed',schema_version:1,notification_id:'notification-1',last_revision:4,reason:'retention'}))
+    await notifier.stop()
+  })
   test('loads the committed full item from a compact PostgreSQL notification', async () => {
     let onNotification: ((message: { channel: string; payload?: string }) => void) | undefined
     const client = {
