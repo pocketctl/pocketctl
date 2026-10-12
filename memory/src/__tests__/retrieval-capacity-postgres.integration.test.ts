@@ -21,7 +21,7 @@ suite('bounded database candidate selection above legacy scan caps',()=>{
   const episode=(await pool.query("INSERT INTO work_episodes(installation_id,episode_id,session_id,turn_id,state,compiler_version) VALUES($1,gen_random_uuid(),'capacity','capacity','ready','test') RETURNING episode_id",[installation])).rows[0].episode_id
   const generated=`SELECT g,md5('capacity-claim-'||g::text)::uuid claim_id,
     CASE WHEN g=13001 THEN '${tail}'::uuid ELSE md5('capacity-version-'||g::text)::uuid END version_id,
-    CASE WHEN g=13001 AND NOT $2::boolean THEN 'knownneedle exact relevant invariant' ELSE 'unrelated filler '||g::text END statement FROM generate_series(1,${count}) g`
+    CASE WHEN g=13001 AND NOT $2::boolean THEN 'knownneedle exact relevant invariant' ELSE 'unrelated filler '||g::text END AS statement FROM generate_series(1,${count}) g`
   await pool.query(`WITH generated AS(${generated}) INSERT INTO knowledge_claims(claim_id,installation_id,claim_type,scope_kind,scope_key,normalized_key,state)
     SELECT claim_id,$1,'test_invariant','installation','','capacity-'||g::text,'active' FROM generated`,[installation,vector])
   await pool.query(`WITH generated AS(${generated}) INSERT INTO knowledge_versions(version_id,installation_id,claim_id,version_number,statement,authority,confidence)

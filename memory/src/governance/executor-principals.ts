@@ -11,7 +11,7 @@ export function createExecutorPrincipals(pool:pg.Pool){return {async authorize(i
  try{await c.query('BEGIN');const binding=await requireCurrentScopePermission({client:c,grant:input.grant,targetInstallationId:input.installationId,permission:'policy_admin'})
   if(permissions.includes('auto_accept_personal')&&binding.owner_scope_kind!=='personal')throw new Error('personal_permission_scope_required')
   if(permissions.includes('publish_delegated')&&binding.owner_scope_kind==='personal')throw new Error('shared_permission_scope_required')
-  if(!(await c.query("SELECT $1::timestamptz>clock_timestamp() AND $1::timestamptz<=clock_timestamp()+interval '1 day' valid",[input.expiresAt])).rows[0].valid)throw new Error('executor_expiry_invalid')
+  if(!(await c.query("SELECT $1::timestamptz>clock_timestamp() AND $1::timestamptz<=clock_timestamp()+interval '1 day' AS valid",[input.expiresAt])).rows[0].valid)throw new Error('executor_expiry_invalid')
   const quota=input.maxAcceptsPerDay??0;if(!Number.isInteger(quota)||quota<0||quota>1000)throw new Error('invalid_acceptance_quota')
   const principalId=randomUUID();await c.query(`INSERT INTO memory_governance_executor_principals(principal_id,installation_id,provider_client_id,state,permissions,authorization_epoch,valid_until,max_accepts_per_day,authorized_by_owner_id,authorized_by_membership_id) VALUES($1,$2,$3,'active',$4,$5,$6,$7,$8,$9)`,[principalId,input.installationId,input.providerClientId,[...new Set(permissions)],binding.authorization_epoch,input.expiresAt,quota,binding.owner_scope_id,binding.membership_id]);await assertCurrentGrantClock(c,input.grant,[input.installationId]);await c.query('COMMIT');return {principalId}
  }catch(e){await c.query('ROLLBACK').catch(()=>undefined);throw e}finally{c.release()}

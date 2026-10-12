@@ -12,7 +12,7 @@ export async function reconcileGovernanceChanges(pool:pg.Pool,input:{runId:strin
    await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[change.installation_id])
    await c.query("SELECT pg_advisory_xact_lock(hashtextextended('migration:'||$1,0))",[change.installation_id])
    const key=JSON.parse(change.entity_id)
-   if(change.entity_kind==='knowledge_claims'&&key.claim_id){const row=(await c.query('SELECT to_jsonb(c) row FROM knowledge_claims c WHERE installation_id=$1 AND claim_id=$2',[change.installation_id,key.claim_id])).rows[0]?.row;if(row)await backfillClaim(c,input.runId,change.installation_id,JSON.stringify([key.claim_id]),row)}
+   if(change.entity_kind==='knowledge_claims'&&key.claim_id){const row=(await c.query('SELECT to_jsonb(c) AS row FROM knowledge_claims c WHERE installation_id=$1 AND claim_id=$2',[change.installation_id,key.claim_id])).rows[0]?.row;if(row)await backfillClaim(c,input.runId,change.installation_id,JSON.stringify([key.claim_id]),row)}
    else if(BACKFILL_FAMILIES.includes(change.entity_kind))await recordMigrationAction(c,{runId:input.runId,installationId:change.installation_id,table:change.entity_kind,id:change.entity_id,row:{sequence:String(change.sequence),operation:change.operation,source_revision:change.source_revision},action:'unchanged',reason:change.operation==='DELETE'?'captured_source_deletion':'captured_immutable_change'})
   });processed++}
   if(batch.length<200)break;after=String(batch.at(-1)!.sequence)

@@ -48,7 +48,7 @@ db('actual baseline38 sources against current additive schema', () => {
     async function fingerprint() {
       const result: Record<string, { count: number; hash: string }> = {}
       for (const table of tableNames) {
-        const rows = (await pool.query(`SELECT to_jsonb(t) row FROM ${table} t WHERE installation_id=$1 ORDER BY to_jsonb(t)::text`, [retained.f.installationId])).rows
+        const rows = (await pool.query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE installation_id=$1 ORDER BY to_jsonb(t)::text`, [retained.f.installationId])).rows
         result[table] = { count: rows.length, hash: createHash('sha256').update(JSON.stringify(rows)).digest('hex') }
       }
       return result

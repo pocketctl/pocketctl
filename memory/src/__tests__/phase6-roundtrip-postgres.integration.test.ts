@@ -130,7 +130,7 @@ db('Phase 6 four-kind real local Git engineering roundtrip', () => {
         WHERE h.wiki_id=$1 AND s.section_key='generated'`, [f.wiki.wikiId])).rows)
         .toEqual([{ markdown: 'Local Git Wiki paragraph', authority: 'manual', build_run_id: f.runId }])
       expect((await pool.query('SELECT count(*)::int n FROM memory_wiki_source_bindings WHERE wiki_version_id=$1', [outcomes.get('wiki')!.versionId])).rows[0].n).toBe(1)
-      expect((await pool.query(`SELECT h.state,h.current_version_id,v.author_id,v.document->>'title' title,p.current_version_id publication
+      expect((await pool.query(`SELECT h.state,h.current_version_id,v.author_id,v.document->>'title' title,p.current_version_id AS publication
         FROM memory_skill_heads h JOIN memory_skill_versions v ON v.version_id=h.current_version_id
         JOIN memory_skill_publication_heads p ON p.installation_id=h.installation_id AND p.skill_id=h.skill_id WHERE h.skill_id=$1`, [f.skill.reviewed.skillId])).rows)
         .toEqual([{ state: 'draft', current_version_id: outcomes.get('skill')!.versionId, author_id: author.membershipId,
