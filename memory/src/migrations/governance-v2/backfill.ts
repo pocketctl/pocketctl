@@ -26,11 +26,27 @@ export async function migrationTransaction<T>(pool:pg.Pool,fn:(c:pg.PoolClient)=
 export interface MigrationBaseline {installationIds:string[];rows:Record<string,Record<string,string>>;owners:Record<string,Record<string,string[]>>;startWatermark:string;createdAt:string}
 export async function migrationRows(c:Pick<pg.PoolClient,'query'>,table:string,installationIds:string[],after='',limit=200){
  if(!BACKFILL_FAMILIES.includes(table))throw new Error('unknown_migration_family')
- const pk=(await c.query(`SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) WHERE i.indrelid=$1::regclass AND i.indisprimary ORDER BY a.attnum`,[table])).rows.map(r=>r.attname as string)
+ const attributes=(await c.query(`SELECT a.attname,a.atttypid='uuid'::regtype AS uuid_key FROM pg_index i JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) WHERE i.indrelid=$1::regclass AND i.indisprimary ORDER BY a.attnum`,[table])).rows
+ const pk=attributes.map(r=>r.attname as string)
  if(!pk.length)throw new Error('migration_primary_key_required')
  const ident=(name:string)=>'"'+name.replace(/"/g,'""')+'"'
  const key=`jsonb_build_array(${pk.map(k=>`t.${ident(k)}::text`).join(',')})::text`
- const scope=table==='memory_promotion_candidates'?`t.target_installation_id=ANY($3::uuid[])`:table==='memory_review_automation_decisions'?`EXISTS(SELECT 1 FROM memory_review_automation_runs r WHERE r.run_id=t.run_id AND r.installation_id=ANY($3::uuid[]))`:table==='memory_review_automation_policy_heads'?`t.installation_id=ANY($3::uuid[])`:`memory_governance_change_scopes($2,to_jsonb(t))&&$3::uuid[]`
+ // These source families are directly installation-owned in every supported
+ // schema. Avoid converting large payloads to JSON merely to find that owner;
+ // the native predicate also gives the planner accurate scope selectivity.
+ const directSource=['source_events','source_artifacts','work_episodes'].includes(table)
+ const scope=directSource?`t.installation_id=ANY($3::uuid[])`:table==='memory_promotion_candidates'?`t.target_installation_id=ANY($3::uuid[])`:table==='memory_review_automation_decisions'?`EXISTS(SELECT 1 FROM memory_review_automation_runs r WHERE r.run_id=t.run_id AND r.installation_id=ANY($3::uuid[]))`:table==='memory_review_automation_policy_heads'?`t.installation_id=ANY($3::uuid[])`:`memory_governance_change_scopes($2,to_jsonb(t))&&$3::uuid[]`
+ // Canonical UUID byte order equals the existing C-collated JSON-string
+ // cursor order. Keep checkpoint IDs unchanged, but let PostgreSQL use the
+ // primary key instead of sorting every row's JSON body on every page.
+ let uuidCursor:string|null=null,uuidPage=attributes.length===1&&attributes[0].uuid_key===true
+ if(uuidPage&&after){
+  try{const parsed=JSON.parse(after);uuidPage=Array.isArray(parsed)&&parsed.length===1&&typeof parsed[0]==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(parsed[0])&&JSON.stringify(parsed)===after;if(uuidPage)uuidCursor=parsed[0]}catch{uuidPage=false}
+ }
+ if(uuidPage){
+  const column=`t.${ident(pk[0])}`
+  return (await c.query(`SELECT ${key} AS id,to_jsonb(t) AS row FROM ${ident(table)} t WHERE ($1::text='' OR ${column}>$5::uuid) AND ${scope} AND $2::text IS NOT NULL ORDER BY ${column} LIMIT $4`,[after,table,installationIds,limit,uuidCursor])).rows as {id:string;row:Record<string,any>}[]
+ }
  const rows=(await c.query(`SELECT ${key} AS id,to_jsonb(t) AS row FROM ${ident(table)} t WHERE (${key} COLLATE "C")>($1 COLLATE "C") AND ${scope} AND $2::text IS NOT NULL ORDER BY ${key} COLLATE "C" LIMIT $4`,[after,table,installationIds,limit])).rows as {id:string;row:Record<string,any>}[]
  return rows
 }
