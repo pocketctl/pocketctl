@@ -137,7 +137,9 @@ export class TeamMemoryContextBridge {
       const grant = await this.grants.mint({
         userId,
         installationIds: [scope.installation_id],
-        callerType: userId === actorUserId ? 'web' : 'daemon',
+        // Selection checks read permission; it is not native delivery. The
+        // daemon broker separately signs its owned Session at dispatch.
+        callerType: 'web',
         services: ['memory.context'],
       })
       const binding = grant.ok ? grant.bindings.find(item => item.installation_id === scope.installation_id) : null

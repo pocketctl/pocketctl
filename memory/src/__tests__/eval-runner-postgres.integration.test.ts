@@ -1,3 +1,5 @@
+import {readFileSync} from 'node:fs'
+import {GoldenDatasetSchema} from '../eval/schema.js'
 import pg from 'pg'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -305,4 +307,33 @@ describeWithDatabase('golden evaluator fail-closed gates (PostgreSQL)', () => {
       await rm(tempDir, { recursive: true, force: true })
     }
   }, 30_000)
+  test('frozen synthetic governance fixture produces grouped intervals and honest off comparison',async()=>{
+    const dataset=GoldenDatasetSchema.parse(JSON.parse(readFileSync(new URL('../eval/fixtures/governance-golden-v1.json',import.meta.url),'utf8')))
+    const installation=dataset.cases[0].installation_id
+    if(installation!==INSTALLATION)await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version)
+      VALUES($1,'pocketctl-memory','active','ready',1)`,[installation])
+    for(const item of dataset.cases){
+      const claim=item.expected.claim_ids[0],version=item.expected.current_version_ids![0]
+      await pool.query(`INSERT INTO knowledge_claims(claim_id,installation_id,claim_type,scope_kind,scope_key,normalized_key,state)
+        VALUES($1,$2,'test_invariant','installation','',$3,'active')`,[claim,installation,item.id])
+      await pool.query(`INSERT INTO knowledge_versions(version_id,installation_id,claim_id,version_number,statement,authority,confidence,created_at)
+        VALUES($1,$2,$3,1,$4,'user_accepted',.9,$5)`,[version,installation,claim,item.query+' deterministic synthetic fact',item.lineage!.observed_at])
+      await pool.query('UPDATE knowledge_claims SET current_version_id=$2 WHERE claim_id=$1',[claim,version])
+      const episode=(await pool.query(`INSERT INTO work_episodes(installation_id,episode_id,session_id,turn_id,state,compiler_version)
+        VALUES($1,gen_random_uuid(),$2,$2,'ready','synthetic') RETURNING episode_id`,[installation,item.id])).rows[0].episode_id
+      await pool.query(`INSERT INTO knowledge_evidence(evidence_id,installation_id,version_id,episode_id,evidence_kind,excerpt,excerpt_hash,occurred_at,ordinal)
+        VALUES(gen_random_uuid(),$1,$2,$3,'episode',$4,sha256(convert_to($4,'utf8')),clock_timestamp(),0)`,[installation,version,episode,item.query+' deterministic synthetic fact'])
+    }
+    const on=await createEvalRunner({pool,cursorSigningKey:'golden-fixture'}).run(dataset)
+    const off=await createEvalRunner({pool,cursorSigningKey:'golden-fixture',variant:'memory_off'}).run(dataset)
+    expect(on.quality).toMatchObject({holdoutCases:5,correlationGroups:4,groupSuccesses:4,ambiguousCases:1,
+      automaticAcceptanceEligible:false,calibrationTrust:'declared_labels_only',embeddingTokens:0,costMicros:0,reviewSeconds:null})
+    expect(on.quality?.groupHitInterval95?.low).toBeLessThan(.6)
+    expect(on.quality?.currentVersionCorrectRate).toBe(1)
+    expect(off.top5HitRate).toBe(0);expect(off.quality?.currentVersionCorrectRate).toBe(0)
+    expect(off.quality?.evidenceSupportRate).toBeNull()
+    console.info(JSON.stringify({gate:'governance-golden-v1',datasetDigest:on.datasetDigest,evaluator:on.evaluatorVersion,
+      source:'synthetic_fixture',on: {...on,cases:undefined},off:{...off,cases:undefined}}))
+  })
+
 })

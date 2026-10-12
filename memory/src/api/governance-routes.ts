@@ -1,9 +1,14 @@
+import {createPublicationDelegation} from '../governance/publication-delegation.js'
+import {createExecutorPrincipals} from '../governance/executor-principals.js'
+import {createAutomationRepository} from '../governance/automation-repository.js'
+import {automationPolicySchema} from '../governance/automation-policy.js'
+import {z} from 'zod'
 import { createHash } from 'crypto'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 
 import type { GrantGuard } from '../auth/grant-guard.js'
-import type { RouteV2Grant } from '../governance/authorization.js'
+import { assertCurrentGrantClock, requireCurrentScopePermission, TargetBindingError, type RouteV2Grant } from '../governance/authorization.js'
 import { MemoryApiError } from './errors.js'
 import { createAuditRepository } from '../governance/audit-repository.js'
 import { createPromotionRepository } from '../governance/promotion-repository.js'
@@ -13,6 +18,8 @@ import { createReviewPolicyRepository, ReviewPolicyRevisionConflictError } from 
 import { createTransferService, TransferError } from '../governance/transfer-service.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
+import {parseRevisionMetadataPatch,type RevisionMetadataPatch} from '../governance/revision-metadata.js'
+import type {TombstoneHmacKey} from '../config.js'
 
 /**
  * ADR-0005 §8.2 governance routes. Every mutation requires an
@@ -24,14 +31,18 @@ import { createTransactionBoundPool } from './transaction-bound-pool.js'
 
 export interface GovernanceRouteDeps {
   pool: pg.Pool
+  delegatedPublishMode?: 'off'|'enabled'
+  automationMode?: 'off'|'shadow'|'assist'
   guard: GrantGuard
   sharedScopesEnabled: boolean
   cursorSigningKey: string
+  tombstoneHmacKeys?:readonly TombstoneHmacKey[]
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceRouteDeps): void {
+  const automation=createAutomationRepository(deps.pool)
   const promotionRepository = createPromotionRepository(deps.pool)
   const reviewPolicy = createReviewPolicyRepository(deps.pool)
   const audit = createAuditRepository(deps.pool, { cursorSecret: deps.cursorSigningKey })
@@ -118,16 +129,67 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
   }
 
   async function idempotentMutation<T>(input: {
+    grant: RouteV2Grant
     targetInstallationId: string
     operation: string
     key: string
     request: { body?: unknown; params?: unknown }
     run(pool: pg.Pool): Promise<T>
     metadata(result: T): Record<string, unknown>
-    replay(metadata: Record<string, unknown>): Promise<T>
+    replay(metadata: Record<string, unknown>, pool: pg.Pool): Promise<T>
   }): Promise<T> {
+    const binding = input.grant.scopeBindings.find(b => b.installation_id === input.targetInstallationId)
+    const permissions: Record<string, 'read'|'contribute'|'review'|'publish'|'policy_admin'|'scope_admin'> = {
+      'governance.propose':'contribute', 'governance.decision':'review', 'governance.publish':'publish',
+      'governance.executor_principal':'policy_admin','governance.delegate_publish':'publish','governance.delegate_revoke':'publish','governance.automation_policy':'policy_admin', 'governance.revoke':'publish', 'governance.review_policy':'policy_admin', 'governance.transfer':'scope_admin',
+      'governance.revise':binding?.permissions.includes('review') ? 'review' : 'contribute',
+      'governance.withdraw':'read',
+    }
+    const checkClock = async (client: pg.PoolClient, freshWrite = false) => {
+      try {
+        const selected=[input.targetInstallationId]
+        const body=input.request.body as {target_installation_id?:unknown;source_installation_id?:unknown;expected_revision?:unknown;
+          repair_legacy_bundle?:unknown;refresh_source_metadata?:unknown;metadata_patch?:unknown;evidence_selection?:{new_evidence_ids?:unknown}}|undefined
+        const dependency=input.operation==='governance.transfer'?body?.target_installation_id:input.operation==='governance.propose'?body?.source_installation_id:undefined
+        if(typeof dependency==='string')selected.push(dependency)
+        if(freshWrite&&input.operation==='governance.revise'){
+          const added=body?.evidence_selection?.new_evidence_ids
+          const needsMetadata=body?.refresh_source_metadata===true||body?.metadata_patch!==undefined
+          if(needsMetadata||(Array.isArray(added)&&added.length>0)||body?.repair_legacy_bundle===true){
+            // The domain savepoint has returned, but receipt persistence can
+            // still block. Resolve the actual dependency from the original
+            // immutable revision; never trust a source ID from the request.
+            const candidateId=(input.request.params as {candidateId?:unknown}|undefined)?.candidateId
+            const row=(await client.query<{source_installation_id:string;legacy:boolean}>(`
+              SELECT c.source_installation_id,(v.revision_bundle IS NULL AND v.revision_bundle_hash IS NULL) AS legacy
+              FROM memory_promotion_candidates c JOIN memory_promotion_candidate_versions v USING(candidate_id)
+              WHERE c.target_installation_id=$1 AND c.candidate_id=$2 AND v.revision_number=$3`,
+              [input.targetInstallationId,candidateId,body?.expected_revision])).rows[0]
+            if(!row)throw new TargetBindingError('revision authority dependencies missing')
+            if(needsMetadata||(Array.isArray(added)&&added.length>0)||row.legacy)selected.push(row.source_installation_id)
+          }
+        }
+        await assertCurrentGrantClock(client,input.grant,selected)
+      }
+      catch (error) { if (error instanceof TargetBindingError) throw new MemoryApiError('forbidden','current authorization required'); throw error }
+    }
+    const authorize = async (client: pg.PoolClient) => {
+      const permission = permissions[input.operation]
+      if (!permission) throw new MemoryApiError('forbidden','current authorization required')
+      try {
+        await requireCurrentScopePermission({client,grant:input.grant,targetInstallationId:input.targetInstallationId,permission,
+          ...(input.operation==='governance.transfer' ? {allowedSharedStates:['active','dissolving']} : {})})
+        if(input.operation==='governance.transfer'){
+          const target=(input.request.body as {target_installation_id?:unknown})?.target_installation_id
+          if(typeof target!=='string')throw new TargetBindingError('target missing')
+          await requireCurrentScopePermission({client,grant:input.grant,targetInstallationId:target,permission:'scope_admin',allowedPrimarySharedStates:input.grant.primaryInstallationId===target?['active']:['active','dissolving']})
+        }
+      } catch (error) { if (error instanceof TargetBindingError) throw new MemoryApiError('forbidden','current authorization required'); throw error }
+    }
     let completed: T | undefined
     const outcome = await idempotency.execute({
+      authorize,
+      beforeCommit: client=>checkClock(client,true),
       installationId: input.targetInstallationId,
       operation: input.operation,
       key: input.key,
@@ -149,7 +211,19 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
         'Idempotency-Key was already used for a different request')
     }
     if (outcome.kind === 'failed') throw outcome.error
-    if (outcome.kind === 'replayed') return input.replay(outcome.metadata)
+    if (outcome.kind === 'replayed') {
+      // The permission locks cover body materialization, not only the saved metadata.
+      const client=await deps.pool.connect()
+      try {
+        await client.query('BEGIN')
+        await authorize(client)
+        const result=await input.replay(outcome.metadata, createTransactionBoundPool(client))
+        await checkClock(client)
+        await client.query('COMMIT')
+        return result
+      } catch(error) { await client.query('ROLLBACK'); throw error }
+      finally { client.release() }
+    }
     return completed as T
   }
 
@@ -198,25 +272,35 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
       ? query.state.split(',').filter(Boolean)
       : undefined
     const candidates = await promotionRepository.listQueue(query.target_installation_id!, states)
+    const scopeMode=(await deps.pool.query(`SELECT p.document->>'mode' AS mode FROM memory_review_automation_policy_heads h JOIN memory_review_automation_policies p USING(policy_id) WHERE h.installation_id=$1`,[query.target_installation_id])).rows[0]?.mode??'off'
+    const effectiveMode=!deps.automationMode||deps.automationMode==='off'||scopeMode==='off'?'off':deps.automationMode==='shadow'||scopeMode==='shadow'?'shadow':'assist'
     const queue = []
     for (const candidate of candidates) {
       const revision = await promotionRepository.getLatestRevision(candidate.candidate_id)
       const decisions = revision
         ? await promotionRepository.listDecisions(revision.candidate_revision_id)
         : []
-      const conflictClaims = candidate.state === 'conflict'
+      const conflictClaims = ['proposed','approved','conflict'].includes(candidate.state)
         ? await promotionRepository.listConflictClaims(query.target_installation_id!, candidate)
         : []
+      const evidence=revision?await promotionRepository.listEvidence(revision.candidate_revision_id):[]
+      const prior=revision?(await deps.pool.query(`SELECT e.excerpt_hash FROM memory_promotion_candidate_versions v JOIN memory_promotion_evidence e USING(candidate_revision_id) WHERE v.candidate_id=$1 AND v.revision_number=$2 ORDER BY e.ordinal`,[candidate.candidate_id,revision.revision_number-1])).rows:[]
+      const nowHashes=new Set(evidence.map(e=>e.excerpt_hash)),oldHashes=new Set(prior.map(e=>e.excerpt_hash))
       queue.push({
         candidate,
         current_revision: revision
-          ? { revision_number: revision.revision_number, statement: revision.statement }
+          ? { revision_number: revision.revision_number, statement: revision.statement,bundle_hash:revision.revision_bundle_hash,structured_content:revision.structured_content,applicability:revision.revision_bundle?.applicability ?? null }
           : null,
         decisions: decisions.map(decision => ({
           decision: decision.decision,
           membership_id: decision.membership_id,
           created_at: decision.created_at,
         })),
+        evidence,
+        evidence_changes:{added:[...nowHashes].filter(h=>!oldHashes.has(h)).length,removed:[...oldHashes].filter(h=>!nowHashes.has(h)).length,retained:[...nowHashes].filter(h=>oldHashes.has(h)).length},
+        delegated_publish_mode:deps.delegatedPublishMode??'off',
+        automation_mode:effectiveMode,
+        automation_advice:effectiveMode!=='off'?await automation.currentAdvice({installationId:query.target_installation_id!,candidateId:candidate.candidate_id,subjectKind:'promotion'}):null,
         conflict_claims: conflictClaims,
       })
     }
@@ -254,6 +338,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     ).digest('hex')
     try {
       const result = await idempotentMutation({
+        grant,
         targetInstallationId,
         operation: 'governance.propose',
         key: idempotencyKey,
@@ -270,17 +355,28 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
           candidate_revision_id: proposed.candidateRevision.candidate_revision_id,
           classification: proposed.classification,
         }),
-        replay: async metadata => {
+        replay: async (metadata, transactionPool) => {
+          const repository = createPromotionRepository(transactionPool)
           const candidateId = String(metadata.candidate_id ?? '')
-          const candidate = await promotionRepository.getCandidate(targetInstallationId, candidateId)
-          const candidateRevision = await promotionRepository.getLatestRevision(candidateId)
+          const candidate = await repository.getCandidate(targetInstallationId, candidateId)
+          const candidateRevision = await repository.getRevision(candidateId, String(metadata.candidate_revision_id))
           if (!candidate || !candidateRevision) {
             throw new PromotionError('not_found', 'idempotent proposal result not found')
+          }
+          const canReadTarget = grant.scopeBindings.some(binding =>
+            binding.installation_id === targetInstallationId && binding.permissions.includes('read'))
+          // Legacy receipts may retain a target-derived classification after a
+          // new revision clears the candidate's current conflict fields.
+          const hasTargetClassification = metadata.classification !== 'new'
+            || candidateRevision.revision_bundle?.relationships
+            || candidate.conflict_group_id || candidate.duplicate_of_claim_id
+          if (!canReadTarget && hasTargetClassification) {
+            throw new PromotionError('not_found', 'proposal result unavailable')
           }
           return {
             candidate,
             candidateRevision,
-            classification: metadata.classification as 'new' | 'duplicate' | 'conflict',
+            classification: metadata.classification as 'new' | 'duplicate' | 'related' | 'potential_conflict' | 'conflict',
           }
         },
       })
@@ -293,6 +389,76 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     } catch (error) {
       return mapGovernanceError(error, reply)
     }
+  })
+
+  const bulkSchema=z.object({target_installation_id:z.string().uuid(),items:z.array(z.object({candidate_id:z.string().uuid(),expected_revision:z.number().int().positive(),expected_hash:z.string().regex(/^[a-f0-9]{64}$/),decision:z.enum(['approve','request_changes','reject']),review_duration_ms:z.number().int().min(0).max(86400000).optional()}).strict()).min(1).max(20)}).strict()
+  app.post('/api/v1/memory/governance/bulk-decisions',{bodyLimit:32768},async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const key=requireIdempotencyKey(request,reply),parsed=bulkSchema.safeParse(request.body)
+    if(!key||!parsed.success)return fail(reply,new MemoryApiError('invalid_request','exact item revision/hash required'))
+    const results=[]
+    for(const [index,item] of parsed.data.items.entries()){
+      try{
+        const result=await idempotentMutation({grant,targetInstallationId:parsed.data.target_installation_id,operation:'governance.decision',key:createHash('sha256').update(JSON.stringify([key,index])).digest('hex'),request:{body:{...item,target_installation_id:parsed.data.target_installation_id},params:{candidateId:item.candidate_id}},run:pool=>createPublicationService(pool).decide({grant,targetInstallationId:parsed.data.target_installation_id,candidateId:item.candidate_id,expectedCandidateRevision:item.expected_revision,expectedBundleHash:item.expected_hash,decision:item.decision,reviewDurationMs:item.review_duration_ms}),metadata:r=>({decision_id:r.decisionId}),replay:async m=>({decisionId:String(m.decision_id)})})
+        results.push({candidate_id:item.candidate_id,status:'success',decision_id:result.decisionId})
+      }catch(error){
+        if(error instanceof PublicationError||error instanceof MemoryApiError||error instanceof TargetBindingError){
+          const code=error instanceof TargetBindingError?'forbidden':error.code
+          results.push({candidate_id:item.candidate_id,status:code==='forbidden'?'revoked':code==='not_found'?'unavailable':'conflict',code})
+        }else throw error
+      }
+    }
+    return {results}
+  })
+  app.get('/api/v1/memory/governance/executor-principals',async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const id=(request.query as {target_installation_id?:string}).target_installation_id
+    if(!id||!UUID_PATTERN.test(id))return fail(reply,new MemoryApiError('invalid_request','target scope required'))
+    const c=await deps.pool.connect()
+    try{await c.query('BEGIN');await requireCurrentScopePermission({client:c,grant,targetInstallationId:id,permission:'publish'});const rows=(await c.query(`SELECT principal_id,provider_client_id,permission_revision::text,valid_until FROM memory_governance_executor_principals WHERE installation_id=$1 AND state='active' AND 'publish_delegated'=ANY(permissions) AND valid_until>clock_timestamp() ORDER BY created_at LIMIT 50`,[id])).rows;await assertCurrentGrantClock(c,grant,[id]);await c.query('COMMIT');return {principals:rows,mode:deps.delegatedPublishMode??'off'}}catch(e){await c.query('ROLLBACK');if(e instanceof TargetBindingError)return fail(reply,new MemoryApiError('forbidden','current publisher required'));throw e}finally{c.release()}
+  })
+  app.post('/api/v1/memory/governance/executor-principals',{bodyLimit:8192},async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const key=requireIdempotencyKey(request,reply),body=z.object({target_installation_id:z.string().uuid(),provider_client_id:z.string().min(1).max(200),permissions:z.array(z.enum(['auto_accept_personal','publish_delegated'])).min(1).max(2),expires_at:z.string().datetime(),max_accepts_per_day:z.number().int().min(0).max(1000).optional()}).strict().safeParse(request.body)
+    if(!key||!body.success)return fail(reply,new MemoryApiError('invalid_request','bounded executor permission and deadline required'))
+    try{return await idempotentMutation<{principalId:string}>({grant,targetInstallationId:body.data.target_installation_id,operation:'governance.executor_principal',key,request,run:pool=>createExecutorPrincipals(pool).authorize({grant,installationId:body.data.target_installation_id,providerClientId:body.data.provider_client_id,permissions:body.data.permissions,expiresAt:body.data.expires_at,maxAcceptsPerDay:body.data.max_accepts_per_day}),metadata:r=>r,replay:async m=>({principalId:String(m.principalId)})})}catch(e){return fail(reply,new MemoryApiError('forbidden','current human policy admin required'))}
+  })
+  app.post('/api/v1/memory/governance/executor-principals/:id/disable',{bodyLimit:4096},async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const key=requireIdempotencyKey(request,reply),body=z.object({target_installation_id:z.string().uuid(),expected_revision:z.string().regex(/^[1-9][0-9]*$/)}).strict().safeParse(request.body),id=(request.params as {id:string}).id
+    if(!key||!body.success||!UUID_PATTERN.test(id))return fail(reply,new MemoryApiError('invalid_request','executor scope and permission revision required'))
+    try{return await idempotentMutation({grant,targetInstallationId:body.data.target_installation_id,operation:'governance.executor_principal',key,request,run:pool=>createExecutorPrincipals(pool).disable({grant,installationId:body.data.target_installation_id,principalId:id,expectedRevision:body.data.expected_revision}),metadata:r=>r,replay:async()=>({disabled:true})})}catch(e){return fail(reply,new MemoryApiError('forbidden','current human policy admin required'))}
+  })
+  app.post('/api/v1/memory/governance/publication-delegations',{bodyLimit:8192},async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const key=requireIdempotencyKey(request,reply),body=z.object({target_installation_id:z.string().uuid(),candidate_id:z.string().uuid(),expected_revision:z.number().int().positive(),expected_hash:z.string().regex(/^[a-f0-9]{64}$/),principal_id:z.string().uuid(),expires_at:z.string().datetime()}).strict().safeParse(request.body)
+    if(!key||!body.success)return fail(reply,new MemoryApiError('invalid_request','exact revision, scope and executor required'))
+    if(deps.delegatedPublishMode!=='enabled')return fail(reply,new MemoryApiError('revision_conflict','delegated publication is off'))
+    try{return await idempotentMutation<{delegationId:string}>({grant,targetInstallationId:body.data.target_installation_id,operation:'governance.delegate_publish',key,request,run:pool=>createPublicationDelegation(pool).create({grant,installationId:body.data.target_installation_id,candidateId:body.data.candidate_id,expectedRevision:body.data.expected_revision,expectedHash:body.data.expected_hash,principalId:body.data.principal_id,expiresAt:body.data.expires_at}),metadata:r=>r,replay:async m=>({delegationId:String(m.delegationId)})})}catch(e){return fail(reply,new MemoryApiError(e instanceof TargetBindingError?'forbidden':'revision_conflict','delegation authorization or revision changed'))}
+  })
+  app.post('/api/v1/memory/governance/publication-delegations/:id/revoke',{bodyLimit:4096},async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const key=requireIdempotencyKey(request,reply),body=z.object({target_installation_id:z.string().uuid()}).strict().safeParse(request.body),id=(request.params as {id:string}).id
+    if(!key||!body.success||!UUID_PATTERN.test(id))return fail(reply,new MemoryApiError('invalid_request','exact delegation scope required'))
+    try{return await idempotentMutation({grant,targetInstallationId:body.data.target_installation_id,operation:'governance.delegate_revoke',key,request,run:pool=>createPublicationDelegation(pool).revoke({grant,installationId:body.data.target_installation_id,delegationId:id}),metadata:r=>r,replay:async()=>({revoked:true})})}catch(e){return fail(reply,new MemoryApiError('forbidden','current human publisher required'))}
+  })
+
+  app.get('/api/v1/memory/governance/automation-policy',async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const id=(request.query as {target_installation_id?:string}).target_installation_id
+    if(!id||!UUID_PATTERN.test(id))return fail(reply,new MemoryApiError('invalid_request','target scope required'))
+    const c=await deps.pool.connect()
+    try{await c.query('BEGIN');await requireCurrentScopePermission({client:c,grant,targetInstallationId:id,permission:'read'})
+      const row=(await c.query(`SELECT h.revision::int,p.document,p.policy_hash FROM memory_review_automation_policy_heads h JOIN memory_review_automation_policies p USING(policy_id) WHERE h.installation_id=$1`,[id])).rows[0]??{revision:0,document:null}
+      await assertCurrentGrantClock(c,grant,[id]);await c.query('COMMIT');return {...row,effective_mode:deps.automationMode??'off'}
+    }catch(e){await c.query('ROLLBACK');if(e instanceof TargetBindingError)return fail(reply,new MemoryApiError('forbidden','current read permission required'));throw e}finally{c.release()}
+  })
+  app.patch('/api/v1/memory/governance/automation-policy',{bodyLimit:8192},async(request,reply)=>{
+    const grant=await guardV2OrFail(request,reply,'memory.search');if(isFailed(grant))return grant.failed
+    const key=requireIdempotencyKey(request,reply),parsed=z.object({target_installation_id:z.string().uuid(),expected_revision:z.number().int().min(0),document:automationPolicySchema}).strict().safeParse(request.body)
+    if(!key||!parsed.success)return fail(reply,new MemoryApiError('invalid_request','off/shadow/assist policy and CAS required'))
+    try{return await idempotentMutation<Record<string,unknown>>({grant,targetInstallationId:parsed.data.target_installation_id,operation:'governance.automation_policy',key,request,run:pool=>createAutomationRepository(pool).setPolicy({installationId:parsed.data.target_installation_id,grant,expectedRevision:parsed.data.expected_revision,document:parsed.data.document}),metadata:r=>r,replay:async m=>m})}
+    catch(e){if(e instanceof TargetBindingError)return fail(reply,new MemoryApiError('forbidden','current human policy admin required'));if(e instanceof Error&&e.message==='automation_policy_conflict')return fail(reply,new MemoryApiError('revision_conflict','automation policy changed'));return mapGovernanceError(e,reply)}
   })
 
   app.post('/api/v1/memory/governance/proposals/:candidateId/decisions', { bodyLimit: 8192 }, async (request, reply) => {
@@ -312,6 +478,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     }
     try {
       const result = await idempotentMutation({
+        grant,
         targetInstallationId,
         operation: 'governance.decision',
         key: idempotencyKey,
@@ -321,6 +488,8 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
           targetInstallationId,
           candidateId: (request.params as { candidateId: string }).candidateId,
           expectedCandidateRevision: expectedRevision,
+          expectedBundleHash:typeof body?.expected_hash==='string'?body.expected_hash:undefined,
+          reviewDurationMs:typeof body?.review_duration_ms==='number'&&Number.isInteger(body.review_duration_ms)&&body.review_duration_ms>=0&&body.review_duration_ms<=86400000?body.review_duration_ms:undefined,
           decision,
           reasonCode: typeof body?.reason_code === 'string' ? body.reason_code : undefined,
         }),
@@ -351,6 +520,16 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     const expectedRevision = body.expected_revision
     const statement = body.statement
     const structuredContent = body.structured_content as Record<string, unknown>
+    let metadataPatch:RevisionMetadataPatch|undefined
+    try {
+      if(body.refresh_source_metadata!==undefined&&typeof body.refresh_source_metadata!=='boolean')throw new Error('invalid metadata refresh')
+      if(body.metadata_patch!==undefined)metadataPatch=parseRevisionMetadataPatch(body.metadata_patch)
+    } catch {return fail(reply,new MemoryApiError('invalid_request','invalid revision metadata'))}
+    const selection=body.evidence_selection as {retained_ordinals?:unknown;removed_ordinals?:unknown;new_evidence_ids?:unknown}|undefined
+    if(!selection || !Array.isArray(selection.retained_ordinals)||!Array.isArray(selection.removed_ordinals)||!Array.isArray(selection.new_evidence_ids)){
+      return fail(reply,new MemoryApiError('invalid_request','explicit evidence_selection required'))
+    }
+    const evidenceSelection={retainedOrdinals:selection.retained_ordinals as number[],removedOrdinals:selection.removed_ordinals as number[],newEvidenceIds:selection.new_evidence_ids as string[]}
     const binding = grant.scopeBindings.find(entry => entry.installation_id === targetInstallationId)
     if (!binding || (!binding.permissions.includes('contribute') && !binding.permissions.includes('review'))) {
       return fail(reply, new MemoryApiError('forbidden', 'contribute or review permission required'))
@@ -363,6 +542,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     }
     try {
       const result = await idempotentMutation({
+        grant,
         targetInstallationId,
         operation: 'governance.revise',
         key: idempotencyKey,
@@ -373,20 +553,26 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
           expectedRevision,
           statement,
           structuredContent,
+          evidenceSelection,grant,repairLegacyBundle:body.repair_legacy_bundle===true,
+          metadataPatch,refreshSourceMetadata:body.refresh_source_metadata===true,
           contentHash: createHash('sha256').update(statement, 'utf8').digest('hex'),
           createdByMembershipId: binding.membership_id,
         }),
         metadata: revised => ({
           candidate_revision_id: revised.candidateRevisionId,
           revision_number: revised.revisionNumber,
+          evidence_changes:revised.evidenceChanges,
         }),
         replay: async metadata => ({
           candidateRevisionId: String(metadata.candidate_revision_id),
           revisionNumber: Number(metadata.revision_number),
+          evidenceChanges:metadata.evidence_changes as {retained:number;removed:number;added:number},
         }),
       })
       return result
     } catch (error) {
+      if (error instanceof TargetBindingError) return fail(reply,new MemoryApiError('forbidden','current authorization required'))
+      if (error instanceof MemoryApiError) return fail(reply,error)
       reply.code(error instanceof Error && error.message.includes('revision') ? 409 : 400)
       return { error: { code: error instanceof Error && error.message.includes('revision') ? 'revision_conflict' : 'state_conflict', message: 'proposal revision rejected' } }
     }
@@ -408,6 +594,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     if (!binding) return fail(reply, new MemoryApiError('not_found', 'resource not found'))
     try {
       return await idempotentMutation({
+        grant,
         targetInstallationId,
         operation: 'governance.withdraw',
         key: idempotencyKey,
@@ -453,11 +640,12 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
       : undefined
     try {
       const result = await idempotentMutation({
+        grant,
         targetInstallationId,
         operation: 'governance.publish',
         key: idempotencyKey,
         request,
-        run: pool => createPublicationService(pool).publish({
+        run: pool => createPublicationService(pool,{tombstoneHmacKeys:deps.tombstoneHmacKeys}).publish({
           grant,
           targetInstallationId,
           candidateId: (request.params as { candidateId: string }).candidateId,
@@ -482,7 +670,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
       })
       return { claim_id: result.claimId, version_id: result.versionId, resolution: result.resolution }
     } catch (error) {
-      if (error instanceof PublicationError && error.code === 'forbidden') {
+      if ((error instanceof PublicationError || error instanceof MemoryApiError) && error.code === 'forbidden') {
         const binding = grant.scopeBindings.find(entry =>
           entry.installation_id === targetInstallationId)
         await audit.append({
@@ -498,6 +686,10 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
           previousState: null,
           nextState: null,
           metadata: { reason_code: error.code },
+        }).catch(() => {
+          // A target can disappear after guard verification. Audit availability
+          // must never turn a correctly denied write into a different response.
+          request.log.warn({code:'memory_denial_audit_failed'},'Memory denial audit unavailable')
         })
       }
       return mapGovernanceError(error, reply)
@@ -520,6 +712,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     const expectedRevision = body.expected_revision
     try {
       const result = await idempotentMutation({
+        grant,
         targetInstallationId,
         operation: 'governance.revoke',
         key: idempotencyKey,
@@ -574,6 +767,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     }
     try {
       const result = await idempotentMutation({
+        grant,
         targetInstallationId: target,
         operation: 'governance.review_policy',
         key: idempotencyKey,
@@ -652,6 +846,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     const expectedRevision = body.expected_revision
     try {
       return await idempotentMutation({
+        grant,
         targetInstallationId: sourceInstallationId,
         operation: 'governance.transfer',
         key: idempotencyKey,

@@ -1,3 +1,4 @@
+import {currentClaimVersionSql} from './version-selection.js'
 import type pg from 'pg'
 import type { ClaimRepository } from './repository.js'
 
@@ -25,17 +26,28 @@ export function createLifecycleService(pool: pg.Pool, claims: ClaimRepository) {
       try {
         await client.query('BEGIN')
         try {
-          const due = await client.query<{ claim_id: string }>(`
-            SELECT c.claim_id::text
+          // Discover without holding Claims; a purge owns generation/outbox
+          // rows first. Lock the complete installation set before domain rows,
+          // then recheck eligibility on this bounded batch after every wait.
+          const observed = await client.query<{ claim_id: string; installation_id: string }>(`
+            SELECT c.claim_id::text, c.installation_id::text
             FROM knowledge_claims c
-            JOIN knowledge_versions v ON v.version_id = c.current_version_id
-            WHERE c.state = 'active'
+            JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.version_id = c.current_version_id
+            WHERE c.state = 'active' AND ${currentClaimVersionSql()}
               AND v.valid_until IS NOT NULL
               AND v.valid_until <= NOW()
             ORDER BY c.claim_id
             LIMIT 500
-            FOR UPDATE OF c
           `)
+          const installationIds=[...new Set(observed.rows.map(row=>row.installation_id))].sort()
+          for(const id of installationIds)await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`,[id])
+          const due=await client.query<{claim_id:string}>(`
+            SELECT c.claim_id::text FROM knowledge_claims c
+            JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.version_id=c.current_version_id
+            WHERE c.claim_id=ANY($1::uuid[]) AND c.state='active' AND ${currentClaimVersionSql()}
+              AND v.valid_until IS NOT NULL AND v.valid_until<=clock_timestamp()
+            ORDER BY c.installation_id,c.claim_id FOR UPDATE OF c
+          `,[observed.rows.map(row=>row.claim_id)])
           let expired = 0
           for (const row of due.rows) {
             await client.query(`

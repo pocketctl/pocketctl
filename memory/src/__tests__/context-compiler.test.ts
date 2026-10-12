@@ -30,7 +30,9 @@ function fakeDeps(overrides: {
   const completed: Array<Record<string, unknown>> = []
   const deps = {
     pool: {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(async (sql: string, values?:unknown[]) => {
+        if(sql.includes('AS source_metadata_owned'))return {rows:(values?.[1] as string[]).map(versionId=>({version_id:versionId,claim_id:'fixture-claim',scope_kind:'installation',scope_key:'global',repository_id:null,repo_snapshot_id:null,branch:null,applicability:null,consumption_hold_reason:null,current:true,time_eligible:true,source_metadata_owned:true,canonical_remote:null}))}
+
         if (sql.includes('knowledge_evidence')) return { rows: [{ evidence_id: 'e-1' }] }
         if (sql.includes('knowledge_versions')) return { rows: [{ statement: 'version statement here' }] }
         return { rows: [] }

@@ -1,11 +1,12 @@
+import {independentSourceCount,manifestSourceRoots} from '../episodes/source-lineage.js'
 import type pg from 'pg'
-import { createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
+import {assertCurrentMembershipWindows,assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 import { currentReviewDecisions,evaluateQuorum } from '../governance/authority.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
 import { EPISODE_COMPILER_VERSION } from '../episodes/compiler.js'
 import { EPISODE_PACKET_COMPILER_VERSION } from '../episodes/packet.js'
-import { resolveSkillSource,SkillWorkError,type SkillSourceContext,type SkillPrelockedLifecycle } from './source-resolver.js'
+import { assertCurrentSkillSourceClock, resolveSkillSource,SkillWorkError,type SkillSourceContext,type SkillPrelockedLifecycle } from './source-resolver.js'
 import { archiveSourceRequest,findSkillArchive,type SkillVersionRow } from './version-repository.js'
 import { loadSkillReviewPolicySnapshot } from './review-policy-binding.js'
 import { loadSkillPublicationPolicy } from './policy-service.js'
@@ -113,7 +114,7 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   const coauthors=await loadGitSkillCoauthors(client,identity.installationId,request.versionId)
   const counted=binding.owner_scope_kind==='personal'?decisions.filter(d=>d.actor_kind==='personal'&&d.actor_id===binding.owner_scope_id).map(d=>({membershipId:d.actor_id,decision:d.decision}))
     :currentReviewDecisions(decisions.filter(d=>d.actor_kind==='membership'&&(d.decision!=='approve'||!coauthors.has(d.actor_id))).map(d=>({decisionId:d.decision_id,membershipId:d.actor_id,membershipRevision:d.membership_revision,decision:d.decision})),
-      members.filter(m=>(policy.snapshot.policy.publisher_may_count_as_reviewer||!m.roles.includes('publisher'))&&(risk.risk==='low'||m.membership_id!==publisher.actorId))
+      members.filter(m=>(policy.snapshot.policy.publisher_may_count_as_reviewer||m.membership_id!==publisher.actorId)&&(risk.risk==='low'||m.membership_id!==publisher.actorId))
         .map(m=>({membershipId:m.membership_id,membershipRevision:m.membership_revision,state:m.state,roles:m.roles})))
   const quorum=evaluateQuorum({decisions:counted,policy:policy.snapshot.policy,proposerMembershipId:observed.author_id,publisherMembershipId:publisher.actorId})
   if(!quorum.ok)publicationFailure('review_required')
@@ -135,7 +136,7 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   const inputHash=replayTextHash(canonicalJsonString({skillId:request.skillId,versionId:request.versionId,expectedRevision:Number(latest.head_revision),sourceDigest:source.sourceDigest,policyHash:policy.hash,runnerVersion:SKILL_REPLAY_RUNNER_VERSION,cases:cases.map(c=>[c.case_id,replayCaseHash(c)])}))
   if(inputHash!==latest.input_hash)publicationFailure('case_invalid')
   // Natural facts only from exact archive source lineage, never from Replay cases or caller labels.
-  const natural=(await client.query<{session_id:string}>(`SELECT DISTINCT e.session_id FROM work_episodes e JOIN source_sessions s USING(installation_id,session_id)
+  const natural=(await client.query<{session_id:string;episode_id:string;evidence_manifest:unknown}>(`SELECT DISTINCT e.session_id,e.episode_id,e.evidence_manifest FROM work_episodes e JOIN source_sessions s USING(installation_id,session_id)
     WHERE e.installation_id=$1 AND e.state='ready' AND e.outcome='completed' AND s.deleted_at IS NULL
       AND e.repository_id=$2 AND e.repo_snapshot_id=$3 AND e.source_digest IS NOT NULL AND e.compiled_at IS NOT NULL
       AND e.compiler_version=$6 AND e.document_compiler_version=$7 AND e.session_id<>'shared-governance'
@@ -146,12 +147,21 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
         AND COALESCE((e.evidence_manifest->(t->>'evidence_handle')->>'excerpt_length')::int,0)>0
         AND COALESCE((e.evidence_manifest->(t->>'evidence_handle')->>'truncated')::boolean,false)=false)
       AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)`,[identity.installationId,archive.repository_id,archive.repo_snapshot_id,archive.episode_id,archive.archive_id,EPISODE_COMPILER_VERSION,EPISODE_PACKET_COMPILER_VERSION])).rows
-  const independentSuccesses=natural.length
+  const independentSuccesses=independentSourceCount(natural.map(e=>({sessionId:e.session_id,episodeId:e.episode_id,sourceRootIds:manifestSourceRoots(e.evidence_manifest,e.session_id,e.episode_id)})))
   if(request.mode==='auto'&&independentSuccesses<publicationPolicy.policy.minimumIndependentSuccesses)publicationFailure('independent_successes_required')
   // Internal temporal dependencies, never a portable asset field. Consumers
   // waiting on later locks can recheck exactly the successful quorum/publisher.
   const authorizationMembershipIds=binding.owner_scope_kind==='personal'?[]:[...new Set([
     ...quorum.countedDecisionMemberships,...(publisher.actorKind==='membership'?[publisher.actorId]:[]),
   ])].sort()
-  return {version:observed,archive,actor,binding,replayRunId:latest.run_id,independentSuccesses,policyHash:policy.hash,requiredIndependentSuccesses:publicationPolicy.policy.minimumIndependentSuccesses,authorizationMembershipIds}
+  await assertSkillPublicationGrantClock(client,identity,authorizationMembershipIds,source.versionId,source.originPolicyStamp)
+  return {version:observed,archive,actor,binding,replayRunId:latest.run_id,independentSuccesses,policyHash:policy.hash,requiredIndependentSuccesses:publicationPolicy.policy.minimumIndependentSuccesses,authorizationMembershipIds,sourceVersionId:source.versionId,originPolicyStamp:source.originPolicyStamp}
+}
+
+export async function assertSkillPublicationGrantClock(client:Pick<pg.PoolClient,'query'>,identity:SkillPublicationIdentity,membershipIds:readonly string[]=[],sourceVersionId:string|null=null,originPolicyStamp?:string):Promise<void>{
+  try{await assertCurrentGrantClock(client,identity.grant,[identity.installationId])}
+  catch(error){if(error instanceof TargetBindingError)publicationFailure('forbidden');throw error}
+  try{await assertCurrentMembershipWindows(client,membershipIds.map(membershipId=>({installationId:identity.installationId,membershipId})))}
+  catch(error){if(error instanceof TargetBindingError)publicationFailure('review_required');throw error}
+  await assertCurrentSkillSourceClock(client,{installationId:identity.installationId,versionId:sourceVersionId,...(originPolicyStamp?{originPolicyStamp}:{})})
 }

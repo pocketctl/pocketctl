@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
-import { createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
-import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
+import { assertCurrentGrantClock, requireCurrentScopePermission, TargetBindingError, type V2GrantFacts } from '../governance/authorization.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import { appendSkillAudit } from './audit-repository.js'
 
@@ -46,18 +45,20 @@ export async function loadSkillPublicationPolicy(client: Client,installationId: 
     hash:canonicalPayloadHash(binding??policy).toString('hex'),binding }
 }
 export function createSkillPolicyService(deps: {pool:pg.Pool}) {
+  async function finalClock(client:pg.PoolClient,identity:Identity) {
+    try { await assertCurrentGrantClock(client,identity.grant,[identity.installationId]) }
+    catch(error) { if(error instanceof TargetBindingError) throw new SkillPolicyError('forbidden'); throw error }
+  }
   async function authorize(client:pg.PoolClient,identity:Identity,permission:'read'|'policy_admin') {
-    await client.query(`SELECT 1 FROM memory_owner_scopes WHERE installation_id=ANY($1::uuid[]) FOR SHARE`,[identity.grant.scopeBindings.map(b=>b.installation_id)])
-    await client.query(`SELECT 1 FROM memory_scope_memberships WHERE membership_id=ANY($1::uuid[]) FOR SHARE`,[identity.grant.scopeBindings.map(b=>b.membership_id).filter(Boolean)])
-    const auth=createScopeAuthorization(createTransactionBoundPool(client)),grant=await auth.validateV2Grant(identity.grant)
-    const binding=grant?.scopeBindings.find(b=>b.installation_id===identity.installationId)
-    if(!binding||!binding.permissions.includes(permission))throw new SkillPolicyError('forbidden')
-    return binding.owner_scope_kind==='personal'?{actorKind:'personal' as const,actorId:binding.owner_scope_id}:{actorKind:'membership' as const,actorId:binding.membership_id!}
+    try {
+      const binding=await requireCurrentScopePermission({client,grant:identity.grant,targetInstallationId:identity.installationId,permission})
+      return binding.owner_scope_kind==='personal'?{actorKind:'personal' as const,actorId:binding.owner_scope_id}:{actorKind:'membership' as const,actorId:binding.membership_id!}
+    }catch(error){if(error instanceof TargetBindingError)throw new SkillPolicyError('forbidden');throw error}
   }
   return {
     async getPolicy(identity:Identity) {
       const client=await deps.pool.connect()
-      try {await client.query('BEGIN');await authorize(client,identity,'read');const result=await loadSkillPublicationPolicy(client,identity.installationId);await client.query('COMMIT');return result}
+      try {await client.query('BEGIN');await authorize(client,identity,'read');const result=await loadSkillPublicationPolicy(client,identity.installationId);await finalClock(client,identity);await client.query('COMMIT');return result}
       catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
     },
     async execute(identity:Identity,rawRequest:unknown) {
@@ -76,9 +77,12 @@ export function createSkillPolicyService(deps: {pool:pg.Pool}) {
           ON CONFLICT(installation_id) DO UPDATE SET version_id=EXCLUDED.version_id,revision=EXCLUDED.revision`,[identity.installationId,versionId,revision])
         await appendSkillAudit(client,{installationId:identity.installationId,...actor,action:'policy',outcome:'allowed',skillId:null,versionId:null,revision,code:'ok'})
         const result=await loadSkillPublicationPolicy(client,identity.installationId)
-        await client.query('COMMIT');return result
+        await finalClock(client,identity);await client.query('COMMIT');return result
       }catch(error){await client.query('ROLLBACK');if(error instanceof SkillPolicyError)await appendSkillAudit(client,{installationId:identity.installationId,actorKind:null,actorId:null,action:'policy',outcome:'denied',skillId:null,versionId:null,revision:null,code:error.code});throw error}
       finally{client.release()}
     },
   }
 }
+
+/** Product gate is separate from deterministic/replay eligibility. */
+export function skillAssistanceProductState(eligible:boolean):'draft'|'product_gate_closed'{return eligible?'product_gate_closed':'draft'}

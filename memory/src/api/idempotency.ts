@@ -25,6 +25,10 @@ export function createIdempotencyStore(pool: pg.Pool) {
       requestCanonical: string
       /** Git source readers require READ COMMITTED even on a differently configured server. */
       isolation?: 'read_committed'
+      /** Current authority before reservation and again after any reservation wait. */
+      authorize?: (client: pg.PoolClient) => Promise<void>
+      /** Time-only final fence: a legitimate mutation may change its own authority. */
+      beforeCommit?: (client: pg.PoolClient) => Promise<void>
       /** Runs the mutation and returns bounded metadata. */
       /** Runs inside the same transaction that records the completed result. */
       run: (client: pg.PoolClient) => Promise<{ ok: true; metadata: Record<string, unknown> } | { ok: false; error: unknown }>
@@ -39,6 +43,7 @@ export function createIdempotencyStore(pool: pg.Pool) {
       const client = await pool.connect()
       try {
         await client.query(input.isolation === 'read_committed' ? 'BEGIN ISOLATION LEVEL READ COMMITTED' : 'BEGIN')
+        await input.authorize?.(client)
         await client.query(`
           DELETE FROM memory_idempotency_keys
           WHERE installation_id = $1 AND operation = $2 AND key_hash = $3
@@ -61,10 +66,12 @@ export function createIdempotencyStore(pool: pg.Pool) {
             WHERE installation_id = $1 AND operation = $2 AND key_hash = $3
           `, [input.installationId, input.operation, keyHash])
           const row = existing.rows[0]
+          await input.authorize?.(client)
           await client.query('ROLLBACK')
           if (!row || !row.request_hash.equals(requestHash)) return { kind: 'conflict' }
           return { kind: 'replayed', metadata: row.response_metadata ?? {} }
         }
+        await input.authorize?.(client)
         const result = await input.run(client)
         if (!result.ok) {
           await client.query('ROLLBACK')
@@ -79,6 +86,7 @@ export function createIdempotencyStore(pool: pg.Pool) {
           input.installationId, input.operation, keyHash,
           JSON.stringify(result.metadata ?? {}), RETENTION_MS,
         ])
+        await input.beforeCommit?.(client)
         await client.query('COMMIT')
         return { kind: 'completed', metadata: result.metadata ?? {} }
       } catch (error) {

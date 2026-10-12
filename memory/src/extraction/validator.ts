@@ -1,4 +1,5 @@
-import { normalizedClaimKey, tokenSimilarity } from '../retrieval/query-normalizer.js'
+import {compareClaimRelationships,classifyClaimStatements,type ClaimComparison,type ClaimRelationship} from '../claims/conflict-classifier.js'
+import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 import type { ExtractionPolicyDocument } from '../policies/schemas.js'
 import type { EvidenceRole } from '../episodes/packet.js'
 
@@ -14,6 +15,8 @@ export const CONFLICT_THRESHOLD = 0.5
 
 export interface ActiveClaimIdentity {
   claimId: string
+  versionId?:string
+  comparison?:ClaimComparison
   statement: string
 }
 
@@ -31,6 +34,9 @@ export interface ValidationContext {
   tombstonedKeys: ReadonlySet<string>
   /** Active claims in the same (claim_type, scope) family. */
   activeFamily: readonly ActiveClaimIdentity[]
+  /** Explicit null means full v2 equivalence found no exact match. Undefined is the legacy fixture contract. */
+  exactClaimId?: string | null
+  identityStatus?: 'verified' | 'legacy_unknown' | 'requires_review'
   policy?: ExtractionPolicyDocument
   /** Different handles can refer to the same source event. */
   evidenceSourceKeys?: ReadonlyMap<string, string>
@@ -54,10 +60,10 @@ export type CandidateForValidation = {
 }
 
 export type CandidateVerdict =
-  | { status: 'validated'; validation: { codes: string[] } }
-  | { status: 'rejected_by_validator'; validation: { codes: string[] } }
-  | { status: 'duplicate'; duplicateOfClaimId: string; validation: { codes: string[] } }
-  | { status: 'conflict'; duplicateOfClaimId: string | null; validation: { codes: string[] } }
+  | { status: 'validated'; validation: { codes: string[];relationships?:ClaimRelationship[];needs_human_review?:boolean } }
+  | { status: 'rejected_by_validator'; validation: { codes: string[];relationships?:ClaimRelationship[];needs_human_review?:boolean } }
+  | { status: 'duplicate'; duplicateOfClaimId: string; validation: { codes: string[];relationships?:ClaimRelationship[];needs_human_review?:boolean } }
+  | { status: 'conflict'; duplicateOfClaimId: string | null; validation: { codes: string[];relationships?:ClaimRelationship[];needs_human_review?:boolean } }
 
 function reject(codes: string[]): CandidateVerdict {
   return { status: 'rejected_by_validator', validation: { codes } }
@@ -84,6 +90,7 @@ export function validateCandidate(
   context: ValidationContext,
 ): CandidateVerdict {
   const codes: string[] = []
+  if (context.identityStatus && context.identityStatus !== 'verified') codes.push('identity_requires_review')
 
   // Evidence coverage: 1..12 handles, all resolving in this episode's
   // manifest — a handle from anywhere else is unresolvable.
@@ -183,28 +190,24 @@ export function validateCandidate(
 
   // Duplicate / conflict classification against the active family — never a
   // mutation of the existing claim.
-  // Exact identity wins irrespective of family order. Near matches remain
-  // reviewable conflicts: lexical overlap cannot distinguish negation or a
-  // changed condition, particularly in code and Chinese text.
+  // Exact full equivalence wins irrespective of family order. Related and
+  // potential-conflict hints remain reviewable and cannot modify an Active Claim.
   const identity = normalizedClaimKey({ claimType: candidate.claimType, scopeKey: candidate.scopeKey, statement: candidate.statement })
-  const exact = context.activeFamily.find(active => normalizedClaimKey({
+  const exact = context.exactClaimId !== undefined
+    ? context.exactClaimId ? {claimId: context.exactClaimId} : undefined
+    : context.activeFamily.find(active => normalizedClaimKey({
     claimType: candidate.claimType, scopeKey: candidate.scopeKey, statement: active.statement,
   }) === identity)
   if (exact) return {
     status: 'duplicate', duplicateOfClaimId: exact.claimId,
     validation: { codes: ['exact_duplicate'] },
   }
-  let best: { claimId: string; similarity: number } | undefined
-  for (const active of context.activeFamily) {
-    const similarity = tokenSimilarity(candidate.statement, active.statement)
-    if (similarity >= CONFLICT_THRESHOLD && (!best || similarity > best.similarity)) {
-      best = { claimId: active.claimId, similarity }
-    }
-  }
-  if (best) return {
-    status: 'conflict', duplicateOfClaimId: best.claimId,
-    validation: { codes: [`possible_conflict:${best.similarity.toFixed(2)}`] },
-  }
+  const relationships:ClaimRelationship[]=context.activeFamily.map(active=>({claimId:active.claimId,...(active.versionId?{versionId:active.versionId}:{}),
+    ...(active.comparison??classifyClaimStatements(candidate.statement,active.statement))})).filter(item=>item.relation!=='unrelated')
+    .sort(compareClaimRelationships)
+  const conflict=relationships.find(item=>item.relation==='potential_conflict')
+  if(conflict)return{status:'conflict',duplicateOfClaimId:conflict.claimId,validation:{codes:conflict.codes,relationships:relationships.slice(0,8),needs_human_review:true}}
+  if(relationships.length)return{status:'validated',validation:{codes:['related_knowledge'],relationships:relationships.slice(0,8),needs_human_review:true}}
 
   return { status: 'validated', validation: { codes: [] } }
 }

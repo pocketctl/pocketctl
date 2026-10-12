@@ -326,7 +326,7 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     const outcome = await extractorWith(rejected, undefined, 1).extract({
       installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
     })
-    expect(outcome).toMatchObject({ kind: 'failed', errorCode: 'budget_exceeded' })
+    expect(outcome).toMatchObject({ kind: 'deferred_budget', errorCode: 'budget_exceeded' })
     const runs = await pool.query(`SELECT COUNT(*)::int AS count FROM memory_extraction_runs`)
     expect(runs.rows[0].count).toBe(0)
   })

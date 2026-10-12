@@ -226,17 +226,17 @@ describe('candidate validator', () => {
     const verdict = validateCandidate(candidate(), context({
       activeFamily: [{ claimId: 'claim-1', statement: 'Vitest files live next to the sources' }],
     }))
-    expect(verdict).toMatchObject({ status: 'conflict', duplicateOfClaimId: 'claim-1' })
+    expect(verdict).toMatchObject({ status: 'validated',validation:{codes:['related_knowledge'],relationships:[{claimId:'claim-1',relation:'related'}]} })
   })
 
-  test('mid-band similarity becomes a conflict, never an automatic supersede', () => {
+  test('mid-band similarity stays related and awaits manual acceptance', () => {
     const verdict = validateCandidate(
       candidate({ statement: 'Vitest test files live next to sources and cover every module' }),
       context({
         activeFamily: [{ claimId: 'claim-2', statement: 'Vitest files live next to sources' }],
       }),
     )
-    expect(verdict).toMatchObject({ status: 'conflict', duplicateOfClaimId: 'claim-2' })
+    expect(verdict).toMatchObject({ status: 'validated',validation:{codes:['related_knowledge'],relationships:[{claimId:'claim-2',relation:'related'}]} })
   })
 })
 

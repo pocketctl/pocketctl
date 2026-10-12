@@ -431,6 +431,15 @@ func (sm *SessionManager) GetWorktreeInfo(sessionID string) (string, string, boo
 	return ps.WorktreePath, ps.WorktreeBranch, true
 }
 
+// GetRequestedDocumentCaptureRoot restores local history metadata without
+// resuming an agent turn, then applies the same workspace authorization.
+func (sm *SessionManager) GetRequestedDocumentCaptureRoot(sessionID string) (string, bool) {
+	if !sm.EnsureSessionLoaded(sessionID) {
+		return "", false
+	}
+	return sm.GetDocumentCaptureRoot(sessionID)
+}
+
 // GetDocumentCaptureRoot returns the canonical, locally authorized workspace
 // root for generation-time document capture. Isolated sessions always bind to
 // their worktree rather than the same-named file in the original cwd.

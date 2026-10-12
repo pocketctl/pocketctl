@@ -1,13 +1,16 @@
+import {currentClaimVersionSql} from '../claims/version-selection.js'
+import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
-import { createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
-import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
+import { requireCurrentScopePermission, TargetBindingError, type GrantScopeBinding, type V2GrantFacts } from '../governance/authorization.js'
 import { resolvePacketEvidence } from '../claims/evidence-resolver.js'
 import { redactSecrets } from '../episodes/content-policy.js'
 import { canonicalJsonString, canonicalPayloadHash } from '../inbox/canonical-json.js'
 import { skillModeForScope, type SkillConfig } from './config.js'
 import type { MemoryMode } from '../config.js'
+import {claimConsumptionDecision} from '../governance/applicability.js'
+import {canonicalRepositoryRemotes} from '../governance/publication-applicability.js'
 
 export const SKILL_EXTRACTION_POLICY_VERSION = 'skill-extraction.v1'
 export class SkillWorkError extends Error {
@@ -28,7 +31,7 @@ export interface SkillSourcePacket {
 export interface ResolvedSkillInput {
   installationId: string; repositoryId: string; repoSnapshotId: string
   kind: 'episode' | 'claim_version'; episodeId: string | null; versionId: string | null
-  sessionId: string | null; sourceDigest: string; inputDigest: string
+  sessionId: string | null; sourceDigest: string; inputDigest: string;originPolicyStamp?:string
   ownerKind: 'personal' | 'team' | 'organization'; authorizationEpoch: string
   mode: 'shadow' | 'enabled'; sources: SkillSourcePacket[]
 }
@@ -50,7 +53,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
   const parsed = SkillSourceRequestSchema.safeParse(input.source)
   if (!parsed.success) throw new SkillWorkError('skill_source_invalid')
   const source = parsed.data
-  // Match compilation/correction: session(s) -> installation -> repository -> rows.
+  // Match compilation/correction: sessions -> installation/authority -> repository -> source rows.
   // These preliminary reads grant no authority; every fact is checked again under locks below.
   const provenance = await client.query<{ session_id: string; repository_id: string | null }>(source.kind === 'episode'
     ? `SELECT session_id,repository_id FROM work_episodes WHERE installation_id=$1 AND episode_id=$2`
@@ -67,18 +70,17 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
     await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,
       [input.installationId, session])
   }
-  await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`, [input.installationId])
+  // Fence every Grant installation, including a different primary, before
+  // repository/source rows. A prior primary revocation must finish first.
+  let binding: GrantScopeBinding
+  try {
+    binding = await requireCurrentScopePermission({client,grant:input.grant,targetInstallationId:input.installationId,permission:input.requiredPermission??'contribute'})
+  } catch (error) {
+    if (error instanceof TargetBindingError) throw new SkillWorkError('skill_forbidden')
+    throw error
+  }
   if (lockedRepositoryId) await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:repository:' || $1 || ':' || $2,0))`,
       [input.installationId, lockedRepositoryId])
-  // Lock the scope/membership rows until the caller commits its output.
-  await client.query('SELECT 1 FROM memory_owner_scopes WHERE installation_id=ANY($1::uuid[]) FOR SHARE',
-    [input.grant.scopeBindings.map(binding => binding.installation_id)])
-  await client.query('SELECT 1 FROM memory_scope_memberships WHERE membership_id=ANY($1::uuid[]) FOR SHARE',
-    [input.grant.scopeBindings.map(binding => binding.membership_id).filter(Boolean)])
-  const authorization = createScopeAuthorization(createTransactionBoundPool(client))
-  const grant = await authorization.validateV2Grant(input.grant)
-  const binding = grant?.scopeBindings.find(row => row.installation_id === input.installationId)
-  if (!binding || !binding.permissions.includes(input.requiredPermission ?? 'contribute')) throw new SkillWorkError('skill_forbidden')
   const installation = await client.query(`SELECT 1 FROM memory_installations
     WHERE installation_id=$1 AND relay_status='active'
       AND local_status NOT IN ('purging','purged','integrity_error') FOR SHARE`, [input.installationId])
@@ -88,6 +90,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
 
   let repositoryId: string, repoSnapshotId: string, episodeId: string | null = null
   let sessionId: string | null = null, versionId: string | null = null, sourceDigest: string
+  let originPolicyStamp:string|null=null
   let packets: SkillSourcePacket[]
   if (source.kind === 'episode') {
     // Governance's synthetic episodes are not completed natural Sessions.
@@ -99,9 +102,9 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
     sessionId = session.rows[0].session_id
     if (!sessionIds.includes(sessionId)) throw new SkillWorkError('skill_source_invalid')
     const rows = await client.query<{
-      repository_id: string; repo_snapshot_id: string; document: Record<string, unknown>
+      session_id: string; repository_id: string; repo_snapshot_id: string; document: Record<string, unknown>
       evidence_manifest: Record<string, Record<string, unknown>>; source_digest: Buffer
-    }>(`SELECT e.repository_id, e.repo_snapshot_id, e.document, e.evidence_manifest, e.source_digest
+    }>(`SELECT e.session_id, e.repository_id, e.repo_snapshot_id, e.document, e.evidence_manifest, e.source_digest
       FROM work_episodes e JOIN source_sessions s USING (installation_id,session_id)
       WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.state='ready' AND e.outcome='completed'
         AND e.compiled_at IS NOT NULL AND e.ready_at <= NOW() AND s.deleted_at IS NULL
@@ -111,6 +114,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       FOR SHARE OF e,s`, [input.installationId, source.episodeId])
     const row = rows.rows[0]
     if (!row || row.source_digest?.length !== 32) throw new SkillWorkError('skill_source_invalid')
+    if (row.session_id !== sessionId || !sessionIds.includes(row.session_id)) throw new SkillWorkError('skill_source_invalid')
     repositoryId = row.repository_id; repoSnapshotId = row.repo_snapshot_id; episodeId = source.episodeId
     if (repositoryId !== lockedRepositoryId) throw new SkillWorkError('skill_source_invalid')
     sourceDigest = row.source_digest.toString('hex')
@@ -137,25 +141,43 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
   } else {
     repositoryId = source.repositoryId; repoSnapshotId = source.repoSnapshotId; versionId = source.versionId
     const rows = await client.query<{
-      statement: string; structured_content: unknown; claim_id: string; repository_id: string | null
+      origin_policy_required:boolean;statement: string; structured_content: unknown; claim_id: string; repository_id: string | null
       repo_snapshot_id: string | null; scope_kind: string; scope_key: string; repository_key: string
-    }>(`SELECT v.statement,v.structured_content,c.claim_id,v.repository_id,v.repo_snapshot_id,
-        c.scope_kind,c.scope_key,r.repository_key
+      branch: string | null; applicability: unknown; consumption_hold_reason: string | null
+      canonical_repository_key: string | null; canonical_remote: string | null
+    }>(`SELECT ${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required,v.statement,v.structured_content,c.claim_id,v.repository_id,v.repo_snapshot_id,
+        c.scope_kind,c.scope_key,r.repository_key,v.branch,to_jsonb(v)->'applicability' AS applicability,
+        to_jsonb(c)->>'consumption_hold_reason' AS consumption_hold_reason,
+        to_jsonb(c)->>'canonical_repository_key' AS canonical_repository_key,r.canonical_remote
       FROM knowledge_versions v JOIN knowledge_claims c USING (installation_id,claim_id)
       JOIN repositories r ON r.installation_id=v.installation_id AND r.repository_id=$3
-      WHERE v.installation_id=$1 AND v.version_id=$2 AND c.current_version_id=v.version_id AND c.state='active'
+      WHERE v.installation_id=$1 AND v.version_id=$2 AND ${currentClaimVersionSql()} AND c.state='active'
         AND c.owner_scope_kind=$4 AND c.owner_scope_id=$5
         AND c.claim_type IN ('work_method','operational_runbook','reusable_skill_candidate')
         AND c.conflict_group_id IS NULL
-        AND (v.valid_until IS NULL OR v.valid_until>NOW()) AND (v.valid_from IS NULL OR v.valid_from<=NOW())
+        AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp()) AND (v.valid_from IS NULL OR v.valid_from<=clock_timestamp())
         AND (($4='personal' AND v.authority IN ('user_accepted','user_corrected')) OR
           ($4<>'personal' AND v.source_promotion_candidate_id IS NOT NULL AND EXISTS
             (SELECT 1 FROM memory_authority_records a WHERE a.installation_id=v.installation_id AND a.version_id=v.version_id)))
-      FOR SHARE OF c,v`, [input.installationId, versionId, repositoryId, binding.owner_scope_kind, binding.owner_scope_id])
+      FOR SHARE OF c,v,r`, [input.installationId, versionId, repositoryId, binding.owner_scope_kind, binding.owner_scope_id])
     const row = rows.rows[0]
-    if (!row || (row.repository_id ? row.repository_id !== repositoryId
+    if (!row) throw new SkillWorkError('skill_claim_scope_invalid')
+    if(row.origin_policy_required){const decision=(await originPolicyDecisions(client,input.installationId,[versionId])).get(versionId);
+      if(!decision?.eligible)throw new SkillWorkError(decision?.reason??'origin_policy_requires_review')
+      originPolicyStamp=decision.stamp}
+    // A snapshot's observed branch is provenance, not proof of the current request's branch/task.
+    // Those scopes remain unavailable until the API carries separately verified context.
+    if (!claimConsumptionDecision({scopeKind:row.scope_kind,scopeKey:row.scope_key,repositoryId:row.repository_id,
+      snapshotId:row.repo_snapshot_id,branch:row.branch,applicability:row.applicability,
+      consumptionHoldReason:row.consumption_hold_reason,canonicalRepositoryKey:row.canonical_repository_key},
+      {repositoryId, snapshotId:repoSnapshotId}).eligible
+      || (row.applicability!=null && ['repository','snapshot','branch'].includes(row.scope_kind)
+        && (!row.canonical_remote || !canonicalRepositoryRemotes(row.canonical_repository_key??'').includes(row.canonical_remote)))) {
+      throw new SkillWorkError('skill_claim_applicability_invalid')
+    }
+    if (row.applicability==null && ((row.repository_id ? row.repository_id !== repositoryId
       : row.scope_kind !== 'repository' || ![repositoryId, row.repository_key].includes(row.scope_key))
-      || (row.repo_snapshot_id && row.repo_snapshot_id !== repoSnapshotId)) throw new SkillWorkError('skill_claim_scope_invalid')
+      || (row.repo_snapshot_id && row.repo_snapshot_id !== repoSnapshotId))) throw new SkillWorkError('skill_claim_scope_invalid')
     const capsuleSchema = await client.query<{ available: boolean }>(`
       SELECT to_regclass('knowledge_evidence_capsules') IS NOT NULL AS available
     `)
@@ -194,7 +216,10 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       return { token: `source-${index + 1}`, handle: `claim:${e.evidence_id}`, excerpt: e.excerpt,
         excerptHash: hash, kind: e.evidence_kind, eventId: e.source_event_id, artifactId: e.artifact_id, evidenceId: e.evidence_id }
     })
-    sourceDigest = canonicalPayloadHash({ versionId, statement: row.statement, content: row.structured_content, packets }).toString('hex')
+    sourceDigest = canonicalPayloadHash({ versionId, statement: row.statement, content: row.structured_content, packets,
+      ...(originPolicyStamp?{originPolicyStamp}:{}),
+      // Preserve existing legacy digests; explicit metadata participates in every later source recheck.
+      ...(row.applicability==null?{}:{applicability:row.applicability,canonicalRemote:row.canonical_remote}) }).toString('hex')
   }
   const snapshot = await client.query(`SELECT 1 FROM repo_snapshots s JOIN repositories r USING (installation_id,repository_id)
     WHERE s.installation_id=$1 AND s.repository_id=$2 AND s.repo_snapshot_id=$3
@@ -202,11 +227,29 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       AND NOT EXISTS (SELECT 1 FROM memory_source_snapshot_tombstones t WHERE t.installation_id=s.installation_id AND t.repository_id=s.repository_id AND t.commit_sha=s.commit_sha)
     FOR SHARE OF s,r`, [input.installationId, repositoryId, repoSnapshotId])
   if (!snapshot.rowCount) throw new SkillWorkError('skill_snapshot_invalid')
+  await assertCurrentSkillSourceClock(client,{installationId:input.installationId,versionId,...(originPolicyStamp?{originPolicyStamp}:{})})
   const serialized = canonicalJsonString(packets)
   if (serialized.length > context.config.maxInputChars) throw new SkillWorkError('skill_input_size_exceeded')
   if (packets.some(packet => redactSecrets(packet.excerpt) !== packet.excerpt)) throw new SkillWorkError('skill_secret_detected')
   const identity = { installationId: input.installationId, repositoryId, repoSnapshotId, kind: source.kind,
     episodeId, versionId, sessionId, sourceDigest, ownerKind: binding.owner_scope_kind,
-    authorizationEpoch: binding.authorization_epoch, mode, sources: packets }
+    authorizationEpoch: binding.authorization_epoch, mode, sources: packets,...(originPolicyStamp?{originPolicyStamp}:{}) }
   return { ...identity, inputDigest: canonicalPayloadHash({ ...identity, policyVersion: SKILL_EXTRACTION_POLICY_VERSION }).toString('hex') }
+}
+
+/** No new locks: the resolver already owns the exact source Claim/Version.
+ * Time keeps moving while later task/head/outbox rows are acquired. Repeat
+ * this after the last write at every native mutation/positive-read boundary. */
+export async function assertCurrentSkillSourceClock(client:Pick<pg.PoolClient,'query'>,source:{installationId:string;versionId:string|null;originPolicyStamp?:string}):Promise<void>{
+  if(!source.versionId)return
+  const current=await client.query(`SELECT ${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
+    WHERE v.installation_id=$1 AND v.version_id=$2 AND ${currentClaimVersionSql()} AND c.state='active'
+      AND (v.valid_from IS NULL OR v.valid_from<=clock_timestamp())
+      AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp())`,[source.installationId,source.versionId])
+  if(!current.rowCount)throw new SkillWorkError('skill_source_invalid')
+  if(current.rows[0]?.origin_policy_required){
+    const decision=(await originPolicyDecisions(client,source.installationId,[source.versionId])).get(source.versionId)
+    if(!decision?.eligible)throw new SkillWorkError(decision?.reason??'origin_policy_requires_review')
+    if(source.originPolicyStamp!==undefined&&decision.stamp!==source.originPolicyStamp)throw new SkillWorkError('origin_policy_changed')
+  }
 }

@@ -6,6 +6,8 @@ import type { VerifiedMemoryGrant } from '../auth/grant-guard.js'
 import type { RecallClaim, RecallResult } from './recall-service.js'
 
 /**
+ * Ownership stays in separate installations; RRF is a view, never a physical
+ * merge or a reusable cross-reader authorization decision.
  * ADR-0005 §6.4 cross-scope retrieval. Authorization precedes retrieval:
  * every selected installation must appear as a validated v2 grant binding
  * (the underlying per-installation SQL is already installation-fenced, so no
@@ -52,7 +54,7 @@ export function selectFederatedScopes(input: {
     // when it is personal, otherwise nothing federates implicitly.
     const primary = input.grant.scopeBindings.find(
       binding => binding.installation_id === input.grant.primaryInstallationId)
-    if (!primary || primary.owner_scope_kind !== 'personal') return []
+    if (!primary || primary.owner_scope_kind !== 'personal' || !primary.permissions.includes('read')) return []
     return [{
       installationId: primary.installation_id,
       ownerScopeKind: 'personal',
@@ -77,7 +79,7 @@ export function selectFederatedScopes(input: {
   const selected: SelectedScope[] = []
   for (const installationId of requested) {
     const binding = byInstallation.get(installationId)
-    if (!binding) {
+    if (!binding || !binding.permissions.includes('read')) {
       throw new FederatedScopeSelectionError('unauthorized_scope',
         'scope selection must be a subset of the validated grant bindings')
     }
@@ -268,7 +270,9 @@ export interface FederatedCursorContextInput {
   repositoryId?: string | null
   repoSnapshotId?: string | null
   branch?: string | null
+  taskScopeKey?: string | null
   claimTypes?: readonly string[] | null
+  scopeContextFingerprint?: string
 }
 
 /**
@@ -336,6 +340,8 @@ function federatedCursorContext(input: FederatedCursorContextInput): string {
     repositoryId: input.repositoryId ?? null,
     repoSnapshotId: input.repoSnapshotId ?? null,
     branch: input.branch ?? null,
+    ...(input.taskScopeKey!=null?{taskScopeKey:input.taskScopeKey}:{}),
+    ...(input.scopeContextFingerprint!==undefined?{scopeContextFingerprint:input.scopeContextFingerprint}:{}),
     claimTypes: input.claimTypes ? [...input.claimTypes].sort() : null,
   })).digest('base64url')
 }

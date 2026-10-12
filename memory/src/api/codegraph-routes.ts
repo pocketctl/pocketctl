@@ -10,6 +10,8 @@ import {
   StartCodeSnapshotRequestSchema,
 } from '../codegraph/source-repository.js'
 import { createSourceIngestService, SnapshotIngestError } from '../codegraph/ingest-service.js'
+import {SourceLifecycleFenceError} from '../codegraph/lifecycle.js'
+import {TargetBindingError} from '../governance/authorization.js'
 import { SourceRepositoryTombstonedError } from '../codegraph/source-repository.js'
 import { createCodeGraphReadService } from '../codegraph/read-service.js'
 import { phase4ModeForScope, type SharedScopesMode } from '../config.js'
@@ -76,8 +78,13 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
   }
 
   const fail = (reply: ReplyLike, error: unknown): void => {
-    if (error instanceof SourceRepositoryTombstonedError) {
-      reply.code(409).send(errorBody(new MemoryApiError('revision_conflict', error.code)))
+    if(error instanceof TargetBindingError||error instanceof SourceLifecycleFenceError&&error.code==='forbidden'){
+      reply.code(403).send(errorBody(new MemoryApiError('forbidden','source mutation rejected')))
+      return
+    }
+    if (error instanceof SourceRepositoryTombstonedError || error instanceof SourceLifecycleFenceError) {
+      const missing=error.code==='not_found'
+      reply.code(missing?404:409).send(errorBody(new MemoryApiError(missing?'not_found':'revision_conflict', error.code)))
       return
     }
     if (error instanceof SnapshotIngestError) {
@@ -152,6 +159,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
     try {
       const result = await ingest.startSnapshot({
         installationId: grant.installationId,
+        grant,
         repository: parsed.data.repository,
         gitObjectFormat: parsed.data.git_object_format,
         commitSha: parsed.data.commit_sha,
@@ -185,6 +193,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
     try {
       const result = await ingest.uploadBatch({
         installationId: grant.installationId,
+        grant,
         snapshotId: snapshotId.data,
         batchIndex: parsed.data.batch_index,
         entries: parsed.data.entries,
@@ -222,6 +231,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
     try {
       const result = await ingest.finalizeSnapshot({
         installationId: grant.installationId,
+        grant,
         snapshotId: snapshotId.data,
         manifestSha256: parsed.data.manifest_sha256,
         expectedFileCount: parsed.data.expected_file_count,
@@ -248,6 +258,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
     try {
       await ingest.abortSnapshot({
         installationId: grant.installationId,
+        grant,
         snapshotId: snapshotId.data,
         sourceKind: sourceKindForGrant(grant),
       })

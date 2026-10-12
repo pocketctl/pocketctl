@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vit
 import { applyMemorySchema } from '../schema.js'
 import { registerGovernanceRoutes } from '../api/governance-routes.js'
 import type { RouteV2Grant } from '../governance/authorization.js'
+import {confirmRepositoryApplicabilityFixture} from '../testing/governance-applicability-fixture.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -41,7 +42,7 @@ function grantFor(membershipId: string, permissions: string[]): RouteV2Grant {
       {
         installation_id: TEAM,
         owner_scope_kind: 'team',
-        owner_scope_id: 'ddddeeee-0000-4000-8000-000000000031',
+        owner_scope_id: TEAM,
         membership_id: membershipId,
         membership_revision: '2',
         authorization_epoch: '1',
@@ -126,11 +127,12 @@ describeWithDatabase('memory governance API (PostgreSQL)', () => {
       `, [TEAM, membershipId, roles])
     }
 
+    await confirmRepositoryApplicabilityFixture(pool,PERSONAL,SOURCE_CLAIM,[TEAM])
     app = Fastify()
     const grantsByActor: Record<string, RouteV2Grant> = {
       [PROPOSER]: grantFor(PROPOSER, ['read', 'contribute']),
       [REVIEWER]: grantFor(REVIEWER, ['read', 'review']),
-      [PUBLISHER]: grantFor(PUBLISHER, ['read', 'review', 'publish', 'policy_admin', 'scope_admin']),
+      [PUBLISHER]: grantFor(PUBLISHER, ['read', 'review', 'publish']),
     }
     registerGovernanceRoutes(app, {
       pool,

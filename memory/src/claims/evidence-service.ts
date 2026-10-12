@@ -1,3 +1,4 @@
+import {readBoundEvidence,type EvidenceReadInput,type BoundEvidenceReadInput} from './evidence-on-demand.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
 
@@ -7,6 +8,8 @@ import type pg from 'pg'
  */
 export function createEvidenceService(pool: pg.Pool) {
   return {
+    summary:(input:EvidenceReadInput)=>readBoundEvidence(pool,input,false),
+    readBound:(input:BoundEvidenceReadInput)=>readBoundEvidence(pool,input,true),
     async evidenceForVersion(input: {
       installationId: string
       versionId: string

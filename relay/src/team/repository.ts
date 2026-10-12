@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import {TeamMemorySourceProjector,type TeamMemorySourceProjectorLike} from './memory-source-projector.js'
 import { requireTeamAccess } from './access.js'
 import {
   candidateForProvider,
@@ -108,7 +109,7 @@ function maskedLabel(displayName: string | null, email: string): string {
 }
 
 export class TeamRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(private readonly pool: pg.Pool, private readonly memorySources: TeamMemorySourceProjectorLike = new TeamMemorySourceProjector(false)) {}
 
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
@@ -260,7 +261,7 @@ export class TeamRepository {
     )
     const row = result.rows[0]
     if (!row) throw new TeamRepositoryError('team_not_found', 'team not found')
-    if (row.state !== 'active') throw new TeamRepositoryError('invalid_state', 'team is not active')
+    if (row.state !== 'active') throw new TeamRepositoryError('team_not_found', 'team not found')
     if (options.admin || options.write) {
       const member = await client.query(`SELECT role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = $2 AND state = 'active'${options.lock ? ' FOR SHARE' : ''}`, [teamId, actorUserId])
       if (!member.rows[0]) throw new TeamRepositoryError('team_not_found', 'team not found')
@@ -574,6 +575,21 @@ export class TeamRepository {
     })
   }
 
+  /** Membership lifecycle and its content-free revoke envelopes share one commit. */
+  private async revokeMemberMemorySources(client:pg.PoolClient,teamId:string,userId:number|null,
+    reason:'team_member_left'|'team_member_removed'|'team_dissolved'):Promise<void>{
+    const readers=await client.query<{participant_id:string;team_session_id:string;user_id:string|number;revision:string|number}>(`
+      SELECT participant.participant_id,participant.team_session_id,participant.user_id,participant.revision
+      FROM collaboration_session_participants participant
+      JOIN collaboration_sessions session ON session.team_session_id=participant.team_session_id
+      WHERE session.team_id=$1 AND participant.state='active' AND ($2::int IS NULL OR participant.user_id=$2)
+      ORDER BY participant.team_session_id,participant.user_id FOR UPDATE OF participant`,[teamId,userId])
+    for(const reader of readers.rows)await this.memorySources.revokeReaderSession?.(client,{
+      teamSessionId:reader.team_session_id,userId:Number(reader.user_id),participantRevision:Number(reader.revision),reason})
+    if(readers.rows.length)await client.query(`UPDATE collaboration_session_participants SET state='removed',revision=revision+1,updated_at=NOW(),removed_at=NOW()
+      WHERE participant_id=ANY($1::text[])`,[readers.rows.map(row=>row.participant_id)])
+  }
+
   async leaveTeam(input: {
     teamId: string
     actorUserId: number
@@ -593,6 +609,7 @@ export class TeamRepository {
         [input.teamId, input.actorUserId],
       )
       this.expectRevision(Number(membership.rows[0].revision), input.expectedRevision)
+      await this.revokeMemberMemorySources(client,input.teamId,input.actorUserId,'team_member_left')
       const updated = await client.query(
         `UPDATE collaboration_team_memberships
          SET state = 'left', revision = revision + 1, updated_at = NOW(), ended_at = NOW()
@@ -659,6 +676,7 @@ export class TeamRepository {
         throw new TeamRepositoryError('invalid_state', `membership is already ${current.state}`)
       }
       this.expectRevision(Number(current.revision), input.expectedRevision)
+      await this.revokeMemberMemorySources(client,input.teamId,Number(current.user_id),'team_member_removed')
       const updated = await client.query(
         `UPDATE collaboration_team_memberships
          SET state = 'removed', revision = revision + 1, updated_at = NOW(), ended_at = NOW()
@@ -706,6 +724,7 @@ export class TeamRepository {
         [input.teamId],
       )
       await client.query(`DELETE FROM collaboration_team_daemon_bindings WHERE team_id = $1`, [input.teamId])
+      await this.revokeMemberMemorySources(client,input.teamId,null,'team_dissolved')
       await client.query(
         `UPDATE collaboration_team_memberships
          SET state = 'removed', revision = revision + 1, updated_at = NOW(), ended_at = NOW()

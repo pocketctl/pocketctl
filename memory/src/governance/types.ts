@@ -4,6 +4,8 @@
  * values fail closed everywhere.
  */
 
+import type {RevisionBundle} from './revision-bundle.js'
+
 export type PromotionCandidateState =
   | 'proposed'
   | 'changes_requested'
@@ -92,6 +94,8 @@ export interface PromotionCandidateVersionRow {
   content_hash: string
   review_policy_version_id: string
   parent_review_policy_version_id: string | null
+  revision_bundle?: RevisionBundle|null
+  revision_bundle_hash?: string|null
   created_by_membership_id: string | null
   created_at: Date
 }

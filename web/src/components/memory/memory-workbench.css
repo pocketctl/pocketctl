@@ -1516,3 +1516,12 @@
   .memory-loadout-editor .loadout-form { grid-template-columns: minmax(0, 1fr) 80px; }
   .memory-loadout-editor .loadout-form > input:not([type=number]) { grid-column: 1 / -1; grid-row: 2; }
 }
+
+/* A1 continues the workbench fields and theme controls. */
+.memory-governance-item-header { flex-wrap: wrap; }
+.memory-governance-item, .memory-review-policy-editor { min-width: 0; }
+.memory-governance-statement, .memory-governance-muted li { overflow-wrap: anywhere; }
+.memory-policy-field :is(input:not([type="checkbox"]), select, textarea) { width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg); background: var(--surface); }
+.memory-policy-field:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.memory-governance-queue details { padding: 8px 0; }
+.memory-governance-queue summary { cursor: pointer; font-size: 12px; }

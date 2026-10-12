@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'crypto'
 import type pg from 'pg'
-import { JOB_DEAD_LETTER_ATTEMPTS, JOB_PRIORITIES, type JobClaim, type JobType } from './types.js'
+import { JOB_DEAD_LETTER_ATTEMPTS, JOB_PRIORITIES, type JobClaim, type JobType, type JobDeferReason } from './types.js'
 
 const RETRY_LADDER_MS: readonly number[] = [1_000, 5_000, 15_000, 45_000]
 const RETRY_CAP_MS = 5 * 60_000
@@ -9,6 +9,12 @@ const RETRY_CAP_MS = 5 * 60_000
 export function retryDelayMs(attempts: number): number {
   if (attempts <= RETRY_LADDER_MS.length) return RETRY_LADDER_MS[attempts - 1]
   return RETRY_CAP_MS
+}
+
+/** ±20% jitter, capped at the frozen maximum; explicit sample aids reproducibility. */
+export function retryDelayWithJitterMs(attempts:number,sample=Math.random()):number{
+  if(!Number.isFinite(sample)||sample<0||sample>1)throw new Error('invalid_retry_jitter')
+  return Math.min(RETRY_CAP_MS,Math.round(retryDelayMs(attempts)*(.8+.4*sample)))
 }
 
 interface JobRow {
@@ -68,35 +74,51 @@ export function createJobRepository(pool: pg.Pool) {
       ])
     },
 
-    /** Reclaim expired leases, then claim one bounded batch (SKIP LOCKED). */
+    /** Serialize the short claim transaction so caps hold across workers. */
     async claimJobs(input: {
-      workerId: string
-      limit: number
-      leaseMs: number
+      workerId: string; limit: number; leaseMs: number
+      globalLimit?: number; perInstallationLimit?: number
+      typeLimits?: Partial<Record<JobType,number>>
     }): Promise<JobClaim[]> {
-      await pool.query(`
-        UPDATE memory_jobs
-        SET state = 'pending', claimed_by = NULL, claim_expires_at = NULL
-        WHERE state = 'running' AND claim_expires_at < NOW()
-      `)
-      const result = await pool.query<JobRow>(`
-        UPDATE memory_jobs SET
-          state = 'running',
-          claimed_by = $1,
-          claim_epoch = claim_epoch + 1,
-          claim_expires_at = NOW() + ($2 * INTERVAL '1 millisecond'),
-          attempts = attempts + 1,
-          last_error_code = NULL
-        WHERE job_id IN (
-          SELECT job_id FROM memory_jobs
-          WHERE state = 'pending' AND available_at <= NOW()
-          ORDER BY priority ASC, available_at ASC, created_at ASC
-          FOR UPDATE SKIP LOCKED
-          LIMIT $3
-        )
-        RETURNING job_id, installation_id, job_type, idempotency_key, payload, attempts, claim_epoch
-      `, [input.workerId, input.leaseMs, input.limit])
-      return result.rows.map(toClaim)
+      if(input.limit===0)return []
+      if(!Number.isInteger(input.limit)||input.limit<0||input.limit>1000||!Number.isFinite(input.leaseMs)||input.leaseMs<=0)throw new Error('invalid_claim_limits')
+      const globalLimit=input.globalLimit??2147483647,tenantLimit=input.perInstallationLimit??2147483647
+      const limits=input.typeLimits??{}
+      if(!Number.isInteger(globalLimit)||globalLimit<1||!Number.isInteger(tenantLimit)||tenantLimit<1
+        ||Object.values(limits).some(n=>!Number.isInteger(n)||Number(n)<0))throw new Error('invalid_claim_limits')
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN')
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))")
+        await client.query(`UPDATE memory_jobs SET state='pending',claimed_by=NULL,claim_expires_at=NULL
+          WHERE state='running' AND claim_expires_at<=clock_timestamp()`)
+        const result=await client.query<JobRow>(`WITH live AS(
+          SELECT installation_id,job_type FROM memory_jobs WHERE state='running' AND claim_expires_at>clock_timestamp()
+        ), tenant AS(SELECT installation_id,count(*)::int n FROM live GROUP BY installation_id),
+        kind AS(SELECT job_type,count(*)::int n FROM live GROUP BY job_type),
+        ranked AS(SELECT j.job_id,j.priority,j.available_at,j.created_at,
+          COALESCE(t.n,0) AS active_tenant,
+          ROW_NUMBER() OVER(PARTITION BY j.installation_id ORDER BY j.priority,j.available_at,j.created_at,j.job_id) AS tenant_rank,
+          ROW_NUMBER() OVER(PARTITION BY j.job_type ORDER BY j.priority,COALESCE(t.n,0),j.available_at,j.created_at,j.job_id) AS type_rank,
+          $5::int-COALESCE(t.n,0) AS tenant_room,
+          COALESCE(($6::jsonb->>j.job_type)::int,2147483647)-COALESCE(k.n,0) AS type_room
+          FROM memory_jobs j LEFT JOIN tenant t ON t.installation_id IS NOT DISTINCT FROM j.installation_id
+          LEFT JOIN kind k ON k.job_type=j.job_type
+          WHERE j.state='pending' AND j.available_at<=clock_timestamp()
+            AND COALESCE(($6::jsonb->>j.job_type)::int,2147483647)>COALESCE(k.n,0)
+            AND $5::int>COALESCE(t.n,0)),
+        picked AS(SELECT j.job_id FROM memory_jobs j JOIN ranked r ON r.job_id=j.job_id
+          WHERE r.tenant_rank<=r.tenant_room AND r.type_rank<=r.type_room
+          ORDER BY r.priority,r.active_tenant,r.tenant_rank,r.available_at,r.created_at,j.job_id
+          FOR UPDATE OF j SKIP LOCKED
+          LIMIT LEAST($3::int,GREATEST(0,$4::int-(SELECT count(*)::int FROM live))))
+        UPDATE memory_jobs j SET state='running',claimed_by=$1,claim_epoch=j.claim_epoch+1,
+          claim_expires_at=clock_timestamp()+($2*interval '1 millisecond'),attempts=j.attempts+1,last_error_code=NULL
+        FROM picked WHERE j.job_id=picked.job_id
+        RETURNING j.job_id,j.installation_id,j.job_type,j.idempotency_key,j.payload,j.attempts,j.claim_epoch`,
+          [input.workerId,input.leaseMs,input.limit,globalLimit,tenantLimit,JSON.stringify(limits)])
+        await client.query('COMMIT');return result.rows.map(toClaim)
+      }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
 
     /**
@@ -111,12 +133,18 @@ export function createJobRepository(pool: pg.Pool) {
       claimEpoch: number
       leaseMs: number
     }): Promise<boolean> {
-      const result = await pool.query(`
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN')
+        await client.query("SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3 AND state='running' FOR UPDATE",[input.jobId,input.claimedBy,input.claimEpoch])
+        const result = await client.query(`
         UPDATE memory_jobs
-        SET claim_expires_at = NOW() + ($4 * INTERVAL '1 millisecond')
-        WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running'
+        SET claim_expires_at = clock_timestamp() + ($4 * INTERVAL '1 millisecond')
+        WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running' AND claim_expires_at>clock_timestamp()
       `, [input.jobId, input.claimedBy, input.claimEpoch, input.leaseMs])
-      return (result.rowCount ?? 0) > 0
+        await client.query('COMMIT')
+        return (result.rowCount ?? 0) > 0
+      }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
 
     /** Fenced completion; false means the caller no longer owns the job. */
@@ -125,7 +153,11 @@ export function createJobRepository(pool: pg.Pool) {
       claimedBy: string
       claimEpoch: number
     }): Promise<boolean> {
-      const result = await pool.query(`
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN')
+        await client.query("SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3 AND state='running' FOR UPDATE",[input.jobId,input.claimedBy,input.claimEpoch])
+        const result = await client.query(`
         UPDATE memory_jobs
         SET state = CASE WHEN last_error_code = 'rerun_required' THEN 'pending' ELSE 'completed' END,
             completed_at = CASE WHEN last_error_code = 'rerun_required' THEN NULL ELSE NOW() END,
@@ -133,9 +165,40 @@ export function createJobRepository(pool: pg.Pool) {
             claimed_by = CASE WHEN last_error_code = 'rerun_required' THEN NULL ELSE claimed_by END,
             claim_expires_at = NULL,
             last_error_code = NULL
-        WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running'
+        WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running' AND claim_expires_at>clock_timestamp()
       `, [input.jobId, input.claimedBy, input.claimEpoch])
-      return (result.rowCount ?? 0) > 0
+        await client.query('COMMIT')
+        return (result.rowCount ?? 0) > 0
+      }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
+    },
+
+    /** Budget waits undo only this claim's attempt, preserving earlier failures. */
+    async deferJob(input: {
+      jobId: string; claimedBy: string; claimEpoch: number
+      reason: JobDeferReason; availableAt: Date
+    }): Promise<boolean> {
+      if (!Number.isFinite(input.availableAt.getTime())) throw new Error('invalid_defer_clock')
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN')
+        await client.query("SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3 AND state='running' FOR UPDATE",[input.jobId,input.claimedBy,input.claimEpoch])
+        const result = await client.query(`
+        UPDATE memory_jobs SET state='pending',
+          attempts=CASE WHEN last_error_code='rerun_required' THEN 0 ELSE GREATEST(0,attempts-1) END,
+          available_at=CASE WHEN last_error_code='rerun_required' THEN clock_timestamp()+interval '1 second'
+            ELSE GREATEST($4::timestamptz,clock_timestamp()+interval '1 second') END,
+          claimed_by=NULL,claim_expires_at=NULL,completed_at=NULL,
+          last_error_code=CASE WHEN last_error_code='rerun_required' THEN 'rerun_required' ELSE $5 END,
+          payload=jsonb_set(payload,ARRAY[$6::text],to_jsonb(
+            CASE WHEN payload->>$6 ~ '^[0-9]{1,9}$'
+              THEN LEAST(999999999,(payload->>$6)::int+1) ELSE 1 END))
+        WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3 AND state='running'
+          AND claim_expires_at>clock_timestamp()
+      `, [input.jobId,input.claimedBy,input.claimEpoch,input.availableAt,input.reason,
+        input.reason==='source_not_ready'?'source_wait_count':'budget_wait_count'])
+        await client.query('COMMIT')
+        return (result.rowCount??0)>0
+      }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
 
     /**
@@ -170,7 +233,10 @@ export function createJobRepository(pool: pg.Pool) {
             FOR UPDATE
           `, [input.jobId, input.claimedBy, input.claimEpoch])
           const row = claimed.rows[0]
-          if (!row) {
+          const live=await client.query(`SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2
+            AND claim_epoch=$3 AND state='running' AND claim_expires_at>clock_timestamp()`,
+            [input.jobId,input.claimedBy,input.claimEpoch])
+          if (!row||!live.rowCount) {
             await client.query('COMMIT')
             return false
           }
@@ -250,7 +316,7 @@ export function createJobRepository(pool: pg.Pool) {
             await client.query('COMMIT')
             return true
           }
-          const delayMs = retryDelayMs(attempts)
+          const delayMs = retryDelayWithJitterMs(attempts)
           await client.query(`
             UPDATE memory_jobs
             SET state = 'pending',

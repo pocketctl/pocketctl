@@ -1,3 +1,5 @@
+import {createEvidenceService} from '../claims/evidence-service.js'
+import type {SearchServiceDeps} from '../retrieval/search-service.js'
 import { createSkillReadService, SkillReadError, skillJson } from '../skills/read-service.js'
 import { GitApiError, gitApiError, GitListQuery, type GitReadService } from '../git-sync/read-service.js'
 import { loadSkillConfig } from '../skills/config.js'
@@ -5,7 +7,7 @@ import type { SkillSourceContext } from '../skills/source-resolver.js'
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/server'
 import type pg from 'pg'
-import { createSearchService } from '../retrieval/search-service.js'
+import { createSearchService,type SearchHit } from '../retrieval/search-service.js'
 import { createRecallService } from '../retrieval/recall-service.js'
 import { createMemoryReadService } from '../retrieval/read-service.js'
 import { createCodeGraphReadService } from '../codegraph/read-service.js'
@@ -24,6 +26,7 @@ import {
   resolveFederatedCursor,
   selectFederatedScopes,
 } from '../retrieval/federated-search-service.js'
+import {resolveFederatedScopeContexts,unavailableScopeSearchPage,unavailableScopeRecall} from '../retrieval/federated-context.js'
 
 /**
  * The bounded read-only MCP tools (plans Phase 1 §12 and Phase 4 §4.2). They call the same application
@@ -42,6 +45,7 @@ export interface MemoryToolDeps {
   recallEmbeddingTimeoutMs: number
   cursorSigningKey: string
   embed?: EmbeddingProvider & { provider: string; model: string }
+  onRecallMetrics?:SearchServiceDeps['onRecallMetrics']
   embeddingConsentFingerprint?: string
 }
 
@@ -69,6 +73,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
   if(deps.gitOnly)return
   const search = createSearchService({
     pool: deps.pool,
+    onRecallMetrics:deps.onRecallMetrics,
     recallEmbeddingTimeoutMs: deps.recallEmbeddingTimeoutMs,
     cursorSigningKey: deps.cursorSigningKey,
     ...(deps.embed ? { embed: deps.embed } : {}),
@@ -77,6 +82,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       : {}),
   })
   const recall = createRecallService(deps.pool, search)
+  const evidenceService=createEvidenceService(deps.pool)
   const reads = createMemoryReadService(deps.pool, deps.cursorSigningKey)
   const graphReads = createCodeGraphReadService(deps.pool, deps.cursorSigningKey)
   const wikiReads = createWikiReadService(deps.pool)
@@ -118,6 +124,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       repository_id: z.string().uuid().optional(),
       repo_snapshot_id: z.string().uuid().optional(),
       branch: z.string().min(1).max(255).optional(),
+      task_scope_key: z.string().min(1).max(512).optional(),
       claim_types: z.array(ClaimTypeEnum).min(1).max(9).optional(),
       as_of: z.string().datetime().optional(),
       limit: z.number().int().min(1).max(20).optional(),
@@ -127,17 +134,22 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     },
   }, async args => {
     if (args.scope_installation_ids) {
+      const grant=requireV2Grant()
       const scopes = selectFederatedScopes({
-        grant: requireV2Grant(),
+        grant,
         requestedInstallationIds: args.scope_installation_ids,
         sharedScopesEnabled: deps.sharedScopesEnabled,
       })
+      const scopedContexts=await resolveFederatedScopeContexts(deps.pool,{grant,scopes,
+        repositoryId:args.repository_id,repoSnapshotId:args.repo_snapshot_id,branch:args.branch,taskScopeKey:args.task_scope_key})
       const cursorContext = {
+        scopeContextFingerprint:scopedContexts.fingerprint,
         scopes,
         query: args.query,
         repositoryId: args.repository_id,
         repoSnapshotId: args.repo_snapshot_id,
         branch: args.branch,
+        taskScopeKey: args.task_scope_key,
         claimTypes: args.claim_types,
       }
       const cursor = resolveFederatedCursor({
@@ -147,27 +159,29 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
         requestedAsOf: args.as_of ? new Date(args.as_of) : null,
       })
       const limit = args.limit ?? 10
-      const perScope = await collectFederatedSearchPages({
+      const perScope = await collectFederatedSearchPages<SearchHit>({
         scopes,
         targetCount: cursor.offset + limit,
-        load: async (scope, innerCursor, pageLimit) => search.search({
+        load: async (scope, innerCursor, pageLimit) => {
+              const resolved=scopedContexts.contexts.get(scope.installationId)!
+              if(!resolved.context)return unavailableScopeSearchPage<SearchHit>(resolved.reason)
+              return search.search({
           installationId: scope.installationId,
           query: args.query,
-          repositoryId: args.repository_id ?? null,
-          repoSnapshotId: args.repo_snapshot_id ?? null,
-          branch: args.branch ?? null,
+          ...resolved.context,
           claimTypes: args.claim_types ?? null,
           asOf: cursor.asOf,
           limit: pageLimit,
           cursor: innerCursor,
-        }),
+        })
+        },
       })
       const merged = mergeFederatedRrf(perScope.flatMap(({ scope, hits }) =>
         hits.map(hit => ({
           scope,
           hit,
           claimId: hit.claimId,
-          repositoryApplicable: args.repository_id ? hit.repositoryId === args.repository_id : true,
+          repositoryApplicable: scopedContexts.contexts.get(scope.installationId)?.context?.repositoryId ? hit.repositoryId === scopedContexts.contexts.get(scope.installationId)!.context!.repositoryId : true,
           authority: hit.authority,
           freshnessAt: hit.freshnessAt,
         }))), cursor.offset + limit)
@@ -211,6 +225,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       repositoryId: args.repository_id ?? null,
       repoSnapshotId: args.repo_snapshot_id ?? null,
       branch: args.branch ?? null,
+      taskScopeKey: args.task_scope_key ?? null,
       claimTypes: args.claim_types ?? null,
       asOf: args.as_of ? new Date(args.as_of) : null,
       limit: args.limit ?? 10,
@@ -226,6 +241,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       repository_id: z.string().uuid().optional(),
       repo_snapshot_id: z.string().uuid().optional(),
       branch: z.string().min(1).max(255).optional(),
+      task_scope_key: z.string().min(1).max(512).optional(),
       claim_types: z.array(ClaimTypeEnum).min(1).max(9).optional(),
       as_of: z.string().datetime().optional(),
       max_claims: z.number().int().min(1).max(10).optional(),
@@ -236,25 +252,26 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     },
   }, async args => {
     if (args.scope_installation_ids) {
+      const grant=requireV2Grant()
       const scopes = selectFederatedScopes({
-        grant: requireV2Grant(),
+        grant,
         requestedInstallationIds: args.scope_installation_ids,
         sharedScopesEnabled: deps.sharedScopesEnabled,
       })
+      const scopedContexts=await resolveFederatedScopeContexts(deps.pool,{grant,scopes,
+        repositoryId:args.repository_id,repoSnapshotId:args.repo_snapshot_id,branch:args.branch,taskScopeKey:args.task_scope_key})
       const perScope = await Promise.all(scopes.map(async scope => ({
         scope,
-        result: await recall.recall({
+        result: await (scopedContexts.contexts.get(scope.installationId)!.context ? recall.recall({
           installationId: scope.installationId,
           query: args.query,
-          repositoryId: args.repository_id ?? null,
-          repoSnapshotId: args.repo_snapshot_id ?? null,
-          branch: args.branch ?? null,
+          ...scopedContexts.contexts.get(scope.installationId)!.context!,
           claimTypes: args.claim_types ?? null,
           asOf: args.as_of ? new Date(args.as_of) : null,
           maxClaims: args.max_claims ?? 5,
           maxEvidencePerClaim: args.max_evidence_per_claim ?? 2,
           maxChars: args.max_chars ?? 8000,
-        }),
+        }) : unavailableScopeRecall(scopedContexts.contexts.get(scope.installationId)!.reason!)),
       })))
       const merged = mergeFederatedRrf(perScope.flatMap(({ scope, result }) =>
         result.claims.map(claim => ({
@@ -277,6 +294,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       repositoryId: args.repository_id ?? null,
       repoSnapshotId: args.repo_snapshot_id ?? null,
       branch: args.branch ?? null,
+      taskScopeKey: args.task_scope_key ?? null,
       claimTypes: args.claim_types ?? null,
       asOf: args.as_of ? new Date(args.as_of) : null,
       maxClaims: args.max_claims ?? 5,
@@ -300,6 +318,28 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       versionCursor: args.version_cursor ?? null,
     })
     return textResult(claim ?? { error: { code: 'not_found' } })
+  })
+
+  const evidenceReferenceArgs={evidence_id:z.uuid(),installation_id:z.uuid().optional(),pack_id:z.uuid().optional(),pack_installation_id:z.uuid().optional(),
+    repository_id:z.uuid().optional(),repo_snapshot_id:z.uuid().optional(),branch:z.string().min(1).max(255).optional(),task_scope_key:z.string().min(1).max(512).optional()}
+  const evidenceInput=(args:{evidence_id:string;installation_id?:string;pack_id?:string;pack_installation_id?:string;repository_id?:string;repo_snapshot_id?:string;branch?:string;task_scope_key?:string})=>{
+    const grant=currentGrant(),v2='version' in grant&&grant.version==='v2'?grant:undefined
+    return{installationId:qualifiedInstallation(args.installation_id),evidenceId:args.evidence_id,scopeGrant:v2,expiresAt:grant.expiresAt,
+      packId:args.pack_id,packInstallationId:args.pack_installation_id,
+      frame:{repositoryId:args.repository_id??null,repoSnapshotId:args.repo_snapshot_id??null,branch:args.branch??null,taskScopeKey:args.task_scope_key??null}}
+  }
+  server.registerTool('memory_get_evidence_reference',{description:'Read a current evidence summary and exact version/hash; missing original material is explicit.',
+    inputSchema:evidenceReferenceArgs,annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true}},async args=>{
+    const result=await evidenceService.summary(evidenceInput(args));return textResult(result??{error:{code:'not_found'}})
+  })
+  server.registerTool('memory_read_evidence_content',{description:'Read at most four sanitized evidence pages using an exact version and hash; full material also requires source version/hash. This grants no execution authority.',
+    inputSchema:{...evidenceReferenceArgs,version_id:z.uuid(),excerpt_hash:z.string().regex(/^[a-f0-9]{64}$/),source_version:z.uuid().optional(),
+      source_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),page:z.number().int().min(0).max(3).default(0),max_chars:z.number().int().min(1).max(4000).default(4000)},
+    annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true}},async args=>{
+    if(args.source_hash&&!args.source_version)return textResult({error:{code:'invalid_request'}})
+    const result=await evidenceService.readBound({...evidenceInput(args),versionId:args.version_id,excerptHash:args.excerpt_hash,
+      sourceHash:args.source_hash,sourceVersion:args.source_version,page:args.page,maxChars:args.max_chars})
+    return textResult(result??{error:{code:'not_found'}})
   })
 
   server.registerTool('memory_get_evidence', {

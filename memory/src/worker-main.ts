@@ -1,8 +1,15 @@
+import {createPublicationExecutor} from './governance/publication-executor.js'
+import {createAutomationRepository} from './governance/automation-repository.js'
+import {evaluateAutomation} from './governance/automation-evaluator.js'
+import {updateRetrievalIndexGauges} from './metrics.js'
+import {createSharedClaimLifecycle} from './governance/publication-service.js'
+import {updateJobSchedulingGauges} from './metrics.js'
 import { createServer } from 'http'
 import { createHash } from 'node:crypto'
 import { loadMemoryConfig } from './config.js'
 import { createMemoryPool } from './db.js'
 import { applyMemorySchema } from './schema.js'
+import {assertMemoryRuntimeCompatibility,MemoryRuntimeCompatibilityError} from './migrations/governance-v2/compatibility.js'
 import { createShutdownSignal } from './shutdown.js'
 import { createRelayHttpClient, type RelayHttpClient } from './relay/http-client.js'
 import { RelayRequestError } from './relay/errors.js'
@@ -26,7 +33,8 @@ import { createWikiGenerator } from './wiki/generator.js'
 import { createSkillGenerator } from './skills/generator.js'
 import { createSkillWorker } from './skills/worker.js'
 import { createExtractionRepository } from './extraction/repository.js'
-import { createCandidateExtractor } from './extraction/extractor.js'
+import { createCandidateExtractor,deferBudgetOutcome } from './extraction/extractor.js'
+import { JobDeferredError } from './jobs/types.js'
 import { createCandidateDeduper } from './extraction/deduper.js'
 import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleTextGenerator } from './model/openai-compatible-text.js'
@@ -117,6 +125,9 @@ async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics): Promise<void
     }
   }
 
+  await updateJobSchedulingGauges(pool,metrics)
+  await updateRetrievalIndexGauges(pool,metrics.phase1)
+
   const outbox = await pool.query<{ pending: string; reported: string; dead_letter: string }>(`
     SELECT COUNT(*) FILTER (WHERE reported_at IS NULL AND dead_lettered_at IS NULL)::text AS pending,
            COUNT(*) FILTER (WHERE reported_at IS NOT NULL)::text AS reported,
@@ -142,6 +153,10 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await applyMemorySchema(pool)
+  await assertMemoryRuntimeCompatibility(pool)
+  if(config.delegatedPublishMode!=='enabled'){
+    const c=await pool.connect();try{await c.query('BEGIN');await c.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))");await c.query("UPDATE memory_jobs SET state='dead',claim_epoch=claim_epoch+1,claimed_by=NULL,claim_expires_at=NULL,last_error_code='delegated_publish_off' WHERE job_type='execute_publication_delegation' AND state IN('pending','running')");await c.query('COMMIT')}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+  }
   const providerBudgetStore = config.providerBudget || config.wikiProviderBudget || config.skill.providerBudget
     ? createProviderBudgetStore(pool)
     : undefined
@@ -213,6 +228,7 @@ async function main(): Promise<void> {
   let usageWorker: ReturnType<typeof createUsageWorker> | undefined
   let feedTimer: ReturnType<typeof setInterval> | undefined
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
+  let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
   const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
@@ -296,6 +312,8 @@ async function main(): Promise<void> {
         build_wiki: config.wikiMaxConcurrency,
         extract_skill_candidate: config.skill.maxConcurrency,
       },
+      onClaim:job=>{if(job.claim_epoch>1)metrics.jobRepeatClaims.inc({type:job.job_type})},
+      onExecution:(job,result,seconds)=>metrics.jobRuntime.observe({type:job.job_type,result},seconds),
       onError: loopError('jobs'),
     })
     const gitConfig=config.gitSync??loadGitSyncConfig({})
@@ -464,7 +482,11 @@ async function main(): Promise<void> {
     const extractionTextRoute = createExtractionTextRoute(config.mimoTextModel, config.textModel)
     if (extractionTextRoute && textGenerator) {
       const extractionConsentFingerprint = extractionTextRoute.fingerprint
-      const extractionStore = createExtractionRepository(pool)
+      const extractionStore = createExtractionRepository(pool,result=>metrics.phase1.sourceWork.inc({result}))
+      const recoverBudgetWaits=()=>extractionStore.recoverBudgetWaits({consentFingerprint:extractionConsentFingerprint,limit:50})
+      await recoverBudgetWaits()
+      budgetRecoveryTimer=setInterval(()=>{void recoverBudgetWaits().catch(loopError('budget_recovery'))},5*60_000)
+      budgetRecoveryTimer.unref?.()
       const extractionPolicyResolver = createPolicyResolver({
         pool,
         repository: createPolicyRepository(pool),
@@ -475,6 +497,7 @@ async function main(): Promise<void> {
         provider: extractionTextRoute.provider,
         model: extractionTextRoute.model,
         modelConfigFingerprint: extractionConsentFingerprint,
+        expectedConsentFingerprint:extractionConsentFingerprint,
         timeoutMs: config.modelTimeoutMs,
         extractionNotBefore: config.extractionNotBefore,
         maxRunsPerEpisode: config.extractionMaxRunsPerEpisode,
@@ -502,10 +525,12 @@ async function main(): Promise<void> {
           SELECT extraction_mode, extraction_consent_fingerprint
           FROM memory_feature_settings WHERE installation_id = $1
         `, [job.installation_id])
-        if (!consent.rows[0] || consent.rows[0].extraction_mode === 'off'
-          || consent.rows[0].extraction_consent_fingerprint !== extractionConsentFingerprint) {
+        if (!consent.rows[0] || consent.rows[0].extraction_mode === 'off') {
           metrics.phase1.extractionRuns.inc({ result: 'skipped' })
           return
+        }
+        if(consent.rows[0].extraction_consent_fingerprint!==extractionConsentFingerprint){
+          throw new JobDeferredError('source_not_ready',new Date(Date.now()+5*60_000))
         }
         const started = Date.now()
         const turnId = String(job.payload.turn_id ?? job.idempotency_key.replace(/^extract:/, '').split(':')[0])
@@ -514,6 +539,7 @@ async function main(): Promise<void> {
           turnId,
           signal,
           fence: ctx?.fence,
+          expectedSourceDigest:typeof job.payload.expected_source_digest==='string'?job.payload.expected_source_digest:undefined,
         })
         const result = outcome.kind === 'succeeded'
           ? 'succeeded'
@@ -559,6 +585,7 @@ async function main(): Promise<void> {
         if (outcome.kind === 'failed' && outcome.retryable) {
           throw new Error(`extract_candidates retryable: ${outcome.errorCode}`)
         }
+        deferBudgetOutcome(outcome)
       })
     } else {
       loopError('extract_candidates')(new Error('extraction_unconfigured'))
@@ -609,6 +636,66 @@ async function main(): Promise<void> {
 		// handlers so legacy queued rows complete instead of looping as no_handler.
 		jobWorker.register('compile_context_shadow', async () => undefined)
 		jobWorker.register('record_context_delivery', async () => undefined)
+    const sharedLifecycle=createSharedClaimLifecycle(pool)
+    jobWorker.register('expire_promotion_candidates',async job=>{
+      if(job.installation_id)await sharedLifecycle.expirePromotionCandidates(job.installation_id)
+    })
+    const enqueuePromotionExpiry=async()=>{
+      const scopes=await pool.query<{installation_id:string}>(`SELECT DISTINCT target_installation_id AS installation_id
+        FROM memory_promotion_candidates WHERE state IN('proposed','changes_requested','approved','conflict')
+          AND expires_at<=clock_timestamp() ORDER BY target_installation_id LIMIT 1000`)
+      for(const row of scopes.rows)await jobRepository.enqueueJob({installationId:row.installation_id,
+        jobType:'expire_promotion_candidates',idempotencyKey:`promotion-expire:${Math.floor(Date.now()/60000)}`})
+    }
+    jobWorker.register('execute_publication_delegation',async(job,signal,ctx)=>{
+      if(config.delegatedPublishMode!=='enabled'||!job.installation_id)return
+      const delegationId=job.payload.delegation_id;if(typeof delegationId!=='string')return
+      const actor=(await pool.query(`SELECT p.provider_client_id,p.permission_revision::text,s.authorization_epoch::text FROM memory_publication_delegations d JOIN memory_governance_executor_principals p USING(installation_id,principal_id) JOIN memory_owner_scopes s USING(installation_id) WHERE d.delegation_id=$1 AND d.installation_id=$2`,[delegationId,job.installation_id])).rows[0]
+      if(!actor||actor.provider_client_id!==config.providerClientId)return
+      // Validate this exact bearer with the authenticated Relay endpoint before
+      // decoding its expiry. No network call holds publication database locks.
+      const token=await tokens.get()
+      let cursor:string|null=null,verified=false
+      for(let page=0;page<20&&!signal.aborted;page++){
+        const result=await http.request('GET',`/api/extensions/v2/provider/installations${cursor?`?cursor=${encodeURIComponent(cursor)}`:''}`,{token,operation:'delegated_executor_identity'}) as {installations?:Array<{installation_id:string;status:string;authorization_epoch?:string}> ;next_cursor?:string|null;has_more?:boolean}
+        const installation=result.installations?.find(r=>r.installation_id===job.installation_id)
+        if(installation){verified=installation.status==='active'&&installation.authorization_epoch===actor.authorization_epoch;break}
+        if(!result.has_more||!result.next_cursor)break;cursor=result.next_cursor
+      }
+      if(!verified)return
+      let expiresAt:number
+      try{const payload=JSON.parse(Buffer.from(token.split('.')[1],'base64url').toString('utf8'));if(payload.provider_id!==config.providerId||payload.token_type!=='extension_provider')return;expiresAt=payload.exp}catch{return}
+      if(signal.aborted||!Number.isFinite(expiresAt))return
+      const executor=createPublicationExecutor({pool,mode:'enabled',fence:ctx?.fence,tombstoneHmacKeys:config.tombstoneHmacKeys,executorGrant:{providerClientId:config.providerClientId,installationId:job.installation_id,authorizationEpoch:actor.authorization_epoch,permissionRevision:actor.permission_revision,expiresAt}})
+      const result=await executor.execute(delegationId)
+      if(!result.published&&result.reason==='quorum_failed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+60000))
+    })
+    const enqueueDelegatedPublication=async()=>{
+      if(config.delegatedPublishMode!=='enabled')return
+      const rows=(await pool.query(`SELECT d.delegation_id,d.installation_id FROM memory_publication_delegations d JOIN memory_promotion_candidates c ON c.candidate_id=d.candidate_id WHERE d.state='active' AND d.valid_until>clock_timestamp() AND c.state='approved' ORDER BY d.created_at LIMIT 100`)).rows
+      for(const r of rows)await jobRepository.enqueueJob({installationId:r.installation_id,jobType:'execute_publication_delegation',idempotencyKey:`delegate:${r.delegation_id}:${Math.floor(Date.now()/60000)}`,payload:{delegation_id:r.delegation_id}})
+    }
+    const automation=createAutomationRepository(pool)
+    jobWorker.register('evaluate_review_shadow',async(job,signal,ctx)=>{
+      if(!job.installation_id||!config.reviewAutomationMode||config.reviewAutomationMode==='off')return
+      const kind=job.payload.subject_kind,candidateId=job.payload.candidate_id
+      if((kind!=='personal'&&kind!=='promotion')||typeof candidateId!=='string')return
+      const input={installationId:job.installation_id,subjectKind:kind,candidateId} as const
+      if(await automation.currentAdvice(input))return
+      const prepared=await automation.prepare(input,ctx?.fence)
+      if(!prepared)return
+      const decision=await evaluateAutomation(prepared,{provider:config.providerBudget&&config.textModel?.model===prepared.policy.model?deepSeekTextGenerator:undefined,signal,timeoutMs:config.modelTimeoutMs})
+      await automation.finish(prepared,decision,ctx?.fence)
+    })
+    const enqueueReviewShadow=async()=>{
+      if(!config.reviewAutomationMode||config.reviewAutomationMode==='off')return
+      const rows=(await pool.query(`SELECT c.target_installation_id installation_id,c.candidate_id,c.revision
+        FROM memory_promotion_candidates c JOIN memory_review_automation_policy_heads h ON h.installation_id=c.target_installation_id
+        JOIN memory_review_automation_policies p USING(policy_id)
+        WHERE p.document->>'mode' IN('shadow','assist') AND c.state IN('proposed','changes_requested','conflict') AND c.expires_at>clock_timestamp()
+        ORDER BY c.created_at,c.candidate_id LIMIT 100`)).rows
+      for(const r of rows)await jobRepository.enqueueJob({installationId:r.installation_id,jobType:'evaluate_review_shadow',idempotencyKey:`review:${r.candidate_id}:${r.revision}:${Math.floor(Date.now()/60000)}`,payload:{subject_kind:'promotion',candidate_id:r.candidate_id}})
+    }
     jobWorker.register('expire_claims', async () => {
       await lifecycle.expireDueClaims()
     })
@@ -618,8 +705,14 @@ async function main(): Promise<void> {
       priority: 95,
     })
     await enqueueExpirySweep()
+    await enqueuePromotionExpiry()
+    await enqueueReviewShadow()
+    await enqueueDelegatedPublication()
     maintenanceTimer = setInterval(() => {
       void enqueueExpirySweep().catch(loopError('expire_schedule'))
+      void enqueuePromotionExpiry().catch(loopError('promotion_expire_schedule'))
+      void enqueueReviewShadow().catch(loopError('review_shadow_schedule'))
+      void enqueueDelegatedPublication().catch(loopError('delegated_publish_schedule'))
     }, 60_000)
     maintenanceTimer.unref?.()
     const rawWorkerEmbeddingProvider = config.embeddingModel
@@ -654,9 +747,9 @@ async function main(): Promise<void> {
           .digest('hex'),
       } : {}),
     })
-    const indexClaimVersion = async (job: import('./jobs/types.js').JobClaim, signal: AbortSignal) => {
+    const indexClaimVersion = async (job: import('./jobs/types.js').JobClaim, signal: AbortSignal,ctx?:{fence:import('./jobs/types.js').JobFence}) => {
       try {
-        await claimIndexer.handleIndexClaimVersion(job, signal)
+        await claimIndexer.handleIndexClaimVersion(job, signal,ctx)
         metrics.phase1.indexJobs.inc({ result: 'success' })
       } catch (error) {
         metrics.phase1.indexJobs.inc({ result: 'failed' })
@@ -722,6 +815,7 @@ async function main(): Promise<void> {
   // out from under a relay ack or feed commit.
   if (feedTimer) clearInterval(feedTimer)
   if (maintenanceTimer) clearInterval(maintenanceTimer)
+  if (budgetRecoveryTimer) clearInterval(budgetRecoveryTimer)
   clearInterval(gaugeTimer)
   clearInterval(retentionTimer)
   await Promise.all([
@@ -749,6 +843,6 @@ async function main(): Promise<void> {
 
 main().catch(error => {
   // Config or startup failures exit non-zero without echoing secrets.
-  console.error('memory-worker startup failed:', loopErrorCode(error))
+  console.error('memory-worker startup failed:', error instanceof MemoryRuntimeCompatibilityError?error.code:loopErrorCode(error))
   process.exit(1)
 })

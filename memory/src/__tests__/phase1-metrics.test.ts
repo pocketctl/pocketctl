@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { createPhase1Metrics } from '../metrics.js'
+import { createPhase1Metrics,recordRecallMetrics,updateRetrievalIndexGauges } from '../metrics.js'
 
 describe('phase one metrics', () => {
   test('exposes bounded-label extraction, search and recall metrics', async () => {
@@ -55,4 +55,17 @@ describe('phase one metrics', () => {
       expect(output).not.toContain(marker)
     }
   })
+  test('records eligible/hydrated rows, index delay and bounded degradation without identifiers',async()=>{
+    const metrics=createPhase1Metrics()
+    recordRecallMetrics(metrics,{eligible:13001,hydrated:201,returned:10,truncated:true,degraded:false,durationMs:200})
+    await updateRetrievalIndexGauges({query:async()=>({rows:[{pending:'2',age:'7'}]})} as never,metrics)
+    const output=await metrics.registry.metrics()
+    expect(output).toContain('pocketctl_memory_retrieval_rows_sum{stage="eligible"} 13001')
+    expect(output).toContain('pocketctl_memory_retrieval_rows_sum{stage="hydrated"} 201')
+    expect(output).toContain('pocketctl_memory_retrieval_index_pending 2')
+    expect(output).toContain('pocketctl_memory_retrieval_index_oldest_seconds 7')
+    expect(output).toContain('pocketctl_memory_retrieval_outcomes_total{degraded="false",truncated="true"} 1')
+    expect(output).not.toContain('installation_id')
+  })
+
 })

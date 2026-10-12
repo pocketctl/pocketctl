@@ -1,3 +1,7 @@
+import {candidateReviewHash} from './review-hash.js'
+import {normalizeFeedbackReason} from './feedback-policy.js'
+export {normalizeFeedbackReason} from './feedback-policy.js'
+import {activateRevisionInterval,ClaimVersionIntervalError} from './version-selection.js'
 import type pg from 'pg'
 import type {
   ClaimState,
@@ -6,6 +10,8 @@ import type {
   ScopeKind,
 } from './types.js'
 import { resolvePacketEvidence } from './evidence-resolver.js'
+import {claimIdentityV2, ClaimIdentityUnavailableError} from './identity.js'
+import {resolveClaimApplicability,projectClaimIdentity,assertIdentityNotTombstoned,assertClaimIdentityAvailable,assertCurrentIdentityProjection,ClaimIdentityWriteError} from './identity-writer.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 import type { TombstoneHmacKey } from '../config.js'
 import { findTombstonedNormalizedKeys } from './tombstones.js'
@@ -25,8 +31,13 @@ export type LedgerError =
   | { code: 'candidate_not_found' }
   | { code: 'candidate_not_reviewable' }
   | { code: 'candidate_evidence_stale' }
+  | { code: 'source_discovery_changed' }
   | { code: 'tombstoned_identity' }
+  | { code: 'identity_requires_review' }
+  | { code: 'identity_migration_required' }
+  | { code: 'tombstone_hmac_keyring_incomplete' }
   | { code: 'revision_conflict'; currentRevision: number; state: string }
+  | { code: 'revision_interval_requires_review' }
   | { code: 'claim_not_found' }
   | { code: 'claim_not_active' }
   | { code: 'identity_conflict' }
@@ -34,6 +45,10 @@ export type LedgerError =
   | { code: 'invalid_input'; detail: string }
 
 export interface AcceptInput {
+  /** Internal executor only; strict human REST schemas cannot supply this. */
+  automationAuthority?:boolean
+  expectedHash?:string
+  reviewDurationMs?:number
   installationId: string
   candidateId: string
   expectedRevision: number
@@ -64,19 +79,22 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
       try {
         await client.query('BEGIN')
         try {
-          const source = await client.query<{ session_id: string }>(`
-            SELECT e.session_id
+          const source = await client.query<{ session_id: string; episode_id: string }>(`
+            SELECT e.session_id, e.episode_id::text
             FROM memory_candidates c
             JOIN work_episodes e
               ON e.installation_id = c.installation_id AND e.episode_id = c.episode_id
             WHERE c.installation_id = $1 AND c.candidate_id = $2
           `, [input.installationId, input.candidateId])
-          if (source.rows[0]) {
-            await client.query(`
-              SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0)),
-                     pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
-            `, [input.installationId, source.rows[0].session_id])
+          const discoveredSource = source.rows[0]
+          if (!discoveredSource) {
+            await client.query('ROLLBACK')
+            return { ok: false, error: { code: 'candidate_not_found' } }
           }
+          await client.query(`
+            SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0)),
+                   pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
+          `, [input.installationId, discoveredSource.session_id])
           const candidate = await client.query<{
             candidate_id: string
             episode_id: string
@@ -95,13 +113,14 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             valid_from: Date | null
             valid_until: Date | null
             evidence_handles: unknown
+            validation:{applicability?:unknown}
             status: string
             revision: string
           }>(`
             SELECT candidate_id::text, episode_id::text, run_id::text, claim_type, statement, structured_content,
                    normalized_key, scope_kind, scope_key, repository_id::text, repo_snapshot_id::text,
                    branch, confidence::text, freshness_at, valid_from, valid_until,
-                   evidence_handles, status, revision::text
+                   evidence_handles,validation, status, revision::text
             FROM memory_candidates
             WHERE installation_id = $1 AND candidate_id = $2
             FOR UPDATE
@@ -111,6 +130,17 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_found' } }
           }
+          // Prove the actual locked candidate still belongs to the source
+          // tuple whose Session key was discovered before installation ownership.
+          const currentSource = await client.query<{session_id:string}>(`
+            SELECT session_id FROM work_episodes
+            WHERE installation_id=$1 AND episode_id=$2
+          `,[input.installationId,row.episode_id])
+          if (row.episode_id !== discoveredSource.episode_id || currentSource.rows[0]?.session_id !== discoveredSource.session_id) {
+            await client.query('ROLLBACK')
+            return {ok:false,error:{code:'source_discovery_changed'}}
+          }
+          if(input.expectedHash!==undefined&&candidateReviewHash(row as unknown as Record<string,unknown>)!==input.expectedHash){await client.query('ROLLBACK');return {ok:false,error:{code:'revision_conflict',currentRevision:Number(row.revision),state:row.status}}}
           if (row.status !== 'validated' && row.status !== 'conflict') {
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_reviewable' } }
@@ -144,39 +174,19 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             return { ok: false, error: { code: 'invalid_input', detail: 'statement length' } }
           }
 
-          const finalNormalizedKey = normalizedClaimKey({
-            claimType: row.claim_type,
-            scopeKey: row.scope_key,
-            statement,
-          })
-          await client.query(`
-            SELECT pg_advisory_xact_lock(hashtextextended('claim-identity:' || $1 || ':' || $2 || ':' || $3 || ':' || $4, 0))
-          `, [input.installationId, row.claim_type, row.scope_key, finalNormalizedKey])
-          const existingClaim = await client.query<{ claim_id: string }>(`
-            SELECT claim_id::text, revision::text FROM knowledge_claims
-            WHERE installation_id = $1 AND claim_type = $2 AND scope_key = $3 AND normalized_key = $4
-            FOR UPDATE
-          `, [input.installationId, row.claim_type, row.scope_key, finalNormalizedKey])
-
-          const tombstoned = await findTombstonedNormalizedKeys(client, {
-            installationId: input.installationId, normalizedKeys: [finalNormalizedKey],
-            keys: options.tombstoneHmacKeys ?? [],
-          })
-          if (tombstoned.has(finalNormalizedKey)) {
-            await client.query('ROLLBACK')
-            return { ok: false, error: { code: 'tombstoned_identity' } }
-          }
-
-          if (existingClaim.rows[0]) {
-            await client.query('ROLLBACK')
-            return { ok: false, error: { code: 'identity_conflict' } }
-          }
+          const applicability=await resolveClaimApplicability(client,{installationId:input.installationId,scopeKind:row.scope_kind,scopeKey:row.scope_key,
+            repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,applicability:row.validation?.applicability})
+          const projection=await projectClaimIdentity(client,{installationId:input.installationId,claimType:row.claim_type,statement,
+            structuredContent:row.structured_content??{},applicability,validFrom:row.valid_from,validUntil:row.valid_until})
+          const finalNormalizedKey=projection.legacyKey
+          await assertIdentityNotTombstoned(client,{installationId:input.installationId,projection,keys:options.tombstoneHmacKeys??[]})
+          await assertClaimIdentityAvailable(client,{installationId:input.installationId,claimType:row.claim_type,scopeKey:row.scope_key,projection})
           const created = await client.query<{ claim_id: string }>(`
             INSERT INTO knowledge_claims
-              (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key, state)
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'active')
+              (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key, state,canonical_repository_key,identity_generation,normalized_key_v2,topic_key_v2,duplicate_digest_v2,consumption_hold_reason)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'active',$6,$7,$8,$9,$10,$11)
             RETURNING claim_id::text
-          `, [input.installationId, row.claim_type, row.scope_kind, row.scope_key, finalNormalizedKey])
+          `, [input.installationId,row.claim_type,row.scope_kind,row.scope_key,finalNormalizedKey,applicability.canonicalRepositoryKey,projection.generation,projection.keyV2,projection.topicKeyV2,projection.duplicateDigestV2,applicability.status==='verified'?null:'identity_requires_review'])
           const claimId = created.rows[0].claim_id
           const versionNumber = 1
 
@@ -184,15 +194,15 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             INSERT INTO knowledge_versions
               (version_id, installation_id, claim_id, version_number, statement,
                structured_content, authority, confidence, repository_id, repo_snapshot_id, branch,
-               freshness_at, valid_from, valid_until, source_candidate_id)
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+               freshness_at, valid_from, valid_until, source_candidate_id,applicability,effective_from)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14,$15::jsonb,clock_timestamp())
             RETURNING version_id::text
           `, [
             input.installationId, claimId, versionNumber, statement,
             JSON.stringify(row.structured_content ?? {}),
-            input.editedStatement ? 'user_corrected' : 'user_accepted',
+            input.automationAuthority?'automation_accepted':input.editedStatement ? 'user_corrected' : 'user_accepted',
             row.confidence, row.repository_id, row.repo_snapshot_id, row.branch,
-            row.freshness_at, row.valid_from, row.valid_until, row.candidate_id,
+            row.freshness_at, row.valid_from, row.valid_until, row.candidate_id,JSON.stringify(applicability),
           ])
           const versionId = version.rows[0].version_id
 
@@ -225,10 +235,10 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             WHERE installation_id = $1 AND candidate_id = $2
           `, [input.installationId, input.candidateId])
           await client.query(`
-            INSERT INTO memory_feedback (feedback_id, installation_id, candidate_id, claim_id, version_id, action)
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+            INSERT INTO memory_feedback (feedback_id, installation_id, candidate_id, claim_id, version_id, action,details)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5,$6)
           `, [input.installationId, input.candidateId, claimId, versionId,
-            input.editedStatement ? 'candidate_corrected' : 'candidate_accepted'])
+            input.editedStatement ? 'candidate_corrected' : 'candidate_accepted',JSON.stringify(input.automationAuthority?{actor_kind:'automation_executor',decision:'auto_accepted'}:input.reviewDurationMs===undefined?{}:{review_duration_ms:input.reviewDurationMs})])
           await client.query(`
             INSERT INTO memory_jobs (job_id, installation_id, job_type, idempotency_key, priority, payload)
             VALUES (gen_random_uuid(), $1, 'index_claim_version', $2, 90, $3::jsonb)
@@ -244,6 +254,8 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           }
         } catch (error) {
           await client.query('ROLLBACK')
+          if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
+          if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
           throw error
         }
       } finally {
@@ -257,13 +269,16 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
       candidateId: string
       expectedRevision: number
       reasonCode?: string
+      expectedHash?:string
+      reviewDurationMs?:number
     }): Promise<{ ok: true } | { ok: false; error: LedgerError }> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
         try {
-          const candidate = await client.query<{ status: string; revision: string }>(`
-            SELECT status, revision::text FROM memory_candidates
+          const candidate = await client.query<{ status: string; revision: string;candidate:Record<string,unknown> }>(`
+            SELECT status, revision::text,to_jsonb(memory_candidates) candidate FROM memory_candidates
             WHERE installation_id = $1 AND candidate_id = $2
             FOR UPDATE
           `, [input.installationId, input.candidateId])
@@ -272,6 +287,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_found' } }
           }
+          if(input.expectedHash!==undefined&&candidateReviewHash(row.candidate)!==input.expectedHash){await client.query('ROLLBACK');return {ok:false,error:{code:'revision_conflict',currentRevision:Number(row.revision),state:row.status}}}
           if (row.status !== 'validated' && row.status !== 'conflict') {
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_reviewable' } }
@@ -285,13 +301,15 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             WHERE installation_id = $1 AND candidate_id = $2
           `, [input.installationId, input.candidateId])
           await client.query(`
-            INSERT INTO memory_feedback (feedback_id, installation_id, candidate_id, action, reason_code)
-            VALUES (gen_random_uuid(), $1, $2, 'candidate_rejected', $3)
-          `, [input.installationId, input.candidateId, input.reasonCode?.slice(0, 128) ?? null])
+            INSERT INTO memory_feedback (feedback_id, installation_id, candidate_id, action, reason_code,details)
+            VALUES (gen_random_uuid(), $1, $2, 'candidate_rejected', $3,$4)
+          `, [input.installationId, input.candidateId, normalizeFeedbackReason(input.reasonCode),JSON.stringify(input.reviewDurationMs===undefined?{}:{review_duration_ms:input.reviewDurationMs})])
           await client.query('COMMIT')
           return { ok: true }
         } catch (error) {
           await client.query('ROLLBACK')
+          if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
+          if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
           throw error
         }
       } finally {
@@ -343,13 +361,18 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           await client.query(`
             SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
           `, [input.installationId])
-          const episodesAfterLock = await client.query<{ episode_id: string }>(`
-            SELECT episode_id::text FROM work_episodes
+          const episodesAfterLock = await client.query<{ episode_id: string; session_id: string }>(`
+            SELECT episode_id::text, session_id FROM work_episodes
             WHERE installation_id = $1 AND episode_id = ANY($2::uuid[])
           `, [input.installationId, episodeIds])
           if (episodesAfterLock.rows.length !== episodeIds.length) {
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'invalid_input', detail: 'evidence provenance' } }
+          }
+          const discoveredEpisodes = new Map(episodes.rows.map(row=>[row.episode_id,row.session_id]))
+          if (episodesAfterLock.rows.some(row=>discoveredEpisodes.get(row.episode_id)!==row.session_id)) {
+            await client.query('ROLLBACK')
+            return {ok:false,error:{code:'source_discovery_changed'}}
           }
 
           const claim = await client.query<{
@@ -363,10 +386,16 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             repository_id: string | null
             repo_snapshot_id: string | null
             branch: string | null
+            canonical_repository_key:string|null
+            normalized_key_v2:string|null
+            identity_generation:number
+            statement:string
+            topic_key_v2:string|null;duplicate_digest_v2:string|null
+            applicability:unknown;consumption_hold_reason:string|null;structured_content:Record<string,unknown>;valid_from:Date|null;valid_until:Date|null
           }>(`
             SELECT c.claim_id::text, c.state, c.revision::text, c.claim_type, c.scope_kind,
                    c.current_version_id::text,
-                   c.scope_key, v.repository_id::text, v.repo_snapshot_id::text, v.branch
+                   c.scope_key,c.canonical_repository_key,c.normalized_key_v2,c.identity_generation,c.topic_key_v2,c.duplicate_digest_v2,v.statement, v.repository_id::text, v.repo_snapshot_id::text, v.branch,v.applicability,c.consumption_hold_reason,v.structured_content,v.valid_from,v.valid_until
             FROM knowledge_claims c
             LEFT JOIN knowledge_versions v ON v.version_id = c.current_version_id
             WHERE c.installation_id = $1 AND c.claim_id = $2
@@ -413,24 +442,13 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             }
           }
           const finalStatement = input.statement.trim()
-          const finalNormalizedKey = normalizedClaimKey({
-            claimType: row.claim_type,
-            scopeKey: row.scope_key,
-            statement: finalStatement,
-          })
-          await client.query(`
-            SELECT pg_advisory_xact_lock(hashtextextended('claim-identity:' || $1 || ':' || $2 || ':' || $3 || ':' || $4, 0))
-          `, [input.installationId, row.claim_type, row.scope_key, finalNormalizedKey])
-          const collision = await client.query(`
-            SELECT 1 FROM knowledge_claims
-            WHERE installation_id = $1 AND claim_type = $2 AND scope_key = $3
-              AND normalized_key = $4 AND claim_id <> $5
-            LIMIT 1
-          `, [input.installationId, row.claim_type, row.scope_key, finalNormalizedKey, input.claimId])
-          if (collision.rows[0]) {
-            await client.query('ROLLBACK')
-            return { ok: false, error: { code: 'identity_conflict' } }
-          }
+          const applicability=await resolveClaimApplicability(client,{installationId:input.installationId,scopeKind:row.scope_kind,scopeKey:row.scope_key,
+            canonicalRepositoryKey:row.canonical_repository_key,repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,
+            applicability:row.applicability,consumptionHoldReason:row.consumption_hold_reason})
+          const priorProjection=await projectClaimIdentity(client,{installationId:input.installationId,claimType:row.claim_type,statement:row.statement,
+            structuredContent:row.structured_content??{},applicability,validFrom:row.valid_from,validUntil:row.valid_until})
+          assertCurrentIdentityProjection(row,priorProjection)
+          const finalNormalizedKey=normalizedClaimKey({claimType:row.claim_type,scopeKey:row.scope_key,statement:finalStatement})
           const next = await client.query<{ max_version: number | null }>(`
             SELECT MAX(version_number) AS max_version FROM knowledge_versions
             WHERE installation_id = $1 AND claim_id = $2
@@ -440,21 +458,20 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             SELECT clock_timestamp() AS effective_at
           `)
           const correctionAt = effectiveAt.rows[0].effective_at
-          await client.query(`
-            UPDATE knowledge_versions
-            SET valid_until = $3
-            WHERE installation_id = $1 AND version_id = $2
-              AND (valid_until IS NULL OR valid_until > $3)
-          `, [input.installationId, row.current_version_id, correctionAt])
+          const projection=await projectClaimIdentity(client,{installationId:input.installationId,claimType:row.claim_type,statement:finalStatement,
+            structuredContent:row.structured_content??{},applicability,validFrom:row.valid_from,validUntil:row.valid_until})
+          await assertIdentityNotTombstoned(client,{installationId:input.installationId,projection,keys:options.tombstoneHmacKeys??[]})
+          await assertClaimIdentityAvailable(client,{installationId:input.installationId,claimType:row.claim_type,scopeKey:row.scope_key,projection,excludeClaimId:input.claimId})
           const version = await client.query<{ version_id: string }>(`
             INSERT INTO knowledge_versions
               (version_id, installation_id, claim_id, version_number, statement,
                structured_content, authority, confidence, repository_id, repo_snapshot_id, branch,
-               freshness_at, valid_from)
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, '{}'::jsonb, 'user_corrected', 0.9, $5, $6, $7, $8, $8)
+               freshness_at, valid_from, valid_until,applicability)
+            SELECT gen_random_uuid(), $1, $2, $3, $4, source.structured_content, 'user_corrected', 0.9, $5, $6, $7, $8, source.valid_from,source.valid_until,$9::jsonb
+            FROM knowledge_versions source WHERE source.installation_id=$1 AND source.version_id=$10
             RETURNING version_id::text
           `, [input.installationId, input.claimId, versionNumber, finalStatement,
-            row.repository_id, row.repo_snapshot_id, row.branch, correctionAt])
+            row.repository_id, row.repo_snapshot_id, row.branch, correctionAt,JSON.stringify(applicability),row.current_version_id])
           const versionId = version.rows[0].version_id
 
           const capsuleId = await insertEvidenceCapsule(client, {
@@ -488,12 +505,13 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             return { ok: false, error: { code: 'evidence_required' } }
           }
 
+          await activateRevisionInterval(client,{installationId:input.installationId,claimId:input.claimId,previousVersionId:row.current_version_id,versionId})
           await client.query(`
             UPDATE knowledge_claims
-            SET current_version_id = $2, normalized_key = $4,
+            SET current_version_id = $2, normalized_key = $4, normalized_key_v2=$5,topic_key_v2=$6,duplicate_digest_v2=$7,identity_generation=GREATEST(identity_generation,$8),canonical_repository_key=$9,consumption_hold_reason=CASE WHEN $10 THEN COALESCE(consumption_hold_reason,'identity_requires_review') ELSE consumption_hold_reason END,
                 revision = revision + 1, updated_at = NOW()
             WHERE installation_id = $1 AND claim_id = $3
-          `, [input.installationId, versionId, input.claimId, finalNormalizedKey])
+          `, [input.installationId, versionId, input.claimId, finalNormalizedKey,projection.keyV2,projection.topicKeyV2,projection.duplicateDigestV2,projection.generation,applicability.canonicalRepositoryKey,applicability.status!=='verified'])
           await client.query(`
             INSERT INTO memory_feedback (feedback_id, installation_id, claim_id, version_id, action)
             VALUES (gen_random_uuid(), $1, $2, $3, 'claim_corrected')
@@ -507,6 +525,8 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           return { ok: true, claimId: input.claimId, versionId, versionNumber }
         } catch (error) {
           await client.query('ROLLBACK')
+          if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
+          if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
           throw error
         }
       } finally {
@@ -525,6 +545,9 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
       try {
         await client.query('BEGIN')
         try {
+          // Installation deletion owns derived generations/outbox before Claims.
+          // Join its lifecycle fence before taking any domain row lock.
+          await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`, [input.installationId])
           const claim = await client.query<{ claim_id: string; state: string; revision: string; current_version_id: string | null }>(`
             SELECT claim_id::text, state, revision::text, current_version_id::text
             FROM knowledge_claims
@@ -582,6 +605,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
       try {
         await client.query('BEGIN')
         try {
+          await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`, [input.installationId])
           // Stable lock order: sort by claim id.
           const [first, second] = [input.claimId, input.supersededByClaimId].sort()
           for (const id of [first, second]) {

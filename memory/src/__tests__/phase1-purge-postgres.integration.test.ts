@@ -456,27 +456,12 @@ describeWithDatabase('phase one purge and replay cannot resurrect (PostgreSQL)',
       installationId: INSTALLATION, sessionId: 'ses-1', reason: 'user_deleted', sourceFeedId: null,
     })
 
-    // Replay: re-seed the same session bytes and extract again.
+    // Replay bytes cannot erase the durable privacy fence or dispatch a model.
     await seedEpisodeChain(pool, INSTALLATION, 'ses-1')
-    await pool.query(`
-      DELETE FROM memory_session_tombstones WHERE installation_id = $1 AND session_id = 'ses-1'
-    `, [INSTALLATION]).catch(() => undefined)
-    const replay = await extractor.extract({
-      installationId: INSTALLATION, turnId: 'ses-1-turn', signal: new AbortController().signal,
-    })
-    expect(replay.kind).toBe('succeeded')
-    const replayed = await pool.query<{ candidate_id: string; status: string }>(`
-      SELECT candidate_id::text, status FROM memory_candidates
-      WHERE installation_id = $1 AND statement = $2
-      ORDER BY created_at DESC LIMIT 1
-    `, [INSTALLATION, purgedStatement.rows[0].statement])
-    expect(replayed.rows[0].status).toBe('duplicate')
-    const acceptance = await createClaimRepository(pool).acceptCandidate({
-      installationId: INSTALLATION,
-      candidateId: replayed.rows[0].candidate_id,
-      expectedRevision: 1,
-    })
-    expect(acceptance).toMatchObject({ ok: false, error: { code: 'candidate_not_reviewable' } })
+    const replay=await extractor.extract({installationId:INSTALLATION,turnId:'ses-1-turn',signal:new AbortController().signal})
+    expect(replay.kind).toBe('episode_missing')
+    expect((await pool.query("SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id='ses-1'",[INSTALLATION])).rowCount).toBe(1)
+    expect((await pool.query('SELECT COUNT(*)::int n FROM memory_candidates WHERE installation_id=$1',[INSTALLATION])).rows[0].n).toBe(0)
     const claims = await pool.query(`SELECT COUNT(*)::int AS count FROM knowledge_claims WHERE installation_id = $1`, [INSTALLATION])
     expect(claims.rows[0].count).toBe(1)
   })

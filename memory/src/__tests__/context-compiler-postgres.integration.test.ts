@@ -1,5 +1,5 @@
 import pg from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createSearchService } from '../retrieval/search-service.js'
@@ -13,6 +13,7 @@ import { createGenerationRunRepository } from '../generation/repository.js'
 import { createContextCompiler } from '../context/compiler.js'
 import { createPolicyRepository } from '../policies/repository.js'
 import { createPolicyResolver } from '../policies/resolver.js'
+import {createAdmissionService} from '../context/admission-service.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -184,5 +185,65 @@ describeWithDatabase('context pack compilation (PostgreSQL)', () => {
     expect(outcome).toEqual({ kind: 'off' })
     const packs = await pool.query(`SELECT COUNT(*)::int AS n FROM memory_context_packs`)
     expect(packs.rows[0].n).toBe(0)
+  })
+  test('consumption metadata changes create a new compilation generation instead of replaying a ready pack',async()=>{
+    await seedClaim({key:'metadata-generation',statement:'metadata generation marker'})
+    const request={installationId:INSTALLATION,sessionId:'ses-c',clientRequestId:'cr-generation',agent:'codex',adapterCapability:'native_hidden_v1' as const,repositoryId:REPOSITORY,query:'metadata generation marker',requestKey:KEY}
+    const first=await compiler.compile(request)
+    expect(first.kind).toBe('ready')
+    await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='identity_requires_review' WHERE installation_id=$1",[INSTALLATION])
+    const held=await compiler.compile(request)
+    expect(held.kind).toBe('empty')
+    await pool.query('UPDATE knowledge_claims SET consumption_hold_reason=NULL WHERE installation_id=$1',[INSTALLATION])
+    const resumed=await compiler.compile(request)
+    expect(resumed.kind).toBe('ready')
+    if(first.kind==='ready'&&resumed.kind==='ready')expect(resumed.packId).not.toBe(first.packId)
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_generation_runs')).rows[0].n).toBe(3)
+  })
+  test('a source mutation between retrieval and persistence returns retryable degradation and no ready pack',async()=>{
+    await seedClaim({key:'concurrent-source',statement:'concurrent source marker'})
+    const persist=packs.persist.bind(packs)
+    const boundary=vi.spyOn(packs,'persist').mockImplementationOnce(async input=>{
+      await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='fixture_hold' WHERE installation_id=$1",[INSTALLATION])
+      return persist(input)
+    })
+    try{
+      expect(await compiler.compile({installationId:INSTALLATION,sessionId:'ses-c',clientRequestId:'cr-race',agent:'codex',adapterCapability:'native_hidden_v1',repositoryId:REPOSITORY,query:'concurrent source marker',requestKey:KEY})).toEqual({kind:'degraded',reason:'context_consumption_changed'})
+      expect((await pool.query("SELECT 1 FROM memory_context_packs WHERE state='ready'")).rowCount).toBe(0)
+      expect((await pool.query("SELECT state,error_code FROM memory_generation_runs WHERE operation='compile_context'")).rows[0]).toEqual({state:'failed',error_code:'context_consumption_changed'})
+    }finally{boundary.mockRestore()}
+  })
+
+  test.each(['repository', 'snapshot'])('a tombstoned %s cannot mint a fresh Context pack', async tombstone => {
+    await seedClaim({key:'deleted-source',statement:'deleted source applicability marker'})
+    const claim=(await pool.query('SELECT claim_id,current_version_id FROM knowledge_claims WHERE installation_id=$1',[INSTALLATION])).rows[0]
+    const snapshot=crypto.randomUUID(),commit='b'.repeat(40)
+    await pool.query("UPDATE repositories SET canonical_remote='https://example.test/fixture.git' WHERE repository_id=$1",[REPOSITORY])
+    await pool.query("INSERT INTO repo_snapshots(installation_id,repository_id,repo_snapshot_id,commit_sha,branch,observed_at) VALUES($1,$2,$3,$4,'main',NOW())",[INSTALLATION,REPOSITORY,snapshot,commit])
+    const app={scopeKind:'branch',scopeKey:'main',canonicalRepositoryKey:'example.test/fixture',repositoryId:REPOSITORY,snapshotId:snapshot,branch:'main',status:'verified'}
+    await pool.query("UPDATE knowledge_claims SET scope_kind='branch',scope_key='main',canonical_repository_key=$2 WHERE claim_id=$1",[claim.claim_id,app.canonicalRepositoryKey])
+    await pool.query("UPDATE knowledge_versions SET repo_snapshot_id=$2,branch='main',applicability=$3 WHERE version_id=$1",[claim.current_version_id,snapshot,app])
+    if(tombstone==='repository')await pool.query("INSERT INTO memory_repository_tombstones(installation_id,repository_id,reason_code) VALUES($1,$2,'fixture')",[INSTALLATION,REPOSITORY])
+    else await pool.query("INSERT INTO memory_source_snapshot_tombstones(installation_id,snapshot_id,repository_id,commit_sha,reason_code) VALUES($1,$2,$3,$4,'fixture')",[INSTALLATION,crypto.randomUUID(),REPOSITORY,commit])
+    // Registry rows remain: deletion proof must survive a fresh generation and omitted commit hint.
+    const outcome=await compiler.compile({installationId:INSTALLATION,sessionId:'ses-c',clientRequestId:'cr-tomb-'+tombstone,agent:'codex',adapterCapability:'native_hidden_v1',repositoryId:REPOSITORY,branch:'main',query:'deleted source applicability marker',requestKey:KEY})
+    expect(outcome.kind).toBe('empty')
+    expect((await pool.query("SELECT 1 FROM memory_context_packs WHERE state='ready'")).rowCount).toBe(0)
+  })
+
+  test.each(['branch','snapshot','task'])('explicit %s applicability is retained in the frozen pack query context',async scopeKind=>{
+    await seedClaim({key:'frozen-'+scopeKind,statement:'frozen applicability marker'})
+    const claim=(await pool.query('SELECT claim_id,current_version_id FROM knowledge_claims WHERE installation_id=$1',[INSTALLATION])).rows[0]
+    const snapshot=crypto.randomUUID(),commit='a'.repeat(40),scopeKey=scopeKind==='branch'?'main':scopeKind==='snapshot'?snapshot:'task-a'
+    await pool.query("UPDATE repositories SET canonical_remote='https://example.test/fixture.git' WHERE repository_id=$1",[REPOSITORY])
+    await pool.query("INSERT INTO repo_snapshots(installation_id,repository_id,repo_snapshot_id,commit_sha,branch,observed_at) VALUES($1,$2,$3,$4,'main',NOW())",[INSTALLATION,REPOSITORY,snapshot,commit])
+    const app={scopeKind,scopeKey,canonicalRepositoryKey:'example.test/fixture',repositoryId:REPOSITORY,snapshotId:snapshot,branch:'main',status:'verified'}
+    await pool.query('UPDATE knowledge_claims SET scope_kind=$2,scope_key=$3,canonical_repository_key=$4 WHERE claim_id=$1',[claim.claim_id,scopeKind,scopeKey,app.canonicalRepositoryKey])
+    await pool.query("UPDATE knowledge_versions SET repo_snapshot_id=$2,branch='main',applicability=$3 WHERE version_id=$1",[claim.current_version_id,snapshot,app])
+    const outcome=await compiler.compile({installationId:INSTALLATION,sessionId:'ses-c',clientRequestId:'cr-frame-'+scopeKind,agent:'codex',adapterCapability:'native_hidden_v1',repositoryId:REPOSITORY,commitSha:commit,branch:'main',taskScopeKey:scopeKind==='task'?'task-a':null,query:'frozen applicability marker',requestKey:KEY})
+    expect(outcome.kind).toBe('ready')
+    if(outcome.kind!=='ready')return
+    const admission=createAdmissionService({pool,nonceHmacKey:Buffer.alloc(32,7)})
+    expect((await admission.admit({installationId:INSTALLATION,sessionId:'ses-c',clientRequestId:'cr-frame-'+scopeKind,packId:outcome.packId,agent:'codex',adapter:'codex-app-server',grantConfigVersion:'1'})).ok).toBe(true)
   })
 })

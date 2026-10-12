@@ -22,8 +22,9 @@ export interface WikiCandidateFixture {
 export async function insertWikiCandidateFixture(
   pool: pg.Pool,
   suffix: string,
+  existingInstallationId?:string,
 ): Promise<WikiCandidateFixture> {
-  const installationId = randomUUID()
+  const installationId = existingInstallationId??randomUUID()
   const repositoryId = randomUUID()
   const snapshotId = randomUUID()
   const graphVersionId = randomUUID()
@@ -34,14 +35,14 @@ export async function insertWikiCandidateFixture(
   const blobHash = createHash('sha256').update(`source:${suffix}`).digest('hex')
   const graphHash = createHash('sha256').update(`graph:${suffix}`).digest('hex')
   const sourceToken = `src_${createHash('sha256').update(suffix).digest('hex').slice(0, 24)}`
-  await pool.query(`
+  if(!existingInstallationId)await pool.query(`
     INSERT INTO memory_installations
       (installation_id, provider_id, relay_status, local_status, config_version,
        granted_scopes, subscriptions, enabled_services, event_filter)
     VALUES ($1, 'pocketctl-memory', 'active', 'ready', 1,
             '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb)
   `, [installationId])
-  await pool.query(`
+  if(!existingInstallationId)await pool.query(`
     INSERT INTO memory_owner_scopes
       (installation_id, owner_scope_kind, owner_scope_id, state, authorization_epoch)
     VALUES ($1, 'personal', $1, 'active', 1)

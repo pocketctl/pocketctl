@@ -291,11 +291,14 @@ export function registerCapabilityV2GrantRoutes(app: FastifyInstance, deps: Capa
       return fail(reply, new ExtensionApiError('invalid_request', 'services must be a list of service ids'))
     }
 
+    if(body?.session_id!==undefined&&(typeof body.session_id!=='string'||!body.session_id.length||body.session_id.length>64))
+      return fail(reply,new ExtensionApiError('invalid_request','invalid session_id'))
     const minted = await grantService.mint({
       userId: payload.userId,
       installationIds,
       callerType: callerType as 'web' | 'daemon' | 'agent',
       services,
+      ...(typeof body?.session_id==='string'?{sessionId:body.session_id}:{}),
     })
     if (!minted.ok) {
       return fail(reply, new ExtensionApiError(minted.code, minted.message))

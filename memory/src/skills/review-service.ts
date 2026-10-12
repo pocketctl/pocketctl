@@ -2,14 +2,14 @@ import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
 import type { V2GrantFacts } from '../governance/authorization.js'
-import { createScopeAuthorization } from '../governance/authorization.js'
+import {assertCurrentGrantClock,TargetBindingError, createScopeAuthorization } from '../governance/authorization.js'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 import { loadSkillReviewPolicySnapshot as policySnapshot } from './review-policy-binding.js'
 import { currentReviewDecisions, evaluateQuorum } from '../governance/authority.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
 import { SkillCandidateDocumentSchema, skillDocumentHash } from './types.js'
 import { assessSkillRisk } from './risk-policy.js'
-import { resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillPrelockedLifecycle } from './source-resolver.js'
+import { assertCurrentSkillSourceClock, resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillPrelockedLifecycle } from './source-resolver.js'
 import { appendSkillAudit, SKILL_AUDIT_ACTIONS, type SkillAuditInput } from './audit-repository.js'
 import { appendSkillVersion, archiveSourceRequest, findSkillArchive, findSkillVersion, type SkillVersionRow } from './version-repository.js'
 import { assertImportApproval, type GovernedImport } from '../git-sync/governance-adapter.js'
@@ -167,18 +167,18 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
           } else {
             const memberships = await client.query<{ membership_id: string; membership_revision: string; state: string; roles: string[] }>(`
               SELECT membership_id,membership_revision::text,state,roles FROM memory_scope_memberships
-              WHERE installation_id=$1 AND membership_id=ANY($2::uuid[]) ORDER BY membership_id FOR SHARE`,
+              WHERE installation_id=$1 AND membership_id=ANY($2::uuid[]) AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp()) ORDER BY membership_id FOR SHARE`,
             [identity.installationId,decisions.rows.filter(d => d.actor_kind === 'membership').map(d => d.actor_id)])
             counted = currentReviewDecisions(decisions.rows.filter(d => d.actor_kind === 'membership'&&(d.decision!=='approve'||!coauthors.has(d.actor_id))).map(d => ({
               decisionId: d.decision_id, membershipId: d.actor_id, membershipRevision: d.membership_revision!, decision: d.decision,
-            })), memberships.rows.filter(m => policy.snapshot.policy.publisher_may_count_as_reviewer || !m.roles.includes('publisher'))
+            })), memberships.rows
               .map(m => ({ membershipId: m.membership_id, membershipRevision: m.membership_revision, state: m.state, roles: m.roles })))
           }
           // At review time this actor is not publishing. The existing quorum helper also enforces
           // self-publication; personal low-risk review explicitly permits its owner at this stage.
           const quorum = evaluateQuorum({ decisions: counted,
             policy: binding.owner_scope_kind === 'personal' ? { ...policy.snapshot.policy, allow_self_publish: true } : policy.snapshot.policy,
-            proposerMembershipId: version.author_id, publisherMembershipId: actor.actorId })
+            proposerMembershipId: version.author_id, publisherMembershipId: null })
           const state = request.action === 'reject' ? 'rejected' : quorum.ok ? 'reviewed' : 'draft'
           await client.query(`UPDATE memory_skill_heads SET state=$3,revision=$4,updated_at=NOW()
             WHERE installation_id=$1 AND skill_id=$2 AND revision=$5`, [identity.installationId,skillId,state,nextRevision,request.expectedRevision])
@@ -186,6 +186,8 @@ export function createSkillReviewService(deps: { pool: pg.Pool; context: SkillSo
         }
         await appendSkillAudit(client, { installationId: identity.installationId, ...actor, action, outcome: 'allowed',
           skillId: result.skillId, versionId: result.versionId, revision: result.revision, code: 'ok' })
+        try{await assertCurrentGrantClock(client,identity.grant,[identity.installationId])}catch(error){if(error instanceof TargetBindingError)fail('forbidden');throw error}
+        await assertCurrentSkillSourceClock(client,source)
         await client.query('COMMIT')
         return result
       } catch (error) {

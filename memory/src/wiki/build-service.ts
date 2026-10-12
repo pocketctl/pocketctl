@@ -1,3 +1,4 @@
+import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import type pg from 'pg'
 
 import type { JobClaim, JobFence } from '../jobs/types.js'
@@ -47,19 +48,21 @@ export function createWikiBuildService(deps: {
   const pool = deps.pool
   const repository = createWikiRepository(pool)
 
+  async function lockSourceLifecycle(client: pg.PoolClient, installationId: string, runId: string): Promise<void> {
+    await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`, [installationId])
+    // Only discover the lock key here. lockRun and the job fence must read
+    // current facts again after any source purge has finished.
+    const observed = await client.query<{repository_id:string}>(`
+      SELECT w.repository_id FROM memory_wiki_build_runs r
+      JOIN memory_wikis w USING(installation_id,wiki_id)
+      WHERE r.installation_id=$1 AND r.run_id=$2`, [installationId,runId])
+    if (observed.rows[0]) await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:repository:' || $1 || ':' || $2,0))`, [installationId,observed.rows[0].repository_id])
+  }
+
   async function recheckFence(client: pg.PoolClient, fence: JobFence): Promise<void> {
-    const result = await client.query<{
-      state: string
-      claimed_by: string | null
-      claim_epoch: string
-    }>(`
-      SELECT state, claimed_by, claim_epoch::text
-      FROM memory_jobs WHERE job_id = $1
-    `, [fence.jobId])
-    const row = result.rows[0]
-    if (!row || row.state !== 'running' || row.claimed_by !== fence.claimedBy
-      || Number(row.claim_epoch) !== fence.claimEpoch) {
-      throw new WikiBuildFenceError('job_fence_lost')
+    try{await assertJobFence(client,fence)}catch(error){
+      if(error instanceof StaleJobFenceError)throw new WikiBuildFenceError('job_fence_lost')
+      throw error
     }
   }
 
@@ -147,6 +150,7 @@ export function createWikiBuildService(deps: {
         const start = await pool.connect()
         try {
         await start.query('BEGIN')
+        await lockSourceLifecycle(start, claim.installation_id, runId)
         await recheckFence(start, fence)
         run = await lockRun(start, { installationId: claim.installation_id, runId })
         if (run.state === 'candidate' || run.state === 'published'
@@ -218,6 +222,7 @@ export function createWikiBuildService(deps: {
       const publishCandidate = await pool.connect()
       try {
         await publishCandidate.query('BEGIN')
+        await lockSourceLifecycle(publishCandidate, claim.installation_id, runId)
         await recheckFence(publishCandidate, fence)
         const current = await lockRun(publishCandidate, {
           installationId: claim.installation_id,

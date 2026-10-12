@@ -6,6 +6,7 @@ import { createClaimRepository } from '../claims/repository.js'
 import { createReviewService } from '../claims/review-service.js'
 import { createIdempotencyStore } from '../api/idempotency.js'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
+import { claimIdentityV2 } from '../claims/identity.js'
 import { insertKnowledgeTombstones } from '../claims/tombstones.js'
 import { normalizedClaimKey } from '../retrieval/query-normalizer.js'
 
@@ -99,6 +100,16 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     candidateId = candidate.rows[0].candidate_id
   })
 
+  test('hash mismatch keeps candidate pending and observed human duration is stored atomically',async()=>{
+    const current=(await review.reviewQueue({installationId:INSTALLATION}))[0]
+    const rejected=await review.rejectCandidate({installationId:INSTALLATION,candidateId,expectedRevision:Number(current.revision),expectedHash:'a'.repeat(64),reviewDurationMs:1234})
+    expect(rejected.ok).toBe(false)
+    expect((await pool.query('SELECT status FROM memory_candidates WHERE candidate_id=$1',[candidateId])).rows[0].status).toBe('validated')
+    const accepted=await review.acceptCandidate({installationId:INSTALLATION,candidateId,expectedRevision:Number(current.revision),expectedHash:current.content_hash,reviewDurationMs:1234})
+    expect(accepted.ok).toBe(true)
+    expect((await pool.query('SELECT details FROM memory_feedback WHERE candidate_id=$1',[candidateId])).rows[0].details).toEqual({review_duration_ms:1234})
+  })
+
   test('accept as-is creates claim + version + evidence + pointer + feedback + index job', async () => {
     const result = await review.acceptCandidate({
       installationId: INSTALLATION, candidateId, expectedRevision: 1,
@@ -170,6 +181,17 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     expect(await review.acceptCandidate({ installationId: INSTALLATION, candidateId, expectedRevision: 1, editedStatement: statement }))
       .toMatchObject({ ok: false, error: { code: 'tombstoned_identity' } })
     expect((await pool.query(`SELECT count(*)::int AS count FROM knowledge_claims`)).rows[0].count).toBe(0)
+  })
+
+  test.each(['as_is','edited'])('acceptance %s cannot revive a v2-only privacy-deleted identity', async variant => {
+    const statement = variant === 'as_is' ? 'Vitest files live next to sources' : 'Deleted edited knowledge'
+    const identity = claimIdentityV2({claimType:'repository_convention',scopeKind:'installation',scopeKey:'global',
+      canonicalRepositoryKey:null,branch:null,snapshotId:null,statement,status:'verified'})
+    await insertKnowledgeTombstones(pool,{installationId:INSTALLATION,normalizedKeys:[],normalizedKeysV2:[identity.key],reason:'privacy_delete',keys:[TOMBSTONE_KEY]})
+    expect(await review.acceptCandidate({installationId:INSTALLATION,candidateId,expectedRevision:1,...(variant==='edited'?{editedStatement:statement}:{})}))
+      .toMatchObject({ok:false,error:{code:'tombstoned_identity'}})
+    expect((await pool.query('SELECT count(*)::int AS n FROM knowledge_claims')).rows[0].n).toBe(0)
+    expect((await pool.query('SELECT status FROM memory_candidates WHERE candidate_id=$1',[candidateId])).rows[0].status).toBe('validated')
   })
 
   test('a candidate that expires while waiting for review cannot enter active knowledge', async () => {
@@ -259,9 +281,11 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     const duplicate = await pool.query<{ candidate_id: string }>(`
       INSERT INTO memory_candidates
         (candidate_id, installation_id, run_id, episode_id, ordinal, claim_type, statement,
-         normalized_key, scope_kind, scope_key, confidence, freshness_at, evidence_handles, status)
+         structured_content,normalized_key, scope_kind, scope_key, repository_id,repo_snapshot_id,branch,
+         valid_from,valid_until,confidence, freshness_at, evidence_handles,validation,status)
       SELECT gen_random_uuid(), installation_id, run_id, episode_id, 1, claim_type, statement,
-             normalized_key, scope_kind, scope_key, confidence, freshness_at, evidence_handles, 'validated'
+             structured_content,normalized_key, scope_kind, scope_key,repository_id,repo_snapshot_id,branch,
+             valid_from,valid_until,confidence, freshness_at, evidence_handles,validation,'validated'
       FROM memory_candidates WHERE candidate_id = $1
       RETURNING candidate_id::text
     `, [candidateId])

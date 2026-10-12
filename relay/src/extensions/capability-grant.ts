@@ -196,6 +196,7 @@ export interface ScopeBindingV2 {
 }
 
 export interface CapabilityGrantV2Input {
+  sessionId?:string
   issuer: string
   providerId: string
   userId: number
@@ -220,6 +221,7 @@ export function signCapabilityGrantV2(
   return jwt.sign(
     {
       token_type: CAPABILITY_GRANT_V2_TOKEN_TYPE,
+      ...(input.sessionId?{session_id:input.sessionId}:{}),
       caller_type: input.callerType,
       services: input.services,
       primary_installation_id: input.primaryInstallationId,
@@ -240,6 +242,7 @@ export function signCapabilityGrantV2(
 }
 
 export interface VerifiedCapabilityGrantV2 {
+  sessionId?:string
   userId: number
   providerId: string
   callerType: string
@@ -297,6 +300,7 @@ export function verifyCapabilityGrantV2(
     return null
   }
   if (payload.token_type !== CAPABILITY_GRANT_V2_TOKEN_TYPE) return null
+  if(payload.session_id!==undefined&&(typeof payload.session_id!=='string'||!payload.session_id.length||payload.session_id.length>64))return null
   const match = typeof payload.sub === 'string' ? /^user:(\d+)$/.exec(payload.sub) : null
   if (!match) return null
   if (typeof payload.aud !== 'string' || typeof payload.caller_type !== 'string'
@@ -317,6 +321,7 @@ export function verifyCapabilityGrantV2(
     providerId: payload.aud,
     callerType: payload.caller_type,
     services: payload.services as string[],
+    ...(typeof payload.session_id==='string'?{sessionId:payload.session_id}:{}),
     primaryInstallationId: payload.primary_installation_id,
     scopeBindings: payload.scope_bindings as ScopeBindingV2[],
     configVersion: payload.config_version,

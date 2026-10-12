@@ -1,10 +1,11 @@
+import {planAssistedWikiDiff} from '../governance/knowledge-assistance.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import { z } from 'zod'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 
 import type { GrantGuard, VerifiedMemoryGrant } from '../auth/grant-guard.js'
-import type { ValidatedV2Grant } from '../governance/authorization.js'
+import {TargetBindingError,type ValidatedV2Grant} from '../governance/authorization.js'
 import { phase4ModeForScope, type SharedScopesMode } from '../config.js'
 import { createPurgeRepository } from '../purge/repository.js'
 import { createWikiBuildService } from '../wiki/build-service.js'
@@ -115,6 +116,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     return {
       primaryInstallationId: grant.installationId,
       configVersion: grant.configVersion,
+      expiresAt: grant.expiresAt,
       scopeBindings: [{
         installation_id: grant.installationId,
         owner_scope_kind: 'personal',
@@ -270,11 +272,16 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     let scheduled
     try {
       scheduled = await builds.scheduleBuild({
+        grant: governed,
         installationId,
         repositoryId: repositoryId.data,
         expectedGeneration: parsed.data.expected_generation,
       })
     } catch (error) {
+      if(error instanceof Error && error.message === 'wiki_forbidden') {
+        reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'build rejected')))
+        return reply
+      }
       if (error instanceof Error && error.message === 'wiki_generation_conflict') {
         reply.code(409).send(errorBody(new MemoryApiError('revision_conflict', 'build rejected')))
         return reply
@@ -376,11 +383,16 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
     let scheduled
     try {
       scheduled = await builds.scheduleBuild({
+        grant: governed,
         installationId,
         repositoryId: wiki.repository_id,
         expectedGeneration: parsed.data.expected_generation,
       })
     } catch (error) {
+      if(error instanceof Error && error.message === 'wiki_forbidden') {
+        reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'build rejected')))
+        return reply
+      }
       if (error instanceof Error && error.message === 'wiki_generation_conflict') {
         reply.code(409).send(errorBody(new MemoryApiError('revision_conflict', 'build rejected')))
         return reply
@@ -430,7 +442,10 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
       return reply
     }
-    return candidate.rows[0]
+    const active=wiki.wiki_version_id?(await deps.pool.query('SELECT section_key,markdown,authority FROM memory_wiki_sections WHERE installation_id=$1 AND wiki_version_id=$2',[installationId,wiki.wiki_version_id])).rows:[]
+    const generated=candidate.rows[0].document.pages.flatMap((p:{sections:Array<{section_key:string;markdown:string}>})=>p.sections)
+    const assistanceDiff=planAssistedWikiDiff(active.map(s=>({key:s.section_key,markdown:s.markdown,authority:s.authority})),generated.map((s:{section_key:string;markdown:string})=>({key:s.section_key,markdown:s.markdown})))
+    return {...candidate.rows[0],assistance:{state:'draft',automation_product_gate:'closed',tool_authorization:false,diff:assistanceDiff}}
   })
 
   app.post('/api/v1/memory/wikis/:wikiId/candidates/:buildId/publish', { bodyLimit: 4 * 1024 }, async (request, reply) => {
@@ -572,6 +587,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       reply.code(403).send(errorBody(new MemoryApiError('forbidden', 'purge rejected')))
       return reply
     }
+    try {
     const snapshotCount = await deps.pool.query<{ count: string; owner_scope_kind: string | null }>(`
       SELECT COUNT(s.snapshot_id)::text AS count,
              MAX(os.owner_scope_kind::text) AS owner_scope_kind
@@ -582,6 +598,7 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       WHERE r.installation_id = $1 AND r.repository_id = $2
     `, [installationId, repositoryId.data])
     const result = await purge.purgeRepository({
+      grant: governed,
       installationId,
       repositoryId: repositoryId.data,
       reasonCode: 'explicit_repository_delete',
@@ -594,6 +611,10 @@ export function registerWikiRoutes(app: FastifyInstance, deps: WikiRouteDeps): v
       }, Number(snapshotCount.rows[0]?.count ?? 0))
     }
     return result
+    }catch(error){
+      if(error instanceof TargetBindingError){reply.code(403).send(errorBody(new MemoryApiError('forbidden','purge rejected')));return reply}
+      sendWikiMutationError(reply,error);return reply
+    }
   })
 }
 

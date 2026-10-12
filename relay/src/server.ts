@@ -1243,7 +1243,7 @@ async function main() {
   });
   registerTeamRoutes(app, {
     config: teamConfig,
-    service: createTeamRouteService(pool),
+    service: createTeamRouteService(pool,teamMemorySources),
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
     revalidateTeamSubscriptions: () => router.revalidateTeamSubscriptions(),

@@ -1,4 +1,7 @@
+import {currentClaimVersionSql} from '../claims/version-selection.js'
+import {originPolicyDecisions} from '../governance/origin-policy.js'
 import type pg from 'pg'
+import type {TombstoneHmacKey} from '../config.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { V2GrantFacts } from '../governance/authorization.js'
@@ -9,7 +12,7 @@ import { canonicalJsonString, canonicalPayloadHash } from '../inbox/canonical-js
 import { buildExportBundle, restoreExportBundle, verifyExportBase, rawFilesDigest, rawFileHash, type AttestationKeyRegistry } from './attestation.js'
 import { ASSET_KINDS, RevisionSchema, FIELD_MAPPING, PortableAssetSchema, type AssetKey, type ExportBundle, type PortableAsset } from './types.js'
 import { collectGitLifecycleSources, readGitAssets, sameGitLifecycleSources, validateSavedGitAssets } from './asset-reader.js'
-import { lockGitPolicyScopes, requireGitPermission, requireCurrentGitAuthorization, type GitAuthorizationStamp } from './authorization.js'
+import {assertGitGrantClock, lockGitPolicyScopes, requireGitPermission, requireCurrentGitAuthorization, type GitAuthorizationStamp } from './authorization.js'
 import { insertGitSnapshot, lockGitConnection, type GitConnection } from './repository.js'
 import { assetContentHash, encodeAsset } from './codec.js'
 import { normalizedPathsOverlap, validateRepositoryPath } from './paths.js'
@@ -44,9 +47,9 @@ export interface RegisteredGitBaseContext {
 /** Local Ledger operations only. READ COMMITTED plus lifecycle/source/head locks
  * and final materialization recheck form one consistent baseline, without a stale
  * MVCC snapshot established before waiting on a purge lock. No remote Git I/O. */
-export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationRegistry;skill:SkillPublicationValidationDeps}) {
+export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationRegistry;skill:SkillPublicationValidationDeps;tombstoneHmacKeys?:readonly TombstoneHmacKey[]}) {
   async function transaction<T>(grant:V2GrantFacts,input:Subject,keys:AssetKey[],run:(client:pg.PoolClient,connection:GitConnection,
-    reader:(exportId:string,purpose:'local_preview'|'external_export')=>Promise<PortableAsset[]>,
+    reader:(exportId:string,purpose:'local_preview'|'external_export',managementComparison?:boolean)=>Promise<PortableAsset[]>,
     validateBase:(bundle:ExportBundle)=>Promise<void>,stamp:GitAuthorizationStamp,reviewPolicyHash:string,keyView:AttestationKeyRegistry,
     lockedMembershipIds:ReadonlySet<string>,lifecycle:import('../skills/source-resolver.js').SkillPrelockedLifecycle)=>Promise<T>,savedAssets:readonly PortableAsset[]=[],purpose:'read'|'contribute'|'review'|'publish'='contribute',writeIntent=false):Promise<T> {
     const client=await deps.pool.connect()
@@ -109,8 +112,8 @@ export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationReg
       if(!c||c.repositoryId!==observed.repository_id||c.ownerScopeKind!==stamp.ownerScopeKind||c.ownerScopeId!==stamp.ownerScopeId)throw new Error('git_source_stale')
       if(c.generation!==input.expectedGeneration)throw new Error('git_generation_conflict')
       if(c.state!=='active'||c.syncMode==='off')throw new Error('git_connection_disabled')
-      const temporal={versionIds:new Set<string>(),membershipIds:new Set<string>()}
-      const reader=(exportId:string,purpose:'local_preview'|'external_export')=>readGitAssets(client,{connection:c,grant,exportId,purpose,lifecycle,skill:deps.skill,temporal},keys)
+      const temporal={currentVersionIds:new Set<string>(),versionIds:new Set<string>(),membershipIds:new Set<string>(),originPolicyStamps:new Map<string,string>()}
+      const reader=(exportId:string,purpose:'local_preview'|'external_export',managementComparison=false)=>readGitAssets(client,{connection:c,grant,exportId,purpose,managementComparison,lifecycle,skill:deps.skill,temporal},keys)
       const validateBase=(bundle:ExportBundle)=>validateSavedGitAssets(client,{connection:c,grant,exportId:bundle.exportId,purpose:bundle.purpose,lifecycle,skill:deps.skill,temporal},bundle.assets.map(s=>s.asset))
       const result=await run(client,c,reader,validateBase,stamp,reviewPolicyHash,keyView,new Set(members.rows.map(row=>row.membership_id as string)),lifecycle)
       // Exact dependencies were validated and row-locked before connection wait.
@@ -119,11 +122,19 @@ export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationReg
       const versions=[...temporal.versionIds],temporalMembers=[...temporal.membershipIds]
       const validVersions=await client.query(`SELECT version_id FROM knowledge_versions WHERE installation_id=$1 AND version_id=ANY($2::uuid[])
         AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())`,[input.installationId,versions])
+      const currentVersions=[...temporal.currentVersionIds]
+      const validCurrent=await client.query(`SELECT v.version_id FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
+        WHERE v.installation_id=$1 AND v.version_id=ANY($2::uuid[]) AND ${currentClaimVersionSql()}`,[input.installationId,currentVersions])
+      if(validCurrent.rowCount!==currentVersions.length)throw new Error('git_source_stale')
       const validMembers=await client.query(`SELECT membership_id FROM memory_scope_memberships WHERE installation_id=$1 AND membership_id=ANY($2::uuid[])
         AND state='active' AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())`,[input.installationId,temporalMembers])
       if(validVersions.rowCount!==versions.length||validMembers.rowCount!==temporalMembers.length)throw new Error('git_source_stale')
+      if(temporal.originPolicyStamps.size){
+        const origin=await originPolicyDecisions(client,input.installationId,[...temporal.originPolicyStamps.keys()])
+        for(const [versionId,expected] of temporal.originPolicyStamps){const decision=origin.get(versionId);if(!decision?.eligible||decision.stamp!==expected)throw new Error('git_source_stale')}
+      }
       await requireCurrentGitAuthorization(client,stamp,purpose)
-      await client.query('COMMIT')
+      await assertGitGrantClock(client,grant,[input.installationId]);await client.query('COMMIT')
       return result
     } catch(error) {await client.query('ROLLBACK');throw error} finally {client.release()}
   }
@@ -150,7 +161,7 @@ export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationReg
     // Authorize before even the unlocked lifecycle discovery read. The source
     // transaction below independently revalidates in its normal lock order.
     const preflight=await deps.pool.connect()
-    try {await preflight.query('BEGIN');await requireGitPermission(preflight,grant,input.installationId,permission);await preflight.query('COMMIT')}
+    try {await preflight.query('BEGIN');await requireGitPermission(preflight,grant,input.installationId,permission);await assertGitGrantClock(preflight,grant,[input.installationId]);await preflight.query('COMMIT')}
     catch(error){await preflight.query('ROLLBACK');throw error}finally{preflight.release()}
     const found=await deps.pool.query<{base_document:PortableAsset}>('SELECT base_document FROM memory_git_snapshot_assets WHERE installation_id=$1 AND connection_id=$2 AND export_id=$3 ORDER BY path',[input.installationId,input.connectionId,input.exportId])
     if(!found.rowCount)throw new Error('git_export_unregistered')
@@ -160,10 +171,10 @@ export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationReg
       if(canonicalJsonString(observed.assets.map(s=>s.asset))!==canonicalJsonString(savedAssets))throw new Error('git_source_stale')
       await verifyCurrent(observed,c,client,keyView)
       await validateBase(observed)
-      await reader(observed.exportId,observed.purpose)
-      const current=await reader(observed.exportId,'local_preview')
+      await reader(observed.exportId,observed.purpose,true)
+      const current=await reader(observed.exportId,'local_preview',true)
       await validateBase(observed)
-      if(canonicalJsonString(current)!==canonicalJsonString(await reader(observed.exportId,'local_preview')))throw new Error('git_source_stale')
+      if(canonicalJsonString(current)!==canonicalJsonString(await reader(observed.exportId,'local_preview',true)))throw new Error('git_source_stale')
       const bindings=(await client.query<{assetId:string;kind:string;path:string}>(`SELECT asset_id AS "assetId",kind,path FROM memory_git_asset_bindings
         WHERE installation_id=$1 AND connection_id=$2 ORDER BY asset_id LIMIT 4097 FOR ${permission==='publish'?'UPDATE':'SHARE'}`,[c.installationId,c.connectionId])).rows
       if(bindings.length>4096)throw new Error('git_source_limit')
@@ -280,7 +291,7 @@ export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationReg
         if(canonicalJsonString(observed.assets.map(s=>s.asset))!==canonicalJsonString(savedAssets))throw new Error('git_source_stale')
         await verifyCurrent(observed,c,client,keyView)
         await validateBase(observed)
-        await reader(observed.exportId,observed.purpose)
+        await reader(observed.exportId,observed.purpose,true)
         await validateBase(observed)
         await lockGitConnection(client,c.installationId,c.connectionId,input.expectedGeneration)
         const bundle=await restore(client,c.installationId,c.connectionId,input.exportId)

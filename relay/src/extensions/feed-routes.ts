@@ -131,7 +131,11 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
             { snapshot_required: true },
           )
         }
-        if (installation.subscriptions.length === 0) {
+        // Personal first-party Memory must consume Team privacy controls even
+        // after capture topics/scopes are withdrawn. This grants no content read.
+        const mandatoryTeamRevocations = installation.provider_id === 'pocketctl-memory'
+          && installation.owner_scope_kind === 'personal'
+        if (installation.subscriptions.length === 0 && !mandatoryTeamRevocations) {
           throw new ExtensionApiError('invalid_request', 'installation has no topic subscriptions')
         }
         if (!installation.subscriptions.every(topic => installation.granted_scopes.includes(
@@ -183,6 +187,7 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
           limit,
           daemonIds,
           agentTypes,
+          mandatoryTeamRevocations,
         })
 
         // Bounded response: cut before exceeding the byte budget; a single

@@ -46,6 +46,19 @@ describe('CandidateReviewList', () => {
     memoryClient.rejectMemoryCandidate.mockResolvedValue({ candidate_id: 'candidate-1' })
   })
 
+  test('personal bulk preserves per-item conflict and sends exact hash',async()=>{
+    const hashed=candidates.map(c=>({...c,content_hash:'a'.repeat(64)}))
+    memoryClient.listMemoryCandidates.mockResolvedValue({candidates:hashed})
+    memoryClient.acceptMemoryCandidate.mockRejectedValueOnce(new MemoryClientError(409,'revision_conflict','changed')).mockResolvedValueOnce({claim_id:'claim-2',version_id:'version-2'})
+    const wrapper=mount(CandidateReviewList);await flushPromises()
+    const selections=wrapper.findAll('.memory-candidate-list input[type=checkbox]')
+    await selections[0].setValue(true);await selections[1].setValue(true)
+    await wrapper.findAll('button').find(b=>b.text().includes('bulkAccept'))!.trigger('click');await flushPromises()
+    expect(memoryClient.acceptMemoryCandidate).toHaveBeenCalledTimes(2)
+    expect(memoryClient.acceptMemoryCandidate.mock.calls[0][4]).toMatchObject({expectedHash:'a'.repeat(64)})
+    expect(wrapper.text()).toContain('result.conflict');expect(wrapper.text()).toContain('result.success')
+  })
+
   test('filters the design queue by text and candidate type', async () => {
     const wrapper = mount(CandidateReviewList)
     await flushPromises()

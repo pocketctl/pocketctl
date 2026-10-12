@@ -16,7 +16,7 @@ export function createSkillRolloutService(deps: { pool: pg.Pool; context: SkillS
       const parsed = Request.safeParse(raw)
       if (!parsed.success) throw new SkillExecutionError('invalid_request')
       const request = parsed.data
-      return withSkillTransaction(deps.pool, async client => {
+      return withSkillTransaction(deps.pool,identity, async client => {
         await authorizeSkillExecution(client,identity,deps.context,'publish')
         // Anyone currently authorized to publish may close a fixture rollout; enabling stays construction-gated.
         if (request.state !== 'disabled') requireSkillExecutionFixture(deps.fixtureCapability)

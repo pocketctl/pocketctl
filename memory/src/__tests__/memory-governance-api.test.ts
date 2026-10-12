@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { registerGovernanceRoutes } from '../api/governance-routes.js'
 import { MemoryApiError } from '../api/errors.js'
 import type { RouteV2Grant } from '../governance/authorization.js'
+import {revisionBundleHash,type RevisionBundle} from '../governance/revision-bundle.js'
 import { PublicationError } from '../governance/publication-service.js'
 
 const TEAM = 'cafecafe-0000-4000-8000-000000000002'
@@ -45,6 +46,7 @@ function makeApp(options: {
         return { rows: script.rows, rowCount: script.rows.length }
       }
     }
+    if (/jsonb_to_recordset\(\$1::jsonb\)/.test(sql)) return {rows:[{alive:true}],rowCount:1}
     if (/INSERT INTO memory_idempotency_keys/.test(sql)) {
       return { rows: [{ reserved: 1 }], rowCount: 1 }
     }
@@ -142,6 +144,10 @@ describe('memory governance API', () => {
 
   test('returns the active incumbent claims needed for explicit conflict resolution', async () => {
     const incumbent = 'cafecafe-0000-4000-8000-000000000051'
+    const bundle:RevisionBundle={schemaVersion:2,statement:'incumbent statement',structuredContent:{environment:'staging'},
+      applicability:{scopeKind:'installation',scopeKey:'',canonicalRepositoryKey:null,repositoryId:null,snapshotId:null,branch:null,status:'verified'},
+      sourceContentHash:'a'.repeat(64),sourceValidFrom:null,sourceValidUntil:null,sourceFreshnessAt:'2026-08-30T00:00:00.000Z',
+      evidence:[],originPolicyHash:null,reviewPolicyHash:'b'.repeat(64)}
     const { app } = make({
       poolQueries: [
         {
@@ -174,13 +180,14 @@ describe('memory governance API', () => {
             candidate_revision_id: 'cafecafe-0000-4000-8000-000000000071',
             candidate_id: CANDIDATE,
             revision_number: 1,
-            statement: 'candidate statement',
+            statement: bundle.statement,structured_content:bundle.structuredContent,revision_bundle:bundle,revision_bundle_hash:revisionBundleHash(bundle),
           }],
         },
         { match: /FROM memory_review_decisions/, rows: [] },
         {
-          match: /JOIN knowledge_versions v ON v.version_id = c.current_version_id/,
-          rows: [{ claim_id: incumbent, statement: 'incumbent statement', conflict_variant: 0 }],
+          match: /FROM knowledge_claims c/,
+          rows: [{ claim_id:incumbent,claim_type:'work_method',scope_kind:'installation',scope_key:'',canonical_repository_key:null,identity_generation:1,normalized_key_v2:null,conflict_group_id:null,conflict_variant:0,
+            version_metadata:{statement:bundle.statement,structured_content:{environment:'production'},repository_id:null,repo_snapshot_id:null,branch:null,applicability:bundle.applicability,valid_from:null,valid_until:null} }],
         },
       ],
     })
@@ -216,6 +223,13 @@ describe('memory governance API', () => {
   test('maps service errors to bounded HTTP envelopes', async () => {
     const { app } = make({
       poolQueries: [
+        {
+          match: /LEFT JOIN memory_scope_memberships/,
+          rows: [{installation_id:TEAM,local_status:'ready',relay_status:'active',config_version:'1',
+            owner_scope_kind:'team',owner_scope_id:'cafecafe-0000-4000-8000-000000000041',
+            scope_state:'active',authorization_epoch:'1',membership_id:'cafecafe-0000-4000-8000-000000000021',
+            membership_time_valid:true,membership_state:'active',membership_revision:'2',roles:['scope_administrator'],tombstone_epoch:null}],
+        },
         {
           match: /FROM memory_promotion_candidates/,
           rows: [],

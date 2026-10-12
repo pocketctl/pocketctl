@@ -1,3 +1,5 @@
+import {EvidenceReferenceQuerySchema,EvidenceContentQuerySchema} from './schemas.js'
+import {recordRecallMetrics} from '../metrics.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import type { GrantGuard, VerifiedMemoryGrant } from '../auth/grant-guard.js'
@@ -12,7 +14,7 @@ import {
   SearchRequestSchema,
   UUIDSchema,
 } from './schemas.js'
-import { createSearchService } from '../retrieval/search-service.js'
+import { createSearchService,type SearchHit } from '../retrieval/search-service.js'
 import { createRecallService } from '../retrieval/recall-service.js'
 import { createEvidenceService } from '../claims/evidence-service.js'
 import { createMemoryReadService } from '../retrieval/read-service.js'
@@ -30,6 +32,7 @@ import {
   resolveFederatedCursor,
   selectFederatedScopes,
 } from '../retrieval/federated-search-service.js'
+import {resolveFederatedScopeContexts,unavailableScopeSearchPage,unavailableScopeRecall} from '../retrieval/federated-context.js'
 
 /**
  * Read routes (plan §7.1). Authorization is the grant guard; every data
@@ -59,6 +62,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
   registerMemoryCors(app, deps.policy)
   const search = createSearchService({
     pool: deps.pool,
+    onRecallMetrics:input=>{if(deps.phase1Metrics)recordRecallMetrics(deps.phase1Metrics,input)},
     ...(deps.embed ? { embed: deps.embed } : {}),
     recallEmbeddingTimeoutMs: deps.recallEmbeddingTimeoutMs,
     cursorSigningKey: deps.cursorSigningKey,
@@ -182,12 +186,16 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           requestedInstallationIds: parsed.data.scope_installation_ids,
           sharedScopesEnabled: deps.sharedScopesEnabled === true,
         })
+        const scopedContexts=await resolveFederatedScopeContexts(deps.pool,{grant,scopes,
+          repositoryId:parsed.data.repository_id,repoSnapshotId:parsed.data.repo_snapshot_id,branch:parsed.data.branch,taskScopeKey:parsed.data.task_scope_key})
         const cursorContext = {
+          scopeContextFingerprint:scopedContexts.fingerprint,
           scopes,
           query: parsed.data.query,
           repositoryId: parsed.data.repository_id,
           repoSnapshotId: parsed.data.repo_snapshot_id,
           branch: parsed.data.branch,
+          taskScopeKey: parsed.data.task_scope_key,
           claimTypes: parsed.data.claim_types,
         }
         const cursor = resolveFederatedCursor({
@@ -197,27 +205,29 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           requestedAsOf: parsed.data.as_of ? new Date(parsed.data.as_of) : null,
         })
         const limit = parsed.data.limit ?? 10
-        const perScope = await collectFederatedSearchPages({
+        const perScope = await collectFederatedSearchPages<SearchHit>({
           scopes,
           targetCount: cursor.offset + limit,
-          load: async (scope, innerCursor, pageLimit) => search.search({
+          load: async (scope, innerCursor, pageLimit) => {
+              const resolved=scopedContexts.contexts.get(scope.installationId)!
+              if(!resolved.context)return unavailableScopeSearchPage<SearchHit>(resolved.reason)
+              return search.search({
             installationId: scope.installationId,
             query: parsed.data.query,
-            repositoryId: parsed.data.repository_id ?? null,
-            repoSnapshotId: parsed.data.repo_snapshot_id ?? null,
-            branch: parsed.data.branch ?? null,
+            ...resolved.context,
             claimTypes: parsed.data.claim_types ?? null,
             asOf: cursor.asOf,
             limit: pageLimit,
             cursor: innerCursor,
-          }),
+          })
+          },
         })
         const merged = mergeFederatedRrf(perScope.flatMap(({ scope, hits }) =>
           hits.map(hit => ({
             scope,
             hit,
             claimId: hit.claimId,
-            repositoryApplicable: parsed.data.repository_id ? hit.repositoryId === parsed.data.repository_id : true,
+            repositoryApplicable: scopedContexts.contexts.get(scope.installationId)?.context?.repositoryId ? hit.repositoryId === scopedContexts.contexts.get(scope.installationId)!.context!.repositoryId : true,
             authority: hit.authority,
             freshnessAt: hit.freshnessAt,
           }))), cursor.offset + limit)
@@ -259,20 +269,19 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       return
     }
     const result = await guardRoute(request, reply, 'memory.search', async grant => {
-      const started = Date.now()
       const searched = await search.search({
         installationId: defaultReadInstallationId(grant),
         query: parsed.data.query,
         repositoryId: parsed.data.repository_id ?? null,
         repoSnapshotId: parsed.data.repo_snapshot_id ?? null,
         branch: parsed.data.branch ?? null,
+        taskScopeKey: parsed.data.task_scope_key ?? null,
         claimTypes: parsed.data.claim_types ?? null,
         asOf: parsed.data.as_of ? new Date(parsed.data.as_of) : null,
         limit: parsed.data.limit ?? 10,
         cursor: parsed.data.cursor ?? null,
       })
       const degraded = searched.degradedComponents.includes('embedding') ? 'embedding' : 'none'
-      deps.phase1Metrics?.searchLatency.observe({ degraded }, (Date.now() - started) / 1000)
       deps.phase1Metrics?.searchResults.observe({ degraded }, searched.hits.length)
       return searched
     })
@@ -292,20 +301,20 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           requestedInstallationIds: parsed.data.scope_installation_ids,
           sharedScopesEnabled: deps.sharedScopesEnabled === true,
         })
+        const scopedContexts=await resolveFederatedScopeContexts(deps.pool,{grant,scopes,
+          repositoryId:parsed.data.repository_id,repoSnapshotId:parsed.data.repo_snapshot_id,branch:parsed.data.branch,taskScopeKey:parsed.data.task_scope_key})
         const perScope = await Promise.all(scopes.map(async scope => ({
           scope,
-          result: await recall.recall({
+          result: await (scopedContexts.contexts.get(scope.installationId)!.context ? recall.recall({
             installationId: scope.installationId,
             query: parsed.data.query,
-            repositoryId: parsed.data.repository_id ?? null,
-            repoSnapshotId: parsed.data.repo_snapshot_id ?? null,
-            branch: parsed.data.branch ?? null,
+            ...scopedContexts.contexts.get(scope.installationId)!.context!,
             claimTypes: parsed.data.claim_types ?? null,
             asOf: parsed.data.as_of ? new Date(parsed.data.as_of) : null,
             maxClaims: parsed.data.max_claims ?? 5,
             maxEvidencePerClaim: parsed.data.max_evidence_per_claim ?? 2,
             maxChars: parsed.data.max_chars ?? 8000,
-          }),
+          }) : unavailableScopeRecall(scopedContexts.contexts.get(scope.installationId)!.reason!)),
         })))
         const merged = mergeFederatedRrf(perScope.flatMap(({ scope, result: recalled }) =>
           recalled.claims.map(claim => ({
@@ -342,6 +351,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
         repositoryId: parsed.data.repository_id ?? null,
         repoSnapshotId: parsed.data.repo_snapshot_id ?? null,
         branch: parsed.data.branch ?? null,
+        taskScopeKey: parsed.data.task_scope_key ?? null,
         claimTypes: parsed.data.claim_types ?? null,
         asOf: parsed.data.as_of ? new Date(parsed.data.as_of) : null,
         maxClaims: parsed.data.max_claims ?? 5,
@@ -404,6 +414,32 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       return claim
     })
     if (result !== undefined) return result
+  })
+
+  for(const kind of ['reference','content'] as const)app.get(`/api/v1/memory/evidence/:evidenceId/${kind}`,async(request,reply)=>{
+    const result=await guardRoute(request,reply,'memory.search',async grant=>{
+      const parsed=(kind==='reference'?EvidenceReferenceQuerySchema:EvidenceContentQuerySchema).safeParse(request.query)
+      if(!parsed.success)throw new MemoryApiError('invalid_request','invalid evidence reference query')
+      const data=parsed.data
+      const id=resourceId((request.params as {evidenceId:string}).evidenceId,reply)
+      if(!id)return undefined
+      const v2='version' in grant&&grant.version==='v2'?grant:undefined
+      if(data.installation_id&&!v2)throw new MemoryApiError('forbidden','explicit scope requires v2 grant')
+      const installation=data.installation_id?selectFederatedScopes({grant:v2!,requestedInstallationIds:[data.installation_id],
+        sharedScopesEnabled:deps.sharedScopesEnabled===true})[0].installationId:defaultReadInstallationId(grant)
+      const input={installationId:installation,evidenceId:id,scopeGrant:v2,expiresAt:grant.expiresAt,
+        packId:data.pack_id,packInstallationId:data.pack_installation_id,
+        frame:{repositoryId:data.repository_id??null,repoSnapshotId:data.repo_snapshot_id??null,branch:data.branch??null,taskScopeKey:data.task_scope_key??null}}
+      let row
+      if(kind==='content'){
+        const content=EvidenceContentQuerySchema.parse(request.query)
+        row=await evidence.readBound({...input,versionId:content.version_id,excerptHash:content.excerpt_hash,
+          sourceHash:content.source_hash,sourceVersion:content.source_version,page:content.page,maxChars:content.max_chars})
+      }else row=await evidence.summary(input)
+      if(!row)throw new MemoryApiError('not_found','evidence reference unavailable')
+      return row
+    })
+    if(result!==undefined)return result
   })
 
   app.get('/api/v1/memory/evidence/:evidenceId', async (request, reply) => {

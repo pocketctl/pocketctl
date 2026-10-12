@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
 import type { ValidatedV2Grant } from '../governance/authorization.js'
-import { requireCurrentWikiPermission } from './authorization.js'
+import {assertCurrentWikiGrantClock, lockWikiRepository, requireCurrentWikiPermission } from './authorization.js'
 import type { Phase4Metrics } from '../metrics.js'
 
 export type WikiManualErrorCode =
@@ -61,11 +61,12 @@ export function createWikiManualService(
       throw error
     }
   }
-  async function transact<T>(work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  async function transact<T>(grant:ValidatedV2Grant,installationId:string,work: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
       const result = await work(client)
+      await assertCurrentWikiGrantClock(client,grant,[installationId])
       await client.query('COMMIT')
       return result
     } catch (error) {
@@ -82,11 +83,12 @@ export function createWikiManualService(
 
   async function lockState(input: ManualActionInput, locked: boolean): Promise<{ lockVersion: number }> {
     validateBounded(input)
-    return transact(async client => {
+    return transact(input.grant,input.targetInstallationId,async client => {
       const binding = await requireCurrentWikiPermission({
         client, grant: input.grant, targetInstallationId: input.targetInstallationId,
         permission: 'contribute',
       })
+      await lockWikiRepository(client,input.targetInstallationId,input.wikiId)
       const current = await client.query<{
         current_version_id: string
         locked: boolean
@@ -136,11 +138,12 @@ export function createWikiManualService(
     }> {
       return observe('edit', async () => {
         validateBounded(input, input.markdown)
-        return transact(async client => {
+        return transact(input.grant,input.targetInstallationId,async client => {
         const binding = await requireCurrentWikiPermission({
           client, grant: input.grant, targetInstallationId: input.targetInstallationId,
           permission: governed?'publish':'contribute',
         })
+        await lockWikiRepository(client,input.targetInstallationId,input.wikiId)
         const wiki = await client.query(`
           SELECT 1 FROM memory_wikis w
           WHERE w.installation_id = $1 AND w.wiki_id = $2

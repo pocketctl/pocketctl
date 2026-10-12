@@ -49,6 +49,10 @@ const claimImmutable = z.object({
 }).strict()
 const claimEditable = z.object({ statement: text(4000), structuredContent: StructuredContentSchema }).strict()
 const claimServer = z.object({
+  identityGeneration: z.number().int().min(1).max(2).optional(),
+  normalizedKeyV2: DigestSchema.nullable().optional(), topicKeyV2: DigestSchema.nullable().optional(), duplicateDigestV2: DigestSchema.nullable().optional(), canonicalRepositoryKey: text(1024).nullable().optional(),
+  consumptionHoldReason: text(128).nullable().optional(), applicability: jsonObject.nullable().optional(),
+  effectiveFrom: timestamp.nullable().optional(), effectiveUntil: timestamp.nullable().optional(),
   scopeKind: z.enum(SCOPE_KINDS), scopeKey: text(512), normalizedKey: text(4000),
   repositoryId: id.nullable(), repoSnapshotId: id.nullable(), branch: text(255).nullable(),
   sourceCandidateId: id.nullable(), supersededByClaimId: id.nullable(), ...times,
@@ -191,6 +195,9 @@ export const FIELD_MAPPING = {
  * authorized Ledger reader, not this pure codec. */
 export const DOMAIN_FIELD_MAPPING = {
   knowledge_claims: {
+    identity_generation: 'serverOnly.identityGeneration', normalized_key_v2: 'serverOnly.normalizedKeyV2',
+    topic_key_v2:'serverOnly.topicKeyV2',duplicate_digest_v2:'serverOnly.duplicateDigestV2',
+    canonical_repository_key: 'serverOnly.canonicalRepositoryKey', consumption_hold_reason: 'serverOnly.consumptionHoldReason',
     claim_id: 'key.id', installation_id: 'immutable.installationId', claim_type: 'immutable.claimType',
     scope_kind: 'serverOnly.scopeKind', scope_key: 'serverOnly.scopeKey', normalized_key: 'serverOnly.normalizedKey',
     state: 'immutable.state', current_version_id: 'baseVersionId', superseded_by_claim_id: 'serverOnly.supersededByClaimId',
@@ -199,6 +206,7 @@ export const DOMAIN_FIELD_MAPPING = {
     conflict_group_id: 'serverOnly.conflictGroupId', conflict_variant: 'serverOnly.conflictVariant',
   },
   knowledge_versions: {
+    applicability: 'serverOnly.applicability', effective_from: 'serverOnly.effectiveFrom', effective_until: 'serverOnly.effectiveUntil',
     version_id: 'baseVersionId', installation_id: 'immutable.installationId', claim_id: 'key.id',
     version_number: 'immutable.versionNumber', statement: 'editable.statement', structured_content: 'editable.structuredContent',
     authority: 'immutable.authority', confidence: 'immutable.confidence', repository_id: 'serverOnly.repositoryId',

@@ -15,7 +15,18 @@ export type ClaimType =
 
 export type ScopeKind = 'installation' | 'repository' | 'snapshot' | 'branch' | 'task'
 
+/** Personal write authority remains restricted; reading future values does not
+ * expand the personal writer's accepted authority enum. */
 export type VersionAuthority = 'user_accepted' | 'user_corrected'
+export type KnownVersionAuthority = VersionAuthority | 'automation_accepted' | 'team_reviewed' | 'team_published' | 'organization_reviewed' | 'organization_published'
+export type ReadableVersionAuthority = KnownVersionAuthority | (string & {})
+
+/** Additive read metadata only. An unrecognized/machine value must never fall
+ * back to a human label. Preserve the original wire value beside this result. */
+export function versionAuthorityCompatibility(value:unknown):{recognized:boolean,human_approved:boolean}{
+ const human=typeof value==='string'&&['user_accepted','user_corrected','team_reviewed','team_published','organization_reviewed','organization_published'].includes(value)
+ return {recognized:human||value==='automation_accepted',human_approved:human}
+}
 
 export type FeedbackAction =
   | 'candidate_accepted'

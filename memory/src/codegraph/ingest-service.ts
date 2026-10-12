@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'crypto'
 import type pg from 'pg'
+import {assertSourceGrantClock,requireSourceAuthority,lockSourceRepository,lockSourceSnapshot,SourceLifecycleFenceError,type SourceMutationGrant} from './lifecycle.js'
 
 import { createIdempotencyStore } from '../api/idempotency.js'
 import {
@@ -96,6 +97,7 @@ export function createSourceIngestService(
 
     async startSnapshot(input: {
       installationId: string
+      grant?: SourceMutationGrant
       repository: { repository_key: string; canonical_remote?: string }
       gitObjectFormat: string
       commitSha: string
@@ -112,7 +114,40 @@ export function createSourceIngestService(
         || input.expectedByteCount > CODE_SNAPSHOT_MAX_TOTAL_BYTES) {
         throw new SnapshotIngestError('invalid_request')
       }
+      // A repeated authorize callback may already own the receipt. Freeze the
+      // pre-receipt dependency set so a new source never adds a late lock.
+      let dependencies: { repositoryId: string | null; snapshotId: string | null } | undefined
+      const authorize = async (client: pg.PoolClient): Promise<void> => {
+        await requireSourceAuthority(client, input)
+        const observed = await client.query<{ repository_id: string }>(
+          'SELECT repository_id FROM repositories WHERE installation_id=$1 AND repository_key=$2',
+          [input.installationId, input.repository.repository_key],
+        )
+        const repositoryId = observed.rows[0]?.repository_id ?? null
+        if (dependencies && repositoryId !== dependencies.repositoryId) {
+          throw new SourceLifecycleFenceError('source_changed')
+        }
+        let snapshotId: string | null = null
+        if (repositoryId) {
+          await lockSourceRepository(client, input.installationId, repositoryId)
+          const source = await client.query<{ snapshot_id: string }>(
+            'SELECT snapshot_id FROM memory_source_snapshots WHERE installation_id=$1 AND repository_id=$2 AND commit_sha=$3 AND manifest_hash=$4',
+            [input.installationId, repositoryId, input.commitSha, input.manifestSha256],
+          )
+          snapshotId = source.rows[0]?.snapshot_id ?? null
+        }
+        if (dependencies && snapshotId !== dependencies.snapshotId) {
+          throw new SourceLifecycleFenceError('source_changed')
+        }
+        dependencies ??= { repositoryId, snapshotId }
+        if (snapshotId) {
+          await lockSourceSnapshot(client, { installationId: input.installationId, snapshotId })
+        }
+      }
       const result = await idempotency.execute({
+        authorize,
+        beforeCommit: client => assertSourceGrantClock(client,input),
+        isolation: 'read_committed',
         installationId: input.installationId,
         operation: 'code_snapshot_start',
         key: input.idempotencyKey,
@@ -141,6 +176,7 @@ export function createSourceIngestService(
               expectedFileCount: input.expectedFileCount,
               expectedByteCount: input.expectedByteCount,
             }, client)
+            if(snapshot.state==='failed')throw new SnapshotIngestError('state_conflict')
             return { ok: true, metadata: {
               snapshotId: snapshot.snapshotId,
               repositoryId: snapshot.repositoryId,
@@ -163,6 +199,7 @@ export function createSourceIngestService(
 
     async uploadBatch(input: {
       installationId: string
+      grant?: SourceMutationGrant
       snapshotId: string
       batchIndex: number
       entries: Array<{
@@ -210,6 +247,12 @@ export function createSourceIngestService(
         validated.push({ entry, content })
       }
       const result = await idempotency.execute({
+        authorize: async client => {
+          await requireSourceAuthority(client,input)
+          await lockSourceSnapshot(client,input)
+        },
+        beforeCommit: client => assertSourceGrantClock(client,input),
+        isolation: 'read_committed',
         installationId: input.installationId,
         operation: `code_snapshot_batch:${input.snapshotId}`,
         key: String(input.batchIndex),
@@ -227,7 +270,7 @@ export function createSourceIngestService(
             if (!snapshot) throw new SnapshotIngestError('not_found')
             if (snapshot.state !== 'staging') throw new SnapshotIngestError('state_conflict')
             const acceptedBytes: Record<string, number> = {}
-            for (const { entry, content } of validated) {
+            for (const { entry, content } of [...validated].sort((a,b)=>a.entry.blob_sha256.localeCompare(b.entry.blob_sha256)||a.entry.path.localeCompare(b.entry.path))) {
               await repository.insertBlob({
                 installationId: input.installationId,
                 blobHash: entry.blob_sha256,
@@ -283,6 +326,7 @@ export function createSourceIngestService(
 
     async finalizeSnapshot(input: {
       installationId: string
+      grant?: SourceMutationGrant
       snapshotId: string
       manifestSha256: string
       expectedFileCount: number
@@ -294,6 +338,12 @@ export function createSourceIngestService(
       state: string
     }> {
       const result = await idempotency.execute({
+        authorize: async client => {
+          await requireSourceAuthority(client,input)
+          await lockSourceSnapshot(client,input)
+        },
+        beforeCommit: client => assertSourceGrantClock(client,input),
+        isolation: 'read_committed',
         installationId: input.installationId,
         operation: `code_snapshot_finalize:${input.snapshotId}`,
         key: input.idempotencyKey,
@@ -384,18 +434,21 @@ export function createSourceIngestService(
 
     async abortSnapshot(input: {
       installationId: string
+      grant?: SourceMutationGrant
       snapshotId: string
       sourceKind?: 'personal' | 'shared'
     }): Promise<boolean> {
-      const snapshot = await repository.getSnapshot({
-        installationId: input.installationId,
-        snapshotId: input.snapshotId,
-      })
-      if (!snapshot) throw new SnapshotIngestError('not_found')
-      const aborted = await repository.abortSnapshot({
-        installationId: input.installationId,
-        snapshotId: input.snapshotId,
-      })
+      const client=await pool.connect()
+      let aborted: boolean
+      try {
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await requireSourceAuthority(client,input)
+        await lockSourceSnapshot(client,input)
+        aborted=await repository.abortSnapshot(input,client)
+        await assertSourceGrantClock(client,input)
+        await client.query('COMMIT')
+      } catch(error){await client.query('ROLLBACK');throw error}
+      finally{client.release()}
       if (aborted) {
         options.metrics?.codeSnapshots.inc({
           result: 'aborted', source_kind: input.sourceKind ?? 'personal',

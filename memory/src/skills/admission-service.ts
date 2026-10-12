@@ -1,8 +1,8 @@
 import type pg from 'pg'
 import { z } from 'zod'
-import type { V2GrantFacts } from '../governance/authorization.js'
+import {assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 import { persistSkillTask, type ScheduledSkillTask } from './repository.js'
-import { resolveSkillSource, SkillSourceRequestSchema, type SkillSourceContext } from './source-resolver.js'
+import { assertCurrentSkillSourceClock, resolveSkillSource, SkillWorkError, SkillSourceRequestSchema, type SkillSourceContext } from './source-resolver.js'
 
 const Request = z.object({ candidateKey: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/),
   source: SkillSourceRequestSchema }).strict()
@@ -17,6 +17,9 @@ export function createSkillAdmissionService(deps: { pool: pg.Pool; context: Skil
         grant: input.grant, source: parsed.data.source }, deps.context)
       const result = await persistSkillTask(client, { resolved, candidateKey: parsed.data.candidateKey,
         grant: input.grant, source: parsed.data.source })
+      try { await assertCurrentGrantClock(client,input.grant,[input.installationId]) }
+      catch(error) { if(error instanceof TargetBindingError)throw new SkillWorkError('skill_forbidden');throw error }
+      await assertCurrentSkillSourceClock(client,resolved)
       await client.query('COMMIT')
       try {deps.onOutcome?.(result.deduplicated?'deduplicated':'admitted')} catch { /* telemetry cannot change admission */ }
       return result

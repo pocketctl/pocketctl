@@ -1,3 +1,4 @@
+import {requireSourceAuthority,lockSourceSnapshot,SourceLifecycleFenceError} from './lifecycle.js'
 import { createHash } from 'crypto'
 import { randomUUID } from 'crypto'
 import { z } from 'zod'
@@ -110,8 +111,23 @@ export function createSourceRepository(pool: pg.Pool) {
       installationId: string
       repositoryKey: string
       canonicalRemote?: string
-    }, client?: Queryable): Promise<string> {
+    }, client?: pg.PoolClient): Promise<string> {
+      if (!client) {
+        const owned = await pool.connect()
+        try {
+          await owned.query('BEGIN')
+          const id = await this.resolveRepository(input, owned)
+          await owned.query('COMMIT')
+          return id
+        } catch (error) { await owned.query('ROLLBACK'); throw error }
+        finally { owned.release() }
+      }
       const query = client ?? pool
+      if (input.canonicalRemote) {
+        // Publication needs a stable unique canonical match, including concurrent inserts
+        // and updates of a different registry row. Acquire before the upsert's row lock.
+        await query.query("SELECT pg_advisory_xact_lock(hashtextextended('registry:canonical:'||$1,0))",[input.installationId])
+      }
       const result = await query.query<{ repository_id: string }>(`
         INSERT INTO repositories
           (repository_id, installation_id, repository_key, canonical_remote,
@@ -302,31 +318,25 @@ export function createSourceRepository(pool: pg.Pool) {
       return (result.rowCount ?? 0) === 1
     },
 
-    /** Abort: staging entries vanish; the snapshot reads failed forever. */
-    async abortSnapshot(input: {
-      installationId: string
-      snapshotId: string
-    }): Promise<boolean> {
-      const client = await pool.connect()
+    /** Only staging/ready sources may abort; authority and state share the transaction. */
+    async abortSnapshot(input: {installationId:string;snapshotId:string},transactionClient?:pg.PoolClient):Promise<boolean>{
+      const client=transactionClient??await pool.connect()
       try {
-        await client.query('BEGIN')
-        const removed = await client.query(`
-          DELETE FROM memory_source_snapshot_entries
-          WHERE installation_id = $1 AND snapshot_id = $2
-        `, [input.installationId, input.snapshotId])
-        const marked = await client.query(`
-          UPDATE memory_source_snapshots
-          SET state = 'failed', completed_at = NOW()
-          WHERE installation_id = $1 AND snapshot_id = $2 AND state IN ('staging', 'ready')
-        `, [input.installationId, input.snapshotId])
-        await client.query('COMMIT')
-        return (marked.rowCount ?? 0) === 1 || (removed.rowCount ?? 0) > 0
-      } catch (error) {
-        await client.query('ROLLBACK')
-        throw error
-      } finally {
-        client.release()
-      }
+        if(!transactionClient){
+          await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+          await requireSourceAuthority(client,input)
+          await lockSourceSnapshot(client,input)
+        }
+        const source=await this.getSnapshot(input,client)
+        if(!source)throw new SourceLifecycleFenceError('not_found')
+        if(source.state==='failed'){if(!transactionClient)await client.query('COMMIT');return false}
+        if(source.state!=='staging'&&source.state!=='ready')throw new SourceLifecycleFenceError('state_conflict')
+        await client.query('DELETE FROM memory_source_snapshot_entries WHERE installation_id=$1 AND snapshot_id=$2',[input.installationId,input.snapshotId])
+        await client.query("UPDATE memory_source_snapshots SET state='failed',completed_at=NOW() WHERE installation_id=$1 AND snapshot_id=$2",[input.installationId,input.snapshotId])
+        if(!transactionClient)await client.query('COMMIT')
+        return true
+      }catch(error){if(!transactionClient)await client.query('ROLLBACK');throw error}
+      finally{if(!transactionClient)client.release()}
     },
 
     /** Read one blob's content (never cross-installation). */

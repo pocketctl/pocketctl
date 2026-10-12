@@ -317,7 +317,7 @@ describe('candidate extractor orchestration', () => {
     })
     await expect(extractor.extract({
       installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
-    })).resolves.toMatchObject({ kind: 'failed', errorCode: 'budget_exceeded', retryable: false })
+    })).resolves.toMatchObject({ kind: 'deferred_budget', errorCode: 'budget_exceeded' })
     expect(store.discardRun).toHaveBeenCalledWith({ runId: 'run-1', fence: undefined })
     expect(store.markRun).not.toHaveBeenCalled()
   })

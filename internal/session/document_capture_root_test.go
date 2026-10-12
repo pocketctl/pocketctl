@@ -1,12 +1,52 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestRequestedDocumentRootLoadsHistoricalCodexAfterRestart(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	t.Setenv("POCKETCTL_CODEX_HOMES", "")
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "10", "08")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sid := "01a11936-09a8-77f3-84f3-e1bea892b704"
+	data, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": sid, "cwd": root, "originator": "codex_cli_rs"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rollout-2026-10-08T09-52-14-"+sid+".jsonl"), append(data, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, allowed := range []bool{true, false} {
+		sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+		allowedRoot := root
+		if !allowed {
+			allowedRoot = t.TempDir()
+		}
+		policy, err := NewCwdPolicy([]string{allowedRoot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sm.SetCwdPolicy(policy)
+		got, ok := sm.GetRequestedDocumentCaptureRoot(sid)
+		canonical, _ := filepath.EvalSymlinks(root)
+		if ok != allowed || (ok && got != canonical) {
+			t.Fatalf("allowed=%v root=%q ok=%v", allowed, got, ok)
+		}
+		if sm.sessions[sid] == nil || sm.sessions[sid].Status != protocol.StatusExited || sm.sessions[sid].PTY != nil {
+			t.Fatal("metadata read must not start an agent")
+		}
+	}
+}
 
 func TestDocumentCaptureRootPrefersAuthorizedWorktreeThenCanonicalCwd(t *testing.T) {
 	allowed := t.TempDir()

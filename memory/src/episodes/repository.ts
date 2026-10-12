@@ -1,3 +1,5 @@
+import {assertJobFence} from '../generation/fence.js'
+import type {JobFence} from '../jobs/types.js'
 import type pg from 'pg'
 import type { JobClaim } from '../jobs/types.js'
 import { compileEpisode, sourceReferenceFromEvents, summarizeEvents, type TerminalOutcome } from './compiler.js'
@@ -27,7 +29,7 @@ export function createEpisodeRepository(
   const extractionDebounceMs = options.extractionDebounceMs ?? 120_000
 
   const repository = {
-    async compileTurn(installationId: string, turnId: string): Promise<void> {
+    async compileTurn(installationId: string, turnId: string, fence?:JobFence): Promise<void> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
@@ -347,6 +349,7 @@ export function createEpisodeRepository(
             await client.query('ROLLBACK')
             return
           }
+          if(fence)await assertJobFence(client,fence)
           await client.query('COMMIT')
         } catch (error) {
           await client.query('ROLLBACK')
@@ -357,10 +360,10 @@ export function createEpisodeRepository(
       }
     },
 
-    async handleCompileEpisode(job: JobClaim, signal: AbortSignal): Promise<void> {
+    async handleCompileEpisode(job: JobClaim, signal: AbortSignal, ctx?:{fence:JobFence}): Promise<void> {
       if (!job.installation_id) return
       if (signal.aborted) throw new Error('compile_episode aborted')
-      await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''))
+      await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence)
     },
   }
   return repository

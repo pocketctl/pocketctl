@@ -561,8 +561,9 @@ export function createMemoryContextGrantBroker(deps: MemoryMcpGrantBrokerDeps & 
         return { type: 'memory_context_grant_error', code: 'invalid_request' }
       }
       if (scopeInstallationIds !== undefined) {
-        if (!Array.isArray(scopeInstallationIds) || scopeInstallationIds.length !== 1
-          || typeof scopeInstallationIds[0] !== 'string') {
+        if (!Array.isArray(scopeInstallationIds) || scopeInstallationIds.length === 0 || scopeInstallationIds.length > 16
+          || new Set(scopeInstallationIds).size!==scopeInstallationIds.length
+          || scopeInstallationIds.some(id=>typeof id!=='string')) {
           return { type: 'memory_context_grant_error', code: 'invalid_request' }
         }
         const owned = await deps.pool.query(
@@ -582,6 +583,7 @@ export function createMemoryContextGrantBroker(deps: MemoryMcpGrantBrokerDeps & 
           installationIds: scopeInstallationIds,
           callerType: 'daemon',
           services: ['memory.context'],
+          sessionId,
         })
         if (!minted.ok) {
           const code = minted.code === 'feature_disabled' ? 'feature_disabled'

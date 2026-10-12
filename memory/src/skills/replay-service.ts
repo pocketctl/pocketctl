@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
-import { createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
+import {assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
 import { redactSecrets } from '../episodes/content-policy.js'
 import { appendSkillAudit, type SkillAuditInput } from './audit-repository.js'
 import { loadSkillReviewPolicySnapshot } from './review-policy-binding.js'
-import { resolveSkillSource, SkillWorkError, type SkillSourceContext } from './source-resolver.js'
+import { assertCurrentSkillSourceClock, resolveSkillSource, SkillWorkError, type SkillSourceContext } from './source-resolver.js'
 import { archiveSourceRequest, findSkillArchive, findSkillVersion, type SkillArchiveSource, type SkillVersionRow } from './version-repository.js'
 import { ReplayCaseSchema, ReplayInputError, SKILL_REPLAY_RUNNER_VERSION, replayCaseHash, replayTextHash,
   runRecordedReplayCase, type ReplayCase, type ReplayCaseResult, type SkillReplayRunner } from './replay-runner.js'
@@ -32,7 +32,7 @@ function fail(code: ErrorCode): never { throw new SkillReplayError(code) }
 const domainError = (error: unknown): SkillReplayError => error instanceof SkillReplayError ? error
   : error instanceof SkillWorkError ? new SkillReplayError(error.code === 'skill_forbidden' ? 'forbidden' : error.code === 'skill_disabled' ? 'feature_disabled' : 'source_invalid')
     : new SkillReplayError(error instanceof ReplayInputError && error.code === 'replay_aborted' ? 'replay_cancelled' : 'runner_failed')
-interface Prepared { version: SkillVersionRow; archive: SkillArchiveSource }
+interface Prepared { version: SkillVersionRow; archive: SkillArchiveSource;originPolicyStamp?:string }
 interface RunRow { run_id: string; state: 'running' | 'passed' | 'failed' | 'cancelled'; input_hash: string; attempt: number; lease_token: string; live: boolean; error_code: string | null }
 interface CaseRow { case_id: string; kind: ReplayCase['kind']; provenance: ReplayCase['provenance']; state: 'pending' | 'passed' | 'failed' | 'cancelled' }
 const counts = () => ({ total: 0, pending: 0, passed: 0, failed: 0, cancelled: 0 })
@@ -50,9 +50,9 @@ export interface SkillReplayCaseRegistry {
 export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSourceContext; cases: SkillReplayCaseRegistry; runner?: SkillReplayRunner }) {
   const runner = deps.runner ?? { version: SKILL_REPLAY_RUNNER_VERSION, run: runRecordedReplayCase }
   if (runner.version !== SKILL_REPLAY_RUNNER_VERSION) throw new Error('unsupported_skill_replay_runner')
-  async function transaction<T>(body: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  async function transaction<T>(identity:Identity|null,body: (client: pg.PoolClient) => Promise<T>,prepared:Prepared|null=null): Promise<T> {
     const client = await deps.pool.connect()
-    try { await client.query('BEGIN'); const result = await body(client); await client.query('COMMIT'); return result }
+    try { await client.query('BEGIN'); const result = await body(client); if(identity)await assertCurrentSkillSourceClock(client,{installationId:identity.installationId,versionId:prepared?.archive.claim_version_id??null,...(prepared?.originPolicyStamp?{originPolicyStamp:prepared.originPolicyStamp}:{})}); if(identity)try{await assertCurrentGrantClock(client,identity.grant,[identity.installationId])}catch(error){if(error instanceof TargetBindingError)fail('forbidden');throw error};await client.query('COMMIT'); return result }
     catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
   }
   async function prepare(identity: Identity, request: SubjectInput): Promise<Prepared> {
@@ -90,6 +90,7 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
     const archive = prepared.archive
     const sessions = [...new Set(cases.filter(c => c.kind === 'historical_session').map(c => c.reference_id))].sort()
     const source = await resolveSkillSource(client, { ...identity, source: archiveSourceRequest(archive), requiredPermission: 'review', additionalSessionIds: sessions }, deps.context)
+    prepared.originPolicyStamp=source.originPolicyStamp
     if (source.sourceDigest !== archive.source_digest || source.inputDigest !== archive.input_digest) fail('source_invalid')
     for (const sessionId of sessions) {
       const history = await client.query(`SELECT 1 FROM source_sessions s JOIN work_episodes e USING(installation_id,session_id)
@@ -141,7 +142,7 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
         const subject = Subject.parse({ skillId: request.skillId, versionId: request.versionId, expectedRevision: request.expectedRevision })
         const prepared = await prepare(identity, subject), cases = await loadCases(identity, prepared, request.caseIds)
         const hash = inputHash(prepared, cases, subject), token = randomUUID()
-        const start = await transaction(async client => {
+        const start = await transaction(identity,async client => {
           const actor = await lockContext(client, identity, prepared, subject, cases)
           const prior = (await client.query<RunRow>(`SELECT *,lease_expires_at>clock_timestamp() AS live FROM memory_skill_replay_runs
             WHERE installation_id=$1 AND skill_id=$2 AND idempotency_key=$3 FOR UPDATE`, [identity.installationId,subject.skillId,request!.idempotencyKey])).rows[0]
@@ -167,7 +168,7 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
           await appendSkillAudit(client, { installationId: identity.installationId, ...actor, action: 'replay', outcome: 'allowed',
             skillId: subject.skillId, versionId: subject.versionId, revision: subject.expectedRevision, code: 'ok' })
           return { runId }
-        })
+        },prepared)
         if (start.evidence) return start.evidence
         owned = { runId: start.runId!, token }
         const results: ReplayCaseResult[] = []
@@ -189,7 +190,7 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
         }
         const refreshed = await loadCases(identity, prepared, request.caseIds)
         if (inputHash(prepared, refreshed, subject) !== hash) fail('case_invalid')
-        return await transaction(async client => {
+        return await transaction(identity,async client => {
           const actor = await lockContext(client, identity, prepared, subject, cases)
           if (runSignal.aborted) fail('replay_cancelled')
           const run = (await client.query<RunRow>(`SELECT *,lease_expires_at>clock_timestamp() AS live FROM memory_skill_replay_runs
@@ -211,10 +212,10 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
           await appendSkillAudit(client, { installationId: identity.installationId, ...actor, action: 'replay', outcome: 'allowed',
             skillId: subject.skillId, versionId: subject.versionId, revision: subject.expectedRevision, code: passed ? 'ok' : 'replay_failed' })
           return summary(client, identity, { ...run, state, error_code: errorCode })
-        })
+        },prepared)
       } catch (error) {
         const domain = signal.aborted ? new SkillReplayError('replay_cancelled') : domainError(error)
-        if (owned) await transaction(client => cancel(client, identity, owned!.runId, owned!.token, domain.code))
+        if (owned) await transaction(null,client => cancel(client, identity, owned!.runId, owned!.token, domain.code))
         await auditDenied(identity, request, domain)
         throw domain
       }
@@ -228,13 +229,13 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
         const observed = (await deps.pool.query<RunRow>(`SELECT * FROM memory_skill_replay_runs WHERE installation_id=$1 AND skill_id=$2 ORDER BY sequence DESC LIMIT 1`, [identity.installationId,request.skillId])).rows[0] ?? null
         const ids = observed ? (await deps.pool.query<{ case_id: string }>(`SELECT case_id FROM memory_skill_replay_cases WHERE installation_id=$1 AND run_id=$2 ORDER BY case_id`, [identity.installationId,observed.run_id])).rows.map(c => c.case_id) : []
         const cases = observed ? await loadCases(identity, prepared, ids) : []
-        return await transaction(async client => {
+        return await transaction(identity,async client => {
           await lockContext(client, identity, prepared, request, cases)
           const latest = (await client.query<RunRow>(`SELECT * FROM memory_skill_replay_runs WHERE installation_id=$1 AND skill_id=$2 ORDER BY sequence DESC LIMIT 1 FOR SHARE`, [identity.installationId,request.skillId])).rows[0] ?? null
           if (latest?.run_id !== observed?.run_id) fail('version_conflict')
           if (latest && latest.input_hash !== inputHash(prepared, cases, request)) fail('case_invalid')
           return summary(client, identity, latest)
-        })
+        },prepared)
       } catch (error) { const domain = domainError(error); await auditDenied(identity, request, domain); throw domain }
     },
   }

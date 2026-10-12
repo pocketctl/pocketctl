@@ -112,18 +112,20 @@ describeWithDatabase('claim lifecycle transactions (PostgreSQL)', () => {
     expect(corrected.versionNumber).toBe(2)
     const versions = await pool.query<{
       version_id: string; version_number: string; statement: string
-      freshness_at: Date; valid_from: Date | null; valid_until: Date | null
+      freshness_at: Date; valid_from: Date | null; valid_until: Date | null; effective_from:Date;effective_until:Date|null
     }>(`
-      SELECT version_id::text, version_number::text, statement, freshness_at, valid_from, valid_until
+      SELECT version_id::text, version_number::text, statement, freshness_at, valid_from, valid_until, effective_from, effective_until
       FROM knowledge_versions
       WHERE claim_id = $1 ORDER BY version_number
     `, [claimId])
     expect(versions.rows.map(row => row.version_number)).toEqual(['1', '2'])
     expect(versions.rows[0].statement).toBe('Vitest files live next to sources')
     expect(versions.rows[1].statement).toContain('central tests/ tree')
-    expect(versions.rows[0].valid_until).toBeInstanceOf(Date)
-    expect(versions.rows[1].valid_from).toEqual(versions.rows[0].valid_until)
-    expect(versions.rows[1].freshness_at).toEqual(versions.rows[1].valid_from)
+    expect(versions.rows[0].valid_until).toBeNull()
+    expect(versions.rows[1].valid_from).toBeNull()
+    expect(versions.rows[1].valid_until).toBeNull()
+    expect(versions.rows[0].effective_until).toEqual(versions.rows[1].effective_from)
+    expect(versions.rows[1].effective_until).toBeNull()
     const claim = await pool.query<{ current_version_id: string; revision: string; normalized_key: string }>(`
       SELECT current_version_id::text, revision::text, normalized_key FROM knowledge_claims WHERE claim_id = $1
     `, [claimId])

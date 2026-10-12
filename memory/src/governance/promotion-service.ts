@@ -1,11 +1,17 @@
+import {claimIdentityV2} from '../claims/identity.js'
+import {classifyClaimConflict,summarizeClaimRelationships} from '../claims/conflict-classifier.js'
 import { createHash, randomUUID } from 'crypto'
 import type pg from 'pg'
 
 import { sanitizeText } from '../episodes/content-policy.js'
 import { createAuditRepository } from './audit-repository.js'
-import type { ValidatedV2Grant } from './authorization.js'
+import { assertCurrentGrantClock, requireCurrentScopePermission, TargetBindingError, type ValidatedV2Grant } from './authorization.js'
 import type { PromotionCandidateRow, PromotionCandidateVersionRow } from './types.js'
-import { loadEffectiveReviewPolicySnapshot } from './review-policy.js'
+import {canonicalRepositoryRemotes,publicationApplicability,PublicationApplicabilityError} from './publication-applicability.js'
+import {findClaimTopicFamily} from '../claims/identity-lookup.js'
+import {captureSourceApplicability} from './applicability.js'
+import {bundleEvidence,revisionBundleHash,type RevisionBundle} from './revision-bundle.js'
+import { canonicalReviewPolicyHash, loadEffectiveReviewPolicySnapshot } from './review-policy.js'
 
 /**
  * ADR-P3-06 explicit promotion. Personal→Team and Team→Organization only:
@@ -47,7 +53,7 @@ export interface ProposeInput {
 export interface ProposeResult {
   candidate: PromotionCandidateRow
   candidateRevision: PromotionCandidateVersionRow
-  classification: 'new' | 'duplicate' | 'conflict'
+  classification: 'new' | 'duplicate' | 'related' | 'potential_conflict' | 'conflict'
 }
 
 const MAX_SHARED_EVIDENCE = 8
@@ -64,6 +70,9 @@ interface SourceVersionRow {
   scope_kind: string
   scope_key: string
   normalized_key: string
+  repository_id:string|null; repo_snapshot_id:string|null; branch:string|null; canonical_repository_key:string|null
+  applicability:unknown;consumption_hold_reason:string|null;source_snapshot_commit_sha:string|null;source_repository_key:string|null;source_canonical_remote:string|null;source_metadata_owned:boolean;source_origin_policy_hash:string|null
+  valid_from_exact:string|null;valid_until_exact:string|null;valid_from:Date|null; valid_until:Date|null; freshness_at:Date|null
 }
 
 interface SourceEvidenceRow {
@@ -150,6 +159,18 @@ export function createPromotionService(pool: pg.Pool) {
       try {
         await client.query('BEGIN')
         try {
+          try {
+            await requireCurrentScopePermission({client, grant, targetInstallationId:grant.primaryInstallationId, permission:'contribute'})
+          } catch (error) {
+            if (error instanceof TargetBindingError) throw new PromotionError('forbidden_direction', 'current target contribution permission required')
+            throw error
+          }
+          try {
+            await requireCurrentScopePermission({client, grant, targetInstallationId:input.sourceInstallationId, permission:'read'})
+          } catch (error) {
+            if (error instanceof TargetBindingError) throw new PromotionError('not_found', 'source installation not found')
+            throw error
+          }
           // Scope-edge validation (ADR-P3-06): personal→team, team→organization.
           const scopes = await client.query<{
             installation_id: string
@@ -172,10 +193,23 @@ export function createPromotionService(pool: pg.Pool) {
           const source = await client.query<SourceVersionRow>(`
             SELECT c.claim_id, c.state AS claim_state, c.current_version_id,
                    v.version_id, v.statement, v.structured_content,
-                   c.claim_type, c.scope_kind, c.scope_key, c.normalized_key
+                   c.claim_type, c.scope_kind, c.scope_key, c.normalized_key, c.canonical_repository_key,
+                   v.repository_id,v.repo_snapshot_id,v.branch,v.valid_from,v.valid_until,
+                   to_char(v.valid_from AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS valid_from_exact,
+                   to_char(v.valid_until AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS valid_until_exact,
+                   v.freshness_at,v.applicability,c.consumption_hold_reason,r.repository_key AS source_repository_key,r.canonical_remote AS source_canonical_remote,s.commit_sha AS source_snapshot_commit_sha,
+                   ((v.repository_id IS NULL OR r.repository_id IS NOT NULL) AND (v.repo_snapshot_id IS NULL OR s.repo_snapshot_id IS NOT NULL)) AS source_metadata_owned, COALESCE(pr.revision_bundle->>'originPolicyHash',pr.revision_bundle->>'reviewPolicyHash',gr.policy_hash) AS source_origin_policy_hash
             FROM knowledge_claims c
             JOIN knowledge_versions v ON v.version_id = c.current_version_id
                  AND v.installation_id = c.installation_id
+            LEFT JOIN repositories r ON r.installation_id=v.installation_id AND r.repository_id=v.repository_id
+            LEFT JOIN repo_snapshots s ON s.installation_id=v.installation_id AND s.repository_id=v.repository_id AND s.repo_snapshot_id=v.repo_snapshot_id
+            LEFT JOIN memory_authority_records ar ON ar.installation_id=v.installation_id AND ar.version_id=v.version_id
+            LEFT JOIN memory_promotion_candidate_versions pr ON pr.candidate_revision_id=ar.candidate_revision_id
+   LEFT JOIN memory_git_claim_authority ga ON ga.installation_id=v.installation_id AND ga.version_id=v.version_id
+     AND ga.claim_id=c.claim_id AND ga.revision_id=ar.candidate_revision_id
+   LEFT JOIN memory_git_governed_revisions gr ON gr.installation_id=ga.installation_id AND gr.revision_id=ga.revision_id
+     AND gr.claim_id=c.claim_id AND gr.review_policy_version_id=ar.review_policy_version_id
             WHERE c.installation_id = $1 AND c.claim_id = $2
             FOR UPDATE OF c
           `, [input.sourceInstallationId, input.sourceClaimId])
@@ -197,18 +231,23 @@ export function createPromotionService(pool: pg.Pool) {
           `, [grant.primaryInstallationId, input.idempotencyDigest])
           if (replay.rows[0]?.target_id) {
             const existing = await client.query(`
-              SELECT c.*, r.candidate_revision_id FROM memory_promotion_candidates c
+              SELECT c.*, r.candidate_revision_id,r.revision_bundle FROM memory_promotion_candidates c
               JOIN memory_promotion_candidate_versions r ON r.candidate_id = c.candidate_id
                 AND r.revision_number = 1
               WHERE c.candidate_id = $1
             `, [replay.rows[0].target_id])
             if (existing.rows[0]) {
-              await client.query('COMMIT')
+              if(!targetBinding.permissions.includes('read')&&(existing.rows[0].revision_bundle?.relationships||existing.rows[0].conflict_group_id||existing.rows[0].duplicate_of_claim_id))throw new PromotionError('not_found','proposal result unavailable')
+              try { await assertCurrentGrantClock(client, grant,[input.sourceInstallationId]) } catch (error) {
+            if (error instanceof TargetBindingError) throw new PromotionError('forbidden_direction', 'grant expired before commit')
+            throw error
+          }
+          await client.query('COMMIT')
               return {
                 candidate: toCandidate(existing.rows[0]),
                 candidateRevision: existing.rows[0] as unknown as PromotionCandidateVersionRow,
-                classification: existing.rows[0].duplicate_of_claim_id ? 'duplicate'
-                  : existing.rows[0].conflict_group_id ? 'conflict' : 'new',
+                classification: existing.rows[0].revision_bundle?.relationships?.classification??(existing.rows[0].duplicate_of_claim_id ? 'duplicate'
+                  : existing.rows[0].conflict_group_id ? 'conflict' : 'new'),
               }
             }
           }
@@ -263,35 +302,34 @@ export function createPromotionService(pool: pg.Pool) {
 
           // Deterministic duplicate/conflict classification inside the target.
           const sourceHash = contentHashOf(sourceRow.statement)
-          const existing = await client.query<TargetClaimRow>(`
-            SELECT claim_id, conflict_group_id, current_version_id
-            FROM knowledge_claims
-            WHERE installation_id = $1 AND claim_type = $2 AND scope_key = $3
-              AND normalized_key = $4 AND state = 'active'
-            LIMIT 1
-          `, [grant.primaryInstallationId, sourceRow.claim_type, sourceRow.scope_key, sourceRow.normalized_key])
-          const existingRow = existing.rows[0]
-          let classification: ProposeResult['classification'] = 'new'
-          let state: PromotionCandidateRow['state'] = 'proposed'
-          let conflictGroupId: string | null = null
-          let duplicateOfClaimId: string | null = null
-          if (existingRow) {
-            const existingVersion = await client.query<{ statement: string }>(`
-              SELECT statement FROM knowledge_versions
-              WHERE installation_id = $1 AND version_id = $2
-            `, [grant.primaryInstallationId, existingRow.current_version_id])
-            const existingHash = existingVersion.rows[0]
-              ? contentHashOf(existingVersion.rows[0].statement)
-              : ''
-            if (existingHash === sourceHash) {
-              classification = 'duplicate'
-              duplicateOfClaimId = existingRow.claim_id
-            } else {
-              classification = 'conflict'
-              state = 'conflict'
-              conflictGroupId = existingRow.conflict_group_id ?? randomUUID()
+          const bundle:RevisionBundle={schemaVersion:2,statement:sourceRow.statement,structuredContent:sourceRow.structured_content??{},
+            applicability:captureSourceApplicability({scopeKind:sourceRow.scope_kind,scopeKey:sourceRow.scope_key,
+              canonicalRepositoryKey:sourceRow.canonical_repository_key,repositoryId:sourceRow.repository_id,snapshotId:sourceRow.repo_snapshot_id,branch:sourceRow.branch,
+              applicability:sourceRow.applicability,consumptionHoldReason:sourceRow.consumption_hold_reason??(!sourceRow.source_metadata_owned||(sourceRow.canonical_repository_key&& !canonicalRepositoryRemotes(sourceRow.canonical_repository_key).includes(sourceRow.source_canonical_remote??''))?'source_metadata_requires_review':null)}),
+            sourceSnapshotCommitSha:sourceRow.source_snapshot_commit_sha,sourceRepositoryKey:sourceRow.source_repository_key,
+            sourceContentHash:sourceHash,sourceValidFrom:sourceRow.valid_from_exact?.replace(/(\.\d{3})000Z$/,'$1Z')??sourceRow.valid_from?.toISOString()??null,
+            sourceValidUntil:sourceRow.valid_until_exact?.replace(/(\.\d{3})000Z$/,'$1Z')??sourceRow.valid_until?.toISOString()??null,sourceFreshnessAt:sourceRow.freshness_at?.toISOString()??null,
+            evidence:bundleEvidence(sanitizedEvidence),originPolicyHash:sourceRow.source_origin_policy_hash,reviewPolicyHash:canonicalReviewPolicyHash(effectivePolicy)}
+          let classification:ProposeResult['classification']='new',state:PromotionCandidateRow['state']='proposed'
+          let conflictGroupId:string|null=null,duplicateOfClaimId:string|null=null
+          try{
+            const mapped=await publicationApplicability(client,bundle,grant.primaryInstallationId)
+            const proposed={...mapped,claimType:sourceRow.claim_type,statement:sourceRow.statement,structuredContent:sourceRow.structured_content??{},validFrom:bundle.sourceValidFrom,validUntil:bundle.sourceValidUntil}
+            if(targetBinding.permissions.includes('read')){
+              const existing=await findClaimTopicFamily(client,{installationId:grant.primaryInstallationId,claimType:sourceRow.claim_type,
+                applicability:mapped,statement:sourceRow.statement})
+              const items=existing.map(row=>({claimId:row.claim_id,versionId:row.version_id,...classifyClaimConflict(proposed,row.facts)}))
+              bundle.relationships=summarizeClaimRelationships(items)
+              classification=bundle.relationships.classification
+              const duplicate=items.find(item=>item.relation==='duplicate')
+              if(duplicate)duplicateOfClaimId=duplicate.claimId
+              // Identity collisions still require explicit parallel/supersede even
+              // when different conditions make the statements merely related.
+              const conflict=existing.find(row=>items.some(item=>item.claimId===row.claim_id&&item.relation==='potential_conflict')
+                ||claimIdentityV2(row.facts).key===claimIdentityV2(proposed).key)
+              if(!duplicate&&conflict){state='conflict';conflictGroupId=conflict.conflict_group_id??randomUUID()}
             }
-          }
+          }catch(error){if(!(error instanceof PublicationApplicabilityError))throw error}
 
           // TTL from the effective policy.
           const ttlDays = effectivePolicy.candidate_ttl_days
@@ -316,14 +354,14 @@ export function createPromotionService(pool: pg.Pool) {
             INSERT INTO memory_promotion_candidate_versions
               (candidate_revision_id, candidate_id, revision_number, statement,
                structured_content, content_hash, review_policy_version_id,
-               parent_review_policy_version_id, created_by_membership_id)
-            VALUES ($1, $2, 1, $3, $4::jsonb, $5, $6, $7, $8)
+               parent_review_policy_version_id, created_by_membership_id,revision_bundle,revision_bundle_hash)
+            VALUES ($1, $2, 1, $3, $4::jsonb, $5, $6, $7, $8,$9::jsonb,$10)
             RETURNING *
           `, [
             candidateRevisionId, candidateId, sourceRow.statement,
             JSON.stringify(sourceRow.structured_content ?? {}), sourceHash,
             policySnapshot.activeVersionId, policySnapshot.parentActiveVersionId,
-            targetBinding.membership_id,
+            targetBinding.membership_id,JSON.stringify(bundle),revisionBundleHash(bundle),
           ])
           for (const item of sanitizedEvidence) {
             await client.query(`
@@ -349,6 +387,10 @@ export function createPromotionService(pool: pg.Pool) {
             candidateId, input.idempotencyDigest, state, JSON.stringify({ revision: 1 }),
           ])
 
+          try { await assertCurrentGrantClock(client, grant,[input.sourceInstallationId]) } catch (error) {
+            if (error instanceof TargetBindingError) throw new PromotionError('forbidden_direction', 'grant expired before commit')
+            throw error
+          }
           await client.query('COMMIT')
           return {
             candidate: toCandidate(inserted.rows[0]),

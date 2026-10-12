@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import type { JobClaim, JobFence, JobType } from './types.js'
+import { JobDeferredError, type JobClaim, type JobFence, type JobType } from './types.js'
 import type { JobRepository } from './repository.js'
 
 export interface JobHandlerContext {
@@ -22,6 +22,9 @@ export interface JobWorkerOptions {
   claimLimit?: number
   concurrencyLimits?: Partial<Record<JobType, number>>
   leaseMs?: number
+  perInstallationLimit?: number
+  onExecution?(job:JobClaim,result:"completed"|"deferred"|"failed"|"lost",seconds:number):void
+  onClaim?(job:JobClaim):void
   /** Bounded wait for in-flight handlers after abort (plan: 20s). */
   drainDeadlineMs?: number
   onError?(error: unknown, job?: JobClaim): void
@@ -35,6 +38,7 @@ interface InFlightEntry {
   claim: JobClaim
   controller: AbortController
   abort: () => void
+  lostOwnership:boolean
 }
 
 /**
@@ -56,6 +60,8 @@ export function createJobWorker(options: JobWorkerOptions) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let renewTimer: ReturnType<typeof setInterval> | undefined
   let stopped = false
+  let started=false
+  let filling:Promise<void>|undefined
   let inFlight: Array<Promise<void>> = []
   const runningClaims = new Map<string, InFlightEntry>()
   const activeByType = new Map<JobType, number>()
@@ -65,6 +71,7 @@ export function createJobWorker(options: JobWorkerOptions) {
     const limit = options.concurrencyLimits?.[jobType]
     if (!limit) return () => undefined
     while ((activeByType.get(jobType) ?? 0) >= limit) {
+      if(stopped||options.signal.aborted)throw new Error('job_aborted_before_dispatch')
       await new Promise<void>(resolve => {
         const waiters = waitersByType.get(jobType) ?? []
         waiters.push(resolve)
@@ -97,7 +104,7 @@ export function createJobWorker(options: JobWorkerOptions) {
       const controller = new AbortController()
       const abort = () => controller.abort()
       options.signal.addEventListener('abort', abort, { once: true })
-      const entry: InFlightEntry = { claim, controller, abort }
+      const entry: InFlightEntry = { claim, controller, abort, lostOwnership:false }
       runningClaims.set(claim.job_id, entry)
       const ctx: JobHandlerContext = {
         fence: {
@@ -108,18 +115,29 @@ export function createJobWorker(options: JobWorkerOptions) {
       }
       const run = (async () => {
         let release: () => void = () => undefined
+        const began=Date.now()
+        let outcome:"completed"|"deferred"|"failed"|"lost"="failed"
         try {
           release = await acquire(claim.job_type)
-          if (controller.signal.aborted) {
+          if (controller.signal.aborted||stopped) {
             const error = new Error('job_aborted_before_dispatch')
             error.name = 'AbortError'
             throw error
           }
           await handler(claim, controller.signal, ctx)
-          await options.jobs.completeJob({
+          if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
+          const completed=await options.jobs.completeJob({
             jobId: claim.job_id, claimedBy: options.workerId, claimEpoch: claim.claim_epoch,
           })
+          outcome=completed?"completed":"lost"
         } catch (error) {
+          if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
+          if (error instanceof JobDeferredError) {
+            const deferred=await options.jobs.deferJob({ jobId:claim.job_id,claimedBy:options.workerId,
+              claimEpoch:claim.claim_epoch,reason:error.reason,availableAt:error.availableAt })
+            outcome=deferred?"deferred":"lost"
+            return
+          }
           options.onError?.(error, claim)
           await options.jobs.rescheduleJob({
             jobId: claim.job_id,
@@ -131,6 +149,8 @@ export function createJobWorker(options: JobWorkerOptions) {
           release()
           runningClaims.delete(claim.job_id)
           options.signal.removeEventListener('abort', abort)
+          options.onExecution?.(claim,outcome,(Date.now()-began)/1000)
+          if(started&&!stopped)void fill().catch(error=>options.onError?.(error))
         }
       })()
       inFlight.push(run)
@@ -147,24 +167,35 @@ export function createJobWorker(options: JobWorkerOptions) {
     return `handler_failed_${name}`.slice(0, 64)
   }
 
-  async function tick(): Promise<void> {
-    if (stopped || options.signal.aborted) return
-    const claims = await options.jobs.claimJobs({
-      workerId: options.workerId,
-      limit: claimLimit,
-      leaseMs,
-    })
-    if (claims.length > 0) await dispatch(claims)
+  function fill():Promise<void> {
+    if(filling)return filling
+    if(stopped||options.signal.aborted)return Promise.resolve()
+    filling=(async()=>{
+      const free=claimLimit-runningClaims.size
+      if(free<=0)return
+      const claims=await options.jobs.claimJobs({workerId:options.workerId,limit:free,leaseMs,
+        globalLimit:claimLimit,perInstallationLimit:options.perInstallationLimit??claimLimit,
+        typeLimits:options.concurrencyLimits})
+      for(const claim of claims)options.onClaim?.(claim)
+      // dispatch registers every claim synchronously before its first await.
+      void dispatch(claims).catch(error=>options.onError?.(error))
+    })().finally(()=>{filling=undefined})
+    return filling
   }
 
-  function schedule(): void {
-    if (stopped) return
-    timer = setTimeout(() => {
-      timer = undefined
-      void tick()
-        .catch(error => options.onError?.(error))
-        .finally(() => schedule())
-    }, pollIntervalMs)
+  async function tick():Promise<void>{
+    await fill()
+    // Preserve the single-batch manual-test API. The live poller awaits only
+    // claiming, so free slots refill independently of a slow handler.
+    await Promise.all([...inFlight])
+  }
+
+  function schedule():void{
+    if(stopped)return
+    timer=setTimeout(()=>{
+      timer=undefined
+      void fill().catch(error=>options.onError?.(error)).finally(()=>schedule())
+    },pollIntervalMs)
     timer.unref?.()
   }
 
@@ -188,17 +219,19 @@ export function createJobWorker(options: JobWorkerOptions) {
         })
           .then(owned => {
             if (!owned && runningClaims.get(entry.claim.job_id) === entry) {
+              entry.lostOwnership=true
               entry.abort()
             }
           })
           .catch(error => {
             options.onError?.(error, entry.claim)
             if (runningClaims.get(entry.claim.job_id) === entry) {
+              entry.lostOwnership=true
               entry.abort()
             }
           })
       }
-    }, Math.max(250, Math.floor(leaseMs / 3)))
+    }, Math.max(10, Math.floor(leaseMs / 3)))
     renewTimer.unref?.()
   }
 
@@ -208,6 +241,7 @@ export function createJobWorker(options: JobWorkerOptions) {
     },
     start(): void {
       if (stopped || options.signal.aborted) return
+      started=true
       schedule()
       startRenewal()
     },
@@ -217,6 +251,7 @@ export function createJobWorker(options: JobWorkerOptions) {
       if (timer) clearTimeout(timer)
       if (renewTimer) clearInterval(renewTimer)
       renewTimer = undefined
+      await filling?.catch(()=>undefined)
       const deadline = Date.now() + drainDeadlineMs
       while (inFlight.length > 0 && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 50))

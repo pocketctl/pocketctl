@@ -43,7 +43,7 @@ db('Phase 5 Skill versions and human governance', () => {
     const f = await fixture()
     await applyMemorySchema(pool)
     await applyMemorySchema(pool)
-    expect((await pool.query(`SELECT MAX(version) AS version FROM memory_schema_migrations`)).rows[0].version).toBe(50)
+    expect((await pool.query(`SELECT MAX(version) AS version FROM memory_schema_migrations`)).rows[0].version).toBe(MEMORY_MIGRATIONS.at(-1)!.version)
     expect((await pool.query(`SELECT 1 FROM memory_skill_candidates WHERE candidate_id=$1`, [f.candidateId])).rowCount).toBe(1)
     expect(await draft(f)).toMatchObject({ state: 'draft', revision: 1 })
   })
@@ -140,14 +140,14 @@ db('Phase 5 Skill versions and human governance', () => {
     await expect(bounded.execute(f.author, { action: 'edit', skillId: d.skillId, expectedRevision: 1, document: document() })).rejects.toMatchObject({ code: 'size_exceeded' })
     expect((await pool.query(`SELECT 1 FROM memory_skill_versions`)).rowCount).toBe(1)
   })
-  test('publisher role never expands contribute permission and policy can exclude its review from quorum', async () => {
+  test('publisher review preserves contribute boundaries and awaits the actual publishing actor', async () => {
     const f = await fixture('team'), policies = createReviewPolicyRepository(pool)
     const head = (await policies.getHead(f.installationId))!
     await policies.publishVersion({ installationId: f.installationId, expectedRevision: head.revision, createdByMembershipId: null,
       document: { ...DEFAULT_TEAM_REVIEW_POLICY, publisher_may_count_as_reviewer: false } })
     const d = await draft(f), publisher = await f.actor(['publisher'], ['read','review','publish'])
     await expect(service().execute(publisher, { action: 'edit', skillId: d.skillId, expectedRevision: 1, document: document() })).rejects.toMatchObject({ code: 'forbidden' })
-    expect(await service().execute(publisher, { action: 'approve', skillId: d.skillId, expectedRevision: 1 })).toMatchObject({ state: 'draft', revision: 2 })
+    expect(await service().execute(publisher, { action: 'approve', skillId: d.skillId, expectedRevision: 1 })).toMatchObject({ state: 'reviewed', revision: 2 })
     const reviewer = await f.actor(['reviewer'], ['read','review'])
     expect(await service().execute(reviewer, { action: 'approve', skillId: d.skillId, expectedRevision: 2 })).toMatchObject({ state: 'reviewed', revision: 3 })
   })

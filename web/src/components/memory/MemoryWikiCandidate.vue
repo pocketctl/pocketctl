@@ -10,6 +10,7 @@
         <code>{{ candidate.commit_sha.slice(0, 12) }}</code>
       </div>
     </header>
+    <p class="memory-governance-muted">{{ t('memory.assistance.draft') }} · {{ t('memory.assistance.protected') }}</p>
     <div class="memory-wiki-diff">
       <article v-for="section in candidateSections" :key="section.section_key">
         <header><strong>{{ section.heading }}</strong><code>{{ section.section_key }}</code></header>
@@ -57,7 +58,18 @@ const props = defineProps<{
 const emit = defineEmits<{ publish: [] }>()
 const { t } = useLocale()
 const confirming = ref(false)
-const candidateSections = computed(() => props.candidate.document.pages.flatMap(page => page.sections))
+const candidateSections = computed(() => {
+  const sections = props.candidate.document.pages.flatMap(page => page.sections).map(section => {
+    const active = props.activeSections.find(old => old.section_key === section.section_key)
+    return active && active.authority !== 'generated' ? { ...section, markdown: active.markdown } : section
+  })
+  for (const active of props.activeSections) {
+    if (active.authority !== 'generated' && !sections.some(section => section.section_key === active.section_key)) {
+      sections.push({ ...active, source_tokens: active.citations.map(citation => citation.source_token) })
+    }
+  }
+  return sections
+})
 function activeMarkdown(sectionKey: string): string {
   return props.activeSections.find(section => section.section_key === sectionKey)?.markdown ?? ''
 }

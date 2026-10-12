@@ -96,4 +96,12 @@ describe('TeamMemoryContextBridge', () => {
       .rejects.toMatchObject({ code: 'memory_grant_required' })
     expect(mint).toHaveBeenCalledWith(expect.objectContaining({ userId: 11 }))
   })
+  it('validates peer read permission without requesting an unbound daemon Context grant',async()=>{
+    const query=vi.fn(async()=>({rows:[{team_id:'team-1',participant_user_ids:[7,9],installation_id:INSTALLATION,owner_scope_id:SCOPE,owner_scope_kind:'team'}]}))
+    const mint=vi.fn(async(input:{userId:number;callerType:string;sessionId?:string})=>input.callerType==='daemon'&&!input.sessionId?{ok:false as const,code:'invalid_request' as const,message:'context session is required'}:grant(input.userId))
+    const bridge=new TeamMemoryContextBridge({query} as unknown as pg.Pool,{mint},{enabled:true,fetchImpl:vi.fn(async()=>new Response('{}',{status:200})) as typeof fetch})
+    await expect(bridge.validateSnapshot({sessionId:'team-session',actorUserId:7,references:[{source_kind:'memory_claim',source_id:CLAIM,source_version:VERSION,installation_id:INSTALLATION,owner_scope_id:SCOPE}]})).resolves.toMatchObject({installation_id:INSTALLATION})
+    expect(mint.mock.calls.every(([input])=>input.callerType==='web')).toBe(true)
+  })
+
 })

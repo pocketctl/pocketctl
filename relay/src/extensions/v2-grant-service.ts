@@ -16,6 +16,7 @@ import { permissionsForRoles, normalizeScopeRoles } from './scope-types.js'
  */
 
 export interface V2GrantMintInput {
+  sessionId?:string
   userId: number
   installationIds: string[]
   callerType: 'web' | 'daemon' | 'agent'
@@ -215,6 +216,13 @@ export function createV2GrantService(deps: V2GrantServiceDeps) {
             }
           }
 
+          // Context daemon grants retain the same owned, signed Session as v1.
+          if(input.callerType==='daemon'&&services.includes('memory.context')){
+            if(typeof input.sessionId!=='string'||!input.sessionId.length||input.sessionId.length>64)
+              return{ok:false,code:'invalid_request',message:'context session is required'}
+            const session=await database.query('SELECT 1 FROM sessions WHERE session_id=$1 AND user_id=$2',[input.sessionId,input.userId])
+            if(!session.rows[0])return{ok:false,code:'not_found',message:'session not found'}
+          }
           const ttl = Math.min(
             Math.max(1, Math.trunc(deps.ttlSeconds ?? 60)),
             60,
@@ -224,6 +232,7 @@ export function createV2GrantService(deps: V2GrantServiceDeps) {
             providerId: primary.provider_id,
             userId: input.userId,
             callerType: input.callerType,
+            ...(input.callerType==='daemon'&&services.includes('memory.context')?{sessionId:input.sessionId}:{}),
             services,
             primaryInstallationId: primary.installation_id,
             scopeBindings: bindings,

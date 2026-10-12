@@ -1,11 +1,13 @@
+import {independentSourceCount,manifestSourceRoots} from '../episodes/source-lineage.js'
+import {rankAssistedCandidates} from '../governance/knowledge-assistance.js'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
-import { createScopeAuthorization, type V2GrantFacts, type GrantScopeBinding } from '../governance/authorization.js'
+import { assertCurrentGrantClock, TargetBindingError, createScopeAuthorization, type V2GrantFacts, type GrantScopeBinding } from '../governance/authorization.js'
 import { loadSkillReviewPolicySnapshot } from './review-policy-binding.js'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 import { skillModeForScope } from './config.js'
-import { resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillPrelockedLifecycle } from './source-resolver.js'
+import { assertCurrentSkillSourceClock, resolveSkillSource, SkillWorkError, type SkillSourceContext, type SkillPrelockedLifecycle } from './source-resolver.js'
 import { archiveSourceRequest, findSkillArchive, findSkillVersion, type SkillArchiveSource, type SkillVersionRow } from './version-repository.js'
 import { assessSkillRisk } from './risk-policy.js'
 import type { SkillCandidateDocument } from './types.js'
@@ -30,9 +32,19 @@ export function skillJson(value: unknown): any {
   return value
 }
 export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSourceContext; cursorSigningKey: string; cases?: SkillReplayCaseRegistry }) {
-  async function transaction<T>(body: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  async function transaction<T>(identity: SkillIdentity, body: (client: pg.PoolClient, sourceVersions: Map<string,string|undefined>) => Promise<T>): Promise<T> {
     const client = await deps.pool.connect()
-    try { await client.query('BEGIN'); const result = await body(client); await client.query('COMMIT'); return result }
+    try {
+      await client.query('BEGIN')
+      const sourceVersions=new Map<string,string|undefined>(),result=await body(client,sourceVersions)
+      try { await assertCurrentGrantClock(client,identity.grant,[identity.installationId]) }
+      catch(error) { if(error instanceof TargetBindingError)return fail('forbidden'); throw error }
+      for(const [versionId,originPolicyStamp] of [...sourceVersions].sort(([a],[b])=>a.localeCompare(b))) {
+        try { await assertCurrentSkillSourceClock(client,{installationId:identity.installationId,versionId,...(originPolicyStamp?{originPolicyStamp}:{})}) }
+        catch(error) { if(error instanceof SkillWorkError)return fail('not_found'); throw error }
+      }
+      await client.query('COMMIT'); return result
+    }
     catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
   }
   async function authorize(client: pg.PoolClient, identity: SkillIdentity) {
@@ -61,10 +73,11 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
     for(const repository of repositoryIds)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:repository:' || $1 || ':' || $2,0))`,[identity.installationId,repository])
     return {sessionIds,repositoryIds}
   }
-  async function source(client: pg.PoolClient, identity: SkillIdentity, archive: SkillArchiveSource, prelockedLifecycle?: SkillPrelockedLifecycle) {
+  async function source(client: pg.PoolClient, identity: SkillIdentity, archive: SkillArchiveSource, sourceVersions: Map<string,string|undefined>, prelockedLifecycle?: SkillPrelockedLifecycle) {
     try {
       const resolved = await resolveSkillSource(client,{...identity,source:archiveSourceRequest(archive),requiredPermission:'read',...(prelockedLifecycle?{prelockedLifecycle}:{})},deps.context)
       if (resolved.sourceDigest !== archive.source_digest || resolved.inputDigest !== archive.input_digest) return fail('not_found')
+      if(resolved.versionId)sourceVersions.set(resolved.versionId,resolved.originPolicyStamp)
       return resolved.sources.map(s => ({token:s.token,handle:s.handle,excerpt_hash:s.excerptHash,event_id:s.eventId,artifact_id:s.artifactId,evidence_id:s.evidenceId}))
     } catch (error) { if (error instanceof SkillWorkError) return fail(error.code === 'skill_forbidden' ? 'forbidden' : error.code === 'skill_disabled' ? 'feature_disabled' : 'not_found'); throw error }
   }
@@ -77,13 +90,13 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
     return {can_edit:usable && binding.permissions.includes('contribute'),can_review:usable && current && binding.permissions.includes('review') && !(self && (version.risk !== 'low' || binding.owner_scope_kind !== 'personal')),
       can_replay:usable && current && binding.permissions.includes('review'),can_publish:false,can_revoke:usable && binding.permissions.includes('publish'),can_rollback:false,can_manage_policy:binding.permissions.includes('policy_admin')}
   }
-  async function detail(client: pg.PoolClient, identity: SkillIdentity, skillId: string, prelockedLifecycle?: SkillPrelockedLifecycle) {
+  async function detail(client: pg.PoolClient, identity: SkillIdentity, skillId: string, sourceVersions: Map<string,string|undefined>, prelockedLifecycle?: SkillPrelockedLifecycle) {
     const {binding,...mode} = await authorize(client,identity)
     const version = await findSkillVersion(client,identity.installationId,skillId)
     if (!version) return fail('not_found')
     const archive = await findSkillArchive(client,identity.installationId,version.candidate_id)
     if (!archive) return fail('not_found')
-    const sources = await source(client,identity,archive,prelockedLifecycle)
+    const sources = await source(client,identity,archive,sourceVersions,prelockedLifecycle)
     const current = await policyCurrent(client,identity,binding,version)
     const rows = await client.query(`SELECT version_id,version_number,document_hash,policy_hash,risk,created_at FROM memory_skill_versions WHERE installation_id=$1 AND skill_id=$2 ORDER BY version_number DESC LIMIT 50`,[identity.installationId,skillId])
     const summary = rows.rows.find(r => r.version_id === version.version_id)!
@@ -111,12 +124,12 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
     return `${data}.${createHmac('sha256',deps.cursorSigningKey).update(data).digest('base64url')}`
   }
   return {
-    authorize: (identity: SkillIdentity) => transaction(client => authorize(client,identity)),
-    get: (identity: SkillIdentity, skillId: string) => transaction(client => detail(client,identity,skillId)),
+    authorize: (identity: SkillIdentity) => transaction(identity,client => authorize(client,identity)),
+    get: (identity: SkillIdentity, skillId: string) => transaction(identity,(client,sourceVersions) => detail(client,identity,skillId,sourceVersions)),
     async list(identity: SkillIdentity, raw: unknown, candidates = false) {
       const parsed = SkillListQuerySchema.safeParse(raw); if (!parsed.success) return fail('invalid_request')
       const query = parsed.data, kind = candidates ? 'candidates' : 'skills', after = decodeCursor(identity,query,kind), limit = query.limit ?? 20
-      return transaction(async client => {
+      return transaction(identity,async (client,sourceVersions) => {
         const {binding,...mode} = await authorize(client,identity)
         const selected = await client.query<{id:string;created_at?:Date}>(candidates
           ? `SELECT c.candidate_id AS id,c.created_at FROM memory_skill_candidates c JOIN memory_skill_archives a USING(installation_id,archive_id) JOIN memory_skill_tasks t ON t.installation_id=c.installation_id AND t.task_id=c.task_id
@@ -133,34 +146,40 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
         const lifecycle=await lockReadSources(client,identity,observedArchives)
         const items: unknown[] = []
         for (const row of selected.rows.slice(0,limit)) {
+          const itemSources=new Map<string,string|undefined>(),beforeItems=items.length
           await client.query('SAVEPOINT skill_read_item')
           try {
             if (candidates) {
               const archive = await findSkillArchive(client,identity.installationId,row.id); if (!archive) continue
-              await source(client,identity,archive,lifecycle)
+              await source(client,identity,archive,itemSources,lifecycle)
               const task=(await client.query('SELECT current_generation::text FROM memory_skill_tasks WHERE installation_id=$1 AND task_id=$2',[identity.installationId,archive.task_id])).rows[0]
               if(archive.candidate_state!=='candidate'||task?.current_generation!==archive.generation)continue
               const head = (await client.query(`SELECT h.revision::text,h.state,v.candidate_id FROM memory_skill_heads h JOIN memory_skills s USING(installation_id,skill_id) JOIN memory_skill_versions v ON v.installation_id=h.installation_id AND v.version_id=h.current_version_id WHERE s.installation_id=$1 AND s.task_id=$2`,[identity.installationId,archive.task_id])).rows[0]
+              const natural=(await client.query(`SELECT DISTINCT e.episode_id,e.session_id,e.evidence_manifest FROM work_episodes e JOIN source_sessions s USING(installation_id,session_id) WHERE e.installation_id=$1 AND e.state='ready' AND e.outcome='completed' AND s.deleted_at IS NULL AND (e.episode_id=$2 OR EXISTS(SELECT 1 FROM knowledge_evidence k JOIN memory_skill_archive_sources a ON a.installation_id=k.installation_id AND a.evidence_id=k.evidence_id WHERE a.archive_id=$3 AND k.episode_id=e.episode_id)) AND EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(e.document->'tests','[]')) t WHERE t->>'status'='passed' AND e.evidence_manifest?(t->>'evidence_handle')) AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)`,[identity.installationId,archive.episode_id,archive.archive_id])).rows
+              const independentSuccesses=independentSourceCount(natural.map(e=>({sessionId:e.session_id,episodeId:e.episode_id,sourceRootIds:manifestSourceRoots(e.evidence_manifest,e.session_id,e.episode_id)})))
+              const sourceCount=Number((await client.query('SELECT COUNT(DISTINCT excerpt_hash)::int n FROM memory_skill_archive_sources WHERE installation_id=$1 AND archive_id=$2',[identity.installationId,archive.archive_id])).rows[0].n)
+              const assistance={state:'draft',automation_product_gate:'closed',tool_authorization:false,independentSuccesses,evidenceQuality:sourceCount}
               const risk = assessSkillRisk(archive.document)
-              items.push({candidate_id:row.id,created_at:row.created_at,task_id:archive.task_id,generation:Number(archive.generation),archive_id:archive.archive_id,document:archive.document,repository_id:archive.repository_id,risk:risk.risk,risk_reasons:risk.risk==='low'?[]:['manual_review_required'],expected_revision:Number(head?.revision ?? 0),can_draft:binding.permissions.includes('contribute')&&!['rejected','revoked'].includes(head?.state)&&head?.candidate_id!==row.id})
+              items.push({assistance,candidate_id:row.id,created_at:row.created_at,task_id:archive.task_id,generation:Number(archive.generation),archive_id:archive.archive_id,document:archive.document,repository_id:archive.repository_id,risk:risk.risk,risk_reasons:risk.risk==='low'?[]:['manual_review_required'],expected_revision:Number(head?.revision ?? 0),can_draft:binding.permissions.includes('contribute')&&!['rejected','revoked'].includes(head?.state)&&head?.candidate_id!==row.id})
             } else {
-              const d = await detail(client,identity,row.id,lifecycle)
+              const d = await detail(client,identity,row.id,itemSources,lifecycle)
               if(query.state&&d.state!==query.state)continue
               items.push({skill_id:d.skill_id,version_id:d.version_id,version_number:d.version_number,revision:d.revision,state:d.state,title:d.title,risk:d.risk,repository_id:d.repository_id,created_at:d.created_at})
             }
             await client.query('RELEASE SAVEPOINT skill_read_item')
           } catch (error) { await client.query('ROLLBACK TO SAVEPOINT skill_read_item'); if (!(error instanceof SkillReadError) || error.code !== 'not_found') throw error }
+          finally { if(items.length>beforeItems)for(const [versionId,originPolicyStamp] of itemSources)sourceVersions.set(versionId,originPolicyStamp) }
         }
         await authorize(client,identity)
-        return {items,next_cursor:selected.rows.length>limit ? encodeCursor(identity,query,kind,selected.rows[limit-1]!.id) : null,...mode}
+        return {items:candidates?rankAssistedCandidates((items as Array<{candidate_id:string;assistance:{independentSuccesses:number;evidenceQuality:number}}>).map(i=>({...i,id:i.candidate_id,independentSuccesses:i.assistance.independentSuccesses,evidenceQuality:i.assistance.evidenceQuality}))):items,next_cursor:selected.rows.length>limit ? encodeCursor(identity,query,kind,selected.rows[limit-1]!.id) : null,...mode}
       })
     },
-    async archive(identity: SkillIdentity, skillId: string) { return transaction(async client => {
-      const d = await detail(client,identity,skillId)
+    async archive(identity: SkillIdentity, skillId: string) { return transaction(identity,async (client,sourceVersions) => {
+      const d = await detail(client,identity,skillId,sourceVersions)
       const row = (await client.query(`SELECT task_id,generation::text,candidate_key,policy_version,repository_id,repo_snapshot_id,source_kind,source_digest,document_hash,generated_at,content_hash,input_digest,document FROM memory_skill_archives WHERE installation_id=$1 AND archive_id=$2`,[identity.installationId,d.archive_id])).rows[0]
       return {archive_id:d.archive_id,...row,sources:d.sources}
     }) },
-    async diff(identity: SkillIdentity, skillId: string, from: string, to: string) { return transaction(async client => {
+    async diff(identity: SkillIdentity, skillId: string, from: string, to: string) { return transaction(identity,async (client,sourceVersions) => {
       await authorize(client,identity)
       const current=await findSkillVersion(client,identity.installationId,skillId)
       if(!current)return fail('not_found')
@@ -168,14 +187,14 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
       const archives:SkillArchiveSource[]=[]
       for(const row of observed.rows){const archive=await findSkillArchive(client,identity.installationId,row.candidate_id);if(archive)archives.push(archive)}
       const lifecycle=await lockReadSources(client,identity,archives)
-      await detail(client,identity,skillId,lifecycle)
+      await detail(client,identity,skillId,sourceVersions,lifecycle)
       const versions = await client.query<{version_id:string;document:SkillCandidateDocument;candidate_id:string}>(`SELECT version_id,document,candidate_id FROM memory_skill_versions WHERE installation_id=$1 AND skill_id=$2 AND version_id=ANY($3::uuid[])`,[identity.installationId,skillId,[from,to]])
       const a = versions.rows.find(v=>v.version_id===from),b=versions.rows.find(v=>v.version_id===to); if (!a || !b) return fail('not_found')
-      for (const v of versions.rows) { const archive=await findSkillArchive(client,identity.installationId,v.candidate_id); if (!archive) return fail('not_found'); await source(client,identity,archive,lifecycle) }
+      for (const v of versions.rows) { const archive=await findSkillArchive(client,identity.installationId,v.candidate_id); if (!archive) return fail('not_found'); await source(client,identity,archive,sourceVersions,lifecycle) }
       return {from_version_id:from,to_version_id:to,changes:Object.keys(a.document).filter(k=>JSON.stringify(a.document[k as keyof SkillCandidateDocument])!==JSON.stringify(b.document[k as keyof SkillCandidateDocument])).map(field=>({field,before:a.document[field as keyof SkillCandidateDocument],after:b.document[field as keyof SkillCandidateDocument]}))}
     }) },
-    async replay(identity: SkillIdentity, skillId: string) { return transaction(async client => {
-      const d=await detail(client,identity,skillId)
+    async replay(identity: SkillIdentity, skillId: string) { return transaction(identity,async (client,sourceVersions) => {
+      const d=await detail(client,identity,skillId,sourceVersions)
       const run=(await client.query(`SELECT run_id,state,error_code,head_revision::text FROM memory_skill_replay_runs WHERE installation_id=$1 AND skill_id=$2 AND version_id=$3 AND policy_hash=$4 ORDER BY sequence DESC LIMIT 1`,[identity.installationId,skillId,d.version_id,d.policy_hash])).rows[0]
       const counts=()=>({total:0,pending:0,passed:0,failed:0,cancelled:0})
       const kinds={historical_session:counts(),golden_task:counts()},provenance={fixture:0,recorded:0}
@@ -196,6 +215,6 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
       }
       return {run_id:run?.run_id??null,state:run?.state??'not_run',error_code:run && !evidenceCurrent?'evidence_stale':run?.error_code??null,evidence_current:!!run&&evidenceCurrent,eligible:evidenceCurrent&&run?.state==='passed'&&kinds.historical_session.total>0&&kinds.golden_task.total>0&&Object.values(kinds).every(k=>k.total===k.passed),natural_execution_count:0,kinds,provenance}
     }) },
-    async resolve(identity: SkillIdentity, skillId: string) { const d=await transaction(client=>detail(client,identity,skillId)); if(d.state!=='reviewed'||!d.policy_current)return fail('not_found'); return {...d,eligible:false,execution_allowed:false,reason_codes:['product_gate_closed']} },
+    async resolve(identity: SkillIdentity, skillId: string) { const d=await transaction(identity,(client,sourceVersions)=>detail(client,identity,skillId,sourceVersions)); if(d.state!=='reviewed'||!d.policy_current)return fail('not_found'); return {...d,eligible:false,execution_allowed:false,reason_codes:['product_gate_closed']} },
   }
 }

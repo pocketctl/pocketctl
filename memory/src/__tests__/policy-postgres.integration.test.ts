@@ -329,6 +329,7 @@ describeWithDatabase('versioned policies (PostgreSQL)', () => {
   })
 
   test('extraction reservation is policy-bound: same policy dedupes, changed policy reruns', async () => {
+    await pool.query("INSERT INTO memory_feature_settings(installation_id,extraction_mode) VALUES($1,'enabled')",[INSTALLATION])
     await pool.query(`
       INSERT INTO source_sessions (installation_id, session_id, first_recorded_at, last_recorded_at)
       VALUES ($1, 'ses-p', NOW(), NOW())
@@ -347,6 +348,7 @@ describeWithDatabase('versioned policies (PostgreSQL)', () => {
     const episodeId = (await pool.query<{ episode_id: string }>(
       `SELECT episode_id::text FROM work_episodes LIMIT 1`)).rows[0].episode_id
     const digest = Buffer.alloc(32, 3)
+    await pool.query('UPDATE work_episodes SET source_digest=$2 WHERE episode_id=$1',[episodeId,digest])
     const base = {
       installationId: INSTALLATION,
       episodeId,

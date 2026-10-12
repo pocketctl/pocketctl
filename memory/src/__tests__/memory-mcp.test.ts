@@ -1,3 +1,5 @@
+import { applyMemorySchema } from '../schema.js'
+import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import Fastify, { type FastifyInstance } from 'fastify'
 import pg from 'pg'
 import { generateKeyPairSync } from 'crypto'
@@ -67,6 +69,8 @@ describeWithDatabase('memory MCP endpoint (PostgreSQL + real grants)', () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 4 })
+    await assertMemoryTestDatabase(pool, databaseUrl!)
+    await applyMemorySchema(pool)
     const pair = generateKeyPairSync('rsa', { modulusLength: 2048 })
     keys = resolveGrantKeyMaterial({
       EXTENSION_GRANT_PRIVATE_KEY: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
@@ -146,7 +150,7 @@ describeWithDatabase('memory MCP endpoint (PostgreSQL + real grants)', () => {
     expect((body.result as { protocolVersion: string }).protocolVersion).toBeTruthy()
   })
 
-  test('tools/list exposes exactly the fourteen read-only tools', async () => {
+  test('tools/list exposes exactly the sixteen read-only tools', async () => {
     const response = await post(rpc('tools/list', {}))
     expect(response.statusCode).toBe(200)
     const parsed = parseRpc(response)
@@ -157,12 +161,14 @@ describeWithDatabase('memory MCP endpoint (PostgreSQL + real grants)', () => {
       'memory_get_claim',
       'memory_get_code_graph',
       'memory_get_evidence',
+      'memory_get_evidence_reference',
       'memory_get_repository_context',
       'memory_get_skill',
       'memory_get_wiki_page',
       'memory_git_diff',
       'memory_git_status',
       'memory_list_skills',
+      'memory_read_evidence_content',
       'memory_recall',
       'memory_resolve_skill',
       'memory_search',
@@ -342,4 +348,25 @@ describeWithDatabase('memory MCP endpoint (PostgreSQL + real grants)', () => {
       await limitedApp.close()
     }
   })
+  test('bound evidence tools use a real signed read grant and reject a stale version',async()=>{
+    const claim=(await pool.query(`INSERT INTO knowledge_claims(claim_id,installation_id,claim_type,scope_kind,scope_key,normalized_key,state)
+      VALUES(gen_random_uuid(),$1,'test_invariant','installation','','mcp-evidence-reference','active') RETURNING claim_id`,[INSTALLATION])).rows[0].claim_id
+    const version=(await pool.query(`INSERT INTO knowledge_versions(version_id,installation_id,claim_id,version_number,statement,authority,confidence)
+      VALUES(gen_random_uuid(),$1,$2,1,'Bound source evidence','user_accepted',.9) RETURNING version_id`,[INSTALLATION,claim])).rows[0].version_id
+    await pool.query('UPDATE knowledge_claims SET current_version_id=$2 WHERE claim_id=$1',[claim,version])
+    const episode=(await pool.query(`INSERT INTO work_episodes(installation_id,episode_id,session_id,turn_id,state,compiler_version)
+      VALUES($1,gen_random_uuid(),'mcp-evidence','mcp-evidence','ready','test') RETURNING episode_id`,[INSTALLATION])).rows[0].episode_id
+    const evidence=(await pool.query(`INSERT INTO knowledge_evidence(evidence_id,installation_id,version_id,episode_id,evidence_kind,excerpt,excerpt_hash,occurred_at,ordinal)
+      VALUES(gen_random_uuid(),$1,$2,$3,'episode','Bound source evidence',sha256('Bound source evidence'::bytea),clock_timestamp(),0) RETURNING evidence_id`,[INSTALLATION,version,episode])).rows[0].evidence_id
+    const summaryResponse=await post(rpc('tools/call',{name:'memory_get_evidence_reference',arguments:{evidence_id:evidence}}))
+    const summary=JSON.parse((parseRpc(summaryResponse) as {result:{content:Array<{text:string}>}}).result.content[0].text)
+    expect(summary.reference).toMatchObject({evidence_id:evidence,version_id:version,excerpt_hash:expect.stringMatching(/^[a-f0-9]{64}$/)})
+    const readResponse=await post(rpc('tools/call',{name:'memory_read_evidence_content',arguments:{evidence_id:evidence,version_id:version,excerpt_hash:summary.reference.excerpt_hash}}))
+    const read=JSON.parse((parseRpc(readResponse) as {result:{content:Array<{text:string}>}}).result.content[0].text)
+    expect(read.content).toBe('Bound source evidence')
+    await pool.query("UPDATE knowledge_claims SET state='revoked' WHERE claim_id=$1",[claim])
+    const denied=await post(rpc('tools/call',{name:'memory_read_evidence_content',arguments:{evidence_id:evidence,version_id:version,excerpt_hash:summary.reference.excerpt_hash}}))
+    expect(JSON.parse((parseRpc(denied) as {result:{content:Array<{text:string}>}}).result.content[0].text)).toEqual({error:{code:'not_found'}})
+  })
+
 })

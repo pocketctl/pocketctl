@@ -35,6 +35,7 @@ export interface ContextRouteDeps {
   packs: PackRepository
   settings: ContextSettingsRepository
   loadouts: LoadoutRepository
+  sharedScopesEnabled?:boolean
   requestKey: { keyId: string; hmacKey: Buffer }
 }
 
@@ -114,11 +115,14 @@ interface CompileBody {
   session_id?: unknown
   agent?: unknown
   adapter_capability?: unknown
+  evidence_read_capability?:unknown
   repository_hint?: {
     repository_id?: unknown
     branch?: unknown
     commit_sha?: unknown
+    repo_snapshot_id?:unknown
   } | null
+  task_scope_key?:unknown
   query?: unknown
   selected_references?: unknown
 }
@@ -161,7 +165,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       })
     }
     if (grant.callerType !== 'daemon') throw new MemoryApiError('forbidden', 'caller type not permitted')
-    if (!('version' in grant) && grant.sessionId !== sessionId) {
+    if (grant.sessionId !== sessionId) {
       throw new MemoryApiError('unauthorized', 'grant rejected')
     }
     return grant
@@ -185,7 +189,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     grant: Awaited<ReturnType<typeof daemonGuard>>,
     installationId: string,
   ): boolean => 'version' in grant && grant.version === 'v2'
-    && grant.primaryInstallationId === installationId
+    && (grant.primaryInstallationId === installationId || deps.sharedScopesEnabled===true)
     && Boolean(grant.scopeBindings.find(binding => binding.installation_id === installationId)
       ?.permissions.includes('read'))
 
@@ -246,8 +250,10 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       || !boundedString(body.session_id, 64)
       || !boundedString(body.agent, 64)
       || (body.adapter_capability !== 'native_hidden_v1' && body.adapter_capability !== 'shadow_only')
+      ||(body.evidence_read_capability!==undefined&&!['bounded_excerpt_v1','on_demand_v1'].includes(String(body.evidence_read_capability)))
       || typeof body.query !== 'string'
       || references === null
+      || !optionalBoundedString(body.task_scope_key,512)
       || (body.repository_hint != null
         && (typeof body.repository_hint !== 'object'
           || (body.repository_hint.repository_id !== undefined
@@ -258,14 +264,16 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
               || body.repository_hint.branch.length > 255))
           || (body.repository_hint.commit_sha !== undefined
             && (typeof body.repository_hint.commit_sha !== 'string'
-              || !COMMIT_SHA_RE.test(body.repository_hint.commit_sha)))))) {
+              || !COMMIT_SHA_RE.test(body.repository_hint.commit_sha)))
+          || !optionalUuid(body.repository_hint.repo_snapshot_id)))) {
       throw new MemoryApiError('invalid_request', 'invalid compile body')
     }
     const query = truncateUtf8(body.query, MAX_QUERY_BYTES)
 
     // Session binding: the body session MUST equal the grant session.
     const grant = await daemonGuard(req.headers.authorization, body.session_id)
-    if (references.length > 0 && !sharedAuthorized(grant, grant.installationId)) {
+    if (references.length > 0 && (!sharedAuthorized(grant, grant.installationId)
+      || references.some(reference=>!sharedAuthorized(grant,reference.installation_id)))) {
       throw new MemoryApiError('forbidden', 'shared Context requires a readable v2 scope grant')
     }
     if (deps.rateLimiter && !deps.rateLimiter.check(`context:${grant.installationId}`).allowed) {
@@ -279,6 +287,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       clientRequestId: body.client_request_id,
       agent: body.agent,
       adapterCapability: body.adapter_capability,
+      evidenceReadCapability:body.evidence_read_capability==='on_demand_v1'&&body.adapter_capability==='native_hidden_v1'?'on_demand_v1':undefined,
       repositoryId: typeof body.repository_hint?.repository_id === 'string'
         && UUID_RE.test(body.repository_hint.repository_id)
         ? body.repository_hint.repository_id : null,
@@ -286,9 +295,13 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
         ? body.repository_hint?.repository_id : null,
       branch: typeof body.repository_hint?.branch === 'string'
         ? body.repository_hint.branch : null,
+      repoSnapshotId:typeof body.repository_hint?.repo_snapshot_id==='string'?body.repository_hint.repo_snapshot_id:null,
+      commitSha:typeof body.repository_hint?.commit_sha==='string'?body.repository_hint.commit_sha:null,
+      taskScopeKey:typeof body.task_scope_key==='string'?body.task_scope_key:null,
       query,
       requestKey: deps.requestKey,
       selectedReferences: references,
+      ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     })
 
     switch (outcome.kind) {
@@ -302,9 +315,16 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
           reason: outcome.reason,
           degraded_components: outcome.degradedComponents,
         }
-      case 'ready':
+      case 'ready':{
+        let evidenceCapability='bounded_excerpt_v1'
+        if(body.evidence_read_capability==='on_demand_v1'&&body.adapter_capability==='native_hidden_v1'){
+          const proof=(await deps.pool.query(`SELECT count(*)::int AS n,bool_and(evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
+            FROM memory_context_pack_evidence WHERE pack_id=$1`,[outcome.packId])).rows[0]
+          if(proof?.n>0&&proof.proven)evidenceCapability='on_demand_v1'
+        }
         return {
           outcome: 'ready',
+          ...(body.evidence_read_capability?{evidence_read_capability:evidenceCapability}:{}),
           pack: {
             pack_id: outcome.packId,
             stable_tokens: outcome.stableTokens,
@@ -313,6 +333,9 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
           },
           admission_required: true,
         }
+      }
+      case 'degraded':
+        return { outcome: 'degraded', reason: outcome.reason }
       case 'retrieval_failed':
         return { outcome: 'degraded', reason: 'retrieval_failed' }
       default:
@@ -347,6 +370,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       adapter: body.adapter,
       grantConfigVersion: grant.configVersion,
       sharedGrantAuthorized: sharedAuthorized(grant, grant.installationId),
+      ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     })
     if (!result.ok) {
       reply.code(result.error === 'pack_not_ready' ? 404 : 409)
@@ -383,6 +407,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       packId,
       injectionId: query.injection_id,
       nonce: query.nonce,
+      ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     })
     if (!result.ok) {
       reply.code(result.error === 'expired' ? 410 : result.error === 'already_consumed' ? 409 : 404)

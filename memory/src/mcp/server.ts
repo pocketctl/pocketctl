@@ -1,3 +1,4 @@
+import type {SearchServiceDeps} from '../retrieval/search-service.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { McpServer, createMcpHandler, type McpHttpHandler } from '@modelcontextprotocol/server'
 import type { FastifyInstance } from 'fastify'
@@ -34,6 +35,7 @@ export interface McpRouteDeps {
   recallEmbeddingTimeoutMs: number
   cursorSigningKey: string
   embed?: EmbeddingProvider & { provider: string; model: string }
+  onRecallMetrics?:SearchServiceDeps['onRecallMetrics']
   embeddingConsentFingerprint?: string
   sharedScopesEnabled?: boolean
 }
@@ -43,6 +45,7 @@ export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
     const server = new McpServer({ name: 'pocketctl-memory', version: deps.providerVersion })
     registerMemoryTools(server, {
       pool: deps.pool,
+      onRecallMetrics:deps.onRecallMetrics,
       gitOnly: deps.gitOnly,
       ...(deps.gitReads ? { gitReads: deps.gitReads } : {}),
       ...(deps.skillContext ? { skillContext: deps.skillContext } : {}),

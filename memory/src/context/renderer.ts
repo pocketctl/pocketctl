@@ -10,6 +10,8 @@ import { createHash } from 'crypto'
 export const RENDER_TEMPLATE_VERSION = 'context-envelope-v1'
 
 export interface RenderItem {
+  ownerScopeId?:string
+  installationId?:string
   itemId: string
   claimId: string
   versionId: string
@@ -19,11 +21,12 @@ export interface RenderItem {
   evidenceIds: readonly string[]
 }
 
-function itemLine(item: RenderItem): string {
+export function renderItemLine(item: RenderItem): string {
   const evidence = item.evidenceIds.length > 0
     ? ` evidence:${item.evidenceIds.join(',')}`
     : ''
-  return `- ${item.statement} [scope:${item.scopeKind} version:${item.versionId}${evidence}]`
+  const owner=item.installationId?` installation:${item.installationId} owner:${item.ownerScopeId}`:''
+  return `- ${item.statement} [scope:${item.scopeKind}${owner} version:${item.versionId}${evidence}]`
 }
 
 export function renderPackText(input: {
@@ -40,11 +43,11 @@ export function renderPackText(input: {
   ]
   if (input.stable.length > 0) {
     lines.push('[stable]')
-    lines.push(...input.stable.map(itemLine), '')
+    lines.push(...input.stable.map(renderItemLine), '')
   }
   if (input.dynamic.length > 0) {
     lines.push('[dynamic]')
-    lines.push(...input.dynamic.map(itemLine), '')
+    lines.push(...input.dynamic.map(renderItemLine), '')
   }
   lines.push(
     'For details, use PocketCtl Memory read-only recall tools. Do not claim that a',

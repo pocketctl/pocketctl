@@ -1,6 +1,6 @@
 import type pg from 'pg'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
-import { createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
+import {assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
 
 export type GitPermission = 'read' | 'contribute' | 'review' | 'publish' | 'scope_admin'
 export interface GitAuthorizationStamp {
@@ -96,4 +96,9 @@ export async function requireCurrentGitAuthorization(client: pg.PoolClient, stam
   permission: GitPermission): Promise<GitAuthorizationStamp> {
   await lockMirrors(client, [stamp.installationId])
   return currentStamp(client, stamp, permission, 'git_authorization_stale')
+}
+
+export async function assertGitGrantClock(client:Pick<pg.PoolClient,'query'>,grant:V2GrantFacts,selectedInstallationIds:readonly string[]=[]):Promise<void>{
+  try {await assertCurrentGrantClock(client,grant,selectedInstallationIds)}
+  catch(error){if(error instanceof TargetBindingError)throw new Error('git_forbidden');throw error}
 }

@@ -68,7 +68,8 @@
               :scopes="governanceScopes" />
             <MemoryGovernanceQueue v-if="governanceTarget" :entries="governanceQueue"
               :loading="governanceLoading" :error="governanceError"
-              @decide="decideGovernance" @publish="publishGovernance" />
+              @decide="decideGovernance" @publish="publishGovernance" :bulk-results="bulkReviewResults" @bulk="bulkGovernance" @revise="reviseGovernance" :executors="publicationExecutors" @delegate="createDelegation" />
+            <div v-if="pendingDelegations.length" class="memory-governance-actions"><p>{{ t('memory.governance.delegation.pending') }}</p><button v-for="d in pendingDelegations" :key="d.id" type="button" class="memory-button" @click="revokeDelegation(d.id)">{{ t('memory.governance.delegation.revoke') }} · {{ d.candidateId }}</button></div>
             <MemoryConflictPanel v-if="conflictCandidates.length" :candidates="conflictCandidates"
               :claims="conflictClaims" @resolve="resolveGovernanceConflict" />
             <MemoryScopeMembers v-if="selectedGovernanceScope?.owner_scope_kind !== 'personal' && canManageScope"
@@ -76,7 +77,7 @@
               :loading="governanceMembersLoading" @change-role="changeMemberRole" @revoke="revokeMember" />
             <MemoryReviewPolicyEditor v-if="selectedGovernanceScope?.owner_scope_kind !== 'personal'"
               :document="reviewPolicyDocument" :revision="reviewPolicyRevision"
-              :can-edit="canEditReviewPolicy" @save="saveGovernanceReviewPolicy" />
+              :can-edit="canEditReviewPolicy" :automation-policy="automationPolicy" @save-automation="saveAutomation" @save="saveGovernanceReviewPolicy" />
             <div v-if="canManageScope && selectedGovernanceScope?.owner_scope_kind !== 'personal'"
               class="memory-governance-actions">
               <button type="button" @click="pendingLifecycleState = 'suspended'">
@@ -179,7 +180,7 @@ import { useLocale } from '../composables/useLocale'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import {
   currentMemoryInstallation, decideGovernanceCandidate, discoverMemoryInstallation,
-  enableMemoryServices, getReviewPolicy, listGovernanceQueue, listGovernanceScopes,
+  listPublicationExecutors,delegatePublication,revokePublicationDelegation,reviseGovernanceCandidate,bulkDecideGovernance,getAutomationReviewPolicy,saveAutomationReviewPolicy,enableMemoryServices, getReviewPolicy, listGovernanceQueue, listGovernanceScopes,
   listScopeMembers, publishGovernanceCandidate, saveReviewPolicy, updateScopeMember,
   proposeGovernanceClaim, startScopeTransfer, updateScopeLifecycle,
 } from '../services/memoryClient'
@@ -225,6 +226,11 @@ const governanceScopesError = ref('')
 const governanceTarget = ref('')
 const wikiTarget = ref('')
 const governanceQueue = ref<MemoryGovernanceQueueEntry[]>([])
+const publicationExecutors=ref<import('../types/memory').MemoryExecutorPrincipal[]>([])
+const pendingDelegations=ref<Array<{id:string;candidateId:string}>>([])
+const bulkReviewResults=ref<import('../types/memory').MemoryBulkDecisionResult[]>([])
+const reviewStarted=ref(performance.now())
+const automationPolicy=ref<import('../types/memory').MemoryAutomationPolicyState|null>(null)
 const governanceLoading = ref(false)
 const governanceError = ref<string | null>(null)
 const governanceMembers = ref<MemoryScopeMember[]>([])
@@ -355,6 +361,9 @@ async function loadGovernanceWorkspace(): Promise<void> {
   await loadGovernanceQueue()
   const scope = selectedGovernanceScope.value
   governanceMembers.value = []
+  publicationExecutors.value=[];pendingDelegations.value=[]
+  automationPolicy.value=null
+  bulkReviewResults.value=[]
   reviewPolicyDocument.value = null
   reviewPolicyRevision.value = 0
   if (!scope || scope.owner_scope_kind === 'personal') return
@@ -370,6 +379,8 @@ async function loadGovernanceWorkspace(): Promise<void> {
   }
   try {
     const policy = await getReviewPolicy(scope.installation_id)
+    automationPolicy.value=await getAutomationReviewPolicy(scope.installation_id)
+    if(scope.permissions.includes('publish'))publicationExecutors.value=(await listPublicationExecutors(scope.installation_id)).principals
     reviewPolicyRevision.value = policy.head?.revision ?? 0
     reviewPolicyDocument.value = policy.versions.find(
       version => version.policyVersionId === policy.head?.activeVersionId)?.document ?? null
@@ -384,12 +395,32 @@ async function loadGovernanceQueue(): Promise<void> {
   governanceError.value = null
   try {
     governanceQueue.value = (await listGovernanceQueue(governanceTarget.value)).queue
+    reviewStarted.value=performance.now()
   } catch (err) {
     governanceQueue.value = []
     governanceError.value = err instanceof Error ? err.message : 'governance queue unavailable'
   } finally {
     governanceLoading.value = false
   }
+}
+
+async function createDelegation(input:{candidateId:string;principalId:string}){
+ const entry=governanceQueue.value.find(e=>e.candidate.candidate_id===input.candidateId);if(!entry?.current_revision?.bundle_hash)return
+ try{const result=await delegatePublication({targetInstallationId:governanceTarget.value,candidateId:input.candidateId,expectedRevision:entry.candidate.revision,expectedHash:entry.current_revision.bundle_hash,principalId:input.principalId,expiresAt:new Date(Date.now()+5*60000).toISOString()});pendingDelegations.value.push({id:result.delegationId,candidateId:input.candidateId})}catch(e){governanceError.value=e instanceof Error?e.message:'delegation failed'}
+}
+async function revokeDelegation(id:string){try{await revokePublicationDelegation(governanceTarget.value,id);pendingDelegations.value=pendingDelegations.value.filter(d=>d.id!==id)}catch(e){governanceError.value=e instanceof Error?e.message:'delegation revoke failed'}}
+async function reviseGovernance(input:{candidateId:string;statement:string;retainedOrdinals:number[]}){
+ const entry=governanceQueue.value.find(e=>e.candidate.candidate_id===input.candidateId);if(!entry)return
+ try{await reviseGovernanceCandidate({targetInstallationId:governanceTarget.value,candidateId:input.candidateId,expectedRevision:entry.candidate.revision,statement:input.statement,structuredContent:entry.current_revision?.structured_content??{},retainedOrdinals:input.retainedOrdinals,removedOrdinals:(entry.evidence??[]).filter(e=>!input.retainedOrdinals.includes(e.ordinal)).map(e=>e.ordinal)});await loadGovernanceQueue()}catch(e){governanceError.value=e instanceof Error?e.message:'revision failed'}
+}
+async function bulkGovernance(items:import('../types/memory').MemoryBulkDecisionItem[]){
+ governanceLoading.value=true
+ try{bulkReviewResults.value=(await bulkDecideGovernance({targetInstallationId:governanceTarget.value,items})).results;await loadGovernanceQueue()}
+ catch(e){governanceError.value=e instanceof Error?e.message:'bulk review failed'}finally{governanceLoading.value=false}
+}
+async function saveAutomation(document:NonNullable<import('../types/memory').MemoryAutomationPolicyState['document']>){
+ if(!automationPolicy.value||!canEditReviewPolicy.value)return
+ try{await saveAutomationReviewPolicy({targetInstallationId:governanceTarget.value,expectedRevision:automationPolicy.value.revision,document});automationPolicy.value=await getAutomationReviewPolicy(governanceTarget.value)}catch(e){governanceError.value=e instanceof Error?e.message:'automation policy failed'}
 }
 
 async function decideGovernance(candidateId: string, decision: 'approve' | 'request_changes' | 'reject') {
@@ -399,7 +430,7 @@ async function decideGovernance(candidateId: string, decision: 'approve' | 'requ
     await decideGovernanceCandidate({
       installationIds: [governanceTarget.value], candidateId,
       targetInstallationId: governanceTarget.value,
-      expectedRevision: entry.candidate.revision,
+      expectedRevision: entry.candidate.revision,expectedHash:entry.current_revision?.bundle_hash??undefined,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value))),
       decision,
     })
     await loadGovernanceQueue()

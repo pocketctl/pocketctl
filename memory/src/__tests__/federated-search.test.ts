@@ -65,6 +65,16 @@ function scope(installationId: string, kind: SelectedScope['ownerScopeKind'] = '
 }
 
 describe('federated scope selection', () => {
+  test('default personal reads also require the primary binding read permission', () => {
+    const restricted=grant()
+    restricted.scopeBindings[0].permissions=[]
+    expect(()=>defaultReadInstallationId({...restricted,version:'v2',installationId:PERSONAL,services:['memory.search'],callerType:'web'})).toThrow(FederatedScopeSelectionError)
+  })
+  test('a selected binding without read permission cannot enter the query pool', () => {
+    const restricted=grant()
+    restricted.scopeBindings[1].permissions=['contribute']
+    expect(()=>selectFederatedScopes({grant:restricted,requestedInstallationIds:[TEAM],sharedScopesEnabled:true})).toThrow(FederatedScopeSelectionError)
+  })
   test('defaults to the primary personal installation only', () => {
     const selected = selectFederatedScopes({
       grant: grant(), requestedInstallationIds: null, sharedScopesEnabled: false,

@@ -114,6 +114,10 @@ async function ensurePolicyHead(
   installationId: string,
   document: ReviewPolicyDocument,
 ): Promise<void> {
+  // Existing heads need no exclusive set lock. Policy updates lock the head
+  // before appending a version (FK key-share on the set); set->head here
+  // would invert that order. Missing-head bootstrap remains serialized.
+  if((await client.query(`SELECT 1 FROM memory_review_policy_heads h JOIN memory_review_policy_sets s USING(policy_id) WHERE s.installation_id=$1`,[installationId])).rowCount)return
   await client.query(`
     INSERT INTO memory_review_policy_sets (policy_id, installation_id)
     VALUES (gen_random_uuid(), $1)
@@ -175,62 +179,42 @@ export async function loadEffectiveReviewPolicySnapshot(
   installationId: string,
   options: { ensure?: boolean } = {},
 ): Promise<EffectiveReviewPolicySnapshot> {
-  const scope = await client.query<{
-    owner_scope_kind: string
-    parent_organization_id: string | null
-  }>(`
-    SELECT owner_scope_kind, parent_organization_id::text
-    FROM memory_owner_scopes
-    WHERE installation_id = $1
-    FOR SHARE
-  `, [installationId])
-  const row = scope.rows[0]
-  if (!row || !['team', 'organization'].includes(row.owner_scope_kind)) {
-    throw new Error('shared review policy scope missing')
+  async function scopeRows(query:string,ids:unknown[]){
+   return client.query<{installation_id:string;owner_scope_kind:string;parent_organization_id:string|null;alive:boolean}>(query,ids)
   }
-  const scopeKind = row.owner_scope_kind as 'team' | 'organization'
-  const targetDefault = scopeKind === 'organization'
-    ? DEFAULT_ORGANIZATION_REVIEW_POLICY
-    : DEFAULT_TEAM_REVIEW_POLICY
-  if (options.ensure) await ensurePolicyHead(client, installationId, targetDefault)
-  const target = await readPolicyHead(client, installationId)
-  if (!target) throw new Error('review policy head missing')
-  const targetPolicy = resolveEffectivePolicy(targetDefault, target.document)
+  const alive=`s.state='active' AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error')
+    AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t WHERE t.owner_scope_kind=s.owner_scope_kind AND t.owner_scope_id=s.owner_scope_id AND t.authorization_epoch>=s.authorization_epoch)`
+  const scope=await scopeRows(`SELECT s.installation_id,s.owner_scope_kind,s.parent_organization_id::text,(${alive}) AS alive
+    FROM memory_owner_scopes s JOIN memory_installations i USING(installation_id) WHERE s.installation_id=$1 FOR SHARE OF s,i`,[installationId])
+  const row=scope.rows[0]
+  if(!row||!row.alive||!['team','organization'].includes(row.owner_scope_kind))throw new ReviewPolicyScopeStaleError()
+  const scopeKind=row.owner_scope_kind as 'team'|'organization'
+  let parentInstallationId:string|null=null
+  if(scopeKind==='team'&&row.parent_organization_id){
+   const parent=await scopeRows(`SELECT s.installation_id,s.owner_scope_kind,s.parent_organization_id::text,(${alive}) AS alive
+     FROM memory_owner_scopes s JOIN memory_installations i USING(installation_id)
+     WHERE s.owner_scope_kind='organization' AND s.owner_scope_id=$1 FOR SHARE OF s,i`,[row.parent_organization_id])
+   if(parent.rows[0]&&!parent.rows[0].alive)throw new ReviewPolicyScopeStaleError()
+   if(!parent.rows[0]&&(await client.query("SELECT 1 FROM memory_scope_tombstones WHERE owner_scope_kind='organization' AND owner_scope_id=$1 LIMIT 1",[row.parent_organization_id])).rowCount)throw new ReviewPolicyScopeStaleError()
+   parentInstallationId=parent.rows[0]?.installation_id??null
+  }
+  // Resolve/lock parent policy before child policy. Missing Memory installation
+  // remains the explicit code-floor bridge; installed inactive parents do not.
+  if(parentInstallationId&&options.ensure)await ensurePolicyHead(client,parentInstallationId,DEFAULT_ORGANIZATION_REVIEW_POLICY)
+  const parent=parentInstallationId?await readPolicyHead(client,parentInstallationId):null
+  const targetDefault=scopeKind==='organization'?DEFAULT_ORGANIZATION_REVIEW_POLICY:DEFAULT_TEAM_REVIEW_POLICY
+  if(options.ensure)await ensurePolicyHead(client,installationId,targetDefault)
+  const target=await readPolicyHead(client,installationId)
+  if(!target)throw new Error('review policy head missing')
+  const targetPolicy=resolveEffectivePolicy(targetDefault,target.document)
+  const policy=scopeKind==='team'&&row.parent_organization_id
+   ?resolveEffectivePolicy(parent?resolveEffectivePolicy(DEFAULT_ORGANIZATION_REVIEW_POLICY,parent.document):DEFAULT_ORGANIZATION_REVIEW_POLICY,targetPolicy)
+   :targetPolicy
+  return {scopeKind,activeVersionId:target.activeVersionId,parentActiveVersionId:parent?.activeVersionId??null,policy}
+}
 
-  if (scopeKind === 'organization' || !row.parent_organization_id) {
-    return {
-      scopeKind,
-      activeVersionId: target.activeVersionId,
-      parentActiveVersionId: null,
-      policy: targetPolicy,
-    }
-  }
-
-  const parentScope = await client.query<{ installation_id: string }>(`
-    SELECT installation_id::text
-    FROM memory_owner_scopes
-    WHERE owner_scope_kind = 'organization' AND owner_scope_id = $1
-    FOR SHARE
-  `, [row.parent_organization_id])
-  const parentInstallationId = parentScope.rows[0]?.installation_id
-  if (parentInstallationId && options.ensure) {
-    await ensurePolicyHead(client, parentInstallationId, DEFAULT_ORGANIZATION_REVIEW_POLICY)
-  }
-  // A Team's Organization need not have Memory installed or a policy head yet.
-  // Reads inherit its code-owned floor without creating an installation/head.
-  // Null provenance fences this revision once a real parent head appears.
-  const parent = parentInstallationId
-    ? await readPolicyHead(client, parentInstallationId)
-    : null
-  const parentPolicy = parent
-    ? resolveEffectivePolicy(DEFAULT_ORGANIZATION_REVIEW_POLICY, parent.document)
-    : DEFAULT_ORGANIZATION_REVIEW_POLICY
-  return {
-    scopeKind,
-    activeVersionId: target.activeVersionId,
-    parentActiveVersionId: parent?.activeVersionId ?? null,
-    policy: resolveEffectivePolicy(parentPolicy, targetPolicy),
-  }
+export class ReviewPolicyScopeStaleError extends Error{
+ constructor(){super('review_policy_scope_stale');this.name='ReviewPolicyScopeStaleError'}
 }
 
 export class ReviewPolicyRevisionConflictError extends Error {
@@ -260,46 +244,18 @@ export function createReviewPolicyRepository(pool: pg.Pool) {
       try {
         await client.query('BEGIN')
         try {
-          const set = await client.query<{ policy_id: string }>(`
-            INSERT INTO memory_review_policy_sets (policy_id, installation_id)
-            VALUES ($1, $2)
-            ON CONFLICT (installation_id) DO NOTHING
-            RETURNING policy_id
-          `, [randomUUID(), installationId])
-          const policyId = set.rows[0]?.policy_id
-            ?? (await client.query<{ policy_id: string }>(
-              `SELECT policy_id FROM memory_review_policy_sets WHERE installation_id = $1`,
-              [installationId],
-            )).rows[0].policy_id
-          const existing = await client.query<{ policy_version_id: string }>(`
-            SELECT active_version_id AS policy_version_id FROM memory_review_policy_heads
-            WHERE policy_id = $1
-          `, [policyId])
-          if (existing.rows[0]) {
-            await client.query('COMMIT')
-            const head = await this.getHead(installationId)
-            return {
-              policyId,
-              policyVersionId: existing.rows[0].policy_version_id,
-              versionNumber: head?.revision ?? 1,
-            }
-          }
-          const version = await client.query<{ policy_version_id: string }>(`
-            INSERT INTO memory_review_policy_versions
-              (policy_version_id, policy_id, version_number, document, content_hash)
-            VALUES ($1, $2, 1, $3::jsonb, $4)
-            RETURNING policy_version_id
-          `, [randomUUID(), policyId, JSON.stringify(document), canonicalReviewPolicyHash(document)])
-          await client.query(`
-            INSERT INTO memory_review_policy_heads (policy_id, active_version_id, revision)
-            VALUES ($1, $2, 1)
-          `, [policyId, version.rows[0].policy_version_id])
+          await ensurePolicyHead(client, installationId, document)
+          // Read the active immutable version and its own number in the same
+          // transaction. Head CAS revisions can advance when rolling back.
+          const current = await client.query<{policy_id:string;policy_version_id:string;version_number:string}>(`
+            SELECT s.policy_id,h.active_version_id AS policy_version_id,v.version_number::text
+            FROM memory_review_policy_sets s JOIN memory_review_policy_heads h USING(policy_id)
+            JOIN memory_review_policy_versions v ON v.policy_version_id=h.active_version_id
+            WHERE s.installation_id=$1 FOR SHARE OF h`, [installationId])
+          const row=current.rows[0]
+          if(!row)throw new Error('review policy head missing')
           await client.query('COMMIT')
-          return {
-            policyId,
-            policyVersionId: version.rows[0].policy_version_id,
-            versionNumber: 1,
-          }
+          return {policyId:row.policy_id,policyVersionId:row.policy_version_id,versionNumber:Number(row.version_number)}
         } catch (error) {
           await client.query('ROLLBACK')
           throw error

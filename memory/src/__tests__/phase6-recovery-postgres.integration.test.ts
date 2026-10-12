@@ -57,6 +57,17 @@ db('Phase 6 retained metadata recovery with fresh authority',()=>{
     expect((await pool.query('SELECT unfinished,attempts FROM memory_git_run_receipts WHERE run_id=$1',[s.queued.runId])).rows[0]).toMatchObject({unfinished:true,attempts:expect.any(Number)})
     expect((await pool.query('SELECT count(*)::int n FROM memory_git_snapshots')).rows[0].n).toBe(0)
   })
+  test.each(['entry','during_admission'])('recovery %s expiry rejects without reviving an old run',async boundary=>{
+    const s=await setup(),{createGitRecoveryService}=await import('../git-sync/recovery-service.js')
+    const before=(await pool.query('SELECT count(*)::int AS n FROM memory_git_runs')).rows[0].n
+    const expiresAt=boundary==='entry'?1:Number((await pool.query('SELECT extract(epoch FROM clock_timestamp())::float8 AS now')).rows[0].now)+0.7
+    const reads={resolve:async(...args:Parameters<typeof s.reads.resolve>)=>{
+      if(boundary==='during_admission')await pool.query('SELECT pg_sleep(GREATEST(0,$1-extract(epoch FROM clock_timestamp()))::float8)',[expiresAt+0.01])
+      return s.reads.resolve(...args)
+    }}
+    await expect(createGitRecoveryService({...s.deps,recoveryReads:reads}).admit({...s.fresh.grant,expiresAt},s.request)).rejects.toThrow('git_forbidden')
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_git_runs')).rows[0].n).toBe(before)
+  })
   test.each(['cancelled','dead','closed'] as const)('recovery never revives an old %s run',async terminal=>{
     const s=await setup('github','pull','after',terminal),{createGitRecoveryService}=await import('../git-sync/recovery-service.js')
     const current=await createGitRecoveryService({...s.deps,recoveryReads:s.reads}).admit(s.fresh.grant,s.request)

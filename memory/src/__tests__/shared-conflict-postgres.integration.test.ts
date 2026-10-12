@@ -1,9 +1,12 @@
+import {confirmRepositoryApplicabilityFixture} from '../testing/governance-applicability-fixture.js'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema, MEMORY_MIGRATIONS } from '../schema.js'
+import { createPromotionRepository } from '../governance/promotion-repository.js'
 import { createPromotionService } from '../governance/promotion-service.js'
 import { createPublicationService, createSharedClaimLifecycle, PublicationError } from '../governance/publication-service.js'
 import type { ValidatedV2Grant } from '../governance/authorization.js'
+import {normalizedClaimKey} from '../retrieval/query-normalizer.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -21,6 +24,8 @@ const REVIEWER = 'fffffff0-0000-4000-8000-000000000022'
 const PUBLISHER = 'fffffff0-0000-4000-8000-000000000023'
 const TARGET_CLAIM = 'fffffff0-0000-4000-8000-000000000031'
 const TARGET_VERSION = 'fffffff0-0000-4000-8000-000000000032'
+const STATEMENT = 'Use environment-specific test commands'
+const NORMALIZED_KEY = normalizedClaimKey({claimType:'repository_convention',scopeKey:'/repo',statement:STATEMENT})
 
 function grantFor(membershipId: string, permissions: string[]): ValidatedV2Grant {
   return {
@@ -39,7 +44,7 @@ function grantFor(membershipId: string, permissions: string[]): ValidatedV2Grant
       {
         installation_id: TEAM,
         owner_scope_kind: 'team',
-        owner_scope_id: 'fffffff0-0000-4000-8000-000000000041',
+        owner_scope_id: TEAM,
         membership_id: membershipId,
         membership_revision: '2',
         authorization_epoch: '1',
@@ -100,13 +105,13 @@ describeWithDatabase('shared conflict resolution and claim lifecycle (PostgreSQL
     await pool.query(`
       INSERT INTO knowledge_claims
         (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key, state)
-      VALUES ($1, $2, 'repository_convention', 'repository', '/repo', 'conflict-key', 'active')
-    `, [SOURCE_CLAIM, PERSONAL])
+      VALUES ($1, $2, 'repository_convention', 'repository', '/repo', $3, 'active')
+    `, [SOURCE_CLAIM, PERSONAL,NORMALIZED_KEY])
     await pool.query(`
       INSERT INTO knowledge_versions
-        (version_id, installation_id, claim_id, version_number, statement, authority, confidence)
-      VALUES ($1, $2, $3, 1, 'challenger statement', 'user_accepted', 0.9)
-    `, [SOURCE_VERSION, PERSONAL, SOURCE_CLAIM])
+        (version_id, installation_id, claim_id, version_number, statement, structured_content,authority, confidence)
+      VALUES ($1, $2, $3, 1, $4, '{"environment":"staging"}'::jsonb,'user_accepted', 0.9)
+    `, [SOURCE_VERSION, PERSONAL, SOURCE_CLAIM,STATEMENT])
     await pool.query(`
       UPDATE knowledge_claims SET current_version_id = $2 WHERE installation_id = $1 AND claim_id = $3
     `, [PERSONAL, SOURCE_VERSION, SOURCE_CLAIM])
@@ -120,25 +125,34 @@ describeWithDatabase('shared conflict resolution and claim lifecycle (PostgreSQL
       VALUES ($1, $2, $3, $4, 1, 'episode', 'challenger evidence', 'hash', NOW())
     `, [EVIDENCE, PERSONAL, SOURCE_VERSION, EPISODE])
 
-    // Active canonical team claim with the same identity but different
-    // content. It is intentionally ungrouped: the first published conflict
+    // Active canonical team claim with the same exact body but different
+    // structured conditions. It is intentionally ungrouped: the first published conflict
     // must attach the incumbent and challenger atomically.
     await pool.query(`
       INSERT INTO knowledge_claims
         (claim_id, installation_id, claim_type, scope_kind, scope_key, normalized_key, state,
          owner_scope_kind, owner_scope_id, conflict_group_id, conflict_variant)
-      VALUES ($1, $2, 'repository_convention', 'repository', '/repo', 'conflict-key', 'active',
-              'team', 'fffffff0-0000-4000-8000-000000000041', NULL, 0)
-    `, [TARGET_CLAIM, TEAM])
+      VALUES ($1, $2, 'repository_convention', 'repository', '/repo', $3, 'active',
+              'team', $2, NULL, 0)
+    `, [TARGET_CLAIM, TEAM,NORMALIZED_KEY])
     await pool.query(`
       INSERT INTO knowledge_versions
-        (version_id, installation_id, claim_id, version_number, statement, authority, confidence)
-      VALUES ($1, $2, $3, 1, 'incumbent statement', 'team_published', 0.9)
-    `, [TARGET_VERSION, TEAM, TARGET_CLAIM])
+        (version_id, installation_id, claim_id, version_number, statement,structured_content, authority, confidence)
+      VALUES ($1, $2, $3, 1, $4,'{"environment":"production"}'::jsonb, 'team_published', 0.9)
+    `, [TARGET_VERSION, TEAM, TARGET_CLAIM,STATEMENT])
     await pool.query(`
       UPDATE knowledge_claims SET current_version_id = $2
       WHERE installation_id = $1 AND claim_id = $3
     `, [TEAM, TARGET_VERSION, TARGET_CLAIM])
+
+    // Source and incumbent use confirmed corresponding repositories owned by
+    // their respective installations. A shared directory label is no identity proof.
+    await confirmRepositoryApplicabilityFixture(pool,PERSONAL,SOURCE_CLAIM,[TEAM])
+    const sourceApp=(await pool.query('SELECT applicability FROM knowledge_versions WHERE version_id=$1',[SOURCE_VERSION])).rows[0].applicability
+    const targetRepo=(await pool.query('SELECT repository_id::text FROM repositories WHERE installation_id=$1 AND repository_key=$2',[TEAM,'/repo'])).rows[0].repository_id
+    await pool.query('UPDATE knowledge_claims SET canonical_repository_key=$2 WHERE claim_id=$1',[TARGET_CLAIM,sourceApp.canonicalRepositoryKey])
+    await pool.query('UPDATE knowledge_versions SET repository_id=$2,applicability=$3 WHERE version_id=$1',
+      [TARGET_VERSION,targetRepo,{...sourceApp,repositoryId:targetRepo}])
 
     for (const [membershipId, roles] of [
       [PROPOSER, ['contributor']], [REVIEWER, ['reviewer']], [PUBLISHER, ['publisher']],
@@ -158,7 +172,8 @@ describeWithDatabase('shared conflict resolution and claim lifecycle (PostgreSQL
       evidenceIds: [EVIDENCE],
       idempotencyDigest: `conflict-${Date.now()}-${Math.random()}`,
     })
-    expect(proposed.classification).toBe('conflict')
+    expect(proposed.classification).toBe('related')
+    expect(proposed.candidate.state).toBe('conflict')
     return {
       candidateId: proposed.candidate.candidate_id,
       revision: proposed.candidate.revision,
@@ -180,6 +195,29 @@ describeWithDatabase('shared conflict resolution and claim lifecycle (PostgreSQL
     })
   }
 
+  test.each(['parallel','supersede'] as const)('re-reviewed conflict uses the latest revision for %s publication',async resolution=>{
+    const p=await proposeConflictCandidate(),repository=createPromotionRepository(pool)
+    await repository.appendRevision({targetInstallationId:TEAM,candidateId:p.candidateId,expectedRevision:1,
+      statement:STATEMENT,structuredContent:{environment:'preview'},grant:grantFor(PROPOSER,['read','contribute']),
+      createdByMembershipId:PROPOSER,evidenceSelection:{retainedOrdinals:[1],removedOrdinals:[],newEvidenceIds:[]}})
+    const result=await approveAndPublish(p.candidateId,2,resolution,resolution==='supersede'?[TARGET_CLAIM]:undefined)
+    expect((await pool.query('SELECT structured_content FROM knowledge_versions WHERE version_id=$1',[result.versionId])).rows[0].structured_content).toEqual({environment:'preview'})
+    expect(result.resolution).toBe(resolution)
+  })
+
+  test('conflict queue resolves distinct source and target repository UUIDs from the reviewed bundle',async()=>{
+    for(const [installation,claim,version] of [[PERSONAL,SOURCE_CLAIM,SOURCE_VERSION],[TEAM,TARGET_CLAIM,TARGET_VERSION]]){
+      const app=(await pool.query('SELECT applicability FROM knowledge_versions WHERE version_id=$1',[version])).rows[0].applicability
+      const mapped={...app,scopeKey:app.repositoryId}
+      await pool.query('UPDATE knowledge_versions SET applicability=$2 WHERE version_id=$1',[version,mapped])
+      await pool.query('UPDATE knowledge_claims SET scope_key=$2,normalized_key=$3 WHERE installation_id=$1 AND claim_id=$4',
+        [installation,mapped.scopeKey,normalizedClaimKey({claimType:'repository_convention',scopeKey:mapped.scopeKey,statement:STATEMENT}),claim])
+    }
+    const p=await proposeConflictCandidate(),repository=createPromotionRepository(pool),candidate=(await repository.getCandidate(TEAM,p.candidateId))!
+    const claims=await repository.listConflictClaims(TEAM,candidate)
+    expect(claims.map(row=>row.claim_id)).toEqual([TARGET_CLAIM])
+  })
+
   test('parallel variants coexist with the incumbent and stay visible together', async () => {
     const { candidateId, revision, groupId } = await proposeConflictCandidate()
     const result = await approveAndPublish(candidateId, revision, 'parallel')
@@ -199,17 +237,17 @@ describeWithDatabase('shared conflict resolution and claim lifecycle (PostgreSQL
     const visible = await pool.query(`
       SELECT claim_id, conflict_group_id FROM knowledge_claims
       WHERE installation_id = $1 AND state = 'active'
-        AND claim_type = 'repository_convention' AND scope_key = '/repo' AND normalized_key = 'conflict-key'
-    `, [TEAM])
+        AND claim_type = 'repository_convention' AND scope_key = '/repo' AND normalized_key = $2
+    `, [TEAM,NORMALIZED_KEY])
     expect(visible.rows).toHaveLength(2)
     expect(new Set(visible.rows.map(row => row.conflict_group_id))).toEqual(new Set([groupId]))
 
     // A third parallel variant takes the next slot.
-    const second = await proposeConflictCandidate()
     await pool.query(`
-      UPDATE knowledge_versions SET statement = 'third statement'
+      UPDATE knowledge_versions SET structured_content = '{"environment":"preview"}'::jsonb
       WHERE installation_id = $1 AND version_id = $2
     `, [PERSONAL, SOURCE_VERSION])
+    const second = await proposeConflictCandidate()
     const secondPublish = await approveAndPublish(second.candidateId, second.revision, 'parallel')
     expect(secondPublish.conflictVariant).toBe(2)
   })
@@ -238,13 +276,13 @@ describeWithDatabase('shared conflict resolution and claim lifecycle (PostgreSQL
     const active = await pool.query(`
       SELECT COUNT(*)::text AS count FROM knowledge_claims
       WHERE installation_id = $1 AND state = 'active'
-        AND claim_type = 'repository_convention' AND scope_key = '/repo' AND normalized_key = 'conflict-key'
-    `, [TEAM])
+        AND claim_type = 'repository_convention' AND scope_key = '/repo' AND normalized_key = $2
+    `, [TEAM,NORMALIZED_KEY])
     expect(Number(active.rows[0].count)).toBe(1)
 
-    // Supersede rejects foreign and inactive targets (fresh challenger text).
+    // Supersede rejects foreign and inactive targets (distinct challenger conditions).
     await pool.query(`
-      UPDATE knowledge_versions SET statement = 'second challenger statement'
+      UPDATE knowledge_versions SET structured_content = '{"environment":"preview"}'::jsonb
       WHERE installation_id = $1 AND version_id = $2
     `, [PERSONAL, SOURCE_VERSION])
     const again = await proposeConflictCandidate()

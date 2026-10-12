@@ -85,6 +85,9 @@ export interface MemoryRecallBundle {
 }
 
 export interface MemoryCandidate {
+  content_hash?:string
+  automation_mode?:'off'|'shadow'|'assist'
+  automation_advice?:{recommendation:string;reason:string}|null
   candidate_id: string
   claim_type: MemoryClaimType
   statement: string
@@ -310,7 +313,12 @@ export interface MemoryGovernanceQueueEntry {
     expires_at: string
     revision: number
   }
-  current_revision: { revision_number: number; statement: string } | null
+  delegated_publish_mode?:'off'|'enabled'
+  automation_mode?: 'off'|'shadow'|'assist'
+  automation_advice?: {recommendation:string;reason:string;cost_micros?:number|null;billing_uncertain?:boolean}|null
+  evidence?: Array<{ordinal:number;excerpt:string;excerpt_hash:string}>
+  evidence_changes?: {added:number;removed:number;retained:number}
+  current_revision: { revision_number: number; statement: string;bundle_hash?:string|null;applicability?:unknown;structured_content?:unknown } | null
   decisions: Array<{ decision: string; membership_id: string; created_at: string }>
   conflict_claims: Array<{ claim_id: string; statement: string; conflict_variant: number }>
 }
@@ -501,3 +509,9 @@ export interface MemoryWikiCandidate {
     }>
   }
 }
+
+export interface MemoryAutomationPolicyState {revision:number;document:{mode:'off'|'shadow'|'assist';model:string;promptVersion:string;evaluatorVersion?:'review-v1';originPolicy?:'owned-sanitized-evidence-v1';personalAutoAccept?:boolean;delegatedPublish?:boolean}|null;effective_mode:'off'|'shadow'|'assist'}
+export interface MemoryBulkDecisionItem {candidate_id:string;expected_revision:number;expected_hash:string;decision:'approve'|'request_changes'|'reject';review_duration_ms?:number}
+export interface MemoryBulkDecisionResult {candidate_id:string;status:'success'|'conflict'|'revoked'|'unavailable';code?:string}
+
+export interface MemoryExecutorPrincipal {principal_id:string;provider_client_id:string;permission_revision:string;valid_until:string}

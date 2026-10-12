@@ -14,7 +14,7 @@ import { createGitInboxService } from '../git-sync/inbox-service.js'
 import { createGitRecoveryService, type GitRecoveryReadRegistry } from '../git-sync/recovery-service.js'
 import { verifyGitWebhook } from '../git-sync/provider.js'
 import { parseStrictJson } from '../git-sync/strict-json.js'
-import type { GitPermission } from '../git-sync/authorization.js'
+import {assertGitGrantClock,type GitPermission } from '../git-sync/authorization.js'
 import { registerMemoryCors } from './cors.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
@@ -78,7 +78,7 @@ export function registerGitRoutes(app:FastifyInstance,deps:GitRouteDeps) {
     const key=keySchema.parse(c.r.headers['idempotency-key'])
     // Token issuance/expiry is not authority identity; membership and revision are.
     const principal=c.id.grant.scopeBindings.find(b=>b.installation_id===c.id.installationId)
-    const result=await store.execute({installationId:c.id.installationId,operation:`git:${c.r.method}:${c.r.routeOptions.url}`,key,isolation:'read_committed',
+    const result=await store.execute({beforeCommit:client=>assertGitGrantClock(client,c.id.grant),installationId:c.id.installationId,operation:`git:${c.r.method}:${c.r.routeOptions.url}`,key,isolation:'read_committed',
       requestCanonical:canonicalJsonString({principal,primary:c.id.grant.primaryInstallationId,config:c.id.grant.configVersion,resourceId:c.resourceId,body}),
       run:async client=>{try {const bound={...deps,pool:createTransactionBoundPool(client)}
         const metadata=await run(bound);return {ok:true,metadata}}catch(error){return {ok:false,error}}},

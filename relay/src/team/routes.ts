@@ -2,6 +2,7 @@ import { isTeamProvider } from './types.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 
+import type {TeamMemorySourceProjectorLike} from './memory-source-projector.js'
 import type { TeamAgentCandidate } from './agent-offers.js'
 import type { TeamCollaborationConfig } from './config.js'
 import {
@@ -369,6 +370,6 @@ export function registerTeamRoutes(app: FastifyInstance, dependencies: TeamRoute
   })
 }
 
-export function createTeamRouteService(pool: pg.Pool): TeamRouteService {
-  return new TeamRepository(pool)
+export function createTeamRouteService(pool: pg.Pool, memorySources?:TeamMemorySourceProjectorLike): TeamRouteService {
+  return new TeamRepository(pool,memorySources)
 }

@@ -9,7 +9,7 @@ import { createWikiPublicationService } from '../wiki/publication-service.js'
 import { createGitExportService } from './export-service.js'
 import { lockImportProposal,prepareGovernedImport,requireImportQuorum,requireImportActor,type ImportSubject } from './governance-adapter.js'
 import { insertGitRevisionLink,lockGitConnection,type GitConnection } from './repository.js'
-import { lockGitPolicyScopes,requireGitPermission,requireCurrentGitAuthorization } from './authorization.js'
+import {assertGitGrantClock, lockGitPolicyScopes,requireGitPermission,requireCurrentGitAuthorization } from './authorization.js'
 import { RevisionSchema, type SkillAsset, type WikiAsset } from './types.js'
 import type { GitSyncMode } from './config.js'
 import { snapshotDigest } from './merge.js'
@@ -45,7 +45,7 @@ export function createGitImportService(deps:Parameters<typeof createGitExportSer
       await client.query('BEGIN')
       await lockGitPolicyScopes(client,grant,input.installationId)
       const stamp=await requireGitPermission(client,grant,input.installationId,'publish')
-      if(!seen.rowCount){await client.query('COMMIT');return null}
+      if(!seen.rowCount){await assertGitGrantClock(client,grant,[input.installationId]);await client.query('COMMIT');return null}
       const observed=(await client.query('SELECT repository_id FROM memory_git_connections WHERE installation_id=$1 AND connection_id=$2',[input.installationId,input.connectionId])).rows[0]
       if(!observed)throw new Error('git_not_found')
       await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:repository:' || $1 || ':' || $2,0))`,[input.installationId,observed.repository_id])
@@ -55,7 +55,7 @@ export function createGitImportService(deps:Parameters<typeof createGitExportSer
         [input.installationId,input.connectionId,input.proposalId])).rows[0]
       if(retained) {
         if(retained.export_id!==input.exportId||retained.proposal_revision!==input.expectedRevision)throw new Error('git_revision_conflict')
-        await requireCurrentGitAuthorization(client,stamp,'publish');await client.query('COMMIT')
+        await requireCurrentGitAuthorization(client,stamp,'publish');await assertGitGrantClock(client,grant,[input.installationId]);await client.query('COMMIT')
         return {proposalId:input.proposalId,outcome:retained.outcome,versionId:retained.version_id,linkId:retained.link_id}
       }
       const row=(await client.query(`SELECT o.outcome,l.version_id,l.link_id,p.export_id,p.revision::text,p.generation::text,p.state,p.head_commit,l.commit_sha
@@ -67,7 +67,7 @@ export function createGitImportService(deps:Parameters<typeof createGitExportSer
       if(row.export_id!==input.exportId||row.revision!==input.expectedRevision||row.generation!==input.expectedGeneration||row.state!=='applied'
         ||row.head_commit!==row.commit_sha)throw new Error('git_revision_conflict')
       await requireCurrentGitAuthorization(client,stamp,'publish')
-      await client.query('COMMIT')
+      await assertGitGrantClock(client,grant,[input.installationId]);await client.query('COMMIT')
       return {proposalId:input.proposalId,outcome:row.outcome,versionId:row.version_id,linkId:row.link_id}
     }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
   }
@@ -126,8 +126,8 @@ export function createGitImportService(deps:Parameters<typeof createGitExportSer
       const applyDomain=async()=>{
         const bound=createTransactionBoundPool(context.client)
         if(g.current.asset.key.kind==='claim'||g.current.asset.key.kind==='rule') {
-          const result=deleting?await createClaimRevisionService(bound).append({grant,installationId:input.installationId,governed:g})
-            :preparedClaim=await prepareClaimRevision(context.client,{grant,installationId:input.installationId,governed:g})
+          const result=deleting?await createClaimRevisionService(bound).append({grant,installationId:input.installationId,governed:g,tombstoneHmacKeys:deps.tombstoneHmacKeys})
+            :preparedClaim=await prepareClaimRevision(context.client,{grant,installationId:input.installationId,governed:g,tombstoneHmacKeys:deps.tombstoneHmacKeys})
           outcome=result.outcome;versionId=result.versionId
         } else if(g.current.asset.key.kind==='skill') {
           const current=g.current.asset as SkillAsset,result=p.proposed_document.result

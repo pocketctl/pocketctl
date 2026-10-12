@@ -22,7 +22,8 @@ export interface FusedResult {
 export function fuseRanks(pools: readonly RankedPool[], limit: number): FusedResult[] {
   const scores = new Map<string, { score: number; sources: string[] }>()
   for (const pool of pools) {
-    pool.ranked.forEach((versionId, rank) => {
+    const unique=[...new Set(pool.ranked)]
+    unique.forEach((versionId, rank) => {
       const entry = scores.get(versionId) ?? { score: 0, sources: [] }
       entry.score += 1 / (RRF_K + rank)
       if (!entry.sources.includes(pool.name)) entry.sources.push(pool.name)

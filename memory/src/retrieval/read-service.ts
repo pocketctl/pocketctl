@@ -1,5 +1,8 @@
+import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
+import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
 import { createHmac, timingSafeEqual } from 'crypto'
 import type pg from 'pg'
+import {versionAuthorityCompatibility} from '../claims/types.js'
 
 /** Shared installation-scoped read semantics used by REST and MCP. */
 export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string) {
@@ -15,6 +18,10 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           SELECT c.claim_id::text, c.claim_type, c.scope_kind, c.scope_key,
                  c.state, c.revision::text, c.current_version_id::text,
                  c.created_at, c.updated_at,
+                 COALESCE((to_jsonb(c)->>'identity_generation')::int,1) AS identity_generation,
+                 to_jsonb(c)->>'normalized_key_v2' AS normalized_key_v2,
+                 to_jsonb(c)->>'canonical_repository_key' AS canonical_repository_key,
+                 to_jsonb(c)->>'consumption_hold_reason' AS consumption_hold_reason,
                  v.statement, v.authority, v.repository_id::text,
                  v.repo_snapshot_id::text, v.branch, v.freshness_at,
                  v.created_at AS version_created_at
@@ -22,7 +29,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           JOIN knowledge_versions v
             ON v.installation_id = c.installation_id
            AND v.version_id = c.current_version_id
-          WHERE c.installation_id = $1 AND c.state = 'active'
+          WHERE c.installation_id = $1 AND c.state = 'active' AND ${currentClaimVersionSql()}
             AND ($2::timestamptz IS NULL
               OR (c.updated_at, c.claim_id) < ($2::timestamptz, $3::uuid))
           ORDER BY c.updated_at DESC, c.claim_id DESC
@@ -34,14 +41,14 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           JOIN knowledge_versions v
             ON v.installation_id = c.installation_id
            AND v.version_id = c.current_version_id
-          WHERE c.installation_id = $1 AND c.state = 'active'
+          WHERE c.installation_id = $1 AND c.state = 'active' AND ${currentClaimVersionSql()}
         `, [installationId]),
       ])
       const hasMore = claims.rows.length > limit
       const page = hasMore ? claims.rows.slice(0, limit) : claims.rows
       const last = page.at(-1)
       return {
-        claims: page,
+        claims: page.map(row=>({...row,authority_compatibility:versionAuthorityCompatibility(row.authority)})),
         next_cursor: hasMore && last
           ? encodeClaimListCursor(
             installationId,
@@ -64,7 +71,11 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
       const claim = await pool.query(`
         SELECT c.claim_id::text, c.claim_type, c.scope_kind, c.scope_key,
                c.state, c.revision::text, c.created_at, c.updated_at,
-               c.current_version_id::text
+               c.current_version_id::text,
+               COALESCE((to_jsonb(c)->>'identity_generation')::int,1) AS identity_generation,
+               to_jsonb(c)->>'normalized_key_v2' AS normalized_key_v2,
+               to_jsonb(c)->>'canonical_repository_key' AS canonical_repository_key,
+               to_jsonb(c)->>'consumption_hold_reason' AS consumption_hold_reason
         FROM knowledge_claims c
         WHERE c.installation_id = $1 AND c.claim_id = $2
       `, [installationId, claimId])
@@ -73,7 +84,11 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         SELECT * FROM (
           SELECT version_id::text, version_number, statement, structured_content, authority,
                  confidence::text, repository_id::text, repo_snapshot_id::text,
-                 branch, freshness_at, valid_from, valid_until, created_at
+                 branch, freshness_at, valid_from, valid_until, created_at,
+                 to_jsonb(knowledge_versions)->'applicability' AS applicability,
+                 to_jsonb(knowledge_versions)->>'effective_from' AS effective_from,
+                 to_jsonb(knowledge_versions)->>'effective_until' AS effective_until,
+                 CASE WHEN EXISTS(SELECT 1 FROM knowledge_claims selection_claim WHERE ${currentClaimVersionSql('selection_claim','knowledge_versions')}) THEN 'current' ELSE 'stale' END AS selection_status
           FROM knowledge_versions
           WHERE installation_id = $1 AND claim_id = $2
             AND ($3::integer IS NULL OR version_number < $3)
@@ -87,25 +102,41 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
       const oldestVersion = page[0]?.version_number
       return {
         claim: claim.rows[0],
-        versions: page.map(row => ({ ...row, version_number: String(row.version_number) })),
+        versions: page.map(row => ({ ...row, version_number: String(row.version_number),authority_compatibility:versionAuthorityCompatibility(row.authority) })),
         next_version_cursor: hasMore && typeof oldestVersion === 'number'
           ? encodeVersionCursor(claimId, oldestVersion, cursorSigningKey)
           : null,
       }
     },
 
+    /** Authorized consumers select one revision first, then its fact window. */
+    async selectClaimVersion(installationId:string,claimId:string,input:{asOf?:Date}={}) {
+      const result=await pool.query(`WITH selection_clock AS (SELECT COALESCE($3::timestamptz,clock_timestamp()) AS at)
+        SELECT v.* FROM selection_clock CROSS JOIN knowledge_claims c
+        JOIN knowledge_versions v USING(installation_id,claim_id)
+        WHERE c.installation_id=$1 AND c.claim_id=$2 AND c.state='active'
+          AND ${input.asOf?asOfClaimVersionSql('c','v','selection_clock.at'):currentClaimVersionSql('c','v','selection_clock.at')}
+          AND (v.valid_from IS NULL OR v.valid_from<=selection_clock.at)
+          AND (v.valid_until IS NULL OR v.valid_until>selection_clock.at)`,[installationId,claimId,input.asOf??null])
+      return result.rows[0]??null
+    },
+
     async getEvidence(installationId: string, evidenceId: string) {
       const rows = await pool.query(`
         SELECT e.evidence_id::text, e.evidence_kind, e.episode_id::text,
                e.source_event_id::text, e.artifact_id::text, e.excerpt, e.locator,
-               e.occurred_at, e.ordinal, v.claim_id::text, v.version_id::text
+               e.occurred_at, e.ordinal, v.claim_id::text, v.version_id::text,encode(e.excerpt_hash,'hex') AS excerpt_hash,${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required
         FROM knowledge_evidence e
         JOIN knowledge_versions v
           ON v.installation_id = e.installation_id AND v.version_id = e.version_id
-        WHERE e.installation_id = $1 AND e.evidence_id = $2
+        JOIN knowledge_claims c ON c.installation_id=v.installation_id AND c.claim_id=v.claim_id
+        WHERE c.state='active' AND c.consumption_hold_reason IS NULL AND ${currentClaimVersionSql()}
+          AND (v.valid_from IS NULL OR v.valid_from<=clock_timestamp()) AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp())
+          AND e.installation_id = $1 AND e.evidence_id = $2
       `, [installationId, evidenceId])
       const row = rows.rows[0]
       if (!row) return null
+      if(row.origin_policy_required&&!(await originPolicyDecisions(pool,installationId,[row.version_id])).get(row.version_id)?.eligible)return null
       return {
         evidence_id: row.evidence_id,
         evidence_kind: row.evidence_kind,
@@ -118,6 +149,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         occurred_at: row.occurred_at,
         claim_id: row.claim_id,
         version_id: row.version_id,
+        excerpt_hash:row.excerpt_hash,
       }
     },
 
@@ -144,7 +176,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         FROM knowledge_claims c
         JOIN knowledge_versions v ON v.version_id = c.current_version_id
                                   AND v.installation_id = c.installation_id
-        WHERE c.installation_id = $1 AND c.state = 'active' AND v.repository_id = $2
+        WHERE c.installation_id = $1 AND c.state = 'active' AND ${currentClaimVersionSql()} AND v.repository_id = $2
           AND (v.valid_from IS NULL OR v.valid_from <= NOW())
           AND (v.valid_until IS NULL OR v.valid_until > NOW())
         ORDER BY c.claim_type, c.claim_id

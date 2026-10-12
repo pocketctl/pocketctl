@@ -47,9 +47,10 @@ describe('review policy monotonic resolution', () => {
     const client = {
       async query(sql: string, values?: unknown[]) {
         queries.push(sql)
-        if (sql.includes('FROM memory_owner_scopes') && sql.includes('installation_id = $1')) {
+        if (sql.includes('FROM memory_owner_scopes') && sql.includes('s.installation_id=$1')) {
           return {
             rows: [{
+              installation_id:'team-installation',alive:true,
               owner_scope_kind: 'team',
               parent_organization_id: '33333333-3333-4333-8333-333333333333',
             }],
@@ -63,8 +64,8 @@ describe('review policy monotonic resolution', () => {
             }],
           }
         }
-        if (sql.includes("owner_scope_kind = 'organization'")) {
-          return { rows: [{ installation_id: 'organization-installation' }] }
+        if (sql.includes("owner_scope_kind='organization'")) {
+          return { rows: [{ installation_id: 'organization-installation',alive:true,owner_scope_kind:'organization',parent_organization_id:null }] }
         }
         if (sql.includes('FROM memory_review_policy_versions') && values?.[0] === 'organization-installation') {
           return {
@@ -93,7 +94,7 @@ describe('review policy monotonic resolution', () => {
     expect(snapshot.policy.minimum_approvals).toBe(4)
     expect(snapshot.policy.candidate_ttl_days).toBe(5)
     expect(snapshot.policy.max_shared_evidence).toBe(2)
-    expect(queries.some(sql => sql.includes("owner_scope_kind = 'organization'"))).toBe(true)
+    expect(queries.some(sql => sql.includes("owner_scope_kind='organization'"))).toBe(true)
   })
 
   test('migration 23 fences both candidate and authority provenance to the parent policy', () => {
