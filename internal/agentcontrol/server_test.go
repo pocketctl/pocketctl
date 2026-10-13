@@ -193,3 +193,151 @@ func testSocketPath(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "control.sock")
 }
+
+type cancelAwareProvider struct {
+	fakeRuntimeProvider
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (p *cancelAwareProvider) Acquire(ctx context.Context, _ AcquireRequest) (AcquireResult, error) {
+	close(p.started)
+	<-ctx.Done()
+	close(p.canceled)
+	return AcquireResult{}, ctx.Err()
+}
+func TestAgentControlDisconnectCancelsAcquire(t *testing.T) {
+	path := testSocketPath(t)
+	provider := &cancelAwareProvider{started: make(chan struct{}), canceled: make(chan struct{})}
+	server := NewServer(path, map[string]RuntimeProvider{AgentCodex: provider})
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewAgentClient(path, AgentCodex).Acquire(ctx, AcquirePayload{CWD: "/repo", Intent: IntentNew, OperationID: "disconnect"})
+		done <- err
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("acquire not started")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled call succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client ignored cancellation")
+	}
+	select {
+	case <-provider.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned acquire still running")
+	}
+}
+
+type heldAcquireProvider struct {
+	fakeRuntimeProvider
+	started  chan struct{}
+	proceed  chan struct{}
+	released chan string
+}
+
+func (p *heldAcquireProvider) Acquire(context.Context, AcquireRequest) (AcquireResult, error) {
+	if p.acquires.Add(1) == 1 {
+		close(p.started)
+	}
+	<-p.proceed
+	return AcquireResult{Mode: string(LaunchManaged), LeaseID: "held-lease"}, nil
+}
+func (p *heldAcquireProvider) Release(_ context.Context, req ReleaseRequest) error {
+	p.released <- req.Payload.LeaseID
+	return nil
+}
+func TestAgentControlDuplicateSurvivesOneCanceledWaiter(t *testing.T) {
+	p := &heldAcquireProvider{started: make(chan struct{}), proceed: make(chan struct{}), released: make(chan string, 2)}
+	s := NewServer(testSocketPath(t), nil)
+	s.ctx = context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := AcquireRequest{Agent: AgentCodex, Payload: AcquirePayload{OperationID: "duplicate"}}
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() { _, err := s.acquireDeduplicated(ctx, p, req); first <- err }()
+	<-p.started
+	go func() { _, err := s.acquireDeduplicated(context.Background(), p, req); second <- err }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.mu.Lock()
+		waiters := s.cache[AgentCodex+"\x00duplicate"].waiters
+		s.mu.Unlock()
+		if waiters == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(p.proceed)
+			t.Fatal("duplicate not waiting")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-first; err == nil {
+		t.Fatal("canceled waiter succeeded")
+	}
+	close(p.proceed)
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	if p.acquires.Load() != 1 {
+		t.Fatal("duplicate started competing acquire")
+	}
+	select {
+	case <-p.released:
+		t.Fatal("released live duplicate's lease")
+	default:
+	}
+}
+func TestAgentControlAbandonedAcquireReleasesLateLeaseBeforeRetry(t *testing.T) {
+	p := &heldAcquireProvider{started: make(chan struct{}), proceed: make(chan struct{}), released: make(chan string, 2)}
+	s := NewServer(testSocketPath(t), nil)
+	s.ctx = context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := AcquireRequest{Agent: AgentCodex, Payload: AcquirePayload{OperationID: "retry"}}
+	done := make(chan error, 1)
+	go func() { _, err := s.acquireDeduplicated(ctx, p, req); done <- err }()
+	<-p.started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("canceled call succeeded")
+	}
+	// A slow provider may finish after cancellation. Do not let a retry create
+	// the same lease until cleanup of that previous operation has completed.
+	if _, err := s.acquireDeduplicated(context.Background(), p, req); err == nil {
+		t.Fatal("retry raced abandoned operation")
+	}
+	close(p.proceed)
+	s.wg.Wait()
+	select {
+	case lease := <-p.released:
+		if lease != "held-lease" {
+			t.Fatal(lease)
+		}
+	default:
+		t.Fatal("abandoned lease leaked")
+	}
+	if _, err := s.acquireDeduplicated(context.Background(), p, req); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	if p.acquires.Load() != 2 {
+		t.Fatal("canceled cache poisoned retry")
+	}
+}

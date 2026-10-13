@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -125,6 +126,9 @@ func TestCodexLauncherDaemonUnavailableFallsBackQuickly(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
 		t.Fatalf("fallback took %v", elapsed)
+	}
+	if !strings.Contains(stderr.String(), "acquire timed out") {
+		t.Fatalf("misleading fallback: %s", stderr.String())
 	}
 	if executed.Path != "/native/codex" || !reflect.DeepEqual(executed.Args, []string{"hello"}) {
 		t.Fatalf("exec=%+v", executed)

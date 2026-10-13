@@ -9,6 +9,7 @@ import type { ArchiveChunkManifest,ArchiveEventBody } from '../session-archive/m
 import { inspectLifecycleEligibility,type LifecycleEligibility } from './eligibility.js'
 import { LifecycleJobRepository,type LifecycleJob } from './repository.js'
 import type { SessionLifecycleConfig } from './types.js'
+import { sessionLifecycleReadiness } from './readiness.js'
 
 class Superseded extends Error {}
 interface StagedChunk {manifest:ArchiveChunkManifest;events?:ArchiveEventBody[];document?:Record<string,any>}
@@ -58,8 +59,8 @@ export class SessionLifecycleExecutor {
       reasonCode:reason,retentionDays:this.config.notificationRetentionDays,stages})
   }
   async execute(lease:LifecycleJob,deleteOptions:NonNullable<Parameters<typeof deleteSessionInTransaction>[2]>={}):Promise<'succeeded'|'partial'|'cancelled'>{
-    if(process.env.NODE_ENV==='production')throw new Error('production lifecycle release gates are incomplete')
-    if(this.config.mode!=='enforce'||!this.config.effectiveAt||!this.config.transitionDeadline)throw new Error('lifecycle policy is not effective')
+    const readiness = sessionLifecycleReadiness(this.config, this.storage)
+    if (!readiness.execution_ready) throw new Error(`lifecycle execution blocked: ${readiness.blockers.join(',')}`)
     if(lease.action==='purge')return this.purge(lease,deleteOptions)
     if(!['archive','cool'].includes(lease.action))throw new Error('unsupported archive executor action')
     let snapshot:LifecycleEligibility|undefined,manifestId:string|undefined,archived=false

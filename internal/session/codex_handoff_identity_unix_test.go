@@ -64,16 +64,11 @@ func TestStopPersistedCodexHandoffStopsOnlyExactBinaryAndListenIdentity(t *testi
 	// Allow the shell child to exec before inspecting its argv.
 	deadline := time.Now().Add(time.Second)
 	for {
-		processes, err := platform.NewProcessInspector().List()
+		process, err := platform.InspectProcess(context.Background(), cmd.Process.Pid)
 		if err != nil {
 			t.Fatal(err)
 		}
-		ready := false
-		for _, process := range processes {
-			if process.PID == cmd.Process.Pid && len(process.Args) > 1 && process.Args[1] == "app-server" {
-				ready = true
-			}
-		}
+		ready := len(process.Args) > 1 && process.Args[1] == "app-server"
 		if ready {
 			break
 		}
@@ -152,5 +147,60 @@ func TestCodexCoordinatorStaleProjectHandoffPreservesOtherProjectRuntime(t *test
 				t.Fatalf("recovery lost existing thread identity: %v", ids)
 			}
 		})
+	}
+}
+
+// npm installs launch app-server through Node; adoption must preserve this PID.
+func TestCodexHandoffIdentityAcceptsNodeScript(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "codex cli.js")
+	ready := filepath.Join(dir, "ready")
+	source := "#!/usr/bin/env node\nrequire('fs').writeFileSync(process.env.READY_FILE, 'ready'); setInterval(() => {}, 1000);\n"
+	if err := os.WriteFile(script, []byte(source), 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "codex")
+	if err := os.Symlink(script, alias); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := filepath.Join(dir, "app.sock")
+	cmd := exec.Command(node, script, "app-server", "-c", "thread_unload_delay_secs=0", "--listen", "unix://"+endpoint)
+	cmd.Env = append(os.Environ(), "READY_FILE="+ready)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Node fixture not ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	birth, err := platform.ProcessStartIdentity(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := daemon.CodexAppServerState{PID: cmd.Process.Pid, ProcessStartIdentity: birth, Binary: alias, Endpoint: endpoint, RemoteURI: "unix://" + endpoint}
+	if got, ok := codexHandoffProcessIdentity(&state); !ok || got != birth {
+		t.Fatalf("Node app-server identity rejected: %q %v", got, ok)
+	}
+	for _, mutate := range []func(*daemon.CodexAppServerState){
+		func(s *daemon.CodexAppServerState) { s.Binary = filepath.Join(dir, "other.js") },
+		func(s *daemon.CodexAppServerState) { s.Endpoint += ".foreign"; s.RemoteURI = "unix://" + s.Endpoint },
+		func(s *daemon.CodexAppServerState) { s.ProcessStartIdentity = "reused-pid" },
+	} {
+		wrong := state
+		mutate(&wrong)
+		if _, ok := codexHandoffProcessIdentity(&wrong); ok {
+			t.Fatalf("accepted foreign identity: %+v", wrong)
+		}
 	}
 }

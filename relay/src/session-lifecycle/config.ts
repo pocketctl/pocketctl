@@ -1,5 +1,6 @@
 import { timestampMicros } from './time.js'
 import type { SessionLifecycleConfig } from './types.js'
+import { loadSessionLifecycleRelease } from './release.js'
 
 const POLICY = {
   version: 'session-lifecycle-v1',
@@ -15,6 +16,8 @@ export function sessionLifecycleConfig(
   if (mode !== 'off' && mode !== 'observe' && mode !== 'enforce') {
     throw new Error('SESSION_LIFECYCLE_MODE must be off, observe or enforce')
   }
+  const storageDriver = env.SESSION_LIFECYCLE_STORAGE_DRIVER?.trim() || 's3'
+  if (storageDriver !== 's3' && storageDriver !== 'filesystem') throw new Error('invalid lifecycle storage driver')
   // Configuration defaults on per the user's 2026-10-12 instruction. Actual
   // execution readiness is assessed separately and must not be inferred here.
   const version = env.SESSION_LIFECYCLE_POLICY_VERSION ?? POLICY.version
@@ -54,8 +57,9 @@ export function sessionLifecycleConfig(
     }
     return raw
   }
-  const effectiveAt = time('SESSION_LIFECYCLE_EFFECTIVE_AT')
-  const transitionDeadline = time('SESSION_LIFECYCLE_TRANSITION_DEADLINE')
+  const release = loadSessionLifecycleRelease(env.SESSION_LIFECYCLE_RELEASE_FILE)
+  const effectiveAt = time('SESSION_LIFECYCLE_EFFECTIVE_AT') ?? release?.effectiveAt ?? null
+  const transitionDeadline = time('SESSION_LIFECYCLE_TRANSITION_DEADLINE') ?? release?.transitionDeadline ?? null
   if (
     effectiveAt &&
     transitionDeadline &&
@@ -102,5 +106,9 @@ export function sessionLifecycleConfig(
     ),
     objectBucket: env.SESSION_LIFECYCLE_OBJECT_BUCKET || null,
     objectRegion: env.SESSION_LIFECYCLE_OBJECT_REGION || null,
+    storageDriver,
+    archiveDirectory: env.SESSION_LIFECYCLE_OBJECT_DIRECTORY || null,
+    filesystemMinFreeBytes: integer('SESSION_LIFECYCLE_FILESYSTEM_MIN_FREE_BYTES', 256 * 1024 * 1024, Number.MAX_SAFE_INTEGER),
+    release,
   }
 }

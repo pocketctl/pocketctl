@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -94,7 +95,18 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 			} else {
 				reason = protocolErr.Code
 			}
-		} else if err == nil && result.Reason != "" {
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			reason = "runtime acquire timed out"
+		} else if errors.Is(err, context.Canceled) {
+			reason = "runtime acquire canceled"
+		} else if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				reason = "runtime acquire timed out"
+			} else {
+				reason = err.Error()
+			}
+		} else if result.Reason != "" {
 			reason = result.Reason
 		}
 		fmt.Fprintf(l.Stderr, "pocketctl: managed Codex unavailable; starting native Codex (%s)\n", oneLine(reason))

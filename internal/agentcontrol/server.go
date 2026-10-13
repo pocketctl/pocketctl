@@ -25,10 +25,15 @@ type RuntimeProvider interface {
 }
 
 type acquireCacheEntry struct {
-	ready  chan struct{}
-	result AcquireResult
-	err    error
-	at     time.Time
+	ready     chan struct{}
+	result    AcquireResult
+	err       error
+	at        time.Time
+	cancel    context.CancelFunc
+	waiters   int
+	finished  bool
+	delivered bool
+	abandoned bool
 }
 
 type Server struct {
@@ -129,7 +134,17 @@ func (s *Server) handle(conn net.Conn) {
 		s.writeResponse(conn, resp)
 		return
 	}
-	result, dispatchErr := s.dispatch(s.ctx, req)
+	// One request per connection. Losing the launcher must cancel its waiter,
+	// including cancellation without a deadline. Duplicate acquires retain the
+	// shared operation while at least one caller is still waiting.
+	requestCtx, cancelRequest := context.WithCancel(s.ctx)
+	defer cancelRequest()
+	go func() {
+		var extra [1]byte
+		_, _ = conn.Read(extra[:])
+		cancelRequest()
+	}()
+	result, dispatchErr := s.dispatch(requestCtx, req)
 	if dispatchErr != nil {
 		resp.Error = asProtocolError(dispatchErr)
 	} else {
@@ -178,28 +193,97 @@ func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
 func (s *Server) acquireDeduplicated(ctx context.Context, provider RuntimeProvider, req AcquireRequest) (AcquireResult, error) {
 	key := req.Agent + "\x00" + req.Payload.OperationID
 	s.mu.Lock()
-	if existing := s.cache[key]; existing != nil {
-		ready := existing.ready
+	entry := s.cache[key]
+	if entry != nil && entry.abandoned {
 		s.mu.Unlock()
-		select {
-		case <-ready:
-			return existing.result, existing.err
-		case <-ctx.Done():
-			return AcquireResult{}, ctx.Err()
-		}
+		return AcquireResult{}, context.Canceled
 	}
-	entry := &acquireCacheEntry{ready: make(chan struct{}), at: time.Now()}
-	s.cache[key] = entry
-	for cacheKey, cached := range s.cache {
-		if cacheKey != key && time.Since(cached.at) > 5*time.Minute {
-			delete(s.cache, cacheKey)
+	if entry == nil {
+		operationCtx, cancel := context.WithTimeout(s.ctx, DefaultAcquireTimeout)
+		entry = &acquireCacheEntry{ready: make(chan struct{}), at: time.Now(), cancel: cancel}
+		s.cache[key] = entry
+		for cacheKey, cached := range s.cache {
+			if cacheKey != key && cached.finished && time.Since(cached.at) > 5*time.Minute {
+				delete(s.cache, cacheKey)
+			}
 		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			defer cancel()
+			result, err := provider.Acquire(operationCtx, req)
+			s.mu.Lock()
+			entry.result, entry.err, entry.finished = result, err, true
+			// An abandoned operation cannot leave a live lease behind or poison a retry.
+			abandoned := entry.waiters == 0 || operationCtx.Err() != nil
+			entry.abandoned = abandoned
+			if err != nil && !abandoned {
+				if s.cache[key] == entry {
+					delete(s.cache, key)
+				}
+			}
+			if abandoned {
+				entry.err = context.Canceled
+			}
+			close(entry.ready)
+			s.mu.Unlock()
+			if abandoned {
+				releaseAbandonedAcquire(provider, req, result)
+				s.mu.Lock()
+				if s.cache[key] == entry {
+					delete(s.cache, key)
+				}
+				s.mu.Unlock()
+			}
+		}()
 	}
+	entry.waiters++
 	s.mu.Unlock()
+	delivered := false
+	defer func() {
+		s.mu.Lock()
+		entry.waiters--
+		if delivered {
+			entry.delivered = true
+		}
+		abandoned := entry.waiters == 0 && !entry.delivered
+		if abandoned {
+			entry.abandoned = true
+			entry.cancel()
+		}
+		// The worker owns cleanup if it has not finished. Otherwise the final
+		// canceled waiter owns it. A completed error may already have been cleaned.
+		release := abandoned && entry.finished && entry.err == nil
+		result := entry.result
+		s.mu.Unlock()
+		if release {
+			releaseAbandonedAcquire(provider, req, result)
+			s.mu.Lock()
+			if s.cache[key] == entry {
+				delete(s.cache, key)
+			}
+			s.mu.Unlock()
+		}
+	}()
+	select {
+	case <-entry.ready:
+		if err := ctx.Err(); err != nil {
+			return AcquireResult{}, err
+		}
+		delivered = true
+		return entry.result, entry.err
+	case <-ctx.Done():
+		return AcquireResult{}, ctx.Err()
+	}
+}
 
-	entry.result, entry.err = provider.Acquire(ctx, req)
-	close(entry.ready)
-	return entry.result, entry.err
+func releaseAbandonedAcquire(provider RuntimeProvider, req AcquireRequest, result AcquireResult) {
+	if result.LeaseID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), serverIOTimeout)
+	defer cancel()
+	_ = provider.Release(ctx, ReleaseRequest{Agent: req.Agent, ClientPID: req.ClientPID, Payload: ReleasePayload{LeaseID: result.LeaseID}})
 }
 
 func (s *Server) writeResponse(conn net.Conn, resp Response) {

@@ -1,4 +1,6 @@
 {
+  "workspace.call_start_failed": "Agent failed to start. Ask the host owner to check its runtime.",
+  "workspace.call_skills_invalid": "Project skill validation failed. Ask the host owner to check skill files and links.",
   "memory.assistance.draft": "Generated draft; review differences",
   "memory.assistance.protected": "Manual and locked sections are preserved",
   "memory.assistance.productGate": "Draft review available; automation product gate closed",
@@ -372,6 +374,9 @@
   "session.host_offline_notice": "Host is offline. You can continue this session when it reconnects.",
   "session.creating": "Model is working...",
   "session.completed": "Done",
+  "session.documents.more": "View more",
+  "session.documents.previous": "Previous",
+  "session.documents.next": "Next",
   "session.documents.title": "Session documents",
   "session.documents.snapshot": "Captured snapshot",
   "session.documents.loading": "Loading documents…",

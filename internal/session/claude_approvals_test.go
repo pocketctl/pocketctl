@@ -140,3 +140,97 @@ func TestClaudeApprovalTombstoneExpires(t *testing.T) {
 		t.Fatal("expired tombstone was not pruned")
 	}
 }
+
+func TestClaudeLegacyApprovalTimeoutAndConcurrentRequests(t *testing.T) {
+	t.Setenv("POCKETCTL_CLAUDE_APPROVAL_V2", "")
+	events := make(chan protocol.DaemonEvent, 32)
+	sm := NewSessionManager(events)
+	sm.sessions["legacy"] = &ProcessState{SessionID: "legacy", Agent: adapter.AgentClaude, Status: protocol.StatusRunning}
+	for _, id := range []string{"first", "second"} {
+		sm.handleApprovalRequest(approval.Request{SessionID: "legacy", RequestID: id, Tool: "Bash"})
+	}
+	for range 4 {
+		<-events
+	}
+	if err := sm.resolveLegacyClaudeApproval("foreign", "first", true); err == nil {
+		t.Fatal("foreign session could answer approval")
+	}
+	sm.handleLegacyApprovalFinished(approval.Finished{SessionID: "legacy", RequestID: "first", Reason: approval.FinishTimedOut})
+	if event := <-events; event.Type != "approval_resolved" || event.Reason != "timed_out" || event.Approved {
+		t.Fatalf("timeout=%#v", event)
+	}
+	if event := <-events; event.Status != protocol.StatusWaitingApproval {
+		t.Fatalf("remaining request status=%#v", event)
+	}
+	if snapshot := sm.PendingClaudeApprovals("legacy"); len(snapshot) != 1 || snapshot[0].RequestID != "second" || snapshot[0].Tool != "Bash" {
+		t.Fatalf("pending snapshot=%#v", snapshot)
+	}
+	if got := sm.sessions["legacy"].PendingRequestID; got != "second" {
+		t.Fatalf("remaining request=%s", got)
+	}
+	sm.handleLegacyApprovalFinished(approval.Finished{SessionID: "legacy", RequestID: "first", Reason: approval.FinishTimedOut})
+	if len(events) != 0 {
+		t.Fatal("duplicate finish emitted events")
+	}
+	delete(sm.sessions, "legacy")
+	sm.handleLegacyApprovalFinished(approval.Finished{SessionID: "legacy", RequestID: "second", Reason: approval.FinishSessionDrained})
+	if event := <-events; event.Type != "approval_resolved" || event.RequestID != "second" {
+		t.Fatalf("removed session resolution=%#v", event)
+	}
+	if len(sm.legacyClaudeApprovals) != 0 {
+		t.Fatal("pending ledger leaked")
+	}
+}
+
+func TestClaudeLegacyApprovalReferencesSurviveRestart(t *testing.T) {
+	t.Setenv("POCKETCTL_CLAUDE_APPROVAL_V2", "")
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
+	var saved []ClaudeApprovalReference
+	sm.SetClaudeApprovalRecorder(func(refs []ClaudeApprovalReference) error {
+		saved = append([]ClaudeApprovalReference(nil), refs...)
+		return nil
+	})
+	sm.handleApprovalRequest(approval.Request{SessionID: "legacy", RequestID: "restart", Tool: "Bash"})
+	if len(saved) != 1 || saved[0].SessionID != "legacy" || saved[0].RequestID != "restart" || saved[0].CreatedAt.IsZero() {
+		t.Fatalf("restart references=%#v", saved)
+	}
+	sm.handleLegacyApprovalFinished(approval.Finished{SessionID: "legacy", RequestID: "restart", Reason: approval.FinishHookDisconnected})
+	if len(saved) != 0 {
+		t.Fatalf("finished request retained=%#v", saved)
+	}
+}
+
+func TestClaudeApprovalRecorderDetachWaitsForWriter(t *testing.T) {
+	t.Setenv("POCKETCTL_CLAUDE_APPROVAL_V2", "")
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
+	entered, release, requested, detached := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var saved []ClaudeApprovalReference
+	sm.SetClaudeApprovalRecorder(func(refs []ClaudeApprovalReference) error {
+		close(entered)
+		<-release
+		saved = append([]ClaudeApprovalReference(nil), refs...)
+		return nil
+	})
+	go func() {
+		sm.handleApprovalRequest(approval.Request{SessionID: "legacy", RequestID: "shutdown", Tool: "Bash"})
+		close(requested)
+	}()
+	<-entered
+	go func() { sm.SetClaudeApprovalRecorder(nil); close(detached) }()
+	early := false
+	select {
+	case <-detached:
+		early = true
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-requested
+	<-detached
+	if early {
+		t.Fatal("shutdown detached the recorder before its in-flight reference write completed")
+	}
+	sm.handleLegacyApprovalFinished(approval.Finished{SessionID: "legacy", RequestID: "shutdown", Reason: approval.FinishServerShutdown})
+	if len(saved) != 1 || saved[0].RequestID != "shutdown" {
+		t.Fatalf("shutdown lost restart reference: %#v", saved)
+	}
+}

@@ -268,6 +268,9 @@ func (p *CodexRuntimeProvider) Acquire(ctx context.Context, req agentcontrol.Acq
 		_ = agentcontrol.RecordCodexFallback(agentcontrol.CodexFallbackRuntime)
 		return agentcontrol.AcquireResult{}, runtimeProtocolError(err)
 	}
+	if err := ctx.Err(); err != nil {
+		return agentcontrol.AcquireResult{}, err
+	}
 	leaseID := fmt.Sprintf("codex-%d-%s", req.ClientPID, req.Payload.OperationID)
 	if err := p.sm.leases.Register(agentcontrol.Lease{ID: leaseID, Agent: agentcontrol.AgentCodex, SessionID: req.Payload.SessionID, PID: req.ClientPID, Generation: snapshot.Generation}); err != nil {
 		return agentcontrol.AcquireResult{}, runtimeProtocolError(err)

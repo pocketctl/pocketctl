@@ -2164,6 +2164,10 @@ func cmdDaemonStart(args []string) {
 	case <-ctx.Done(): // PR4: 控制通道 stop → cancel → 这里唤醒
 		sendShutdownNotice()
 	}
+	// The event pump can already be stopped (control-socket shutdown). Keep
+	// the last pending references until the next startup publishes closures;
+	// deferred broker Close must not erase them after losing its event route.
+	sm.SetClaudeApprovalRecorder(nil)
 	logger.Info("shutting down")
 	fmt.Println(i18n.T("daemon.shutting_down"))
 	runDaemonShutdownSequence(daemonShutdownSteps{
@@ -4681,6 +4685,9 @@ func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent s
 // classifyCreateError maps a CreateSession error message to a reason code
 // for the session_create_failed event (no_cli, bad_cwd, cwd_in_use, start_fail).
 func classifyCreateError(msg string) string {
+	if strings.Contains(msg, "codex_project_skills_invalid:") {
+		return "codex_project_skills_invalid"
+	}
 	if strings.Contains(msg, "unsupported Codex reasoning effort") {
 		return "unsupported_effort"
 	}

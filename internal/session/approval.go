@@ -63,9 +63,18 @@ func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
 		sm.sessions[req.SessionID] = ps
 		ok = true
 	}
+	sm.legacyClaudeApprovals[claudeApprovalKey{sessionID: req.SessionID, requestID: req.RequestID}] = &PendingClaudeApproval{SessionID: req.SessionID, RequestID: req.RequestID, CreatedAt: time.Now(), Tool: req.Tool, Input: append(json.RawMessage(nil), req.Input...)}
 	ps.Status = protocol.StatusWaitingApproval
 	ps.PendingRequestID = req.RequestID
 	sm.mu.Unlock()
+
+	// Persist before publishing so a hard restart can close the old card.
+	if err := sm.persistClaudeApprovalReferences(); err != nil {
+		if sm.approvals != nil {
+			_ = sm.approvals.Resolve(req.RequestID, false)
+		}
+		return
+	}
 
 	// ok is always true here (we created the placeholder above when missing);
 	// the guard is retained for clarity and future callers that may pass a
@@ -87,46 +96,77 @@ func (sm *SessionManager) handleApprovalRequest(req approval.Request) {
 	}
 }
 
-// handleApprovalCancel is the approval server's OnCancel callback: a pending
-// tool-use request was resolved OUT-OF-BAND — a user-launched terminal session
-// answered the [y/n] prompt locally (allow non-nil), or the hook went away
-// (allow nil). The server has already dropped the pending entry; here we clear
-// the session's waiting_approval state and tell clients to dismiss the now-stale
-// approval card (with the terminal-side result when known) so a second device
-// can't re-answer it. Invoked from the server's accept goroutine — must not block.
-func (sm *SessionManager) handleApprovalCancel(requestID, sessionID string, allow *bool) {
+// handleLegacyApprovalFinished closes every default-path hook request from the
+// broker's authoritative lifecycle, including timeout, drain and disconnect.
+// The per-request ledger also retains concurrent approvals in the same session.
+func (sm *SessionManager) handleLegacyApprovalFinished(finished approval.Finished) {
+	now := time.Now()
+	key := claudeApprovalKey{sessionID: finished.SessionID, requestID: finished.RequestID}
 	sm.mu.Lock()
-	ps, ok := sm.sessions[sessionID]
-	cleared := ok && ps.PendingRequestID == requestID
-	if cleared {
-		ps.PendingRequestID = ""
-		if ps.Status == protocol.StatusWaitingApproval {
-			ps.Status = protocol.StatusRunning
-		}
-		ps.LastActivityAt = time.Now()
-	}
-	sm.mu.Unlock()
-	if !cleared {
+	if _, pending := sm.legacyClaudeApprovals[key]; !pending {
+		sm.mu.Unlock()
 		return
 	}
-
-	// Dismiss the card on every client. Carry the decision when the terminal
-	// actually answered (allow non-nil) so the card shows allowed/denied rather
-	// than vanishing; a bare disconnect just clears it.
-	if allow != nil {
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:      "approval_resolved",
-			SessionID: sessionID,
-			RequestID: requestID,
-			Approved:  *allow,
+	delete(sm.legacyClaudeApprovals, key)
+	sm.pruneClaudeApprovalTombstonesLocked(now)
+	sm.claudeApprovalResolved[key] = now.Add(claudeApprovalTombstoneTTL)
+	ps := sm.sessions[finished.SessionID]
+	status := ""
+	if ps != nil {
+		ps.PendingRequestID = ""
+		for pending := range sm.legacyClaudeApprovals {
+			if pending.sessionID == finished.SessionID {
+				ps.PendingRequestID = pending.requestID
+				break
+			}
 		}
+		if ps.PendingRequestID != "" {
+			ps.Status = protocol.StatusWaitingApproval
+		} else if ps.Status == protocol.StatusWaitingApproval {
+			ps.Status = protocol.StatusRunning
+		}
+		ps.LastActivityAt = now
+		status = ps.Status
 	}
-	sm.outputCh <- protocol.DaemonEvent{
-		Type:           "session_status",
-		SessionID:      sessionID,
-		Status:         protocol.StatusRunning,
-		LastActivityAt: time.Now().UTC().Format(time.RFC3339),
+	sm.mu.Unlock()
+	_ = sm.persistClaudeApprovalReferences()
+	resolved := protocol.DaemonEvent{Type: "approval_resolved", SessionID: finished.SessionID, RequestID: finished.RequestID}
+	if finished.Approved != nil {
+		resolved.Approved = *finished.Approved
 	}
+	if finished.Reason != approval.FinishApproved && finished.Reason != approval.FinishDenied {
+		resolved.Reason = string(finished.Reason)
+	}
+	sm.outputCh <- resolved
+	if status != "" {
+		sm.outputCh <- protocol.DaemonEvent{Type: "session_status", SessionID: finished.SessionID, Status: status, LastActivityAt: now.UTC().Format(time.RFC3339)}
+	}
+}
+
+// resolveLegacyClaudeApproval validates session ownership before answering the
+// broker. Late answers converge without attempting to authorize a lost hook.
+func (sm *SessionManager) resolveLegacyClaudeApproval(sessionID, requestID string, approved bool) error {
+	key := claudeApprovalKey{sessionID: sessionID, requestID: requestID}
+	sm.mu.Lock()
+	sm.pruneClaudeApprovalTombstonesLocked(time.Now())
+	_, resolved := sm.claudeApprovalResolved[key]
+	pending := sm.legacyClaudeApprovals[key]
+	submitting := pending != nil && pending.submitting
+	if pending != nil && !submitting {
+		pending.submitting = true
+	}
+	sm.mu.Unlock()
+	if resolved || submitting {
+		return &ResolvedElsewhereError{RequestID: requestID}
+	}
+	if pending == nil {
+		return fmt.Errorf("claude approval request not pending in session")
+	}
+	if err := sm.approvals.Resolve(requestID, approved); err != nil {
+		// A broker terminal path already won and will publish its actual reason.
+		return &ResolvedElsewhereError{RequestID: requestID}
+	}
+	return nil
 }
 
 func permissionEvent(sessionID string, pending PendingOpenCodePermission, policyMode trustedActionPolicyMode) protocol.DaemonEvent {
@@ -449,35 +489,7 @@ func (sm *SessionManager) ResolveApproval(sessionID, requestID string, approved 
 	if sm.routesClaudeApproval(sessionID) {
 		return sm.resolveClaudeApproval(sessionID, requestID, approved)
 	}
-	sm.mu.Lock()
-	ps, ok := sm.sessions[sessionID]
-	if ok && ps.PendingRequestID == requestID {
-		ps.PendingRequestID = ""
-		ps.Status = protocol.StatusRunning
-		ps.LastActivityAt = time.Now()
-	}
-	sm.mu.Unlock()
-
-	if err := sm.approvals.Resolve(requestID, approved); err != nil {
-		return err
-	}
-
-	// Persist the decision so a refresh/replay (and other devices) reconstruct
-	// the answered card instead of re-rendering it as pending. Keyed by
-	// request_id; the clicking client already flipped its card optimistically
-	// and the pending-only guard on the client makes this a no-op there.
-	sm.outputCh <- protocol.DaemonEvent{Type: "approval_resolved", SessionID: sessionID, RequestID: requestID, Approved: approved}
-
-	if ok {
-		// Hook resolved → Claude proceeds; reflect running state to clients.
-		sm.outputCh <- protocol.DaemonEvent{
-			Type:           "session_status",
-			SessionID:      sessionID,
-			Status:         protocol.StatusRunning,
-			LastActivityAt: time.Now().UTC().Format(time.RFC3339),
-		}
-	}
-	return nil
+	return sm.resolveLegacyClaudeApproval(sessionID, requestID, approved)
 }
 
 func (sm *SessionManager) ResolveApprovalAction(sessionID, requestID, action string) error {

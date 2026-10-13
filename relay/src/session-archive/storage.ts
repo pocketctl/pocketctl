@@ -5,6 +5,7 @@ export interface ArchiveStorage {
   put(key: string, bytes: Buffer): Promise<void>
   read(key: string): Promise<AsyncIterable<Uint8Array>>
   delete(key: string): Promise<void>
+  close?(): void
 }
 export function archiveObjectKey(manifestId: string, ordinal: number): string {
   if (

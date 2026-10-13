@@ -144,6 +144,7 @@ type SessionManager struct {
 	approvalEnabled bool   // set once an approval server is attached
 	// Claude V2 approvals are isolated from Codex/OpenCode interaction state.
 	// They are enabled only by the Claude-specific rollout flag.
+	legacyClaudeApprovals       map[claudeApprovalKey]*PendingClaudeApproval
 	claudeApprovalV2            bool
 	claudeApprovals             map[string]*claudeApprovalSession
 	claudeApprovalResolved      map[claudeApprovalKey]time.Time
@@ -230,6 +231,7 @@ func NewSessionManagerWithTrustedActionPolicy(outputCh chan protocol.DaemonEvent
 		turns:                  turn.NewRegistry(nil, nil),
 		turnMetrics:            NewTurnMetrics(),
 		turnMode:               parseTurnEnrichmentMode(os.Getenv("POCKETCTL_TURN_ENRICHMENT")),
+		legacyClaudeApprovals:  make(map[claudeApprovalKey]*PendingClaudeApproval),
 		claudeApprovalV2:       claudeApprovalV2Enabled(),
 		claudeApprovals:        make(map[string]*claudeApprovalSession),
 		claudeApprovalResolved: make(map[claudeApprovalKey]time.Time),
@@ -311,7 +313,7 @@ func (sm *SessionManager) SetApprovalServer(srv *approval.Server, pocketctlPath 
 	if sm.claudeApprovalV2 {
 		srv.SetOnFinished(sm.handleClaudeApprovalFinished)
 	} else {
-		srv.SetOnCancel(sm.handleApprovalCancel)
+		srv.SetOnFinished(sm.handleLegacyApprovalFinished)
 	}
 	// Share the file-lock manager so the approval server can deny Edit/Write on
 	// files held by other sessions (Scheme C), even in bypassPermissions mode.

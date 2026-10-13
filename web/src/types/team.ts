@@ -256,7 +256,7 @@ export interface TeamCallSummary {
   event_id: string
   offer_id: string
   state: 'pending' | 'dispatched' | 'accepted' | 'completed' | 'failed' | 'blocked' | 'uncertain'
-  outcome: 'waiting_owner' | 'memory_adapter_unsupported' | null
+  outcome: 'waiting_owner' | 'memory_adapter_unsupported' | 'start_fail' | 'codex_project_skills_invalid' | null
   created_at: string
   updated_at: string
 }
