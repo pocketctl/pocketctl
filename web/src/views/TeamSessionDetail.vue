@@ -180,6 +180,8 @@ const callsByEvent = computed(() => {
   return byEvent
 })
 function callLabel(call: TeamCallSummary): string {
+  if (call.state === 'failed' && call.outcome === 'start_fail') return t('workspace.call_start_failed')
+  if (call.state === 'failed' && call.outcome === 'codex_project_skills_invalid') return t('workspace.call_skills_invalid')
   if (call.state === 'failed' && call.outcome === 'memory_adapter_unsupported') return t('workspace.shared_memory_unsupported')
   if (call.outcome === 'waiting_owner' && ['accepted', 'dispatched'].includes(call.state)) return t('workspace.waiting_agent_owner')
   return ({ pending: t('workspace.call_pending'), dispatched: t('workspace.call_dispatched'), accepted: t('session.tool_group_running'), completed: t('team.task_state.completed'), failed: t('session.execution_failed'), blocked: t('workspace.call_blocked'), uncertain: t('attention.state_unknown') })[call.state]

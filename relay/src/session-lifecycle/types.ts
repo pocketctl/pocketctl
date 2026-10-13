@@ -1,3 +1,5 @@
+import type { SessionLifecycleRelease } from './release.js'
+
 export type LifecycleMode = 'off' | 'observe' | 'enforce'
 export type LifecycleAction = 'archive' | 'cool' | 'resume' | 'purge'
 export type ContentState =
@@ -56,6 +58,10 @@ export interface SessionLifecycleConfig {
   maxCompressedBytes: number
   objectBucket: string | null
   objectRegion: string | null
+  storageDriver: 's3' | 'filesystem'
+  archiveDirectory: string | null
+  filesystemMinFreeBytes: number
+  release: SessionLifecycleRelease | null
 }
 export interface LifecycleInput {
   ownerUserId: number | null

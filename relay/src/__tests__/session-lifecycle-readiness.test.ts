@@ -2,6 +2,7 @@ import { describe, expect, test,vi } from 'vitest'
 import { sessionLifecycleReadiness } from '../session-lifecycle/readiness.js'
 import { sessionLifecycleConfig } from '../session-lifecycle/config.js'
 import { systemNotificationsEnabled } from '../attention-inbox/notification-routes.js'
+import { releasedConfig, releaseFixture } from './session-lifecycle-release-fixture.js'
 
 describe('enabled defaults and truthful lifecycle readiness', () => {
   test('notifications default on and retain an explicit off switch', () => {
@@ -38,5 +39,65 @@ describe('enabled defaults and truthful lifecycle readiness', () => {
       expect(status.execution_ready).toBe(false)
       expect(status.blockers).toContain('production_release_not_ready')
     }finally{vi.unstubAllEnvs()}
+  })
+  test('a version-bound published production release becomes executable with installed storage', () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    try {
+      const status = sessionLifecycleReadiness(releasedConfig('fixture-storage'), { namespace: 'fixture-storage' })
+      expect(status).toMatchObject({ execution_ready: true, production_release_ready: true, blockers: [] })
+    } finally { vi.unstubAllEnvs() }
+  })
+  test.each([
+    [{ policyVersion: 'other-policy' }, 'release_policy_mismatch'],
+    [{ effectiveAt: '2026-01-02T00:00:00Z' }, 'release_dates_mismatch'],
+    [{ transitionDeadline: '2026-02-02T00:00:00Z' }, 'release_dates_mismatch'],
+    [{ storageNamespace: 'other-storage' }, 'release_storage_mismatch'],
+    [{ publishedAt: '2099-01-01T00:00:00Z' }, 'release_not_published'],
+    [{ evidence: { ...releaseFixture('fixture-storage').evidence, legal_publication: '' } }, 'legal_publication'],
+  ])('production release rejects inconsistent or incomplete evidence %j', (patch, reason) => {
+    vi.stubEnv('NODE_ENV', 'production')
+    try {
+      const status = sessionLifecycleReadiness(releasedConfig('fixture-storage', patch), { namespace: 'fixture-storage' })
+      expect(status.execution_ready).toBe(false)
+      expect(status.release_blockers).toContain(reason)
+    } finally { vi.unstubAllEnvs() }
+  })
+  test('all missing runtime prerequisites are reported even when production release evidence is absent', () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    try {
+      expect(sessionLifecycleReadiness(sessionLifecycleConfig({})).blockers).toEqual([
+        'object_reader_not_configured', 'policy_not_effective',
+        'historical_transition_not_configured', 'production_release_not_ready',
+      ])
+    } finally { vi.unstubAllEnvs() }
+  })
+  test('a published release cannot execute before its effective time', () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    try {
+      const config = releasedConfig('fixture-storage', {
+        effectiveAt: '2099-01-01T00:00:00Z', transitionDeadline: '2099-02-01T00:00:00Z',
+      }, { SESSION_LIFECYCLE_EFFECTIVE_AT: '2099-01-01T00:00:00Z', SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2099-02-01T00:00:00Z' })
+      expect(sessionLifecycleReadiness(config, { namespace: 'fixture-storage' }).blockers).toContain('policy_not_effective')
+    } finally { vi.unstubAllEnvs() }
+  })
+  test('production policy cannot predate its formal publication', () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    try {
+      const status = sessionLifecycleReadiness(releasedConfig('fixture-storage', { publishedAt: '2026-01-02T00:00:00Z' }), { namespace: 'fixture-storage' })
+      expect(status.execution_ready).toBe(false)
+      expect(status.release_blockers).toContain('policy_before_publication')
+    } finally { vi.unstubAllEnvs() }
+  })
+  test('historical transition must last at least 30 complete days after policy activation', () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    try {
+      const config = releasedConfig('fixture-storage', { transitionDeadline: '2026-01-30T23:59:59.999999Z' },
+        { SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2026-01-30T23:59:59.999999Z' })
+      const status = sessionLifecycleReadiness(config, { namespace: 'fixture-storage' })
+      expect(status.execution_ready).toBe(false)
+      expect(status.release_blockers).toContain('historical_transition_too_short')
+      const exact = releasedConfig('fixture-storage', { transitionDeadline: '2026-01-31T00:00:00Z' }, { SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2026-01-31T00:00:00Z' })
+      expect(sessionLifecycleReadiness(exact, { namespace: 'fixture-storage' }).execution_ready).toBe(true)
+    } finally { vi.unstubAllEnvs() }
   })
 })

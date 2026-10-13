@@ -200,6 +200,12 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     expect(JSON.stringify(unsupported)).not.toContain('/secret')
     await pool.query(`UPDATE collaboration_context_deliveries SET outcome = 'private context /secret' WHERE call_id = $1`, [first!.callId])
     expect((await sessions.listCalls(shared.id, ownerUserId)).find(call => call.id === first!.callId)?.outcome).toBeNull()
+    for (const outcome of ['start_fail', 'codex_project_skills_invalid']) {
+      await pool.query(`UPDATE collaboration_calls SET outcome = $2 WHERE call_id = $1`, [first!.callId, outcome])
+      const visible = await sessions.listCalls(shared.id, ownerUserId)
+      expect(visible.find(call => call.id === first!.callId)?.outcome).toBe(outcome)
+      expect(JSON.stringify(visible)).not.toContain('/secret')
+    }
     const contextV2 = await contexts.create({
       sessionId: shared.id, actorUserId: ownerUserId, expectedRevision: 1, requestId: 'context-v2',
       goal: 'Produce the final recommendation', consensus: ['The first call completed'], openQuestions: [],

@@ -29,6 +29,8 @@ EnvironmentFile=/opt/pocketctl/relay/.env
 # 安全限制
 NoNewPrivileges=true
 ProtectSystem=strict
+StateDirectory=pocketctl/session-archive
+StateDirectoryMode=0700
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

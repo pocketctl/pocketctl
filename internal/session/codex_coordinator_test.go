@@ -1403,3 +1403,16 @@ func TestCodexCoordinatorShutdownIgnoresActiveOpenCodeLease(t *testing.T) {
 		t.Fatalf("Codex handoff survived shutdown with only an OpenCode lease: %v", err)
 	}
 }
+
+func TestCodexCoordinatorCanceledHealthProbePreservesRuntime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	coord := newCodexCoordinator(nil)
+	existing := &codexAppServerRuntime{PID: 123, Endpoint: "/tmp/existing.sock", RemoteURI: "unix:///tmp/existing.sock", Stop: func() error { t.Fatal("canceled health check stopped existing runtime"); return nil }}
+	coord.runtime = existing
+	coord.probe = func(context.Context, *codexAppServerRuntime) error { cancel(); return context.Canceled }
+	_, err := coord.ensureStarted(ctx, "/opt/codex", "0.162.1", agentcontrol.CodexCapabilities{SchemaHash: "schema"})
+	if !errors.Is(err, context.Canceled) || coord.runtime != existing {
+		t.Fatalf("runtime changed after cancellation: %v", err)
+	}
+}

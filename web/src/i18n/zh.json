@@ -1,4 +1,6 @@
 {
+  "workspace.call_start_failed": "Agent 启动失败，请主机所有者检查运行环境",
+  "workspace.call_skills_invalid": "项目技能目录检查失败，请主机所有者检查技能文件及链接",
   "memory.assistance.draft": "生成草稿；仅供审查差异",
   "memory.assistance.protected": "手工与锁定章节保留",
   "memory.assistance.productGate": "草稿可审查，自动化产品闸门未开放",
@@ -372,6 +374,9 @@
   "session.host_offline_notice": "主机已离线，恢复在线后可继续此会话",
   "session.creating": "模型正在工作中...",
   "session.completed": "已完成",
+  "session.documents.more": "查看更多",
+  "session.documents.previous": "上一页",
+  "session.documents.next": "下一页",
   "session.documents.title": "本次会话文档",
   "session.documents.snapshot": "已捕获快照",
   "session.documents.loading": "正在读取文档列表…",

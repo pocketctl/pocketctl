@@ -203,20 +203,30 @@ func codexProjectSkillRoots(cwd string) ([]string, error) {
 				return nil, fmt.Errorf("skill root leaves project: %s", candidate)
 			}
 			err = filepath.WalkDir(actual, func(path string, entry fs.DirEntry, walkErr error) error {
+				// Claude rotates debug logs and can leave debug/latest dangling.
+				// Ignore only missing debug artifacts; live links still undergo
+				// the same containment and directory checks as skill files.
+				rel, _ := filepath.Rel(actual, path)
+				debugArtifact := name == ".claude" && (rel == "debug" || strings.HasPrefix(rel, "debug"+string(filepath.Separator)))
 				if walkErr != nil {
+					if debugArtifact && os.IsNotExist(walkErr) {
+						return nil
+					}
 					return walkErr
 				}
 				count++
 				if count > 20000 {
 					return errors.New("project skill discovery exceeds 20000 entries")
 				}
-				rel, _ := filepath.Rel(actual, path)
 				if strings.Count(rel, string(filepath.Separator)) > 32 {
 					return errors.New("project skill discovery exceeds depth 32")
 				}
 				if entry.Type()&os.ModeSymlink != 0 {
 					target, err := filepath.EvalSymlinks(path)
 					if err != nil {
+						if debugArtifact && os.IsNotExist(err) {
+							return nil
+						}
 						return err
 					}
 					info, err := os.Stat(target)
@@ -253,7 +263,7 @@ func withinSkillProject(root, path string) bool {
 func (c *codexCoordinator) configureProjectSkills(ctx context.Context, client codexRuntimeClient) error {
 	roots, err := codexProjectSkillRoots(c.projectCwd)
 	if err != nil {
-		return err
+		return fmt.Errorf("codex_project_skills_invalid: %w", err)
 	}
 	if roots == nil {
 		roots = []string{}

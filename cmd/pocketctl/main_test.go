@@ -2624,6 +2624,7 @@ func TestDaemonCwdPolicyInvalidExplicitRootDoesNotFallBack(t *testing.T) {
 
 func TestClassifyCreateErrorCodexConfiguration(t *testing.T) {
 	for message, want := range map[string]string{
+		"codex_project_skills_invalid: lstat missing":                 "codex_project_skills_invalid",
 		`unsupported Codex reasoning effort "high" for model "model"`: "unsupported_effort",
 		"permission requires --allow-dangerous-remote-permissions":    "remote_permission_denied",
 		"codex remote approval requires native approval capabilities": "codex_managed_required",

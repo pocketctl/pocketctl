@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -259,5 +261,67 @@ func TestCodexInvocationCompactionRequiresNativeCompletion(t *testing.T) {
 	}
 	if again := p.Project(codexapp.Inbound{Method: "item/completed", Params: params}); len(again) != 0 {
 		t.Fatal("duplicate completion")
+	}
+}
+
+func TestCodexProjectSkillsIgnoreClaudeDebugArtifacts(t *testing.T) {
+	for _, linkedDirectory := range []bool{false, true} {
+		t.Run(fmt.Sprint(linkedDirectory), func(t *testing.T) {
+			sm, c, rpc, _ := invocationFixture(t)
+			debug := filepath.Join(c.projectCwd, ".claude", "debug")
+			if linkedDirectory {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), debug); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(debug, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(debug, "deleted.txt"), filepath.Join(debug, "latest")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			items, err := sm.CodexInvocations(context.Background(), "s")
+			if err != nil || len(items) != 16 {
+				t.Fatalf("debug artifacts blocked skills: %d %v", len(items), err)
+			}
+			rpc.lastCall(t, "skills/extraRoots/set")
+		})
+	}
+}
+
+func TestCodexProjectSkillsStillRejectBrokenSkillLinks(t *testing.T) {
+	_, c, rpc, _ := invocationFixture(t)
+	if err := os.Symlink(filepath.Join(c.projectCwd, "missing"), filepath.Join(c.projectCwd, ".claude", "skills", "broken")); err != nil {
+		t.Fatal(err)
+	}
+	err := c.configureProjectSkills(context.Background(), rpc)
+	if err == nil || !strings.Contains(err.Error(), "codex_project_skills_invalid") {
+		t.Fatalf("expected classified skill error, got %v", err)
+	}
+}
+
+func TestCodexProjectDebugLiveEscapesStillRejected(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		t.Run(fmt.Sprint(directory), func(t *testing.T) {
+			_, c, _, _ := invocationFixture(t)
+			target := t.TempDir()
+			if !directory {
+				target = filepath.Join(target, "log.txt")
+				if err := os.WriteFile(target, []byte("log"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			debug := filepath.Join(c.projectCwd, ".claude", "debug")
+			if err := os.MkdirAll(debug, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(debug, "latest")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := codexProjectSkillRoots(c.projectCwd); err == nil {
+				t.Fatal("live escape in debug directory accepted")
+			}
+		})
 	}
 }

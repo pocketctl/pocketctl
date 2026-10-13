@@ -1,5 +1,6 @@
 <template>
   <main>
+    <SessionDocumentShelf v-if="showShelf" :documents="shelfDocuments" list-status="ready" @open="openShelfDocument" />
     <button id="document-harness-opener" ref="opener" type="button">Open document</button>
     <output id="document-harness-close-count">{{ closeCount }}</output>
     <SessionDocumentViewer
@@ -15,6 +16,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
+import SessionDocumentShelf from '../src/components/session-documents/SessionDocumentShelf.vue'
 import SessionDocumentViewer from '../src/components/session-documents/SessionDocumentViewer.vue'
 import type { SessionDocumentViewerState } from '../src/composables/useSessionDocuments'
 import type { SessionDocumentMetadata } from '../src/services/sessionDocuments'
@@ -37,6 +39,14 @@ const baseDocument: SessionDocumentMetadata = {
   sourceEventId: 'browser-event',
   capturedAt: '2026-09-12T00:00:00.000Z',
   committedAt: '2026-09-12T00:00:01.000Z',
+}
+const showShelf = new URLSearchParams(location.search).has('shelf')
+const shelfDocuments = Array.from({ length: 23 }, (_, i) => ({ ...baseDocument,
+  documentId: `document-${i}`, displayName: `会话文档-${23 - i}.md`, format: 'markdown' as const,
+  byteSize: 2048,
+}))
+function openShelfDocument(document: SessionDocumentMetadata) {
+  viewer.value = { status: 'ready', document, text: '# 文档快照\n\n分页阅读验证。', offlineSnapshot: false }
 }
 const viewer = ref<SessionDocumentViewerState>({
   status: 'closed', document: null, text: '', offlineSnapshot: false,

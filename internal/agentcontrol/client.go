@@ -81,6 +81,8 @@ func (c Client) call(ctx context.Context, req Request, result any) error {
 		return fmt.Errorf("connect agent control: %w", err)
 	}
 	defer conn.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
@@ -98,6 +100,9 @@ func (c Client) call(ctx context.Context, req Request, result any) error {
 	}
 	line, err := bufio.NewReaderSize(io.LimitReader(conn, MaxFrameSize+2), MaxFrameSize+2).ReadBytes('\n')
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("read agent control response: %w", ctx.Err())
+		}
 		return fmt.Errorf("read agent control response: %w", err)
 	}
 	line = bytes.TrimSuffix(line, []byte{'\n'})

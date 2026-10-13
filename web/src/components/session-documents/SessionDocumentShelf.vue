@@ -15,7 +15,7 @@
     </div>
     <div v-else class="session-document-list">
       <button
-        v-for="document in documents"
+        v-for="document in documents.slice(0, 3)"
         :key="`${document.documentId}:${document.versionId}`"
         type="button"
         class="session-document-row"
@@ -36,6 +36,47 @@
         <span class="document-open" aria-hidden="true">›</span>
       </button>
     </div>
+    <button v-if="documents.length > 3" ref="moreButton" type="button" class="document-more" data-testid="documents-more" @click="showList">
+      {{ t('session.documents.more') }} ({{ documents.length }})
+    </button>
+    <Teleport to="body">
+      <div v-if="listOpen" class="document-list-overlay" @click.self="closeList">
+        <section ref="dialog" class="document-list-dialog" role="dialog" aria-modal="true" :aria-label="t('session.documents.title')" tabindex="-1" @keydown.esc.stop.prevent="closeList" @keydown.tab="trapFocus">
+          <header class="document-shelf-header">
+            <strong>{{ t('session.documents.title') }}</strong>
+            <button type="button" class="document-more" @click="closeList">{{ t('common.close') }}</button>
+          </header>
+          <div class="session-document-list document-page" :key="page">
+            <button
+              v-for="document in pageDocuments"
+              :key="`${document.documentId}:${document.versionId}`"
+              type="button"
+              class="session-document-row"
+              :class="{ unavailable: document.state !== 'available' }"
+              :disabled="document.state === 'pending'"
+              :aria-label="rowAriaLabel(document)"
+              @click="openDocument(document, $event)"
+            >
+              <span class="document-icon" :class="document.format">{{ document.format === 'markdown' ? 'MD' : 'H' }}</span>
+              <span class="document-copy">
+                <strong>{{ document.displayName }}</strong>
+                <small>
+                  <span>{{ formatBytes(document.byteSize) }}</span>
+                  <span>·</span>
+                  <span :class="{ verified: document.state === 'available' }">{{ statusLabel(document) }}</span>
+                </small>
+              </span>
+              <span class="document-open" aria-hidden="true">›</span>
+            </button>
+          </div>
+          <footer class="document-pagination">
+            <button type="button" :disabled="page === 0" @click="page--">{{ t('session.documents.previous') }}</button>
+            <span aria-live="polite">{{ page + 1 }} / {{ pageCount }}</span>
+            <button type="button" data-testid="documents-next" :disabled="page + 1 >= pageCount" @click="page++">{{ t('session.documents.next') }}</button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
     <p v-if="listStatus === 'offline'" class="document-shelf-note" role="status">
       {{ t('session.documents.offline') }}
     </p>
@@ -50,7 +91,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { SessionDocumentMetadata } from '../../services/sessionDocuments'
 import type { SessionDocumentListStatus } from '../../composables/useSessionDocuments'
@@ -62,6 +103,40 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [document: SessionDocumentMetadata, opener: HTMLButtonElement]; refresh: [] }>()
 const { t } = useLocale()
 const hasUnavailable = computed(() => props.documents.some((item) => item.state !== 'available'))
+
+// Relay returns a bounded (at most 50), newest-first metadata list.
+const listOpen = ref(false)
+const page = ref(0)
+const pageCount = computed(() => Math.max(1, Math.ceil(props.documents.length / 10)))
+const pageDocuments = computed(() => props.documents.slice(page.value * 10, (page.value + 1) * 10))
+const dialog = ref<HTMLElement | null>(null)
+const moreButton = ref<HTMLButtonElement | null>(null)
+watch(pageCount, count => { page.value = Math.min(page.value, count - 1) })
+watch(() => props.documents.length, count => { if (!count) closeList() })
+async function showList() {
+  page.value = 0
+  listOpen.value = true
+  await nextTick()
+  dialog.value?.focus()
+}
+function closeList() {
+  listOpen.value = false
+  moreButton.value?.focus()
+}
+function trapFocus(event: KeyboardEvent) {
+  const buttons = Array.from(dialog.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+  const first = buttons[0], last = buttons.at(-1)
+  if (!buttons.includes(document.activeElement as HTMLButtonElement)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first)?.focus()
+    return
+  }
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.value)) {
+    event.preventDefault(); last?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault(); first?.focus()
+  }
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -84,6 +159,14 @@ function openDocument(document: SessionDocumentMetadata, event: MouseEvent): voi
 </script>
 
 <style scoped>
+.document-more,.document-pagination button{padding:10px 14px;border:0;border-radius:6px;color:var(--accent);background:transparent;cursor:pointer}
+.document-list-overlay{position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;padding:20px;background:#010409bd;overscroll-behavior:contain}
+.document-list-dialog{width:min(640px,100%);max-height:85dvh;display:flex;flex-direction:column;background:var(--surface);color:var(--fg);border:1px solid var(--border-light);border-radius:12px;overflow:hidden}
+.document-list-dialog header{justify-content:space-between;flex-shrink:0}
+.document-page{overflow:auto;overscroll-behavior:contain}
+.document-pagination{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);flex-shrink:0}
+.document-pagination button:disabled{opacity:.4;cursor:default}
+
 .session-document-shelf{position:relative;overflow:hidden;border:1px solid var(--border-light);border-radius:12px;background:var(--surface);box-shadow:0 8px 28px #0000001f;animation:document-shelf-in .32s cubic-bezier(.2,.8,.2,1) both}
 .session-document-shelf::before{content:"";position:absolute;inset:0 auto 0 0;width:2px;background:linear-gradient(#58a6ff,#e07a4f)}
 .document-shelf-header{min-height:46px;display:flex;align-items:center;gap:9px;padding:0 14px;border-bottom:1px solid var(--border)}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "session-lifecycle-v1",
+  "publishedAt": null,
+  "effectiveAt": null,
+  "transitionDeadline": null,
+  "storageNamespace": null,
+  "evidence": {
+    "production_provider_and_backup_policy": null,
+    "legal_publication": null,
+    "production_client_release": null,
+    "capacity_and_fault_acceptance": null
+  }
+}

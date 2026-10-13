@@ -59,6 +59,15 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = '' })
 
 describe('team session detail', () => {
+  test.each([
+    ['start_fail', 'Agent 启动失败，请主机所有者检查运行环境'],
+    ['codex_project_skills_invalid', '项目技能目录检查失败，请主机所有者检查技能文件及链接'],
+  ])('explains %s without exposing host paths', async (outcome, expected) => {
+    calls.value = [{ id: 'call-1', event_id: 'e1', offer_id: 'offer-1', state: 'failed', outcome }]
+    const { wrapper } = await render()
+    expect(wrapper.text()).toContain(expected)
+  })
+
   test('immediately updates the open detail after sidebar archive and ignores other sessions', async () => {
     const { wrapper } = await render()
     const browser = wrapper.findComponent({ name: 'TeamSessionBrowser' })

@@ -56,6 +56,9 @@ func (sm *SessionManager) ClaudeApprovalV2Enabled() bool {
 }
 
 func (sm *SessionManager) SetClaudeApprovalRecorder(recorder func([]ClaudeApprovalReference) error) {
+	// Detaching during shutdown must wait for the last atomic reference write.
+	sm.claudeApprovalPersistenceMu.Lock()
+	defer sm.claudeApprovalPersistenceMu.Unlock()
 	sm.mu.Lock()
 	sm.claudeApprovalRecorder = recorder
 	sm.mu.Unlock()
@@ -84,6 +87,9 @@ func (sm *SessionManager) ClaudeApprovalReferences() []ClaudeApprovalReference {
 
 func (sm *SessionManager) claudeApprovalReferencesLocked() []ClaudeApprovalReference {
 	var references []ClaudeApprovalReference
+	for key, pending := range sm.legacyClaudeApprovals {
+		references = append(references, ClaudeApprovalReference{SessionID: key.sessionID, RequestID: key.requestID, CreatedAt: pending.CreatedAt})
+	}
 	for _, state := range sm.claudeApprovals {
 		for _, request := range state.pending {
 			references = append(references, ClaudeApprovalReference{
@@ -345,14 +351,16 @@ func (sm *SessionManager) routesClaudeApproval(sessionID string) bool {
 // and Relay reconnect replay. It never exposes the registry's mutable storage.
 func (sm *SessionManager) PendingClaudeApprovals(sessionID string) []protocol.DaemonEvent {
 	sm.mu.RLock()
-	state := sm.claudeApprovals[sessionID]
-	if state == nil {
-		sm.mu.RUnlock()
-		return nil
+	pending := make([]PendingClaudeApproval, 0)
+	for key, request := range sm.legacyClaudeApprovals {
+		if key.sessionID == sessionID {
+			pending = append(pending, cloneClaudeApproval(request))
+		}
 	}
-	pending := make([]PendingClaudeApproval, 0, len(state.pending))
-	for _, request := range state.pending {
-		pending = append(pending, cloneClaudeApproval(request))
+	if state := sm.claudeApprovals[sessionID]; state != nil {
+		for _, request := range state.pending {
+			pending = append(pending, cloneClaudeApproval(request))
+		}
 	}
 	sm.mu.RUnlock()
 	sort.Slice(pending, func(i, j int) bool {

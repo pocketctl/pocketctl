@@ -477,6 +477,8 @@ export class TeamSessionService {
          CASE WHEN c.outcome = 'waiting_owner' THEN 'waiting_owner'
               WHEN c.state = 'failed' AND d.outcome = 'team_memory_context_unsupported_adapter'
                 THEN 'memory_adapter_unsupported'
+              WHEN c.state = 'failed' AND c.outcome IN ('start_fail', 'codex_project_skills_invalid')
+                THEN c.outcome
               ELSE NULL END AS outcome,
          c.created_at, c.updated_at
        FROM collaboration_calls c

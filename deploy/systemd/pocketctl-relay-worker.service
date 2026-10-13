@@ -19,6 +19,8 @@ RestartSec=5
 
 NoNewPrivileges=true
 ProtectSystem=strict
+StateDirectory=pocketctl/session-archive
+StateDirectoryMode=0700
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

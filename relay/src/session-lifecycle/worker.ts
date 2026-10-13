@@ -7,6 +7,7 @@ import { inspectLifecycleEligibility } from './eligibility.js'
 import { SessionLifecycleExecutor } from './executor.js'
 import { SessionLifecycleScanner } from './scanner.js'
 import type { SessionLifecycleConfig } from './types.js'
+import { sessionLifecycleReadiness } from './readiness.js'
 
 /** Single independent maintenance loop. Leases coordinate all workers; stop
  * drains current work and the next process can take expired durable claims. */
@@ -49,8 +50,14 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
       const page=await new SessionLifecycleScanner(pool,config).scanPage({limit:Math.min(100,config.batchSessions),afterRowId:cursor})
       cursor=page.nextRowId??0;report.observe=page;options.onReport?.(report);return
     }
-    if(process.env.NODE_ENV==='production'){report.blockedReadiness='production_release_not_ready';options.onReport?.(report);return}
-    if(!executor||!config.effectiveAt||!config.transitionDeadline){report.blockedReadiness=!executor?'object_store_unconfigured':'policy_not_effective';options.onReport?.(report);return}
+    const readiness = sessionLifecycleReadiness(config, storage ?? false)
+    if (!readiness.execution_ready || !executor) {
+      report.blockedReadiness = readiness.blockers[0] ?? 'object_reader_not_configured'
+      report.readinessBlockers = readiness.blockers
+      report.releaseBlockers = readiness.release_blockers
+      options.onReport?.(report)
+      return
+    }
     const rows=(await pool.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND (last_activity_at IS NULL OR last_activity_at<NOW()-interval '60 days') ORDER BY id LIMIT $2`,[cursor,config.batchSessions])).rows
     cursor=rows.length===config.batchSessions?rows.at(-1)!.id:0
     for(const row of rows){

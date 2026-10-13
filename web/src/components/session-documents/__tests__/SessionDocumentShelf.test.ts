@@ -11,6 +11,42 @@ const available = {
 }
 
 describe('SessionDocumentShelf', () => {
+  test('shows latest three and paginates all documents in a dialog', async () => {
+    const documents = Array.from({ length: 23 }, (_, i) => ({ ...available,
+      documentId: `doc-${i}`, displayName: `notes-${i}.md` }))
+    const wrapper = mount(SessionDocumentShelf, { props: { documents, listStatus: 'ready' },
+      global: { stubs: { Teleport: true } } })
+    expect(wrapper.findAll('button.session-document-row')).toHaveLength(3)
+    await wrapper.get('[data-testid="documents-more"]').trigger('click')
+    const dialog = () => wrapper.get('[role="dialog"]')
+    expect(dialog().findAll('button.session-document-row')).toHaveLength(10)
+    expect(dialog().text()).toContain('notes-0.md')
+    await dialog().get('[data-testid="documents-next"]').trigger('click')
+    expect(dialog().text()).toContain('notes-10.md')
+    expect(dialog().text()).not.toContain('notes-0.md')
+    await dialog().get('[data-testid="documents-next"]').trigger('click')
+    expect(dialog().findAll('button.session-document-row')).toHaveLength(3)
+    expect(dialog().get('[data-testid="documents-next"]').attributes('disabled')).toBeDefined()
+    await dialog().find('button.session-document-row').trigger('click')
+    expect(wrapper.emitted('open')?.[0]?.[0]).toEqual(documents[20])
+    wrapper.unmount()
+  })
+
+  test('clamps pages after refresh and closes when access clears the list', async () => {
+    const documents = Array.from({ length: 23 }, (_, i) => ({ ...available, documentId: `doc-${i}` }))
+    const wrapper = mount(SessionDocumentShelf, { props: { documents, listStatus: 'ready' },
+      global: { stubs: { Teleport: true } } })
+    await wrapper.get('[data-testid="documents-more"]').trigger('click')
+    await wrapper.get('[data-testid="documents-next"]').trigger('click')
+    await wrapper.get('[data-testid="documents-next"]').trigger('click')
+    await wrapper.setProps({ documents: documents.slice(0, 4) })
+    expect(wrapper.get('[role="dialog"]').text()).toContain('1 / 1')
+    expect(wrapper.get('[role="dialog"]').findAll('.session-document-row')).toHaveLength(4)
+    await wrapper.setProps({ documents: [], listStatus: 'unavailable' })
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   test('renders accessible available and unavailable rows and emits the full metadata identity', async () => {
     const unavailable = { ...available, documentId: 'doc-2', versionId: 'ver-2', displayName: 'large.html', format: 'html' as const, state: 'unavailable' as const, reason: 'too_large' }
     const wrapper = mount(SessionDocumentShelf, {
