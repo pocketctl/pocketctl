@@ -41,6 +41,8 @@ export function permissionOptions(agent: AgentType, creation = false, mutableMod
 export function permissionTitleKey(permission?: PermissionConfig): string {
   if (!permission) return 'session.permission.unavailable'
   if (permission.agent === 'dsh') return ['read-only','workspace-write','danger-full-access'].includes(permission.preset) ? `session.permission.dsh.${permission.preset}.title` : permission.preset
+  // Older daemon snapshots use Claude CLI's native default name for manual approval.
+  if (permission.agent === 'claude-code' && (permission.mode as string) === 'default') return 'session.permission.claude.manual.title'
   return permission.agent === 'claude-code' ? `session.permission.claude.${permission.mode}.title` : `session.permission.codex.${permission.preset}.title`
 }
 

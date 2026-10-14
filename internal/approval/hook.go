@@ -37,10 +37,9 @@ import (
 // config.ApprovalSocketPath) so any terminal's hook connects to the single
 // running daemon; POCKETCTL_APPROVAL_SOCK overrides it if set.
 //
-// Failure policy: if the daemon isn't running (socket unreachable / missing),
-// we writeContinue() so Claude falls back to its OWN permission UI rather than
-// silently denying every tool — the user's terminal stays usable without the
-// daemon. Only when we successfully reach the daemon do we honor its decision.
+// Failure policy: daemon-owned sessions deny on IPC failure; falling through
+// would let native allow rules authorize an unapproved tool. User-launched
+// terminal sessions retain Claude's native permission UI without the daemon.
 func RunHook(logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -52,6 +51,7 @@ func RunHook(logger *slog.Logger) error {
 	var payload struct {
 		SessionID string          `json:"session_id"`
 		ToolName  string          `json:"tool_name"`
+		ToolUseID string          `json:"tool_use_id"`
 		ToolInput json.RawMessage `json:"tool_input"`
 		Cwd       string          `json:"cwd"`
 		// permission_mode is a common PreToolUse field carrying the session's
@@ -122,8 +122,16 @@ func RunHook(logger *slog.Logger) error {
 
 	// Ask the server. It performs the Scheme C file-lock check and, depending on
 	// perm mode, either short-circuits (bypass) or brokers client approval.
-	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, effectivePermMode)
+	resp, err := askSocket(sockPath, sessionID, payload.ToolName, payload.ToolInput, payload.Cwd, effectivePermMode, payload.ToolUseID)
 	if err != nil {
+		if !isTerminalSession() {
+			// A daemon-owned session has no human at Claude's native prompt.
+			// Falling through would apply user allow rules even though the remote
+			// approval was never received. Never authorize on transport failure.
+			writeDecision(false, "PocketCtl approval unavailable; tool was not authorized")
+			logger.Warn("managed approval failed closed", "session", sessionID, "error", err)
+			return nil
+		}
 		// Daemon unreachable (not running, socket gone, etc.). Fall back to
 		// Claude's native permission UI so the terminal stays usable without the
 		// daemon — do NOT silently deny. We log but otherwise no-op.
@@ -150,7 +158,7 @@ func RunHook(logger *slog.Logger) error {
 
 // askSocket connects to the approval server, sends one JSON request, and blocks
 // for the decision line.
-func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd, permMode string) (hookResponse, error) {
+func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd, permMode, toolUseID string) (hookResponse, error) {
 	conn, err := net.DialTimeout("unix", sockPath, 5*time.Second)
 	if err != nil {
 		return hookResponse{}, fmt.Errorf("dial: %w", err)
@@ -163,6 +171,7 @@ func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd, per
 		Input:     input,
 		Cwd:       cwd,
 		PermMode:  permMode,
+		ToolUseID: toolUseID,
 	}
 	// Always include the input field key so the server sees consistent JSON.
 	body, err := json.Marshal(req)
@@ -175,7 +184,7 @@ func askSocket(sockPath, sessionID, tool string, input json.RawMessage, cwd, per
 		return hookResponse{}, fmt.Errorf("write: %w", err)
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(approvalTimeout + time.Minute))
+	_ = conn.SetReadDeadline(time.Now().Add(approvalTimeout + 30*time.Second))
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
 	if err != nil {

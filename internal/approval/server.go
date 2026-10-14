@@ -53,6 +53,7 @@ type Response struct {
 // hookRequest is the wire format the hook script sends over the socket.
 type hookRequest struct {
 	SessionID string          `json:"session_id"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Tool      string          `json:"tool"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	Cwd       string          `json:"cwd,omitempty"`
@@ -69,7 +70,7 @@ type hookResponse struct {
 	LockConflict bool   `json:"lock_conflict,omitempty"`
 }
 
-// OnRequestFunc is invoked once per incoming hook connection, after the request
+// OnRequestFunc is invoked once per tool invocation (or legacy hook connection), after the request
 // is registered as pending. It must return quickly (it only fans the request
 // out to clients); the blocking wait happens inside the server.
 type OnRequestFunc func(req Request)
@@ -127,6 +128,7 @@ type Server struct {
 	onReq    OnRequestFunc
 	onCancel OnCancelFunc
 	onFinish OnFinishedFunc
+	calls    map[toolCallKey]*toolCallDecision
 
 	// fileLocks (Scheme C) enforces per-file mutual exclusion across sessions.
 	// When non-nil, Edit/Write/MultiEdit/NotebookEdit on a file held by another
@@ -157,6 +159,7 @@ func NewServer(socketPath string, logger *slog.Logger) *Server {
 		logger:     logger,
 		ipc:        defaultIPCListener,
 		pending:    make(map[string]*pendingEntry),
+		calls:      make(map[toolCallKey]*toolCallDecision),
 		timeout:    approvalTimeout,
 	}
 }
@@ -305,6 +308,7 @@ func (s *Server) takePendingForSession(sessionID string) []takenPending {
 }
 
 func (s *Server) notifyFinished(requestID, sessionID string, approved *bool, reason FinishReason) {
+	s.logger.Info("approval request finished", "request_id", requestID, "session", sessionID, "reason", reason)
 	s.mu.Lock()
 	onFinish := s.onFinish
 	s.mu.Unlock()
@@ -356,6 +360,24 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.logger.Error("approval hook missing session_id")
 		return
 	}
+	// Claude can invoke the same PocketCtl hook through multiple settings
+	// scopes or command paths. Only a tool invocation ID is safe to coalesce;
+	// identical command text alone may represent independent operations.
+	call, leader, conflict := s.joinToolCall(hr)
+	if conflict {
+		writeHookResponse(conn, hookResponse{Reason: "approval tool invocation conflict or capacity exceeded"})
+		return
+	}
+	if call != nil && !leader {
+		s.logger.Info("approval hook coalesced", "session", hr.SessionID, "tool_use_id", hr.ToolUseID)
+		<-call.done
+		writeHookResponse(conn, call.response)
+		return
+	}
+	decision := hookResponse{Reason: "approval hook disconnected before a decision"}
+	if call != nil {
+		defer func() { s.completeToolCall(call, decision) }()
+	}
 
 	// --- Scheme C: file-lock pre-check -------------------------------------
 	// For file-writing tools, deny immediately if another session holds the
@@ -373,9 +395,8 @@ func (s *Server) handleConn(conn net.Conn) {
 			absPath := normalizePath(hr.Cwd, path)
 			if held, holder := fl.IsLockedByOther(hr.SessionID, absPath); held {
 				reason := fmt.Sprintf("文件 %s 正被会话 %s 编辑，请等待其完成或切换会话后再试", path, holder)
-				out, _ := json.Marshal(hookResponse{Allow: false, Reason: reason, LockConflict: true})
-				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-				_, _ = conn.Write(append(out, '\n'))
+				decision = hookResponse{Allow: false, Reason: reason, LockConflict: true}
+				writeHookResponse(conn, decision)
 				return
 			}
 			// Bypass mode: no client approval will follow, so take/refresh the
@@ -391,9 +412,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	// In bypass mode with no lock conflict, tell the hook "no opinion" so it
 	// writeContinue()s and Claude runs the tool under its own permission logic.
 	if hr.PermMode == "bypassPermissions" {
-		out, _ := json.Marshal(hookResponse{Allow: true, Reason: "no lock conflict"})
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		_, _ = conn.Write(append(out, '\n'))
+		decision = hookResponse{Allow: true, Reason: "no lock conflict"}
+		writeHookResponse(conn, decision)
 		return
 	}
 
@@ -407,10 +427,18 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	ch := make(chan Response, 1)
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		decision = hookResponse{Reason: "approval server shut down"}
+		writeHookResponse(conn, decision)
+		return
+	}
 	s.mu.Lock()
 	s.pending[reqID] = &pendingEntry{ch: ch, sessionID: hr.SessionID}
 	onReq := s.onReq
 	s.mu.Unlock()
+	s.closeMu.Unlock()
 
 	if onReq != nil {
 		onReq(req)
@@ -470,7 +498,8 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.mu.Unlock()
 		if !won {
 			// A remote response, drain, or shutdown already won.
-			return
+			resp = <-ch
+			break
 		}
 		if local != nil && *local && fl != nil {
 			if path, ok := extractFilePath(hr.Tool, hr.Input); ok {
@@ -488,6 +517,9 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 		}
 		s.notifyFinished(reqID, hr.SessionID, local, reason)
+		if local != nil {
+			decision = hookResponse{Allow: *local, Reason: string(reason)}
+		}
 		return
 	}
 
@@ -503,15 +535,21 @@ func (s *Server) handleConn(conn net.Conn) {
 	if !resp.Allow {
 		reason = "denied by user"
 	}
-	out, _ := json.Marshal(hookResponse{Allow: resp.Allow, Reason: reason})
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write(append(out, '\n')); err != nil {
-		s.logger.Debug("approval hook write", "error", err)
-	}
+	decision = hookResponse{Allow: resp.Allow, Reason: reason}
+	writeHookResponse(conn, decision)
 }
 
 // approvalTimeout is how long the server will block a hook waiting for a
 // client decision before auto-denying. Long enough for a human to read the
 // prompt; short enough that an orphaned request (client closed the app,
 // network dropped) doesn't wedge Claude forever.
-const approvalTimeout = 10 * time.Minute
+// Claude cancels legacy command hooks at 600s and discards their decision.
+// Start earlier: broker at 540s, socket fallback at 570s, Claude at >=600s.
+// Explicit managed hook timeout is 660s; existing user hooks stay safe too.
+const approvalTimeout = 9 * time.Minute
+
+func writeHookResponse(conn net.Conn, response hookResponse) {
+	out, _ := json.Marshal(response)
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, _ = conn.Write(append(out, '\n'))
+}

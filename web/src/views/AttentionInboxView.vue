@@ -89,7 +89,7 @@ import { createSystemNotificationStore } from '../composables/useSystemNotificat
 import { useAttentionInbox, type AttentionInboxStore, type AttentionLifecycleFilter } from '../composables/useAttentionInbox'
 import { useLocale } from '../composables/useLocale'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
-import { listMyInvitations, respondToTeamInvitation } from '../services/teamClient'
+import { listMyInvitations, respondToTeamInvitation, TeamApiError } from '../services/teamClient'
 import type { AttentionActionID, AttentionInboxDisplayKind, AttentionInboxItem, AttentionInboxScope, AttentionRecoveryItem, SystemNotification } from '../types/attentionInbox'
 import type { TeamInvitation } from '../types/team'
 
@@ -182,7 +182,13 @@ function selectInvitation(invitation: TeamInvitation): void { selectedKey.value 
 async function loadTeamInvitations(): Promise<void> {
   invitationError.value = ''
   try { teamInvitations.value = await listMyInvitations() }
-  catch (failure) { teamInvitations.value = []; invitationError.value = failure instanceof Error ? failure.message : t('common.error') }
+  catch (failure) {
+    teamInvitations.value = []
+    // Personal inboxes also load invitations. An account without Team access
+    // has no invitations; that capability boundary is not an inbox failure.
+    if (failure instanceof TeamApiError && failure.status === 403 && failure.code === 'team_access_denied') return
+    invitationError.value = failure instanceof Error ? failure.message : t('common.error')
+  }
 }
 async function respondInvitation(action: 'accept' | 'decline'): Promise<void> {
   if (!selectedInvitation.value) return

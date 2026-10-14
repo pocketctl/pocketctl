@@ -1,3 +1,4 @@
+import { nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { describe, expect, test } from 'vitest'
 
@@ -11,6 +12,23 @@ const available = {
 }
 
 describe('SessionDocumentShelf', () => {
+  test('keeps keyboard focus in the dialog when the final page disables Next', async () => {
+    const documents = Array.from({ length: 23 }, (_, i) => ({ ...available, documentId: `focus-${i}` }))
+    const wrapper = mount(SessionDocumentShelf, { attachTo: document.body,
+      props: { documents, listStatus: 'ready' } })
+    await wrapper.get('[data-testid="documents-more"]').trigger('click')
+    const next = document.querySelector<HTMLButtonElement>('[data-testid="documents-next"]')!
+    next.focus(); next.click(); await nextTick(); await nextTick()
+    next.focus(); next.click(); await nextTick(); await nextTick()
+    expect(next.disabled).toBe(true)
+    expect(document.activeElement).toBe(document.querySelector('[role="dialog"]'))
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="documents-more"]').element)
+    wrapper.unmount()
+  })
+
   test('shows latest three and paginates all documents in a dialog', async () => {
     const documents = Array.from({ length: 23 }, (_, i) => ({ ...available,
       documentId: `doc-${i}`, displayName: `notes-${i}.md` }))

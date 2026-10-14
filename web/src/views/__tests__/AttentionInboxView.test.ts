@@ -7,10 +7,11 @@ import type { TeamInvitation } from '../../types/team'
 import { createAttentionInboxStore } from '../../composables/useAttentionInbox'
 import { createSystemNotificationStore } from '../../composables/useSystemNotifications'
 import { AttentionInboxApiError } from '../../services/attentionInboxClient'
+import { TeamApiError } from '../../services/teamClient'
 import { useLocale } from '../../composables/useLocale'
 
 const teamApi = vi.hoisted(() => ({ listMyInvitations: vi.fn(async (): Promise<TeamInvitation[]> => []), respondToTeamInvitation: vi.fn(async () => undefined) }))
-vi.mock('../../services/teamClient', () => teamApi)
+vi.mock('../../services/teamClient', async importOriginal => ({ ...(await importOriginal<any>()), ...teamApi }))
 const noticesAPI = vi.hoisted(() => ({ listNotificationSubjects: vi.fn(), getNotificationSubject: vi.fn() }))
 vi.mock('../../services/attentionInboxClient', async importOriginal => ({ ...(await importOriginal<any>()), ...noticesAPI }))
 
@@ -152,6 +153,18 @@ beforeEach(() => {
 })
 
 describe('AttentionInboxView', () => {
+  test.each([
+    [403, 'team_access_denied', false],
+    [403, 'permission_denied', true],
+    [503, 'service_unavailable', true],
+  ] as const)('invitation response %s/%s only hides expected account unavailability', async (status, code, showsError) => {
+    teamApi.listMyInvitations.mockRejectedValueOnce(new TeamApiError(status, { error: { code, message: 'Invitation request failed' } }))
+    const { wrapper } = await render()
+    expect(wrapper.find('.inbox-error').exists()).toBe(showsError)
+    expect(wrapper.find('[data-item-id="approval-1"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   test('system notices remain visible with approvals off and expose no approval actions', async () => {
     const subject = { subject_id: 'subject-1', session_id: 'old-session', daemon_id: 'daemon-1', title: 'Deleted investigation', daemon_name: 'Mac Studio', action: 'purge' as const, result: 'succeeded' as const, last_activity_at: '2026-06-01T00:00:00Z', executed_at: '2026-10-12T00:00:00Z', effective_purge_at: null, reason_code: 'inactivity_90_days', navigation: { type: 'lifecycle_detail' as const, id: 'subject-1' } }
     const notice: SystemNotification = { notification_id: 'notice-1', revision: 2, kind: 'system', topic: 'session_lifecycle', created_at: '2026-10-12T00:00:00Z', read_at: null, expires_at: '2027-01-10T00:00:00Z', subject_count: 1, subject_preview: [subject], subjects_next_cursor: null, requires_approval: false }

@@ -113,6 +113,15 @@ const dialog = ref<HTMLElement | null>(null)
 const moreButton = ref<HTMLButtonElement | null>(null)
 watch(pageCount, count => { page.value = Math.min(page.value, count - 1) })
 watch(() => props.documents.length, count => { if (!count) closeList() })
+// A page change can disable Next or remove the focused document row.
+// Restore focus inside the modal so Escape/Tab keep reaching its handlers.
+watch([page, () => props.documents], async () => {
+  const ownedFocus = dialog.value?.contains(document.activeElement)
+  await nextTick()
+  if (!listOpen.value || !ownedFocus) return
+  const active = document.activeElement
+  if (!dialog.value?.contains(active) || active?.matches(':disabled')) dialog.value?.focus()
+})
 async function showList() {
   page.value = 0
   listOpen.value = true

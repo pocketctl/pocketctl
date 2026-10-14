@@ -377,6 +377,14 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 	if claudePrint {
 		spec.Env = printEnv
 	}
+	if agentType == adapter.AgentClaude {
+		spec.Env, err = sm.claudeResumeEnv(sessionID, cwd, resumeConfig.Permission, spec.Env)
+		if err != nil {
+			cancel()
+			sm.finishOwnedResume(entry, err)
+			return err
+		}
+	}
 	proc, err := sm.startResumeProcess(ctx, spec)
 	if err != nil {
 		cancel()
@@ -492,7 +500,16 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		return err
 	}
 	// D1: capture stdout stream-json + adapter (unified command feedback path, like daemon sessions).
-	proc, err := sm.startResumeProcess(ctx, resumeLaunchSpec{Path: cliPath, Args: args, Dir: ps.Cwd})
+	spec := resumeLaunchSpec{Path: cliPath, Args: args, Dir: ps.Cwd}
+	if agentType == adapter.AgentClaude {
+		spec.Env, err = sm.claudeResumeEnv(ps.SessionID, ps.Cwd, ps.Permission, nil)
+		if err != nil {
+			cancel()
+			sm.finishOwnedResume(entry, err)
+			return err
+		}
+	}
+	proc, err := sm.startResumeProcess(ctx, spec)
 	if err != nil {
 		cancel()
 		sm.finishOwnedResume(entry, err)

@@ -1406,7 +1406,7 @@ export class Router {
       if (!active || active.ws !== ws || active.registrationId !== registrationId) return;
       for (const [clientWs, client] of this.clients) {
         if (clientWs.readyState === 1 && this.sameUser(client.userId, userId)) {
-          this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias, os: daemonOS, ip: daemonIP });
+          this.send(clientWs, { type: 'daemon_status', daemon_id: daemonId, status: 'online', hostname, agents, alias, os: daemonOS, ip: daemonIP, arch: daemonArch, version: daemonVersion, started_at: daemonStartedAt, last_heartbeat: active.lastHeartbeatAt });
         }
       }
     }).catch((e) => console.error('getDaemonAlias:', e));
@@ -1558,6 +1558,10 @@ export class Router {
   private finalizeDaemonShutdown(daemonId: string): void {
     const daemon = this.daemons.get(daemonId);
     if (!daemon) return;
+
+    // Reconcile Team calls and pending commands before removing the registry
+    // entry: the later socket close becomes a no-op once offline is finalized.
+    this.unregisterDaemon(daemonId, daemon.ws);
 
     const timer = this.pendingOfflineTimers.get(daemonId);
     if (timer) {
@@ -3521,9 +3525,10 @@ export class Router {
       // 乐观:仅 WS 全量列表在启动宽限期内用,防列表闪烁;
       // 单主机刷新如实返回真实 status(走到这里 = 内存无活跃连接 = 已离线)。
       const inStartupWindow = (Date.now() - this.startedAt) < this.listGraceMs;
-      const optimisticOnline = optimistic && inStartupWindow;
-      // 非乐观模式下以 DB 记录的 status 为准;乐观模式下被乐观值覆盖。
       const dbOnline = row.status === 'online' && Date.now() - new Date(row.last_heartbeat).getTime() < this.heartbeatTimeoutMs;
+      // Restart grace can preserve recent online presence, never resurrect an
+      // explicitly offline host or a stale heartbeat from before the restart.
+      const optimisticOnline = optimistic && inStartupWindow && dbOnline;
       const demoOnline = isAppReviewDemoDaemon(row.daemon_id);
       const isOnline = demoOnline || optimisticOnline || (!optimistic && dbOnline);
       return {

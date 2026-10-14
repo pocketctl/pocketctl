@@ -1275,6 +1275,47 @@ describe('SessionDetail processEvent integration', () => {
     })
   })
 
+  test.each(['waiting_approval', 'waiting_question'])('keeps whole-turn timing through %s and hides completion until idle', async (waitingStatus) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get('session_list')?.({ type: 'session_list', sessions: [{
+      session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'claude-code', status: 'running', daemon_online: true,
+    }] })
+    websocketMock.handlers.get('replay_end')?.({ type: 'replay_end', session_id: 'ses_1', status: 'running',
+      turn_started_at: new Date(Date.now() - 125000).toISOString() })
+    await wrapper.vm.$nextTick()
+    const start = vm.turnStartTime
+    expect(start).not.toBeNull()
+    websocketMock.handlers.get('session_status')?.({ session_id: 'ses_1', status: waitingStatus })
+    await wrapper.vm.$nextTick()
+    expect(vm.lastTurnDuration).toBeNull()
+    expect(vm.lastTurnEndedAt).toBe('')
+    expect(wrapper.find('.turn-status-bar .status-dot.working').exists()).toBe(true)
+    expect(wrapper.find('.turn-status-bar.done').exists()).toBe(false)
+    websocketMock.handlers.get('session_status')?.({ session_id: 'ses_1', status: 'running' })
+    await wrapper.vm.$nextTick()
+    expect(vm.turnStartTime).toBe(start)
+    websocketMock.handlers.get('session_status')?.({ session_id: 'ses_1', status: 'idle' })
+    await wrapper.vm.$nextTick()
+    expect(vm.lastTurnDuration).toBeGreaterThanOrEqual(125)
+    expect(wrapper.find('.turn-status-bar.done').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  test.each(['waiting_approval', 'waiting_question'])('restores a visible elapsed bar when reopening %s', async (waitingStatus) => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ type: 'session_list', sessions: [{
+      session_id: 'ses_1', daemon_id: 'daemon-1', agent_type: 'claude-code', status: waitingStatus, daemon_online: true,
+    }] })
+    websocketMock.handlers.get('replay_end')?.({ type: 'replay_end', session_id: 'ses_1', status: waitingStatus,
+      turn_started_at: new Date(Date.now() - 125000).toISOString() })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.turn-status-bar .status-dot.working').exists()).toBe(true)
+    expect(wrapper.find('.turn-status-bar').text()).toContain('2m 5s')
+    expect(wrapper.find('.turn-status-bar.done').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   test('uses replay_end idle over a stale running session-list snapshot', async () => {
     const wrapper = shallowMount(SessionDetail)
 
@@ -1792,10 +1833,10 @@ describe('SessionDetail processEvent integration', () => {
     },
   )
 
-  test('keeps known controls out of the timeline while retaining genuinely unknown live and replay events', () => {
+  test.each(['session_discovered', 'session_organization_changed'])('keeps %s out of the timeline while retaining genuinely unknown live and replay events', (controlType) => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
-    const known = { type: 'session_discovered', session_id: 'ses_1', event_id: 'known-control' }
+    const known = { type: controlType, session_id: 'ses_1', event_id: 'known-control' }
     for (const handler of websocketMock.allHandlers) handler(known)
     websocketMock.handlers.get('replay_batch')?.({ type: 'replay_batch', session_id: 'ses_1', events: [known] })
 
@@ -1807,7 +1848,7 @@ describe('SessionDetail processEvent integration', () => {
       events: [{ type: 'future_control_like_event', session_id: 'foreign-session', event_id: 'foreign-replay-unknown', text: 'drop me' }],
     })
 
-    expect(vm.messages.some((message: any) => message.type === 'session_discovered')).toBe(false)
+    expect(vm.messages.some((message: any) => message.type === controlType)).toBe(false)
     expect(vm.messages.filter((message: any) => message.id === 'unknown:genuine-unknown')).toHaveLength(1)
     expect(vm.messages.some((message: any) => message.id === 'unknown:foreign-replay-unknown')).toBe(false)
   })

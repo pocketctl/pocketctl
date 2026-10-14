@@ -234,7 +234,10 @@ func (sm *SessionManager) SyncLiveTerminalSession(sessionID, cwd string, pid int
 
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
-	if !ok || ps.Source != "terminal" || ps.Agent != adapter.AgentClaude {
+	// A historical terminal session can currently be driven by our one-shot
+	// resume. Its startup metadata may say idle before stdout emits a result;
+	// only the resume owner can update lifecycle during that interval.
+	if !ok || ps.Source != "terminal" || ps.Agent != adapter.AgentClaude || sm.resumeProcesses[sessionID] != nil {
 		sm.mu.Unlock()
 		return false
 	}

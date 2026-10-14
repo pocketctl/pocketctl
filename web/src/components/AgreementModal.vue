@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月1日' : 'Updated: October 1, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月13日' : 'Updated: October 13, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -58,6 +58,12 @@
             <li>退出登录只结束当前登录状态，不会删除账户。</li>
             <li>您可通过“设置 → 账户 → 删除账户”发起账户删除。关联个人数据、Team 共享资料及可能影响账户删除的 Team 关联，按隐私政策所述范围处理。</li>
             <li>基础设施日志、第三方日志和备份按照隐私政策所述的独立周期清理。</li>
+          </ol>
+          <ol>
+            <li>个人会话按最后有效业务活动计算保留期限：连续严格超过 60 天无有效业务活动时自动归档并转为私有冷存储，严格超过 90 天时清除云端会话数据。有效活动、保护条件、删除范围及 Team 排除范围见隐私政策；达到期限不代表仍在执行或等待处理的会话会被立即删除。</li>
+            <li>本规则自本版本在官方网站正式公示之日起生效，具体时间及历史数据过渡截止时间以正式公告为准。生效前已有会话享有至少 30 天清除过渡期；实际清除时间取最后有效业务活动后 90 天与公布的过渡截止时间中较晚者。</li>
+            <li>生命周期维护由服务端按有效活动和保护条件自动执行，无需您对每次归档或清除另行批准。系统维护通知与 Agent 工具审批是不同功能；通知是否已读不控制维护执行，阅读历史、置顶、改标题和手工归档也不延长保留期限。</li>
+            <li>归档后的历史和文档在清除前仍可按原有权限读取。已清除会话只能查看必要的操作摘要，正文不能通过通知恢复；分阶段清除的完成情况以系统结果为准。请在清除前使用产品支持的方式导出或另行保存需要长期保留的内容。服务端冷存储不替代您对重要项目文件和资料的独立备份。</li>
           </ol>
         </section>
         <section>
@@ -114,6 +120,12 @@
             <li>Signing out ends the current login state; it does not delete the account.</li>
             <li>You may initiate account deletion through Settings → Account → Delete Account. Associated personal data, Team shared content, and Team relationships that may affect account deletion are handled within the scope described in the Privacy Policy.</li>
             <li>Infrastructure logs, third-party logs, and backups are cleared on the separate cycles described in the Privacy Policy.</li>
+          </ol>
+          <ol>
+            <li>Personal-session retention is calculated from the last valid business activity: sessions are automatically archived into private cold storage after strictly more than 60 consecutive days without valid business activity, and their cloud session data is purged after strictly more than 90 days. Valid activity, protection conditions, deletion scope, and Team exclusions are described in the Privacy Policy. Reaching a deadline does not immediately delete sessions still executing or awaiting processing.</li>
+            <li>These rules take effect when this version is formally published on the official website. The formal notice states the effective time and historical transition deadline. Sessions that existed before the policy took effect receive at least a 30-day purge transition period. Their purge time is the later of 90 days after the last valid business activity and the published transition deadline.</li>
+            <li>The server performs lifecycle maintenance automatically according to valid activity and protection conditions, without separate approval for each archive or purge. System maintenance notices and Agent tool approvals are different functions. Notice read status does not control maintenance, and reading history, pinning, editing titles, or manual archiving does not renew retention.</li>
+            <li>Archived history and documents remain readable under the existing permissions until purge. Purged sessions expose only necessary operation summaries; notices cannot restore conversation bodies. Completion of staged purge is determined by system results. Before purge, use supported export features or separately save content you need to retain longer. Server-side cold storage does not replace independent backups of important project files and materials.</li>
           </ol>
         </section>
         <section>
