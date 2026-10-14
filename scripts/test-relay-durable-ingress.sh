@@ -3,10 +3,9 @@ set -euo pipefail
 
 # Durable-ingress release gate: serialized Go core-package tests plus the
 # destructive Postgres integration suite. The Relay unit suite, Relay build,
-# and the OpenCode/Codex managed terminal gates are owned by
-# scripts/release-preflight.sh (steps opencode-managed, codex-managed,
-# relay-tests, relay-build) and must not be duplicated here — enforced by
-# scripts/tests/release-contract.test.sh
+# and the OpenCode/Codex managed terminal gates are owned by the release
+# preflight steps (opencode-managed, codex-managed, relay-tests, relay-build)
+# and must not be duplicated here — enforced by the release contract test
 # (openspec/changes/dedupe-local-release-gates).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

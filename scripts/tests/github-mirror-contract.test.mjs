@@ -84,7 +84,9 @@ const dependencyQueue = [...requiredScripts]
 for (let index = 0; index < dependencyQueue.length; index += 1) {
   const script = dependencyQueue[index]
   const scriptPath = path.join(repoRoot, script)
-  if (!fs.existsSync(scriptPath)) continue
+  // A referenced path may be a directory (docker build context, mkdir
+  // fixtures). Only script files carry dependencies; skip the rest.
+  if (!fs.existsSync(scriptPath) || fs.statSync(scriptPath).isDirectory()) continue
   const scriptText = fs.readFileSync(scriptPath, 'utf8')
   for (const match of scriptText.matchAll(/(?:\.\/)?(scripts\/[A-Za-z0-9._/-]+)/g)) {
     if (requiredScripts.has(match[1])) continue
