@@ -124,7 +124,7 @@ func mergeHookEntry(settingsPath, pocketctlPath string) error {
 	entry := map[string]any{
 		"matcher":     "", // all tools
 		"description": HookMarker,
-		"hooks":       []any{map[string]any{"type": "command", "command": command}},
+		"hooks":       []any{map[string]any{"type": "command", "command": command, "timeout": 660}},
 	}
 
 	hooks, _ := settings["hooks"].(map[string]any)

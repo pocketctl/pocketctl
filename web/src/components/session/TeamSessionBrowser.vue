@@ -351,6 +351,31 @@ const hostQuery = ref(""),
   error = ref(""),
   filtersElement = ref<HTMLElement | null>(null);
 let generation = 0;
+let presenceTimer: ReturnType<typeof setTimeout> | undefined;
+function clearPresencePoll() {
+  if (presenceTimer) clearTimeout(presenceTimer);
+  presenceTimer = undefined;
+}
+// Shared hosts can belong to another member, so personal daemon events are
+// insufficient. Refresh the authorized Team snapshot like the session composer.
+function schedulePresencePoll(current: number) {
+  clearPresencePoll();
+  if (current !== generation || !props.teamId) return;
+  const requestedTeam = props.teamId;
+  presenceTimer = setTimeout(async () => {
+    presenceTimer = undefined;
+    try {
+      const nextOffers = await listTeamAgentOffers(requestedTeam);
+      if (current !== generation) return;
+      offers.value = nextOffers.filter((offer) => offer.state === "active");
+    } catch {
+      // A transport failure is not evidence that a host went offline.
+      // Keep the last snapshot and retry; the request never overlaps itself.
+    } finally {
+      if (current === generation) schedulePresencePoll(current);
+    }
+  }, 5_000);
+}
 const selectedTeam = computed(() =>
   teams.value.find((team) => team.id === props.teamId),
 );
@@ -431,6 +456,7 @@ function changeScope(scope: SessionScope) {
   emit("update:scope", scope);
 }
 async function load() {
+  clearPresencePoll();
   const current = ++generation;
   loading.value = true;
   error.value = "";
@@ -455,7 +481,10 @@ async function load() {
     if (current === generation)
       error.value = failure instanceof Error ? failure.message : t('workspace.load_failed');
   } finally {
-    if (current === generation) loading.value = false;
+    if (current === generation) {
+      loading.value = false;
+      schedulePresencePoll(current);
+    }
   }
 }
 function outsideClick(event: MouseEvent) {
@@ -482,6 +511,7 @@ watch([filtered, loading], () => {
 onMounted(() => document.addEventListener("click", outsideClick));
 onBeforeUnmount(() => {
   generation++;
+  clearPresencePoll();
   document.removeEventListener("click", outsideClick);
 });
 </script>

@@ -486,7 +486,7 @@
         <!-- Turn status bar: lives inside the message stream (visually part of
              it), below the last message. Live timer while working; on completion
              shows total duration + output tokens + a copy button. -->
-        <div v-if="!focusedSubAgentId && (isTurnWorking || lastTurnDuration !== null || completedBarVisible)" class="turn-status-bar" :class="{ done: lastTurnDuration !== null || completedBarVisible }">
+        <div v-if="!focusedSubAgentId && (isTurnWorking || completedBarVisible)" class="turn-status-bar" :class="{ done: completedBarVisible }">
           <template v-if="isTurnWorking">
             <span class="status-dot working"></span>
             <span class="status-text">{{ t('session.creating') }}</span>
@@ -1807,8 +1807,12 @@ const EXECUTING_SESSION_STATUSES = new Set(['running', 'busy', 'retry', 'waiting
 function isExecutingStatus(value: unknown): boolean {
   return typeof value === 'string' && EXECUTING_SESSION_STATUSES.has(value)
 }
+function isTurnActiveStatus(value: unknown): boolean {
+  return isExecutingStatus(value) || value === 'waiting_approval' || value === 'waiting_question'
+}
+const isTurnActive = computed(() => runtimeSnapshotReady.value && statusReady.value && isTurnActiveStatus(status.value))
 const isExecuting = computed(() => runtimeSnapshotReady.value && statusReady.value && isExecutingStatus(status.value))
-const isTurnWorking = computed(() => runtimeSnapshotReady.value && !isDisconnected.value && (isExecuting.value || awaitingStart.value))
+const isTurnWorking = computed(() => runtimeSnapshotReady.value && !isDisconnected.value && (isTurnActive.value || awaitingStart.value))
 
 // --- Turn timer (status bar above the input area) ---
 // Fresh sends start the timer optimistically. Restored sessions start only from
@@ -1847,7 +1851,7 @@ function applySessionRuntime(meta: any) {
   if (!nextStatus) return
   status.value = nextStatus
   statusReady.value = true
-  resumeStartAt = isExecutingStatus(nextStatus) ? parseTurnStart(meta.turn_started_at) : null
+  resumeStartAt = isTurnActiveStatus(nextStatus) ? parseTurnStart(meta.turn_started_at) : null
 }
 
 function startTurnTimer(startAt?: number) {
@@ -1876,14 +1880,14 @@ function discardTurnTimer() {
   turnElapsed.value = 0
   lastTurnDuration.value = null
 }
-// Drive the timer from isExecuting: start on false→true, stop on true→false.
+// Drive timing from the whole turn, including approval and question waits.
 // Gated by sessionSwitching so status snapshots received during initial load /
 // session switch don't start the timer. The authoritative turn start is
 // recovered from replay_end and must be present before a historical timer runs.
 // NOTE: no { immediate: true } — that would fire before sessionSwitching is
 // set in onMounted, starting a zero-based timer that competes with the
 // replay_end recovery.
-watch(() => isExecuting.value, (exec, prev) => {
+watch(() => isTurnActive.value, (exec, prev) => {
   if (sessionSwitching) return
   if (exec && !prev) {
     const startAt = resumeStartAt
@@ -1894,7 +1898,7 @@ watch(() => isExecuting.value, (exec, prev) => {
 })
 watch(isDisconnected, disconnected => {
   if (!disconnected) return
-  if (isExecuting.value || awaitingStart.value) discardTurnTimer()
+  if (isTurnActive.value || awaitingStart.value) discardTurnTimer()
   awaitingStart.value = false
 })
 
@@ -1918,8 +1922,8 @@ const hasLastUserPrompt = computed(() =>
 // the "completed" bar — check + label + tokens + copy — as long as history has
 // an agent reply. Precise duration is omitted (not recomputed from events).
 const completedBarVisible = computed(() => {
-  if (isExecuting.value || lastTurnDuration.value !== null) return false
-  return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && hasLastAgentReply.value
+  if (isTurnActive.value || awaitingStart.value || isDisconnected.value) return false
+  return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && (lastTurnDuration.value !== null || hasLastAgentReply.value)
 })
 // A reload has no in-memory transition to populate lastTurnEndedAt. In that
 // case the materialized session activity time is the persisted end timestamp.
@@ -2266,6 +2270,14 @@ function resolveDefaultSession() {
 }
 watch(showNewSession, open => { if (!open && sessionId.value === 'default') resolveDefaultSession() })
 
+// Local sends remain receipt-addressable while the authoritative page rebuilds.
+const replayLocalMessages = new Set<any>()
+function settleReplayLocalMessage(message: any, target: any[]) {
+  if (!replayLocalMessages.delete(message)) return
+  const index = target.indexOf(message)
+  if (index >= 0) target.push(...target.splice(index, 1))
+}
+
 function loadHistory() {
   if (historyPageTimer) clearTimeout(historyPageTimer)
   clearHistorySlowTimer()
@@ -2279,6 +2291,16 @@ function loadHistory() {
     if (!resolveDefaultSession()) send({ type: 'list_sessions' })
     return
   }
+  clearAllToolTimeouts()
+  pendingToolResults.clear()
+  contentStreams.reset()
+  liveContentBatcher.reset(loadKey.value)
+  replayLocalMessages.clear()
+  const localMessages = messages.value.filter((message: any) => message.__msg_id && !message.__echo_reconciled)
+  messages.value = localMessages
+  for (const message of messages.value) replayLocalMessages.add(message)
+  subagentMessages.value = {}
+  childrenToken.value = {}
   replayReqId.value++
   isLoading.value = true
   historySlowTimer = setTimeout(() => {
@@ -2842,7 +2864,7 @@ function sendPromptText(text: string, invocationID?: string): boolean {
     failOrRollbackOptimistic(msgId)  // L1: WebSocket not open
     return false
   }
-  startTurnTimer()  // begin turn timer (stops when isExecuting → false)
+  startTurnTimer()  // begin whole-turn timing, including approval/question waits
   awaitingStart.value = true  // A: show turn-bar until first running/agent_text
   armAckTimeout(msgId)  // L2: roll back if relay doesn't ack within 3s
   return true
@@ -3315,6 +3337,8 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const identity = userMessageIdentity(evt)
     const existingByIdentity = target.find((message: any) => message.type === 'user_text' && sameUserMessage(message, identity))
     if (existingByIdentity) {
+      settleReplayLocalMessage(existingByIdentity, target)
+      existingByIdentity.__echo_reconciled = true
       preserveTurnMetadata(existingByIdentity, evt)
       preserveUserIdentity(existingByIdentity, identity)
       applyCanonicalCorrelation(existingByIdentity, eventCorrelation(evt))
@@ -3323,6 +3347,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const correlation = eventCorrelation(evt)
     const correlated = findMessageByCorrelation(correlation, target)
     if (correlated) {
+      settleReplayLocalMessage(correlated, target)
       preserveUserIdentity(correlated, identity)
       preserveTurnMetadata(correlated, evt)
       applyCanonicalCorrelation(correlated, correlation)
@@ -3339,6 +3364,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       && latestUser.content === text
       && !userIdentitiesConflict(latestUser, identity)
       && !correlationsConflict(correlation, messageCorrelation(latestUser))) {
+      settleReplayLocalMessage(latestUser, target)
       preserveUserIdentity(latestUser, identity)
       preserveTurnMetadata(latestUser, evt)
       applyCanonicalCorrelation(latestUser, correlation)
@@ -3645,7 +3671,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // During a session switch, capture the turn start time from the last
     // executing status (busy/running/waiting) so the timer can resume the
     // accumulated elapsed instead of restarting from zero.
-    if (sessionSwitching && (s === 'running' || s === 'busy' || s === 'retry' || s === 'waiting')) {
+    if (sessionSwitching && isTurnActiveStatus(s)) {
       const ts = evt.turn_started_at || evt.payload?.turn_started_at
       if (ts) resumeStartAt = new Date(ts).getTime()
     }
@@ -4111,6 +4137,11 @@ onMounted(() => {
       nextTick(scrollToBottom)
     }
     for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
+    if (!wasLoadingBackward) {
+      // Unacknowledged/failed local sends follow the replayed history. A later
+      // canonical echo still reconciles them by request identity.
+      for (const message of [...replayLocalMessages]) settleReplayLocalMessage(message, messages.value)
+    }
     if (isMobile.value && renderMessages.value.length) isLoading.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
     // backward: last_seq is the oldest id of the returned page → next page cursor
@@ -4142,8 +4173,8 @@ onMounted(() => {
         const turnStartedAt = Object.prototype.hasOwnProperty.call(msg, 'turn_started_at')
           ? msg.turn_started_at
           : meta?.turn_started_at
-        resumeStartAt = isExecutingStatus(nextStatus) ? parseTurnStart(turnStartedAt) : null
-        if (statusReady.value && isExecutingStatus(nextStatus) && resumeStartAt !== null && !isDisconnected.value) {
+        resumeStartAt = isTurnActiveStatus(nextStatus) ? parseTurnStart(turnStartedAt) : null
+        if (statusReady.value && isTurnActiveStatus(nextStatus) && resumeStartAt !== null && !isDisconnected.value) {
           startTurnTimer(resumeStartAt)
         }
         resumeStartAt = null
@@ -4351,13 +4382,13 @@ onMounted(() => {
       if (lastActivityAt) ls.last_activity_at = lastActivityAt
     }
     if (msg.session_id === sessionId.value) {
-      const wasExecuting = isExecuting.value
-      if (!wasExecuting && isExecutingStatus(msg.status)) {
+      const wasTurnActive = isTurnActive.value
+      if (!wasTurnActive && isTurnActiveStatus(msg.status)) {
         resumeStartAt = parseTurnStart(msg.turn_started_at || msg.payload?.turn_started_at) ?? Date.now()
       }
       status.value = msg.status
       statusReady.value = true
-      if (wasExecuting && !isExecuting.value && lastActivityAt) lastTurnEndedAt.value = lastActivityAt
+      if (wasTurnActive && !isTurnActive.value && lastActivityAt) lastTurnEndedAt.value = lastActivityAt
       reconcileVisibleUnresolvedTools(msg.status)
       if (msg.exit_reason) exitReason.value = msg.exit_reason
       if (msg.exited_at) exitedAt.value = msg.exited_at

@@ -2,6 +2,7 @@
 export const knownNonTimelineControlEventTypes = new Set<string>([
   'websocket_connected', 'connection_restored', 'pong',
   'session_list', 'session_created', 'session_discovered',
+  'session_organization_changed',
   'daemon_list', 'daemon_status', 'command_list',
   'session_agent_list', 'session_agent_changed', 'session_meta',
   'replay_batch', 'replay_end',

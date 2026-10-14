@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月1日' : 'Updated: October 1, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月13日' : 'Updated: October 13, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -57,7 +57,7 @@
             <li>远程查看使用已上传的文档快照，读取需要通过身份验证及会话归属校验。快照不是实时远程文件浏览；文档正文不会自动加入公开分享、会话导出或普通会话重放。HTML 按静态隔离方式预览，脚本和外部资源受限制。</li>
             <li>文档通过 TLS 加密传输，但服务端存储不是端到端加密；Relay 及获授权的运维人员可访问存储的文档。文档预览本身不会将正文发送给额外的模型服务。</li>
             <li>您可关闭主机上的文档采集功能以停止后续采集。关闭预览、退出查看、删除主机上的源文件或关闭采集，不会删除已上传快照。快照可在来源主机离线时继续供获授权客户端查看。</li>
-            <li>快照及其版本按文档配额和历史版本清理规则保存。删除对应会话或成功删除账户，会删除当前业务数据库中关联的文档快照和元数据；基础设施日志与备份按本政策所述的独立周期处理。已经在其他设备保存、复制或下载的副本不会随服务端删除而自动消失。</li>
+            <li>快照及其版本按文档配额、历史版本清理和会话生命周期规则保存。删除对应会话或成功删除账户，会触发云端关联文档快照、元数据及冷存储副本的删除，完成情况以各阶段结果为准；基础设施日志与备份按本政策所述的独立周期处理。已经在其他设备保存、复制或下载的副本不会随服务端删除而自动消失。</li>
           </ol>
         </section>
         <section>
@@ -85,11 +85,17 @@
         <section>
           <h4>七、保存与删除</h4>
           <ol>
-            <li>个人账户、主机、个人会话、事件及已接受的个人 Memory 记忆通常在账户有效期间保存，直至您删除相关数据、安装或账户；待审核候选和技术作业数据按产品与运维清理规则处理。Team 共享数据按下述共享范围另行处理。</li>
+            <li>个人账户、主机及已接受的个人 Memory 记忆通常在账户有效期间保存，直至您删除相关数据、安装或账户；个人会话及其事件、文档适用下述生命周期规则。待审核候选和技术作业数据按产品与运维清理规则处理，Team 共享数据按共享范围另行处理。</li>
+            <li>会话生命周期规则自本版本在官方网站正式公示之日起生效，具体公示、生效时间及历史数据过渡截止时间以正式公告为准。生效前已有会话享有自政策生效起至少 30 天的清除过渡期；其实际清除时间取最后有效业务活动后 90 天与公布的过渡截止时间中较晚者，不会因新版本上线立即清除。</li>
+            <li>个人会话连续严格超过 60 天没有有效业务活动时，会自动归档并转为私有冷存储；严格超过 90 天时，会按本政策清除云端会话数据。届时已超过 90 天且满足清除条件的会话可以直接进入清除，无需先经过归档。共享 Team 会话、Team Run 和已发布的共享知识不属于本版自动处理范围。</li>
+            <li>有效业务活动是服务确认的会话消息与 Agent 执行活动。浏览历史、修改标题、置顶、手工归档、将通知标为已读及设备重连不会延长保留期限。新的有效业务活动会重新计算期限，并恢复因不活跃而自动归档的会话；手工归档意图保留。仍有执行、待处理审批或问题、未完成处理或依赖关系，以及归属或活动来源无法确认的会话，不会被自动处理。</li>
+            <li>冷存储使用当前服务服务器上的私有磁盘目录，不是公开下载目录，也不是独立灾备副本；不因此将正文交给新的第三方对象存储服务。归档后的历史和文档在清除前仍可由获授权客户端读取，且继续按原有身份与会话归属校验访问。服务端存储不是端到端加密，获授权的服务及运维人员可以访问存储内容。</li>
+            <li>云端清除覆盖会话正文、上传的文档及版本、相关入站和派生源副本、私有冷存储副本，以及已安装 Memory 中依赖该会话的源数据。清除分阶段完成，只有相应删除任务和 Memory 回执均完成后，系统通知才显示全部完成；未完成阶段会显示为部分完成。独立、已接受的知识及必要用量汇总按其自身规则保留。</li>
+            <li>系统维护通知只保留必要的会话、主机摘要和阶段结果，完成后的摘要保留 90 天，不保留已清除的完整对话正文。为防止已删除数据重新出现及完成删除对账，服务会保留必要标识和删除记录；这些记录不能用于恢复会话正文。</li>
             <li>成功完成账户删除后，当前业务数据库中的关联个人账户数据会被删除。Team 关联可能影响账户删除的完成；如无法完成，请通过“帮助与反馈”或下方联系方式申请处理。</li>
             <li>退出 Team、被移除、撤销 Agent 共享、移除 Memory 绑定、结束或归档共享会话以及解散 Team，属于权限或协作状态变更，不会自动清空已保存的 Team 任务、共享消息、Context 版本、Agent 调用和 Run 历史。已发布的团队知识与个人源数据分开处理，也不会仅因原作者退出或删除个人源数据而自动删除；如需处理仍保留的共享内容，请联系我们。</li>
             <li>撤回共享或删除服务端数据不会自动删除其他成员已经查看、复制或导出的内容，也不会自动清理 Agent 主机上已产生的原生会话、文件或模型服务商保存的数据；这些副本由相应成员、主机所有者或服务商按其规则处理。</li>
-            <li>Nginx 访问日志、Relay 审计日志、第三方服务日志和备份按照各自的运维保留周期清理，可能不会与账户删除同步完成。</li>
+            <li>Nginx 访问日志、Relay 审计日志、第三方服务日志和备份按照各自的运维保留周期清理，可能不会与会话或账户删除同步完成。删除运行中的业务数据不表示备份副本立即消失；恢复备份时须核对并重放最新删除记录，避免已删除会话重新对外提供。</li>
             <li>iOS Beta 候补邮箱保存至完成通知、您请求删除或候补计划终止。</li>
           </ol>
         </section>
@@ -161,7 +167,7 @@
             <li>Remote viewing uses uploaded snapshots and requires authentication and session ownership checks. Snapshots are not a live remote-file browser. Document bodies are not automatically included in public shares, session exports, or ordinary session replay. HTML uses an isolated static preview with restrictions on scripts and external resources.</li>
             <li>Documents are encrypted in transit using TLS, but server-side storage is not end-to-end encrypted. Relay and authorized operators can access stored documents. Document preview itself does not send document bodies to additional model services.</li>
             <li>You can disable document capture on the host to stop future capture. Disabling preview, closing the viewer, deleting the source file on the host, or disabling capture does not delete uploaded snapshots. Authorized clients may continue viewing snapshots while the source host is offline.</li>
-            <li>Snapshots and their versions are retained under document quotas and historical-version cleanup rules. Deleting the corresponding session or successfully deleting the account removes associated document snapshots and metadata from the current business database. Infrastructure logs and backups follow the separate retention cycles described in this policy. Copies already saved, copied, or downloaded on other devices are not automatically removed by server-side deletion.</li>
+            <li>Snapshots and versions follow document quotas, historical-version cleanup, and session lifecycle rules. Deleting the associated session or successfully deleting the account triggers deletion of associated cloud document snapshots, metadata, and cold-storage copies; completion is determined by the stage results. Infrastructure logs and backups follow the separate cycles described in this policy. Copies already saved, copied, or downloaded on other devices do not disappear automatically when server-side data is deleted.</li>
           </ol>
         </section>
         <section>
@@ -189,11 +195,17 @@
         <section>
           <h4>7. Retention and Deletion</h4>
           <ol>
-            <li>Personal account, host, personal-session, event, and accepted personal Memory data is generally retained while your account is active, until you delete applicable data, the installation, or the account. Pending candidates and technical job data follow product and operational cleanup rules. Team shared data is handled separately within the shared scope described below.</li>
+            <li>Personal account, host, and accepted personal Memory data is generally retained while your account is active, until you delete applicable data, the installation, or the account. Personal sessions, their events, and documents follow the lifecycle rules below. Pending candidates and technical job data follow product and operational cleanup rules; Team shared data is handled separately within its shared scope.</li>
+            <li>The session lifecycle rules take effect when this version is formally published on the official website. The formal notice states the publication time, effective time, and historical transition deadline. Sessions that existed before the policy took effect receive at least 30 days from the effective time before automatic purge. Their purge time is the later of 90 days after the last valid business activity and the published transition deadline; deploying a new version does not immediately purge them.</li>
+            <li>Personal sessions are automatically archived into private cold storage after strictly more than 60 consecutive days without valid business activity, and their cloud session data is purged after strictly more than 90 days under this policy. Sessions already beyond 90 days that satisfy purge conditions may be purged directly without first being archived. Shared Team sessions, Team Runs, and published shared knowledge are excluded from this version of automatic maintenance.</li>
+            <li>Valid business activity means session messages and Agent execution activity confirmed by the service. Reading history, editing titles, pinning, manual archiving, marking notices as read, and reconnecting devices do not renew retention. New valid business activity recalculates retention and restores sessions archived for inactivity while preserving manual archive intent. Sessions with ongoing execution, pending approvals or questions, unfinished processing or dependencies, or unverified ownership or activity provenance are not automatically processed.</li>
+            <li>Cold storage uses a private disk directory on the current service server. It is neither a public download directory nor an independent disaster-recovery copy, and does not introduce a new third-party object storage service for these bodies. Archived history and documents remain readable by authorized clients until purge, subject to the existing identity and session-ownership checks. Server-side storage is not end-to-end encrypted; authorized services and operations personnel can access stored content.</li>
+            <li>Cloud purge covers conversation bodies, uploaded documents and versions, relevant ingress and derived source copies, private cold-storage copies, and source data dependent on the session in installed Memory. Purge completes in stages. A system notice reports full completion only after the required deletion tasks and Memory receipts finish; unfinished stages are reported as partial completion. Independent accepted knowledge and necessary usage aggregates follow their own retention rules.</li>
+            <li>System maintenance notices retain only necessary session and host summaries and stage results for 90 days after completion, without the full bodies of purged conversations. The service retains necessary identifiers and deletion records to prevent deleted data from reappearing and to reconcile deletion. These records cannot restore conversation bodies.</li>
             <li>When account deletion completes successfully, associated personal account data is deleted from the current application database. Team relationships may prevent account deletion from completing; if it cannot be completed, request assistance through Help &amp; Feedback or the contact details below.</li>
             <li>Leaving or being removed from a Team, revoking an Agent offer, removing a Memory binding, ending or archiving a shared session, or dissolving a Team changes permissions or collaboration state; it does not automatically erase stored Team tasks, shared messages, Context versions, Agent calls, or Run history. Published shared knowledge is handled separately from personal source data and is not automatically deleted solely because its author leaves or deletes the personal source. Contact us to request handling of retained shared content.</li>
             <li>Withdrawing sharing or deleting server-side data does not automatically delete content other members have already viewed, copied, or exported, native sessions or files created on Agent hosts, or data retained by model providers. Those copies are handled by the relevant member, host owner, or provider under their rules.</li>
-            <li>Nginx access logs, Relay audit logs, third-party service logs, and backups follow separate operational retention cycles and may not be deleted synchronously with the account.</li>
+            <li>Nginx access logs, Relay audit logs, third-party service logs, and backups follow separate operational retention cycles and may not be deleted synchronously with sessions or accounts. Deleting live application data does not immediately erase backup copies. Backup restoration must reconcile and replay the latest deletion records before making restored sessions available, to prevent deleted sessions from reappearing.</li>
             <li>An iOS Beta waitlist email is retained until notification is complete, you request deletion, or the waitlist program ends.</li>
           </ol>
         </section>

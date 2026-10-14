@@ -21,6 +21,15 @@ describe('deployment lifecycle preflight CLI', () => {
     expect(result.status).toBe(2)
     expect(JSON.parse(result.stdout)).toMatchObject({ execution_ready: false, blockers: ['policy_not_effective', 'historical_transition_not_configured', 'production_release_not_ready'] })
   })
+  test('storage preparation can pass while unpublished policy remains blocked', () => {
+    const result = run('--require-storage', '--probe-storage')
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ storage_probe: 'passed', execution_ready: false, deployment_ready: false })
+    delete env.SESSION_LIFECYCLE_OBJECT_DIRECTORY
+    const missing = run('--require-storage')
+    expect(missing.status).toBe(2)
+    expect(JSON.parse(missing.stdout).blockers).toContain('object_reader_not_configured')
+  })
   test('a complete release passes actual disk put/read/delete without leaving a probe object', () => {
     const namespace = createHash('sha256').update(JSON.stringify(['filesystem-v1', env.SESSION_LIFECYCLE_OBJECT_DIRECTORY])).digest('hex')
     const file = join(directory, 'release.json')

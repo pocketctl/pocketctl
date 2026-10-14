@@ -1,7 +1,9 @@
 <template>
   <main>
     <SessionDocumentShelf v-if="showShelf" :documents="shelfDocuments" list-status="ready" @open="openShelfDocument" />
-    <button id="document-harness-opener" ref="opener" type="button">Open document</button>
+    <button id="document-harness-opener" ref="opener" type="button" @click="show(hostileSource)">Open hostile HTML</button>
+    <button type="button" @click="shelfDocuments = shelfDocuments.slice(0, 2)">Revoke all but two documents</button>
+    <output aria-label="Sandbox result">{{ messages.includes('unexpected-script') ? 'Probe script escaped' : 'No probe script messages' }}</output>
     <output id="document-harness-close-count">{{ closeCount }}</output>
     <SessionDocumentViewer
       :viewer="viewer"
@@ -14,7 +16,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import SessionDocumentShelf from '../src/components/session-documents/SessionDocumentShelf.vue'
 import SessionDocumentViewer from '../src/components/session-documents/SessionDocumentViewer.vue'
@@ -25,7 +27,7 @@ const opener = ref<HTMLButtonElement | null>(null)
 const compact = ref(false)
 const htmlRendering = ref(true)
 const closeCount = ref(0)
-const messages: unknown[] = []
+const messages = reactive<unknown[]>([])
 const baseDocument: SessionDocumentMetadata = {
   documentId: 'browser-doc',
   versionId: 'browser-version',
@@ -40,11 +42,12 @@ const baseDocument: SessionDocumentMetadata = {
   capturedAt: '2026-09-12T00:00:00.000Z',
   committedAt: '2026-09-12T00:00:01.000Z',
 }
+const hostileSource = '<h1>Sandbox verification</h1><p>Static HTML remains readable.</p><script>parent.postMessage("unexpected-script", "*")<\/script><form action="https://example.com"><input value="test"><button>Submit blocked form</button></form>'
 const showShelf = new URLSearchParams(location.search).has('shelf')
-const shelfDocuments = Array.from({ length: 23 }, (_, i) => ({ ...baseDocument,
+const shelfDocuments = ref(Array.from({ length: 23 }, (_, i) => ({ ...baseDocument,
   documentId: `document-${i}`, displayName: `会话文档-${23 - i}.md`, format: 'markdown' as const,
   byteSize: 2048,
-}))
+})))
 function openShelfDocument(document: SessionDocumentMetadata) {
   viewer.value = { status: 'ready', document, text: '# 文档快照\n\n分页阅读验证。', offlineSnapshot: false }
 }

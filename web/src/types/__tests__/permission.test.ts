@@ -2,6 +2,12 @@ import { describe, expect, test } from 'vitest'
 import { defaultPermission, expandCodexPreset, permissionOptions, permissionTitleKey } from '../permission'
 
 describe('agent permissions', () => {
+  test('labels legacy Claude default as request approval without changing the stored mode', () => {
+    const permission = { agent: 'claude-code' as const, mode: 'default' as any }
+    expect(permissionTitleKey(permission)).toBe('session.permission.claude.manual.title')
+    expect(permission.mode).toBe('default')
+  })
+
   test('uses identical product defaults', () => {
     expect(defaultPermission('claude-code')).toEqual({ agent: 'claude-code', mode: 'manual' })
     expect(defaultPermission('codex')).toEqual({ agent: 'codex', preset: 'request_approval', approval_policy: 'on-request', sandbox_mode: 'workspace-write' })

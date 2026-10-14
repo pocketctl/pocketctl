@@ -102,6 +102,24 @@ describe('HostsView mobile iOS parity', () => {
     expect(wrapper.text()).not.toContain('DeepSeek Harness')
   })
 
+  test.each([false, true])('hydrates metadata from online status after a sparse snapshot (new=%s)', async (newHost) => {
+    isMobile.value = false
+    const wrapper = mountView()
+    handlers.get('daemon_list')?.({ daemons: newHost ? [] : [{ ...offline, daemon_id: 'recovered' }] })
+    handlers.get('daemon_status')?.({ daemon_id: 'recovered', status: 'online', hostname: 'recovered-host', os: 'linux', arch: 'arm64', version: newHost ? 'v0.5.3' : '0.5.3', started_at: 1791900000, last_heartbeat: Date.now(), agents: [] })
+    await flushPromises()
+    if (newHost) await wrapper.get('.host-card-main').trigger('click')
+    expect(wrapper.get('.host-reference-meta').text()).toContain('just now')
+    expect(wrapper.get('.host-detail-panel').text()).toContain('arm64')
+    expect(wrapper.get('.host-detail-panel').text()).toContain('v0.5.3')
+    expect(wrapper.get('.host-detail-panel').text()).not.toContain('vv0.5.3')
+    handlers.get('daemon_status')?.({ daemon_id: 'recovered', status: 'online', agents: [] })
+    await flushPromises()
+    expect(wrapper.get('.host-detail-panel').text()).toContain('arm64')
+    expect(wrapper.get('.host-detail-panel').text()).toContain('v0.5.3')
+    expect(wrapper.get('.host-detail-panel').text()).not.toContain('vv0.5.3')
+  })
+
   test('shows the four-metric overview and sorts online hosts first', async () => {
     const wrapper = mountView()
     handlers.get('daemon_list')?.({ daemons: [offline, online] })

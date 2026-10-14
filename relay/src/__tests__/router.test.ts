@@ -135,6 +135,20 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+test('registration broadcasts metadata needed to hydrate a sparse reconnect snapshot', async () => {
+  const router = new Router(createMockPool())
+  const client = createMockWs()
+  router.registerClient(client, 1)
+  await router.registerDaemon(createMockWs(), {
+    type: 'register', daemon_id: 'metadata-host', hostname: 'linux-host', agents: [],
+    os: 'linux', arch: 'arm64', version: '0.5.3', started_at: 1791900000,
+  }, 1)
+  await tick()
+  expect(client._sent.find((m: any) => m.type === 'daemon_status' && m.status === 'online')).toMatchObject({
+    arch: 'arm64', version: '0.5.3', started_at: 1791900000, last_heartbeat: expect.any(Number),
+  })
+})
+
 test('durable ingress flag off preserves the legacy persist-and-ack path', async () => {
   const pool = createMockPool()
   const repository = { persistBatch: vi.fn(), seedCheckpoint: vi.fn() }
@@ -1383,6 +1397,11 @@ describe('Router - offline debounce', () => {
   })
 
   test('daemon_shutdown declares offline immediately without waiting for grace', async () => {
+    const teamDispatchBroker = {
+      observeDaemonEvent: vi.fn(),
+      handleDaemonDisconnected: vi.fn(async () => {}),
+    }
+    router = new Router(pool, { teamDispatchBroker })
     const clientWs = createMockWs()
     router.registerClient(clientWs, 42)
 
@@ -1403,6 +1422,11 @@ describe('Router - offline debounce', () => {
       q.sql.includes('UPDATE daemons') && q.params.includes('daemon-1')
     )
     expect(offlineUpdate).toBeDefined()
+    // Explicit shutdown removes the registry entry before the socket closes;
+    // cleanup must already have reached Team instead of relying on that close.
+    expect(teamDispatchBroker.handleDaemonDisconnected).toHaveBeenCalledExactlyOnceWith('daemon-1')
+    router.unregisterDaemon('daemon-1', ws1)
+    expect(teamDispatchBroker.handleDaemonDisconnected).toHaveBeenCalledTimes(1)
   })
 
   test('past the grace window the daemon is declared offline and pushed', async () => {
@@ -3714,6 +3738,21 @@ describe('Router - list_daemons restart grace', () => {
     expect(list.daemons).toHaveLength(1)
     expect(list.daemons[0].daemon_online).toBe(true)
     expect(list.daemons[0].status).toBe('online')
+  })
+
+  test.each([
+    ['offline', new Date().toISOString()],
+    ['online', new Date(0).toISOString()],
+  ])('startup grace must not resurrect %s hosts with stale or offline presence', async (status, lastHeartbeat) => {
+    pool.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM daemons')) return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], status, last_heartbeat: lastHeartbeat, user_id: 1 }] }
+      return { rows: [], rowCount: 0 }
+    })
+    const clientWs = createMockWs()
+    await (router as any).handleListDaemons(clientWs, 1)
+    const list = clientWs._sent.find((m: any) => m.type === 'daemon_list')
+    expect(list.daemons[0].daemon_online).toBe(false)
+    expect(list.daemons[0].status).toBe('offline')
   })
 
   test('DB-online daemon not in memory goes offline after startup grace elapses', async () => {

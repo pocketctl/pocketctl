@@ -215,6 +215,38 @@ describe('SessionDetail history loading', () => {
     wrapper.unmount()
   })
 
+  test('reconnect rebuilds history once and preserves distinct same-text turns and pending sends', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const vm = wrapper.vm as any
+    const events = [
+      { type: 'user_text', text: 'repeat', msg_id: 'first' },
+      { type: 'agent_text', text: 'answer one' },
+      { type: 'user_text', text: 'repeat', msg_id: 'second' },
+      { type: 'agent_text', text: 'answer two' },
+    ].map(event => ({ ...event, session_id: 'session-http-lan' }))
+    const replay = async () => {
+      const req = websocketMock.send.mock.calls.map(([m]) => m).filter(m => m.type === 'replay').at(-1)!
+      websocketMock.handlers.get('replay_batch')?.({ session_id: 'session-http-lan', req_id: req.req_id, events })
+      websocketMock.handlers.get('replay_end')?.({ session_id: 'session-http-lan', req_id: req.req_id, has_more: false, status: 'idle' })
+      await flushPromises()
+    }
+    await replay()
+    const pending = { id: 'local', type: 'user_text', role: 'user', content: 'not acknowledged', __msg_id: 'pending-send', deliveryStatus: 'pending' }
+    vm.messages.push(pending)
+    for (let count = 0; count < 2; count++) {
+      websocketMock.handlers.get('connection_restored')?.({})
+      await replay()
+      expect(vm.messages.map((m: any) => m.content)).toEqual(['repeat', 'answer one', 'repeat', 'answer two', 'not acknowledged'])
+    }
+    events.push({ type: 'user_text', text: 'not acknowledged', msg_id: 'pending-send', session_id: 'session-http-lan' })
+    websocketMock.handlers.get('connection_restored')?.({})
+    await replay()
+    expect(vm.messages.filter((m: any) => m.content === 'not acknowledged')).toHaveLength(1)
+    expect(vm.messages.at(-1).__echo_reconciled).toBe(true)
+    wrapper.unmount()
+  })
+
   test('keeps replay usable when an auxiliary session request fails', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     websocketMock.send.mockImplementation((message: Record<string, unknown>) => {

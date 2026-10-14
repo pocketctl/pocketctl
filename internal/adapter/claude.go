@@ -62,6 +62,7 @@ type ClaudeContent struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Thinking  string          `json:"thinking,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"` // tool_result string or content blocks
 }
 
 type ClaudeAdapter struct {
@@ -107,8 +108,21 @@ func (a *ClaudeAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, er
 	}
 
 	var raw ClaudeStreamEvent
-	if err := json.Unmarshal([]byte(line), &raw); err != nil {
+	// Stream events form a tagged union: system permission_denied carries a
+	// string message, whereas assistant/user carry a conversation object.
+	// Decode that field only for the event types that consume it.
+	var wire struct {
+		*ClaudeStreamEvent
+		Message json.RawMessage `json:"message"`
+	}
+	wire.ClaudeStreamEvent = &raw
+	if err := json.Unmarshal([]byte(line), &wire); err != nil {
 		return nil, fmt.Errorf("parse json: %w", err)
+	}
+	if (raw.Type == "assistant" || raw.Type == "user") && len(wire.Message) > 0 {
+		if err := json.Unmarshal(wire.Message, &raw.Message); err != nil {
+			return nil, fmt.Errorf("parse message: %w", err)
+		}
 	}
 
 	if raw.Type == "system" && raw.Subtype == "init" && raw.SessionID != "" {
@@ -285,7 +299,23 @@ func (a *ClaudeAdapter) convertUser(raw ClaudeStreamEvent, sid string) ([]protoc
 	var events []protocol.DaemonEvent
 	for _, c := range raw.Message.Content {
 		if c.Type == "tool_result" {
-			output := c.Text
+			var output string
+			if len(c.Content) > 0 && json.Unmarshal(c.Content, &output) != nil {
+				var blocks []ClaudeContent
+				if err := json.Unmarshal(c.Content, &blocks); err != nil {
+					return nil, fmt.Errorf("parse tool result: %w", err)
+				}
+				var texts []string
+				for _, block := range blocks {
+					if block.Type == "text" {
+						texts = append(texts, block.Text)
+					}
+				}
+				output = strings.Join(texts, "\n")
+			}
+			if output == "" {
+				output = c.Text
+			}
 			events = append(events, protocol.DaemonEvent{
 				Type:      "tool_result",
 				SessionID: sid,

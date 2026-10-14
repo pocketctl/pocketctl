@@ -1,7 +1,10 @@
 import { useLocale } from '../../composables/useLocale'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+
+enableAutoUnmount(afterEach)
+afterEach(() => vi.useRealTimers())
 
 const api = vi.hoisted(() => ({ updateTeamSession:vi.fn(),getTeamSession:vi.fn(),getTeamContext:vi.fn(async()=>null),createTeamContext:vi.fn(async()=>({})),listTeamTasks:vi.fn(async()=>[]),listTeamMembers:vi.fn(async()=>[]),listTeamAgentCandidates: vi.fn(), listTeams: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), createTeamSession: vi.fn() }))
 vi.mock('../../services/teamClient', () => api)
@@ -34,6 +37,7 @@ beforeEach(() => {
   useLocale().setLocale('zh')
   writesEnabled = true
   vi.clearAllMocks()
+  api.listTeamAgentOffers.mockReset()
   api.listTeams.mockResolvedValue([{ id: 'ctm_1', name: 'Alpha' }, { id: 'ctm_2', name: 'Beta' }])
   api.listTeamAgentCandidates.mockResolvedValue([{daemon_id:'d1',hostname:'Host One',online:true},{daemon_id:'d2',hostname:'Host Two',online:true}])
   api.listTeamAgentOffers.mockResolvedValue([{ id: 'offer-1', state:'active', daemon_id: 'd1', provider: 'codex', managed_callable: true, online:true, availability: 'online' }, {id:'offer-2',state:'active',daemon_id:'d2',provider:'claude-code',managed_callable:false,online:true,availability:'unmanaged'}])
@@ -45,6 +49,53 @@ beforeEach(() => {
 })
 
 describe('team session list', () => {
+  test('refreshes shared host presence without personal daemon events or a page reload', async () => {
+    vi.useFakeTimers()
+    const { wrapper } = await render()
+    expect(wrapper.get('.presence').text()).toContain('2 / 2')
+    // d2 belongs to another member: personal daemon events are not available.
+    api.listTeamAgentOffers.mockResolvedValue([
+      { id: 'offer-1', state: 'active', daemon_id: 'd1', provider: 'codex', online: true },
+      { id: 'offer-2', state: 'active', daemon_id: 'd2', provider: 'claude-code', online: false },
+    ])
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(wrapper.get('.presence').text()).toContain('1 / 2')
+    await wrapper.get('.host-trigger').trigger('click')
+    const remote = wrapper.findAll('.host-filter-option').find(button => button.text().includes('Host Two'))!
+    expect(remote.find('.dot').classes()).toContain('offline')
+    api.listTeamAgentOffers.mockResolvedValue([
+      { id: 'offer-1', state: 'active', daemon_id: 'd1', provider: 'codex', online: true },
+      { id: 'offer-2', state: 'active', daemon_id: 'd2', provider: 'claude-code', online: true },
+    ])
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(wrapper.get('.presence').text()).toContain('2 / 2')
+    expect(wrapper.get('nav').text()).toContain('Joint review')
+    wrapper.unmount()
+    const requests = api.listTeamAgentOffers.mock.calls.length
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(api.listTeamAgentOffers).toHaveBeenCalledTimes(requests)
+  })
+
+  test('ignores an old team presence response after switching teams', async () => {
+    vi.useFakeTimers()
+    const { wrapper, router } = await render()
+    let finishOld!: (offers: any[]) => void
+    api.listTeamAgentOffers.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(finishOld).toBeTypeOf('function')
+    api.listTeamAgentOffers.mockResolvedValue([{ id: 'new', state: 'active', daemon_id: 'new-host', online: false }])
+    await router.push('/team/ctm_2/sessions')
+    await flushPromises()
+    expect(wrapper.get('.presence').text()).toContain('0 / 1')
+    finishOld([{ id: 'stale', state: 'active', daemon_id: 'old-host', online: true }])
+    await flushPromises()
+    expect(wrapper.get('.presence').text()).toContain('0 / 1')
+    wrapper.unmount()
+  })
+
   test('archives using the current revision after bindings changed outside the sidebar', async () => {
     const current = { ...session, revision: 4 }
     api.getTeamSession.mockResolvedValue(current)

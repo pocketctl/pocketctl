@@ -68,7 +68,28 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
+})
+
+test('retries a temporary ticket failure during reconnect until the Relay returns', async () => {
+  vi.useFakeTimers()
+  mockAccessToken.value = makeToken({ exp: Math.floor(Date.now() / 1000) + 3600 })
+  vi.resetModules()
+  const socket = (await import('../useWebSocket')).useWebSocket()
+  await socket.connect()
+  lastWs.readyState = FakeWS.OPEN
+  lastWs.onopen()
+  vi.mocked(globalThis.fetch).mockResolvedValueOnce({ ok: false, status: 502 } as Response)
+  lastWs.readyState = FakeWS.CLOSED
+  lastWs.onclose({ code: 1006 })
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(capturedUrls).toHaveLength(1)
+  await vi.advanceTimersByTimeAsync(2000)
+  expect(capturedUrls).toHaveLength(2)
+  lastWs.readyState = FakeWS.OPEN
+  lastWs.onopen()
+  expect(socket.connected.value).toBe(true)
 })
 
 describe('useWebSocket — connect 前确保 token 新鲜', () => {

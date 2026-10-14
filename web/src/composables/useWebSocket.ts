@@ -258,7 +258,12 @@ async function connect(url?: string) {
     }
     ws.value.onerror = () => { ws.value?.close() }
   } catch {
-    if (generation === connectionGeneration) connecting = false
+    if (generation === connectionGeneration) {
+      connecting = false
+      // Ticket acquisition can fail while Relay is restarting, before a
+      // WebSocket exists to schedule its own onclose retry.
+      if (accessToken.value) scheduleReconnect()
+    }
   }
 }
 

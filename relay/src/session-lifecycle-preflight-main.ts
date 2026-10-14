@@ -6,7 +6,7 @@ import { archiveObjectKey, readArchiveObject } from './session-archive/storage.j
 
 const args = new Set(process.argv.slice(2))
 try {
-  if ([...args].some(arg => !['--require-execution', '--require-release', '--probe-storage'].includes(arg))) throw new Error('invalid preflight argument')
+  if ([...args].some(arg => !['--require-execution', '--require-release', '--require-storage', '--probe-storage'].includes(arg))) throw new Error('invalid preflight argument')
   const config = sessionLifecycleConfig(process.env), storage = createConfiguredArchiveStorage(config)
   let probe = args.has('--probe-storage') ? 'unavailable' : 'not_requested'
   try {
@@ -24,6 +24,7 @@ try {
     console.log(JSON.stringify({ ...status, deployment_ready: deploymentReady, storage_driver: config.storageDriver, storage_namespace: storage?.namespace ?? null, storage_probe: probe }))
     if (args.has('--require-execution') && !status.execution_ready) process.exitCode = 2
     if (args.has('--require-release') && !deploymentReady) process.exitCode = 2
+    if (args.has('--require-storage') && !storage) process.exitCode = 2
   } finally { storage?.close?.() }
 } catch (error) {
   const message = error instanceof Error && ['invalid session lifecycle release file', 'invalid preflight argument'].includes(error.message)

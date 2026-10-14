@@ -104,7 +104,7 @@
           </template>
         </div>
 
-        <dl class="detail-grid host-reference-meta"><div><dt>{{ t('hosts.daemon_version') }}</dt><dd class="mono">{{ selectedDaemon.version ? 'v'+selectedDaemon.version : '—' }}</dd></div><div><dt>{{ t('dashboard.total_sessions') }}</dt><dd>{{ detailSessionTotal }}</dd></div><div><dt>{{ t('dashboard.token_total') }}</dt><dd>{{ formatTokenCount(daemonCost?.total) }}</dd></div><div><dt>{{ t('hosts.last_heartbeat') }}</dt><dd>{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</dd></div></dl>
+        <dl class="detail-grid host-reference-meta"><div><dt>{{ t('hosts.daemon_version') }}</dt><dd class="mono">{{ selectedDaemon.version ? 'v'+selectedDaemon.version.replace(/^v/, '') : '—' }}</dd></div><div><dt>{{ t('dashboard.total_sessions') }}</dt><dd>{{ detailSessionTotal }}</dd></div><div><dt>{{ t('dashboard.token_total') }}</dt><dd>{{ formatTokenCount(daemonCost?.total) }}</dd></div><div><dt>{{ t('hosts.last_heartbeat') }}</dt><dd>{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</dd></div></dl>
         <div class="host-reference-agents">          <!-- Agent 运行状态（C4b 版本上报 + C4c 升级占位） -->
           <div class="hd-section">
             <div class="hd-section-title">{{ t('hosts.agent_status') }}</div>
@@ -158,7 +158,7 @@
             <div class="hd-section-title">{{ t('hosts.connection_info') }}</div>
             <div class="conn-grid">
               <div class="conn-item"><div class="c-label">{{ t('hosts.ip_addr') }}</div><div class="c-val">{{ selectedDaemon.ip && selectedDaemon.ip !== 'unknown' ? selectedDaemon.ip : '—' }}</div></div>
-              <div class="conn-item"><div class="c-label">{{ t('hosts.daemon_version') }}</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version : '—' }}</div></div>
+              <div class="conn-item"><div class="c-label">{{ t('hosts.daemon_version') }}</div><div class="c-val">{{ selectedDaemon.version ? 'v' + selectedDaemon.version.replace(/^v/, '') : '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.os') }}</div><div class="c-val">{{ selectedDaemon.os || '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.uptime') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.started_at ? formatUptime(selectedDaemon.started_at) : '—' }}</div></div>
               <div class="conn-item"><div class="c-label">{{ t('hosts.last_heartbeat') }}</div><div :class="['c-val', { muted: !selectedDaemon.daemon_online }]">{{ selectedDaemon.last_heartbeat ? formatRelativeTime(selectedDaemon.last_heartbeat) : '—' }}</div></div>
@@ -755,10 +755,13 @@ onMounted(() => {
     const idx = daemons.value.findIndex(d => d.daemon_id === msg.daemon_id)
     if (idx >= 0) {
       if (msg.agents) daemons.value[idx].agents = msg.agents
+      for (const field of ['arch', 'version', 'started_at', 'last_heartbeat'] as const) {
+        if (msg[field] !== undefined) daemons.value[idx][field] = msg[field]
+      }
       if (msg.status === 'online') { daemons.value[idx].daemon_online = true; daemons.value[idx].status = 'online'; if (msg.hostname) daemons.value[idx].hostname = msg.hostname; if (msg.os) daemons.value[idx].os = msg.os; if (msg.ip) daemons.value[idx].ip = msg.ip }
       else if (msg.status === 'offline') { daemons.value[idx].daemon_online = false; daemons.value[idx].status = 'offline' }
       else if (msg.status === 'reconnecting') { daemons.value[idx].status = 'reconnecting' }
-    } else if (msg.status === 'online') { daemons.value.push({ daemon_id: msg.daemon_id, hostname: msg.hostname, agents: msg.agents, daemon_online: true, daemon_alias: msg.alias || null, os: msg.os, ip: msg.ip, status: 'online' }) }
+    } else if (msg.status === 'online') { daemons.value.push({ daemon_id: msg.daemon_id, hostname: msg.hostname, agents: msg.agents, daemon_online: true, daemon_alias: msg.alias || null, os: msg.os, ip: msg.ip, arch: msg.arch, version: msg.version, started_at: msg.started_at, last_heartbeat: msg.last_heartbeat, status: 'online' }) }
   }))
   cleanups.push(onEvent('upgrade_result', (msg: any) => {
     upgrading.value = ''
