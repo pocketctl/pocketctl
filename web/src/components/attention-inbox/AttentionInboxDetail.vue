@@ -118,8 +118,25 @@ const selectedAnswers = ref<string[][]>([])
 const customAnswers = ref<string[]>([])
 const questions = computed(() => props.item.context.questions ?? [])
 const providerLabel = computed(() => props.item.provider === 'opencode' ? 'OpenCode' : 'Codex')
-const contextText = computed(() => props.item.context.command || props.item.context.description || props.item.context.permission_name || '')
-const contextLabel = computed(() => props.item.context.command ? t('attention.command') : t('attention.context'))
+function nonEmptyText(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value : ''
+}
+
+function nestedCommand(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  return nonEmptyText((value as Record<string, unknown>).command)
+}
+
+const commandText = computed(() => {
+  const context = props.item.context
+  const command = nonEmptyText(context.command)
+  if (command || props.item.provider !== 'opencode') return command
+  // Existing OpenCode inbox records retain native input/metadata rather than
+  // a top-level command. Permission patterns are scopes, not executable text.
+  return nestedCommand(context.input) || nestedCommand(context.metadata)
+})
+const contextText = computed(() => commandText.value || props.item.context.description || props.item.context.permission_name || '')
+const contextLabel = computed(() => commandText.value ? t('attention.command') : t('attention.context'))
 const riskReasonKeys: Record<string, string> = {
   executes_command: 'attention.risk_reason.executes_command',
   changes_files: 'attention.risk_reason.changes_files',
