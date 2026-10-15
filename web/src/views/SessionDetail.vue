@@ -3245,24 +3245,29 @@ function userMessageIdentity(evt: any) {
   return {
     userEventKey: value('event_id') ? JSON.stringify([...scope, value('event_id')]) : '',
     userPartKey: value('part_id') ? JSON.stringify([...scope, value('source_turn_id') || value('turn_id'), value('part_id')]) : '',
+    // Claude source_turn_id identifies its native user record even without part_id.
+    userNativeKey: String(value('turn_id')).startsWith('turn:v1:claude-code:') && value('source_turn_id')
+      ? JSON.stringify([...scope, value('source_turn_id')]) : '',
   }
 }
 
 function sameUserMessage(left: any, right: any): boolean {
   return Boolean(
     (left.userEventKey && left.userEventKey === right.userEventKey)
-    || (left.userPartKey && left.userPartKey === right.userPartKey),
+    || (left.userPartKey && left.userPartKey === right.userPartKey)
+    || (left.userNativeKey && left.userNativeKey === right.userNativeKey),
   )
 }
 
 function userIdentitiesConflict(left: any, right: any): boolean {
-  return Boolean((left.userEventKey || left.userPartKey)
-    && (right.userEventKey || right.userPartKey) && !sameUserMessage(left, right))
+  return Boolean((left.userEventKey || left.userPartKey || left.userNativeKey)
+    && (right.userEventKey || right.userPartKey || right.userNativeKey) && !sameUserMessage(left, right))
 }
 
 function preserveUserIdentity(message: any, identity: ReturnType<typeof userMessageIdentity>) {
   if (identity.userEventKey) message.userEventKey = identity.userEventKey
   if (identity.userPartKey) message.userPartKey = identity.userPartKey
+  if (identity.userNativeKey) message.userNativeKey = identity.userNativeKey
 }
 
 function withoutExistingUserMessages(page: any[], existing: any[]): any[] {
@@ -3359,6 +3364,21 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // Only consume the latest local user message once, never a historical
     // same-text message or an explicitly conflicting request.
     const latestUser = [...target].reverse().find((message: any) => message.type === 'user_text')
+    // Admission echo and native Claude history are distinct transport events.
+    // Bridge them once by canonical turn plus exact text, then retain the native
+    // identity for later replay. A second native input cannot consume this row.
+    const nativeTurn = evt.turn_id || evt.payload?.turn_id
+    if (identity.userNativeKey && !correlation.msgId && !correlation.requestId
+      && latestUser && !latestUser.userNativeKey
+      && (messageCorrelation(latestUser).msgId || messageCorrelation(latestUser).requestId)
+      && latestUser.deliveryStatus !== 'failed'
+      && latestUser.turn_id === nativeTurn && latestUser.content === text) {
+      settleReplayLocalMessage(latestUser, target)
+      preserveUserIdentity(latestUser, identity)
+      preserveTurnMetadata(latestUser, evt)
+      latestUser.__echo_reconciled = true
+      return
+    }
     if (latestUser?.__msg_id && !latestUser.__echo_reconciled
       && latestUser.deliveryStatus !== 'failed'
       && latestUser.content === text

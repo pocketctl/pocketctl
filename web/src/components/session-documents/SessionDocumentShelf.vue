@@ -176,7 +176,7 @@ function openDocument(document: SessionDocumentMetadata, event: MouseEvent): voi
 .document-pagination{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);flex-shrink:0}
 .document-pagination button:disabled{opacity:.4;cursor:default}
 
-.session-document-shelf{position:relative;overflow:hidden;border:1px solid var(--border-light);border-radius:12px;background:var(--surface);box-shadow:0 8px 28px #0000001f;animation:document-shelf-in .32s cubic-bezier(.2,.8,.2,1) both}
+.session-document-shelf{flex-shrink:0;position:relative;overflow:hidden;border:1px solid var(--border-light);border-radius:12px;background:var(--surface);box-shadow:0 8px 28px #0000001f;animation:document-shelf-in .32s cubic-bezier(.2,.8,.2,1) both}
 .session-document-shelf::before{content:"";position:absolute;inset:0 auto 0 0;width:2px;background:linear-gradient(#58a6ff,#e07a4f)}
 .document-shelf-header{min-height:46px;display:flex;align-items:center;gap:9px;padding:0 14px;border-bottom:1px solid var(--border)}
 .document-shelf-header svg{width:16px;height:16px;fill:none;stroke:var(--accent);stroke-width:1.8}

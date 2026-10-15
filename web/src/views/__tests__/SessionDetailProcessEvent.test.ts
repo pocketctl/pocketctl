@@ -1033,6 +1033,25 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
   })
 
+  test.each([false, true])('merges Claude admitted and native echoes across lifecycle rows (local=%s)', (local) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    if (local) vm.sendPromptText('one command')
+    const msgID = local ? vm.messages.at(-1).__msg_id : 'remote-message'
+    const turn = 'turn:v1:claude-code:cu-turn'
+    vm.processEvent({ type:'user_text', text:'one command', msg_id:msgID, request_id:msgID, turn_id:turn })
+    vm.processEvent({ type:'turn_status', turn_id:turn, turn_status:'running' })
+    const native = { type:'user_text', text:'one command', source_turn_id:'native-user-uuid', turn_id:turn }
+    vm.processEvent(native)
+    vm.processEvent({ type:'agent_text', text:'done', turn_id:turn })
+    vm.processEvent(native)
+    expect(vm.messages.filter((m:any)=>m.type === 'user_text')).toHaveLength(1)
+    // A distinct native user record, even in the same canonical turn, stays separate.
+    vm.processEvent({...native, source_turn_id:'another-native-user'})
+    expect(vm.messages.filter((m:any)=>m.type === 'user_text')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
   test.each([false, true])('deduplicates durable user messages across live and replay (mobile=%s)', async (mobile) => {
     responsiveMock.isMobile.value = mobile
     const wrapper = shallowMount(SessionDetail)
