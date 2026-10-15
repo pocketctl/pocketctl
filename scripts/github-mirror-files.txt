@@ -31,6 +31,7 @@ scripts/test-csp-contract.sh
 scripts/test-postgres-role-separation.sh
 scripts/test-postgres-existing-volume-gate.sh
 scripts/test-pocketctl-memory-pg13-schema.sh
+scripts/configure-session-lifecycle-filesystem.mjs
 scripts/secret-scan.sh
 scripts/deploy.sh
 scripts/package-release-candidate.sh
