@@ -64,6 +64,46 @@ describe('SessionDetail processEvent integration', () => {
     websocketMock.send.mockClear()
   })
 
+  test('interrupted turn footer uses the outcome rather than successful completion', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle', daemon_online: true }]
+    vm.processEvent({type: 'agent_text', text: 'partial reply'})
+    vm.processEvent({type: 'turn_status', turn_id: 'footer-turn', turn_status: 'interrupted'})
+    vm.status = 'idle'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.status-text').text()).toBe('workspace.interrupted')
+    wrapper.unmount()
+  })
+
+  test('native replay stream generations reuse the same message but keep distinct turns', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    for (const [generation, turn] of [[1, 'turn-a'], [2, 'turn-a'], [2, 'turn-b']]) {
+      vm.processEvent({ type: 'agent_text', text: 'same reply', stream_id: `codex:${generation}:stream:agent_text:ses_1:${turn}:item-1`, chunk_seq: 0, byte_offset: 0, final: true, total_bytes: 10, turn_id: turn })
+    }
+    expect(vm.messages.filter((m: any) => m.type === 'agent_text').map((m:any) => m.content)).toEqual(['same reply', 'same reply'])
+    wrapper.unmount()
+  })
+
+  test('historical lifecycle cannot overwrite a live session status between replay pages', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get('session_status')!({ session_id: 'ses_1', status: 'idle' })
+    websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', events: [
+      { type: 'session_status', session_id: 'ses_1', status: 'waiting_approval', seq: 801 },
+    ] })
+    await wrapper.vm.$nextTick()
+    expect(vm.status).toBe('idle')
+    websocketMock.handlers.get('session_status')!({ session_id: 'ses_1', status: 'running' })
+    websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', events: [
+      { type: 'session_status', session_id: 'ses_1', status: 'completed', seq: 802 },
+    ] })
+    await wrapper.vm.$nextTick()
+    expect(vm.status).toBe('running')
+    wrapper.unmount()
+  })
+
   test('mobile hides tools by default, retains interactions and persists the menu preference', async () => {
     responsiveMock.isMobile.value = true
     const wrapper = shallowMount(SessionDetail)
@@ -1030,6 +1070,25 @@ describe('SessionDetail processEvent integration', () => {
     vm.processEvent({ type: 'turn_status', turn_id: 'turn-next', turn_status: 'running' })
     vm.processEvent({ type: 'user_text', text: '1+1？', turn_id: 'turn-next' })
     expect(vm.messages.filter((m: any) => m.type === 'user_text')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  test.each([false, true])('merges Claude admitted and native echoes across lifecycle rows (local=%s)', (local) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    if (local) vm.sendPromptText('one command')
+    const msgID = local ? vm.messages.at(-1).__msg_id : 'remote-message'
+    const turn = 'turn:v1:claude-code:cu-turn'
+    vm.processEvent({ type:'user_text', text:'one command', msg_id:msgID, request_id:msgID, turn_id:turn })
+    vm.processEvent({ type:'turn_status', turn_id:turn, turn_status:'running' })
+    const native = { type:'user_text', text:'one command', source_turn_id:'native-user-uuid', turn_id:turn }
+    vm.processEvent(native)
+    vm.processEvent({ type:'agent_text', text:'done', turn_id:turn })
+    vm.processEvent(native)
+    expect(vm.messages.filter((m:any)=>m.type === 'user_text')).toHaveLength(1)
+    // A distinct native user record, even in the same canonical turn, stays separate.
+    vm.processEvent({...native, source_turn_id:'another-native-user'})
+    expect(vm.messages.filter((m:any)=>m.type === 'user_text')).toHaveLength(2)
     wrapper.unmount()
   })
 

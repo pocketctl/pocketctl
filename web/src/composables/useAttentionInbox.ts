@@ -1,4 +1,4 @@
-import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import { computed, reactive, ref, type ComputedRef, type Ref } from 'vue'
 import {
   AttentionInboxApiError,
   listAttentionInbox,
@@ -121,7 +121,7 @@ export function createAttentionInboxStore(dependencies: AttentionInboxStoreDepen
   const items = ref(new Map<string, AttentionInboxItem>())
   const recoveryItems = ref(new Map<string, AttentionRecoveryItem>())
   const cursors = new Map<string, string | null>()
-  const counts = new Map<string, AttentionInboxCounts>()
+  const counts = reactive(new Map<string, AttentionInboxCounts>())
   const scopes = new Map<string, AttentionInboxScope>()
   const isLoading = ref(false)
   const errorMessage = ref('')

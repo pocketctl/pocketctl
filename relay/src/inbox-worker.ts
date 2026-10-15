@@ -9,6 +9,7 @@ import type { MaterializationInput, MaterializationResult } from './materializat
 import type { RealtimeOutboxWriter } from './materialization/realtime-outbox.js'
 import { isSessionDocumentArtifactEvent } from './session-documents/materializer.js'
 import { observeInboxOldest, workerBacklog, workerBatchSize, workerClaimedRows, workerDrainPasses, workerRetries } from './metrics.js'
+import { isSideEffectFreeReplay } from './materialization/replay-batch-policy.js'
 
 const MAX_ATTEMPTS = 12
 const STALE_CLAIM_LEASE_MS = 300_000
@@ -18,10 +19,10 @@ const CLAIM_HEARTBEAT_INTERVAL_MS = 100_000
 const DEFAULT_DRAIN_PASSES = 32
 
 export interface InboxWorkerDeps {
-  repository: Pick<InboxRepository, 'claimBatch' | 'complete' | 'reschedule' | 'deadLetter' | 'resetStaleClaims' | 'renewClaims'>
-  materializer: Pick<EventMaterializer, 'materialize'>
+  repository: Pick<InboxRepository, 'claimBatch' | 'complete' | 'reschedule' | 'deadLetter' | 'resetStaleClaims' | 'renewClaims'> & Partial<Pick<InboxRepository, 'readReplayPrefix'>>
+  materializer: Pick<EventMaterializer, 'materialize'> & Partial<Pick<EventMaterializer, 'materializeReplayBatch'>>
   artifactMaterializer?: { materialize(input: MaterializationInput): Promise<MaterializationResult> }
-  outboxWriter?: Pick<RealtimeOutboxWriter, 'complete'>
+  outboxWriter?: Pick<RealtimeOutboxWriter, 'complete'> & Partial<Pick<RealtimeOutboxWriter, 'completeReplayBatch'>>
   workerId: string
   shardCount: number
   shardIndex: number
@@ -103,6 +104,12 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
   let stopped = true
   let lastRecoveryAt = Number.NEGATIVE_INFINITY
   let shouldContinueImmediately = false
+
+  const materializationInput = (row: InboxRow): MaterializationInput => ({
+    inboxId: row.inboxId, userId: row.userId, daemonId: row.daemonId, daemonGeneration: row.daemonGeneration,
+    sessionId: row.sessionId, eventType: row.eventType, payload: row.payload,
+    receivedAt: row.receivedAt, context: row.materializationContext,
+  })
 
   async function processRow(row: InboxRow, assertClaim: () => Promise<void>): Promise<void> {
     try {
@@ -218,6 +225,30 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
       for (const row of rows) {
         const assertClaim = async (): Promise<void> => {
           if (!activeClaims.get(row.inboxId)?.owned) throw new LostClaimError(row.inboxId)
+        }
+        if (deps.repository.readReplayPrefix && deps.materializer.materializeReplayBatch
+          && deps.outboxWriter?.completeReplayBatch && isSideEffectFreeReplay(materializationInput(row))) {
+          try {
+            const tail = await deps.repository.readReplayPrefix(row, Math.min(32, batchSize))
+            if (tail.length) {
+              const prefix = [row, ...tail]
+              workerBatchSize.observe(prefix.length)
+              const complete = deps.outboxWriter.completeReplayBatch.bind(deps.outboxWriter)
+              await deps.materializer.materializeReplayBatch(prefix.map(materializationInput), assertClaim, {
+                workerId: deps.workerId,
+                fences: prefix.map(item => ({ inboxId: item.inboxId, attempts: item.attempts })),
+                complete: (client, results) => complete(client, prefix.map((item, i) => ({
+                  inboxId: item.inboxId, attempts: item.attempts,
+                  eventId: results[i].eventId, deliveries: results[i].deliveries,
+                })), deps.workerId),
+              })
+              activeClaims.delete(row.inboxId)
+              continue
+            }
+          } catch {
+            // The transaction rolls back followers without claiming them or
+            // spending their retries. Preserve the established head retry path.
+          }
         }
         await processRow(row, assertClaim)
         activeClaims.delete(row.inboxId)

@@ -90,6 +90,15 @@ func BuildRecords(sessionID string, result CaptureResult, limits TransportLimits
 	if sessionID == "" || limits.MaxEventBytes <= 0 || limits.MaxChunkBytes <= 0 {
 		return nil, errors.New("invalid document transport limits")
 	}
+	// Native file-change IDs may embed long paths. Document source references
+	// are opaque and capped at 256 bytes across Relay and clients. Preserve valid
+	// references; hash oversized ones in full instead of truncating distinct IDs.
+	// Do this before record IDs are derived so a previously rejected begin can
+	// be retried with a new, valid record identity. Native history IDs stay intact.
+	if len(result.SourceEventID) > 256 {
+		digest := sha256.Sum256([]byte(result.SourceEventID))
+		result.SourceEventID = "source-sha256-" + hex.EncodeToString(digest[:])
+	}
 	if result.Reason != "" {
 		records := []protocol.DaemonEvent{unavailableRecord(sessionID, result)}
 		if !recordsFit(records, limits.MaxEventBytes) {

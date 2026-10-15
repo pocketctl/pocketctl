@@ -339,6 +339,9 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 				}
 				if event.Type == "session_meta" {
 					seenMeta = true
+					if event.ControlMode != protocol.ControlManaged || !sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+						t.Fatalf("restored metadata revoked managed composer: %+v", event)
+					}
 				}
 				if event.Type == "session_discovered" {
 					seenDiscovery = true
@@ -357,6 +360,30 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 				t.Fatal("restored thread did not emit session_discovered")
 			}
 		})
+	}
+}
+
+func TestCodexInitialModelRefreshPreservesManagedComposer(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 8)
+	sm := NewSessionManager(output)
+	coord := newVerifiedTestCodexCoordinator(sm)
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["thread/resume"] = json.RawMessage(`{"model":"gpt-5.6"}`)
+	coord.runtime = &codexAppServerRuntime{Client: rpc}
+	coord.generation = 6
+	sm.sessions["thr_initial_model"] = &ProcessState{
+		SessionID: "thr_initial_model", Agent: "codex", Source: "daemon",
+		ControlMode: protocol.ControlManaged,
+	}
+	coord.refreshManagedThreadModelAsync("thr_initial_model")
+	select {
+	case event := <-output:
+		if event.Type != "session_meta" || event.Model != "gpt-5.6" || event.ControlMode != protocol.ControlManaged ||
+			!sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+			t.Fatalf("initial model metadata revoked managed composer: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no initial model metadata")
 	}
 }
 
@@ -1414,5 +1441,26 @@ func TestCodexCoordinatorCanceledHealthProbePreservesRuntime(t *testing.T) {
 	_, err := coord.ensureStarted(ctx, "/opt/codex", "0.162.1", agentcontrol.CodexCapabilities{SchemaHash: "schema"})
 	if !errors.Is(err, context.Canceled) || coord.runtime != existing {
 		t.Fatalf("runtime changed after cancellation: %v", err)
+	}
+}
+
+func TestCodexRecoveryReservesNativeHistoryBeforeAsyncSubscription(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.sessions["recovering"] = &ProcessState{SessionID: "recovering", Agent: adapter.AgentCodex, Source: "terminal", Status: protocol.StatusIdle}
+	coord := newVerifiedTestCodexCoordinator(sm)
+	coord.runtime = &codexAppServerRuntime{Client: newFakeCodexRuntimeClient()}
+	coord.restoreManagedThreads([]string{"recovering"})
+	coord.mu.Lock()
+	coord.startEventPumpLocked()
+	coord.mu.Unlock()
+	defer coord.shutdown()
+	if sm.RegisterTerminalSession("recovering", "/work", 0, "", protocol.StatusBusy, adapter.AgentCodex) {
+		t.Fatal("recovery allowed a parallel JSONL producer")
+	}
+	if sm.SessionControlMode("recovering") != protocol.ControlManaged {
+		t.Fatal("native ownership not reserved")
+	}
+	if sm.sessions["recovering"].Status != protocol.StatusIdle {
+		t.Fatal("watcher changed recovered lifecycle")
 	}
 }

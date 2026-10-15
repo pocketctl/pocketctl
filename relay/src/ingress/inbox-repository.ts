@@ -2,6 +2,7 @@ import type pg from 'pg'
 import type { AckCheckpoint, IngressEnvelope, PriorityClass } from './types.js'
 import type { MaterializationContext } from '../materialization/types.js'
 import { inboxClaimSeconds, inboxPoolWait } from '../metrics.js'
+import { isSideEffectFreeReplay, REPLAY_BATCH_MAX_BYTES } from '../materialization/replay-batch-policy.js'
 
 export interface InboxRow {
   inboxId: number;
@@ -467,6 +468,34 @@ export class InboxRepository {
     } finally {
       inboxClaimSeconds.observe(Math.max(0, (performance.now() - claimStartedAt) / 1000))
     }
+  }
+  /** Read a bounded prefix. Followers remain pending until the atomic batch commits. */
+  async readReplayPrefix(head: InboxRow, limit = 32): Promise<InboxRow[]> {
+    if (head.priorityClass !== 2 || !isSideEffectFreeReplay({ ...head, context: head.materializationContext }))
+      return [];
+    const size = Math.min(31, Math.max(0, Math.trunc(limit) - 1));
+    if (!size)
+      return [];
+    const next = await this.pool.query<ClaimedRow>(`SELECT * FROM event_inbox WHERE daemon_id=$1 AND daemon_generation=$2
+     AND status IN(0,1) AND (seq,inbox_id)>($3,$4) ORDER BY seq,inbox_id LIMIT $5`, [head.daemonId, head.daemonGeneration, head.seq, head.inboxId, size]);
+    const prefix: InboxRow[] = [];
+    let bytes = Buffer.byteLength(JSON.stringify(head.payload));
+    if (bytes > REPLAY_BATCH_MAX_BYTES)
+      return [];
+    for (const raw of next.rows) {
+      const row = toInboxRow(raw);
+      if (row.status !== 0 || row.availableAt.getTime() > Date.now() || row.priorityClass !== 2
+        || row.userId !== head.userId || row.sessionId !== head.sessionId
+        || !isSideEffectFreeReplay({ ...row, context: row.materializationContext }))
+        break;
+      bytes += Buffer.byteLength(JSON.stringify(row.payload));
+      if (bytes > REPLAY_BATCH_MAX_BYTES)
+        break;
+      prefix.push(row);
+    }
+    if (!prefix.length)
+      return [];
+    return prefix;
   }
 
   async reschedule(

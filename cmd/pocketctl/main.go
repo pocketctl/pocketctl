@@ -1481,7 +1481,9 @@ func cmdDaemonStart(args []string) {
 	// official TUI still held a lease, adopt it immediately and resume the
 	// persisted managed threads. With no handoff this is a no-op and Codex stays
 	// lazy until the next acquire/session start.
+	codexRecoveryDone := make(chan struct{})
 	daemon.Go("codex-runtime-recover", logger, func() {
+		defer close(codexRecoveryDone)
 		recoverCtx, recoverCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer recoverCancel()
 		if err := sm.CodexRuntimeProvider().Recover(recoverCtx); err != nil {
@@ -1696,6 +1698,9 @@ func cmdDaemonStart(args []string) {
 				logger.Warn("outbound spool disabled", "error", err)
 			} else {
 				spoolReady = true
+				if err := client.InitReplayACKs(filepath.Join(cfgDir, "replay-acks")); err != nil {
+					logger.Warn("historical replay ACK cache disabled", "error", err)
+				}
 			}
 			// Remove orphan spool files left by a previous daemon whose ID changed
 			// (machine.id drift): each is bounded but never reclaimed otherwise.
@@ -2073,6 +2078,12 @@ func cmdDaemonStart(args []string) {
 		handleWatcherEvents(ctx, sw.Events(), adapter.AgentClaude, sm, pm, outputCh, logger, &stateDirty)
 	})
 	daemon.RunLoop(ctx, "watcher-codex", logger, func() {
+		// Restore persisted native ownership before admitting a second history reader.
+		select {
+		case <-ctx.Done():
+			return
+		case <-codexRecoveryDone:
+		}
 		handleWatcherEvents(ctx, cw.Events(), adapter.AgentCodex, sm, pm, outputCh, logger, &stateDirty)
 	})
 
@@ -3387,15 +3398,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 						logger.Info("late session jsonl resolved", "session", sessionSnapshot.SessionID, "path", jsonlPath)
 					}
 
-					var tailer *watcher.JSONLTailer
-					var err error
-					if parserAgent == adapter.AgentClaude && watcher.ClaudeJSONLV2Enabled() {
-						tailer, err = watcher.NewClaudeJSONLTailerFromStart(jsonlPath, sessionSnapshot.SessionID)
-					} else if publishedAgent == adapter.AgentCodexDesktop {
-						tailer, err = watcher.NewCodexObserverJSONLTailerFromStart(jsonlPath)
-					} else {
-						tailer, err = watcher.NewJSONLTailerFromStart(jsonlPath, parserAgent)
-					}
+					tailer, err := newTerminalHydrationTailer(jsonlPath, sessionSnapshot.SessionID, parserAgent)
 					if err != nil {
 						logger.Warn("terminal jsonl tailer start failed", "session", sessionSnapshot.SessionID, "error", err)
 						return

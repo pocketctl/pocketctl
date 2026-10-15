@@ -493,8 +493,8 @@
             <span v-if="turnStartTime !== null" class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
           </template>
           <template v-else>
-            <svg class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-            <span class="status-text">{{ t('session.completed') }}</span>
+            <svg v-if="completedTurnStatus === 'completed'" class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <span class="status-text">{{ completedTurnStatus === 'completed' ? t('session.completed') : t(completedTurnStatus === 'failed' ? 'session.execution_failed' : `workspace.${completedTurnStatus}`) }}</span>
             <span v-if="lastTurnDuration !== null" class="status-timer">{{ fmtDuration(lastTurnDuration) }}</span>
             <span v-if="lastAgentUsage?.output_tokens" class="status-tokens">{{ t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) }}</span>
             <button v-if="hasLastAgentReply" class="status-copy-btn" @click="copyLastReply">
@@ -788,7 +788,7 @@ import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
 import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
 import { canSendClaudeSession } from '../utils/claudeSessionControl'
 import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
-import { ContentStreamAssembler } from '../utils/contentStream'
+import { ContentStreamAssembler, contentStreamDisplayId } from '../utils/contentStream'
 import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
 import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../utils/replaySessionTrust'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
@@ -1925,6 +1925,10 @@ const completedBarVisible = computed(() => {
   if (isTurnActive.value || awaitingStart.value || isDisconnected.value) return false
   return ['idle', 'completed', 'exited', 'error', 'killed'].includes(status.value) && (lastTurnDuration.value !== null || hasLastAgentReply.value)
 })
+const completedTurnStatus = computed(() => {
+  const latest = [...messages.value].reverse().find((message: any) => message.turn_status)?.turn_status
+  return ['interrupted', 'failed', 'abandoned'].includes(latest || '') ? latest : 'completed'
+})
 // A reload has no in-memory transition to populate lastTurnEndedAt. In that
 // case the materialized session activity time is the persisted end timestamp.
 const completedTurnEndedAt = computed(() => lastTurnEndedAt.value || (
@@ -2230,7 +2234,7 @@ function prependOlderReplayEvents(events: any[]) {
   const tempMsgs: any[] = []
   const tempSubagent: Record<string, any[]> = {}
   for (const evt of events) {
-    processEvent(evt, tempMsgs, tempSubagent)
+    processEvent(evt, tempMsgs, tempSubagent, true)
   }
   if (tempMsgs.length) {
     const existingPartKeys = new Set(messages.value.map((message: any) => message.partKey).filter(Boolean))
@@ -3245,24 +3249,29 @@ function userMessageIdentity(evt: any) {
   return {
     userEventKey: value('event_id') ? JSON.stringify([...scope, value('event_id')]) : '',
     userPartKey: value('part_id') ? JSON.stringify([...scope, value('source_turn_id') || value('turn_id'), value('part_id')]) : '',
+    // Claude source_turn_id identifies its native user record even without part_id.
+    userNativeKey: String(value('turn_id')).startsWith('turn:v1:claude-code:') && value('source_turn_id')
+      ? JSON.stringify([...scope, value('source_turn_id')]) : '',
   }
 }
 
 function sameUserMessage(left: any, right: any): boolean {
   return Boolean(
     (left.userEventKey && left.userEventKey === right.userEventKey)
-    || (left.userPartKey && left.userPartKey === right.userPartKey),
+    || (left.userPartKey && left.userPartKey === right.userPartKey)
+    || (left.userNativeKey && left.userNativeKey === right.userNativeKey),
   )
 }
 
 function userIdentitiesConflict(left: any, right: any): boolean {
-  return Boolean((left.userEventKey || left.userPartKey)
-    && (right.userEventKey || right.userPartKey) && !sameUserMessage(left, right))
+  return Boolean((left.userEventKey || left.userPartKey || left.userNativeKey)
+    && (right.userEventKey || right.userPartKey || right.userNativeKey) && !sameUserMessage(left, right))
 }
 
 function preserveUserIdentity(message: any, identity: ReturnType<typeof userMessageIdentity>) {
   if (identity.userEventKey) message.userEventKey = identity.userEventKey
   if (identity.userPartKey) message.userPartKey = identity.userPartKey
+  if (identity.userNativeKey) message.userNativeKey = identity.userNativeKey
 }
 
 function withoutExistingUserMessages(page: any[], existing: any[]): any[] {
@@ -3300,7 +3309,7 @@ function findAffectedFileChangeCard(target: any[], evt: any): any | undefined {
     )))
 }
 
-function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>) {
+function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>, historical = false) {
   const type = evt.type || evt.event_type
   if (isKnownNonTimelineControlEvent(type)) return
   if (type === 'agent_plan') {
@@ -3359,6 +3368,21 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // Only consume the latest local user message once, never a historical
     // same-text message or an explicitly conflicting request.
     const latestUser = [...target].reverse().find((message: any) => message.type === 'user_text')
+    // Admission echo and native Claude history are distinct transport events.
+    // Bridge them once by canonical turn plus exact text, then retain the native
+    // identity for later replay. A second native input cannot consume this row.
+    const nativeTurn = evt.turn_id || evt.payload?.turn_id
+    if (identity.userNativeKey && !correlation.msgId && !correlation.requestId
+      && latestUser && !latestUser.userNativeKey
+      && (messageCorrelation(latestUser).msgId || messageCorrelation(latestUser).requestId)
+      && latestUser.deliveryStatus !== 'failed'
+      && latestUser.turn_id === nativeTurn && latestUser.content === text) {
+      settleReplayLocalMessage(latestUser, target)
+      preserveUserIdentity(latestUser, identity)
+      preserveTurnMetadata(latestUser, evt)
+      latestUser.__echo_reconciled = true
+      return
+    }
     if (latestUser?.__msg_id && !latestUser.__echo_reconciled
       && latestUser.deliveryStatus !== 'failed'
       && latestUser.content === text
@@ -3396,6 +3420,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     let content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     const usage = evt.usage || evt.payload?.usage
     const streamId = evt.stream_id || evt.payload?.stream_id
+    const displayId = streamId ? contentStreamDisplayId(streamId) : undefined
     let streaming = evt.streaming ?? evt.payload?.streaming ?? false
     let streamCompleted = false
     if (streamId) {
@@ -3408,7 +3433,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
         totalBytes: Number(evt.total_bytes ?? evt.payload?.total_bytes) || undefined,
       })
       if (!update || (!update.changed && !update.transitionedToComplete)) return
-      content = update.appended
+      content = update.content
       streaming = !update.completed
       streamCompleted = update.completed
     }
@@ -3419,7 +3444,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (!content) {
       if (streamId && streamCompleted) {
         const last = [...target].reverse().find((message: any) =>
-          message.type === 'agent_text' && message.streamId === streamId)
+          message.type === 'agent_text' && message.streamId === displayId)
         if (last) {
           last.streaming = false
           if (usage) last.usage = usage
@@ -3454,16 +3479,18 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (merged !== 'legacy') return
     if (streamId) {
       const existing = [...target].reverse().find((message: any) =>
-        message.type === 'agent_text' && message.streamId === streamId)
+        message.type === 'agent_text' && message.streamId === displayId)
       if (existing) {
-        existing.content += content
+        // A shorter replay prefix must not regress an already assembled message.
+        if (displayId !== streamId && existing.content.length > content.length && existing.content.startsWith(content)) return
+        existing.content = content
         existing.streaming = streaming
         if (usage) existing.usage = usage
         preserveTurnMetadata(existing, evt)
       } else if (content) {
         target.push({
           id: nextId('a'), type: 'agent_text', role: 'agent',
-          content, streaming, usage, streamId, ...eventWithTurnMetadata(evt),
+          content, streaming, usage, streamId: displayId, ...eventWithTurnMetadata(evt),
         })
       }
       return
@@ -3484,6 +3511,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   } else if (type === 'agent_reasoning') {
     let content = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     const streamId = evt.stream_id || evt.payload?.stream_id
+    const displayId = streamId ? contentStreamDisplayId(streamId) : undefined
     if (streamId) {
       const update = contentStreams.accept({
         streamId,
@@ -3494,17 +3522,19 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
         totalBytes: Number(evt.total_bytes ?? evt.payload?.total_bytes) || undefined,
       })
       if (!update || (!update.changed && !update.transitionedToComplete)) return
-      content = update.appended
+      content = update.content
       const existing = [...target].reverse().find((message: any) =>
-        message.type === 'agent_reasoning' && message.streamId === streamId)
+        message.type === 'agent_reasoning' && message.streamId === displayId)
       if (existing) {
-        existing.content += content
+        // A shorter replay prefix must not regress an already assembled message.
+        if (displayId !== streamId && existing.content.length > content.length && existing.content.startsWith(content)) return
+        existing.content = content
         existing.streaming = !update.completed
         preserveTurnMetadata(existing, evt)
       } else if (content) {
         target.push({
           id: nextId('or'), type: 'agent_reasoning', role: 'agent',
-          content, streaming: !update.completed, streamId, ...eventWithTurnMetadata(evt),
+          content, streaming: !update.completed, streamId: displayId, ...eventWithTurnMetadata(evt),
         })
       }
       return
@@ -3661,6 +3691,8 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     }
     target.push({ id: nextId('ts'), type: 'turn_status', role: 'agent', eventId, ...eventWithTurnMetadata(evt) })
   } else if (type === 'session_status') {
+    // Historical lifecycle belongs to past turns; replay_end supplies current state.
+    if (historical) return
     const s = evt.status || evt.payload?.status
     if (s) {
       status.value = s
@@ -4111,7 +4143,7 @@ onMounted(() => {
       const replayContext = replaySessionTrustContext()
       progressiveReplayEvents.append(replayContext, evts)
       const previousIDs = new Set(sourceMessages.value.map(message => message.id))
-      for (const evt of progressiveReplayEvents.takeReady(replayContext)) processEvent(evt)
+      for (const evt of progressiveReplayEvents.takeReady(replayContext)) processEvent(evt, messages.value, undefined, true)
       for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
       nextTick(scrollToBottom)
     }
@@ -4133,7 +4165,7 @@ onMounted(() => {
     if (wasLoadingBackward) {
       prependOlderReplayEvents(olderReplayEvents.takeFinal(replayContext))
     } else {
-      for (const evt of progressiveReplayEvents.takeFinal(replayContext)) processEvent(evt)
+      for (const evt of progressiveReplayEvents.takeFinal(replayContext)) processEvent(evt, messages.value, undefined, true)
       nextTick(scrollToBottom)
     }
     for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))

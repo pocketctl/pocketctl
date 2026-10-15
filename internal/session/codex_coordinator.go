@@ -481,9 +481,26 @@ func (c *codexCoordinator) startEventPumpLocked() {
 	c.pumpWG.Add(1)
 	go func() { defer c.pumpWG.Done(); c.reapThreads(ctx) }()
 	for _, threadID := range c.managedThreadSnapshot() {
+		c.reserveRecoveredThread(threadID)
 		if c.beginSubscription(threadID) {
 			c.startTerminalThreadSubscription(ctx, client, generation, threadID, projector)
 		}
+	}
+}
+
+// Persisted threads with current origin proof retain native history ownership
+// while their backend and paginated history are being restored asynchronously.
+func (c *codexCoordinator) reserveRecoveredThread(threadID string) {
+	if c.sm == nil || !c.admissionAllowed(threadID) || c.isCodexDesktopOrigin(threadID) {
+		return
+	}
+	if !c.sm.EnsureSessionLoaded(threadID) {
+		return
+	}
+	c.sm.mu.Lock()
+	defer c.sm.mu.Unlock()
+	if ps := c.sm.sessions[threadID]; ps != nil && ps.Agent == adapter.AgentCodex && ps.Source != "observer" {
+		ps.ControlMode = protocol.ControlManaged
 	}
 }
 
@@ -883,13 +900,28 @@ func (c *codexCoordinator) refreshManagedThreadModelAsync(threadID string) {
 		if current == "" {
 			// Initial discovery is metadata, not a user-visible model switch.
 			c.sm.SetSessionModel(threadID, model)
-			c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: model}
+			c.sm.outputCh <- c.sm.codexSessionMetadata(protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: model})
 			return
 		}
 		// The daemon's central outgoing classifier commits this new model and
 		// keeps it durable before Relay fans it out to Web/iOS.
 		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_model_changed", SessionID: threadID, Model: model}
 	}()
+}
+
+// Model refreshes use the same session_meta contract as explicit metadata reads.
+// Web/iOS replace their capability snapshot on this event, so a model-only
+// update would revoke the managed composer until the next metadata read.
+func (sm *SessionManager) codexSessionMetadata(event protocol.DaemonEvent) protocol.DaemonEvent {
+	event.ControlMode = sm.SessionControlMode(event.SessionID)
+	event.Capabilities = sm.SessionCapabilities(event.SessionID)
+	if permission, mutable, modes, ok := sm.GetPermissionMeta(event.SessionID); ok {
+		event.Permission, event.PermissionMutable, event.PermissionMutableModes = permission, mutable, modes
+	}
+	if homeID, homeLabel, ok := sm.GetSessionCodexHome(event.SessionID); ok {
+		event.CodexHomeID, event.CodexHomeLabel = homeID, homeLabel
+	}
+	return event
 }
 
 func (c *codexCoordinator) projectHistorical(projector *codexProjection, message codexapp.Inbound) {
@@ -1257,7 +1289,7 @@ func (c *codexCoordinator) subscribeThread(parent context.Context, client codexR
 	c.sm.mu.Unlock()
 	c.mu.Unlock()
 	if resumed.Model != "" {
-		c.sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: resumed.Model, Resync: true}
+		c.sm.outputCh <- c.sm.codexSessionMetadata(protocol.DaemonEvent{Type: "session_meta", SessionID: threadID, Model: resumed.Model, Resync: true})
 	}
 	if readOnly {
 		c.finishSubscription(threadID, false, client, generation)

@@ -1,3 +1,4 @@
+import { computed } from 'vue'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { AttentionInboxApiError } from '../../services/attentionInboxClient'
 import type {
@@ -84,6 +85,20 @@ function harness(initial = snapshot([baseItem])) {
 beforeEach(() => vi.clearAllMocks())
 
 describe('useAttentionInbox store', () => {
+  test('reactive badges converge after a resolved event without reloading', async () => {
+    const { store, event } = harness()
+    await store.start()
+    const attentionBadge = computed(() => store.attentionCount({ type: 'global' }))
+    const actionableBadge = computed(() => store.actionableCount({ type: 'global' }))
+    expect(attentionBadge.value).toBe(1)
+    expect(actionableBadge.value).toBe(1)
+    event({type: 'attention_item_changed', item: {...baseItem, revision: 5, state: 'resolved', allowed_actions: []}})
+    expect(store.itemsFor({type: 'global'}, 'active')).toHaveLength(0)
+    expect(attentionBadge.value).toBe(0)
+    expect(actionableBadge.value).toBe(0)
+    store.stop()
+  })
+
   test('keeps the feature unavailable and does not bind WebSocket when capability is disabled', async () => {
     const disabled = snapshot([], {
       capabilities: {

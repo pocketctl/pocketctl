@@ -2,11 +2,51 @@ package sessiondocument
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestBuildRecordsBoundsLongNativeSourceWithoutTruncationCollisions(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		result := CaptureResult{
+			DocumentID: "doc-long", VersionID: "ver-long", DisplayName: "report.md",
+			Format: protocol.SessionDocumentFormatMarkdown, SourceTurnID: "turn-1",
+			SourceEventID: strings.Repeat("x", 256) + "a", CapturedAt: time.Now().UTC(),
+			ByteSize: 5, Bytes: []byte("hello"), SHA256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+		}
+		if unavailable {
+			result.Reason = protocol.SessionDocumentReasonReadFailed
+		}
+		limits := TransportLimits{MaxEventBytes: 4096, MaxChunkBytes: 64}
+		first, err := BuildRecords("s", result, limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := protocol.ValidateSessionDocumentEvent(first[0], protocol.SessionDocumentProtocolLimits{MaxDocumentBytes: 100, MaxChunkBytes: 64}); err != nil {
+			t.Fatalf("long native source produced invalid begin (unavailable=%v): %v", unavailable, err)
+		}
+		repeated, err := BuildRecords("s", result, limits)
+		if err != nil || repeated[0].EventID != first[0].EventID || repeated[0].SourceEventID != first[0].SourceEventID {
+			t.Fatal("source mapping is unstable")
+		}
+		if result.SourceEventID != strings.Repeat("x", 256)+"a" {
+			t.Fatal("input source was mutated")
+		}
+		result.SourceEventID = strings.Repeat("x", 256) + "b"
+		other, err := BuildRecords("s", result, limits)
+		if err != nil || other[0].SourceEventID == first[0].SourceEventID || other[0].EventID == first[0].EventID {
+			t.Fatal("long source identities collided")
+		}
+		result.SourceEventID = strings.Repeat("x", 256)
+		boundary, err := BuildRecords("s", result, limits)
+		if err != nil || boundary[0].SourceEventID != result.SourceEventID {
+			t.Fatal("valid source identity changed")
+		}
+	}
+}
 
 func TestBuildRecordsEncodesBeginBoundedChunksAndCommitWithStableIdentities(t *testing.T) {
 	result := CaptureResult{

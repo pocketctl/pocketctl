@@ -124,6 +124,36 @@ export class RealtimeOutboxWriter {
       client.release()
     }
   }
+  /** Called only inside the locked prefix materialization transaction. */
+  async completeReplayBatch(client: pg.PoolClient, rows: {
+    inboxId: number;
+    attempts: number;
+    eventId: number | null;
+    deliveries: MaterializedDelivery[];
+  }[], workerId: string): Promise<void> {
+    if (!rows.length) return
+    const fenced = await client.query(`UPDATE event_inbox i
+      SET status=2,completed_at=NOW(),materialized_event_id=c.event_id,
+          claimed_at=NULL,claimed_by=NULL,last_error=NULL
+      FROM jsonb_to_recordset($1::jsonb) AS c(inbox_id bigint,attempts int,event_id bigint,ordinal int)
+      WHERE i.inbox_id=c.inbox_id AND i.attempts=c.attempts
+        AND ((c.ordinal=0 AND i.status=1 AND i.claimed_by=$2)
+          OR (c.ordinal>0 AND i.status=0 AND i.available_at<=NOW()))`, [JSON.stringify(rows.map((row, ordinal) => ({
+            inbox_id: row.inboxId, attempts: row.attempts, event_id: row.eventId, ordinal,
+          }))), workerId])
+    if (fenced.rowCount !== rows.length) throw new LostClaimError(rows[0].inboxId)
+    const deliveries = rows.flatMap(row => row.deliveries.map(delivery => ({
+      inbox_id: row.inboxId, delivery_key: delivery.deliveryKey, event_id: delivery.eventId, user_id: delivery.userId,
+      session_id: delivery.sessionId, event_type: delivery.type, audience: delivery.audience,
+      request_id: delivery.requestId, payload: delivery.payload,
+    }))).map((delivery, ordinal) => ({ ...delivery, ordinal }))
+    await client.query(`INSERT INTO realtime_outbox(inbox_id,delivery_key,event_id,user_id,session_id,event_type,audience,request_id,payload)
+      SELECT d.inbox_id,d.delivery_key,d.event_id,d.user_id,d.session_id,d.event_type,d.audience,d.request_id,d.payload
+      FROM jsonb_to_recordset($1::jsonb) AS d(inbox_id bigint,delivery_key text,event_id bigint,user_id int,session_id text,event_type text,audience text,request_id text,payload jsonb,ordinal int)
+      ORDER BY d.ordinal ON CONFLICT(inbox_id,delivery_key) DO NOTHING`, [JSON.stringify(deliveries)])
+    await client.query(`SELECT pg_notify('pocketctl_realtime',$1)`, [String(rows[rows.length - 1].inboxId)])
+  }
+
 }
 
 export class RealtimeOutboxRepository implements RealtimeOutboxRepositoryLike {

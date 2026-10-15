@@ -1592,3 +1592,14 @@ func TestCreateSessionRejectsDangerousPermissionWithoutLocalSwitch(t *testing.T)
 		t.Fatalf("with the local switch the dangerous mode must proceed, got %v", err)
 	}
 }
+
+func TestRegisterTerminalSessionCodexRecoveryDoesNotStartDuplicateTailer(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	sm.sessions["recovering"] = &ProcessState{SessionID: "recovering", Agent: adapter.AgentCodex, Source: "daemon", ControlMode: protocol.ControlManaged, Status: protocol.StatusIdle}
+	if sm.RegisterTerminalSession("recovering", "/work", 0, "", protocol.StatusBusy, adapter.AgentCodex) {
+		t.Fatal("recovering native owner must not start a second history producer")
+	}
+	if sm.sessions["recovering"].Status != protocol.StatusIdle {
+		t.Fatal("watcher overwrote native status")
+	}
+}

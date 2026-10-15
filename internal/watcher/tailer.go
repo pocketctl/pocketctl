@@ -165,8 +165,8 @@ func NewJSONLTailerFromStart(filePath, agentType string) (*JSONLTailer, error) {
 // with deterministic fallback record identities. Desktop history is replayed
 // from the beginning after daemon restarts, so projections without a native
 // semantic ID need an ID stable across tailer instances for Relay deduplication.
-// The ordinary Codex CLI constructor intentionally keeps its legacy identity
-// behavior.
+// Terminal startup hydration also uses this reader so fallback CLI history
+// cannot manufacture new durable events after every daemon restart.
 func NewCodexObserverJSONLTailerFromStart(filePath string) (*JSONLTailer, error) {
 	absolutePath, err := filepath.Abs(filePath)
 	if err != nil {

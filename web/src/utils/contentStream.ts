@@ -1,3 +1,8 @@
+// Runtime generations scope transport chunks, not the native message displayed.
+export function contentStreamDisplayId(streamId: string): string {
+  return streamId.replace(/^codex:[0-9]+:stream:(agent_text|agent_reasoning):([^:]+):([^:]+):(.+)$/, 'codex:stream:$1:$2:$3:$4')
+}
+
 export interface ContentStreamChunk {
   streamId: string
   sequence: number
