@@ -2084,6 +2084,38 @@ export async function advanceEventEffectStep(pool: pg.Pool, eventID: number, nex
     [eventID, nextStep],
   );
 }
+/** Caller holds the session fence and has proved this batch has no effects. */
+export async function persistReplayContentBatch(client: Pick<pg.PoolClient, 'query'>, sessionId: string, inputs: {
+  eventType: string;
+  payload: Record<string, unknown>;
+  userId: number;
+}[]): Promise<PersistedEventEffect[]> {
+  const prepared = inputs.map((input, ordinal) => {
+    const payload = sanitizeJSONBPayload(input.payload);
+    return { ordinal, session_id: sessionId, event_type: input.eventType, payload, user_id: input.userId,
+      event_hash: createHash('md5').update(eventHashInput(sessionId, input.eventType, payload)).digest('hex').slice(0, 16) };
+  });
+  // Repeated source identities within one prefix must not make one INSERT
+  // touch the same target row twice. Each receipt still gets its own outbox.
+  const unique = prepared.filter((row, index) => prepared.findIndex(item => item.event_hash === row.event_hash) === index);
+  const result = await client.query(`INSERT INTO events(session_id,event_type,payload,event_hash,effect_status,effect_step,user_id)
+  SELECT d.session_id,d.event_type,d.payload,d.event_hash,'completed',0,d.user_id
+  FROM jsonb_to_recordset($1::jsonb) AS d(ordinal int,session_id text,event_type text,payload jsonb,event_hash text,user_id int)
+  ORDER BY d.ordinal
+  ON CONFLICT(session_id,event_hash) DO UPDATE
+  SET event_hash=EXCLUDED.event_hash,user_id=COALESCE(events.user_id,EXCLUDED.user_id)
+  RETURNING id,event_hash,user_id,(xmax=0) AS inserted,effect_status,effect_step`, [JSON.stringify(unique)]);
+  const indexed = new Map(result.rows.map(row => [row.event_hash, row]));
+  return prepared.map(item => {
+    const row = indexed.get(item.event_hash);
+    // An older pending ledger can have unfinished effects even when today's
+    // duplicate payload omits them. Roll back and run the original effect path.
+    if (!row || !['completed', 'none'].includes(row.effect_status) || Number(row.user_id) !== item.user_id) {
+      throw new Error('replay content batch requires ordinary materialization');
+    }
+    return { rowID: Number(row.id), inserted: row.inserted === true || row.inserted === 't', completed: true, nextStep: Number(row.effect_step) || 0 };
+  });
+}
 
 export async function completeEventEffect(pool: pg.Pool, eventID: number): Promise<void> {
   await pool.query(`UPDATE events SET effect_status = 'completed' WHERE id = $1`, [eventID]);

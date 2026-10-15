@@ -41,6 +41,8 @@ import type {
 } from './types.js'
 import { resolveSessionActivityAt } from './session-activity-policy.js'
 import { isObserverAgentType } from '../session-observer-policy.js'
+import { isSideEffectFreeReplay, REPLAY_BATCH_MAX_BYTES } from './replay-batch-policy.js'
+import { LostClaimError, type ClaimFence } from '../ingress/inbox-repository.js'
 
 const subagentTurnStatuses = new Set([
   'running', 'interrupt_requested', 'completed', 'interrupted', 'failed', 'abandoned',
@@ -1083,6 +1085,51 @@ export class EventMaterializer {
       catch (error) { if (!(error instanceof AdmissionSessionMovedError) || attempt === 2) throw error }
     }
     throw new AdmissionSessionMovedError('session identity did not stabilize')
+  }
+  async materializeReplayBatch(inputs: MaterializationInput[], assertClaim: () => Promise<void>, claims: {
+    workerId: string;
+    fences: ClaimFence[];
+    complete(client: pg.PoolClient, results: MaterializationResult[]): Promise<void>;
+  }): Promise<MaterializationResult[]> {
+    const head = inputs[0];
+    if (!head || inputs.length > 32 || inputs.reduce((size, input) => size + Buffer.byteLength(JSON.stringify(input.payload)), 0) > REPLAY_BATCH_MAX_BYTES || inputs.some(input => !isSideEffectFreeReplay(input)
+      || input.sessionId !== head.sessionId || input.userId !== head.userId || input.daemonId !== head.daemonId
+      || input.daemonGeneration !== head.daemonGeneration))
+      throw new Error('invalid replay content batch');
+    return db.withSessionMaterializationFence(this.options.pool, head.sessionId!, async (client) => {
+      await assertClaim();
+      // Lock the actual unresolved prefix, not just a list of proposed IDs.
+      // Only the head has a durable lease. Pending followers never consume an
+      // attempt unless the ordinary worker actually claims them after fallback.
+      const owned = await client.query(`SELECT inbox_id,status,claimed_by,attempts,priority_class,
+        available_at<=NOW() AS available FROM event_inbox
+        WHERE daemon_id=$1 AND daemon_generation=$2 AND status IN(0,1)
+        ORDER BY seq,inbox_id LIMIT $3 FOR UPDATE`, [head.daemonId, head.daemonGeneration, inputs.length]);
+      if (claims.fences.length !== inputs.length || owned.rowCount !== inputs.length || owned.rows.some((row, i) =>
+        Number(row.inbox_id) !== inputs[i].inboxId || Number(row.inbox_id) !== claims.fences[i].inboxId
+        || Number(row.attempts) !== claims.fences[i].attempts || row.priority_class !== 2
+        || (i === 0 ? row.status !== 1 || row.claimed_by !== claims.workerId : row.status !== 0 || !row.available))) {
+        throw new LostClaimError(head.inboxId);
+      }
+      const scopedPool = client as unknown as pg.Pool;
+      if (await db.isSessionDeleted(scopedPool, head.sessionId!))
+        throw new db.DeletedDaemonSessionError();
+      await db.assertDaemonSessionAccess(scopedPool, { sessionId: head.sessionId!, userId: head.userId, daemonId: head.daemonId, policy: 'must_exist' });
+      const scoped = new EventMaterializer({ ...this.options, pool: scopedPool });
+      const stored = await db.persistReplayContentBatch(client, head.sessionId!, inputs.map(input => ({ eventType: input.eventType, payload: input.payload, userId: input.userId! })));
+      const results: MaterializationResult[] = [];
+      for (let i = 0; i < inputs.length; i++) {
+        const input = inputs[i], event = stored[i];
+        // Journal uses the same transaction; a failure rolls every canonical
+        // write back and the worker falls back to ordered single-row handling.
+        await scoped.appendExtensionJournal(input, event.rowID);
+        results.push({ eventId: event.rowID, inserted: event.inserted, completed: true,
+          deliveries: [this.delivery(input, event.rowID, this.deliveryAudience(input), this.deliveryPayload(input))] });
+      }
+      await assertClaim();
+      await claims.complete(client, results);
+      return results;
+    });
   }
 
   private async materializeAttempt(

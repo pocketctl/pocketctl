@@ -141,7 +141,7 @@ func (sm *SessionManager) RegisterTerminalSession(sessionID, cwd string, pid int
 		// no per-thread PID. Their rollout is still visible to the native watcher,
 		// but starting a JSONL tailer would project every event a second time.
 		if pid == 0 && agent == adapter.AgentCodex && ps.Source == "daemon" &&
-			ps.ControlMode == protocol.ControlManaged && ps.Backend != nil {
+			ps.ControlMode == protocol.ControlManaged {
 			return false
 		}
 		// Codex rollout discovery has no PID, so the childPids guard above cannot

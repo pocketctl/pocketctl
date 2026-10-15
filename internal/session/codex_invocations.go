@@ -382,7 +382,7 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		sm.sessions[id].Model = model
 		sm.sessions[id].Effort = effort
 		sm.mu.Unlock()
-		sm.outputCh <- protocol.DaemonEvent{Type: "session_meta", SessionID: id, Model: model, Effort: effort}
+		sm.outputCh <- sm.codexSessionMetadata(protocol.DaemonEvent{Type: "session_meta", SessionID: id, Model: model, Effort: effort})
 		return textResult("后续回合使用 " + args), nil
 	case "permissions":
 		if args == "" {

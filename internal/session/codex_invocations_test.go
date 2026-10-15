@@ -87,6 +87,11 @@ func TestCodexInvocationModelsAndExportFailure(t *testing.T) {
 	if sm.sessions["s"].Model != "fixture" || sm.sessions["s"].Effort != "high" {
 		t.Fatal("model only changed presentation")
 	}
+	meta := <-sm.outputCh
+	if meta.Type != "session_meta" || meta.ControlMode != protocol.ControlManaged ||
+		!sameStrings(meta.Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+		t.Fatalf("model selection metadata revoked managed composer: %+v", meta)
+	}
 	rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[],"nextCursor":"same"}`)
 	if _, err := sm.InvokeCodexCommand(ctx, "s", "/export", ""); err == nil {
 		t.Fatal("partial export accepted on cursor loop")

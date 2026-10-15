@@ -126,6 +126,8 @@ type connectionStatusEvent struct {
 type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 
 type Client struct {
+	replayACKs *replayACKCache // protected by outMu; populated only by real ACKs
+
 	// HostAwake reports full system wake, not display activity. Set before Run.
 	HostAwake func() (bool, error)
 
@@ -1105,6 +1107,10 @@ func (c *Client) appendPreparedOutboundUntil(
 			c.outMu.Unlock()
 			return nil, false
 		}
+		if evt.Resync && evt.ChunkSeq == nil && evt.ByteOffset == nil && c.replayACKs.contains(evt.EventID) {
+			c.outMu.Unlock()
+			return nil, true
+		}
 		prepared, err := c.prepareOutboundLocked(evt, c.seqCtr+1)
 		if err != nil {
 			c.outMu.Unlock()
@@ -1488,7 +1494,11 @@ func (c *Client) handleEventAck(msg protocol.EventAckMessage) {
 	if msg.UpToSeq > c.ackedSeq {
 		c.lastACKAt = time.Now().UTC()
 	}
+	ackFacts := c.replayACKs.acknowledged(c.outBuf, msg.UpToSeq)
 	eventIDs := c.trimOutboundLocked(msg.UpToSeq)
+	if err := c.replayACKs.record(ackFacts); err != nil {
+		c.logger.Warn("persist replay ACK cache failed; history may replay", "error", err)
+	}
 	restored := false
 	if c.flowControlSupported && msg.EventWindow > 0 {
 		c.eventWindow = clampEventWindow(msg.EventWindow, c.maxOutCount)

@@ -64,6 +64,46 @@ describe('SessionDetail processEvent integration', () => {
     websocketMock.send.mockClear()
   })
 
+  test('interrupted turn footer uses the outcome rather than successful completion', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle', daemon_online: true }]
+    vm.processEvent({type: 'agent_text', text: 'partial reply'})
+    vm.processEvent({type: 'turn_status', turn_id: 'footer-turn', turn_status: 'interrupted'})
+    vm.status = 'idle'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.status-text').text()).toBe('workspace.interrupted')
+    wrapper.unmount()
+  })
+
+  test('native replay stream generations reuse the same message but keep distinct turns', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    for (const [generation, turn] of [[1, 'turn-a'], [2, 'turn-a'], [2, 'turn-b']]) {
+      vm.processEvent({ type: 'agent_text', text: 'same reply', stream_id: `codex:${generation}:stream:agent_text:ses_1:${turn}:item-1`, chunk_seq: 0, byte_offset: 0, final: true, total_bytes: 10, turn_id: turn })
+    }
+    expect(vm.messages.filter((m: any) => m.type === 'agent_text').map((m:any) => m.content)).toEqual(['same reply', 'same reply'])
+    wrapper.unmount()
+  })
+
+  test('historical lifecycle cannot overwrite a live session status between replay pages', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get('session_status')!({ session_id: 'ses_1', status: 'idle' })
+    websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', events: [
+      { type: 'session_status', session_id: 'ses_1', status: 'waiting_approval', seq: 801 },
+    ] })
+    await wrapper.vm.$nextTick()
+    expect(vm.status).toBe('idle')
+    websocketMock.handlers.get('session_status')!({ session_id: 'ses_1', status: 'running' })
+    websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', events: [
+      { type: 'session_status', session_id: 'ses_1', status: 'completed', seq: 802 },
+    ] })
+    await wrapper.vm.$nextTick()
+    expect(vm.status).toBe('running')
+    wrapper.unmount()
+  })
+
   test('mobile hides tools by default, retains interactions and persists the menu preference', async () => {
     responsiveMock.isMobile.value = true
     const wrapper = shallowMount(SessionDetail)
