@@ -1187,8 +1187,9 @@ async function main() {
       const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
       console.log(`[startup] initDB done in ${(t - tPool).toFixed(0)}ms`);
       console.log('Database initialized');
-      // Backfill sessions token columns from agent_text usage events
+      // Legacy counters are backfilled only before the V2 baseline is activated.
       try {
+        const backfillStartedAt = Date.now();
         const backfilled = await backfillSessionTokens(pool);
         if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
         const modelBf = await backfillSessionModel(pool);
@@ -1197,6 +1198,7 @@ async function main() {
           const statsBf = await backfillTokenDailyStats(pool);
           if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
         }
+        console.log(`[tokens] startup backfill complete sessions=${backfilled} models=${modelBf} duration_ms=${Date.now() - backfillStartedAt}`);
       } catch (e) { console.error('[tokens] backfill failed:', e); }
       if (tokenFeatures.writeFacts) {
         const initialized = await initializeTokenUsageAccounting(pool, tokenFeatures)
