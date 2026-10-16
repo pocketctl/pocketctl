@@ -4488,6 +4488,13 @@ export async function incrementSessionTokens(pool: pg.Pool, sessionId: string, u
  *  Sums input/output/cache_read/cache_create per session into the token columns.
  *  Model-agnostic (raw token counts). Runs once on relay startup. */
 export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
+  // Once V2 is activated, retained events are no longer the source of truth
+  // for lifetime counters. Live materialization owns those counters; replaying
+  // legacy history at every startup is both unbounded and potentially lossy.
+  const baseline = await pool.query(
+    `SELECT key FROM token_usage_accounting_state WHERE key = 'baseline-v1' LIMIT 1`,
+  );
+  if (baseline.rows.length > 0) return 0;
   const result = await pool.query(`
     WITH agg AS (
       SELECT session_id,
@@ -4521,43 +4528,61 @@ export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
  *      covers terminal sessions whose model was never explicitly announced)
  *  Idempotent. Run on startup. */
 export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
-  // Existing sessions can already have metadata events even though older
-  // Relay versions never copied them into the list projection.
-  await pool.query(`
-    WITH latest AS (
-      SELECT DISTINCT ON (session_id) session_id, COALESCE(payload,body_header)->>'effort' AS effort
-      FROM events WHERE event_type = 'session_meta'
-        AND NULLIF(BTRIM(COALESCE(payload,body_header)->>'effort'), '') IS NOT NULL
-      ORDER BY session_id, id DESC
-    )
-    UPDATE sessions s SET effort = latest.effort FROM latest
-    WHERE s.session_id = latest.session_id AND s.effort IS NULL
-  `);
-  const result = await pool.query(`
-    WITH candidates AS (
-      SELECT session_id, model,
-             ROW_NUMBER() OVER (
-               PARTITION BY session_id
-               ORDER BY CASE source
-                          WHEN 'session_created'        THEN 1
-                          WHEN 'session_model_changed'   THEN 2
-                          WHEN 'session_meta'            THEN 2
-                          WHEN 'agent_text'              THEN 3
-                        END,
-                        created_at DESC
-             ) AS rn
-      FROM (
-        SELECT session_id, COALESCE(payload,body_header)->>'model' AS model, event_type AS source, created_at
-        FROM events
-        WHERE event_type IN ('session_created', 'session_model_changed', 'session_meta', 'agent_text')
-          AND COALESCE(payload,body_header) ? 'model' AND COALESCE(payload,body_header)->>'model' <> ''
-      ) e
-    )
-    UPDATE sessions s SET model = c.model
-    FROM (SELECT session_id, model FROM candidates WHERE rn = 1) c
-    WHERE s.session_id = c.session_id AND s.model IS NULL
-  `);
-  return result.rowCount ?? 0;
+  // Keyset only sessions with missing metadata, then use the existing
+  // (session_id, id) event index. Never sort the entire event history at startup.
+  let cursor = '';
+  let updated = 0;
+  for (;;) {
+    const page = await pool.query<{ session_id: string; model: string | null; effort: string | null }>(`
+      SELECT session_id, model, effort FROM sessions
+      WHERE session_id > $1 AND (model IS NULL OR effort IS NULL)
+      ORDER BY session_id LIMIT 25
+    `, [cursor]);
+    if (page.rows.length === 0) break;
+    const ids = page.rows.map(row => row.session_id);
+    cursor = ids[ids.length - 1];
+    const effortIds = page.rows.filter(row => row.effort === null).map(row => row.session_id);
+    const modelIds = page.rows.filter(row => row.model === null).map(row => row.session_id);
+    // Existing sessions can already have metadata events even though older
+    // Relay versions never copied them into the list projection.
+    if (effortIds.length > 0) await pool.query(`
+      WITH latest AS (
+        SELECT DISTINCT ON (session_id) session_id, COALESCE(payload,body_header)->>'effort' AS effort
+        FROM events WHERE session_id = ANY($1::text[]) AND event_type = 'session_meta'
+          AND NULLIF(BTRIM(COALESCE(payload,body_header)->>'effort'), '') IS NOT NULL
+        ORDER BY session_id, id DESC
+      )
+      UPDATE sessions s SET effort = latest.effort FROM latest
+      WHERE s.session_id = latest.session_id AND s.effort IS NULL
+    `, [effortIds]);
+    if (modelIds.length === 0) continue;
+    const result = await pool.query(`
+      WITH candidates AS (
+        SELECT session_id, model,
+               ROW_NUMBER() OVER (
+                 PARTITION BY session_id
+                 ORDER BY CASE source
+                            WHEN 'session_created'        THEN 1
+                            WHEN 'session_model_changed'   THEN 2
+                            WHEN 'session_meta'            THEN 2
+                            WHEN 'agent_text'              THEN 3
+                          END,
+                          created_at DESC
+               ) AS rn
+        FROM (
+          SELECT session_id, COALESCE(payload,body_header)->>'model' AS model, event_type AS source, created_at
+          FROM events
+          WHERE session_id = ANY($1::text[]) AND event_type IN ('session_created', 'session_model_changed', 'session_meta', 'agent_text')
+            AND COALESCE(payload,body_header) ? 'model' AND COALESCE(payload,body_header)->>'model' <> ''
+        ) e
+      )
+      UPDATE sessions s SET model = c.model
+      FROM (SELECT session_id, model FROM candidates WHERE rn = 1) c
+      WHERE s.session_id = c.session_id AND s.model IS NULL
+    `, [modelIds]);
+    updated += result.rowCount ?? 0;
+  }
+  return updated;
 }
 
 /** Backfill token_daily_stats from past-day events (idempotent: ON CONFLICT DO NOTHING,
