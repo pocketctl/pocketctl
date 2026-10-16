@@ -20,5 +20,6 @@ go test -p 1 ./internal/protocol ./internal/ws ./internal/session ./internal/dae
   src/__tests__/replay-batch-postgres.integration.test.ts \
   src/__tests__/mixed-agent-durable-ingress-postgres.integration.test.ts \
   src/__tests__/token-usage-postgres.integration.test.ts \
+  src/__tests__/token-dead-letter-postgres.integration.test.ts \
   src/__tests__/quota-binding-postgres.integration.test.ts \
   src/__tests__/session-message-admission-postgres.integration.test.ts)
