@@ -4,7 +4,7 @@ export type TokenDayCloseResult =
   | { date: string; status: 'already_sealed' }
   | { date: string; status: 'waiting'; pendingRows: number }
   | { date: string; status: 'failed'; deadLetterRows?: number; reason?: 'reconciliation_mismatch' | 'missing_usage_facts' }
-  | { date: string; status: 'sealed'; factCount: number; total: number }
+  | { date: string; status: 'sealed'; factCount: number; total: number; nonAccountingDeadLetterRows?: number }
 
 function utcDate(now: Date): string {
   return now.toISOString().slice(0, 10)
@@ -35,7 +35,8 @@ function bigint(value: unknown): bigint {
 /**
  * Closes one UTC accounting date under a transaction-scoped advisory lock.
  * A date cannot become historical until all inbox rows received before its
- * cutoff are terminal, no dead letters remain, and fact/rollup totals match.
+ * cutoff are terminal, no potentially accounting dead letters remain, and
+ * fact/rollup totals match. Non-accounting failures remain in the inbox.
  */
 export async function closeTokenUsageDay(
   pool: pg.Pool,
@@ -81,13 +82,29 @@ export async function closeTokenUsageDay(
     }
 
     const dead = await client.query(
-      `SELECT COUNT(*) AS count
-       FROM event_inbox
-       WHERE received_at >= ($1::date::timestamp AT TIME ZONE 'UTC')
-         AND received_at < (($1::date + 1)::timestamp AT TIME ZONE 'UTC')
-         AND status = 3`,
+      `SELECT COUNT(*) FILTER (WHERE NOT non_accounting) AS count,
+              COUNT(*) FILTER (WHERE non_accounting) AS non_accounting_count
+       FROM (
+         SELECT (
+           event_type = 'subagent_usage'
+           OR (NOT (payload ? 'usage') AND event_type IN (
+             'agent_text', 'tool_call', 'tool_result', 'user_text', 'turn_status',
+             'session_meta', 'session_model_changed', 'subagent_discovered',
+             'session_discovered', 'session_document_begin',
+             'session_document_chunk', 'session_document_commit'
+           ))
+         ) AS non_accounting
+         FROM event_inbox
+         WHERE received_at >= ($1::date::timestamp AT TIME ZONE 'UTC')
+           AND received_at < (($1::date + 1)::timestamp AT TIME ZONE 'UTC')
+           AND status = 3
+       ) dead`,
       [date],
     )
+    // agent_text owns immutable usage facts; subagent_usage is paired
+    // bookkeeping and must never double-count. Only enumerated, usage-free
+    // types can be excluded. Unknown types and even usage:null fail closed.
+    const nonAccountingDeadLetterRows = Number(dead.rows[0]?.non_accounting_count ?? 0)
     const deadLetterRows = Number(dead.rows[0]?.count ?? 0)
     if (deadLetterRows > 0) {
       await client.query(
@@ -220,10 +237,17 @@ export async function closeTokenUsageDay(
       [date, factCountExact.toString(), sourceRequestCount.toString(),
        sessionSourceRequestCount.toString(), sourceTotal.toString(), sessionSourceTotal.toString()],
     )
+    if (nonAccountingDeadLetterRows > 0) {
+      await client.query(
+        `INSERT INTO audit_log(action,details) VALUES ('token_day_non_accounting', $1::jsonb)`,
+        [{ date, count: nonAccountingDeadLetterRows, policy: 'non_accounting_v1' }],
+      )
+    }
     await client.query('COMMIT')
     return {
       date,
       status: 'sealed',
+      ...(nonAccountingDeadLetterRows > 0 ? { nonAccountingDeadLetterRows } : {}),
       factCount: Number(factCountExact),
       total: Number(sourceTotal),
     }
