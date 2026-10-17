@@ -309,6 +309,8 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     task.value = null
     clearRunPoll()
     try {
+      await restoreOutbox().catch(failure => { if (currentGeneration === generation) error.value = errorMessage(failure) })
+      if (currentGeneration !== generation) return
       const [nextSession, nextContext, nextCapabilities, nextRuns] = await Promise.all([
         getTeamSession(sessionID.value),
         getTeamContext(sessionID.value),
@@ -328,7 +330,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       runContext.value = nextRunContext
       void loadLinkedTask(nextSession, currentGeneration)
       await catchUp(0)
-      await restoreOutbox()
+      await restoreOutbox().catch(failure => { if (currentGeneration === generation) error.value = errorMessage(failure) })
       void flushOutbox()
       if (currentGeneration !== generation) return
       connect()
@@ -341,6 +343,12 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     } finally {
       if (currentGeneration === generation) loading.value = false
     }
+  }
+
+  function recoverOnline(): void {
+    if (accessRevoked.value || loading.value || disposed) return
+    if (!session.value || !capabilities.value) { void load(); return }
+    void restoreOutbox().then(flushOutbox).catch(failure => { error.value = errorMessage(failure) })
   }
 
   async function reloadSession(): Promise<void> {
@@ -480,6 +488,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
         revokeAccess()
       }),
       onEvent('connection_restored', () => {
+        if (!session.value || !capabilities.value) { recoverOnline(); return }
         if(capabilities.value?.collaboration)subscribeTeamSession(sessionID.value)
         const latestSequence = contiguousEventSeq.value
         void catchUp(latestSequence).catch(failure => { error.value = errorMessage(failure) })
@@ -494,14 +503,18 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     if (next) void load()
   })
 
+  watch(() => connected.value, online => { if (online) recoverOnline() })
+
   watch(()=>user.value?.id,()=>{generation++;pendingMessages.value=[];events.value=[];session.value=null;accessRevoked.value=true;unsubscribeTeamSession(sessionID.value)})
   onMounted(() => {
     disposed = false
     installSubscriptionHandlers()
+    window.addEventListener('online', recoverOnline)
     void load()
   })
   onBeforeUnmount(() => {
     disposed = true
+    window.removeEventListener('online', recoverOnline)
     generation++
     clearCallPoll()
     clearSessionPoll()

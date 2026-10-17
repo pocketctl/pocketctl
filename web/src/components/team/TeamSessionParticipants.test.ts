@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, expect, test, vi } from 'vitest'
 import TeamSessionParticipants from './TeamSessionParticipants.vue'
 
-const api = vi.hoisted(() => ({ getTeamSession: vi.fn(), setTeamSessionAgentBinding: vi.fn(), setTeamSessionParticipant: vi.fn() }))
+const api = vi.hoisted(() => ({ getTeamSession: vi.fn(), setTeamSessionAgentBinding: vi.fn(), setTeamSessionParticipant: vi.fn(), getTeamAgentCapabilities: vi.fn() }))
 vi.mock('../../services/teamClient', () => api)
 const session: any = { id: 'css_1', creator_user_id: 7, state: 'active', revision: 2, participants: [], agent_bindings: [] }
 const offers: any[] = [
@@ -32,6 +32,24 @@ test('prevents new bindings after write access is revoked', async () => {
   expect(button.attributes()).toHaveProperty('disabled')
   await button.trigger('click')
   expect(api.getTeamSession).not.toHaveBeenCalled()
+  wrapper.unmount()
+})
+
+test('opens configuration without the parent popover dismissing it on focus, then returns to participants', async () => {
+  api.getTeamAgentCapabilities.mockResolvedValue({ default_source: 'test', default_config: { model: 'model', reasoning_effort: null, permission_profile: 'read_only' }, models: [{ id: 'model', reasoning_efforts: [] }], permission_profiles: ['read_only'], overridable_fields: [], revision: 'cap-1' })
+  const wrapper = mount(TeamSessionParticipants, { attachTo: document.body, props: { session: { ...session, team_id: 'ctm_1', agent_bindings: [{ id: 'binding', offer_id: 'mine', owner_user_id: 7, provider: 'codex', daemon_id: 'docker' }] }, members: [], currentUserId: 7, agentConfigEnabled: true } })
+  await flushPromises()
+  const config = Array.from(document.querySelectorAll<HTMLButtonElement>('.agent-row button')).find(button => button.textContent === '配置详情')!
+  config.click()
+  await flushPromises()
+  expect(document.querySelector('.agent-config')).not.toBeNull()
+  expect(document.querySelectorAll('.workspace-action-list')).toHaveLength(1)
+  expect(wrapper.emitted('close')).toBeUndefined()
+  document.querySelector<HTMLButtonElement>('.workspace-action-list header button[aria-label="返回"]')!.click()
+  await flushPromises()
+  expect(document.querySelector('.participants-body')).not.toBeNull()
+  expect(document.querySelector('.agent-config')).toBeNull()
+  expect(wrapper.emitted('close')).toBeUndefined()
   wrapper.unmount()
 })
 

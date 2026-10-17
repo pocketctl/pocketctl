@@ -6,13 +6,13 @@
    <p v-if="error" role="alert">{{ error }} <button type="button" @click="load">重试加载</button></p>
    <template v-if="capability">
     <label>配置来源<select v-model="mode"><option value="default">默认配置（创建时快照）</option><option value="custom">仅本会话自定义</option></select></label>
-    <p>默认来源：{{ capability.default_source }}。仅影响该会话的独立 Agent，下次调用生效。</p>
+    <p>默认来源：{{ teamConfigSourceLabel(capability.default_source) }}。仅影响该会话的独立 Agent，下次调用生效。</p>
     <label>模型<select v-model="runtime.model" :disabled="mode==='default'||!canModel" @change="normalizeEffort"><option v-for="m in capability.models" :key="m.id" :value="m.id">{{ m.id }}</option></select></label>
-    <label>思考强度<select v-model="runtime.reasoning_effort" :disabled="mode==='default'||!canEffort||!efforts.length"><option :value="null">由模型决定</option><option v-for="effort in efforts" :key="effort" :value="effort">{{ effort }}</option></select></label>
-    <label>权限<select v-model="runtime.permission_profile" :disabled="mode==='default'||!isOwner"><option v-for="p in capability.permission_profiles" :key="p" :value="p">{{ p }}</option></select></label>
+    <label>思考强度<select v-model="runtime.reasoning_effort" :disabled="mode==='default'||!canEffort||!efforts.length"><option :value="null">由模型决定</option><option v-for="effort in efforts" :key="effort" :value="effort">{{ teamEffortLabel(effort) }}</option></select></label>
+    <label>权限<select v-model="runtime.permission_profile" :disabled="mode==='default'||!isOwner"><option v-for="p in capability.permission_profiles" :key="p" :value="p">{{ teamPermissionLabel(p) }}</option></select></label>
     <p v-if="!isOwner">只有 Agent 所有者可修改权限边界；模型和强度须在预授权范围内。</p>
     <p v-if="bindingConfig">{{ ({unresolved:'待确认',pending:'下次调用生效',applied:'已应用',rejected:'应用被拒绝'})[bindingConfig.status] }} · 修订 {{ bindingConfig.config_revision }}</p>
-    <p v-if="bindingConfig?.applied_config">最近实际应用：{{ bindingConfig.applied_config.model }} / {{ bindingConfig.applied_config.reasoning_effort || '默认强度' }} / {{ bindingConfig.applied_config.permission_profile }}（修订 {{ bindingConfig.applied_revision }}）</p>
+    <p v-if="bindingConfig?.applied_config">最近实际应用：{{ bindingConfig.applied_config.model }} / {{ bindingConfig.applied_config.reasoning_effort ? teamEffortLabel(bindingConfig.applied_config.reasoning_effort) : '默认强度' }} / {{ teamPermissionLabel(bindingConfig.applied_config.permission_profile) }}（修订 {{ bindingConfig.applied_revision }}）</p>
     <button type="button" :disabled="mode==='default'" @click="mode='default';runtime={...snapshot!}">恢复创建时默认</button>
     <fieldset v-if="isOwner && session && capability.policy_revision" :disabled="busy"><legend>本团队的配置预授权</legend><p>适用于此 Agent 在本团队的所有会话。权限边界始终仅你可改。</p><label><input type="checkbox" v-model="delegateModel" />允许成员调整模型</label><label><input type="checkbox" v-model="delegateEffort" />允许成员调整思考强度</label><button type="button" :disabled="busy" @click="savePolicy">保存预授权</button><p v-if="policyNotice" role="status">{{ policyNotice }}</p></fieldset>
    </template>
@@ -23,6 +23,7 @@
 <script setup lang="ts">
 import {computed,onMounted,ref,watch} from 'vue'
 import ActionList from '../ActionList.vue'
+import {teamConfigSourceLabel,teamPermissionLabel,teamEffortLabel} from '../../utils/teamLabels'
 import {getTeamAgentCapabilities,saveTeamAgentConfig,saveTeamConfigPolicy} from '../../services/teamClient'
 import type {TeamAgentOffer,TeamSessionAgentBinding,TeamSession,TeamRuntimeConfig,TeamAgentConfigCapabilities,SessionAgentConfig} from '../../types/team'
 export interface TeamConfigDraft{mode:'default'|'custom';override:Partial<TeamRuntimeConfig>;capability_revision:string}

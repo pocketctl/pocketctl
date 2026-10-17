@@ -19,6 +19,20 @@ import {teamV2DatabaseEnabled,teamV2Pool,humanTeamFixture} from './fixtures/team
   expect(reset).toMatchObject({reset_required:true,retained_after_seq:3,completed_through:5})
   expect(reset.events.map(e=>e.event_seq)).toEqual([4,5])
  })
+ test('summarizes an entire public agent stream without changing unread counts or event bytes',async()=>{
+  const f=await humanTeamFixture(pool),reads=new TeamReadStateService(pool)
+  await f.send('preview stream')
+  // Use a distinct test Call identity; public stream reads do not depend on a live provider.
+  const call='preview-'+f.key
+  for(const [index,content] of ['{"action":"complete","summary":"可读结论",','"todo":','[]}'].entries()) {
+   await pool.query(`INSERT INTO collaboration_events(event_id,team_session_id,event_seq,kind,content,call_id) VALUES($1,$2,$3,'agent_message',$4,$5)`,['stream-'+f.key+'-'+index,f.session.id,index+2,content,call])
+  }
+  await pool.query(`UPDATE collaboration_sessions SET latest_event_seq=4 WHERE team_session_id=$1`,[f.session.id])
+  expect(await reads.summary(f.session.id,f.users[1])).toMatchObject({preview:'可读结论',unread_count:2})
+  expect((await pool.query(`SELECT content FROM collaboration_events WHERE team_session_id=$1 ORDER BY event_seq DESC LIMIT 1`,[f.session.id])).rows[0].content).toBe('[]}')
+  await f.send('member follow-up')
+  expect(await reads.summary(f.session.id,f.users[1])).toMatchObject({preview:'member follow-up',unread_count:3})
+ })
  test('keeps device read positions monotonic, rejects future cursors and excludes own/system messages',async()=>{
   const f=await humanTeamFixture(pool),reads=new TeamReadStateService(pool)
   await f.send('own',f.users[1]);await f.send('incoming-1');await f.send('incoming-2')

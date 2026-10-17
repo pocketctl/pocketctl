@@ -1,5 +1,5 @@
 <template>
-  <ActionList v-show="!configuredBinding" :title="mode === 'picker' ? t('workspace.add_members') : mode === 'members' ? t('workspace.members') : t('workspace.participants')" :width="420" :back="mode !== 'summary'" @back="mode='summary'" @close="!busy && emit('close')">
+  <ActionList v-if="!configuredBinding" :title="mode === 'picker' ? t('workspace.add_members') : mode === 'members' ? t('workspace.members') : t('workspace.participants')" :width="420" :back="mode !== 'summary'" @back="mode='summary'" @close="!busy && emit('close')">
     <div class="participants-body" data-testid="team-session-participants">
       <template v-if="mode === 'picker'">
         <input v-model="memberQuery" type="search" :aria-label="t('workspace.member_search')" :placeholder="t('workspace.member_search')" />
@@ -24,7 +24,7 @@
         <small> {{ t('workspace.agent_bindings') }} </small>
         <div v-for="binding in session.agent_bindings" :key="binding.id" class="agent-row">
           <span :class="['availability-dot', binding.availability]"></span>
-          <div><strong>{{ teamProviderLabel(binding.provider) }}</strong><em>{{ binding.daemon_id }} · {{ binding.availability }}</em></div>
+          <div><strong>{{ teamProviderLabel(binding.provider) }}</strong><em>{{ binding.daemon_id }} · {{ teamAvailabilityLabel(binding.availability) }}</em></div>
           <button v-if="agentConfigEnabled" type="button" @click="configuredBinding=binding">配置详情</button>
           <RouterLink v-if="binding.owner_user_id === currentUserId && binding.native_session_id" :to="nativeSessionLink(binding.native_session_id)"> {{ t('workspace.native_session') }} </RouterLink>
         </div>
@@ -47,6 +47,7 @@ async function refreshConfig(){emit('updated',await getTeamSession(props.session
 import { teamProviderLabel } from '../../utils/teamProvider'
 import { computed, ref } from 'vue'
 import ActionList from '../ActionList.vue'
+import {teamAvailabilityLabel} from '../../utils/teamLabels'
 import { useLocale } from '../../composables/useLocale'
 import { getTeamSession, setTeamSessionAgentBinding, setTeamSessionParticipant } from '../../services/teamClient'
 import type { TeamAgentOffer, TeamMember, TeamSession } from '../../types/team'

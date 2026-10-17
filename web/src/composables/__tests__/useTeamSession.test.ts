@@ -10,7 +10,7 @@ const api = vi.hoisted(() => ({
 const outboxFixture=vi.hoisted(()=>({data:new Map<string,any>()}))
 const ws = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>() }))
 
-vi.mock('../../services/teamClient', () => api)
+vi.mock('../../services/teamClient', async () => ({ ...await vi.importActual<any>('../../services/teamClient'), ...api }))
 vi.mock('../useAuth',()=>({useAuth:()=>({user:{value:{id:7}}})}))
 vi.mock('../../services/teamOutbox',async()=>{const actual=await vi.importActual<any>('../../services/teamOutbox');const data=outboxFixture.data;return {...actual,teamOutbox:{list:async(scope:string)=>[...data.values()].filter((p:any)=>p.scope===scope),put:async(p:any)=>{data.set(p.key,JSON.parse(JSON.stringify(p)))},remove:async(k:string)=>{data.delete(k)},blockScope:async(scope:string)=>{for(const row of data.values())if(row.scope===scope&&row.state==='queued')row.state='failed'}}}})
 vi.mock('../useWebSocket', () => ({
@@ -21,6 +21,9 @@ vi.mock('../useWebSocket', () => ({
 }))
 
 import { useTeamSession } from '../useTeamSession'
+import { getRelayOrigin } from '../useEnv'
+import { TeamApiError } from '../../services/teamClient'
+import { teamOutbox } from '../../services/teamOutbox'
 
 function session(id: string) {
   return {
@@ -41,6 +44,45 @@ function run(id: string, sessionID: string, revision: number, state: 'running' |
 }
 
 describe('useTeamSession run recovery', () => {
+  test('still loads authorized history when local storage is unavailable, without falsely acknowledging a send', async () => {
+    api.listTeamRuns.mockResolvedValue([])
+    api.listTeamEvents.mockResolvedValue({ events: [{ id: 'history', event_seq: 1, kind: 'member_message', content: 'stored on server' }], next_cursor: null })
+    const list = vi.spyOn(teamOutbox, 'list').mockRejectedValue(new Error('storage unavailable'))
+    const put = vi.spyOn(teamOutbox, 'put').mockRejectedValue(new Error('storage unavailable'))
+    let state!: ReturnType<typeof useTeamSession>
+    const wrapper = mount(defineComponent({ setup() { state = useTeamSession(ref('ctm_1'), ref('css_1')); return () => h('div') } }))
+    try {
+      await flushPromises()
+      expect(state.session.value?.id).toBe('css_1')
+      expect(state.events.value.map(event => event.id)).toEqual(['history'])
+      state.draft.value = 'keep this draft'
+      expect(await state.sendMessage({ targetMode: 'discussion' })).toBe(false)
+      expect(state.draft.value).toBe('keep this draft')
+      expect(state.error.value).toBe('storage unavailable')
+      expect(api.appendTeamMessage).not.toHaveBeenCalled()
+    } finally { wrapper.unmount(); list.mockRestore(); put.mockRestore() }
+  })
+  test('restores a persisted outbox before a failed initial network load, then authorizes before sending online', async () => {
+    api.listTeamRuns.mockResolvedValue([])
+    const scope = JSON.stringify([getRelayOrigin(), 7, 'ctm_1', 'css_1'])
+    outboxFixture.data.set('queued', { key: 'queued', scope, request_id: 'stable-offline', session_id: 'css_1', author_user_id: 7, content: 'queued before reload', target_mode: 'discussion', target_offer_ids: [], reference_event_id: null, created_at: '2026-10-17T00:00:00Z', state: 'queued' })
+    api.getTeamSession.mockRejectedValue(new TeamApiError(0, { error: { message: 'offline', retryable: true } }))
+    let state!: ReturnType<typeof useTeamSession>
+    const wrapper = mount(defineComponent({ setup() { state = useTeamSession(ref('ctm_1'), ref('css_1')); return () => h('div') } }))
+    await flushPromises()
+    expect(state.pendingMessages.value.map(row => row.request_id)).toEqual(['stable-offline'])
+    expect(state.session.value).toBeNull()
+    expect(api.appendTeamMessage).not.toHaveBeenCalled()
+    api.getTeamSession.mockImplementation(async (id: string) => session(id))
+    api.appendTeamMessage.mockResolvedValue({ event: { id: 'confirmed', event_seq: 1, kind: 'member_message', request_id: 'stable-offline', author_user_id: 7 }, call_ids: [] })
+    window.dispatchEvent(new Event('online'))
+    await flushPromises()
+    expect(state.session.value?.id).toBe('css_1')
+    expect(api.appendTeamMessage).toHaveBeenCalledTimes(1)
+    expect(api.appendTeamMessage).toHaveBeenCalledWith('css_1', expect.objectContaining({ requestID: 'stable-offline' }))
+    expect(state.pendingMessages.value).toHaveLength(0)
+    wrapper.unmount()
+  })
   test('retains authorized history when a rolled-back Relay refuses subscriptions', async () => {
     api.listTeamRuns.mockResolvedValue([])
     let state!: ReturnType<typeof useTeamSession>

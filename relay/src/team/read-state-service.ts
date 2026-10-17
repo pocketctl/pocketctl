@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import {requireTeamAccess} from './access.js'
 import {TeamRepositoryError} from './repository.js'
+import {teamMessagePreview} from './message-preview.js'
 
 export class TeamReadStateService {
  constructor(private readonly pool:pg.Pool){}
@@ -31,8 +32,15 @@ export class TeamReadStateService {
     (SELECT COUNT(DISTINCT CASE WHEN e.kind='agent_message' AND e.call_id IS NOT NULL THEN 'call:'||e.call_id ELSE e.event_id END)
      FROM collaboration_events e WHERE e.team_session_id=s.team_session_id AND e.event_seq>COALESCE(r.event_seq,0)
        AND e.kind IN ('member_message','agent_message') AND (e.author_user_id IS NULL OR e.author_user_id<>$2)) AS unread_count,
-    (SELECT e.content FROM collaboration_events e WHERE e.team_session_id=s.team_session_id AND e.kind IN ('member_message','agent_message') ORDER BY e.event_seq DESC LIMIT 1) AS preview
-    FROM collaboration_sessions s LEFT JOIN team_read_positions r ON r.team_session_id=s.team_session_id AND r.user_id=$2 WHERE s.team_session_id=$1`,[sessionId,userId])).rows[0]
-  return {read_event_seq:Number(row.read_event_seq),unread_count:Number(row.unread_count),preview:row.preview??null}
+    latest.kind AS preview_kind,
+    CASE WHEN latest.kind='agent_message' AND latest.call_id IS NOT NULL THEN
+      (SELECT string_agg(part.content,'' ORDER BY part.event_seq) FROM collaboration_events part
+       WHERE part.team_session_id=s.team_session_id AND part.kind='agent_message' AND part.call_id=latest.call_id AND part.event_seq<=latest.event_seq)
+      ELSE latest.content END AS preview
+    FROM collaboration_sessions s LEFT JOIN team_read_positions r ON r.team_session_id=s.team_session_id AND r.user_id=$2
+    LEFT JOIN LATERAL (SELECT e.kind,e.call_id,e.content,e.event_seq FROM collaboration_events e
+      WHERE e.team_session_id=s.team_session_id AND e.kind IN ('member_message','agent_message') ORDER BY e.event_seq DESC LIMIT 1) latest ON true
+    WHERE s.team_session_id=$1`,[sessionId,userId])).rows[0]
+  return {read_event_seq:Number(row.read_event_seq),unread_count:Number(row.unread_count),preview:teamMessagePreview(row.preview??null,row.preview_kind??null)}
  }
 }

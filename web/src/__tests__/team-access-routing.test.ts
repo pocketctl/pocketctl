@@ -1,18 +1,28 @@
 import { ref } from 'vue'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
-const state = vi.hoisted(() => ({ allowed: false, token: 'fixture', refresh: vi.fn() }))
+const state = vi.hoisted(() => ({ allowed: false, offline: false, token: 'fixture', refresh: vi.fn() }))
 vi.mock('../composables/useAuth', () => ({ useAuth: () => ({ accessToken: ref(state.token), doRefreshToken: async () => false }) }))
-vi.mock('../composables/useTeamAccess', () => ({ useTeamAccess: () => ({ refresh: state.refresh }) }))
+vi.mock('../composables/useTeamAccess', () => ({ useTeamAccess: () => ({ refresh: state.refresh, denied: { get value() { return !state.allowed && !state.offline } } }) }))
 import { createPocketctlRouter } from '../router'
 
 beforeEach(() => {
-  state.token = 'fixture'; state.allowed = false
+  state.token = 'fixture'; state.allowed = false; state.offline = false
   state.refresh.mockReset().mockImplementation(async () => state.allowed)
   window.history.replaceState({}, '', '/app/sessions')
 })
 
 describe('Team route qualification', () => {
+  test('keeps a deep link reachable for local outbox recovery when qualification is unknown offline', async () => {
+    state.offline = true
+    const router = createPocketctlRouter()
+    await router.push('/team/ctm_one/session/css_one')
+    expect(router.currentRoute.value.path).toBe('/team/ctm_one/session/css_one')
+    expect(state.refresh).toHaveBeenCalled()
+    state.offline = false
+    await router.push('/teams')
+    expect(router.currentRoute.value.path).toBe('/sessions')
+  })
   test('denies all Team deep links, then allows them after the server grants access', async () => {
     const router = createPocketctlRouter()
     const paths = ['/teams', '/team/ctm_one/sessions', '/team/ctm_one/session/css_one']

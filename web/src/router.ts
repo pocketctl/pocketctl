@@ -54,7 +54,13 @@ export function createPocketctlRouter() {
     const { accessToken, doRefreshToken } = useAuth()
     if (!accessToken.value) await doRefreshToken()
     if (to.meta.requiresAuth && !accessToken.value) return '/login'
-    if (to.meta.requiresTeam && !await useTeamAccess().refresh()) return '/sessions'
+    if (to.meta.requiresTeam) {
+      const access = useTeamAccess()
+      await access.refresh()
+      // An unavailable network must not hide this account's local outbox.
+      // The detail view stays read-only until its own authorized load succeeds.
+      if (access.denied.value) return '/sessions'
+    }
     if (to.path === '/login' && accessToken.value) {
       return resolveAuthenticatedLanding('/') || '/'
     }

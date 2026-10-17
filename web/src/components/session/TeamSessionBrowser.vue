@@ -98,7 +98,7 @@
         >
           <svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4" /></svg
           ><span class="filter-trigger-label"
-            >{{ providerLabel(provider) }}（{{ filtered.length }}）</span
+            >{{ providerLabel(provider) }}</span
           ><svg class="chevron" viewBox="0 0 24 24">
             <path d="m7 10 5 5 5-5" />
           </svg>
@@ -952,4 +952,10 @@ button:focus-visible {
 }
 @media(max-width:768px) { .panel-head,header { padding-left:52px; } }
 .team-unread{padding:2px 6px;border-radius:12px;background:var(--accent-muted);color:var(--accent);font-size:10px;margin-left:6px}.team-preview{display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal!important;overflow-wrap:anywhere}
+.browser-filters { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:6px; }
+.host-trigger { height:34px; }.host-trigger small { display:none; }
+.filter-trigger { font-size:11px; padding:0 7px; gap:4px; grid-template-columns:14px minmax(0,1fr) 12px; }
+.filter-trigger-label { font-size:11px; }
+.team-session-browser :deep(.browser-team-select .team-filter-trigger) { height:44px; padding-top:19px; padding-bottom:5px; }
+.team-session-browser :deep(.browser-team-caption) { top:4px; }
 </style>
