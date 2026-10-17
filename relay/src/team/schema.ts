@@ -477,7 +477,10 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       PERFORM pg_notify('team_events', NEW.team_session_id);
       RETURN NEW;
     END $$;
-    CREATE OR REPLACE TRIGGER team_event_journal_append AFTER INSERT ON collaboration_events
+    -- PostgreSQL 12/13 do not support CREATE OR REPLACE TRIGGER. Startup
+    -- holds the schema advisory lock; both statements share this transaction.
+    DROP TRIGGER IF EXISTS team_event_journal_append ON collaboration_events;
+    CREATE TRIGGER team_event_journal_append AFTER INSERT ON collaboration_events
       FOR EACH ROW EXECUTE FUNCTION journal_team_event();
   `)
 
