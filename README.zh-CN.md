@@ -190,7 +190,7 @@ Memory 把 Agent 对仓库的了解沉淀为经过评审的持久知识，而不
 ## Team 协作（实验性）
 
 Team 协作把 PocketCtl 从个人跨设备控制台扩展为人与 Agent 的小型工作区。在
-Web 客户端中你可以：
+Web 与 iOS 客户端中你可以：
 
 - **创建 Team 并管理成员** — 通过邮箱邀请成员并指定 admin、member 或只读
   viewer 角色；按账号开通加入资格，带版本校验地变更与审计角色，并可移除
@@ -205,13 +205,19 @@ Web 客户端中你可以：
   owner/daemon/offer/binding 授权与既有配额、审批规则继续生效。
 - **运行有预算的多 Agent 协作（可选）** — 冻结的调用数、并发与时长预算，
   并为不确定结局提供恢复机制；不确定的工作不会被盲目重试。
+- **按会话配置 Agent 并定向分派任务** — 每个 Team 会话独立选择可调用的
+  Agent 并设置逐 Agent 参数，任务可指派给指定负责人。
+- **保留私有旁路通道** — 成员可发送仅指定接收者可见的交互，审批走仅所有者
+  可见的私有通道。
+- **多端保持同步** — 引用回复与已读状态在 Web 和 iOS 间保持一致；未发送的
+  消息经逐设备发件箱在刷新或离线后恢复并补发。
 
 共享 Memory 是到既有受治理安装的独立可选桥接；Team 成员身份本身不会授予
 知识权限——每个参与者与接收方都会被重新校验，且只使用精确发布的 Memory
 引用。
 
 自托管环境需要分别通过 `TEAM_COLLABORATION`、`TEAM_AUTORUN` 和
-`TEAM_MEMORY_BRIDGE` 开放各阶段，三者默认均为 `off`；iOS 暂不提供 Team UI。
+`TEAM_MEMORY_BRIDGE` 开放各阶段，三者默认均为 `off`。
 详见[功能矩阵](docs/team-collaboration-feature-matrix.md)和
 [灰度与关闭手册](docs/operations/team-collaboration-rollout.md)。
 
