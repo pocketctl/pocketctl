@@ -126,6 +126,8 @@ type connectionStatusEvent struct {
 type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 
 type Client struct {
+	TeamConfigInventory func() map[string]*protocol.TeamConfigCapabilities
+
 	replayACKs *replayACKCache // protected by outMu; populated only by real ACKs
 
 	// HostAwake reports full system wake, not display activity. Set before Run.

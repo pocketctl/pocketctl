@@ -1,6 +1,7 @@
 import type { AttentionAction, AttentionProvider, AttentionRiskLevel } from './types.js'
 
 export interface ApprovalActionSource {
+  teamPrivate?:boolean
   provider: AttentionProvider | string
   availableDecisions?: string[]
   alwaysRules?: string[]
@@ -61,7 +62,8 @@ export function mapApprovalActions(source: ApprovalActionSource): AttentionActio
 	const enforced = Array.isArray(source.enforcedAllowedActions)
 		? new Set(source.enforcedAllowedActions)
 		: null
-  if (source.provider === 'codex') {
+  if (source.teamPrivate && source.provider==='claude-code') return [ACTIONS.once,ACTIONS.reject]
+  if (source.provider === 'codex' || (source.teamPrivate && source.provider==='dsh')) {
     const seen = new Set<string>()
     const actions: AttentionAction[] = []
     for (const decision of source.availableDecisions ?? []) {

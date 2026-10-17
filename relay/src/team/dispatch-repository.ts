@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
 
+import { TeamAgentConfigService, runtimeConfigHash } from './agent-config-service.js'
+import type { TeamRuntimeConfig } from './types.js'
 import { teamAccountsEnabled } from './access.js'
 import { teamEventView } from './event-repository.js'
 import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js'
@@ -21,6 +23,11 @@ export interface DispatchAuthorization {
   offer_revision: number
   owner_user_id: number
   daemon_id: string
+  requested_config?: TeamRuntimeConfig
+  config_revision?: number
+  config_hash?: string
+  capability_revision?: string
+  execution_mode?: 'discussion'|'review'|'execute'
 }
 
 export interface ClaimedDispatch {
@@ -49,13 +56,14 @@ export function dispatchAuthorizationMatches(
     && Number(accounting.binding_revision) === authorization.binding_revision
     && Number(accounting.offer_revision) === authorization.offer_revision
     && authorization.protocol_version === TEAM_COLLABORATION_PROTOCOL_VERSION
+    && (!accounting.config_hash || (authorization.config_hash === accounting.config_hash && authorization.config_revision === Number(accounting.config_revision)))
     && authorization.daemon_id === daemonId && authorization.owner_user_id === ownerUserId)
 }
 
 export function dispatchProjectionKind(message: Record<string, unknown>): 'agent_message' | 'status' | null {
   // Native subagent streams remain private. Only the selected receiver's
   // root answer and lifecycle can settle its shared Team call.
-  if (message.is_subagent === true || (typeof message.agent_id === 'string' && message.agent_id.length > 0)) return null
+  if (message.resync === true || message.is_subagent === true || (typeof message.agent_id === 'string' && message.agent_id.length > 0)) return null
   if (message.type === 'agent_text' && typeof message.text === 'string' && message.text.length > 0) return 'agent_message'
   if (dispatchTerminalStatus(message) || message.type === 'interactive_prompt' || message.type === 'approval_request') return 'status'
   return null
@@ -102,10 +110,11 @@ export class TeamDispatchRepository {
 
   async claim(callId: string): Promise<ClaimedDispatch | null> {
     return this.transaction(async client => {
+      await client.query(`SELECT s.team_session_id FROM collaboration_sessions s JOIN collaboration_calls c ON c.team_session_id=s.team_session_id WHERE c.call_id=$1 FOR UPDATE OF s`,[callId])
       const result = await client.query(
         `SELECT call.*, event.content, COALESCE(run.initiator_user_id, event.author_user_id) AS initiator_user_id, session.state AS session_state, team.state AS team_state,
                 binding.binding_id, binding.revision AS current_binding_revision, binding.state AS binding_state,
-                binding.native_session_id AS binding_native_session_id, binding.owner_user_id AS binding_owner_user_id,
+                binding.native_session_id AS binding_native_session_id, binding.applied_revision AS binding_applied_revision, binding.applied_config AS binding_applied_config, binding.owner_user_id AS binding_owner_user_id,
                 offer.revision AS current_offer_revision, offer.state AS offer_state, offer.provider,
                 offer.daemon_id, offer.owner_user_id, member.state AS membership_state,
                 daemon.status AS daemon_status, daemon.collaboration_capabilities
@@ -145,6 +154,21 @@ export class TeamDispatchRepository {
         await client.query(`UPDATE collaboration_calls SET state = 'blocked', outcome = 'native_session_busy', updated_at = NOW(), finished_at = NOW() WHERE call_id = $1`, [callId])
         return null
       }
+      let frozen: Awaited<ReturnType<TeamAgentConfigService['freeze']>> = null
+      if (row.config_hash) {
+        if(process.env.TEAM_AGENT_CONFIG_V2!=='on'){await client.query(`UPDATE collaboration_calls SET state='blocked',outcome='team_config_disabled',finished_at=NOW() WHERE call_id=$1`,[callId]);return null}
+        try {
+          frozen = await new TeamAgentConfigService(this.pool).freeze(client,row.team_session_id,row.offer_id,Number(row.initiator_user_id),row.execution_mode??undefined)
+          if (!frozen || frozen.config_revision !== Number(row.config_revision) || frozen.config_hash !== row.config_hash) throw new Error('config_revision_stale')
+        } catch {
+          await client.query(`UPDATE collaboration_calls SET state='blocked',outcome='configuration_requires_confirmation',finished_at=NOW(),updated_at=NOW() WHERE call_id=$1`,[callId])
+          return null
+        }
+      }
+      if (frozen && (Number(row.binding_applied_revision) !== frozen.config_revision || !row.binding_applied_config || runtimeConfigHash(row.binding_applied_config)!==frozen.config_hash) && row.binding_native_session_id) {
+        await client.query(`UPDATE collaboration_session_agent_bindings SET native_session_id=NULL WHERE binding_id=$1`,[row.binding_id])
+        row.binding_native_session_id = null
+      }
       const operation: 'create' | 'message' = row.binding_native_session_id ? 'message' : 'create'
       const providerRequestId = `team-${callId}`
       await client.query(
@@ -161,6 +185,8 @@ export class TeamDispatchRepository {
         nativeSessionId: row.binding_native_session_id,
         providerRequestId,
         authorization: {
+          ...(frozen ?? {}),
+          ...(row.execution_mode ? {execution_mode:row.execution_mode} : {}),
           protocol_version: TEAM_COLLABORATION_PROTOCOL_VERSION,
           operation,
           call_id: callId,
@@ -241,6 +267,18 @@ export class TeamDispatchRepository {
          WHERE binding_id = $1 AND (native_session_id IS NULL OR native_session_id = $2)`, [row.binding_id, nativeSessionId],
       )
       await client.query(`UPDATE collaboration_calls SET native_session_id = $2, updated_at = NOW() WHERE call_id = $1`, [callId, nativeSessionId])
+      return true
+    })
+  }
+
+  async recordConfigReceipt(callId:string,daemonId:string,owner:number,config:unknown,revision:number,configHash:string):Promise<boolean> {
+    return this.transaction(async client=>{
+      const row=(await client.query(`SELECT c.*,e.event_seq AS config_call_event_seq FROM collaboration_calls c JOIN collaboration_events e ON e.event_id=c.event_id JOIN team_agent_offers o ON o.offer_id=c.offer_id
+        WHERE c.call_id=$1 AND o.daemon_id=$2 AND o.owner_user_id=$3 FOR UPDATE OF c`,[callId,daemonId,owner])).rows[0]
+      if(!row?.config_hash || row.config_hash!==configHash || Number(row.config_revision)!==revision || runtimeConfigHash(config as TeamRuntimeConfig)!==configHash)return false
+      await client.query(`UPDATE collaboration_calls SET applied_config=$2::jsonb,applied_config_hash=$3 WHERE call_id=$1`,[callId,JSON.stringify(config),configHash])
+      await client.query(`UPDATE collaboration_session_agent_bindings SET applied_config=$2::jsonb,applied_revision=$3,applied_call_event_seq=$4,config_status=CASE WHEN config_revision=$3 AND requested_config=$2::jsonb THEN 'applied' WHEN config_revision=$3 THEN 'pending' ELSE config_status END
+        WHERE binding_id=$1 AND (applied_revision IS NULL OR applied_revision<$3 OR (applied_revision=$3 AND applied_call_event_seq<=$4))`,[row.binding_id,JSON.stringify(config),revision,Number(row.config_call_event_seq)])
       return true
     })
   }

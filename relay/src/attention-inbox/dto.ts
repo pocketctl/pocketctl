@@ -24,9 +24,10 @@ export function serializeAttentionConfig(config: AttentionInboxConfig) {
         remote_response: config.providers.opencode.remoteResponse,
       },
       'claude-code': {
-        projection: false,
-        remote_response: false,
+        projection: config.providers['claude-code'].projection,
+        remote_response: config.providers['claude-code'].remoteResponse,
       },
+      ...(config.providers.dsh ? {dsh:{projection:config.providers.dsh.projection,remote_response:config.providers.dsh.remoteResponse}} : {}),
     },
   }
 }

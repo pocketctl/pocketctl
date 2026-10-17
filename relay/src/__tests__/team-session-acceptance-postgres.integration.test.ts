@@ -50,6 +50,32 @@ describeWithDatabase('Team session acceptance boundaries (PostgreSQL)', () => {
     return { key, owner, member, teams, service, team, session, first, second, daemonIds, membership: accepted.membership! }
   }
 
+  test('creates a zero-Agent conversation, validates participants atomically and reauthorizes replay', async () => {
+    const f = await fixture()
+    const input = {teamId:f.team.id,actorUserId:f.owner,title:'human only',taskId:null,offerIds:[],participantUserIds:[f.member],requestId:'zero-agents'}
+    const created = await f.service.createSession(input)
+    expect(created.agent_bindings).toEqual([])
+    expect(created.participants.map(p => p.user_id).sort()).toEqual([f.owner,f.member].sort())
+    expect((await f.service.createSession(input)).id).toBe(created.id)
+    await expect(f.service.createSession({...input,title:'different'})).rejects.toMatchObject({code:'idempotency_conflict'})
+    const before = (await pool.query('SELECT COUNT(*) FROM collaboration_sessions')).rows[0].count
+    await expect(f.service.createSession({...input,requestId:'outsider',participantUserIds:[2147483647]})).rejects.toMatchObject({code:'team_access_denied'})
+    expect((await pool.query('SELECT COUNT(*) FROM collaboration_sessions')).rows[0].count).toBe(before)
+    await f.service.appendMessage({sessionId:created.id,actorUserId:f.member,requestId:'human-message',content:'hello',targetMode:'discussion',targetOfferIds:[],referenceEventId:null})
+    expect((await pool.query('SELECT COUNT(*)::int AS n FROM collaboration_calls WHERE team_session_id=$1',[created.id])).rows[0].n).toBe(0)
+    await f.service.removeParticipant({sessionId:created.id,actorUserId:f.owner,userId:f.member,expectedRevision:1,requestId:'remove-human'})
+    await expect(f.service.listEvents(created.id,f.member,0,100)).rejects.toMatchObject({code:'team_not_found'})
+  })
+
+  test('removing an Agent owner retires its binding in the same transaction and keeps discussion open', async () => {
+    const f = await fixture()
+    await f.service.removeParticipant({sessionId:f.session.id,actorUserId:f.owner,userId:f.member,expectedRevision:1,requestId:'retire-owner'})
+    const view = await f.service.getSession(f.session.id,f.owner)
+    expect(view.agent_bindings.map(b => b.offer_id)).toEqual([f.first.id])
+    await expect(f.service.appendMessage({sessionId:f.session.id,actorUserId:f.member,requestId:'after-removal',content:'denied',targetMode:'discussion',targetOfferIds:[],referenceEventId:null})).rejects.toMatchObject({code:'team_not_found'})
+    expect((await f.service.appendMessage({sessionId:f.session.id,actorUserId:f.owner,requestId:'still-open',content:'still open',targetMode:'discussion',targetOfferIds:[],referenceEventId:null})).call_ids).toEqual([])
+  })
+
   test.each(['removed', 'left'] as const)('excludes a %s team member from session detail and list while preserving history', async action => {
     const f = await fixture()
     const note = await f.service.appendMessage({ sessionId: f.session.id, actorUserId: f.member, requestId: f.key, content: 'Retained history', targetMode: 'discussion', targetOfferIds: [], referenceEventId: null })

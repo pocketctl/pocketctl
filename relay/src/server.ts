@@ -86,6 +86,12 @@ import { resolveGrantKeyMaterial } from './extensions/capability-grant.js';
 import { registerTeamCapabilityRoutes, resolveTeamCollaborationConfig } from './team/config.js';
 import { createTeamRouteService, registerTeamRoutes } from './team/routes.js';
 import { createTeamTaskRouteService, registerTeamTaskRoutes } from './team/task-routes.js';
+import { hostname as teamRelayHostname } from 'node:os';
+import { TeamInteractionService,recoverTeamPrivateResolutions } from './team/interaction-service.js';
+import { registerTeamInteractionRoutes } from './team/interaction-routes.js';
+import { TeamReadStateService } from './team/read-state-service.js';
+import { TeamEventFanout } from './team/event-fanout.js';
+import { TeamAgentConfigService } from './team/agent-config-service.js';
 import { TeamSessionService } from './team/session-service.js';
 import { registerTeamSessionRoutes } from './team/session-routes.js';
 import { TeamDispatchService } from './team/dispatch-service.js';
@@ -1017,20 +1023,21 @@ async function main() {
     },
   } : undefined
   let router: Router
+  let teamFanout: TeamEventFanout | undefined
   let teamDispatchService: TeamDispatchService | undefined
   const teamContextService = new TeamContextService(pool, {
-    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+    event: () => {}, // Shared delivery comes from the transactional Team journal.
   }, teamMemoryContextBridge)
   const teamSessionService = new TeamSessionService(pool, {
-    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+    event: () => {}, // Shared delivery comes from the transactional Team journal.
     revoked: (sessionId, userId) => router.revokeTeamSubscription(sessionId, userId),
     dispatch: callIds => teamDispatchService?.enqueue(callIds),
   }, teamMemorySources, teamMemoryContextBridge)
   const teamRunService = new TeamRunService(pool, {
-    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+    event: () => {}, // Shared delivery comes from the transactional Team journal.
   })
   router = new Router(pools, {
-    teamSubscriptionAuthorizer: { canSubscribe: (userId, sessionId) => teamConfig.collaboration === 'on' ? teamSessionService.canSubscribe(userId, sessionId) : Promise.resolve(false) },
+    teamSubscriptionAuthorizer: { sharedHighWater: (userId,sessionId) => teamSessionService.sharedHighWater(userId,sessionId), canSubscribe: (userId, sessionId) => teamSessionService.canSubscribe(userId, sessionId) },
     teamDispatchBroker: {
       observeDaemonEvent: (daemonId, ownerUserId, message, generation) => teamDispatchService?.observeDaemonEvent(daemonId, ownerUserId, message, generation),
       handleDaemonDisconnected: daemonId => teamDispatchService?.handleDaemonDisconnected(daemonId) ?? Promise.resolve(),
@@ -1095,9 +1102,10 @@ async function main() {
     } : {}),
   });
   teamDispatchService = new TeamDispatchService(pool, {
+    ownsDaemon: (daemonId,ownerUserId) => router.ownsTeamDaemon(daemonId,ownerUserId),
     send: input => router.sendTeamCommand(input.daemonId, input.ownerUserId, input.capability, input.command),
   }, {
-    event: (sessionId, participantUserIds, event) => router.broadcastTeamEvent(sessionId, participantUserIds, event),
+    event: () => {}, // Shared delivery comes from the transactional Team journal.
   }, {
     memorySources: teamMemorySources,
     memoryContextBridge: teamMemoryContextBridge,
@@ -1218,6 +1226,13 @@ async function main() {
         await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
         await attentionRuntime.start();
         if (teamConfig.collaboration === 'on') teamDispatchService?.start()
+        {
+          // Durable history and original Inbox recovery continue during a write rollback.
+          teamFanout ??= new TeamEventFanout(pool,process.env.TEAM_RELAY_NODE_ID || teamRelayHostname(),
+            (sessionId,participants,event) => router.broadcastTeamEvent(sessionId,participants,event),
+            async () => {await router.revalidateTeamSubscriptions();await router.drainTeamPrivateCommands();await recoverTeamPrivateResolutions(pool,attentionRepository)})
+          teamFanout.start()
+        }
       }
       if (!shuttingDown) databaseReady = true
     })
@@ -1279,7 +1294,7 @@ async function main() {
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
     revalidateTeamSubscriptions: () => router.revalidateTeamSubscriptions(),
-    isDaemonOnline: (daemonId, ownerUserId) => router.isTeamDaemonOnline(daemonId, ownerUserId),
+    isDaemonOnline: (daemonId, ownerUserId) => router.isSharedTeamDaemonOnline(daemonId, ownerUserId),
   });
   registerTeamTaskRoutes(app, {
     config: teamConfig,
@@ -1290,6 +1305,8 @@ async function main() {
   registerTeamSessionRoutes(app, {
     config: teamConfig,
     service: teamSessionService,
+    agentConfigService: new TeamAgentConfigService(pool),
+    readStateService: new TeamReadStateService(pool),
     contextService: teamContextService,
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
@@ -1317,6 +1334,11 @@ async function main() {
     config: runtimeConfig.sessionDocuments,
     verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
   });
+  registerTeamInteractionRoutes(app,{
+    service:new TeamInteractionService(pool,attentionService),
+    enabled:()=>teamConfig.collaboration==='on' && process.env.TEAM_PRIVATE_INTERACTIONS_V2==='on',
+    verifyAccessToken:token=>verifyAccessTokenWithRevocation(token,pool),
+  })
   registerAttentionInboxRoutes(app, {
     pool,
     config: attentionConfig,
@@ -2635,6 +2657,7 @@ async function main() {
       console.error('[shutdown] attention inbox drain error:', e instanceof Error ? e.name : typeof e)
     }
     try {
+      await teamFanout?.stop()
       await teamDispatchService?.stop()
     } catch (e) {
       console.error('[shutdown] team dispatch drain error:', e instanceof Error ? e.name : typeof e)

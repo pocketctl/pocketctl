@@ -29,6 +29,8 @@ describe('Team dispatch contract', () => {
 
   test('projects only shared reply text and terminal lifecycle', () => {
     expect(dispatchProjectionKind({ type: 'agent_text', text: 'answer' })).toBe('agent_message')
+    expect(dispatchProjectionKind({ type: 'agent_text', text: 'old restored answer', resync: true })).toBeNull()
+    expect(dispatchProjectionKind({ type: 'turn_status', status: 'completed', resync: true })).toBeNull()
     expect(dispatchProjectionKind({ type: 'turn_status', status: 'completed' })).toBe('status')
     expect(dispatchProjectionKind({ type: 'approval_request', text: 'secret' })).toBe('status')
     expect(dispatchProjectionKind({ type: 'interactive_prompt', input: { prompt: 'private' } })).toBe('status')

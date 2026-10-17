@@ -1569,6 +1569,19 @@ func cmdDaemonStart(args []string) {
 		return sm.DispatchMemoryContextControl(message)
 	}
 	client.SetAgentManageable(agentManageable)
+	client.TeamConfigInventory = func() map[string]*protocol.TeamConfigCapabilities {
+		result := map[string]*protocol.TeamConfigCapabilities{}
+		for _, agent := range []string{adapter.AgentCodex, adapter.AgentClaude, adapter.AgentDSH} {
+			capabilityCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			cap := sm.TeamConfigCapabilities(capabilityCtx, agent)
+			cancel()
+			if cap != nil {
+				result[agent] = cap
+				sm.RememberTeamConfigCapability(agent, cap.Revision)
+			}
+		}
+		return result
+	}
 	client.SetAgentInventory(agents)
 	client.SetVersion(version)
 	client.SetStartedAt(time.Now().Unix())
@@ -3976,6 +3989,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
 						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: cmd.Collaboration})
 					continue
+				}
+				if receipt := sm.TeamConfigReceipt(ctx, cmd.Collaboration, cmd.SessionID); receipt != nil {
+					client.SendMsg(*receipt)
 				}
 				stateDirty.Store(true)
 				if cmd.TeamContext != nil {

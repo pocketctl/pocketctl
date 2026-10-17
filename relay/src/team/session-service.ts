@@ -3,6 +3,9 @@ import type pg from 'pg'
 
 import { requireTeamAccess } from './access.js'
 import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.js'
+import { TeamReadStateService } from './read-state-service.js'
+import { TeamAgentConfigService, bindingConfigView } from './agent-config-service.js'
+import type { TeamRuntimeConfig, SessionAgentConfig } from './types.js'
 import { TeamEventRepository } from './event-repository.js'
 import { TeamRepositoryError } from './repository.js'
 import type { TeamEvent, TeamMessageTargetMode, TeamProvider, TeamSessionState } from './types.js'
@@ -20,8 +23,11 @@ export interface TeamSessionView {
   revision: number
   latest_event_seq: number
   current_context_version: number
+  read_event_seq?: number
+  unread_count?: number
+  preview?: string | null
   participants: Array<{ id: string; user_id: number; state: string; revision: number }>
-  agent_bindings: Array<{ id: string; offer_id: string; owner_user_id: number; daemon_id: string; provider: TeamProvider; state: string; revision: number; native_session_id: string | null; availability: string }>
+  agent_bindings: Array<{ id: string; offer_id: string; owner_user_id: number; daemon_id: string; provider: TeamProvider; state: string; revision: number; native_session_id: string | null; availability: string; config?: SessionAgentConfig }>
   created_at: string
   updated_at: string
 }
@@ -193,16 +199,18 @@ export class TeamSessionService {
        ORDER BY session.updated_at DESC`,
       [teamId, actorUserId, filters.daemonId ?? null, filters.provider ?? null],
     )
-    return Promise.all(result.rows.map(row => this.view(this.pool, row, actorUserId)))
+    return Promise.all(result.rows.map(async row => ({...await this.view(this.pool,row,actorUserId),...await new TeamReadStateService(this.pool).summary(row.team_session_id,actorUserId)})))
   }
 
   async getSession(sessionId: string, actorUserId: number): Promise<TeamSessionView> {
     return this.view(this.pool, await this.sessionFor(this.pool, sessionId, actorUserId), actorUserId)
   }
 
-  async createSession(input: { teamId: string; actorUserId: number; title: string; taskId: string | null; offerIds: string[]; requestId: string }): Promise<TeamSessionView> {
+  async createSession(input: { teamId: string; actorUserId: number; title: string; taskId: string | null; offerIds: string[]; participantUserIds?: number[]; agentConfigs?: Record<string,{mode:'default'|'custom';override?:Partial<TeamRuntimeConfig>;capability_revision?:string}>; requestId: string }): Promise<TeamSessionView> {
     return this.idempotent(input.actorUserId, `team.session.create:${input.teamId}`, input.requestId, {
-      title: input.title, task_id: input.taskId, offer_ids: [...input.offerIds].sort(),
+      ...(input.agentConfigs ? {agent_configs: Object.fromEntries(Object.entries(input.agentConfigs).sort())} : {}),
+      title: input.title, task_id: input.taskId, offer_ids: [...new Set(input.offerIds)].sort(),
+      ...((input.participantUserIds?.length ?? 0) ? { participant_user_ids: [...new Set(input.participantUserIds)].sort((a,b) => a-b) } : {}),
     }, async client => {
       await this.requireMember(client, input.teamId, input.actorUserId, true)
       if (input.taskId) {
@@ -214,8 +222,13 @@ export class TeamSessionService {
         if (task.rows[0].state === 'archived') throw new TeamRepositoryError('invalid_state', 'task must be restored before linking a new session')
       }
       const offers = await this.offers(client as unknown as pg.Pool, input.teamId, input.offerIds, true)
-      if (offers.length === 0 || offers.some(offer => !this.callable(offer, input.teamId))) {
+      if (offers.some(offer => !this.callable(offer, input.teamId))) {
         throw new TeamRepositoryError('no_callable_agent', 'at least one selected Agent is not callable')
+      }
+      for (const userId of [...new Set(input.participantUserIds ?? [])].sort((a,b) => a-b)) {
+        if (!Number.isSafeInteger(userId) || userId < 1) throw new TeamRepositoryError('team_not_found', 'participant not found')
+        await requireTeamAccess(client, userId, true)
+        await this.requireActiveMembership(client, input.teamId, userId, true)
       }
       const sessionId = `css_${randomUUID()}`
       const inserted = await client.query(
@@ -223,7 +236,7 @@ export class TeamSessionService {
          VALUES ($1, $2, $3, $4, $5) RETURNING *`,
         [sessionId, input.teamId, input.actorUserId, input.taskId, input.title],
       )
-      const participantIds = new Set<number>([input.actorUserId, ...offers.map(offer => Number(offer.owner_user_id))])
+      const participantIds = new Set<number>([input.actorUserId, ...(input.participantUserIds ?? []), ...offers.map(offer => Number(offer.owner_user_id))])
       for (const userId of participantIds) {
         await client.query(
           `INSERT INTO collaboration_session_participants
@@ -240,6 +253,8 @@ export class TeamSessionService {
           [`cab_${randomUUID()}`, sessionId, offer.offer_id, offer.owner_user_id],
         )
       }
+      if (Object.keys(input.agentConfigs ?? {}).some(id => !input.offerIds.includes(id))) throw new TeamRepositoryError('team_not_found','configuration requires selected Agent')
+      for (const offer of offers) await new TeamAgentConfigService(this.pool).initialize(client,sessionId,offer.offer_id,input.actorUserId,input.agentConfigs?.[offer.offer_id])
       return this.view(client as unknown as pg.Pool, inserted.rows[0], input.actorUserId)
     })
   }
@@ -296,11 +311,14 @@ export class TeamSessionService {
         [input.sessionId, input.userId],
       )
       if (!input.active) {
-        const ownsBinding = await client.query(
-          `SELECT 1 FROM collaboration_session_agent_bindings WHERE team_session_id = $1 AND owner_user_id = $2 AND state = 'active'`,
-          [input.sessionId, input.userId],
-        )
-        if (ownsBinding.rows[0]) throw new TeamRepositoryError('invalid_state', 'remove the member Agent bindings first')
+        // Access removal and binding retirement share the Session transaction.
+        // In-flight calls retain identity for reconciliation; pending work stops.
+        await client.query(`UPDATE collaboration_session_agent_bindings SET state='removed', revision=revision+1,
+          removed_at=NOW(),updated_at=NOW() WHERE team_session_id=$1 AND owner_user_id=$2 AND state='active'`, [input.sessionId,input.userId])
+        await client.query(`UPDATE collaboration_calls SET state='cancelled',outcome='participant_removed',finished_at=NOW(),updated_at=NOW()
+          WHERE team_session_id=$1 AND state='pending' AND offer_id IN (SELECT offer_id FROM team_agent_offers WHERE owner_user_id=$2)`, [input.sessionId,input.userId])
+        await client.query(`UPDATE collaboration_runs SET stop_requested=true,next_wake_at=NOW(),updated_at=NOW()
+          WHERE team_session_id=$1 AND state IN ('ready','running','waiting_input','blocked','paused')`, [input.sessionId])
       }
       if (current.rows[0]) {
         if (!input.active && current.rows[0].state === 'active') {
@@ -398,8 +416,9 @@ export class TeamSessionService {
     })
   }
 
-  async appendMessage(input: { sessionId: string; actorUserId: number; requestId: string; content: string; targetMode: TeamMessageTargetMode; targetOfferIds: string[]; referenceEventId: string | null }): Promise<{ event: TeamEvent; call_ids: string[] }> {
-    const result = await this.transaction(async client => {
+  async appendMessage(input: { sessionId: string; actorUserId: number; requestId: string; content: string; targetMode: TeamMessageTargetMode; targetOfferIds: string[]; referenceEventId: string | null; contextVersion?:number }, transactionClient?:pg.PoolClient): Promise<{ event: TeamEvent; call_ids: string[] }> {
+    const transact = transactionClient ? async <T>(run:(client:pg.PoolClient)=>Promise<T>)=>run(transactionClient) : this.transaction.bind(this)
+    const result = await transact(async client => {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`team:event:${input.sessionId}:${input.actorUserId}:${input.requestId}`])
       const session = await this.sessionFor(client as unknown as pg.Pool, input.sessionId, input.actorUserId, true)
       if (session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'shared session is not writable')
@@ -443,7 +462,7 @@ export class TeamSessionService {
         targetMode: input.targetMode,
         targetOfferIds: targets,
         referenceEventId: input.referenceEventId,
-        contextVersion: Number(session.current_context_version),
+        contextVersion: input.contextVersion ?? Number(session.current_context_version),
       })
       const participants = await client.query<{ user_id: number }>(
         `SELECT participant.user_id FROM collaboration_session_participants participant
@@ -458,18 +477,59 @@ export class TeamSessionService {
       if (error instanceof Error && error.message === 'reference_not_found') throw new TeamRepositoryError('team_not_found', 'referenced event not found')
       throw error
     })
-    if (!result.replayed) {
+    if (!result.replayed && !transactionClient) {
       this.notifier.event?.(input.sessionId, result.participantUserIds, result.appended.event)
       this.notifier.dispatch?.(result.appended.call_ids)
     }
     return result.appended
   }
 
-  async listEvents(sessionId: string, actorUserId: number, afterSeq: number, limit: number) {
-    await this.sessionFor(this.pool, sessionId, actorUserId)
-    return this.events.listEvents(this.pool, sessionId, afterSeq, limit)
+  async assignTask(input:{sessionId:string;actorUserId:number;requestId:string;instruction:string;acceptance:string;targetOfferIds:string[];contextVersion:number;referenceEventId?:string|null}) {
+    if(!input.instruction.trim()||!input.acceptance.trim()||input.instruction.length>32000||input.acceptance.length>16000||input.targetOfferIds.length<1||input.targetOfferIds.length>16)throw new TeamRepositoryError('invalid_state','task instruction, acceptance and targets required')
+    const result=await this.transaction(async client=>{
+      const operation=`team.task.dispatch:${input.sessionId}`
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`${operation}:${input.actorUserId}:${input.requestId}`])
+      const session=await this.sessionFor(client,input.sessionId,input.actorUserId,true)
+      const fingerprint=hash({...input,targetOfferIds:[...new Set(input.targetOfferIds)].sort()})
+      const prior=(await client.query(`SELECT request_hash,response FROM collaboration_team_idempotency WHERE user_id=$1 AND operation=$2 AND request_id=$3`,[input.actorUserId,operation,input.requestId])).rows[0]
+      if(prior){if(prior.request_hash!==fingerprint)throw new TeamRepositoryError('idempotency_conflict','task request reused with different content');return {...prior.response,replayed:true}}
+      if(input.contextVersion!==Number(session.current_context_version))throw new TeamRepositoryError('context_revision_conflict','selected materials changed',Number(session.current_context_version))
+      const taskId=`ctk_${randomUUID()}`
+      await client.query(`INSERT INTO team_tasks(task_id,team_id,creator_user_id,title,background) VALUES($1,$2,$3,$4,$5)`,[taskId,session.team_id,input.actorUserId,input.instruction.split('\n')[0].slice(0,240),input.instruction+'\n\n交付与验收：\n'+input.acceptance])
+      await client.query(`INSERT INTO team_task_holders(task_id,user_id) VALUES($1,$2)`,[taskId,input.actorUserId])
+      // Internal source events do not consume the direct-message request ID
+      // namespace. The operation receipt is the sole task deduplication key.
+      const message=await this.appendMessage({sessionId:input.sessionId,actorUserId:input.actorUserId,requestId:`task-${randomUUID()}`,content:input.instruction+'\n\n交付与验收：\n'+input.acceptance,targetMode:'offers',targetOfferIds:input.targetOfferIds,referenceEventId:input.referenceEventId??null,contextVersion:input.contextVersion},client)
+      await client.query('UPDATE collaboration_events SET request_id=NULL WHERE event_id=$1',[message.event.id])
+      message.event.request_id=null
+      await client.query('UPDATE collaboration_calls SET task_id=$2 WHERE call_id=ANY($1::text[])',[message.call_ids,taskId])
+      const response={task_id:taskId,...message}
+      await client.query(`INSERT INTO collaboration_team_idempotency(user_id,operation,request_id,request_hash,response) VALUES($1,$2,$3,$4,$5::jsonb)`,[input.actorUserId,operation,input.requestId,fingerprint,JSON.stringify(response)])
+      return {...response,replayed:false}
+    })
+    if(!result.replayed)this.notifier.dispatch?.(result.call_ids)
+    return {task_id:result.task_id,event:result.event,call_ids:result.call_ids}
   }
 
+  async listEvents(sessionId: string, actorUserId: number, afterSeq: number, limit: number) {
+    const session = await this.sessionFor(this.pool, sessionId, actorUserId)
+    const highWater = Number(session.latest_event_seq), floor = Number(session.retained_after_seq ?? 0)
+    const reset = afterSeq < floor || afterSeq > highWater
+    const page = await this.events.listEvents(this.pool, sessionId, reset ? floor : afterSeq, limit, highWater)
+    return {...page, shared_high_water:highWater,completed_through:page.next_cursor ?? highWater,reset_required:reset,retained_after_seq:floor}
+  }
+
+  async messageByRequest(sessionId:string,actorUserId:number,requestId:string) {
+    await this.sessionFor(this.pool,sessionId,actorUserId)
+    const row=(await this.pool.query(`SELECT * FROM collaboration_events WHERE team_session_id=$1 AND author_user_id=$2 AND request_id=$3`,[sessionId,actorUserId,requestId])).rows[0]
+    if (!row) throw new TeamRepositoryError('team_not_found','message not found')
+    const {teamEventView}=await import('./event-repository.js')
+    const calls=await this.pool.query(`SELECT call_id FROM collaboration_calls WHERE event_id=$1 ORDER BY offer_id`,[row.event_id])
+    return {event:teamEventView(row),call_ids:calls.rows.map(c=>c.call_id)}
+  }
+  async sharedHighWater(userId:number,sessionId:string):Promise<number> {
+    return Number((await this.sessionFor(this.pool,sessionId,userId)).latest_event_seq)
+  }
   async listCalls(sessionId: string, actorUserId: number) {
     await this.sessionFor(this.pool, sessionId, actorUserId)
     const result = await this.pool.query(
@@ -537,6 +597,7 @@ export class TeamSessionService {
       current_context_version: Number(row.current_context_version),
       participants: participants.rows.map(participant => ({ id: participant.participant_id, user_id: Number(participant.user_id), state: participant.state, revision: Number(participant.revision) })),
       agent_bindings: bindings.rows.map(binding => ({
+        config: bindingConfigView(binding),
         id: binding.binding_id,
         offer_id: binding.offer_id,
         owner_user_id: Number(binding.owner_user_id),

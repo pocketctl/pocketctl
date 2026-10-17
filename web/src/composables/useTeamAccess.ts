@@ -10,7 +10,7 @@ export function createTeamAccessController(token: Ref<string>, load: () => Promi
   let generation = 0
   let pending: { token: string; promise: Promise<boolean> } | undefined
   const capabilities = computed(() => token.value && token.value === snapshotToken.value ? snapshot.value : null)
-  const enabled = computed(() => capabilities.value?.collaboration === true)
+  const enabled = computed(() => (capabilities.value?.collaboration === true || capabilities.value?.reads_enabled === true))
   // A new token invalidates the old grant, but is not a confirmed denial.
   const denied = computed(() => !!token.value && checkedToken.value === token.value && !enabled.value)
   function refresh(): Promise<boolean> {

@@ -115,7 +115,7 @@ withDatabase('Team Run request contract acceptance (PostgreSQL)', () => {
     const stopped = await f.runs.control({ runId: first.run.id, actorUserId: f.owner, action: 'cancel', expectedRevision: paused.run.revision, requestId: 'stop-first-run' })
     // The real repository settles the known zero-call Run; no native result
     // is fabricated. Its current lease token is incremented by control.
-    const leaseToken = Number((await pool.query('SELECT lease_token FROM collaboration_runs WHERE run_id=$1', [stopped.run.id])).rows[0].lease_token)
+    const leaseToken = Number((await pool.query("UPDATE collaboration_runs SET lease_expires_at=NOW()+INTERVAL '60 seconds' WHERE run_id=$1 RETURNING lease_token", [stopped.run.id])).rows[0].lease_token)
     await f.runs.transition({ runId: stopped.run.id, leaseToken, state: 'cancelled', content: 'Zero-call stop settled', terminalReason: 'run_stop_requested' })
     const second = await f.runs.create({ ...f.runInput, requestId: 'second-run-client-id' })
     const secondPaused = await f.runs.control({ runId: second.run.id, actorUserId: f.owner, action: 'pause', expectedRevision: second.run.revision, requestId: 'same-per-run-control-id' })

@@ -123,6 +123,16 @@ func (sm *SessionManager) restoreCollaborationClaude(auth *protocol.Collaboratio
 		return nil
 	}
 	permission := adapter.DefaultPermissionConfig(agent)
+	if auth.RequestedConfig != nil {
+		if b.ConfigRevision != auth.ConfigRevision || b.ConfigHash != auth.ConfigHash {
+			return nil
+		}
+		selected, err := teamPermission(agent, b.RuntimePermission)
+		if err != nil {
+			return nil
+		}
+		permission = *selected
+	}
 	env := append(os.Environ(), "POCKETCTL_SESSION_ID="+id)
 	if sm.approvalEnabled && sm.approvals != nil {
 		env = append(env, "POCKETCTL_APPROVAL_SOCK="+sm.approvals.SocketPath(), "POCKETCTL_PERM_MODE="+permission.Mode)
@@ -139,6 +149,10 @@ func (sm *SessionManager) restoreCollaborationClaude(auth *protocol.Collaboratio
 	}
 	ps.Source, ps.ClaudePrintSession, ps.ClaudePrintStarted = "daemon", true, true
 	ps.Permission, ps.ClaudePrintEnv = &permission, env
+	if auth.RequestedConfig != nil {
+		ps.Model = b.RuntimeModel
+		ps.Effort = b.RuntimeEffort
+	}
 	registerCwdKeyLocked(sm, id, normalizeCwd(cwd))
 	return ps
 }

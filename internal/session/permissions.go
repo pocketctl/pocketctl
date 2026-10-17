@@ -164,6 +164,9 @@ func (sm *SessionManager) SetPermissionConfig(sessionID string, cfg *protocol.Pe
 }
 
 func (sm *SessionManager) setPermissionConfig(ctx context.Context, sessionID string, cfg *protocol.PermissionConfig) error {
+	if sm.teamReadOnlySession(sessionID) && (cfg == nil || cfg.DangerousBypass || cfg.SandboxMode != "read-only") {
+		return fmt.Errorf("Team read-only runtime cannot grant write permissions")
+	}
 	_, release, err := sm.acquireObserverDrive(ctx, sessionID)
 	if err != nil {
 		return err

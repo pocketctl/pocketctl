@@ -7,6 +7,7 @@ import { teamBudgetStopsTotal, teamUncertainTotal } from '../metrics.js'
 interface TeamRunWorkerRepository {
   claimNext(workerId: string, leaseMs: number): ReturnType<TeamRunRepository['claimNext']>
   loadWork(runId: string, leaseToken: number): ReturnType<TeamRunRepository['loadWork']>
+  settleRound?: TeamRunRepository['settleRound']
   scheduleCall(input: Parameters<TeamRunRepository['scheduleCall']>[0]): ReturnType<TeamRunRepository['scheduleCall']>
   transition(input: Parameters<TeamRunRepository['transition']>[0]): ReturnType<TeamRunRepository['transition']>
   cancelPending(runId: string, leaseToken: number): Promise<number>
@@ -68,7 +69,7 @@ export class TeamRunWorker {
     return true
   }
 
-  private observeBudgetStop(runId: string, dimension: 'calls' | 'concurrency' | 'duration'): void {
+  private observeBudgetStop(runId: string, dimension: 'calls' | 'concurrency' | 'duration' | 'rounds'): void {
     teamBudgetStopsTotal.inc({ dimension })
     console.info('[team-observability] run budget stopped', { runId, reason: 'budget_exhausted', dimension })
   }
@@ -79,6 +80,7 @@ export class TeamRunWorker {
       scheduled = await this.options.repository.scheduleCall(input)
     } catch (error) {
       if (await this.handleContinuationError(input, error)) return
+      if(error instanceof TeamRepositoryError&&error.code==='team_feature_disabled'){await this.transition({...input,state:'blocked',terminalReason:'feature_disabled',content:'Run paused because discussion scheduling is disabled.'});return}
       if (error instanceof TeamRepositoryError && error.code === 'agent_unavailable') {
         await this.transition({ ...input, state: 'blocked', terminalReason: 'agent_unavailable', content: 'Run blocked because its target Agent is unavailable.' })
         return
@@ -148,7 +150,7 @@ export class TeamRunWorker {
     const workerOfferIds = snapshot.bindings.filter(binding => binding.callable && binding.offerId !== run.coordinator_offer_id).map(binding => binding.offerId)
 
     if (!latestCall || latestCall.runStep <= run.processed_call_step) {
-      await this.scheduleCoordinator(run, lease.leaseToken, workerOfferIds, latestCall?.runStep ?? 0, snapshot.latestMemberInput ?? undefined)
+      await this.scheduleCoordinator(run, lease.leaseToken, workerOfferIds, latestCall?.runStep ?? 0, latestCall?.runRole==='worker' ? latestCall.response??undefined : snapshot.latestMemberInput ?? undefined)
       return true
     }
     if (['pending', 'dispatched', 'accepted'].includes(latestCall.state)) {
@@ -161,6 +163,10 @@ export class TeamRunWorker {
       return true
     }
     if (latestCall.runRole === 'worker') {
+      if(run.mode && this.options.repository.settleRound) {
+        Object.assign(run,await this.options.repository.settleRound(run.id,lease.leaseToken,latestCall.runStep))
+        if((run.no_progress_count??0)>=2 && (run.max_rounds==null || (run.rounds_used??0)<run.max_rounds)){await this.transition({...transitionBase,state:'blocked',terminalReason:'no_progress',processedCallStep:latestCall.runStep,content:'Run blocked after two settled rounds without new structured evidence or conclusions.'});return true}
+      }
       const observation = latestCall.state === 'completed'
         ? `Agent ${latestCall.offerId} completed:\n${latestCall.response ?? '(no public response)'}`
         : `Agent ${latestCall.offerId} ended in state ${latestCall.state}: ${latestCall.outcome ?? 'no outcome'}`
@@ -190,6 +196,7 @@ export class TeamRunWorker {
         await this.transition({
           ...transitionBase, state: 'completed', terminalReason: 'coordinator_completed',
           processedCallStep: latestCall.runStep, content: decision.summary,
+          ...(decision.result ? {structuredResult:decision.result} : {}),
         })
       }
     } catch (error) {
@@ -203,6 +210,7 @@ export class TeamRunWorker {
   }
 
   private async scheduleCoordinator(run: TeamRun, leaseToken: number, allowedOfferIds: string[], processedCallStep: number, observation?: string): Promise<void> {
+    if(run.mode && run.max_rounds!=null && (run.rounds_used??0)>=run.max_rounds){await this.transition({runId:run.id,leaseToken,state:'failed',terminalReason:'rounds_exhausted',processedCallStep,content:'Run stopped at its frozen round limit.'});return}
     if (run.calls_used >= run.budget.max_calls) {
       this.observeBudgetStop(run.id, 'calls')
       await this.transition({
@@ -211,10 +219,12 @@ export class TeamRunWorker {
       })
       return
     }
+    if(run.mode && (run.no_progress_count??0)>=2){await this.transition({runId:run.id,leaseToken,state:'blocked',terminalReason:'no_progress',processedCallStep,content:'Run blocked after two settled rounds without new structured evidence or conclusions.'});return}
     await this.schedule({
       runId: run.id, leaseToken, offerId: run.coordinator_offer_id, role: 'coordinator', processedCallStep,
       content: coordinatorPrompt({
         contextVersion: run.context_version, allowedOfferIds,
+        mode:run.mode??undefined, roundsRemaining:run.max_rounds==null?undefined:Math.max(0,run.max_rounds-(run.rounds_used??0)),
         callsRemaining: Math.max(0, run.budget.max_calls - run.calls_used - 1), observation,
       }),
     })

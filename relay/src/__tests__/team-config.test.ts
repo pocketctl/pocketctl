@@ -84,6 +84,7 @@ describe('GET /api/team/capabilities', () => {
       schema_version: 1,
       contract_version: 'team-collaboration.v1',
       collaboration: true,
+      reads_enabled: true,
       autorun: false,
       memory_bridge: false,
       writes_enabled: true,

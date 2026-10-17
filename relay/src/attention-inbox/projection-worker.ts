@@ -87,7 +87,14 @@ export function createAttentionProjectionWorker(dependencies: AttentionProjectio
         // eligibility must keep this cursor ahead of a proposed cold range.
         // A reset/lagging projection therefore stops explicitly for repair.
         if (rawRow.body_storage === 'cold') throw new Error('attention projection cursor requires cold reconciliation')
-        const projection = projectAttentionEvent(mapEventRow(rawRow))
+        const mapped=mapEventRow(rawRow)
+        if(['claude-code','dsh'].includes(mapped.provider??'')) {
+          const trusted=await client.query(`SELECT 1 FROM collaboration_calls c JOIN team_agent_offers o ON o.offer_id=c.offer_id JOIN daemons d ON d.daemon_id=o.daemon_id AND d.user_id=o.owner_user_id
+            WHERE c.native_session_id=$1 AND o.owner_user_id=$2 AND o.daemon_id=$3
+              AND (($5::boolean AND d.collaboration_capabilities ? 'team_private_interactions_v2') OR ($4 IN ('approval_resolved','question_resolved') AND EXISTS(SELECT 1 FROM attention_items i WHERE i.session_id=$1 AND i.user_id=$2 AND i.daemon_id=$3 AND i.context->>'team_native_request'='true'))) LIMIT 1`,[mapped.sessionId,mapped.userId,mapped.daemonId,mapped.eventType,process.env.TEAM_PRIVATE_INTERACTIONS_V2==='on'])
+          if(trusted.rows[0])mapped.capabilities.push('team_private_interactions_v2')
+        }
+        const projection = projectAttentionEvent(mapped)
         if (projection) await dependencies.repository.applyProjection(client, projection)
       }
       if (events.rows.length > 0) {

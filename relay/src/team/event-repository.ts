@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
+import { TeamAgentConfigService } from './agent-config-service.js'
 
 import type { TeamEvent, TeamMessageTargetMode } from './types.js'
 
@@ -32,6 +33,7 @@ function iso(value: Date | string): string {
 export function teamEventView(row: any): TeamEvent {
   return {
     id: row.event_id,
+    request_id: row.request_id ?? null,
     team_session_id: row.team_session_id,
     event_seq: Number(row.event_seq),
     kind: row.kind,
@@ -112,30 +114,31 @@ export class TeamEventRepository {
     )
     const callIds: string[] = []
     for (const offerId of input.targetOfferIds) {
+      const frozen=await new TeamAgentConfigService(client as unknown as pg.Pool).freeze(client,input.teamSessionId,offerId,input.authorUserId)
       const callId = `ccl_${randomUUID()}`
       await client.query(
         `INSERT INTO collaboration_calls
           (call_id, team_session_id, event_id, offer_id, binding_id, context_version,
-           context_snapshot_hash, history_through_event_seq)
-         SELECT $1, $2, $3, $4, binding.binding_id, $5, context.content_hash, GREATEST($6::bigint - 1, 0)
+           context_snapshot_hash, history_through_event_seq,requested_config,config_revision,config_hash)
+         SELECT $1, $2, $3, $4, binding.binding_id, $5, context.content_hash, GREATEST($6::bigint - 1, 0),$7::jsonb,$8,$9
          FROM collaboration_session_agent_bindings
            binding
          LEFT JOIN collaboration_context_versions context
            ON context.team_session_id = binding.team_session_id AND context.version = $5
          WHERE binding.team_session_id = $2 AND binding.offer_id = $4 AND binding.state = 'active'`,
-        [callId, input.teamSessionId, eventId, offerId, input.contextVersion, Number(sequence.rows[0].latest_event_seq)],
+        [callId, input.teamSessionId, eventId, offerId, input.contextVersion, Number(sequence.rows[0].latest_event_seq),frozen ? JSON.stringify(frozen.requested_config):null,frozen?.config_revision??null,frozen?.config_hash??null],
       )
       callIds.push(callId)
     }
     return { event: teamEventView(inserted.rows[0]), call_ids: callIds }
   }
 
-  async listEvents(db: Pick<pg.Pool, 'query'>, teamSessionId: string, afterSeq: number, limit: number): Promise<{ events: TeamEvent[]; next_cursor: number | null }> {
+  async listEvents(db: Pick<pg.Pool, 'query'>, teamSessionId: string, afterSeq: number, limit: number, highWater?: number): Promise<{ events: TeamEvent[]; next_cursor: number | null }> {
     const result = await db.query(
       `SELECT * FROM collaboration_events
-       WHERE team_session_id = $1 AND event_seq > $2
+       WHERE team_session_id = $1 AND event_seq > $2 AND ($4::bigint IS NULL OR event_seq <= $4)
        ORDER BY event_seq ASC LIMIT $3`,
-      [teamSessionId, afterSeq, limit + 1],
+      [teamSessionId, afterSeq, limit + 1, highWater ?? null],
     )
     const hasMore = result.rows.length > limit
     const rows = hasMore ? result.rows.slice(0, limit) : result.rows

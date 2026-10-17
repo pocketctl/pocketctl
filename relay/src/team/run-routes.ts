@@ -94,13 +94,18 @@ export function registerTeamRunRoutes(app: FastifyInstance, deps: Dependencies):
     const coordinatorOfferId = typeof parsed.parsed.coordinator_offer_id === 'string' ? parsed.parsed.coordinator_offer_id : ''
     const contextVersion = Number(parsed.parsed.context_version)
     const budget = parseBudget(parsed.parsed.budget)
+    const mode=parsed.parsed.mode as import('./types.js').TeamRunMode|undefined
+    if(mode && deps.config.discussionsV2!=='on')return fail(reply,503,'team_feature_disabled','Discussion modes disabled',true)
+    const participants=parsed.parsed.participant_offer_ids
+    const maxRounds=parsed.parsed.max_rounds
+    if(mode!==undefined && (!['discussion','review','execute'].includes(mode)||!Array.isArray(participants)||participants.length<2||participants.length>16||!participants.every(id=>typeof id==='string')||new Set(participants).size!==participants.length||!participants.includes(coordinatorOfferId)||(maxRounds!==undefined&&(!Number.isSafeInteger(maxRounds)||Number(maxRounds)<1||Number(maxRounds)>20)))) return fail(reply,400,'invalid_request','invalid discussion mode, participants or rounds')
     if (!coordinatorOfferId || !Number.isSafeInteger(contextVersion) || contextVersion < 1 || budget === null) {
       return fail(reply, 400, 'invalid_request', 'coordinator_offer_id, context_version, or budget is invalid')
     }
     try {
       const run = await deps.service.create({
         sessionId: param(request.params, 'sessionId'), actorUserId: identity.userId,
-        coordinatorOfferId, contextVersion, budget, requestId: parsed.requestId,
+        coordinatorOfferId, contextVersion, budget, ...(mode ? {mode,participantOfferIds:participants as string[],maxRounds:maxRounds===undefined?3:Number(maxRounds)} : {}), requestId: parsed.requestId,
       })
       reply.code(201)
       return { run }

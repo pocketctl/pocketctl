@@ -26,8 +26,8 @@ describe('Team shared-session creation',()=>{
    await wrapper.get('select').setValue('open');await wrapper.findAll('.offer-choice input')[0].setValue(true);await wrapper.findAll('.person-choice input')[1].setValue(true)
    expect(wrapper.get('button[form="team-shared-session-create-form"]').attributes('type')).toBe('submit')
    await wrapper.get('form').trigger('submit');await flushPromises()
-   expect(api.createTeamSession).toHaveBeenCalledWith('team',{title:'New session',offerIDs:['online'],taskID:'open'})
-   expect(api.setTeamSessionParticipant).toHaveBeenCalledWith(session,8,true)
+   expect(api.createTeamSession).toHaveBeenCalledWith('team',expect.objectContaining({title:'New session',offerIDs:['online'],taskID:'open',participantUserIDs:expect.arrayContaining([8])}))
+   expect(api.setTeamSessionParticipant).not.toHaveBeenCalled()
    expect(api.createTeamContext).toHaveBeenCalledWith('created-session',expect.objectContaining({goal:'Discuss scope',expectedRevision:0}))
    expect(router.currentRoute.value.name).toBe('team-session')
   }finally{wrapper.unmount()}
@@ -42,7 +42,7 @@ describe('Team shared-session creation',()=>{
    expect(wrapper.get('[data-testid="team-session-title"]').attributes('disabled')).toBeDefined()
    expect(wrapper.text()).toContain('重试剩余设置');expect(wrapper.text()).toContain('打开已创建的会话')
    await wrapper.get('form').trigger('submit');await flushPromises()
-   expect(api.createTeamSession).toHaveBeenCalledTimes(1);expect(api.setTeamSessionParticipant).toHaveBeenCalledTimes(1)
+   expect(api.createTeamSession).toHaveBeenCalledTimes(1);expect(api.setTeamSessionParticipant).not.toHaveBeenCalled()
    expect(api.getTeamContext).toHaveBeenCalledWith('created-session');expect(api.createTeamContext).toHaveBeenCalledTimes(2)
    expect(router.currentRoute.value.name).toBe('team-session')
   }finally{wrapper.unmount()}

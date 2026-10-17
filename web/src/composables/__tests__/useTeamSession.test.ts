@@ -7,9 +7,12 @@ const api = vi.hoisted(() => ({
   getTeamContext: vi.fn(), getTeamSession: vi.fn(), getTeamTask: vi.fn(), listTeamEvents: vi.fn(),
   listTeamCalls: vi.fn(), listTeamRuns: vi.fn(), setTeamSessionAgentBinding: vi.fn(), supplementTeamRun: vi.fn(),
 }))
+const outboxFixture=vi.hoisted(()=>({data:new Map<string,any>()}))
 const ws = vi.hoisted(() => ({ handlers: new Map<string, (message: any) => void>() }))
 
 vi.mock('../../services/teamClient', () => api)
+vi.mock('../useAuth',()=>({useAuth:()=>({user:{value:{id:7}}})}))
+vi.mock('../../services/teamOutbox',async()=>{const actual=await vi.importActual<any>('../../services/teamOutbox');const data=outboxFixture.data;return {...actual,teamOutbox:{list:async(scope:string)=>[...data.values()].filter((p:any)=>p.scope===scope),put:async(p:any)=>{data.set(p.key,JSON.parse(JSON.stringify(p)))},remove:async(k:string)=>{data.delete(k)},blockScope:async(scope:string)=>{for(const row of data.values())if(row.scope===scope&&row.state==='queued')row.state='failed'}}}})
 vi.mock('../useWebSocket', () => ({
   useWebSocket: () => ({
     connect: vi.fn(), connected: { value: true }, subscribeTeamSession: vi.fn(), unsubscribeTeamSession: vi.fn(),
@@ -38,9 +41,22 @@ function run(id: string, sessionID: string, revision: number, state: 'running' |
 }
 
 describe('useTeamSession run recovery', () => {
+  test('retains authorized history when a rolled-back Relay refuses subscriptions', async () => {
+    api.listTeamRuns.mockResolvedValue([])
+    let state!: ReturnType<typeof useTeamSession>
+    const wrapper=mount(defineComponent({setup(){state=useTeamSession(ref('ctm_1'),ref('css_1'));return()=>h('div')}}))
+    await flushPromises()
+    api.getTeamCapabilities.mockResolvedValue({collaboration:false,writes_enabled:false,reads_enabled:true})
+    ws.handlers.get('team_collaboration_subscription_error')?.({team_session_id:'css_1',error:'not_found'})
+    await flushPromises()
+    expect(state.session.value?.id).toBe('css_1')
+    expect(state.canSend.value).toBe(false)
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.useFakeTimers()
     ws.handlers.clear()
+    outboxFixture.data.clear()
     api.getTeamCapabilities.mockResolvedValue({ schema_version: 1, contract_version: 'team-collaboration.v1', collaboration: true, autorun: true, memory_bridge: false, writes_enabled: true })
     api.getTeamContext.mockImplementation(async (sessionID: string, version?: number) => ({
       id: `ctx-${sessionID}-${version ?? 1}`, team_session_id: sessionID, version: version ?? 1, revision: 1,
@@ -107,7 +123,8 @@ describe('useTeamSession run recovery', () => {
     expect(api.appendTeamMessage).not.toHaveBeenCalled()
     expect(state.draft.value).toBe('Offline discussion')
     expect(await state.sendMessage({ targetMode: 'discussion' })).toBe(true)
-    expect(api.appendTeamMessage).toHaveBeenCalledWith('css_1', { content: 'Offline discussion', targetMode: 'discussion' })
+    await flushPromises()
+    expect(api.appendTeamMessage).toHaveBeenCalledWith('css_1',expect.objectContaining({content:'Offline discussion',targetMode:'discussion',requestID:expect.any(String)}))
     expect(state.draft.value).toBe('')
     state.session.value!.state = 'paused'
     state.draft.value = 'Keep draft'

@@ -10,6 +10,8 @@ import type { TeamContextReference, TeamMessageTargetMode, TeamProvider, TeamSes
 interface Dependencies {
   config: TeamCollaborationConfig
   service: TeamSessionService
+  readStateService?: import('./read-state-service.js').TeamReadStateService
+  agentConfigService?: import('./agent-config-service.js').TeamAgentConfigService
   contextService?: TeamContextService
   verifyAccessToken(token: string): Promise<{ userId: number } | null>
   getDatabaseReady?: () => boolean
@@ -44,7 +46,7 @@ function body(value: unknown): Record<string, unknown> | null {
 function mutation(value: unknown, reply: Reply, revision = true) {
   const parsed = body(value)
   if (!parsed) return { error: fail(reply, 400, 'invalid_request', 'JSON object body required') }
-  if (['actor_user_id', 'author_user_id', 'owner_user_id', 'creator_user_id'].some(key => key in parsed)) return { error: fail(reply, 400, 'invalid_request', 'client-supplied identity fields are not allowed') }
+  if (['actor_user_id', 'author_user_id', 'owner_user_id', 'creator_user_id','user_id'].some(key => key in parsed)) return { error: fail(reply, 400, 'invalid_request', 'client-supplied identity fields are not allowed') }
   const requestId = typeof parsed.request_id === 'string' ? parsed.request_id.trim() : ''
   if (!requestId || requestId.length > 128) return { error: fail(reply, 400, 'invalid_request', 'valid request_id is required') }
   if (revision && (!Number.isSafeInteger(parsed.expected_revision) || Number(parsed.expected_revision) < 1)) return { error: fail(reply, 400, 'invalid_request', 'expected_revision must be a positive integer') }
@@ -53,6 +55,14 @@ function mutation(value: unknown, reply: Reply, revision = true) {
 function param(params: unknown, key: string) {
   const value = (params as Record<string, unknown> | null)?.[key]
   return typeof value === 'string' ? value : ''
+}
+
+function validConfig(value: unknown): boolean {
+  const c = body(value)
+  if (!c || Object.keys(c).some(k=>!['mode','override','capability_revision','request_id','expected_config_revision'].includes(k)) || !['default','custom'].includes(String(c.mode))) return false
+  if (c.capability_revision !== undefined && typeof c.capability_revision !== 'string') return false
+  const override = c.override === undefined ? {} : body(c.override)
+  return override !== null && Object.entries(override).every(([k,v]) => ['model','permission_profile'].includes(k) ? typeof v === 'string' && v.length > 0 : k === 'reasoning_effort' && (v === null || typeof v === 'string'))
 }
 
 export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependencies): void {
@@ -70,10 +80,18 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
     const parsed = mutation(request.body, reply, false); if ('error' in parsed) return parsed.error
     const title = typeof parsed.parsed.title === 'string' ? parsed.parsed.title.trim() : ''
     const taskId = parsed.parsed.task_id === undefined || parsed.parsed.task_id === null ? null : typeof parsed.parsed.task_id === 'string' ? parsed.parsed.task_id : undefined
-    const offerIds = Array.isArray(parsed.parsed.offer_ids) ? parsed.parsed.offer_ids.filter((id): id is string => typeof id === 'string') : []
-    if (!title || title.length > 240 || taskId === undefined || offerIds.length === 0 || offerIds.length > 16) return fail(reply, 400, 'invalid_request', 'title, task_id, or offer_ids is invalid')
+    const agentConfigs = parsed.parsed.agent_configs
+    const offerIds = parsed.parsed.offer_ids ?? []
+    const participantUserIds = parsed.parsed.participant_user_ids ?? []
+    if (!title || title.length > 240 || taskId === undefined
+      || !Array.isArray(offerIds) || offerIds.length > 16 || !offerIds.every(id => typeof id === 'string' && id.length > 0)
+      || !Array.isArray(participantUserIds) || participantUserIds.length > 100 || !participantUserIds.every(id => Number.isSafeInteger(id) && id > 0)) {
+      return fail(reply, 400, 'invalid_request', 'title, task_id, offer_ids, or participant_user_ids is invalid')
+    }
+    if(agentConfigs!==undefined&&body(agentConfigs)&&Object.keys(agentConfigs as object).length&&deps.config.agentConfig!=='on')return fail(reply,503,'team_feature_disabled','Agent configuration is disabled',true)
+    if (agentConfigs !== undefined && (!body(agentConfigs) || Object.values(agentConfigs as object).some(c => !validConfig(c)))) return fail(reply,400,'invalid_request','invalid Agent configuration')
     try {
-      const session = await deps.service.createSession({ teamId: param(request.params, 'teamId'), actorUserId: identity.userId, title, taskId, offerIds: [...new Set(offerIds)], requestId: parsed.requestId })
+      const session = await deps.service.createSession({ teamId: param(request.params, 'teamId'), actorUserId: identity.userId, title, taskId, offerIds: [...new Set(offerIds)], participantUserIds: [...new Set(participantUserIds)], ...(agentConfigs === undefined ? {} : {agentConfigs:agentConfigs as Parameters<TeamSessionService['createSession']>[0]['agentConfigs']}), requestId: parsed.requestId })
       reply.code(201); return { session }
     } catch (error) { return mapError(error, reply) }
   })
@@ -115,6 +133,28 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
     })
   }
 
+  app.post('/api/team/sessions/:sessionId/tasks',async(request,reply)=>{
+    const identity=await actor(request.headers.authorization,reply,deps);if('error' in identity)return identity.error
+    const disabled=writable(reply,deps);if(disabled)return disabled
+    const parsed=mutation(request.body,reply,false);if('error' in parsed)return parsed.error
+    const b=parsed.parsed
+    if(typeof b.instruction!=='string'||!b.instruction.trim()||typeof b.acceptance!=='string'||!b.acceptance.trim()
+      ||!Array.isArray(b.target_offer_ids)||!b.target_offer_ids.length||b.target_offer_ids.length>16||!b.target_offer_ids.every(id=>typeof id==='string')
+      ||!Number.isSafeInteger(b.context_version)||Number(b.context_version)<0||(b.reference_event_id!=null&&typeof b.reference_event_id!=='string'))return fail(reply,400,'invalid_request','instruction, acceptance, targets and materials version required')
+    try{const result=await deps.service.assignTask({sessionId:param(request.params,'sessionId'),actorUserId:identity.userId,requestId:parsed.requestId,instruction:b.instruction.trim(),acceptance:b.acceptance.trim(),targetOfferIds:b.target_offer_ids,contextVersion:Number(b.context_version),referenceEventId:b.reference_event_id as string|null|undefined});reply.code(201);return result}catch(e){return mapError(e,reply)}
+  })
+
+  app.get('/api/team/sessions/:sessionId/messages/by-request/:requestId',async(request,reply)=>{
+    const identity=await actor(request.headers.authorization,reply,deps);if('error' in identity)return identity.error
+    try{return await deps.service.messageByRequest(param(request.params,'sessionId'),identity.userId,param(request.params,'requestId'))}catch(e){return mapError(e,reply)}
+  })
+  if(deps.readStateService) app.put('/api/team/sessions/:sessionId/read-position',async(request,reply)=>{
+    const identity=await actor(request.headers.authorization,reply,deps);if('error' in identity)return identity.error
+    const b=body(request.body)
+    if(!b||!Number.isSafeInteger(b.event_seq)||Number(b.event_seq)<0)return fail(reply,400,'invalid_request','valid event_seq required')
+    try{return await deps.readStateService!.advance(param(request.params,'sessionId'),identity.userId,Number(b.event_seq))}catch(e){return mapError(e,reply)}
+  })
+
   app.get('/api/team/sessions/:sessionId/calls', async (request, reply) => {
     const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
     try { return { calls: await deps.service.listCalls(param(request.params, 'sessionId'), identity.userId) } }
@@ -136,7 +176,9 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
     const parsed = mutation(request.body, reply, false); if ('error' in parsed) return parsed.error
     const content = typeof parsed.parsed.content === 'string' ? parsed.parsed.content.trim() : ''
     const targetMode = parsed.parsed.target_mode as TeamMessageTargetMode
-    const targetOfferIds = Array.isArray(parsed.parsed.target_offer_ids) ? parsed.parsed.target_offer_ids.filter((id): id is string => typeof id === 'string') : []
+    const rawTargets=parsed.parsed.target_offer_ids
+    if(rawTargets!==undefined && (!Array.isArray(rawTargets)||!rawTargets.every((id:unknown)=>typeof id==='string')))return fail(reply,400,'invalid_request','target_offer_ids must contain strings')
+    const targetOfferIds = (rawTargets??[]) as string[]
     const referenceEventId = parsed.parsed.reference_event_id === undefined || parsed.parsed.reference_event_id === null ? null : typeof parsed.parsed.reference_event_id === 'string' ? parsed.parsed.reference_event_id : undefined
     if (!content || content.length > 64_000 || !['offers', 'all', 'discussion'].includes(targetMode) || referenceEventId === undefined) return fail(reply, 400, 'invalid_request', 'message content or targets are invalid')
     try {
@@ -144,6 +186,38 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
       reply.code(201); return result
     } catch (error) { return mapError(error, reply) }
   })
+
+  if (deps.agentConfigService) {
+    app.put('/api/team/teams/:teamId/agents/:offerId/config-policy',async(request,reply)=>{
+      const identity=await actor(request.headers.authorization,reply,deps);if('error' in identity)return identity.error
+      const disabled=writable(reply,deps);if(disabled)return disabled
+      if(deps.config.agentConfig!=='on')return fail(reply,503,'team_feature_disabled','Agent configuration disabled',true)
+      const parsed=mutation(request.body,reply,false);if('error' in parsed)return parsed.error
+      const b=parsed.parsed
+      if(Object.keys(b).some(k=>!['request_id','expected_policy_revision','overridable_fields'].includes(k))||!Number.isSafeInteger(b.expected_policy_revision)||Number(b.expected_policy_revision)<1||!Array.isArray(b.overridable_fields)||!b.overridable_fields.every(f=>typeof f==='string'&&['model','reasoning_effort'].includes(f)))return fail(reply,400,'invalid_request','invalid sharing policy')
+      try{return await deps.agentConfigService!.updatePolicy({teamId:param(request.params,'teamId'),offerId:param(request.params,'offerId'),actorUserId:identity.userId,requestId:parsed.requestId,expectedRevision:Number(b.expected_policy_revision),fields:b.overridable_fields as string[]})}catch(error){return mapError(error,reply)}
+    })
+    app.get('/api/team/teams/:teamId/agents/:offerId/capabilities',async (request,reply) => {
+      if(deps.config.agentConfig!=='on')return fail(reply,503,'team_feature_disabled','Agent configuration disabled',true)
+      const identity = await actor(request.headers.authorization,reply,deps); if ('error' in identity) return identity.error
+      try {return {capabilities:await deps.agentConfigService!.offerCapabilities(param(request.params,'teamId'),param(request.params,'offerId'),identity.userId)}} catch(e) {return mapError(e,reply)}
+    })
+    app.get('/api/team/sessions/:sessionId/agent-bindings/:offerId/capabilities',async (request,reply) => {
+      if(deps.config.agentConfig!=='on')return fail(reply,503,'team_feature_disabled','Agent configuration disabled',true)
+      const identity = await actor(request.headers.authorization,reply,deps); if ('error' in identity) return identity.error
+      try {return {capabilities:await deps.agentConfigService!.capabilities(param(request.params,'sessionId'),param(request.params,'offerId'),identity.userId)}} catch(e) {return mapError(e,reply)}
+    })
+    app.put('/api/team/sessions/:sessionId/agent-bindings/:offerId/config',async (request,reply) => {
+      if(deps.config.agentConfig!=='on')return fail(reply,503,'team_feature_disabled','Agent configuration disabled',true)
+      const identity = await actor(request.headers.authorization,reply,deps); if ('error' in identity) return identity.error
+      const disabled = writable(reply,deps); if (disabled) return disabled
+      const parsed = mutation(request.body,reply,false); if ('error' in parsed) return parsed.error
+      const b = parsed.parsed
+      if (!validConfig(b) || !Number.isSafeInteger(b.expected_config_revision) || Number(b.expected_config_revision)<1 || typeof b.capability_revision !== 'string') return fail(reply,400,'invalid_request','invalid configuration revision or body')
+      try {return {config:await deps.agentConfigService!.update({sessionId:param(request.params,'sessionId'),offerId:param(request.params,'offerId'),actorUserId:identity.userId,requestId:parsed.requestId,
+        expectedRevision:Number(b.expected_config_revision),mode:b.mode as 'default'|'custom',override:(b.override ?? {}) as import('./types.js').TeamRuntimeConfig,capabilityRevision:b.capability_revision})}} catch(e) {return mapError(e,reply)}
+    })
+  }
 
   if (deps.contextService) {
     app.get('/api/team/sessions/:sessionId/context', async (request, reply) => {

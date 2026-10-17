@@ -13,7 +13,7 @@ import { nextTick, onBeforeUnmount, onMounted, onUpdated, ref } from 'vue'
 import WorkspaceIcon from './WorkspaceIcon.vue'
 import { useLocale } from '../composables/useLocale'
 import '../assets/action-list.css'
-const props = withDefaults(defineProps<{ title: string; anchor?: HTMLElement | null; width?: number; back?: boolean; closeLabel?: string; mobileSheet?: boolean }>(), { width: 340, back: false })
+const props = withDefaults(defineProps<{ title: string; anchor?: HTMLElement | null; width?: number; back?: boolean; closeLabel?: string; mobileSheet?: boolean; preferAbove?:boolean }>(), { width: 340, back: false })
 const emit = defineEmits<{ close: []; back: [] }>()
 const { t } = useLocale()
 const panel = ref<HTMLElement>(), position = ref<Record<string, string>>({})
@@ -37,8 +37,12 @@ function place() {
   const rect = anchor?.isConnected ? anchor.getBoundingClientRect() : null
   const height = Math.min(panel.value.scrollHeight, window.innerHeight - 32)
   const left = rect ? Math.max(10, Math.min(rect.right - width, window.innerWidth - width - 10)) : (window.innerWidth - width) / 2
-  const top = rect ? Math.max(10, Math.min(rect.bottom + 6, window.innerHeight - height - 10)) : Math.max(16, Math.min(80, (window.innerHeight - height) / 2))
-  const next = { width: `${width}px`, left: `${left}px`, top: `${top}px`, maxHeight: `${window.innerHeight - top - 10}px` }
+  const above=rect ? Math.max(0,rect.top-16):0,below=rect ? Math.max(0,window.innerHeight-rect.bottom-16):0
+  const useAbove=!!rect && ((props.preferAbove && above>=Math.min(height,240)) || (below<height && above>below))
+  const available=rect ? (useAbove?above:below) : window.innerHeight-32
+  const actualHeight=Math.min(height,Math.max(120,available))
+  const top=rect ? (useAbove?Math.max(10,rect.top-actualHeight-6):Math.max(10,Math.min(rect.bottom+6,window.innerHeight-actualHeight-10))) : Math.max(16,(window.innerHeight-actualHeight)/2)
+  const next = { width: `${width}px`, left: `${left}px`, top: `${top}px`, maxHeight: `${actualHeight}px` }
   if (JSON.stringify(next) !== JSON.stringify(position.value)) position.value = next
 }
 function outside(event: PointerEvent) {

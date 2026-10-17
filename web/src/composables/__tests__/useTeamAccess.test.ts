@@ -5,6 +5,11 @@ import type { TeamCapabilities } from '../../types/team'
 
 const allowed: TeamCapabilities = { schema_version: 1, contract_version: 'team-collaboration.v1', collaboration: true, autorun: true, memory_bridge: false, writes_enabled: true }
 describe('Team account capability cache', () => {
+  test('keeps authorized history visible when application writes are rolled back', async () => {
+    const access = createTeamAccessController(ref('alice'), async () => ({ ...allowed, collaboration: false, reads_enabled: true, writes_enabled: false }))
+    expect(await access.refresh()).toBe(true)
+    expect(access.capabilities.value?.writes_enabled).toBe(false)
+  })
   test('starts closed, reflects grant/revoke and fails closed on a network error', async () => {
     const token = ref('alice')
     let response: TeamCapabilities | Error = allowed

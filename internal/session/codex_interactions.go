@@ -308,6 +308,15 @@ func (c *codexInteractions) handleApproval(message codexapp.Inbound, kind string
 	for _, decision := range available {
 		pending.available[decision] = struct{}{}
 	}
+	if c.sm.teamReadOnlySession(params.ThreadID) {
+		// A read-only Team run cannot turn a sandbox denial into an owner
+		// approval that grants writes or broader filesystem permissions.
+		result, _, err := codexApprovalResponse(pending, "reject")
+		if err == nil {
+			_ = c.client.Respond(pending.requestID, result, nil)
+		}
+		return
+	}
 	release, open := c.beginLifecycle(params.ThreadID)
 	if !open {
 		return

@@ -30,16 +30,18 @@
             <div><strong>{{ run.budget.max_concurrent_calls }}</strong><span> {{ t('workspace.concurrency_limit') }} </span></div>
             <div><strong>{{ durationLabel }}</strong><span> {{ t('workspace.duration_limit') }} </span></div>
           </div>
+          <p v-if="run.max_rounds">轮次 {{ run.rounds_used }} / {{ run.max_rounds }} · {{ run.mode }}</p>
           <p class="deadline">{{ t('workspace.run_deadline', {date:formatDate(run.deadline_at)}) }}</p>
         </section>
 
+        <section v-if="run.structured_result"><small>讨论结论</small><p>{{ run.structured_result.conclusion }}</p><p v-if="run.structured_result.todo.length">待办：{{ run.structured_result.todo.join('；') }}</p><p v-if="run.structured_result.disagreements.length">分歧：{{ run.structured_result.disagreements.join('；') }}</p></section>
         <section class="task-boundary">
           <small> {{ t('workspace.user_task_state') }} </small>
           <div><strong>{{ task?.title || t('workspace.no_linked_task') }}</strong><span>{{ task ? taskStateLabel(task.state) : '—' }}</span></div>
           <p> {{ t('workspace.task_state_boundary') }} </p>
         </section>
 
-        <section v-if="run.state === 'waiting_input'" class="input-request" data-testid="team-run-input-request">
+        <section v-if="run.state === 'waiting_input' || run.terminal_reason === 'no_progress'" class="input-request" data-testid="team-run-input-request">
           <small> {{ t('workspace.coordinator_needs_input') }} </small>
           <strong>{{ run.waiting_question || t('workspace.provide_run_input') }}</strong>
           <textarea v-model="supplement" rows="3" :disabled="busy" :placeholder="t('workspace.supplement_placeholder')" />
@@ -54,7 +56,7 @@
             <button v-if="!run.stop_requested" type="button" class="danger-action" :disabled="busy" @click="$emit('control', 'cancel')"> {{ t('workspace.request_stop') }} </button>
           </div>
           <button v-else type="button" :disabled="busy" @click="$emit('suggest-pause')"> {{ t('workspace.suggest_pause') }} </button>
-          <p v-if="run.state === 'blocked' && !canResume"> {{ t('workspace.unknown_call_hint') }} </p>
+          <p v-if="run.state === 'blocked' && !canResume && run.terminal_reason!=='no_progress'"> {{ t('workspace.unknown_call_hint') }} </p>
         </section>
       </template>
 
@@ -62,7 +64,10 @@
         <small>{{ run ? t('workspace.new_run') : t('workspace.start_autorun') }}</small>
         <p>{{ currentContext ? currentContext.goal : t('workspace.create_context_first') }}</p>
         <label> {{ t('workspace.coordinator_agent') }} <ActionSelect><select v-model="selectedCoordinator" :disabled="busy || !autorunEnabled"><option value=""> {{ t('workspace.select_available_agent') }} </option><option v-for="binding in callableBindings" :key="binding.id" :value="binding.offer_id">{{ bindingLabel(binding) }}</option></select></ActionSelect></label>
-        <button type="button" :disabled="busy || !autorunEnabled || !currentContext || !selectedCoordinator" @click="$emit('start', selectedCoordinator)"> {{ t('workspace.start_bounded_run') }} </button>
+        <label>模式<ActionSelect><select v-model="discussionMode"><option value="discussion">方案讨论（只读）</option><option value="review">交叉评审（只读）</option><option value="execute">协作执行</option></select></ActionSelect></label>
+        <fieldset><legend>参与 Agent（至少两位）</legend><label v-for="binding in callableBindings" :key="binding.id"><input :checked="selectedParticipants.includes(binding.offer_id)" type="checkbox" :value="binding.offer_id" @change="toggleParticipant(binding.offer_id,($event.target as HTMLInputElement).checked)" />{{ bindingLabel(binding) }}</label></fieldset>
+        <label>最多轮次<input v-model.number="maxRounds" type="number" min="1" max="20" /></label><p>默认 3 轮、20 次调用、30 分钟，并发上限 2；协调者计入预算。</p>
+        <button type="button" :disabled="busy || !autorunEnabled || !currentContext || !selectedCoordinator || selectedParticipants.length<2 || !selectedParticipants.includes(selectedCoordinator)" @click="startDiscussion"> {{ t('workspace.start_bounded_run') }} </button>
         <p v-if="!autorunEnabled" class="notice"> {{ t('workspace.autorun_disabled') }} </p>
       </section>
 
@@ -105,7 +110,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   close: []
-  start: [coordinatorOfferID: string]
+  start: [coordinatorOfferID: string,options?:{mode:import('../../types/team').TeamRunMode;participantOfferIDs:string[];maxRounds:number;budget:{max_calls:number;max_concurrent_calls:number;max_duration_seconds:number};requestID:string}]
   control: [action: 'pause' | 'resume' | 'cancel']
   supplement: [content: string]
   'suggest-pause': []
@@ -115,13 +120,17 @@ const emit = defineEmits<{
 const supplement = ref('')
 const supplementSubmitting = ref(false)
 const selectedCoordinator = ref('')
+const discussionMode=ref<import('../../types/team').TeamRunMode>('discussion'),selectedParticipants=ref<string[]>([]),maxRounds=ref(3)
+let discussionRequestID=crypto.randomUUID(),discussionSignature=''
+function toggleParticipant(id:string,checked:boolean){selectedParticipants.value=checked?[...new Set([...selectedParticipants.value,id])]:selectedParticipants.value.filter(value=>value!==id)}
+function startDiscussion(){const signature=JSON.stringify([selectedCoordinator.value,discussionMode.value,[...selectedParticipants.value].sort(),maxRounds.value,props.currentContext?.version]);if(signature!==discussionSignature){discussionSignature=signature;discussionRequestID=crypto.randomUUID()};emit('start',selectedCoordinator.value,{mode:discussionMode.value,participantOfferIDs:selectedParticipants.value,maxRounds:maxRounds.value,budget:{max_calls:20,max_concurrent_calls:2,max_duration_seconds:1800},requestID:discussionRequestID})}
 const callableBindings = computed(() => props.session.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online'))
 const isCreator = computed(() => props.session.creator_user_id === props.currentUserId)
 const terminal = computed(() => Boolean(props.run && ['completed', 'failed', 'cancelled'].includes(props.run.state)))
 const coordinator = computed(() => props.session.agent_bindings.find(binding => binding.offer_id === props.run?.coordinator_offer_id))
 const coordinatorLabel = computed(() => coordinator.value ? bindingLabel(coordinator.value) : `Agent ${props.run?.coordinator_offer_id ?? ''}`)
 const coordinatorAvailability = computed(() => coordinator.value?.availability === 'access_disabled' ? t('team.availability.access_disabled') : coordinator.value?.availability ?? t('workspace.removed'))
-const canResume = computed(() => props.run?.terminal_reason !== 'dispatch_uncertain' && props.run?.terminal_reason !== 'run_deadline_reconcile_required')
+const canResume = computed(() => props.run?.terminal_reason !== 'dispatch_uncertain' && props.run?.terminal_reason !== 'run_deadline_reconcile_required' && props.run?.terminal_reason !== 'no_progress')
 const durationLabel = computed(() => {
   const seconds = props.run?.budget.max_duration_seconds ?? 0
   return seconds >= 3_600 && seconds % 3_600 === 0 ? t('workspace.hours_count', {count:seconds / 3_600}) : t('workspace.minutes_count', {count:Math.ceil(seconds / 60)})

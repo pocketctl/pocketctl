@@ -23,15 +23,20 @@ var (
 )
 
 type collaborationNativeBinding struct {
-	NativeSessionID string
-	TeamSessionID   string
-	BindingID       string
-	BindingRevision int64
-	OfferID         string
-	OfferRevision   int64
-	OwnerUserID     int
-	DaemonID        string
-	Agent           string
+	RuntimeModel      string
+	RuntimeEffort     string
+	RuntimePermission string
+	ConfigRevision    int64
+	ConfigHash        string
+	NativeSessionID   string
+	TeamSessionID     string
+	BindingID         string
+	BindingRevision   int64
+	OfferID           string
+	OfferRevision     int64
+	OwnerUserID       int
+	DaemonID          string
+	Agent             string
 }
 
 func ValidateCollaborationAuthorization(auth *protocol.CollaborationAuthorization, operation string) error {
@@ -245,6 +250,10 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err := ValidateCollaborationAuthorization(auth, "create"); err != nil {
 		return "", err
 	}
+	permission, err := sm.validateTeamConfig(ctx, auth, agent)
+	if err != nil {
+		return "", err
+	}
 	if agent != adapter.AgentCodex && agent != adapter.AgentClaude && agent != adapter.AgentDSH {
 		return "", fmt.Errorf("%w: unsupported provider", ErrCollaborationAuthorization)
 	}
@@ -263,18 +272,41 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if sm.collaborationCalls == nil {
 		sm.collaborationCalls = make(map[string]string)
 	}
-	if _, exists := sm.collaborationBindings[auth.BindingID]; exists {
-		sm.collaborationMu.Unlock()
-		return "", ErrCollaborationBinding
+	if old, exists := sm.collaborationBindings[auth.BindingID]; exists {
+		if auth.RequestedConfig == nil || (old.ConfigRevision > auth.ConfigRevision || (old.ConfigRevision == auth.ConfigRevision && old.ConfigHash == auth.ConfigHash)) || old.TeamSessionID != auth.TeamSessionID || old.OwnerUserID != auth.OwnerUserID || old.OfferID != auth.OfferID || old.DaemonID != auth.DaemonID {
+			sm.collaborationMu.Unlock()
+			return "", ErrCollaborationBinding
+		}
+		sm.mu.RLock()
+		ps := sm.sessions[old.NativeSessionID]
+		busy := ps != nil && (ps.Status == protocol.StatusRunning || ps.Status == protocol.StatusBusy || ps.Status == protocol.StatusRetry || ps.Status == protocol.StatusWaitingApproval || ps.Status == protocol.StatusWaitingQuestion)
+		sm.mu.RUnlock()
+		if busy {
+			sm.collaborationMu.Unlock()
+			return "", ErrCollaborationSessionBusy
+		}
+		if err := sm.disposeFailedCollaborationSession(old, collaborationWorkspace(roots[0], auth.BindingID), ps); err != nil {
+			sm.collaborationMu.Unlock()
+			return "", err
+		}
+		delete(sm.collaborationBindings, auth.BindingID)
 	}
 	if _, exists := sm.collaborationCalls[auth.CallID]; exists {
 		sm.collaborationMu.Unlock()
 		return "", ErrCollaborationDuplicateCall
 	}
 	binding := collaborationNativeBinding{
+		ConfigRevision: auth.ConfigRevision, ConfigHash: auth.ConfigHash,
 		NativeSessionID: "creating", TeamSessionID: auth.TeamSessionID, BindingID: auth.BindingID,
 		BindingRevision: auth.BindingRevision, OfferID: auth.OfferID, OfferRevision: auth.OfferRevision,
 		OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: agent,
+	}
+	if auth.RequestedConfig != nil {
+		binding.RuntimeModel = auth.RequestedConfig.Model
+		binding.RuntimePermission = auth.RequestedConfig.PermissionProfile
+		if auth.RequestedConfig.ReasoningEffort != nil {
+			binding.RuntimeEffort = *auth.RequestedConfig.ReasoningEffort
+		}
 	}
 	sm.collaborationBindings[auth.BindingID] = binding
 	sm.collaborationMu.Unlock()
@@ -295,10 +327,14 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
 		initialPrompt = ""
 	}
-	nativeSessionID, err := sm.CreateSession(ctx, protocol.SessionConfig{
-		Agent: agent, Cwd: workspace, Prompt: initialPrompt, AutoCreateDir: true,
-		ClaudePrintSession: agent == adapter.AgentClaude,
-	})
+	cfg := protocol.SessionConfig{Agent: agent, Cwd: workspace, Prompt: initialPrompt, AutoCreateDir: true, ClaudePrintSession: agent == adapter.AgentClaude, Permission: permission}
+	if auth.RequestedConfig != nil {
+		cfg.Model = auth.RequestedConfig.Model
+		if auth.RequestedConfig.ReasoningEffort != nil {
+			cfg.Effort = *auth.RequestedConfig.ReasoningEffort
+		}
+	}
+	nativeSessionID, err := sm.CreateSession(ctx, cfg)
 	if nativeSessionID == "" && err == nil {
 		err = ErrCollaborationBinding
 	}
@@ -321,7 +357,13 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err != nil {
 		return "", err
 	}
-	if agent == adapter.AgentClaude || agent == adapter.AgentDSH {
+	if auth.RequestedConfig != nil {
+		receipt := sm.TeamConfigReceipt(ctx, auth, nativeSessionID)
+		if receipt == nil || receipt.ConfigHash != auth.ConfigHash {
+			return "", fmt.Errorf("team_actual_configuration_mismatch")
+		}
+	}
+	if agent == adapter.AgentClaude || agent == adapter.AgentDSH || agent == adapter.AgentCodex {
 		if err := persistCollaborationNative(binding, workspace); err != nil {
 			return "", err
 		}
@@ -373,8 +415,36 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 	process := sm.sessions[nativeSessionID]
 	policy := sm.cwdPolicy
 	sm.mu.RUnlock()
+	if auth.RequestedConfig != nil && (process == nil || process.Agent == adapter.AgentCodex) {
+		receipt := sm.TeamConfigReceipt(ctx, auth, nativeSessionID)
+		if receipt == nil || receipt.ConfigHash != auth.ConfigHash {
+			if process != nil && (process.Status == protocol.StatusRunning || process.Status == protocol.StatusBusy || process.Status == protocol.StatusWaitingApproval || process.Status == protocol.StatusWaitingQuestion) {
+				return ErrCollaborationSessionBusy
+			}
+			if err := sm.restoreConfiguredCollaborationCodex(ctx, auth, nativeSessionID, policy); err != nil {
+				return err
+			}
+			sm.mu.RLock()
+			process = sm.sessions[nativeSessionID]
+			sm.mu.RUnlock()
+		}
+	}
+	if _, err := sm.validateTeamConfig(ctx, auth, func() string {
+		if process != nil {
+			return process.Agent
+		}
+		return ""
+	}()); err != nil {
+		return err
+	}
 	if restored := sm.restoreCollaborationClaude(auth, nativeSessionID, process, policy); restored != nil {
 		process = restored
+	}
+	if auth.RequestedConfig != nil {
+		receipt := sm.TeamConfigReceipt(ctx, auth, nativeSessionID)
+		if receipt == nil || receipt.ConfigHash != auth.ConfigHash {
+			return ErrCollaborationBinding
+		}
 	}
 	sm.mu.RLock()
 	busy := process == nil || process.Status == protocol.StatusRunning || process.Status == protocol.StatusBusy ||
@@ -402,14 +472,22 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 			return ErrCollaborationBinding
 		}
 		binding = collaborationNativeBinding{
+			ConfigRevision: auth.ConfigRevision, ConfigHash: auth.ConfigHash,
 			NativeSessionID: nativeSessionID, TeamSessionID: auth.TeamSessionID,
 			BindingID: auth.BindingID, BindingRevision: auth.BindingRevision,
 			OfferID: auth.OfferID, OfferRevision: auth.OfferRevision,
 			OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: process.Agent,
 		}
+		if auth.RequestedConfig != nil {
+			binding.RuntimeModel = auth.RequestedConfig.Model
+			binding.RuntimePermission = auth.RequestedConfig.PermissionProfile
+			if auth.RequestedConfig.ReasoningEffort != nil {
+				binding.RuntimeEffort = *auth.RequestedConfig.ReasoningEffort
+			}
+		}
 		sm.collaborationBindings[auth.BindingID] = binding
 	}
-	if binding.NativeSessionID != nativeSessionID || binding.TeamSessionID != auth.TeamSessionID ||
+	if (auth.RequestedConfig != nil && (binding.ConfigRevision != auth.ConfigRevision || binding.ConfigHash != auth.ConfigHash)) || binding.NativeSessionID != nativeSessionID || binding.TeamSessionID != auth.TeamSessionID ||
 		binding.BindingRevision != auth.BindingRevision || binding.OfferID != auth.OfferID ||
 		binding.OfferRevision != auth.OfferRevision || binding.OwnerUserID != auth.OwnerUserID || binding.DaemonID != auth.DaemonID {
 		sm.collaborationMu.Unlock()

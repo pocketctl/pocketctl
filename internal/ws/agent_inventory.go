@@ -42,12 +42,20 @@ func (c *Client) SetAgentInventory(inventory []discovery.AgentInfo) bool {
 func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 	c.agentMu.RLock()
 	defer c.agentMu.RUnlock()
-	capabilities := []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1}
+	capabilities := []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1, protocol.CapabilityTeamPrivateInteractionsV2}
 	if c.dshTeamCallable {
 		capabilities = append(capabilities, protocol.CapabilityTeamDSHV1)
 	}
+	configs := map[string]*protocol.TeamConfigCapabilities{}
+	if c.TeamConfigInventory != nil {
+		configs = c.TeamConfigInventory()
+		if len(configs) > 0 {
+			capabilities = append(capabilities, protocol.CapabilityTeamConfigV2)
+		}
+	}
 	return protocol.RegisterMessage{
-		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname,
+		TeamAgentConfigs: configs,
+		Type:             "register", DaemonID: c.daemonID, Hostname: c.hostname,
 		Agents: append([]string(nil), c.agents...), AgentVersions: maps.Clone(c.agentVersions),
 		AgentLatests: maps.Clone(c.agentLatests), AgentManageable: maps.Clone(c.agentManageable),
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,

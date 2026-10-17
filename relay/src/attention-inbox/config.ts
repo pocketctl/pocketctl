@@ -29,7 +29,8 @@ export function attentionInboxConfig(
     providers: {
       codex: { projection, remoteResponse },
       opencode: { projection, remoteResponse },
-      'claude-code': { projection: false, remoteResponse: false },
+      'claude-code': { projection: projection && env.TEAM_PRIVATE_INTERACTIONS_V2==='on', remoteResponse: remoteResponse },
+      dsh:{projection:projection && env.TEAM_PRIVATE_INTERACTIONS_V2==='on',remoteResponse},
     },
     recovery: {
       mode: recoveryMode,
