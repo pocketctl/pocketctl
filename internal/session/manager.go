@@ -148,6 +148,8 @@ type SessionManager struct {
 	claudeApprovalV2            bool
 	claudeApprovals             map[string]*claudeApprovalSession
 	claudeApprovalResolved      map[claudeApprovalKey]time.Time
+	teamConfigAdvertised        map[string]string
+	teamNativeConfigs           map[string]protocol.TeamRuntimeConfig
 	claudeApprovalRecorder      func([]ClaudeApprovalReference) error
 	claudeApprovalPersistenceMu sync.Mutex
 	claudeTelemetryRecorder     func(metric, reason string)

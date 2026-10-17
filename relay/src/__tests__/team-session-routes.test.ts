@@ -30,6 +30,17 @@ function appFor(overrides: Record<string, unknown>) {
 }
 
 describe('Team shared session routes', () => {
+  test('creates a human-only session with explicit participants and rejects malformed selections', async () => {
+    const { app, service } = appFor({ createSession: vi.fn(async () => ({ id: 'css_humans' })) })
+    const payload = {request_id: 'humans', title: '群聊', offer_ids: [], participant_user_ids: [24,25]}
+    const response = await app.inject({method:'POST',url:'/api/team/teams/t1/sessions',headers:{authorization:'Bearer valid'},payload})
+    expect(response.statusCode).toBe(201)
+    expect(service.createSession).toHaveBeenCalledWith(expect.objectContaining({actorUserId:23,offerIds:[],participantUserIds:[24,25]}))
+    for (const invalid of [{participant_user_ids:[24,'25']},{participant_user_ids:[0]},{offer_ids:['ok',null]},{participant_user_ids:'24'}]) {
+      expect((await app.inject({method:'POST',url:'/api/team/teams/t1/sessions',headers:{authorization:'Bearer valid'},payload:{...payload,...invalid}})).statusCode).toBe(400)
+    }
+    await app.close()
+  })
   test('reads call status through authenticated participant authorization', async () => {
     const { app } = appFor({ listCalls: async (_session: string, actor: number) => [{ id: 'ccl_1', state: 'uncertain', actor }] })
     expect((await app.inject({ method: 'GET', url: '/api/team/sessions/css_1/calls' })).statusCode).toBe(401)

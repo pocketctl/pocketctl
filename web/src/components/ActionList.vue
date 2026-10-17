@@ -13,7 +13,7 @@ import { nextTick, onBeforeUnmount, onMounted, onUpdated, ref } from 'vue'
 import WorkspaceIcon from './WorkspaceIcon.vue'
 import { useLocale } from '../composables/useLocale'
 import '../assets/action-list.css'
-const props = withDefaults(defineProps<{ title: string; anchor?: HTMLElement | null; width?: number; back?: boolean; closeLabel?: string; mobileSheet?: boolean }>(), { width: 340, back: false })
+const props = withDefaults(defineProps<{ title: string; anchor?: HTMLElement | null; width?: number; back?: boolean; closeLabel?: string; mobileSheet?: boolean; preferAbove?:boolean }>(), { width: 340, back: false })
 const emit = defineEmits<{ close: []; back: [] }>()
 const { t } = useLocale()
 const panel = ref<HTMLElement>(), position = ref<Record<string, string>>({})
@@ -34,11 +34,23 @@ function place() {
   if (!panel.value) return
   const width = Math.min(props.width, window.innerWidth - 20)
   const anchor = props.anchor || opener
-  const rect = anchor?.isConnected ? anchor.getBoundingClientRect() : null
-  const height = Math.min(panel.value.scrollHeight, window.innerHeight - 32)
-  const left = rect ? Math.max(10, Math.min(rect.right - width, window.innerWidth - width - 10)) : (window.innerWidth - width) / 2
-  const top = rect ? Math.max(10, Math.min(rect.bottom + 6, window.innerHeight - height - 10)) : Math.max(16, Math.min(80, (window.innerHeight - height) / 2))
-  const next = { width: `${width}px`, left: `${left}px`, top: `${top}px`, maxHeight: `${window.innerHeight - top - 10}px` }
+  // A body/removed opener is not an anchor (e.g. a nested form replaces its parent).
+  const anchorRect = anchor?.isConnected && anchor !== document.body && !anchor.contains(panel.value) ? anchor.getBoundingClientRect() : null
+  const rect = anchorRect && anchorRect.width > 0 && anchorRect.height > 0 ? anchorRect : null
+  panel.value.style.width = `${width}px`
+  // The panel scrollHeight is its *clamped* flex layout. Measuring that on every
+  // update feeds the previous limit back into placement and collapses the body.
+  const content = panel.value.querySelector<HTMLElement>('.action-list-content')!
+  const chromeHeight = Array.from(panel.value.children).filter(child => child !== content).reduce((sum, child) => sum + (child as HTMLElement).offsetHeight, 0)
+  const height = Math.min(content.scrollHeight + chromeHeight + 2, window.innerHeight - 32)
+  const above=rect ? Math.max(0,rect.top-16):0,below=rect ? Math.max(0,window.innerHeight-rect.bottom-16):0
+  const useAbove=!!rect && ((props.preferAbove && above>=Math.min(height,240)) || (below<height && above>below))
+  const available=rect ? (useAbove?above:below) : window.innerHeight-32
+  const anchored = !!rect && available >= Math.min(height, 240)
+  const left = rect && anchored ? Math.max(10, Math.min(rect.right - width, window.innerWidth - width - 10)) : (window.innerWidth - width) / 2
+  const actualHeight = anchored ? Math.min(height, available) : height
+  const top=rect && anchored ? (useAbove?Math.max(10,rect.top-actualHeight-6):Math.max(10,Math.min(rect.bottom+6,window.innerHeight-actualHeight-10))) : Math.max(16,(window.innerHeight-actualHeight)/2)
+  const next = { width: `${width}px`, left: `${left}px`, top: `${top}px`, maxHeight: `${actualHeight}px` }
   if (JSON.stringify(next) !== JSON.stringify(position.value)) position.value = next
 }
 function outside(event: PointerEvent) {

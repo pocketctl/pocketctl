@@ -34,6 +34,7 @@ import {
 } from '../metrics.js'
 
 export interface TeamDispatchTransport {
+  ownsDaemon?(daemonId:string,ownerUserId:number):boolean
   send(input: { daemonId: string; ownerUserId: number; capability: string; command: Record<string, unknown> }): boolean
 }
 
@@ -122,6 +123,10 @@ export class TeamDispatchService {
 
   async dispatch(callId: string): Promise<void> {
     const startedAt = process.hrtime.bigint()
+    if (this.transport.ownsDaemon) {
+      const route=(await this.pool.query(`SELECT o.daemon_id,o.owner_user_id,d.status AS daemon_status FROM collaboration_calls c JOIN team_agent_offers o ON o.offer_id=c.offer_id JOIN daemons d ON d.daemon_id=o.daemon_id AND d.user_id=o.owner_user_id WHERE c.call_id=$1`,[callId])).rows[0]
+      if (!route || (route.daemon_status!=='offline' && !this.transport.ownsDaemon(route.daemon_id,Number(route.owner_user_id)))) return
+    }
     const claimed = await this.repository.claim(callId)
     if (!claimed) return
     const metricOperation = claimed.authorization.operation
@@ -327,6 +332,12 @@ export class TeamDispatchService {
     if (message.type === 'session_created' && nativeSessionId && authorization.operation === 'create') {
       if (!await this.repository.bindNativeSession(authorization.call_id, daemonId, ownerUserId, nativeSessionId)) return
       await this.settleCreatedSession(accounting, nativeSessionId)
+      return
+    }
+    if (message.type === 'collaboration_config_receipt') {
+      if (message.applied_config && typeof message.config_hash === 'string' && Number.isSafeInteger(message.config_revision)) {
+        await this.repository.recordConfigReceipt(authorization.call_id,daemonId,ownerUserId,message.applied_config,Number(message.config_revision),message.config_hash)
+      }
       return
     }
     if (message.type === 'collaboration_context_receipt') {

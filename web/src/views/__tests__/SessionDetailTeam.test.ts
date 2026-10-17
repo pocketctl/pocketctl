@@ -25,12 +25,13 @@ vi.mock('../../composables/useAuth', () => ({ useAuth: () => ({ user: ref({ id: 
 vi.mock('../../composables/useTeamSession', () => ({ useTeamSession: () => {
   const session = ref<any>({ ...teamSession, agent_bindings: teamSession.agent_bindings.map(item => ({ ...item })) })
   return {
+    pendingMessages:ref([]),retryMessage:vi.fn(),reconcileMessage:vi.fn(),markRead:vi.fn(async()=>{}),
     session, calls, events: ref([...events, ...extraEvents].map(event => ({ ...event }))), context: ref(null), draft: ref(''), loading: ref(false), sending: ref(false), error: ref(''),
     readOnlyReason: computed(() => ''), canSend: computed(() => true), sendMessage,
   }
 } }))
 vi.mock('../../composables/useTeamAccess', async()=>{const {ref}=await import('vue');return {useTeamAccess:()=>({capabilities:ref({writes_enabled:true})})}})
-const api = vi.hoisted(() => ({ getTeamContext:vi.fn(), listTeamAgentCandidates: vi.fn(async()=>[]), listTeams: vi.fn(), listTeamMembers: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), updateTeamSession: vi.fn() }))
+const api = vi.hoisted(() => ({ listTeamInteractions:vi.fn(async()=>({items:[]})),actTeamInteraction:vi.fn(), getTeamContext:vi.fn(), listTeamAgentCandidates: vi.fn(async()=>[]), listTeams: vi.fn(), listTeamMembers: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), updateTeamSession: vi.fn() }))
 vi.mock('../../services/teamClient', () => api)
 
 async function render(attachTo?: HTMLElement) {

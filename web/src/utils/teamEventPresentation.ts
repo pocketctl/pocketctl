@@ -5,6 +5,8 @@ export function teamSystemEventText(event: TeamEvent): string {
   if (event.kind === "context")
     return `共享 Context 已更新至 v${event.context_version ?? "?"}`;
   if (event.kind !== "run") return text;
+  if (text === 'Run pause requested.') return '已请求暂停自动协作。';
+  if (text === 'Run resume requested.') return '已请求恢复自动协作。';
   if (
     text.startsWith(
       "You are the coordinator for a bounded PocketCtl Team collaboration run.",

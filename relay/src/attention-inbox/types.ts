@@ -1,5 +1,5 @@
 export type AttentionInboxMode = 'off' | 'observe' | 'on'
-export type AttentionProvider = 'codex' | 'opencode' | 'claude-code'
+export type AttentionProvider = 'codex' | 'opencode' | 'claude-code' | 'dsh'
 export type AttentionRiskLevel = 'low' | 'medium' | 'high' | 'critical'
 export type AttentionItemKind = 'approval' | 'question'
 export type AttentionItemState =
@@ -30,7 +30,7 @@ export interface AttentionInboxConfig {
   mode: AttentionInboxMode
   enabled: boolean
   remoteResponseEnabled: boolean
-  providers: Record<AttentionProvider, AttentionProviderCapability>
+  providers: Record<Exclude<AttentionProvider,'dsh'>, AttentionProviderCapability> & {dsh?:AttentionProviderCapability}
   recovery: {
     mode: AttentionInboxMode
     projection: boolean
@@ -62,7 +62,7 @@ export interface AttentionItemDraft {
   daemonId: string
   sessionId: string
   requestId: string
-  provider: Exclude<AttentionProvider, 'claude-code'>
+  provider: AttentionProvider
   kind: AttentionItemKind
   riskLevel: AttentionRiskLevel
   classificationIncomplete: boolean

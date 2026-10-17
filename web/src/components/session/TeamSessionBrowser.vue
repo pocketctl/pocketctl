@@ -98,14 +98,14 @@
         >
           <svg viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4" /></svg
           ><span class="filter-trigger-label"
-            >{{ providerLabel(provider) }}（{{ filtered.length }}）</span
+            >{{ providerLabel(provider) }}</span
           ><svg class="chevron" viewBox="0 0 24 24">
             <path d="m7 10 5 5 5-5" />
           </svg>
         </button>
         <div v-if="menu === 'agent'" class="filter-menu" role="menu" :aria-label="t('session.agent_filter_label')">
           <button
-            v-for="agent in ['', 'codex', 'claude-code']"
+            v-for="agent in ['', 'codex', 'claude-code', 'dsh']"
             :key="agent"
             type="button"
             class="filter-option"
@@ -164,7 +164,7 @@
           @click="emit('opened', item.id)"
           ><i :class="['dot', { offline: item.state !== 'active' }]"></i>
           <div>
-            <strong>{{ item.title }}</strong
+            <strong>{{ item.title }}</strong><span v-if="item.unread_count" class="team-unread" :aria-label="`${item.unread_count} 条未读`">{{ item.unread_count }}</span><small v-if="item.preview" class="team-preview">{{ item.preview }}</small
 > <small>{{ t('workspace.shared_session_meta', {people:item.participants.length, agents:item.agent_bindings.length, date:new Date(item.updated_at).toLocaleDateString(), hosts:new Set(item.agent_bindings.map(binding => binding.daemon_id)).size}) }}</small>
           </div></RouterLink
         >
@@ -251,6 +251,7 @@
     <TeamSessionCreateDialog
       v-if="createOpen"
       :team-id="teamId"
+      :agent-config-enabled="teamAccess.capabilities.value?.agent_config_v2 === true"
       @close="createOpen = false"
     />
   </aside>
@@ -260,6 +261,7 @@ import { useLocale } from "../../composables/useLocale"
 const { t } = useLocale()
 import { computed, onBeforeUnmount, onMounted, ref, watch, toRefs } from "vue";
 import { useSessionBrowserFilters } from "../../composables/useSessionBrowserFilters";
+import { useWebSocket } from '../../composables/useWebSocket';
 import { useAuth } from "../../composables/useAuth";
 import TeamOverlay from "../team/TeamOverlay.vue";
 import { useTeamAccess } from "../../composables/useTeamAccess";
@@ -351,6 +353,9 @@ const hostQuery = ref(""),
   error = ref(""),
   filtersElement = ref<HTMLElement | null>(null);
 let generation = 0;
+const {onEvent:watchTeamEvent}=useWebSocket()
+let listDetach:(()=>void)|undefined,listTimer:ReturnType<typeof setTimeout>|undefined
+async function refreshList(){const g=generation;try{const next=await listTeamSessions(props.teamId);if(g===generation)sessions.value=next}catch{}}
 let presenceTimer: ReturnType<typeof setTimeout> | undefined;
 function clearPresencePoll() {
   if (presenceTimer) clearTimeout(presenceTimer);
@@ -368,6 +373,7 @@ function schedulePresencePoll(current: number) {
       const nextOffers = await listTeamAgentOffers(requestedTeam);
       if (current !== generation) return;
       offers.value = nextOffers.filter((offer) => offer.state === "active");
+      await refreshList();
     } catch {
       // A transport failure is not evidence that a host went offline.
       // Keep the last snapshot and retry; the request never overlaps itself.
@@ -384,7 +390,7 @@ function providerLabel(value: string) {
     ? "Codex"
     : value === "claude-code"
       ? "Claude Code"
-      : t('session.agent_filter_all');
+      : value==='dsh' ? 'DSH' : t('session.agent_filter_all');
 }
 function matches(item: TeamSessionSummary, host: string, agent: string) {
   return (
@@ -508,10 +514,10 @@ watch([filtered, loading], () => {
           props.currentTeamId !== props.teamId),
     );
 });
-onMounted(() => document.addEventListener("click", outsideClick));
+onMounted(() => {document.addEventListener("click", outsideClick);listDetach=watchTeamEvent('team_collaboration_session_changed',()=>{if(listTimer)clearTimeout(listTimer);listTimer=setTimeout(()=>void refreshList(),80)})});
 onBeforeUnmount(() => {
   generation++;
-  clearPresencePoll();
+  clearPresencePoll();listDetach?.();if(listTimer)clearTimeout(listTimer);
   document.removeEventListener("click", outsideClick);
 });
 </script>
@@ -945,4 +951,11 @@ button:focus-visible {
   text-align: center;
 }
 @media(max-width:768px) { .panel-head,header { padding-left:52px; } }
+.team-unread{padding:2px 6px;border-radius:12px;background:var(--accent-muted);color:var(--accent);font-size:10px;margin-left:6px}.team-preview{display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal!important;overflow-wrap:anywhere}
+.browser-filters { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:6px; }
+.host-trigger { height:34px; }.host-trigger small { display:none; }
+.filter-trigger { font-size:11px; padding:0 7px; gap:4px; grid-template-columns:14px minmax(0,1fr) 12px; }
+.filter-trigger-label { font-size:11px; }
+.team-session-browser :deep(.browser-team-select .team-filter-trigger) { height:44px; padding-top:19px; padding-bottom:5px; }
+.team-session-browser :deep(.browser-team-caption) { top:4px; }
 </style>

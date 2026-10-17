@@ -47,6 +47,14 @@ function pool(options: {
 }
 
 describe('Attention Inbox router adapter', () => {
+  test('uses legacy boolean replies only for rolled-back Claude Hook daemons', async () => {
+    const router = new Router(pool({agentType:'claude-code'})), daemon=ws()
+    ;(router as any).daemons.set('d1', {ws:daemon,daemonId:'d1',userId:7,collaborationCapabilities:[]})
+    try {
+      expect(await router.submitAttentionInboxInteraction(7,{type:'approval_response',session_id:'s',request_id:'r',action:'reject'})).toEqual({accepted:true})
+      expect(daemon._sent).toEqual([{type:'approval_response',session_id:'s',request_id:'r',approved:false}])
+    } finally {router.stop()}
+  })
   test('forwards only the normalized interaction command to the owned online daemon', async () => {
     const router = new Router(pool())
     const daemon = ws()

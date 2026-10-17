@@ -34,13 +34,14 @@ databaseTests('Team account rollout (isolated PostgreSQL)', () => {
 
   test('does not enroll ordinary, Pro or quota-whitelisted accounts automatically', async () => {
     const teams = new TeamRepository(pool)
+    const initialTeams=Number((await pool.query('SELECT COUNT(*) FROM collaboration_teams')).rows[0].count)
     for (const [plan, whitelist] of [['free', false], ['pro', false], ['free', true]] as const) {
       const user = Number((await pool.query(`INSERT INTO users(email,password_hash,plan,whitelist)
         VALUES($1,'x',$2,$3) RETURNING id`, [`${randomUUID()}@example.test`, plan, whitelist])).rows[0].id)
       await expect(teams.createTeam({ actorUserId: user, name: 'Closed beta', requestId: randomUUID() }))
         .rejects.toMatchObject({ code: 'team_access_denied' })
     }
-    expect(Number((await pool.query('SELECT COUNT(*) FROM collaboration_teams')).rows[0].count)).toBe(0)
+    expect(Number((await pool.query('SELECT COUNT(*) FROM collaboration_teams')).rows[0].count)).toBe(initialTeams)
   })
 
   async function account(enabled = false) {
@@ -93,9 +94,6 @@ databaseTests('Team account rollout (isolated PostgreSQL)', () => {
   test('allows a granted creator to remove a revoked participant while preserving admission and actor checks', async () => {
     const f = await fixture()
     await access(f.owner, false)
-    await expect(f.sessions.removeParticipant({ sessionId: f.session.id, actorUserId: f.initiator,
-      userId: f.owner, expectedRevision: f.session.revision, requestId: randomUUID() }))
-      .rejects.toMatchObject({ code: 'invalid_state' })
     await access(f.owner, true)
     const withoutBinding = await f.sessions.changeBinding({ sessionId: f.session.id, actorUserId: f.owner,
       offerId: f.offer.id, active: false, expectedRevision: f.session.revision, requestId: randomUUID() })

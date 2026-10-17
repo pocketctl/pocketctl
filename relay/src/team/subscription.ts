@@ -1,4 +1,5 @@
 export interface TeamSubscriptionAuthorizer {
+  sharedHighWater?(userId:number,sessionId:string):Promise<number>
   canSubscribe(userId: number, sessionId: string): Promise<boolean>
 }
 

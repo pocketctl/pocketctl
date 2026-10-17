@@ -45,6 +45,9 @@ func runCollaborationSessionCreate(ctx context.Context, client *ws.Client, sm *s
 		Cwd: cwd, Collaboration: cmd.Collaboration}
 	setSessionControlMetadata(&event, sm, nativeSessionID)
 	client.SendMsg(event)
+	if receipt := sm.TeamConfigReceipt(ctx, cmd.Collaboration, nativeSessionID); receipt != nil {
+		client.SendMsg(*receipt)
+	}
 	stateDirty.Store(true)
 	if cmd.TeamContext != nil {
 		client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: nativeSessionID,

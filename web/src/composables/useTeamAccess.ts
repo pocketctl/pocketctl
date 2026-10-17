@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef, type Ref } from 'vue'
 import { useAuth } from './useAuth'
-import { getTeamCapabilities } from '../services/teamClient'
+import { getTeamCapabilities, TeamApiError } from '../services/teamClient'
 import type { TeamCapabilities } from '../types/team'
 
 export function createTeamAccessController(token: Ref<string>, load: () => Promise<TeamCapabilities>) {
@@ -10,7 +10,7 @@ export function createTeamAccessController(token: Ref<string>, load: () => Promi
   let generation = 0
   let pending: { token: string; promise: Promise<boolean> } | undefined
   const capabilities = computed(() => token.value && token.value === snapshotToken.value ? snapshot.value : null)
-  const enabled = computed(() => capabilities.value?.collaboration === true)
+  const enabled = computed(() => (capabilities.value?.collaboration === true || capabilities.value?.reads_enabled === true))
   // A new token invalidates the old grant, but is not a confirmed denial.
   const denied = computed(() => !!token.value && checkedToken.value === token.value && !enabled.value)
   function refresh(): Promise<boolean> {
@@ -29,12 +29,14 @@ export function createTeamAccessController(token: Ref<string>, load: () => Promi
         snapshotToken.value = currentToken; snapshot.value = response
         checkedToken.value = currentToken
         return enabled.value
-      } catch {
-        if (generation === requestGeneration && token.value === currentToken) {
+      } catch (failure) {
+        // Transport failure is not revocation. Keep only the grant already
+        // verified for this exact token; a new account remains unconfirmed.
+        if (generation === requestGeneration && token.value === currentToken && failure instanceof TeamApiError && [401, 403, 404].includes(failure.status)) {
           snapshotToken.value = ''; snapshot.value = null
           checkedToken.value = currentToken
         }
-        return false
+        return generation === requestGeneration && token.value === currentToken && enabled.value
       }
     })().finally(() => { if (pending?.promise === promise) pending = undefined })
     pending = { token: currentToken, promise }

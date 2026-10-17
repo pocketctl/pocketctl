@@ -52,7 +52,7 @@
       </div>
     </template>
 
-    <TeamSessionCreateDialog v-if="newSessionOpen && selectedTeam && teamWritesEnabled" :team-id="selectedTeam.id" :task-id="newSessionTaskID" @close="newSessionOpen = false" />
+    <TeamSessionCreateDialog v-if="newSessionOpen && selectedTeam && teamWritesEnabled" :team-id="selectedTeam.id" :agent-config-enabled="capabilities?.agent_config_v2 === true" :task-id="newSessionTaskID" @close="newSessionOpen = false" />
     <TeamCreateDialog :open="createOpen" :candidates="createCandidates" :candidates-loading="createCandidatesLoading" :busy="creating" :error="createError" @close="createOpen = false" @submit="submitCreate" />
   </div>
 </template>

@@ -1,5 +1,5 @@
 <template>
-  <ActionList :title="t('workspace.shared_context')" :width="480" @close="emit('close')">
+  <ActionList prefer-above mobile-sheet :title="t('workspace.shared_context')" :width="560" @close="emit('close')">
     <div class="team-action-body" data-testid="team-context-panel">
     <p class="panel-version">{{ context ? `v${context.version}` : t('workspace.not_created') }}</p>
     <div v-if="context" class="context-body">

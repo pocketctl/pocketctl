@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
@@ -182,6 +181,7 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 	}
 	applyCodexPermissionParams(params, config.Permission)
 	var response struct {
+		codexNativeConfigFields
 		Thread struct {
 			ID string `json:"id"`
 		} `json:"thread"`
@@ -221,6 +221,9 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 			createErr = errors.Join(createErr, errNativeSessionCreateUncertain)
 		}
 		return "", createErr
+	}
+	if b.sm != nil && response.Thread.ID != "" {
+		b.sm.rememberNativeCodexConfig(response.Thread.ID, response.codexNativeConfigFields)
 	}
 	if response.Thread.ID == "" {
 		return "", fmt.Errorf("%w: Codex thread/start returned no thread id", errNativeSessionCreateUncertain)
@@ -290,9 +293,13 @@ func (b *CodexAppServerBackend) Resume(ctx context.Context, threadID string) err
 		return err
 	}
 	defer release()
-	var response json.RawMessage
-	if err := current.client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID}, &response); err != nil {
+	var response codexNativeConfigFields
+	params, permission := b.coord.teamResumeParams(threadID)
+	if err := current.client.Call(ctx, "thread/resume", params, &response); err != nil {
 		return fmt.Errorf("Codex thread/resume: %w", err)
+	}
+	if b.sm != nil {
+		b.sm.rememberTeamCodexResume(threadID, response, permission)
 	}
 	b.coord.markSubscribed(threadID)
 	return nil

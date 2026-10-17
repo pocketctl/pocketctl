@@ -1,7 +1,7 @@
 export type TeamRunDecision =
   | { action: 'call_agent'; context_version: number; target_offer_id: string; instruction: string }
   | { action: 'request_input'; context_version: number; question: string }
-  | { action: 'complete'; context_version: number; summary: string }
+  | { action: 'complete'; context_version: number; summary: string; result?:{conclusion:string;todo:string[];disagreements:string[];reason:string} }
 
 export class TeamRunDecisionError extends Error {
   constructor(message: string) {
@@ -62,8 +62,13 @@ export function parseTeamRunDecision(content: string, input: {
     return { action: 'request_input', context_version: input.contextVersion, question: boundedText(value.question, 'question', 4_000) }
   }
   if (value.action === 'complete') {
-    exactKeys(value, ['action', 'context_version', 'summary'])
-    return { action: 'complete', context_version: input.contextVersion, summary: boundedText(value.summary, 'summary', 16_000) }
+    exactKeys(value, value.schema_version===2 ? ['schema_version','action','context_version','summary','todo','disagreements'] : ['action','context_version','summary'])
+    const summary=boundedText(value.summary,'summary',16000)
+    if(value.schema_version===2){
+      const parseList=(v:unknown)=>{if(!Array.isArray(v)||v.length>50||!v.every(x=>typeof x==='string'&&x.length<=4000))throw new TeamRunDecisionError('invalid structured result');return v as string[]}
+      return {action:'complete',context_version:input.contextVersion,summary,result:{conclusion:summary,todo:parseList(value.todo),disagreements:parseList(value.disagreements),reason:'coordinator_completed'}}
+    }
+    return {action:'complete',context_version:input.contextVersion,summary}
   }
   throw new TeamRunDecisionError('coordinator decision action is invalid')
 }
@@ -72,6 +77,8 @@ export function coordinatorPrompt(input: {
   contextVersion: number
   allowedOfferIds: string[]
   callsRemaining: number
+  mode?:import('./types.js').TeamRunMode
+  roundsRemaining?:number
   observation?: string
 }): string {
   return [
@@ -79,6 +86,7 @@ export function coordinatorPrompt(input: {
     'Return exactly one JSON object. Never approve tools, invent users, routes, or Agent IDs.',
     `Frozen context_version: ${input.contextVersion}. Calls remaining after this call: ${input.callsRemaining}.`,
     `Allowed target_offer_id values: ${input.allowedOfferIds.join(', ') || '(none)'}.`,
+    ...(input.mode ? [`Mode: ${input.mode}. Rounds remaining: ${input.roundsRemaining}. Read-only modes cannot write or execute tools with side effects.`, 'Workers must report new verifiable artifacts and conclusions as JSON arrays named artifacts and conclusions. A repeated instruction without new evidence is no progress.','For completion use schema_version:2 with summary, todo:[], disagreements:[] alongside action and context_version.'] : []),
     'Allowed forms:',
     `{"action":"call_agent","context_version":${input.contextVersion},"target_offer_id":"...","instruction":"..."}`,
     `{"action":"request_input","context_version":${input.contextVersion},"question":"..."}`,

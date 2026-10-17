@@ -879,9 +879,7 @@ func (c *codexCoordinator) refreshManagedThreadModelAsync(threadID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		var resumed struct {
-			Model string `json:"model"`
-		}
+		var resumed struct{ codexNativeConfigFields }
 		lock := c.threadOperationLock(threadID)
 		lock.Lock()
 		defer lock.Unlock()
@@ -892,6 +890,7 @@ func (c *codexCoordinator) refreshManagedThreadModelAsync(threadID string) {
 			slog.Default().Debug("Codex model refresh failed", "thread", threadID, "generation", generation, "error", err)
 			return
 		}
+		c.sm.rememberNativeCodexConfig(threadID, resumed.codexNativeConfigFields)
 		model := strings.TrimSpace(resumed.Model)
 		current, exists := c.sm.GetSessionModel(threadID)
 		if !exists || model == "" || model == current {
@@ -1138,13 +1137,14 @@ func (c *codexCoordinator) subscribeThread(parent context.Context, client codexR
 	defer cancel()
 	var resumed struct {
 		Thread json.RawMessage `json:"thread"`
-		Model  string          `json:"model"`
-		Cwd    string          `json:"cwd"`
+		codexNativeConfigFields
+		Cwd string `json:"cwd"`
 	}
 	statusRevision := projector.ThreadStatusRevision(threadID)
 	_, turnRevision := c.turnSnapshot(threadID)
 	method := "thread/resume"
-	params := map[string]any{"threadId": threadID, "excludeTurns": true}
+	params, restoredPermission := c.teamResumeParams(threadID)
+	params["excludeTurns"] = true
 	if readOnly {
 		method = "thread/read"
 		params = map[string]any{"threadId": threadID}
@@ -1158,6 +1158,9 @@ func (c *codexCoordinator) subscribeThread(parent context.Context, client codexR
 			readOnly = false
 			err = client.Call(ctx, "thread/resume", map[string]any{"threadId": threadID, "excludeTurns": true}, &resumed)
 		}
+	}
+	if err == nil && !readOnly {
+		c.sm.rememberTeamCodexResume(threadID, resumed.codexNativeConfigFields, restoredPermission)
 	}
 	if !current() {
 		return

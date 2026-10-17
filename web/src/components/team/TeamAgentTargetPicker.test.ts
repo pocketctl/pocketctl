@@ -34,3 +34,12 @@ test('allows choosing human discussion with no available Agent', async () => {
   await buttons[1].trigger('click')
   expect(wrapper.emitted('update:modelValue')).toEqual([[{ mode: 'discussion', offerIDs: [] }]])
 })
+
+test('deselects the last Agent into discussion while explicit all remains a separate action',async()=>{
+ const binding:TeamSessionAgentBinding={id:'b',offer_id:'o',owner_user_id:1,daemon_id:'d',provider:'codex',state:'active',revision:1,native_session_id:null,availability:'online'}
+ const wrapper=mount(TeamAgentTargetPicker,{props:{modelValue:{mode:'offers',offerIDs:['o']},bindings:[binding]}})
+ await wrapper.get('.target-trigger').trigger('click');await wrapper.get('[data-offer-id="o"]').trigger('click')
+ expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'discussion',offerIDs:[]}])
+ await wrapper.findAll('.target-menu>button')[0].trigger('click')
+ expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'all',offerIDs:[]}])
+})

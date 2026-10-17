@@ -2,7 +2,7 @@
 .workspace-action-list>header{display:flex;align-items:center;gap:6px;flex:none;min-height:42px;padding:7px 8px 7px 14px;border-bottom:1px solid var(--border)}
 .workspace-action-list>header h2{flex:1;min-width:0;margin:0;color:var(--fg-secondary);font:600 12px/1.5 var(--font-body);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workspace-action-list>header button{display:grid;place-items:center;width:28px;height:28px;flex:none;padding:0;border:0;border-radius:7px;background:none;color:var(--fg-secondary);cursor:pointer}.workspace-action-list>header svg{width:15px;height:15px}
-.workspace-action-list .action-list-content{padding:8px 12px 12px;overflow:auto;overscroll-behavior:contain;min-height:0}
+.workspace-action-list .action-list-content{flex:1 1 auto;padding:8px 12px 12px;overflow:auto;overscroll-behavior:contain;min-height:0}
 .workspace-action-list .action-item{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:9px 10px;border:0;border-radius:7px;background:transparent;color:var(--fg);text-align:left;font:inherit;cursor:pointer;white-space:normal}
 .workspace-action-list .action-item:hover,.workspace-action-list .action-item:focus-visible,.workspace-action-list>header button:hover{background:var(--surface-hover)}.workspace-action-list .action-item.selected{color:var(--accent);background:var(--accent-muted)}.workspace-action-list .action-item.danger{color:var(--error)}
 .workspace-action-list .action-item:disabled{opacity:.45;cursor:default}.workspace-action-list .action-item svg{width:16px;height:16px;flex:none}.workspace-action-list .action-item small{margin-left:auto;color:var(--fg-tertiary);font-size:10px}

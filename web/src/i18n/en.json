@@ -1710,7 +1710,7 @@
   "replica.pending_items": "Pending items",
   "replica.pending_copy": "Review reminders and invitations",
   "replica.all_sessions": "View all sessions",
-  "replica.week_usage": "Last 7 days usage",
+  "replica.week_usage": "Last 7 days: {{value}} · Chart: 14-day trend",
   "replica.host_summary": "Connected work hosts",
   "replica.host_details": "Resources and session details",
   "replica.last_activity": "Last active",

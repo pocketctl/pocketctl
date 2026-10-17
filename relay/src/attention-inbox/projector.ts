@@ -30,8 +30,8 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
 }
 
-function supportedProvider(value: string | null): 'codex' | 'opencode' | null {
-  return value === 'codex' || value === 'opencode' ? value : null
+function supportedProvider(value:string|null,teamPrivate:boolean):AttentionProvider|null {
+ return value==='codex'||value==='opencode'||(teamPrivate&&(value==='claude-code'||value==='dsh')) ? value as AttentionProvider : null
 }
 
 function riskLevel(payload: Record<string, unknown>): AttentionRiskLevel {
@@ -173,7 +173,8 @@ function resolution(payload: Record<string, unknown>): Record<string, unknown> {
 
 export function projectAttentionEvent(row: AttentionEventRow): AttentionProjection | null {
   if (row.userId === null || !row.daemonId || !row.sessionId) return null
-  const provider = supportedProvider(row.provider)
+  const teamPrivate=row.capabilities.includes('team_private_interactions_v2')
+  const provider = supportedProvider(row.provider,teamPrivate)
   if (provider === null) return null
   if (provider === 'opencode' && row.controlMode !== 'managed') return null
   const requestId = requestID(row.payload)
@@ -203,10 +204,11 @@ export function projectAttentionEvent(row: AttentionEventRow): AttentionProjecti
     ?? (kind === 'approval' && row.capabilities.includes('trusted_action_policy_v1') ? true : classificationIncomplete(row.payload))
   const reasons = securityContext?.riskReasons ?? riskReasons(row.payload)
   const questions = Array.isArray(row.payload.questions) ? row.payload.questions : []
-  const context = contextFor(row.payload, kind)
+  const context: Record<string,unknown> = {...contextFor(row.payload, kind),...(teamPrivate?{team_native_request:true}:{})}
   let allowedActions = kind === 'approval'
     ? mapApprovalActions({
         provider,
+        teamPrivate,
         availableDecisions: stringArray(row.payload.available_decisions),
         alwaysRules: stringArray(row.payload.always),
         controlMode: row.controlMode,

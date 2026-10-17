@@ -41,6 +41,7 @@ export class TeamApiError extends Error {
 interface TeamRequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
   body?: Record<string, unknown>
+  headers?:Record<string,string>
 }
 
 function requestID(): string {
@@ -57,6 +58,7 @@ async function teamRequest<T>(path: string, options: TeamRequestOptions = {}, al
       cache: 'no-store',
       headers: {
         Accept: 'application/json',
+        ...options.headers,
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
         ...(accessToken.value ? { Authorization: `Bearer ${accessToken.value}` } : {}),
       },
@@ -75,8 +77,15 @@ async function teamRequest<T>(path: string, options: TeamRequestOptions = {}, al
   return body as T
 }
 
-export function getTeamCapabilities(): Promise<TeamCapabilities> {
-  return teamRequest<TeamCapabilities>('/api/team/capabilities')
+export async function getTeamCapabilities(): Promise<TeamCapabilities> {
+ const snapshot=await teamRequest<TeamCapabilities>('/api/team/capabilities')
+ if(snapshot.collaboration || snapshot.reads_enabled!==undefined)return snapshot
+ // Older Relay versions do not distinguish entitled history readers from a
+ // disabled write rollout. The authorized read endpoint is the authority.
+ try{await teamRequest('/api/team/teams');return {...snapshot,reads_enabled:true}}catch{return {...snapshot,reads_enabled:false}}
+}
+export async function saveTeamConfigPolicy(team:string,offer:string,revision:number,fields:string[],key:string):Promise<{policy_revision:number;overridable_fields:Array<'model'|'reasoning_effort'>}>{
+ return teamRequest(`/api/team/teams/${encodeURIComponent(team)}/agents/${encodeURIComponent(offer)}/config-policy`,{method:'PUT',body:{request_id:key,expected_policy_revision:revision,overridable_fields:fields}})
 }
 
 export async function listTeams(): Promise<TeamSummary[]> {
@@ -269,9 +278,9 @@ export async function getTeamSession(sessionID: string): Promise<TeamSession> {
   return (await teamRequest<{ session: TeamSession }>(`/api/team/sessions/${encodeURIComponent(sessionID)}`)).session
 }
 
-export async function createTeamSession(teamID: string, input: { title: string; taskID?: string | null; offerIDs: string[] }): Promise<TeamSession> {
+export async function createTeamSession(teamID: string, input: { title: string; taskID?: string | null; offerIDs: string[];participantUserIDs?:number[];agentConfigs?:Record<string,{mode:'default'|'custom';override?:Partial<import('../types/team').TeamRuntimeConfig>;capability_revision?:string}>;requestID?:string }): Promise<TeamSession> {
   return (await teamRequest<{ session: TeamSession }>(`/api/team/teams/${encodeURIComponent(teamID)}/sessions`, {
-    method: 'POST', body: { request_id: requestID(), title: input.title, task_id: input.taskID ?? null, offer_ids: input.offerIDs },
+    method: 'POST', body: { request_id: input.requestID ?? requestID(), title: input.title, task_id: input.taskID ?? null, offer_ids: input.offerIDs,participant_user_ids:input.participantUserIDs??[],...(input.agentConfigs?{agent_configs:input.agentConfigs}:{}) },
   })).session
 }
 
@@ -285,15 +294,15 @@ export async function listTeamCalls(sessionID: string): Promise<TeamCallSummary[
   return (await teamRequest<{ calls: TeamCallSummary[] }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/calls`)).calls
 }
 
-export async function listTeamEvents(sessionID: string, afterSequence = 0, limit = 100): Promise<{ events: TeamEvent[]; next_cursor: number | null }> {
+export async function listTeamEvents(sessionID: string, afterSequence = 0, limit = 100): Promise<{ events: TeamEvent[]; next_cursor: number | null;shared_high_water?:number;completed_through?:number;reset_required?:boolean;retained_after_seq?:number }> {
   return teamRequest(`/api/team/sessions/${encodeURIComponent(sessionID)}/events?after_seq=${afterSequence}&limit=${limit}`)
 }
 
-export async function appendTeamMessage(sessionID: string, input: { content: string; targetMode: TeamMessageTargetMode; targetOfferIDs?: string[]; referenceEventID?: string | null }): Promise<{ event: TeamEvent; call_ids: string[] }> {
+export async function appendTeamMessage(sessionID: string, input: { content: string; targetMode: TeamMessageTargetMode; targetOfferIDs?: string[]; referenceEventID?: string | null;requestID?:string }): Promise<{ event: TeamEvent; call_ids: string[] }> {
   return teamRequest(`/api/team/sessions/${encodeURIComponent(sessionID)}/events`, {
     method: 'POST',
     body: {
-      request_id: requestID(), content: input.content, target_mode: input.targetMode,
+      request_id: input.requestID ?? requestID(), content: input.content, target_mode: input.targetMode,
       target_offer_ids: input.targetOfferIDs ?? [], reference_event_id: input.referenceEventID ?? null,
     },
   })
@@ -328,6 +337,10 @@ export async function listTeamRuns(sessionID: string): Promise<TeamRun[]> {
 }
 
 export async function createTeamRun(sessionID: string, input: {
+  mode?:import('../types/team').TeamRunMode
+  participantOfferIDs?:string[]
+  maxRounds?:number
+  requestID?:string
   coordinatorOfferID: string
   contextVersion: number
   budget?: Partial<TeamRun['budget']>
@@ -335,7 +348,8 @@ export async function createTeamRun(sessionID: string, input: {
   return (await teamRequest<{ run: TeamRun }>(`/api/team/sessions/${encodeURIComponent(sessionID)}/runs`, {
     method: 'POST',
     body: {
-      request_id: requestID(), coordinator_offer_id: input.coordinatorOfferID,
+      request_id: input.requestID??requestID(), coordinator_offer_id: input.coordinatorOfferID,
+      ...(input.mode ? {mode:input.mode,participant_offer_ids:input.participantOfferIDs,max_rounds:input.maxRounds??3}:{}),
       context_version: input.contextVersion, ...(input.budget ? { budget: input.budget } : {}),
     },
   })).run
@@ -402,3 +416,16 @@ export async function createTeamWorkspace(input: CreateTeamWorkspaceInput): Prom
 export async function changeTeamMemberRole(teamID: string, member: TeamMember, role: import('../types/team').TeamRole): Promise<TeamMember> {
   return (await teamRequest<{ membership: TeamMember }>(`/api/team/teams/${encodeURIComponent(teamID)}/members/${encodeURIComponent(member.id)}/role`, {method:'PATCH',body:{request_id:requestID(),expected_revision:member.revision,role}})).membership
 }
+
+export function findTeamMessage(session:string,request:string):Promise<{event:TeamEvent;call_ids:string[]}>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/messages/by-request/${encodeURIComponent(request)}`)}
+export function markTeamRead(session:string,eventSeq:number):Promise<{event_seq:number}>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/read-position`,{method:'PUT',body:{event_seq:eventSeq}})}
+export async function getTeamAgentCapabilities(session:string,offer:string,team?:string):Promise<import('../types/team').TeamAgentConfigCapabilities>{
+ const path=team?`teams/${encodeURIComponent(team)}/agents`:`sessions/${encodeURIComponent(session)}/agent-bindings`
+ return (await teamRequest<{capabilities:import('../types/team').TeamAgentConfigCapabilities}>(`/api/team/${path}/${encodeURIComponent(offer)}/capabilities`)).capabilities
+}
+export async function saveTeamAgentConfig(session:string,offer:string,input:{request_id:string;mode:'default'|'custom';override:Partial<import('../types/team').TeamRuntimeConfig>;expected_config_revision:number;capability_revision:string}):Promise<import('../types/team').SessionAgentConfig>{
+ return (await teamRequest<{config:import('../types/team').SessionAgentConfig}>(`/api/team/sessions/${encodeURIComponent(session)}/agent-bindings/${encodeURIComponent(offer)}/config`,{method:'PUT',body:input})).config
+}
+export function assignTeamTask(session:string,input:{request_id:string;instruction:string;acceptance:string;target_offer_ids:string[];context_version:number}):Promise<{task_id:string;event:TeamEvent;call_ids:string[]}>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/tasks`,{method:'POST',body:input})}
+export function listTeamInteractions(session:string):Promise<{items:import('../types/attentionInbox').AttentionInboxItem[];private_cursor:string}>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/interactions`)}
+export function actTeamInteraction(session:string,item:string,key:string,revision:number,action:'once'|'reject'):Promise<unknown>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/interactions/${encodeURIComponent(item)}/actions`,{method:'POST',headers:{'Idempotency-Key':key},body:{expected_revision:revision,action_id:action}})}

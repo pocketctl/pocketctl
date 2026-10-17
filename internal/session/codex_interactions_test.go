@@ -962,3 +962,21 @@ func TestCodexInteractionsLeavesUnsupportedOpenAIFormToOfficialTUI(t *testing.T)
 		t.Fatalf("unsupported form was answered by daemon: %+v", client.responses)
 	}
 }
+
+func TestTeamReadOnlyDeclinesNativeApprovalWithoutPublishingOwnerAction(t *testing.T) {
+	output := make(chan protocol.DaemonEvent, 16)
+	sm := NewSessionManager(output)
+	sm.collaborationBindings = map[string]collaborationNativeBinding{"binding": {NativeSessionID: "read-only-team", RuntimePermission: "read_only"}}
+	client := newInteractionCodexClient()
+	broker := newCodexInteractions(sm, 7, client)
+	request := codexServerRequest(t, `99`, "item/commandExecution/requestApproval", `{"threadId":"read-only-team","turnId":"turn","itemId":"write","command":"touch blocked.txt","availableDecisions":["accept","decline"]}`)
+	broker.Handle(request)
+	client.responseMu.Lock()
+	defer client.responseMu.Unlock()
+	if len(client.responses) != 1 || !strings.Contains(string(client.responses[0].result), "decline") {
+		t.Fatalf("read-only escalation was not declined: %+v", client.responses)
+	}
+	if broker.HasPending("read-only-team") || len(output) != 0 {
+		t.Fatal("read-only escalation exposed an actionable owner approval")
+	}
+}

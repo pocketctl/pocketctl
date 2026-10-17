@@ -13,6 +13,7 @@ describe('Attention Inbox v1 runtime configuration', () => {
         codex: { projection: false, remoteResponse: false },
         opencode: { projection: false, remoteResponse: false },
         'claude-code': { projection: false, remoteResponse: false },
+        dsh: { projection: false, remoteResponse: false },
       },
       recovery: {
         mode: 'off',
@@ -43,7 +44,8 @@ describe('Attention Inbox v1 runtime configuration', () => {
         providers: expect.objectContaining({
           codex: { projection: true, remoteResponse: true },
           opencode: { projection: true, remoteResponse: true },
-          'claude-code': { projection: false, remoteResponse: false },
+          'claude-code': { projection: false, remoteResponse: true },
+          dsh: { projection: false, remoteResponse: true },
         }),
       }))
   })

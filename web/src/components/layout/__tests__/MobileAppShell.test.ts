@@ -188,7 +188,11 @@ describe('mobile application shell', () => {
       if (outcome === 'offline') fail(new Error('offline'))
       else complete({ ...allowed, collaboration: outcome === 'allowed', writes_enabled: outcome === 'allowed' })
       await flushPromises()
-      expect(router.currentRoute.value.path).toBe(outcome === 'allowed' ? '/teams' : '/sessions')
+      expect(router.currentRoute.value.path).toBe(outcome === 'revoked' ? '/sessions' : '/teams')
+      if (outcome === 'offline') {
+        expect(realTeamAccess.enabled.value).toBe(false)
+        expect(realTeamAccess.denied.value).toBe(false)
+      }
     } finally { wrapper.unmount(); realTeamAccess = undefined; accessToken.value = 'fixture-token' }
   })
   test('keeps Team out of the mobile bottom nav and gates the desktop entry by account', async () => {

@@ -87,7 +87,7 @@ export class TeamContextDeliveryService {
   async prepare(callId: string, memoryContext?: TeamMemoryContextSelection | null): Promise<CollaborationContextDelivery> {
     const call = (await this.pool.query(
       `SELECT call.call_id, call.binding_id, call.context_version, call.context_snapshot_hash,
-              call.history_through_event_seq, call.team_session_id,
+              call.history_through_event_seq, call.team_session_id, call.run_id,
               context.goal, context.consensus, context.open_questions, context.context_references, context.content_hash
        FROM collaboration_calls call
        LEFT JOIN collaboration_context_versions context
@@ -101,9 +101,9 @@ export class TeamContextDeliveryService {
     }
     const history = await this.pool.query(
       `SELECT event_seq, kind, content FROM collaboration_events
-       WHERE team_session_id = $1 AND event_seq <= $2
+       WHERE team_session_id = $1 AND (event_seq <= $2 OR ($3::text IS NOT NULL AND call_id IN (SELECT call_id FROM collaboration_calls WHERE run_id=$3)))
        ORDER BY event_seq DESC LIMIT 100`,
-      [call.team_session_id, Number(call.history_through_event_seq)],
+      [call.team_session_id, Number(call.history_through_event_seq),call.run_id],
     )
     const built = buildTeamContextStableText({
       goal: String(call.goal ?? ''),

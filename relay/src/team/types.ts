@@ -163,6 +163,7 @@ export interface TeamEvent {
   context_version: number | null
   call_id: TeamCallID | null
   content: string
+  request_id?: string | null
   created_at: string
 }
 
@@ -195,6 +196,12 @@ export interface TeamRunBudget {
 }
 
 export interface TeamRun {
+  mode?: TeamRunMode | null
+  participant_offer_ids?: string[] | null
+  max_rounds?: number | null
+  rounds_used?: number
+  no_progress_count?: number
+  structured_result?: {conclusion:string;todo:string[];disagreements:string[];reason:string} | null
   id: TeamRunID
   team_session_id: TeamSessionID
   initiator_user_id: number
@@ -281,3 +288,35 @@ export type TeamErrorCode =
   | 'no_callable_agent'
   | 'dispatch_uncertain'
   | 'budget_exhausted'
+
+// Config support is independently negotiated; v1 daemon execution never implies it.
+export const TEAM_CONFIG_CAPABILITY = 'team_collaboration_config_v2' as const
+export interface TeamRuntimeConfig {
+  model: string
+  reasoning_effort: string | null
+  permission_profile: string
+}
+export interface SessionAgentConfig {
+  mode: 'default' | 'custom'
+  default_snapshot: TeamRuntimeConfig | null
+  override: Partial<TeamRuntimeConfig>
+  requested_config: TeamRuntimeConfig | null
+  applied_config: TeamRuntimeConfig | null
+  config_revision: number
+  applied_revision: number | null
+  capability_revision: string | null
+  status: 'unresolved' | 'pending' | 'applied' | 'rejected'
+}
+export interface TeamAgentConfigCapabilities {
+  policy_revision?:number
+  schema_version: 2
+  revision: string
+  models: Array<{ id: string; reasoning_efforts: string[]; default_reasoning_effort?:string|null }>
+  permission_profiles: string[]
+  default_config: TeamRuntimeConfig
+  default_source: string
+  overridable_fields: Array<'model' | 'reasoning_effort'>
+  read_only: boolean
+  runtime_switch: 'recreate' | 'hot'
+}
+export type TeamRunMode = 'discussion' | 'review' | 'execute'

@@ -296,9 +296,11 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		if effort != "" {
 			params["config"] = map[string]any{"model_reasoning_effort": effort}
 		}
-		if err := client.Call(ctx, "thread/resume", params, nil); err != nil {
+		var resumed codexNativeConfigFields
+		if err := client.Call(ctx, "thread/resume", params, &resumed); err != nil {
 			return nil, err
 		}
+		sm.rememberNativeCodexConfig(id, resumed)
 		b.coord.markSubscribed(id)
 	}
 	if item.Kind == "skill" {
@@ -374,9 +376,11 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		if effort != "" {
 			params["config"] = map[string]any{"model_reasoning_effort": effort}
 		}
-		if err = client.Call(ctx, "thread/resume", params, nil); err != nil {
+		var resumed codexNativeConfigFields
+		if err = client.Call(ctx, "thread/resume", params, &resumed); err != nil {
 			return nil, err
 		}
+		sm.rememberNativeCodexConfig(id, resumed)
 		b.coord.markSubscribed(id)
 		sm.mu.Lock()
 		sm.sessions[id].Model = model

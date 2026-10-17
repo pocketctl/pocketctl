@@ -14,6 +14,25 @@ function socket() {
 }
 
 describe('Team collaboration WebSocket subscriptions', () => {
+  test('rejects forged internal dispatch before ownership lookup or native routing', async () => {
+    const pool = { query: vi.fn() }
+    const router = new Router(pool as any)
+    const ws = socket()
+    router.registerClient(ws, 7)
+    try {
+      for (const msg of [
+        { type: 'collaboration_session_create' },
+        { type: 'collaboration_user_message', session_id: 'owned' },
+        { type: 'session_create', collaboration: { owner_user_id: 7 } },
+        { type: 'user_message', session_id: 'owned', team_context: {} },
+        { type: 'set_model', session_id: 'owned', config_hash: 'forged' },
+      ]) {
+        await router.handleClientMessage(ws, { ...msg, request_id: 'forgery' })
+        expect(ws.sent.at(-1)).toMatchObject({ code: 'team_internal_command_forbidden' })
+      }
+      expect(pool.query).not.toHaveBeenCalled()
+    } finally { router.stop() }
+  })
   test('authorizes subscriptions, broadcasts only to participants, and revokes immediately', async () => {
     const authorizer = { canSubscribe: vi.fn(async (userId: number) => userId === 7) }
     const router = new Router({ query: vi.fn() } as any, { teamSubscriptionAuthorizer: authorizer })
@@ -28,11 +47,11 @@ describe('Team collaboration WebSocket subscriptions', () => {
     expect(denied.sent[0]).toMatchObject({ type: 'team_collaboration_subscription_error', error: 'not_found' })
 
     await router.broadcastTeamEvent('css_1', [7], { event_seq: 4 })
-    expect(allowed.sent[1]).toMatchObject({ type: 'team_collaboration_event', event: { event_seq: 4 } })
+    expect(allowed.sent[2]).toMatchObject({ type: 'team_collaboration_event', event: { event_seq: 4 } })
     expect(denied.sent).toHaveLength(1)
 
     router.revokeTeamSubscription('css_1', 7)
-    expect(allowed.sent[2]).toEqual({ type: 'team_collaboration_access_revoked', team_session_id: 'css_1' })
+    expect(allowed.sent[3]).toEqual({ type: 'team_collaboration_access_revoked', team_session_id: 'css_1' })
     router.stop()
   })
 

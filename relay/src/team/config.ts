@@ -5,23 +5,30 @@ import { TEAM_CONTRACT_VERSION } from './types.js'
 export type TeamFeatureFlag = 'off' | 'on'
 
 export interface TeamCollaborationConfig {
+  agentConfig?: TeamFeatureFlag
+  discussionsV2?: TeamFeatureFlag
+  privateInteractions?: TeamFeatureFlag
   collaboration: TeamFeatureFlag
   autorun: TeamFeatureFlag
   memoryBridge: TeamFeatureFlag
 }
 
 export interface TeamCapabilitySnapshot {
+  reads_enabled?:boolean
   schema_version: 1
   contract_version: typeof TEAM_CONTRACT_VERSION
   collaboration: boolean
   autorun: boolean
   memory_bridge: boolean
   writes_enabled: boolean
+  agent_config_v2?:boolean
+  discussions_v2?:boolean
+  private_interactions_v2?:boolean
 }
 
 function strictFlag(
   env: Record<string, string | undefined>,
-  name: 'TEAM_COLLABORATION' | 'TEAM_AUTORUN' | 'TEAM_MEMORY_BRIDGE',
+  name: 'TEAM_COLLABORATION' | 'TEAM_AUTORUN' | 'TEAM_MEMORY_BRIDGE' | 'TEAM_AGENT_CONFIG_V2' | 'TEAM_DISCUSSIONS_V2' | 'TEAM_PRIVATE_INTERACTIONS_V2',
 ): TeamFeatureFlag {
   const value = env[name]?.trim() || 'off'
   if (value !== 'off' && value !== 'on') {
@@ -34,6 +41,9 @@ export function resolveTeamCollaborationConfig(
   env: Record<string, string | undefined> = process.env,
 ): TeamCollaborationConfig {
   const config: TeamCollaborationConfig = {
+    ...(env.TEAM_AGENT_CONFIG_V2!==undefined ? {agentConfig:strictFlag(env,'TEAM_AGENT_CONFIG_V2')} : {}),
+    ...(env.TEAM_DISCUSSIONS_V2!==undefined ? {discussionsV2:strictFlag(env,'TEAM_DISCUSSIONS_V2')} : {}),
+    ...(env.TEAM_PRIVATE_INTERACTIONS_V2!==undefined ? {privateInteractions:strictFlag(env,'TEAM_PRIVATE_INTERACTIONS_V2')} : {}),
     collaboration: strictFlag(env, 'TEAM_COLLABORATION'),
     autorun: strictFlag(env, 'TEAM_AUTORUN'),
     memoryBridge: strictFlag(env, 'TEAM_MEMORY_BRIDGE'),
@@ -61,6 +71,9 @@ export function teamCapabilitySnapshot(
       && config.memoryBridge === 'on'
       && dependencies.memoryExtensionAvailable,
     writes_enabled: collaboration,
+    ...(config.agentConfig ? {agent_config_v2:collaboration&&config.agentConfig==='on'} : {}),
+    ...(config.discussionsV2 ? {discussions_v2:collaboration&&config.autorun==='on'&&config.discussionsV2==='on'} : {}),
+    ...(config.privateInteractions ? {private_interactions_v2:collaboration&&config.privateInteractions==='on'} : {}),
   }
 }
 
@@ -89,8 +102,6 @@ export function registerTeamCapabilityRoutes(
     }
     reply.header('Cache-Control', 'no-store')
     const enabled = await dependencies.isTeamEnabled(actor.userId)
-    return teamCapabilitySnapshot(enabled ? dependencies.config : { collaboration: 'off', autorun: 'off', memoryBridge: 'off' }, {
-      memoryExtensionAvailable: dependencies.memoryExtensionAvailable,
-    })
+    return {...teamCapabilitySnapshot(enabled ? dependencies.config : { collaboration: 'off', autorun: 'off', memoryBridge: 'off' }, {memoryExtensionAvailable:dependencies.memoryExtensionAvailable}),reads_enabled:enabled}
   })
 }

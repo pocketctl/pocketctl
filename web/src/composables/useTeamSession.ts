@@ -2,6 +2,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 
 import {
   appendTeamMessage,
+  findTeamMessage,
+  markTeamRead,
+  TeamApiError,
   controlTeamRun,
   createTeamRun,
   getTeamContext,
@@ -15,6 +18,9 @@ import {
   supplementTeamRun,
 } from '../services/teamClient'
 import type { TeamCallSummary, TeamCapabilities, TeamContextSnapshot, TeamEvent, TeamMessageTargetMode, TeamRun, TeamSession, TeamTask } from '../types/team'
+import { useAuth } from './useAuth'
+import { getRelayOrigin } from './useEnv'
+import { teamOutbox,TeamContinuousCursor,type TeamOutboxMessage } from '../services/teamOutbox'
 import { useScopedSessionDraft } from './useScopedSessionState'
 import { useWebSocket } from './useWebSocket'
 import { useLocale } from './useLocale'
@@ -25,6 +31,13 @@ function errorMessage(error: unknown): string {
 
 export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonly<Ref<string>>) {
   const { t } = useLocale()
+  const {user}=useAuth()
+  const accountScope=computed(()=>JSON.stringify([getRelayOrigin(),user.value?.id??null,teamID.value,sessionID.value]))
+  const pendingMessages=ref<TeamOutboxMessage[]>([])
+  const continuous=new TeamContinuousCursor()
+  const contiguousEventSeq=ref(0)
+  let syncPromise:Promise<void>|undefined
+  let flushing=false
   const scope = computed(() => ({ type: 'team' as const, teamId: teamID.value }))
   const { draft, clearDraft } = useScopedSessionDraft(scope, sessionID)
   const session = ref<TeamSession | null>(null)
@@ -61,27 +74,108 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     if (session.value.state === 'paused') return '共享会话已暂停'
     if (session.value.state !== 'active') return '共享会话为只读状态'
     if (capabilities.value?.writes_enabled !== true) return '团队写入暂不可用'
-    if (!connected.value) return '实时连接已断开，恢复后可发送'
     return ''
   })
   const canSend = computed(() => !loading.value && !sending.value && !readOnlyReason.value)
 
   function mergeEvents(nextEvents: TeamEvent[]): void {
     const byID = new Map(events.value.map(event => [event.id, event]))
-    for (const event of nextEvents) byID.set(event.id, event)
+    for (const event of nextEvents) {
+      byID.set(event.id,event)
+      contiguousEventSeq.value=continuous.receive(event.event_seq)
+      if(event.request_id && event.author_user_id===user.value?.id){
+        const pending=pendingMessages.value.find(p=>p.request_id===event.request_id)
+        if(pending){pendingMessages.value=pendingMessages.value.filter(p=>p.key!==pending.key);void teamOutbox.remove(pending.key).catch(()=>{})}
+      }
+    }
     events.value = [...byID.values()].sort((left, right) => left.event_seq - right.event_seq)
   }
 
-  async function catchUp(afterSequence = 0): Promise<void> {
-    const currentGeneration = generation
-    const currentSessionID = sessionID.value
-    let cursor: number | null = afterSequence
-    do {
-      const page = await listTeamEvents(currentSessionID, cursor, 100)
-      if (currentGeneration !== generation || accessRevoked.value) return
-      mergeEvents(page.events)
-      cursor = page.next_cursor
-    } while (cursor !== null)
+  async function catchUp(afterSequence = contiguousEventSeq.value):Promise<void>{
+    if(syncPromise)return syncPromise
+    const currentGeneration=generation,currentSessionID=sessionID.value
+    const run=async()=>{
+      let cursor:number|null=afterSequence
+      do{
+        const before=cursor
+        const page=await listTeamEvents(currentSessionID,cursor,100)
+        if(currentGeneration!==generation||accessRevoked.value)return
+        if(page.reset_required){events.value=[];continuous.reset(page.retained_after_seq??0);contiguousEventSeq.value=continuous.value}
+        mergeEvents(page.events)
+        if(page.completed_through!==undefined)contiguousEventSeq.value=continuous.completed(page.completed_through)
+        cursor=page.next_cursor
+        if(cursor!==null&&cursor<=before)throw new Error('消息历史未推进，请重试同步')
+      }while(cursor!==null)
+    }
+    const work=run();syncPromise=work
+    let success=false
+    try{await work;success=true}finally{if(syncPromise===work)syncPromise=undefined;if(success&&currentGeneration===generation&&events.value.some(e=>e.event_seq>contiguousEventSeq.value))queueMicrotask(()=>void catchUp().catch(f=>{error.value=errorMessage(f)}))}
+  }
+  function revokeAccess(){void teamOutbox.blockScope(accountScope.value).catch(()=>{});generation++;pendingMessages.value=[];clearCallPoll();clearSessionPoll();clearRunPoll();calls.value=[];events.value=[];session.value=null;context.value=null;runs.value=[];task.value=null;draft.value='';accessRevoked.value=true;subscribed.value=false;unsubscribeTeamSession(sessionID.value)}
+  function authorityFailure(failure:unknown){if(failure instanceof TeamApiError && [401,403,404].includes(failure.status)){revokeAccess();return true}return false}
+  async function restoreOutbox(){
+    const scope=accountScope.value,g=generation
+    if(!user.value)return
+    const rows=await teamOutbox.list(scope)
+    if(scope!==accountScope.value||g!==generation)return
+    pendingMessages.value=rows.map(p=>p.state==='sending'?{...p,state:'unknown'}:p)
+    for(const row of pendingMessages.value)if(row.state==='unknown')await reconcileMessage(row.request_id)
+  }
+  async function reconcileMessage(request:string):Promise<boolean>{
+    const row=pendingMessages.value.find(p=>p.request_id===request)
+    if(!row||row.scope!==accountScope.value||accessRevoked.value)return false
+    const g=generation
+    let authorized=false
+    try{
+      await getTeamSession(row.session_id);authorized=true
+      const result=await findTeamMessage(row.session_id,row.request_id)
+      if(g!==generation||row.scope!==accountScope.value)return false
+      mergeEvents([result.event]);pendingMessages.value=pendingMessages.value.filter(p=>p.key!==row.key);await teamOutbox.remove(row.key);return true
+    }catch(failure){
+      if(g===generation){
+        error.value=errorMessage(failure)
+        if(!authorized)authorityFailure(failure);
+        if(authorized && failure instanceof TeamApiError && failure.status===404){row.state='failed';row.error='未找到原消息，可使用原请求重试';await teamOutbox.put({...row})}
+      }
+      return false
+    }
+  }
+  async function flushOutbox(){
+    if(flushing||capabilities.value?.writes_enabled!==true||!connected.value||navigator.onLine===false||!user.value||accessRevoked.value||!session.value)return
+    flushing=true
+    let madeProgress=false
+    const g=generation,scope=accountScope.value
+    try{
+      // Reauthorize after reconnect before even the first persisted send.
+      await getTeamSession(sessionID.value)
+      for(const row of [...pendingMessages.value]){
+        if(g!==generation||scope!==accountScope.value||accessRevoked.value||!connected.value)break
+        if(row.state!=='queued')break
+        row.state='sending';await teamOutbox.put({...row})
+        try{
+          const result=await appendTeamMessage(row.session_id,{requestID:row.request_id,content:row.content,targetMode:row.target_mode,targetOfferIDs:row.target_offer_ids,referenceEventID:row.reference_event_id})
+          if(g!==generation||scope!==accountScope.value)break
+          mergeEvents([result.event]);pendingMessages.value=pendingMessages.value.filter(p=>p.key!==row.key);await teamOutbox.remove(row.key);madeProgress=true;void refreshCalls()
+        }catch(failure){
+          if(!pendingMessages.value.some(p=>p.key===row.key))continue
+          row.state=failure instanceof TeamApiError && failure.status>=400 && failure.status<500 ? 'failed':'unknown'
+          row.error=errorMessage(failure);await teamOutbox.put({...row})
+          if(g===generation)error.value=row.error
+          break // preserve queue order until the preceding result is resolved
+        }
+      }
+    }catch(failure){if(g===generation){authorityFailure(failure);error.value=errorMessage(failure)}}finally{flushing=false;if(madeProgress&&pendingMessages.value[0]?.state==='queued'&&connected.value&&!accessRevoked.value)queueMicrotask(()=>void flushOutbox())}
+  }
+  async function retryMessage(request:string){
+    const row=pendingMessages.value.find(p=>p.request_id===request)
+    if(!row||row.scope!==accountScope.value||accessRevoked.value)return
+    if(row.state==='unknown'){if(await reconcileMessage(request))return;if(row.state==='unknown')return}
+    if(!pendingMessages.value.includes(row))return
+    await getTeamSession(row.session_id)
+    row.state='queued';await teamOutbox.put({...row});await flushOutbox()
+  }
+  async function markRead(){
+    if(capabilities.value?.reads_enabled!==undefined && !accessRevoked.value && document.visibilityState==='visible' && contiguousEventSeq.value>0)await markTeamRead(sessionID.value,contiguousEventSeq.value)
   }
 
   function clearSessionPoll(): void {
@@ -102,13 +196,15 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
         // A sidebar mutation or another participant can change metadata without
         // appending a discussion event. Do not overwrite a newer local mutation.
         if (!session.value || nextSession.revision >= session.value.revision) session.value = nextSession
+        if(nextSession.latest_event_seq>contiguousEventSeq.value)await catchUp()
         if (context.value?.version !== session.value.current_context_version) {
           const nextContext = await getTeamContext(currentSessionID)
           if (!disposed && !accessRevoked.value && currentGeneration === generation
             && nextContext?.version === session.value?.current_context_version) context.value = nextContext
         }
+        if(!subscribed.value)await catchUp()
       } catch (failure) {
-        if (!disposed && !accessRevoked.value && currentGeneration === generation) error.value = errorMessage(failure)
+        if (!disposed && !accessRevoked.value && currentGeneration === generation) {authorityFailure(failure);error.value = errorMessage(failure)}
       } finally {
         if (currentGeneration === generation) scheduleSessionPoll()
       }
@@ -141,7 +237,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
         }
       }
     } catch (failure) {
-      if (currentGeneration === generation) error.value = errorMessage(failure)
+      if (currentGeneration === generation) {authorityFailure(failure);error.value = errorMessage(failure)}
     } finally {
       if (request === callRequest && currentGeneration === generation && !disposed && !accessRevoked.value) {
         callPollTimer = setTimeout(() => { void refreshCalls() }, 1_500)
@@ -203,6 +299,8 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     runError.value = ''
     accessRevoked.value = false
     events.value = []
+    continuous.reset();contiguousEventSeq.value=0;syncPromise=undefined;pendingMessages.value=[]
+    connect()
     calls.value = []
     clearCallPoll()
     clearSessionPoll()
@@ -211,6 +309,8 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     task.value = null
     clearRunPoll()
     try {
+      await restoreOutbox().catch(failure => { if (currentGeneration === generation) error.value = errorMessage(failure) })
+      if (currentGeneration !== generation) return
       const [nextSession, nextContext, nextCapabilities, nextRuns] = await Promise.all([
         getTeamSession(sessionID.value),
         getTeamContext(sessionID.value),
@@ -229,18 +329,26 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       if (currentGeneration !== generation) return
       runContext.value = nextRunContext
       void loadLinkedTask(nextSession, currentGeneration)
-      await catchUp()
+      await catchUp(0)
+      await restoreOutbox().catch(failure => { if (currentGeneration === generation) error.value = errorMessage(failure) })
+      void flushOutbox()
       if (currentGeneration !== generation) return
       connect()
-      subscribeTeamSession(sessionID.value)
+      if(nextCapabilities.collaboration)subscribeTeamSession(sessionID.value)
       scheduleRunPoll()
       scheduleSessionPoll()
       void refreshCalls()
     } catch (failure) {
-      if (currentGeneration === generation) error.value = errorMessage(failure)
+      if (currentGeneration === generation) {authorityFailure(failure);error.value = errorMessage(failure)}
     } finally {
       if (currentGeneration === generation) loading.value = false
     }
+  }
+
+  function recoverOnline(): void {
+    if (accessRevoked.value || loading.value || disposed) return
+    if (!session.value || !capabilities.value) { void load(); return }
+    void restoreOutbox().then(flushOutbox).catch(failure => { error.value = errorMessage(failure) })
   }
 
   async function reloadSession(): Promise<void> {
@@ -259,13 +367,13 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     scheduleRunPoll()
   }
 
-  async function createRun(coordinatorOfferID: string): Promise<boolean> {
+  async function createRun(coordinatorOfferID: string,options?:{mode:import('../types/team').TeamRunMode;participantOfferIDs:string[];maxRounds:number;budget:TeamRun['budget'];requestID:string}): Promise<boolean> {
     if (!context.value || !autorunEnabled.value || runBusy.value) return false
     runBusy.value = true
     runError.value = ''
     try {
       const created = await createTeamRun(sessionID.value, {
-        coordinatorOfferID, contextVersion: context.value.version,
+        coordinatorOfferID, contextVersion: context.value.version,...options,
       })
       replaceRun(created)
       runContext.value = context.value
@@ -339,24 +447,18 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     } finally { runBusy.value = false }
   }
 
-  async function sendMessage(input: { targetMode: TeamMessageTargetMode; targetOfferIDs?: string[]; referenceEventID?: string | null }): Promise<boolean> {
-    const content = draft.value.trim()
-    if (!content || !canSend.value || (input.targetMode !== 'discussion' && !callableBindings.value.length)) return false
-    sending.value = true
-    error.value = ''
-    try {
-      const result = await appendTeamMessage(sessionID.value, { content, ...input })
-      mergeEvents([result.event])
-      clearDraft()
-      void refreshCalls()
-      return true
-    } catch (failure) {
-      error.value = errorMessage(failure)
-      await reloadSession()
-      return false
-    } finally {
-      sending.value = false
-    }
+  async function sendMessage(input:{targetMode:TeamMessageTargetMode;targetOfferIDs?:string[];referenceEventID?:string|null}):Promise<boolean>{
+    const content=draft.value.trim()
+    if(!content||!canSend.value||!user.value||(input.targetMode!=='discussion'&&!callableBindings.value.length))return false
+    sending.value=true;error.value=''
+    try{
+      const request=crypto.randomUUID(),scope=accountScope.value
+      const row:TeamOutboxMessage={key:scope+':'+request,scope,session_id:sessionID.value,author_user_id:user.value.id,request_id:request,content,
+        target_mode:input.targetMode,target_offer_ids:input.targetOfferIDs??[],reference_event_id:input.referenceEventID??null,created_at:new Date().toISOString(),state:'queued'}
+      await teamOutbox.put(row)
+      if(scope!==accountScope.value)return false
+      pendingMessages.value.push(row);clearDraft();void flushOutbox();return true
+    }catch(failure){error.value=errorMessage(failure);return false}finally{sending.value=false}
   }
 
   function installSubscriptionHandlers(): void {
@@ -364,30 +466,33 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
       onEvent('team_collaboration_event', message => {
         if (accessRevoked.value || message.team_session_id !== sessionID.value || !message.event) return
         mergeEvents([message.event])
+        if(message.event.event_seq>contiguousEventSeq.value)void catchUp().catch(f=>{error.value=errorMessage(f)})
         if (['run', 'status', 'agent_message'].includes(message.event.kind)) void refreshRuns().finally(scheduleRunPoll)
       }),
       onEvent('team_collaboration_subscription', message => {
-        if (message.team_session_id === sessionID.value) subscribed.value = message.subscribed === true
+        if(message.team_session_id===sessionID.value){subscribed.value=message.subscribed===true;if(subscribed.value)void catchUp().catch(f=>{error.value=errorMessage(f)})}
       }),
       onEvent('team_collaboration_subscription_error', message => {
-        if (message.team_session_id === sessionID.value) error.value = '无法订阅此共享会话'
+        if (message.team_session_id !== sessionID.value) return
+        const g=generation
+        // Older Relays disable subscriptions together with writes. Confirm
+        // HTTP read authority before treating their refusal as revocation.
+        void Promise.all([getTeamSession(sessionID.value),getTeamCapabilities()]).then(([,caps])=>{
+          if(g!==generation)return
+          if(!caps.collaboration){capabilities.value=caps;subscribed.value=false;scheduleSessionPoll()}
+          else {revokeAccess();error.value='无法订阅此共享会话'}
+        }).catch(failure=>{if(g===generation){authorityFailure(failure);error.value=errorMessage(failure)}})
       }),
       onEvent('team_collaboration_access_revoked', message => {
         if (message.team_session_id !== sessionID.value) return
-        generation++
-        clearCallPoll()
-        clearSessionPoll()
-        clearRunPoll()
-        calls.value = []
-        events.value = []
-        session.value = null
-        accessRevoked.value = true
-        subscribed.value = false
+        revokeAccess()
       }),
       onEvent('connection_restored', () => {
-        subscribeTeamSession(sessionID.value)
-        const latestSequence = events.value.at(-1)?.event_seq ?? 0
+        if (!session.value || !capabilities.value) { recoverOnline(); return }
+        if(capabilities.value?.collaboration)subscribeTeamSession(sessionID.value)
+        const latestSequence = contiguousEventSeq.value
         void catchUp(latestSequence).catch(failure => { error.value = errorMessage(failure) })
+        void restoreOutbox().then(flushOutbox).catch(f=>{error.value=errorMessage(f)})
         void refreshRuns().finally(scheduleRunPoll)
       }),
     ]
@@ -398,13 +503,18 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     if (next) void load()
   })
 
+  watch(() => connected.value, online => { if (online) recoverOnline() })
+
+  watch(()=>user.value?.id,()=>{generation++;pendingMessages.value=[];events.value=[];session.value=null;accessRevoked.value=true;unsubscribeTeamSession(sessionID.value)})
   onMounted(() => {
     disposed = false
     installSubscriptionHandlers()
+    window.addEventListener('online', recoverOnline)
     void load()
   })
   onBeforeUnmount(() => {
     disposed = true
+    window.removeEventListener('online', recoverOnline)
     generation++
     clearCallPoll()
     clearSessionPoll()
@@ -414,6 +524,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
   })
 
   return {
+    pendingMessages,contiguousEventSeq,retryMessage,reconcileMessage,markRead,
     session, events, calls, context, runContext, runs, latestRun, task, capabilities, draft, loading, sending,
     runBusy, error, runError, connected, subscribed, callableBindings, autorunEnabled,
     readOnlyReason, canSend, load, reloadSession, refreshRuns, sendMessage, createRun,

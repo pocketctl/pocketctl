@@ -42,6 +42,8 @@ export async function initAttentionInboxSchema(pool: Pick<pg.Pool, 'query'>): Pr
       UNIQUE (user_id, daemon_id, session_id, request_id, kind)
     );
 
+    ALTER TABLE attention_items DROP CONSTRAINT IF EXISTS attention_items_provider_check;
+    ALTER TABLE attention_items ADD CONSTRAINT attention_items_provider_check CHECK(provider IN ('codex','opencode','claude-code','dsh'));
     ALTER TABLE attention_items ADD COLUMN IF NOT EXISTS risk_reasons
       JSONB NOT NULL DEFAULT '[]'::jsonb;
 

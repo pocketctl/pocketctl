@@ -3,7 +3,7 @@
     class="app-layout"
     :class="{
       'reference-shell': isLoggedIn && !route.meta.standalone,
-      'design-shell': isLoggedIn && !isSessionRoute && !route.meta.standalone,
+      'design-shell': isLoggedIn && (!isSessionRoute || isTeamSessionRoute) && !route.meta.standalone,
       'standalone-route': !!route.meta.standalone,
       'sidebar-collapsed': sidebarCollapsed,
       'mobile-shell-active': showMobileShell,
@@ -88,9 +88,9 @@
     <RegisterDaemonDialog v-if="registerOpen" @close="registerOpen = false" />
 
     <!-- Main Content -->
-    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell || route.meta.standalone, 'session-detail-route': isSessionRoute && !showMobileShell }">
+    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell || route.meta.standalone, 'session-detail-route': isSessionRoute && !showMobileShell, 'team-detail-route': isTeamSessionRoute && !showMobileShell }">
       <!-- Topbar (only when logged in) -->
-      <header class="topbar" v-if="isLoggedIn && !showMobileShell && !isSessionRoute">
+      <header class="topbar" v-if="isLoggedIn && !showMobileShell && (!isSessionRoute || isTeamSessionRoute)">
         <div class="topbar-breadcrumb breadcrumb">
           <span>{{ t('replica.workspace') }}</span><span>/</span><strong>{{ pageTitle }}</strong>
         </div>
@@ -303,6 +303,7 @@ const pageTitle = computed(() => {
     '/memory': t('nav.memory'),
     '/teams': t('team.title'),
   }
+  if (isTeamSessionRoute.value || route.name === 'team-sessions') return t('workspace.team_sessions')
   if (route.path.startsWith('/session/')) return t('nav.session_detail')
   return titles[route.path] || t('nav.overview')
 })
@@ -408,6 +409,8 @@ if (typeof window !== 'undefined') {
 }
 .main-content { transition: margin-left 0.2s ease; }
 .main-content.session-detail-route { --topbar-h: 0px; }
+.main-content.team-detail-route { --topbar-h: 58px; height:100dvh; min-height:0; overflow:hidden; display:flex; flex-direction:column; }
+.main-content.team-detail-route > .topbar { flex:none; }
 
 :root {
   --mobile-topbar-h: calc(56px + env(safe-area-inset-top));

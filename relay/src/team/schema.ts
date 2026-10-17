@@ -388,4 +388,97 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       END IF;
     END $$
   `)
+  // Additive v2 migration: old bindings remain unresolved and old calls/runs
+  // retain their exact execution contract. Application rollback keeps data.
+  await db.query(`
+    ALTER TABLE collaboration_session_agent_bindings
+      ADD COLUMN IF NOT EXISTS config_updated_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS config_mode VARCHAR(16) NOT NULL DEFAULT 'default' CHECK (config_mode IN ('default','custom')),
+      ADD COLUMN IF NOT EXISTS default_snapshot JSONB,
+      ADD COLUMN IF NOT EXISTS config_override JSONB NOT NULL DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS requested_config JSONB,
+      ADD COLUMN IF NOT EXISTS applied_config JSONB,
+      ADD COLUMN IF NOT EXISTS config_revision BIGINT NOT NULL DEFAULT 1 CHECK (config_revision > 0),
+      ADD COLUMN IF NOT EXISTS applied_revision BIGINT,
+      ADD COLUMN IF NOT EXISTS applied_call_event_seq BIGINT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS config_capability_revision TEXT,
+      ADD COLUMN IF NOT EXISTS config_status VARCHAR(16) NOT NULL DEFAULT 'unresolved' CHECK (config_status IN ('unresolved','pending','applied','rejected'));
+    ALTER TABLE collaboration_sessions ADD COLUMN IF NOT EXISTS retained_after_seq BIGINT NOT NULL DEFAULT 0 CHECK (retained_after_seq >= 0);
+    ALTER TABLE collaboration_calls
+      ADD COLUMN IF NOT EXISTS task_id TEXT REFERENCES team_tasks(task_id) ON DELETE RESTRICT,
+      ADD COLUMN IF NOT EXISTS requested_config JSONB,
+      ADD COLUMN IF NOT EXISTS config_revision BIGINT,
+      ADD COLUMN IF NOT EXISTS config_hash CHAR(64),
+      ADD COLUMN IF NOT EXISTS applied_config JSONB,
+      ADD COLUMN IF NOT EXISTS applied_config_hash CHAR(64),
+      ADD COLUMN IF NOT EXISTS execution_mode VARCHAR(16) CHECK (execution_mode IN ('discussion','review','execute'));
+    ALTER TABLE team_agent_offers ADD COLUMN IF NOT EXISTS config_policy JSONB NOT NULL DEFAULT '{"overridable_fields":[]}'::jsonb;
+    ALTER TABLE team_agent_offers ADD COLUMN IF NOT EXISTS config_policy_revision BIGINT NOT NULL DEFAULT 1;
+    ALTER TABLE collaboration_runs
+      ADD COLUMN IF NOT EXISTS mode VARCHAR(16) CHECK (mode IN ('discussion','review','execute')),
+      ADD COLUMN IF NOT EXISTS participant_offer_ids JSONB,
+      ADD COLUMN IF NOT EXISTS input_through_event_seq BIGINT,
+      ADD COLUMN IF NOT EXISTS participant_configs JSONB,
+      ADD COLUMN IF NOT EXISTS max_rounds INT CHECK (max_rounds > 0),
+      ADD COLUMN IF NOT EXISTS rounds_used INT NOT NULL DEFAULT 0 CHECK (rounds_used >= 0),
+      ADD COLUMN IF NOT EXISTS no_progress_count INT NOT NULL DEFAULT 0 CHECK (no_progress_count >= 0),
+      ADD COLUMN IF NOT EXISTS progress_hash CHAR(64),
+      ADD COLUMN IF NOT EXISTS structured_result JSONB;
+    CREATE TABLE IF NOT EXISTS team_event_journal (
+      journal_seq BIGSERIAL PRIMARY KEY,
+      event_id TEXT NOT NULL UNIQUE REFERENCES collaboration_events(event_id) ON DELETE CASCADE,
+      team_session_id TEXT NOT NULL REFERENCES collaboration_sessions(team_session_id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_team_event_journal_session ON team_event_journal(team_session_id,journal_seq);
+    CREATE TABLE IF NOT EXISTS team_event_cursors (
+      node_id TEXT PRIMARY KEY,
+      journal_seq BIGINT NOT NULL DEFAULT 0 CHECK (journal_seq >= 0),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS team_read_positions (
+      team_session_id TEXT NOT NULL REFERENCES collaboration_sessions(team_session_id) ON DELETE CASCADE,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      event_seq BIGINT NOT NULL DEFAULT 0 CHECK (event_seq >= 0),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(team_session_id,user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_team_private_pending_native ON attention_items(session_id,request_id,item_id) WHERE context->>'team_native_request'='true' AND state IN ('open','snoozed','submitting','result_unknown');
+    CREATE TABLE IF NOT EXISTS team_private_command_outbox (
+      command_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      owner_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      daemon_id VARCHAR(64) NOT NULL REFERENCES daemons(daemon_id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      command JSONB NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','delivered','expired')),
+      expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW()+INTERVAL '30 seconds',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(owner_user_id,session_id,request_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_team_private_commands_pending ON team_private_command_outbox(daemon_id,created_at) WHERE state='pending';
+    CREATE TABLE IF NOT EXISTS team_private_interaction_links (
+      attention_item_id UUID PRIMARY KEY REFERENCES attention_items(item_id) ON DELETE CASCADE,
+      team_session_id TEXT NOT NULL REFERENCES collaboration_sessions(team_session_id) ON DELETE CASCADE,
+      binding_id TEXT NOT NULL REFERENCES collaboration_session_agent_bindings(binding_id) ON DELETE RESTRICT,
+      call_id TEXT NOT NULL REFERENCES collaboration_calls(call_id) ON DELETE CASCADE,
+      owner_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_team_private_interaction_owner ON team_private_interaction_links(owner_user_id,team_session_id);
+    -- A trigger covers every event writer, including native projection and Run
+    -- workers. No private payload or fabricated ingress inbox enters this log.
+    CREATE OR REPLACE FUNCTION journal_team_event() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      -- Serialize journal allocation through commit. A bare BIGSERIAL allows
+      -- transaction 12 to commit before 11, making a polling cursor skip 11.
+      PERFORM pg_advisory_xact_lock(873621054);
+      INSERT INTO team_event_journal(event_id,team_session_id) VALUES (NEW.event_id,NEW.team_session_id);
+      PERFORM pg_notify('team_events', NEW.team_session_id);
+      RETURN NEW;
+    END $$;
+    CREATE OR REPLACE TRIGGER team_event_journal_append AFTER INSERT ON collaboration_events
+      FOR EACH ROW EXECUTE FUNCTION journal_team_event();
+  `)
+
 }

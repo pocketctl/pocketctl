@@ -214,7 +214,7 @@ what leaves the development host.
 ## Team collaboration (experimental)
 
 Team collaboration turns PocketCtl from a personal cross-device cockpit into a
-small human-and-Agent workspace. In the Web client you can:
+small human-and-Agent workspace. In the Web and iOS clients you can:
 
 - **Create Teams and manage membership** — invite members by email as admins,
   members, or read-only viewers; gate joining per account, change and audit
@@ -235,6 +235,14 @@ small human-and-Agent workspace. In the Web client you can:
 - **Run bounded multi-Agent coordination (optional)** — frozen call,
   concurrency, and wall-time budgets with recovery for uncertain outcomes;
   uncertain work is never blindly retried.
+- **Configure agents per session and route tasks** — each Team session picks
+  its own callable agents with per-agent settings, and tasks can be assigned
+  to a specific holder.
+- **Keep private side-channels** — members can send interactions visible only
+  to chosen receivers, and approvals travel an owner-only private channel.
+- **Stay in sync across devices** — quoted replies and read states follow you
+  between Web and iOS, and unsent messages survive reloads or offline periods
+  in a per-device outbox.
 
 Shared Memory is a separate opt-in bridge to an existing governed installation;
 Team membership never grants knowledge access by itself — every participant and
@@ -242,7 +250,7 @@ receiver is revalidated, and only exact published Memory references are used.
 
 Self-hosted operators must enable each phase independently with
 `TEAM_COLLABORATION`, `TEAM_AUTORUN`, and `TEAM_MEMORY_BRIDGE`. All default to
-`off`; iOS does not yet provide Team UI. See the
+`off`. See the
 [feature matrix](docs/team-collaboration-feature-matrix.md) and
 [rollout runbook](docs/operations/team-collaboration-rollout.md).
 

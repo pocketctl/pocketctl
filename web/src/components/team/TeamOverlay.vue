@@ -82,12 +82,14 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 .team-overlay-panel {
+  display: flex;
+  flex-direction: column;
   width: 550px;
   max-width: calc(100vw - 32px);
   max-height: 90dvh;
   margin: auto;
-  padding: 24px;
-  overflow: auto;
+  padding: 0;
+  overflow: hidden;
   border: 1px solid var(--border-light);
   border-radius: 12px;
   background: var(--bg);
@@ -109,10 +111,13 @@ onBeforeUnmount(() => {
   border-radius: 0;
 }
 header {
+  flex: none;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin: 0;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--border);
   gap: 16px;
 }
 header h2 {
@@ -142,11 +147,15 @@ header button {
   padding: 22px 24px;
 }
 footer {
+  flex: none;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 24px;
+  margin: 0;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border);
 }
+.team-overlay-content { min-height: 0; flex: 1 1 auto; overflow: auto; padding: 22px 24px; overscroll-behavior: contain; }
 .drawer footer {
   margin: 0;
   padding: 18px 24px;

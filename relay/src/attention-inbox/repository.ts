@@ -269,7 +269,7 @@ export class AttentionInboxRepository {
           errorCode: existing.error_code ?? undefined,
         }
       }
-      if (item.provider !== 'codex' && item.provider !== 'opencode') {
+      if (item.provider !== 'codex' && item.provider !== 'opencode' && !(['claude-code','dsh'].includes(item.provider) && item.context.team_native_request === true)) {
         await client.query('COMMIT')
         return { outcome: 'provider_not_enabled', item }
       }

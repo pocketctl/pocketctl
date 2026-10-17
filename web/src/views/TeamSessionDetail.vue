@@ -11,7 +11,6 @@
         <RouterLink class="mobile-back" :aria-label="t('workspace.return_session_list')" :to="listLink">‹</RouterLink>
         <div class="title-copy"><strong>{{ session?.title || t('common.loading') }}</strong><span>{{ t('workspace.created_by_agents', {creator:members.find(member => member.user_id === session?.creator_user_id)?.display_label || t('team.member'), count:session?.agent_bindings.length || 0}) }}</span></div>
         <div class="header-actions">
-          <TopbarGithubLink />
           <span v-if="session" :class="['session-state', session.state]">{{ stateLabel(session.state) }}</span>
           <div class="session-id-box"><span>{{ sessionID.slice(0,8) }}</span><button type="button" :aria-label="t('session.actions.copy_id')" @click="copySessionID"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
           <div ref="moreRoot" class="session-more" @keydown.esc.stop="moreOpen = false"><button :aria-label="t('workspace.more_session_actions')" :aria-expanded="moreOpen" @click="moreOpen = !moreOpen">···</button><div v-if="moreOpen" class="session-more-menu"><button v-if="isCreator && session" @click="togglePaused(); moreOpen = false">{{ session.state === 'paused' ? t('workspace.resume') : t('workspace.pause') }}</button><button @click="copySessionID(); moreOpen = false"> {{ t('session.actions.copy_id') }} </button></div></div>
@@ -32,7 +31,7 @@
       <section ref="messagesElement" :style="{'--composer-reserve':composerHeight + 'px'}" class="messages" @scroll="saveReadingPosition">
         <div v-if="loading && !events.length" class="empty"> {{ t('workspace.loading_collaboration') }} </div>
         <div v-else-if="!events.length" class="empty"><strong> {{ t('workspace.start_team_discussion') }} </strong><span> {{ t('workspace.team_discussion_hint') }} </span></div>
-        <article v-for="event in displayEvents" :id="`team-event-${event.id}`" :key="event.id" :class="['event', event.kind]">
+        <article v-for="event in displayEvents" :id="`team-event-${event.id}`" :key="event.id" :class="['event', event.kind, { 'own-message': event.kind === 'member_message' && event.author_user_id === currentUserID }]">
           <span v-if="event.kind === 'member_message' || event.kind === 'agent_message'" :class="['message-avatar',{agent:event.kind === 'agent_message'}]">{{ authorLabel(event).slice(0,1) }}</span>
           <div class="event-body">
           <div class="event-meta">
@@ -47,10 +46,15 @@
             <small v-if="call.state === 'uncertain'"> {{ t('workspace.call_result_unknown') }} </small>
             <RouterLink v-if="ownerNativeLink(call.offer_id)" :to="ownerNativeLink(call.offer_id)!"> {{ t('workspace.open_own_native_session') }} </RouterLink>
           </div>
+          <small v-if="event.author_user_id===currentUserID && event.kind==='member_message'">已发送</small>
           <div class="event-actions"><span v-if="event.target_mode">{{ targetLabel(event) }}</span><button v-if="event.context_version" class="context-receipt" @click="openContextVersion(event.context_version)">Context v{{ event.context_version }}</button><button type="button" @click="referenceEvent = event"> {{ t('workspace.references') }} </button></div>
           </div>
         </article>
+        <article v-for="pending in pendingMessages" :key="pending.request_id" class="event member_message own-message"><div class="event-body"><strong>我</strong><MessageUser :content="pending.content" /><small role="status">{{ ({queued:'待发送',sending:'发送中',failed:'发送失败',unknown:'结果未知'})[pending.state] }}</small><button v-if="pending.state==='failed'" type="button" @click="retryMessage(pending.request_id)">重试</button><button v-if="pending.state==='unknown'" type="button" @click="reconcileMessage(pending.request_id)">核对结果</button></div></article>
+        <TeamPrivateApprovalCard v-for="item in interactions.items.value" :key="item.item_id" :item="item" :connected="interactions.connected.value" :busy="interactions.busy.value===item.item_id" @act="interactions.act(item,$event)" />
+        <p v-if="interactions.error.value" role="alert">{{ interactions.error.value }}</p>
       </section>
+      <button v-if="newMessageCount" type="button" class="new-team-messages" @click="scrollToBottom();newMessageCount=0;markRead()">{{ newMessageCount }} 条新消息 ↓</button>
 
       <footer ref="composerElement" class="composer-shell">
         <div class="composer-container">
@@ -59,7 +63,7 @@
         <div class="composer-row">
           <textarea v-model="draft" :style="{height:textareaHeight + 'px'}" :disabled="!!readOnlyReason" rows="1" :placeholder="readOnlyReason || t('workspace.team_composer_placeholder')" data-testid="team-session-composer" @keydown.enter.exact.prevent="send" />
         </div>
-        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" :members="members" /><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false"> {{ t('workspace.materials') }} </button>
+        <div class="composer-controls"><TeamAgentTargetPicker v-model="target" :bindings="session?.agent_bindings ?? []" :members="members" /><button type="button" class="composer-tool" :disabled="!!readOnlyReason||!session?.agent_bindings.some(b=>b.availability==='online')" @click="assignTaskOpen=true">分派任务</button><span class="composer-context">Context v{{ session?.current_context_version || 0 }}</span><button class="materials-button" @click="historyContext = null; showContext = true; showParticipants = false; showRun = false"> {{ t('workspace.materials') }} </button>
           <button type="button" class="send-button" :disabled="!canSend || !draft.trim() || !!targetUnavailableReason" data-testid="team-session-send" @click="send">{{ sending ? '…' : '↑' }}</button>
         </div>
         </div>
@@ -69,9 +73,10 @@
       </footer>
     </main>
 
+    <TeamTaskAssignPanel v-if="assignTaskOpen&&session" :session="session" @close="assignTaskOpen=false" @sent="sentTask" />
     <TeamOverlay actions v-if="showTask && task" :title="t('team.tab.tasks')" drawer @close="showTask = false"><h2>{{ task.title }}</h2><p style="white-space:pre-wrap;line-height:1.8;font-size:12px;color:var(--fg-secondary)">{{ task.background }}</p></TeamOverlay>
     <TeamContextPanel v-if="showContext && session" :context="historyContext || context" :read-only="!!historyContext || session.current_user_role === 'viewer' || teamAccess.capabilities.value?.writes_enabled !== true" :session="session" :current-user-id="currentUserID" @saved="context = $event" @close="showContext = false; historyContext = null" />
-    <TeamSessionParticipants v-if="showParticipants && session" :session="session" :members="members" :offers="offers" :writes-enabled="teamAccess.capabilities.value?.writes_enabled === true && session.current_user_role!=='viewer'" :current-user-id="currentUserID" @updated="session = $event" @close="showParticipants = false" />
+    <TeamSessionParticipants :agent-config-enabled="teamAccess.capabilities.value?.agent_config_v2===true" v-if="showParticipants && session" :session="session" :members="members" :offers="offers" :writes-enabled="teamAccess.capabilities.value?.writes_enabled === true && session.current_user_role!=='viewer'" :current-user-id="currentUserID" @updated="session = $event" @close="showParticipants = false" />
     <TeamRunPanel
       v-if="showRun && session"
       :session="session"
@@ -81,7 +86,7 @@
       :task="task"
       :members="members"
       :current-user-id="currentUserID"
-      :autorun-enabled="autorunEnabled"
+      :autorun-enabled="autorunEnabled && teamAccess.capabilities.value?.discussions_v2 === true"
       :busy="runBusy"
       :error="runError"
       @close="showRun = false"
@@ -95,8 +100,11 @@
 </template>
 
 <script setup lang="ts">
+import TeamTaskAssignPanel from '../components/team/TeamTaskAssignPanel.vue'
+import TeamPrivateApprovalCard from '../components/team/TeamPrivateApprovalCard.vue'
+import {useTeamInteractions} from '../composables/useTeamInteractions'
+
 import { teamProviderLabel } from '../utils/teamProvider'
-import TopbarGithubLink from '../components/TopbarGithubLink.vue'
 import { useLocale } from "../composables/useLocale"
 const { t } = useLocale()
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -125,15 +133,19 @@ const scope = computed<SessionScope>(() => ({ type: 'team', teamId: teamID.value
 const browseScope = ref<SessionScope>({type:'team',teamId:teamID.value})
 const moreRoot=ref<HTMLElement|null>(null)
 function closeMore(event:MouseEvent){if(!moreRoot.value?.contains(event.target as Node))moreOpen.value=false}
+const assignTaskOpen=ref(false)
 const outsideBrowse = ref(false), moreOpen = ref(false), showTask = ref(false)
 const teamBrowser = ref<InstanceType<typeof TeamSessionBrowser>|null>(null)
 function revealCurrent(){browseScope.value={type:'team',teamId:teamID.value};outsideBrowse.value=false;void nextTick(()=>teamBrowser.value?.revealCurrent())}
 async function copySessionID(){try{await navigator.clipboard.writeText(sessionID.value)}catch{error.value=t('workspace.copy_failed')}}
 const {
+  pendingMessages,retryMessage,reconcileMessage,markRead,
   session, events, calls, context, runContext, latestRun, task, draft, loading, sending, runBusy, error, runError,
   autorunEnabled, readOnlyReason, canSend, sendMessage, createRun, controlRun, supplementRunInput,
   suggestRunPause, withdrawAgent,
 } = useTeamSession(teamID, sessionID)
+const interactions=useTeamInteractions(sessionID,computed(()=>session.value!==null))
+function sentTask(event:TeamEvent){if(!events.value.some(e=>e.id===event.id))events.value.push(event)}
 function applyBrowserUpdate(updated: TeamSession) {
   if (updated.id === sessionID.value && updated.team_id === teamID.value) session.value = updated
 }
@@ -151,7 +163,7 @@ let composerObserver:ResizeObserver|null=null,resizeCleanup:(()=>void)|null=null
 function beginResize(event:PointerEvent){event.preventDefault();resizeCleanup?.();const start=event.clientY,height=textareaHeight.value;const move=(next:PointerEvent)=>{textareaHeight.value=Math.max(64,Math.min(400,height+start-next.clientY))};const finish=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',finish);resizeCleanup=null};resizeCleanup=finish;window.addEventListener('pointermove',move);window.addEventListener('pointerup',finish,{once:true})}
 onMounted(()=>{if(typeof ResizeObserver!=='undefined'&&composerElement.value){composerObserver=new ResizeObserver(()=>{composerHeight.value=composerElement.value?.offsetHeight??190});composerObserver.observe(composerElement.value)}})
 onBeforeUnmount(()=>{composerObserver?.disconnect();resizeCleanup?.()})
-const target = ref<TeamAgentTargetValue>({ mode: 'all', offerIDs: [] }), messagesElement = ref<HTMLElement | null>(null)
+const target = ref<TeamAgentTargetValue>({ mode: 'discussion', offerIDs: [] }), messagesElement = ref<HTMLElement | null>(null)
 const targetUnavailableReason = computed(() => {
   if (target.value.mode === 'discussion') return ''
   const callable = session.value?.agent_bindings.filter(binding => binding.state === 'active' && binding.availability === 'online') ?? []
@@ -238,7 +250,9 @@ function scrollToEvent(eventID: string): void {
     : eventID
   document.getElementById(`team-event-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
 function scrollToBottom(): void { const element = messagesElement.value; if (element) element.scrollTop = element.scrollHeight }
-function saveReadingPosition(): void { const element = messagesElement.value; if (element) setScopedReadingPosition(scope.value, sessionID.value, element.scrollTop) }
+const atBottom=ref(true),newMessageCount=ref(0)
+function saveReadingPosition():void{const element=messagesElement.value;if(element){setScopedReadingPosition(scope.value,sessionID.value,element.scrollTop);atBottom.value=element.scrollHeight-element.scrollTop-element.clientHeight<40;if(atBottom.value){newMessageCount.value=0;void markRead().catch(()=>{})}}}
+watch(()=>displayEvents.value.length,async(next,previous)=>{if(loading.value)return;if(atBottom.value){await nextTick();scrollToBottom();void markRead().catch(()=>{})}else newMessageCount.value+=Math.max(0,next-previous)})
 function restoreReadingPosition(): void {
   if (restoredSessionID === sessionID.value || !messagesElement.value || loading.value) return
   restoredSessionID = sessionID.value
@@ -246,7 +260,7 @@ function restoreReadingPosition(): void {
   nextTick(() => { if (messagesElement.value) messagesElement.value.scrollTop = position ?? messagesElement.value.scrollHeight })
 }
 watch([teamID, daemonID, provider], () => { void loadList() })
-watch(sessionID, () => { historyGeneration++; historyContext.value=null; restoredSessionID = ''; referenceEvent.value = null; browseScope.value={type:'team',teamId:teamID.value} })
+watch(sessionID, () => { historyGeneration++;newMessageCount.value=0;atBottom.value=true;assignTaskOpen.value=false; historyContext.value=null; restoredSessionID = ''; referenceEvent.value = null; browseScope.value={type:'team',teamId:teamID.value} })
 watch([loading, () => events.value.length], restoreReadingPosition)
 onMounted(() => {
   daemonID.value = typeof route.query.daemon === 'string' ? route.query.daemon : ''
@@ -283,4 +297,19 @@ onBeforeUnmount(()=>{document.removeEventListener('click',closeMore);historyGene
 .people-strip { flex-wrap:wrap; overflow:visible; white-space:normal; }
 .people-strip button { white-space:nowrap; }
 @media(max-width:768px) { .people-strip { gap:6px; }.people-strip .strip-divider { display:none; }.materials-button { margin-left:auto; } }
+.new-team-messages{position:absolute;bottom:220px;left:50%;z-index:30;padding:8px 16px;border:1px solid var(--border);border-radius:20px;background:var(--surface);color:var(--accent)}
+/* Match the confirmed shared chat: white timeline, own messages on the right. */
+.team-session-layout { height:calc(100dvh - var(--topbar-h, 58px)); }
+.conversation,.conversation-header,.messages { background:var(--surface); }
+.event.member_message { padding:16px 0; border-bottom:1px solid var(--border); }
+.event.member_message .event-body { flex:0 1 auto; width:fit-content; max-width:85%; }
+.event.member_message :deep(.msg-user) { width:auto; border:0; background:transparent; padding:4px 0; }
+.event.own-message { flex-direction:row-reverse; }
+.event.own-message .event-meta { justify-content:flex-end; }
+.event.own-message :deep(.msg-user) { padding:12px 16px; background:var(--accent-muted); border-radius:12px 12px 3px 12px; }
+.event.own-message .event-body>small { display:block; text-align:right; font-size:10px; color:var(--fg-secondary); margin-top:7px; }
+.composer-tool,.materials-button { min-height:32px; padding:5px 8px; border:0; border-radius:6px; color:var(--fg-secondary); background:none; font:11px var(--font-body); cursor:pointer; }
+.composer-tool:hover:not(:disabled),.materials-button:hover { background:var(--surface-hover); }
+.composer-tool:disabled { opacity:.45; cursor:not-allowed; }
+@media(max-width:768px) { .team-session-layout { height:100dvh; }.event.member_message .event-body { max-width:88%; }.composer-tool,.materials-button { min-height:44px; } }
 </style>

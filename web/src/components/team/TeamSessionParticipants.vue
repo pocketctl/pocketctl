@@ -1,5 +1,5 @@
 <template>
-  <ActionList :title="mode === 'picker' ? t('workspace.add_members') : mode === 'members' ? t('workspace.members') : t('workspace.participants')" :width="420" :back="mode !== 'summary'" @back="mode='summary'" @close="!busy && emit('close')">
+  <ActionList v-if="!configuredBinding" :title="mode === 'picker' ? t('workspace.add_members') : mode === 'members' ? t('workspace.members') : t('workspace.participants')" :width="420" :back="mode !== 'summary'" @back="mode='summary'" @close="!busy && emit('close')">
     <div class="participants-body" data-testid="team-session-participants">
       <template v-if="mode === 'picker'">
         <input v-model="memberQuery" type="search" :aria-label="t('workspace.member_search')" :placeholder="t('workspace.member_search')" />
@@ -24,7 +24,8 @@
         <small> {{ t('workspace.agent_bindings') }} </small>
         <div v-for="binding in session.agent_bindings" :key="binding.id" class="agent-row">
           <span :class="['availability-dot', binding.availability]"></span>
-          <div><strong>{{ teamProviderLabel(binding.provider) }}</strong><em>{{ binding.daemon_id }} · {{ binding.availability }}</em></div>
+          <div><strong>{{ teamProviderLabel(binding.provider) }}</strong><em>{{ binding.daemon_id }} · {{ teamAvailabilityLabel(binding.availability) }}</em></div>
+          <button v-if="agentConfigEnabled" type="button" @click="configuredBinding=binding">配置详情</button>
           <RouterLink v-if="binding.owner_user_id === currentUserId && binding.native_session_id" :to="nativeSessionLink(binding.native_session_id)"> {{ t('workspace.native_session') }} </RouterLink>
         </div>
       </section>
@@ -34,23 +35,30 @@
     </div>
     <template v-if="mode==='picker'" #footer><span class="member-selection">{{ t('workspace.members_selected', {count:selectedUserIDs.length}) }}</span><button class="primary member-confirm" type="button" :disabled="busy || !canManage || !selectedUserIDs.length" @click="add">{{ t('workspace.add_selected') }}</button></template>
   </ActionList>
+  <TeamAgentConfigPanel v-if="configuredBinding" :team-i-d="session.team_id" :session="session" :offer="configuredBinding" :current-user-i-d="currentUserId" @saved="refreshConfig" @close="configuredBinding=null" />
 </template>
 
 <script setup lang="ts">
+import TeamAgentConfigPanel from './TeamAgentConfigPanel.vue'
+import type {TeamSessionAgentBinding} from '../../types/team'
+const configuredBinding=ref<TeamSessionAgentBinding|null>(null)
+async function refreshConfig(){emit('updated',await getTeamSession(props.session.id))}
+
 import { teamProviderLabel } from '../../utils/teamProvider'
 import { computed, ref } from 'vue'
 import ActionList from '../ActionList.vue'
+import {teamAvailabilityLabel} from '../../utils/teamLabels'
 import { useLocale } from '../../composables/useLocale'
 import { getTeamSession, setTeamSessionAgentBinding, setTeamSessionParticipant } from '../../services/teamClient'
 import type { TeamAgentOffer, TeamMember, TeamSession } from '../../types/team'
 
-const props = withDefaults(defineProps<{ session: TeamSession; members: TeamMember[]; currentUserId: number; offers?: TeamAgentOffer[]; writesEnabled?: boolean }>(),{offers:()=>[],writesEnabled:false})
+const props = withDefaults(defineProps<{ session: TeamSession; members: TeamMember[]; currentUserId: number; offers?: TeamAgentOffer[]; writesEnabled?: boolean; agentConfigEnabled?:boolean }>(),{offers:()=>[],writesEnabled:false})
 const emit = defineEmits<{ close: []; updated: [session: TeamSession] }>()
 const { t } = useLocale()
 const mode = ref<'summary'|'members'|'picker'>('summary'), memberQuery = ref(''), selectedUserIDs = ref<number[]>([]), busy = ref(false), error = ref('')
 const ownOffers = computed(()=>props.offers.filter(offer=>offer.owner_user_id===props.currentUserId && offer.state==='active'))
 function isBound(id:string){return props.session.agent_bindings.some(binding=>binding.offer_id===id && binding.state==='active')}
-async function toggleBinding(id:string){if(busy.value || !props.writesEnabled)return;busy.value=true;error.value='';try {const current=await getTeamSession(props.session.id);emit('updated',await setTeamSessionAgentBinding(current,id,!isBound(id)))}catch(failure){error.value=failureMessage(failure)}finally{busy.value=false}}
+async function toggleBinding(id:string){if(busy.value || !props.writesEnabled)return;if(isBound(id) && !window.confirm("撤回后该 Agent 不再接收此会话的新调用，已接受的调用会继续结算。确认撤回？"))return;busy.value=true;error.value='';try {const current=await getTeamSession(props.session.id);emit('updated',await setTeamSessionAgentBinding(current,id,!isBound(id)))}catch(failure){error.value=failureMessage(failure)}finally{busy.value=false}}
 const canManage = computed(() => props.writesEnabled && props.session.creator_user_id === props.currentUserId && ['active','paused'].includes(props.session.state))
 const participantIDs = computed(() => new Set(props.session.participants.filter(participant=>participant.state==='active').map(participant => participant.user_id)))
 const availableMembers = computed(() => props.members.filter(member => member.state === 'active' && !participantIDs.value.has(member.user_id)))

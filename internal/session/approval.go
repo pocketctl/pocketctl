@@ -516,6 +516,30 @@ func (sm *SessionManager) resolveApprovalAction(ctx context.Context, sessionID, 
 		if sm.ClaudeChannelApprovalKnowsPublicRequest(sessionID, requestID) {
 			return sm.resolveClaudeChannelApproval(sessionID, requestID, action)
 		}
+		// Inbox uses the same typed action for all providers. Route Hook
+		// requests only by their exact session-scoped registry identity.
+		key := claudeApprovalKey{sessionID: sessionID, requestID: requestID}
+		sm.mu.RLock()
+		legacy := sm.legacyClaudeApprovals[key] != nil
+		_, resolved := sm.claudeApprovalResolved[key]
+		current := sm.claudeApprovals[sessionID]
+		v2 := current != nil && current.pending[requestID] != nil
+		sm.mu.RUnlock()
+		if legacy || v2 || resolved {
+			if action != "once" && action != "reject" {
+				return fmt.Errorf("Claude Hook supports once or reject only")
+			}
+			if resolved {
+				return &ResolvedElsewhereError{RequestID: requestID}
+			}
+			if sm.approvals == nil {
+				return fmt.Errorf("approval not configured on this daemon")
+			}
+			if v2 {
+				return sm.resolveClaudeApproval(sessionID, requestID, action == "once")
+			}
+			return sm.resolveLegacyClaudeApproval(sessionID, requestID, action == "once")
+		}
 		return fmt.Errorf("opencode session not found")
 	}
 	if b.coord == nil || b.coord.srv() == nil {

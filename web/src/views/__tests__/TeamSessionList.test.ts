@@ -146,7 +146,7 @@ describe('team session list', () => {
     await wrapper.get('.offer-choice input:not(:disabled)').setValue(true)
     await wrapper.get('[data-testid="team-session-create"]').trigger('submit')
     await flushPromises()
-    expect(api.createTeamSession).toHaveBeenCalledWith('ctm_1', { title: 'Joint review', offerIDs: ['offer-1'], taskID: undefined })
+    expect(api.createTeamSession).toHaveBeenCalledWith('ctm_1', { title: 'Joint review', offerIDs: ['offer-1'], taskID: undefined,participantUserIDs:[7],agentConfigs:{},requestID:expect.any(String) })
     expect(router.currentRoute.value.name).toBe('team-session')
   })
   test('retries unfinished Context setup without creating a duplicate session', async () => {

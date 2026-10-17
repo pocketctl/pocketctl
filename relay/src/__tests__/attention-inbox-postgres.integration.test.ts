@@ -376,6 +376,8 @@ describeWithDatabase('Attention Inbox PostgreSQL transaction boundaries', () => 
   })
 
   test('offline HTTP submission restores open state and a later terminal resolution still wins', async () => {
+    // Shared presence is now consulted when the socket belongs to another Relay.
+    await pool.query(`UPDATE daemons SET status='offline' WHERE daemon_id='attention-daemon'`)
     await insertRequest('offline-terminal')
     await createAttentionProjectionWorker({ pool, repository }).runOnce()
     const row = await pool.query(

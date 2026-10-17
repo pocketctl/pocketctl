@@ -93,8 +93,11 @@ describe('TeamRunPanel', () => {
   test('starts a new bounded run with a selected callable coordinator', async () => {
     const wrapper = render({ run: null })
     expect(wrapper.get('select').element.value).toBe('offer-codex')
+    expect(wrapper.findAll('fieldset input')).toHaveLength(2)
+    for(const checkbox of wrapper.findAll('fieldset input'))await checkbox.setValue(true)
+    expect((wrapper.vm as any).selectedParticipants).toEqual(['offer-codex','offer-claude'])
     await wrapper.findAll('button').find(button => button.text() === '开始有界协作')!.trigger('click')
-    expect(wrapper.emitted('start')).toEqual([['offer-codex']])
+    expect(wrapper.emitted('start')).toEqual([['offer-codex',expect.objectContaining({mode:'discussion',participantOfferIDs:['offer-codex','offer-claude'],maxRounds:3,budget:{max_calls:20,max_concurrent_calls:2,max_duration_seconds:1800}})]])
   })
 })
 

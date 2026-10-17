@@ -1710,7 +1710,7 @@
   "replica.pending_items": "待处理事项",
   "replica.pending_copy": "查看需要处理的提醒与邀请",
   "replica.all_sessions": "查看全部会话",
-  "replica.week_usage": "最近 7 天用量",
+  "replica.week_usage": "近 7 天累计 {{value}} · 图为近 14 天趋势",
   "replica.host_summary": "已连接的工作主机",
   "replica.host_details": "资源与会话详情",
   "replica.last_activity": "最后活跃",

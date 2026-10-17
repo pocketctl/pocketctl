@@ -78,11 +78,12 @@ function daemonAgentInventory(msg: any): { agents: any[]; collaborationCapabilit
       type: t,
       version: agentVersions[t] || '',
       latest: agentLatests[t] || '',
+      team_config: msg.team_agent_configs?.[t],
       manageable: agentManageable[t] !== false, // 缺省 true，兼容旧 daemon
     }));
 
     const collaborationCapabilities = Array.isArray(msg.capabilities)
-      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1' || capability === 'team_collaboration_dsh_v1'))] as string[]
+      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1' || capability === 'team_collaboration_dsh_v1' || capability === 'team_collaboration_config_v2' || capability === 'team_private_interactions_v2'))] as string[]
       : [];
     return { agents, collaborationCapabilities };
 }
@@ -2453,6 +2454,15 @@ export class Router {
   private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    // These envelopes are authored only by the authenticated Team dispatcher.
+    // The personal-session fallback must never become a second dispatch API.
+    if (String(msg?.type ?? '').startsWith('collaboration_')
+      || ['collaboration', 'team_context', 'team_config', 'applied_config', 'config_hash', 'config_revision']
+        .some(key => Object.prototype.hasOwnProperty.call(msg ?? {}, key))) {
+      this.send(clientWs, { type: 'error', request_id: msg?.request_id,
+        code: 'team_internal_command_forbidden', error: 'internal Team command is not a client operation' });
+      return;
+    }
     if (msg.type === 'team_collaboration_subscribe' || msg.type === 'team_collaboration_unsubscribe') {
       const teamSessionId = typeof msg.team_session_id === 'string' ? msg.team_session_id : '';
       if (!client.userId || !teamSessionId || !this.teamSubscriptionAuthorizer) {
@@ -2470,7 +2480,15 @@ export class Router {
         return;
       }
       client.subscribedTeamSessions.add(teamSessionId);
-      this.send(clientWs, { type: 'team_collaboration_subscription', team_session_id: teamSessionId, subscribed: true, protocol: 'team_collaboration_v1' });
+      // Register before reading the high water so frames racing the ACK are
+      // buffered by v2 clients and old clients retain their v1 subscription.
+      try {
+        const highWater = await this.teamSubscriptionAuthorizer?.sharedHighWater?.(client.userId!,teamSessionId);
+        this.send(clientWs, { type: 'team_collaboration_subscription', team_session_id: teamSessionId, subscribed: true, protocol: 'team_collaboration_v1', ...(highWater === undefined ? {} : {shared_high_water:highWater}) });
+      } catch {
+        client.subscribedTeamSessions.delete(teamSessionId);
+        this.send(clientWs,{type:'team_collaboration_subscription_error',team_session_id:teamSessionId,error:'not_found'});
+      }
       return;
     }
     if (msg.type === 'user_message' && client.userId !== null) {
@@ -2567,6 +2585,12 @@ export class Router {
             error: 'observer session is read-only',
           });
         }
+        return;
+      }
+      if (['set_session_model','set_effort','set_permission_config','set_session_agent','invoke_command'].includes(msg.type)
+        && await isCollaborationManagedSession(this.pool,client.userId,msg.session_id)) {
+        this.send(clientWs,{type:'error',session_id:msg.session_id,request_id:msg.request_id,
+          code:'collaboration_session_requires_team_dispatch',error:'Team configuration must use its Binding authorization'});
         return;
       }
       if (msg.type !== 'user_message' && msg.type !== 'session_document_resolve') client.subscribedSessions.add(msg.session_id);
@@ -3155,18 +3179,18 @@ export class Router {
 
           const daemon = this.daemons.get(daemonId);
           if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== userId) {
-            return { accepted: false, code: 'daemon_unreachable' };
+            if(!await this.isSharedTeamDaemonOnline(daemonId,userId))return {accepted:false,code:'daemon_unreachable'};
+            // Only Inbox's already claimed, owner-authorized action reaches
+            // this path. The outbox carries delivery, never approval truth.
+            await lockedClient.query(`INSERT INTO team_private_command_outbox(owner_user_id,daemon_id,session_id,request_id,command)
+              VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT(owner_user_id,session_id,request_id) DO NOTHING`,[userId,daemonId,command.session_id,command.request_id,JSON.stringify(command)]);
+            return {accepted:true};
           }
 
           // Rebuild the outbound object so API-only or caller-controlled fields can
           // never leak into the daemon protocol.
           if (command.type === 'approval_response') {
-            this.send(daemon.ws, {
-              type: command.type,
-              session_id: command.session_id,
-              request_id: command.request_id,
-              action: command.action,
-            });
+            this.send(daemon.ws,attentionNativeCommand(command,daemon.collaborationCapabilities,policy.agentType));
           } else if (command.type === 'question_response') {
             this.send(daemon.ws, {
               type: command.type,
@@ -3689,6 +3713,41 @@ export class Router {
     return { success: true };
   }
 
+  async isSharedTeamDaemonOnline(daemonId:string,owner:number):Promise<boolean>{
+    if(this.ownsTeamDaemon(daemonId,owner))return true;
+    const row=(await this.pool.query(`SELECT status,last_heartbeat FROM daemons WHERE daemon_id=$1 AND user_id=$2`,[daemonId,owner])).rows[0];
+    return Boolean(row && row.status==='online' && Date.now()-new Date(row.last_heartbeat).getTime()<this.heartbeatTimeoutMs);
+  }
+
+  async drainTeamPrivateCommands():Promise<void>{
+    const ids=[...this.daemons.values()].filter(d=>d.ws.readyState===1).map(d=>d.daemonId);
+    if(!ids.length)return;
+    const client=await this.controlPool.connect();
+    try{
+      await client.query('BEGIN');
+      const rows=(await client.query(`SELECT * FROM team_private_command_outbox WHERE state='pending' AND daemon_id=ANY($1::text[]) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 20`,[ids])).rows;
+      for(const row of rows){
+        const daemon=this.daemons.get(row.daemon_id);
+        if(!daemon||daemon.userId!==Number(row.owner_user_id)||daemon.ws.readyState!==1)continue;
+        if(new Date(row.expires_at).getTime()<=Date.now()){await client.query(`UPDATE team_private_command_outbox SET state='expired' WHERE command_id=$1`,[row.command_id]);continue;}
+        const command=row.command;
+        if(!['approval_response','question_response','question_reject'].includes(command?.type)||command.session_id!==row.session_id||command.request_id!==row.request_id)continue;
+        const policy=await db.getSessionRuntimePolicy(client as unknown as pg.Pool,row.session_id,Number(row.owner_user_id));
+        if(!policy||policy.daemonId!==row.daemon_id||isObserverAgentType(policy.agentType)){
+          await client.query(`UPDATE team_private_command_outbox SET state='expired' WHERE command_id=$1`,[row.command_id]);continue;
+        }
+        this.send(daemon.ws,attentionNativeCommand(command,daemon.collaborationCapabilities,policy.agentType));
+        await client.query(`UPDATE team_private_command_outbox SET state='delivered' WHERE command_id=$1`,[row.command_id]);
+      }
+      await client.query('COMMIT');
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+  }
+
+  ownsTeamDaemon(daemonId:string,ownerUserId:number):boolean {
+    const daemon=this.daemons.get(daemonId);
+    return Boolean(daemon && daemon.userId===ownerUserId && daemon.ws.readyState===1);
+  }
+
   sendTeamCommand(daemonId: string, ownerUserId: number, capability: string, command: Record<string, unknown>): boolean {
     const daemon = this.daemons.get(daemonId);
     if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== ownerUserId
@@ -3721,11 +3780,13 @@ export class Router {
   private async sendAuthorizedTeamEvent(teamSessionId: string, participantUserIds: number[], event: unknown): Promise<void> {
     const allowed = new Set(participantUserIds);
     for (const [ws, client] of this.clients) {
-      if (!client.subscribedTeamSessions.has(teamSessionId)) continue;
+      if (client.userId === null || !allowed.has(client.userId)) continue;
       const authorized = client.userId !== null
         && await this.teamSubscriptionAuthorizer?.canSubscribe(client.userId, teamSessionId).catch(() => false);
       // A disconnect/unsubscribe may complete during the authority check.
-      if (this.clients.get(ws) !== client || !client.subscribedTeamSessions.has(teamSessionId)) continue;
+      if (this.clients.get(ws) !== client) continue;
+      if (authorized) this.send(ws, { type:'team_collaboration_session_changed', team_session_id:teamSessionId });
+      if (!client.subscribedTeamSessions.has(teamSessionId)) continue;
       if (!authorized) {
         client.subscribedTeamSessions.delete(teamSessionId);
         this.send(ws, { type: 'team_collaboration_access_revoked', team_session_id: teamSessionId });
@@ -3767,7 +3828,23 @@ export class Router {
       this.messageRequestLog.sent(ws, data, false);
       return;
     }
+    if (ws.bufferedAmount > 4 * 1024 * 1024) {
+      ws.close(1013, 'client_backpressure_reconnect');
+      return;
+    }
     ws.send(JSON.stringify(data));
     this.messageRequestLog.sent(ws, data, true);
   }
+}
+
+// Older native daemons use the original boolean Claude Hook reply. Preserve
+// that protocol for already admitted Inbox requests after a daemon rollback.
+function attentionNativeCommand(command:Record<string,any>,capabilities?:string[],provider?:string):Record<string,unknown>{
+ if(command.type==='approval_response'){
+  const base={type:command.type,session_id:command.session_id,request_id:command.request_id}
+  if(['claude-code','dsh'].includes(provider??'')&&!capabilities?.includes('team_private_interactions_v2')&&['once','reject'].includes(command.action))return {...base,approved:command.action==='once'}
+  return {...base,action:command.action}
+ }
+ if(command.type==='question_response')return {type:command.type,session_id:command.session_id,request_id:command.request_id,answers:command.answers}
+ return {type:command.type,session_id:command.session_id,request_id:command.request_id}
 }

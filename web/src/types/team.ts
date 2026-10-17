@@ -24,6 +24,10 @@ export function isTeamProvider(value: unknown): value is TeamProvider {
 export type TeamMemoryAccessState = 'available' | 'forbidden' | 'installation_paused' | 'feature_disabled'
 
 export interface TeamCapabilities {
+ reads_enabled?:boolean
+ agent_config_v2?:boolean
+ private_interactions_v2?:boolean
+ discussions_v2?:boolean
   schema_version: 1
   contract_version: typeof TEAM_CONTRACT_VERSION
   collaboration: boolean
@@ -136,6 +140,7 @@ export interface TeamSessionAgentBinding {
   revision: number
   native_session_id: string | null
   availability: TeamAgentAvailability
+  config?:SessionAgentConfig
 }
 
 export interface TeamSessionSummary {
@@ -149,6 +154,9 @@ export interface TeamSessionSummary {
   revision: number
   latest_event_seq: number
   current_context_version: number
+  unread_count?:number
+  read_event_seq?:number
+  preview?:string|null
   participants: TeamSessionParticipant[]
   agent_bindings: TeamSessionAgentBinding[]
   updated_at: string
@@ -163,6 +171,7 @@ export interface TeamEventReference {
 }
 
 export interface TeamEvent {
+ request_id?:string|null
   id: TeamEventID
   team_session_id: TeamSessionID
   event_seq: number
@@ -201,6 +210,12 @@ export interface TeamContextSnapshot {
 }
 
 export interface TeamRun {
+ mode?:TeamRunMode|null
+ participant_offer_ids?:string[]|null
+ max_rounds?:number|null
+ rounds_used?:number
+ no_progress_count?:number
+ structured_result?:{conclusion:string;todo:string[];disagreements:string[];reason:string}|null
   id: TeamRunID
   team_session_id: TeamSessionID
   initiator_user_id: number
@@ -260,3 +275,33 @@ export interface TeamCallSummary {
   created_at: string
   updated_at: string
 }
+
+export interface TeamRuntimeConfig {
+  model: string
+  reasoning_effort: string | null
+  permission_profile: string
+}
+export interface SessionAgentConfig {
+  mode: 'default' | 'custom'
+  default_snapshot: TeamRuntimeConfig | null
+  override: Partial<TeamRuntimeConfig>
+  requested_config: TeamRuntimeConfig | null
+  applied_config: TeamRuntimeConfig | null
+  config_revision: number
+  applied_revision: number | null
+  capability_revision: string | null
+  status: 'unresolved' | 'pending' | 'applied' | 'rejected'
+}
+export interface TeamAgentConfigCapabilities {
+  policy_revision?:number
+  schema_version: 2
+  revision: string
+  models: Array<{ id: string; reasoning_efforts: string[] }>
+  permission_profiles: string[]
+  default_config: TeamRuntimeConfig
+  default_source: string
+  overridable_fields: Array<'model' | 'reasoning_effort'>
+  read_only: boolean
+  runtime_switch: 'recreate' | 'hot'
+}
+export type TeamRunMode = 'discussion' | 'review' | 'execute'

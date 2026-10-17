@@ -1,5 +1,5 @@
 export type AttentionInboxMode = 'off' | 'observe' | 'on'
-export type AttentionInboxProvider = 'codex' | 'opencode' | 'claude-code'
+export type AttentionInboxProvider = 'codex' | 'opencode' | 'claude-code' | 'dsh'
 export type AttentionInboxKind = 'approval' | 'question'
 export type AttentionInboxDisplayKind = AttentionInboxKind | 'recovery'
 export type AttentionInboxState = 'open' | 'snoozed' | 'submitting' | 'result_unknown' | 'resolved' | 'expired'
@@ -21,7 +21,7 @@ export interface AttentionInboxCapabilities {
   mode: AttentionInboxMode
   enabled: boolean
   remote_response_enabled: boolean
-  providers: Record<AttentionInboxProvider, AttentionProviderCapability>
+  providers: Record<Exclude<AttentionInboxProvider,'dsh'>, AttentionProviderCapability> & {dsh?:AttentionProviderCapability}
   recovery?: {
     mode: AttentionInboxMode
     projection: boolean

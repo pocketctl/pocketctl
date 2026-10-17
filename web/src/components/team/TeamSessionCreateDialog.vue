@@ -1,5 +1,5 @@
 <template>
-  <TeamOverlay large :title="t('workspace.new_shared_session')" @close="emit('close')">
+  <TeamOverlay v-show="!configuring" large :title="t('workspace.new_shared_session')" @close="emit('close')">
     <form
       id="team-shared-session-create-form"
       class="create-session"
@@ -19,7 +19,6 @@
           v-model.trim="goal"
           data-testid="team-session-goal"
           rows="3"
-          required
           maxlength="16000"
           :placeholder="t('replica.session_goal_placeholder')"
           :disabled="!!created"
@@ -40,7 +39,7 @@
           v-model="selectedMembers"
           type="checkbox"
           :value="member.user_id"
-          :disabled="!!created"
+          :disabled="!!created || requiredMembers.has(member.user_id)"
         />{{ member.display_label }}</label
       >
       <h3>{{ t('replica.session_agents') }}</h3>
@@ -67,7 +66,7 @@
             · {{ offer.daemon_id }}</small
           ></span
         >
-        <small>{{ t(offer.managed_callable ? 'team.online' : 'replica.agent_not_callable') }}</small>
+        <small>{{ t(offer.managed_callable ? 'team.online' : 'replica.agent_not_callable') }}</small><button v-if="selected.includes(offer.id) && agentConfigEnabled" type="button" @click.prevent="configuring=offer">配置</button>
       </label>
       <p v-if="!loading && !offers.some((offer) => offer.managed_callable)">
         {{ t('replica.no_callable_agents') }}
@@ -88,15 +87,18 @@
         ><button
           class="btn primary"
           type="submit" form="team-shared-session-create-form"
-          :disabled="busy || loading || !title || !goal || !selected.length"
+          :disabled="busy || loading || !title"
         >
           {{ t(busy ? 'common.loading' : created ? 'replica.retry_session_setup' : 'replica.create_session') }}
         </button>
       </template>
   </TeamOverlay>
+  <TeamAgentConfigPanel v-if="configuring" :team-i-d="teamId" :offer="configuring" :current-user-i-d="user?.id??0" :initial="agentConfigs[configuring.id]" @saved="agentConfigs[configuring!.id]=$event" @close="configuring=null" />
 </template>
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref,computed,watch } from "vue";
+import { useAuth } from '../../composables/useAuth';
+import TeamAgentConfigPanel, {type TeamConfigDraft} from './TeamAgentConfigPanel.vue';
 import { useRouter } from "vue-router";
 import TeamOverlay from "./TeamOverlay.vue";
 import ActionSelect from "../ActionSelect.vue";
@@ -110,7 +112,6 @@ import {
   listTeamAgentOffers,
   listTeamMembers,
   listTeamTasks,
-  setTeamSessionParticipant,
 } from "../../services/teamClient";
 import type {
   TeamAgentOffer,
@@ -119,7 +120,9 @@ import type {
   TeamTask,
 } from "../../types/team";
 const {t}=useLocale();
-const props = defineProps<{ teamId: string; taskId?: string }>();
+const {user}=useAuth(),configuring=ref<TeamAgentOffer|null>(null),agentConfigs=ref<Record<string,TeamConfigDraft>>({});
+const creationRequestID=crypto.randomUUID();
+const props = defineProps<{ teamId: string; agentConfigEnabled?:boolean; taskId?: string }>();
 const emit = defineEmits<{ close: [] }>(),
   router = useRouter();
 const offers = ref<TeamAgentOffer[]>([]),
@@ -134,6 +137,8 @@ const selected = ref<string[]>([]),
   loading = ref(true),
   error = ref(""),
   created = ref<TeamSession | null>(null);
+const requiredMembers=computed(()=>new Set([user.value?.id??0,...offers.value.filter(o=>selected.value.includes(o.id)).map(o=>o.owner_user_id)]));
+watch(requiredMembers,ids=>{selectedMembers.value=[...new Set([...selectedMembers.value,...ids])].filter(id=>id>0)});
 let retrying = false;
 onMounted(async () => {
   try {
@@ -154,7 +159,7 @@ onMounted(async () => {
   }
 });
 async function create() {
-  if (busy.value || !title.value || !goal.value || !selected.value.length)
+  if (busy.value || !title.value)
     return;
   busy.value = true;
   error.value = "";
@@ -163,24 +168,13 @@ async function create() {
       created.value = await createTeamSession(props.teamId, {
         title: title.value,
         offerIDs: selected.value,
+        participantUserIDs:selectedMembers.value,agentConfigs:Object.fromEntries(Object.entries(agentConfigs.value).filter(([id])=>selected.value.includes(id))),requestID:creationRequestID,
         taskID: props.taskId || selectedTask.value || undefined,
       });
     else created.value = await getTeamSession(created.value.id);
-    for (const userID of selectedMembers.value) {
-      if (
-        !created.value.participants.some(
-          (member) => member.user_id === userID && member.state === "active",
-        )
-      )
-        created.value = await setTeamSessionParticipant(
-          created.value,
-          userID,
-          true,
-        );
-    }
     // On an uncertain response, read back before attempting the remaining step.
     const snapshot = retrying ? await getTeamContext(created.value.id) : null;
-    if (!snapshot)
+    if (!snapshot && goal.value)
       await createTeamContext(created.value.id, {
         expectedRevision: 0,
         goal: goal.value,
@@ -188,7 +182,7 @@ async function create() {
         openQuestions: [],
         references: [],
       });
-    else if (snapshot.goal !== goal.value)
+    else if (snapshot && snapshot.goal !== goal.value)
       throw new Error(t('replica.session_existing_goal'));
     emit("close");
     await router.push({

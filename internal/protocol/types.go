@@ -217,12 +217,15 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	Choice        string                      `json:"choice,omitempty"` // owner-selected PTY option on interaction_result
-	Invocation    map[string]any              `json:"invocation,omitempty"`
-	Directory     *DirectoryResult            `json:"directory,omitempty"`
-	Type          string                      `json:"type"`
-	Collaboration *CollaborationAuthorization `json:"collaboration,omitempty"`
-	TeamContext   *CollaborationContext       `json:"team_context,omitempty"`
+	AppliedConfig  *TeamRuntimeConfig          `json:"applied_config,omitempty"`
+	ConfigRevision int64                       `json:"config_revision,omitempty"`
+	ConfigHash     string                      `json:"config_hash,omitempty"`
+	Choice         string                      `json:"choice,omitempty"` // owner-selected PTY option on interaction_result
+	Invocation     map[string]any              `json:"invocation,omitempty"`
+	Directory      *DirectoryResult            `json:"directory,omitempty"`
+	Type           string                      `json:"type"`
+	Collaboration  *CollaborationAuthorization `json:"collaboration,omitempty"`
+	TeamContext    *CollaborationContext       `json:"team_context,omitempty"`
 	// Seq is a monotonically increasing per-connection sequence number stamped
 	// by the ws.Client just before the event is sent to the relay. It enables
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the
@@ -574,18 +577,19 @@ func ValidateQuestionAnswers(questions []QuestionInfo, answers [][]string) error
 
 // Control messages
 type RegisterMessage struct {
-	Type            string            `json:"type"`
-	DaemonID        string            `json:"daemon_id"`
-	Hostname        string            `json:"hostname"`
-	Agents          []string          `json:"agents"`
-	AgentVersions   map[string]string `json:"agent_versions,omitempty"`
-	AgentLatests    map[string]string `json:"agent_latests,omitempty"`
-	AgentManageable map[string]bool   `json:"agent_manageable,omitempty"`
-	OS              string            `json:"os"`
-	IP              string            `json:"ip"`
-	Arch            string            `json:"arch,omitempty"`
-	Version         string            `json:"version,omitempty"`
-	StartedAt       int64             `json:"started_at,omitempty"`
+	TeamAgentConfigs map[string]*TeamConfigCapabilities `json:"team_agent_configs,omitempty"`
+	Type             string                             `json:"type"`
+	DaemonID         string                             `json:"daemon_id"`
+	Hostname         string                             `json:"hostname"`
+	Agents           []string                           `json:"agents"`
+	AgentVersions    map[string]string                  `json:"agent_versions,omitempty"`
+	AgentLatests     map[string]string                  `json:"agent_latests,omitempty"`
+	AgentManageable  map[string]bool                    `json:"agent_manageable,omitempty"`
+	OS               string                             `json:"os"`
+	IP               string                             `json:"ip"`
+	Arch             string                             `json:"arch,omitempty"`
+	Version          string                             `json:"version,omitempty"`
+	StartedAt        int64                              `json:"started_at,omitempty"`
 	// AckedSeq is the highest event seq the daemon considers durably delivered
 	// (acked + trimmed). On a fresh daemonSeq entry the relay seeds its persisted
 	// water-mark from this, so a daemon that reconnects/restarts and replays only
@@ -605,16 +609,21 @@ type RegisterMessage struct {
 // CollaborationAuthorization is a Relay-authored, daemon-enforced binding for
 // one Team Agent operation. It never grants arbitrary native-session access.
 type CollaborationAuthorization struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	Operation       string `json:"operation"`
-	CallID          string `json:"call_id"`
-	TeamSessionID   string `json:"team_session_id"`
-	BindingID       string `json:"binding_id"`
-	BindingRevision int64  `json:"binding_revision"`
-	OfferID         string `json:"offer_id"`
-	OfferRevision   int64  `json:"offer_revision"`
-	OwnerUserID     int    `json:"owner_user_id"`
-	DaemonID        string `json:"daemon_id"`
+	RequestedConfig    *TeamRuntimeConfig `json:"requested_config,omitempty"`
+	ConfigRevision     int64              `json:"config_revision,omitempty"`
+	ConfigHash         string             `json:"config_hash,omitempty"`
+	CapabilityRevision string             `json:"capability_revision,omitempty"`
+	ExecutionMode      string             `json:"execution_mode,omitempty"`
+	ProtocolVersion    int                `json:"protocol_version"`
+	Operation          string             `json:"operation"`
+	CallID             string             `json:"call_id"`
+	TeamSessionID      string             `json:"team_session_id"`
+	BindingID          string             `json:"binding_id"`
+	BindingRevision    int64              `json:"binding_revision"`
+	OfferID            string             `json:"offer_id"`
+	OfferRevision      int64              `json:"offer_revision"`
+	OwnerUserID        int                `json:"owner_user_id"`
+	DaemonID           string             `json:"daemon_id"`
 }
 
 type CollaborationContext struct {

@@ -16,7 +16,7 @@ vi.mock('../../composables/useLocale', async () => {
 const api = vi.hoisted(() => ({
   getTeamCapabilities: vi.fn(), listTeams: vi.fn(), getTeam: vi.fn(), listTeamMembers: vi.fn(),
   listTeamAgentOffers: vi.fn(), listTeamInvitations: vi.fn(), listTeamAgentCandidates: vi.fn(),
-  listTeamSessions: vi.fn(), listMyTeamAgentCandidates: vi.fn(), createTeamWorkspace: vi.fn(),
+  listTeamSessions: vi.fn(), listTeamTasks: vi.fn(), listMyTeamAgentCandidates: vi.fn(), createTeamWorkspace: vi.fn(),
 }))
 vi.mock('../../services/teamClient', () => api)
 
@@ -48,10 +48,22 @@ beforeEach(() => {
   api.listTeamMembers.mockImplementation(async (id: string) => [{ id: `member-${id}`, team_id: id, user_id: 7, display_label: `member-${id}`, state: 'active', revision: 1, joined_at: '', ended_at: null }])
   api.listTeamAgentOffers.mockResolvedValue([]); api.listTeamInvitations.mockResolvedValue([]); api.listTeamAgentCandidates.mockResolvedValue([]); api.listTeamSessions.mockResolvedValue([])
   api.listMyTeamAgentCandidates.mockResolvedValue([offlineAgent, occupiedAgent])
+  api.listTeamTasks.mockResolvedValue([])
   api.createTeamWorkspace.mockResolvedValue({ team: { ...teams[0], id: 'ctm_new', name: 'New team' }, warnings: [] })
 })
 
 describe('TeamsView', () => {
+  test.each([true, false])('creation from the team page respects agent config capability=%s', async (enabled) => {
+    api.getTeamCapabilities.mockResolvedValue({ collaboration: true, writes_enabled: true, agent_config_v2: enabled })
+    api.listTeamAgentOffers.mockResolvedValue([{ id: 'offer-online', provider: 'codex', daemon_id: 'daemon-online', owner_user_id: 7, state: 'active', managed_callable: true }])
+    const { wrapper } = await render()
+    await wrapper.get('[data-testid="team-tab-sessions"]').trigger('click')
+    await wrapper.get('.sessions-panel .panel-intro button').trigger('click')
+    await flushPromises()
+    await wrapper.get('.offer-choice input').setValue(true)
+    expect(wrapper.findAll('.offer-choice button').map(button => button.text())).toEqual(enabled ? ['配置'] : [])
+    wrapper.unmount()
+  })
   test('shows the access notice without loading Team data for an account that is not enabled', async () => {
     api.getTeamCapabilities.mockResolvedValue({ collaboration: false, writes_enabled: false })
     const { wrapper } = await render()

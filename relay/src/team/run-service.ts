@@ -55,15 +55,20 @@ export class TeamRunService {
     actorUserId: number
     coordinatorOfferId: string
     contextVersion: number
+    mode?: import('./types.js').TeamRunMode
+    participantOfferIds?:string[]
+    maxRounds?:number
     budget?: Partial<TeamRunBudget>
     requestId: string
   }): Promise<TeamRun> {
+    if(input.mode && (input.budget?.max_concurrent_calls??2)>2)throw new TeamRepositoryError('budget_exhausted','v2 concurrency cannot exceed 2')
     return this.publish(await this.repository.create({
       sessionId: input.sessionId,
       actorUserId: input.actorUserId,
       coordinatorOfferId: input.coordinatorOfferId,
       contextVersion: input.contextVersion,
-      budget: normalizeTeamRunBudget(input.budget),
+      mode:input.mode,participantOfferIds:input.participantOfferIds,maxRounds:input.maxRounds,
+      budget: normalizeTeamRunBudget(input.mode ? {max_calls:20,...input.budget} : input.budget),
       requestId: input.requestId,
     }))
   }

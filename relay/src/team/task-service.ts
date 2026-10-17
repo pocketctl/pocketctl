@@ -301,7 +301,7 @@ export class TeamTaskService {
   private async view(db: Pick<pg.Pool, 'query'>, row: any): Promise<TeamTaskView> {
     const [holders, sessions] = await Promise.all([
       db.query<{ user_id: number }>(`SELECT user_id FROM team_task_holders WHERE task_id = $1 AND state = 'active' ORDER BY user_id`, [row.task_id]),
-      db.query<{ team_session_id: string }>(`SELECT team_session_id FROM collaboration_sessions WHERE task_id = $1 ORDER BY created_at`, [row.task_id]),
+      db.query<{ team_session_id: string }>(`SELECT team_session_id FROM collaboration_sessions WHERE task_id = $1 OR EXISTS (SELECT 1 FROM collaboration_calls c WHERE c.task_id=$1 AND c.team_session_id=collaboration_sessions.team_session_id) ORDER BY created_at`, [row.task_id]),
     ])
     return {
       id: row.task_id,

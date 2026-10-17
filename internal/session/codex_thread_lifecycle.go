@@ -178,9 +178,14 @@ func (b *CodexAppServerBackend) beginThreadOperation(ctx context.Context, id str
 	needsResume := b.coord.detachedThreads[id] || (known && !subscribed)
 	b.coord.subscribeMu.Unlock()
 	if resume && needsResume {
-		if err := current.client.Call(ctx, "thread/resume", map[string]any{"threadId": id}, nil); err != nil {
+		var resumed codexNativeConfigFields
+		params, permission := b.coord.teamResumeParams(id)
+		if err := current.client.Call(ctx, "thread/resume", params, &resumed); err != nil {
 			unlock()
 			return nil, nil, fmt.Errorf("resume released Codex session: %w", err)
+		}
+		if b.sm != nil {
+			b.sm.rememberTeamCodexResume(id, resumed, permission)
 		}
 		if active, gen, ok := b.coord.backendClient(); ok && (active != current.client || gen != current.generation) {
 			unlock()
