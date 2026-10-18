@@ -60,6 +60,32 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = '' })
 
 describe('team session detail', () => {
+  test('references the complete streamed Agent reply without mixing calls or authors', async () => {
+    extraEvents.push(
+      { ...events[1], id: 'chunk-2', event_seq: 3, content: ' completely' },
+      { ...events[1], id: 'other-author', event_seq: 4, author_offer_id: 'offer-2', content: 'SECRET_OTHER_AUTHOR' },
+      { ...events[1], id: 'other-call', event_seq: 5, call_id: 'call-2', content: 'OTHER_CALL' },
+      { ...events[0], id: 'reply-stream', event_seq: 6, content: 'Reply', reference: { event_id: 'e2', event_seq: 2 } },
+      { ...events[0], id: 'reply-later-chunk', event_seq: 7, content: 'Reply', reference: { event_id: 'chunk-2', event_seq: 3 } },
+    )
+    const { wrapper } = await render()
+    for (const id of ['reply-stream', 'reply-later-chunk']) {
+      expect(wrapper.find(`#team-event-${id} .reference`).text()).toBe('Codex · Reviewed completely')
+    }
+    wrapper.unmount()
+  })
+  test('renders historical references with the original author and text, including unavailable history', async () => {
+    extraEvents.push(
+      { ...events[0], id: 'reply', event_seq: 3, content: 'Reply body', reference: { event_id: 'e1', event_seq: 1 } },
+      { ...events[0], id: 'missing-reply', event_seq: 4, content: 'Older reply', reference: { event_id: 'missing', event_seq: 0 } },
+    )
+    const { wrapper } = await render()
+    expect(wrapper.find('#team-event-reply .reference').text()).toBe('Me · Please review')
+    expect(wrapper.find('#team-event-missing-reply .reference').text()).toBe('引用的消息尚未加载')
+    expect(wrapper.find('.title-copy').text()).toContain('Alpha ·')
+    wrapper.unmount()
+  })
+
   test.each([
     ['start_fail', 'Agent 启动失败，请主机所有者检查运行环境'],
     ['codex_project_skills_invalid', '项目技能目录检查失败，请主机所有者检查技能文件及链接'],
@@ -74,7 +100,7 @@ describe('team session detail', () => {
     const browser = wrapper.findComponent({ name: 'TeamSessionBrowser' })
     browser.vm.$emit('updated', { ...teamSession, id: 'css_other', state: 'archived' })
     await flushPromises()
-    expect(wrapper.text()).toContain('进行中')
+    expect(wrapper.text()).toContain('群聊')
     browser.vm.$emit('updated', { ...teamSession, state: 'archived', revision: 3 })
     await flushPromises()
     expect(wrapper.text()).toContain('已归档')

@@ -75,7 +75,7 @@
 .reference-shell{--header-h:56px;--bg:#f6f8fa;--panel:#fff;--rail:#fff;--soft:#eef1f5;--hover:#f6f8fa;--line:#d8e0e9;--line-strong:#c9d4e2;--ink:#1f2328;--muted:#667184;--faint:#7e8898;--brand:#0969da;--brand-soft:#e7f0fd;--green:#1a7f37;--green-soft:#eaf5ee;--amber:#9a6700;--amber-soft:#fff4df;--shadow:none;--r:12px;--rs:10px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:var(--bg)}
 }
 @media(max-width:768px){
-.reference-shell [data-theme=dark] .app-layout{--bg:#0d1117;--panel:#161b22;--rail:#161b22;--soft:#1c2129;--hover:#1c2129;--line:#30363d;--line-strong:#484f58;--ink:#e6edf3;--muted:#8b949e;--faint:#8b949e;--brand:#58a6ff;--brand-soft:#1c304b;--green:#3fb950;--green-soft:#17332a;--amber:#d29922;--amber-soft:#352a1c}
+[data-theme=dark] .reference-shell{--bg:#0d1117;--panel:#161b22;--rail:#161b22;--soft:#1c2129;--hover:#1c2129;--line:#30363d;--line-strong:#484f58;--ink:#e6edf3;--muted:#8b949e;--faint:#8b949e;--brand:#58a6ff;--brand-soft:#1c304b;--green:#3fb950;--green-soft:#17332a;--amber:#d29922;--amber-soft:#352a1c}
 }
 @media(max-width:768px){
 .reference-shell{display:block;min-height:100dvh;background:var(--bg)}
