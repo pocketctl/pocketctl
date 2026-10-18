@@ -224,7 +224,7 @@
   "team.sessions_copy": "Shared discussion and execution history",
   "team.sessions_management_boundary": "Creation, messaging, and management use the shared session surface; this page does not simulate successful actions.",
   "team.sessions_empty": "No shared sessions yet",
-  "team.sessions_empty_copy": "Once the team has a callable agent, collaboration can begin from the shared session surface.",
+  "team.sessions_empty_copy": "Start a group chat with members. Agents can join later.",
   "team.session_state.active": "Active",
   "team.session_state.paused": "Paused",
   "team.session_state.ended": "Ended",
@@ -1806,7 +1806,7 @@
   "replica.session_agents": "Participating Agents",
   "replica.session_agents_copy": "Choose online Agents offered by team members. Each Agent has its own session.",
   "replica.agent_not_callable": "Currently unavailable for calls",
-  "replica.no_callable_agents": "No callable Agents are available. Share your own Agent with the team or wait for a host to come online.",
+  "replica.no_callable_agents": "No callable Agents are available. Create a member group chat now and add Agents later.",
   "replica.session_setup_incomplete": "The session was created, but some setup remains: ",
   "replica.open_created_session": "Open the created session",
   "replica.retry_session_setup": "Retry remaining setup",
@@ -1932,5 +1932,8 @@
   "attention.notification.stage_state.succeeded": "Completed",
   "attention.notification.stage_state.failed": "Failed; retry pending",
   "attention.notification.stage_state.not_applicable": "Not applicable",
-  "attention.notification.effective_purge": "Expected purge time"
+  "attention.notification.effective_purge": "Expected purge time",
+  "workspace.chat_label": "Group chat",
+  "workspace.session_summary": "{{team}} · {{members}} members · {{agents}} Agents",
+  "workspace.reference_unavailable": "Referenced message is not loaded"
 }

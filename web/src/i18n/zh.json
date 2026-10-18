@@ -224,7 +224,7 @@
   "team.sessions_copy": "共享讨论与执行记录",
   "team.sessions_management_boundary": "共享会话的创建、发送和管理将在统一会话界面中提供；此处不模拟成功操作。",
   "team.sessions_empty": "还没有共享会话",
-  "team.sessions_empty_copy": "团队中有可调用 Agent 后，可从共享会话界面开始协作。",
+  "team.sessions_empty_copy": "选择成员即可开始群聊，Agent 可稍后加入。",
   "team.session_state.active": "进行中",
   "team.session_state.paused": "已暂停",
   "team.session_state.ended": "已结束",
@@ -1806,7 +1806,7 @@
   "replica.session_agents": "参与 Agent",
   "replica.session_agents_copy": "选择团队成员提供的在线 Agent，每个 Agent 对应独立会话。",
   "replica.agent_not_callable": "当前不可调用",
-  "replica.no_callable_agents": "当前没有可调用的 Agent。请在团队中添加自己的 Agent，或等待主机上线。",
+  "replica.no_callable_agents": "当前没有可调用的 Agent。可直接创建成员群聊，稍后再加入 Agent。",
   "replica.session_setup_incomplete": "会话已创建，以下设置尚未完成：",
   "replica.open_created_session": "打开已创建的会话",
   "replica.retry_session_setup": "重试剩余设置",
@@ -1932,5 +1932,8 @@
   "attention.notification.stage_state.succeeded": "已完成",
   "attention.notification.stage_state.failed": "失败，等待重试",
   "attention.notification.stage_state.not_applicable": "无需执行",
-  "attention.notification.effective_purge": "预计清除时间"
+  "attention.notification.effective_purge": "预计清除时间",
+  "workspace.chat_label": "群聊",
+  "workspace.session_summary": "{{team}} · {{members}} 位成员 · {{agents}} 个 Agent",
+  "workspace.reference_unavailable": "引用的消息尚未加载"
 }
