@@ -41,6 +41,9 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
     ON event_inbox (daemon_id, daemon_generation, seq, inbox_id)
     WHERE status IN (0, 1);
 
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_materialized_event_id
+    ON event_inbox (materialized_event_id);
+
     CREATE INDEX IF NOT EXISTS idx_event_inbox_completed_cleanup
     ON event_inbox (completed_at, inbox_id)
     WHERE status = 2;
@@ -94,5 +97,10 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_realtime_outbox_undelivered
     ON realtime_outbox (created_at, outbox_id)
     WHERE delivered_at IS NULL;
+
+    -- Events are deleted by session retention. The cascading foreign key must
+    -- find referencing deliveries without scanning the outbox for every event.
+    CREATE INDEX IF NOT EXISTS idx_realtime_outbox_event_id
+    ON realtime_outbox (event_id);
   `)
 }

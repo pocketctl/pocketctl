@@ -294,6 +294,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
       PRIMARY KEY (user_id, request_id)
     )
   `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_request_push_effect_event_id ON request_push_effect(event_id)');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS email_outbox (
       id BIGSERIAL PRIMARY KEY,

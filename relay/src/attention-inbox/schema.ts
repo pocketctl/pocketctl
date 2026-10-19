@@ -51,6 +51,10 @@ export async function initAttentionInboxSchema(pool: Pick<pg.Pool, 'query'>): Pr
       ON attention_items (user_id, state, updated_at DESC, item_id DESC);
     CREATE INDEX IF NOT EXISTS idx_attention_items_user_daemon_state
       ON attention_items (user_id, daemon_id, state, updated_at DESC, item_id DESC);
+    CREATE INDEX IF NOT EXISTS idx_attention_items_source_event_id
+      ON attention_items (source_event_id);
+    CREATE INDEX IF NOT EXISTS idx_attention_items_resolution_event_id
+      ON attention_items (resolution_event_id);
     CREATE INDEX IF NOT EXISTS idx_attention_items_snooze_due
       ON attention_items (snoozed_until, item_id) WHERE state = 'snoozed';
     CREATE INDEX IF NOT EXISTS idx_attention_items_submission_due
