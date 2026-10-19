@@ -2,6 +2,8 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
+import { createInboxRepository } from '../inbox/repository.js'
+import type { ExtensionFeedEnvelopeV1 } from '../relay/contracts.js'
 import { createClaimRepository } from '../claims/repository.js'
 import { createReviewService } from '../claims/review-service.js'
 import { createIdempotencyStore } from '../api/idempotency.js'
@@ -98,6 +100,15 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
       RETURNING candidate_id::text
     `, [INSTALLATION, run.rows[0].run_id, episodeId, JSON.stringify([EVIDENCE_HANDLE])])
     candidateId = candidate.rows[0].candidate_id
+  })
+
+  test.each(['turn-1', null])('a later content gap (%s) prevents pending candidate promotion and review queue exposure', async turnId => {
+    expect(await review.reviewQueue({ installationId: INSTALLATION })).toHaveLength(1)
+    const gap: ExtensionFeedEnvelopeV1 = { envelope_version: 1, feed_id: '100', topic: 'session.event.v1', source: { kind: 'canonical_event', id: 'evt-100', recorded_at: '2026-10-19T00:00:00Z' }, subject: { session_id: 'ses-1', ...(turnId ? { turn_id: turnId } : {}), event_type: 'agent_text' }, classification: {}, data: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } }
+    await createInboxRepository(pool).commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '100', error_code: 'oversized_content', raw: gap, gap }], cursor: 'c', leaseToken: 'l', ack: async () => 100 })
+    expect(await review.acceptCandidate({ installationId: INSTALLATION, candidateId, expectedRevision: 1 })).toMatchObject({ ok: false, error: { code: 'candidate_evidence_stale' } })
+    expect(await review.reviewQueue({ installationId: INSTALLATION })).toHaveLength(0)
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM knowledge_claims WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
   })
 
   test('hash mismatch keeps candidate pending and observed human duration is stored atomically',async()=>{

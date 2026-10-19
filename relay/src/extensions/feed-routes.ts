@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type pg from 'pg'
 import { requiredExtensionScopeForTopic, type ExtensionMode, type ExtensionTopic } from './types.js'
@@ -196,11 +197,15 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
         let budget = maxResponseBytes
         let lastFeedId = afterFeedId
         for (const row of rows) {
-          const envelope = {
+          let envelope: Record<string, unknown> = {
             ...(row.payload as Record<string, unknown>),
             feed_id: String(row.feed_id),
           }
-          const size = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
+          let size = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
+          if (size > maxResponseBytes && query.oversized_content === 'quarantine-v1') {
+            envelope = oversizedContentEnvelope(envelope, size) ?? envelope
+            size = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
+          }
           if (size > maxResponseBytes) {
             throw new ExtensionApiError('invalid_request', 'feed item exceeds the response budget')
           }
@@ -329,4 +334,24 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
       client.release()
     }
   })
+}
+
+/** Explicit content allowlist: lifecycle, unknown and privacy controls fail closed. */
+function oversizedContentEnvelope(envelope: Record<string, unknown>, originalBytes: number): Record<string, unknown> | null {
+  const subject = envelope.subject as Record<string, unknown> | undefined
+  const source = envelope.source as Record<string, unknown> | undefined
+  const bounded = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_.:@/-]{1,256}$/.test(value)
+  if (envelope.envelope_version !== 1 || envelope.topic !== 'session.event.v1'
+    || !subject || !source || source.kind !== 'canonical_event'
+    || !bounded(source.id) || !bounded(subject.session_id)
+    || (subject.turn_id !== undefined && !bounded(subject.turn_id))
+    || !['agent_text', 'user_message', 'user_text', 'user_goal', 'tool_call', 'tool_result'].includes(String(subject.event_type))
+    || typeof source.recorded_at !== 'string' || source.recorded_at.length > 64 || Number.isNaN(Date.parse(source.recorded_at))) return null
+  return {
+    envelope_version: 1, feed_id: envelope.feed_id, topic: envelope.topic,
+    source: { kind: 'canonical_event', id: source.id, recorded_at: source.recorded_at },
+    subject: { session_id: subject.session_id, ...(subject.turn_id ? { turn_id: subject.turn_id } : {}), event_type: subject.event_type },
+    classification: {}, data: {},
+    quarantine: { reason: 'oversized_content', original_bytes: originalBytes, original_sha256: createHash('sha256').update(JSON.stringify(envelope)).digest('hex') },
+  }
 }

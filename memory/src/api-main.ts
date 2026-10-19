@@ -1,3 +1,5 @@
+import {loadBusinessHealth, summarizeBusinessHealth} from './reporting/business-health.js'
+import {updateBusinessHealthGauges} from './metrics.js'
 import {recordRecallMetrics,updateRetrievalIndexGauges} from './metrics.js'
 import Fastify from 'fastify'
 import { createHash } from 'node:crypto'
@@ -60,7 +62,7 @@ import {
  * Health semantics (frozen):
  * - /health  — process is alive; no Relay or database probe.
  * - /ready   — config valid, database answers SELECT 1, migrations applied.
- *   A degraded Relay or installation never makes the API unready.
+ *   Business degradation keeps HTTP 200 but appears in overall status and operational reasons.
  */
 async function main(): Promise<void> {
   const config = loadMemoryConfig()
@@ -81,7 +83,7 @@ async function main(): Promise<void> {
     }
     try {
       await pool.query('SELECT 1')
-      return { status: 'ready',compatibility:MEMORY_BRIDGE_COMPATIBILITY }
+      return { ...summarizeBusinessHealth(await loadBusinessHealth(pool), config.mode !== 'off'), compatibility:MEMORY_BRIDGE_COMPATIBILITY }
     } catch {
       reply.code(503)
       return { status: 'unavailable' }
@@ -91,7 +93,7 @@ async function main(): Promise<void> {
   // Bounded Prometheus metrics with the frozen label allowlists.
   const metrics = createMemoryMetrics()
   app.get('/metrics', async (_req, reply) => {
-    if(schemaReady){await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
+    if(schemaReady){await updateBusinessHealthGauges(pool,metrics,config.mode !== 'off');await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
     reply.header('content-type', metrics.registry.contentType)
     return metrics.registry.metrics()
   })

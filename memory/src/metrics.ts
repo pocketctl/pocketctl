@@ -1,3 +1,4 @@
+import {BUSINESS_HEALTH_REASONS, loadBusinessHealth, evaluateBusinessHealth} from './reporting/business-health.js'
 import {JOB_TYPES} from './jobs/types.js'
 import { Registry, Counter, Gauge, Histogram } from 'prom-client'
 import type pg from 'pg'
@@ -28,6 +29,8 @@ export function createMemoryMetrics() {
   const phase5 = createPhase5Metrics(registry)
   const phase6 = createPhase6Metrics(registry)
 
+  const businessAlerts = new Gauge({name:'pocketctl_memory_business_alerts',help:'Installations with active bounded business health alerts',labelNames:['reason'] as const,registers:[registry]})
+  const evidenceGaps = new Gauge({name:'pocketctl_memory_evidence_gaps',help:'Retained oversized-content quarantine envelopes without content',registers:[registry]})
   const installations = new Gauge({
     name: 'pocketctl_memory_installations',
     help: 'Local installations by local state',
@@ -120,6 +123,7 @@ export function createMemoryMetrics() {
 
   return {
     registry,
+    businessAlerts, evidenceGaps,
     installations,
     feedPulls,
     feedAcks,
@@ -761,4 +765,12 @@ export async function updateRetrievalIndexGauges(pool:Pick<pg.Pool,'query'>,metr
  metrics.retrievalIndexPending.set(Number(result.rows[0]?.pending??0))
  metrics.retrievalIndexLag.set(Math.max(0,Number(result.rows[0]?.age??0)))
  metrics.processResidentBytes.set(process.memoryUsage().rss)
+}
+
+/** Write every frozen reason on every refresh, including zero after recovery. */
+export async function updateBusinessHealthGauges(pool:Pick<pg.Pool,'query'>,metrics:MemoryMetrics,enabled=true):Promise<void>{
+  const rows=await loadBusinessHealth(pool)
+  const health=rows.map(row=>evaluateBusinessHealth(row,enabled))
+  for(const reason of BUSINESS_HEALTH_REASONS)metrics.businessAlerts.set({reason},health.filter(row=>row.reasons.includes(reason)).length)
+  metrics.evidenceGaps.set(rows.reduce((sum,row)=>sum+Number(row.evidence_gaps??0),0))
 }

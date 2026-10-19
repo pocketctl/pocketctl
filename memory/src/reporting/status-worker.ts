@@ -1,3 +1,4 @@
+import {loadBusinessHealth, evaluateBusinessHealth} from './business-health.js'
 import type pg from 'pg'
 
 export interface StatusWorkerOptions {
@@ -9,6 +10,12 @@ export interface StatusWorkerOptions {
 }
 
 const DEFAULT_INTERVAL_MS = 60_000
+
+/** Relay accepts only nonnegative safe integer counters, unlike SQL EXTRACT. */
+function relayCount(value: unknown): number {
+  const count = Number(value ?? 0)
+  return Number.isFinite(count) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(count))) : 0
+}
 
 /**
  * Per-installation status heartbeat (every 60s): provider version, local
@@ -25,47 +32,22 @@ export function createStatusWorker(options: StatusWorkerOptions) {
     if (current) return 0
     const pass = (async () => {
       try {
-        const rows = await options.pool.query<{
-          installation_id: string
-          local_status: string
-          last_feed_id: string | null
-          last_error_code: string | null
-          feed_lag_seconds: number | null
-          pending_jobs: string
-          failed_jobs_24h: string
-        }>(`
-          SELECT i.installation_id,
-                 i.local_status,
-                 i.last_feed_id::text,
-                 i.last_error_code,
-                 EXTRACT(EPOCH FROM (NOW() - i.last_pull_at))::bigint AS feed_lag_seconds,
-                 (SELECT COUNT(*) FROM memory_jobs j
-                   WHERE j.installation_id = i.installation_id AND j.state = 'pending')::text AS pending_jobs,
-                 (SELECT COUNT(*) FROM memory_jobs j
-                   WHERE j.installation_id = i.installation_id AND j.state = 'dead'
-                     AND j.created_at > NOW() - INTERVAL '24 hours')::text AS failed_jobs_24h
-          FROM memory_installations i
-          -- Relay rejects heartbeats after revocation. Reporting only the
-          -- statuses it accepts avoids a retrying not_found loop while the
-          -- purge worker completes its local cleanup.
-          WHERE i.relay_status IN ('pending', 'active', 'paused')
-        `)
-        for (const row of rows.rows) {
+        const rows = await loadBusinessHealth(options.pool)
+        for (const row of rows) {
+          const health = evaluateBusinessHealth(row)
           await options.reportStatus({
             installation_id: row.installation_id,
             provider_version: options.providerVersion,
-            state: row.local_status === 'ready' ? 'ready'
-              : row.local_status === 'degraded' ? 'degraded'
-                : row.local_status === 'integrity_error' ? 'error'
-                  : 'syncing',
-            last_feed_id: Number(row.last_feed_id ?? 0),
-            feed_lag_seconds: Number(row.feed_lag_seconds ?? 0),
-            pending_jobs: Number(row.pending_jobs),
-            failed_jobs_24h: Number(row.failed_jobs_24h),
-            ...(row.last_error_code ? { last_error_code: row.last_error_code } : {}),
+            state: health.state,
+            last_feed_id: relayCount(row.last_feed_id),
+            feed_lag_seconds: relayCount(row.feed_lag_seconds),
+            pending_jobs: relayCount(row.pending_jobs),
+            failed_jobs_24h: relayCount(row.failed_jobs_24h),
+            ...(health.primaryError ? { last_error_code: health.primaryError } : {}),
+            ...(row.last_extract_at ? {last_extract_at: new Date(row.last_extract_at).toISOString()} : {}),
           })
         }
-        return rows.rows.length
+        return rows.length
       } finally {
         current = undefined
       }

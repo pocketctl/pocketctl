@@ -205,6 +205,10 @@ and managed from the Memory workbench in the Web app.
   persists or logs pack contents.
 - **MCP access** — hosting agents can query the same knowledge through an MCP
   bridge, so tools and the workbench share one source of truth.
+- **Operational status** — the workbench reports stalled synchronization,
+  budget waits, extraction stalls, and missing evidence. Oversized ordinary
+  Feed content is quarantined so later events can continue; affected evidence
+  cannot be used to extract or approve new knowledge.
 
 Model-assisted extraction runs on the server and requires a configured
 provider; without one the workbench stays unavailable instead of running

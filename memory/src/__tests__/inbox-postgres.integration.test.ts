@@ -2,6 +2,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
+import { createPurgeRepository } from '../purge/repository.js'
 import { createInboxRepository } from '../inbox/repository.js'
 import { createFeedConsumer } from '../inbox/feed-worker.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
@@ -57,13 +58,76 @@ describeWithDatabase('durable inbox (PostgreSQL)', () => {
 
   beforeEach(async () => {
     await pool.query(`
-      TRUNCATE memory_jobs, memory_feed_inbox, memory_installations RESTART IDENTITY CASCADE
+      TRUNCATE memory_purge_receipts, memory_session_tombstones, memory_jobs, memory_feed_inbox, memory_installations RESTART IDENTITY CASCADE
     `)
     await pool.query(`
       INSERT INTO memory_installations
         (installation_id, provider_id, relay_status, local_status, config_version)
       VALUES ($1, 'pocketctl-memory', 'active', 'syncing', 1)
     `, [INSTALLATION])
+  })
+
+  test('content gaps durably commit before ACK, survive redelivery and are erased by session privacy purge', async () => {
+    const gap = envelope(1, { data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
+    let acknowledgments = 0
+    const ack = vi.fn(async () => {
+      const stored = (await pool.query(`SELECT session_id, turn_id, data, projection_state FROM memory_feed_inbox WHERE installation_id=$1 AND feed_id=1`, [INSTALLATION])).rows[0]
+      expect(stored).toEqual({ session_id: 'ses-1', turn_id: 'turn-1', data: gap.quarantine, projection_state: 'quarantined' })
+      acknowledgments++
+      if (acknowledgments === 1) throw new Error('lost ACK')
+      return 2
+    })
+    const consumer = createFeedConsumer({ pool, pullFeed: async () => batch([gap, envelope(2)]), ackFeed: ack, workerId: 'gap-test', signal: new AbortController().signal })
+    await consumer.runOnce()
+    expect(ack).toHaveBeenCalledTimes(1)
+    await consumer.runOnce()
+    expect(ack).toHaveBeenCalledTimes(2)
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(2)
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM source_events WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
+    await createPurgeRepository(pool, { hmacKey: 'test-key' }).purgeSession({ installationId: INSTALLATION, sessionId: 'ses-1', reason: 'session_deleted', sourceFeedId: null })
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
+    await inbox.commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '1', error_code: 'oversized_content', raw: gap, gap }], cursor: 'cursor', leaseToken: 'lease', ack: async () => 1 })
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
+  })
+
+  test('quarantine metadata digest conflicts fence the installation and never ACK', async () => {
+    const gap = envelope(1, { data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
+    const commit = (value: ExtensionFeedEnvelopeV1, ack: () => Promise<number>) => inbox.commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '1', error_code: 'oversized_content', raw: value, gap: value }], cursor: 'c', leaseToken: 'l', ack })
+    await commit(gap, async () => 1)
+    const ack = vi.fn(async () => 1)
+    await expect(commit({ ...gap, quarantine: { ...gap.quarantine!, original_sha256: 'b'.repeat(64) } }, ack)).rejects.toThrow('feed integrity violation')
+    expect(ack).not.toHaveBeenCalled()
+    expect((await pool.query(`SELECT local_status FROM memory_installations WHERE installation_id=$1`, [INSTALLATION])).rows[0].local_status).toBe('integrity_error')
+  })
+
+  test.each([['revoking', 'ready'], ['revoked', 'ready'], ['active', 'purging'], ['active', 'purged']])('terminal installation %s/%s cannot persist a pulled batch', async (relayStatus, localStatus) => {
+    await pool.query(`UPDATE memory_installations SET relay_status=$2, local_status=$3 WHERE installation_id=$1`, [INSTALLATION, relayStatus, localStatus])
+    const ack = vi.fn(async () => 1)
+    await expect(inbox.commitBatch({ installationId: INSTALLATION, envelopes: [envelope(1)], rawQuarantined: [], cursor: 'c', leaseToken: 'l', ack })).rejects.toThrow('feed_installation_unavailable')
+    expect(ack).not.toHaveBeenCalled()
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
+  })
+
+  test('installation purge fences an already-pulled gap and ordinary content before persistence or ACK', async () => {
+    const gap = envelope(1, { data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
+    await createPurgeRepository(pool, { hmacKey: 'test-key' }).purgeInstallation({ installationId: INSTALLATION, requestId: '88888888-8888-4888-8888-888888888888', reason: 'revoked' })
+    const ack = vi.fn(async () => 2)
+    await expect(inbox.commitBatch({ installationId: INSTALLATION, envelopes: [envelope(2)], rawQuarantined: [{ feed_id: '1', error_code: 'oversized_content', raw: gap, gap }], cursor: 'c', leaseToken: 'l', ack })).rejects.toThrow('feed_installation_unavailable')
+    expect(ack).not.toHaveBeenCalled()
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
+  })
+
+  test('invalid content-gap identity never ACKs', async () => {
+    const ack = vi.fn(async () => 1)
+    const errors: unknown[] = []
+    const consumer = createFeedConsumer({ pool, pullFeed: async () => batch([envelope(1, { subject: { session_id: null, event_type: 'agent_text' }, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })]), ackFeed: ack, workerId: 'gap-test', signal: new AbortController().signal, onError: error => errors.push(error) })
+    await consumer.runOnce()
+    expect(errors).toHaveLength(1)
+    const foreign = createFeedConsumer({ pool, pullFeed: async () => batch([envelope(1)], { installation_id: '99999999-9999-4999-8999-999999999999' }), ackFeed: ack, workerId: 'gap-test', signal: new AbortController().signal, onError: error => errors.push(error) })
+    await foreign.runOnce()
+    expect(errors).toHaveLength(2)
+    expect(ack).not.toHaveBeenCalled()
+    expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
   })
 
   test('commits a batch atomically and acks only after the commit', async () => {
@@ -259,7 +323,7 @@ describeWithDatabase('feed consumer typed recovery (PostgreSQL)', () => {
 
   beforeEach(async () => {
     await pool.query(`
-      TRUNCATE memory_jobs, memory_feed_inbox, memory_installations RESTART IDENTITY CASCADE
+      TRUNCATE memory_purge_receipts, memory_session_tombstones, memory_jobs, memory_feed_inbox, memory_installations RESTART IDENTITY CASCADE
     `)
     await pool.query(`
       INSERT INTO memory_installations

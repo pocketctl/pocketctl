@@ -40,6 +40,7 @@
     </section>
 
     <section v-else class="memory-workspace" data-testid="memory-workspace">
+      <MemoryOperationalStatus :installation-id="installation.installation_id" />
       <div v-if="isMobile" class="memory-scope"><WorkspaceIcon name="memory" class="icon" /><span class="grow">{{ t('replica.personal_memory') }}</span><span class="badge green">{{ t('memory.services_enabled') }}</span></div>
       <div class="memory-workspace-shell memory-grid" data-testid="memory-workbench-frame">
         <MemoryModuleNavigation v-model="active" :review-count="reviewCount" />
@@ -192,6 +193,7 @@ import { promotionTargetsForSource } from '../utils/memoryGovernance'
 import MemorySearchPanel from '../components/memory/MemorySearchPanel.vue'
 import CandidateReviewList from '../components/memory/CandidateReviewList.vue'
 import ClaimDetailPanel from '../components/memory/ClaimDetailPanel.vue'
+import MemoryOperationalStatus from '../components/memory/MemoryOperationalStatus.vue'
 import MemorySettingsCard from '../components/memory/MemorySettingsCard.vue'
 import MemoryScopeSwitcher from '../components/memory/MemoryScopeSwitcher.vue'
 import MemoryGovernanceQueue from '../components/memory/MemoryGovernanceQueue.vue'

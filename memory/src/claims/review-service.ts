@@ -49,6 +49,10 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
           ON r.installation_id = c.installation_id AND r.run_id = c.run_id
         WHERE c.installation_id = $1 AND c.status IN ('validated', 'conflict')
           AND r.episode_source_digest = e.source_digest
+          AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+            WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+              AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
+              AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
         ORDER BY c.created_at DESC, c.candidate_id
         LIMIT $2
       `, [input.installationId, limit])

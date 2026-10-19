@@ -19,6 +19,7 @@ export const EXTENSION_TOPICS: readonly ExtensionTopic[] = Object.freeze([
 ])
 
 export interface ExtensionFeedEnvelopeV1 {
+  quarantine?: { reason: 'oversized_content'; original_bytes: number; original_sha256: string }
   envelope_version: 1
   feed_id: string
   topic: ExtensionTopic
