@@ -82,6 +82,7 @@ export function sessionLifecycleConfig(
       3_600_000,
       86_400_000,
     ),
+    continuationDelayMs: integer('SESSION_LIFECYCLE_CONTINUATION_DELAY_MS', 5_000, 86_400_000),
     batchSessions: integer('SESSION_LIFECYCLE_BATCH_SESSIONS', 20, 1000),
     batchBytes: integer(
       'SESSION_LIFECYCLE_BATCH_BYTES',

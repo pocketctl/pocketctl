@@ -8,11 +8,15 @@ import { SessionLifecycleExecutor } from './executor.js'
 import { SessionLifecycleScanner } from './scanner.js'
 import type { SessionLifecycleConfig } from './types.js'
 import { sessionLifecycleReadiness } from './readiness.js'
+import { LifecycleScanProgress } from './scan-progress.js'
 
 /** Single independent maintenance loop. Leases coordinate all workers; stop
  * drains current work and the next process can take expired durable claims. */
 export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycleConfig,storage:ArchiveStorage|undefined,secret:string,options:{workerId:string;deleteOptions?:Parameters<SessionLifecycleExecutor['execute']>[1];onReport?:(report:Record<string,unknown>)=>void}){
   let cursor=0,stopped=true,timer:ReturnType<typeof setTimeout>|undefined,current:Promise<void>|undefined
+  let nextDelayMs=config.scanIntervalMs
+  const continuationDelayMs=Math.min(config.continuationDelayMs,config.scanIntervalMs)
+  const progress=new LifecycleScanProgress(pool)
   const executor=storage?new SessionLifecycleExecutor(pool,config,storage,secret):undefined
   const collector=storage?new ArchiveObjectCollector(pool,storage):undefined
   const notices=new AttentionNotificationRepository(pool,secret)
@@ -39,35 +43,51 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
       }catch(error){await db.query('ROLLBACK');throw error}finally{db.release()}
     }
   }
-  async function pass(){
+  async function pass(forceScan=false){
+    nextDelayMs=config.scanIntervalMs
     const start=Date.now(),counts:Record<string,number>={},report:Record<string,unknown>={mode:config.mode,scanned:0,executed:0,bytes:0,blocked:counts}
+    const emit=()=>options.onReport?.({...report,nextDelayMs})
     // Committed cleanup continues with the maintenance switch off.
     if(collector)report.objectsDeleted=await collector.runOnce(config.batchSessions)
     await reconcile()
     await notices.expire(Math.min(100,config.batchSessions));await notices.deliverPending(100)
-    if(config.mode==='off'){options.onReport?.(report);return}
+    if(config.mode==='off'){emit();return}
     if(config.mode==='observe'){
       const page=await new SessionLifecycleScanner(pool,config).scanPage({limit:Math.min(100,config.batchSessions),afterRowId:cursor})
-      cursor=page.nextRowId??0;report.observe=page;options.onReport?.(report);return
+      cursor=page.nextRowId??0;report.observe=page
+      if(page.nextRowId!==null)nextDelayMs=continuationDelayMs
+      emit();return
     }
     const readiness = sessionLifecycleReadiness(config, storage ?? false)
     if (!readiness.execution_ready || !executor) {
       report.blockedReadiness = readiness.blockers[0] ?? 'object_reader_not_configured'
       report.readinessBlockers = readiness.blockers
       report.releaseBlockers = readiness.release_blockers
-      options.onReport?.(report)
+      emit()
       return
     }
-    const rows=(await pool.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND (last_activity_at IS NULL OR last_activity_at<NOW()-interval '60 days') ORDER BY id LIMIT $2`,[cursor,config.batchSessions])).rows
-    cursor=rows.length===config.batchSessions?rows.at(-1)!.id:0
-    for(const row of rows){
-      if(stopped||Date.now()-start>=config.runBudgetMs)break
-      report.scanned=Number(report.scanned)+1
-      const inspection=await inspectLifecycleEligibility(pool,row.session_id,config),root=inspection.root
-      for(const reason of inspection.prediction.blockedReasons)counts[reason]=(counts[reason]??0)+1
-      if(!root||!inspection.prediction.action)continue
-      if(inspection.prediction.action==='purge'&&inspection.members.some(member=>Number(member.id)<row.id))continue
-      await executor.jobs.enqueue({userId:root.user_id,sessionId:root.session_id,action:inspection.prediction.action,policyVersion:config.policyVersion,activityEpoch:root.epoch})
+    const scanLease=await progress.claim(config.policyVersion,config.runBudgetMs+60_000,forceScan)
+    if(scanLease){
+      let afterRowId=scanLease.afterRowId,completed=false
+      try{
+        const rows=(await pool.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND (last_activity_at IS NULL OR last_activity_at<NOW()-($2::int*interval '1 day')) ORDER BY id LIMIT $3`,[afterRowId,config.archiveDays,config.batchSessions+1])).rows
+        let inspected=0
+        for(const row of rows.slice(0,config.batchSessions)){
+          if(stopped||Date.now()-start>=config.runBudgetMs)break
+          const inspection=await inspectLifecycleEligibility(pool,row.session_id,config),root=inspection.root
+          for(const reason of inspection.prediction.blockedReasons)counts[reason]=(counts[reason]??0)+1
+          if(root&&inspection.prediction.action&&!(inspection.prediction.action==='purge'&&inspection.members.some(member=>Number(member.id)<row.id)))
+            await executor.jobs.enqueue({userId:root.user_id,sessionId:root.session_id,action:inspection.prediction.action,policyVersion:config.policyVersion,activityEpoch:root.epoch})
+          // Advance only after inspection and any durable enqueue succeeded.
+          // A budget stop or error must not skip the rest of the fetched page.
+          afterRowId=Number(row.id);inspected++;report.scanned=inspected
+        }
+        completed=inspected===rows.length
+      }finally{
+        const checkpoint=completed?0:afterRowId
+        report.scanCursor=checkpoint;report.scanComplete=completed
+        report.scanCheckpointSaved=await progress.finish(scanLease,checkpoint,completed?config.scanIntervalMs:continuationDelayMs)
+      }
     }
     for(let index=0;index<config.batchSessions&&!stopped&&Date.now()-start<config.runBudgetMs;index++){
       const lease=await executor.jobs.claim(options.workerId,300000)
@@ -81,10 +101,13 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
       // sessions stay durable for the next pass rather than multiplying it.
       if(lease.action==='archive'||lease.action==='cool')break
     }
-    options.onReport?.(report)
+    nextDelayMs=await progress.nextDelay(config.policyVersion,continuationDelayMs,config.scanIntervalMs)
+    emit()
   }
-  const runOnce=async()=>{if(current)return current;current=pass();try{await current}finally{current=undefined}}
-  const schedule=()=>{if(stopped)return;timer=setTimeout(()=>{timer=undefined;void runOnce().catch(error=>options.onReport?.({errorName:error instanceof Error?error.name:'unknown'})).finally(schedule)},config.scanIntervalMs);timer.unref?.()}
+  const runOnce=async(forceScan=false)=>{if(current)return current;current=pass(forceScan);try{await current}finally{current=undefined}}
+  const schedule=()=>{if(stopped)return;timer=setTimeout(()=>{timer=undefined;void runOnce().catch(error=>options.onReport?.({errorName:error instanceof Error?error.name:'unknown'})).finally(schedule)},nextDelayMs);timer.unref?.()}
   return {start(){if(!stopped)return;stopped=false;void runOnce().catch(error=>options.onReport?.({errorName:error instanceof Error?error.name:'unknown'})).finally(schedule)},
-    async stop(){stopped=true;if(timer)clearTimeout(timer);timer=undefined;await current},async runOnce(){const previous=stopped;stopped=false;try{await runOnce()}finally{stopped=previous}}}
+    // Explicit one-shot calls can scan before next_scan_at, while still
+    // respecting another worker's live page lease and the persisted cursor.
+    async stop(){stopped=true;if(timer)clearTimeout(timer);timer=undefined;await current},async runOnce(){const previous=stopped;stopped=false;try{await runOnce(true)}finally{stopped=previous}}}
 }

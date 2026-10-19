@@ -27,6 +27,7 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     storage = configuredArchiveStorage(pool)!
     await pool.query('TRUNCATE users,daemons,sessions,events,subagents,deleted_sessions,extension_source_outbox,extension_feed RESTART IDENTITY CASCADE')
     await pool.query('TRUNCATE session_lifecycle_deletions,extension_session_deletions,session_archive_object_deletions')
+    await pool.query('TRUNCATE session_lifecycle_scan_state')
     userId = (await pool.query("INSERT INTO users(email,password_hash) VALUES('disk-release@test.invalid','x') RETURNING id")).rows[0].id
     await pool.query("INSERT INTO daemons(daemon_id,user_id,alias) VALUES('host',$1,'Disk fixture host')", [userId])
     await pool.query(`INSERT INTO sessions(session_id,user_id,daemon_id,status,title,last_activity_at,last_business_activity_at,activity_verified)

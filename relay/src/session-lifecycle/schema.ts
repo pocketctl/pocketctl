@@ -13,6 +13,16 @@ export async function initSessionLifecycleSchema(
       CHECK (content_state IN ('hot','cooling','cold','mixed','deleting','deleted'));
     ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cooling_operation_id UUID;
 
+    CREATE TABLE IF NOT EXISTS session_lifecycle_scan_state (
+      policy_version TEXT PRIMARY KEY,
+      after_row_id BIGINT NOT NULL DEFAULT 0 CHECK (after_row_id >= 0),
+      next_scan_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      lease_token UUID,
+      lease_until TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK ((lease_token IS NULL) = (lease_until IS NULL))
+    );
+
     CREATE TABLE IF NOT EXISTS session_lifecycle_jobs (
       operation_id UUID PRIMARY KEY,
       user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

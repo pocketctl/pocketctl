@@ -10,6 +10,7 @@ describe('session lifecycle config', () => {
       policyVersion: 'session-lifecycle-v1',
       notificationRetentionDays: 90,
       scanIntervalMs: 3_600_000,
+      continuationDelayMs: 5_000,
       batchSessions: 20,
       transferConcurrency: 1,
     })
@@ -19,6 +20,7 @@ describe('session lifecycle config', () => {
     { SESSION_LIFECYCLE_ARCHIVE_DAYS: '90' },
     { SESSION_LIFECYCLE_PURGE_DAYS: '60' },
     { SESSION_LIFECYCLE_BATCH_SESSIONS: '20junk' },
+    { SESSION_LIFECYCLE_CONTINUATION_DELAY_MS: '0' },
     { SESSION_LIFECYCLE_TRANSFER_CONCURRENCY: '0' },
     { SESSION_LIFECYCLE_MAX_CHUNK_BYTES: '-1' },
     { SESSION_LIFECYCLE_EFFECTIVE_AT: 'tomorrow' },

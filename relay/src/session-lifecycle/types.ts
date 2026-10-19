@@ -51,6 +51,7 @@ export interface SessionLifecycleConfig {
   transitionDeadline: string | null
   notificationRetentionDays: number
   scanIntervalMs: number
+  continuationDelayMs: number
   batchSessions: number
   batchBytes: number
   runBudgetMs: number
