@@ -67,8 +67,8 @@ describeWithDatabase('durable inbox (PostgreSQL)', () => {
     `, [INSTALLATION])
   })
 
-  test('content gaps durably commit before ACK, survive redelivery and are erased by session privacy purge', async () => {
-    const gap = envelope(1, { data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
+  test.each(['agent_text', 'command_list', 'session_agent_list'])('%s gaps durably commit before ACK, survive redelivery and are erased by session privacy purge', async eventType => {
+    const gap = envelope(1, { subject: { session_id: 'ses-1', turn_id: 'turn-1', event_type: eventType }, data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
     let acknowledgments = 0
     const ack = vi.fn(async () => {
       const stored = (await pool.query(`SELECT session_id, turn_id, data, projection_state FROM memory_feed_inbox WHERE installation_id=$1 AND feed_id=1`, [INSTALLATION])).rows[0]
