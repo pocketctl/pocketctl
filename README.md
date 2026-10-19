@@ -264,7 +264,7 @@ Self-hosted operators must enable each phase independently with
 |---|---|
 | `pocketctl login [--prod] [--email]` | Authenticate through browser device flow or email verification. |
 | `pocketctl daemon start [--prod]` | Start the daemon and discover local agents. |
-| `pocketctl daemon status` | Show daemon, Relay, and discovered-agent status. |
+| `pocketctl daemon status [--no-update-check]` | Show status; in an interactive terminal, offer updates newer than the running daemon. |
 | `pocketctl daemon doctor` | Diagnose configuration and connection problems. |
 | `pocketctl daemon diagnose <session-id>` | Check whether one session is proxied and print a reason and recovery advice. |
 | `pocketctl daemon logs` | Locate or follow daemon logs. |
@@ -274,6 +274,15 @@ Self-hosted operators must enable each phase independently with
 | `pocketctl uninstall [--yes] [--keep-binary]` | Remove the daemon and local PocketCtl data. |
 
 Run `pocketctl help` or the relevant subcommand with `--help` for all options.
+
+`daemon status` prints status first. Update checks time out after two seconds;
+failed checks, equal/older versions, and noninteractive calls never prompt.
+Press Enter to keep the current version, or answer `y` to update and refresh status.
+For a root-owned system binary, `daemon update` requests sudo authorization before
+downloading. Only the verified installation runs as root; daemon restart retains
+the invoking user's identity. Automatic elevation requires a root-controlled
+executable and parent directories. Cancellation leaves the binary and daemon
+unchanged. `--no-restart` installs without restarting the daemon.
 
 ## Security and data boundary
 

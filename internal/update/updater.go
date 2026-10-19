@@ -3,6 +3,7 @@
 package update
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -70,12 +70,25 @@ var downloadClient = &http.Client{Timeout: 3 * time.Minute}
 
 // CheckLatest queries the GitHub releases API for the latest version tag.
 func CheckLatest() (tag string, err error) {
-	return queryLatest(githubAPIBase)
+	return CheckLatestContext(context.Background())
+}
+
+// CheckLatestContext lets status impose a short deadline without changing the
+// explicit update command's timeout.
+func CheckLatestContext(ctx context.Context) (string, error) {
+	return queryLatestContext(ctx, githubAPIBase)
 }
 
 // queryLatest fetched the /latest release tag from a single API base URL.
 func queryLatest(api string) (string, error) {
-	req, _ := http.NewRequest("GET", api+"/latest", nil)
+	return queryLatestContext(context.Background(), api)
+}
+
+func queryLatestContext(ctx context.Context, api string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", api+"/latest", nil)
+	if err != nil {
+		return "", err
+	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := apiClient.Do(req)
 	if err != nil {
@@ -100,8 +113,8 @@ func queryLatest(api string) (string, error) {
 // CheckVersion verifies a specific version tag exists on GitHub and that the
 // release carries a verifiable official checksum for this platform's asset.
 func CheckVersion(version string) (tag string, err error) {
-	if !strings.HasPrefix(version, "v") {
-		return "", fmt.Errorf("version must start with 'v', got: %s", version)
+	if !strings.HasPrefix(version, "v") || parseVersion(version) == nil {
+		return "", fmt.Errorf("version must be a complete semantic version starting with 'v', got: %s", version)
 	}
 	if err := queryVersionTagStatus(githubAPIBase, version); err != nil {
 		return "", err
@@ -371,83 +384,19 @@ func downloadOne(url, expectedSHA string, expectedSize int64) (string, error) {
 
 // ReplaceBinary safely replaces the running binary with a new one at tmpPath.
 // On success it removes the temp file and returns nil.
-func ReplaceBinary(tmpPath string) (err error) {
-	execPath, err := os.Executable()
+func ReplaceBinary(tmpPath string) error {
+	realPath, err := ExecutablePath()
 	if err != nil {
-		return fmt.Errorf("get executable path: %w", err)
+		return err
 	}
-
-	// Resolve symlinks to get the real path
-	realPath, err := filepath.EvalSymlinks(execPath)
+	sha, err := fileSHA256(tmpPath)
 	if err != nil {
-		realPath = execPath
+		return err
 	}
-
-	// On macOS, an ad-hoc/unsigned binary that re-execs itself (which the daemon
-	// does on `daemon start` and `daemon_restart`) is SIGKILL'd by Gatekeeper
-	// once its on-disk contents change. After we swap in the freshly downloaded
-	// binary its prior signature is invalid, so re-sign it ad-hoc here — every
-	// successful replacement path funnels through this deferred call.
-	defer func() {
-		if err == nil {
-			resignDarwin(realPath)
-		}
-	}()
-
-	info, err := os.Stat(realPath)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", realPath, err)
+	if err := InstallVerified(tmpPath, realPath, sha); err != nil {
+		return err
 	}
-
-	// Try direct rename first (atomic, preferred on all platforms).
-	if err := os.Rename(tmpPath, realPath); err != nil {
-		errStr := err.Error()
-		// "text file busy" (ETXTBSY) happens on Linux/WSL when the binary is
-		// currently running — you can't rename over a live executable.
-		// The standard workaround: delete the old file first (Linux keeps the
-		// inode alive until the process exits, but the path is freed), then
-		// rename the new one into place.
-		if strings.Contains(errStr, "text file busy") || strings.Contains(errStr, "resource busy") || strings.Contains(errStr, "permission denied") {
-			// Remove the old binary (safe on Linux: inode stays until process exits)
-			if rmErr := os.Remove(realPath); rmErr == nil {
-				// Now rename the new binary into the freed path
-				if renameErr := os.Rename(tmpPath, realPath); renameErr == nil {
-					return nil
-				}
-				// rename still failed — try copy to the freed path
-				if copyErr := copyFile(tmpPath, realPath, info.Mode()); copyErr == nil {
-					os.Remove(tmpPath)
-					return nil
-				}
-			}
-			// Remove didn't work either — fall through to retry/cross-device logic
-		}
-		// Retry for transient EBUSY on NTFS/DrvFs (/mnt/c on WSL)
-		if strings.Contains(errStr, "text file busy") || strings.Contains(errStr, "resource busy") {
-			for i := 0; i < 3; i++ {
-				time.Sleep(500 * time.Millisecond)
-				if err := os.Rename(tmpPath, realPath); err == nil {
-					return nil
-				}
-			}
-		}
-		// If that fails (cross-device or permissions), try copy + remove
-		if isCrossDevice(err) || os.IsPermission(err) {
-			// On Linux, copying over a running binary also gets ETXTBSY.
-			// Remove first, then copy (same trick as above).
-			os.Remove(realPath)
-			if err := copyFile(tmpPath, realPath, info.Mode()); err != nil {
-				os.Remove(tmpPath)
-				return fmt.Errorf("replace binary at %s: %w", realPath, err)
-			}
-			os.Remove(tmpPath)
-		} else {
-			os.Remove(tmpPath)
-			return fmt.Errorf("rename %s -> %s: %w", tmpPath, realPath, err)
-		}
-	}
-
-	return nil
+	return os.Remove(tmpPath)
 }
 
 // DaemonProcessController is the authoritative daemon lifecycle surface the
@@ -572,42 +521,6 @@ func fileSHA256(path string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-
-func copyFile(src, dst string, mode os.FileMode) error {
-	s, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-
-	// On Linux/WSL, opening a running binary with O_WRONLY|O_TRUNC returns
-	// ETXTBSY ("text file busy"). Retry a few times in case the OS releases
-	// the lock momentarily.
-	var d *os.File
-	for i := 0; i < 3; i++ {
-		d, err = os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-		if err == nil {
-			break
-		}
-		if !strings.Contains(err.Error(), "text file busy") {
-			break // different error, don't retry
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-
-	if _, err := io.Copy(d, s); err != nil {
-		return err
-	}
-	return nil
-}
-
-func isCrossDevice(err error) bool {
-	return strings.Contains(err.Error(), "invalid cross-device link")
 }
 
 // (isDaemonRunning/killDaemon/waitForExit PID-trust helpers were removed in H-6.)

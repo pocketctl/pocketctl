@@ -107,6 +107,12 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "__install_update":
+		if err := runPrivilegedUpdateInstall(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
 	case "agent":
 		cmdAgent(os.Args[2:])
 	case "daemon":
@@ -2679,7 +2685,13 @@ func cmdDaemonStatus(args ...string) {
 		os.Exit(2)
 	}
 	var output strings.Builder
-	defer func() { writeDaemonStatusOutput(output.String(), options.pager) }()
+	runningVersion := ""
+	defer func() {
+		writeDaemonStatusOutput(output.String(), options.pager)
+		if runningVersion != "" && !options.noUpdateCheck {
+			offerStatusUpdate(runningVersion, args)
+		}
+	}()
 	pid, running, runtimeErr := daemon.RuntimeStatus()
 	if runtimeErr != nil {
 		renderDaemonStatusUncertainty(&output, runtimeErr)
@@ -2695,7 +2707,9 @@ func cmdDaemonStatus(args ...string) {
 		fmt.Fprintln(&output, i18n.T("daemon.running_no_state", pid))
 		return
 	}
-	renderVerifiedDaemonStatus(&output, *state, pid, daemon.VerifyRuntimeIdentity, options.limit)
+	if renderVerifiedDaemonStatus(&output, *state, pid, daemon.VerifyRuntimeIdentity, options.limit) {
+		runningVersion = state.Version
+	}
 }
 
 func renderDaemonStatusUncertainty(out io.Writer, err error) {
@@ -2809,15 +2823,15 @@ func renderVerifiedDaemonStatus(
 	pidfilePID int,
 	verify func(int, string) (bool, error),
 	limits ...int,
-) {
+) bool {
 	running, err := verify(state.PID, state.RuntimeInstanceToken)
 	if err != nil {
 		renderDaemonStatusUncertainty(out, err)
-		return
+		return false
 	}
 	if !running {
 		fmt.Fprintln(out, i18n.T("daemon.not_running"))
-		return
+		return false
 	}
 	if state.PID != pidfilePID {
 		renderDaemonStatusUncertainty(
@@ -2829,9 +2843,10 @@ func renderVerifiedDaemonStatus(
 				pidfilePID,
 			),
 		)
-		return
+		return false
 	}
 	renderDaemonStatus(out, state, pidfilePID, func(int) bool { return true }, limits...)
+	return true
 }
 
 func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int, isAlive func(int) bool, limits ...int) {
@@ -4798,6 +4813,26 @@ func cmdDaemonUpdate(args []string) {
 		return
 	}
 
+	// Check the caller's runtime before any installation; never switch its identity.
+	wasRunning := false
+	if !*noRestart {
+		_, wasRunning, err = daemon.RuntimeStatus()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	execPath, err := update.ExecutablePath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	sudo, err := prepareUpdateInstall(execPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	// 2. Resolve binary + checksum
 	fmt.Println()
 	fmt.Println(i18n.T("update.resolving"))
@@ -4824,17 +4859,12 @@ func cmdDaemonUpdate(args []string) {
 	// 4. Replace binary
 	fmt.Println()
 	fmt.Println(i18n.T("update.replacing"))
-	if err := update.ReplaceBinary(tmpPath); err != nil {
+	if err := installDownloadedUpdate(sudo, execPath, tmpPath, tag, binInfo.SHA); err != nil {
+		os.Remove(tmpPath)
 		fmt.Fprintln(os.Stderr, i18n.T("update.replace_fail", err))
-		fmt.Println()
-		fmt.Println(i18n.T("update.permission_hint"))
-		fmt.Printf("     sudo pocketctl daemon update")
-		if *versionFlag != "" {
-			fmt.Printf(" --version %s", *versionFlag)
-		}
-		fmt.Println()
 		os.Exit(1)
 	}
+	os.Remove(tmpPath)
 	fmt.Println(i18n.T("update.replaced"))
 
 	// 5. Restart daemon (unless --no-restart)
@@ -4843,9 +4873,17 @@ func cmdDaemonUpdate(args []string) {
 		fmt.Println(i18n.T("update.check_daemon"))
 		if err := update.RestartDaemon(); err != nil {
 			fmt.Fprintln(os.Stderr, i18n.T("update.restart_fail", err))
+			os.Exit(1)
 		}
 	}
 
+	if !*noRestart && wasRunning {
+		if err := waitUpdatedDaemon(tag, 15*time.Second); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(i18n.T("update.running_verified", tag))
+	}
 	fmt.Println()
 	fmt.Println(strings.Repeat("─", 40))
 	fmt.Println(i18n.T("update.done"))

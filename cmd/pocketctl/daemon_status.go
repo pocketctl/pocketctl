@@ -17,14 +17,16 @@ import (
 )
 
 type daemonStatusOptions struct {
-	limit int
-	pager bool
+	limit         int
+	pager         bool
+	noUpdateCheck bool
 }
 
 func parseDaemonStatusOptions(args []string, out io.Writer) (daemonStatusOptions, error) {
 	options := daemonStatusOptions{limit: 10}
 	fs := flag.NewFlagSet("daemon status", flag.ContinueOnError)
 	fs.SetOutput(out)
+	fs.BoolVar(&options.noUpdateCheck, "no-update-check", false, "Skip checking for daemon updates")
 	fs.IntVar(&options.limit, "limit", 10, "Maximum sessions to show (positive integer)")
 	all := fs.Bool("all", false, "Print all sessions")
 	fs.BoolVar(&options.pager, "pager", false, "Browse all sessions with less (j/k, /search, n, q)")
