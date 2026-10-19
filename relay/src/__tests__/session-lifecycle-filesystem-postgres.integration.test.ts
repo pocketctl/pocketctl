@@ -48,6 +48,28 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     await createSessionLifecycleWorker(pool, config, storage, 'disk-test-secret', { workerId: 'disk-production-fixture', onReport: value => { report = value } }).runOnce()
     return report
   }
+  test.each([[70,false],[70,true],[100,true]])('worker reports demo exclusion at %s days (verified=%s) without scheduling', async (days, verified) => {
+    await pool.query("UPDATE sessions SET source='app_review_demo',activity_verified=$1,last_activity_at=NOW()-($2::int*interval '1 day')", [verified, days])
+    const before = (await pool.query('SELECT * FROM sessions')).rows
+    const report = await run()
+    expect(report).toMatchObject({ scanned: 1, executed: 0 })
+    expect(report.blocked).toEqual({ demo_excluded: 1 })
+    expect((await pool.query('SELECT * FROM session_lifecycle_jobs')).rows).toEqual([])
+    expect((await pool.query('SELECT * FROM sessions')).rows).toEqual(before)
+  })
+  test.each(['archive','cool','purge'] as const)('executor cancels a previously queued %s after demo classification', async action => {
+    const config = releasedConfig(storage.namespace!, {}, env)
+    const executor = new SessionLifecycleExecutor(pool, config, storage, 'disk-test-secret')
+    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action, policyVersion: config.policyVersion })
+    await pool.query("UPDATE sessions SET source='app_review_demo',last_activity_at=NOW()-interval '100 days'")
+    const before = (await pool.query('SELECT * FROM sessions')).rows
+    expect(await executor.execute((await executor.jobs.claim('demo-direct-fixture', 300_000))!)).toBe('cancelled')
+    expect((await pool.query('SELECT * FROM sessions')).rows).toEqual(before)
+    expect((await pool.query('SELECT payload FROM events')).rows.every(row => row.payload !== null)).toBe(true)
+    expect((await pool.query('SELECT * FROM session_lifecycle_deletions')).rows).toEqual([])
+    expect((await pool.query('SELECT * FROM session_archive_manifests')).rows).toEqual([])
+    expect((await pool.query('SELECT * FROM attention_notifications')).rows).toEqual([])
+  })
   test('complete production release archives to disk and reads exact history after reader restart', async () => {
     const report = await run()
     expect(report).toMatchObject({ scanned: 1, executed: 1 })

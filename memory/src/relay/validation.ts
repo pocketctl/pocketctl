@@ -239,7 +239,7 @@ function validContentGap(input: Record<string, unknown>): boolean {
     && typeof input.feed_id === 'string' && /^[1-9][0-9]*$/.test(input.feed_id)
     && isPlainObject(subject) && bounded(subject.session_id)
     && (subject.turn_id === undefined || bounded(subject.turn_id))
-    && ['agent_text', 'user_message', 'user_text', 'user_goal', 'tool_call', 'tool_result'].includes(String(subject.event_type))
+    && ['agent_text', 'user_message', 'user_text', 'user_goal', 'tool_call', 'tool_result', 'command_list', 'session_agent_list'].includes(String(subject.event_type))
     && hasOnlyKeys(subject, ['session_id', 'turn_id', 'event_type'])
     && isPlainObject(source) && source.kind === 'canonical_event' && bounded(source.id)
     && isIsoTimestamp(source.recorded_at) && String(source.recorded_at).length <= 64

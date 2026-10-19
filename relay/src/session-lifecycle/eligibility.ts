@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import { isAppReviewDemoDaemon, isAppReviewDemoSession } from '../config/app-review-demo.js'
 import { evaluateLifecycle } from './policy.js'
 import { timestampMicros } from './time.js'
 import type { LifecycleBlocker, LifecycleEvaluation, LifecycleInput, SessionLifecycleConfig } from './types.js'
@@ -87,7 +88,10 @@ export async function inspectLifecycleEligibility(db:Database,sessionId:string,c
   const protections:Record<string,LifecycleBlocker>={admission:'admission_pending',inbox:'inbox_pending',outbox:'outbox_pending',effect:'effect_pending',attention:'attention_pending',uploads:'document_upload_pending',collaboration:'collaboration_pending',tombstone:'session_deleted',extension:'extension_pending',projection:'attention_pending'}
   for(const [flag,reason] of Object.entries(protections))if(p[flag])blocked.add(reason)
   const coolingOwned=root?.content_state==='cooling'&&options.ownCoolingEpochs?.get(sessionId)===root?.epoch
-  const input:LifecycleInput={ownerUserId:root?.user_id??null,scope:rows.some(row=>row.team_bound)?'team':'personal',activityAt:root?.activity_time??null,
+  // Exclude the whole dependency component so a real root cannot indirectly
+  // archive or purge a demo member. Legacy fixtures may lack their source tag.
+  const demo=rows.some(row=>row.source==='app_review_demo'||isAppReviewDemoSession(row.session_id)||isAppReviewDemoDaemon(row.daemon_id))
+  const input:LifecycleInput={ownerUserId:root?.user_id??null,scope:demo?'demo':rows.some(row=>row.team_bound)?'team':'personal',activityAt:root?.activity_time??null,
     activityVerified:root?.activity_verified??false,status:root?.status??null,turnActive:!!root?.turn_started_at,archiveReason:root?.archive_reason??null,
     contentState:coolingOwned?'hot':root?.content_state??'hot',dependencyActivityAt:rows.map(row=>row.activity_time??null),
     historical:!!config.effectiveAt&&rows.some(row=>row.activity_time&&timestampMicros(row.activity_time)<timestampMicros(config.effectiveAt!)),blockers:[...blocked]}

@@ -336,7 +336,7 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
   })
 }
 
-/** Explicit content allowlist: lifecycle, unknown and privacy controls fail closed. */
+/** Explicit content/discovery allowlist: lifecycle, unknown and privacy controls fail closed. */
 function oversizedContentEnvelope(envelope: Record<string, unknown>, originalBytes: number): Record<string, unknown> | null {
   const subject = envelope.subject as Record<string, unknown> | undefined
   const source = envelope.source as Record<string, unknown> | undefined
@@ -345,7 +345,7 @@ function oversizedContentEnvelope(envelope: Record<string, unknown>, originalByt
     || !subject || !source || source.kind !== 'canonical_event'
     || !bounded(source.id) || !bounded(subject.session_id)
     || (subject.turn_id !== undefined && !bounded(subject.turn_id))
-    || !['agent_text', 'user_message', 'user_text', 'user_goal', 'tool_call', 'tool_result'].includes(String(subject.event_type))
+    || !['agent_text', 'user_message', 'user_text', 'user_goal', 'tool_call', 'tool_result', 'command_list', 'session_agent_list'].includes(String(subject.event_type))
     || typeof source.recorded_at !== 'string' || source.recorded_at.length > 64 || Number.isNaN(Date.parse(source.recorded_at))) return null
   return {
     envelope_version: 1, feed_id: envelope.feed_id, topic: envelope.topic,

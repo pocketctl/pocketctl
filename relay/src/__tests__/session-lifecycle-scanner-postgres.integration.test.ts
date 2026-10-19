@@ -4,6 +4,7 @@ import { initDB } from '../db.js'
 import { SessionLifecycleScanner } from '../session-lifecycle/scanner.js'
 import { sessionLifecycleConfig } from '../session-lifecycle/config.js'
 import { lifecycleTestPool } from './session-lifecycle-test-database.js'
+import { ensureAppReviewDemoData } from '../config/app-review-demo.js'
 
 const suite =
   process.env.RUN_SESSION_LIFECYCLE_POSTGRES === '1' ? describe : describe.skip
@@ -53,6 +54,20 @@ suite('session lifecycle read-only observe scanner PostgreSQL', () => {
       sessionLifecycleConfig({SESSION_LIFECYCLE_MODE:'off'}),
     )
     expect((await off.scanPage({ limit: 20 })).candidates).toEqual([])
+  })
+  test('seeded demo fixtures are classified separately from real unverified sessions without writes', async () => {
+    await ensureAppReviewDemoData(pool, userId)
+    await add('real-unverified', '2026-01-01T00:00:00Z')
+    await pool.query("UPDATE sessions SET last_activity_at='2026-01-01',activity_verified=false")
+    const before = (await pool.query('SELECT * FROM sessions ORDER BY id')).rows
+    const report = await scanner.scanPage({ limit: 20, now: '2026-06-01T00:00:00Z' })
+    const demos = report.candidates.filter(candidate => candidate.sessionId !== 'real-unverified')
+    expect(demos).toHaveLength(3)
+    for (const demo of demos) expect(demo.prediction).toMatchObject({ action: null, blockedReasons: ['demo_excluded'] })
+    expect(report.candidates.find(candidate => candidate.sessionId === 'real-unverified')!.prediction.blockedReasons)
+      .toEqual(['activity_unverified'])
+    expect(report.eligibleCount).toBe(0)
+    expect((await pool.query('SELECT * FROM sessions ORDER BY id')).rows).toEqual(before)
   })
   test('UTC microsecond boundary and unknown activity are explicit; no writes occur', async () => {
     await add('exact', '2026-01-01T00:00:00Z')

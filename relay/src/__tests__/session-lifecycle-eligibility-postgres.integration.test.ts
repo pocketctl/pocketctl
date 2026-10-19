@@ -20,6 +20,29 @@ suite('final fenced lifecycle eligibility PostgreSQL',()=>{
   async function add(id='root',parent:string|null=null){await pool.query(`INSERT INTO sessions(session_id,user_id,daemon_id,status,last_activity_at,activity_verified,parent_session_id)
     VALUES($1,$2,'host','idle','2026-01-01',true,$3)`,[id,userId,parent])}
   const inspect=()=>inspectLifecycleEligibility(pool,'root',config,{now})
+  test.each(['source','session_id','daemon_id'])('recognizes demo %s without relying on activity verification',async(marker)=>{
+    const id=marker==='session_id'?'app-review-demo-legacy':'root'
+    await add(id)
+    if(marker==='source')await pool.query("UPDATE sessions SET source='app_review_demo'")
+    if(marker==='daemon_id'){
+      await pool.query("INSERT INTO daemons(daemon_id,user_id) VALUES('app-review-demo-host',$1)",[userId])
+      await pool.query("UPDATE sessions SET daemon_id='app-review-demo-host'")
+    }
+    for(const verified of [false,true]){
+      await pool.query('UPDATE sessions SET activity_verified=$1',[verified])
+      const result=await inspectLifecycleEligibility(pool,id,config,{now})
+      expect(result.prediction).toMatchObject({action:null,blockedReasons:['demo_excluded']})
+      expect(result.root!.activity_verified).toBe(verified)
+    }
+  })
+  test('a demo dependency excludes the whole component from either entry point',async()=>{
+    await add();await add('app-review-demo-child','root')
+    for(const id of ['root','app-review-demo-child']){
+      const result=await inspectLifecycleEligibility(pool,id,config,{now:'2026-06-01T00:00:00Z'})
+      expect(result.sessionIds).toEqual(['app-review-demo-child','root'])
+      expect(result.prediction).toMatchObject({action:null,blockedReasons:['demo_excluded']})
+    }
+  })
   test('idle without a turn is eligible; started turn and unknown status protect',async()=>{
     await add();expect((await inspect()).prediction.action).toBe('archive')
     await pool.query("UPDATE sessions SET turn_started_at=NOW() WHERE session_id='root'")
