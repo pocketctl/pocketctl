@@ -1,7 +1,7 @@
 import { openSync, closeSync, fstatSync, readFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import type { SessionLifecycleConfig } from './types.js'
-import { DAY_US, timestampMicros } from './time.js'
+import { timestampMicros } from './time.js'
 
 export const lifecycleReleaseGates = [
   'production_provider_and_backup_policy',
@@ -62,8 +62,8 @@ export function lifecycleReleaseBlockers(config: SessionLifecycleConfig, storage
   if (release.policyVersion !== config.policyVersion) blockers.push('release_policy_mismatch')
   if (!release.publishedAt || timestampMicros(release.publishedAt) > timestampMicros(now)) blockers.push('release_not_published')
   if (release.publishedAt && release.effectiveAt && timestampMicros(release.effectiveAt) < timestampMicros(release.publishedAt)) blockers.push('policy_before_publication')
-  if (release.effectiveAt && release.transitionDeadline && timestampMicros(release.transitionDeadline) - timestampMicros(release.effectiveAt) < 30n * DAY_US)
-    blockers.push('historical_transition_too_short')
+  if (release.effectiveAt && release.transitionDeadline && timestampMicros(release.transitionDeadline) < timestampMicros(release.effectiveAt))
+    blockers.push('historical_transition_before_effective')
   if (!release.effectiveAt || !release.transitionDeadline || !config.effectiveAt || !config.transitionDeadline
     || timestampMicros(release.effectiveAt) !== timestampMicros(config.effectiveAt)
     || timestampMicros(release.transitionDeadline) !== timestampMicros(config.transitionDeadline)) blockers.push('release_dates_mismatch')

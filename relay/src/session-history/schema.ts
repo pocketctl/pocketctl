@@ -8,6 +8,9 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_header JSONB NOT NULL DEFAULT '{}'::jsonb;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_manifest_id UUID;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_chunk_ordinal INT;
+    -- FK checks and object GC query references without a body_storage predicate.
+    CREATE INDEX IF NOT EXISTS idx_events_archive_body_reference ON events(body_manifest_id,body_chunk_ordinal)
+      WHERE body_manifest_id IS NOT NULL;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_owner_user_id INT;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_activity_epoch BIGINT;
 
