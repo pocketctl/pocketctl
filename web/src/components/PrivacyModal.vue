@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月13日' : 'Updated: October 13, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月19日' : 'Updated: October 19, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -86,7 +86,7 @@
           <h4>七、保存与删除</h4>
           <ol>
             <li>个人账户、主机及已接受的个人 Memory 记忆通常在账户有效期间保存，直至您删除相关数据、安装或账户；个人会话及其事件、文档适用下述生命周期规则。待审核候选和技术作业数据按产品与运维清理规则处理，Team 共享数据按共享范围另行处理。</li>
-            <li>会话生命周期规则自本版本在官方网站正式公示之日起生效，具体公示、生效时间及历史数据过渡截止时间以正式公告为准。生效前已有会话享有自政策生效起至少 30 天的清除过渡期；其实际清除时间取最后有效业务活动后 90 天与公布的过渡截止时间中较晚者，不会因新版本上线立即清除。</li>
+            <li>本版会话生命周期规则于 2026 年 10 月 19 日正式公示后生效，适用于生效前已有及生效后新增的个人会话，不另设历史数据清除过渡期。会话是否归档或清除，按已验证的最后有效业务活动时间及下述条件判断；未达到条件的会话不会仅因本规则生效而被处理。具体公示及生效时间见官方网站正式公告。</li>
             <li>个人会话连续严格超过 60 天没有有效业务活动时，会自动归档并转为私有冷存储；严格超过 90 天时，会按本政策清除云端会话数据。届时已超过 90 天且满足清除条件的会话可以直接进入清除，无需先经过归档。共享 Team 会话、Team Run 和已发布的共享知识不属于本版自动处理范围。</li>
             <li>有效业务活动是服务确认的会话消息与 Agent 执行活动。浏览历史、修改标题、置顶、手工归档、将通知标为已读及设备重连不会延长保留期限。新的有效业务活动会重新计算期限，并恢复因不活跃而自动归档的会话；手工归档意图保留。仍有执行、待处理审批或问题、未完成处理或依赖关系，以及归属或活动来源无法确认的会话，不会被自动处理。</li>
             <li>冷存储使用当前服务服务器上的私有磁盘目录，不是公开下载目录，也不是独立灾备副本；不因此将正文交给新的第三方对象存储服务。归档后的历史和文档在清除前仍可由获授权客户端读取，且继续按原有身份与会话归属校验访问。服务端存储不是端到端加密，获授权的服务及运维人员可以访问存储内容。</li>
@@ -196,7 +196,7 @@
           <h4>7. Retention and Deletion</h4>
           <ol>
             <li>Personal account, host, and accepted personal Memory data is generally retained while your account is active, until you delete applicable data, the installation, or the account. Personal sessions, their events, and documents follow the lifecycle rules below. Pending candidates and technical job data follow product and operational cleanup rules; Team shared data is handled separately within its shared scope.</li>
-            <li>The session lifecycle rules take effect when this version is formally published on the official website. The formal notice states the publication time, effective time, and historical transition deadline. Sessions that existed before the policy took effect receive at least 30 days from the effective time before automatic purge. Their purge time is the later of 90 days after the last valid business activity and the published transition deadline; deploying a new version does not immediately purge them.</li>
+            <li>This session lifecycle policy takes effect upon formal publication on October 19, 2026. It applies to both existing and newly created personal sessions, without an additional historical purge transition period. Archiving and purge depend on verified last valid business activity and the conditions below; sessions that do not qualify are not processed merely because the policy takes effect. The official website notice states the publication and effective times.</li>
             <li>Personal sessions are automatically archived into private cold storage after strictly more than 60 consecutive days without valid business activity, and their cloud session data is purged after strictly more than 90 days under this policy. Sessions already beyond 90 days that satisfy purge conditions may be purged directly without first being archived. Shared Team sessions, Team Runs, and published shared knowledge are excluded from this version of automatic maintenance.</li>
             <li>Valid business activity means session messages and Agent execution activity confirmed by the service. Reading history, editing titles, pinning, manual archiving, marking notices as read, and reconnecting devices do not renew retention. New valid business activity recalculates retention and restores sessions archived for inactivity while preserving manual archive intent. Sessions with ongoing execution, pending approvals or questions, unfinished processing or dependencies, or unverified ownership or activity provenance are not automatically processed.</li>
             <li>Cold storage uses a private disk directory on the current service server. It is neither a public download directory nor an independent disaster-recovery copy, and does not introduce a new third-party object storage service for these bodies. Archived history and documents remain readable by authorized clients until purge, subject to the existing identity and session-ownership checks. Server-side storage is not end-to-end encrypted; authorized services and operations personnel can access stored content.</li>

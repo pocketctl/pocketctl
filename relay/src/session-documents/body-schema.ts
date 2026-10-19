@@ -7,6 +7,9 @@ export async function initSessionDocumentBodySchema(db: Pick<pg.Pool,'query'>): 
     ALTER TABLE session_document_versions ADD COLUMN IF NOT EXISTS body_storage TEXT NOT NULL DEFAULT 'hot';
     ALTER TABLE session_document_versions ADD COLUMN IF NOT EXISTS body_manifest_id UUID;
     ALTER TABLE session_document_versions ADD COLUMN IF NOT EXISTS body_chunk_ordinal INT;
+    -- FK checks and object GC query references without a body_storage predicate.
+    CREATE INDEX IF NOT EXISTS idx_document_archive_body_reference ON session_document_versions(body_manifest_id,body_chunk_ordinal)
+      WHERE body_manifest_id IS NOT NULL;
     ALTER TABLE session_document_versions ADD COLUMN IF NOT EXISTS body_activity_epoch BIGINT;
     DO $$ BEGIN
       IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='session_document_versions'::regclass AND conname='document_body_location') THEN

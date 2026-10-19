@@ -88,16 +88,19 @@ describe('enabled defaults and truthful lifecycle readiness', () => {
       expect(status.release_blockers).toContain('policy_before_publication')
     } finally { vi.unstubAllEnvs() }
   })
-  test('historical transition must last at least 30 complete days after policy activation', () => {
+  test('published policy supports no additional historical transition while retaining other release gates', () => {
     vi.stubEnv('NODE_ENV', 'production')
     try {
-      const config = releasedConfig('fixture-storage', { transitionDeadline: '2026-01-30T23:59:59.999999Z' },
-        { SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2026-01-30T23:59:59.999999Z' })
-      const status = sessionLifecycleReadiness(config, { namespace: 'fixture-storage' })
-      expect(status.execution_ready).toBe(false)
-      expect(status.release_blockers).toContain('historical_transition_too_short')
-      const exact = releasedConfig('fixture-storage', { transitionDeadline: '2026-01-31T00:00:00Z' }, { SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2026-01-31T00:00:00Z' })
-      expect(sessionLifecycleReadiness(exact, { namespace: 'fixture-storage' }).execution_ready).toBe(true)
+      const config = releasedConfig('fixture-storage', { transitionDeadline: '2026-01-01T00:00:00Z' },
+        { SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2026-01-01T00:00:00Z' })
+      expect(sessionLifecycleReadiness(config, { namespace: 'fixture-storage' }).execution_ready).toBe(true)
+      const missingClient = { ...config, release: { ...config.release!, evidence: { ...config.release!.evidence, production_client_release: undefined } } }
+      expect(sessionLifecycleReadiness(missingClient, { namespace: 'fixture-storage' }).release_blockers).toContain('production_client_release')
+      const earlier = { ...config, release: { ...config.release!, transitionDeadline: '2025-12-31T23:59:59.999999Z' } }
+      expect(sessionLifecycleReadiness(earlier, { namespace: 'fixture-storage' }).release_blockers).toContain('historical_transition_before_effective')
+      const delayed = releasedConfig('fixture-storage', { transitionDeadline: '2026-01-31T00:00:00Z' },
+        { SESSION_LIFECYCLE_TRANSITION_DEADLINE: '2026-01-31T00:00:00Z' })
+      expect(sessionLifecycleReadiness(delayed, { namespace: 'fixture-storage' }).execution_ready).toBe(true)
     } finally { vi.unstubAllEnvs() }
   })
 })
