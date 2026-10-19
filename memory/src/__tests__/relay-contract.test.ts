@@ -126,3 +126,10 @@ describe('relay feed batch contract', () => {
     expect(result.ok).toBe(true)
   })
 })
+
+test('oversize metadata has a dedicated non-projectable decision and malformed identity fails closed', () => {
+  const value = envelopeFixture({ data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
+  expect(classifyEnvelope(value).kind).toBe('content_gap')
+  expect(classifyEnvelope({ ...value, subject: { session_id: null, event_type: 'agent_text' } }).kind).toBe('fatal')
+  expect(classifyEnvelope({ ...value, topic: 'session.deleted.v1' }).kind).toBe('fatal')
+})

@@ -16,7 +16,7 @@ export function createFeedClient(options: FeedClientOptions) {
   return {
     async pullFeed(installationId: string, limit: number): Promise<FeedBatch> {
       const body = await withProviderAuthRetry(tokens, 'pull_feed', token =>
-        http.request('GET', `/api/extensions/v1/feed?installation_id=${installationId}&limit=${limit}`, {
+        http.request('GET', `/api/extensions/v1/feed?installation_id=${installationId}&limit=${limit}&oversized_content=quarantine-v1`, {
           operation: 'pull_feed',
           token,
         }))
@@ -25,6 +25,7 @@ export function createFeedClient(options: FeedClientOptions) {
         // A malformed batch is never acked and never partially stored.
         throw new Error('pull_feed returned a malformed batch')
       }
+      if (decision.batch.installation_id !== installationId) throw new Error('pull_feed returned an installation mismatch')
       return decision.batch
     },
 

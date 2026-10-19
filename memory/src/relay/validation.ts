@@ -11,6 +11,8 @@ import {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export type EnvelopeDecision =
+  | { kind: 'content_gap'; envelope: ExtensionFeedEnvelopeV1 }
+  | { kind: 'fatal'; errorCode: 'invalid_content_gap' }
   | { kind: 'accepted'; envelope: ExtensionFeedEnvelopeV1 }
   | { kind: 'quarantined'; errorCode: 'unsupported_envelope_version' | 'invalid_envelope' }
 
@@ -35,6 +37,10 @@ function isIsoTimestamp(value: unknown): value is string {
  */
 export function classifyEnvelope(input: unknown): EnvelopeDecision {
   if (!isPlainObject(input)) return { kind: 'quarantined', errorCode: 'invalid_envelope' }
+  if (input.quarantine !== undefined) {
+    if (!validContentGap(input)) return { kind: 'fatal', errorCode: 'invalid_content_gap' }
+    return { kind: 'content_gap', envelope: input as unknown as ExtensionFeedEnvelopeV1 }
+  }
   if (typeof input.envelope_version !== 'number' || !Number.isInteger(input.envelope_version)) {
     return { kind: 'quarantined', errorCode: 'invalid_envelope' }
   }
@@ -222,4 +228,27 @@ export function validateScopeControlBatch(input: unknown): ScopeControlBatchDeci
   if (!isNonEmptyString(input.lease_token)) return { ok: false, error: 'invalid_batch' }
   if (!isIsoTimestamp(input.lease_expires_at)) return { ok: false, error: 'invalid_batch' }
   return { ok: true, batch: input as unknown as ScopeControlFeedBatch }
+}
+
+function validContentGap(input: Record<string, unknown>): boolean {
+  const subject = input.subject
+  const source = input.source
+  const q = input.quarantine
+  const bounded = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_.:@/-]{1,256}$/.test(value)
+  return input.envelope_version === 1 && input.topic === 'session.event.v1'
+    && typeof input.feed_id === 'string' && /^[1-9][0-9]*$/.test(input.feed_id)
+    && isPlainObject(subject) && bounded(subject.session_id)
+    && (subject.turn_id === undefined || bounded(subject.turn_id))
+    && ['agent_text', 'user_message', 'user_text', 'user_goal', 'tool_call', 'tool_result'].includes(String(subject.event_type))
+    && hasOnlyKeys(subject, ['session_id', 'turn_id', 'event_type'])
+    && isPlainObject(source) && source.kind === 'canonical_event' && bounded(source.id)
+    && isIsoTimestamp(source.recorded_at) && String(source.recorded_at).length <= 64
+    && hasOnlyKeys(source, ['kind', 'id', 'recorded_at'])
+    && isPlainObject(q) && q.reason === 'oversized_content'
+    && Number.isSafeInteger(q.original_bytes) && Number(q.original_bytes) > 0
+    && typeof q.original_sha256 === 'string' && /^[a-f0-9]{64}$/.test(q.original_sha256)
+    && hasOnlyKeys(q, ['reason', 'original_bytes', 'original_sha256'])
+    && isPlainObject(input.data) && Object.keys(input.data).length === 0
+    && isPlainObject(input.classification) && Object.keys(input.classification).length === 0
+    && hasOnlyKeys(input, ['envelope_version', 'feed_id', 'topic', 'source', 'subject', 'classification', 'data', 'quarantine'])
 }

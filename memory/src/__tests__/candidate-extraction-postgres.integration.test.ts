@@ -2,6 +2,8 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
+import { createInboxRepository } from '../inbox/repository.js'
+import type { ExtensionFeedEnvelopeV1 } from '../relay/contracts.js'
 import { createExtractionRepository } from '../extraction/repository.js'
 import { createJobRepository } from '../jobs/repository.js'
 import { StaleJobFenceError } from '../generation/fence.js'
@@ -125,6 +127,24 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
       VALUES ($1, gen_random_uuid(), 'ses-1', 'turn-1', 'ready', 'memory-phase0-episodes-v1',
               $2, $3::jsonb, $4::jsonb, 'memory-episode-packet-v1', NOW())
     `, [INSTALLATION, SOURCE_DIGEST, JSON.stringify(DOCUMENT), JSON.stringify(MANIFEST)])
+  })
+
+  test('oversized-content gaps fence load and reservation only for affected turn, including session-wide gaps', async () => {
+    const episode = await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1')
+    expect(episode).not.toBeNull()
+    const gap: ExtensionFeedEnvelopeV1 = { envelope_version: 1, feed_id: '100', topic: 'session.event.v1', source: { kind: 'canonical_event', id: 'evt-100', recorded_at: '2026-10-19T00:00:00Z' }, subject: { session_id: 'ses-1', turn_id: 'turn-1', event_type: 'agent_text' }, classification: {}, data: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } }
+    await createInboxRepository(pool).commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '100', error_code: 'oversized_content', raw: gap, gap }], cursor: 'c', leaseToken: 'l', ack: async () => 100 })
+    expect(await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1')).toBeNull()
+    const fn = generator([])
+    expect(await extractorWith(fn).extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })).toEqual({ kind: 'episode_missing' })
+    expect(fn).not.toHaveBeenCalled()
+    const reserved = await store.reserveRun({ installationId: INSTALLATION, episodeId: episode!.episodeId, sourceDigest: SOURCE_DIGEST, extractorVersion: 'ext-v1', promptVersion: 'prompt-v1', modelConfigHash: Buffer.alloc(32), mode: 'enabled', provider: 'test', model: 'test', staleAfterMs: 60000 })
+    expect(reserved.owner).toBe(false)
+    expect(reserved.sourceUnavailable).toBe(true)
+    await pool.query(`UPDATE memory_feed_inbox SET turn_id='other-turn' WHERE installation_id=$1`, [INSTALLATION])
+    expect(await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1')).not.toBeNull()
+    await pool.query(`UPDATE memory_feed_inbox SET turn_id=NULL WHERE installation_id=$1`, [INSTALLATION])
+    expect(await store.loadEpisodeForExtraction(INSTALLATION, 'turn-1')).toBeNull()
   })
 
   function generator(results: ModelJsonResult<unknown>[]) {
@@ -437,6 +457,18 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
       status: 'validated' as const,
       validation: {},
       duplicateOfClaimId: null,
+    })
+
+    test('an in-flight extraction cannot publish validated candidates after a content gap arrives', async () => {
+      const { runId, episodeId } = await freshRun()
+      const gap: ExtensionFeedEnvelopeV1 = { envelope_version: 1, feed_id: '100', topic: 'session.event.v1', source: { kind: 'canonical_event', id: 'evt-100', recorded_at: '2026-10-19T00:00:00Z' }, subject: { session_id: 'ses-1', turn_id: 'turn-1', event_type: 'agent_text' }, classification: {}, data: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } }
+      await createInboxRepository(pool).commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '100', error_code: 'oversized_content', raw: gap, gap }], cursor: 'c', leaseToken: 'l', ack: async () => 100 })
+      await store.persistCandidates({ runId, installationId: INSTALLATION, episodeId, candidateStatus: 'validated', candidates: [candidateRow(0)], usage: { inputTokens: 10, outputTokens: 5, costMicros: 1 } })
+      const candidates = (await pool.query(`SELECT status, validation FROM memory_candidates WHERE run_id=$1`, [runId])).rows
+      expect(candidates).toHaveLength(1)
+      expect(candidates[0].status).toBe('rejected_by_validator')
+      expect(candidates[0].validation.codes).toEqual(['incomplete_source_gap'])
+      expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_usage_outbox WHERE usage_id=$1`, [`extraction:${runId}`])).rows[0].n).toBe(1)
     })
 
     test('persistCandidates rejects a stale fence: no candidates, no usage, run stays running', async () => {

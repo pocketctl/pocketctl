@@ -151,7 +151,12 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           }
 
           const evidenceRevision = await client.query<{ current: boolean }>(`
-            SELECT e.source_digest = r.episode_source_digest AS current
+            SELECT (e.source_digest = r.episode_source_digest AND NOT EXISTS (
+              SELECT 1 FROM memory_feed_inbox gap
+              WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+                AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
+                AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id)
+            )) AS current
             FROM work_episodes e
             JOIN memory_extraction_runs r ON r.installation_id = e.installation_id AND r.episode_id = e.episode_id
             WHERE e.installation_id = $1 AND e.episode_id = $2 AND r.run_id = $3

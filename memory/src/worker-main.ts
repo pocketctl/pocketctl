@@ -1,3 +1,4 @@
+import {updateBusinessHealthGauges} from './metrics.js'
 import {createPublicationExecutor} from './governance/publication-executor.js'
 import {createAutomationRepository} from './governance/automation-repository.js'
 import {evaluateAutomation} from './governance/automation-evaluator.js'
@@ -98,7 +99,7 @@ function loopErrorCode(error: unknown): string {
 }
 
 /** Update the DB-backed gauges; absent label values reset to zero. */
-async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics): Promise<void> {
+async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics, enabled = true): Promise<void> {
   const installations = await pool.query<{ local_status: string; count: string }>(`
     SELECT local_status, COUNT(*)::text AS count FROM memory_installations GROUP BY local_status
   `)
@@ -125,6 +126,7 @@ async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics): Promise<void
     }
   }
 
+  await updateBusinessHealthGauges(pool,metrics,enabled)
   await updateJobSchedulingGauges(pool,metrics)
   await updateRetrievalIndexGauges(pool,metrics.phase1)
 
@@ -192,10 +194,10 @@ async function main(): Promise<void> {
     metricsServer.listen(config.metricsPort, config.metricsBind === 'all' ? '0.0.0.0' : '127.0.0.1')
   })
   const gaugeTimer = setInterval(() => {
-    void updateGauges(pool, metrics).catch(loopError('metrics_gauges'))
+    void updateGauges(pool, metrics, config.mode !== 'off').catch(loopError('metrics_gauges'))
   }, GAUGE_INTERVAL_MS)
   gaugeTimer.unref?.()
-  void updateGauges(pool, metrics).catch(loopError('metrics_gauges'))
+  void updateGauges(pool, metrics, config.mode !== 'off').catch(loopError('metrics_gauges'))
 
   // Retention sweep for finished jobs: reconcile-driven keys (drain/revive
   // timestamps, per-batch ids) would otherwise accumulate forever. Dead

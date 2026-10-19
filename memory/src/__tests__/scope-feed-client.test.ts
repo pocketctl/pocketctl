@@ -21,3 +21,14 @@ describe('scope-control feed client binding', () => {
       .rejects.toThrow(/installation mismatch/)
   })
 })
+
+describe('ordinary content feed quarantine negotiation', () => {
+  test('opts into metadata quarantine and rejects a foreign installation response', async () => {
+    const request = vi.fn(async (..._args: unknown[]) => ({ installation_id: REQUESTED, items: [], next_cursor: 'cursor', lease_token: 'lease', lease_expires_at: '2026-10-19T00:01:00Z' }))
+    const client = createFeedClient({ http: { request } as never, tokens: { get: vi.fn(async () => 'token'), invalidate: vi.fn() } })
+    await client.pullFeed(REQUESTED, 100)
+    expect(request.mock.calls[0]?.[1]).toContain('oversized_content=quarantine-v1')
+    request.mockResolvedValueOnce({ installation_id: RETURNED, items: [], next_cursor: 'cursor', lease_token: 'lease', lease_expires_at: '2026-10-19T00:01:00Z' })
+    await expect(client.pullFeed(REQUESTED, 100)).rejects.toThrow('installation mismatch')
+  })
+})

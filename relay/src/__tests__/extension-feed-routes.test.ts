@@ -112,6 +112,24 @@ describe('extension feed routes', () => {
     return app
   }
 
+  test('opt-in quarantines oversized ordinary content and continues, preserving legacy fail-closed behavior', async () => {
+    const payload = { envelope_version: 1, topic: 'session.event.v1', source: { kind: 'canonical_event', id: 'evt-1', recorded_at: '2026-10-19T00:00:00Z' }, subject: { session_id: 'ses-1', turn_id: 'turn-1', event_type: 'agent_text' }, classification: {}, data: { text: 'secret'.repeat(1000) } }
+    const app = track(makeApp({ feedRows: [{ feed_id: 101, payload }, { feed_id: 102, payload: { ...payload, data: { text: 'ok' } } }] }, { maxResponseBytes: 2048 }))
+    const request = (suffix: string) => app.inject({ method: 'GET', url: `/api/extensions/v1/feed?installation_id=${INSTALLATION}${suffix}`, headers: { authorization: `Bearer ${providerToken()}` } })
+    expect((await request('')).statusCode).toBe(400)
+    const response = await request('&oversized_content=quarantine-v1')
+    expect(response.statusCode).toBe(200)
+    const items = response.json().items
+    expect(items.map((item: { feed_id: string }) => item.feed_id)).toEqual(['101', '102'])
+    expect(items[0].quarantine).toEqual({ reason: 'oversized_content', original_bytes: Buffer.byteLength(JSON.stringify({ ...payload, feed_id: '101' })), original_sha256: createHash('sha256').update(JSON.stringify({ ...payload, feed_id: '101' })).digest('hex') })
+    expect(items[0].data).toEqual({})
+    expect(JSON.stringify(items[0])).not.toContain('secret')
+    for (const overrides of [{ topic: 'session.deleted.v1' }, { topic: 'session.access.revoked.v1' }, { topic: 'turn.lifecycle.v1' }, { subject: { ...payload.subject, event_type: 'turn_completed' } }, { subject: { ...payload.subject, session_id: null } }]) {
+      const blocked = track(makeApp({ feedRows: [{ feed_id: 101, payload: { ...payload, ...overrides } }] }, { maxResponseBytes: 2048 }))
+      expect((await blocked.inject({ method: 'GET', url: `/api/extensions/v1/feed?installation_id=${INSTALLATION}&oversized_content=quarantine-v1`, headers: { authorization: `Bearer ${providerToken()}` } })).statusCode).toBe(400)
+    }
+  })
+
   test('pulls a bounded batch with a fresh lease and a signed cursor', async () => {
     const app = track(makeApp({
       feedRows: [

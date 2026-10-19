@@ -103,7 +103,10 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
         JOIN source_sessions s
           ON s.installation_id = e.installation_id AND s.session_id = e.session_id
         LEFT JOIN memory_feature_settings f ON f.installation_id = e.installation_id
-        WHERE e.installation_id = $1 AND e.turn_id = $2 AND e.compiled_at IS NOT NULL
+        WHERE e.installation_id = $1 AND e.turn_id = $2 AND e.compiled_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+            AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
+            AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
       `, [installationId, turnId])
       const row = result.rows[0]
       if (!row) return null
@@ -165,7 +168,10 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             JOIN memory_feature_settings f ON f.installation_id=e.installation_id
             JOIN memory_installations i ON i.installation_id=e.installation_id
             WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3
-              AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL
+              AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+            AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
+            AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
               AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id) AND f.extraction_mode IN('shadow','enabled')
               AND i.relay_status='active' AND i.local_status='ready'
               AND ($4::text IS NULL OR f.extraction_consent_fingerprint=$4)
@@ -175,7 +181,10 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
               JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
               JOIN memory_feature_settings f ON f.installation_id=e.installation_id
               JOIN memory_installations i ON i.installation_id=e.installation_id
-              WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL
+              WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+            AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
+            AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
                 AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
                 AND f.extraction_mode IN('shadow','enabled') AND i.relay_status IN('pending','paused','active')
                 AND i.local_status NOT IN('purging','purged','integrity_error')`,[input.installationId,input.episodeId,input.sourceDigest])
@@ -401,8 +410,11 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             `, [input.installationId, source.rows[0].session_id])
           }
           if (input.fence) await assertJobFence(client, input.fence)
-          const revision = await client.query<{ current: boolean }>(`
-            SELECT e.source_digest = r.episode_source_digest AS current
+          const revision = await client.query<{ current: boolean; source_complete: boolean }>(`
+            SELECT e.source_digest = r.episode_source_digest AS current, NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+            AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
+            AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id)) AS source_complete
             FROM work_episodes e
             JOIN memory_extraction_runs r ON r.installation_id = e.installation_id AND r.episode_id = e.episode_id
             WHERE e.installation_id = $1 AND e.episode_id = $2 AND r.run_id = $3
@@ -428,7 +440,10 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             }
             validation={...validation,applicability,
               ...(digest?{normalized_key_v2:claimIdentityV2(identity).key,duplicate_digest_v2:digest}:{})}
-            if (!revision.rows[0].current) {
+            if (!revision.rows[0].source_complete) {
+              status = 'rejected_by_validator'
+              validation = { ...validation, codes: ['incomplete_source_gap'] }
+            } else if (!revision.rows[0].current) {
               status = 'rejected_by_validator'
               validation = { ...validation, codes: ['obsolete_source_digest'] }
             } else if (applicability.status!=='verified'&&(status==='validated'||status==='conflict'||status==='duplicate')) {

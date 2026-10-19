@@ -2,7 +2,7 @@ import type pg from 'pg'
 import type { FeedBatch } from '../relay/contracts.js'
 import { classifyEnvelope } from '../relay/validation.js'
 import { RelayRequestError } from '../relay/errors.js'
-import { createInboxRepository, FeedIntegrityError } from './repository.js'
+import { createInboxRepository, FeedIntegrityError, type QuarantinedInput } from './repository.js'
 import { createScopeControlProjector } from '../governance/membership-projector.js'
 
 export interface FeedConsumerOptions {
@@ -76,12 +76,16 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
       throw error
     }
 
+    if (pulled.installation_id !== installationId) throw new Error('feed installation mismatch: batch was not committed or acknowledged')
     const accepted: FeedBatch['items'] = []
-    const quarantined: Array<{ feed_id: string; error_code: 'unsupported_envelope_version' | 'invalid_envelope'; raw: unknown }> = []
+    const quarantined: QuarantinedInput[] = []
     let hasUnaddressableEnvelope = false
     for (const item of pulled.items) {
       const decision = classifyEnvelope(item)
-      if (decision.kind === 'accepted') accepted.push(decision.envelope)
+      if (decision.kind === 'fatal') throw new Error('invalid_content_gap: batch was not committed or acknowledged')
+      if (decision.kind === 'content_gap') {
+        quarantined.push({ feed_id: decision.envelope.feed_id, error_code: 'oversized_content', raw: decision.envelope, gap: decision.envelope })
+      } else if (decision.kind === 'accepted') accepted.push(decision.envelope)
       else {
         const rawFeedId = (item as { feed_id?: unknown }).feed_id
         const feedId = typeof rawFeedId === 'string' && /^[1-9][0-9]*$/.test(rawFeedId)

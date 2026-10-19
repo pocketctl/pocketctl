@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import type { ExtensionFeedEnvelopeV1 } from '../relay/contracts.js'
+import { classifyEnvelope } from '../relay/validation.js'
 import { canonicalPayloadHash } from './canonical-json.js'
 
 export class FeedIntegrityError extends Error {
@@ -11,7 +12,8 @@ export class FeedIntegrityError extends Error {
 
 export interface QuarantinedInput {
   feed_id: string
-  error_code: 'unsupported_envelope_version' | 'invalid_envelope'
+  error_code: 'unsupported_envelope_version' | 'invalid_envelope' | 'oversized_content'
+  gap?: ExtensionFeedEnvelopeV1
   raw: unknown
 }
 
@@ -39,6 +41,21 @@ export function createInboxRepository(pool: pg.Pool) {
         try {
           await client.query('BEGIN')
           try {
+            // Match purge/extraction ordering: all session locks precede the
+            // installation lock, even when one batch contains multiple gaps.
+            const gaps = input.rawQuarantined.filter(row => row.error_code === 'oversized_content')
+            for (const row of gaps) {
+              if (!row.gap || row.gap.feed_id !== row.feed_id || classifyEnvelope(row.gap).kind !== 'content_gap') throw new Error('invalid_content_gap')
+            }
+            const sessions = [...new Set(gaps.map(row => row.gap!.subject.session_id!))].sort()
+            for (const sessionId of sessions) {
+              await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))`, [input.installationId, sessionId])
+            }
+            await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))`, [input.installationId])
+            const installation = await client.query(`SELECT 1 FROM memory_installations
+              WHERE installation_id=$1 AND relay_status NOT IN ('revoking','revoked')
+                AND local_status NOT IN ('purging','purged','integrity_error') FOR SHARE`, [input.installationId])
+            if (!installation.rowCount) throw new Error('feed_installation_unavailable')
             for (const envelope of input.envelopes) {
               const feedId = envelope.feed_id
               maxFeedId = maxDecimal(maxFeedId, feedId)
@@ -72,22 +89,29 @@ export function createInboxRepository(pool: pg.Pool) {
             }
             for (const quarantined of input.rawQuarantined) {
               const feedId = quarantined.feed_id
+              if (quarantined.error_code === 'oversized_content') {
+                const tombstone = await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2', [input.installationId, quarantined.gap!.subject.session_id])
+                // A later redelivery must not resurrect purged source metadata.
+                if (tombstone.rowCount) { maxFeedId = maxDecimal(maxFeedId, feedId); continue }
+              }
               maxFeedId = maxDecimal(maxFeedId, feedId)
-              const hash = canonicalPayloadHash(quarantined.raw)
+              const hash = canonicalPayloadHash(quarantined.gap ?? quarantined.raw)
               const insert = await client.query(`
                 INSERT INTO memory_feed_inbox
                   (installation_id, feed_id, envelope_version, topic, source_kind, source_id,
-                   event_type, recorded_at, data, payload_hash, projection_state, error_code)
+                   event_type, recorded_at, data, payload_hash, projection_state, error_code, session_id, turn_id)
                 VALUES ($1, $2::bigint, 1, 'quarantined', 'relay', $3, 'quarantined', NOW(),
-                        $4::jsonb, $5, 'quarantined', $6)
+                        $4::jsonb, $5, 'quarantined', $6, $7, $8)
                 ON CONFLICT (installation_id, feed_id) DO NOTHING
               `, [
                 input.installationId,
                 feedId,
                 `quarantine-${feedId}`,
-                JSON.stringify({ redacted: true }),
+                JSON.stringify(quarantined.gap?.quarantine ?? { redacted: true }),
                 hash,
                 quarantined.error_code,
+                quarantined.gap?.subject.session_id ?? null,
+                quarantined.gap?.subject.turn_id ?? null,
               ])
               if ((insert.rowCount ?? 0) === 0) {
                 await assertReplayHash(client, input.installationId, feedId, hash)
