@@ -16,6 +16,14 @@ const session: LifecycleInput = {
 }
 describe('session lifecycle policy', () => {
   test.each([
+    ['2026-03-12T00:00:00Z', null, false],
+    ['2026-03-12T00:00:00Z', 'manual', true],
+    ['2026-06-01T00:00:00Z', null, true],
+  ] as const)('demo scope is excluded before activity validation at %s (%s, %s)', (now, archiveReason, activityVerified) => {
+    expect(evaluateLifecycle({ ...session, scope: 'demo', archiveReason, activityVerified }, now, config))
+      .toMatchObject({ action: null, archiveAt: null, purgeAt: null, blockedReasons: ['demo_excluded'] })
+  })
+  test.each([
     ['2026-03-02T00:00:00.000000Z', null],
     ['2026-03-02T00:00:00.000001Z', 'archive'],
     ['2026-04-01T00:00:00.000000Z', 'archive'],

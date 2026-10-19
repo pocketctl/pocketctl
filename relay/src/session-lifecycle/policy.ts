@@ -43,6 +43,10 @@ export function evaluateLifecycle(
   }
   if (config.mode === 'off')
     return { ...result, blockedReasons: ['policy_disabled'] }
+  // Synthetic review fixtures are outside retention policy, not unverified
+  // business history. Do not assign them archive/purge dates or repair reasons.
+  if (input.scope === 'demo')
+    return { ...result, blockedReasons: ['demo_excluded'] }
   const current = timestampMicros(now)
   const reasons = new Set<LifecycleBlocker>(input.blockers)
   if (config.effectiveAt && current < timestampMicros(config.effectiveAt))

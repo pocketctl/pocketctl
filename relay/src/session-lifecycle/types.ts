@@ -21,6 +21,7 @@ export type LifecycleBlocker =
   | 'policy_not_effective'
   | 'owner_unknown'
   | 'scope_excluded'
+  | 'demo_excluded'
   | 'activity_unknown'
   | 'activity_invalid'
   | 'activity_future'
@@ -65,7 +66,7 @@ export interface SessionLifecycleConfig {
 }
 export interface LifecycleInput {
   ownerUserId: number | null
-  scope: 'personal' | 'team' | 'unknown'
+  scope: 'personal' | 'team' | 'demo' | 'unknown'
   activityAt: string | null
   activityVerified: boolean
   dependencyActivityAt?: (string | null)[]
