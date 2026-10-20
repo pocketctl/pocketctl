@@ -35,10 +35,7 @@
       <strong>{{ t('memory.phase4.wiki_empty') }}</strong><p>{{ t('memory.phase4.wiki_empty_copy') }}</p>
     </div>
 
-    <section v-if="!repositoryId && !scopeUnavailable" class="memory-wiki-layout memory-wiki-intro" data-testid="memory-wiki-intro">
-      <aside><h3>{{ t('memory.wiki_index') }}</h3><p>{{ t('memory.wiki_index_empty') }}</p></aside>
-      <article><h3>{{ t('memory.wiki_choose_repository') }}</h3><p>{{ t('memory.wiki_choose_repository_copy') }}</p></article>
-    </section>
+    <MemoryFeatureIntro v-if="!wiki && !loading" feature="wiki" />
 
     <template v-if="wiki">
       <div class="memory-provenance-spine" data-testid="memory-wiki-provenance">
@@ -126,6 +123,7 @@ import type { MemoryWikiScopeContext } from '../../services/memoryClient'
 import type {
   MemoryActiveWiki, MemoryGovernanceScope, MemoryWikiBuild, MemoryWikiCandidate, MemoryWikiSection,
 } from '../../types/memory'
+import MemoryFeatureIntro from './MemoryFeatureIntro.vue'
 import MarkdownRenderer from '../MarkdownRenderer.vue'
 import MemoryScopeSwitcher from './MemoryScopeSwitcher.vue'
 import MemoryWikiCandidateView from './MemoryWikiCandidate.vue'
