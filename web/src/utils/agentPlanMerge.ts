@@ -3,6 +3,7 @@ export type AgentPlanStatus = 'pending' | 'in_progress' | 'completed'
 export interface AgentPlanItem {
   step: string
   status: AgentPlanStatus
+  sourceTitle?: string
 }
 
 export interface AgentPlanSnapshot {
@@ -13,6 +14,7 @@ export interface AgentPlanSnapshot {
   revision: number
   explanation: string
   items: AgentPlanItem[]
+  title?: string
 }
 
 const validStatuses = new Set<AgentPlanStatus>(['pending', 'in_progress', 'completed'])
@@ -21,8 +23,10 @@ export function normalizeAgentPlanEvent(event: any): AgentPlanSnapshot | null {
   const payload = event?.payload && typeof event.payload === 'object' ? event.payload : event
   const sessionId = String(payload?.session_id ?? payload?.sessionId ?? '')
   const eventId = String(payload?.event_id ?? payload?.eventId ?? '')
-  const rawItems = payload?.plan ?? payload?.items
-  if (!sessionId || !eventId || !Array.isArray(rawItems) || rawItems.length === 0) return null
+  const todo = (payload?.type ?? payload?.event_type ?? event?.type ?? event?.event_type) === 'agent_todo'
+  const cleared = payload?.status === 'cleared' || (todo && !(payload?.todos?.length))
+  const rawItems = payload?.plan ?? payload?.todos?.map((row: any) => ({ step: row.content, status: row.status })) ?? payload?.items ?? (cleared ? [] : undefined)
+  if (!sessionId || !eventId || !Array.isArray(rawItems) || (rawItems.length === 0 && !cleared)) return null
 
   const items: AgentPlanItem[] = []
   for (const raw of rawItems) {
@@ -34,11 +38,12 @@ export function normalizeAgentPlanEvent(event: any): AgentPlanSnapshot | null {
 
   return {
     sessionId,
-    partId: String(payload.part_id ?? payload.partId ?? `plan:${sessionId}`),
+    partId: String(payload.part_id ?? payload.partId ?? `${todo ? 'todo' : 'plan'}:${sessionId}`),
     eventId,
     previousEventId: String(payload.previous_event_id ?? payload.previousEventId ?? ''),
-    revision: Math.max(0, Number(payload.revision) || 0),
+    revision: Math.max(0, Number(payload.revision ?? (todo ? payload.seq : 0)) || 0),
     explanation: typeof payload.explanation === 'string' ? payload.explanation.trim() : '',
+    title: payload.task_list_title || (todo ? 'Agent tasks' : undefined),
     items,
   }
 }

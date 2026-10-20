@@ -369,6 +369,7 @@ func truncate(s string, maxLen int) string {
 // It is held by the PTY session's JSONL tailer; SetPendingCmd is called from
 // SessionManager.SendMessage whenever the user sends a slash command via PTY.
 type JSONLStreamParser struct {
+	tasks         claudeTaskState
 	pendingCmd    string
 	compactStatus string
 	compactError  string
@@ -393,7 +394,14 @@ func (p *JSONLStreamParser) SetPendingCmd(content string) {
 // is derived conservatively from record uuids: a user record starts (or
 // addends) a turn, the result record closes it as completed, an interruption
 // marker closes it as interrupted; incomplete records never guess completion.
-func (p *JSONLStreamParser) Parse(line string) ([]protocol.DaemonEvent, error) {
+func (p *JSONLStreamParser) Parse(line string) (result []protocol.DaemonEvent, parseErr error) {
+	defer func() {
+		if parseErr == nil {
+			plans := p.tasks.consume(line)
+			p.stampTurns(plans, false)
+			result = append(result, plans...)
+		}
+	}()
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil, nil
@@ -613,3 +621,6 @@ func (p *JSONLStreamParser) makeReceipt(sid, text string) protocol.DaemonEvent {
 		Message:       msg,
 	}
 }
+
+// SeedTaskState restores acknowledged tasks without replaying historical content.
+func (p *JSONLStreamParser) SeedTaskState(line string) { p.tasks.consume(line) }

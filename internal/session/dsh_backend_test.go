@@ -205,3 +205,23 @@ func TestDSHClientToolAndQuestionContracts(t *testing.T) {
 		}
 	}
 }
+
+func TestDSHTodoProjectionAndTurnReset(t *testing.T) {
+	out := make(chan protocol.DaemonEvent, 10)
+	c := &dshCoordinator{sm: NewSessionManager(out), seenEvents: map[string]int64{}}
+	turn := 0
+	c.durable("s", dshEvent{Seq: 1, Type: "todo/write", Data: json.RawMessage(`{"todos":[{"content":"Build","status":"in_progress"}]}`)}, true, &turn)
+	first := <-out
+	if first.Type != "agent_plan" || first.Plan[0].Step != "Build" {
+		t.Fatalf("bad todo: %+v", first)
+	}
+	c.durable("s", dshEvent{Seq: 2, Type: "turn/start", Data: json.RawMessage(`{"turn":2}`)}, true, &turn)
+	clear := <-out
+	if clear.Status != "cleared" || clear.Revision <= first.Revision {
+		t.Fatalf("bad clear: %+v", clear)
+	}
+	c.durable("s", dshEvent{Seq: 3, Type: "todo/write", Data: json.RawMessage(`{"todos":[{"content":"Bad","status":"unknown"}]}`)}, true, &turn)
+	if len(out) != 0 {
+		t.Fatal("invalid status published")
+	}
+}

@@ -296,6 +296,7 @@ type DaemonEvent struct {
 	ProfileName            string                     `json:"profile_name,omitempty"`
 	Todos                  []TodoItem                 `json:"todos,omitempty"`
 	Explanation            string                     `json:"explanation,omitempty"`
+	TaskListTitle          string                     `json:"task_list_title,omitempty"`
 	Plan                   []PlanItem                 `json:"plan,omitempty"`
 	CostUSD                float64                    `json:"cost_usd,omitempty"`
 	Turns                  int                        `json:"turns,omitempty"`
@@ -514,7 +515,7 @@ func ValidPlanStatus(status string) bool {
 // caller has resolved and stamped SessionID. It intentionally leaves every
 // other daemon event unchanged.
 func FinalizeAgentPlanEvent(event *DaemonEvent) {
-	if event != nil && event.Type == "agent_plan" && event.SessionID != "" {
+	if event != nil && event.Type == "agent_plan" && event.SessionID != "" && event.TaskListTitle == "" {
 		event.PartID = "plan:" + event.SessionID
 	}
 }

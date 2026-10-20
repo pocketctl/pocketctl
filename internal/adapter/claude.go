@@ -66,6 +66,7 @@ type ClaudeContent struct {
 }
 
 type ClaudeAdapter struct {
+	tasks         claudeTaskState
 	sessionID     string
 	slashCommands []string
 	// pendingCmd is the slash command being executed this spawn (e.g. "compact"),
@@ -130,7 +131,11 @@ func (a *ClaudeAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, er
 		a.slashCommands = raw.SlashCommands
 	}
 
-	return a.convertEvent(raw)
+	events, err := a.convertEvent(raw)
+	if err == nil {
+		events = append(events, a.tasks.consume(line)...)
+	}
+	return events, err
 }
 
 func (a *ClaudeAdapter) SessionID() string {

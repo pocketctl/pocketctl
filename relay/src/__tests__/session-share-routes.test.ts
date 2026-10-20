@@ -1,11 +1,25 @@
 import Fastify from 'fastify'
 import jwt from 'jsonwebtoken'
+import { randomUUID } from 'node:crypto'
+import type { ShareRecord, ShareStore } from '../session-share/store.js'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 
 const shareTestKey = 'share-test-key'
 
 type ShareClaims = { userId: number; sessionId: string }
+function memoryStore(): ShareStore & {rows: Map<string,ShareRecord>} {
+  const time=new Date(Math.floor(Date.now()/1000)*1000)
+  const row:ShareRecord={id:'11111111-1111-4111-8111-111111111111',user_id:7,session_id:'ses_1',title:'Example',created_at:time,expires_at:new Date(+time+900000),revoked_at:null,server_time:time}
+  const rows=new Map([[row.id,row]]),requests=new Map<string,string>()
+  const get=async(userId:number,id:string)=>{const r=rows.get(id);return r&&r.user_id===userId?{...r,server_time:new Date()}:null}
+  return {rows,get,
+    async list(userId,sessionId){return [...rows.values()].filter(r=>r.user_id===userId&&(!sessionId||r.session_id===sessionId)&&!r.revoked_at&&+r.expires_at>Date.now())},
+    async create(userId,sessionId,requestId){const key=`${userId}:${requestId}`,id=requests.get(key);if(id)return (await get(userId,id))!;const r={...row,id:randomUUID(),user_id:userId,session_id:sessionId};rows.set(r.id,r);requests.set(key,r.id);return r},
+    async revoke(userId,id){const r=await get(userId,id);if(!r)return null;r.revoked_at??=new Date();rows.set(id,r);return r}
+  }
+}
+
 describe('temporary session share links', () => {
   const apps: Array<ReturnType<typeof Fastify>> = []
   let registerSessionShareRoutes: any
@@ -16,8 +30,8 @@ describe('temporary session share links', () => {
     vi.stubEnv('JWT_SECRET', shareTestKey)
     const auth = await import('../auth.js')
     const routes = await import('../session-share-routes.js')
-    signSessionShareToken = auth.signSessionShareToken
-    verifySessionShareToken = auth.verifySessionShareToken
+    signSessionShareToken = (userId,sessionId) => auth.signManagedSessionShareToken({userId,sessionId,shareId:'11111111-1111-4111-8111-111111111111',iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+900})
+    verifySessionShareToken = auth.verifyManagedSessionShareToken
     registerSessionShareRoutes = routes.registerSessionShareRoutes
   })
 
@@ -29,11 +43,14 @@ describe('temporary session share links', () => {
     owned?: (userId: number, sessionId: string) => boolean
     events?: any[]
     logger?: any
+    store?: ShareStore
+    history?: () => Promise<any[]>
   } = {}) {
     const app = Fastify(options.logger)
     apps.push(app)
     registerSessionShareRoutes(app, {
       pool: {},
+      store: options.store ?? memoryStore(),
       publicIssuer: 'https://public.example',
       verifyAccessToken: vi.fn(async (token) => token === 'owner-access'
         ? { userId: 7 }
@@ -41,7 +58,7 @@ describe('temporary session share links', () => {
       isSessionOwnedByUser: vi.fn(async (_pool, userId, sessionId) =>
         (options.owned ?? ((candidateUserId, candidateSessionId) =>
           candidateUserId === 7 && candidateSessionId === 'ses_1'))(userId, sessionId)),
-      getSessionAllEvents: vi.fn(async () => options.events ?? [
+      getSessionAllEvents: options.history ?? vi.fn(async () => options.events ?? [
         {
           id: 1,
           event_type: 'user_text',
@@ -55,7 +72,6 @@ describe('temporary session share links', () => {
           payload: { type: 'tool_result', output: 'second-event' },
         },
       ]),
-      signSessionShareToken,
       verifySessionShareToken,
     })
     return app
@@ -71,6 +87,7 @@ describe('temporary session share links', () => {
         authorization: 'Bearer owner-access',
         host: 'attacker.invalid',
       },
+      payload: {request_id:randomUUID()},
     })
     const after = Date.now()
 
@@ -186,12 +203,11 @@ describe('temporary session share links', () => {
   test('share token verifier accepts only the dedicated exact claim shape', () => {
     const valid = signSessionShareToken(7, 'ses_1')
     const extraClaim = jwt.sign(
-      { type: 'session_share', userId: 7, sessionId: 'ses_1', role: 'admin' },
+      { ...(jwt.decode(valid) as object), role: 'admin' },
       shareTestKey,
-      { expiresIn: '15m' },
     )
 
-    expect(verifySessionShareToken(valid)).toEqual({ userId: 7, sessionId: 'ses_1' })
+    expect(verifySessionShareToken(valid)).toMatchObject({ userId: 7, sessionId: 'ses_1',shareId:'11111111-1111-4111-8111-111111111111' })
     expect(verifySessionShareToken(extraClaim)).toBeNull()
     expect(verifySessionShareToken('invalid')).toBeNull()
   })
@@ -210,6 +226,38 @@ describe('temporary session share links', () => {
     await app.inject({ method: 'GET', url: `/share/session/${token}` })
 
     expect(logs).not.toContain(token)
+  })
+
+  test('reopen and URL retrieval preserve the same grant; revoke invalidates public access and replay', async () => {
+    const store=memoryStore(),app=makeApp({store}),headers={authorization:'Bearer owner-access'},payload={request_id:randomUUID()}
+    const create=()=>app.inject({method:'POST',url:'/api/sessions/ses_1/share-link',headers,payload})
+    const first=(await create()).json(),again=(await create()).json()
+    expect(again).toMatchObject({id:first.id,url:first.url,expires_at:first.expires_at})
+    const path=new URL(first.url).pathname
+    expect((await app.inject(path)).statusCode).toBe(200)
+    expect((await app.inject({url:`/api/share-links/${first.id}/url`,headers})).json().url).toBe(first.url)
+    const listed=(await app.inject({url:'/api/share-links?session_id=ses_1',headers})).json()
+    expect(listed.links.every((r:any)=>!r.url)).toBe(true)
+    expect((await app.inject({method:'DELETE',url:`/api/share-links/${first.id}`,headers})).json().status).toBe('revoked')
+    expect((await app.inject(path)).statusCode).toBe(404)
+    expect((await app.inject({url:`/api/share-links/${first.id}/url`,headers})).statusCode).toBe(410)
+    expect((await create()).json()).toMatchObject({id:first.id,status:'revoked',expires_at:first.expires_at})
+    expect((await create()).json().url).toBeUndefined()
+    expect((await app.inject({method:'DELETE',url:`/api/share-links/${first.id}`,headers})).json().status).toBe('revoked')
+  })
+  test('unowned management and legacy stateless links are unavailable',async()=>{
+    const store=memoryStore(),app=makeApp({store}),headers={authorization:'Bearer owner-access'}
+    store.rows.set('22222222-2222-4222-8222-222222222222',{...store.rows.values().next().value!,id:'22222222-2222-4222-8222-222222222222',user_id:8})
+    for(const method of ['GET','DELETE'] as const)expect((await app.inject({method,url:'/api/share-links/22222222-2222-4222-8222-222222222222',headers})).statusCode).toBe(404)
+    const legacy=jwt.sign({type:'session_share',userId:7,sessionId:'ses_1'},shareTestKey,{expiresIn:'15m'})
+    expect((await app.inject(`/share/session/${legacy}`)).statusCode).toBe(404)
+  })
+  test('revocation during history read and database failure both fail closed',async()=>{
+    const store=memoryStore(),token=signSessionShareToken(7,'ses_1')
+    const app=makeApp({store,history:async()=>{await store.revoke(7,'11111111-1111-4111-8111-111111111111');return []}})
+    expect((await app.inject(`/share/session/${token}`)).statusCode).toBe(404)
+    store.get=async()=>{throw new Error('database unavailable')}
+    expect((await app.inject(`/share/session/${token}`)).statusCode).toBe(404)
   })
 
   test('production server registers the route with the resolved public issuer', () => {

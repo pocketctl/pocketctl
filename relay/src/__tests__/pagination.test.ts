@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
-import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore, listSessionsPageByDaemon } from '../db.js'
+import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getLatestAgentTaskLists, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore, listSessionsPageByDaemon } from '../db.js'
 
 // Reusable mocks (mirror router.test.ts patterns)
 function createMockPool() {
@@ -788,4 +788,20 @@ describe('replay_subagent independent child sessions (zcode model)', () => {
       sql.includes("COALESCE(payload,body_header)->>'agent_id' = $2") && params.includes('agent-a')
     )).toBe(true)
   })
+})
+
+
+test('restores independent task sources and retains empty snapshots', async () => {
+  const rows = [
+    { id: 1, event_type: 'agent_plan', payload: { type: 'agent_plan', part_id: 'plan:s', revision: 3 } },
+    { id: 2, event_type: 'agent_plan', payload: { type: 'agent_plan', part_id: 'openspec:s:f', revision: 10 } },
+    { id: 3, event_type: 'agent_todo', payload: { type: 'agent_todo', todos: [] } },
+  ]
+  const pool = { query: vi.fn().mockResolvedValue({ rows }) } as any
+  expect(await getLatestAgentTaskLists(pool, 's')).toEqual(rows)
+  const sql = pool.query.mock.calls[0][0]
+  expect(sql).toContain('DISTINCT ON')
+  expect(sql).toContain("event_type IN ('agent_plan','agent_todo')")
+  expect(sql).toContain("->>'part_id'")
+  expect(sql).toContain("->>'agent_id', '') = ''")
 })

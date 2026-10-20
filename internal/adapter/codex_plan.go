@@ -40,16 +40,20 @@ type codexPlanTracker struct {
 	order       []string
 }
 
-func (t *codexPlanTracker) project(callID string, payload codexPlanPayload) protocol.DaemonEvent {
+func (t *codexPlanTracker) project(callID string, payload codexPlanPayload, revisionFloor int) protocol.DaemonEvent {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if identity, ok := t.seen[callID]; ok {
 		return codexPlanEvent(identity, payload)
 	}
+	revision := t.revision + 1
+	if revisionFloor > revision {
+		revision = revisionFloor
+	}
 	identity := codexPlanIdentity{
 		EventID:         "codex:plan:" + callID,
 		PreviousEventID: t.lastEventID,
-		Revision:        t.revision + 1,
+		Revision:        revision,
 	}
 	if t.seen == nil {
 		t.seen = make(map[string]codexPlanIdentity)
@@ -99,8 +103,13 @@ func LoadCodexPlanState(path string) (*CodexPlanState, error) {
 }
 
 func codexPlanEvent(identity codexPlanIdentity, payload codexPlanPayload) protocol.DaemonEvent {
+	status := ""
+	if len(payload.Plan) == 0 {
+		status = "cleared"
+	}
 	return protocol.DaemonEvent{
 		Type:            "agent_plan",
+		Status:          status,
 		EventID:         identity.EventID,
 		PreviousEventID: identity.PreviousEventID,
 		Revision:        identity.Revision,
@@ -252,7 +261,7 @@ func validateCodexPlanObject(object map[string]any) (codexPlanPayload, error) {
 		explanation = strings.TrimSpace(explanation)
 	}
 	rawPlan, ok := object["plan"].([]any)
-	if !ok || len(rawPlan) == 0 || len(rawPlan) > codexPlanMaxItems {
+	if !ok || len(rawPlan) > codexPlanMaxItems {
 		return codexPlanPayload{}, fmt.Errorf("codex plan item count is invalid")
 	}
 	plan := make([]protocol.PlanItem, 0, len(rawPlan))
@@ -277,7 +286,7 @@ func validateCodexPlanObject(object map[string]any) (codexPlanPayload, error) {
 		}
 		plan = append(plan, protocol.PlanItem{Step: step, Status: status})
 	}
-	if len(plan) == 0 {
+	if len(plan) == 0 && len(rawPlan) != 0 {
 		return codexPlanPayload{}, fmt.Errorf("codex plan has no visible items")
 	}
 	return codexPlanPayload{Explanation: explanation, Plan: plan}, nil

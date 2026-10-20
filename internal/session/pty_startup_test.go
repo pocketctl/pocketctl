@@ -57,7 +57,7 @@ func TestPTYCreateDefersFirstTurnUntilRelayRegistration(t *testing.T) {
 
 func TestPTYInitialPromptWaitsForOwnerAndCancellation(t *testing.T) {
 	scanner := ptyscan.NewScanner("startup")
-	scanner.Feed([]byte("Do you want to proceed?\n1. Yes\n2. No"))
+	scanner.Feed([]byte("Do you want to proceed?\n❯ 1. Yes\n  2. No\n"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -95,7 +95,7 @@ func TestPTYOwnerChoiceEmitsSubmittedReceipt(t *testing.T) {
 	sm := NewSessionManager(output)
 	terminal := &interruptPTY{}
 	scanner := ptyscan.NewScanner("owned")
-	scanner.Feed([]byte("Do you want to proceed?\n1. Yes\n2. No"))
+	scanner.Feed([]byte("Do you want to proceed?\n❯ 1. Yes\n  2. No\n"))
 	id := scanner.ActiveRequestID()
 	sm.sessions["owned"] = &ProcessState{SessionID: "owned", Agent: "claude-code", Source: "daemon", PTY: terminal, PTYScanner: scanner}
 	if err := sm.ResolveInteractivePrompt("owned", id, "1"); err != nil {

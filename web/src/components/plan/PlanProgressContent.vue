@@ -2,7 +2,7 @@
   <section class="plan-progress-content" :data-complete="allCompleted || undefined">
     <div class="plan-heading-row">
       <div>
-        <h2 class="plan-heading">{{ t('plan.title') }}</h2>
+        <h2 class="plan-heading">{{ plan.title?.startsWith('OpenSpec') ? plan.title : t('plan.title') }}</h2>
         <div class="plan-count">{{ t('plan.progress_count', { completed, total: plan.items.length }) }}</div>
       </div>
       <slot name="actions" />
@@ -30,6 +30,7 @@
         :data-plan-status="item.status"
         :aria-label="t('plan.step_aria', { status: statusLabel(item.status), step: item.step })"
       >
+        <strong v-if="item.sourceTitle" class="plan-source-title">{{ item.sourceTitle }}</strong>
         <span class="plan-step-icon" aria-hidden="true">
           <svg v-if="item.status === 'completed'" viewBox="0 0 20 20"><path d="m5 10 3 3 7-7" /></svg>
           <span v-else-if="item.status === 'in_progress'" class="plan-active-dot" />
@@ -73,6 +74,7 @@ function statusLabel(status: AgentPlanStatus): string {
 .plan-step { min-height: 44px; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: start; gap: 9px; padding: 10px 8px; border-radius: var(--radius-md); color: var(--fg-secondary); }
 .plan-step.in-progress { background: var(--accent-muted); color: var(--fg); }
 .plan-step.completed { color: var(--fg-tertiary); }
+.plan-source-title { grid-column: 1 / -1; font-size: 12px; margin: 6px 0; }
 .plan-step-icon { width: 18px; height: 18px; display: grid; place-items: center; margin-top: 1px; border: 1.5px solid var(--border-light); border-radius: 50%; }
 .plan-step.in-progress .plan-step-icon { border-color: var(--accent); }
 .plan-step.completed .plan-step-icon { border-color: var(--success); color: var(--success); }

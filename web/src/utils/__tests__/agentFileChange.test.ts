@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../agentFileChange'
+import { createAgentFileChangeReducer, summarizeFileChanges, type AgentFileChangeMessage } from '../agentFileChange'
 
 const fixture = JSON.parse(readFileSync(
   resolve(process.cwd(), '../testdata/contracts/agent_file_change_turn.json'),
@@ -250,4 +250,37 @@ describe('createAgentFileChangeReducer', () => {
     expect(card(target).files.find(file => file.path === 'src/transient.ts')?.edits).toHaveLength(1)
     expect(card(target)).toMatchObject({ additions: 5, deletions: 3 })
   })
+})
+
+
+test('session summary deduplicates paths and patch identities across loaded turns', () => {
+  const reducer = createAgentFileChangeReducer()
+  const messages: AgentFileChangeMessage[] = []
+  reducer.accept(completed(), messages)
+  reducer.accept(completed({ turn_id: 'turn_2', event_id: 'event-2', change_set_id: 'native:call_2', seq: 21, additions: 3 }), messages)
+  const summary = summarizeFileChanges([...messages, messages[0]])!
+  expect(summary.fileChange.files).toHaveLength(1)
+  expect(summary.fileChange.files[0].edits).toHaveLength(2)
+  expect(summary.fileChange.additions).toBe(4)
+  expect(summary.fileChange.deletions).toBe(2)
+  expect(messages[0].fileChange.files[0].edits).toHaveLength(1)
+})
+
+test('session summary keeps timeline order when daemon sequences restart', () => {
+  const reducer = createAgentFileChangeReducer()
+  const messages: AgentFileChangeMessage[] = []
+  for (const [index, seq] of [52, 69, 17].entries()) {
+    reducer.accept(completed({
+      turn_id: `turn_${index + 1}`,
+      event_id: `event-${index + 1}`,
+      change_set_id: `native:call_${index + 1}`,
+      seq,
+      diff: `@@ -1 +1 @@\n-before-${index}\n+after-${index}\n`,
+    }), messages)
+  }
+  const summary = summarizeFileChanges([...messages, messages[0]])!
+  expect(summary.fileChange.files[0].edits.map(edit => edit.eventId))
+    .toEqual(['event-1', 'event-2', 'event-3'])
+  expect(summary.fileChange.files[0].edits.map(edit => edit.diff))
+    .toEqual(messages.map(message => message.fileChange.files[0].edits[0].diff))
 })

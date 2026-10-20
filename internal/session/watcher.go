@@ -34,6 +34,13 @@ func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
 // interactive_prompt events. Runs once per daemon session; exits when the PTY
 // master is closed (session exit / kill).
 func (sm *SessionManager) drainPTY(ctx context.Context, ps *ProcessState) {
+	defer func() {
+		if ps.PTYScanner != nil {
+			for _, event := range ps.PTYScanner.Close() {
+				sm.outputCh <- event
+			}
+		}
+	}()
 	buf := make([]byte, 4096)
 	for {
 		select {

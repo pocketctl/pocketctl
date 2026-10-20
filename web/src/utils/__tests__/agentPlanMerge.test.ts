@@ -66,3 +66,10 @@ describe('agent plan snapshots', () => {
     expect(normalizeAgentPlanEvent(event)).toBeNull()
   })
 })
+
+test('explicit clear tombstone prevents older tasks from returning', () => {
+  const current = mergeAgentPlan(undefined, first)
+  const cleared = mergeAgentPlan(current, { type: 'agent_plan', session_id: 'session-1', event_id: 'clear', previous_event_id: 'plan-1', revision: 2, status: 'cleared' })
+  expect(cleared?.items).toEqual([])
+  expect(mergeAgentPlan(cleared, first)).toBe(cleared)
+})

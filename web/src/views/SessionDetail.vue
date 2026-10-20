@@ -1,5 +1,6 @@
 <template>
   <div class="session-layout">
+    <ShareLinkDialog v-if="showShareManager" :key="sessionId" :session-id="sessionId" :title="sessionTitle" @close="showShareManager=false" @manage="showShareManager=false;router.push({path:'/settings',query:{section:'shares'}})" />
     <!-- Session List Panel -->
     <div class="session-panel">
       <TeamSessionBrowser v-if="browseScope.type === 'team' && teamAccess.enabled.value" :team-id="browseScope.teamId" @update:scope="browseScope = $event" />
@@ -193,7 +194,7 @@
             </span>
           </div>
         </div>
-        <div class="session-toolbar-actions">
+        <div class="session-toolbar-actions"><button v-if="!focusedSubAgentId" class="btn small" @click="showShareManager=true">{{ t('sharing.share') }}</button>
           <TopbarGithubLink />
           <span :class="['status-pill', statusClass]"><span class="pulse"></span><span class="status-pill-label">{{ statusLabel }}</span></span>
         <div class="session-id-box">
@@ -684,10 +685,10 @@
       @close="closeFileChangePanel"
     >
       <section class="file-change-side-panel" role="region" :aria-label="fileChangeButtonLabel">
-        <p class="file-change-panel-summary">+{{ fileChangeAdditions }} −{{ fileChangeDeletions }}</p>
+        <p class="file-change-panel-summary">{{ t('session.file_change_loaded_scope') }} · +{{ fileChangeAdditions }} −{{ fileChangeDeletions }}</p>
         <div class="file-change-panel-list">
           <FileChangeCard
-            v-for="message in fileChangeMessages"
+            v-for="message in (fileChangeSummary ? [fileChangeSummary] : [])"
             :key="message.id"
             :message="message"
             @open-mobile="openFileChangeSheet(message, $event)"
@@ -727,6 +728,7 @@
 </template>
 
 <script setup lang="ts">
+import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, provide } from 'vue'
@@ -794,7 +796,7 @@ import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../uti
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
 import { completedPlanItemCount } from '../utils/agentPlanMerge'
-import { createAgentFileChangeReducer, type AgentFileChangeMessage } from '../utils/agentFileChange'
+import { createAgentFileChangeReducer, summarizeFileChanges, type AgentFileChangeMessage } from '../utils/agentFileChange'
 import { projectTurns, TurnSegmentCollapseRegistry, TurnSegmentIdentityRegistry } from '../utils/turnProjection'
 import { isKnownNonTimelineControlEvent, knownNonTimelineControlEventTypes, unknownTimelineEventIdentity } from '../utils/timelineEventRegistry'
 import { createClientId } from '../utils/clientId'
@@ -827,6 +829,7 @@ const showToolCalls = computed(() => !isMobile.value || mobileShowToolCalls.valu
 const { setSessionHeader, clearSessionHeader } = useSessionHeader()
 const { connect, send, sendUserMessage, onEvent, connected, reconnecting } = useWebSocket()
 const { t } = useLocale()
+const showShareManager=ref(false)
 const { user } = useAuth()
 
 const sessionId = computed(() => String(route.params.id || 'default'))
@@ -915,9 +918,10 @@ function togglePlanFromOverflow() {
 function closePlanPanel() { setPlanPanelOpen(false) }
 const fileChangePanelOpen = ref(false)
 const fileChangeMessages = computed(() => messages.value.filter((message: any) => message.type === 'agent_file_change'))
-const fileChangeFileCount = computed(() => fileChangeMessages.value.reduce((total, message) => total + message.fileChange.files.length, 0))
-const fileChangeAdditions = computed(() => fileChangeMessages.value.reduce((total, message) => total + message.fileChange.additions, 0))
-const fileChangeDeletions = computed(() => fileChangeMessages.value.reduce((total, message) => total + message.fileChange.deletions, 0))
+const fileChangeSummary = computed(() => summarizeFileChanges(fileChangeMessages.value))
+const fileChangeFileCount = computed(() => fileChangeSummary.value?.fileChange.files.length ?? 0)
+const fileChangeAdditions = computed(() => fileChangeSummary.value?.fileChange.additions ?? 0)
+const fileChangeDeletions = computed(() => fileChangeSummary.value?.fileChange.deletions ?? 0)
 const fileChangeButtonLabel = computed(() => t('session.file_change_edited_files', { n: fileChangeFileCount.value }))
 function setFileChangePanelOpen(open: boolean) {
   fileChangePanelOpen.value = open
@@ -3312,6 +3316,7 @@ function findAffectedFileChangeCard(target: any[], evt: any): any | undefined {
 function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>, historical = false) {
   const type = evt.type || evt.event_type
   if (isKnownNonTimelineControlEvent(type)) return
+  if (type === 'agent_todo' && !evt.agent_id && !evt.payload?.agent_id) acceptAgentPlan(evt)
   if (type === 'agent_plan') {
     if (!evt.agent_id && !evt.payload?.agent_id) acceptAgentPlan(evt)
     return
@@ -3799,7 +3804,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   } else if (type === 'interactive_resolved') {
     const payload = evt.payload ?? evt
     const requestId = evt.request_id || payload.request_id
-    if (requestId) recordInteractionResolution('interactive_prompt', requestId, { selectedChoice: payload.choice, reason: 'submitted', resultUnknown: false }, evt, rootTarget, interactionBuckets)
+    if (requestId) recordInteractionResolution('interactive_prompt', requestId, { selectedChoice: payload.choice, reason: payload.status || 'submitted', resultUnknown: false }, evt, rootTarget, interactionBuckets)
   } else if (type === 'interactive_prompt') {
     // Daemon scanned a selection menu the agent's TUI drew to the PTY (e.g. a
     // host PreToolUse hook's "Do you want to proceed? ❶Yes ❷No" prompt that

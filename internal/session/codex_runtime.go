@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -15,6 +16,7 @@ import (
 )
 
 type CodexRuntimeProvider struct {
+	recovering         atomic.Int32
 	projectsMu         sync.Mutex
 	projects           map[string]*codexCoordinator
 	homesMu            sync.Mutex
@@ -34,6 +36,8 @@ func codexHomeRuntimeStateDir() string {
 // It is deliberately lazy when no handoff file exists, so normal daemon start
 // does not spawn Codex until a terminal or managed Web session needs it.
 func (p *CodexRuntimeProvider) Recover(ctx context.Context) error {
+	p.recovering.Add(1)
+	defer p.recovering.Add(-1)
 	projectErr := p.recoverProjects(ctx)
 	homeErr := p.recoverHomes(ctx)
 	return errors.Join(projectErr, homeErr, p.recoverLegacy(ctx))

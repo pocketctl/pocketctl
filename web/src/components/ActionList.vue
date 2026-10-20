@@ -71,7 +71,7 @@ onMounted(async () => {
 onUpdated(place)
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', outside, true); document.removeEventListener('focusin', focusOut); window.removeEventListener('resize', place)
-  if (panel.value?.contains(document.activeElement)) (props.anchor || opener)?.focus()
+  if (document.activeElement === document.body || panel.value?.contains(document.activeElement)) (props.anchor || opener)?.focus()
 })
 </script>
 

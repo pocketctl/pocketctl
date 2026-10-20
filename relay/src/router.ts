@@ -3242,10 +3242,9 @@ export class Router {
         replayNewestSeq = page.events.length > 0 ? page.events[page.events.length - 1].id : (lastSeq ?? 0);
         hasMore = page.hasMore;
         if (!lastSeq || lastSeq <= 0) {
-          const latestPlan = await db.getLatestAgentPlan(this.pool, sessionId);
-          if (latestPlan && !events.some(event => event.id === latestPlan.id)) {
-            events = [...events, latestPlan].sort((left, right) => left.id - right.id);
-          }
+          const latestLists = await db.getLatestAgentTaskLists(this.pool, sessionId);
+          events = [...events, ...latestLists.filter(list => !events.some(event => event.id === list.id))]
+            .sort((left, right) => left.id - right.id);
         }
       } else if (isPagedForward) {
         const page = await db.getCompleteForwardReplayPage(

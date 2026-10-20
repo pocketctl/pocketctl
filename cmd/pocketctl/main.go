@@ -1837,8 +1837,15 @@ func cmdDaemonStart(args []string) {
 	// from the session's cached model, update the cache and emit a
 	// session_model_changed event so the relay + Web/iOS clients reflect the
 	// /model switch in real time.
+	openSpecTasks := session.NewOpenSpecTasks(sm.GetSessionCwd)
+	if dir, err := config.ConfigDir(); err == nil {
+		if err := openSpecTasks.LoadBindings(filepath.Join(dir, "openspec-task-bindings.json")); err != nil {
+			logger.Warn("OpenSpec bindings unavailable", "error", err)
+		}
+	}
 	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
 		sm.ObserveNativeTitle(evt)
+		openSpecTasks.Observe(evt)
 		enrichRepositoryFacts(context.Background(), &evt)
 		// Turn lifecycle chokepoint: registry sync + single (turn, state)
 		// emission dedup for every producer (codex projection, claude JSONL
@@ -1925,6 +1932,7 @@ func cmdDaemonStart(args []string) {
 	// Context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	go sm.RunTitleMaintenance(ctx)
+	go openSpecTasks.Run(ctx, outputCh)
 	defer cancel()
 	if documentCaptureConfigErr != nil {
 		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
@@ -4212,10 +4220,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Invocation: result}
 				if invocationErr != nil {
 					event.Error = invocationErr.Error()
-					if errors.Is(invocationErr, session.ErrCodexInvocationsUnsupported) {
-						// Deterministic failure: clients use this code to drop the retry button.
-						event.Code = "invocations_unsupported"
-					}
+					event.Code = codexInvocationErrorCode(invocationErr)
 				}
 				client.SendMsg(event)
 

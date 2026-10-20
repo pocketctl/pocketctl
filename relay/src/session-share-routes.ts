@@ -1,42 +1,29 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
+import { shareViewerPage, unavailablePage } from './session-share/render.js';
 import { withSessionHistoryScope } from './session-history/postgres-reader.js';
 import {
-  signSessionShareToken as defaultSignSessionShareToken,
+  signManagedSessionShareToken as defaultSignSessionShareToken,
   verifyAccessTokenWithRevocation as defaultVerifyAccessToken,
-  verifySessionShareToken as defaultVerifySessionShareToken,
+  verifyManagedSessionShareToken as defaultVerifySessionShareToken,
 } from './auth.js';
 import {
   getSessionAllEvents as defaultGetSessionAllEvents,
   isSessionOwnedByUser as defaultIsSessionOwnedByUser,
 } from './db.js';
 
-const SHARE_DURATION_MS = 15 * 60 * 1000;
+import { postgresShareStore, ShareConflict, ShareLimit, type ShareStore, type ShareRecord } from './session-share/store.js';
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHARE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-const PRIVATE_DOCUMENT_EVENT_TYPES = new Set([
-  'session_document_begin',
-  'session_document_chunk',
-  'session_document_commit',
-  'session_documents_changed',
-]);
-
 interface SessionShareRouteDependencies {
   pool: Pool;
   publicIssuer: string;
+  store?: ShareStore;
   verifyAccessToken?: typeof defaultVerifyAccessToken;
   isSessionOwnedByUser?: typeof defaultIsSessionOwnedByUser;
   getSessionAllEvents?: typeof defaultGetSessionAllEvents;
   signSessionShareToken?: typeof defaultSignSessionShareToken;
   verifySessionShareToken?: typeof defaultVerifySessionShareToken;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
 }
 
 function setViewerHeaders(reply: FastifyReply): void {
@@ -47,76 +34,6 @@ function setViewerHeaders(reply: FastifyReply): void {
   reply.header('X-Content-Type-Options', 'nosniff');
   reply.header('Content-Security-Policy', SHARE_CSP);
   reply.type('text/html; charset=utf-8');
-}
-
-function unavailablePage(): string {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>分享链接不可用 · PocketCtl</title>
-  <style>
-    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: #0d1117; color: #e6edf3; }
-    main { max-width: 32rem; padding: 2rem; text-align: center; }
-    p { color: #8b949e; line-height: 1.6; }
-  </style>
-</head>
-<body><main><h1>分享链接不可用</h1><p>链接可能已过期、被修改，或对应会话已不可访问。</p></main></body>
-</html>`;
-}
-
-function payloadText(payload: unknown): string {
-  if (typeof payload === 'string') return payload;
-  try {
-    const serialized = JSON.stringify(payload, null, 2);
-    return serialized ?? String(payload);
-  } catch {
-    return String(payload);
-  }
-}
-
-function shareViewerPage(events: any[]): string {
-  const publicEvents = events.filter((event) => {
-    const eventType = event?.event_type ?? event?.payload?.type;
-    return typeof eventType !== 'string' || !PRIVATE_DOCUMENT_EVENT_TYPES.has(eventType);
-  });
-  const renderedEvents = publicEvents.map((event, index) => {
-    const eventType = escapeHtml(String(event?.event_type ?? event?.payload?.type ?? 'event'));
-    const createdAt = escapeHtml(String(event?.created_at ?? ''));
-    const payload = escapeHtml(payloadText(event?.payload));
-    return `<article class="event">
-      <header><span>${index + 1}. ${eventType}</span><time>${createdAt}</time></header>
-      <pre>${payload}</pre>
-    </article>`;
-  }).join('\n');
-
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>共享会话 · PocketCtl</title>
-  <style>
-    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #0d1117; color: #e6edf3; }
-    main { width: min(100% - 2rem, 900px); margin: 0 auto; padding: 2.5rem 0 4rem; }
-    .intro { margin-bottom: 1.5rem; color: #8b949e; line-height: 1.6; }
-    .event { margin: 0 0 1rem; overflow: hidden; border: 1px solid #30363d; border-radius: 12px; background: #161b22; }
-    .event header { display: flex; justify-content: space-between; gap: 1rem; padding: .75rem 1rem; border-bottom: 1px solid #21262d; color: #8b949e; font-size: .8rem; }
-    pre { margin: 0; padding: 1rem; overflow-wrap: anywhere; white-space: pre-wrap; color: #e6edf3; font: .8rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>共享会话</h1>
-    <p class="intro">这是一个临时、只读的完整会话快照。页面不提供登录或控制能力。</p>
-    ${renderedEvents || '<p class="intro">当前没有可显示的会话事件。</p>'}
-  </main>
-</body>
-</html>`;
 }
 
 export function registerSessionShareRoutes(
@@ -130,30 +47,59 @@ export function registerSessionShareRoutes(
   const signSessionShareToken = dependencies.signSessionShareToken ?? defaultSignSessionShareToken;
   const verifySessionShareToken = dependencies.verifySessionShareToken ?? defaultVerifySessionShareToken;
 
+  const store = dependencies.store ?? postgresShareStore(dependencies.pool);
+  const active = (r: ShareRecord) => !r.revoked_at && r.expires_at.getTime() > r.server_time.getTime();
+  const dto = (r: ShareRecord) => ({ id:r.id, session_id:r.session_id, title:r.title || r.session_id,
+    created_at:r.created_at.toISOString(), expires_at:r.expires_at.toISOString(),
+    status:r.revoked_at?'revoked':active(r)?'active':'expired', server_time:r.server_time.toISOString() });
+  const urlFor = (r: ShareRecord) => `${publicIssuer}/share/session/${encodeURIComponent(signSessionShareToken({
+    userId:r.user_id, sessionId:r.session_id, shareId:r.id,
+    iat:Math.floor(r.created_at.getTime()/1000), exp:Math.floor(r.expires_at.getTime()/1000),
+  }))}`;
+  const authorize = async (req: FastifyRequest, reply: FastifyReply) => {
+    reply.header('Cache-Control','no-store, private');
+    const bearer=req.headers.authorization;
+    const access=bearer?.startsWith('Bearer ') ? await verifyAccessToken(bearer.slice(7),dependencies.pool) : null;
+    if (!access) reply.code(401).send({error:'authorization required'});
+    return access;
+  };
   app.post('/api/sessions/:sessionId/share-link', async (req, reply) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      reply.code(401);
-      return { error: 'authorization required' };
+    const access=await authorize(req,reply);if(!access)return;
+    const {sessionId}=req.params as {sessionId:string};
+    if(!await isSessionOwnedByUser(dependencies.pool,access.userId,sessionId))return reply.code(404).send({error:'session not found'});
+    const requestId=(req.body as {request_id?:unknown}|null)?.request_id;
+    if(typeof requestId!=='string'||!uuid.test(requestId))return reply.code(400).send({error:'request_id UUID required'});
+    try {
+      const record=await store.create(access.userId,sessionId,requestId);
+      // A replay of a revoked/expired intent must never create a new authorization.
+      return {...dto(record), ...(active(record)?{url:urlFor(record)}:{})};
+    } catch(error) {
+      if(error instanceof ShareConflict)return reply.code(409).send({error:'share request conflict'});
+      if(error instanceof ShareLimit)return reply.code(429).send({error:'active share limit reached (100)'});
+      throw error;
     }
-    const access = await verifyAccessToken(authHeader.slice(7), dependencies.pool);
-    if (!access) {
-      reply.code(401);
-      return { error: 'invalid token' };
-    }
-    const { sessionId } = req.params as { sessionId: string };
-    const owned = await isSessionOwnedByUser(dependencies.pool, access.userId, sessionId);
-    if (!owned) {
-      reply.code(404);
-      return { error: 'session not found or not owned' };
-    }
-
-    const token = signSessionShareToken(access.userId, sessionId);
-    const url = `${publicIssuer}/share/session/${encodeURIComponent(token)}`;
-    return {
-      url,
-      expires_at: new Date(Date.now() + SHARE_DURATION_MS).toISOString(),
-    };
+  });
+  app.get('/api/share-links',async(req,reply)=>{
+    const access=await authorize(req,reply);if(!access)return;
+    const sessionId=(req.query as {session_id?:unknown}).session_id;
+    if(sessionId!==undefined&&(typeof sessionId!=='string'||sessionId.length>64))return reply.code(400).send({error:'invalid session'});
+    const rows=await store.list(access.userId,sessionId as string|undefined);
+    return {links:rows.map(dto),server_time:(rows[0]?.server_time??new Date()).toISOString()};
+  });
+  for(const suffix of ['', '/url'])app.get(`/api/share-links/:id${suffix}`,async(req,reply)=>{
+    const access=await authorize(req,reply);if(!access)return;
+    const {id}=req.params as {id:string};
+    const record=uuid.test(id)?await store.get(access.userId,id):null;
+    if(!record)return reply.code(404).send({error:'share not found'});
+    if(suffix && !active(record))return reply.code(410).send({error:'share unavailable'});
+    return {...dto(record),...(suffix?{url:urlFor(record)}:{})};
+  });
+  app.delete('/api/share-links/:id',async(req,reply)=>{
+    const access=await authorize(req,reply);if(!access)return;
+    const {id}=req.params as {id:string};
+    const record=uuid.test(id)?await store.revoke(access.userId,id):null;
+    if(!record)return reply.code(404).send({error:'share not found'});
+    return dto(record);
   });
 
   // Fastify's default maxParamLength is 100, while a signed JWT is longer.
@@ -169,6 +115,9 @@ export function registerSessionShareRoutes(
     if (!share) return unavailable();
 
     try {
+      const record=await store.get(share.userId,share.shareId);
+      if(!record || !active(record) || record.session_id!==share.sessionId ||
+        Math.floor(record.created_at.getTime()/1000)!==share.iat || Math.floor(record.expires_at.getTime()/1000)!==share.exp) return unavailable();
       const owned = await isSessionOwnedByUser(
         dependencies.pool,
         share.userId,
@@ -176,7 +125,9 @@ export function registerSessionShareRoutes(
       );
       if (!owned) return unavailable();
       const events = await withSessionHistoryScope({ userId: share.userId }, () => getSessionAllEvents(dependencies.pool, share.sessionId));
-      return shareViewerPage(events);
+      const current=await store.get(share.userId,share.shareId);
+      if(!current || !active(current))return unavailable();
+      return shareViewerPage(events, { expiresAt: record.expires_at });
     } catch {
       return unavailable();
     }

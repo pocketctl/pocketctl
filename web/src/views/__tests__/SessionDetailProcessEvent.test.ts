@@ -1772,6 +1772,15 @@ describe('SessionDetail processEvent integration', () => {
     expect(vm.messages.find((message: any) => message.request_id === 'mcp_1')).toMatchObject({ status: 'resolved', action: 'accept', redacted: true })
   })
 
+  test.each(['superseded', 'cancelled', 'expired'])('closes a PTY choice without selecting an option on %s', (status) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'interactive_resolved', request_id: 'old-choice', status })
+    vm.processEvent({ type: 'interactive_prompt', request_id: 'old-choice', input: { prompt: 'Select', options: [{ index: '1', label: 'Yes' }, { index: '2', label: 'No' }] } })
+    expect(vm.messages.find((message: any) => message.request_id === 'old-choice')).toMatchObject({ status: 'resolved', reason: status })
+    wrapper.unmount()
+  })
+
   test.each(['interaction_result', 'interactive_resolved'])('closes a PTY choice on %s including receipt-before-prompt replay', (receiptType) => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any

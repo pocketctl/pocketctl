@@ -146,6 +146,13 @@ func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 	}
 	parser := adapter.NewJSONLParser(agentType)
 	seedCodexTailerSession(parser, agentType, filePath)
+	if claude, ok := parser.(*adapter.JSONLStreamParser); ok {
+		// Restore incremental tasks before tailing from EOF without emitting old events.
+		if err := claude.RestoreTaskState(io.LimitReader(f, info.Size())); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("restore Claude task state: %w", err)
+		}
+	}
 	return &JSONLTailer{
 		filePath: filePath,
 		offset:   info.Size(), // Start from end
@@ -224,9 +231,9 @@ func newJSONLTailerFromLine(filePath, agentType string, stableEventIDs bool, sta
 	parser := adapter.NewJSONLParser(agentType)
 	seedCodexTailerSession(parser, agentType, filePath)
 	var stateParser adapter.JSONLParser
-	if agentType == adapter.AgentCodex {
-		// ACK cursors suppress already-delivered output, but stateful Codex
-		// parsing still needs the skipped prefix to recover Plan deduplication and
+	if agentType == adapter.AgentCodex || agentType == adapter.AgentClaude {
+		// ACK cursors suppress already-delivered output, but stateful parsers
+		// still need the skipped prefix to recover task/plan state and
 		// the native turn that may span the cursor.
 		stateParser = parser
 	}
