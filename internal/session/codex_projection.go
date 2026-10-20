@@ -55,6 +55,7 @@ type codexProjection struct {
 	turnDiff       map[string]string
 	fileChangePath map[string]map[string]struct{}
 	turnError      map[string]adapter.CodexProjectedError
+	plans          map[string]managedPlanState
 }
 
 type codexProjectedPart struct {
@@ -157,6 +158,8 @@ func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protoc
 		return p.projectTurn(in.Method, in.Params, historical)
 	case "error":
 		return p.projectError(in.Params, historical)
+	case "turn/plan/updated":
+		return p.projectPlan(in.Params)
 	case "turn/diff/updated":
 		return p.projectTurnDiff(in.Params, historical)
 	case "item/started", "item/completed":

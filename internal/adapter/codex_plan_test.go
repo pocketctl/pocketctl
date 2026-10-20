@@ -142,3 +142,30 @@ func codexPlanResponseLine(t *testing.T, callID, source string) string {
 	}
 	return string(line)
 }
+
+func TestCodexExplicitEmptyPlanPublishesClear(t *testing.T) {
+	parser := NewCodexJSONLParser()
+	events, err := parser.Parse(codexPlanResponseLine(t, "clear-plan", `tools.update_plan({plan:[]})`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == "agent_plan" && event.Status == "cleared" && len(event.Plan) == 0 {
+			return
+		}
+	}
+	t.Fatal("explicit empty plan did not publish a clear tombstone")
+}
+
+func TestCodexTimestampedPlanRevisionSurvivesTransportSwitchAndReplay(t *testing.T) {
+	line := codexPlanResponseLine(t, "timestamped", `tools.update_plan({plan:[{step:"B",status:"pending"}]})`)
+	var raw map[string]any
+	json.Unmarshal([]byte(line), &raw)
+	raw["timestamp"] = "2026-10-20T05:50:00Z"
+	encoded, _ := json.Marshal(raw)
+	first, _ := NewCodexJSONLParser().Parse(string(encoded))
+	replay, _ := NewCodexJSONLParser().Parse(string(encoded))
+	if first[1].Revision < 1_000_000_000_000 || replay[1].Revision != first[1].Revision || replay[1].EventID != first[1].EventID {
+		t.Fatal("timestamped source resets revision or changes identity on replay")
+	}
+}

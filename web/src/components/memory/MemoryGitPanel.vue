@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import MemoryFeatureIntro from './MemoryFeatureIntro.vue'
 import ActionSelect from '../ActionSelect.vue'
 import {computed,onBeforeUnmount,ref,watch} from 'vue'
 import {useLocale} from '../../composables/useLocale'
@@ -170,6 +171,7 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
     <p v-if="unavailable" role="status">{{ t('memory.git.unavailable') }}</p>
     <p v-else-if="loading && !page" role="status">{{ t('memory.git.loading') }}</p>
     <p v-else-if="page && !page.items.length" role="status">{{ t('memory.git.empty') }}</p>
+    <MemoryFeatureIntro v-if="!loading && !page?.items.length" feature="git" />
     <div v-if="page?.items.length" class="memory-git-workspace">
       <aside class="memory-git-queue" :aria-label="t('memory.git.connections')">
         <button v-for="c in page.items" :key="c.connectionId" class="memory-git-connection" :class="{active:selected===c.connectionId}" :aria-pressed="selected===c.connectionId" @click="choose(c)">

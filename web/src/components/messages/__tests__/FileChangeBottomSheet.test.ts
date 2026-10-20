@@ -23,36 +23,22 @@ describe('FileChangeBottomSheet', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  test('closes from the close control', async () => {
-    const wrapper = mount(FileChangeBottomSheet, { global: { stubs: { Teleport: true } }, props: { message } })
-    await wrapper.get('[data-testid="file-change-close"]').trigger('click')
-    expect(wrapper.emitted('close')).toHaveLength(1)
-  })
-
-  test('closes on Escape and restores focus to the opening card', async () => {
+  test('has one title and close control and restores focus through the action list', async () => {
     const opener = document.createElement('button')
     document.body.append(opener)
     opener.focus()
     const wrapper = mount(FileChangeBottomSheet, { global: { stubs: { Teleport: true } }, props: { message, returnFocusTo: opener }, attachTo: document.body })
     await wrapper.vm.$nextTick()
-    expect(document.activeElement).toBe(wrapper.get('[data-testid="file-change-close"]').element)
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    expect(wrapper.findAll('.workspace-action-list > header, .file-change-sheet-header')).toHaveLength(1)
+    const close = wrapper.get('.workspace-action-list > header button')
+    expect(document.activeElement).toBe(close.element)
+    await close.trigger('click')
     expect(wrapper.emitted('close')).toHaveLength(1)
+    await close.trigger('keydown', { key: 'Escape' })
+    expect(wrapper.emitted('close')).toHaveLength(2)
+    expect(wrapper.find('[data-testid="file-change-grabber"]').exists()).toBe(false)
     wrapper.unmount()
     expect(document.activeElement).toBe(opener)
     opener.remove()
-  })
-
-  test('closes after a downward drag within an action list', async () => {
-    const wrapper = mount(FileChangeBottomSheet, { global: { stubs: { Teleport: true } }, props: { message } })
-    const grabber = wrapper.get('[data-testid="file-change-grabber"]')
-    await grabber.trigger('pointerdown', { clientY: 100 })
-    window.dispatchEvent(new PointerEvent('pointermove', { clientY: 190 }))
-
-    expect(wrapper.emitted('close')).toHaveLength(1)
-    expect(wrapper.find('[aria-modal]').exists()).toBe(false)
-    expect(wrapper.find('.workspace-action-list').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="file-change-sheet"]').classes()).toContain('reduced-motion')
   })
 })

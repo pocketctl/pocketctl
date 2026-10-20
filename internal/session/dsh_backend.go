@@ -769,15 +769,16 @@ func (c *dshCoordinator) durable(id string, e dshEvent, history bool, currentTur
 			CacheRead  int `json:"cacheReadTokens"`
 			CacheWrite int `json:"cacheWriteTokens"`
 		} `json:"usage"`
-		Stream    []dshCompact    `json:"stream"`
-		Message   dshMessage      `json:"message"`
-		Title     string          `json:"title"`
-		ID        string          `json:"id"`
-		Outcome   string          `json:"outcome"`
-		CallID    string          `json:"callId"`
-		Name      string          `json:"name"`
-		Arguments string          `json:"arguments"`
-		Reason    json.RawMessage `json:"reason"`
+		Stream    []dshCompact        `json:"stream"`
+		Message   dshMessage          `json:"message"`
+		Title     string              `json:"title"`
+		ID        string              `json:"id"`
+		Outcome   string              `json:"outcome"`
+		CallID    string              `json:"callId"`
+		Name      string              `json:"name"`
+		Arguments string              `json:"arguments"`
+		Todos     []protocol.TodoItem `json:"todos"`
+		Reason    json.RawMessage     `json:"reason"`
 		Header    struct {
 			Config struct {
 				Provider string `json:"provider"`
@@ -810,7 +811,29 @@ func (c *dshCoordinator) durable(id string, e dshEvent, history bool, currentTur
 		base.TurnConfidence = protocol.TurnConfidenceNative
 	}
 	switch e.Type {
+	case "todo/write":
+		if data.Todos == nil {
+			return
+		}
+		base.Type = "agent_plan"
+		base.PartID = "plan:" + id
+		base.Revision = int(e.Seq + 1)
+		base.TaskListTitle = "DSH"
+		for _, todo := range data.Todos {
+			if strings.TrimSpace(todo.Content) == "" || (todo.Status != "pending" && todo.Status != "in_progress" && todo.Status != "completed") {
+				return
+			}
+			base.Plan = append(base.Plan, protocol.PlanItem{Step: todo.Content, Status: todo.Status})
+		}
+		if len(base.Plan) == 0 {
+			base.Status = "cleared"
+		}
+		c.sm.outputCh <- base
 	case "turn/start":
+		cleared := base
+		cleared.Type, cleared.PartID, cleared.Status = "agent_plan", "plan:"+id, "cleared"
+		cleared.Revision = int(e.Seq + 1)
+		c.sm.outputCh <- cleared
 		if !history {
 			c.startTurn(id, data.Turn)
 		}

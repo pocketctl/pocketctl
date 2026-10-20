@@ -107,6 +107,12 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "__install_update":
+		if err := runPrivilegedUpdateInstall(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
 	case "agent":
 		cmdAgent(os.Args[2:])
 	case "daemon":
@@ -1831,8 +1837,15 @@ func cmdDaemonStart(args []string) {
 	// from the session's cached model, update the cache and emit a
 	// session_model_changed event so the relay + Web/iOS clients reflect the
 	// /model switch in real time.
+	openSpecTasks := session.NewOpenSpecTasks(sm.GetSessionCwd)
+	if dir, err := config.ConfigDir(); err == nil {
+		if err := openSpecTasks.LoadBindings(filepath.Join(dir, "openspec-task-bindings.json")); err != nil {
+			logger.Warn("OpenSpec bindings unavailable", "error", err)
+		}
+	}
 	client.OnEvent = func(evt protocol.DaemonEvent) []protocol.DaemonEvent {
 		sm.ObserveNativeTitle(evt)
+		openSpecTasks.Observe(evt)
 		enrichRepositoryFacts(context.Background(), &evt)
 		// Turn lifecycle chokepoint: registry sync + single (turn, state)
 		// emission dedup for every producer (codex projection, claude JSONL
@@ -1919,6 +1932,7 @@ func cmdDaemonStart(args []string) {
 	// Context with signal handling
 	ctx, cancel := context.WithCancel(context.Background())
 	go sm.RunTitleMaintenance(ctx)
+	go openSpecTasks.Run(ctx, outputCh)
 	defer cancel()
 	if documentCaptureConfigErr != nil {
 		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
@@ -2679,7 +2693,13 @@ func cmdDaemonStatus(args ...string) {
 		os.Exit(2)
 	}
 	var output strings.Builder
-	defer func() { writeDaemonStatusOutput(output.String(), options.pager) }()
+	runningVersion := ""
+	defer func() {
+		writeDaemonStatusOutput(output.String(), options.pager)
+		if runningVersion != "" && !options.noUpdateCheck {
+			offerStatusUpdate(runningVersion, args)
+		}
+	}()
 	pid, running, runtimeErr := daemon.RuntimeStatus()
 	if runtimeErr != nil {
 		renderDaemonStatusUncertainty(&output, runtimeErr)
@@ -2695,7 +2715,9 @@ func cmdDaemonStatus(args ...string) {
 		fmt.Fprintln(&output, i18n.T("daemon.running_no_state", pid))
 		return
 	}
-	renderVerifiedDaemonStatus(&output, *state, pid, daemon.VerifyRuntimeIdentity, options.limit)
+	if renderVerifiedDaemonStatus(&output, *state, pid, daemon.VerifyRuntimeIdentity, options.limit) {
+		runningVersion = state.Version
+	}
 }
 
 func renderDaemonStatusUncertainty(out io.Writer, err error) {
@@ -2809,15 +2831,15 @@ func renderVerifiedDaemonStatus(
 	pidfilePID int,
 	verify func(int, string) (bool, error),
 	limits ...int,
-) {
+) bool {
 	running, err := verify(state.PID, state.RuntimeInstanceToken)
 	if err != nil {
 		renderDaemonStatusUncertainty(out, err)
-		return
+		return false
 	}
 	if !running {
 		fmt.Fprintln(out, i18n.T("daemon.not_running"))
-		return
+		return false
 	}
 	if state.PID != pidfilePID {
 		renderDaemonStatusUncertainty(
@@ -2829,9 +2851,10 @@ func renderVerifiedDaemonStatus(
 				pidfilePID,
 			),
 		)
-		return
+		return false
 	}
 	renderDaemonStatus(out, state, pidfilePID, func(int) bool { return true }, limits...)
+	return true
 }
 
 func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int, isAlive func(int) bool, limits ...int) {
@@ -4197,10 +4220,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Invocation: result}
 				if invocationErr != nil {
 					event.Error = invocationErr.Error()
-					if errors.Is(invocationErr, session.ErrCodexInvocationsUnsupported) {
-						// Deterministic failure: clients use this code to drop the retry button.
-						event.Code = "invocations_unsupported"
-					}
+					event.Code = codexInvocationErrorCode(invocationErr)
 				}
 				client.SendMsg(event)
 
@@ -4798,6 +4818,26 @@ func cmdDaemonUpdate(args []string) {
 		return
 	}
 
+	// Check the caller's runtime before any installation; never switch its identity.
+	wasRunning := false
+	if !*noRestart {
+		_, wasRunning, err = daemon.RuntimeStatus()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	execPath, err := update.ExecutablePath()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	sudo, err := prepareUpdateInstall(execPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	// 2. Resolve binary + checksum
 	fmt.Println()
 	fmt.Println(i18n.T("update.resolving"))
@@ -4824,17 +4864,12 @@ func cmdDaemonUpdate(args []string) {
 	// 4. Replace binary
 	fmt.Println()
 	fmt.Println(i18n.T("update.replacing"))
-	if err := update.ReplaceBinary(tmpPath); err != nil {
+	if err := installDownloadedUpdate(sudo, execPath, tmpPath, tag, binInfo.SHA); err != nil {
+		os.Remove(tmpPath)
 		fmt.Fprintln(os.Stderr, i18n.T("update.replace_fail", err))
-		fmt.Println()
-		fmt.Println(i18n.T("update.permission_hint"))
-		fmt.Printf("     sudo pocketctl daemon update")
-		if *versionFlag != "" {
-			fmt.Printf(" --version %s", *versionFlag)
-		}
-		fmt.Println()
 		os.Exit(1)
 	}
+	os.Remove(tmpPath)
 	fmt.Println(i18n.T("update.replaced"))
 
 	// 5. Restart daemon (unless --no-restart)
@@ -4843,9 +4878,17 @@ func cmdDaemonUpdate(args []string) {
 		fmt.Println(i18n.T("update.check_daemon"))
 		if err := update.RestartDaemon(); err != nil {
 			fmt.Fprintln(os.Stderr, i18n.T("update.restart_fail", err))
+			os.Exit(1)
 		}
 	}
 
+	if !*noRestart && wasRunning {
+		if err := waitUpdatedDaemon(tag, 15*time.Second); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(i18n.T("update.running_verified", tag))
+	}
 	fmt.Println()
 	fmt.Println(strings.Repeat("─", 40))
 	fmt.Println(i18n.T("update.done"))

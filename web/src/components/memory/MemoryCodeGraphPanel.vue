@@ -24,6 +24,8 @@
       <strong>{{ t('memory.phase4.graph_empty') }}</strong><p>{{ t('memory.phase4.graph_empty_copy') }}</p>
     </div>
 
+    <MemoryFeatureIntro v-if="!loading && !graph?.nodes.length" feature="codegraph" />
+
     <template v-if="graph && graph.nodes.length">
       <div class="memory-provenance-spine" data-testid="memory-codegraph-provenance">
         <span class="memory-provenance-dot" aria-hidden="true"></span>
@@ -80,6 +82,7 @@ import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { getMemoryCodeGraph } from '../../services/memoryClient'
 import type { MemoryCodeGraphEdge, MemoryCodeGraphNode, MemoryCodeGraphPage } from '../../types/memory'
+import MemoryFeatureIntro from './MemoryFeatureIntro.vue'
 import MemoryImpactPanel from './MemoryImpactPanel.vue'
 
 const props = defineProps<{ repositoryId: string }>()

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,9 +11,60 @@ import (
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestCodexInvocationRecoveryDoesNotPermanentlyDisableCommands(t *testing.T) {
+	sm, _, _, _ := invocationFixture(t)
+	provider := sm.CodexRuntimeProvider()
+	backend := sm.sessions["s"].Backend
+	sm.sessions["s"].Backend = nil
+	provider.recovering.Add(1)
+	for _, id := range []string{"s", "not-hydrated-yet"} {
+		if _, err := sm.invocationBackend(id); !errors.Is(err, ErrCodexRuntimeRecovering) {
+			t.Fatalf("%s during recovery: %v", id, err)
+		}
+	}
+	// An already restored project remains usable while other projects recover.
+	sm.sessions["s"].Backend = backend
+	if got, err := sm.invocationBackend("s"); err != nil || got != backend {
+		t.Fatalf("restored project blocked: %v", err)
+	}
+	provider.recovering.Add(-1)
+	sm.sessions["s"].Backend = nil
+	if _, err := sm.invocationBackend("s"); !errors.Is(err, ErrCodexInvocationsUnsupported) {
+		t.Fatalf("terminal session must remain unsupported after recovery: %v", err)
+	}
+	if _, err := sm.invocationBackend("not-hydrated-yet"); err == nil || errors.Is(err, ErrCodexRuntimeRecovering) {
+		t.Fatalf("missing session remained recovering: %v", err)
+	}
+}
+
+func TestCodexRecoveryClearsProgressAfterFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path, err := agentcontrol.ConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
+	p := sm.CodexRuntimeProvider()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.Recover(ctx); err == nil {
+		t.Fatal("malformed config should fail recovery")
+	}
+	if p.recovering.Load() != 0 {
+		t.Fatal("recovery progress leaked")
+	}
+}
 
 func invocationFixture(t *testing.T) (*SessionManager, *codexCoordinator, *fakeCodexRuntimeClient, string) {
 	t.Helper()

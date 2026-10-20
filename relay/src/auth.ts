@@ -216,3 +216,23 @@ export function decodeToken(token: string): { userId?: number; jti?: string; typ
     return null;
   }
 }
+
+
+/** Registered shares have immutable timestamps; recreating their URL never renews access. */
+export interface ManagedShareClaims { userId: number; sessionId: string; shareId: string; iat: number; exp: number }
+export function signManagedSessionShareToken(claims: ManagedShareClaims): string {
+  return jwt.sign({ type: 'session_share_v2', ...claims }, JWT_SECRET, { algorithm: 'HS256' });
+}
+export function verifyManagedSessionShareToken(token: string): ManagedShareClaims | null {
+  if (typeof token !== 'string' || token.length > 2048) return null;
+  try {
+    const value = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
+    if (!value || typeof value === 'string') return null;
+    if (Object.keys(value).some(key => !['type','userId','sessionId','shareId','iat','exp'].includes(key))) return null;
+    if (value.type !== 'session_share_v2' || !Number.isSafeInteger(value.userId) || value.userId <= 0) return null;
+    if (typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.length > 64) return null;
+    if (typeof value.shareId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.shareId)) return null;
+    if (typeof value.iat !== 'number' || typeof value.exp !== 'number' || !Number.isSafeInteger(value.iat) || !Number.isSafeInteger(value.exp) || value.exp - value.iat !== 900) return null;
+    return { userId: value.userId, sessionId: value.sessionId, shareId: value.shareId, iat: value.iat!, exp: value.exp! };
+  } catch { return null; }
+}

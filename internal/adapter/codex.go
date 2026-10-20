@@ -265,6 +265,7 @@ type codexExecItem struct {
 
 // codexPayload is the union of fields across all payload subtypes.
 type codexPayload struct {
+	planRevisionFloor int
 	// message / function_call / function_call_output discriminator
 	Type    string `json:"type,omitempty"` // "message" | "function_call" | "function_call_output"
 	Role    string `json:"role,omitempty"` // for messages: user | assistant
@@ -479,6 +480,11 @@ func parseCodexLine(line string, session *CodexAdapter, plan *codexPlanTracker) 
 	if err := json.Unmarshal(raw.Payload, &p); err != nil {
 		return nil, nil // payload shape we don't recognize — skip
 	}
+	// Real rollout timestamps keep legacy/observer plans comparable with native
+	// app-server observation revisions, while replay retains deterministic IDs.
+	if stamp, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
+		p.planRevisionFloor = int(stamp.UnixMicro())
+	}
 	return convertCodexPayload(raw.Type, p, session, plan), nil
 }
 
@@ -539,7 +545,7 @@ func convertCodexResponseItem(p codexPayload, session *CodexAdapter, plan *codex
 		if err != nil {
 			return events
 		}
-		return append(events, plan.project(p.CallID, payload))
+		return append(events, plan.project(p.CallID, payload, p.planRevisionFloor))
 	case "custom_tool_call_output":
 		return []protocol.DaemonEvent{codexToolResult(p.CallID, p.Output)}
 	}

@@ -651,6 +651,18 @@ func (sm *SessionManager) publishResumeFailure(ctx context.Context, proc resumeP
 }
 
 func (sm *SessionManager) newStreamAdapter(ps *ProcessState, agentType, prompt string) adapter.AgentAdapter {
+	if agentType == adapter.AgentClaude {
+		adp := adapter.NewClaudeAdapter(prompt)
+		sm.mu.RLock()
+		sessionID, cwd := ps.SessionID, ps.Cwd
+		sm.mu.RUnlock()
+		if path, err := adapter.ResolveJSONLPathFor(agentType, sessionID, cwd); err == nil {
+			if err := adp.RestoreTaskState(path); err != nil {
+				slog.Warn("restore Claude task state", "session", sessionID, "error", err)
+			}
+		}
+		return adp
+	}
 	if agentType != adapter.AgentCodex {
 		return adapter.NewAdapter(agentType, prompt)
 	}

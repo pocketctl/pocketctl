@@ -307,3 +307,55 @@ func TestClaudeTrustChoiceUsesArrowAndRejectsReplay(t *testing.T) {
 		t.Fatal("replay accepted")
 	}
 }
+
+func TestProseWithConfirmationAndNumberedRequirementsIsNotMenu(t *testing.T) {
+	for _, text := range []string{
+		"Confirm read-only scope\n1. Use TodoWrite\n2. If only TaskCreate exists\n3. Don't read files\n",
+		"Do you want to proceed?\n1. This is a quoted example\n2. This is explanation\n",
+		"确认任务如下：\n1. 检查\n2. 测试\n",
+	} {
+		if events := NewScanner("s").Feed([]byte(text)); len(events) != 0 {
+			t.Fatalf("prose emitted choices: %+v", events)
+		}
+	}
+}
+
+func TestLatestMenuSupersedesPreviousRequest(t *testing.T) {
+	s := NewScanner("s")
+	first := s.Feed([]byte("Do you want to proceed?\n❯ 1. Yes\n  2. No\n"))
+	second := s.Feed([]byte("\n请选择:\n❯ 1. 保存\n  2. 放弃\n"))
+	if len(second) != 2 || second[0].Type != "interactive_resolved" || second[0].Status != "superseded" || second[0].RequestID != first[0].RequestID {
+		t.Fatalf("old choice must close before new prompt: %+v", second)
+	}
+	if s.ActivePrompt().Options[0].Label != "保存" {
+		t.Fatal("scanner retained the earlier prompt")
+	}
+	if _, err := s.ClaimChoice(first[0].RequestID, "1"); err == nil {
+		t.Fatal("superseded choice accepted")
+	}
+}
+
+func TestClosingScannerCancelsPendingChoiceOnce(t *testing.T) {
+	s := NewScanner("s")
+	first := s.Feed([]byte(rawMenu))
+	events := s.Close()
+	if len(events) != 1 || events[0].Type != "interactive_resolved" || events[0].Status != "cancelled" || events[0].RequestID != first[0].RequestID {
+		t.Fatalf("missing cancellation: %+v", events)
+	}
+	if len(s.Close()) != 0 || s.ActivePrompt() != nil {
+		t.Fatal("closure must be idempotent")
+	}
+	if _, err := s.ClaimChoice(first[0].RequestID, "1"); err == nil {
+		t.Fatal("cancelled choice accepted")
+	}
+}
+
+func TestPartialOptionLabelDoesNotPublishAnotherChoice(t *testing.T) {
+	s := NewScanner("s")
+	if got := s.Feed([]byte("Do you want to proceed?\n❯ 1. Yes\n  2. N")); len(got) != 0 {
+		t.Fatal("partial option was published")
+	}
+	if got := s.Feed([]byte("o\n")); len(got) != 1 {
+		t.Fatalf("complete menu events=%d", len(got))
+	}
+}

@@ -230,7 +230,7 @@ Web 与 iOS 客户端中你可以：
 |---|---|
 | `pocketctl login [--prod] [--email]` | 通过浏览器设备流或邮箱验证码登录。 |
 | `pocketctl daemon start [--prod]` | 启动 Daemon 并发现本地 Agent。 |
-| `pocketctl daemon status` | 查看 Daemon、Relay 和已发现 Agent 的状态。 |
+| `pocketctl daemon status [--no-update-check]` | 查看状态；交互终端中仅在发现高于当前运行 Daemon 的版本时提供更新选择。 |
 | `pocketctl daemon doctor` | 诊断配置和连接问题。 |
 | `pocketctl daemon diagnose <会话ID>` | 检查单个会话是否已代理，并输出原因和恢复建议。 |
 | `pocketctl daemon logs` | 定位或跟踪 Daemon 日志。 |
@@ -240,6 +240,10 @@ Web 与 iOS 客户端中你可以：
 | `pocketctl uninstall [--yes] [--keep-binary]` | 移除 Daemon 和本地 PocketCtl 数据。 |
 
 运行 `pocketctl help`，或对相应子命令使用 `--help` 查看全部参数。
+
+`daemon status` 先输出状态，再检查更新，检查超时为 2 秒。检查失败、相同或更低版本、非交互调用均不弹出更新选择。回车保留当前版本，输入 `y` 更新后重新显示状态；可通过 `--no-update-check` 跳过检查。
+
+对于 root 所有的系统二进制，`daemon update` 在下载前请求 sudo 授权，仅安装步骤以 root 执行，daemon 仍由原用户重启。自动提权要求可执行文件及其父目录均由 root 控制。取消授权不会替换二进制或停止 daemon；`--no-restart` 仅安装、不重启。
 
 ## 安全与数据边界
 

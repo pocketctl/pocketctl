@@ -124,7 +124,10 @@
             <template v-else>
               <MemoryScopeSwitcher v-model="gitTarget" :scopes="gitScopes" />
               <MemoryGitPanel v-if="gitTarget" :scope-id="gitTarget" />
-              <p v-else role="status">{{ t('memory.git.shared_scope_required') }}</p>
+              <template v-else>
+                <p role="status">{{ t('memory.git.shared_scope_required') }}</p>
+                <MemoryFeatureIntro feature="git" />
+              </template>
             </template>
           </template>
           <section v-if="active === 'context'" data-testid="memory-panel-context">
@@ -204,6 +207,7 @@ import MemoryPromotionDialog from '../components/memory/MemoryPromotionDialog.vu
 import MemoryWikiPanel from '../components/memory/MemoryWikiPanel.vue'
 import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 import MemorySkillsView from './MemorySkillsView.vue'
+import MemoryFeatureIntro from '../components/memory/MemoryFeatureIntro.vue'
 import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
 import MemoryModuleNavigation from '../components/memory/MemoryModuleNavigation.vue'
 import { MEMORY_MODULE_GROUPS, type MemoryModule } from '../components/memory/memoryModules'

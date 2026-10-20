@@ -19,7 +19,7 @@
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
         </span>
-        <span class="choice-tag">{{ t('interactive.title') }}</span>
+        <span class="choice-tag">{{ t(isPending ? 'interactive.title' : 'interactive.closed') }}</span>
         <span v-if="isPending" class="choice-waiting">{{ t('interactive.waiting') }}</span>
       </div>
 

@@ -1,3 +1,4 @@
+import { initSessionShareSchema } from './session-share/store.js';
 import { initPreferenceSchema } from './user-preferences.js';
 import pg from 'pg';
 import { createHash } from 'crypto';
@@ -836,6 +837,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initDurableIngressSchema(pool);
   await initAttentionInboxSchema(pool);
   await initSessionDocumentSchema(pool);
+  await initSessionShareSchema(pool);
   await initSessionOrganizationSchema(pool);
   await initSessionLifecycleSchema(pool);
   await initSessionHistoryBodySchema(pool);
@@ -2318,6 +2320,21 @@ export async function getLatestAgentPlan(pool: pg.Pool, sessionId: string): Prom
     [sessionId],
   );
   return (await hydratePostgresEventRows(pool, sessionId, result.rows))[0];
+}
+
+// Initial replay must restore each task source independently, including clears.
+export async function getLatestAgentTaskLists(pool: pg.Pool, sessionId: string): Promise<any[]> {
+  const result = await pool.query(
+    `SELECT DISTINCT ON (event_type, COALESCE(COALESCE(payload,body_header)->>'part_id', event_type))
+       id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
+     FROM events WHERE session_id = $1 AND event_type IN ('agent_plan','agent_todo')
+       AND COALESCE(COALESCE(payload,body_header)->>'agent_id', '') = ''
+     ORDER BY event_type, COALESCE(COALESCE(payload,body_header)->>'part_id', event_type),
+       CASE WHEN event_type = 'agent_plan'
+         AND (COALESCE(payload,body_header)->>'revision') ~ '^[1-9][0-9]*$'
+         THEN (COALESCE(payload,body_header)->>'revision')::numeric ELSE 0 END DESC,
+       id DESC`, [sessionId]);
+  return hydratePostgresEventRows(pool, sessionId, result.rows);
 }
 
 export interface CompleteBackwardReplayPage {

@@ -378,3 +378,31 @@ export function createAgentFileChangeReducer(): AgentFileChangeReducer {
     },
   }
 }
+
+
+/** Session summary of the loaded history only. Patch IDs prevent replay duplication. */
+export function summarizeFileChanges(messages: AgentFileChangeMessage[]): AgentFileChangeMessage | undefined {
+  const files = new Map<string, AgentChangedFile>()
+  for (const message of messages) {
+    for (const file of message.fileChange.files) {
+      const previous = files.get(file.path)
+      const edits = new Map((previous?.edits ?? []).map(edit => [edit.id, edit]))
+      for (const edit of file.edits) edits.set(edit.id, edit)
+      // Input cards follow the session timeline; each card already orders its
+      // edits. Daemon seq restarts with a new process and cannot order turns.
+      // Map replacement deduplicates replay without moving an existing patch.
+      const ordered = [...edits.values()]
+      files.set(file.path, { ...file, edits: ordered,
+        additions: ordered.reduce((total, edit) => total + edit.additions, 0),
+        deletions: ordered.reduce((total, edit) => total + edit.deletions, 0),
+      })
+    }
+  }
+  const merged = [...files.values()]
+  if (!merged.length) return undefined
+  return { id: 'session-file-changes', type: 'agent_file_change', role: 'agent', fileChange: {
+    turnId: 'session-file-changes', files: merged, selectedPath: merged[0].path,
+    additions: merged.reduce((total, file) => total + file.additions, 0),
+    deletions: merged.reduce((total, file) => total + file.deletions, 0),
+  } }
+}

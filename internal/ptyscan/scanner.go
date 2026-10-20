@@ -68,12 +68,9 @@ var questionPhrases = regexp.MustCompile(
 	`(?i)` +
 		`do you want to (?:proceed|continue)\??` +
 		`|do you trust the contents of this directory\??` +
-		`|proceed\??` +
 		`|requires confirmation` +
 		`|requires approval` +
 		`|needs (?:your )?(?:confirmation|approval)` +
-		`|confirm\??` +
-		`|(?:请)?(?:确认|是否)` +
 		`|是否继续` +
 		`|是否(?:允许|同意|执行)` +
 		`|(?:等待|需要)你的决定` +
@@ -89,7 +86,7 @@ var questionPhrases = regexp.MustCompile(
 //	› 1. Yes          → ("1", "Yes")
 //	  2) No           → ("2", "No")
 //	3. Apply patch    → ("3", "Apply patch")
-var optionLine = regexp.MustCompile(`(?:❯|›|\s)*\s*(\d+)[.)]\s+(\S[^\n\r\x1b]*)`)
+var optionLine = regexp.MustCompile(`^[ \t]*(?:❯|›)?[ \t]*(\d+)[.)][ \t]+(\S[^\n\r\x1b]*)$`)
 
 // ansiEscape strips CSI/OSC sequences and a few cursor-control bytes the Ink
 // TUI emits while redrawing (colors, erase-line "\x1b[2K", hide/show cursor).
@@ -339,8 +336,8 @@ func (s *Scanner) ActivePrompt() *PendingPrompt {
 }
 
 // Feed appends PTY bytes and returns any newly-detected interactive_prompt
-// events. At most one event is returned per Feed call (the first new prompt
-// found); subsequent redraws of the same prompt are suppressed until the
+// events. A replacement closes the previous request before emitting the new prompt;
+// subsequent redraws of the same prompt are suppressed until the
 // timeout elapses or Reset is called.
 func (s *Scanner) Feed(data []byte) []protocol.DaemonEvent {
 	s.mu.Lock()
@@ -362,8 +359,12 @@ func (s *Scanner) Feed(data []byte) []protocol.DaemonEvent {
 	}
 
 	prompt := s.detectLocked()
-	if prompt == nil {
+	if prompt == nil || (s.active != nil && s.fingerprint(s.active) == s.fingerprint(prompt)) {
 		return nil
+	}
+	var events []protocol.DaemonEvent
+	if s.active != nil {
+		events = append(events, protocol.DaemonEvent{Type: "interactive_resolved", SessionID: s.sessionID, RequestID: s.active.RequestID, Status: "superseded"})
 	}
 	s.active = prompt
 	s.seen[s.fingerprint(prompt)] = now
@@ -372,12 +373,12 @@ func (s *Scanner) Feed(data []byte) []protocol.DaemonEvent {
 		"prompt":  prompt.PromptText,
 		"options": prompt.Options,
 	})
-	return []protocol.DaemonEvent{{
+	return append(events, protocol.DaemonEvent{
 		Type:      "interactive_prompt",
 		SessionID: s.sessionID,
 		RequestID: prompt.RequestID,
 		Input:     input,
-	}}
+	})
 }
 
 // detectLocked scans the current buffer for a menu, returning a PendingPrompt
@@ -394,20 +395,31 @@ func (s *Scanner) detectLocked() *PendingPrompt {
 
 	// Find the LAST question phrase in the window — the relevant prompt is the
 	// one currently blocking, which is the most recently drawn one.
-	phraseLoc := questionPhrases.FindStringIndex(clean)
-	if phraseLoc == nil {
+	phrases := questionPhrases.FindAllStringIndex(clean, -1)
+	if len(phrases) == 0 {
 		return nil
 	}
+	phraseLoc := phrases[len(phrases)-1]
 	promptText := strings.TrimSpace(clean[phraseLoc[0]:phraseLoc[1]])
 
 	// Search forward from the phrase for numbered options.
 	tail := clean[phraseLoc[1]:]
+	// Plain streaming output may end midway through an option label. ANSI frames
+	// are rendered as a complete terminal screen and often omit a final newline.
+	if !strings.Contains(string(s.buf), "\x1b[") && !strings.HasSuffix(tail, "\n") {
+		if end := strings.LastIndex(tail, "\n"); end >= 0 {
+			tail = tail[:end]
+		} else {
+			return nil
+		}
+	}
 	tailLines := splitNonEmpty(tail)
 	if len(tailLines) > optionScanLines {
 		tailLines = tailLines[:optionScanLines]
 	}
 
 	var opts []Option
+	selected := false
 	// Stop scanning further lines once we've seen the menu and hit a blank or
 	// non-option line after collecting ≥2 options — this delimits the menu from
 	// unrelated text below it. While still inside the numbered list, keep
@@ -422,6 +434,7 @@ func (s *Scanner) detectLocked() *PendingPrompt {
 			continue
 		}
 		menuStarted = true
+		selected = selected || strings.HasPrefix(strings.TrimSpace(ln), "❯") || strings.HasPrefix(strings.TrimSpace(ln), "›")
 		for _, m := range matches {
 			idx := strings.TrimSpace(m[1])
 			label := strings.TrimSpace(m[2])
@@ -432,7 +445,7 @@ func (s *Scanner) detectLocked() *PendingPrompt {
 		}
 	}
 
-	if len(opts) < minOptions {
+	if len(opts) < minOptions || !selected {
 		return nil
 	}
 
@@ -545,11 +558,21 @@ func (s *Scanner) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active = nil
-	// Trim the buffer to drop the already-rendered menu so a redraw right after
-	// answering doesn't re-detect the stale prompt.
-	if len(s.buf) > 0 {
-		s.buf = s.buf[len(s.buf)/2:]
+	s.buf = nil
+	s.seen = make(map[string]time.Time)
+}
+
+// Close cancels the pending menu when its owning PTY exits. It is idempotent.
+func (s *Scanner) Close() []protocol.DaemonEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf = nil
+	if s.active == nil {
+		return nil
 	}
+	event := protocol.DaemonEvent{Type: "interactive_resolved", SessionID: s.sessionID, RequestID: s.active.RequestID, Status: "cancelled"}
+	s.active = nil
+	return []protocol.DaemonEvent{event}
 }
 
 // fingerprint returns a stable key for a detected prompt (phrase + options).
