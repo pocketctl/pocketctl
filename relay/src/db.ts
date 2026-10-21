@@ -2927,6 +2927,11 @@ export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: 
      ON CONFLICT (session_id) DO UPDATE SET
        daemon_id = $2,
        status = $7,
+       turn_started_at = CASE
+         WHEN $7 IN ('idle', 'exited', 'completed', 'failed', 'stopped', 'terminated', 'abandoned', 'error', 'killed')
+           THEN NULL
+         ELSE sessions.turn_started_at
+       END,
        agent_type = COALESCE(NULLIF($3, ''), sessions.agent_type),
        cwd = COALESCE(NULLIF($4, ''), sessions.cwd),
        title = COALESCE($5, sessions.title),
@@ -3303,7 +3308,7 @@ export async function listSubagentsByParent(pool: pg.Pool, parentSessionId: stri
 /** Mark sessions as completed if their daemon has been offline for > 5 minutes. */
 export async function cleanStaleSessions(pool: pg.Pool): Promise<void> {
   await pool.query(`
-    UPDATE sessions SET status = 'completed', updated_at = NOW()
+    UPDATE sessions SET status = 'completed', turn_started_at = NULL, updated_at = NOW()
     WHERE status IN ('running', 'busy', 'retry')
       AND daemon_id NOT IN (SELECT daemon_id FROM daemons WHERE status = 'online' AND last_heartbeat > NOW() - INTERVAL '5 minutes')
   `);
@@ -3345,7 +3350,7 @@ export async function reconcileDaemonSessions(
       return [];
     }
     const res = await client.query(
-      `UPDATE sessions SET status = 'completed', updated_at = NOW()
+      `UPDATE sessions SET status = 'completed', turn_started_at = NULL, updated_at = NOW()
        WHERE daemon_id = $1
          AND status IN ('running', 'busy', 'retry')
          AND session_id NOT LIKE 'pending-%'

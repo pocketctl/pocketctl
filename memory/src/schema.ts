@@ -1,3 +1,4 @@
+import {RUNTIME_HEALTH_INDEX_MIGRATION} from './reporting/runtime-health-index-migration.js'
 import {JOB_RELEASE_FENCE_MIGRATION} from './generation/job-release-fence-migration.js'
 import {GOVERNANCE_INCREMENTAL_MIGRATION} from './migrations/governance-v2/incremental-migration.js'
 import {SOURCE_LINEAGE_MIGRATION} from './episodes/source-lineage-migration.js'
@@ -113,6 +114,9 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_memory_feed_inbox_pending
         ON memory_feed_inbox (installation_id, feed_id)
         WHERE projection_state = 'pending'`,
+      // Session privacy deletion must not scan an installation's entire inbox.
+      `CREATE INDEX IF NOT EXISTS idx_memory_feed_inbox_session
+        ON memory_feed_inbox (installation_id, session_id)`,
       `
       CREATE TABLE IF NOT EXISTS memory_snapshot_runs (
         run_id             UUID PRIMARY KEY,
@@ -2228,6 +2232,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   SOURCE_LINEAGE_MIGRATION,
   GOVERNANCE_INCREMENTAL_MIGRATION,
   JOB_RELEASE_FENCE_MIGRATION,
+  RUNTIME_HEALTH_INDEX_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

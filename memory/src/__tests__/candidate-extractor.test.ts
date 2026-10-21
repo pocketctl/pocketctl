@@ -322,6 +322,23 @@ describe('candidate extractor orchestration', () => {
     expect(store.markRun).not.toHaveBeenCalled()
   })
 
+  test.each(['budget_exceeded', 'budget_unavailable'] as const)(
+    'a timed-out primary followed by %s requires explicit repair without discarding its run', async code => {
+      const store = fakeStore()
+      const timeoutFallback = { primary: { code: 'http_error' as const, detail: 'timeout' as const,
+        budgetReservationId: 'primary-reservation', billingUncertain: true } }
+      const { fn } = generator([{ ok: false, code, retryable: code === 'budget_unavailable', timeoutFallback }])
+      const outcome = await createCandidateExtractor({ store, textGenerator: { generateJson: fn as never }, ...DEPS_BASE })
+        .extract({ installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal })
+      expect(outcome).toMatchObject({ kind: 'failed', runId: 'run-1',
+        errorCode: 'provider_result_unknown', retryable: false, timeoutFallback })
+      expect(store.discardRun).not.toHaveBeenCalled()
+      expect(store.markRun).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        runId: 'run-1', state: 'failed', errorCode: 'provider_result_unknown',
+      }))
+    },
+  )
+
   test('persists validated candidates with usage accounting', async () => {
     const store = fakeStore()
     const { fn } = generator([{ ok: true, value: okOutput(), usage: { inputTokens: 10, outputTokens: 5, model: 'm', costMicros: 17 } }])

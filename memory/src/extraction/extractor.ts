@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import type { TextGenerator, ModelJsonResult } from '../ports/text-generator.js'
+import type { TextGenerator, ModelJsonResult, TimeoutFallbackDiagnostics } from '../ports/text-generator.js'
 import { JobDeferredError, type JobFence } from '../jobs/types.js'
 import type { ExtractionRepository } from './repository.js'
 import type { CandidateDeduper } from './deduper.js'
@@ -55,7 +55,7 @@ export type ExtractionOutcome =
   | { kind: 'skipped_run_limit' }
   | { kind: 'episode_missing' }
   | { kind: 'quarantined'; runId: string }
-  | { kind: 'failed'; runId: string; errorCode: string; retryable: boolean }
+  | { kind: 'failed'; runId: string; errorCode: string; retryable: boolean; timeoutFallback?: TimeoutFallbackDiagnostics }
   | { kind: 'deferred_budget'; runId: string; errorCode: 'budget_exceeded' | 'budget_unavailable'; retryAt: Date | null }
   | { kind: 'deferred_source' }
   | { kind: 'not_configured' }
@@ -81,6 +81,8 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       /** Owning job fence; side-effect writes reject on ownership loss. */
       fence?: JobFence
       expectedSourceDigest?: string
+      /** Exact failed run authorized by the bounded operator recovery workflow. */
+      retryFailedRunId?: string
     }): Promise<ExtractionOutcome> {
       const episode = await deps.store.loadEpisodeForExtraction(input.installationId, input.turnId)
       if (!episode) return { kind: 'episode_missing' }
@@ -118,6 +120,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         maxRunsPerEpisode: deps.maxRunsPerEpisode,
         fence: input.fence,
         expectedConsentFingerprint:deps.expectedConsentFingerprint,
+        retryFailedRunId: input.retryFailedRunId,
       })
       if(reserved.sourceWaiting)return {kind:'deferred_source'}
       if(reserved.sourceUnavailable)return {kind:'episode_missing'}
@@ -142,7 +145,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         operation: 'candidate_extract' | 'candidate_repair',
         system: string,
       ): Promise<
-        { ok: true; candidates: ExtractionCandidate[] } | { ok: false; errorCode: string; retryable: boolean; retryAt?: Date | null }
+        { ok: true; candidates: ExtractionCandidate[] } | { ok: false; errorCode: string; retryable: boolean; retryAt?: Date | null; timeoutFallback?: TimeoutFallbackDiagnostics }
       > => {
         const result: ModelJsonResult<unknown> = await deps.textGenerator.generateJson({
           operation,
@@ -153,10 +156,17 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           timeoutMs: deps.timeoutMs,
           signal: input.signal,
         })
-        if (result.ok || (result.code !== 'budget_exceeded' && result.code !== 'budget_unavailable')) {
+        if (result.timeoutFallback || result.ok || (result.code !== 'budget_exceeded' && result.code !== 'budget_unavailable')) {
           providerCallsObserved += 1
         }
         if (!result.ok) {
+          // A fallback budget refusal happened AFTER a real primary timeout.
+          // Deferring as a fresh budget wait would discard this attempt identity
+          // and could bill the primary again. Require bounded operator repair.
+          if (result.timeoutFallback && (result.code === 'budget_exceeded' || result.code === 'budget_unavailable')) {
+            return { ok: false, errorCode: 'provider_result_unknown', retryable: false,
+              timeoutFallback: result.timeoutFallback }
+          }
           if (result.usage) {
             usage = {
               inputTokens: usage.inputTokens + result.usage.inputTokens,
@@ -222,7 +232,8 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         }
         return quarantined
           ? { kind: 'quarantined', runId: reserved.runId }
-          : { kind: 'failed', runId: reserved.runId, errorCode: outcome.errorCode, retryable: outcome.retryable }
+          : { kind: 'failed', runId: reserved.runId, errorCode: outcome.errorCode, retryable: outcome.retryable,
+            ...(outcome.timeoutFallback ? { timeoutFallback: outcome.timeoutFallback } : {}) }
       }
 
       const manifestHandleSet = new Set(manifestHandles)

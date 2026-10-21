@@ -363,6 +363,11 @@ func (sm *SessionManager) createCodexExecSession(ctx context.Context, sessionID,
 	env = ensureEnvDefault(env, "GH_PAGER", "cat")
 	env = ensureEnvDefault(env, "TERM_PROGRAM", "pocketctl")
 	cmd.Env = setEnvValue(env, "POCKETCTL_SESSION_ID", sessionID)
+	cmd.Args, cmd.Env, err = applyManagedTaskToolsCommand("codex", cmd.Args, cmd.Env)
+	if err != nil {
+		cancel()
+		return "", err
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()

@@ -27,6 +27,7 @@ Commands:
   agent opencode enable|disable|status   Manage transparent OpenCode terminal control
   agent codex enable|disable|status      Manage Codex CLI terminal control (Desktop is read-only)
   agent zcode sync enable|disable|status Sync ZCode sessions read-only (view in Web/iOS)
+  task-tools status|enable|disable|reset  Configure native task tools (see task-tools --help)
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
   daemon status  Show daemon status and 10 recent sessions [--limit N | --all | --pager]
@@ -100,6 +101,18 @@ Codex CLI terminal control (requires Codex CLI 0.144.1+):
   pocketctl agent codex status        Show desired/effective state and capability diagnostics
   codex --native                      Bypass Pocketctl for one invocation
 
+Task list tools (daemon-owned runtimes):
+  pocketctl task-tools status                 Show saved intent; runtime capability is not probed
+  pocketctl task-tools enable codex           Enable native update_plan
+  pocketctl task-tools enable claude-code     Enable native Task/Todo tools
+  pocketctl task-tools disable codex          Disable future task tool exposure
+  pocketctl task-tools reset claude-code      Restore native settings/defaults
+  Alias: pocketctl daemon task-tools <action> [codex|claude-code]
+  Default: inherit. Applies when a new native process starts; never interrupts existing work.
+  Codex app-server may be reused even after daemon restart. Wait for active work to finish
+  and close/restart the affected native runtime. Existing task history is retained.
+  Does not affect native terminal/observer sessions, bypass approvals, or force model planning.
+
 Multiple Codex accounts:
   The default ~/.codex account is watched automatically. Give every other account
   its own CODEX_HOME and register that directory when starting the daemon:
@@ -160,6 +173,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   agent opencode enable|disable|status   管理透明 OpenCode 终端控制
   agent codex enable|disable|status      管理 Codex CLI 终端控制（Desktop 只读）
   agent zcode sync enable|disable|status 只读同步 ZCode 会话（在 Web/iOS 查看）
+  task-tools status|enable|disable|reset  配置原生任务工具（详见 task-tools --help）
   daemon start   启动 daemon（连接 relay）
   daemon stop    停止运行中的 daemon
   daemon status  查看 daemon 状态及最近 10 个会话 [--limit N | --all | --pager]
@@ -232,6 +246,18 @@ Codex CLI 终端控制（要求 Codex CLI 0.144.1+）:
   pocketctl agent codex status        查看期望/实际状态与能力诊断
   codex --native                      单次绕过 Pocketctl
 
+任务列表工具（daemon 创建的原生运行时）:
+  pocketctl task-tools status                 查看配置意图；不探测运行时实际工具能力
+  pocketctl task-tools enable codex           开启原生 update_plan
+  pocketctl task-tools enable claude-code     开启原生 Task/Todo 工具
+  pocketctl task-tools disable codex          关闭后续任务工具暴露
+  pocketctl task-tools reset claude-code      恢复原生设置/默认值
+  别名：pocketctl daemon task-tools <action> [codex|claude-code]
+  默认 inherit，在新原生进程启动时应用；不会打断已有任务。
+  Codex app-server 可能在 daemon 重启后继续复用。请等待任务结束后关闭并重新启动
+  受影响的原生运行时；已有任务历史保留。原生终端/只读观察会话不受影响。
+  开关不绕过审批，也不保证模型自动创建计划。
+
 多 Codex 账号:
   默认账号 ~/.codex 会自动监听。其它账号必须分别使用独立的 CODEX_HOME，
   并在启动 daemon 时登记对应目录:
@@ -290,6 +316,18 @@ const configDirDisplay = "~/.pocketctl"
 var messages = map[string]msg{
 	// ---- help.* ----------------------------------------------------------
 	"help.body": {helpEn, helpZh},
+	"task_tools.help": {
+		"Usage: pocketctl task-tools status [codex|claude-code]\n       pocketctl task-tools enable|disable|reset <codex|claude-code>\nAlias: pocketctl daemon task-tools ...; claude is an alias for claude-code.\nDefault: inherit. reset removes the PocketCtl override. Only new daemon-owned native processes apply changes.\nExisting runtimes are not restarted; Codex app-server can survive daemon restart. Task history and approval policy are unchanged.",
+		"用法: pocketctl task-tools status [codex|claude-code]\n      pocketctl task-tools enable|disable|reset <codex|claude-code>\n别名: pocketctl daemon task-tools ...；claude 等同 claude-code。\n默认 inherit；reset 移除 PocketCtl 覆盖设置。仅新启动的 daemon 原生进程应用设置。\n不自动重启已有运行时；Codex app-server 可在 daemon 重启后继续存在。任务历史与审批策略不变。",
+	},
+	"task_tools.status": {
+		"%s: desired=%s; source=%s; runtime_effective=unknown (not probed)",
+		"%s: 期望=%s；配置=%s；运行时实际状态=unknown（未探测）",
+	},
+	"task_tools.boundary": {
+		"Saved intent applies to new daemon-owned native processes only. Existing runtimes may need restarting after active work finishes; restarting only the daemon may reuse Codex app-server. No process was restarted. Native terminal/observer sessions and task history are unchanged. Enabling tools does not force the model to use them or bypass approvals.",
+		"配置意图仅在新启动的 daemon 原生进程中应用。已有运行时可能需等待任务结束后重启；仅重启 daemon 仍可能复用 Codex app-server。本命令未重启进程。原生终端/只读观察会话及任务历史不变。开启工具不保证模型主动调用，也不绕过审批。",
+	},
 
 	// ---- agent.* ---------------------------------------------------------
 	"agent.help": {
@@ -438,8 +476,8 @@ var messages = map[string]msg{
 		"Daemon 运行中 (PID %d)，状态不可用",
 	},
 	"daemon.usage_sub": {
-		"usage: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake>",
-		"用法: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake>",
+		"usage: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake|task-tools>",
+		"用法: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake|task-tools>",
 	},
 	"daemon.unknown_sub":     {"unknown daemon subcommand: %s", "未知的 daemon 子命令: %s"},
 	"daemon.already_running": {"daemon already running (PID %d)", "守护进程已在运行 (PID %d)"},

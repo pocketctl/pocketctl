@@ -11,6 +11,9 @@
         <li v-for="subject in subjects" :key="subject.subject_id">
           <button type="button" :disabled="loading" @click="open(subject)">
             <span><strong>{{ subject.title }}</strong><small>{{ subject.daemon_name }}</small>
+              <small>{{ t('attention.notification.last_activity') }} · {{ formatDate(subject.last_activity_at) }}</small>
+              <small>{{ t('attention.notification.reason') }} · {{ reasonLabel(subject) }}</small>
+              <small>{{ t('attention.notification.processing') }} · {{ t(`attention.notification.processing.${subject.action}`) }}</small>
               <small v-if="subject.action !== 'purge' && subject.effective_purge_at">{{ t('attention.notification.effective_purge') }} · {{ formatDate(subject.effective_purge_at) }}</small></span>
             <span><b>{{ t(`attention.notification.action.${subject.action}`) }}</b><small>{{ t(`attention.notification.result.${subject.result}`) }}</small>
               <small v-for="(state,stage) in subject.stages" :key="stage">{{ t(`attention.notification.stage.${stage}`) }} · {{ t(`attention.notification.stage_state.${state}`) }}</small></span><span aria-hidden="true">›</span>
@@ -20,11 +23,12 @@
       <button v-if="cursor" type="button" class="btn btn-secondary" data-testid="notification-subject-more" :disabled="loading" @click="load(true)">{{ t('attention.load_more') }}</button>
       <div v-if="selectedSummary" class="operation-summary" data-testid="notification-operation-summary">
         <h3>{{ selectedSummary.title }}</h3>
-        <p>{{ t(selectedSummary.action === 'purge' ? 'attention.notification.deleted' : 'attention.notification.operation_detail') }}</p>
+        <p>{{ t(selectedSummary.action === 'purge' && (selectedSummary.result === 'succeeded' || selectedSummary.stages?.database === 'succeeded') ? 'attention.notification.deleted' : 'attention.notification.operation_detail') }}</p>
         <dl><dt>{{ t('attention.notification.host') }}</dt><dd>{{ selectedSummary.daemon_name }}</dd>
           <dt>{{ t('attention.notification.last_activity') }}</dt><dd>{{ formatDate(selectedSummary.last_activity_at) }}</dd>
           <dt>{{ t('attention.notification.executed') }}</dt><dd>{{ formatDate(selectedSummary.executed_at) }}</dd>
           <dt>{{ t('attention.notification.reason') }}</dt><dd>{{ reasonLabel(selectedSummary) }}</dd>
+          <dt>{{ t('attention.notification.processing') }}</dt><dd>{{ t(`attention.notification.processing.${selectedSummary.action}`) }}</dd>
           <dt>{{ t('attention.notification.result') }}</dt><dd>{{ t(`attention.notification.result.${selectedSummary.result}`) }}</dd>
           <template v-for="(state,stage) in selectedSummary.stages" :key="stage"><dt>{{ t(`attention.notification.stage.${stage}`) }}</dt><dd>{{ t(`attention.notification.stage_state.${state}`) }}</dd></template></dl>
       </div>
@@ -46,7 +50,16 @@ let generation = 0
 function formatDate(value: string | null) { return value ? new Date(value).toLocaleString() : '—' }
 function reasonLabel(subject: LifecycleNotificationSubject) {
   if (subject.reason_code.startsWith('test_fixture')) return t('attention.notification.reason.fixture')
-  return t(subject.action === 'resume' ? 'attention.notification.reason.resumed' : subject.action === 'purge' ? 'attention.notification.reason.purge' : 'attention.notification.reason.archive')
+  switch (subject.reason_code) {
+    case 'inactivity_60_days': case 'transfer_budget_reached': case 'cold_transfer_failed':
+      return t('attention.notification.reason.archive')
+    case 'inactivity_90_days': case 'external_cleanup_pending': case 'cloud_cleanup_completed': case 'database_purge_failed':
+      return t('attention.notification.reason.purge')
+    case 'business_activity': return t('attention.notification.reason.resumed')
+    case 'user_requested_zombie_cleanup': return t('attention.notification.reason.zombie')
+    case 'superseded': return t('attention.notification.reason.superseded')
+    default: return t('attention.notification.reason.unknown')
+  }
 }
 function fail(failure: unknown) {
   subjects.value = []; selectedSummary.value = null; cursor.value = null; count.value = 0

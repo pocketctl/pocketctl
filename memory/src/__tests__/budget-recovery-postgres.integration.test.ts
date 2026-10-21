@@ -5,6 +5,7 @@ import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {createExtractionRepository} from '../extraction/repository.js'
 import {createCandidateExtractor,type ExtractionOutcome} from '../extraction/extractor.js'
+import {withTimeoutFallback} from '../model/text-fallback.js'
 import {createProviderBudgetStore,withTextProviderBudget} from '../model/provider-budget.js'
 import {createJobRepository} from '../jobs/repository.js'
 import {createJobWorker} from '../jobs/worker.js'
@@ -120,4 +121,72 @@ suite('budget waiting and positively proven recovery',()=>{
   expect((await extract.extract({installationId:installation,turnId:e.turn,signal:new AbortController().signal})).kind).toBe(change==='consent_changed'?'deferred_source':'episode_missing')
   expect(generateJson).not.toHaveBeenCalled()
  })
+ test.each(['budget_exceeded','budget_unavailable'] as const)('primary timeout followed by %s remains repair-required across repeated jobs',async failure=>{
+  const e=await episode(),jobs=createJobRepository(pool),budget=createProviderBudgetStore(pool)
+  const primary=vi.fn(async()=>({ok:false as const,code:'http_error' as const,detail:'timeout',retryable:true}))
+  const fallback=generator()
+  const limits={key:'attempted-timeout',window:'daily-asia-shanghai' as const,maxRequests:1,
+   maxInputTokens:100000,maxOutputTokens:100000,maxOutputTokensPerRequest:10}
+  // For unavailable, only the fallback reservation boundary is offline; primary
+  // still uses the real durable store and consumes a real reservation.
+  const fallbackBudget=failure==='budget_unavailable'?{...budget,reserve:async()=>{throw new Error('synthetic store outage')}}:budget
+  const textGenerator=withTimeoutFallback(
+   withTextProviderBudget({generateJson:primary} as TextGenerator,budget,limits),
+   withTextProviderBudget({generateJson:fallback} as TextGenerator,fallbackBudget,limits))
+  const extract=createCandidateExtractor({store:createExtractionRepository(pool),textGenerator,provider:'fixture',model:'fixture',timeoutMs:1000})
+  const outcomes:ExtractionOutcome[]=[]
+  const worker=createJobWorker({pool,jobs,workerId:'timeout-budget-owner',signal:new AbortController().signal})
+  worker.register('extract_candidates',async(job,signal,ctx)=>{
+   const outcome=await extract.extract({installationId:installation,turnId:String(job.payload.turn_id),signal,fence:ctx?.fence,
+    retryFailedRunId:typeof job.payload.retry_failed_run_id==='string'?job.payload.retry_failed_run_id:undefined})
+   outcomes.push(outcome)
+   if(outcome.kind==='failed'&&outcome.retryable)throw new Error('retryable extraction')
+   await bridge(outcome)
+  })
+  try{
+   await jobs.enqueueJob({installationId:installation,jobType:'extract_candidates',idempotencyKey:'timeout-first',payload:{turn_id:e.turn}})
+   await worker.tick()
+   expect(outcomes[0]).toMatchObject({kind:'failed',errorCode:'provider_result_unknown',retryable:false,
+    timeoutFallback:{primary:{billingUncertain:true,budgetReservationId:expect.any(String)}}})
+   const run=(await pool.query('SELECT run_id,state,error_code FROM memory_extraction_runs')).rows[0]
+   expect(run).toMatchObject({state:'failed',error_code:'provider_result_unknown'})
+   expect((await pool.query("SELECT state,attempts FROM memory_jobs WHERE idempotency_key='timeout-first'")).rows[0])
+    .toEqual({state:'completed',attempts:1})
+   expect(await createExtractionRepository(pool).recoverBudgetWaits({consentFingerprint:'current-consent',limit:10})).toBe(0)
+   // Opening tomorrow's budget must not make the unknown run automatically safe.
+   await pool.query("UPDATE memory_provider_budget_reservations SET created_at=clock_timestamp()-interval '2 days'")
+   await jobs.enqueueJob({installationId:installation,jobType:'extract_candidates',idempotencyKey:'timeout-redelivery',payload:{turn_id:e.turn}})
+   await worker.tick();await worker.tick()
+   expect(outcomes[1]).toEqual({kind:'skipped_existing',runId:run.run_id,state:'failed'})
+   expect((await pool.query('SELECT run_id,state,error_code FROM memory_extraction_runs')).rows).toEqual([run])
+   expect((await pool.query('SELECT budget_key,state FROM memory_provider_budget_reservations')).rows)
+    .toEqual([{budget_key:'attempted-timeout',state:'reserved'}])
+   expect(primary).toHaveBeenCalledTimes(1)
+   expect(fallback).not.toHaveBeenCalled()
+   for(const retryFailedRunId of ['not-a-uuid', randomUUID()]){
+    await expect(extract.extract({installationId:installation,turnId:e.turn,signal:new AbortController().signal,retryFailedRunId}))
+     .resolves.toEqual({kind:'skipped_existing',runId:run.run_id,state:'failed'})
+   }
+   // The operator authorization is tied to the old exact run. One new failed
+   // attempt cannot be retired again by replaying that same authorization.
+   await jobs.enqueueJob({installationId:installation,jobType:'extract_candidates',idempotencyKey:`recovery:provider:${run.run_id}`,
+    payload:{turn_id:e.turn,retry_failed_run_id:run.run_id}})
+   await worker.tick()
+   expect(outcomes[2]).toMatchObject({kind:'failed',errorCode:'provider_result_unknown',retryable:false})
+   const newRun=(await pool.query('SELECT run_id,state,error_code FROM memory_extraction_runs')).rows[0]
+   expect(newRun.run_id).not.toBe(run.run_id)
+   expect(primary).toHaveBeenCalledTimes(2)
+   await pool.query("UPDATE memory_provider_budget_reservations SET created_at=clock_timestamp()-interval '2 days'")
+   await jobs.enqueueJob({installationId:installation,jobType:'extract_candidates',idempotencyKey:'old-authorization-replay',
+    payload:{turn_id:e.turn,retry_failed_run_id:run.run_id}})
+   await worker.tick()
+   expect(outcomes[3]).toEqual({kind:'skipped_existing',runId:newRun.run_id,state:'failed'})
+   expect(primary).toHaveBeenCalledTimes(2)
+   expect(fallback).not.toHaveBeenCalled()
+   expect((await pool.query('SELECT state FROM memory_provider_budget_reservations')).rows)
+    .toEqual([{state:'reserved'},{state:'reserved'}])
+   expect((await pool.query('SELECT run_id FROM memory_extraction_runs')).rows).toEqual([{run_id:newRun.run_id}])
+  }finally{await worker.stop()}
+ })
+
 })

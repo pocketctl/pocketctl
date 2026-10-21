@@ -126,6 +126,29 @@ db('context settings management under real capability grants (PostgreSQL)', () =
     expect(write.statusCode, write.body).toBe(200)
     expect((await stored()).find(row => row.installation_id === PERSONAL)).toEqual({ installation_id: PERSONAL, mode: 'enabled', revision: '2' })
   })
+  test('create_only cannot overwrite revision one and validates its type', async () => {
+    const token=v1()
+    const conflict=await app.inject({method:'PUT',url:'/api/v1/memory/context/settings',headers:headers(token),payload:{...payload,create_only:true}})
+    expect(conflict.statusCode).toBe(409)
+    expect((await pool.query('SELECT mode,revision::int FROM memory_context_settings WHERE installation_id=$1',[PERSONAL])).rows[0]).toEqual({mode:'off',revision:1})
+    const invalid=await app.inject({method:'PUT',url:'/api/v1/memory/context/settings',headers:{...headers(token),'idempotency-key':'invalid-create-flag'},payload:{...payload,create_only:'yes'}})
+    expect(invalid.statusCode).toBe(400)
+    const created=await app.inject({method:'PUT',url:'/api/v1/memory/context/settings',headers:{...headers(token),'idempotency-key':'new-session-setting'},payload:{...payload,scope_kind:'session',scope_key:'new-session',mode:'off',create_only:true}})
+    expect(created.statusCode).toBe(200)
+  })
+
+  test('repository UUID keys normalize before creation and conflict detection; session case is preserved',async()=>{
+    const token=v1();const repo='ABCDEFAB-1234-4234-8234-ABCDEFABCDEF'
+    const created=await app.inject({method:'PUT',url:'/api/v1/memory/context/settings',headers:headers(token),payload:{...payload,scope_kind:'repository',scope_key:repo,create_only:true}})
+    expect(created.statusCode).toBe(200)
+    expect((await pool.query("SELECT scope_key FROM memory_context_settings WHERE installation_id=$1 AND scope_kind='repository'",[PERSONAL])).rows[0].scope_key).toBe(repo.toLowerCase())
+    const duplicate=await app.inject({method:'PUT',url:'/api/v1/memory/context/settings',headers:{...headers(token),'idempotency-key':'lowercase-repo-duplicate'},payload:{...payload,scope_kind:'repository',scope_key:repo.toLowerCase(),create_only:true}})
+    expect(duplicate.statusCode).toBe(409)
+    const session=await app.inject({method:'PUT',url:'/api/v1/memory/context/settings',headers:{...headers(token),'idempotency-key':'case-sensitive-session'},payload:{...payload,scope_kind:'session',scope_key:'Session-AbC',mode:'off',create_only:true}})
+    expect(session.statusCode).toBe(200)
+    expect((await pool.query("SELECT scope_key FROM memory_context_settings WHERE installation_id=$1 AND scope_kind='session'",[PERSONAL])).rows[0].scope_key).toBe('Session-AbC')
+  })
+
   test('v1 cannot bypass shared-scope member authorization', async () => { await denied(v1({ installationId: TEAM }), 403) })
   test('v2 reader cannot configure a scope even with the manage service', async () => {
     await pool.query("UPDATE memory_scope_memberships SET roles=ARRAY['reader'] WHERE membership_id=$1", [MEMBER])

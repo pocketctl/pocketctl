@@ -12,6 +12,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 
 export type EnvelopeDecision =
   | { kind: 'content_gap'; envelope: ExtensionFeedEnvelopeV1 }
+  | { kind: 'discovery_gap'; envelope: ExtensionFeedEnvelopeV1 }
   | { kind: 'fatal'; errorCode: 'invalid_content_gap' }
   | { kind: 'accepted'; envelope: ExtensionFeedEnvelopeV1 }
   | { kind: 'quarantined'; errorCode: 'unsupported_envelope_version' | 'invalid_envelope' }
@@ -39,7 +40,8 @@ export function classifyEnvelope(input: unknown): EnvelopeDecision {
   if (!isPlainObject(input)) return { kind: 'quarantined', errorCode: 'invalid_envelope' }
   if (input.quarantine !== undefined) {
     if (!validContentGap(input)) return { kind: 'fatal', errorCode: 'invalid_content_gap' }
-    return { kind: 'content_gap', envelope: input as unknown as ExtensionFeedEnvelopeV1 }
+    const eventType = (input.subject as Record<string, unknown>).event_type
+    return { kind: eventType === 'command_list' || eventType === 'session_agent_list' ? 'discovery_gap' : 'content_gap', envelope: input as unknown as ExtensionFeedEnvelopeV1 }
   }
   if (typeof input.envelope_version !== 'number' || !Number.isInteger(input.envelope_version)) {
     return { kind: 'quarantined', errorCode: 'invalid_envelope' }

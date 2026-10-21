@@ -1,4 +1,4 @@
-import {loadBusinessHealth, summarizeBusinessHealth} from './reporting/business-health.js'
+import {loadBudgetUncertainty,loadBusinessHealth, summarizeBusinessHealth} from './reporting/business-health.js'
 import {updateBusinessHealthGauges} from './metrics.js'
 import {recordRecallMetrics,updateRetrievalIndexGauges} from './metrics.js'
 import Fastify from 'fastify'
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     }
     try {
       await pool.query('SELECT 1')
-      return { ...summarizeBusinessHealth(await loadBusinessHealth(pool), config.mode !== 'off'), compatibility:MEMORY_BRIDGE_COMPATIBILITY }
+      return { ...summarizeBusinessHealth(await loadBusinessHealth(pool), config.mode !== 'off'), budget_uncertainty:await loadBudgetUncertainty(pool), compatibility:MEMORY_BRIDGE_COMPATIBILITY }
     } catch {
       reply.code(503)
       return { status: 'unavailable' }

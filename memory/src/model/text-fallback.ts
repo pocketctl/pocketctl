@@ -62,7 +62,24 @@ export function withTimeoutFallback(primary: TextGenerator, fallback: TextGenera
       const result = await primary.generateJson<T>(input)
       if (!result.ok && result.code === 'http_error' && result.detail === 'timeout'
         && !input.signal.aborted) {
-        return fallback.generateJson<T>(input)
+        // Keep the primary's existing identity so pre-deployment reservations
+        // still fence replays. Only the second remote attempt needs a distinct,
+        // stable identity; the budget wrappers retain the same shared pool.
+        const requestKey = input.requestKey
+          ? `timeout-fallback:v1:${createHash('sha256').update(input.requestKey).digest('hex')}`
+          : input.requestKey
+        const fallbackResult = await fallback.generateJson<T>({ ...input, requestKey })
+        return {
+          ...fallbackResult,
+          timeoutFallback: {
+            primary: {
+              code: 'http_error' as const,
+              detail: 'timeout' as const,
+              ...(result.budgetReservationId ? { budgetReservationId: result.budgetReservationId } : {}),
+              ...(result.billingUncertain ? { billingUncertain: true } : {}),
+            },
+          },
+        }
       }
       return result
     },

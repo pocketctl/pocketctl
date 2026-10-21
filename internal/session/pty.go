@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
@@ -44,6 +45,12 @@ func startPTYCli(provider platform.PTYProvider, cliPath string, args []string, c
 		env = ensureEnvDefault(env, "GH_PAGER", "cat")
 		env = ensureEnvDefault(env, "TERM_PROGRAM", "pocketctl")
 	}
+	var err error
+	args, env, err = appconfig.ApplyTaskTools(agentType, args, env)
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd.Args = append([]string{cmd.Path}, args...)
 	cmd.Env = env
 
 	// PR2: PTY 启动走 platform.PTYProvider（Unix=creack/pty, Windows=stub），

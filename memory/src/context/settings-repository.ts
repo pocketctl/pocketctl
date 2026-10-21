@@ -31,10 +31,15 @@ export function createContextSettingsRepository(pool: pg.Pool) {
       mode: ContextMode
       maxTokens: number | null
       expectedRevision: number
+      createOnly?: boolean
     }): Promise<{ ok: true; revision: number } | { ok: false; error: 'cas_conflict' }> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        // Serialize absent-row creation as well as revision updates.
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[
+          `context-setting:${input.installationId}:${JSON.stringify([input.scopeKind,input.scopeKey,input.agent])}`,
+        ])
         const existing = await client.query<{ setting_id: string; revision: string }>(`
           SELECT setting_id::text, revision::text FROM memory_context_settings
           WHERE installation_id = $1 AND scope_kind = $2 AND scope_key = $3
@@ -43,7 +48,7 @@ export function createContextSettingsRepository(pool: pg.Pool) {
         `, [input.installationId, input.scopeKind, input.scopeKey, input.agent])
         const row = existing.rows[0]
         if (row) {
-          if (Number(row.revision) !== input.expectedRevision) {
+          if (input.createOnly || Number(row.revision) !== input.expectedRevision) {
             await client.query('COMMIT')
             return { ok: false, error: 'cas_conflict' }
           }
@@ -64,11 +69,12 @@ export function createContextSettingsRepository(pool: pg.Pool) {
           INSERT INTO memory_context_settings
             (setting_id, installation_id, scope_kind, scope_key, agent, mode, max_tokens, revision)
           VALUES ($1, $2, $3, $4, $5, $6, $7, 1)
+          ON CONFLICT DO NOTHING
           RETURNING revision::text
         `, [randomUUID(), input.installationId, input.scopeKind, input.scopeKey,
           input.agent, input.mode, input.maxTokens])
         await client.query('COMMIT')
-        return { ok: true, revision: Number(inserted.rows[0].revision) }
+        return inserted.rows[0] ? { ok: true, revision: Number(inserted.rows[0].revision) } : {ok:false,error:'cas_conflict'}
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined)
         throw error

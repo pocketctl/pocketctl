@@ -129,7 +129,7 @@ describe('relay feed batch contract', () => {
 
 test.each(['agent_text', 'command_list', 'session_agent_list'])('oversize %s metadata has a dedicated non-projectable decision and controls fail closed', eventType => {
   const value = envelopeFixture({ subject: { session_id: 'ses-1', turn_id: 'turn-1', event_type: eventType }, data: {}, classification: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } })
-  expect(classifyEnvelope(value).kind).toBe('content_gap')
+  expect(classifyEnvelope(value).kind).toBe(eventType === 'agent_text' ? 'content_gap' : 'discovery_gap')
   expect(classifyEnvelope({ ...value, subject: { session_id: null, event_type: 'agent_text' } }).kind).toBe('fatal')
   expect(classifyEnvelope({ ...value, topic: 'session.deleted.v1' }).kind).toBe('fatal')
   for (const event_type of ['session_status', 'turn_completed', 'unknown_control']) {
