@@ -53,7 +53,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.5.7"
+var version = "0.5.8"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -113,6 +113,8 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "task-tools":
+		cmdTaskTools(os.Args[2:])
 	case "agent":
 		cmdAgent(os.Args[2:])
 	case "daemon":
@@ -261,6 +263,8 @@ func cmdDaemon(args []string) {
 		cmdDaemonUpdate(args[1:])
 	case "service":
 		cmdDaemonService(args[1:])
+	case "task-tools":
+		cmdTaskTools(args[1:])
 	case "keep-awake":
 		cmdDaemonKeepAwake(args[1:])
 	default:

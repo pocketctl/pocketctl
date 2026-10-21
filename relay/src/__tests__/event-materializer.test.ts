@@ -38,6 +38,14 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test.each([undefined, null, '', '   ', 1])('rejects session_status without a usable status (%s) before any write', async status => {
+    const pool = pools()
+    await expect(new EventMaterializer({ pool: pool as never }).materialize(inputFor({
+      type: 'session_status', session_id: 'ses-1', status,
+    }))).rejects.toMatchObject({ name: 'SchemaValidationError' })
+    expect(pool.query).not.toHaveBeenCalled()
+  })
+
   test('DSH authoritative default effort clears a previously stored effort', async () => {
     const update = vi.spyOn(db, 'updateSessionMetadata').mockResolvedValue(undefined)
     const materializer = new EventMaterializer({ pool: pools() as never })

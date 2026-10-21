@@ -38,6 +38,11 @@ func startCodexAppServerForHome(ctx context.Context, binary, _ string, _ uint64,
 		cmd.Env = codexCommandEnvironment(cmd.Env, []string{"CODEX_HOME=" + home})
 	}
 	cmd.Env = codexAppServerEnv(cmd.Env)
+	var err error
+	cmd.Args, cmd.Env, err = applyManagedTaskToolsCommand("codex", cmd.Args, cmd.Env)
+	if err != nil {
+		return nil, err
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	reader, writer := io.Pipe()
 	cmd.Stdout, cmd.Stderr = writer, writer

@@ -117,6 +117,10 @@ func startCodexAppServerWithIdentity(ctx context.Context, binary string, generat
 	cmd.Env = codexCommandEnvironment(os.Environ(), cmd.Env)
 	cmd.Env = codexAppServerEnv(cmd.Env)
 	cmd.Env = append(cmd.Env, "POCKETCTL_CODEX_SOCKET="+socketPath)
+	cmd.Args, cmd.Env, err = applyManagedTaskToolsCommand("codex", cmd.Args, cmd.Env)
+	if err != nil {
+		return nil, err
+	}
 	stderr := &codexStartupStderr{}
 	phase := "start"
 	defer func() { stderr.finish(phase, generation) }()

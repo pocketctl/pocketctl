@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	appconfig "github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/ptyscan"
 )
@@ -385,6 +386,12 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 			return err
 		}
 	}
+	spec.Args, spec.Env, err = appconfig.ApplyTaskTools(agentType, spec.Args, spec.Env)
+	if err != nil {
+		cancel()
+		sm.finishOwnedResume(entry, err)
+		return err
+	}
 	proc, err := sm.startResumeProcess(ctx, spec)
 	if err != nil {
 		cancel()
@@ -508,6 +515,12 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 			sm.finishOwnedResume(entry, err)
 			return err
 		}
+	}
+	spec.Args, spec.Env, err = appconfig.ApplyTaskTools(agentType, spec.Args, spec.Env)
+	if err != nil {
+		cancel()
+		sm.finishOwnedResume(entry, err)
+		return err
 	}
 	proc, err := sm.startResumeProcess(ctx, spec)
 	if err != nil {

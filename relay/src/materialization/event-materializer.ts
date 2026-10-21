@@ -1080,6 +1080,14 @@ export class EventMaterializer {
   }
 
   async materialize(input: MaterializationInput, effect?: MaterializationEffect, options: MaterializationRunOptions = {}): Promise<MaterializationResult> {
+    // Sparse legacy status packets must not replace a known terminal state
+    // with "unknown" or clear an active turn. Reject before persistence.
+    if (input.eventType === 'session_status'
+      && (typeof input.payload.status !== 'string' || !input.payload.status.trim())) {
+      const error = new Error('session_status requires a nonempty status')
+      error.name = 'SchemaValidationError'
+      throw error
+    }
     for (let attempt=0; attempt<3; attempt++) {
       try { return await this.materializeAttempt(input,effect,options) }
       catch (error) { if (!(error instanceof AdmissionSessionMovedError) || attempt === 2) throw error }
