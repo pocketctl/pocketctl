@@ -83,8 +83,8 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
     for (const item of pulled.items) {
       const decision = classifyEnvelope(item)
       if (decision.kind === 'fatal') throw new Error('invalid_content_gap: batch was not committed or acknowledged')
-      if (decision.kind === 'content_gap') {
-        quarantined.push({ feed_id: decision.envelope.feed_id, error_code: 'oversized_content', raw: decision.envelope, gap: decision.envelope })
+      if (decision.kind === 'content_gap' || decision.kind === 'discovery_gap') {
+        quarantined.push({ feed_id: decision.envelope.feed_id, error_code: decision.kind === 'discovery_gap' ? 'oversized_discovery' : 'oversized_content', raw: decision.envelope, gap: decision.envelope })
       } else if (decision.kind === 'accepted') accepted.push(decision.envelope)
       else {
         const rawFeedId = (item as { feed_id?: unknown }).feed_id

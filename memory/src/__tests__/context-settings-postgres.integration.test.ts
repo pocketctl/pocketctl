@@ -84,6 +84,18 @@ describeWithDatabase('context settings and loadouts (PostgreSQL)', () => {
     `, [INSTALLATION])
   })
 
+  test('create-only is atomic and never overwrites an existing revision-one setting', async () => {
+    const settings = createContextSettingsRepository(pool)
+    const input = {installationId:INSTALLATION,scopeKind:'session' as const,scopeKey:'create-race',agent:null,mode:'off' as const,maxTokens:1000,expectedRevision:1,createOnly:true}
+    const results=await Promise.all([settings.upsert(input),settings.upsert({...input,mode:'enabled'})])
+    expect(results.filter(r=>r.ok)).toHaveLength(1)
+    expect(results.filter(r=>!r.ok)).toHaveLength(1)
+    const before=(await settings.list({installationId:INSTALLATION})).find(row=>row.scopeKey==='create-race')!
+    expect(before.revision).toBe(1)
+    expect(await settings.upsert({...input,mode:before.mode==='off'?'enabled':'off'})).toEqual({ok:false,error:'cas_conflict'})
+    expect((await settings.list({installationId:INSTALLATION})).find(row=>row.scopeKey==='create-race')).toEqual(before)
+  })
+
   test('effective mode is the minimum across scopes; agent rows override generic', async () => {
     await settings.upsert({
       installationId: INSTALLATION, scopeKind: 'installation', scopeKey: 'global',

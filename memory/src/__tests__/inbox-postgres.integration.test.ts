@@ -82,11 +82,12 @@ describeWithDatabase('durable inbox (PostgreSQL)', () => {
     expect(ack).toHaveBeenCalledTimes(1)
     await consumer.runOnce()
     expect(ack).toHaveBeenCalledTimes(2)
+    expect((await pool.query(`SELECT event_type,error_code FROM memory_feed_inbox WHERE installation_id=$1 AND feed_id=1`,[INSTALLATION])).rows[0]).toEqual({event_type:eventType,error_code:eventType === 'agent_text' ? 'oversized_content' : 'oversized_discovery'})
     expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(2)
     expect((await pool.query(`SELECT COUNT(*)::int AS n FROM source_events WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
     await createPurgeRepository(pool, { hmacKey: 'test-key' }).purgeSession({ installationId: INSTALLATION, sessionId: 'ses-1', reason: 'session_deleted', sourceFeedId: null })
     expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
-    await inbox.commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '1', error_code: 'oversized_content', raw: gap, gap }], cursor: 'cursor', leaseToken: 'lease', ack: async () => 1 })
+    await inbox.commitBatch({ installationId: INSTALLATION, envelopes: [], rawQuarantined: [{ feed_id: '1', error_code: eventType === 'agent_text' ? 'oversized_content' : 'oversized_discovery', raw: gap, gap }], cursor: 'cursor', leaseToken: 'lease', ack: async () => 1 })
     expect((await pool.query(`SELECT COUNT(*)::int AS n FROM memory_feed_inbox WHERE installation_id=$1`, [INSTALLATION])).rows[0].n).toBe(0)
   })
 

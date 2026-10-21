@@ -620,6 +620,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       || typeof body.mode !== 'string'
       || !['off', 'shadow', 'enabled'].includes(body.mode)
       || !positiveRevision(body.expected_revision)
+      || (body.create_only !== undefined && typeof body.create_only !== 'boolean')
       || !optionalBoundedString(body.agent, 64)
       || (body.max_tokens !== undefined && body.max_tokens !== null
         && (typeof body.max_tokens !== 'number' || !Number.isSafeInteger(body.max_tokens)
@@ -628,11 +629,12 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     }
     const setting = {
       scopeKind: body.scope_kind as 'installation' | 'repository' | 'session',
-      scopeKey: String(body.scope_key),
+      scopeKey: body.scope_kind === 'repository' ? String(body.scope_key).toLowerCase() : String(body.scope_key),
       agent: typeof body.agent === 'string' ? body.agent : null,
       mode: body.mode as ContextMode,
       maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : null,
       expectedRevision: body.expected_revision as number,
+      createOnly: body.create_only === true,
     }
     const outcome = await mutation(req, grant.installationId, 'context_settings', async transactionPool => {
       const result = await createContextSettingsRepository(transactionPool).upsert({

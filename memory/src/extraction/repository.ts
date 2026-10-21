@@ -131,8 +131,9 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
 
     /**
      * Reserve the run uniqueness key. A leftover 'failed' run from a previous
-     * bounded retry is retired first; an existing running/succeeded/
-     * quarantined run is returned so the caller can skip the model call.
+     * bounded retry is retired first, except an unknown provider result needs
+     * an exact operator-authorized run ID. Existing running/succeeded/
+     * quarantined and unauthorized unknown runs skip the model call.
      */
     async reserveRun(input: {
       installationId: string
@@ -150,6 +151,8 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
       maxRunsPerEpisode?: number
       fence?: JobFence
       expectedConsentFingerprint?: string
+      /** Exact unknown-result run authorized for one bounded operator retry. */
+      retryFailedRunId?: string
     }): Promise<ReservedRun> {
       const effectivePolicyHashValue = input.effectivePolicyHash ?? DEFAULT_POLICY_HASH
       const client = await pool.connect()
@@ -198,12 +201,14 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
               AND effective_policy_hash = $6 AND prompt_version=$8
-              AND (state = 'failed'
+              AND ((state = 'failed' AND (error_code IS DISTINCT FROM 'provider_result_unknown' OR run_id = $9::uuid))
                 OR (state = 'running'
                   AND started_at < NOW() - ($7 * INTERVAL '1 millisecond')))
           `, [input.installationId, input.episodeId, input.sourceDigest,
             input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,
-            Math.max(60_000, input.staleAfterMs),input.promptVersion])
+            Math.max(60_000, input.staleAfterMs),input.promptVersion,
+            input.retryFailedRunId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.retryFailedRunId)
+              ? input.retryFailedRunId : null])
           const existing = await client.query<{ run_id: string; state: ExtractionRunState }>(`
             SELECT run_id::text, state FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2

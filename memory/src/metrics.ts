@@ -1,4 +1,4 @@
-import {BUSINESS_HEALTH_REASONS, loadBusinessHealth, evaluateBusinessHealth} from './reporting/business-health.js'
+import {BUSINESS_HEALTH_REASONS, loadBudgetUncertainty,loadBusinessHealth, evaluateBusinessHealth} from './reporting/business-health.js'
 import {JOB_TYPES} from './jobs/types.js'
 import { Registry, Counter, Gauge, Histogram } from 'prom-client'
 import type pg from 'pg'
@@ -30,6 +30,8 @@ export function createMemoryMetrics() {
   const phase6 = createPhase6Metrics(registry)
 
   const businessAlerts = new Gauge({name:'pocketctl_memory_business_alerts',help:'Installations with active bounded business health alerts',labelNames:['reason'] as const,registers:[registry]})
+  const budgetUncertainty = new Gauge({name:'pocketctl_memory_text_budget_uncertainty',help:'Current Shanghai-day provider-pool reservations older than five minutes, including successful fallback runs',labelNames:['kind'] as const,registers:[registry]})
+  const extractionOutcomes = new Gauge({name:'pocketctl_memory_extraction_outcomes',help:'Durable extraction failures, separate from dead queue jobs',labelNames:['kind'] as const,registers:[registry]})
   const evidenceGaps = new Gauge({name:'pocketctl_memory_evidence_gaps',help:'Retained oversized-content quarantine envelopes without content',registers:[registry]})
   const installations = new Gauge({
     name: 'pocketctl_memory_installations',
@@ -123,7 +125,7 @@ export function createMemoryMetrics() {
 
   return {
     registry,
-    businessAlerts, evidenceGaps,
+    businessAlerts, evidenceGaps, extractionOutcomes, budgetUncertainty,
     installations,
     feedPulls,
     feedAcks,
@@ -770,7 +772,10 @@ export async function updateRetrievalIndexGauges(pool:Pick<pg.Pool,'query'>,metr
 /** Write every frozen reason on every refresh, including zero after recovery. */
 export async function updateBusinessHealthGauges(pool:Pick<pg.Pool,'query'>,metrics:MemoryMetrics,enabled=true):Promise<void>{
   const rows=await loadBusinessHealth(pool)
+  const uncertainty=await loadBudgetUncertainty(pool)
+  for(const kind of ['aged_reserved_requests','reserved_input_tokens','reserved_output_tokens'] as const) metrics.budgetUncertainty.set({kind},uncertainty[kind])
   const health=rows.map(row=>evaluateBusinessHealth(row,enabled))
   for(const reason of BUSINESS_HEALTH_REASONS)metrics.businessAlerts.set({reason},health.filter(row=>row.reasons.includes(reason)).length)
+  for(const kind of ['failed_extractions_24h','quarantined_extractions_24h','uncertain_extractions_24h','unresolved_extractions'] as const) metrics.extractionOutcomes.set({kind},rows.reduce((sum,row)=>sum+Number(row[kind]??0),0))
   metrics.evidenceGaps.set(rows.reduce((sum,row)=>sum+Number(row.evidence_gaps??0),0))
 }

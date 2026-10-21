@@ -17,8 +17,18 @@ export interface ModelUsage {
   costMicros?: number
 }
 
+/** Content-free provenance for the timed-out primary when fallback is used. */
+export interface TimeoutFallbackDiagnostics {
+  primary: {
+    code: 'http_error'
+    detail: 'timeout'
+    budgetReservationId?: string
+    billingUncertain?: boolean
+  }
+}
+
 export type ModelJsonResult<T> =
-  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean }
+  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean; timeoutFallback?: TimeoutFallbackDiagnostics }
   | {
       ok: false
       code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'provider_result_unknown'
@@ -31,6 +41,7 @@ export type ModelJsonResult<T> =
       budgetReservationId?: string
       retryAt?: string
       billingUncertain?: boolean
+      timeoutFallback?: TimeoutFallbackDiagnostics
     }
 
 export interface TextGenerator {

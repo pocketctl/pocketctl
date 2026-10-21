@@ -21,7 +21,7 @@ let generation=0
 let timer:ReturnType<typeof setInterval>|undefined
 const state=computed(()=>snapshot.value?.state??(loaded.value?'unknown':'loading'))
 const attention=computed(()=>['degraded','error','offline'].includes(state.value))
-const reasons=['feed_stalled','budget_blocked','extraction_stalled','evidence_gap','feed_integrity']
+const reasons=['feed_stalled','budget_blocked','extraction_stalled','extraction_failed','evidence_gap','feed_integrity']
 const reason=computed(()=>attention.value&&reasons.includes(snapshot.value?.last_error_code??'')?snapshot.value!.last_error_code:null)
 async function refresh(){
   if(busy.value)return

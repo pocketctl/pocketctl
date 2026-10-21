@@ -12,7 +12,7 @@ export class FeedIntegrityError extends Error {
 
 export interface QuarantinedInput {
   feed_id: string
-  error_code: 'unsupported_envelope_version' | 'invalid_envelope' | 'oversized_content'
+  error_code: 'unsupported_envelope_version' | 'invalid_envelope' | 'oversized_content' | 'oversized_discovery'
   gap?: ExtensionFeedEnvelopeV1
   raw: unknown
 }
@@ -43,9 +43,9 @@ export function createInboxRepository(pool: pg.Pool) {
           try {
             // Match purge/extraction ordering: all session locks precede the
             // installation lock, even when one batch contains multiple gaps.
-            const gaps = input.rawQuarantined.filter(row => row.error_code === 'oversized_content')
+            const gaps = input.rawQuarantined.filter(row => row.error_code === 'oversized_content' || row.error_code === 'oversized_discovery')
             for (const row of gaps) {
-              if (!row.gap || row.gap.feed_id !== row.feed_id || classifyEnvelope(row.gap).kind !== 'content_gap') throw new Error('invalid_content_gap')
+              if (!row.gap || row.gap.feed_id !== row.feed_id || classifyEnvelope(row.gap).kind !== (row.error_code === 'oversized_discovery' ? 'discovery_gap' : 'content_gap')) throw new Error('invalid_content_gap')
             }
             const sessions = [...new Set(gaps.map(row => row.gap!.subject.session_id!))].sort()
             for (const sessionId of sessions) {
@@ -89,7 +89,7 @@ export function createInboxRepository(pool: pg.Pool) {
             }
             for (const quarantined of input.rawQuarantined) {
               const feedId = quarantined.feed_id
-              if (quarantined.error_code === 'oversized_content') {
+              if (quarantined.error_code === 'oversized_content' || quarantined.error_code === 'oversized_discovery') {
                 const tombstone = await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2', [input.installationId, quarantined.gap!.subject.session_id])
                 // A later redelivery must not resurrect purged source metadata.
                 if (tombstone.rowCount) { maxFeedId = maxDecimal(maxFeedId, feedId); continue }
@@ -100,7 +100,7 @@ export function createInboxRepository(pool: pg.Pool) {
                 INSERT INTO memory_feed_inbox
                   (installation_id, feed_id, envelope_version, topic, source_kind, source_id,
                    event_type, recorded_at, data, payload_hash, projection_state, error_code, session_id, turn_id)
-                VALUES ($1, $2::bigint, 1, 'quarantined', 'relay', $3, 'quarantined', NOW(),
+                VALUES ($1, $2::bigint, 1, 'quarantined', 'relay', $3, $9, NOW(),
                         $4::jsonb, $5, 'quarantined', $6, $7, $8)
                 ON CONFLICT (installation_id, feed_id) DO NOTHING
               `, [
@@ -112,6 +112,7 @@ export function createInboxRepository(pool: pg.Pool) {
                 quarantined.error_code,
                 quarantined.gap?.subject.session_id ?? null,
                 quarantined.gap?.subject.turn_id ?? null,
+                quarantined.gap?.subject.event_type ?? 'quarantined',
               ])
               if ((insert.rowCount ?? 0) === 0) {
                 await assertReplayHash(client, input.installationId, feedId, hash)

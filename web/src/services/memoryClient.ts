@@ -622,6 +622,7 @@ export async function putContextSetting(input: {
   agent?: string | null
   mode: 'off' | 'shadow' | 'enabled'
   max_tokens?: number | null
+  create_only?: boolean
   expected_revision: number
 }): Promise<{ revision: number }> {
   return memoryJson('memory.manage', '/api/v1/memory/context/settings', {

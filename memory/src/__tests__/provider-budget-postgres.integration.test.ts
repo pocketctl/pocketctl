@@ -1,7 +1,9 @@
 import pg from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
-import { createProviderBudgetStore } from '../model/provider-budget.js'
+import { createProviderBudgetStore, withTextProviderBudget } from '../model/provider-budget.js'
+import { withTimeoutFallback } from '../model/text-fallback.js'
+import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
@@ -93,4 +95,75 @@ describeWithDatabase('provider budget reservations (PostgreSQL)', () => {
     expect((await pool.query(`SELECT count(*)::int AS count FROM memory_provider_budget_reservations
       WHERE budget_key = $1`, [key])).rows[0].count).toBe(3)
   })
+
+  const timeout = { ok: false as const, code: 'http_error' as const, detail: 'timeout', retryable: true }
+  const success = { ok: true as const, value: { provider: 'fallback' },
+    usage: { inputTokens: 7, outputTokens: 3, model: 'synthetic' } }
+  const routeInput = { operation: 'candidate_extract' as const, requestKey: 'extraction:stable-run:candidate_extract',
+    system: 'synthetic', document: {}, schema: {}, timeoutMs: 1000, signal: new AbortController().signal }
+  const routeLimits = { key: 'timeout-route', window: 'daily-asia-shanghai' as const,
+    maxRequests: 2, maxInputTokens: 100_000, maxOutputTokens: 100, maxOutputTokensPerRequest: 10 }
+
+  function route(fallbackResult: ModelJsonResult<unknown> = success,
+    limits = routeLimits, primaryResult: ModelJsonResult<unknown> = timeout) {
+    const store = createProviderBudgetStore(pool)
+    const primary = { generateJson: vi.fn(async () => primaryResult) } as TextGenerator
+    const fallback = { generateJson: vi.fn(async () => fallbackResult) } as TextGenerator
+    return { primary, fallback, generator: withTimeoutFallback(
+      withTextProviderBudget(primary, store, limits), withTextProviderBudget(fallback, store, limits),
+    ) }
+  }
+
+  test.each([true, false])('composed timeout fallback preserves two durable attempts and replay fence (settled fallback=%s)', async settled => {
+    const f = route(settled ? success : timeout)
+    const result = await f.generator.generateJson(routeInput)
+    expect(result.ok).toBe(settled)
+    expect(result).toMatchObject({ timeoutFallback: { primary: {
+      code: 'http_error', detail: 'timeout', billingUncertain: true,
+    } } })
+    const rows = (await pool.query(`SELECT reservation_id, budget_key, state,
+      reserved_output_tokens::int, actual_input_tokens::int, actual_output_tokens::int
+      FROM memory_provider_budget_reservations ORDER BY created_at`)).rows
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ budget_key: 'timeout-route', state: 'reserved', reserved_output_tokens: 10,
+      actual_input_tokens: 0, actual_output_tokens: 0 })
+    expect(rows[1]).toMatchObject({ budget_key: 'timeout-route', state: settled ? 'settled' : 'reserved',
+      actual_input_tokens: settled ? 7 : 0, actual_output_tokens: settled ? 3 : 0 })
+    expect(rows[0].reservation_id).not.toBe(rows[1].reservation_id)
+    expect(result.budgetReservationId).toBe(rows[1].reservation_id)
+    expect(result.timeoutFallback?.primary.budgetReservationId).toBe(rows[0].reservation_id)
+    // Recreate all wrappers and the store as after a process restart.
+    const replay = route()
+    await expect(replay.generator.generateJson(routeInput)).resolves.toMatchObject({ ok: false, code: 'provider_result_unknown' })
+    expect(replay.primary.generateJson).not.toHaveBeenCalled()
+    expect(replay.fallback.generateJson).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT count(*)::int n FROM memory_provider_budget_reservations')).rows[0].n).toBe(2)
+    expect(f.primary.generateJson).toHaveBeenCalledTimes(1)
+    expect(f.fallback.generateJson).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([
+    { maxRequests: 1, maxOutputTokens: 100, dimension: 'text_requests' },
+    { maxRequests: 2, maxOutputTokens: 10, dimension: 'text_output_tokens' },
+  ])('timeout reservation still consumes the shared $dimension limit before fallback', async cap => {
+    const f = route(success, { ...routeLimits, maxRequests: cap.maxRequests, maxOutputTokens: cap.maxOutputTokens })
+    await expect(f.generator.generateJson(routeInput)).resolves.toMatchObject({ ok: false, code: 'budget_exceeded',
+      detail: cap.dimension, retryAt: expect.any(String), timeoutFallback: { primary: { billingUncertain: true } } })
+    expect(f.primary.generateJson).toHaveBeenCalledTimes(1)
+    expect(f.fallback.generateJson).not.toHaveBeenCalled()
+    const rows = (await pool.query('SELECT budget_key, state FROM memory_provider_budget_reservations')).rows
+    expect(rows).toEqual([{ budget_key: 'timeout-route', state: 'reserved' }])
+  })
+
+  test.each(['reserved', 'settled'])('an existing primary identity is preserved across deployment (%s)', async state => {
+    // Seed using the old direct budget wrapper without the routing layer.
+    const primary = { generateJson: vi.fn(async () => state === 'settled' ? success : timeout) } as TextGenerator
+    await withTextProviderBudget(primary, createProviderBudgetStore(pool), routeLimits).generateJson(routeInput)
+    const f = route()
+    await expect(f.generator.generateJson(routeInput)).resolves.toMatchObject({ ok: false, code: 'provider_result_unknown' })
+    expect(f.primary.generateJson).not.toHaveBeenCalled()
+    expect(f.fallback.generateJson).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT state FROM memory_provider_budget_reservations')).rows).toEqual([{ state }])
+  })
+
 })
