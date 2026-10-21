@@ -130,6 +130,10 @@ type Client struct {
 
 	replayACKs *replayACKCache // protected by outMu; populated only by real ACKs
 
+	// Owned by the serve loop across reconnects. These events have left outputCh
+	// (and passed OnEvent once) but have not all entered the durable buffer yet.
+	pendingEvents []protocol.DaemonEvent
+
 	// HostAwake reports full system wake, not display activity. Set before Run.
 	HostAwake func() (bool, error)
 
@@ -747,6 +751,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	if !c.replayOutbound(ctx, conn, done) {
 		return readPumpError(readErr, "connection closed during durable replay")
 	}
+	if !c.sendPendingEvents(done) {
+		return readPumpError(readErr, "connection closed during pending delivery")
+	}
 
 	// Re-announce current authoritative session snapshots only after every
 	// durable event from the previous connection has been replayed. Otherwise a
@@ -769,15 +776,12 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 			// events (e.g. session_model_changed from an agent_text model change)
 			// before forwarding to the relay.
 			if c.OnEvent != nil {
-				for _, e := range c.OnEvent(evt) {
-					if !c.sendEventUntil(e, done) {
-						return fmt.Errorf("connection closed")
-					}
-				}
+				c.pendingEvents = append(c.pendingEvents, c.OnEvent(evt)...)
 			} else {
-				if !c.sendEventUntil(evt, done) {
-					return fmt.Errorf("connection closed")
-				}
+				c.pendingEvents = append(c.pendingEvents, evt)
+			}
+			if !c.sendPendingEvents(done) {
+				return readPumpError(readErr, "connection closed during event delivery")
 			}
 		case <-done:
 			return readPumpError(readErr, "connection closed")
@@ -1078,25 +1082,47 @@ func (c *Client) sendEvent(evt protocol.DaemonEvent) {
 }
 
 func (c *Client) sendEventUntil(evt protocol.DaemonEvent, stop <-chan struct{}) bool {
+	_, ok := c.deliverEventUntil(evt, stop)
+	return ok
+}
+
+func (c *Client) sendPendingEvents(stop <-chan struct{}) bool {
+	for len(c.pendingEvents) > 0 {
+		retry, ok := c.deliverEventUntil(c.pendingEvents[0], stop)
+		if !retry {
+			c.pendingEvents[0] = protocol.DaemonEvent{}
+			c.pendingEvents = c.pendingEvents[1:]
+		}
+		if !ok {
+			return false
+		}
+	}
+	c.pendingEvents = nil
+	return true
+}
+
+// retry is true only when connection loss interrupted durable admission. Once
+// frames are buffered, replay owns them even if a subsequent write fails.
+func (c *Client) deliverEventUntil(evt protocol.DaemonEvent, stop <-chan struct{}) (retry, ok bool) {
 	if protocol.IsSessionDocumentUploadEvent(evt.Type) {
 		c.outMu.Lock()
 		supported := c.sessionDocumentSupported
 		c.outMu.Unlock()
 		if !supported {
 			c.logger.Debug("document snapshot event suppressed for incompatible relay", "type", evt.Type)
-			return true
+			return false, true
 		}
 	}
 	frames, ok := c.appendPreparedOutboundUntil(&evt, stop)
 	if !ok {
-		return false
+		return channelClosed(stop), false
 	}
 	for _, frame := range frames {
 		if !c.writeBuffered(frame.seq, frame.data, stop) {
-			return false
+			return false, false
 		}
 	}
-	return true
+	return false, true
 }
 
 func (c *Client) appendPreparedOutboundUntil(
