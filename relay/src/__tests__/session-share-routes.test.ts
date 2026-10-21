@@ -3,13 +3,15 @@ import jwt from 'jsonwebtoken'
 import { randomUUID } from 'node:crypto'
 import type { ShareRecord, ShareStore } from '../session-share/store.js'
 import { readFileSync } from 'node:fs'
-import { afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const shareTestKey = 'share-test-key'
+// The stored grant and its JWT must share the same issuance time, as in production.
+let fixtureIssuedAt: number
 
 type ShareClaims = { userId: number; sessionId: string }
 function memoryStore(): ShareStore & {rows: Map<string,ShareRecord>} {
-  const time=new Date(Math.floor(Date.now()/1000)*1000)
+  const time=new Date(fixtureIssuedAt*1000)
   const row:ShareRecord={id:'11111111-1111-4111-8111-111111111111',user_id:7,session_id:'ses_1',title:'Example',created_at:time,expires_at:new Date(+time+900000),revoked_at:null,server_time:time}
   const rows=new Map([[row.id,row]]),requests=new Map<string,string>()
   const get=async(userId:number,id:string)=>{const r=rows.get(id);return r&&r.user_id===userId?{...r,server_time:new Date()}:null}
@@ -30,9 +32,13 @@ describe('temporary session share links', () => {
     vi.stubEnv('JWT_SECRET', shareTestKey)
     const auth = await import('../auth.js')
     const routes = await import('../session-share-routes.js')
-    signSessionShareToken = (userId,sessionId) => auth.signManagedSessionShareToken({userId,sessionId,shareId:'11111111-1111-4111-8111-111111111111',iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+900})
+    signSessionShareToken = (userId,sessionId) => auth.signManagedSessionShareToken({userId,sessionId,shareId:'11111111-1111-4111-8111-111111111111',iat:fixtureIssuedAt,exp:fixtureIssuedAt+900})
     verifySessionShareToken = auth.verifyManagedSessionShareToken
     registerSessionShareRoutes = routes.registerSessionShareRoutes
+  })
+
+  beforeEach(() => {
+    fixtureIssuedAt = Math.floor(Date.now() / 1000)
   })
 
   afterEach(async () => {
@@ -169,6 +175,31 @@ describe('temporary session share links', () => {
     expect(response.body).not.toContain('private.md')
     expect(response.body).not.toContain('private-body')
     expect(response.body).not.toContain('session_document')
+  })
+
+  test('public viewer remains available when fixture setup crosses a second boundary', async () => {
+    const start = new Date(Math.floor(Date.now() / 1000) * 1000 + 999)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(start)
+      const app = makeApp()
+      vi.setSystemTime(new Date(start.getTime() + 1))
+      const token = signSessionShareToken(7, 'ses_1')
+      const response = await app.inject({ method: 'GET', url: `/share/session/${token}` })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toContain('first-event')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('public viewer rejects signed timestamps that do not match the stored grant', async () => {
+    const app = makeApp()
+    const claims = jwt.decode(signSessionShareToken(7, 'ses_1')) as jwt.JwtPayload
+    const token = jwt.sign({ ...claims, iat: claims.iat! + 1, exp: claims.exp! + 1 }, shareTestKey)
+
+    expect((await app.inject(`/share/session/${token}`)).statusCode).toBe(404)
   })
 
   test('all invalid, expired, wrong-type, and mismatched share tokens return one generic unavailable page', async () => {
