@@ -2,94 +2,39 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-**Keep your AI coding agents within reach.**
+**Step away from your desk. Keep your coding agents moving from your iPhone.**
 
-PocketCtl is a cross-device control plane for Claude Code, Codex, OpenCode, and
-ZCode. Follow work from a browser or iPhone, respond when an agent needs you,
-and continue supported sessions without moving the repository or agent process
-off your development machine.
+Use PocketCtl to check on Codex, Claude Code, OpenCode, and other agents, answer questions, handle approvals, or send the next instruction. Your repositories and agents keep running on your development machine while you continue from your iPhone or browser.
+
+**iOS 2.1 is available on the App Store and connects to PocketCtl's hosted service.** You can also use the Web app.
 
 [Website](https://www.pocketctl.me) · [Web app](https://www.pocketctl.me/app) · [iOS app](https://apps.apple.com/cn/app/pocketctl/id6778710005) · [Releases](https://github.com/pocketctl/pocketctl/releases)
 
+<table>
+  <tr><th>Follow development</th><th>Review test results</th><th>Check completion</th></tr>
+  <tr><td><img src="docs/images/iphone-session-demo-en.png" width="250" alt="Follow development" /></td><td><img src="docs/images/iphone-validation-demo-en.png" width="250" alt="Review test results" /></td><td><img src="docs/images/iphone-completion-demo-en.png" width="250" alt="Check completion" /></td></tr>
+</table>
+
+Workflow demo in a native iOS simulator, with synthetic English conversations; these are not actual test or deployment receipts. Commit and deployment skills shown belong to the example project and require configuration in your own agent environment.
+
 ## Why PocketCtl
 
-- **Stay in the loop from anywhere** — stream session output, status, tool calls,
-  edited files, plans, and sub-agent activity in real time.
-- **Act when the runtime supports it** — send follow-up messages, answer
-  questions, handle approvals, steer work, or interrupt a turn from Web or iOS.
-- **Start sessions from a directory picker** — browse and select the working
-  directory for a new session on Web or iOS instead of typing paths by hand.
-- **Keep the native terminal experience** — managed Codex and OpenCode sessions
-  continue to use their official TUI while sharing one runtime with PocketCtl.
-- **Recover context after a disconnect** — the Relay persists normalized events
-  for replay, and the daemon reconciles supported managed sessions after restart.
-- **Browse session documents remotely** — capture secure snapshots of a
-  session's key documents and view or download them from Web or iOS,
-  including clicking HTML/Markdown document links directly in conversation
-  history.
-- **Organize sessions with projects** — group sessions into projects, pin the
-  ones that matter, and archive finished sessions to keep the active list
-  focused, from Web or iOS.
-- **Focus attention** — the optional Attention Inbox groups pending questions,
-  approvals, high-risk actions, and recovery signals with their session context.
-  System notifications show session maintenance results separately, with unread
-  status and cleanup progress for each affected session.
-- **Collaborate with people and their Agents (experimental)** — the Web client
-  can create Teams, shared tasks and sessions, route bounded work to
-  member-contributed Codex, Claude Code, or DeepSeek Harness Agents, and
-  optionally run budgeted
-  multi-Agent coordination.
-- **Grow governed project knowledge (experimental)** — the optional Memory
-  workbench turns repository sources into a review-gated wiki and a dependency
-  code graph with impact analysis, and keeps skill documents under explicit
-  governance.
+- **Follow work away from your desk** — see output, tools, plans, and file changes from multiple agents on iPhone or in a browser.
+- **Respond when needed** — reply, handle approvals and questions, or interrupt work in supported sessions.
+- **Keep your native terminal** — managed Codex/OpenCode sessions share one runtime with your phone; repositories and agent processes stay on your development machine.
+- **Read reports on your phone** — open HTML/Markdown documents from a session to review agent-generated test or acceptance reports before deciding what to do next.
+- **Organize and share results** — group, pin, and archive sessions, browse documents, and create revocable read-only share links.
 
-## Agent support
-
-Control is deliberately capability-based. A discovered session is not
-automatically advertised as remotely controllable.
-
-| Agent | Observe | Remote interaction | Integration model |
-|---|---|---|---|
-| **Claude Code** | Live history and output | Independently started terminal sessions can continue through an idle/exited `--resume` handoff. PocketCtl-created PTYs support Web/iOS approvals; the native terminal remains authoritative for independently started sessions. | Automatic discovery; no shared runtime claim. See [Claude cross-device control](docs/claude-cross-device-control.md). |
-| **Codex CLI 0.144.1+** | Threads, turns, items, plans, and interactions | Managed sessions support shared input, steer/interrupt, approvals, questions, standard MCP elicitation, and explicit `/` command/skill invocation with autocomplete. | Optional launcher connects the official TUI and daemon to one app-server. See [Codex managed terminal control](docs/codex-managed-terminal.md). |
-| **Codex Desktop** | Incremental rollout history, status, model, token usage, tools, plans, and file changes | Read-only: no remote input, approval, interrupt, kill, resume, or session creation. | Automatically discovered observer; displayed separately from Codex CLI as `codex-desktop`. |
-| **OpenCode 1.17.11+** | Sessions, content, status, commands, and interactions | Managed sessions support shared input, permissions, and questions. Existing independent processes stay read-only until safely resumed through the launcher. | Optional launcher connects the official TUI and daemon to one shared server. See [OpenCode managed terminal control](docs/opencode-managed-terminal.md). |
-| **DeepSeek Harness 0.2.0-rc.2 (preview)** | Native session history, streaming output, tools and turns | Shared input, queue/steer, cancellation, one-time approvals and questions. | Explicit attachment to the same `dsh web` Host used by the native browser client. |
-| **ZCode Desktop** | Incremental history sync from the local SQLite store | Read-only: no remote input, approval, resume, or control. | Explicit opt-in observer for Desktop-owned sessions. |
-| **ZCode Runtime** | Live events and turn state of native ZCode sessions | PocketCtl-created sessions support remote creation, shared input, and interrupting active turns; other reverse interaction requests stay unsupported. | Daemon-owned `zcode app-server --stdio` runtime, listed separately from the ZCode Desktop observer. |
-
-PocketCtl is extensible through agent providers. See [Adding an agent](docs/adding-an-agent.md)
-for the public adapter contract.
-
-## How it works
-
-```text
-┌────────────────────┐       HTTPS / WSS       ┌────────────────────┐
-│ Web app / iOS app  │ ◄─────────────────────► │       Relay        │
-└────────────────────┘                         │ auth + event replay│
-                                               └─────────┬──────────┘
-                                                         │ WSS
-                                               ┌─────────▼──────────┐
-                                               │ PocketCtl daemon   │
-                                               │ development host   │
-                                               └─────────┬──────────┘
-                                                         │ local runtime
-                                               ┌─────────▼──────────┐
-                                               │ Coding agent CLIs  │
-                                               └────────────────────┘
-```
-
-- The **daemon** runs beside your repositories, discovers agent sessions, and
-  translates each runtime's real capabilities into a common protocol.
-- The **Relay** authenticates devices, routes commands, and persists session
-  events for history and reconnects.
-- The **Web and iOS clients** present the same sessions and only enable actions
-  that the daemon has explicitly confirmed as supported.
+Session sharing and link management are available on **iOS 2.1** and Web.
+Links expire 15 minutes after creation, and anyone with a link can read the shared
+content without signing in. You can revoke a link early; revocation cannot take
+back content someone has already loaded or saved.
 
 ## Quick start
 
 The fastest path uses the hosted Relay at `pocketctl.me`.
+
+Use a macOS or Linux development machine that stays awake and online. Install and sign in to the agent CLI you want to use first. The steps below connect to the hosted service; you do not need to deploy a Relay.
 
 ### 1. Install the daemon
 
@@ -120,12 +65,10 @@ Use the [Web app](https://www.pocketctl.me/app) or install PocketCtl from the
 [App Store](https://apps.apple.com/cn/app/pocketctl/id6778710005). The daemon
 automatically discovers compatible CLIs available on its `PATH`.
 
-## Enable shared terminal control
+### 4. Try your first remote interaction with Codex
 
-Managed launchers are opt-in and reversible. They do not install, replace, or
-upgrade the underlying agent CLI.
-
-### Codex
+Install and sign in to a supported Codex CLI on your development machine first.
+From your project directory, run:
 
 ```bash
 pocketctl agent codex enable
@@ -133,192 +76,82 @@ pocketctl agent codex status
 codex
 ```
 
-Use `codex --native ...` for a one-off bypass, or
-`pocketctl agent codex disable` to remove the PocketCtl launcher.
+If your shell has not picked up the launcher's PATH, open a new terminal before
+running `codex`. Start a task in the terminal, then sign in to the same PocketCtl
+account on Web/iOS, select that host and Codex session, and send a follow-up
+message. Managed CLI sessions support interaction; Codex Desktop sessions are read-only.
 
-**Multiple Codex accounts on one machine.** Isolated Codex homes
-(`~/.codex-a`, `~/.codex-proxy`, …) can all be watched at once — pass extra
-homes with repeatable `--codex-home <dir>` flags or the
-`POCKETCTL_CODEX_HOMES` environment variable, then pick the account when
-starting a session from Web or iOS.
+See the [setup guide](docs/getting-started.md) for other agents, launcher removal,
+multiple accounts, and diagnostic commands.
 
-### OpenCode
+## Agent support
 
-```bash
-pocketctl agent opencode enable
-pocketctl agent opencode status
-opencode
-```
+| Agent / session type | Observe | Remote interaction |
+|---|---|---|
+| Claude Code | Yes | Approvals for managed PTYs; idle/exited handoff for independent terminals |
+| Codex CLI 0.144.1+ | Yes | Shared input, approvals, questions, and interrupt in managed sessions |
+| OpenCode 1.17.11+ | Yes | Shared input, permissions, and questions in managed sessions |
+| DeepSeek Harness 0.2.0-rc.2 (preview) | Yes | Shared control after explicit local Host attachment |
+| Codex Desktop / ZCode Desktop | Yes | Read-only |
+| ZCode Runtime | Yes | Input and interrupt for PocketCtl-created sessions |
 
-Use `opencode --native ...` for a one-off bypass, or
-`pocketctl agent opencode disable` to remove the PocketCtl launcher.
+Discovery does not grant control. See the [full capabilities and limitations](docs/agent-support.md).
 
-### DeepSeek Harness (preview)
+## FAQ
 
-Start the native Host, then attach PocketCtl using its printed launch URL:
+**Does my computer need to stay on?** To keep an agent working, send instructions, or handle approvals, your development machine must stay awake and online with the daemon and relevant agent service running. PocketCtl does not move local tasks onto your phone.
 
-```bash
-dsh web --no-open
-# In another terminal, paste the actual URL printed above:
-pocketctl agent dsh enable --url 'http://127.0.0.1:PORT/?token=TOKEN'
-pocketctl agent dsh status
-```
+**Do I pay for agents or models separately?** PocketCtl does not include agent subscriptions or model credits. You use your own agent accounts and model services, with charges handled by their respective providers.
 
-Open that launch URL for local interaction. The daemon discovers sessions under
-its `--allowed-cwd-root` directories; select the same session in PocketCtl Web
-for remote interaction. Both clients share one Host and session ID. Keep the
-Host running; `pocketctl agent dsh disable` detaches PocketCtl without stopping
-DSH. After restarting the Host, enable again with its new launch URL.
+**Why can I see a session but not type into it?** Codex Desktop and ZCode Desktop sessions are read-only. Shared interaction with Codex CLI or OpenCode requires managed integration; see the support table for other agents.
 
-The bootstrap credential stays in `~/.pocketctl/dsh.json` with mode `0600` and is
-not sent to Relay. Only loopback Host URLs are accepted. This integration targets
-DSH's existing Host; it does not start a separate ACP runtime. Electron Desktop
-0.2.0-rc.2 has also passed local-daemon/Docker-Relay acceptance for shared input,
-questions, approvals, cancellation, and bidirectional model/effort/permission
-selection. Web (including mobile layout) and iOS expose the native settings.
-Model and effort changes affect subsequent requests and also save the Host's
-default model. Full-access/custom permission presets require the daemon-local
-`--allow-dangerous-remote-permissions` opt-in. Desktop currently requires an explicit
-local bridge plugin to export its Host launch URL; automatic Desktop attachment
-is not implemented. Remote worktree/fork creation and attachment uploads are
-not covered.
+**Can I read test reports on my phone?** You can open HTML/Markdown reports captured as session documents. Your agent or testing tools generate the reports; PocketCtl provides access to them.
 
-## Memory (experimental)
-
-Memory turns what agents learn about a repository into durable, reviewed
-knowledge instead of context that vanishes with the session. It is optional
-and managed from the Memory workbench in the Web app.
-
-- **Knowledge ledger** — candidate knowledge extracted from repository sources
-  enters an immutable, versioned ledger with evidence and confidence. Nothing
-  is accepted until you review it; corrections create new versions instead of
-  overwriting history.
-- **Dependency code graph** — see how components depend on each other and run
-  impact analysis before changing one.
-- **Skill document governance** — operational skill documents (trigger,
-  preconditions, steps, validation, rollback) follow an explicit candidate →
-  review → approve/publish workflow instead of silent edits.
-- **Pre-turn context injection** — on each new turn the daemon compiles the
-  relevant knowledge into a hidden context pack and delivers it through the
-  agent's native channel within a hard 750ms budget. Delivery is fail-open —
-  any failure never delays or blocks your turn — and the daemon never
-  persists or logs pack contents.
-- **MCP access** — hosting agents can query the same knowledge through an MCP
-  bridge, so tools and the workbench share one source of truth.
-- **Operational status** — the workbench reports stalled synchronization,
-  budget waits, extraction stalls, and missing evidence. Oversized ordinary
-  Feed content is quarantined so later events can continue; affected evidence
-  cannot be used to extract or approve new knowledge.
-
-Model-assisted extraction runs on the server and requires a configured
-provider; without one the workbench stays unavailable instead of running
-degraded. See [Security and data boundary](#security-and-data-boundary) for
-what leaves the development host.
-
-## Team collaboration (experimental)
-
-Team collaboration turns PocketCtl from a personal cross-device cockpit into a
-small human-and-Agent workspace. In the Web and iOS clients you can:
-
-- **Create Teams and manage membership** — invite members by email as admins,
-  members, or read-only viewers; gate joining per account, change and audit
-  roles with revision checks, and remove members. Removal revokes future reads
-  and execution, and retained history never transfers native-session
-  ownership.
-- **Maintain lightweight tasks** — assign holders and track progress, separate
-  from shared sessions and automatic runs.
-- **Share sessions with frozen Context** — explicit collaboration events and
-  versioned Context snapshots (goals, consensus, open questions, references)
-  are shared with authenticated receipts; native private session logs are
-  never shared automatically.
-- **Call member-contributed Agents** — Codex, Claude Code, and DeepSeek
-  Harness agents can join a Team as explicitly contributed, callable
-  receivers with live
-  presence and occupancy; narrow owner/daemon/offer/binding authorization and
-  the existing quota and approval rules still apply.
-- **Run bounded multi-Agent coordination (optional)** — frozen call,
-  concurrency, and wall-time budgets with recovery for uncertain outcomes;
-  uncertain work is never blindly retried.
-- **Configure agents per session and route tasks** — each Team session picks
-  its own callable agents with per-agent settings, and tasks can be assigned
-  to a specific holder.
-- **Keep private side-channels** — members can send interactions visible only
-  to chosen receivers, and approvals travel an owner-only private channel.
-- **Stay in sync across devices** — quoted replies and read states follow you
-  between Web and iOS, and unsent messages survive reloads or offline periods
-  in a per-device outbox.
-
-Shared Memory is a separate opt-in bridge to an existing governed installation;
-Team membership never grants knowledge access by itself — every participant and
-receiver is revalidated, and only exact published Memory references are used.
-
-Self-hosted operators must enable each phase independently with
-`TEAM_COLLABORATION`, `TEAM_AUTORUN`, and `TEAM_MEMORY_BRIDGE`. All default to
-`off`. See the
-[feature matrix](docs/team-collaboration-feature-matrix.md) and
-[rollout runbook](docs/operations/team-collaboration-rollout.md).
-
-## Essential commands
-
-| Command | Purpose |
-|---|---|
-| `pocketctl login [--prod] [--email]` | Authenticate through browser device flow or email verification. |
-| `pocketctl daemon start [--prod]` | Start the daemon and discover local agents. |
-| `pocketctl daemon status [--no-update-check]` | Show status; in an interactive terminal, offer updates newer than the running daemon. |
-| `pocketctl daemon doctor` | Diagnose configuration and connection problems. |
-| `pocketctl daemon diagnose <session-id>` | Check whether one session is proxied and print a reason and recovery advice. |
-| `pocketctl daemon logs` | Locate or follow daemon logs. |
-| `pocketctl daemon update [--version TAG]` | Download and verify a published update. |
-| `pocketctl agent <agent> status` | Inspect launcher, capability, and runtime state. |
-| `pocketctl agent zcode sync enable` | Enable read-only ZCode history sync; restart the daemon to apply it. |
-| `pocketctl uninstall [--yes] [--keep-binary]` | Remove the daemon and local PocketCtl data. |
-
-Run `pocketctl help` or the relevant subcommand with `--help` for all options.
-
-`daemon status` prints status first. Update checks time out after two seconds;
-failed checks, equal/older versions, and noninteractive calls never prompt.
-Press Enter to keep the current version, or answer `y` to update and refresh status.
-For a root-owned system binary, `daemon update` requests sudo authorization before
-downloading. Only the verified installation runs as root; daemon restart retains
-the invoking user's identity. Automatic elevation requires a root-controlled
-executable and parent directories. Cancellation leaves the binary and daemon
-unchanged. `--no-restart` installs without restarting the daemon.
+**What if my host or session is missing?** Check that your phone and daemon use the same PocketCtl account. Run `pocketctl daemon status`, then `pocketctl daemon doctor`. For a session that cannot be controlled, use `pocketctl daemon diagnose <session-id>`. See the [setup guide](docs/getting-started.md).
 
 ## Security and data boundary
 
-PocketCtl keeps repositories and agent processes on the development host, but
-that does **not** mean session content stays local.
+Repositories and agent processes stay on your development machine. Session content travels through the Relay service.
 
-The experimental personal-session lifecycle has passed local Docker acceptance:
-eligible sessions archive and move to private cold storage after more than 60
-days of verified inactivity, and purge after more than 90 days. Business activity
-restores an inactivity archive; reading a session does not renew its lifetime.
-Lifecycle and system-notification configuration defaults are enabled, but new
-automatic lifecycle actions remain blocked in production pending the storage,
-backup, policy, client-release, and capacity gates. This source release does not
-activate a new retention policy on the hosted service.
+- Hosted connections use HTTPS/WSS, but **session content is not end-to-end encrypted**. The Relay can read and store content needed for routing and history replay.
+- Depending on service configuration, title generation and Memory extraction can send relevant text to server-side model providers.
+- Read-only share links allow anonymous access, expire after 15 minutes, and can be revoked early. Revocation cannot retract content already loaded or saved.
+- Teams share explicitly contributed collaboration content, not native private session logs automatically.
 
-- Production transport uses HTTPS/WSS.
-- Session and tool content is **not end-to-end encrypted**. The configured Relay
-  can read and persist normalized content required for routing, replay,
-  notifications, and account features.
-- If `MIMO_API_KEY` is configured on the Relay, the text needed to generate a
-  session title is sent to Xiaomi MiMo first with thinking disabled. A MiMo
-  timeout falls back to DeepSeek when `DEEPSEEK_API_KEY` is configured; without
-  either key, title generation is skipped.
-- If Memory is enabled, model-assisted knowledge extraction sends the relevant
-  repository text to the configured server-side provider. Pre-turn context
-  packs travel through the authenticated Relay like other session content;
-  the daemon never persists or logs them.
-- If Team collaboration is enabled, explicit shared events and frozen Context
-  are stored by Relay and delivered to selected members' Agents. Native private
-  session logs are not shared automatically; Team Memory accepts only exact,
-  authorized published references.
-- Managed Codex/OpenCode endpoints and local runtime credentials remain on the
-  development host; clients communicate through the authenticated Relay.
+See [data processing and experimental retention](docs/security-and-data.md) and the [Privacy Policy](https://www.pocketctl.me/privacy.html).
 
-Review the current [Privacy Policy](https://www.pocketctl.me/privacy.html) before
-using the hosted service or connecting sensitive repositories.
+## How it works
+
+```text
+┌────────────────────┐       HTTPS / WSS       ┌────────────────────┐
+│ Web app / iOS app  │ ◄─────────────────────► │       Relay        │
+└────────────────────┘                         │ auth + event replay│
+                                               └─────────┬──────────┘
+                                                         │ WSS
+                                               ┌─────────▼──────────┐
+                                               │ PocketCtl daemon   │
+                                               │ development host   │
+                                               └─────────┬──────────┘
+                                                         │ local runtime
+                                               ┌─────────▼──────────┐
+                                               │ Coding agent CLIs  │
+                                               └────────────────────┘
+```
+
+- The **daemon** runs beside your repositories, discovers agent sessions, and
+  translates each runtime's real capabilities into a common protocol.
+- The **Relay** authenticates devices, routes commands, and persists session
+  events for history and reconnects.
+- The **Web and iOS clients** present the same sessions and only enable actions
+  that the daemon has explicitly confirmed as supported.
+
+## Experimental features
+
+**Memory** manages reviewed project knowledge, dependencies, and skill documents in the Web workbench, and supplies context for later agent tasks. Model-assisted extraction requires a configured server-side model provider.
+
+**Teams** support members, shared tasks and sessions, and agents explicitly contributed by members. Multi-agent coordination and shared Memory require separate enablement; joining a Team does not automatically share private sessions or grant knowledge access.
+
+Availability depends on service configuration and account access. For self-hosting, `TEAM_COLLABORATION`, `TEAM_AUTORUN`, and `TEAM_MEMORY_BRIDGE` default to off. See [experimental features](docs/experimental-features.md).
 
 ## Self-hosting
 

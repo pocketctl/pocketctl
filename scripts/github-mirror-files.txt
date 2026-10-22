@@ -51,3 +51,17 @@ Makefile
 LICENSE
 README.md
 README.zh-CN.md
+docs/getting-started.md
+docs/getting-started.zh-CN.md
+docs/agent-support.md
+docs/agent-support.zh-CN.md
+docs/images/iphone-session-demo.png
+docs/security-and-data.md
+docs/security-and-data.zh-CN.md
+docs/experimental-features.md
+docs/experimental-features.zh-CN.md
+docs/images/iphone-validation-demo.png
+docs/images/iphone-completion-demo.png
+docs/images/iphone-session-demo-en.png
+docs/images/iphone-validation-demo-en.png
+docs/images/iphone-completion-demo-en.png

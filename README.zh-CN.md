@@ -2,83 +2,38 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-**让 AI 编码代理始终触手可及。**
+**离开电脑，也能用 iPhone 继续推进 AI 编码任务。**
 
-PocketCtl 是面向 Claude Code、Codex、OpenCode 和 ZCode 的跨设备控制平面。
-你可以从浏览器或 iPhone 跟进任务、在 Agent 需要时响应，并在支持的会话中
-继续工作，同时让代码仓库和 Agent 进程留在开发机上运行。
+用 PocketCtl 查看 Codex、Claude Code、OpenCode 等 Agent 的进度，回答问题、处理审批，或继续发送任务。代码仓库和 Agent 仍在你的开发机上运行，你通过 iPhone 或浏览器接着操作。
+
+**iOS 2.1 已在 App Store 上架，可连接 PocketCtl 线上服务。** 也可直接使用 Web 客户端。
 
 [官网](https://www.pocketctl.me) · [Web 客户端](https://www.pocketctl.me/app) · [iOS App](https://apps.apple.com/cn/app/pocketctl/id6778710005) · [版本发布](https://github.com/pocketctl/pocketctl/releases)
 
+<table>
+  <tr><th>跟进开发</th><th>检查测试结果</th><th>确认任务完成</th></tr>
+  <tr><td><img src="docs/images/iphone-session-demo.png" width="250" alt="跟进开发" /></td><td><img src="docs/images/iphone-validation-demo.png" width="250" alt="检查测试结果" /></td><td><img src="docs/images/iphone-completion-demo.png" width="250" alt="确认任务完成" /></td></tr>
+</table>
+
+原生 iOS 模拟器中的流程演示，使用中文合成会话；不是实际测试或上线回执。图中的提交与部署 Skill 来自示例项目，使用时需在自己的 Agent 环境中配置。
+
 ## 为什么使用 PocketCtl
 
-- **随时掌握进度** — 实时查看会话输出、状态、工具调用、文件改动、计划和
-  Sub-agent 活动。
-- **在 Runtime 支持时直接处理** — 从 Web 或 iOS 发送后续消息、回答问题、
-  处理审批、调整任务方向或中断当前 Turn。
-- **可视化选择项目目录** — 在 Web 或 iOS 上新建会话时直接浏览并选择工作
-  目录，无需手动输入路径。
-- **保留原生终端体验** — 受管 Codex 和 OpenCode 会话继续使用官方 TUI，
-  同时与 PocketCtl 共享同一个 Runtime。
-- **断线后恢复上下文** — Relay 持久化规范化事件用于重放，Daemon 重启后会
-  重新协调受支持的受管会话。
-- **远程查看会话文档** — 以安全快照形式捕获会话关键文档，在 Web 或 iOS
-  查看与下载，支持直接点击会话历史中的 HTML/Markdown 文档链接。
-- **用项目组织会话** — 在 Web 或 iOS 上把会话归入项目、置顶重要会话并归档
-  已完成的会话，让活跃列表保持聚焦。
-- **只关注真正需要处理的事项** — 可选的 Attention Inbox 会聚合待回答问题、
-  审批、高风险操作和恢复信号，并保留对应会话上下文。
-  系统通知单独显示会话维护结果、未读状态和各会话的分阶段清理进度。
-- **与成员及其 Agent 协作（实验性）** — Web 客户端可创建 Team、共享任务和
-  会话，把有界工作定向给成员明确提供的 Codex、Claude Code 或 DeepSeek
-  Harness Agent，并可选运行有预算的多 Agent 协作。
-- **沉淀受治理的项目知识（实验性）** — 可选的 Memory 工作台将仓库源码转化
-  为经评审才发布的 Wiki 和带影响分析的依赖代码图谱，并对 Skill 文档保持
-  显式治理。
+- **离开电脑也能跟进** — 在 iPhone 或浏览器查看多个 Agent 的输出、工具调用、计划与文件改动。
+- **需要你时直接响应** — 在支持的会话中回复消息、处理审批和问题，或中断当前任务。
+- **继续使用原生终端** — 受管 Codex/OpenCode 与手机共享同一运行时，代码和 Agent 进程留在开发机。
+- **在手机上查看报告** — 从会话中打开 HTML/Markdown 文档，查看 Agent 生成的测试或验收报告，再决定下一步。
+- **整理工作与分享结果** — 按项目组织、置顶和归档会话，查看文档，并生成可撤销的只读分享链接。
 
-## Agent 支持范围
-
-PocketCtl 按真实能力开放控制。发现一个会话，并不代表它会自动获得远程控制能力。
-
-| Agent | 查看能力 | 远程交互 | 集成方式 |
-|---|---|---|---|
-| **Claude Code** | 实时历史与输出 | 用户独立启动的终端会话可在空闲或退出后通过 `--resume` 接力；PocketCtl 创建的 PTY 支持 Web/iOS 审批，独立终端会话仍以原生终端为权威。 | 自动发现，不宣称共享 Runtime。详见 [Claude 跨端控制](docs/claude-cross-device-control.md)。 |
-| **Codex CLI 0.144.1+** | Thread、Turn、Item、计划与交互 | 受管会话支持共享输入、Steer/Interrupt、审批、问题、标准 MCP Elicitation，以及带自动补全的 `/` 命令与技能显式调用。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个 App Server。详见 [Codex 受管终端控制](docs/codex-managed-terminal.md)。 |
-| **Codex Desktop** | 增量同步 rollout 历史、状态、模型、Token、工具、计划和文件改动 | 只读，不支持远程输入、审批、中断、终止、恢复或创建会话。 | 自动发现的 Observer；以 `codex-desktop` 与 Codex CLI 分开显示。 |
-| **OpenCode 1.17.11+** | 会话、内容、状态、命令与交互 | 受管会话支持共享输入、Permission 和 Question；已独立运行的进程保持只读，直到通过 Launcher 安全恢复。 | 可选 Launcher 将官方 TUI 和 Daemon 连接到同一个共享 Server。详见 [OpenCode 受管终端控制](docs/opencode-managed-terminal.md)。 |
-| **DeepSeek Harness 0.2.0-rc.2（预览）** | 原生会话历史、流式输出、工具和 Turn | 共享输入、排队/steer、取消、单次审批与提问 | 显式接入本地 DSH Web 客户端使用的同一个 `dsh web` Host。 |
-| **ZCode Desktop** | 从本地 SQLite 增量同步历史 | 只读，不支持远程输入、审批、恢复或控制。 | 针对 Desktop 拥有会话、显式启用的 Observer。 |
-| **ZCode Runtime** | 原生 ZCode 会话的实时事件与 Turn 状态 | PocketCtl 创建的会话支持远程创建、共享输入和中断活动 Turn；其余反向交互请求保持不支持。 | Daemon 拥有的 `zcode app-server --stdio` 运行时，与 ZCode Desktop Observer 分开显示。 |
-
-PocketCtl 可通过 Agent Provider 扩展。公共适配协议见
-[添加 Agent](docs/adding-an-agent.md)。
-
-## 工作原理
-
-```text
-┌────────────────────┐       HTTPS / WSS       ┌────────────────────┐
-│ Web 客户端 / iOS   │ ◄─────────────────────► │       Relay        │
-└────────────────────┘                         │ 认证 + 事件重放     │
-                                               └─────────┬──────────┘
-                                                         │ WSS
-                                               ┌─────────▼──────────┐
-                                               │ PocketCtl Daemon   │
-                                               │      开发机         │
-                                               └─────────┬──────────┘
-                                                         │ 本地 Runtime
-                                               ┌─────────▼──────────┐
-                                               │  AI 编码 Agent CLI │
-                                               └────────────────────┘
-```
-
-- **Daemon** 与代码仓库运行在同一台开发机上，发现 Agent 会话，并把不同
-  Runtime 的真实能力转换为统一协议。
-- **Relay** 负责设备认证、命令路由，以及会话事件的持久化、历史重放和重连。
-- **Web 与 iOS 客户端** 展示同一批会话，只开放 Daemon 明确确认支持的操作。
+会话分享与链接管理已包含在 **iOS 2.1**，Web 端同样支持。分享链接固定有效期为
+15 分钟，持有链接者无需登录即可读取分享内容；你可以在到期前主动撤销。
+撤销不会收回对方已经加载或保存的内容。
 
 ## 快速开始
 
 最快的使用方式是连接 `pocketctl.me` 提供的托管 Relay。
+
+准备一台保持开机、联网的 macOS 或 Linux 开发机，并先安装、登录要使用的 Agent CLI。以下步骤连接线上服务，无需自行部署 Relay。
 
 ### 1. 安装 Daemon
 
@@ -109,11 +64,9 @@ pocketctl login --prod --email
 [App Store](https://apps.apple.com/cn/app/pocketctl/id6778710005) 安装 PocketCtl。
 Daemon 会自动发现 `PATH` 中兼容的 Agent CLI。
 
-## 启用共享终端控制
+### 4. 完成第一次远程交互（以 Codex 为例）
 
-受管 Launcher 是可选且可随时撤销的。它不会安装、替换或升级底层 Agent CLI。
-
-### Codex
+开发机需先安装并登录受支持的 Codex CLI。在项目目录执行：
 
 ```bash
 pocketctl agent codex enable
@@ -121,157 +74,78 @@ pocketctl agent codex status
 codex
 ```
 
-单次绕过 PocketCtl 可使用 `codex --native ...`；执行
-`pocketctl agent codex disable` 可移除 PocketCtl Launcher。
+若当前终端尚未加载 Launcher 的 PATH，打开新终端后再运行 `codex`。
+先在终端发起一个任务，然后在同一 PocketCtl 账号的 Web/iOS 客户端中选择该主机和
+Codex 会话，查看输出并发送后续消息。受管 CLI 会话支持交互；Codex Desktop 会话只读。
 
-**单机多 Codex 账号。** 隔离的 Codex home（`~/.codex-a`、`~/.codex-proxy`
-等）可以同时监听——通过可重复的 `--codex-home <目录>` 参数或
-`POCKETCTL_CODEX_HOMES` 环境变量添加额外 home，之后在 Web 或 iOS 新建
-会话时即可选择对应账号。
+其他 Agent、停用 Launcher、多账号和诊断命令见[接入指南](docs/getting-started.zh-CN.md)。
 
-### OpenCode
+## Agent 支持范围
 
-```bash
-pocketctl agent opencode enable
-pocketctl agent opencode status
-opencode
-```
+| Agent / 会话类型 | 查看 | 远程交互 |
+|---|---|---|
+| Claude Code | 支持 | 受管 PTY 支持审批；独立终端需空闲/退出后接力 |
+| Codex CLI 0.144.1+ | 支持 | 受管会话支持共享输入、审批、问题和中断 |
+| OpenCode 1.17.11+ | 支持 | 受管会话支持共享输入、权限确认和问题 |
+| DeepSeek Harness 0.2.0-rc.2（预览） | 支持 | 显式接入本地 Host 后支持共享控制 |
+| Codex Desktop / ZCode Desktop | 支持 | 只读 |
+| ZCode Runtime | 支持 | PocketCtl 创建的会话支持输入和中断 |
 
-单次绕过 PocketCtl 可使用 `opencode --native ...`；执行
-`pocketctl agent opencode disable` 可移除 PocketCtl Launcher。
+发现会话不等于获得控制权。详见[完整能力与限制](docs/agent-support.zh-CN.md)。
 
-### DeepSeek Harness（预览）
+## 常见问题
 
-先启动原生 Host，再用它打印的启动 URL 接入 PocketCtl：
+**手机操作时，电脑必须开着吗？** 继续运行 Agent、发送指令或处理审批时，开发机需要保持唤醒、联网，且 Daemon 与相应 Agent 服务正常运行。PocketCtl 不会把本地任务转移到手机执行。
 
-```bash
-dsh web --no-open
-# 在另一个终端中填入上一步实际输出的 URL：
-pocketctl agent dsh enable --url 'http://127.0.0.1:PORT/?token=TOKEN'
-pocketctl agent dsh status
-```
+**需要另付 Agent 或模型费用吗？** PocketCtl 不包含 Agent 订阅或模型额度。继续使用你自己的 Agent 账号与模型服务，其费用由相应供应商收取。
 
-打开该 URL 使用本地 DSH 客户端。Daemon 自动发现 `--allowed-cwd-root`
-授权目录内的会话，在 PocketCtl Web 选择同一会话即可远程操作。两端共享
-同一个 Host 和会话 ID。请保持 Host 运行；`pocketctl agent dsh disable`
-只解除 PocketCtl 接入，不停止 DSH。Host 重启后需用新的启动 URL 再次启用。
+**为什么能看到会话，却不能输入？** Codex Desktop 和 ZCode Desktop 会话只读。Codex CLI、OpenCode 的共享交互需要受管接入；其他 Agent 的条件见上方支持表。
 
-启动凭据仅保存在权限为 `0600` 的 `~/.pocketctl/dsh.json`，不会发送至 Relay，
-只接受回环地址。本接入复用 DSH 已有 Host，不会另起 ACP 运行时。
-Electron Desktop 0.2.0-rc.2 已通过本机 daemon + Docker Relay 的共享输入、
-提问、审批、双向取消及模型／思考强度／权限双向同步验收。Web（含手机网页）
-和 iOS 均提供原生设置入口。模型与强度用于后续请求，同时保存为 Host 默认模型；
-完全权限及自定义权限预设仍需 daemon 本地开启 `--allow-dangerous-remote-permissions`。
-Desktop 目前需要显式安装本地桥接插件，导出
-Host 启动 URL，尚未实现自动接入。远程创建 worktree/fork 和附件上传尚不在支持范围内。
+**手机可以查看测试报告吗？** 可以从会话打开已捕获为会话文档的 HTML/Markdown 报告。报告由你的 Agent 或测试工具生成，PocketCtl 提供查看入口。
 
-## Memory（实验性）
-
-Memory 把 Agent 对仓库的了解沉淀为经过评审的持久知识，而不是随会话消失的
-上下文。它是可选功能，在 Web 端的 Memory 工作台中管理。
-
-- **知识账本** — 从仓库源码提炼的候选知识进入带证据和置信度的不可变账本。
-  任何条目都需要评审后才会接受；修正会创建新版本，而不是覆盖历史。
-- **依赖代码图谱** — 查看组件之间的依赖关系，修改前先做影响分析。
-- **Skill 文档治理** — 操作型 Skill 文档（触发条件、前置条件、操作步骤、
-  验证方法、回滚说明）走显式的「候选 → 评审 → 批准/发布」流程，而不是
-  静默修改。
-- **回合前上下文注入** — 每个新回合开始时，Daemon 在 750ms 硬预算内把相关
-  知识编译为隐藏上下文包，经 Agent 原生通道投递。投递始终 fail-open ——
-  任何失败都不会延迟或阻塞你的输入 —— 且 Daemon 从不持久化或记录上下文包
-  内容。
-- **MCP 访问** — 宿主 Agent 可通过 MCP 桥接查询同一份知识，工具与工作台
-  共享单一事实来源。
-- **运行状态** — 工作台展示同步停滞、预算等待、提取停滞和证据缺口。
-  超大普通 Feed 内容隔离后，后续事件可继续处理；受影响的证据不能用于
-  提取或接受新知识。
-
-模型辅助的知识提炼在服务端运行，需要已配置的模型 Provider；未配置时工作台
-保持不可用，而不是降级运行。关于哪些数据会离开开发机，见
-[安全与数据边界](#安全与数据边界)。
-
-## Team 协作（实验性）
-
-Team 协作把 PocketCtl 从个人跨设备控制台扩展为人与 Agent 的小型工作区。在
-Web 与 iOS 客户端中你可以：
-
-- **创建 Team 并管理成员** — 通过邮箱邀请成员并指定 admin、member 或只读
-  viewer 角色；按账号开通加入资格，带版本校验地变更与审计角色，并可移除
-  成员。移除会撤销后续读取与执行权限，留存的历史记录不会转移原生会话
-  的所有权。
-- **维护轻量任务** — 指派负责人并跟踪进度，与共享会话和自动运行相互独立。
-- **共享会话与冻结 Context** — 显式协作事件和带版本的 Context 快照（目标、
-  共识、待解决问题、引用）经认证回执后共享；原生私有会话日志永远不会
-  自动共享。
-- **调用成员提供的 Agent** — Codex、Claude Code 与 DeepSeek Harness Agent
-  均可作为成员明确提供的可调用接收方加入 Team，实时展示在线与占用状态；严格的
-  owner/daemon/offer/binding 授权与既有配额、审批规则继续生效。
-- **运行有预算的多 Agent 协作（可选）** — 冻结的调用数、并发与时长预算，
-  并为不确定结局提供恢复机制；不确定的工作不会被盲目重试。
-- **按会话配置 Agent 并定向分派任务** — 每个 Team 会话独立选择可调用的
-  Agent 并设置逐 Agent 参数，任务可指派给指定负责人。
-- **保留私有旁路通道** — 成员可发送仅指定接收者可见的交互，审批走仅所有者
-  可见的私有通道。
-- **多端保持同步** — 引用回复与已读状态在 Web 和 iOS 间保持一致；未发送的
-  消息经逐设备发件箱在刷新或离线后恢复并补发。
-
-共享 Memory 是到既有受治理安装的独立可选桥接；Team 成员身份本身不会授予
-知识权限——每个参与者与接收方都会被重新校验，且只使用精确发布的 Memory
-引用。
-
-自托管环境需要分别通过 `TEAM_COLLABORATION`、`TEAM_AUTORUN` 和
-`TEAM_MEMORY_BRIDGE` 开放各阶段，三者默认均为 `off`。
-详见[功能矩阵](docs/team-collaboration-feature-matrix.md)和
-[灰度与关闭手册](docs/operations/team-collaboration-rollout.md)。
-
-## 常用命令
-
-| 命令 | 用途 |
-|---|---|
-| `pocketctl login [--prod] [--email]` | 通过浏览器设备流或邮箱验证码登录。 |
-| `pocketctl daemon start [--prod]` | 启动 Daemon 并发现本地 Agent。 |
-| `pocketctl daemon status [--no-update-check]` | 查看状态；交互终端中仅在发现高于当前运行 Daemon 的版本时提供更新选择。 |
-| `pocketctl daemon doctor` | 诊断配置和连接问题。 |
-| `pocketctl daemon diagnose <会话ID>` | 检查单个会话是否已代理，并输出原因和恢复建议。 |
-| `pocketctl daemon logs` | 定位或跟踪 Daemon 日志。 |
-| `pocketctl daemon update [--version TAG]` | 下载并校验已发布的更新。 |
-| `pocketctl agent <agent> status` | 查看 Launcher、能力和 Runtime 状态。 |
-| `pocketctl agent zcode sync enable` | 启用只读 ZCode 历史同步；重启 Daemon 后生效。 |
-| `pocketctl uninstall [--yes] [--keep-binary]` | 移除 Daemon 和本地 PocketCtl 数据。 |
-
-运行 `pocketctl help`，或对相应子命令使用 `--help` 查看全部参数。
-
-`daemon status` 先输出状态，再检查更新，检查超时为 2 秒。检查失败、相同或更低版本、非交互调用均不弹出更新选择。回车保留当前版本，输入 `y` 更新后重新显示状态；可通过 `--no-update-check` 跳过检查。
-
-对于 root 所有的系统二进制，`daemon update` 在下载前请求 sudo 授权，仅安装步骤以 root 执行，daemon 仍由原用户重启。自动提权要求可执行文件及其父目录均由 root 控制。取消授权不会替换二进制或停止 daemon；`--no-restart` 仅安装、不重启。
+**主机或会话没有出现怎么办？** 确认手机和 Daemon 登录同一个 PocketCtl 账号，检查 `pocketctl daemon status`，再运行 `pocketctl daemon doctor`。单个会话无法交互时可用 `pocketctl daemon diagnose <会话ID>` 排查，详见[接入指南](docs/getting-started.zh-CN.md)。
 
 ## 安全与数据边界
 
-PocketCtl 让代码仓库和 Agent 进程留在开发机上，但这**不代表会话内容只在本地**。
+代码仓库和 Agent 进程留在开发机，会话内容通过 Relay 服务传输。
 
-实验性的个人会话生命周期已通过本地 Docker 验收：符合条件的会话在有效活动
-连续超过 60 天后归档并迁入私有冷存储，超过 90 天后清除。新的业务活动会恢复
-因不活跃而归档的会话；只读浏览不延长生命周期。生命周期和系统通知的配置默认
-开启，但生产环境的新自动动作仍被存储、备份、政策、客户端发布和容量门槛阻止。
-本次源码发布不代表托管服务已启用新的保留政策。
+- 线上连接使用 HTTPS/WSS，但**会话内容不是端到端加密**；Relay 可读取并保存路由与历史重放所需的内容。
+- 按服务配置，标题生成和 Memory 提炼可能将相关文本发送给服务端模型供应商。
+- 只读分享链接允许匿名访问，15 分钟后过期，也可提前撤销；撤销不能收回他人已加载或保存的内容。
+- Team 只共享明确提供的协作内容，不会自动共享原生私人会话日志。
 
-- 生产环境传输使用 HTTPS/WSS。
-- 会话和工具内容**不是端到端加密**。配置的 Relay 可以读取并持久化路由、
-  历史重放、通知和账户功能所需的规范化内容。
-- 如果 Relay 配置了 `MIMO_API_KEY`，生成会话标题所需的文本会优先发送给小米
-  MiMo（关闭思考模式）。MiMo 超时后，若配置了 `DEEPSEEK_API_KEY` 则回退到
-  DeepSeek；两者均未配置时跳过标题生成。
-- 如果启用 Memory，模型辅助的知识提炼会把相关仓库文本发送给服务端配置的
-  模型 Provider。回合前上下文包与其他会话内容一样经已认证的 Relay 传输；
-  Daemon 从不持久化或记录上下文包内容。
-- 如果启用 Team 协作，显式共享事件和冻结 Context 会由 Relay 保存并投递给
-  选定成员的 Agent。原生私有会话日志不会自动共享；Team Memory 只接受精确、
-  已授权且已发布的引用。
-- 受管 Codex/OpenCode 的本地 Endpoint 和 Runtime 凭据保留在开发机上，
-  客户端通过已认证的 Relay 通信。
+详见[数据处理与实验性保留策略](docs/security-and-data.zh-CN.md)及[隐私政策](https://www.pocketctl.me/privacy.html)。
 
-使用托管服务或连接敏感代码仓库前，请阅读当前的
-[隐私政策](https://www.pocketctl.me/privacy.html)。
+## 工作原理
+
+```text
+┌────────────────────┐       HTTPS / WSS       ┌────────────────────┐
+│ Web 客户端 / iOS   │ ◄─────────────────────► │       Relay        │
+└────────────────────┘                         │ 认证 + 事件重放     │
+                                               └─────────┬──────────┘
+                                                         │ WSS
+                                               ┌─────────▼──────────┐
+                                               │ PocketCtl Daemon   │
+                                               │      开发机         │
+                                               └─────────┬──────────┘
+                                                         │ 本地 Runtime
+                                               ┌─────────▼──────────┐
+                                               │  AI 编码 Agent CLI │
+                                               └────────────────────┘
+```
+
+- **Daemon** 与代码仓库运行在同一台开发机上，发现 Agent 会话，并把不同
+  Runtime 的真实能力转换为统一协议。
+- **Relay** 负责设备认证、命令路由，以及会话事件的持久化、历史重放和重连。
+- **Web 与 iOS 客户端** 展示同一批会话，只开放 Daemon 明确确认支持的操作。
+
+## 实验性功能
+
+**Memory** 在 Web 工作台中管理经过评审的项目知识、依赖关系和 Skill 文档，并为后续 Agent 任务提供上下文。模型辅助提炼需要配置服务端模型 Provider。
+
+**Team** 支持成员、共享任务与会话，以及调用成员明确提供的 Agent。多 Agent 协作和共享 Memory 需要分别启用；加入 Team 不会自动共享私人会话或授予知识访问权限。
+
+这些能力取决于服务配置与账号权限。自托管的 `TEAM_COLLABORATION`、`TEAM_AUTORUN`、`TEAM_MEMORY_BRIDGE` 默认关闭。详见[实验性功能说明](docs/experimental-features.zh-CN.md)。
 
 ## 自托管
 
