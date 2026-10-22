@@ -943,7 +943,7 @@ func TestCodexInteractionsRejectsUnsafeMcpURLAndDoesNotClassifyElicitationAsAppr
 	}
 }
 
-func TestCodexInteractionsLeavesUnsupportedOpenAIFormToOfficialTUI(t *testing.T) {
+func TestCodexInteractionsRepliesToUnsupportedOpenAIForm(t *testing.T) {
 	output := make(chan protocol.DaemonEvent, 2)
 	sm := NewSessionManager(output)
 	client := newInteractionCodexClient()
@@ -958,8 +958,8 @@ func TestCodexInteractionsLeavesUnsupportedOpenAIFormToOfficialTUI(t *testing.T)
 	}
 	client.responseMu.Lock()
 	defer client.responseMu.Unlock()
-	if len(client.responses) != 0 {
-		t.Fatalf("unsupported form was answered by daemon: %+v", client.responses)
+	if len(client.responses) != 1 || client.responses[0].err == nil || client.responses[0].err.Code != -32602 {
+		t.Fatalf("unsupported form was left hanging: %+v", client.responses)
 	}
 }
 

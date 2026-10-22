@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +77,7 @@ type codexInteractions struct {
 	pendingByNative     map[string]*codexPendingInteraction
 	resolvedPublic      map[string]string
 	resolvedNative      map[string]struct{}
+	interruptedTurns    map[string]string
 	deferredStatus      map[string]codexDeferredStatus
 	resolvingByThread   map[string]int
 	lifecycleRevision   map[string]uint64
@@ -94,6 +97,7 @@ func newCodexInteractions(sm *SessionManager, generation uint64, client codexRun
 		pendingByPublic: make(map[string]*codexPendingInteraction),
 		pendingByNative: make(map[string]*codexPendingInteraction),
 		resolvedPublic:  make(map[string]string), resolvedNative: make(map[string]struct{}),
+		interruptedTurns:  make(map[string]string),
 		deferredStatus:    make(map[string]codexDeferredStatus),
 		resolvingByThread: make(map[string]int),
 		lifecycleRevision: make(map[string]uint64),
@@ -246,18 +250,22 @@ func (c *codexInteractions) handleMcpElicitation(message codexapp.Inbound) {
 		RequestedSchema json.RawMessage `json:"requestedSchema"`
 	}
 	if json.Unmarshal(message.Params, &params) != nil || params.ThreadID == "" || message.ID == nil {
+		c.rejectMcpElicitation(message, "invalid_params")
 		return
 	}
-	// openai/form is intentionally not forwarded: its schema is provider
-	// specific and cannot be safely validated by every Pocketctl client.
+	// Unsupported requests must be answered, otherwise the native tool can
+	// wait forever even when no remote client has a card to resolve.
 	if params.Mode != "form" && params.Mode != "url" {
+		c.rejectMcpElicitation(message, "unsupported_mode")
 		return
 	}
 	if params.Mode == "form" {
 		if err := validateMcpFormSchema(params.RequestedSchema); err != nil {
+			c.rejectMcpElicitation(message, "unsupported_schema")
 			return
 		}
 	} else if err := validateMcpElicitationURL(params.URL); err != nil {
+		c.rejectMcpElicitation(message, "invalid_url")
 		return
 	}
 	pending := &codexPendingInteraction{
@@ -279,6 +287,18 @@ func (c *codexInteractions) handleMcpElicitation(message codexapp.Inbound) {
 		Message: params.Message, URL: params.URL, ElicitationSchema: append(json.RawMessage(nil), params.RequestedSchema...),
 	}
 	c.publishPendingTransition(params.ThreadID, protocol.StatusWaitingQuestion, event)
+}
+
+func (c *codexInteractions) rejectMcpElicitation(message codexapp.Inbound, reason string) {
+	// Never log the form, URL, metadata or submitted values: they can contain
+	// credentials. The bounded reason is enough to diagnose incompatibility.
+	slog.Warn("Codex MCP elicitation rejected", "reason", reason)
+	if message.ID == nil || c.closed.Load() {
+		return
+	}
+	if err := c.client.Respond(*message.ID, nil, &codexapp.RPCError{Code: -32602, Message: "PocketCtl cannot handle this MCP elicitation: " + reason}); err != nil {
+		slog.Warn("Codex MCP elicitation rejection write failed", "reason", reason)
+	}
 }
 
 func (c *codexInteractions) handleApproval(message codexapp.Inbound, kind string) {
@@ -408,20 +428,104 @@ func (c *codexInteractions) addPending(pending *codexPendingInteraction) bool {
 	pending.nativeKey = c.nativeKey(pending.threadID, pending.requestID)
 	pending.publicID = c.publicID(pending.nativeKey)
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed.Load() {
+		c.mu.Unlock()
 		return false
 	}
 	if _, resolved := c.resolvedNative[pending.nativeKey]; resolved {
+		c.mu.Unlock()
 		return false
 	}
 	if _, exists := c.pendingByNative[pending.nativeKey]; exists {
+		c.mu.Unlock()
 		return false
 	}
 	c.pendingByNative[pending.nativeKey] = pending
 	c.pendingByPublic[pending.threadID+"\x00"+pending.publicID] = pending
 	c.lifecycleRevision[pending.threadID]++
+	interrupted := pending.turnID != "" && c.interruptedTurns[pending.threadID] == pending.turnID
+	c.mu.Unlock()
+	if interrupted {
+		// Requests already in flight can arrive after Stop. Do not reopen a
+		// question for that exact turn, or affect a subsequent turn.
+		if err := c.cancelPending(pending, false); err != nil {
+			slog.Warn("Codex late interaction cancellation write failed", "thread", pending.threadID)
+		}
+		return false
+	}
 	return true
+}
+
+// CancelTurn releases native approval waits before turn/interrupt. Lifecycle
+// sequencing prevents a simultaneous UI answer from responding twice.
+func (c *codexInteractions) CancelTurn(threadID, turnID string) error {
+	release, open := c.beginLifecycle(threadID)
+	if !open {
+		return fmt.Errorf("Codex interaction broker is closed")
+	}
+	defer release()
+	c.mu.Lock()
+	c.interruptedTurns[threadID] = turnID
+	var pending []*codexPendingInteraction
+	for _, request := range c.pendingByNative {
+		if request.threadID == threadID && request.turnID == turnID {
+			pending = append(pending, request)
+		}
+	}
+	c.mu.Unlock()
+	var errs []error
+	for _, request := range pending {
+		if err := c.cancelPending(request, true); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Caller holds the thread lifecycle sequencer. A failed write restores the
+// pending request so another Stop can retry; no permission is ever granted.
+func (c *codexInteractions) cancelPending(pending *codexPendingInteraction, published bool) error {
+	var result any
+	var rpcErr *codexapp.RPCError
+	event := protocol.DaemonEvent{SessionID: pending.threadID, RequestID: pending.publicID, Reason: protocol.TurnReasonUserRequested}
+	switch pending.kind {
+	case codexMcpElicitation:
+		result = map[string]any{"action": "cancel"}
+		event.Type, event.Action = "mcp_elicitation_resolved", "cancel"
+	case codexApprovalCommand, codexApprovalFile, codexApprovalPermissions:
+		action := "cancel"
+		if _, ok := pending.available["cancel"]; !ok {
+			action = "reject"
+		}
+		response, _, err := codexApprovalResponse(pending, action)
+		if err != nil {
+			rpcErr = &codexapp.RPCError{Code: -32800, Message: "Turn interrupted by user"}
+		} else {
+			result = response
+		}
+		event.Type, event.Action, event.Rejected = "approval_resolved", action, true
+	default:
+		rpcErr = &codexapp.RPCError{Code: -32800, Message: "Turn interrupted by user"}
+		event.Type, event.Rejected = "question_resolved", true
+	}
+	c.mu.Lock()
+	c.markResolvingLocked(pending)
+	c.mu.Unlock()
+	if err := c.client.Respond(pending.requestID, result, rpcErr); err != nil {
+		c.restoreAfterWriteFailure(pending)
+		return fmt.Errorf("cancel Codex interaction: %w", err)
+	}
+	if published {
+		c.publishEvent(event)
+		c.finishResolution(pending.threadID)
+	} else {
+		// No waiting card/state was published for this late request. In
+		// particular, do not resurrect running after native completion.
+		c.mu.Lock()
+		c.decrementResolvingLocked(pending.threadID)
+		c.mu.Unlock()
+	}
+	return nil
 }
 
 func (c *codexInteractions) ResolveApproval(ctx context.Context, threadID, publicID, action string) error {
