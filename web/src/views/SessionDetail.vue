@@ -618,7 +618,7 @@
 
               <div class="input-actions">
                 <!-- Send button (idle) -->
-                <button v-if="!isExecuting || (isManagedOpenCode && messageInput.trim())" class="action-btn send-btn"
+                <button v-if="!isTurnActive || (isManagedOpenCode && messageInput.trim())" class="action-btn send-btn"
                   @pointerdown="preserveComposerFocus"
                   @click="sendMessage"
                   :aria-label="t(isMobile ? 'session.send_mobile' : 'session.send_enter')"
