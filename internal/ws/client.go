@@ -108,6 +108,13 @@ const (
 	ConnectionStopped       ConnectionStatus = "stopped"
 )
 
+// Refresh failures requiring operator intervention. Other errors are retryable.
+var (
+	ErrRefreshLoginRequired      = errors.New("refresh requires login")
+	ErrRefreshStorageUnavailable = errors.New("credential storage unavailable")
+	ErrRefreshPersistenceFailed  = errors.New("refreshed credentials could not be saved")
+)
+
 var errReconnectRequested = errors.New("relay requested reconnect")
 
 var errOutputClosed = errors.New("daemon output channel closed")
@@ -193,13 +200,9 @@ type Client struct {
 	// Relay event_ack. It is used by Codex startup replay to checkpoint source
 	// lines only after the receiver has durably accepted their transport prefix.
 	OnEventsAcknowledged func(eventIDs []string)
-	// OnTokenRefresh is invoked when the relay rejects us with 4001 (invalid/expired
-	// access token). It must attempt a refresh-token exchange and return the new
-	// access token + true on success. On success the client reconnects with the new
-	// token (no backoff, no auth-reject escalation); on failure the rejection count
-	// keeps climbing and eventually the client parks. May be nil — without it the
-	// client behaves as if refresh always fails (stops after authRejectStopThreshold).
-	OnTokenRefresh func() (newAccessToken string, ok bool)
+	// OnTokenRefresh exchanges and durably saves credentials. Only the typed
+	// intervention errors park reconnection; other failures retry with backoff.
+	OnTokenRefresh func(context.Context) (newAccessToken string, err error)
 
 	// reconnectAttempt counts consecutive connections that never reached a
 	// successful registration; it drives the exponential backoff and is reset to
@@ -592,31 +595,48 @@ func (c *Client) Run(ctx context.Context) error {
 			return err
 		}
 
-		// If the relay rejected our access token (4001), try to refresh it before
-		// anything else: a remote daemon whose 24h access token simply expired must
-		// self-heal via its refresh token — the user can't be expected to reach the
-		// machine to re-login. On success, reconnect immediately with the new token.
 		if c.lastCloseAuthReject.Load() && c.OnTokenRefresh != nil {
-			c.logger.Info("auth rejected; attempting token refresh")
-			newToken, ok := c.OnTokenRefresh()
-			if ok && newToken != "" {
-				c.UpdateToken(newToken)
-				c.authRejectCount.Store(0) // refresh worked — forgive prior rejections
-				c.reconnectAttempt.Store(0)
-				c.logger.Info("token refreshed; reconnecting")
-				continue // reconnect at once, no backoff
+			for {
+				c.notifyConnectionStatus(ConnectionAuthUncertain, "refresh_pending")
+				newToken, refreshErr := c.OnTokenRefresh(ctx)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if refreshErr == nil && newToken != "" {
+					c.UpdateToken(newToken)
+					c.authRejectCount.Store(0)
+					c.reconnectAttempt.Store(0)
+					c.logger.Info("token refreshed; reconnecting")
+					break
+				}
+				status, reason := ConnectionAuthUncertain, "refresh_temporarily_unavailable"
+				switch {
+				case errors.Is(refreshErr, ErrRefreshLoginRequired):
+					status, reason = ConnectionLoginRequired, "refresh_rejected"
+				case errors.Is(refreshErr, ErrRefreshStorageUnavailable):
+					status, reason = ConnectionStopped, "auth_storage_unavailable"
+				case errors.Is(refreshErr, ErrRefreshPersistenceFailed):
+					status, reason = ConnectionStopped, "auth_persistence_failed"
+				}
+				c.notifyConnectionStatus(status, reason)
+				// Log a stable reason, never server response bodies or credential values.
+				c.logger.Warn("token refresh did not complete", "reason", reason)
+				if status != ConnectionAuthUncertain {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				// A temporary refresh failure does not prove credentials are invalid.
+				// Retry the refresh itself, not a WebSocket with the known-rejected
+				// access token: redialing it would escalate Relay authentication bans.
+				if !c.backoffSleep(ctx) {
+					return ctx.Err()
+				}
 			}
-			c.logger.Error("token refresh failed; refresh token may be expired — run `pocketctl login` on this machine")
+			continue
 		}
-
-		// Refresh wasn't possible or failed, and the relay keeps rejecting us —
-		// stop hammering. Park until shutdown (returning would let RunLoop restart
-		// the loop); the user must re-login and restart the daemon. A healthy
-		// register_ack (or a successful refresh) resets the counter, so this only
-		// trips when the refresh token is genuinely dead.
-		if c.authRejectCount.Load() >= authRejectStopThreshold {
-			c.logger.Error("relay auth rejected repeatedly even after refresh attempts; pausing reconnect until you run `pocketctl login` and restart the daemon",
-				"consecutive", c.authRejectCount.Load())
+		if c.OnTokenRefresh == nil && c.authRejectCount.Load() >= authRejectStopThreshold {
+			c.notifyConnectionStatus(ConnectionStopped, "auth_refresh_unavailable")
+			c.logger.Error("authentication rejected; reconnect paused because token refresh is unavailable")
 			<-ctx.Done()
 			return ctx.Err()
 		}
@@ -705,11 +725,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// is invalid/revoked (relay validates after upgrade). The backoff is reset in
 	// onRegisterAck, once the relay has actually confirmed our registration.
 
-	c.notifyState(true)
 	if hasFatalBarrier {
 		c.notifyConnectionStatus(ConnectionBackpressured, fatalReason)
 	} else {
-		c.notifyConnectionStatus(ConnectionConnected, "")
+		c.notifyConnectionStatus(ConnectionReconnecting, "awaiting_registration")
 	}
 
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
@@ -1451,6 +1470,7 @@ func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 	// A confirmed registration means the token is good — clear any prior auth
 	// rejections so a later transient 4001 starts counting from scratch.
 	c.authRejectCount.Store(0)
+	c.notifyState(true)
 	c.outMu.Lock()
 	c.ackSupported = msg.SupportsEventAck
 	c.ackKnown = true
@@ -1475,7 +1495,6 @@ func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 	if c.flowControlSupported && msg.EventWindow > 0 {
 		c.eventWindow = clampEventWindow(msg.EventWindow, c.maxOutCount)
 	}
-	recoveredFatal := false
 	if c.streamTransportSupported {
 		blockedSeq := c.fatalFlowBlockedSeq
 		repaired, err := c.repairBufferedEventsLocked(func(event bufferedEvent) bool {
@@ -1488,7 +1507,6 @@ func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 			c.fatalFlowReason = ""
 			c.flowRetryAfterMS = 0
 			c.flowBackpressured = false
-			recoveredFatal = true
 		}
 	}
 	fatalReason := c.fatalFlowReason
@@ -1501,7 +1519,7 @@ func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 		c.outMu.Unlock()
 		if hasFatalBarrier {
 			c.notifyConnectionStatus(ConnectionBackpressured, fatalReason)
-		} else if recoveredFatal {
+		} else {
 			c.notifyConnectionStatus(ConnectionConnected, "")
 		}
 		return
@@ -1514,6 +1532,7 @@ func (c *Client) onRegisterAck(msg protocol.RegisterAckMessage) {
 	upto := c.seqCtr
 	c.outMu.Unlock()
 	c.trimOutbound(upto)
+	c.notifyConnectionStatus(ConnectionConnected, "")
 }
 
 func (c *Client) handleEventAck(msg protocol.EventAckMessage) {

@@ -576,6 +576,30 @@ var messages = map[string]msg{
 		"authentication uncertain",
 		"身份验证状态不确定",
 	},
+	"status.auth_login_notice": {
+		"WARNING: host offline; reconnect paused. Credentials are missing or rejected. Run pocketctl login on this host using the same account and Relay (use --relay for a custom Relay).",
+		"警告：主机离线，已暂停重连。登录凭证缺失或被拒绝。请在本机运行 pocketctl login，使用原账号和 Relay（自定义 Relay 请指定 --relay）。",
+	},
+	"status.auth_storage_notice": {
+		"WARNING: host offline; reconnect paused. Cannot read credential storage. Check auth.json permissions and contents before retrying.",
+		"警告：主机离线，已暂停重连。无法读取凭证文件，请先检查 auth.json 的权限和内容。",
+	},
+	"status.auth_save_notice": {
+		"WARNING: host offline; reconnect paused. Refreshed credentials could not be saved. Check disk space and auth.json permissions, then run pocketctl login using the same account and Relay.",
+		"警告：主机离线，已暂停重连。新凭证保存失败。请检查磁盘空间和 auth.json 权限，再使用原账号和 Relay 运行 pocketctl login。",
+	},
+	"status.auth_unavailable_notice": {
+		"WARNING: host offline; reconnect paused. Authentication was rejected and automatic refresh is unavailable. Check credentials and startup token overrides; run pocketctl login if needed.",
+		"警告：主机离线，已暂停重连。认证被拒绝且无法自动刷新。请检查凭证及启动时指定的 token，必要时运行 pocketctl login。",
+	},
+	"status.auth_retry_notice": {
+		"WARNING: host authentication is unconfirmed; retrying automatically. Check network/Relay availability with pocketctl daemon doctor. This does not establish that credentials have expired.",
+		"警告：主机认证尚未确认，正在自动重试。可运行 pocketctl daemon doctor 检查网络和 Relay；当前不能据此认定凭证过期。",
+	},
+	"status.auth_recovery": {
+		"After repair/login, reload the daemon: manual startup — pocketctl daemon stop, then pocketctl daemon start with the original flags; supervised startup — pocketctl daemon stop, then pocketctl daemon service install with the original service flags. Preserve Relay and permission settings; check pocketctl daemon status for connected. Login alone does not resume a paused daemon.",
+		"修复或登录后需重新加载 daemon：手动启动时执行 pocketctl daemon stop，再带原参数执行 pocketctl daemon start；服务托管时执行 pocketctl daemon stop，再带原服务参数执行 pocketctl daemon service install。保留 Relay 和权限设置，并用 pocketctl daemon status 确认已连接。仅登录不会恢复已暂停的 daemon。",
+	},
 	"status.login_required": {"login required", "需要重新登录"},
 	"status.revoked":        {"access revoked", "访问权限已撤销"},
 	"status.stopped":        {"stopped", "已停止"},

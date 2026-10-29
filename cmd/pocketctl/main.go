@@ -1667,47 +1667,10 @@ func cmdDaemonStart(args []string) {
 		logger.Info("relay certificate pinning enabled")
 	}
 
-	// Auto-refresh the access token when the relay rejects it with 4001. Without
-	// this, a daemon whose 24h access token has simply expired would go permanently
-	// offline and spam the relay with invalid-token reconnects — and a remote user
-	// can't reach the machine to `pocketctl login`. The 7d refresh token lets the
-	// daemon self-heal; only when the refresh token itself is dead does the daemon
-	// park and ask the user to re-login.
-	client.OnTokenRefresh = func() (string, bool) {
-		relayURL, _, refreshToken, err := config.LoadAuth()
-		if err != nil || refreshToken == "" {
-			logger.Error("token refresh: no stored refresh token", "error", err)
-			return "", false
-		}
-		baseURL := strings.TrimSuffix(relayURL, "/ws")
-		baseURL = strings.TrimSuffix(baseURL, "/")
-		baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
-		baseURL = strings.Replace(baseURL, "ws://", "http://", 1)
-		newAccess, newRefresh, err := api.RefreshToken(baseURL, refreshToken, daemon.MachineID())
-		if err != nil {
-			logger.Error("token refresh failed; refresh token may be expired", "error", err)
-			return "", false
-		}
-		// Persist the new tokens with retries. This MUST NOT be swallowed: the
-		// relay has already rotated the old refresh token, so if we don't
-		// durably save the new one the next refresh reuses the rotated one and
-		// gets judged a breach (the m3-pro incident). Only report success once
-		// persisted; otherwise abort so the daemon doesn't act on a half-applied
-		// refresh (it'll retry on the next 4001, and park if refresh stays broken).
-		var saveErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if saveErr = config.SaveAuth(relayURL, newAccess, newRefresh); saveErr == nil {
-				break
-			}
-			logger.Warn("persist refreshed token failed; retrying", "attempt", attempt+1, "error", saveErr)
-			time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
-		}
-		if saveErr != nil {
-			logger.Error("persist refreshed token failed after retries; aborting refresh to avoid stale-token reuse", "error", saveErr)
-			return "", false
-		}
-		logger.Info("access token refreshed; reconnecting with new token")
-		return newAccess, true
+	// Refresh failures retain their category so the connection loop can decide
+	// whether to retry or persist an actionable paused state.
+	client.OnTokenRefresh = func(ctx context.Context) (string, error) {
+		return refreshDaemonToken(ctx, daemon.MachineID(), config.LoadAuth, api.RefreshTokenContext, config.SaveAuth)
 	}
 
 	// Durable outbound spool: mirror unacked events to disk so a daemon process
@@ -2876,6 +2839,7 @@ func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int,
 		return
 	}
 	fmt.Fprintln(out, i18n.T("status.daemon", state.DaemonID))
+	renderDaemonAuthNotice(out, state)
 	ver := state.Version
 	if ver == "" {
 		// Older daemon that predates the Version field — surface it explicitly

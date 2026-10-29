@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -167,20 +168,42 @@ func VerifyEmailCode(baseURL, email, code, lang, machineID string) (accessToken,
 
 // ---- Token Management ----
 
+// ErrRefreshRejected means the refresh endpoint explicitly rejected credentials.
+// Transport, rate-limit, malformed-response and server errors do not imply expiry.
+var ErrRefreshRejected = errors.New("refresh credentials rejected")
+
+type httpResponseError struct {
+	status  int
+	message string
+}
+
+func (e *httpResponseError) Error() string { return e.message }
+
 // RefreshToken refreshes an access token using a refresh token. machineID is
 // used only to backfill legacy refresh tokens that predate machine binding.
 func RefreshToken(baseURL, refreshToken, machineID string) (accessToken, newRefreshToken string, err error) {
+	return RefreshTokenContext(context.Background(), baseURL, refreshToken, machineID)
+}
+
+// RefreshTokenContext bounds refresh work even if the server stops responding.
+func RefreshTokenContext(ctx context.Context, baseURL, refreshToken, machineID string) (accessToken, newRefreshToken string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	body := map[string]string{"refresh_token": refreshToken}
 	if machineID != "" {
 		body["machine_id"] = machineID
 	}
-	resp, err := postJSON(baseURL+"/api/auth/refresh", body)
+	resp, err := postJSONContext(ctx, baseURL+"/api/auth/refresh", body)
 	if err != nil {
+		var responseErr *httpResponseError
+		if errors.As(err, &responseErr) && responseErr.status == http.StatusUnauthorized {
+			return "", "", ErrRefreshRejected
+		}
 		return "", "", err
 	}
 	at, _ := resp["access_token"].(string)
 	rt, _ := resp["refresh_token"].(string)
-	if at == "" {
+	if at == "" || rt == "" {
 		if msg, ok := resp["error"].(string); ok {
 			return "", "", fmt.Errorf("%s", msg)
 		}
@@ -314,9 +337,9 @@ func postJSONContext(ctx context.Context, url string, body map[string]string) (m
 
 	if resp.StatusCode >= 400 {
 		if msg, ok := result["error"].(string); ok {
-			return result, fmt.Errorf("%s", msg)
+			return result, &httpResponseError{status: resp.StatusCode, message: msg}
 		}
-		return result, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return result, &httpResponseError{status: resp.StatusCode, message: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
 
 	return result, nil

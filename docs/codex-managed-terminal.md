@@ -51,6 +51,27 @@ codex resume <thread-id> --remote unix:///private/path/pocketctl-codex.sock
 
 这部分参数由 launcher 自动追加，用户不需要先执行“连接 App Server”命令，也不需要手工维护 socket。
 
+### 复制退出提示中的重连命令
+
+Codex 退出终端时打印的 `--remote unix:///.../app-<home-hash>-<generation>.sock` 是某次 app-server 实例的地址。实例重建后，旧地址可能不存在；`No such file or directory` 本身不能证明会话数据丢失。
+
+当 `codex` 经过 Pocketctl launcher 时，以下两种复制命令会按当前 `CODEX_HOME` 重新 Acquire daemon 管理的 runtime，再调用官方 Codex：
+
+```bash
+codex --remote unix:///private/tmp/pocketctl-<uid>/codex/app-<home-hash>-2.sock resume <thread-id>
+codex --remote unix:///private/tmp/pocketctl-<uid>/codex/app-<home-hash>-2.sock agents
+```
+
+同时支持 `--remote=<uri>` 和 `resume <thread-id> --remote <uri>`。重连保留原始 thread ID 和其他参数，并绑定终端进程租约，退出后按现有逻辑释放租约。`agents` 获取 runtime，不创建新会话，也不替用户选择或停止任务。
+
+自动接管仅适用于当前 OS 用户的 Pocketctl runtime 目录（或同一环境配置的绝对路径 `POCKETCTL_CODEX_RUNTIME_DIR`），且 socket 文件名中的 home hash 必须与当前 `CODEX_HOME` 一致。未知或外部地址、其他用户目录及其他命令继续原样传给 Codex。若 shell 与 daemon 的自定义 runtime 目录不同，需先恢复相同配置。
+
+账户不匹配、旧式无 home hash 地址、缺少明确 thread ID 会给出错误提示；daemon 不可用、集成未启用或 runtime 升级被占用阻止时，不静默回退到 native，也不强制停止现有 runtime。先检查 `pocketctl daemon status` 和 `pocketctl agent codex status`，恢复原账户环境后重试。
+
+该行为需要运行包含此修复的 Pocketctl launcher；直接执行官方 Codex 二进制或使用 `codex --native --remote ...` 会绕过修复。也可以在原账户环境下使用不带旧 socket 的 `codex resume <thread-id>`；普通启动仍遵循原有的 daemon 不可用时 native fallback 规则。
+
+此修复覆盖过期地址的重连入口，不证明特定用户的 runtime 为何退出，也不把“ctl 列表未展示最新会话”的独立问题视为已修复。
+
 ### 多 Codex 账号
 
 每个 Codex 账号应使用独立的 `CODEX_HOME`，并把额外目录加入 daemon 的 allowlist。前台 daemon 可这样启动：
@@ -69,7 +90,7 @@ pocketctl daemon service install --codex-home ~/.codex-a --codex-home ~/.codex-p
 
 Pocketctl 为每个 allowlist home 分配不暴露本机绝对路径的 ID，并启动独立 app-server、socket、generation、lease 与恢复状态。未配置的 home 不会静默接入默认账号。Dashboard 仍只显示一台真实主机；Web/iOS 的新建会话在选择 Codex CLI 后显示账号选择器（单账号时自动选择并隐藏），会话列表显示账号标签并支持筛选。
 
-`exec`、`review`、`login`、`logout`、`mcp`、`plugin`、`app-server`、`completion`、`update`、`doctor`、`sandbox` 等非交互或管理命令保持 Codex 原生执行；用户已明确传入 `--remote` 时也不会重写。
+`exec`、`review`、`login`、`logout`、`mcp`、`plugin`、`app-server`、`completion`、`update`、`doctor`、`sandbox` 等非交互或管理命令保持 Codex 原生执行；外部 `--remote` 地址保持原生执行。唯一例外是上述 Pocketctl 自有 socket 重连命令。
 
 单次绕过 Pocketctl：
 
