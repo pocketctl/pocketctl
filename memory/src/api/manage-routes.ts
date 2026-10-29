@@ -8,13 +8,14 @@ import {
   CorrectRequestSchema,
   DeleteRequestSchema,
   FeedbackRequestSchema,
-  ListQuerySchema,
+  CandidateQuerySchema,
   RejectRequestSchema,
   SettingsPatchSchema,
   TransitionRequestSchema,
   UUIDSchema,
 } from './schemas.js'
 import { createClaimRepository } from '../claims/repository.js'
+import { deliverySourceStatus } from '../claims/delivery-source-status.js'
 import { createReviewService } from '../claims/review-service.js'
 import { createLifecycleService } from '../claims/lifecycle-service.js'
 import { createIdempotencyStore } from './idempotency.js'
@@ -168,7 +169,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
   app.get('/api/v1/memory/candidates', async (request, reply) => {
     const grant = await guardManage(request, reply)
     if (!grant) return
-    const parsed = ListQuerySchema.safeParse(request.query)
+    const parsed = CandidateQuerySchema.safeParse(request.query)
     if (!parsed.success) {
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid candidate query')))
       return
@@ -176,9 +177,22 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     const queue = await review.reviewQueue({
       installationId: grant.installationId,
       limit: parsed.data.limit,
+      submissionId: parsed.data.submission_id, decisionId: parsed.data.decision_id,
     })
     return { candidates: queue }
   })
+
+  app.get<{ Params: { submissionId: string; decisionId: string } }>(
+    '/api/v1/memory/delivery-sources/:submissionId/decisions/:decisionId', async (request, reply) => {
+      const grant = await guardManage(request, reply)
+      if (!grant) return
+      const submissionId = resourceId(request.params.submissionId, reply)
+      if (!submissionId) return
+      const decisionId = resourceId(request.params.decisionId, reply)
+      if (!decisionId) return
+      reply.header('cache-control', 'no-store')
+      return deliverySourceStatus(deps.pool, { installationId: grant.installationId, submissionId, decisionId })
+    })
 
   app.get('/api/v1/memory/settings', async (request, reply) => {
     const grant = await guardManage(request, reply)
@@ -683,6 +697,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
 function isManageRequest(method: string, rawUrl: string): boolean {
   const path = rawUrl.split('?')[0]
   if (method === 'GET' && (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/settings')) return true
+  if (method === 'GET' && /^\/api\/v1\/memory\/delivery-sources\/[^/]+\/decisions\/[^/]+$/.test(path)) return true
   if (method === 'POST' && path === '/api/v1/memory/feedback') return true
   if (method === 'POST' && /^\/api\/v1\/memory\/candidates\/[^/]+\/(accept|reject)$/.test(path)) return true
   if (method === 'POST' && /^\/api\/v1\/memory\/claims\/[^/]+\/(correct|expire|revoke)$/.test(path)) return true

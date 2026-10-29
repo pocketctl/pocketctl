@@ -46,6 +46,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/sessiondocument"
 	"github.com/pocketctl/pocketctl/internal/sessionmcp"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
+	"github.com/pocketctl/pocketctl/internal/teamdelivery"
 	"github.com/pocketctl/pocketctl/internal/turn"
 	"github.com/pocketctl/pocketctl/internal/update"
 	"github.com/pocketctl/pocketctl/internal/watcher"
@@ -1666,47 +1667,10 @@ func cmdDaemonStart(args []string) {
 		logger.Info("relay certificate pinning enabled")
 	}
 
-	// Auto-refresh the access token when the relay rejects it with 4001. Without
-	// this, a daemon whose 24h access token has simply expired would go permanently
-	// offline and spam the relay with invalid-token reconnects — and a remote user
-	// can't reach the machine to `pocketctl login`. The 7d refresh token lets the
-	// daemon self-heal; only when the refresh token itself is dead does the daemon
-	// park and ask the user to re-login.
-	client.OnTokenRefresh = func() (string, bool) {
-		relayURL, _, refreshToken, err := config.LoadAuth()
-		if err != nil || refreshToken == "" {
-			logger.Error("token refresh: no stored refresh token", "error", err)
-			return "", false
-		}
-		baseURL := strings.TrimSuffix(relayURL, "/ws")
-		baseURL = strings.TrimSuffix(baseURL, "/")
-		baseURL = strings.Replace(baseURL, "wss://", "https://", 1)
-		baseURL = strings.Replace(baseURL, "ws://", "http://", 1)
-		newAccess, newRefresh, err := api.RefreshToken(baseURL, refreshToken, daemon.MachineID())
-		if err != nil {
-			logger.Error("token refresh failed; refresh token may be expired", "error", err)
-			return "", false
-		}
-		// Persist the new tokens with retries. This MUST NOT be swallowed: the
-		// relay has already rotated the old refresh token, so if we don't
-		// durably save the new one the next refresh reuses the rotated one and
-		// gets judged a breach (the m3-pro incident). Only report success once
-		// persisted; otherwise abort so the daemon doesn't act on a half-applied
-		// refresh (it'll retry on the next 4001, and park if refresh stays broken).
-		var saveErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			if saveErr = config.SaveAuth(relayURL, newAccess, newRefresh); saveErr == nil {
-				break
-			}
-			logger.Warn("persist refreshed token failed; retrying", "attempt", attempt+1, "error", saveErr)
-			time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
-		}
-		if saveErr != nil {
-			logger.Error("persist refreshed token failed after retries; aborting refresh to avoid stale-token reuse", "error", saveErr)
-			return "", false
-		}
-		logger.Info("access token refreshed; reconnecting with new token")
-		return newAccess, true
+	// Refresh failures retain their category so the connection loop can decide
+	// whether to retry or persist an actionable paused state.
+	client.OnTokenRefresh = func(ctx context.Context) (string, error) {
+		return refreshDaemonToken(ctx, daemon.MachineID(), config.LoadAuth, api.RefreshTokenContext, config.SaveAuth)
 	}
 
 	// Durable outbound spool: mirror unacked events to disk so a daemon process
@@ -1938,6 +1902,14 @@ func cmdDaemonStart(args []string) {
 	go sm.RunTitleMaintenance(ctx)
 	go openSpecTasks.Run(ctx, outputCh)
 	defer cancel()
+	if err := startTeamDelivery(ctx, url, id, client, sm, logger); err != nil {
+		logger.Warn("team delivery unavailable", "code", teamdelivery.DiagnosticCode(err))
+	}
+	if shutdown, err := startAgentTeams(ctx, url, id, client, sm, memoryContextGrants, logger); err != nil {
+		logger.Warn("AgentTeams unavailable", "code", "agentteams_configuration_or_probe_failed")
+	} else {
+		defer func() { cancel(); shutdown() }()
+	}
 	if documentCaptureConfigErr != nil {
 		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
 	} else if documentCaptureEnabled {
@@ -2867,6 +2839,7 @@ func renderDaemonStatus(out io.Writer, state daemon.DaemonState, pidfilePID int,
 		return
 	}
 	fmt.Fprintln(out, i18n.T("status.daemon", state.DaemonID))
+	renderDaemonAuthNotice(out, state)
 	ver := state.Version
 	if ver == "" {
 		// Older daemon that predates the Version field — surface it explicitly
@@ -3991,8 +3964,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					continue
 				}
 				createCommand := cmd
+				createCtx := sm.CaptureTeamCommandContext(ctx)
 				daemon.Go("team-session-create", logger, func() {
-					runCollaborationSessionCreate(ctx, client, sm, createCommand, stateDirty, memoryContextGrants)
+					runCollaborationSessionCreate(createCtx, client, sm, createCommand, stateDirty, memoryContextGrants)
 				})
 				continue
 			case "collaboration_user_message":
@@ -4008,25 +3982,37 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
 					continue
 				}
-				if err := sm.DispatchCollaborationMessage(ctx, cmd.Collaboration, cmd.TeamContext, cmd.SessionID, cmd.Content, cmd.RequestID, cmd.MsgID); err != nil {
-					if cmd.TeamContext != nil {
-						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
-							RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+				messageCommand := cmd
+				messageCtx := sm.CaptureTeamCommandContext(ctx)
+				runMessage := func() {
+					if err := sm.DispatchCollaborationMessage(messageCtx, messageCommand.Collaboration, messageCommand.TeamContext, messageCommand.SessionID, messageCommand.Content, messageCommand.RequestID, messageCommand.MsgID); err != nil {
+						if messageCommand.TeamContext != nil {
+							client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: messageCommand.SessionID,
+								RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: messageCommand.Collaboration, TeamContext: messageCommand.TeamContext})
+						}
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: messageCommand.SessionID,
+							RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: messageCommand.Collaboration})
+						return
 					}
-					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
-						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: cmd.Collaboration})
-					continue
+					if receipt := sm.TeamConfigReceipt(ctx, messageCommand.Collaboration, messageCommand.SessionID); receipt != nil {
+						client.SendMsg(*receipt)
+					}
+					stateDirty.Store(true)
+					if messageCommand.TeamContext != nil {
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: messageCommand.SessionID,
+							RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "accepted", Collaboration: messageCommand.Collaboration, TeamContext: messageCommand.TeamContext})
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: messageCommand.SessionID,
+						RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "accepted", Collaboration: messageCommand.Collaboration})
+					if strings.HasPrefix(messageCommand.SessionID, "agentteams-") {
+						sm.BeginAgentTeamsCall(ctx, messageCommand.Collaboration.CallID)
+					}
 				}
-				if receipt := sm.TeamConfigReceipt(ctx, cmd.Collaboration, cmd.SessionID); receipt != nil {
-					client.SendMsg(*receipt)
+				if strings.HasPrefix(cmd.SessionID, "agentteams-") || (cmd.Collaboration.Delivery != nil && cmd.Collaboration.Delivery.AttemptID != "") {
+					daemon.Go("team-step-message", logger, runMessage)
+				} else {
+					runMessage()
 				}
-				stateDirty.Store(true)
-				if cmd.TeamContext != nil {
-					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
-						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
-				}
-				client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
-					RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
 				continue
 			case "session_create":
 				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())

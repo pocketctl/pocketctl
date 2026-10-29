@@ -13,6 +13,7 @@ export const TEAM_RECONCILE_CAPABILITY = 'team_collaboration_reconcile_v1'
 export const TEAM_COLLABORATION_PROTOCOL_VERSION = 1
 
 export interface DispatchAuthorization {
+  delivery?: { task_id: string; spec_revision: number; attempt_id?: string }
   protocol_version: number
   operation: 'create' | 'message'
   call_id: string
@@ -84,13 +85,22 @@ export class TeamDispatchRepository {
   constructor(
     private readonly pool: pg.Pool,
     private readonly memorySources?: TeamMemorySourceProjectorLike,
+    private readonly stepsEnabledForTeam: (teamId: string) => boolean = () => false,
+    private readonly externalEnabledForTeam: (teamId: string) => boolean = () => false,
   ) {}
 
   async listPendingCallIds(limit = 50): Promise<string[]> {
+    const stepTeams = (await this.pool.query<{ team_id: string }>(`SELECT DISTINCT s.team_id
+      FROM collaboration_calls c JOIN team_task_step_attempts a ON a.call_id=c.call_id
+      JOIN collaboration_sessions s ON s.team_session_id=c.team_session_id WHERE c.state='pending'`)).rows
+    const enabledTeams = stepTeams.map(row => row.team_id).filter(id => this.stepsEnabledForTeam(id))
     const result = await this.pool.query<{ call_id: string }>(
-      `SELECT call_id FROM collaboration_calls WHERE state = 'pending'
-       ORDER BY created_at, call_id LIMIT $1`,
-      [Math.max(1, Math.min(500, Math.trunc(limit)))],
+      `SELECT c.call_id FROM collaboration_calls c
+       JOIN collaboration_sessions s ON s.team_session_id=c.team_session_id
+       LEFT JOIN team_task_step_attempts a ON a.call_id=c.call_id
+       WHERE c.state='pending' AND (a.attempt_id IS NULL OR s.team_id=ANY($2::text[]))
+       ORDER BY c.created_at,c.call_id LIMIT $1`,
+      [Math.max(1, Math.min(500, Math.trunc(limit))), enabledTeams],
     )
     return result.rows.map(row => row.call_id)
   }
@@ -117,8 +127,11 @@ export class TeamDispatchRepository {
                 binding.native_session_id AS binding_native_session_id, binding.applied_revision AS binding_applied_revision, binding.applied_config AS binding_applied_config, binding.owner_user_id AS binding_owner_user_id,
                 offer.revision AS current_offer_revision, offer.state AS offer_state, offer.provider,
                 offer.daemon_id, offer.owner_user_id, member.state AS membership_state,
-                daemon.status AS daemon_status, daemon.collaboration_capabilities
+                daemon.status AS daemon_status, daemon.collaboration_capabilities, frozen.task_id AS delivery_task_id,frozen.spec_revision AS delivery_spec_revision,
+                attempt.attempt_id AS delivery_attempt_id,session.team_id AS dispatch_team_id
          FROM collaboration_calls call
+         LEFT JOIN team_call_delivery_specs frozen ON frozen.call_id=call.call_id
+         LEFT JOIN team_task_step_attempts attempt ON attempt.call_id=call.call_id
          JOIN collaboration_events event ON event.event_id = call.event_id
          LEFT JOIN collaboration_runs run ON run.run_id = call.run_id
          JOIN collaboration_sessions session ON session.team_session_id = call.team_session_id
@@ -131,6 +144,10 @@ export class TeamDispatchRepository {
       )
       const row = result.rows[0]
       if (!row || row.state !== 'pending') return null
+      // A mixed-version deployment must not treat a reserved step as legacy
+      // delivery. Keep the intent pending while the explicit step gate is off.
+      if (row.delivery_attempt_id && !this.stepsEnabledForTeam(row.dispatch_team_id)) return null
+      if (row.provider === 'agentteams' && !this.externalEnabledForTeam(row.dispatch_team_id)) return null
       if (!await teamAccountsEnabled(client, [Number(row.initiator_user_id), Number(row.owner_user_id)], true)) {
         await client.query(`UPDATE collaboration_calls SET state = 'blocked', outcome = 'team_access_revoked', updated_at = NOW(), finished_at = NOW() WHERE call_id = $1`, [callId])
         return null
@@ -140,6 +157,10 @@ export class TeamDispatchRepository {
         || Number(row.binding_owner_user_id) !== Number(row.owner_user_id)
         || !hasCapability(row.collaboration_capabilities, TEAM_DISPATCH_CAPABILITY)
         || !hasCapability(row.collaboration_capabilities, 'team_collaboration_context_v1')
+        || (row.delivery_task_id && !hasCapability(row.collaboration_capabilities, 'team_task_delivery_v1'))
+        || (row.delivery_attempt_id && !hasCapability(row.collaboration_capabilities, 'team_task_steps_v1'))
+        || (row.provider === 'agentteams' && !hasCapability(row.collaboration_capabilities, 'team_external_agentteams_v1'))
+        || (row.provider === 'agentteams' && row.delivery_attempt_id && !hasCapability(row.collaboration_capabilities, 'team_external_agentteams_steps_v1'))
         || (row.provider === 'dsh' && !hasCapability(row.collaboration_capabilities, 'team_collaboration_dsh_v1'))
       if (unavailable) {
         await client.query(`UPDATE collaboration_calls SET state = 'blocked', outcome = 'agent_unavailable', updated_at = NOW(), finished_at = NOW() WHERE call_id = $1`, [callId])
@@ -185,6 +206,7 @@ export class TeamDispatchRepository {
         nativeSessionId: row.binding_native_session_id,
         providerRequestId,
         authorization: {
+          ...(row.delivery_task_id ? {delivery: {task_id: row.delivery_task_id,spec_revision: Number(row.delivery_spec_revision), ...(row.delivery_attempt_id ? {attempt_id: row.delivery_attempt_id} : {})}} : {}),
           ...(frozen ?? {}),
           ...(row.execution_mode ? {execution_mode:row.execution_mode} : {}),
           protocol_version: TEAM_COLLABORATION_PROTOCOL_VERSION,
@@ -207,7 +229,7 @@ export class TeamDispatchRepository {
   // context/quota preparation that started earlier. Receipts never use this gate.
   async sendIfEnabled(callId: string, send: () => boolean): Promise<'sent' | 'unavailable' | 'access_denied'> {
     return this.transaction(async client => {
-      const row = (await client.query(`SELECT call.state, offer.owner_user_id, offer.team_id,
+      const row = (await client.query(`SELECT call.state, offer.owner_user_id, offer.team_id, offer.provider,
           COALESCE(run.initiator_user_id, event.author_user_id) AS initiator_user_id
         FROM collaboration_calls call
         JOIN team_agent_offers offer ON offer.offer_id = call.offer_id
@@ -215,6 +237,7 @@ export class TeamDispatchRepository {
         LEFT JOIN collaboration_runs run ON run.run_id = call.run_id
         WHERE call.call_id = $1 FOR UPDATE OF call`, [callId])).rows[0]
       if (!row || row.state !== 'dispatched') return 'unavailable'
+      if (row.provider === 'agentteams' && !this.externalEnabledForTeam(row.team_id)) return 'unavailable'
       if (!await teamAccountsEnabled(client, [Number(row.initiator_user_id), Number(row.owner_user_id)], true)) return 'access_denied'
       const members = await client.query(`SELECT user_id, role FROM collaboration_team_memberships WHERE team_id = $1 AND user_id = ANY($2::int[]) AND state = 'active' ORDER BY user_id FOR SHARE`, [row.team_id, [...new Set([Number(row.initiator_user_id), Number(row.owner_user_id)])]])
       if (members.rows.length !== new Set([Number(row.initiator_user_id), Number(row.owner_user_id)]).size || members.rows.some(member => member.role === 'viewer')) return 'access_denied'
@@ -233,6 +256,14 @@ export class TeamDispatchRepository {
        WHERE call_id = $1 AND state IN ('dispatched', 'accepted')`,
       [callId, state, outcome],
     )
+  }
+
+  async markReceiptTimedOut(callId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE collaboration_calls SET state = 'uncertain', outcome = 'dispatch_timeout', updated_at = NOW()
+       WHERE call_id = $1 AND state = 'dispatched' AND accepted_at IS NULL RETURNING call_id`, [callId],
+    )
+    return Boolean(result.rows[0])
   }
 
   async markDaemonUncertain(daemonId: string): Promise<void> {
@@ -297,39 +328,111 @@ export class TeamDispatchRepository {
     return Boolean(result.rows[0])
   }
 
-  async projectDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): Promise<ProjectedDispatchEvent | null> {
+  /** Revisit only an already-persisted terminal of this exact external task.
+   * A current-authorized recovery report triggers this; it never invents an event. */
+  async reconcileExternalTerminal(daemonId:string,ownerUserId:number,callId:string,remoteTaskId:string,state:'succeeded'|'failed'|'cancelled'):Promise<ProjectedDispatchEvent|null> {
+    const terminalState=state==='succeeded'?'completed':state==='cancelled'?'interrupted':'failed'
+    const row=(await this.pool.query(`SELECT terminal.payload,terminal.daemon_generation,terminal.materialized_event_id
+      FROM collaboration_calls call JOIN team_agent_offers offer ON offer.offer_id=call.offer_id
+      JOIN event_inbox terminal ON terminal.session_id=call.native_session_id AND terminal.daemon_id=offer.daemon_id AND terminal.user_id=offer.owner_user_id
+      WHERE call.call_id=$1 AND offer.daemon_id=$2 AND offer.owner_user_id=$3 AND offer.provider='agentteams'
+        AND call.state='uncertain' AND call.outcome='daemon_disconnected'
+        AND terminal.event_type='turn_status' AND terminal.status=2
+        AND terminal.payload->>'source_turn_id'=$4 AND terminal.payload->>'turn_status'=$5
+      ORDER BY terminal.inbox_id LIMIT 1`,[callId,daemonId,ownerUserId,remoteTaskId,terminalState])).rows[0]
+    if(!row)return null
+    return this.projectDaemonEvent(daemonId,ownerUserId,row.payload,Number(row.daemon_generation),row.materialized_event_id===null?null:Number(row.materialized_event_id))
+  }
+
+  async projectDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number, materializedEventId?: number | null): Promise<ProjectedDispatchEvent | null> {
     const sessionId = typeof message.session_id === 'string' ? message.session_id : ''
     const seq = Number(message.seq)
     if (!sessionId || !Number.isSafeInteger(seq) || seq <= 0) return null
+    if (daemonGeneration !== undefined && (!Number.isSafeInteger(daemonGeneration) || daemonGeneration <= 0)) return null
     const projectionKind = dispatchProjectionKind(message)
     if (!projectionKind) return null
     const terminal = dispatchTerminalStatus(message) !== null
     const agentText = projectionKind === 'agent_message'
     return this.transaction(async client => {
-      const call = (await client.query(
+      let call = (await client.query(
         `SELECT call.*, offer.owner_user_id, offer.daemon_id, offer.provider
          FROM collaboration_calls call JOIN team_agent_offers offer ON offer.offer_id = call.offer_id
          WHERE call.native_session_id = $1 AND offer.daemon_id = $2 AND offer.owner_user_id = $3
            AND call.state IN ('dispatched', 'accepted')
          ORDER BY call.dispatched_at DESC LIMIT 1 FOR UPDATE OF call`, [sessionId, daemonId, ownerUserId],
       )).rows[0]
+      if (!call && terminal && message.type === 'turn_status' && Number.isSafeInteger(daemonGeneration)) {
+        // A disconnect is uncertainty about transport, not proof of native
+        // failure. Recover only from the persisted original turn, with its
+        // accepted dispatch receipt preceding this exact terminal in the same
+        // trusted daemon generation. Canonical inbox rows may belong to an older
+        // generation after deduplication: ordering comes from transport receipts.
+        // Never infer completion from live status,
+        // replayed history, an older turn, or an unaccepted dispatch.
+        const recovered = (await client.query(
+          `SELECT call.*, offer.owner_user_id, offer.daemon_id, offer.provider,
+                  receipt.payload AS recovery_receipt
+           FROM collaboration_calls call JOIN team_agent_offers offer ON offer.offer_id=call.offer_id
+           JOIN event_inbox terminal ON terminal.session_id=call.native_session_id
+             AND terminal.daemon_id=offer.daemon_id AND terminal.user_id=offer.owner_user_id
+             AND terminal.daemon_generation=$4 AND terminal.seq=$5
+             AND terminal.event_type='turn_status' AND terminal.status IN (1,2) AND terminal.payload=$6::jsonb
+           JOIN LATERAL (
+             SELECT r.payload,received.seq FROM event_inbox_receipt received
+             JOIN event_inbox r ON r.inbox_id=received.inbox_id
+             WHERE r.session_id=call.native_session_id AND r.daemon_id=offer.daemon_id
+               AND r.user_id=offer.owner_user_id AND received.daemon_id=offer.daemon_id
+               AND received.daemon_generation=terminal.daemon_generation
+               AND received.seq<terminal.seq AND r.event_type='collaboration_dispatch_receipt' AND r.status=2
+               AND r.payload->>'status'='accepted' AND r.payload->'collaboration'->>'call_id'=call.call_id
+             ORDER BY received.seq DESC LIMIT 1
+           ) receipt ON TRUE
+           WHERE call.native_session_id=$1 AND offer.daemon_id=$2 AND offer.owner_user_id=$3
+             AND call.state='uncertain' AND call.outcome='daemon_disconnected' AND call.accepted_at IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM event_inbox_receipt received_earlier
+                 JOIN event_inbox earlier ON earlier.inbox_id=received_earlier.inbox_id
+               WHERE earlier.session_id=terminal.session_id
+                 AND earlier.daemon_id=terminal.daemon_id AND earlier.user_id=terminal.user_id
+                 AND received_earlier.daemon_id=terminal.daemon_id
+                 AND received_earlier.daemon_generation=terminal.daemon_generation
+                 AND received_earlier.seq>receipt.seq AND received_earlier.seq<terminal.seq
+                 AND earlier.event_type='turn_status'
+                 AND COALESCE(earlier.payload->>'turn_status',earlier.payload->>'status') IN ('completed','failed','interrupted','abandoned')
+             )
+           ORDER BY call.dispatched_at DESC LIMIT 1 FOR UPDATE OF call`,
+          [sessionId, daemonId, ownerUserId, daemonGeneration, seq, JSON.stringify(message)],
+        )).rows[0]
+        if (recovered && dispatchAuthorizationMatches(recovered, recovered.recovery_receipt?.collaboration, daemonId, ownerUserId)) call = recovered
+      }
       if (!call) return null
       // DSH replays native history after restart with new transport sequences,
       // while new turns can reuse the previous process's sequences. Use native
-      // identity across generations, and the authenticated generation for
-      // transport-only events. Keep existing providers' persisted keys intact.
+      // identity across generations. Every provider's transport sequences can
+      // restart at one, so transport identity includes the trusted generation.
       const nativeEventId = typeof message.event_id === 'string' ? message.event_id : ''
       const projectionKey = call.provider === 'dsh'
         ? `dsh:${createHash('sha256').update(JSON.stringify([daemonId, sessionId,
           nativeEventId ? ['native', nativeEventId] : ['transport', daemonGeneration ?? 0, seq],
         ])).digest('hex')}`
-        : `${daemonId}:${seq}`
+        : daemonGeneration === undefined ? `${daemonId}:${seq}` : `transport:${daemonId}:${daemonGeneration}:${seq}`
       // A reconnect can replay an old turn after a new call is dispatched to
       // the same native session. Sequence identity belongs to the daemon,
       // so an event already projected for any earlier call must stay there.
       const duplicate = await client.query(`SELECT 1 FROM collaboration_events
         WHERE team_session_id = $1 AND request_id = $2 AND call_id IS NOT NULL`, [call.team_session_id, projectionKey])
       if (duplicate.rows[0]) return null
+      if (call.provider !== 'dsh' && daemonGeneration !== undefined) {
+        // Pre-upgrade projections used daemon:seq. Match their original durable
+        // receipt, not merely the sequence, or a later process loses its terminal
+        // event. Ingress retains original generation when replaying its spool.
+        const legacy = await client.query(`SELECT 1 FROM collaboration_events e
+          WHERE e.team_session_id=$1 AND e.request_id=$2 AND e.call_id IS NOT NULL
+            AND EXISTS(SELECT 1 FROM event_inbox i WHERE i.daemon_id=$3 AND i.user_id=$4
+              AND i.daemon_generation=$5 AND i.seq=$6 AND i.session_id=$7 AND i.received_at<=e.created_at)`,
+        [call.team_session_id, `${daemonId}:${seq}`, daemonId, ownerUserId, daemonGeneration, seq, sessionId])
+        if (legacy.rows[0]) return null
+      }
       const sequence = await client.query<{ latest_event_seq: string }>(
         `UPDATE collaboration_sessions SET latest_event_seq = latest_event_seq + 1, updated_at = NOW()
          WHERE team_session_id = $1 RETURNING latest_event_seq`, [call.team_session_id],
@@ -337,12 +440,16 @@ export class TeamDispatchRepository {
       const digest = createHash('sha256').update(`${call.call_id}:${projectionKey}`).digest('hex').slice(0, 32)
       // Never copy private terminal diagnostics into the shared stream.
       const content = agentText ? String(message.text) : dispatchTerminalStatus(message) ?? 'waiting_owner'
+      // This ID comes from Relay materialization, never from daemon payload.
+      const source = agentText && Number.isSafeInteger(materializedEventId) && materializedEventId! > 0
+        ? (await client.query(`SELECT id FROM events WHERE id=$1 AND session_id=$2 AND event_type='agent_text'`, [materializedEventId, sessionId])).rows[0]?.id ?? null
+        : null
       const inserted = await client.query(
         `INSERT INTO collaboration_events
-          (event_id, team_session_id, event_seq, kind, author_offer_id, call_id, content, request_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          (event_id, team_session_id, event_seq, kind, author_offer_id, call_id, content, request_id, native_source_event_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
         [`cev_${digest}`, call.team_session_id, Number(sequence.rows[0].latest_event_seq), agentText ? 'agent_message' : 'status',
-          call.offer_id, call.call_id, content, projectionKey],
+          call.offer_id, call.call_id, content, projectionKey, source],
       )
       if (!terminal) {
         await client.query(`UPDATE collaboration_calls SET outcome = $2, updated_at = NOW() WHERE call_id = $1`,

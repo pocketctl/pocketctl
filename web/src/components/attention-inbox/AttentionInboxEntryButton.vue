@@ -1,6 +1,6 @@
 <template>
   <button
-    v-if="store.isAvailable.value || notifications.available.value"
+    v-if="store.isAvailable.value || notifications.available.value || delivery.available.value"
     type="button"
     :class="[
       'attention-entry-button',
@@ -28,6 +28,7 @@
 </template>
 
 <script setup lang="ts">
+import {useTeamDeliveryInbox} from '../../composables/useTeamDeliveryInbox'
 import { computed, onMounted,onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAttentionInbox, type AttentionInboxStore } from '../../composables/useAttentionInbox'
@@ -46,7 +47,8 @@ const store = props.store ?? useAttentionInbox()
 const notifications=props.scope.type==='global'?useSystemNotifications():createSystemNotificationStore()
 const router = useRouter()
 const { t } = useLocale()
-const count = computed(() => store.attentionCount(props.scope))
+const delivery=useTeamDeliveryInbox(()=>props.scope.type==='global')
+const count = computed(() => store.attentionCount(props.scope)+(props.scope.type==='global'?delivery.items.value.length:0))
 const badge = computed(() => count.value > 99 ? '99+' : String(count.value))
 const ariaLabel = computed(() => count.value > 0
   ? t('attention.entry_count', { count: count.value })

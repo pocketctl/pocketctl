@@ -1308,21 +1308,21 @@ func TestRefreshesTokenOnAuthRejection(t *testing.T) {
 
 	c := newTestClient(wsURL(srv.URL))
 	// First two refreshes succeed (token self-heals); after that the refresh
-	// token is treated as dead, so auth rejections start counting toward stop.
-	c.OnTokenRefresh = func() (string, bool) {
+	// token is explicitly rejected and reconnection pauses.
+	c.OnTokenRefresh = func(context.Context) (string, error) {
 		if atomic.AddInt32(&refreshed, 1) <= 2 {
-			return "fresh-token", true
+			return "fresh-token", nil
 		}
-		return "", false
+		return "", ErrRefreshLoginRequired
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go c.Run(ctx)
 
-	// 2 successful refreshes (no backoff, immediate reconnect) + 3 failed ones
-	// (authRejectStopThreshold, with 1s/2s backoff between) before parking = 5 conns.
+	// Two successful refreshes reconnect immediately; the first definitive
+	// credential rejection parks the client on the third connection.
 	// NOTE: slow Windows CI needs more headroom for backoff jitter and scheduling.
-	waitForConns(t, &conns, 5, 25*time.Second)
+	waitForConns(t, &conns, 3, 25*time.Second)
 
 	if got := atomic.LoadInt32(&refreshed); got < 3 {
 		t.Fatalf("expected OnTokenRefresh called >=3 times, got %d", got)
@@ -1333,10 +1333,10 @@ func TestRefreshesTokenOnAuthRejection(t *testing.T) {
 	if tok != "fresh-token" {
 		t.Fatalf("expected token updated to 'fresh-token' after successful refresh, got %q", tok)
 	}
-	// Parked after the 5th connection — no further dialing.
+	// Parked after the third connection — no further dialing.
 	time.Sleep(2 * time.Second)
-	if got := atomic.LoadInt32(&conns); got > 6 {
-		t.Fatalf("expected daemon parked at 5 connections, got %d (still reconnecting?)", got)
+	if got := atomic.LoadInt32(&conns); got != 3 {
+		t.Fatalf("expected daemon parked at 3 connections, got %d (still reconnecting?)", got)
 	}
 }
 

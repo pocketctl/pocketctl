@@ -1,3 +1,4 @@
+import { TEAM_DELIVERY_REVOCATION_FILTER_SQL } from './team-delivery-revocation-filter.js'
 import type pg from 'pg'
 import type { ExtensionSourceRow } from './envelope.js'
 
@@ -225,7 +226,7 @@ export async function queryFeedRows(
             || ':b' || (f.payload #>> '{data,team_memory_binding_revision}')
             || ':p' || (f.payload #>> '{data,participant_revision}')
             || ':i' || (f.payload #>> '{data,team_memory_binding_id}'))
-      )` : ''})
+      ) OR ${TEAM_DELIVERY_REVOCATION_FILTER_SQL}` : ''})
       AND f.feed_id > $3
       ${options.daemonIds?.length ? "AND (f.source_kind <> 'canonical_event' OR s.daemon_id = ANY($4))" : ''}
       ${options.agentTypes?.length

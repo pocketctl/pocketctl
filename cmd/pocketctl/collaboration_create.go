@@ -55,4 +55,7 @@ func runCollaborationSessionCreate(ctx context.Context, client *ws.Client, sm *s
 	}
 	client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: nativeSessionID,
 		RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
+	if cmd.Agent == "agentteams" {
+		sm.BeginAgentTeamsCall(ctx, cmd.Collaboration.CallID)
+	}
 }

@@ -15,6 +15,7 @@ interface TeamRunWorkerRepository {
 }
 
 interface TeamRunWorkerOptions {
+  externalEnabledForTeam?: (teamId: string) => boolean
   repository: TeamRunWorkerRepository
   workerId: string
   leaseMs?: number
@@ -253,5 +254,5 @@ export class TeamRunWorker {
 }
 
 export function createTeamRunWorker(pool: ConstructorParameters<typeof TeamRunRepository>[0], options: Omit<TeamRunWorkerOptions, 'repository'>): TeamRunWorker {
-  return new TeamRunWorker({ ...options, repository: new TeamRunRepository(pool) })
+  return new TeamRunWorker({ ...options, repository: new TeamRunRepository(pool, options.externalEnabledForTeam) })
 }

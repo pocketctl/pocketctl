@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 
 /** SQL identifiers/clock expressions are internal constants, never request input.
  * JSON access preserves reads of the pre-expand schema. A NULL interval is a
@@ -10,14 +11,14 @@ export function revisionTimeSql(version='v',at='clock_timestamp()'):string {
 }
 export function currentClaimVersionSql(claim='c',version='v',at='clock_timestamp()'):string {
  return `(${claim}.current_version_id=${version}.version_id AND ${claim}.claim_id=${version}.claim_id
-  AND ${claim}.installation_id=${version}.installation_id AND ${revisionTimeSql(version,at)})`
+  AND ${claim}.installation_id=${version}.installation_id AND ${revisionTimeSql(version,at)} AND ${deliveryVersionAvailableSql(version)})`
 }
 /** Latest committed revision at a half-open boundary, before checking facts.
  * Never fall back to an older statement when the chosen revision's facts fail.
  * The current head bounds committed versions; prepared Git versions are hidden.
  * Reversed historical clocks require migration review rather than invented time. */
 export function asOfClaimVersionSql(claim='c',version='v',at='search_clock.as_of'):string {
- return `(${revisionTimeSql(version,at)} AND EXISTS(SELECT 1 FROM knowledge_versions revision_head
+ return `(${revisionTimeSql(version,at)} AND ${deliveryVersionAvailableSql(version)} AND EXISTS(SELECT 1 FROM knowledge_versions revision_head
   WHERE revision_head.installation_id=${claim}.installation_id AND revision_head.claim_id=${claim}.claim_id
    AND revision_head.version_id=${claim}.current_version_id AND ${version}.version_number<=revision_head.version_number
    AND NOT EXISTS(SELECT 1 FROM knowledge_versions later

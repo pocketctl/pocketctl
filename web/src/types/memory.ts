@@ -84,7 +84,18 @@ export interface MemoryRecallBundle {
   totalChars: number
 }
 
+export interface MemoryDeliverySource {
+  task_id: string
+  spec_revision: number
+  submission_id: string
+  submission_version: number
+  decision_id: string
+  accepted_at: string
+  state: 'available' | 'withdrawn'
+}
+
 export interface MemoryCandidate {
+  delivery_source?: MemoryDeliverySource | null
   content_hash?:string
   automation_mode?:'off'|'shadow'|'assist'
   automation_advice?:{recommendation:string;reason:string}|null

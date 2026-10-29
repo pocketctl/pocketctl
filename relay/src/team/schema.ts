@@ -1,4 +1,11 @@
+import { initTeamTaskReadinessSchema } from './task-readiness-schema.js'
+import { initTeamTemplateSchema } from './template-schema.js'
+import { initTeamDeliveryMemorySchema } from './delivery-memory-schema.js'
 import type pg from 'pg'
+import { initTeamDeliverySchema } from './delivery-schema.js'
+import { initTeamAccountLifecycleSchema } from './account-lifecycle-schema.js'
+import { initTeamEvidenceSchema } from './evidence-schema.js'
+import { initTeamPlanSchema } from './plan-schema.js'
 
 export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> {
   await db.query(`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS collaboration_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb`)
@@ -98,7 +105,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       team_id TEXT NOT NULL REFERENCES collaboration_teams(team_id) ON DELETE CASCADE,
       owner_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       daemon_id VARCHAR(64) NOT NULL REFERENCES daemons(daemon_id) ON DELETE RESTRICT,
-      provider VARCHAR(32) NOT NULL CHECK (provider IN ('codex', 'claude-code', 'dsh')),
+      provider VARCHAR(32) NOT NULL CHECK (provider IN ('codex', 'claude-code', 'dsh', 'agentteams')),
       runtime_profile_id TEXT,
       capability_revision BIGINT NOT NULL DEFAULT 1,
       state VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'revoked')),
@@ -111,7 +118,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     -- replacement of the provider constraint atomic.
     ALTER TABLE team_agent_offers
       DROP CONSTRAINT IF EXISTS team_agent_offers_provider_check,
-      ADD CONSTRAINT team_agent_offers_provider_check CHECK (provider IN ('codex', 'claude-code', 'dsh'));
+      ADD CONSTRAINT team_agent_offers_provider_check CHECK (provider IN ('codex', 'claude-code', 'dsh', 'agentteams'));
     CREATE UNIQUE INDEX IF NOT EXISTS uq_team_agent_offer_active_runtime
       ON team_agent_offers(team_id, owner_user_id, daemon_id, provider, COALESCE(runtime_profile_id, ''))
       WHERE state = 'active';
@@ -484,4 +491,27 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
       FOR EACH ROW EXECUTE FUNCTION journal_team_event();
   `)
 
+  // Keep attribution after the short-lived transport inbox is pruned. The
+  // source FK is private metadata, never part of the shared event view.
+  await db.query(`ALTER TABLE collaboration_events ADD COLUMN IF NOT EXISTS native_source_event_id BIGINT REFERENCES events(id) ON DELETE SET NULL`)
+  await db.query(`WITH exact_links AS (
+    SELECT e.event_id,MIN(i.materialized_event_id) source_id
+    FROM collaboration_events e JOIN collaboration_calls c ON c.call_id=e.call_id
+    JOIN team_agent_offers o ON o.offer_id=c.offer_id
+    JOIN event_inbox i ON i.daemon_id=o.daemon_id AND i.user_id=o.owner_user_id
+      AND i.session_id=c.native_session_id AND i.event_type='agent_text'
+      AND e.request_id='transport:'||i.daemon_id||':'||i.daemon_generation||':'||i.seq
+    JOIN events source ON source.id=i.materialized_event_id AND source.session_id=c.native_session_id
+    WHERE e.kind='agent_message' AND e.native_source_event_id IS NULL
+    GROUP BY e.event_id HAVING count(DISTINCT i.materialized_event_id)=1
+  ) UPDATE collaboration_events e SET native_source_event_id=l.source_id
+    FROM exact_links l WHERE e.event_id=l.event_id AND e.native_source_event_id IS NULL`)
+
+  await initTeamDeliverySchema(db)
+  await initTeamAccountLifecycleSchema(db)
+  await initTeamDeliveryMemorySchema(db)
+  await initTeamPlanSchema(db)
+  await initTeamTemplateSchema(db)
+  await initTeamEvidenceSchema(db)
+  await initTeamTaskReadinessSchema(db)
 }

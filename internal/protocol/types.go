@@ -610,24 +610,26 @@ type RegisterMessage struct {
 // CollaborationAuthorization is a Relay-authored, daemon-enforced binding for
 // one Team Agent operation. It never grants arbitrary native-session access.
 type CollaborationAuthorization struct {
-	RequestedConfig    *TeamRuntimeConfig `json:"requested_config,omitempty"`
-	ConfigRevision     int64              `json:"config_revision,omitempty"`
-	ConfigHash         string             `json:"config_hash,omitempty"`
-	CapabilityRevision string             `json:"capability_revision,omitempty"`
-	ExecutionMode      string             `json:"execution_mode,omitempty"`
-	ProtocolVersion    int                `json:"protocol_version"`
-	Operation          string             `json:"operation"`
-	CallID             string             `json:"call_id"`
-	TeamSessionID      string             `json:"team_session_id"`
-	BindingID          string             `json:"binding_id"`
-	BindingRevision    int64              `json:"binding_revision"`
-	OfferID            string             `json:"offer_id"`
-	OfferRevision      int64              `json:"offer_revision"`
-	OwnerUserID        int                `json:"owner_user_id"`
-	DaemonID           string             `json:"daemon_id"`
+	Delivery           *TeamDeliveryBinding `json:"delivery,omitempty"`
+	RequestedConfig    *TeamRuntimeConfig   `json:"requested_config,omitempty"`
+	ConfigRevision     int64                `json:"config_revision,omitempty"`
+	ConfigHash         string               `json:"config_hash,omitempty"`
+	CapabilityRevision string               `json:"capability_revision,omitempty"`
+	ExecutionMode      string               `json:"execution_mode,omitempty"`
+	ProtocolVersion    int                  `json:"protocol_version"`
+	Operation          string               `json:"operation"`
+	CallID             string               `json:"call_id"`
+	TeamSessionID      string               `json:"team_session_id"`
+	BindingID          string               `json:"binding_id"`
+	BindingRevision    int64                `json:"binding_revision"`
+	OfferID            string               `json:"offer_id"`
+	OfferRevision      int64                `json:"offer_revision"`
+	OwnerUserID        int                  `json:"owner_user_id"`
+	DaemonID           string               `json:"daemon_id"`
 }
 
 type CollaborationContext struct {
+	StepInputHash          string                      `json:"step_input_hash,omitempty"`
 	SchemaVersion          int                         `json:"schema_version"`
 	ContextVersion         int64                       `json:"context_version"`
 	ContentHash            string                      `json:"content_hash"`

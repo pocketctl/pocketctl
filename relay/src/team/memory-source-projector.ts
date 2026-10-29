@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto'
 import type pg from 'pg'
 
 import type { TeamEvent } from './types.js'
+import { projectAcceptedDeliveryMemory, revokeAcceptedDeliveryMemory } from './delivery-memory-projector.js'
+
+export { buildAcceptedDeliveryMemorySourceRecords, acceptedDeliverySourceSessionId,
+  ACCEPTED_DELIVERY_SOURCE_VERSION, type AcceptedDeliveryMemoryInput } from './accepted-delivery-memory-source.js'
 
 export const TEAM_MEMORY_SOURCE_KIND = 'team_collaboration_event'
 export const TEAM_MEMORY_SOURCE_VERSION = 1 as const
@@ -182,6 +186,8 @@ export function buildTeamMemorySourceRecords(
 }
 
 export interface TeamMemorySourceProjectorLike {
+  projectAcceptedDelivery?(client: Pick<pg.PoolClient, 'query'>, input: { teamId: string; decisionId: string }): Promise<number>
+  revokeAcceptedDelivery?(client: Pick<pg.PoolClient, 'query'>, submissionId: string): Promise<number>
   projectCompletedCall(client: Pick<pg.PoolClient, 'query'>, callId: string, outcome: TeamEvent): Promise<number>
   revokeReaderSession?(client: Pick<pg.PoolClient, 'query'>, input: {
     teamSessionId: string
@@ -199,7 +205,17 @@ export interface TeamMemorySourceProjectorLike {
 }
 
 export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike {
-  constructor(private readonly enabled: boolean) {}
+  constructor(private readonly enabled: boolean,
+    private readonly options: { acceptedDeliveriesEnabledForTeam?: (teamId: string) => boolean } = {}) {}
+
+  async projectAcceptedDelivery(client: Pick<pg.PoolClient, 'query'>, input: { teamId: string; decisionId: string }): Promise<number> {
+    if (!this.enabled || !this.options.acceptedDeliveriesEnabledForTeam?.(input.teamId)) return 0
+    return projectAcceptedDeliveryMemory(client, input.decisionId, input.teamId)
+  }
+
+  async revokeAcceptedDelivery(client: Pick<pg.PoolClient, 'query'>, submissionId: string): Promise<number> {
+    return revokeAcceptedDeliveryMemory(client, { submissionId, reason: 'artifact_revoked' })
+  }
 
   async projectCompletedCall(
     client: Pick<pg.PoolClient, 'query'>,
@@ -336,6 +352,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
     },
   ): Promise<number> {
     // Capture can be disabled while previously delivered sources still need revocation.
+    const deliveryRevocations = await revokeAcceptedDeliveryMemory(client, input)
     // A paused (or revoking) recipient may still retain prior sources. Cleanup
     // must be durable now so it is delivered when that installation resumes.
     const access = await client.query<{ team_id: string; binding_id: string; binding_revision: string | number }>(`
@@ -353,7 +370,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
       LIMIT 1
     `, [input.teamSessionId, input.userId, input.bindingRevision ?? null, input.bindingId ?? null])
     const row = access.rows[0]
-    if (!row) return 0
+    if (!row) return deliveryRevocations
     const bindingRevision = Number(row.binding_revision)
     const identity = {
       teamSessionId: input.teamSessionId,
@@ -362,7 +379,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
       participantRevision: input.participantRevision,
     }
     const sourceId = `team-access:${input.teamSessionId}:u${input.userId}:b${bindingRevision}:p${input.participantRevision}`
-    let inserted = 0
+    let inserted = deliveryRevocations
     for (const [revocationId, sessionId] of [
       [sourceId, legacyTeamSourceSessionId(identity)],
       [`${sourceId}:i${row.binding_id}`, teamSourceSessionId(identity)],
@@ -394,6 +411,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
     input: { teamId: string; bindingId: string; bindingRevision: number },
   ): Promise<number> {
     // Cleanup is a lifecycle obligation even after disabling new source capture.
+    const deliveryRevocations = await revokeAcceptedDeliveryMemory(client, { ...input, reason: 'binding_removed' })
     const readers = await client.query<{
       team_session_id: string
       user_id: string | number
@@ -407,7 +425,7 @@ export class TeamMemorySourceProjector implements TeamMemorySourceProjectorLike 
       WHERE participant.state = 'active'
       ORDER BY participant.team_session_id, participant.user_id
     `, [input.teamId])
-    let inserted = 0
+    let inserted = deliveryRevocations
     for (const reader of readers.rows) {
       inserted += await this.revokeReaderSession(client, {
         teamSessionId: reader.team_session_id,

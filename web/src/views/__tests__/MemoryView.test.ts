@@ -22,6 +22,9 @@ vi.mock('../../composables/useLocale', async () => {
   }
 })
 
+const memoryRoute = { query: {} as Record<string, string> }
+vi.mock('vue-router', async () => ({ ...(await vi.importActual('vue-router')), useRoute: () => memoryRoute }))
+
 const memoryInstallation = ref<any>(null)
 
 const memoryClient = vi.hoisted(() => ({
@@ -124,7 +127,17 @@ function mountView() {
 
 describe('MemoryView', () => {
   beforeEach(() => {
+    memoryRoute.query = {}
     vi.clearAllMocks()
+  })
+
+  test('delivery link opens personal review with the exact submission and decision filter', async () => {
+    memoryRoute.query = { tab: 'review', submission: '11111111-1111-4111-8111-111111111111', decision: '22222222-2222-4222-8222-222222222222' }
+    memoryInstallation.value = activeInstallation()
+    const view = mountView(); await flushPromises()
+    expect(view.text()).toContain('当前仅查看所选交付及验收记录的个人候选')
+    expect(memoryClient.listMemoryCandidates).toHaveBeenCalledWith({ submissionId: memoryRoute.query.submission, decisionId: memoryRoute.query.decision })
+    view.unmount()
   })
 
   test('without an installation the first-run gate explains the requirement', async () => {

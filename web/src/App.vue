@@ -2,8 +2,8 @@
   <div
     class="app-layout"
     :class="{
-      'reference-shell': isLoggedIn && !route.meta.standalone,
-      'design-shell': isLoggedIn && (!isSessionRoute || isTeamSessionRoute) && !route.meta.standalone,
+      'reference-shell': shellVisible && !route.meta.standalone,
+      'design-shell': shellVisible && (!isSessionRoute || isTeamSessionRoute) && !route.meta.standalone,
       'standalone-route': !!route.meta.standalone,
       'sidebar-collapsed': sidebarCollapsed,
       'mobile-shell-active': showMobileShell,
@@ -16,14 +16,14 @@
     <button v-if="showMobileShell && route.name === 'team-sessions'" ref="mobileNavTrigger" class="team-mobile-menu" :aria-label="t('workspace.open_navigation')" :aria-expanded="mobileNavOpen" @click="openMobileNav"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /></svg></button>
     <div v-if="showMobileShell && mobileNavOpen" class="mobile-nav-backdrop" @click="closeMobileNav"></div>
     <!-- Sidebar -->
-    <nav ref="mobileNavPanel" class="sidebar design-sidebar" :class="{'mobile-open':showMobileShell && mobileNavOpen}" v-if="isLoggedIn && !route.meta.standalone && (!showMobileShell || mobileNavOpen)" :role="showMobileShell ? 'dialog' : undefined" :aria-modal="showMobileShell ? true : undefined" :aria-label="t('workspace.main_navigation')" @keydown.esc.stop.prevent="closeMobileNav" @keydown.tab="trapMobileNavFocus">
+    <nav ref="mobileNavPanel" class="sidebar design-sidebar" :class="{'mobile-open':showMobileShell && mobileNavOpen}" v-if="shellVisible && !route.meta.standalone && (!showMobileShell || mobileNavOpen)" :role="showMobileShell ? 'dialog' : undefined" :aria-modal="showMobileShell ? true : undefined" :aria-label="t('workspace.main_navigation')" @keydown.esc.stop.prevent="closeMobileNav" @keydown.tab="trapMobileNavFocus">
       <router-link to="/" class="sidebar-logo">
         <span class="logo-mark"><img :src="sidebarLogoSrc" alt="pocketctl" /></span>
         <span class="brand-name">pocketctl</span>
       </router-link>
 
       <button v-if="showMobileShell" class="mobile-nav-close" :aria-label="t('workspace.close_navigation')" @click="closeMobileNav">×</button>
-      <button v-if="showMobileShell" class="drawer-new-session" @click="createFromDrawer"><WorkspaceIcon name="plus" />{{ t('new_session.title') }}</button>
+      <button v-if="showMobileShell && isLoggedIn" class="drawer-new-session" @click="createFromDrawer"><WorkspaceIcon name="plus" />{{ t('new_session.title') }}</button>
       <div class="sidebar-nav">
         <template v-for="item in navigationItems" :key="item.id">
           <template v-if="showMobileShell && item.id === 'tokens'">
@@ -88,9 +88,9 @@
     <RegisterDaemonDialog v-if="registerOpen" @close="registerOpen = false" />
 
     <!-- Main Content -->
-    <main class="main-content" :class="{ 'no-sidebar': !isLoggedIn || showMobileShell || route.meta.standalone, 'session-detail-route': isSessionRoute && !showMobileShell, 'team-detail-route': isTeamSessionRoute && !showMobileShell }">
+    <main class="main-content" :class="{ 'no-sidebar': !shellVisible || showMobileShell || route.meta.standalone, 'session-detail-route': isSessionRoute && !showMobileShell, 'team-detail-route': isTeamSessionRoute && !showMobileShell }">
       <!-- Topbar (only when logged in) -->
-      <header class="topbar" v-if="isLoggedIn && !showMobileShell && (!isSessionRoute || isTeamSessionRoute)">
+      <header class="topbar" v-if="shellVisible && !showMobileShell && (!isSessionRoute || isTeamSessionRoute)">
         <div class="topbar-breadcrumb breadcrumb">
           <span>{{ t('replica.workspace') }}</span><span>/</span><strong>{{ pageTitle }}</strong>
         </div>
@@ -99,8 +99,8 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
             {{ t('session.new_session') }}
           </button>
-          <span class="topbar-status"><span class="dot" :class="{off:!connected}" />{{ t(connected?'workspace.all_normal':'replica.relay_connecting') }}</span>
-          <RouterLink class="theme-toggle" to="/inbox" :aria-label="t('attention.title') + ' · ' + t('attention.notification.unread_count',{count:notifications.unread.value})"><WorkspaceIcon name="inbox" /><span v-if="notifications.unread.value" class="notification-dot">●</span></RouterLink>
+          <span class="topbar-status"><span class="dot" :class="{off:!connected}" />{{ t(connected?'workspace.all_normal':reconnecting?'replica.relay_connecting':'replica.relay_disconnected') }}</span>
+          <RouterLink class="theme-toggle" to="/inbox" :aria-label="t('attention.entry_count',{count:attentionTotalCount}) + ' · ' + t('attention.notification.unread_count',{count:notifications.unread.value})"><WorkspaceIcon name="inbox" /><span v-if="notifications.unread.value || attentionTotalCount" class="notification-dot">●</span></RouterLink>
           <TopbarGithubLink />
           <button class="theme-toggle" @click="toggleLocale" :title="locale === 'zh' ? 'English' : '中文'" ><WorkspaceIcon name="globe" /><span>{{ locale === 'zh' ? '中' : 'EN' }}</span></button>
           <button class="theme-toggle" @click="toggleTheme" :title="t('common.toggle_theme')">
@@ -121,6 +121,7 @@
 <script setup lang="ts">
 import { ref, computed, provide, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useTeamDeliveryInbox } from './composables/useTeamDeliveryInbox'
 import { useAuth } from './composables/useAuth'
 import { useTeamAccess } from './composables/useTeamAccess'
 import { useLocale } from './composables/useLocale'
@@ -144,7 +145,8 @@ import { useSystemNotifications,reconcileSessionDeletions,cancelDeletionReconcil
 
 const shellHelpOpen=ref(false)
 const route = useRoute()
-const { isLoggedIn, user, accessToken } = useAuth()
+const { isLoggedIn, user, accessToken, canReadOfflineTeams } = useAuth()
+const shellVisible = computed(() => isLoggedIn.value || (canReadOfflineTeams?.value && route.path === '/teams'))
 const teamAccess = useTeamAccess()
 const router = useRouter()
 watch(accessToken, () => { void teamAccess.refresh() }, { immediate: true })
@@ -185,7 +187,7 @@ watch([connected, isLoggedIn], ([online, authenticated]) => {
   if (online && authenticated) send?.({ type: 'list_daemons' })
 }, { immediate: true })
 const { isMobile } = useResponsiveLayout()
-const showMobileShell = computed(() => isLoggedIn.value && isPwaMobileShellEnabled() && isMobile.value)
+const showMobileShell = computed(() => shellVisible.value && isPwaMobileShellEnabled() && isMobile.value)
 const mobileNavOpen=ref(false),mobileNavPanel=ref<HTMLElement|null>(null),mobileNavTrigger=ref<HTMLButtonElement|null>(null)
 async function openMobileNav(){mobileNavOpen.value=true;await nextTick();mobileNavPanel.value?.querySelector<HTMLElement>('a[href]')?.focus()}
 function closeMobileNav(){mobileNavOpen.value=false;void nextTick(()=>mobileNavTrigger.value?.focus())}
@@ -198,7 +200,8 @@ const { planForSession } = useAgentPlanProgress()
 const { sessionHeader } = useSessionHeader()
 const attentionInbox = useAttentionInbox()
 const notifications=useSystemNotifications()
-const attentionTotalCount = computed(() => attentionInbox.actionableCount({ type: 'global' }))
+const deliveryInbox = useTeamDeliveryInbox(() => isLoggedIn.value)
+const attentionTotalCount = computed(() => attentionInbox.actionableCount({ type: 'global' }) + deliveryInbox.items.value.length)
 const mobileCurrentPlan = planForSession(computed(() =>
   route.path.startsWith('/session/') && !route.query.subagent ? String(route.params.id || '') : '',
 ))
@@ -208,7 +211,7 @@ const triggerTeamCreate=ref(0)
 provide('triggerTeamCreate',triggerTeamCreate)
 const mobileModuleAction=computed(()=>route.path==='/hosts' && route.query.view!=='agents'?'register':route.path==='/teams' && teamAccess.capabilities.value?.writes_enabled?'team':route.path==='/inbox'?'refresh':undefined)
 const mobileModuleSubtitle=computed(()=>t(route.path==='/settings'?'replica.personal_account':route.path==='/memory'?'replica.personal_knowledge':route.path==='/hosts'?'replica.personal_hosts':route.path==='/tokens'?'token.all_hosts':'replica.personal_workspace'))
-function handleMobileModuleAction(){if(mobileModuleAction.value==='register')registerOpen.value=true;else if(mobileModuleAction.value==='team')triggerTeamCreate.value++;else if(mobileModuleAction.value==='refresh')void attentionInbox.refresh()}
+function handleMobileModuleAction(){if(mobileModuleAction.value==='register')registerOpen.value=true;else if(mobileModuleAction.value==='team')triggerTeamCreate.value++;else if(mobileModuleAction.value==='refresh'){void attentionInbox.refresh();window.dispatchEvent(new Event('team-delivery-changed'))}}
 const triggerNewSession = ref(0)
 provide('triggerNewSession', triggerNewSession)
 provide('openWorkspaceNavigation', openMobileNav)
@@ -224,6 +227,7 @@ const navigationItems = computed(() => {
     { id: 'hosts', to: '/hosts', label: 'nav.hosts', icon: 'hosts' },
     { id: 'settings', to: '/settings', label: 'nav.settings', icon: 'settings' },
   ].filter(item => item.id !== 'teams' || teamAccess.enabled.value)
+  if (canReadOfflineTeams?.value) return [{ id: 'teams', to: '/teams', label: 'team.title', icon: 'teams', section: 'nav.manage' }]
   if (!showMobileShell.value) return items
   return [
     { id: 'sessions', to: '/sessions?view=active', label: 'mobile.host_sessions', icon: 'sessions' },

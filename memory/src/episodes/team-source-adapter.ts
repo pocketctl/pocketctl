@@ -1,3 +1,5 @@
+import { adaptAcceptedDeliverySource, type AcceptedDeliveryProvenance } from './accepted-delivery-source.js'
+
 export const TEAM_SOURCE_KIND = 'team_collaboration_event'
 export const TEAM_SOURCE_VERSION = 1 as const
 
@@ -5,12 +7,13 @@ export interface TeamSourceProvenance {
   source_kind: 'team_session'
   original_source_id: string
   reader_projection_id: string
-  source_version: typeof TEAM_SOURCE_VERSION
+  source_version: typeof TEAM_SOURCE_VERSION | 2
   team_id: string
   team_session_id: string
   team_call_id: string
-  team_event_ids: string[]
-  team_event_seqs: number[]
+  team_event_ids?: string[]
+  team_event_seqs?: number[]
+  accepted_delivery?: AcceptedDeliveryProvenance
   author_user_id?: number
   author_offer_id?: string
   context_version: number
@@ -81,6 +84,7 @@ function integerList(value: unknown): number[] | null {
 export function adaptTeamSource(input: TeamSourceAdapterInput): AdaptedTeamSource | null {
   if (input.source_kind !== TEAM_SOURCE_KIND) return null
   const data = input.data ?? {}
+  if (data.team_source_version === 2) return adaptAcceptedDeliverySource(input)
   if (data.team_source_version !== TEAM_SOURCE_VERSION) {
     throw new Error('unsupported Team source version')
   }

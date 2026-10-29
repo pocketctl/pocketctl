@@ -14,7 +14,7 @@ import { createAuditRepository } from '../governance/audit-repository.js'
 import { createPromotionRepository } from '../governance/promotion-repository.js'
 import { createPromotionService, PromotionError } from '../governance/promotion-service.js'
 import { createPublicationService, createSharedClaimLifecycle, PublicationError } from '../governance/publication-service.js'
-import { createReviewPolicyRepository, ReviewPolicyRevisionConflictError } from '../governance/review-policy.js'
+import { createReviewPolicyRepository, ReviewPolicyRevisionConflictError, ReviewPolicyScopeStaleError } from '../governance/review-policy.js'
 import { createTransferService, TransferError } from '../governance/transfer-service.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
@@ -91,6 +91,9 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
       const status = statusByCode[error.code] ?? 400
       reply.code(status)
       return { error: { code: error.code, message: error.message, ...(('details' in error && (error as PublicationError).details) || {}) } }
+    }
+    if (error instanceof ReviewPolicyScopeStaleError) {
+      return fail(reply, new MemoryApiError('forbidden', 'current review policy scope required'))
     }
     if (error instanceof ReviewPolicyRevisionConflictError) {
       reply.code(409)

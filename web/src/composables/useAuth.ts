@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue'
+import { teamDeliveryCache } from '../services/teamDeliveryCache'
 import { getRelayOrigin } from './useEnv'
 import { useLocale } from './useLocale'
 import { applyQuotaPayload } from './useQuota'
@@ -15,6 +16,19 @@ export interface UserInfo {
 const user = ref<UserInfo | null>(null)
 const accessToken = ref('')
 const refreshToken = ref('')
+const offlineIdentity = ref(false)
+const OFFLINE_IDENTITY = 'pocketctl_team_offline_identity'
+const offlineOrigin = () => getRelayOrigin() || location.origin
+let authGeneration = 0
+function hasOfflineIdentity(): boolean {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OFFLINE_IDENTITY) || 'null')
+    return !!user.value && saved?.user === user.value.id && saved.origin === offlineOrigin()
+      && Date.now() >= saved.at && Date.now() - saved.at < 7 * 24 * 60 * 60 * 1000
+  } catch { return false }
+}
+// This is local read permission only; isLoggedIn and accessToken remain unchanged.
+const canReadOfflineTeams = computed(() => offlineIdentity.value && hasOfflineIdentity())
 const { locale } = useLocale()
 
 // Restore user from localStorage
@@ -48,7 +62,7 @@ async function fetchOnce(path: string, body: any, auth?: boolean): Promise<{ ok:
       body: JSON.stringify(body),
       credentials: 'include',
     })
-    const data = await res.json()
+    const data = await res.json().catch(() => ({ error: '无效响应' }))
     return { ok: res.ok, status: res.status, data }
   } catch (e) {
     return { ok: false, status: 0, data: { error: '网络请求失败' } }
@@ -240,12 +254,16 @@ export function isTokenExpired(token: string, skewSec = 30, nowSec = Math.floor(
 }
 
 function saveTokens(data: any) {
+  authGeneration++
+  offlineIdentity.value = false
+  if(user.value && user.value.id!==data.user?.id)void teamDeliveryCache.purge().catch(()=>{})
   accessToken.value = data.access_token
   refreshToken.value = ''
   user.value = data.user
   localStorage.removeItem('pocketctl_access_token')
   localStorage.removeItem('pocketctl_refresh_token')
   localStorage.setItem('pocketctl_user', JSON.stringify(data.user))
+  localStorage.setItem(OFFLINE_IDENTITY, JSON.stringify({ user: data.user.id, origin: offlineOrigin(), at: Date.now() }))
 }
 
 // Router admission and WebSocket startup can restore the same cookie at once.
@@ -260,12 +278,20 @@ function doRefreshToken(): Promise<boolean> {
 }
 
 async function refreshAuthToken(): Promise<boolean> {
+  const generation = authGeneration, origin = offlineOrigin()
   const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
   const body = legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {}
-  const { ok, data } = await apiRequest('/api/auth/refresh', body)
+  const { ok, status, data } = await fetchOnce('/api/auth/refresh', body)
+  if (generation !== authGeneration || origin !== offlineOrigin()) return false
   localStorage.removeItem('pocketctl_access_token')
   localStorage.removeItem('pocketctl_refresh_token')
-  if (!ok) {
+  if (!ok || !data?.access_token || !data?.user?.id) {
+    if (status === 0 || status === 408 || status === 429 || status >= 500) {
+      // Network/service failure is not a server revocation. Never persist a token.
+      offlineIdentity.value = hasOfflineIdentity()
+      accessToken.value = ''
+      return false
+    }
     clearAuthState()
     return false
   }
@@ -274,6 +300,10 @@ async function refreshAuthToken(): Promise<boolean> {
 }
 
 function clearAuthState() {
+  authGeneration++
+  offlineIdentity.value = false
+  localStorage.removeItem(OFFLINE_IDENTITY)
+  void teamDeliveryCache.purge().catch(()=>{})
   user.value = null
   accessToken.value = ''
   refreshToken.value = ''
@@ -297,7 +327,7 @@ const isLoggedIn = computed(() => !!accessToken.value && !!user.value)
 
 export function useAuth() {
   return {
-    user, accessToken, refreshToken, isLoggedIn,
+    user, accessToken, refreshToken, isLoggedIn, canReadOfflineTeams,
     login,                            // legacy (deprecated)
     sendEmailCode, loginViaEmail,     // email verification code
     confirmDeviceAuth,                // device authorization

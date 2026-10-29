@@ -157,3 +157,28 @@ export function leaseBindingHash(input: {
     .update(`${input.installationId}:${input.leaseEpoch}:${input.leaseToken}:${input.cursorFeedId}`)
     .digest()
 }
+
+/** Provider-wide delivery invalidation has its own signing domain and consumer
+ * identity; it grants no installation/session content access. */
+export interface DeliveryWithdrawalCursor {
+  v: 1; consumer_id: string; sequence: string; lease_epoch: string; exp: number
+}
+export function encodeDeliveryWithdrawalCursor(cursor: DeliveryWithdrawalCursor, secret: string): string {
+  const payload = Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+  return `${payload}.${hmac(`${secret}:delivery-withdrawal-v1`, payload)}`
+}
+export function decodeDeliveryWithdrawalCursor(token: string, secret: string, now = Date.now()): DeliveryWithdrawalCursor | null {
+  if (typeof token !== 'string' || token.length > 2048) return null
+  const separator = token.lastIndexOf('.')
+  if (separator <= 0) return null
+  const payload = token.slice(0, separator), signature = token.slice(separator + 1)
+  if (!timingSafeEqualString(signature, hmac(`${secret}:delivery-withdrawal-v1`, payload))) return null
+  let cursor: DeliveryWithdrawalCursor
+  try { cursor = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) } catch { return null }
+  const decimal = (n: unknown): n is string => typeof n === 'string' && /^(0|[1-9][0-9]{0,18})$/.test(n) && BigInt(n) <= 9223372036854775807n
+  if (!cursor || cursor.v !== 1 || typeof cursor.consumer_id !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(cursor.consumer_id)
+    || !decimal(cursor.sequence) || !decimal(cursor.lease_epoch)
+    || typeof cursor.exp !== 'number' || !Number.isSafeInteger(cursor.exp) || cursor.exp * 1000 <= now) return null
+  return cursor
+}

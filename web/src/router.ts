@@ -51,9 +51,12 @@ export function createPocketctlRouter() {
   })
 
   router.beforeEach(async (to) => {
-    const { accessToken, doRefreshToken } = useAuth()
+    const { accessToken, doRefreshToken, canReadOfflineTeams } = useAuth()
     if (!accessToken.value) await doRefreshToken()
-    if (to.meta.requiresAuth && !accessToken.value) return '/login'
+    if (to.meta.requiresAuth && !accessToken.value) {
+      if (canReadOfflineTeams?.value) return to.path === '/teams' ? true : '/teams'
+      return '/login'
+    }
     if (to.meta.requiresTeam) {
       const access = useTeamAccess()
       await access.refresh()

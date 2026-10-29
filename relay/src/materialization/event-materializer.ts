@@ -56,6 +56,8 @@ export interface EventMaterializerOptions {
   transactionClient?: Pick<pg.PoolClient, 'query'>
   durableHooks?: DurableMaterializationHooks
   hooks?: MaterializationHooks
+  /** Idempotent Team projection; must finish before the ingress item is ACKed. */
+  teamEventProjector?: (input: MaterializationInput, materializedEventId?: number | null) => Promise<void>
   /** Staged-rollout gate; production defaults to TOKEN_USAGE_FACTS_WRITE=false. */
   writeTokenUsageFacts?: boolean
   /**
@@ -1089,7 +1091,24 @@ export class EventMaterializer {
       throw error
     }
     for (let attempt=0; attempt<3; attempt++) {
-      try { return await this.materializeAttempt(input,effect,options) }
+      try {
+        const result = await this.materializeAttempt(input, effect, options)
+        const project = this.options.teamEventProjector
+        if (!project) return result
+        // Run outside the canonical session fence: Team owns its own
+        // transaction. A completed canonical event is not proof that this
+        // projection committed; the inbox (or legacy sequence ACK) owns retry.
+        const projectTeam = async () => {
+          await options.assertClaim?.()
+          await project(input, result.eventId)
+        }
+        if (options.deferEffects) {
+          const apply = result.applyEffects
+          return { ...result, applyEffects: async () => { await apply?.(); await projectTeam() } }
+        }
+        await projectTeam()
+        return result
+      }
       catch (error) { if (!(error instanceof AdmissionSessionMovedError) || attempt === 2) throw error }
     }
     throw new AdmissionSessionMovedError('session identity did not stabilize')

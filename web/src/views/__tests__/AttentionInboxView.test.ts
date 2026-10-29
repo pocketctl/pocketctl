@@ -15,6 +15,11 @@ vi.mock('../../services/teamClient', async importOriginal => ({ ...(await import
 const noticesAPI = vi.hoisted(() => ({ listNotificationSubjects: vi.fn(), getNotificationSubject: vi.fn() }))
 vi.mock('../../services/attentionInboxClient', async importOriginal => ({ ...(await importOriginal<any>()), ...noticesAPI }))
 
+const deliveryItems = ref<any[]>([])
+const deliveryAvailable = ref(false)
+vi.mock('../../composables/useTeamDeliveryInbox',()=>({useTeamDeliveryInbox:()=>({items:deliveryItems,available:deliveryAvailable,error:ref(''),refresh:vi.fn(),revokeTeam:(team:string)=>{deliveryItems.value=deliveryItems.value.filter(item=>item.team_id!==team)}})}))
+vi.mock('../../services/teamDeliveryClient',()=>({markDeliverySeen:vi.fn(async()=>({}))}))
+
 const mobile = ref(false)
 vi.mock('../../composables/useResponsiveLayout', () => ({
   useResponsiveLayout: () => ({ isMobile: mobile }),
@@ -140,12 +145,13 @@ async function render(mode: 'off' | 'observe' | 'on' = 'on', notices: SystemNoti
     if (mode === 'off' && !notices.length) throw new AttentionInboxApiError(503, { error: { code: 'feature_disabled' } })
     return { notifications: notices, next_cursor: null, notification_counts: { unread: notices.filter(item => !item.read_at).length } }
   }), read: vi.fn() })
-  const wrapper = mount(View, { props: { store, notificationStore }, global: { plugins: [router] } })
+  const wrapper = mount(View, { props: { store, notificationStore }, global: { plugins: [router], stubs: {TeamTaskDeliveryPanel: {name:'TeamTaskDeliveryPanel',props:['attemptId','taskId'],template:'<div>Delivery panel</div>'}} } })
   await flushPromises()
   return { wrapper, store, router, list, mutate, mutateRecovery, submit, notificationStore }
 }
 
 beforeEach(() => {
+  deliveryItems.value=[];deliveryAvailable.value=false
   mobile.value = false
   vi.clearAllMocks()
   teamApi.listMyInvitations.mockResolvedValue([])
@@ -153,6 +159,23 @@ beforeEach(() => {
 })
 
 describe('AttentionInboxView', () => {
+  test.each([undefined,'aaaaaaaa-1111-4111-8111-111111111111'])('delivery remains reachable and preserves attempt %s',async(attempt)=>{
+    deliveryAvailable.value=true
+    deliveryItems.value=[{attempt_id:attempt,item_id:'reminder',task_id:'task-1',team_id:'team-1',title:'Review this delivery',submission_id:'submission',version:2,kind:'review_required',seen_at:null}]
+    const {wrapper,router}=await render('off')
+    expect(wrapper.find('[data-testid="attention-disabled"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Review this delivery')
+    await wrapper.get('[data-testid="attention-kind-delivery"]').trigger('click')
+    expect(wrapper.findComponent({name:'TeamTaskDeliveryPanel'}).props('attemptId')).toBe(attempt)
+    const link=wrapper.findAll('a').find(a=>a.text()==='打开团队任务 ›')!
+    await link.trigger('click');await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/teams')
+    expect(router.currentRoute.value.query).toMatchObject({team:'team-1',tab:'tasks',task:'task-1'})
+    wrapper.findComponent({name:'TeamTaskDeliveryPanel'}).vm.$emit('revoked');await flushPromises()
+    expect(wrapper.text()).not.toContain('Review this delivery');expect(wrapper.find('.delivery-inbox-detail').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   test.each([
     [403, 'team_access_denied', false],
     [403, 'permission_denied', true],

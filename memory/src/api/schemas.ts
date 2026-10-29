@@ -96,6 +96,10 @@ export const ListQuerySchema = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 })
 
+export const CandidateQuerySchema = ListQuerySchema.extend({
+  submission_id: UUID.optional(), decision_id: UUID.optional(),
+}).refine(value => Boolean(value.submission_id) === Boolean(value.decision_id), 'delivery identity requires both ids')
+
 export const TransitionRequestSchema = z.strictObject({
   expected_revision: z.number().int().min(1),
 })

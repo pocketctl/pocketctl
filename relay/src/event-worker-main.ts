@@ -13,7 +13,7 @@ import {
   tokenUsageFeatures,
 } from './config/token-usage.js'
 import { assertTokenUsageWriteContinuity } from './token-usage/lifecycle.js'
-import { resolveExtensionConfig } from './extensions/config.js'
+import { extensionV2ModeFromEnv, resolveExtensionConfig } from './extensions/config.js'
 import { assertExtensionSchema } from './extensions/schema.js'
 import { projectFeedBatch, observeProjectorBacklog, recordProjectorRetry } from './extensions/feed-projector.js'
 import { runFeedRetentionOnce } from './extensions/retention.js'
@@ -23,7 +23,10 @@ import { SessionDocumentArtifactMaterializer } from './session-documents/materia
 import { SessionDocumentRepository } from './session-documents/repository.js'
 import { assertSessionDocumentSchema } from './session-documents/schema.js'
 import { sessionDocumentBytes, sessionDocumentRecords } from './metrics.js'
-import { resolveTeamCollaborationConfig } from './team/config.js'
+import { TeamDispatchService } from './team/dispatch-service.js'
+import { createTeamEventProjector } from './team/event-projector.js'
+import { TeamMemorySourceProjector } from './team/memory-source-projector.js'
+import { resolveTeamCollaborationConfig, teamDeliveryMemoryEnabled, teamExternalExecutorEnabled } from './team/config.js'
 import { createTeamRunWorker } from './team/run-worker.js'
 import { sessionLifecycleConfig } from './session-lifecycle/config.js'
 import { assertSessionLifecycleSchema } from './session-lifecycle/schema.js'
@@ -253,11 +256,20 @@ export async function main(): Promise<void> {
     workerId:`${workerId}:lifecycle`,deleteOptions:{writeUsageFacts:tokenFeatures.writeFacts,usageFactsAuthoritative:tokenFeatures.dashboardV2,extensionMode:extensionConfig.mode},
     onReport:report=>console.info('[session-lifecycle]',report),
   })
+  const teamProjector = teamConfig.collaboration === 'on'
+    ? createTeamEventProjector(new TeamDispatchService(pool, { send: () => false }, {}, {
+      memorySources: new TeamMemorySourceProjector(teamConfig.memoryBridge === 'on'
+        && extensionConfig.mode === 'enabled' && extensionV2ModeFromEnv() === 'enabled', {
+        acceptedDeliveriesEnabledForTeam: teamId => teamDeliveryMemoryEnabled(teamConfig, teamId),
+      }),
+    }))
+    : undefined
   const worker = createInboxWorker({
     repository,
     materializer: new EventMaterializer({
       pool,
       hooks: createStandaloneMaterializationHooks(),
+      teamEventProjector: teamProjector,
       writeTokenUsageFacts: tokenFeatures.writeFacts,
     }),
     ...(sessionDocumentConfig.captureMode === 'on' ? {
@@ -310,7 +322,7 @@ export async function main(): Promise<void> {
     },
   })
   const teamRunWorker = teamConfig.autorun === 'on'
-    ? createTeamRunWorker(pool, { workerId: `${workerId}:team-run` })
+    ? createTeamRunWorker(pool, { workerId: `${workerId}:team-run`, externalEnabledForTeam: teamId => teamExternalExecutorEnabled(teamConfig, teamId) })
     : undefined
   const runtime = createWorkerRuntime({
     assertSchemaReady: async () => {

@@ -96,6 +96,25 @@ function deliveryStatus(wrapper: ReturnType<typeof shallowMount>, content: strin
 }
 
 describe('SessionDetail managed Codex terminal control', () => {
+  test.each(['waiting_approval', 'waiting_question'])('keeps stop available while %s and preserves the draft', async (status) => {
+    const wrapper = mountSession()
+    websocketMock.handlers.get('session_list')?.({ sessions: [session({
+      status, control_mode: 'managed', capabilities: ['message_acceptance_receipt'],
+    })] })
+    websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status })
+    await nextTick()
+    await wrapper.get('.chat-textarea').setValue('Keep this draft')
+    expect(wrapper.find('.send-btn').exists()).toBe(false)
+    await wrapper.get('.stop-btn').trigger('click')
+    expect(websocketMock.send).toHaveBeenCalledWith({ type: 'session_interrupt', session_id: 'thr_1' })
+    expect((wrapper.get('.chat-textarea').element as HTMLTextAreaElement).value).toBe('Keep this draft')
+    expect(wrapper.find('.stop-btn').exists()).toBe(true)
+    websocketMock.handlers.get('session_status')?.({ session_id: 'thr_1', status: 'idle' })
+    await nextTick()
+    expect(wrapper.find('.stop-btn').exists()).toBe(false)
+    expect(wrapper.find('.send-btn').exists()).toBe(true)
+  })
+
   test('replayed status without a source timestamp preserves the listed activity time', async () => {
     const wrapper = mountSession()
     websocketMock.handlers.get('session_list')?.({

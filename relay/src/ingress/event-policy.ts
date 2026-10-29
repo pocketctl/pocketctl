@@ -7,6 +7,7 @@ const control = new Set([
   'approval_request', 'approval_resolved', 'question_request', 'question_resolved',
   'interactive_prompt', 'interactive_resolved', 'interaction_result', 'permission_config_changed',
   'command_receipt',
+  'collaboration_dispatch_receipt', 'collaboration_context_receipt', 'collaboration_config_receipt',
   // Turn lifecycle control frames: always durable, never droppable content.
   // Producers force a stable event_id (turn:<hash>:status:<state>) so the
   // dedup key converges across reconnect replays.

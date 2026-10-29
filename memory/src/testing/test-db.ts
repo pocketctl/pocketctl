@@ -58,6 +58,8 @@ export async function assertMemoryTestDatabase(
 }
 
 export const MEMORY_TEST_DATABASE_TABLES = [
+  'memory_delivery_withdrawal_checkpoint', 'memory_delivery_withdrawal_receipts',
+  'memory_team_delivery_withdrawals',
   'memory_git_attestation_keys',
   'memory_git_snapshot_keys',
   'memory_git_sync_principals',

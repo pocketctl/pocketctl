@@ -61,6 +61,9 @@ func prepareCollaborationContext(value *protocol.CollaborationContext) (*memoryc
 	if value.MemoryContext != nil {
 		payload += "\n" + collaborationMemorySelectionText(value.MemoryContext)
 	}
+	if value.StepInputHash != "" {
+		payload += "\nstep-inputs:" + value.StepInputHash
+	}
 	digest := sha256.Sum256([]byte(payload))
 	if value.SchemaVersion != 1 || value.ContextVersion < 0 || value.HistoryThroughEventSeq < 0 ||
 		len(value.ContentHash) != 64 || len(value.PayloadHash) != 64 || hex.EncodeToString(digest[:]) != value.PayloadHash {
@@ -247,7 +250,14 @@ func (sm *SessionManager) CreateCollaborationSessionRegistered(ctx context.Conte
 }
 
 func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *protocol.CollaborationAuthorization, teamContext *protocol.CollaborationContext, agent, content string, register func(context.Context, string) error) (_ string, createErr error) {
+	if agent == "agentteams" {
+		return sm.prepareAgentTeamsCall(ctx, auth, teamContext, "", content, register)
+	}
+	controlSnapshot := sm.teamCommandControlSequence(ctx)
 	if err := ValidateCollaborationAuthorization(auth, "create"); err != nil {
+		return "", err
+	}
+	if _, err := teamStepInputBinding(auth, teamContext); err != nil {
 		return "", err
 	}
 	permission, err := sm.validateTeamConfig(ctx, auth, agent)
@@ -323,8 +333,9 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 		return "", err
 	}
 	selectedMemory := collaborationHasSelectedMemory(teamContext)
+	stepInputs := auth.Delivery != nil && auth.Delivery.AttemptID != ""
 	initialPrompt := prompt
-	if selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
+	if stepInputs || selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
 		initialPrompt = ""
 	}
 	cfg := protocol.SessionConfig{Agent: agent, Cwd: workspace, Prompt: initialPrompt, AutoCreateDir: true, ClaudePrintSession: agent == adapter.AgentClaude, Permission: permission}
@@ -357,6 +368,11 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 	if err != nil {
 		return "", err
 	}
+	prepareCtx, preparation, finishPreparation := sm.startTeamStepPreparation(ctx, auth, nativeSessionID, controlSnapshot)
+	defer finishPreparation()
+	if err := prepareCtx.Err(); err != nil {
+		return "", err
+	}
 	if auth.RequestedConfig != nil {
 		receipt := sm.TeamConfigReceipt(ctx, auth, nativeSessionID)
 		if receipt == nil || receipt.ConfigHash != auth.ConfigHash {
@@ -372,11 +388,14 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 		return "", fmt.Errorf("team_memory_context_unsupported_adapter")
 	}
 	if register != nil {
-		if err := register(ctx, nativeSessionID); err != nil {
+		if err := register(prepareCtx, nativeSessionID); err != nil {
 			return "", err
 		}
 	}
-	if selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
+	if err := sm.prepareTeamStepInputs(prepareCtx, auth, teamContext, workspace); err != nil {
+		return "", err
+	}
+	if stepInputs || selectedMemory || register != nil || agent == adapter.AgentClaude || agent == adapter.AgentDSH {
 		base, baseErr := prepareCollaborationContext(teamContext)
 		if baseErr != nil {
 			return "", baseErr
@@ -384,13 +403,13 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 		var selected *memorycontext.PreparedContext
 		if selectedMemory {
 			var outcome memorycontext.Outcome
-			selected, outcome = sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, agent, content, auth.CallID)
+			selected, outcome = sm.prepareCollaborationMemoryContext(prepareCtx, teamContext, nativeSessionID, agent, content, auth.CallID)
 			if selected == nil {
 				return "", fmt.Errorf("team_memory_context_%s", outcome.Reason)
 			}
 		}
 		prompt, hidden := collaborationDelivery(agent, content, mergeCollaborationContext(base, selected))
-		if err := sm.SendMessageWithInput(ctx, UserMessageInput{
+		if err := sm.admitTeamStep(ctx, prepareCtx, preparation, UserMessageInput{
 			SessionID: nativeSessionID, Content: prompt, RequestID: auth.CallID, MsgID: auth.CallID,
 			InputMode: protocol.InputModeNewTurn, HiddenContext: hidden,
 			SkipMemoryContext: true,
@@ -405,16 +424,33 @@ func (sm *SessionManager) createCollaborationSession(ctx context.Context, auth *
 // DispatchCollaborationMessage drives only the session recorded for the exact
 // binding tuple. Duplicate call IDs are never executed again.
 func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth *protocol.CollaborationAuthorization, teamContext *protocol.CollaborationContext, nativeSessionID, content, requestID, msgID string) error {
+	if strings.HasPrefix(nativeSessionID, "agentteams-") {
+		if auth == nil || requestID != "team-"+auth.CallID {
+			return ErrCollaborationAuthorization
+		}
+		_, err := sm.prepareAgentTeamsCall(ctx, auth, teamContext, nativeSessionID, content, nil)
+		return err
+	}
+	controlSnapshot := sm.teamCommandControlSequence(ctx)
 	if auth == nil || (auth.Operation != "create" && auth.Operation != "message") {
 		return ErrCollaborationAuthorization
 	}
 	if err := ValidateCollaborationAuthorization(auth, auth.Operation); err != nil {
 		return err
 	}
+	if _, err := teamStepInputBinding(auth, teamContext); err != nil {
+		return err
+	}
 	sm.mu.RLock()
 	process := sm.sessions[nativeSessionID]
 	policy := sm.cwdPolicy
 	sm.mu.RUnlock()
+	// Discovery may not have recreated ProcessState after a daemon restart.
+	// Establish exact durable Claude ownership before the configured Codex
+	// fallback; a missing in-memory process does not identify the provider.
+	if restored := sm.restoreCollaborationClaude(auth, nativeSessionID, process, policy); restored != nil {
+		process = restored
+	}
 	if auth.RequestedConfig != nil && (process == nil || process.Agent == adapter.AgentCodex) {
 		receipt := sm.TeamConfigReceipt(ctx, auth, nativeSessionID)
 		if receipt == nil || receipt.ConfigHash != auth.ConfigHash {
@@ -436,9 +472,6 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		return ""
 	}()); err != nil {
 		return err
-	}
-	if restored := sm.restoreCollaborationClaude(auth, nativeSessionID, process, policy); restored != nil {
-		process = restored
 	}
 	if auth.RequestedConfig != nil {
 		receipt := sm.TeamConfigReceipt(ctx, auth, nativeSessionID)
@@ -501,6 +534,23 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		sm.collaborationMu.Unlock()
 		return ErrCollaborationSessionBusy
 	}
+	if sm.collaborationPreparing[auth.BindingID] != "" {
+		sm.collaborationMu.Unlock()
+		return ErrCollaborationSessionBusy
+	}
+	if auth.Delivery != nil && auth.Delivery.AttemptID != "" {
+		if sm.collaborationPreparing == nil {
+			sm.collaborationPreparing = make(map[string]string)
+		}
+		sm.collaborationPreparing[auth.BindingID] = auth.CallID
+		defer func() {
+			sm.collaborationMu.Lock()
+			defer sm.collaborationMu.Unlock()
+			if sm.collaborationPreparing[auth.BindingID] == auth.CallID {
+				delete(sm.collaborationPreparing, auth.BindingID)
+			}
+		}()
+	}
 	sm.collaborationCalls[auth.CallID] = nativeSessionID
 	sm.collaborationMu.Unlock()
 
@@ -511,7 +561,15 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		sm.collaborationMu.Unlock()
 		return err
 	}
-	selectedContext, outcome := sm.prepareCollaborationMemoryContext(ctx, teamContext, nativeSessionID, process.Agent, content, requestID)
+	prepareCtx, preparation, finishPreparation := sm.startTeamStepPreparation(ctx, auth, nativeSessionID, controlSnapshot)
+	defer finishPreparation()
+	if err := sm.prepareTeamStepInputs(prepareCtx, auth, teamContext, process.Cwd); err != nil {
+		sm.collaborationMu.Lock()
+		delete(sm.collaborationCalls, auth.CallID)
+		sm.collaborationMu.Unlock()
+		return err
+	}
+	selectedContext, outcome := sm.prepareCollaborationMemoryContext(prepareCtx, teamContext, nativeSessionID, process.Agent, content, requestID)
 	if collaborationHasSelectedMemory(teamContext) && selectedContext == nil {
 		sm.collaborationMu.Lock()
 		delete(sm.collaborationCalls, auth.CallID)
@@ -519,7 +577,7 @@ func (sm *SessionManager) DispatchCollaborationMessage(ctx context.Context, auth
 		return fmt.Errorf("team_memory_context_%s", outcome.Reason)
 	}
 	prompt, hidden := collaborationDelivery(process.Agent, content, mergeCollaborationContext(preparedContext, selectedContext))
-	err = sm.SendMessageWithInput(ctx, UserMessageInput{
+	err = sm.admitTeamStep(ctx, prepareCtx, preparation, UserMessageInput{
 		SessionID: nativeSessionID, Content: prompt, RequestID: requestID, MsgID: msgID,
 		InputMode: protocol.InputModeNewTurn, HiddenContext: hidden,
 		SkipMemoryContext: true,

@@ -1,4 +1,5 @@
 import {currentClaimVersionSql,revisionTimeSql} from '../claims/version-selection.js'
+import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 import type {SelectedScopeProof} from './selected-scope-dependencies.js'
 import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions,type OriginPolicyDecision} from '../governance/origin-policy.js'
 import type pg from 'pg'
@@ -74,4 +75,4 @@ export const WIKI_SOURCE_TIME_INVALID_SQL=`EXISTS(SELECT 1 FROM jsonb_to_records
  LEFT JOIN knowledge_evidence we ON we.installation_id=bs.installation_id AND we.evidence_id=bs.source_ref_id AND bs.source_kind='evidence'
  JOIN knowledge_versions cited ON cited.installation_id=bs.installation_id AND cited.version_id=CASE WHEN bs.source_kind='claim_version' THEN bs.source_ref_id ELSE we.version_id END
  WHERE ref.source_kind='wiki_section' AND ref.installation_id=p.installation_id
-  AND (NOT ${revisionTimeSql('cited')} OR (cited.valid_from IS NOT NULL AND cited.valid_from>clock_timestamp()) OR (cited.valid_until IS NOT NULL AND cited.valid_until<=clock_timestamp())))`
+  AND (NOT ${deliveryVersionAvailableSql('cited')} OR NOT ${revisionTimeSql('cited')} OR (cited.valid_from IS NOT NULL AND cited.valid_from>clock_timestamp()) OR (cited.valid_until IS NOT NULL AND cited.valid_until<=clock_timestamp())))`

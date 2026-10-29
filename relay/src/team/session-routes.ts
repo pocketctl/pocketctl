@@ -1,3 +1,4 @@
+import { validateReviewPolicy } from './delivery-contract.js'
 import { isTeamProvider } from './types.js'
 import type { FastifyInstance } from 'fastify'
 
@@ -24,7 +25,7 @@ function fail(reply: Reply, status: number, code: string, message: string, retry
 }
 function mapError(error: unknown, reply: Reply) {
   if (!(error instanceof TeamRepositoryError)) throw error
-  const status = error.code === 'team_access_denied' ? 403
+  const status = error.code === 'invalid_request' ? 400 : error.code === 'team_feature_disabled' ? 503 : error.code === 'reviewer_required' ? 403 : error.code === 'team_access_denied' ? 403
     : error.code === 'team_not_found' ? 404
     : ['creator_required', 'participant_required', 'offer_owner_required'].includes(error.code) ? 403
       : error.code === 'agent_unavailable' ? 423 : 409
@@ -66,6 +67,16 @@ function validConfig(value: unknown): boolean {
 }
 
 export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependencies): void {
+  app.post('/api/team/sessions/:sessionId/tasks/:taskId/execute', async (request, reply) => {
+    const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
+    const disabled = writable(reply, deps); if (disabled) return disabled
+    const parsed = mutation(request.body, reply); if ('error' in parsed) return parsed.error
+    const b = parsed.parsed
+    if (Object.keys(b).some(k => !['request_id','expected_revision','expected_task_revision','spec_revision','context_version','target_offer_ids'].includes(k))) return fail(reply,400,'invalid_request','unexpected field')
+    try { return await deps.service.executeTask({ sessionId: param(request.params,'sessionId'), taskId: param(request.params,'taskId'), actorUserId: identity.userId,
+      request_id: parsed.requestId, expected_revision: parsed.expectedRevision, ...(b.expected_task_revision === undefined ? {} : {expected_task_revision: b.expected_task_revision as number}), spec_revision: b.spec_revision as number,
+      context_version: b.context_version as number, target_offer_ids: b.target_offer_ids as string[] }) } catch (error) { return mapError(error,reply) }
+  })
   app.get('/api/team/teams/:teamId/sessions', async (request, reply) => {
     const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
     const query = request.query as { daemon_id?: string; provider?: string } | null
@@ -141,7 +152,16 @@ export function registerTeamSessionRoutes(app: FastifyInstance, deps: Dependenci
     if(typeof b.instruction!=='string'||!b.instruction.trim()||typeof b.acceptance!=='string'||!b.acceptance.trim()
       ||!Array.isArray(b.target_offer_ids)||!b.target_offer_ids.length||b.target_offer_ids.length>16||!b.target_offer_ids.every(id=>typeof id==='string')
       ||!Number.isSafeInteger(b.context_version)||Number(b.context_version)<0||(b.reference_event_id!=null&&typeof b.reference_event_id!=='string'))return fail(reply,400,'invalid_request','instruction, acceptance, targets and materials version required')
-    try{const result=await deps.service.assignTask({sessionId:param(request.params,'sessionId'),actorUserId:identity.userId,requestId:parsed.requestId,instruction:b.instruction.trim(),acceptance:b.acceptance.trim(),targetOfferIds:b.target_offer_ids,contextVersion:Number(b.context_version),referenceEventId:b.reference_event_id as string|null|undefined});reply.code(201);return result}catch(e){return mapError(e,reply)}
+    if (b.review_policy !== undefined) { try { validateReviewPolicy(b.review_policy) } catch(e) { return mapError(e,reply) } }
+    try{const result=await deps.service.assignTask({sessionId:param(request.params,'sessionId'),actorUserId:identity.userId,requestId:parsed.requestId,instruction:b.instruction.trim(),acceptance:b.acceptance.trim(),targetOfferIds:b.target_offer_ids,contextVersion:Number(b.context_version),referenceEventId:b.reference_event_id as string|null|undefined,...(b.review_policy === undefined ? {} : {reviewPolicy:b.review_policy as import('./delivery-contract.js').TaskReviewPolicy})});reply.code(201);return result}catch(e){return mapError(e,reply)}
+  })
+
+  app.get('/api/team/sessions/:sessionId/tasks/by-request/:requestId', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    const identity = await actor(request.headers.authorization, reply, deps); if ('error' in identity) return identity.error
+    // Read recovery remains available when new collaboration writes are disabled.
+    try { return await deps.service.taskByRequest(param(request.params, 'sessionId'), identity.userId, param(request.params, 'requestId')) }
+    catch (error) { return mapError(error, reply) }
   })
 
   app.get('/api/team/sessions/:sessionId/messages/by-request/:requestId',async(request,reply)=>{

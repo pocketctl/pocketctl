@@ -1,12 +1,18 @@
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 
+import {parseTaskRequirements,type TaskRequirements} from './task-readiness.js'
 import type { TeamCollaborationConfig } from './config.js'
 import { TeamRepositoryError } from './repository.js'
-import { TeamTaskService, type TeamTaskView } from './task-service.js'
+import { TeamTaskService, type TeamTaskView, type TaskPoolFilter, type TaskRequirementHistory, type TaskRequirementReceipt, type TaskHolderReceipt } from './task-service.js'
 
 export interface TeamTaskRouteService {
-  listTasks(teamId: string, actorUserId: number, includeDeleted?: boolean): Promise<TeamTaskView[]>
+  selfHolderReceipt?(taskId: string, actorUserId: number, requestId: string): Promise<TaskHolderReceipt>
+  requirementHistory?(taskId:string,actorUserId:number,beforeRevision?:number):Promise<TaskRequirementHistory>
+  requirementReceipt?(taskId:string,actorUserId:number,kind:'save'|'override',requestId:string):Promise<TaskRequirementReceipt>
+  updateRequirements?(input:{taskId:string;actorUserId:number;expectedRevision:number;requestId:string;requirements:TaskRequirements}):Promise<TeamTaskView>
+  overrideRequirements?(input:{taskId:string;actorUserId:number;expectedRevision:number;requestId:string;reason:string}):Promise<TeamTaskView>
+  listTasks(teamId: string, actorUserId: number, includeDeleted?: boolean, filter?:TaskPoolFilter): Promise<TeamTaskView[]>
   getTask(taskId: string, actorUserId: number): Promise<TeamTaskView>
   createTask(input: { teamId: string; actorUserId: number; title: string; background: string; requestId: string }): Promise<TeamTaskView>
   updateTask(input: { taskId: string; actorUserId: number; title?: string; background?: string; state?: 'open' | 'in_progress' | 'completed' | 'archived'; expectedRevision: number; requestId: string }): Promise<TeamTaskView>
@@ -79,12 +85,73 @@ function parameter(params: unknown, key: string): string {
 }
 
 export function registerTeamTaskRoutes(app: FastifyInstance, dependencies: Dependencies): void {
+  for(const override of [false,true]){
+    // Three 10k-code-unit fields can exceed 90 KB as UTF-8 and 180 KB
+    // as escaped JSON. Keep the semantic limits, with a bounded transport
+    // envelope that can carry every valid document without truncation.
+    app.route({method:override?'POST':'PUT',url:'/api/team/tasks/:taskId/requirements'+(override?'/override':''),bodyLimit:(override?64:256)*1024,handler:async(request,reply)=>{
+      const identity=await actor(request.headers.authorization,reply,dependencies)
+      if('error' in identity)return identity.error
+      const disabled=writable(reply,dependencies);if(disabled)return disabled
+      if(dependencies.config.taskReadiness!=='on')return fail(reply,503,'team_feature_disabled','Task requirements writes are disabled',true)
+      const parsed=mutation(request.body,reply);if('error' in parsed)return parsed.error
+      const base={taskId:parameter(request.params,'taskId'),actorUserId:identity.userId,expectedRevision:parsed.expectedRevision,requestId:parsed.requestId}
+      if(override){
+        if(Object.keys(parsed.body).some(k=>!['request_id','expected_revision','reason'].includes(k)))return fail(reply,400,'invalid_request','unknown override field')
+        const reason=typeof parsed.body.reason==='string'?parsed.body.reason.trim():''
+        if(!reason||reason.length>1000||reason.includes('\0'))return fail(reply,400,'invalid_request','override reason required')
+        if(!dependencies.service.overrideRequirements)return fail(reply,503,'team_feature_disabled','Task requirements unavailable',true)
+        try{return {task:await dependencies.service.overrideRequirements({...base,reason})}}catch(error){return mapError(error,reply)}
+      }
+      if(Object.keys(parsed.body).some(k=>!['request_id','expected_revision','requirements'].includes(k)))return fail(reply,400,'invalid_request','unknown requirements field')
+      let requirements:TaskRequirements
+      try{requirements=parseTaskRequirements(parsed.body.requirements)}catch{return fail(reply,400,'invalid_request','invalid task requirements')}
+      if(!dependencies.service.updateRequirements)return fail(reply,503,'team_feature_disabled','Task requirements unavailable',true)
+      try{return {task:await dependencies.service.updateRequirements({...base,requirements})}}catch(error){return mapError(error,reply)}
+    }})
+  }
+
+  app.get('/api/team/tasks/:taskId/holders/self/receipt', async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
+    const identity = await actor(request.headers.authorization, reply, dependencies)
+    if ('error' in identity) return identity.error
+    if (dependencies.getDatabaseReady && !dependencies.getDatabaseReady()) return fail(reply, 503, 'team_feature_disabled', 'Team storage is initializing', true)
+    const query = (request.query ?? {}) as Record<string, unknown>, id = query.request_id
+    if (Object.keys(query).some(k => k !== 'request_id') || typeof id !== 'string' || !id.trim() || id !== id.trim() || id.length > 128 || id.includes('\0')) return fail(reply, 400, 'invalid_request', 'invalid holder receipt query')
+    if (!dependencies.service.selfHolderReceipt) return fail(reply, 503, 'team_feature_disabled', 'Task holder receipts unavailable', true)
+    try { return await dependencies.service.selfHolderReceipt(parameter(request.params, 'taskId'), identity.userId, id) }
+    catch (error) { return mapError(error, reply) }
+  })
+
+  app.get('/api/team/tasks/:taskId/requirements/receipt',async(request,reply)=>{
+    const identity=await actor(request.headers.authorization,reply,dependencies)
+    if('error' in identity)return identity.error
+    if(dependencies.getDatabaseReady&&!dependencies.getDatabaseReady())return fail(reply,503,'team_feature_disabled','Team storage is initializing',true)
+    const query=(request.query??{}) as Record<string,unknown>,kind=query.kind,id=query.request_id
+    if(Object.keys(query).some(k=>!['kind','request_id'].includes(k))||!['save','override'].includes(String(kind))||typeof id!=='string'||!id.trim()||id!==id.trim()||id.length>128||id.includes('\0'))return fail(reply,400,'invalid_request','invalid requirements receipt query')
+    if(!dependencies.service.requirementReceipt)return fail(reply,503,'team_feature_disabled','Task requirements unavailable',true)
+    try{return await dependencies.service.requirementReceipt(parameter(request.params,'taskId'),identity.userId,kind as 'save'|'override',id)}catch(error){return mapError(error,reply)}
+  })
+
+  app.get('/api/team/tasks/:taskId/requirements/history',async(request,reply)=>{
+    const identity=await actor(request.headers.authorization,reply,dependencies)
+    if('error' in identity)return identity.error
+    if(dependencies.getDatabaseReady&&!dependencies.getDatabaseReady())return fail(reply,503,'team_feature_disabled','Team storage is initializing',true)
+    const query=(request.query??{}) as Record<string,unknown>,cursor=query.before_revision
+    if(Object.keys(query).some(k=>k!=='before_revision')||(cursor!==undefined&&(typeof cursor!=='string'||!/^[1-9][0-9]*$/.test(cursor)||!Number.isSafeInteger(Number(cursor)))))return fail(reply,400,'invalid_request','invalid history cursor')
+    if(!dependencies.service.requirementHistory)return fail(reply,503,'team_feature_disabled','Task requirements unavailable',true)
+    try{return await dependencies.service.requirementHistory(parameter(request.params,'taskId'),identity.userId,cursor===undefined?undefined:Number(cursor))}catch(error){return mapError(error,reply)}
+  })
+
   app.get('/api/team/teams/:teamId/tasks', async (request, reply) => {
     const identity = await actor(request.headers.authorization, reply, dependencies)
     if ('error' in identity) return identity.error
     if (dependencies.getDatabaseReady && !dependencies.getDatabaseReady()) return fail(reply, 503, 'team_feature_disabled', 'Team storage is initializing', true)
-    const includeDeleted = (request.query as { include_deleted?: string } | null)?.include_deleted === 'true'
-    try { return { tasks: await dependencies.service.listTasks(parameter(request.params, 'teamId'), identity.userId, includeDeleted) } }
+    const query=(request.query??{}) as Record<string,unknown>
+    if(Object.keys(query).some(k=>!['include_deleted','pool'].includes(k))||query.include_deleted!==undefined&&!['true','false'].includes(String(query.include_deleted)))return fail(reply,400,'invalid_request','invalid task filter')
+    const includeDeleted=query.include_deleted==='true',filter=query.pool??'all'
+    if(!['all','unclaimed','mine'].includes(String(filter))||(includeDeleted&&filter!=='all'))return fail(reply,400,'invalid_request','invalid task pool filter')
+    try { return { tasks: await dependencies.service.listTasks(parameter(request.params, 'teamId'), identity.userId, includeDeleted,filter as TaskPoolFilter) } }
     catch (error) { return mapError(error, reply) }
   })
 

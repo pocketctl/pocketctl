@@ -32,7 +32,11 @@ vi.mock('../../composables/useTeamSession', () => ({ useTeamSession: () => {
 } }))
 vi.mock('../../composables/useTeamAccess', async()=>{const {ref}=await import('vue');return {useTeamAccess:()=>({capabilities:ref({writes_enabled:true})})}})
 const api = vi.hoisted(() => ({ listTeamInteractions:vi.fn(async()=>({items:[]})),actTeamInteraction:vi.fn(), getTeamContext:vi.fn(), listTeamAgentCandidates: vi.fn(async()=>[]), listTeams: vi.fn(), listTeamMembers: vi.fn(), listTeamAgentOffers: vi.fn(), listTeamSessions: vi.fn(), updateTeamSession: vi.fn() }))
-vi.mock('../../services/teamClient', () => api)
+vi.mock('../../services/teamClient', async original => ({ ...await original<typeof import('../../services/teamClient')>(), ...api }))
+vi.mock('../../services/teamDeliveryClient', async original => ({
+  ...await original<typeof import('../../services/teamDeliveryClient')>(),
+  getSessionDeliveryCards: vi.fn(async () => ({team_id:'ctm_1',team_session_id:'css_1',items:[],next_cursor:null})),
+}))
 
 async function render(attachTo?: HTMLElement) {
   const View = (await import('../TeamSessionDetail.vue')).default

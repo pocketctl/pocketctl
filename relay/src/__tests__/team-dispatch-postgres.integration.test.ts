@@ -42,11 +42,25 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
 
   beforeEach(async () => { await pool.query(`TRUNCATE users, daemons RESTART IDENTITY CASCADE`) })
 
+  test('bootstrap recovers after PostgreSQL aborts a schema transaction with deadlock', async () => {
+    let attempts = 0
+    const wrapper = { connect: async () => {
+      const client = await pool.connect(), first = ++attempts === 1
+      return { release: () => client.release(), query: (sql: string) =>
+        first && sql.includes('pg_advisory_xact_lock')
+          ? client.query("DO $$ BEGIN RAISE EXCEPTION 'bootstrap test conflict' USING ERRCODE='40P01'; END $$")
+          : client.query(sql) }
+    } }
+    await initDB(wrapper as unknown as pg.Pool)
+    expect(attempts).toBe(2)
+    expect((await pool.query("SELECT to_regclass('attention_items') name")).rows[0].name).toBe('attention_items')
+  })
+
   test.each(['blocked', 'failed', 'uncertain'] as const)('can prepare stop SQL for %s', async state => {
     await expect(new TeamDispatchRepository(pool).stop('ccl_nonexistent', state, 'probe')).resolves.toBeUndefined()
   })
 
-  test.each(['codex', 'dsh'] as const)('%s claims once, serializes a binding, and projects only allowlisted events', async provider => {
+  test.each(['codex', 'claude-code', 'dsh'] as const)('%s claims once, serializes a binding, and projects only allowlisted events', async provider => {
     const user = await pool.query<{ id: number }>(
       `INSERT INTO users (email, password_hash, team_enabled) VALUES ('dispatch.owner@example.test', 'x',true) RETURNING id`,
     )
@@ -104,7 +118,13 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
     expect((await pool.query(`SELECT state FROM collaboration_context_deliveries WHERE call_id = $1`, [first!.callId])).rows[0].state).toBe('accepted')
     expect(await repository.claim(firstMessage.call_ids[0])).toBeNull()
     expect(await repository.bindNativeSession(first!.callId, 'dispatch-daemon', ownerUserId, 'native-team-session')).toBe(true)
+    expect(await repository.markReceiptTimedOut(first!.callId)).toBe(true)
+    expect(await repository.markReceiptTimedOut(first!.callId)).toBe(false)
     expect(await repository.recordReceipt(first!.callId, 'dispatch-daemon', ownerUserId, 'accepted', null)).toBe(true)
+    // The receipt may be processed by a standalone Worker while the sending
+    // Relay still owns an in-memory timer. Database state must win.
+    expect(await repository.markReceiptTimedOut(first!.callId)).toBe(false)
+    expect((await pool.query(`SELECT state FROM collaboration_calls WHERE call_id = $1`, [first!.callId])).rows[0].state).toBe('accepted')
 
     const secondMessage = await sessions.appendMessage({
       sessionId: shared.id, actorUserId: ownerUserId, requestId: 'dispatch-message-2', content: 'Overlap',
@@ -183,7 +203,21 @@ describeWithDatabase('Team dispatch state machine (PostgreSQL)', () => {
       expect((await pool.query(`SELECT state, outcome FROM collaboration_calls WHERE call_id = $1`, [unavailable.call_ids[0]])).rows[0])
         .toMatchObject({ state: 'blocked', outcome: 'agent_unavailable' })
     } else {
-      await repository.stop(next!.callId, 'failed', 'test_cleanup')
+      // A pre-upgrade event used daemon:seq. Its durable ingress generation
+      // distinguishes replay from a new process reusing that sequence.
+      await pool.query(`INSERT INTO event_inbox(user_id,daemon_id,daemon_generation,seq,dedup_key,session_id,event_type,priority_class,payload,received_at)
+        VALUES($1,'dispatch-daemon',100,12,'legacy-completed','native-team-session','turn_status',0,'{}',NOW()-INTERVAL '1 minute')`, [ownerUserId])
+      const finished = { type: 'turn_status', session_id: 'native-team-session', seq: 12, turn_status: 'completed' }
+      expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, finished, 100)).toBeNull()
+      expect((await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, finished, 200))?.event.call_id).toBe(next!.callId)
+      const message = await sessions.appendMessage({
+        sessionId: shared.id, actorUserId: ownerUserId, requestId: 'third-generation', content: 'Continue after restart',
+        targetMode: 'all', targetOfferIds: [], referenceEventId: null,
+      })
+      const third = await repository.claim(message.call_ids[0])
+      expect(await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, finished, 200)).toBeNull()
+      expect((await pool.query('SELECT state FROM collaboration_calls WHERE call_id=$1', [third!.callId])).rows[0].state).toBe('dispatched')
+      expect((await repository.projectDaemonEvent('dispatch-daemon', ownerUserId, finished, 300))?.event.call_id).toBe(third!.callId)
     }
     // Actual PostgreSQL parameter inference, not a mocked query result.
     for (const state of ['blocked', 'failed', 'uncertain'] as const) {

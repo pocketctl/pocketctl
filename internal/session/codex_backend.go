@@ -494,22 +494,47 @@ func (b *CodexAppServerBackend) Interrupt(sessionID string) error {
 	if turnID == "" {
 		return ErrNoActiveCodexTurn
 	}
+	// Backends can outlive their original connection after a reconnect.
+	client := b.client
+	generation := b.generation
+	b.coord.mu.Lock()
+	broker := b.coord.interactions
+	if runtime := b.coord.runtime; runtime != nil && runtime.Client != nil {
+		client, generation = runtime.Client, b.coord.generation
+	}
+	b.coord.mu.Unlock()
+	b.markInterruptRequested(sessionID, turnID)
+	var cancelErr error
+	if broker != nil {
+		cancelErr = broker.CancelTurn(sessionID, turnID)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := b.client.Call(ctx, "turn/interrupt", map[string]any{"threadId": sessionID, "turnId": turnID}, nil); err != nil {
-		return fmt.Errorf("Codex turn/interrupt: %w", err)
+	err := client.Call(ctx, "turn/interrupt", map[string]any{"threadId": sessionID, "turnId": turnID}, nil)
+	// An ACK can be lost, and cancellation itself can complete the turn. Read
+	// the exact native outcome; never synthesize idle merely from a timeout.
+	if b.confirmInterruptedTurn(client, generation, sessionID, turnID) {
+		return cancelErr
 	}
+	if err != nil {
+		return errors.Join(cancelErr, fmt.Errorf("Codex turn/interrupt: %w", err))
+	}
+	return cancelErr
+}
+
+func (b *CodexAppServerBackend) markInterruptRequested(sessionID, turnID string) {
+	b.coord.projectionMu.Lock()
+	defer b.coord.projectionMu.Unlock()
 	if b.sm != nil && b.sm.turnEnabled() {
 		key := turn.ActorKey{SessionID: sessionID}
-		if rec, ok := b.sm.turns.Active(key); ok {
+		if rec, ok := b.sm.turns.Active(key); ok && rec.SourceTurnID == turnID && rec.State != protocol.TurnStateInterruptRequested {
 			if _, terr := b.sm.turns.RequestInterrupt(key, protocol.TurnReasonUserRequested); terr == nil {
-				// The native turn/completed(interrupted) notification drives the
-				// terminal state; this event only marks the request.
+				// User intent remains visible even if native cancellation times
+				// out. Only native evidence may terminalize this turn.
 				b.sm.emitTurnStatus(rec, protocol.TurnStateInterruptRequested, protocol.TurnReasonUserRequested)
 			}
 		}
 	}
-	return nil
 }
 
 func (b *CodexAppServerBackend) Close(sessionID string) error {

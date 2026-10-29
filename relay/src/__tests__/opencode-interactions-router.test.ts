@@ -319,3 +319,21 @@ test('inventory refresh cannot bypass an expired authentication lease', async ()
   expect(await router.refreshDaemonAgents(daemon, message, 1)).toBe(false)
   expect(db._calls.slice(start).some((call: any) => /UPDATE daemons SET agents/.test(call.sql))).toBe(false)
 })
+
+test('registration and refresh retain delivery capability only while explicitly advertised', async () => {
+  const db = pool(), router = new Router(db), daemon = ws()
+  const message = { type: 'register', daemon_id: 'delivery-daemon', started_at: 123, agents: ['codex'],
+    capabilities: ['team_collaboration_dispatch_v1', 'team_task_delivery_v1', 'team_task_delivery_v1', 'team_task_steps_v1', 'unknown'] }
+  await router.registerDaemon(daemon, message, 7)
+  const registered = (router as any).daemons.get('delivery-daemon')
+  expect(registered.collaborationCapabilities).toEqual(['team_collaboration_dispatch_v1', 'team_task_delivery_v1', 'team_task_steps_v1'])
+  expect(db._calls.some((call: any) => /INSERT INTO daemons/.test(call.sql)
+    && call.params.includes(JSON.stringify(registered.collaborationCapabilities)))).toBe(true)
+  expect(await router.refreshDaemonAgents(daemon, { ...message, capabilities: ['team_collaboration_dispatch_v1'] }, 7)).toBe(true)
+  expect(registered.collaborationCapabilities).not.toContain('team_task_delivery_v1')
+  expect(registered.collaborationCapabilities).not.toContain('team_task_steps_v1')
+  expect(await router.refreshDaemonAgents(daemon, message, 7)).toBe(true)
+  expect(registered.collaborationCapabilities).toEqual(['team_collaboration_dispatch_v1', 'team_task_delivery_v1', 'team_task_steps_v1'])
+  const updates = db._calls.filter((call: any) => /UPDATE daemons SET agents/.test(call.sql))
+  expect(updates.at(-1).params).toContain(JSON.stringify(registered.collaborationCapabilities))
+})

@@ -63,8 +63,10 @@ func parseMcpFormSchema(raw json.RawMessage) (mcpFormSchema, error) {
 	if err := requireMcpJSONEOF(decoder); err != nil {
 		return mcpFormSchema{}, fmt.Errorf("invalid MCP elicitation schema: %w", err)
 	}
-	if schema.Type != "object" || len(schema.Properties) == 0 {
-		return mcpFormSchema{}, fmt.Errorf("MCP elicitation schema must be a non-empty object")
+	// Empty properties represent a confirmation with no input fields (for
+	// example, Computer Use asking permission to access an application).
+	if schema.Type != "object" || schema.Properties == nil {
+		return mcpFormSchema{}, fmt.Errorf("MCP elicitation schema must be an object with properties")
 	}
 	for _, name := range schema.Required {
 		if _, ok := schema.Properties[name]; !ok || name == "" {

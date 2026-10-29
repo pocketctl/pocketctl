@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+func TestMcpEmptyFormConfirmation(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{}}`)
+	if err := validateMcpFormContent(schema, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{`null`, `[]`, `{"permission":"always"}`, `{}` + `{}`} {
+		if err := validateMcpFormContent(schema, json.RawMessage(content)); err == nil {
+			t.Fatalf("accepted unexpected confirmation content: %s", content)
+		}
+	}
+	for _, schema := range []string{`{"type":"object"}`, `{"type":"object","properties":null}`, `{"type":"object","properties":{},"required":["missing"]}`} {
+		if err := validateMcpFormSchema(json.RawMessage(schema)); err == nil {
+			t.Fatalf("accepted invalid schema: %s", schema)
+		}
+	}
+}
+
 func TestMcpFormAcceptsTitledMultiSelectSchema(t *testing.T) {
 	schema := json.RawMessage(`{
 		"type":"object",

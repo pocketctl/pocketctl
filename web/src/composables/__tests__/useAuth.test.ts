@@ -160,6 +160,61 @@ describe('useAuth — Email Verification Code', () => {
 })
 
 describe('useAuth — authenticated GET', () => {
+  test('cold reload during transport failure preserves only an origin-bound read-only identity', async () => {
+    vi.resetModules()
+    let auth = (await import('../useAuth')).useAuth()
+    const fetch = mockFetchResponse(true, { access_token: 'online', user: { id: 17 } })
+    await auth.doRefreshToken()
+    vi.resetModules()
+    auth = (await import('../useAuth')).useAuth()
+    fetch.mockRejectedValue(new TypeError('offline'))
+    expect(await auth.doRefreshToken()).toBe(false)
+    expect(auth.user.value?.id).toBe(17)
+    expect(auth.isLoggedIn.value).toBe(false)
+    expect(auth.canReadOfflineTeams.value).toBe(true)
+    expect(auth.accessToken.value).toBe('')
+    fetch.mockResolvedValue({ ok: false, status: 401, json: async () => ({ error: 'expired' }) } as Response)
+    await auth.doRefreshToken()
+    expect(auth.user.value).toBeNull()
+    expect(auth.canReadOfflineTeams.value).toBe(false)
+  })
+
+  test('an unbound saved user cannot enter the offline workspace', async () => {
+    localStorage.setItem('pocketctl_user', JSON.stringify({ id: 17 }))
+    vi.resetModules()
+    const auth = (await import('../useAuth')).useAuth()
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'))
+    await auth.doRefreshToken()
+    expect(auth.canReadOfflineTeams.value).toBe(false)
+  })
+
+  test.each(['expired', 'other-origin'])('offline identity rejects %s binding', async condition => {
+    localStorage.setItem('pocketctl_user', JSON.stringify({ id: 17 }))
+    localStorage.setItem('pocketctl_team_offline_identity', JSON.stringify({ user: 17,
+      origin: condition === 'other-origin' ? 'https://another.test' : location.origin,
+      at: condition === 'expired' ? Date.now() - 8 * 86400000 : Date.now() }))
+    vi.resetModules()
+    const auth = (await import('../useAuth')).useAuth()
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('offline'))
+    await auth.doRefreshToken()
+    expect(auth.canReadOfflineTeams.value).toBe(false)
+  })
+
+  test('an HTTP 503 keeps cache access and later recovery restores authenticated access', async () => {
+    vi.resetModules()
+    const auth = (await import('../useAuth')).useAuth()
+    const fetch = mockFetchResponse(true, { access_token: 'online', user: { id: 17 } })
+    await auth.doRefreshToken()
+    fetch.mockResolvedValue({ ok: false, status: 503, json: async () => { throw Error('gateway') } } as unknown as Response)
+    await auth.doRefreshToken()
+    expect(auth.canReadOfflineTeams.value).toBe(true)
+    expect(auth.isLoggedIn.value).toBe(false)
+    fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ access_token: 'restored', user: { id: 17 } }) } as Response)
+    expect(await auth.doRefreshToken()).toBe(true)
+    expect(auth.canReadOfflineTeams.value).toBe(false)
+    expect(auth.isLoggedIn.value).toBe(true)
+  })
+
   test('shares cookie restoration between router and WebSocket startup', async () => {
     const { doRefreshToken, accessToken } = useAuth()
     let respond!: (value: Response) => void

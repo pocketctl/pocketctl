@@ -28,7 +28,7 @@ export type TeamRunState = 'ready' | 'running' | 'waiting_input' | 'blocked' | '
 export type TeamCallState = 'pending' | 'dispatched' | 'accepted' | 'completed' | 'failed' | 'blocked' | 'cancelled' | 'uncertain'
 export type TeamEventKind = 'member_message' | 'agent_message' | 'status' | 'context' | 'run' | 'system'
 export type TeamMessageTargetMode = 'offers' | 'all' | 'discussion'
-export const TEAM_PROVIDERS = ['codex', 'claude-code', 'dsh'] as const
+export const TEAM_PROVIDERS = ['codex', 'claude-code', 'dsh', 'agentteams'] as const
 export type TeamProvider = typeof TEAM_PROVIDERS[number]
 export function isTeamProvider(value: unknown): value is TeamProvider {
   return typeof value === 'string' && (TEAM_PROVIDERS as readonly string[]).includes(value)
@@ -270,6 +270,17 @@ export interface TeamErrorEnvelope {
 }
 
 export type TeamErrorCode =
+  | 'external_call_not_ready'
+  | 'external_call_settled'
+  | 'authorization_required'
+  | 'invalid_request'
+  | 'acceptance_required'
+  | 'reviewer_required'
+  | 'evidence_required'
+  | 'artifact_integrity'
+  | 'artifact_unavailable'
+  | 'input_limit_exceeded'
+  | 'source_busy'
   | 'team_access_denied'
   | 'team_feature_disabled'
   | 'team_not_found'

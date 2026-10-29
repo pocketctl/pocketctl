@@ -16,6 +16,7 @@ import { createInvalidationService } from '../context/invalidation-service.js'
 import type { ContextMode } from '../context/types.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
+import { registerApiErrorDiagnostics } from './error-diagnostics.js'
 
 /**
  * Phase 2 context routes (plan section 10). Agent routes require a
@@ -37,6 +38,7 @@ export interface ContextRouteDeps {
   loadouts: LoadoutRepository
   sharedScopesEnabled?:boolean
   requestKey: { keyId: string; hmacKey: Buffer }
+  unexpectedErrorSink?: (line: string) => void
 }
 
 const MAX_QUERY_BYTES = 32 * 1024
@@ -128,6 +130,7 @@ interface CompileBody {
 }
 
 export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDeps) {
+  registerApiErrorDiagnostics(app, deps.unexpectedErrorSink)
   const idempotency = createIdempotencyStore(deps.pool)
   const mutation = async (
     req: Pick<import('fastify').FastifyRequest, 'headers' | 'body' | 'params'>,

@@ -54,3 +54,24 @@ func TestAgentInventoryConcurrentRegister(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestAgentInventoryExternalProviderRequiresExplicitRuntimeAndSurvivesCLIRefresh(t *testing.T) {
+	c := &Client{}
+	if slices.Contains(c.agentRegisterMessage().Agents, "agentteams") {
+		t.Fatal("external provider enabled by default")
+	}
+	c.SetAgentTeamsEnabled(true)
+	c.SetAgentInventory([]discovery.AgentInfo{{Type: "codex", Manageable: true}})
+	message := c.agentRegisterMessage()
+	if !slices.Contains(message.Agents, "agentteams") || !slices.Contains(message.Capabilities, "team_external_agentteams_v1") || !message.AgentManageable["agentteams"] {
+		t.Fatal("external installation lost on CLI refresh")
+	}
+	if slices.Contains(message.Capabilities, "team_external_agentteams_steps_v1") {
+		t.Fatal("unimplemented frozen file transfer advertised")
+	}
+	c.SetAgentTeamsEnabled(false)
+	message = c.agentRegisterMessage()
+	if slices.Contains(message.Agents, "agentteams") || slices.Contains(message.Capabilities, "team_external_agentteams_v1") {
+		t.Fatal("disabled external installation retained")
+	}
+}

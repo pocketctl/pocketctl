@@ -1,4 +1,6 @@
+import { DELIVERY_WITHDRAWAL_STREAM_MIGRATION } from './episodes/delivery-withdrawal-stream-migration.js'
 import {RUNTIME_HEALTH_INDEX_MIGRATION} from './reporting/runtime-health-index-migration.js'
+import { DELIVERY_WITHDRAWAL_MIGRATION } from './episodes/delivery-withdrawal-migration.js'
 import {JOB_RELEASE_FENCE_MIGRATION} from './generation/job-release-fence-migration.js'
 import {GOVERNANCE_INCREMENTAL_MIGRATION} from './migrations/governance-v2/incremental-migration.js'
 import {SOURCE_LINEAGE_MIGRATION} from './episodes/source-lineage-migration.js'
@@ -2233,6 +2235,8 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   GOVERNANCE_INCREMENTAL_MIGRATION,
   JOB_RELEASE_FENCE_MIGRATION,
   RUNTIME_HEALTH_INDEX_MIGRATION,
+  DELIVERY_WITHDRAWAL_MIGRATION,
+  DELIVERY_WITHDRAWAL_STREAM_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

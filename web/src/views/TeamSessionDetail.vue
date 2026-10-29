@@ -46,10 +46,14 @@
             <small v-if="call.state === 'uncertain'"> {{ t('workspace.call_result_unknown') }} </small>
             <RouterLink v-if="ownerNativeLink(call.offer_id)" :to="ownerNativeLink(call.offer_id)!"> {{ t('workspace.open_own_native_session') }} </RouterLink>
           </div>
+          <TeamSessionDeliveryCard v-for="card in deliveriesByEvent.get(event.id) || []" :key="card.task_id" :item="card" :cached="deliveryCards.cached.value" :reviewer="deliveryReviewer(card.reviewer_user_id)" @open="deliveryTaskID=$event" />
           <small v-if="event.author_user_id===currentUserID && event.kind==='member_message'">已发送</small>
           <div class="event-actions"><span v-if="event.target_mode">{{ targetLabel(event) }}</span><button v-if="event.context_version" class="context-receipt" @click="openContextVersion(event.context_version)">Context v{{ event.context_version }}</button><button type="button" @click="referenceEvent = event"> {{ t('workspace.references') }} </button></div>
           </div>
         </article>
+        <p v-if="deliveryCards.error.value" role="status">{{ deliveryCards.error.value }}</p>
+        <TeamSessionDeliveryCard v-for="card in unanchoredDeliveries" :key="card.task_id" :item="card" :cached="deliveryCards.cached.value" :reviewer="deliveryReviewer(card.reviewer_user_id)" @open="deliveryTaskID=$event" />
+        <button v-if="deliveryCards.more.value" class="btn" :disabled="deliveryCards.loading.value" @click="deliveryCards.loadMore()">更多任务交付</button>
         <article v-for="pending in pendingMessages" :key="pending.request_id" class="event member_message own-message"><div class="event-body"><strong>我</strong><MessageUser :content="pending.content" /><small role="status">{{ ({queued:'待发送',sending:'发送中',failed:'发送失败',unknown:'结果未知'})[pending.state] }}</small><button v-if="pending.state==='failed'" type="button" @click="retryMessage(pending.request_id)">重试</button><button v-if="pending.state==='unknown'" type="button" @click="reconcileMessage(pending.request_id)">核对结果</button></div></article>
         <TeamPrivateApprovalCard v-for="item in interactions.items.value" :key="item.item_id" :item="item" :connected="interactions.connected.value" :busy="interactions.busy.value===item.item_id" @act="interactions.act(item,$event)" />
         <p v-if="interactions.error.value" role="alert">{{ interactions.error.value }}</p>
@@ -73,7 +77,10 @@
       </footer>
     </main>
 
-    <TeamTaskAssignPanel v-if="assignTaskOpen&&session" :session="session" @close="assignTaskOpen=false" @sent="sentTask" />
+    <TeamTaskAssignPanel v-if="assignTaskOpen&&session" :session="session" :members="members" :current-user-id="currentUserID" @close="assignTaskOpen=false" @sent="sentTask" @assigned="assignedDelivery" />
+    <TeamOverlay v-if="deliveryTaskID" title="交付与验收" @close="deliveryTaskID=''">
+      <TeamTaskDeliveryPanel :key="deliveryTaskID" :task-id="deliveryTaskID" :current-user-id="currentUserID" :members="members" @changed="deliveryCards.refresh()" />
+    </TeamOverlay>
     <TeamOverlay actions v-if="showTask && task" :title="t('team.tab.tasks')" drawer @close="showTask = false"><h2>{{ task.title }}</h2><p style="white-space:pre-wrap;line-height:1.8;font-size:12px;color:var(--fg-secondary)">{{ task.background }}</p></TeamOverlay>
     <TeamContextPanel v-if="showContext && session" :context="historyContext || context" :read-only="!!historyContext || session.current_user_role === 'viewer' || teamAccess.capabilities.value?.writes_enabled !== true" :session="session" :current-user-id="currentUserID" @saved="context = $event" @close="showContext = false; historyContext = null" />
     <TeamSessionParticipants :agent-config-enabled="teamAccess.capabilities.value?.agent_config_v2===true" v-if="showParticipants && session" :session="session" :members="members" :offers="offers" :writes-enabled="teamAccess.capabilities.value?.writes_enabled === true && session.current_user_role!=='viewer'" :current-user-id="currentUserID" @updated="session = $event" @close="showParticipants = false" />
@@ -114,6 +121,10 @@ import MessageUser from '../components/messages/MessageUser.vue'
 import TeamSessionBrowser from '../components/session/TeamSessionBrowser.vue'
 import PersonalSessionBrowser from '../components/session/PersonalSessionBrowser.vue'
 import { teamSystemEventText } from '../utils/teamEventPresentation'
+import TeamSessionDeliveryCard from '../components/team/TeamSessionDeliveryCard.vue'
+import TeamTaskDeliveryPanel from '../components/team/TeamTaskDeliveryPanel.vue'
+import { useSessionDeliveries } from '../composables/useSessionDeliveries'
+import type { SessionDeliveryCard } from '../types/teamDelivery'
 import TeamOverlay from '../components/team/TeamOverlay.vue'
 import TeamAgentTargetPicker, { type TeamAgentTargetValue } from '../components/team/TeamAgentTargetPicker.vue'
 import TeamContextPanel from '../components/team/TeamContextPanel.vue'
@@ -145,6 +156,20 @@ const {
   suggestRunPause, withdrawAgent,
 } = useTeamSession(teamID, sessionID)
 const interactions=useTeamInteractions(sessionID,computed(()=>session.value!==null))
+const deliveryTaskID=ref('')
+const deliveryCards=useSessionDeliveries(sessionID,teamID)
+function assignedDelivery(id:string){deliveryTaskID.value=id;void deliveryCards.refresh()}
+watch(sessionID,()=>{deliveryTaskID.value=''})
+watch(()=>deliveryCards.available.value,available=>{if(!available&&!deliveryCards.loading.value)deliveryTaskID.value=''})
+function deliveryReviewer(id:number){return members.value.find(m=>m.user_id===Number(id))?.display_label || `成员 ${id}`}
+const deliveriesByEvent=computed(()=>{
+ const map=new Map<string,SessionDeliveryCard[]>()
+ for(const card of deliveryCards.items.value){const anchor=displayEvents.value.find(e=>e.kind==='agent_message'&&e.call_id===card.source_call_id)?.id||card.event_id
+  if(anchor&&displayEvents.value.some(e=>e.id===anchor))map.set(anchor,[...(map.get(anchor)||[]),card])
+ }
+ return map
+})
+const unanchoredDeliveries=computed(()=>{const ids=new Set([...deliveriesByEvent.value.values()].flat().map(c=>c.task_id));return deliveryCards.items.value.filter(c=>!ids.has(c.task_id))})
 function sentTask(event:TeamEvent){if(!events.value.some(e=>e.id===event.id))events.value.push(event)}
 function applyBrowserUpdate(updated: TeamSession) {
   if (updated.id === sessionID.value && updated.team_id === teamID.value) session.value = updated

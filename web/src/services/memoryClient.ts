@@ -57,24 +57,49 @@ interface MemoryClientState {
 
 const state: MemoryClientState = { latestSearchId: 0 }
 
+let personalIdentityKey = ''
+let personalGeneration = 0
+function memoryIdentity(): string {
+  const auth = useAuth()
+  return JSON.stringify([getRelayOrigin(), auth.user?.value?.id ?? null, auth.accessToken.value])
+}
+function personalScope() {
+  const identity = memoryIdentity()
+  if (identity !== personalIdentityKey) {
+    personalIdentityKey = identity
+    resetMemoryClient()
+  }
+  return { identity, generation: personalGeneration }
+}
+function assertPersonalScope(scope: ReturnType<typeof personalScope>): void {
+  if (scope.identity !== memoryIdentity() || scope.generation !== personalGeneration) {
+    throw new MemoryClientError(409, 'identity_changed', 'Memory account or Relay changed; reopen the page')
+  }
+}
+
 async function relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const scope = personalScope()
   const { accessToken } = useAuth()
   const headers = new Headers(init.headers)
   headers.set('Accept', 'application/json')
   if (init.body !== undefined) headers.set('Content-Type', 'application/json')
   if (accessToken.value) headers.set('Authorization', `Bearer ${accessToken.value}`)
-  return fetch(`${getRelayOrigin()}${path}`, {
+  const response = await fetch(`${getRelayOrigin()}${path}`, {
     ...init, headers: Object.fromEntries(headers.entries()), credentials: 'include', redirect: 'error',
   })
+  assertPersonalScope(scope)
+  return response
 }
 
 /** Discover the user's pocketctl-memory installation (undefined if absent). */
 export async function discoverMemoryInstallation(): Promise<MemoryInstallation | null> {
+  const scope = personalScope()
   const response = await relayFetch('/api/extensions/v1/installations')
   if (!response.ok) {
     throw new MemoryClientError(response.status, 'discovery_failed', 'installation discovery failed')
   }
   const body = await response.json() as { installations?: MemoryInstallation[] }
+  assertPersonalScope(scope)
   // A user can hold an installation history (older revoked rows first); the
   // relay is the status authority, so prefer the active row for business use
   // and only fall back to the first row so paused/revoked states stay visible.
@@ -90,6 +115,7 @@ export async function enableMemoryServices(
   expectedConfigVersion: number,
   services: string[],
 ): Promise<MemoryInstallation> {
+  const scope = personalScope()
   const response = await relayFetch(`/api/extensions/v1/installations/${installationId}`, {
     method: 'PATCH',
     body: JSON.stringify({
@@ -102,12 +128,15 @@ export async function enableMemoryServices(
   }
   const body = await response.json() as { installation: MemoryInstallation }
   const installation = body.installation
+  assertPersonalScope(scope)
   state.installation = installation
   return installation
 }
 
 async function mintGrant(services: string[]): Promise<NonNullable<MemoryClientState['grant']>> {
+  const scope = personalScope()
   const installation = state.installation ?? await discoverMemoryInstallation()
+  assertPersonalScope(scope)
   if (!installation) {
     throw new MemoryClientError(404, 'no_installation', 'PocketCtl Memory is not installed')
   }
@@ -123,6 +152,7 @@ async function mintGrant(services: string[]): Promise<NonNullable<MemoryClientSt
     throw new MemoryClientError(response.status, 'grant_failed', 'memory grant minting failed')
   }
   const minted = await response.json() as MintedGrant
+  assertPersonalScope(scope)
   if (!minted.provider_public_origin) {
     throw new MemoryClientError(503, 'no_provider_origin', 'provider origin is not configured')
   }
@@ -141,10 +171,12 @@ async function memoryFetch(
   init: RequestInit = {},
   allowRefresh = true,
 ): Promise<Response> {
+  const scope = personalScope()
   const cached = state.grant
   const grant = !cached || cached.expiresAt <= Date.now() + 5_000 || !cached.services.includes(service)
     ? await mintGrant([service])
     : cached
+  assertPersonalScope(scope)
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${grant.token}`)
   headers.set('Accept', 'application/json')
@@ -152,6 +184,7 @@ async function memoryFetch(
   const response = await fetch(`${grant.origin}${path}`, {
     ...init, headers: Object.fromEntries(headers.entries()), redirect: 'error',
   })
+  assertPersonalScope(scope)
   if (response.status === 401 && allowRefresh) {
     if (state.grant?.token === grant.token) state.grant = undefined
     return memoryFetch(service, path, init, false)
@@ -164,8 +197,13 @@ async function memoryJson<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  const scope = personalScope()
   const response = await memoryFetch(service, path, init)
-  if (response.ok) return await response.json() as T
+  if (response.ok) {
+    const result = await response.json() as T
+    assertPersonalScope(scope)
+    return result
+  }
   const body = await response.json().catch(() => ({})) as {
     error?: { code?: string; message?: string; current_revision?: number }
   }
@@ -178,10 +216,12 @@ async function memoryJson<T>(
 }
 
 export function currentMemoryInstallation(): MemoryInstallation | null {
+  personalScope()
   return state.installation ?? null
 }
 
 export function resetMemoryClient(): void {
+  personalGeneration++
   state.installation = undefined
   state.grant = undefined
   v2Grant = null
@@ -295,8 +335,9 @@ export function getMemoryEvidence(evidenceId: string): Promise<MemoryEvidence> {
   return memoryJson<MemoryEvidence>('memory.search', `/api/v1/memory/evidence/${evidenceId}`)
 }
 
-export function listMemoryCandidates(): Promise<{ candidates: MemoryCandidate[] }> {
-  return memoryJson<{ candidates: MemoryCandidate[] }>('memory.manage', '/api/v1/memory/candidates')
+export function listMemoryCandidates(delivery?: { submissionId: string; decisionId: string }): Promise<{ candidates: MemoryCandidate[] }> {
+  const query = delivery ? '?' + new URLSearchParams({ submission_id: delivery.submissionId, decision_id: delivery.decisionId }) : ''
+  return memoryJson<{ candidates: MemoryCandidate[] }>('memory.manage', '/api/v1/memory/candidates' + query)
 }
 
 export function getMemorySettings(): Promise<MemoryFeatureSettings> {

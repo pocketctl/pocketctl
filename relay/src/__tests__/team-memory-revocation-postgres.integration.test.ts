@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto'
 import pg from 'pg'
 import {afterAll,beforeAll,beforeEach,describe,expect,test} from 'vitest'
-import {initDB} from '../db.js'
+import {deleteUserAccount,initDB} from '../db.js'
 import {TeamSessionService} from '../team/session-service.js'
 import {TeamRepository} from '../team/repository.js'
 import {TeamMemorySourceProjector,teamSourceSessionId} from '../team/memory-source-projector.js'
@@ -35,6 +35,20 @@ suite('Team membership durable Memory revocation',()=>{
   function leave(){return teams.leaveTeam({teamId:team.id,actorUserId:member,expectedRevision:1,requestId:'leave'})}
   return{teams,team,owner,member,session,binding,membership,target,leave}
  }
+ test.each(['owner','member'] as const)('account deletion of %s preserves shared Memory and revokes the right readers',async(role)=>{
+  const f=await fixture(),actor=role==='owner'?f.owner:f.member
+  const personal=(await pool.query("SELECT installation_id FROM extension_installations WHERE owner_user_id=$1 AND owner_scope_kind='personal'",[actor])).rows[0].installation_id
+  expect(await deleteUserAccount(pool,actor)).toBe(true)
+  expect((await pool.query('SELECT 1 FROM users WHERE id=$1',[actor])).rows).toEqual([])
+  expect((await pool.query('SELECT status,owner_scope_kind FROM extension_installations WHERE installation_id=$1',[f.target])).rows[0]).toEqual({status:'active',owner_scope_kind:'team'})
+  expect((await pool.query('SELECT state FROM collaboration_teams WHERE team_id=$1',[f.team.id])).rows[0].state).toBe(role==='owner'?'dissolved':'active')
+  expect((await pool.query("SELECT COUNT(*)::int n FROM extension_purge_requests WHERE reason='account_deleted' AND installation_id=$1",[personal])).rows[0].n).toBe(1)
+  // The deleted account's personal sources are purged. If its Team dissolves,
+  // the surviving member still needs durable generation-bound revoke events.
+  const readers=(await pool.query("SELECT owner_user_id,payload FROM extension_source_outbox WHERE source_kind='session_access_revoked'")).rows
+  expect(readers).toHaveLength(role==='owner'?2:0)
+  for(const reader of readers){expect(Number(reader.owner_user_id)).toBe(f.member);expect(reader.payload.reason).toBe('team_dissolved')}
+ })
  test.each(['leave','remove','dissolve'])('%s commits generation-bound revocation with membership transition',async(operation)=>{
   const f=await fixture()
   const input={teamId:f.team.id,actorUserId:operation==='leave'?f.member:f.owner,expectedRevision:1,requestId:operation}

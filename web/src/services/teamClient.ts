@@ -1,3 +1,4 @@
+import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
 import { resetScopedMemoryAuthorization } from './memoryClient'
@@ -21,6 +22,10 @@ import type {
   TeamSummary,
   TeamTask,
   TeamTaskState,
+  TeamTaskPoolFilter,
+  TeamTaskRequirementsInput,
+  TeamTaskRequirementOverrideInput,
+  TeamTaskRequirementHistory,
 } from '../types/team'
 
 export class TeamApiError extends Error {
@@ -38,7 +43,11 @@ export class TeamApiError extends Error {
   }
 }
 
+export type TeamRequestIdentity = {userId:number;origin:string;isCurrent?:()=>boolean}
 interface TeamRequestOptions {
+  identity?: TeamRequestIdentity
+  responseType?: 'blob'
+  timeoutMs?: number
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
   body?: Record<string, unknown>
   headers?:Record<string,string>
@@ -48,12 +57,19 @@ function requestID(): string {
   return globalThis.crypto?.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-async function teamRequest<T>(path: string, options: TeamRequestOptions = {}, allowRefresh = true): Promise<T> {
-  const { accessToken, doRefreshToken } = useAuth()
+export async function teamRequest<T>(path: string, options: TeamRequestOptions = {}, allowRefresh = true): Promise<T> {
+  const { accessToken, doRefreshToken, user, canReadOfflineTeams } = useAuth()
+  if (canReadOfflineTeams?.value) throw new TeamApiError(0, { error: { code: 'offline', message: useLocale().t('team.offline_navigation'), retryable: true } })
+  const requireIdentity=()=>{if(options.identity && (user?.value?.id!==options.identity.userId || getRelayOrigin()!==options.identity.origin || options.identity.isCurrent?.()===false))throw new TeamApiError(409,{error:{code:'request_identity_changed',message:'账号、Relay 或操作状态已变化，原请求已保留。'}})}
+  requireIdentity()
   let response: Response
+  let body: T | TeamApiErrorBody
+  const controller = options.timeoutMs ? new AbortController() : undefined
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined
   try {
     response = await fetch(`${getRelayOrigin()}${path}`, {
       method: options.method ?? 'GET',
+      ...(controller ? { signal: controller.signal } : {}),
       credentials: 'include',
       cache: 'no-store',
       headers: {
@@ -64,15 +80,26 @@ async function teamRequest<T>(path: string, options: TeamRequestOptions = {}, al
       },
       ...(options.body ? { body: JSON.stringify(options.body) } : {}),
     })
+    if (response.ok && options.responseType === 'blob') return await response.blob() as T
+    body = await response.json().catch(error => {
+      // A successful status with an incomplete body cannot confirm a mutation.
+      if (response.ok) throw error
+      return {}
+    }) as T | TeamApiErrorBody
   } catch {
     throw new TeamApiError(0, {
       error: { code: 'network_error', message: 'Network request failed', retryable: true },
     })
   }
-  if (response.status === 401 && allowRefresh && await doRefreshToken()) {
-    return teamRequest<T>(path, options, false)
+  finally { if (timer !== undefined) clearTimeout(timer) }
+  if (response.status === 401 && allowRefresh) {
+    requireIdentity()
+    if(await doRefreshToken()){requireIdentity();return teamRequest<T>(path, options, false)}
+    // An expired access token followed by an unavailable refresh endpoint is
+    // not an authoritative denial of the cached Team data.
+    if (canReadOfflineTeams?.value) throw new TeamApiError(0, { error: { code: 'offline', message: useLocale().t('team.offline_navigation'), retryable: true } })
   }
-  const body = await response.json().catch(() => ({})) as T | TeamApiErrorBody
+  requireIdentity()
   if (!response.ok) throw new TeamApiError(response.status, body as TeamApiErrorBody)
   return body as T
 }
@@ -221,13 +248,13 @@ export async function removeTeamMemoryBinding(binding: TeamMemoryBinding): Promi
   resetScopedMemoryAuthorization()
 }
 
-export async function listTeamTasks(teamID: string, includeDeleted = true): Promise<TeamTask[]> {
-  const query = includeDeleted ? '?include_deleted=true' : ''
-  return (await teamRequest<{ tasks: TeamTask[] }>(`/api/team/teams/${encodeURIComponent(teamID)}/tasks${query}`)).tasks
+export async function listTeamTasks(teamID: string, includeDeleted = true, pool: TeamTaskPoolFilter = 'all', identity?: TeamRequestIdentity): Promise<TeamTask[]> {
+  const query = pool !== 'all' ? `?pool=${encodeURIComponent(pool)}` : includeDeleted ? '?include_deleted=true' : ''
+  return (await teamRequest<{ tasks: TeamTask[] }>(`/api/team/teams/${encodeURIComponent(teamID)}/tasks${query}`, {identity})).tasks
 }
 
-export async function getTeamTask(taskID: string): Promise<TeamTask> {
-  return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(taskID)}`)).task
+export async function getTeamTask(taskID: string, identity?: TeamRequestIdentity): Promise<TeamTask> {
+  return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(taskID)}`, {identity})).task
 }
 
 export async function createTeamTask(teamID: string, title: string, background: string): Promise<TeamTask> {
@@ -242,10 +269,21 @@ export async function updateTeamTask(task: TeamTask, input: { title?: string; ba
   })).task
 }
 
-export async function setTeamTaskSelfHolder(task: TeamTask, active: boolean): Promise<TeamTask> {
-  return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(task.id)}/holders/self`, {
-    method: active ? 'POST' : 'DELETE', body: { request_id: requestID(), expected_revision: task.revision },
+export interface TeamTaskHolderInput { request_id: string; expected_revision: number }
+export interface TeamTaskHolderReceipt { task_id: string; actor_user_id: number; request_id: string; found: boolean; response: TeamTask | null }
+
+// Recovery callers must persist input before sending and pass the original
+// identity. The convenience wrapper below is retained for existing callers.
+export async function mutateTeamTaskSelfHolder(taskID: string, active: boolean, input: TeamTaskHolderInput, identity?: TeamRequestIdentity): Promise<TeamTask> {
+  return (await teamRequest<{ task: TeamTask }>(`/api/team/tasks/${encodeURIComponent(taskID)}/holders/self`, {
+    method: active ? 'POST' : 'DELETE', body: { request_id: input.request_id, expected_revision: input.expected_revision }, identity, timeoutMs: 15000,
   })).task
+}
+export async function findTeamTaskSelfHolder(taskID: string, originalRequestID: string, identity: TeamRequestIdentity): Promise<TeamTaskHolderReceipt> {
+  return teamRequest(`/api/team/tasks/${encodeURIComponent(taskID)}/holders/self/receipt?request_id=${encodeURIComponent(originalRequestID)}`, { identity, timeoutMs: 15000 })
+}
+export async function setTeamTaskSelfHolder(task: TeamTask, active: boolean): Promise<TeamTask> {
+  return mutateTeamTaskSelfHolder(task.id, active, { request_id: requestID(), expected_revision: task.revision })
 }
 
 export async function setTeamTaskHolder(task: TeamTask, userID: number, active: boolean): Promise<TeamTask> {
@@ -426,6 +464,24 @@ export async function getTeamAgentCapabilities(session:string,offer:string,team?
 export async function saveTeamAgentConfig(session:string,offer:string,input:{request_id:string;mode:'default'|'custom';override:Partial<import('../types/team').TeamRuntimeConfig>;expected_config_revision:number;capability_revision:string}):Promise<import('../types/team').SessionAgentConfig>{
  return (await teamRequest<{config:import('../types/team').SessionAgentConfig}>(`/api/team/sessions/${encodeURIComponent(session)}/agent-bindings/${encodeURIComponent(offer)}/config`,{method:'PUT',body:input})).config
 }
-export function assignTeamTask(session:string,input:{request_id:string;instruction:string;acceptance:string;target_offer_ids:string[];context_version:number}):Promise<{task_id:string;event:TeamEvent;call_ids:string[]}>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/tasks`,{method:'POST',body:input})}
+export function assignTeamTask(session:string,input:import('./teamTaskAssignmentJournal').TaskAssignmentInput,identity?:TeamRequestIdentity):Promise<import('./teamTaskAssignmentJournal').TaskAssignmentResult>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/tasks`,{method:'POST',body:input,timeoutMs:30000,identity})}
+export function findTeamTaskAssignment(session:string,request:string,identity?:TeamRequestIdentity):Promise<import('./teamTaskAssignmentJournal').TaskAssignmentReceipt>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/tasks/by-request/${encodeURIComponent(request)}`,{timeoutMs:15000,identity})}
 export function listTeamInteractions(session:string):Promise<{items:import('../types/attentionInbox').AttentionInboxItem[];private_cursor:string}>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/interactions`)}
 export function actTeamInteraction(session:string,item:string,key:string,revision:number,action:'once'|'reject'):Promise<unknown>{return teamRequest(`/api/team/sessions/${encodeURIComponent(session)}/interactions/${encodeURIComponent(item)}/actions`,{method:'POST',headers:{'Idempotency-Key':key},body:{expected_revision:revision,action_id:action}})}
+
+// The caller persists the original request before sending. Retrying these helpers
+// never allocates a new id or substitutes a freshly read task revision.
+export async function saveTeamTaskRequirements(taskID:string,input:TeamTaskRequirementsInput,identity:TeamRequestIdentity):Promise<TeamTask> {
+  return (await teamRequest<{task:TeamTask}>(`/api/team/tasks/${encodeURIComponent(taskID)}/requirements`,{method:'PUT',body:{...input},identity,timeoutMs:15000})).task
+}
+export async function overrideTeamTaskRequirements(taskID:string,input:TeamTaskRequirementOverrideInput,identity:TeamRequestIdentity):Promise<TeamTask> {
+  return (await teamRequest<{task:TeamTask}>(`/api/team/tasks/${encodeURIComponent(taskID)}/requirements/override`,{method:'POST',body:{...input},identity,timeoutMs:15000})).task
+}
+export async function getTeamTaskRequirementHistory(taskID:string,identity:TeamRequestIdentity,beforeRevision?:number):Promise<TeamTaskRequirementHistory> {
+  if(beforeRevision!==undefined&&(!Number.isSafeInteger(beforeRevision)||beforeRevision<=0))throw new RangeError('Invalid requirement history cursor')
+  const query=beforeRevision===undefined?'':`?before_revision=${beforeRevision}`
+  return teamRequest(`/api/team/tasks/${encodeURIComponent(taskID)}/requirements/history${query}`,{identity,timeoutMs:15000})
+}
+export async function findTeamTaskRequirements(taskID:string,kind:'save'|'override',requestID:string,identity:TeamRequestIdentity):Promise<import('../types/teamTaskRequirements').RequirementsReceipt> {
+  return teamRequest(`/api/team/tasks/${encodeURIComponent(taskID)}/requirements/receipt?kind=${encodeURIComponent(kind)}&request_id=${encodeURIComponent(requestID)}`,{identity,timeoutMs:15000})
+}

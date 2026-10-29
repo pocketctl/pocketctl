@@ -65,6 +65,13 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 	if l.AcquireTimeout <= 0 {
 		l.AcquireTimeout = l.Timeout
 	}
+	reconnectPlan, reconnect, reconnectErr := planCodexReconnect(args, cwd, l.Environ())
+	if reconnectErr != nil {
+		return reconnectErr
+	}
+	if reconnect {
+		plan = reconnectPlan
+	}
 	if plan.Mode == LaunchNative {
 		binary, err := l.ResolveBinary()
 		if err != nil {
@@ -108,6 +115,9 @@ func (l CodexLauncher) Run(ctx context.Context, args []string, cwd string) error
 			}
 		} else if result.Reason != "" {
 			reason = result.Reason
+		}
+		if reconnect {
+			return fmt.Errorf("PocketCtl reconnect unavailable (%s); check pocketctl daemon status and pocketctl agent codex status, then retry with the original CODEX_HOME; no native fallback was started", oneLine(reason))
 		}
 		fmt.Fprintf(l.Stderr, "pocketctl: managed Codex unavailable; starting native Codex (%s)\n", oneLine(reason))
 		binary, valid := validatedRealAgentPath(result.RealBinary)

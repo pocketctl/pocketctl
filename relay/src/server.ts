@@ -1,3 +1,26 @@
+import {TeamExternalStopService} from './team/external-stop.js';
+import { registerDeliveryWithdrawalRoutes } from './extensions/delivery-withdrawal-routes.js';
+import {TeamTemplateService} from './team/template-service.js';
+import {registerTeamTemplateRoutes} from './team/template-routes.js';
+import {teamTemplatesEnabled} from './team/config.js';
+import { TeamEvidenceService, evidenceConnectors } from './team/evidence-service.js';
+import { registerTeamEvidenceRoutes } from './team/evidence-routes.js';
+import { TeamStepWorker } from './team/step-worker.js';
+import { TeamPlanExecutionService } from './team/plan-execution-service.js';
+import { TeamStepScheduler } from './team/step-scheduler.js';
+import { StepWakeupRepository } from './team/step-wakeup-repository.js';
+import { TeamDeliveryService } from './team/delivery-service.js';
+import { TeamTaskContextService } from './team/task-context-service.js';
+import { TeamStepInputService } from './team/step-input-service.js';
+import { TeamDeliveryProjector } from './attention-inbox/team-delivery-projector.js';
+import { TeamDeliveryStagingCleanup, deliveryStagingCleanupEnabled } from './team/delivery-staging-cleanup.js';
+import { TeamExternalRecoveryService } from './team/external-recovery.js';
+import { TeamExternalUsageService } from './team/external-usage.js';
+import { TeamExternalAuthorizationService } from './team/external-authorization.js';
+import { registerTeamDeliveryRoutes } from './team/delivery-routes.js';
+import { teamExternalExecutorEnabled, teamDeliveryEnabled, teamDeliveryMemoryEnabled, teamPlanDraftEnabled, teamStepDeliveryEnabled, teamStepExecutionEnabled } from './team/config.js';
+import { TeamPlanService } from './team/plan-service.js';
+import { registerTeamPlanRoutes } from './team/plan-routes.js';
 import { registerPreferenceRoutes } from './user-preferences.js';
 import { getTokenSessionAnalytics, parseTokenSessionQuery, TokenQueryError } from './token-usage/session-analytics.js';
 import { isTeamEnabled, registerTeamAccessGuard } from './team/access.js';
@@ -323,7 +346,7 @@ export async function handleDeleteAccountRequest(
   req: any,
   reply: any,
   pool: any,
-  router: Pick<Router, 'terminateUserConnections'>,
+  router: Pick<Router, 'terminateUserConnections' | 'revalidateTeamSubscriptions'>,
 ): Promise<{ success: true } | { error: string }> {
   const authHeader = req.headers.authorization as string | undefined;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -342,6 +365,14 @@ export async function handleDeleteAccountRequest(
   if (!deleted) {
     reply.code(404);
     return { error: 'user not found' };
+  }
+  // Dissolution also revokes surviving members' shared-session subscriptions.
+  // The durable fanout repeats this across Relay instances; a transient
+  // revalidation failure must not report a committed account deletion as failed.
+  try {
+    await router.revalidateTeamSubscriptions();
+  } catch {
+    console.warn('[account-delete] team subscription revalidation deferred to fanout');
   }
   return { success: true };
 }
@@ -966,11 +997,16 @@ async function main() {
   const extensionConfig = resolveExtensionConfig(process.env)
   const extensionV2Mode = extensionV2ModeFromEnv()
   const teamConfig = resolveTeamCollaborationConfig(process.env)
+  const teamEvidenceConnectors = evidenceConnectors(process.env)
+  if (teamConfig.trustedEvidence === 'on' && (!teamEvidenceConnectors.length || teamEvidenceConnectors.some(c => !teamConfig.deliveryTeams?.includes(c.team_id)))) throw new Error('trusted evidence requires configured connectors in the delivery Team allowlist')
   const teamMemoryBridgeEnabled = teamConfig.collaboration === 'on'
     && teamConfig.memoryBridge === 'on'
     && extensionConfig.mode === 'enabled'
     && extensionV2Mode === 'enabled'
-  const teamMemorySources = new TeamMemorySourceProjector(teamMemoryBridgeEnabled)
+  if (teamConfig.deliveryMemoryCandidates === 'on' && !teamMemoryBridgeEnabled) throw new Error('Team delivery Memory candidates require enabled Extension v2 and Memory bridge')
+  const teamMemorySources = new TeamMemorySourceProjector(teamMemoryBridgeEnabled, {
+    acceptedDeliveriesEnabledForTeam: teamId => teamDeliveryMemoryEnabled(teamConfig, teamId),
+  })
   // Resolve capability signing material exactly once. In development the
   // fallback key is generated in memory, so resolving separately for the
   // HTTP route and daemon broker would produce grants that the published
@@ -1024,7 +1060,17 @@ async function main() {
   } : undefined
   let router: Router
   let teamFanout: TeamEventFanout | undefined
+  const teamDeliveryProjector = new TeamDeliveryProjector(pool)
+  const teamDeliveryStagingCleanup = new TeamDeliveryStagingCleanup(pool,teamConfig.deliveryTeams ?? [])
+  const stagingCleanupEnabled = deliveryStagingCleanupEnabled(process.env,teamConfig.deliveryTeams ?? [])
   let teamDispatchService: TeamDispatchService | undefined
+  const teamStepWorker = new TeamStepWorker({
+    repository: new StepWakeupRepository(pools.worker),
+    scheduler: new TeamStepScheduler(pools.worker, teamId => teamStepExecutionEnabled(teamConfig, teamId)),
+    teamIds: () => (teamConfig.deliveryTeams ?? []).filter(teamId => teamStepExecutionEnabled(teamConfig, teamId)),
+    onCall: callId => teamDispatchService?.enqueue([callId]),
+    onError: code => console.error('[team-step-worker]', { code }),
+  })
   const teamContextService = new TeamContextService(pool, {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
   }, teamMemoryContextBridge)
@@ -1032,14 +1078,14 @@ async function main() {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
     revoked: (sessionId, userId) => router.revokeTeamSubscription(sessionId, userId),
     dispatch: callIds => teamDispatchService?.enqueue(callIds),
-  }, teamMemorySources, teamMemoryContextBridge)
+  }, teamMemorySources, teamMemoryContextBridge, teamId => teamDeliveryEnabled(teamConfig, teamId), teamId => teamExternalExecutorEnabled(teamConfig, teamId))
   const teamRunService = new TeamRunService(pool, {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
-  })
+  }, teamId => teamExternalExecutorEnabled(teamConfig, teamId))
   router = new Router(pools, {
     teamSubscriptionAuthorizer: { sharedHighWater: (userId,sessionId) => teamSessionService.sharedHighWater(userId,sessionId), canSubscribe: (userId, sessionId) => teamSessionService.canSubscribe(userId, sessionId) },
     teamDispatchBroker: {
-      observeDaemonEvent: (daemonId, ownerUserId, message, generation) => teamDispatchService?.observeDaemonEvent(daemonId, ownerUserId, message, generation),
+      handleDaemonEvent: (daemonId, ownerUserId, message, generation, materializedEventId) => teamDispatchService?.handleDaemonEvent(daemonId, ownerUserId, message, generation, materializedEventId) ?? Promise.resolve(),
       handleDaemonDisconnected: daemonId => teamDispatchService?.handleDaemonDisconnected(daemonId) ?? Promise.resolve(),
     },
     transport: {
@@ -1107,6 +1153,8 @@ async function main() {
   }, {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
   }, {
+    externalEnabledForTeam: teamId => teamExternalExecutorEnabled(teamConfig, teamId),
+    stepsEnabledForTeam: teamId => teamStepExecutionEnabled(teamConfig, teamId),
     memorySources: teamMemorySources,
     memoryContextBridge: teamMemoryContextBridge,
   })
@@ -1225,7 +1273,10 @@ async function main() {
       if (!shuttingDown) {
         await startRelayBackgroundWorkers({ welcome: welcomeEmailWorker, realtimeOutboxConsumer });
         await attentionRuntime.start();
+        teamDeliveryProjector.start(); // Persisted attention drains even during a write rollback.
+        if(stagingCleanupEnabled)teamDeliveryStagingCleanup.start()
         if (teamConfig.collaboration === 'on') teamDispatchService?.start()
+        if ((teamConfig.deliveryTeams ?? []).some(teamId => teamStepExecutionEnabled(teamConfig, teamId))) teamStepWorker.start()
         {
           // Durable history and original Inbox recovery continue during a write rollback.
           teamFanout ??= new TeamEventFanout(pool,process.env.TEAM_RELAY_NODE_ID || teamRelayHostname(),
@@ -1290,11 +1341,38 @@ async function main() {
   });
   registerTeamRoutes(app, {
     config: teamConfig,
-    service: createTeamRouteService(pool,teamMemorySources),
+    service: createTeamRouteService(pool,teamMemorySources,teamId => teamExternalExecutorEnabled(teamConfig, teamId)),
     verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
     getDatabaseReady: () => databaseReady,
     revalidateTeamSubscriptions: () => router.revalidateTeamSubscriptions(),
     isDaemonOnline: (daemonId, ownerUserId) => router.isSharedTeamDaemonOnline(daemonId, ownerUserId),
+  });
+  registerTeamEvidenceRoutes(app, {
+    service: new TeamEvidenceService(pool, teamEvidenceConnectors, teamId => teamConfig.trustedEvidence === 'on' && teamDeliveryEnabled(teamConfig, teamId)),
+    verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
+  registerTeamTemplateRoutes(app, {
+    service: new TeamTemplateService(pool, teamId => teamTemplatesEnabled(teamConfig, teamId)),
+    verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
+  registerTeamPlanRoutes(app, {
+    context: new TeamTaskContextService(pool),
+    execution: new TeamPlanExecutionService(pool, teamId => teamStepExecutionEnabled(teamConfig, teamId)),
+    service: new TeamPlanService(pool, {writesEnabledForTeam: teamId => teamPlanDraftEnabled(teamConfig, teamId)}),
+    verifyAccessToken: (token) => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
+  });
+  registerTeamDeliveryRoutes(app, {
+    externalAuthorization: new TeamExternalAuthorizationService(pool, teamId => teamExternalExecutorEnabled(teamConfig, teamId), teamId => teamStepExecutionEnabled(teamConfig, teamId)),
+    externalStop: new TeamExternalStopService(pool),
+    externalRecovery: new TeamExternalRecoveryService(pool, teamId => teamExternalExecutorEnabled(teamConfig, teamId), teamId => teamStepExecutionEnabled(teamConfig, teamId), (daemon, actor, call, remote, state) => teamDispatchService!.reconcileExternalTerminal(daemon, actor, call, remote, state)),
+    externalUsage: new TeamExternalUsageService(pool, teamId => teamExternalExecutorEnabled(teamConfig, teamId), teamId => teamStepExecutionEnabled(teamConfig, teamId)),
+    stepInputs: new TeamStepInputService(pool),
+    service: new TeamDeliveryService(pool, {writesEnabledForTeam: teamId => teamDeliveryEnabled(teamConfig, teamId), stepWritesEnabledForTeam: teamId => teamStepDeliveryEnabled(teamConfig, teamId), memorySources: teamMemorySources}),
+    verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
+    getDatabaseReady: () => databaseReady,
   });
   registerTeamTaskRoutes(app, {
     config: teamConfig,
@@ -1390,6 +1468,13 @@ async function main() {
     leaseTtlSeconds: extensionConfig.leaseTtlSeconds,
     rateLimiter: extensionRateLimits.feed,
     ackRateLimiter: extensionRateLimits.ack,
+  });
+  registerDeliveryWithdrawalRoutes(app, {
+    pool, mode: extensionConfig.mode,
+    providerJwtSecret: extensionConfig.providerJwtSecret, issuer: publicIssuer,
+    cursorSecret: extensionConfig.cursorSecret || publicIssuer,
+    leaseTtlSeconds: extensionConfig.leaseTtlSeconds,
+    rateLimiter: extensionRateLimits.feed, ackRateLimiter: extensionRateLimits.ack,
   });
   registerV2Routes(app, {
     pool,
@@ -2658,6 +2743,9 @@ async function main() {
     }
     try {
       await teamFanout?.stop()
+      await teamDeliveryProjector.stop()
+      await teamDeliveryStagingCleanup.stop()
+      await teamStepWorker.stop()
       await teamDispatchService?.stop()
     } catch (e) {
       console.error('[shutdown] team dispatch drain error:', e instanceof Error ? e.name : typeof e)

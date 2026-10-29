@@ -33,8 +33,8 @@ async function render() {
   await router.push('/teams'); await router.isReady()
   const View = (await import('../TeamsView.vue')).default
   const wrapper = mount(View, { global: { provide:{triggerTeamCreate},plugins: [router], stubs: {
-    TeamTasksPanel: { props: ['teamId'], template: '<div data-testid="tasks-stub">{{ teamId }}</div>' },
-    TeamMembersPanel: { props: ['team'], template: '<div data-testid="members-stub">{{ team.id }}</div>' },
+    TeamTasksPanel: { name:'TeamTasksPanel',props: ['teamId'],emits:['access-denied'], template: '<div data-testid="tasks-stub">{{ teamId }}</div>' },
+    TeamMembersPanel: { name: 'TeamMembersPanel', emits: ['refresh'], props: ['team'], template: '<div data-testid="members-stub">{{ team.id }}</div>' },
   } } })
   await flushPromises()
   return { wrapper, router, triggerTeamCreate }
@@ -53,6 +53,33 @@ beforeEach(() => {
 })
 
 describe('TeamsView', () => {
+  test('workspace permission denial removes the cached directory and visible member data', async () => {
+    const { wrapper } = await render()
+    await wrapper.get('[data-testid="team-tab-members"]').trigger('click')
+    api.getTeam.mockRejectedValueOnce(Object.assign(new Error('revoked'), { status: 403 }))
+    wrapper.findComponent({ name: 'TeamMembersPanel' }).vm.$emit('refresh')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Alpha')
+    expect(wrapper.find('[data-testid="members-stub"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  test('task-list access denial removes the inaccessible Team workspace',async()=>{
+    const {wrapper}=await render()
+    api.listTeams.mockResolvedValue([])
+    wrapper.findComponent({name:'TeamTasksPanel'}).vm.$emit('access-denied')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="tasks-stub"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Alpha')
+    wrapper.unmount()
+  })
+  test('closing writes preserves entitled readers access to Team history',async()=>{
+    api.getTeamCapabilities.mockResolvedValue({collaboration:false,reads_enabled:true,writes_enabled:false})
+    const {wrapper}=await render()
+    expect(wrapper.get('[data-testid="tasks-stub"]').text()).toBe('ctm_a')
+    expect(wrapper.find('[data-testid="team-create-open"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   test.each([true, false])('creation from the team page respects agent config capability=%s', async (enabled) => {
     api.getTeamCapabilities.mockResolvedValue({ collaboration: true, writes_enabled: true, agent_config_v2: enabled })
     api.listTeamAgentOffers.mockResolvedValue([{ id: 'offer-online', provider: 'codex', daemon_id: 'daemon-online', owner_user_id: 7, state: 'active', managed_callable: true }])

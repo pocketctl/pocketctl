@@ -35,7 +35,7 @@ vi.mock('../../composables/useWebSocket', () => ({
 }))
 
 vi.mock('../../composables/useAuth', () => ({
-  useAuth: () => ({ accessToken: ref('token'), logout: vi.fn(), renameSession }),
+  useAuth: () => ({ user: ref(null), accessToken: ref('token'), logout: vi.fn(), renameSession }),
 }))
 
 const sessions = [

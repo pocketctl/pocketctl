@@ -979,6 +979,7 @@ func (sm *SessionManager) KillSession(sessionID string) error {
 		return err
 	}
 	defer release()
+	sm.cancelTeamStepPreparation(sessionID)
 	sm.mu.Lock()
 	ps, ok := sm.sessions[sessionID]
 	cwd := ""

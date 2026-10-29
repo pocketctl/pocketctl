@@ -1,3 +1,4 @@
+import { encodeDeliveryWithdrawalCursor, decodeDeliveryWithdrawalCursor } from '../extensions/cursor.js'
 import { describe, expect, test } from 'vitest'
 import {
   decodeFeedCursor,
@@ -88,5 +89,29 @@ describe('lease binding', () => {
     expect(leaseBindingHash(base)).not.toEqual(leaseBindingHash({ ...base, cursorFeedId: 105 }))
     expect(leaseBindingHash(base)).not.toEqual(leaseBindingHash({ ...base, leaseToken: 'token-b' }))
     expect(leaseBindingHash(base)).not.toEqual(leaseBindingHash({ ...base, leaseEpoch: 4 }))
+  })
+})
+
+
+describe('independent delivery withdrawal cursor', () => {
+  const value = () => ({ v: 1 as const, consumer_id: '11111111-1111-4111-8111-111111111111', sequence: '9223372036854775807', lease_epoch: '9', exp: Math.floor(Date.now()/1000)+600 })
+  test('round-trips bigint positions without converting through JavaScript Number', () => {
+    const input = value(); expect(decodeDeliveryWithdrawalCursor(encodeDeliveryWithdrawalCursor(input, SECRET), SECRET)).toEqual(input)
+  })
+  test('uses a different signing domain from installation feeds', () => {
+    const token = encodeDeliveryWithdrawalCursor(value(), SECRET)
+    expect(decodeFeedCursor(token, SECRET)).toBeNull()
+    expect(decodeDeliveryWithdrawalCursor(encodeFeedCursor(cursor(), SECRET), SECRET)).toBeNull()
+  })
+  test.each(['expired','overflow','negative','numeric','invalid-consumer','invalid-epoch','tampered','wrong-secret'])('rejects %s', fault => {
+    const input: any = value()
+    if (fault === 'expired') input.exp = 1
+    if (fault === 'overflow') input.sequence = '9223372036854775808'
+    if (fault === 'negative') input.sequence = '-1'
+    if (fault === 'numeric') input.sequence = 1
+    if (fault === 'invalid-consumer') input.consumer_id = 'not-a-uuid'
+    if (fault === 'invalid-epoch') input.lease_epoch = '01'
+    const token = encodeDeliveryWithdrawalCursor(input, SECRET) + (fault === 'tampered' ? 'x' : '')
+    expect(decodeDeliveryWithdrawalCursor(token, fault === 'wrong-secret' ? 'other' : SECRET)).toBeNull()
   })
 })

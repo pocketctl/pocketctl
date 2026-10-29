@@ -1,4 +1,5 @@
 import {revisionTimeSql} from '../claims/version-selection.js'
+import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 import type pg from 'pg'
 import {createScopeAuthorization,type V2GrantFacts,type GrantScopeBinding} from '../governance/authorization.js'
 import {canonicalRepositoryRemotes} from '../governance/publication-applicability.js'
@@ -44,7 +45,7 @@ function metadataStampSql(d:string):string {
   'repositories',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.repository_id) FROM repositories r WHERE r.installation_id=${id} AND (r.repository_id=${repository} OR r.canonical_remote=ANY(ARRAY(SELECT value FROM jsonb_array_elements_text(${d}->'remotes'))))),
   'snapshots',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.repo_snapshot_id) FROM repo_snapshots s WHERE s.installation_id=${id} AND s.repository_id=${repository} AND (s.repo_snapshot_id=${snapshot} OR s.commit_sha=${d}->'frame'->>'commitSha')),
   'claims',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.claim_id) FROM knowledge_claims c WHERE c.installation_id=${id} AND EXISTS(SELECT 1 FROM knowledge_versions v WHERE v.installation_id=c.installation_id AND v.claim_id=c.claim_id AND v.version_id=ANY(${versions}))),
-  'versions',(SELECT jsonb_agg(to_jsonb(v)||jsonb_build_object('time_valid',(v.valid_from IS NULL OR v.valid_from<=clock_timestamp()) AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp()),'revision_time_valid',${revisionTimeSql()}) ORDER BY v.version_id) FROM knowledge_versions v WHERE v.installation_id=${id} AND v.version_id=ANY(${versions})),
+  'versions',(SELECT jsonb_agg(to_jsonb(v)||jsonb_build_object('delivery_source_valid',${deliveryVersionAvailableSql()},'time_valid',(v.valid_from IS NULL OR v.valid_from<=clock_timestamp()) AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp()),'revision_time_valid',${revisionTimeSql()}) ORDER BY v.version_id) FROM knowledge_versions v WHERE v.installation_id=${id} AND v.version_id=ANY(${versions})),
   'evidence',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.evidence_id) FROM knowledge_evidence e WHERE e.installation_id=${id} AND e.version_id=ANY(${versions})),
   'episodes',(SELECT jsonb_agg(to_jsonb(w) ORDER BY w.episode_id) FROM work_episodes w WHERE w.installation_id=${id} AND EXISTS(SELECT 1 FROM knowledge_evidence e WHERE e.installation_id=w.installation_id AND e.episode_id=w.episode_id AND e.version_id=ANY(${versions}))),
   'wiki_versions',(SELECT jsonb_agg(to_jsonb(w) ORDER BY w.wiki_version_id) FROM memory_wiki_versions w WHERE w.installation_id=${id} AND w.wiki_version_id=ANY(${wikiVersions})),

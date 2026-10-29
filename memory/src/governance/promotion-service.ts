@@ -218,6 +218,8 @@ export function createPromotionService(pool: pg.Pool) {
           if (sourceRow.claim_state !== 'active') {
             throw new PromotionError('source_not_active', 'source claim is not active')
           }
+          const deliverySource = await client.query<{ available: boolean }>('SELECT memory_delivery_version_available($1,$2) AS available', [input.sourceInstallationId, sourceRow.version_id])
+          if (!deliverySource.rows[0]?.available) throw new PromotionError('source_not_active', 'delivery source has been withdrawn')
           if (sourceRow.current_version_id !== sourceRow.version_id) {
             throw new PromotionError('source_not_current', 'source version is not the current version')
           }

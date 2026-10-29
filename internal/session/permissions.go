@@ -104,6 +104,7 @@ func (sm *SessionManager) InterruptSession(sessionID string) error {
 		return err
 	}
 	defer release()
+	sm.cancelTeamStepPreparation(sessionID)
 	sm.mu.RLock()
 	ps, ok := sm.sessions[sessionID]
 	sm.mu.RUnlock()

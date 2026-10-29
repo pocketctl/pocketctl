@@ -22,7 +22,7 @@ const suite=url&&process.env.RUN_MEMORY_POSTGRES_INTEGRATION==='1'?describe:desc
 suite('authenticated selected foreign Context (dedicated PostgreSQL)',()=>{
  let pool:pg.Pool
  beforeAll(async()=>{pool=new pg.Pool({connectionString:url});await assertMemoryTestDatabase(pool,url!);await applyMemorySchema(pool)},60000)
- beforeEach(async()=>{await pool.query('TRUNCATE memory_installations CASCADE')})
+ beforeEach(async()=>{await pool.query('TRUNCATE memory_team_delivery_withdrawals,memory_installations CASCADE')})
  afterAll(async()=>{await pool?.end()})
  async function fixture(kind:'team'|'organization'='team',sourceKind:'memory_claim'|'memory_evidence'='memory_claim'){
   const ids=[randomUUID(),randomUUID()],repos=[randomUUID(),randomUUID()],snaps=[randomUUID(),randomUUID()],member=randomUUID(),owner=randomUUID(),claim=randomUUID(),version=randomUUID(),evidence=randomUUID(),episode=randomUUID()
@@ -47,6 +47,22 @@ suite('authenticated selected foreign Context (dedicated PostgreSQL)',()=>{
   return{ids,repos,snaps,member,owner,claim,version,evidence,grant,ctx,input,compile,admit}
  }
  async function ready(f:Awaited<ReturnType<typeof fixture>>){const c=await f.compile();expect(c.kind).toBe('ready');if(c.kind!=='ready')throw Error('ready required');return c.packId}
+ test.each(['team','organization'] as const)('delivery withdrawal invalidates cached foreign %s Context and fences the final nonce transition',async kind=>{
+  const f=await fixture(kind),submission=randomUUID(),decision=randomUUID()
+  await pool.query('UPDATE knowledge_evidence SET locator=$2::jsonb WHERE evidence_id=$1',[f.evidence,JSON.stringify({source_provenance:{source_kind:'team_session',source_version:2,team_id:'withdrawal-team',team_session_id:'withdrawal-session',accepted_delivery:{submission_id:submission,decision_id:decision}}})])
+  const packId=await ready(f),a=await f.admit(packId)
+  if(!a.ok||!('nonce'in a))throw Error('nonce required')
+  let changed=false
+  const hooked=queryHookPool(pool,async(sql)=>{
+   if(!changed&&sql.includes("SET state = 'prepared'")){
+    changed=true
+    await pool.query("INSERT INTO memory_team_delivery_withdrawals(team_id,team_session_id,submission_id,decision_id) VALUES('withdrawal-team','withdrawal-session',$1,$2)",[submission,decision])
+   }
+  })
+  expect(await createAdmissionService({pool:hooked,nonceHmacKey:Buffer.alloc(32,7)}).consume({installationId:f.ids[0],sessionId:f.input.sessionId,packId,injectionId:a.injectionId,nonce:a.nonce,selectedScopeGrant:f.grant})).toEqual({ok:false,error:'expired'})
+  expect(changed).toBe(true)
+  expect((await f.compile()).kind).toBe('empty')
+ })
  test.each(['team','organization'] as const)('Personal session consumes an explicitly authorized %s Claim with target-local mapping',async kind=>{
   const f=await fixture(kind),packId=await ready(f),p=(await pool.query('SELECT * FROM memory_context_packs WHERE pack_id=$1',[packId])).rows[0]
   expect(p.installation_id).toBe(f.ids[0]);expect(p.stable_text).toContain('Foreign exact snapshot invariant');expect(p.selected_references).toEqual(f.input.selectedReferences)

@@ -356,6 +356,11 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 			resumeID = ""
 		}
 		args = adapter.BuildClaudeArgsWithContext(content, resumeID, resumeConfig, hidden)
+		refreshArgs, err := memorycontext.ClaudeContextRefreshArgs(ctx, cliPath)
+		if err != nil {
+			return err
+		}
+		args = append(args, refreshArgs...)
 		if firstPrint {
 			for i := 0; i+1 < len(args); i++ {
 				if args[i] == "--session-id" {
