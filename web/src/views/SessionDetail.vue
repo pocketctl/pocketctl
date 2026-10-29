@@ -261,6 +261,9 @@
         </div>
       </div>
 
+      <CodexQuota v-if="currentSessionAgent === 'codex' && currentSession?.control_mode === 'managed' && !focusedSubAgentId"
+        :key="sessionId" :session-id="sessionId" :daemon-id="currentSession.daemon_id" :hostname="currentSession.hostname"
+        :account-label="currentSession.codex_home_label" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div
         ref="messagesEl"
@@ -793,6 +796,7 @@ import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
 import { ContentStreamAssembler, contentStreamDisplayId } from '../utils/contentStream'
 import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
 import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../utils/replaySessionTrust'
+import CodexQuota from '../components/session/CodexQuota.vue'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
 import { completedPlanItemCount } from '../utils/agentPlanMerge'

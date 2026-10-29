@@ -192,12 +192,12 @@ func TestKeyNamingConvention(t *testing.T) {
 	}
 }
 
-func TestHelpDocumentsOpenCodeAgentControl(t *testing.T) {
+func TestHelpDocumentsAgentControl(t *testing.T) {
 	t.Cleanup(func() { Set(English) })
 	for _, lang := range []Lang{English, Chinese} {
 		Set(lang)
 		help := T("help.body")
-		for _, text := range []string{"agent opencode", "enable", "disable", "status", "--no-agent-prompt", "opencode --native"} {
+		for _, text := range []string{"agent opencode", "enable", "disable", "status", "--no-agent-prompt", "opencode --native", "pocketctl agent claude-code enable", "pocketctl agent claude-code status", "POCKETCTL_CLAUDE_CHANNEL_APPROVAL=1 POCKETCTL_CLAUDE_CHANNEL_DEVELOPMENT=1 claude", "pocketctl daemon start --allow-dangerous-remote-permissions", "pocketctl daemon service install --allow-dangerous-remote-permissions", "pocketctl daemon diagnose <session-id>"} {
 			if !strings.Contains(help, text) {
 				t.Fatalf("lang=%v help missing %q", lang, text)
 			}

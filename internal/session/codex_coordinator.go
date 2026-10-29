@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
@@ -52,6 +53,7 @@ type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAp
 type codexRuntimeProbe func(context.Context, *codexAppServerRuntime) error
 
 type codexCoordinator struct {
+	quotaRevision    atomic.Uint64
 	projectCwd       string
 	statePath        string
 	codexHomeID      string
@@ -824,6 +826,10 @@ func (c *codexCoordinator) projectLive(projector *codexProjection, message codex
 func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message codexapp.Inbound, received time.Time) {
 	id, _ := codexAdmissionIdentity(message)
 	if !c.admissionGenerationCurrent(projector.generation) || !c.admissionAllowed(id) {
+		return
+	}
+	if message.Method == "account/rateLimits/updated" || message.Method == "account/updated" {
+		c.invalidateQuota(message.Method == "account/updated")
 		return
 	}
 	c.projectionMu.Lock()

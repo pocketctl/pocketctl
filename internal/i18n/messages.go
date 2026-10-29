@@ -25,6 +25,7 @@ Usage:
 Commands:
   login          Login via browser (OAuth 2.0 Device Flow) or email code
   agent opencode enable|disable|status   Manage transparent OpenCode terminal control
+  agent claude-code enable|disable|status Manage Claude terminal approval relay
   agent codex enable|disable|status      Manage Codex CLI terminal control (Desktop is read-only)
   agent zcode sync enable|disable|status Sync ZCode sessions read-only (view in Web/iOS)
   task-tools status|enable|disable|reset  Configure native task tools (see task-tools --help)
@@ -101,6 +102,22 @@ Codex CLI terminal control (requires Codex CLI 0.144.1+):
   pocketctl agent codex status        Show desired/effective state and capability diagnostics
   codex --native                      Bypass Pocketctl for one invocation
 
+Claude Code and Codex: session control and full access:
+  Remote control and execution permissions are separate settings. Configure access on the development host as the daemon user and keep the daemon online. Bypassing approvals is not required for remote control.
+  Codex CLI: run the commands below, open a new login shell if PATH is not active, then start or resume using the normal codex command. The official TUI and Web/iOS share input, approvals, questions, steer, and interrupt. Already running native processes are not converted into managed sessions. Codex Desktop remains read-only.
+  Claude Code: for full remote session operations, choose Claude Code in New session on Web/iOS to create a PocketCtl-owned PTY. Independent terminals remain authoritative and can hand off through resume when idle or exited. The terminal launcher below only enables the Channel approval relay; it does not convert an independent terminal into a fully managed session.
+  pocketctl agent claude-code enable
+  pocketctl agent claude-code status
+  The terminal Channel approval relay requires Claude Code >= 2.1.211, an available daemon broker, and upstream account/organization capabilities. The current development Channel also requires both flags below in the shell that launches claude. If a prerequisite is missing, it falls back to native Claude; native terminal approvals are always preserved. Open a new login shell after enabling if PATH is not active.
+  POCKETCTL_CLAUDE_CHANNEL_APPROVAL=1 POCKETCTL_CLAUDE_CHANNEL_DEVELOPMENT=1 claude
+
+  For Claude Code Bypass permissions (bypassPermissions), or Codex Full access (danger-full-access) / approval never, first allow elevated requests on the daemon, then select the corresponding permissions in New session on Web/iOS. The flag only permits requests; it does not change existing sessions or select a permission mode for you.
+  pocketctl daemon start --allow-dangerous-remote-permissions
+  pocketctl daemon service install --allow-dangerous-remote-permissions
+  Use the first command for direct startup, or the second to persist arguments for a system service. If a daemon is already running, wait for active work to finish, stop it, and start with the new configuration. Preserve your existing Relay, directory authorization, and account arguments. Elevated modes bypass normal approval or sandbox restrictions; use them for trusted hosts and tasks.
+  pocketctl daemon diagnose <session-id>
+  Use agent status to inspect the launcher, then daemon diagnose to check the actual session. claude --native / codex --native bypass it once; agent … disable disables the launcher without uninstalling the underlying agent.
+
 Task list tools (daemon-owned runtimes):
   pocketctl task-tools status                 Show saved intent; runtime capability is not probed
   pocketctl task-tools enable codex           Enable native update_plan
@@ -171,6 +188,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
 命令:
   login          通过浏览器（OAuth 2.0 Device Flow）或邮箱验证码登录
   agent opencode enable|disable|status   管理透明 OpenCode 终端控制
+  agent claude-code enable|disable|status 管理 Claude 终端审批中继
   agent codex enable|disable|status      管理 Codex CLI 终端控制（Desktop 只读）
   agent zcode sync enable|disable|status 只读同步 ZCode 会话（在 Web/iOS 查看）
   task-tools status|enable|disable|reset  配置原生任务工具（详见 task-tools --help）
@@ -245,6 +263,22 @@ Codex CLI 终端控制（要求 Codex CLI 0.144.1+）:
   pocketctl agent codex disable       移除 Pocketctl launcher，不卸载 Codex
   pocketctl agent codex status        查看期望/实际状态与能力诊断
   codex --native                      单次绕过 Pocketctl
+
+Claude Code 与 Codex：会话控制与完全访问设置:
+  远程控制与执行权限是两项独立设置。先在开发主机以 daemon 所属用户启用接入，并保持 daemon 在线；跳过审批不是远程控制的必要条件。
+  Codex CLI：执行下列命令，若 PATH 未生效则重新打开登录终端，然后通过普通 codex 命令新建或恢复会话。官方 TUI 与 Web/iOS 共享输入、审批、问题、steer 和 interrupt；已经运行的原生进程不会自动转换为受管会话。Codex Desktop 仍为只读。
+  Claude Code：需要完整远程会话操作时，在 Web/iOS 的“新建会话”中选择 Claude Code，创建由 PocketCtl 持有的 PTY。独立终端会话仍以原生终端为权威，空闲或退出后可通过 resume 接力。下面的终端 launcher 设置只启用 Channel 审批中继，不会把独立终端转换为完整受管会话。
+  pocketctl agent claude-code enable
+  pocketctl agent claude-code status
+  终端 Channel 审批中继要求 Claude Code >= 2.1.211、可用的 daemon broker 及上游账号/组织能力。当前开发 Channel 还需在启动 claude 的终端同时设置以下两个开关；任一条件不满足会回退到原生 Claude，原生终端审批始终保留。启用后如 PATH 尚未生效，重新打开登录终端。
+  POCKETCTL_CLAUDE_CHANNEL_APPROVAL=1 POCKETCTL_CLAUDE_CHANNEL_DEVELOPMENT=1 claude
+
+  需要 Claude Code“跳过权限”（bypassPermissions）或 Codex“完全权限”（danger-full-access）/不审批（never）时，先为 daemon 开放高权限请求，再在 Web/iOS 新建会话的权限选项中选择对应模式。该开关只允许请求，不会自动修改已有会话或替你选择权限。
+  pocketctl daemon start --allow-dangerous-remote-permissions
+  pocketctl daemon service install --allow-dangerous-remote-permissions
+  直接启动使用第一条命令；由系统服务托管时使用第二条持久保存参数。已有 daemon 必须在活动任务结束后停止并按新配置启动；请保留原有 Relay、目录授权及账号参数。高权限模式允许越过通常的审批或沙箱限制，仅用于你信任的主机与任务。
+  pocketctl daemon diagnose <session-id>
+  用 agent status 检查 launcher，再用 daemon diagnose 检查实际会话是否受控。claude --native / codex --native 可单次绕过，agent … disable 可关闭 launcher；这些操作不卸载底层 Agent。
 
 任务列表工具（daemon 创建的原生运行时）:
   pocketctl task-tools status                 查看配置意图；不探测运行时实际工具能力
@@ -331,8 +365,8 @@ var messages = map[string]msg{
 
 	// ---- agent.* ---------------------------------------------------------
 	"agent.help": {
-		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\nManaged agents (opencode/codex CLI): enable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.\nCodex Desktop is a read-only observer discovered automatically by the daemon (agent type codex-desktop): Web/iOS can view rollout history and increments, but there is no remote input, approval, interrupt, kill, resume, or Desktop session creation. New PocketCtl sessions always start a Codex CLI session.\nClaude Code (claude-code): installs a Terminal shim that injects the Pocketctl Channel permission relay for interactive Claude sessions. The native Claude terminal approval is always preserved; use `claude --native` to bypass once. Requires Claude Code >= 2.1.211 and the POCKETCTL_CLAUDE_CHANNEL_APPROVAL rollout flag.\nZCode sync is read-only: it surfaces local ZCode session content in Web/iOS. Enable requires a daemon restart to take effect. No remote send/approve/resume/control.",
-		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\n托管型 Agent（opencode/codex CLI）：启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。\nCodex Desktop 为 daemon 自动发现的只读观察者（Agent 类型 codex-desktop）：Web/iOS 可查看 rollout 历史与增量，不支持远程输入、审批、中断、终止、恢复或创建 Desktop 会话。新建会话入口始终创建 Codex CLI 会话。\nClaude Code（claude-code）：安装终端 shim，为交互式 Claude 会话注入 Pocketctl Channel 权限中继。Claude 原生终端审批始终保留；可用 `claude --native` 单次绕过。需要 Claude Code >= 2.1.211 与 POCKETCTL_CLAUDE_CHANNEL_APPROVAL 灰度开关。\nZCode 同步为只读：将本地 ZCode 会话内容展示到 Web/iOS。启用后需重启 daemon 生效。不支持远程发送/审批/恢复/控制。",
+		"Agent control:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\nManaged agents (opencode/codex CLI): enable does not require a daemon restart. Reload your login shell if PATH is not active. Use `opencode --native` or `codex --native` to bypass Pocketctl once.\nCodex Desktop is a read-only observer discovered automatically by the daemon (agent type codex-desktop): Web/iOS can view rollout history and increments, but there is no remote input, approval, interrupt, kill, resume, or Desktop session creation. New PocketCtl sessions always start a Codex CLI session.\nClaude Code (claude-code): installs a Terminal shim that injects the Pocketctl Channel permission relay for interactive Claude sessions. The native Claude terminal approval is always preserved; use `claude --native` to bypass once. Requires Claude Code >= 2.1.211 and both POCKETCTL_CLAUDE_CHANNEL_APPROVAL=1 and POCKETCTL_CLAUDE_CHANNEL_DEVELOPMENT=1 in the launching shell. This is an approval relay, not full terminal session control; use Web/iOS-created sessions for full remote operations.\nZCode sync is read-only: it surfaces local ZCode session content in Web/iOS. Enable requires a daemon restart to take effect. No remote send/approve/resume/control.",
+		"Agent 控制:\n  pocketctl agent opencode enable\n  pocketctl agent opencode disable\n  pocketctl agent opencode status\n  pocketctl agent opencode help\n  pocketctl agent codex enable\n  pocketctl agent codex disable\n  pocketctl agent codex status\n  pocketctl agent codex help\n  pocketctl agent claude-code enable\n  pocketctl agent claude-code disable\n  pocketctl agent claude-code status\n  pocketctl agent claude-code help\n  pocketctl agent zcode sync enable [--history recent|all] [--lookback-days N]\n  pocketctl agent zcode sync disable\n  pocketctl agent zcode sync status\n  pocketctl agent zcode sync help\n\n托管型 Agent（opencode/codex CLI）：启用后无需重启 daemon；若 PATH 尚未生效，请重新载入登录 shell。可用 `opencode --native` 或 `codex --native` 单次绕过 Pocketctl。\nCodex Desktop 为 daemon 自动发现的只读观察者（Agent 类型 codex-desktop）：Web/iOS 可查看 rollout 历史与增量，不支持远程输入、审批、中断、终止、恢复或创建 Desktop 会话。新建会话入口始终创建 Codex CLI 会话。\nClaude Code（claude-code）：安装终端 shim，为交互式 Claude 会话注入 Pocketctl Channel 权限中继。Claude 原生终端审批始终保留；可用 `claude --native` 单次绕过。需要 Claude Code >= 2.1.211，且启动终端同时设置 POCKETCTL_CLAUDE_CHANNEL_APPROVAL=1 与 POCKETCTL_CLAUDE_CHANNEL_DEVELOPMENT=1。这是审批中继，不是终端会话完全控制；完整远程操作请使用 Web/iOS 创建的会话。\nZCode 同步为只读：将本地 ZCode 会话内容展示到 Web/iOS。启用后需重启 daemon 生效。不支持远程发送/审批/恢复/控制。",
 	},
 	"agent.opencode_help": {
 		"usage: pocketctl agent opencode <enable|disable|status|help>",

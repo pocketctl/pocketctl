@@ -33,3 +33,30 @@ describe('Codex invocation routing',()=>{
  })
  test('does not persist native directory and export payloads',()=>{expect(classifyDaemonEvent({type:'invocation_result',session_id:'s'}).durable).toBe(false)})
 })
+
+describe('Codex quota private reads',()=>{
+ test('correlates read results only to the requesting owner and rejects foreign sessions',async()=>{
+  const {router,a,b,d}=fixture()
+  await router.handleClientMessage(a,{type:'read_codex_rate_limits',session_id:'s',request_id:'quota-read'})
+  expect(d.sent[0]?.request_id).not.toBe('quota-read')
+  router.handleDaemonMessage('d',{type:'invocation_result',session_id:'s',request_id:d.sent[0]?.request_id,invocation:{kind:'codex_rate_limits',buckets:[]}})
+  expect(a.sent.at(-1)).toMatchObject({request_id:'quota-read',invocation:{kind:'codex_rate_limits'}})
+  expect(b.sent).toHaveLength(0)
+  await router.handleClientMessage(b,{type:'read_codex_rate_limits',session_id:'foreign',request_id:'denied'})
+  expect(b.sent.at(-1)).toMatchObject({type:'invocation_result',error:'session not found or not owned'})
+  expect(d.sent).toHaveLength(1)
+  router.unregisterClient(a);router.unregisterClient(b)
+ })
+ test('never persists quota invalidations as history',()=>{
+  expect(classifyDaemonEvent({type:'codex_rate_limits_changed',session_id:'s',resync:true}).durable).toBe(false)
+ })
+ test('broadcasts only a sanitized invalidation to the owner, never account payloads',async()=>{
+  const {router,r,a,b}=fixture(); const foreign=socket();router.registerClient(foreign,8)
+  vi.spyOn(r,'authorizeEphemeralTitleSession').mockResolvedValue(true)
+  router.handleDaemonMessage('d',{type:'codex_rate_limits_changed',session_id:'s',resync:true,secret:'account'})
+  await new Promise(resolve=>setTimeout(resolve,0))
+  expect(a.sent.at(-1)).toEqual({type:'codex_rate_limits_changed',session_id:'s',daemon_id:'d',resync:true})
+  expect(b.sent.at(-1)).toEqual(a.sent.at(-1));expect(foreign.sent).toHaveLength(0)
+  router.unregisterClient(a);router.unregisterClient(b);router.unregisterClient(foreign)
+ })
+})

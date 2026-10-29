@@ -2369,6 +2369,16 @@ export class Router {
       }).catch((error) => this.logBestEffortFailure('session_title_update authorization', error));
       return;
     }
+    if (sessionId && msg.type === 'codex_rate_limits_changed') {
+      if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+      const daemon = this.daemons.get(daemonId);
+      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then(allowed => {
+        if (!allowed || !daemon?.userId || this.daemons.get(daemonId) !== daemon) return;
+        this.broadcastToUser(daemon.userId, { type: 'codex_rate_limits_changed',
+          session_id: sessionId, daemon_id: daemonId, resync: msg.resync === true });
+      }).catch(error => this.logBestEffortFailure('quota invalidation authorization', error));
+      return;
+    }
     if (msg.type === 'invocation_result') {
       const pending = this.invocationRequests.get(msg.request_id);
       const daemon = this.daemons.get(daemonId);
@@ -2512,6 +2522,7 @@ export class Router {
       : null;
     const needsControlFence = sessionId !== null
       && msg.type !== 'local_command_log'
+      && msg.type !== 'read_codex_rate_limits'
       && msg.type !== 'user_message'
       && !isObserverSessionMessageAllowed(msg.type);
     if (!needsControlFence || client.userId === null) {
@@ -2558,14 +2569,14 @@ export class Router {
       if (client.userId == null) {
         // Anonymous/API-key connections (userId=null) may not act on a specific
         // session. Real clients always carry a userId (prod requires a token).
-        this.send(clientWs, { type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'forbidden' });
+        this.send(clientWs, { type: ['list_invocations','invoke_command','read_codex_rate_limits'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'forbidden' });
         return;
       }
       sessionRuntimePolicy = sessionRuntimePolicy ?? await db.getSessionRuntimePolicy(
         this.pool, msg.session_id, client.userId,
       ).catch(() => null);
       if (!sessionRuntimePolicy) {
-        this.send(clientWs, { type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'session not found or not owned' });
+        this.send(clientWs, { type: ['list_invocations','invoke_command','read_codex_rate_limits'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'session not found or not owned' });
         return;
       }
       if (isObserverAgentType(sessionRuntimePolicy.agentType)
@@ -3102,7 +3113,7 @@ export class Router {
           if (['approval_response', 'question_response', 'question_reject', 'interactive_response'].includes(msg.type) && typeof msg.request_id === 'string') {
             this.trackInteractionClient(msg.session_id, msg.request_id, msg.type, clientWs);
           }
-          if (['list_invocations', 'invoke_command'].includes(msg.type)) {
+          if (['list_invocations', 'invoke_command', 'read_codex_rate_limits'].includes(msg.type)) {
             const reject = (error: string) => this.send(clientWs, {type:'invocation_result', session_id:msg.session_id, request_id:msg.request_id, error});
             if (typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128 || (msg.type === 'invoke_command' && (typeof msg.content !== 'string' || msg.content.length > 32768)) || (msg.invocation_id != null && (typeof msg.invocation_id !== 'string' || msg.invocation_id.length > 128))) { reject('invalid_request'); return; }
             const fingerprint = JSON.stringify([msg.type,msg.session_id,msg.content,msg.invocation_id]);
@@ -3128,7 +3139,7 @@ export class Router {
           this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'daemon_offline' });
         } else {
           this.send(clientWs, {
-            type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
+            type: ['list_invocations','invoke_command','read_codex_rate_limits'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
             code: 'daemon_unreachable',
             error: 'daemon offline or reconnecting',
           });
@@ -3140,7 +3151,7 @@ export class Router {
         this.send(clientWs, { type: 'user_message_nack', msg_id: msg.msg_id, reason: 'session_not_found' });
       } else {
         this.send(clientWs, {
-          type: ['list_invocations','invoke_command'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
+          type: ['list_invocations','invoke_command','read_codex_rate_limits'].includes(msg.type) ? 'invocation_result' : 'error', session_id: msg.session_id, request_id: msg.request_id,
           code: 'session_not_found',
           error: 'session not found',
         });
