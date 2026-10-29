@@ -2,6 +2,7 @@ package agentcontrol
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -91,5 +92,83 @@ func TestLeaseRegistryPruneReportsOnlyActualRemovals(t *testing.T) {
 	}
 	if registry.Prune() {
 		t.Fatal("empty registry repeatedly reported a removal")
+	}
+}
+
+func TestLeaseRegistryNativeIdentitySurvivesClockDriftButRejectsPIDReuse(t *testing.T) {
+	processes := &fakeProcessIdentities{values: map[int]int64{11: 1100, 22: 2200}}
+	births := map[int]string{11: "linux:111", 22: "linux:222"}
+	registry := newLeaseRegistry(processes.identity)
+	registry.nativeIdentity = func(pid int) (string, error) { return births[pid], nil }
+	if err := registry.Register(Lease{ID: "terminal", PID: 11, Generation: 4}); err != nil {
+		t.Fatal(err)
+	}
+	processes.values[11] = 2100
+	if got := registry.Active(4); len(got) != 1 {
+		t.Fatal("clock drift pruned a live lease")
+	}
+	if err := registry.Bind("terminal", 22); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := registry.Snapshot()
+	if got := snapshot["terminal"]; got.PID != 22 || got.ProcessStartIdentity != "linux:222" {
+		t.Fatalf("bound lease=%+v", got)
+	}
+	// A new process can share the same coarse legacy timestamp but never the
+	// native birth token; it must not inherit the terminal lease.
+	births[22] = "linux:223"
+	if got := registry.Active(4); len(got) != 0 {
+		t.Fatalf("reused PID kept lease=%+v", got)
+	}
+	restored := newLeaseRegistry(processes.identity)
+	restored.nativeIdentity = registry.nativeIdentity
+	restored.Restore(snapshot)
+	if got := restored.Active(4); len(got) != 0 {
+		t.Fatalf("reused PID restored lease=%+v", got)
+	}
+}
+
+func TestLeaseRegistryUpgradesOnlyVerifiedLegacyHandoffs(t *testing.T) {
+	processes := &fakeProcessIdentities{values: map[int]int64{11: 1100, 22: 2200}}
+	registry := newLeaseRegistry(processes.identity)
+	registry.nativeIdentity = func(pid int) (string, error) { return fmt.Sprintf("linux:%d", pid), nil }
+	registry.Restore(map[string]Lease{
+		"live":  {ID: "live", PID: 11, ProcessStart: 1100, Generation: 4},
+		"stale": {ID: "stale", PID: 22, ProcessStart: 2199, Generation: 4},
+	})
+	snapshot := registry.Snapshot()
+	if len(snapshot) != 1 || snapshot["live"].ProcessStartIdentity != "linux:11" {
+		t.Fatalf("upgraded leases=%+v", snapshot)
+	}
+	processes.values[11] = 2100
+	if got := registry.Active(4); len(got) != 1 {
+		t.Fatal("verified legacy lease was not upgraded")
+	}
+}
+
+func TestLeaseRegistryRejectsIdentityChangeDuringRegistration(t *testing.T) {
+	for _, operation := range []string{"register", "bind"} {
+		t.Run(operation, func(t *testing.T) {
+			processes := &fakeProcessIdentities{values: map[int]int64{11: 1100, 22: 2200}}
+			registry := newLeaseRegistry(processes.identity)
+			if err := registry.Register(Lease{ID: "terminal", PID: 11, Generation: 4}); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			registry.nativeIdentity = func(int) (string, error) { calls++; return fmt.Sprint(calls), nil }
+			var err error
+			if operation == "register" {
+				err = registry.Register(Lease{ID: "new", PID: 22, Generation: 4})
+			} else {
+				err = registry.Bind("terminal", 22)
+			}
+			if err == nil {
+				t.Fatal("accepted PID reuse during identity query")
+			}
+			// Inspect the stored lease without triggering another identity query.
+			if len(registry.leases) != 1 || registry.leases["terminal"].PID != 11 {
+				t.Fatalf("failed operation changed leases=%+v", registry.leases)
+			}
+		})
 	}
 }

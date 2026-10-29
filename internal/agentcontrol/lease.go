@@ -6,21 +6,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pocketctl/pocketctl/internal/platform"
 	gopsprocess "github.com/shirou/gopsutil/v3/process"
 )
 
 // Lease identifies one terminal process attached to a managed agent runtime.
-// ProcessStart is the OS-reported creation time in milliseconds since epoch;
-// pairing it with PID prevents a recycled PID from keeping a runtime alive.
+// ProcessStart preserves the legacy epoch-millisecond identity for older daemons.
+// ProcessStartIdentity is the native birth token used by new daemons: unlike
+// gopsutil's Linux epoch estimate it does not drift with wall time or uptime.
 type Lease struct {
-	ID           string    `json:"id"`
-	Agent        string    `json:"agent"`
-	SessionID    string    `json:"session_id,omitempty"`
-	PID          int       `json:"pid"`
-	ProcessStart int64     `json:"process_start"`
-	Generation   uint64    `json:"generation"`
-	CreatedAt    time.Time `json:"created_at"`
-	LastSeen     time.Time `json:"last_seen"`
+	ID                   string    `json:"id"`
+	Agent                string    `json:"agent"`
+	SessionID            string    `json:"session_id,omitempty"`
+	PID                  int       `json:"pid"`
+	ProcessStart         int64     `json:"process_start"`
+	ProcessStartIdentity string    `json:"process_start_identity,omitempty"`
+	Generation           uint64    `json:"generation"`
+	CreatedAt            time.Time `json:"created_at"`
+	LastSeen             time.Time `json:"last_seen"`
 }
 
 type processIdentityFunc func(pid int) (int64, error)
@@ -28,15 +31,18 @@ type processIdentityFunc func(pid int) (int64, error)
 // LeaseRegistry is safe for concurrent acquire/bind/release and snapshot use.
 // Stale processes are pruned whenever active leases or a snapshot is requested.
 type LeaseRegistry struct {
-	mu       sync.Mutex
-	leases   map[string]Lease
-	pruned   []Lease
-	identity processIdentityFunc
-	now      func() time.Time
+	mu             sync.Mutex
+	leases         map[string]Lease
+	pruned         []Lease
+	identity       processIdentityFunc
+	nativeIdentity func(int) (string, error)
+	now            func() time.Time
 }
 
 func NewLeaseRegistry() *LeaseRegistry {
-	return newLeaseRegistry(processStartIdentity)
+	r := newLeaseRegistry(processStartIdentity)
+	r.nativeIdentity = platform.ProcessStartIdentity
+	return r
 }
 
 func newLeaseRegistry(identity processIdentityFunc) *LeaseRegistry {
@@ -54,11 +60,41 @@ func processStartIdentity(pid int) (int64, error) {
 	return process.CreateTime()
 }
 
+// identify samples the native identity around the legacy query so PID reuse
+// cannot associate a legacy timestamp with a different process's birth token.
+func (r *LeaseRegistry) identify(pid int) (int64, string, error) {
+	var birth string
+	if r.nativeIdentity != nil {
+		var err error
+		birth, err = r.nativeIdentity(pid)
+		if err != nil {
+			return 0, "", err
+		}
+		if birth == "" {
+			return 0, "", fmt.Errorf("empty process identity for pid %d", pid)
+		}
+	}
+	legacy, err := r.identity(pid)
+	if err != nil {
+		return 0, "", err
+	}
+	if r.nativeIdentity != nil {
+		after, err := r.nativeIdentity(pid)
+		if err != nil {
+			return 0, "", err
+		}
+		if after != birth {
+			return 0, "", fmt.Errorf("process %d changed while reading identity", pid)
+		}
+	}
+	return legacy, birth, nil
+}
+
 func (r *LeaseRegistry) Register(lease Lease) error {
 	if lease.ID == "" || lease.PID <= 0 || lease.Generation == 0 {
 		return fmt.Errorf("invalid runtime lease")
 	}
-	identity, err := r.identity(lease.PID)
+	identity, birth, err := r.identify(lease.PID)
 	if err != nil {
 		return fmt.Errorf("identify lease process %d: %w", lease.PID, err)
 	}
@@ -67,6 +103,7 @@ func (r *LeaseRegistry) Register(lease Lease) error {
 		lease.CreatedAt = now
 	}
 	lease.ProcessStart = identity
+	lease.ProcessStartIdentity = birth
 	lease.LastSeen = now
 	r.mu.Lock()
 	r.leases[lease.ID] = lease
@@ -75,7 +112,7 @@ func (r *LeaseRegistry) Register(lease Lease) error {
 }
 
 func (r *LeaseRegistry) Bind(id string, pid int) error {
-	identity, err := r.identity(pid)
+	identity, birth, err := r.identify(pid)
 	if err != nil {
 		return fmt.Errorf("identify bound lease process %d: %w", pid, err)
 	}
@@ -87,6 +124,7 @@ func (r *LeaseRegistry) Bind(id string, pid int) error {
 	}
 	lease.PID = pid
 	lease.ProcessStart = identity
+	lease.ProcessStartIdentity = birth
 	lease.LastSeen = r.now().UTC()
 	r.leases[id] = lease
 	return nil
@@ -160,8 +198,22 @@ func (r *LeaseRegistry) pruneLocked() bool {
 	now := r.now().UTC()
 	changed := false
 	for id, lease := range r.leases {
-		identity, err := r.identity(lease.PID)
-		if err != nil || identity != lease.ProcessStart {
+		alive := false
+		if lease.ProcessStartIdentity != "" {
+			if r.nativeIdentity != nil {
+				identity, err := r.nativeIdentity(lease.PID)
+				alive = err == nil && identity == lease.ProcessStartIdentity
+			}
+		} else {
+			// Old handoffs retain their original exact-match rule. Once verified,
+			// upgrade the lease to the stable token for subsequent checks.
+			identity, birth, err := r.identify(lease.PID)
+			alive = err == nil && identity == lease.ProcessStart
+			if alive {
+				lease.ProcessStartIdentity = birth
+			}
+		}
+		if !alive {
 			delete(r.leases, id)
 			r.pruned = append(r.pruned, lease)
 			changed = true
