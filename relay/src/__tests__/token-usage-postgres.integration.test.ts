@@ -56,6 +56,9 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
     })
     try {
       await initDB(upgradePool)
+      // Recreate the pre-accounting schema, before the Team extension existed.
+      // Drop its dependent table explicitly so initDB must restore the FK too.
+      await upgradePool.query(`DROP TABLE team_external_usage_facts`)
       await upgradePool.query(`DROP TABLE token_usage_facts`)
       await upgradePool.query(`
         CREATE TABLE token_usage_facts (
@@ -109,6 +112,13 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
       `)
 
       await Promise.all([initDB(upgradePool), initDB(concurrentUpgradePool)])
+
+      const teamForeignKey = await upgradePool.query(`
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'team_external_usage_facts'::regclass
+          AND confrelid = 'token_usage_facts'::regclass AND contype = 'f'
+      `)
+      expect(teamForeignKey.rowCount).toBe(1)
 
       const columns = await upgradePool.query<{ column_name: string; is_nullable: string }>(`
         SELECT column_name, is_nullable FROM information_schema.columns
