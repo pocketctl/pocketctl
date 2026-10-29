@@ -12,6 +12,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Consume the registration write before closing. Closing the TCP socket with
+// unread client data can reset it before the 4001 frame reaches the client,
+// accidentally testing a transport failure instead of credential rejection.
+func rejectRegisteredTestConnection(conn *websocket.Conn) {
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		return
+	}
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
+}
+
 // A rejected upgrade must never be reported as a registered host, and a
 // client that has stopped dialing must not leave a reconnecting snapshot.
 func TestAuthRejectionPublishesPausedStateWithoutFalseConnected(t *testing.T) {
@@ -22,7 +33,7 @@ func TestAuthRejectionPublishesPausedStateWithoutFalseConnected(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
+		rejectRegisteredTestConnection(conn)
 	}))
 	defer srv.Close()
 	c := newTestClient(wsURL(srv.URL))
@@ -75,7 +86,7 @@ func TestRefreshInterventionPublishesTerminalState(t *testing.T) {
 				}
 				defer conn.Close()
 				attempts.Add(1)
-				_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
+				rejectRegisteredTestConnection(conn)
 			}))
 			defer srv.Close()
 			c := newTestClient(wsURL(srv.URL))
@@ -124,7 +135,7 @@ func TestTransientRefreshFailuresRecoverBeyondOldRejectionLimit(t *testing.T) {
 		defer conn.Close()
 		connections.Add(1)
 		if refreshes.Load() < 5 {
-			_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
+			rejectRegisteredTestConnection(conn)
 			return
 		}
 		_, _, err = conn.ReadMessage()
