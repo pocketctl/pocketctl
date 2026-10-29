@@ -1299,9 +1299,8 @@ func TestRefreshesTokenOnAuthRejection(t *testing.T) {
 			return
 		}
 		atomic.AddInt32(&conns, 1)
-		_ = conn.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(4001, "invalid token"), time.Now().Add(time.Second))
-		conn.Close()
+		defer conn.Close()
+		rejectRegisteredTestConnection(conn)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1315,14 +1314,26 @@ func TestRefreshesTokenOnAuthRejection(t *testing.T) {
 		}
 		return "", ErrRefreshLoginRequired
 	}
+	paused := make(chan struct{}, 1)
+	c.OnConnectionStatus = func(status ConnectionStatus, reason string) {
+		if status == ConnectionLoginRequired && reason == "refresh_rejected" {
+			paused <- struct{}{}
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go c.Run(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = c.Run(ctx) }()
+	defer func() { cancel(); <-done }()
 
 	// Two successful refreshes reconnect immediately; the first definitive
 	// credential rejection parks the client on the third connection.
 	// NOTE: slow Windows CI needs more headroom for backoff jitter and scheduling.
-	waitForConns(t, &conns, 3, 25*time.Second)
+	// A connection count does not prove its rejection/refresh callback finished.
+	select {
+	case <-paused:
+	case <-time.After(25 * time.Second):
+		t.Fatal("authentication did not reach the paused state")
+	}
 
 	if got := atomic.LoadInt32(&refreshed); got < 3 {
 		t.Fatalf("expected OnTokenRefresh called >=3 times, got %d", got)
