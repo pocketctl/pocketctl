@@ -47,7 +47,6 @@ export class TeamDispatchService {
   private readonly contextDelivery: TeamContextDeliveryService
   private readonly timeoutMs: number
   private readonly pollIntervalMs: number
-  private readonly daemonEventChains = new Map<string, Promise<void>>()
   private readonly receiptTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly activeDispatches = new Map<string, Promise<void>>()
   private pollTimer?: ReturnType<typeof setTimeout>
@@ -58,13 +57,15 @@ export class TeamDispatchService {
     private readonly transport: TeamDispatchTransport,
     private readonly notifier: DispatchNotifier = {},
     options: {
+      externalEnabledForTeam?: (teamId: string) => boolean
+      stepsEnabledForTeam?: (teamId: string) => boolean
       timeoutMs?: number
       pollIntervalMs?: number
       memorySources?: TeamMemorySourceProjectorLike
       memoryContextBridge?: TeamMemoryContextBridge
     } = {},
   ) {
-    this.repository = new TeamDispatchRepository(pool, options.memorySources)
+    this.repository = new TeamDispatchRepository(pool, options.memorySources, options.stepsEnabledForTeam, options.externalEnabledForTeam)
     this.contextDelivery = new TeamContextDeliveryService(pool)
     this.memoryContextBridge = options.memoryContextBridge
     this.timeoutMs = options.timeoutMs ?? 30_000
@@ -299,7 +300,8 @@ export class TeamDispatchService {
   }
 
   private async markTimedOut(claimed: ClaimedDispatch, reservationId: string | null, operation: QuotaOperation): Promise<void> {
-    await this.repository.stop(claimed.callId, 'uncertain', 'dispatch_timeout')
+    // Another Relay/Worker can commit the receipt without touching our timer.
+    if (!await this.repository.markReceiptTimedOut(claimed.callId)) return
     await this.contextDelivery.stop(claimed.callId, 'uncertain', 'dispatch_timeout')
     teamUncertainTotal.inc({ reason: 'dispatch_timeout' })
     teamDispatchTotal.inc({ operation: claimed.authorization.operation, outcome: 'timeout' })
@@ -315,8 +317,13 @@ export class TeamDispatchService {
     }, 'grant_timeout').catch(() => {})
   }
 
-  async handleDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): Promise<void> {
-    const projected = await this.repository.projectDaemonEvent(daemonId, ownerUserId, message, daemonGeneration)
+  async reconcileExternalTerminal(daemonId:string,ownerUserId:number,callId:string,remoteTaskId:string,state:'succeeded'|'failed'|'cancelled'):Promise<void> {
+    const projected=await this.repository.reconcileExternalTerminal(daemonId,ownerUserId,callId,remoteTaskId,state)
+    if(projected){this.clearReceiptTimer(callId);this.notifier.event?.(projected.event.team_session_id,projected.participantUserIds,projected.event)}
+  }
+
+  async handleDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number, materializedEventId?: number | null): Promise<void> {
+    const projected = await this.repository.projectDaemonEvent(daemonId, ownerUserId, message, daemonGeneration, materializedEventId)
     if (projected) {
       if (projected.event.call_id) this.clearReceiptTimer(projected.event.call_id)
       this.notifier.event?.(projected.event.team_session_id, projected.participantUserIds, projected.event)
@@ -355,7 +362,6 @@ export class TeamDispatchService {
       return
     }
     if (message.type !== 'collaboration_dispatch_receipt') return
-    this.clearReceiptTimer(authorization.call_id)
     const status = message.status === 'accepted' ? 'accepted' : 'rejected'
     const reason = typeof message.reason === 'string' ? message.reason : null
     if (accounting?.state === status) teamDuplicateSuppressedTotal.inc({ source: 'receipt_replay' })
@@ -366,6 +372,7 @@ export class TeamDispatchService {
       teamDuplicateSuppressedTotal.inc({ source: 'receipt' })
       return
     }
+    this.clearReceiptTimer(authorization.call_id)
     if (reason === 'duplicate_request') {
       teamDuplicateSuppressedTotal.inc({ source: 'daemon' })
       teamUncertainTotal.inc({ reason: 'duplicate_request' })
@@ -384,15 +391,6 @@ export class TeamDispatchService {
     const timer = this.receiptTimers.get(callId)
     if (timer) clearTimeout(timer)
     this.receiptTimers.delete(callId)
-  }
-
-  observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): void {
-    const previous = this.daemonEventChains.get(daemonId) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.handleDaemonEvent(daemonId, ownerUserId, message, daemonGeneration))
-    this.daemonEventChains.set(daemonId, current)
-    void current.catch(error => console.error('[team-dispatch] daemon event failed', { daemonId, error })).finally(() => {
-      if (this.daemonEventChains.get(daemonId) === current) this.daemonEventChains.delete(daemonId)
-    })
   }
 
   private async settleCreatedSession(accounting: any, nativeSessionId: string): Promise<void> {

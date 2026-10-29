@@ -162,6 +162,7 @@ describe('deleted-account authorization boundary', () => {
     const pool = deletionPool(true, events)
     const router = {
       terminateUserConnections: vi.fn(() => events.push('TERMINATE USER CONNECTIONS')),
+      revalidateTeamSubscriptions: vi.fn(async () => { events.push('REVALIDATE TEAM SUBSCRIPTIONS') }),
     }
     const reply = replyDouble()
 
@@ -178,6 +179,23 @@ describe('deleted-account authorization boundary', () => {
     expect(events.indexOf('TERMINATE USER CONNECTIONS')).toBeLessThan(
       events.findIndex(value => value === 'BEGIN'),
     )
+    expect(events.indexOf('REVALIDATE TEAM SUBSCRIPTIONS')).toBeGreaterThan(events.indexOf('COMMIT'))
+    expect(router.revalidateTeamSubscriptions).toHaveBeenCalledOnce()
+  })
+
+  test('a post-commit subscription error does not turn account deletion into an unknown failure', async () => {
+    const { signAccessToken } = await import('../auth.js')
+    const { handleDeleteAccountRequest } = await import('../server.js')
+    const token = await signAccessToken(7, 'person@example.com')
+    const reply = replyDouble(), warning = vi.spyOn(console,'warn').mockImplementation(() => {})
+    try {
+      const result = await handleDeleteAccountRequest({headers:{authorization:`Bearer ${token}`}},reply,deletionPool(true),{
+        terminateUserConnections:vi.fn(),revalidateTeamSubscriptions:vi.fn(async()=>{throw Error('transient database error')}),
+      })
+      expect(result).toEqual({success:true})
+      expect(reply.headers['Set-Cookie']).toContain('Max-Age=0')
+      expect(warning).toHaveBeenCalledOnce()
+    } finally { warning.mockRestore() }
   })
 
   test('returns not found when a concurrent request already deleted the account', async () => {

@@ -688,6 +688,11 @@ async function insertEvidenceForVersion(
     input.evidenceHandles,
   )
   if (resolved.length !== input.evidenceHandles.length) return 0
+  const available = await client.query<{ available: boolean }>(`SELECT NOT EXISTS(
+    SELECT 1 FROM jsonb_array_elements($1::jsonb) evidence
+    WHERE NOT memory_delivery_source_available(evidence)) AS available`,
+  [JSON.stringify(resolved.map(evidence => evidence.manifest.source_provenance ?? {}))])
+  if (!available.rows[0]?.available) return 0
 
   const prepared: Array<{
     evidence: (typeof resolved)[number]

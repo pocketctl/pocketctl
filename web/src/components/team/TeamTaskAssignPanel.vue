@@ -1,44 +1,64 @@
 <template>
- <ActionList :width="560" prefer-above mobile-sheet title="分派任务" @close="emit('close')">
-  <form id="team-assign-task" class="task-form" @submit.prevent="submit">
-   <label>任务说明（必填）<textarea v-model="instruction" required maxlength="32000" rows="5" placeholder="说明目标、范围和约束" /></label>
-   <label>交付与验收（必填）<textarea v-model="acceptance" required maxlength="16000" rows="3" placeholder="例如：提交修改文件，并说明验证命令和结果" /></label>
+ <TeamTemplateTaskPanel v-if="templateOpen" :session="props.session" :current-user-id="currentUserId" @close="emit('close')" @back="templateOpen=false;load()" @created="templateCreated" />
+ <ActionList v-else :width="560" prefer-above mobile-sheet title="分派任务" @close="emit('close')">
+  <button v-if="!revoked" type="button" :disabled="busy||loading||!!pending" @click="templateOpen=true">从协作模板创建草稿</button>
+  <div v-if="pending" class="task-recovery" role="status">
+   <p>分派结果尚未确认。原请求已保留，重新打开后先查询结果，避免重复创建任务。</p>
+   <button type="button" :disabled="busy||loading||!online" @click="resolve">查询原分派结果</button>
+   <button v-if="receiptMissing&&!confirmRetry" type="button" :disabled="busy||loading||!online" @click="confirmRetry=true">重试原分派</button>
+   <div v-if="confirmRetry"><p>使用已保留的内容和同一请求身份重试，不创建新的请求。</p><button type="button" :disabled="busy||!online" @click="retry">确认重试原分派</button><button type="button" :disabled="busy" @click="confirmRetry=false">取消重试</button></div>
+  </div>
+  <p v-if="journalError" role="alert">{{ journalError }}</p>
+  <p v-if="loading" role="status">正在读取分派设置…</p>
+  <form v-if="!revoked" id="team-assign-task" class="task-form" @submit.prevent="submit">
+   <label>任务说明（必填）<textarea v-model="instruction" :disabled="locked" required maxlength="32000" rows="5" placeholder="说明目标、范围和约束" /></label>
+   <label>交付与验收（必填）<textarea v-model="acceptance" :disabled="locked" required maxlength="16000" rows="3" placeholder="例如：提交修改文件，并说明验证命令和结果" /></label>
    <fieldset class="task-agents" aria-describedby="task-agent-hint">
     <legend><span class="task-agent-heading"><span>执行 Agent</span><span class="task-agent-count" aria-live="polite">已选 {{ targets.length }}</span></span></legend>
     <p id="task-agent-hint" class="task-agent-hint">选择本次任务的执行 Agent，可多选。</p>
-    <div v-if="session.agent_bindings.length" class="task-agent-list">
-     <label v-for="binding in session.agent_bindings" :key="binding.id" class="task-agent-option" :class="{ selected:targets.includes(binding.offer_id), unavailable:binding.availability!=='online' }">
-      <input v-model="targets" type="checkbox" :value="binding.offer_id" :disabled="binding.availability!=='online'" />
+    <div v-if="bindings.length" class="task-agent-list">
+     <label v-for="binding in bindings" :key="binding.id" class="task-agent-option" :class="{ selected:targets.includes(binding.offer_id), unavailable:binding.availability!=='online' }">
+      <input v-model="targets" type="checkbox" :value="binding.offer_id" :disabled="locked || binding.availability!=='online'" />
       <span class="task-agent-copy"><AgentBadge :agent="binding.provider" size="md" /><small>主机 · {{ binding.daemon_id }}</small></span>
       <span class="task-agent-status" :class="{ online:binding.availability==='online' }"><i aria-hidden="true"></i>{{ teamAvailabilityLabel(binding.availability) }}</span>
      </label>
     </div>
     <div v-else class="task-agent-empty"><strong>此会话还没有 Agent</strong><span>先在“参与者与 Agent”中加入，再分派任务。</span></div>
    </fieldset>
-   <p>本轮材料：Context v{{ session.current_context_version }}。派发后固定该版本和 Agent 配置。</p>
-   <p v-if="error" role="alert">{{ error }}</p>
+   <fieldset v-if="deliveryEnabled||reviewRequired" class="task-review-settings"><legend>验收设置</legend>
+    <label><input v-model="reviewRequired" type="checkbox" :disabled="locked" />需要人工验收</label>
+    <template v-if="reviewRequired">
+     <label>验收人<ActionSelect><select v-model="reviewer" aria-label="验收人" :disabled="locked"><option :value="0" disabled>请选择</option><option v-for="member in reviewers" :key="member.user_id" :value="member.user_id">{{ memberLabel(member) }}</option></select></ActionSelect></label>
+     <label>主交付 Agent<ActionSelect><select v-model="primary" aria-label="主交付 Agent" :disabled="locked"><option v-for="binding in bindings.filter(b=>targets.includes(b.offer_id))" :key="binding.offer_id" :value="binding.offer_id">{{ binding.provider }} · {{ binding.daemon_id }}</option></select></ActionSelect></label>
+     <label>必需检查项（每行一项）<textarea v-model="checks" rows="3" maxlength="3800" aria-label="必需检查项" :disabled="locked" placeholder="例如：单元测试、重连验证" /></label>
+     <p>只有主交付进入人工验收。其他 Agent 的贡献不会覆盖主交付；执行权限审批仍由 Agent 所有者处理。</p>
+    </template>
+   </fieldset>
+   <p>本轮材料：Context v{{ pending?.input.context_version ?? currentSession?.current_context_version ?? "未知" }}。派发后固定该版本和 Agent 配置。</p>
   </form>
-  <template #footer><button type="submit" form="team-assign-task" :disabled="busy||!instruction.trim()||!acceptance.trim()||!targets.length">{{ busy?'正在派发…':'分派任务' }}</button></template>
+  <p v-if="disabledReason">{{ disabledReason }}</p>
+  <p v-if="error" role="alert">{{ error }}</p>
+  <button v-if="!revoked" type="button" :disabled="busy||loading" @click="load">重新读取分派设置</button>
+  <template #footer><button type="submit" form="team-assign-task" :disabled="!!disabledReason">{{ busy?'正在派发…':'分派任务' }}</button></template>
  </ActionList>
 </template>
 <script setup lang="ts">
 import {ref} from 'vue'
+import TeamTemplateTaskPanel from './TeamTemplateTaskPanel.vue'
+import ActionSelect from '../ActionSelect.vue'
 import ActionList from '../ActionList.vue'
 import AgentBadge from '../AgentBadge.vue'
 import {teamAvailabilityLabel} from '../../utils/teamLabels'
-import {assignTeamTask} from '../../services/teamClient'
-import type {TeamSession,TeamEvent} from '../../types/team'
-const props=defineProps<{session:TeamSession}>(),emit=defineEmits<{close:[];sent:[event:TeamEvent]}>()
-const instruction=ref(''),acceptance=ref(''),targets=ref<string[]>([]),busy=ref(false),error=ref('')
-let key='',signature=''
-async function submit(){if(busy.value||!instruction.value.trim()||!acceptance.value.trim()||!targets.value.length)return;busy.value=true;error.value='';try{
- const body={instruction:instruction.value.trim(),acceptance:acceptance.value.trim(),target_offer_ids:targets.value,context_version:props.session.current_context_version},next=JSON.stringify(body)
- if(signature!==next){signature=next;key=crypto.randomUUID()}
- const result=await assignTeamTask(props.session.id,{...body,request_id:key});emit('sent',result.event);emit('close')
- }catch(e){error.value=e instanceof Error?e.message:'派发失败；重试保留原请求身份'}finally{busy.value=false}}
+import {useTeamTaskAssignment} from '../../composables/useTeamTaskAssignment'
+import type {TeamSession,TeamEvent,TeamMember} from '../../types/team'
+const props=defineProps<{session:TeamSession;members?:TeamMember[];currentUserId?:number}>(),emit=defineEmits<{close:[];sent:[event:TeamEvent];assigned:[taskId:string]}>()
+const {instruction,acceptance,targets,reviewRequired,reviewer,primary,checks,busy,loading,error,journalError,online,locked,revoked,pending,receiptMissing,confirmRetry,session:currentSession,bindings,reviewers,deliveryEnabled,disabledReason,load,submit,resolve,retry}=useTeamTaskAssignment(props,result=>{emit('sent',result.event);emit('assigned',result.task_id);emit('close')})
+const templateOpen=ref(false)
+function templateCreated(task:string){emit('assigned',task);emit('close')}
+function memberLabel(member:TeamMember){if(member.user_id===props.currentUserId)return member.display_label+' · 我';return reviewers.value.filter(m=>m.display_label===member.display_label).length>1?member.display_label+' · 成员 '+member.user_id:member.display_label}
 </script>
 <style scoped>
-.task-form{display:grid;gap:18px}.task-form>label{display:grid;gap:8px}textarea{width:100%;box-sizing:border-box;resize:vertical;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}fieldset{display:grid;gap:12px;border:1px solid var(--border)}p{font-size:12px;color:var(--fg-secondary)}button{padding:10px 18px;border:0;border-radius:6px;background:var(--accent);color:var(--bg)}
+.task-recovery{padding:12px;border:1px solid var(--border);border-radius:10px}.task-recovery button{margin:4px 8px 4px 0}.task-form{display:grid;gap:18px}.task-form>label{display:grid;gap:8px}textarea{width:100%;box-sizing:border-box;resize:vertical;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}fieldset{display:grid;gap:12px;border:1px solid var(--border)}p{font-size:12px;color:var(--fg-secondary)}button{padding:10px 18px;border:0;border-radius:6px;background:var(--accent);color:var(--bg)}
 .task-agents{display:block;min-width:0;margin:0;padding:0;border:0}
 .task-agents legend{width:100%;padding:0;margin-bottom:6px}
 .task-agent-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;font-weight:600}

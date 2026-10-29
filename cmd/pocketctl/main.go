@@ -46,6 +46,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/sessiondocument"
 	"github.com/pocketctl/pocketctl/internal/sessionmcp"
 	"github.com/pocketctl/pocketctl/internal/sysinfo"
+	"github.com/pocketctl/pocketctl/internal/teamdelivery"
 	"github.com/pocketctl/pocketctl/internal/turn"
 	"github.com/pocketctl/pocketctl/internal/update"
 	"github.com/pocketctl/pocketctl/internal/watcher"
@@ -1938,6 +1939,14 @@ func cmdDaemonStart(args []string) {
 	go sm.RunTitleMaintenance(ctx)
 	go openSpecTasks.Run(ctx, outputCh)
 	defer cancel()
+	if err := startTeamDelivery(ctx, url, id, client, sm, logger); err != nil {
+		logger.Warn("team delivery unavailable", "code", teamdelivery.DiagnosticCode(err))
+	}
+	if shutdown, err := startAgentTeams(ctx, url, id, client, sm, memoryContextGrants, logger); err != nil {
+		logger.Warn("AgentTeams unavailable", "code", "agentteams_configuration_or_probe_failed")
+	} else {
+		defer func() { cancel(); shutdown() }()
+	}
 	if documentCaptureConfigErr != nil {
 		logger.Warn("session document capture disabled", "reason", "invalid_configuration")
 	} else if documentCaptureEnabled {
@@ -3991,8 +4000,9 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					continue
 				}
 				createCommand := cmd
+				createCtx := sm.CaptureTeamCommandContext(ctx)
 				daemon.Go("team-session-create", logger, func() {
-					runCollaborationSessionCreate(ctx, client, sm, createCommand, stateDirty, memoryContextGrants)
+					runCollaborationSessionCreate(createCtx, client, sm, createCommand, stateDirty, memoryContextGrants)
 				})
 				continue
 			case "collaboration_user_message":
@@ -4008,25 +4018,37 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: reason, Collaboration: cmd.Collaboration})
 					continue
 				}
-				if err := sm.DispatchCollaborationMessage(ctx, cmd.Collaboration, cmd.TeamContext, cmd.SessionID, cmd.Content, cmd.RequestID, cmd.MsgID); err != nil {
-					if cmd.TeamContext != nil {
-						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
-							RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
+				messageCommand := cmd
+				messageCtx := sm.CaptureTeamCommandContext(ctx)
+				runMessage := func() {
+					if err := sm.DispatchCollaborationMessage(messageCtx, messageCommand.Collaboration, messageCommand.TeamContext, messageCommand.SessionID, messageCommand.Content, messageCommand.RequestID, messageCommand.MsgID); err != nil {
+						if messageCommand.TeamContext != nil {
+							client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: messageCommand.SessionID,
+								RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "rejected", Reason: err.Error(), Collaboration: messageCommand.Collaboration, TeamContext: messageCommand.TeamContext})
+						}
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: messageCommand.SessionID,
+							RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: messageCommand.Collaboration})
+						return
 					}
-					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
-						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "rejected", Reason: err.Error(), Error: err.Error(), Collaboration: cmd.Collaboration})
-					continue
+					if receipt := sm.TeamConfigReceipt(ctx, messageCommand.Collaboration, messageCommand.SessionID); receipt != nil {
+						client.SendMsg(*receipt)
+					}
+					stateDirty.Store(true)
+					if messageCommand.TeamContext != nil {
+						client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: messageCommand.SessionID,
+							RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "accepted", Collaboration: messageCommand.Collaboration, TeamContext: messageCommand.TeamContext})
+					}
+					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: messageCommand.SessionID,
+						RequestID: messageCommand.RequestID, MsgID: messageCommand.MsgID, Status: "accepted", Collaboration: messageCommand.Collaboration})
+					if strings.HasPrefix(messageCommand.SessionID, "agentteams-") {
+						sm.BeginAgentTeamsCall(ctx, messageCommand.Collaboration.CallID)
+					}
 				}
-				if receipt := sm.TeamConfigReceipt(ctx, cmd.Collaboration, cmd.SessionID); receipt != nil {
-					client.SendMsg(*receipt)
+				if strings.HasPrefix(cmd.SessionID, "agentteams-") || (cmd.Collaboration.Delivery != nil && cmd.Collaboration.Delivery.AttemptID != "") {
+					daemon.Go("team-step-message", logger, runMessage)
+				} else {
+					runMessage()
 				}
-				stateDirty.Store(true)
-				if cmd.TeamContext != nil {
-					client.SendMsg(protocol.DaemonEvent{Type: "collaboration_context_receipt", SessionID: cmd.SessionID,
-						RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration, TeamContext: cmd.TeamContext})
-				}
-				client.SendMsg(protocol.DaemonEvent{Type: "collaboration_dispatch_receipt", SessionID: cmd.SessionID,
-					RequestID: cmd.RequestID, MsgID: cmd.MsgID, Status: "accepted", Collaboration: cmd.Collaboration})
 				continue
 			case "session_create":
 				duplicate, grantErr := quotaGrants.Validate(cmd.RequestID, cmd.QuotaGrant, "create", time.Now())

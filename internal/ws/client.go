@@ -145,6 +145,10 @@ type Client struct {
 	// this key, defeating MITM even if a trusted CA is compromised. Empty =
 	// standard system-CA validation only (backwards compatible).
 	relayPin                   string
+	teamDeliveryEnabled        bool // protected by agentMu
+	teamStepsEnabled           bool // protected by agentMu; explicit local opt-in
+	agentTeamsEnabled          bool // fixed external installation; never inferred from CLI discovery
+	agentTeamsStepsEnabled     bool // explicit frozen transfer capability from the configured bridge
 	conn                       *websocket.Conn
 	connMu                     sync.Mutex
 	writeMu                    sync.Mutex // protects WriteMessage on conn

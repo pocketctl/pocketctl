@@ -251,6 +251,7 @@ export function createContextCompiler(deps: {
       const corpus = await deps.pool.query<{ fingerprint: string }>(`
         SELECT md5(COALESCE(string_agg(
           c.claim_id::text || ':' || c.state || ':' || COALESCE(c.current_version_id::text, '')
+          || ':' || memory_delivery_version_available(c.installation_id, c.current_version_id)::text
           || ':' || COALESCE((
             SELECT md5(string_agg(e.evidence_id::text, ',' ORDER BY e.evidence_id))
             FROM knowledge_evidence e

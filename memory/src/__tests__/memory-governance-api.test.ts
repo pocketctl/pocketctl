@@ -6,6 +6,7 @@ import { MemoryApiError } from '../api/errors.js'
 import type { RouteV2Grant } from '../governance/authorization.js'
 import {revisionBundleHash,type RevisionBundle} from '../governance/revision-bundle.js'
 import { PublicationError } from '../governance/publication-service.js'
+import { ReviewPolicyScopeStaleError } from '../governance/review-policy.js'
 
 const TEAM = 'cafecafe-0000-4000-8000-000000000002'
 const PERSONAL = 'cafecafe-0000-4000-8000-000000000001'
@@ -220,7 +221,10 @@ describe('memory governance API', () => {
     expect(response.json().error.message).toContain('Idempotency-Key')
   })
 
-  test('maps service errors to bounded HTTP envelopes', async () => {
+  test.each([
+    {error:new PublicationError('quorum_failed', 'publication quorum failed: insufficient_approvals'),status:409,code:'quorum_failed'},
+    {error:new ReviewPolicyScopeStaleError(),status:403,code:'forbidden'},
+  ])('maps $code service errors to bounded HTTP envelopes', async ({error,status,code}) => {
     const { app } = make({
       poolQueries: [
         {
@@ -233,7 +237,7 @@ describe('memory governance API', () => {
         {
           match: /FROM memory_promotion_candidates/,
           rows: [],
-          error: new PublicationError('quorum_failed', 'publication quorum failed: insufficient_approvals'),
+          error,
         },
       ],
     })
@@ -247,8 +251,8 @@ describe('memory governance API', () => {
         resolution: 'new',
       },
     })
-    expect(response.statusCode).toBe(409)
-    expect(response.json().error.code).toBe('quorum_failed')
+    expect(response.statusCode).toBe(status)
+    expect(response.json().error.code).toBe(code)
   })
 
   test('records a content-free audit event when publish permission is denied', async () => {

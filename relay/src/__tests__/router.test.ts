@@ -135,6 +135,27 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+test('external executor capabilities survive registration and inventory refresh without accepting unknown capabilities', async () => {
+  const pool = createMockPool()
+  const router = new Router(pool)
+  const ws = createMockWs()
+  const capabilities = ['team_external_agentteams_v1', 'team_external_agentteams_steps_v1']
+  const message = { type: 'register', daemon_id: 'external-host', hostname: 'isolated', agents: ['agentteams'], started_at: 17,
+    capabilities: [...capabilities, capabilities[0], 'unknown_external_executor'] }
+  expect(await router.registerDaemon(ws, message, 1)).toBe(true)
+  const registration = pool._queries.find((q: any) => q.sql.includes('INSERT INTO daemons') && q.sql.includes('collaboration_capabilities'))
+  expect(JSON.parse(registration.params[10])).toEqual(capabilities)
+  const originalQuery = pool.query.getMockImplementation()
+  pool.query.mockImplementation((sql: string, params: any[]) => {
+    if (sql.includes('UPDATE daemons SET agents')) {
+      expect(JSON.parse(params[1])).toEqual(capabilities)
+      return Promise.resolve({ rows: [], rowCount: 1 })
+    }
+    return originalQuery(sql, params)
+  })
+  expect(await router.refreshDaemonAgents(ws, message, 1)).toBe(true)
+})
+
 test('registration broadcasts metadata needed to hydrate a sparse reconnect snapshot', async () => {
   const router = new Router(createMockPool())
   const client = createMockWs()
@@ -1398,7 +1419,7 @@ describe('Router - offline debounce', () => {
 
   test('daemon_shutdown declares offline immediately without waiting for grace', async () => {
     const teamDispatchBroker = {
-      observeDaemonEvent: vi.fn(),
+      handleDaemonEvent: vi.fn(async () => {}),
       handleDaemonDisconnected: vi.fn(async () => {}),
     }
     router = new Router(pool, { teamDispatchBroker })
@@ -1427,6 +1448,17 @@ describe('Router - offline debounce', () => {
     expect(teamDispatchBroker.handleDaemonDisconnected).toHaveBeenCalledExactlyOnceWith('daemon-1')
     router.unregisterDaemon('daemon-1', ws1)
     expect(teamDispatchBroker.handleDaemonDisconnected).toHaveBeenCalledTimes(1)
+  })
+
+  test.each([false, true])('Team disconnect projection distinguishes Relay drain=%s from daemon loss', async draining => {
+    const broker = { handleDaemonEvent: vi.fn(async () => {}), handleDaemonDisconnected: vi.fn(async () => {}) }
+    router = new Router(pool, { teamDispatchBroker: broker })
+    const ws = createMockWs()
+    await router.registerDaemon(ws, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [] }, 42)
+    if (draining) router.beginShutdown()
+    router.unregisterDaemon('daemon-1', ws)
+    await tick()
+    expect(broker.handleDaemonDisconnected).toHaveBeenCalledTimes(draining ? 0 : 1)
   })
 
   test('past the grace window the daemon is declared offline and pushed', async () => {
@@ -2629,6 +2661,29 @@ describe('Router - event delivery dedup + ack', () => {
     releaseFirstCost({ rows: [], rowCount: 1 })
     await tick()
     expect(costs).toEqual([1, 2])
+  })
+
+  test('legacy Team receipt holds ACK until projection succeeds, including completed canonical replay', async () => {
+    const handleDaemonEvent = vi.fn().mockRejectedValueOnce(new Error('receipt write failed')).mockResolvedValue(undefined)
+    const r = new Router(createMockPool([1, 0]), { teamDispatchBroker: {
+      handleDaemonEvent, handleDaemonDisconnected: vi.fn(async () => {}),
+    } })
+    const ws = createMockWs()
+    await r.registerDaemon(ws, { type: 'register', daemon_id: 'daemon-1', hostname: 'h', agents: [], started_at: 100 }, 1)
+    const event = { type: 'collaboration_dispatch_receipt', session_id: 'sess-1', seq: 1,
+      status: 'accepted', collaboration: { call_id: 'call-1', owner_user_id: 999 } }
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    ws._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(ws._sent.some((m: any) => m.type === 'event_ack')).toBe(false)
+    expect(handleDaemonEvent).toHaveBeenCalledExactlyOnceWith('daemon-1', 1, expect.objectContaining({ type: event.type }), 100, 1)
+    r.handleDaemonMessage('daemon-1', event)
+    await tick()
+    expect(handleDaemonEvent).toHaveBeenCalledTimes(2)
+    ws._sent.length = 0
+    r.handleDaemonMessage('daemon-1', { type: 'ping' })
+    expect(ws._sent.find((m: any) => m.type === 'event_ack')?.up_to_seq).toBe(1)
   })
 
   test('withholds ack on durable-effect rejection and retries it after insert conflict', async () => {

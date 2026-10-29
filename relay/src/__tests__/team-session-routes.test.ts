@@ -6,7 +6,7 @@ import { TeamRepositoryError } from '../team/repository.js'
 import { registerTeamSessionRoutes } from '../team/session-routes.js'
 import type { TeamSessionService } from '../team/session-service.js'
 
-function appFor(overrides: Record<string, unknown>) {
+function appFor(overrides: Record<string, unknown>, writes = true) {
   const service = {
     listSessions: vi.fn(async () => []),
     getSession: vi.fn(),
@@ -21,7 +21,7 @@ function appFor(overrides: Record<string, unknown>) {
   }
   const app = Fastify()
   registerTeamSessionRoutes(app, {
-    config: resolveTeamCollaborationConfig({ TEAM_COLLABORATION: 'on' }),
+    config: resolveTeamCollaborationConfig({ TEAM_COLLABORATION: writes ? 'on' : 'off' }),
     service: service as unknown as TeamSessionService,
     verifyAccessToken: async token => token === 'valid' ? { userId: 23 } : null,
     getDatabaseReady: () => true,
@@ -30,6 +30,29 @@ function appFor(overrides: Record<string, unknown>) {
 }
 
 describe('Team shared session routes', () => {
+  test('looks up only the authenticated actor assignment receipt and distinguishes absence from denied access', async () => {
+    const taskByRequest = vi.fn(async (session: string, _actor: number, key: string) => ({ operation:'assign_task', team_session_id:session, request_id:key, found:false, response:null }))
+    const { app } = appFor({ taskByRequest })
+    const url = '/api/team/sessions/css_1/tasks/by-request/original%20request'
+    expect((await app.inject({method:'GET',url})).statusCode).toBe(401)
+    expect(taskByRequest).not.toHaveBeenCalled()
+    const response = await app.inject({method:'GET',url,headers:{authorization:'Bearer valid'}})
+    expect(response.statusCode).toBe(200); expect(response.headers['cache-control']).toBe('no-store'); expect(response.json()).toMatchObject({found:false,request_id:'original request'})
+    expect(taskByRequest).toHaveBeenCalledWith('css_1',23,'original request')
+    taskByRequest.mockRejectedValueOnce(new TeamRepositoryError('team_not_found','denied'))
+    expect((await app.inject({method:'GET',url,headers:{authorization:'Bearer valid'}})).statusCode).toBe(404)
+    await app.close()
+  })
+  test('keeps assignment receipt recovery readable when new writes are disabled', async () => {
+    const taskByRequest = vi.fn(async () => ({ operation:'assign_task', team_session_id:'s', request_id:'key', found:false, response:null }))
+    const assignTask = vi.fn()
+    const { app } = appFor({taskByRequest, assignTask}, false)
+    const headers = {authorization:'Bearer valid'}
+    expect((await app.inject({method:'GET',url:'/api/team/sessions/s/tasks/by-request/key',headers})).statusCode).toBe(200)
+    expect((await app.inject({method:'POST',url:'/api/team/sessions/s/tasks',headers,payload:{request_id:'key',instruction:'test',acceptance:'proof',target_offer_ids:['offer'],context_version:0}})).statusCode).toBe(503)
+    expect(assignTask).not.toHaveBeenCalled()
+    await app.close()
+  })
   test('creates a human-only session with explicit participants and rejects malformed selections', async () => {
     const { app, service } = appFor({ createSession: vi.fn(async () => ({ id: 'css_humans' })) })
     const payload = {request_id: 'humans', title: '群聊', offer_ids: [], participant_user_ids: [24,25]}

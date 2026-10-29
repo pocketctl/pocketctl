@@ -24,6 +24,7 @@ export function isTeamProvider(value: unknown): value is TeamProvider {
 export type TeamMemoryAccessState = 'available' | 'forbidden' | 'installation_paused' | 'feature_disabled'
 
 export interface TeamCapabilities {
+ task_readiness_v1?:boolean
  reads_enabled?:boolean
  agent_config_v2?:boolean
  private_interactions_v2?:boolean
@@ -114,6 +115,8 @@ export interface TeamTask {
   title: string
   background: string
   state: TeamTaskState
+  has_delivery_contract?: boolean
+  requirements?: TeamTaskRequirementsState
   previous_state: 'open' | 'in_progress' | 'completed' | null
   revision: number
   holder_user_ids: number[]
@@ -305,3 +308,27 @@ export interface TeamAgentConfigCapabilities {
   runtime_switch: 'recreate' | 'hot'
 }
 export type TeamRunMode = 'discussion' | 'review' | 'execute'
+
+/** Advisory requirements do not grant repository or execution access. */
+export interface TeamTaskRequirements {
+  goal: string
+  scope: string
+  acceptance: string
+  repository: {kind:'git';url:string}|{kind:'not_applicable';reason:string}|null
+}
+export interface TeamTaskRequirementsState {
+  document: TeamTaskRequirements
+  revision: number
+  readiness: {status:'ready'|'needs_information';missing:Array<keyof TeamTaskRequirements>}
+  override: {actor_user_id:number;reason:string;requirements_revision:number}|null
+}
+export interface TeamTaskRequirementHistory {
+  events: Array<{
+    event_id:string;actor_user_id:number|null;kind:'updated'|'override'
+    requirements_revision:number;task_revision:number;details:Record<string,unknown>;created_at:string
+  }>
+  next_before_revision:number|null
+}
+export type TeamTaskPoolFilter='all'|'unclaimed'|'mine'
+export interface TeamTaskRequirementsInput {request_id:string;expected_revision:number;requirements:TeamTaskRequirements}
+export interface TeamTaskRequirementOverrideInput {request_id:string;expected_revision:number;reason:string}

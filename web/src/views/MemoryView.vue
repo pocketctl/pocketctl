@@ -95,7 +95,8 @@
             </div>
             <p v-else-if="governanceError" class="memory-error" role="alert">{{ governanceError }}</p>
             <section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
-            <CandidateReviewList ref="reviewList" @accepted="rememberAcceptedClaim"
+            <p v-if="deliveryReview" class="memory-notice">当前仅查看所选交付及验收记录的个人候选。</p>
+            <CandidateReviewList ref="reviewList" :delivery="deliveryReview" @accepted="rememberAcceptedClaim"
               @changed="refreshReview" @count="reviewCount = $event"/>
             </section>
           </template>
@@ -170,6 +171,7 @@
 </template>
 
 <script setup lang="ts">
+import { useRoute } from 'vue-router'
 import ActionSelect from '../components/ActionSelect.vue'
 import WorkspaceIcon from '../components/WorkspaceIcon.vue'
 import MemoryContextSettings from '../components/memory/MemoryContextSettings.vue'
@@ -220,7 +222,15 @@ const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
-const active = ref<MemoryModule>('search')
+const route = useRoute()
+const active = ref<MemoryModule>(route?.query.tab === 'review' ? 'review' : 'search')
+const deliveryReview = computed(() => {
+  const submissionId = route?.query.submission, decisionId = route?.query.decision
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  return typeof submissionId === 'string' && typeof decisionId === 'string' && uuid.test(submissionId) && uuid.test(decisionId)
+    ? { submissionId, decisionId } : undefined
+})
+watch(() => route?.query.tab, value => { if (value === 'review') active.value = 'review' })
 const phase4RepositoryId = ref('')
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)

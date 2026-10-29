@@ -1,6 +1,7 @@
 import { initSessionShareSchema } from './session-share/store.js';
 import { initPreferenceSchema } from './user-preferences.js';
 import pg from 'pg';
+import { revokeTeamAccount } from './team/account-lifecycle.js';
 import { createHash } from 'crypto';
 import type { SupportedLanguage } from './config/language.js';
 import { sanitizeJSONBPayload } from './jsonb-payload.js';
@@ -89,21 +90,31 @@ export async function initDB(pool: pg.Pool): Promise<void> {
   // complete schema bootstrap/upgrade on one connection under a database-wide
   // transaction lock so fresh installs and legacy upgrades are both serial.
   if (typeof pool.connect === 'function') {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query(`SELECT pg_advisory_xact_lock(hashtext('pocketctl-schema-init-v1'))`);
-      await initDBUnlocked({ query: client.query.bind(client) } as pg.Pool);
-      await client.query('COMMIT');
-    } catch (error) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const client = await pool.connect();
+      let retry = false;
       try {
-        await client.query('ROLLBACK');
-      } catch {
-        // Preserve the schema initialization failure.
+        await client.query('BEGIN');
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext('pocketctl-schema-init-v1'))`);
+        await initDBUnlocked({ query: client.query.bind(client) } as pg.Pool);
+        await client.query('COMMIT');
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK');
+        } catch {
+          // Preserve the schema initialization failure.
+        }
+        // Another already-running Relay/Worker can hold business locks in a
+        // different order from bootstrap DDL. PostgreSQL aborts this whole
+        // transaction on deadlock, so retry from BEGIN on a fresh client only
+        // for that recoverable conflict; permanent schema errors remain fatal.
+        if ((error as { code?: string })?.code !== '40P01' || attempt === 2) throw error;
+        retry = true;
+      } finally {
+        client.release();
       }
-      throw error;
-    } finally {
-      client.release();
+      if (!retry) return;
+      await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
     }
     return;
   }
@@ -3541,6 +3552,8 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
       await client.query('COMMIT');
       return false;
     }
+
+    await revokeTeamAccount(client, userId);
 
     // ADR-0003: provider purge evidence must be created before the user rows
     // disappear; it carries no user FK and survives until the provider acks.

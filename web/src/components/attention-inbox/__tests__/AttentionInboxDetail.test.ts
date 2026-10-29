@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, test, vi } from 'vitest'
 import AttentionInboxDetail from '../AttentionInboxDetail.vue'
+import AttentionInboxItemRow from '../AttentionInboxItemRow.vue'
 import type { AttentionInboxContext, AttentionInboxItem } from '../../../types/attentionInbox'
 
 vi.mock('../../../composables/useLocale', () => ({ useLocale: () => ({ t: (key: string) => key }) }))
@@ -68,5 +69,18 @@ describe('approval command context', () => {
     await wrapper.setProps({ item: item({ description: 'File access' }) })
     expect(wrapper.get('code').text()).toBe('File access')
     expect(wrapper.get('.context-card > span').text()).toBe('attention.context')
+  })
+})
+
+
+describe('approval provider identity', () => {
+  test.each([
+    ['claude-code', 'Claude Code'], ['dsh', 'DeepSeek Harness'], ['codex', 'Codex'], ['opencode', 'OpenCode'],
+  ] as const)('shows %s consistently in the list and approval detail', (provider, label) => {
+    const approval = item({}, provider)
+    const row = mount(AttentionInboxItemRow, { props: { item: approval } })
+    const detail = render({}, provider)
+    expect(row.get('.item-kicker strong').text()).toBe(label)
+    expect(detail.get('.detail-meta').text()).toBe(`${label} · Test host · Command acceptance`)
   })
 })

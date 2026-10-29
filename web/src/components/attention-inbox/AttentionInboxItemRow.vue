@@ -27,13 +27,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { teamProviderLabel } from '../../utils/teamProvider'
 import type { AttentionInboxItem } from '../../types/attentionInbox'
 
 const props = defineProps<{ item: AttentionInboxItem; selected?: boolean }>()
 defineEmits<{ (event: 'select'): void }>()
 const { t } = useLocale()
 
-const providerLabel = computed(() => props.item.provider === 'opencode' ? 'OpenCode' : 'Codex')
+const providerLabel = computed(() => teamProviderLabel(props.item.provider))
 const kindLabel = computed(() => props.item.kind === 'approval' ? t('attention.kind_approval') : t('attention.kind_question'))
 const stateLabel = computed(() => ({
   open: t('attention.state_open'),

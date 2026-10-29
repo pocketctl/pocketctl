@@ -88,6 +88,7 @@ export async function resetDurableIngressTestDatabase(
       extension_provider_status,
       extension_provider_credentials,
       extension_checkpoints,
+      team_delivery_memory_consumers, team_delivery_memory_withdrawals,
       extension_feed,
       extension_source_outbox,
       extension_installations,

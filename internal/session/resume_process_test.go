@@ -164,7 +164,7 @@ func installSentinelResumeCLI(t *testing.T, cliName string) (marker string) {
 	dir := t.TempDir()
 	marker = filepath.Join(dir, "executed-marker")
 	cli := filepath.Join(dir, cliName)
-	body := "#!/bin/sh\ntouch " + shellQuotePath(marker) + "\nexit 0\n"
+	body := "#!/bin/sh\nif [ \"$1\" = --help ]; then\n  printf '%s\\n' '  --append-system-prompt <prompt>' '  --system-prompt-snapshot <on|off>'\n  exit 0\nfi\ntouch " + shellQuotePath(marker) + "\nexit 0\n"
 	if err := os.WriteFile(cli, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -336,6 +336,9 @@ func TestClaudeDormantResumeCarriesHiddenContextOutsideVisiblePrompt(t *testing.
 	}
 	if got := args[contextIndex+1]; !strings.Contains(got, hidden.StableText) || !strings.Contains(got, hidden.DynamicText) {
 		t.Fatalf("hidden system prompt %q missing prepared context", got)
+	}
+	if !strings.Contains(strings.Join(args, " "), "--system-prompt-snapshot off") {
+		t.Fatal("resume can reuse the previous turn's hidden context")
 	}
 }
 

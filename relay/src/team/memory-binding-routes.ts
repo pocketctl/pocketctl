@@ -61,7 +61,11 @@ async function authenticate(
 function mapError(error: unknown, reply: Reply): unknown {
   if (!(error instanceof TeamRepositoryError)) throw error
   const status = {
+    authorization_required: 401, invalid_request: 400, acceptance_required: 409, reviewer_required: 403, evidence_required: 409, artifact_integrity: 400, artifact_unavailable: 503, input_limit_exceeded: 409,
     team_feature_disabled: 503,
+    source_busy: 503,
+    external_call_not_ready: 503,
+    external_call_settled: 409,
     team_not_found: 404,
     team_access_denied: 403,
     membership_required: 403,
@@ -81,7 +85,7 @@ function mapError(error: unknown, reply: Reply): unknown {
     budget_exhausted: 409,
   }[error.code]
   return failure(reply, status, error.code, error.message, {
-    retryable: ['team_feature_disabled', 'revision_conflict'].includes(error.code),
+    retryable: ['source_busy', 'team_feature_disabled', 'revision_conflict'].includes(error.code),
     currentRevision: error.currentRevision,
   })
 }

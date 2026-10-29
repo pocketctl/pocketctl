@@ -107,6 +107,11 @@ func (sm *SessionManager) executionAgent(sessionID string) (string, error) {
 		return "", fmt.Errorf("%w: session %s", ErrSessionExecutionIdentityUnavailable, sessionID)
 	}
 	switch agent {
+	case "agentteams":
+		if _, owned := ps.Backend.(*agentTeamsSessionBackend); owned && ps.Source == "daemon" {
+			return agent, nil
+		}
+		return "", ErrSessionExecutionIdentityUnavailable
 	case adapter.AgentClaude, adapter.AgentCodex, adapter.AgentOpencode, adapter.AgentZcodeManaged, adapter.AgentDSH:
 		return agent, nil
 	default:

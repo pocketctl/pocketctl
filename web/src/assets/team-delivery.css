@@ -1,0 +1,5 @@
+/* Delivery panels also appear inside shared conversations, outside TeamsView. */
+.delivery-panel .btn,.task-management .btn{min-height:36px;padding:8px 14px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg);font:inherit;font-size:12px;line-height:1.4;cursor:pointer}
+.delivery-panel .btn:hover,.task-management .btn:hover{border-color:var(--fg-secondary)}
+.delivery-panel .btn.primary,.task-management .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.delivery-panel .btn:disabled,.task-management .btn:disabled{opacity:.5;cursor:not-allowed}

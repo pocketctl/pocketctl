@@ -37,8 +37,8 @@ export function normalizeTeamRunBudget(value?: Partial<TeamRunBudget>): TeamRunB
 export class TeamRunService {
   private readonly repository: TeamRunRepository
 
-  constructor(pool: pg.Pool, private readonly notifier: RunNotifier = {}) {
-    this.repository = new TeamRunRepository(pool)
+  constructor(pool: pg.Pool, private readonly notifier: RunNotifier = {}, externalEnabledForTeam?: (teamId: string) => boolean) {
+    this.repository = new TeamRunRepository(pool, externalEnabledForTeam)
   }
 
   private publish(mutation: TeamRunMutation): TeamRun {

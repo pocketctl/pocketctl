@@ -1,6 +1,9 @@
+import { frozenTaskRequirementsText } from './task-requirements-snapshot.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 
+import { createInitialTaskSpec } from './delivery-service.js'
+import { validateReviewPolicy, validateMutation, positiveRevision, stableDigest, type TaskReviewPolicy } from './delivery-contract.js'
 import { requireTeamAccess } from './access.js'
 import { candidateForProvider, type DaemonAgentEvidence } from './agent-offers.js'
 import { TeamReadStateService } from './read-state-service.js'
@@ -54,6 +57,8 @@ export class TeamSessionService {
     private readonly notifier: SessionNotifier = {},
     private readonly memorySources?: TeamMemorySourceProjectorLike,
     private readonly memoryContextBridge?: TeamMemoryContextBridge,
+    private readonly deliveryEnabledForTeam: (teamId: string) => boolean = () => false,
+    private readonly externalEnabledForTeam: (teamId: string) => boolean = () => false,
   ) {}
 
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
@@ -173,7 +178,7 @@ export class TeamSessionService {
       agents: row.agents,
       collaboration_capabilities: row.collaboration_capabilities,
       team_id: row.occupied_team_id,
-    } satisfies DaemonAgentEvidence, row.provider, teamId).managed_callable
+    } satisfies DaemonAgentEvidence, row.provider, teamId, this.externalEnabledForTeam(teamId)).managed_callable
   }
 
   async listSessions(teamId: string, actorUserId: number, filters: { daemonId?: string; provider?: TeamProvider } = {}): Promise<TeamSessionView[]> {
@@ -484,7 +489,8 @@ export class TeamSessionService {
     return result.appended
   }
 
-  async assignTask(input:{sessionId:string;actorUserId:number;requestId:string;instruction:string;acceptance:string;targetOfferIds:string[];contextVersion:number;referenceEventId?:string|null}) {
+  async assignTask(input:{sessionId:string;actorUserId:number;requestId:string;instruction:string;acceptance:string;targetOfferIds:string[];contextVersion:number;referenceEventId?:string|null;reviewPolicy?:TaskReviewPolicy}) {
+    if (input.reviewPolicy) validateReviewPolicy(input.reviewPolicy)
     if(!input.instruction.trim()||!input.acceptance.trim()||input.instruction.length>32000||input.acceptance.length>16000||input.targetOfferIds.length<1||input.targetOfferIds.length>16)throw new TeamRepositoryError('invalid_state','task instruction, acceptance and targets required')
     const result=await this.transaction(async client=>{
       const operation=`team.task.dispatch:${input.sessionId}`
@@ -494,8 +500,10 @@ export class TeamSessionService {
       const prior=(await client.query(`SELECT request_hash,response FROM collaboration_team_idempotency WHERE user_id=$1 AND operation=$2 AND request_id=$3`,[input.actorUserId,operation,input.requestId])).rows[0]
       if(prior){if(prior.request_hash!==fingerprint)throw new TeamRepositoryError('idempotency_conflict','task request reused with different content');return {...prior.response,replayed:true}}
       if(input.contextVersion!==Number(session.current_context_version))throw new TeamRepositoryError('context_revision_conflict','selected materials changed',Number(session.current_context_version))
+      if (input.reviewPolicy && (!this.deliveryEnabledForTeam(session.team_id) || !input.targetOfferIds.includes(input.reviewPolicy.primary_offer_id))) throw new TeamRepositoryError('team_feature_disabled', 'delivery unavailable for Team or primary Agent not among targets')
       const taskId=`ctk_${randomUUID()}`
       await client.query(`INSERT INTO team_tasks(task_id,team_id,creator_user_id,title,background) VALUES($1,$2,$3,$4,$5)`,[taskId,session.team_id,input.actorUserId,input.instruction.split('\n')[0].slice(0,240),input.instruction+'\n\n交付与验收：\n'+input.acceptance])
+      if (input.reviewPolicy) await createInitialTaskSpec(client, taskId, input.actorUserId, input.instruction, input.acceptance, input.reviewPolicy)
       await client.query(`INSERT INTO team_task_holders(task_id,user_id) VALUES($1,$2)`,[taskId,input.actorUserId])
       // Internal source events do not consume the direct-message request ID
       // namespace. The operation receipt is the sole task deduplication key.
@@ -503,12 +511,85 @@ export class TeamSessionService {
       await client.query('UPDATE collaboration_events SET request_id=NULL WHERE event_id=$1',[message.event.id])
       message.event.request_id=null
       await client.query('UPDATE collaboration_calls SET task_id=$2 WHERE call_id=ANY($1::text[])',[message.call_ids,taskId])
+      if (input.reviewPolicy) await client.query('INSERT INTO team_call_delivery_specs(call_id,task_id,spec_revision) SELECT unnest($1::text[]),$2,1', [message.call_ids, taskId])
       const response={task_id:taskId,...message}
       await client.query(`INSERT INTO collaboration_team_idempotency(user_id,operation,request_id,request_hash,response) VALUES($1,$2,$3,$4,$5::jsonb)`,[input.actorUserId,operation,input.requestId,fingerprint,JSON.stringify(response)])
       return {...response,replayed:false}
     })
     if(!result.replayed)this.notifier.dispatch?.(result.call_ids)
     return {task_id:result.task_id,event:result.event,call_ids:result.call_ids}
+  }
+
+  async taskByRequest(sessionId: string, actorUserId: number, requestId: string) {
+    if (!requestId || requestId.length > 128) throw new TeamRepositoryError('invalid_request', 'valid request_id is required')
+    return this.transaction(async client => {
+      const session = await this.sessionFor(client, sessionId, actorUserId)
+      const base = { operation: 'assign_task' as const, request_id: requestId, team_session_id: sessionId }
+      const receipt = (await client.query(`SELECT response FROM collaboration_team_idempotency
+        WHERE user_id=$1 AND operation=$2 AND request_id=$3`, [actorUserId, `team.task.dispatch:${sessionId}`, requestId])).rows[0]
+      // An authenticated absence has an explicit response; a 404 can never be
+      // mistaken for permission to recreate an unknown task.
+      if (!receipt) return { ...base, found: false, response: null }
+      const task = (await client.query("SELECT 1 FROM team_tasks WHERE task_id=$1 AND team_id=$2 AND state<>'deleted'", [receipt.response.task_id, session.team_id])).rows[0]
+      if (!task) throw new TeamRepositoryError('team_not_found', 'assigned task is no longer readable')
+      await this.sessionFor(client, sessionId, actorUserId)
+      return { ...base, found: true, response: receipt.response }
+    })
+  }
+
+  async executeTask(input: { sessionId: string; taskId: string; actorUserId: number; request_id: string; expected_revision: number; expected_task_revision?: number; spec_revision: number; context_version: number; target_offer_ids: string[] }) {
+    validateMutation(input); positiveRevision(input.spec_revision)
+    if (input.expected_task_revision !== undefined) positiveRevision(input.expected_task_revision)
+    if (!Number.isSafeInteger(input.context_version) || input.context_version < 0 || !Array.isArray(input.target_offer_ids)
+      || !input.target_offer_ids.length || input.target_offer_ids.length > 16 || input.target_offer_ids.some(id => typeof id !== 'string' || !id || id.length > 128)) throw new TeamRepositoryError('invalid_request', 'context and targets required')
+    const fingerprint = stableDigest({ ...input, target_offer_ids: [...new Set(input.target_offer_ids)].sort() })
+    const result = await this.transaction(async client => {
+      // Keep the existing session -> task lock order; appendMessage owns dispatch.
+      const session = await this.sessionFor(client, input.sessionId, input.actorUserId, true)
+      const task = (await client.query('SELECT * FROM team_tasks WHERE task_id=$1 AND team_id=$2 FOR UPDATE', [input.taskId, session.team_id])).rows[0]
+      if (!task || task.state === 'deleted') throw new TeamRepositoryError('team_not_found', 'task not found')
+      if (!this.deliveryEnabledForTeam(session.team_id)) throw new TeamRepositoryError('team_feature_disabled', 'task delivery disabled')
+      if (Number(task.creator_user_id) !== input.actorUserId && session.actor_team_role !== 'admin') throw new TeamRepositoryError('creator_required', 'task creator or Team admin required')
+      const prior = (await client.query('SELECT request_hash,response FROM team_delivery_receipts WHERE task_id=$1 AND actor_user_id=$2 AND request_id=$3', [input.taskId, input.actorUserId, input.request_id])).rows[0]
+      if (prior) {
+        if (prior.request_hash !== fingerprint) throw new TeamRepositoryError('idempotency_conflict', 'request ID reused')
+        return { response: prior.response, replayed: true }
+      }
+      if (task.requirements != null && input.expected_task_revision === undefined) throw new TeamRepositoryError('revision_conflict', 'saved task requirements require a confirmed task version; refresh or update the client', Number(task.revision))
+      if (input.expected_task_revision !== undefined && Number(task.revision) !== input.expected_task_revision) throw new TeamRepositoryError('revision_conflict', 'task requirements or ownership changed; review before executing', Number(task.revision))
+      if ((await client.query('SELECT 1 FROM team_task_plan_runtime WHERE task_id=$1 UNION ALL SELECT 1 FROM team_task_template_sources WHERE task_id=$1 LIMIT 1', [input.taskId])).rows[0]) throw new TeamRepositoryError('invalid_state', 'template and activated plans require step execution controls')
+      if (!['open', 'in_progress'].includes(task.state) || session.state !== 'active') throw new TeamRepositoryError('invalid_state', 'task and session must be writable')
+      const head = (await client.query('SELECT * FROM team_task_delivery_heads WHERE task_id=$1', [input.taskId])).rows[0]
+      if (!head) throw new TeamRepositoryError('capability_not_supported', 'task has no delivery contract')
+      if (Number(head.revision) !== input.expected_revision || Number(head.spec_revision) !== input.spec_revision) throw new TeamRepositoryError('revision_conflict', 'delivery specification changed', Number(head.revision))
+      if (Number(session.current_context_version) !== input.context_version) throw new TeamRepositoryError('context_revision_conflict', 'shared context changed', Number(session.current_context_version))
+      const spec = (await client.query('SELECT * FROM team_task_specs WHERE task_id=$1 AND revision=$2', [input.taskId, head.spec_revision])).rows[0]
+      if (!input.target_offer_ids.includes(spec.primary_offer_id)) throw new TeamRepositoryError('invalid_request', 'include the selected primary Agent')
+      // Unknown execution is deliberately not permission to create another call.
+      if ((await client.query("SELECT 1 FROM collaboration_calls WHERE task_id=$1 AND state IN ('pending','dispatched','accepted','uncertain') LIMIT 1", [input.taskId])).rows[0]) throw new TeamRepositoryError('invalid_state', 'reconcile outstanding execution before dispatching again')
+      if ((await client.query("SELECT 1 FROM team_acceptance_decisions WHERE submission_id=$1 AND spec_revision=$2 AND decision='accepted'", [head.latest_submission_id, head.spec_revision])).rows[0]) throw new TeamRepositoryError('invalid_state', 'accepted delivery needs an explicit specification revision')
+      const previousReview = head.latest_submission_id ? (await client.query(`SELECT s.submission_id,s.version,s.spec_revision,d.decision,d.reason
+        FROM team_task_submissions s LEFT JOIN team_acceptance_decisions d USING(submission_id)
+        WHERE s.submission_id=$1 AND s.task_id=$2`, [head.latest_submission_id, input.taskId])).rows[0] : null
+      // Freeze the human's new execution intent and the review it responds to
+      // in the immutable source event. Repeating the goal alone lets a resumed
+      // model reasonably answer that its previous delivery is already done.
+      const execution = '这是本任务的新一次显式执行。请按当前冻结规格重新完成工作，并将交付文件写入本次调用指定的新目录。历史目录中的文件不能代替本次交付；不要覆盖历史版本。此前执行中的“写完即停止”仅结束此前那次执行，本次需要新的交付。工具权限和人工验收要求保持不变。'
+      const review = previousReview ? `\n\n上一版交付与审核意见（历史参考，不能替代当前规格）：\n${JSON.stringify(previousReview)}` : ''
+      const message = await this.appendMessage({ sessionId: input.sessionId, actorUserId: input.actorUserId, requestId: `task-${randomUUID()}`,
+        content: `${execution}${review}\n\n任务目标：\n${spec.goal}\n\n交付与验收：\n${spec.acceptance}${frozenTaskRequirementsText(task)}`, targetMode: 'offers', targetOfferIds: input.target_offer_ids, referenceEventId: null, contextVersion: input.context_version }, client)
+      await client.query('UPDATE collaboration_events SET request_id=NULL WHERE event_id=$1', [message.event.id]); message.event.request_id = null
+      await client.query('UPDATE collaboration_calls SET task_id=$2 WHERE call_id=ANY($1::text[])', [message.call_ids, input.taskId])
+      await client.query('INSERT INTO team_call_delivery_specs(call_id,task_id,spec_revision) SELECT unnest($1::text[]),$2,$3', [message.call_ids, input.taskId, head.spec_revision])
+      await client.query('UPDATE team_task_delivery_heads SET revision=revision+1 WHERE task_id=$1', [input.taskId])
+      await client.query("UPDATE team_tasks SET state='in_progress',revision=revision+1,updated_at=NOW() WHERE task_id=$1", [input.taskId])
+      const response = { task_id: input.taskId, spec_revision: input.spec_revision, revision: Number(head.revision) + 1, ...message }
+      await client.query('INSERT INTO team_delivery_receipts(task_id,actor_user_id,request_id,request_hash,operation,response) VALUES($1,$2,$3,$4,$5,$6::jsonb)', [input.taskId, input.actorUserId, input.request_id, fingerprint, 'execute_task', JSON.stringify(response)])
+      await client.query('INSERT INTO team_delivery_outbox(event_id,task_id,kind,payload) VALUES($1,$2,$3,$4::jsonb)', [randomUUID(), input.taskId, 'execution_requested', JSON.stringify({ call_ids: message.call_ids, spec_revision: input.spec_revision })])
+      return { response, replayed: false }
+    })
+    if (!result.replayed) this.notifier.dispatch?.(result.response.call_ids)
+    return result.response
   }
 
   async listEvents(sessionId: string, actorUserId: number, afterSeq: number, limit: number) {
@@ -610,7 +691,7 @@ export class TeamSessionService {
           daemon_id: binding.daemon_id, hostname: binding.hostname, status: binding.status,
           agents: binding.agents, collaboration_capabilities: binding.collaboration_capabilities,
           team_id: binding.occupied_team_id,
-        }, binding.provider, row.team_id).availability,
+        }, binding.provider, row.team_id, this.externalEnabledForTeam(row.team_id)).availability,
       })),
       created_at: iso(row.created_at),
       updated_at: iso(row.updated_at),

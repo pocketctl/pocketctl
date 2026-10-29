@@ -1,3 +1,5 @@
+import { createDeliveryWithdrawalClient } from './relay/delivery-withdrawal-client.js'
+import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-consumer.js'
 import {updateBusinessHealthGauges} from './metrics.js'
 import {createPublicationExecutor} from './governance/publication-executor.js'
 import {createAutomationRepository} from './governance/automation-repository.js'
@@ -254,6 +256,8 @@ async function main(): Promise<void> {
       http,
     })
     const feedClient = createFeedClient({ http, tokens })
+    const withdrawalClient = createDeliveryWithdrawalClient({ http, tokens })
+    const withdrawalConsumer = createDeliveryWithdrawalConsumer({ pool, signal, ...withdrawalClient })
     const snapshotClient = createSnapshotClient({ http, tokens })
     const snapshotReconciler = createSnapshotReconciler({
       pool,
@@ -294,7 +298,8 @@ async function main(): Promise<void> {
       } : {}),
     })
     feedTimer = setInterval(() => {
-      const run = feedConsumer.runOnce().then(() => undefined, loopError('feed'))
+      const run = withdrawalConsumer.runOnce().catch(loopError('delivery_withdrawals'))
+        .then(() => feedConsumer.runOnce()).then(() => undefined, loopError('feed'))
       feedInFlight.add(run)
       void run.finally(() => feedInFlight.delete(run))
     }, config.pollIntervalMs)

@@ -126,8 +126,10 @@ type SessionManager struct {
 	proc                     platform.ProcessController             // PR2: process alive/kill (was syscall; used by Task 3)
 	createDeps               createSessionDependencies
 	collaborationMu          sync.Mutex
+	agentTeams               *agentTeamsRuntime
 	collaborationBindings    map[string]collaborationNativeBinding
 	collaborationCalls       map[string]string
+	collaborationPreparing   map[string]string                   // binding -> Call while step inputs are prepared
 	collaborationRetirements map[string]*collaborationRetirement // nil value caches an absent record; successful retirement replaces it
 
 	// memoryContext is the Phase 2 context coordinator; nil until the relay
@@ -135,6 +137,10 @@ type SessionManager struct {
 	memoryContext           *memorycontext.Coordinator
 	memoryContextReady      func() bool
 	memoryContextCapability func(context.Context, string, string) memorycontext.Capability
+	teamStepInputPreparer   func(context.Context, *protocol.CollaborationAuthorization, string, string) error
+	teamStepPreparations    map[string]*teamStepPreparation
+	teamStepControlSequence uint64
+	teamStepLastControl     map[string]uint64
 	sessionHistoryReader    SessionHistoryReader
 
 	// approvals brokers PreToolUse hook approvals for non-bypass daemon sessions.

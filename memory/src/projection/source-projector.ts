@@ -3,6 +3,7 @@ import { classifyArtifact } from './artifact-classifier.js'
 import { extractCanonicalEventKey } from './event-identity.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import { adaptTeamSource, type TeamSourceProvenance } from '../episodes/team-source-adapter.js'
+import { deliveryWithdrawal } from '../episodes/delivery-withdrawal.js'
 
 const TERMINAL_TURN_STATES = new Set(['completed', 'interrupted', 'failed', 'abandoned'])
 const TURN_STATES = new Set([
@@ -67,7 +68,7 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
           SELECT feed_id::text,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,classification,data
           FROM memory_feed_inbox WHERE installation_id=$1 AND projection_state='pending'
           ORDER BY feed_id LIMIT $2`,[installationId,batchSize])
-        const rowSession=(row:InboxRow)=>adaptTeamSource(row)?.sessionId??row.session_id
+        const rowSession=(row:InboxRow)=>{ deliveryWithdrawal(row); return adaptTeamSource(row)?.sessionId??row.session_id }
         const sessions=[...new Set(observed.rows.flatMap(row=>{const session=rowSession(row);return session?[session]:[]}))].sort()
         for(const session of sessions)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,session])
         await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
@@ -121,6 +122,17 @@ async function projectRow(
   stabilizationMs: number,
   purge?: SourceProjectorOptions['purge'],
 ): Promise<number> {
+  const withdrawal = deliveryWithdrawal(row)
+  if (withdrawal) {
+    if (!purge) throw new Error('Team delivery withdrawal requires purge support')
+    await client.query(`INSERT INTO memory_team_delivery_withdrawals(team_id,team_session_id,submission_id,decision_id)
+      VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+    [withdrawal.teamId, withdrawal.teamSessionId, withdrawal.submissionId, withdrawal.decisionId])
+    // Index rows are derived; current reads also check the durable fence. No
+    // foreign Claim/installation locks are taken while holding this Session.
+    await client.query(`DELETE FROM claim_search_documents d WHERE d.installation_id=$1
+      AND NOT memory_delivery_version_available(d.installation_id,d.version_id)`, [installationId])
+  }
   // Deletion topics carry the purge semantics themselves: clear the session
   // body and derived rows, then mark this row projected (the tombstone fence
   // blocks any replayed content).
@@ -128,7 +140,7 @@ async function projectRow(
     const invalidated = await purge.purgeSession({
       installationId,
       sessionId: row.session_id,
-      reason: row.topic === 'session.access.revoked.v1' ? 'access_revoked' : 'user_deleted',
+      reason: withdrawal ? 'team_delivery_withdrawn' : row.topic === 'session.access.revoked.v1' ? 'access_revoked' : 'user_deleted',
       sourceFeedId: String(row.feed_id),
     }, client)
     await client.query(
@@ -139,6 +151,14 @@ async function projectRow(
     return invalidated
   }
   const adapted = adaptTeamSource(row)
+  if (adapted?.provenance.source_version === 2) {
+    const available = (await client.query<{ available: boolean }>('SELECT memory_delivery_source_available($1::jsonb) AS available', [JSON.stringify(adapted.provenance)])).rows[0]?.available
+    if (!available) {
+      if (purge) await purge.purgeSession({ installationId, sessionId: adapted.sessionId, reason: 'team_delivery_withdrawn', sourceFeedId: String(row.feed_id) }, client)
+      await client.query("UPDATE memory_feed_inbox SET projection_state='purged',projected_at=NOW(),data='{}',classification='{}' WHERE installation_id=$1 AND feed_id=$2", [installationId, row.feed_id])
+      return 0
+    }
+  }
   const sourceRow: InboxRow & {
     origin?: 'team'
     originPosition?: string

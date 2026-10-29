@@ -49,6 +49,7 @@ export function candidateForProvider(
   daemon: DaemonAgentEvidence,
   provider: TeamProvider,
   requestedTeamId: string,
+  externalEnabled = false,
 ): TeamAgentCandidate {
   const installed = installedAgent(daemon.agents, provider)
   const online = daemon.status === 'online'
@@ -59,6 +60,7 @@ export function candidateForProvider(
   const dispatchSupported = Array.isArray(daemon.collaboration_capabilities)
     && daemon.collaboration_capabilities.includes('team_collaboration_dispatch_v1')
     && daemon.collaboration_capabilities.includes('team_collaboration_context_v1')
+    && (provider !== 'agentteams' || (externalEnabled && daemon.collaboration_capabilities.includes('team_external_agentteams_v1')))
     && (provider !== 'dsh' || daemon.collaboration_capabilities.includes('team_collaboration_dsh_v1'))
   const managedCallable = Boolean(installed && online && manageable && dispatchSupported && !occupied)
   const availability: TeamAgentAvailability = occupied

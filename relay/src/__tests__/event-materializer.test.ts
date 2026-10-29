@@ -38,6 +38,33 @@ function pools() {
 }
 
 describe('EventMaterializer', () => {
+  test('Team receipt projection failure propagates and retries even after canonical effects completed', async () => {
+    const pool = pools()
+    const input = inputFor({ type: 'collaboration_dispatch_receipt', session_id: 'ses-1', seq: 8, status: 'accepted', collaboration: { call_id: 'call-1' } })
+    const project = vi.fn().mockRejectedValueOnce(new Error('Team receipt transaction failed')).mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({ pool: pool as never, teamEventProjector: project })
+    await expect(materializer.materialize(input)).rejects.toThrow('Team receipt transaction failed')
+    pool.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('INSERT INTO events')) return { rows: [{ id: 91, inserted: false, effect_status: 'completed', effect_step: 0 }], rowCount: 1 }
+      if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
+      return { rows: [], rowCount: 1 }
+    })
+    await materializer.materialize(input)
+    expect(project).toHaveBeenCalledTimes(2)
+    expect(project).toHaveBeenLastCalledWith(input, 91)
+  })
+
+  test('deferred Team projection runs after canonical effects and cannot be skipped on replay', async () => {
+    const project = vi.fn().mockRejectedValueOnce(new Error('Team projection unavailable')).mockResolvedValue(undefined)
+    const materializer = new EventMaterializer({ pool: pools() as never, teamEventProjector: project })
+    const input = inputFor({ type: 'collaboration_context_receipt', session_id: 'ses-1', status: 'accepted' })
+    const result = await materializer.materialize(input, undefined, { deferEffects: true })
+    expect(project).not.toHaveBeenCalled()
+    await expect(result.applyEffects!()).rejects.toThrow('Team projection unavailable')
+    await result.applyEffects!()
+    expect(project).toHaveBeenCalledTimes(2)
+  })
+
   test.each([undefined, null, '', '   ', 1])('rejects session_status without a usable status (%s) before any write', async status => {
     const pool = pools()
     await expect(new EventMaterializer({ pool: pool as never }).materialize(inputFor({

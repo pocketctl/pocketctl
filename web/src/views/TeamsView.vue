@@ -2,24 +2,25 @@
   <div class="teams-view design-surface content teams-page" data-testid="teams-view">
     <div class="page-tools"><button v-if="capabilities?.writes_enabled" type="button" class="btn primary" data-testid="team-create-open" @click="openCreate"><WorkspaceIcon name="plus" class="icon small" />{{ t('team.create') }}</button></div>
 
-    <div v-if="capabilities && !capabilities.collaboration" class="capability-banner" data-testid="team-disabled">{{ t('team.disabled_copy') }}</div>
+    <div v-if="teamDisabled || capabilities && !capabilities.collaboration" class="capability-banner" data-testid="team-disabled">{{ t('team.disabled_copy') }}</div>
+    <div v-if="navigationCached" class="capability-banner" role="status">{{ t('team.offline_navigation') }} <button class="btn" @click="loadTeams">{{ t('team.retry') }}</button></div>
     <div v-if="warning" class="capability-banner warning" role="status">{{ warning }}</div>
     <div v-if="loading" class="workspace-empty">{{ t('common.loading') }}</div>
     <div v-else-if="error && !teams.length" class="workspace-empty"><strong>{{ t('team.load_failed') }}</strong><span>{{ error }}</span><button type="button" class="btn btn-secondary" @click="loadTeams">{{ t('team.retry') }}</button></div>
-    <template v-else-if="capabilities?.collaboration">
+    <template v-else-if="capabilities?.collaboration || capabilities?.reads_enabled || navigationCached">
       <div v-if="teams.length" class="row team-picker-row"><ActionSelect><select v-model="selectedTeamID" :aria-label="t('team.switcher')"><option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></ActionSelect><span class="sub">{{ t(isTeamAdmin ? 'replica.team_admin_hint' : 'replica.team_member_hint') }}</span></div>
 
       <div v-if="selectedTeam" class="team-workspace">
         <section class="team-overview team-summary card">
           <span class="team-mark"><WorkspaceIcon name="teams" class="icon" /></span><div class="grow"><h2>{{ selectedTeam.name }}</h2><p>{{ selectedTeam.description || t('team.workspace_copy') }}</p></div>
-          <div class="summary-badges team-meta"><span><strong>{{ members.length || selectedTeam.member_count }}</strong> {{ t('team.people_unit') }}</span><span><strong>{{ activeOffers.length }}</strong> Agents</span><span class="online"><strong>{{ onlineOfferCount }}</strong> {{ t('team.online') }}</span></div>
+          <div class="summary-badges team-meta"><span><strong>{{ members.length || selectedTeam.member_count }}</strong> {{ t('team.people_unit') }}</span><span><strong>{{ navigationCached ? '—' : activeOffers.length }}</strong> Agents</span><span class="online"><strong>{{ navigationCached ? '—' : onlineOfferCount }}</strong> {{ t('team.online') }}</span></div>
         </section>
         <div class="team-tabs tabs" role="tablist" :aria-label="t('team.workspace_tabs')">
-          <button v-for="tab in tabs" :id="`team-tab-${tab}`" :key="tab" type="button" role="tab" :aria-selected="activeTab === tab" :class="{ active: activeTab === tab }" :data-testid="`team-tab-${tab}`" @click="setTab(tab)">{{ t(tab==='sessions'?'replica.shared_sessions':`team.tab.${tab}`) }}</button>
+          <button v-for="tab in tabs" :id="`team-tab-${tab}`" :key="tab" type="button" role="tab" :disabled="navigationCached && tab !== 'tasks'" :aria-selected="activeTab === tab" :class="{ active: activeTab === tab }" :data-testid="`team-tab-${tab}`" @click="setTab(tab)">{{ t(tab==='sessions'?'replica.shared_sessions':`team.tab.${tab}`) }}</button>
         </div>
 
         <div v-if="workspaceLoading" class="workspace-empty compact">{{ t('common.loading') }}</div>
-        <TeamTasksPanel v-else-if="activeTab === 'tasks'" :key="selectedTeam.id" :team-id="selectedTeam.id" :team-creator-id="selectedTeam.creator_user_id" :current-user-id="currentUserID" :writes-enabled="teamWritesEnabled" :members="members" :sessions="sessions" @create-session="newSessionTaskID = $event; newSessionOpen = true" />
+        <TeamTasksPanel :readiness-enabled="capabilities?.task_readiness_v1===true" :initial-task-id="typeof route.query.task==='string'?route.query.task:undefined" v-else-if="activeTab === 'tasks'" :key="selectedTeam.id" :team-id="selectedTeam.id" :team-creator-id="selectedTeam.creator_user_id" :current-user-id="currentUserID" :writes-enabled="teamWritesEnabled" :members="members" :sessions="sessions" @create-session="newSessionTaskID = $event; newSessionOpen = true" @access-denied="handleTeamRemoved" />
         <section v-else-if="activeTab === 'sessions'" class="sessions-panel" data-testid="team-sessions-panel">
           <div class="panel-intro module-intro"><div><h2>{{ t('replica.shared_sessions') }}</h2><p>{{ t('replica.team_sessions_copy') }}</p></div><button v-if="teamWritesEnabled" class="btn primary" @click="newSessionTaskID = undefined; newSessionOpen = true"><WorkspaceIcon name="plus" class="icon small" />{{ t('workspace.new_shared_session') }}</button></div>
           <div v-if="sessions.length" class="session-list card">
@@ -58,9 +59,12 @@
 </template>
 
 <script setup lang="ts">
+import { loadTeamNavigation } from '../services/teamNavigationCache'
+import { teamDeliveryCache, deliveryCacheScope } from '../services/teamDeliveryCache'
+import { getRelayOrigin } from '../composables/useEnv'
 import ActionSelect from '../components/ActionSelect.vue'
 import WorkspaceIcon from '../components/WorkspaceIcon.vue'
-import { computed, onMounted, ref, watch, inject } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch, inject } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import TeamSessionCreateDialog from '../components/team/TeamSessionCreateDialog.vue'
 import TeamCreateDialog from '../components/team/TeamCreateDialog.vue'
@@ -87,51 +91,81 @@ const tabs = ['tasks', 'sessions', 'members'] as const
 type TeamTab = typeof tabs[number]
 const triggerTeamCreate=inject<{value:number}>('triggerTeamCreate',{value:0})
 watch(()=>triggerTeamCreate.value,value=>{if(value>0 && capabilities.value?.writes_enabled)void openCreate()})
-const route = useRoute(), router = useRouter(), { user } = useAuth(), { t } = useLocale()
+const route = useRoute(), router = useRouter(), { user, doRefreshToken, canReadOfflineTeams } = useAuth(), { t } = useLocale()
 const capabilities = ref<TeamCapabilities | null>(null), teams = ref<TeamSummary[]>([]), selectedTeamID = ref(''), activeTab = ref<TeamTab>('tasks')
 const members = ref<TeamMember[]>([]), offers = ref<TeamAgentOffer[]>([]), invitations = ref<TeamInvitation[]>([]), candidates = ref<TeamAgentCandidate[]>([]), sessions = ref<TeamSessionSummary[]>([])
 const loading = ref(true), workspaceLoading = ref(false), error = ref(''), warning = ref(''), createOpen = ref(false), creating = ref(false), createError = ref(''), createCandidates = ref<TeamAgentCandidate[]>([]), createCandidatesLoading = ref(false)
-let workspaceGeneration = 0
+let workspaceGeneration = 0, directoryGeneration = 0
+const navigationCached = ref(false), teamDisabled = ref(false)
+const navigationScope = () => deliveryCacheScope(currentUserID.value, getRelayOrigin())
 const currentUserID = computed(() => user.value?.id ?? 0)
 const selectedTeam = computed(() => teams.value.find(team => team.id === selectedTeamID.value) ?? null)
-const teamWritesEnabled=computed(()=>capabilities.value?.writes_enabled===true && !workspaceLoading.value && members.value.find(member=>member.user_id===currentUserID.value)?.role!=='viewer')
+const teamWritesEnabled=computed(()=>!navigationCached.value && capabilities.value?.writes_enabled===true && !workspaceLoading.value && members.value.find(member=>member.user_id===currentUserID.value)?.role!=='viewer')
 const isTeamAdmin = computed(() => selectedTeam.value?.creator_user_id === currentUserID.value || members.value.find(member => member.user_id === currentUserID.value)?.role === 'admin')
 const activeOffers = computed(() => offers.value.filter(offer => offer.state === 'active'))
 const onlineOfferCount = computed(() => activeOffers.value.filter(offer => offer.online).length)
 function message(failure: unknown): string { return failure instanceof Error ? failure.message : t('common.error') }
 
 async function loadTeams(): Promise<void> {
-  loading.value = true; error.value = ''
+  const generation = ++directoryGeneration, scope = navigationScope()
+  const current = () => generation === directoryGeneration && scope === navigationScope()
+  loading.value = true; error.value = ''; capabilities.value = null; teamDisabled.value = false
   try {
-    capabilities.value = await getTeamCapabilities()
-    if (!capabilities.value.collaboration) { teams.value = []; selectedTeamID.value = ''; return }
-    const nextTeams = await listTeams()
-    teams.value = nextTeams
+    if (canReadOfflineTeams?.value) await doRefreshToken()
+    if (!current()) return
+    const snapshot = await loadTeamNavigation({ scope, kind: 'directory', id: 'teams', team: '', current, load: async () => {
+      const nextCapabilities = await getTeamCapabilities()
+      if (!nextCapabilities.collaboration && !nextCapabilities.reads_enabled) { teamDisabled.value = true; throw Object.assign(new Error(t('team.disabled_copy')), { status: 403 }) }
+      const result = await listTeams()
+      if (current()) capabilities.value = nextCapabilities
+      return result
+    } })
+    if (!current()) return
+    navigationCached.value = snapshot.cached
+    if (snapshot.cached) { capabilities.value = null; activeTab.value = 'tasks' }
+    teams.value = snapshot.data
     const queryTeam = typeof route.query.team === 'string' ? route.query.team : ''
-    const nextID = nextTeams.some(team => team.id === queryTeam) ? queryTeam : nextTeams[0]?.id ?? ''
-    selectedTeamID.value = nextID
-  } catch (failure) { error.value = message(failure) }
-  finally { loading.value = false }
+    const nextID = teams.value.some(team => team.id === queryTeam) ? queryTeam : teams.value[0]?.id ?? ''
+    if (selectedTeamID.value === nextID) await loadWorkspace()
+    else selectedTeamID.value = nextID
+  } catch (failure) { if (current()) error.value = message(failure) }
+  finally { if (current()) loading.value = false }
+}
+function navigationRevoked(event: Event) {
+  const detail = (event as CustomEvent).detail
+  if (detail?.scope && detail.scope !== navigationScope() || detail?.filesOnly || detail?.task || detail?.session) return
+  workspaceGeneration++; teams.value = []; selectedTeamID.value = ''; members.value = []; sessions.value = []
+  offers.value = []; invitations.value = []; candidates.value = []; capabilities.value = null
+  navigationCached.value = false; createOpen.value = false; newSessionOpen.value = false
 }
 
 async function loadWorkspace(): Promise<void> {
   const teamID = selectedTeamID.value
+  const scope = navigationScope()
   const generation = ++workspaceGeneration
   const canManageInvitations = selectedTeam.value?.creator_user_id === currentUserID.value
   members.value = []; offers.value = []; invitations.value = []; candidates.value = []; sessions.value = []
-  if (!teamID) return
+  if (!teamID || navigationCached.value) { workspaceLoading.value = false; return }
   workspaceLoading.value = true; error.value = ''
   try {
     const [team, nextMembers, nextOffers, nextInvitations, nextCandidates, nextSessions] = await Promise.all([
       getTeam(teamID), listTeamMembers(teamID), listTeamAgentOffers(teamID), canManageInvitations ? listTeamInvitations(teamID) : Promise.resolve([]), listTeamAgentCandidates(teamID), listTeamSessions(teamID),
     ])
-    if (generation !== workspaceGeneration || selectedTeamID.value !== teamID) return
+    if (generation !== workspaceGeneration || selectedTeamID.value !== teamID || scope !== navigationScope()) return
     const managedInvitations = !canManageInvitations && nextMembers.find(member => member.user_id === currentUserID.value)?.role === 'admin'
       ? await listTeamInvitations(teamID) : nextInvitations
-    if (generation !== workspaceGeneration || selectedTeamID.value !== teamID) return
+    if (generation !== workspaceGeneration || selectedTeamID.value !== teamID || scope !== navigationScope()) return
     teams.value = teams.value.map(current => current.id === team.id ? team : current)
     members.value = nextMembers; offers.value = nextOffers; invitations.value = managedInvitations; candidates.value = nextCandidates; sessions.value = nextSessions
-  } catch (failure) { if (generation === workspaceGeneration) error.value = message(failure) }
+  } catch (failure) {
+    if (generation === workspaceGeneration && scope === navigationScope()) {
+      error.value = message(failure)
+      if ([401, 403, 404].includes((failure as { status?: number })?.status ?? 0)) {
+        await teamDeliveryCache.purge(scope, { team: teamID }).catch(() => {})
+        workspaceLoading.value = false
+      }
+    }
+  }
   finally { if (generation === workspaceGeneration) workspaceLoading.value = false }
 }
 
@@ -161,8 +195,10 @@ watch(selectedTeamID, () => { void loadWorkspace() })
 onMounted(() => {
   const requestedTab = typeof route.query.tab === 'string' ? route.query.tab : ''
   if (tabs.includes(requestedTab as TeamTab)) activeTab.value = requestedTab as TeamTab
+  window.addEventListener('team-delivery-cache-revoked', navigationRevoked)
   void loadTeams()
 })
+onBeforeUnmount(() => { directoryGeneration++; workspaceGeneration++; window.removeEventListener('team-delivery-cache-revoked', navigationRevoked) })
 </script>
 
 <style scoped>

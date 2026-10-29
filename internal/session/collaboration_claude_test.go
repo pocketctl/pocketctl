@@ -76,12 +76,24 @@ func TestCollaborationClaudeRegistersBeforePrintAndPreservesHiddenContext(t *tes
 		time.Sleep(time.Millisecond)
 	}
 	auth := collaborationAuth("message", "second")
+	secondText := "SECOND_CALL_FROZEN_SPEC"
+	secondDigest := sha256.Sum256([]byte(secondText))
+	shared = &protocol.CollaborationContext{SchemaVersion: 1, ContextVersion: 2,
+		ContentHash: strings.Repeat("b", 64), PayloadHash: hex.EncodeToString(secondDigest[:]), StableText: secondText}
 	if err := sm.DispatchCollaborationMessage(context.Background(), auth, shared, id, "SECOND_EXACT_INPUT", "second", "second"); err != nil {
 		t.Fatal(err)
 	}
 	specs, _ = starter.snapshot()
 	if len(specs) != 2 || !strings.Contains(strings.Join(specs[1].Args, " "), "--resume "+id) {
 		t.Fatalf("continuation: %v", specs)
+	}
+	if joined := strings.Join(specs[1].Args, " "); strings.Contains(joined, text) || !strings.Contains(joined, secondText) {
+		t.Fatal("continuation must carry only the current Call's frozen context")
+	}
+	for _, spec := range specs {
+		if !strings.Contains(strings.Join(spec.Args, " "), "--system-prompt-snapshot off") {
+			t.Fatal("Team Call must refresh frozen context on both first launch and resume")
+		}
 	}
 	if err := sm.DispatchCollaborationMessage(context.Background(), auth, shared, id, "SECOND_EXACT_INPUT", "second", "second"); !errors.Is(err, ErrCollaborationDuplicateCall) {
 		t.Fatalf("duplicate: %v", err)
@@ -155,5 +167,62 @@ func TestCollaborationClaudeRegistrationFailureNeverExecutes(t *testing.T) {
 	}
 	if len(sm.sessions) != 0 {
 		t.Fatal("failed receiver reservation survived")
+	}
+}
+
+func TestConfiguredClaudeDispatchAfterRestartBeforeDiscovery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	installSentinelResumeCLI(t, "claude")
+	home := os.Getenv("HOME")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"model":"sonnet","env":{"ANTHROPIC_DEFAULT_SONNET_MODEL":"test-model"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 64))
+	policy, err := NewCwdPolicy([]string{t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm.SetCwdPolicy(policy)
+	cap := sm.TeamConfigCapabilities(context.Background(), adapter.AgentClaude)
+	if cap == nil {
+		t.Fatal("missing fixture capability")
+	}
+	auth := collaborationAuth("message", "restart-configured")
+	auth.RequestedConfig = &protocol.TeamRuntimeConfig{Model: "test-model", PermissionProfile: "acceptEdits"}
+	auth.ConfigHash, auth.ConfigRevision, auth.CapabilityRevision = auth.RequestedConfig.Hash(), 1, cap.Revision
+	id := "configured-claude-before-discovery"
+	cwd := collaborationWorkspace(policy.Roots()[0], auth.BindingID)
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binding := collaborationNativeBinding{NativeSessionID: id, TeamSessionID: auth.TeamSessionID, BindingID: auth.BindingID,
+		BindingRevision: auth.BindingRevision, OfferID: auth.OfferID, OfferRevision: auth.OfferRevision,
+		OwnerUserID: auth.OwnerUserID, DaemonID: auth.DaemonID, Agent: adapter.AgentClaude,
+		RuntimeModel: "test-model", RuntimePermission: "acceptEdits", ConfigHash: auth.ConfigHash, ConfigRevision: 1}
+	if err := persistCollaborationNative(binding, cwd); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".claude", "projects", regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(cwd, "-"))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	starter := newRecordingResumeStarter()
+	sm.setResumeStarter(starter.call)
+	defer starter.finishAll()
+	if err := sm.DispatchCollaborationMessage(context.Background(), auth, nil, id, "resume exact owned Claude", "restart-configured", "restart-configured"); err != nil {
+		t.Fatal(err)
+	}
+	specs, _ := starter.snapshot()
+	if len(specs) != 1 || !strings.Contains(strings.Join(specs[0].Args, " "), "--resume "+id) {
+		t.Fatal("must resume the existing native identity exactly once")
+	}
+	if receipt := sm.TeamConfigReceipt(context.Background(), auth, id); receipt == nil || receipt.ConfigHash != auth.ConfigHash {
+		t.Fatal("restored runtime config differs from frozen binding")
 	}
 }

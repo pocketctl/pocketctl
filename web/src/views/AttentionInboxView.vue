@@ -1,6 +1,6 @@
 <template>
   <div class="attention-inbox-view design-surface content attention-page" :class="{ 'is-mobile': isMobile }">
-    <div v-if="!store.isAvailable.value && !notifications.available.value && !teamInvitations.length" class="attention-disabled" data-testid="attention-disabled">
+    <div v-if="!store.isAvailable.value && !notifications.available.value && !teamInvitations.length && !deliveryInbox.available.value" class="attention-disabled" data-testid="attention-disabled">
       <div class="empty-mark">P</div>
       <p>{{ t('attention.unavailable_copy') }}</p>
     </div>
@@ -29,6 +29,7 @@
           <button type="button" :class="{ active: kind === 'question' }" data-testid="attention-kind-question" @click="kind = 'question'">{{ t('attention.kind_question') }}</button>
           <button type="button" :class="{ active: kind === 'recovery' }" data-testid="attention-kind-recovery" @click="kind = 'recovery'">{{ t('attention.kind_recovery') }}</button>
           <button v-if="scope.type === 'global'" type="button" :class="{ active: kind === 'invitation' }" data-testid="attention-kind-invitation" @click="kind = 'invitation'">{{ t('team.inbox_invitation') }}</button>
+          <button v-if="deliveryInbox.available.value && scope.type==='global'" type="button" :class="{active:kind==='delivery'}" data-testid="attention-kind-delivery" @click="kind='delivery';lifecycle='active'">任务验收</button>
           <button v-if="notifications.available.value" type="button" :class="{ active: kind === 'notification' }" data-testid="attention-kind-notification" @click="kind = 'notification'; lifecycle = 'active'">{{ t('attention.notification.category') }}</button>
         </div>
       </div>
@@ -43,6 +44,7 @@
               <AttentionRecoveryItemRow v-else-if="entry.type === 'recovery'" :item="entry.item"
                 :selected="selectedKey === entry.key" @select="selectRecovery(entry.item)" />
               <SystemNotificationRow v-else-if="entry.type === 'notification'" :item="entry.item" :selected="selectedKey === entry.key" @select="selectNotification(entry.item)" />
+              <button v-else-if="entry.type==='delivery'" type="button" class="invitation-row" :class="{selected:selectedKey===entry.key}" :data-delivery-id="entry.item.item_id" @click="selectDelivery(entry.item)"><span class="invite-mark">T</span><span><strong>{{ entry.item.title }}</strong><small>{{ entry.item.attempt_id ? '步骤交付' : '交付' }} v{{ entry.item.version }} · {{ entry.item.kind==='review_required'?'待验收':'需要修改' }}</small></span><span class="invite-arrow">›</span></button>
               <button v-else type="button" class="invitation-row" :class="{ selected: selectedKey === entry.key }" :data-invitation-id="entry.item.id" @click="selectInvitation(entry.item)">
                 <span class="invite-mark">T</span><span><strong>{{ t('team.invited_to', { team: entry.item.team_name || entry.item.team_id }) }}</strong><small>{{ entry.item.invited_by_label || t('team.inbox_invitation') }}</small></span><span class="invite-arrow">›</span>
               </button>
@@ -55,6 +57,7 @@
         <section v-if="!isMobile && !selectedEntry" class="detail-placeholder queue-detail">
           <span>⌁</span><strong>{{ t('attention.select_item') }}</strong><small>{{ t('attention.select_item_copy') }}</small>
         </section>
+        <section v-else-if="selectedDelivery" class="delivery-inbox-detail"><button v-if="isMobile" class="btn" @click="selectedKey=''">返回提醒</button><h2>{{ selectedDelivery.title }}</h2><RouterLink :to="{path:'/teams',query:{team:selectedDelivery.team_id,tab:'tasks',task:selectedDelivery.task_id}}">打开团队任务 ›</RouterLink><TeamTaskDeliveryPanel :key="selectedDelivery.item_id" :task-id="selectedDelivery.task_id" :attempt-id="selectedDelivery.attempt_id || undefined" :current-user-id="user?.id||0" @changed="deliveryInbox.refresh()" @revoked="revokeDelivery" /></section>
         <AttentionInboxDetail v-else-if="selectedItem" :item="selectedItem" :actions="store.allowedActions(selectedItem)"
           :read-only="store.capabilities.value.mode === 'observe'" :mobile="isMobile" :busy="busy"
           @submit="submit" @snooze="snooze" @restore="restore" @open-session="openSession" @close="selectedKey = ''" />
@@ -70,6 +73,7 @@
           <div><button type="button" class="btn btn-secondary" :disabled="busy" data-testid="team-invitation-decline" @click="respondInvitation('decline')">{{ t('team.decline') }}</button><button type="button" class="btn btn-primary" :disabled="busy" data-testid="team-invitation-accept" @click="respondInvitation('accept')">{{ t('team.accept') }}</button></div>
         </section>
       </div>
+      <p v-if="deliveryInbox.error.value" class="inbox-error" role="status">{{ deliveryInbox.error.value }}</p>
       <p v-if="store.errorMessage.value || invitationError" class="inbox-error" role="status">{{ invitationError || store.errorMessage.value }}</p>
       <p v-if="notifications.error.value && notifications.available.value" class="inbox-error" role="status">{{ t('attention.notification.load_failed') }}</p>
     </template>
@@ -77,6 +81,11 @@
 </template>
 
 <script setup lang="ts">
+import {useAuth} from '../composables/useAuth'
+import {useTeamDeliveryInbox} from '../composables/useTeamDeliveryInbox'
+import {markDeliverySeen} from '../services/teamDeliveryClient'
+import type {DeliveryReminder} from '../types/teamDelivery'
+import TeamTaskDeliveryPanel from '../components/team/TeamTaskDeliveryPanel.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AttentionInboxDetail from '../components/attention-inbox/AttentionInboxDetail.vue'
@@ -100,8 +109,9 @@ const route = useRoute()
 const router = useRouter()
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
+const {user}=useAuth()
 const lifecycle = ref<AttentionLifecycleFilter>('active')
-const kind = ref<'all' | AttentionInboxDisplayKind | 'invitation' | 'notification'>('all')
+const kind = ref<'all' | AttentionInboxDisplayKind | 'invitation' | 'notification' | 'delivery'>('all')
 const selectedKey = ref('')
 const busy = ref(false)
 const teamInvitations = ref<TeamInvitation[]>([])
@@ -111,11 +121,13 @@ const lifecycleOptions: AttentionLifecycleFilter[] = ['active', 'snoozed', 'hand
 const scope = computed<AttentionInboxScope>(() => typeof route.query.daemon_id === 'string' && route.query.daemon_id
   ? { type: 'daemon', daemonId: route.query.daemon_id, daemonName: typeof route.query.daemon_name === 'string' ? route.query.daemon_name : undefined }
   : { type: 'global' })
+const deliveryInbox=useTeamDeliveryInbox(()=>scope.value.type==='global')
 const scopeCopy = computed(() => scope.value.type === 'daemon'
   ? t('attention.daemon_scope', { name: scope.value.daemonName || scope.value.daemonId })
   : t('attention.global_scope'))
 const visibleEntries = computed(() => {
   const entries: Array<
+    | { type: 'delivery'; key: string; item: DeliveryReminder }
     | { type: 'item'; key: string; item: AttentionInboxItem }
     | { type: 'recovery'; key: string; item: AttentionRecoveryItem }
     | { type: 'invitation'; key: string; item: TeamInvitation }
@@ -139,6 +151,7 @@ const visibleEntries = computed(() => {
       : lifecycle.value === 'active' ? !item.read_at : lifecycle.value === 'handled' && !!item.read_at)
       .map(item => ({ type: 'notification' as const, key: `notification:${item.notification_id}`, item })))
   }
+  if(scope.value.type==='global'&&lifecycle.value==='active'&&(kind.value==='all'||kind.value==='delivery'))entries.push(...deliveryInbox.items.value.map(item=>({type:'delivery' as const,key:`delivery:${item.item_id}`,item})))
   return entries
 })
 const selectedItem = computed(() => selectedKey.value.startsWith('item:')
@@ -148,8 +161,11 @@ const selectedRecovery = computed(() => selectedKey.value.startsWith('recovery:'
 const selectedInvitation = computed(() => selectedKey.value.startsWith('invitation:')
   ? teamInvitations.value.find(invitation => invitation.id === selectedKey.value.slice(11)) : undefined)
 const selectedNotification = computed(() => selectedKey.value.startsWith('notification:') ? notifications.items.value.find(item => item.notification_id === selectedKey.value.slice(13)) : undefined)
-const selectedEntry = computed(() => selectedItem.value ?? selectedRecovery.value ?? selectedInvitation.value ?? selectedNotification.value)
-const totalAttentionCount = computed(() => store.attentionCount(scope.value) + (scope.value.type === 'global' ? teamInvitations.value.length : 0))
+const selectedDelivery=computed(()=>selectedKey.value.startsWith('delivery:')?deliveryInbox.items.value.find(i=>i.item_id===selectedKey.value.slice(9)):undefined)
+function revokeDelivery(){const team=selectedDelivery.value?.team_id;selectedKey.value='';if(team)deliveryInbox.revokeTeam(team)}
+async function selectDelivery(item:DeliveryReminder){selectedKey.value=`delivery:${item.item_id}`;try{await markDeliverySeen(item.item_id)}catch{await deliveryInbox.refresh()}}
+const selectedEntry = computed(() => selectedItem.value ?? selectedRecovery.value ?? selectedInvitation.value ?? selectedNotification.value ?? selectedDelivery.value)
+const totalAttentionCount = computed(() => store.attentionCount(scope.value) + (scope.value.type === 'global' ? teamInvitations.value.length + deliveryInbox.items.value.length : 0))
 const queueTitle = computed(() => kind.value === 'notification' ? t('attention.notification.category') : lifecycle.value === 'active' ? t('attention.needs_action') : lifecycleLabel(lifecycle.value))
 const hasMoreHint = computed(() => (kind.value !== 'notification' && store.hasMore(scope.value)) || ((kind.value === 'notification' || kind.value === 'all') && !!notifications.nextCursor.value))
 async function loadMore() {
@@ -265,6 +281,7 @@ onBeforeUnmount(() => { if (!props.notificationStore) notifications.stop() })
 </script>
 
 <style scoped>
+.delivery-inbox-detail{padding:24px;min-width:0;overflow:auto}.delivery-inbox-detail h2{font-size:17px}.delivery-inbox-detail>a{color:var(--accent);font-size:12px}
 .attention-inbox-view { width: min(1280px, calc(100% - 48px)); min-height: calc(100dvh - 118px); margin: 0 auto; padding: 31px 0 44px; color: var(--fg); }
 .inbox-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 21px; }
 .inbox-scope { margin: 0; color: var(--fg-secondary); font-size: 13px; }

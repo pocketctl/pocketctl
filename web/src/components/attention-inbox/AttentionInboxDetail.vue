@@ -97,6 +97,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { teamProviderLabel } from '../../utils/teamProvider'
 import type { AttentionActionID, AttentionInboxAction, AttentionInboxItem, AttentionQuestion, AttentionQuestionOption } from '../../types/attentionInbox'
 
 const props = defineProps<{
@@ -117,7 +118,7 @@ const { t } = useLocale()
 const selectedAnswers = ref<string[][]>([])
 const customAnswers = ref<string[]>([])
 const questions = computed(() => props.item.context.questions ?? [])
-const providerLabel = computed(() => props.item.provider === 'opencode' ? 'OpenCode' : 'Codex')
+const providerLabel = computed(() => teamProviderLabel(props.item.provider))
 function nonEmptyText(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value : ''
 }

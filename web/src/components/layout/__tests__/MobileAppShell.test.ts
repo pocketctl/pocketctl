@@ -1,6 +1,6 @@
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { describe, expect, test, vi } from 'vitest'
+import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
 import { computed, ref } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import logoDark from '../../../assets/logo-github-org.svg'
@@ -16,6 +16,9 @@ const sidebarDaemons = ref(new Map<string, { online: boolean }>())
 const send = vi.fn()
 const teamEnabled = ref(false)
 const accessToken = ref('fixture-token')
+const canReadOfflineTeams = ref(false)
+beforeEach(() => { vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('isolated shell test')) })
+afterEach(() => { vi.restoreAllMocks() })
 let realTeamAccess: ReturnType<typeof createTeamAccessController> | undefined
 
 vi.mock('../../../composables/useTeamAccess', async importOriginal => ({
@@ -28,10 +31,12 @@ vi.mock('../../../composables/useResponsiveLayout', () => ({
 }))
 vi.mock('../../../composables/useEnv', () => ({
   isPwaMobileShellEnabled: () => true,
+  getRelayOrigin: () => '',
 }))
 vi.mock('../../../composables/useAuth', () => ({
   useAuth: () => ({
     isLoggedIn: loggedIn,
+    canReadOfflineTeams,
     accessToken,
     user: ref({ display_name: 'Mobile User', plan: 'free' }),
   }),
@@ -60,6 +65,19 @@ function testRouter(path = '/sessions') {
 }
 
 describe('mobile application shell', () => {
+  test('offline Team cache keeps normal navigation without showing new-session actions', async () => {
+    const previousMobile = mobile.value, previousLogin = loggedIn.value
+    mobile.value = true; loggedIn.value = false; canReadOfflineTeams.value = true
+    const router = testRouter('/teams'); await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    try {
+      await wrapper.get('.mobile-menu-trigger').trigger('click'); await flushPromises()
+      expect(wrapper.find('a[href="/teams"]').exists()).toBe(true)
+      expect(wrapper.find('.drawer-new-session').exists()).toBe(false)
+      expect(wrapper.find('a[href="/memory"]').exists()).toBe(false)
+    } finally { wrapper.unmount(); mobile.value = previousMobile; loggedIn.value = previousLogin; canReadOfflineTeams.value = false }
+  })
   test('loads sidebar host counts on connection and refreshes them after reconnecting on Settings', async () => {
     const previousMobile = mobile.value
     mobile.value = false

@@ -1,3 +1,5 @@
+import { parseAcceptedDeliveryProvenance, type AcceptedDeliveryProvenance } from './accepted-delivery-source.js'
+
 /**
  * Deterministic Work Episode compiler. No model calls, no body text, no
  * natural language: the summary is statistics and ID references only, so the
@@ -64,6 +66,7 @@ export interface EpisodeSourceReference {
   team_call_id: string
   context_version: number
   read_scope: Record<string, unknown>
+  accepted_delivery?: AcceptedDeliveryProvenance
 }
 
 export function compileEpisode(facts: EpisodeFacts): CompiledEpisode {
@@ -116,6 +119,8 @@ export function sourceReferenceFromEvents(
       || typeof source.context_version !== 'number'
       || source.read_scope === null || typeof source.read_scope !== 'object'
       || Array.isArray(source.read_scope)) continue
+    const acceptedDelivery = source.source_version === 2 ? parseAcceptedDeliveryProvenance(source.accepted_delivery) : null
+    if (source.source_version === 2 && !acceptedDelivery) continue
     return {
       source_kind: 'team_session',
       source_version: source.source_version,
@@ -124,6 +129,7 @@ export function sourceReferenceFromEvents(
       team_call_id: source.team_call_id,
       context_version: source.context_version,
       read_scope: source.read_scope as Record<string, unknown>,
+      ...(acceptedDelivery ? { accepted_delivery: acceptedDelivery } : {}),
     }
   }
   return null

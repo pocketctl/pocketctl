@@ -40,6 +40,7 @@ import { AuthLeaseManager } from './ingress/auth-lease.js';
 import type { AuthLeaseOptions } from './ingress/auth-lease.js';
 import { InboxRepository } from './ingress/inbox-repository.js';
 import { IngressController, type IngressTarget } from './ingress/controller.js';
+import { createTeamEventProjector } from './team/event-projector.js';
 import { EventMaterializer } from './materialization/event-materializer.js';
 import {
   isSessionDocumentArtifactEvent,
@@ -83,7 +84,7 @@ function daemonAgentInventory(msg: any): { agents: any[]; collaborationCapabilit
     }));
 
     const collaborationCapabilities = Array.isArray(msg.capabilities)
-      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1' || capability === 'team_collaboration_dsh_v1' || capability === 'team_collaboration_config_v2' || capability === 'team_private_interactions_v2'))] as string[]
+      ? [...new Set(msg.capabilities.filter((capability: unknown) => capability === 'team_collaboration_dispatch_v1' || capability === 'team_collaboration_context_v1' || capability === 'team_collaboration_reconcile_v1' || capability === 'team_collaboration_dsh_v1' || capability === 'team_collaboration_config_v2' || capability === 'team_private_interactions_v2' || capability === 'team_task_delivery_v1' || capability === 'team_task_steps_v1' || capability === 'team_external_agentteams_v1' || capability === 'team_external_agentteams_steps_v1'))] as string[]
       : [];
     return { agents, collaborationCapabilities };
 }
@@ -183,7 +184,7 @@ interface DaemonRevocationGateState {
 export interface RouterOptions {
   teamSubscriptionAuthorizer?: TeamSubscriptionAuthorizer;
   teamDispatchBroker?: {
-    observeDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number): void;
+    handleDaemonEvent(daemonId: string, ownerUserId: number, message: Record<string, unknown>, daemonGeneration?: number, materializedEventId?: number | null): Promise<void>;
     handleDaemonDisconnected(daemonId: string): Promise<void>;
   };
   /** Session-bound context grant broker (Phase 2); absent disables the leg. */
@@ -456,6 +457,7 @@ export class Router {
       pool: this.ingestPool,
       effectPool: this.pool,
       writeTokenUsageFacts: this.writeTokenUsageFacts,
+      teamEventProjector: this.teamDispatchBroker ? createTeamEventProjector(this.teamDispatchBroker) : undefined,
       extensionJournalSink: this.extensionJournalSink,
       hooks: {
         bindSession: (sessionId, daemonId) => this.sessionToDaemon.set(sessionId, daemonId),
@@ -1440,8 +1442,13 @@ export class Router {
       return;
     }
     if (!daemon) return;
-    void this.teamDispatchBroker?.handleDaemonDisconnected(daemonId)
-      .catch((error) => console.error('[team-dispatch] disconnect reconciliation failed', error));
+    // Closing our sockets during a Relay restart is not evidence that the
+    // daemon or its accepted native invocation disappeared. Preserve that
+    // durable state; actual daemon loss outside a drain remains uncertain.
+    if (!this.shuttingDown) {
+      void this.teamDispatchBroker?.handleDaemonDisconnected(daemonId)
+        .catch((error) => console.error('[team-dispatch] disconnect reconciliation failed', error));
+    }
     this.cancelDaemonRevocationGate(daemon.registrationId);
 
     // Clean up any pending takeover timer
@@ -1762,6 +1769,7 @@ export class Router {
         inboxId: 0,
         userId: this.daemons.get(daemonId)?.userId ?? null,
         daemonId,
+        daemonGeneration: state?.startedAt ?? this.daemons.get(daemonId)?.startedAt,
         sessionId,
         eventType: type,
         payload,
@@ -2081,9 +2089,6 @@ export class Router {
       }
     }
     msg = sanitizeJSONBPayload(msg);
-    const collaborationDaemon = originDaemon ?? this.daemons.get(daemonId);
-    const collaborationOwner = collaborationDaemon?.userId;
-    if (collaborationOwner) this.teamDispatchBroker?.observeDaemonEvent(daemonId, collaborationOwner, msg, collaborationDaemon?.startedAt);
     if (msg.type === 'user_message_receipt') {
       logMessageReceipt(this.daemons.get(daemonId)?.userId ?? null, daemonId, msg);
     }

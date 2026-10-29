@@ -43,10 +43,37 @@ func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 	c.agentMu.RLock()
 	defer c.agentMu.RUnlock()
 	capabilities := []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1, protocol.CapabilityTeamPrivateInteractionsV2}
+	if c.teamDeliveryEnabled {
+		capabilities = append(capabilities, protocol.CapabilityTeamDeliveryV1)
+		if c.teamStepsEnabled {
+			capabilities = append(capabilities, protocol.CapabilityTeamStepsV1)
+		}
+	}
 	if c.dshTeamCallable {
 		capabilities = append(capabilities, protocol.CapabilityTeamDSHV1)
 	}
 	configs := map[string]*protocol.TeamConfigCapabilities{}
+	agents := append([]string(nil), c.agents...)
+	manageable := maps.Clone(c.agentManageable)
+	if c.agentTeamsEnabled {
+		found := false
+		for _, agent := range agents {
+			if agent == "agentteams" {
+				found = true
+			}
+		}
+		if !found {
+			agents = append(agents, "agentteams")
+		}
+		if manageable == nil {
+			manageable = map[string]bool{}
+		}
+		manageable["agentteams"] = true
+		capabilities = append(capabilities, "team_external_agentteams_v1")
+		if c.agentTeamsStepsEnabled && c.teamStepsEnabled {
+			capabilities = append(capabilities, "team_external_agentteams_steps_v1")
+		}
+	}
 	if c.TeamConfigInventory != nil {
 		configs = c.TeamConfigInventory()
 		if len(configs) > 0 {
@@ -56,9 +83,21 @@ func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 	return protocol.RegisterMessage{
 		TeamAgentConfigs: configs,
 		Type:             "register", DaemonID: c.daemonID, Hostname: c.hostname,
-		Agents: append([]string(nil), c.agents...), AgentVersions: maps.Clone(c.agentVersions),
-		AgentLatests: maps.Clone(c.agentLatests), AgentManageable: maps.Clone(c.agentManageable),
+		Agents: agents, AgentVersions: maps.Clone(c.agentVersions),
+		AgentLatests: maps.Clone(c.agentLatests), AgentManageable: manageable,
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
 		SupportsQuotaGrant: true, SupportsDirectoryBrowse: true, SupportsDocumentResolve: true, Capabilities: capabilities,
 	}
+}
+
+func (c *Client) SetAgentTeamsEnabled(enabled bool) {
+	c.agentMu.Lock()
+	c.agentTeamsEnabled = enabled
+	c.agentMu.Unlock()
+}
+
+func (c *Client) SetAgentTeamsStepsEnabled(enabled bool) {
+	c.agentMu.Lock()
+	c.agentTeamsStepsEnabled = enabled
+	c.agentMu.Unlock()
 }

@@ -162,6 +162,9 @@ export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKey
         if(input.expectedBundleHash!==undefined&&latest.revision_bundle_hash!==input.expectedBundleHash)throw new PublicationError('revision_conflict','candidate bundle mismatch')
         const evidence=(await client.query<SharedRevisionEvidence>('SELECT ordinal,evidence_kind,excerpt,excerpt_hash,source_evidence_hash,occurred_at,sanitized_locator FROM memory_promotion_evidence WHERE candidate_revision_id=$1 ORDER BY ordinal FOR SHARE',[latest.candidate_revision_id])).rows
         if(!verifyRevisionBundle(latest,evidence))throw new PublicationError('state_conflict','revision bundle integrity mismatch')
+        if (input.decision === 'approve' && !(await client.query<{ available: boolean }>(`SELECT NOT EXISTS(SELECT 1 FROM memory_promotion_evidence
+          WHERE candidate_revision_id=$1 AND NOT memory_delivery_source_available(sanitized_locator->'source_provenance')) AS available`,
+        [latest.candidate_revision_id])).rows[0]?.available) throw new PublicationError('evidence_missing', 'delivery source has been withdrawn')
         // A vote belongs to the immutable revision's policy, not whichever
         // head became active since proposal. Retain prior votes as history.
         const policySnapshot = await currentPolicySnapshot(client, input.targetInstallationId)
@@ -298,6 +301,9 @@ export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKey
             ORDER BY ordinal ASC FOR UPDATE
           `, [latest.candidate_revision_id])
           if(!verifyRevisionBundle(latest,evidence.rows))throw new PublicationError('state_conflict','revision bundle integrity mismatch')
+          if (!(await client.query<{ available: boolean }>(`SELECT NOT EXISTS(SELECT 1 FROM memory_promotion_evidence
+            WHERE candidate_revision_id=$1 AND NOT memory_delivery_source_available(sanitized_locator->'source_provenance')) AS available`,
+          [latest.candidate_revision_id])).rows[0]?.available) throw new PublicationError('evidence_missing', 'delivery source has been withdrawn')
           if (evidence.rows.length === 0) {
             throw new PublicationError('evidence_missing', 'candidate revision has no shared evidence package')
           }

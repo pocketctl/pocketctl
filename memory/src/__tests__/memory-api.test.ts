@@ -280,6 +280,34 @@ describe('memory api manage routes', () => {
     await Promise.all(apps.splice(0).map(app => app.close()))
   })
 
+  test.each(['reject', 'wrong-service'] as const)('delivery source status rejects %s grants before resource validation', async mode => {
+    const app = makeManageApp({ mode }); apps.push(app)
+    const response = await app.inject({ method: 'GET',
+      url: '/api/v1/memory/delivery-sources/invalid/decisions/invalid',
+      headers: { host: 'memory.example', authorization: 'Bearer t' } })
+    expect(response.statusCode).toBe(401)
+  })
+
+  test('delivery source status validates identity, returns an opaque absence, and cannot be cached', async () => {
+    const app = makeManageApp(); apps.push(app)
+    const headers = { host: 'memory.example', authorization: 'Bearer t' }
+    const invalid = await app.inject({ method: 'GET', url: '/api/v1/memory/delivery-sources/invalid/decisions/invalid', headers })
+    expect(invalid.statusCode).toBe(400)
+    const response = await app.inject({ method: 'GET', url: `/api/v1/memory/delivery-sources/${INSTALLATION}/decisions/${INSTALLATION}`, headers })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ source: null })
+    expect(response.headers['cache-control']).toBe('no-store')
+  })
+
+  test('candidate delivery filter requires a complete valid submission and decision pair', async () => {
+    const app = makeManageApp(); apps.push(app)
+    const headers = { host: 'memory.example', authorization: 'Bearer t' }
+    for (const query of [`submission_id=${INSTALLATION}`, `decision_id=${INSTALLATION}`, 'submission_id=invalid&decision_id=invalid']) {
+      expect((await app.inject({ method: 'GET', url: '/api/v1/memory/candidates?' + query, headers })).statusCode).toBe(400)
+    }
+    expect((await app.inject({ method: 'GET', url: `/api/v1/memory/candidates?submission_id=${INSTALLATION}&decision_id=${INSTALLATION}`, headers })).json()).toEqual({ candidates: [] })
+  })
+
   test('management preflight remains unauthenticated when read and manage routes share an app', async () => {
     const { app, seen } = makeFullMemoryApp('reject')
     apps.push(app)

@@ -107,7 +107,7 @@ function canonicalHash(value: unknown): string {
 }
 
 export class TeamRunRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(private readonly pool: pg.Pool, private readonly externalEnabledForTeam: (teamId: string) => boolean = () => false) {}
 
   // Run requests are deduplicated solely by collaboration_team_idempotency,
   // scoped by operation and Session/Run ID. Their events must not consume the
@@ -196,7 +196,7 @@ export class TeamRunRepository {
       daemon_id: row.daemon_id, hostname: row.hostname, status: row.daemon_status,
       agents: row.agents, collaboration_capabilities: row.collaboration_capabilities,
       team_id: row.occupied_team_id,
-    } satisfies DaemonAgentEvidence, row.provider, teamId).managed_callable
+    } satisfies DaemonAgentEvidence, row.provider, teamId, this.externalEnabledForTeam(teamId)).managed_callable
   }
 
   async create(input: {

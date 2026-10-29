@@ -109,7 +109,7 @@ function maskedLabel(displayName: string | null, email: string): string {
 }
 
 export class TeamRepository {
-  constructor(private readonly pool: pg.Pool, private readonly memorySources: TeamMemorySourceProjectorLike = new TeamMemorySourceProjector(false)) {}
+  constructor(private readonly pool: pg.Pool, private readonly memorySources: TeamMemorySourceProjectorLike = new TeamMemorySourceProjector(false), private readonly externalEnabledForTeam: (teamId: string) => boolean = () => false) {}
 
   private async transaction<T>(run: (client: pg.PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect()
@@ -751,7 +751,7 @@ export class TeamRepository {
       [actorUserId],
     )
     return result.rows.flatMap(daemon => offeredProviders(daemon.agents)
-      .map(provider => candidateForProvider(daemon, provider, teamId)))
+      .map(provider => candidateForProvider(daemon, provider, teamId, this.externalEnabledForTeam(teamId))))
   }
 
   async listMyAgentCandidates(actorUserId: number): Promise<TeamAgentCandidate[]> {
@@ -764,7 +764,7 @@ export class TeamRepository {
       [actorUserId],
     )
     return result.rows.flatMap(daemon => offeredProviders(daemon.agents)
-      .map(provider => candidateForProvider(daemon, provider, '')))
+      .map(provider => candidateForProvider(daemon, provider, '', this.externalEnabledForTeam(daemon.team_id ?? ''))))
   }
 
   async listAgentOffers(teamId: string, actorUserId: number): Promise<CollaborationAgentOfferView[]> {
@@ -805,7 +805,7 @@ export class TeamRepository {
       )
       const daemon = daemonResult.rows[0]
       if (!daemon) throw new TeamRepositoryError('team_not_found', 'daemon not found')
-      const evidence = candidateForProvider(daemon, input.provider, input.teamId)
+      const evidence = candidateForProvider(daemon, input.provider, input.teamId, this.externalEnabledForTeam(input.teamId))
       if (!evidence.installed) {
         throw new TeamRepositoryError('capability_not_supported', 'provider is not installed on this daemon')
       }
@@ -1029,7 +1029,7 @@ export class TeamRepository {
       agents: row.agents,
       collaboration_capabilities: row.collaboration_capabilities,
       team_id: row.occupied_team_id ?? null,
-    }, row.provider, row.team_id)
+    }, row.provider, row.team_id, this.externalEnabledForTeam(row.team_id))
     return {
       id: row.offer_id,
       team_id: row.team_id,

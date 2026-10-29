@@ -1,4 +1,5 @@
 import {revisionTimeSql} from '../claims/version-selection.js'
+import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
 import type {V2GrantFacts} from '../governance/authorization.js'
 import {WIKI_SOURCE_TIME_INVALID_SQL} from './consumption.js'
@@ -375,7 +376,7 @@ export function createAdmissionService(deps: {
               AND p.state = 'ready' AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
               AND j.consumption_generation=COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               AND NOT EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
-                WHERE item.pack_id=p.pack_id AND (NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
+                WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
             RETURNING p.pack_id::text, p.stable_text, p.dynamic_text,
                       p.stable_hash, p.dynamic_hash
           `, [input.injectionId, input.installationId, input.sessionId, input.packId, nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline])
@@ -397,7 +398,7 @@ export function createAdmissionService(deps: {
             SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7')}) OR NOT (${selectedScopeFenceSql('$8')}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
               OR j.consumption_generation IS NULL OR j.consumption_generation<>COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               OR EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
-                WHERE item.pack_id=p.pack_id AND (NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))
+                WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))
               THEN 'expired' ELSE j.state END,
               outcome_code=CASE WHEN j.state='admitted' AND j.admission_expires_at>=clock_timestamp() THEN 'consumption_context_changed' ELSE j.outcome_code END
             FROM memory_context_packs p

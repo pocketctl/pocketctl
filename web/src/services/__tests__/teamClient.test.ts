@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
 
 const accessToken = ref('access-1')
+const canReadOfflineTeams = ref(false)
 const doRefreshToken = vi.fn(async () => false)
 const { resetScopedMemoryAuthorization } = vi.hoisted(() => ({
   resetScopedMemoryAuthorization: vi.fn(),
 }))
 
 vi.mock('../../composables/useAuth', () => ({
-  useAuth: () => ({ accessToken, doRefreshToken }),
+  useAuth: () => ({ accessToken, doRefreshToken, canReadOfflineTeams }),
 }))
 vi.mock('../../composables/useEnv', () => ({ getRelayOrigin: () => 'https://relay.test' }))
 vi.mock('../memoryClient', () => ({ resetScopedMemoryAuthorization }))
@@ -22,11 +23,26 @@ import type { TeamMemoryBinding } from '../../types/team'
 
 describe('teamClient', () => {
   beforeEach(() => {
+    canReadOfflineTeams.value = false
     accessToken.value = 'access-1'
     doRefreshToken.mockReset()
     doRefreshToken.mockResolvedValue(false)
     resetScopedMemoryAuthorization.mockReset()
     vi.unstubAllGlobals()
+  })
+
+  test('offline cache identity never sends a Team request or mutation', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    canReadOfflineTeams.value = true
+    await expect(getTeamCapabilities()).rejects.toMatchObject({ status: 0, code: 'offline' })
+    await expect(createTeamWorkspace({ name: 'offline', invitationEmails: [], agents: [] })).rejects.toMatchObject({ status: 0, code: 'offline' })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  test('expired token plus refresh outage is not treated as membership revocation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, json: async () => ({ error: {} }) })))
+    doRefreshToken.mockImplementationOnce(async () => { canReadOfflineTeams.value = true; return false })
+    await expect(listTeamSessions('team')).rejects.toMatchObject({ status: 0, code: 'offline' })
   })
 
   test('loads server capabilities with the current access token', async () => {

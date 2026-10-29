@@ -37,6 +37,7 @@ vi.mock('../../composables/useWebSocket', () => ({
 
 vi.mock('../../composables/useAuth', () => ({
   useAuth: () => ({
+    user: ref(null),
     accessToken: ref('token'),
     apiGetAuth: vi.fn(),
   }),

@@ -12,6 +12,7 @@ vi.mock('../../composables/useEnv', () => ({
 
 const {
   resetMemoryClient,
+  listMemoryCandidates,
   discoverMemoryInstallation,
   enableMemoryServices,
   searchMemory,
@@ -74,6 +75,7 @@ function relayAndProviderFetch(options: {
 }
 
 beforeEach(() => {
+  accessToken.value = 'user-token'
   resetMemoryClient()
 })
 
@@ -361,4 +363,29 @@ describe('memoryClient', () => {
 		expect(JSON.parse(String(request?.init.body))).toEqual({ document: { max_items: 4 } })
 	})
 
+})
+
+test('personal candidate requests discard cached grants after account credential changes', async () => {
+  const { calls } = relayAndProviderFetch({ providerHandler: () => new Response(JSON.stringify({ candidates: [] })) })
+  await listMemoryCandidates()
+  accessToken.value = 'different-account-token'
+  await listMemoryCandidates({ submissionId: 'sub / one', decisionId: 'decision / one' })
+  expect(calls.filter(c => c.path === '/api/extensions/v1/installations')).toHaveLength(2)
+  expect(calls.filter(c => c.path === '/api/extensions/v1/grants')).toHaveLength(2)
+  expect(calls.at(-1)?.search).toContain('submission_id=sub+%2F+one')
+})
+
+test('late personal grants cannot repopulate authorization or call the provider after identity changes', async () => {
+  let resolveGrant: ((response: Response) => void) | undefined
+  const fetcher = vi.fn(async (url: string) => {
+    if (url.includes('/installations')) return new Response(JSON.stringify({ installations: [INSTALLATION] }))
+    return new Promise<Response>(resolve => { resolveGrant = resolve })
+  })
+  vi.stubGlobal('fetch', fetcher)
+  const request = listMemoryCandidates()
+  await vi.waitFor(() => expect(resolveGrant).toBeTypeOf('function'))
+  accessToken.value = 'new-account-token'
+  resolveGrant!(new Response(JSON.stringify({ grant: 'old-grant', expires_in: 300, provider_public_origin: 'https://memory.example' })))
+  await expect(request).rejects.toMatchObject({ code: 'identity_changed' })
+  expect(fetcher).toHaveBeenCalledTimes(2)
 })

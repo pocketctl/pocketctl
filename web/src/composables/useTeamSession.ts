@@ -24,6 +24,7 @@ import { teamOutbox,TeamContinuousCursor,type TeamOutboxMessage } from '../servi
 import { useScopedSessionDraft } from './useScopedSessionState'
 import { useWebSocket } from './useWebSocket'
 import { useLocale } from './useLocale'
+import { teamDeliveryCache, deliveryCacheScope } from '../services/teamDeliveryCache'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '共享会话请求失败'
@@ -111,7 +112,7 @@ export function useTeamSession(teamID: Readonly<Ref<string>>, sessionID: Readonl
     let success=false
     try{await work;success=true}finally{if(syncPromise===work)syncPromise=undefined;if(success&&currentGeneration===generation&&events.value.some(e=>e.event_seq>contiguousEventSeq.value))queueMicrotask(()=>void catchUp().catch(f=>{error.value=errorMessage(f)}))}
   }
-  function revokeAccess(){void teamOutbox.blockScope(accountScope.value).catch(()=>{});generation++;pendingMessages.value=[];clearCallPoll();clearSessionPoll();clearRunPoll();calls.value=[];events.value=[];session.value=null;context.value=null;runs.value=[];task.value=null;draft.value='';accessRevoked.value=true;subscribed.value=false;unsubscribeTeamSession(sessionID.value)}
+  function revokeAccess(){void teamDeliveryCache.purge(deliveryCacheScope(user.value?.id||0,getRelayOrigin()),{session:sessionID.value}).catch(()=>{});void teamOutbox.blockScope(accountScope.value).catch(()=>{});generation++;pendingMessages.value=[];clearCallPoll();clearSessionPoll();clearRunPoll();calls.value=[];events.value=[];session.value=null;context.value=null;runs.value=[];task.value=null;draft.value='';accessRevoked.value=true;subscribed.value=false;unsubscribeTeamSession(sessionID.value)}
   function authorityFailure(failure:unknown){if(failure instanceof TeamApiError && [401,403,404].includes(failure.status)){revokeAccess();return true}return false}
   async function restoreOutbox(){
     const scope=accountScope.value,g=generation

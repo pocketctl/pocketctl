@@ -4,9 +4,38 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 )
+
+func TestClaudeContextRefreshUsesExactRuntimeHelp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix fixture")
+	}
+	for _, tc := range []struct {
+		name, help string
+		want       []string
+	}{
+		{"snapshot", "  --system-prompt-snapshot <on|off> Record prompt", []string{"--system-prompt-snapshot", "off"}},
+		{"legacy", "  --append-system-prompt <prompt> Append", nil},
+		{"description-only", "Description mentions --system-prompt-snapshot but is not a flag", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "claude")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' '"+tc.help+"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ClaudeContextRefreshArgs(context.Background(), binary)
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got=%v err=%v want=%v", got, err, tc.want)
+			}
+		})
+	}
+	if _, err := ClaudeContextRefreshArgs(context.Background(), filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("probe failure must stop dispatch")
+	}
+}
 
 func TestProbeClaudeAppendSystemPromptRequiresHelpEvidence(t *testing.T) {
 	if ProbeClaudeAppendSystemPrompt("--help output without the flag") {
