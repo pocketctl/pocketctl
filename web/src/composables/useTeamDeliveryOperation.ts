@@ -4,7 +4,8 @@ import { useAuth } from './useAuth'
 import { getRelayOrigin } from './useEnv'
 import { deliveryCacheScope } from '../services/teamDeliveryCache'
 import { TeamApiError } from '../services/teamClient'
-import { decideTaskDelivery, reviseDeliverySpec, executeDeliveryTask, getDeliveryReceipt } from '../services/teamDeliveryClient'
+import { deliveryOperationError } from '../services/teamDeliveryDiagnostics'
+import { revokeDeliveryArtifact, decideTaskDelivery, reviseDeliverySpec, executeDeliveryTask, getDeliveryReceipt } from '../services/teamDeliveryClient'
 import { confirmedDeliveryReceipt, type DeliveryPendingOperation } from '../services/teamDeliveryRecovery'
 import { TeamDeliveryOperationJournal, validDeliveryIntent, type DeliveryIntent } from '../services/teamDeliveryOperationJournal'
 
@@ -37,7 +38,7 @@ export function useTeamDeliveryOperation(task:()=>string,actor:()=>number,comple
   }catch(e){if(current(g)&&r===read){ready.value=false;receiptMissing.value=false;confirmRetry.value=false;storageError.value=e instanceof Error?e.message:'无法读取原操作记录。'}}
  }
  async function finish(intent:DeliveryIntent,result:unknown,g:number,opScope:string){
-  confirmedDeliveryReceipt({task_id:intent.task,...(intent.operation.kind==='acceptance'&&intent.operation.attemptId?{attempt_id:intent.operation.attemptId}:{}),request_id:intent.operation.input.request_id,found:true,receipt:{operation:intent.operation.kind,response:result}},intent.task,intent.operation)
+  confirmedDeliveryReceipt({task_id:intent.task,...((intent.operation.kind==='acceptance'||intent.operation.kind==='revoke_artifact')&&intent.operation.attemptId?{attempt_id:intent.operation.attemptId}:{}),request_id:intent.operation.input.request_id,found:true,receipt:{operation:intent.operation.kind==='revoke_artifact'?`revoke:${intent.operation.submissionId}:${intent.operation.artifactId}`:intent.operation.kind,response:result}},intent.task,intent.operation)
   await journal.remove(opScope,intent);if(!current(g))return
   pending.value=null;receiptMissing.value=false;confirmRetry.value=false;busy.value=false;notify();await refresh();if(current(g))await complete()
  }
@@ -45,12 +46,12 @@ export function useTeamDeliveryOperation(task:()=>string,actor:()=>number,comple
   error.value='';receiptMissing.value=false;confirmRetry.value=false
   const op=intent.operation,identity={userId:intent.actor,origin}
   try{
-   const result=op.kind==='plan_draft'?await saveTaskPlanDraft(intent.task,op.input,identity):op.kind==='plan_control'?await controlTaskPlan(intent.task,op.input,identity):op.kind==='acceptance'?(op.attemptId?await decideTaskDelivery(intent.task,op.input,identity,op.attemptId):await decideTaskDelivery(intent.task,op.input,identity)):op.kind==='revise_spec'?await reviseDeliverySpec(intent.task,op.input,identity):await executeDeliveryTask(intent.task,op.session!,op.input,identity)
+   const result=op.kind==='revoke_artifact'?await revokeDeliveryArtifact(intent.task,op.submissionId,op.artifactId,op.input,identity,op.attemptId):op.kind==='plan_draft'?await saveTaskPlanDraft(intent.task,op.input,identity):op.kind==='plan_control'?await controlTaskPlan(intent.task,op.input,identity):op.kind==='acceptance'?(op.attemptId?await decideTaskDelivery(intent.task,op.input,identity,op.attemptId):await decideTaskDelivery(intent.task,op.input,identity)):op.kind==='revise_spec'?await reviseDeliverySpec(intent.task,op.input,identity):await executeDeliveryTask(intent.task,op.session!,op.input,identity)
    if(current(g))await finish(intent,result,g,opScope)
   }catch(e){if(!current(g))return
    if(denial(e)){revoke();return}
    if(first&&e instanceof TeamApiError&&(400<=e.status&&e.status<500)&&![408,429].includes(e.status)&&e.code!=='idempotency_conflict'){
-    try{await journal.remove(opScope,intent);if(!current(g))return;pending.value=null;busy.value=false;notify();await refresh();if(current(g)){error.value=e.status===409?'交付、规格或共享材料版本已变化，请重新核对。':e.message;await complete(error.value)}}catch(storage){if(current(g)){ready.value=false;storageError.value=storage instanceof Error?storage.message:'无法更新操作记录。'}}
+    try{await journal.remove(opScope,intent);if(!current(g))return;pending.value=null;busy.value=false;notify();await refresh();if(current(g)){error.value=deliveryOperationError(e);await complete(error.value)}}catch(storage){if(current(g)){ready.value=false;storageError.value=storage instanceof Error?storage.message:'无法更新操作记录。'}}
    }else error.value='操作结果未知，请查询原操作。'
   }
  }
@@ -63,7 +64,7 @@ export function useTeamDeliveryOperation(task:()=>string,actor:()=>number,comple
  async function resolve(){
   if(!ready.value||busy.value||revoked.value||!same()||!pending.value||!navigator.onLine)return
   busy.value=true;receiptMissing.value=false;confirmRetry.value=false;error.value='';const g=generation,intent=JSON.parse(JSON.stringify(pending.value)) as DeliveryIntent,opScope=scope
-  try{const identity={userId:intent.actor,origin};const result=await (intent.operation.kind==='plan_draft'?getTaskPlanDraftReceipt(intent.task,intent.operation.input.request_id,identity):intent.operation.kind==='plan_control'?getTaskPlanControlReceipt(intent.task,intent.operation.input.request_id,identity):getDeliveryReceipt(intent.task,intent.operation.input.request_id,identity,intent.operation.kind==='acceptance'?intent.operation.attemptId:undefined));if(!current(g))return
+  try{const identity={userId:intent.actor,origin};const result=await (intent.operation.kind==='plan_draft'?getTaskPlanDraftReceipt(intent.task,intent.operation.input.request_id,identity):intent.operation.kind==='plan_control'?getTaskPlanControlReceipt(intent.task,intent.operation.input.request_id,identity):getDeliveryReceipt(intent.task,intent.operation.input.request_id,identity,(intent.operation.kind==='acceptance'||intent.operation.kind==='revoke_artifact')?intent.operation.attemptId:undefined));if(!current(g))return
    if(confirmedDeliveryReceipt(result,intent.task,intent.operation)){await finish(intent,(result as {receipt:{response:unknown}}).receipt.response,g,opScope)}else{receiptMissing.value=true;error.value='未查到原操作回执，可确认重试相同请求和内容。'}
   }catch(e){if(current(g)){if(e instanceof TeamApiError&&e.status===404&&e.code!=='team_not_found')error.value='此 Relay 暂不支持原操作查询，已保留记录。';else fail(e)}}finally{if(g===generation)busy.value=false}
  }

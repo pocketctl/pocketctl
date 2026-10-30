@@ -3933,6 +3933,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 	documentSlots := make(chan struct{}, 2)
 	directorySlots := make(chan struct{}, 2)
 	modelSlots := make(chan struct{}, 2)
+	quotaReadSlots := make(chan struct{}, 4)
 	var directoryRequests sync.Map
 	for {
 		select {
@@ -4213,6 +4214,28 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					event.Code = codexInvocationErrorCode(invocationErr)
 				}
 				client.SendMsg(event)
+
+			case "read_codex_rate_limits":
+				select {
+				case quotaReadSlots <- struct{}{}:
+					go func(cmd protocol.ClientMessage) {
+						defer func() { <-quotaReadSlots }()
+						readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+						defer cancel()
+						snapshot, err := sm.ReadCodexRateLimits(readCtx, cmd.SessionID)
+						event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID}
+						if err != nil {
+							event.Error = err.Error()
+							event.Code = codexInvocationErrorCode(err)
+						} else {
+							raw, _ := json.Marshal(snapshot)
+							_ = json.Unmarshal(raw, &event.Invocation)
+						}
+						client.SendMsg(event)
+					}(cmd)
+				default:
+					client.SendMsg(protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Error: "busy"})
+				}
 
 			case "list_commands":
 				logger.Debug("list commands", "session", cmd.SessionID)

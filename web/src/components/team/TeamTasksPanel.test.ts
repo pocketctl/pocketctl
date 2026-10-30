@@ -9,8 +9,8 @@ vi.mock('../../composables/useEnv',()=>({getRelayOrigin:()=>''}))
 const task={id:'task',team_id:'team',creator_user_id:1,title:'protected task',background:'protected background',state:'in_progress',holder_user_ids:[1],session_ids:[],revision:1,has_delivery_contract:true}
 const wrappers:Array<ReturnType<typeof mount>>=[]
 const denied=()=>new TeamApiError(404,{error:{code:'team_not_found',message:'denied'}})
-async function render(){const w=mount(TeamTasksPanel,{props:{teamId:'team',teamCreatorId:1,currentUserId:1,writesEnabled:true,initialTaskId:'task'},global:{stubs:{TeamTaskRequirementsPanel:{name:'TeamTaskRequirementsPanel',template:'<div>requirements</div>'},TeamTaskHolderPanel:{name:'TeamTaskHolderPanel',emits:['revoked','changed'],template:'<button data-testid="holder-revoke" @click="$emit(\'revoked\')">holder revoke</button>'},TeamOverlay:{template:'<section><slot/><slot name="footer"/></section>'},TeamTaskDeliveryPanel:{name:'TeamTaskDeliveryPanel',emits:['revoked','changed'],template:'<button data-testid="revoke" @click="$emit(\'revoked\')">revoke</button>'},ActionSelect:{template:'<span><slot/></span>'},ActionList:true,WorkspaceIcon:true}}});wrappers.push(w);await flushPromises();return w}
-beforeEach(()=>{vi.resetAllMocks();api.listTeamTasks.mockResolvedValue([task])})
+async function render(){const w=mount(TeamTasksPanel,{props:{teamId:'team',teamCreatorId:1,currentUserId:1,writesEnabled:true,initialTaskId:'task'},global:{stubs:{RouterLink:true,TeamTaskRequirementsPanel:{name:'TeamTaskRequirementsPanel',template:'<div>requirements</div>'},TeamTaskHolderPanel:{name:'TeamTaskHolderPanel',emits:['revoked','changed'],template:'<button data-testid="holder-revoke" @click="$emit(\'revoked\')">holder revoke</button>'},TeamOverlay:{template:'<section><slot/><slot name="footer"/></section>'},TeamTaskDeliveryPanel:{name:'TeamTaskDeliveryPanel',emits:['revoked','changed'],template:'<button data-testid="revoke" @click="$emit(\'revoked\')">revoke</button>'},ActionSelect:{template:'<span><slot/></span>'},ActionList:true,WorkspaceIcon:true}}});wrappers.push(w);await flushPromises();return w}
+beforeEach(()=>{vi.resetAllMocks();api.listTeamTasks.mockResolvedValue([task]);api.createTeamTask.mockResolvedValue({...task,id:"created"});api.updateTeamTask.mockResolvedValue(task)})
 afterEach(()=>wrappers.splice(0).forEach(w=>w.unmount()))
 test('delivery denial clears the surrounding task and ignores an older list response',async()=>{
  const w=await render();expect(w.text()).toContain('protected background')
@@ -46,4 +46,60 @@ test('plain task deep link keeps task content and opens requirements without pro
  expect(w.findComponent({name:'TeamTaskDeliveryPanel'}).exists()).toBe(false)
  expect(w.find('[data-testid="task-delivery-open"]').exists()).toBe(false)
  expect(w.findComponent({name:'TeamTaskRequirementsPanel'}).exists()).toBe(true)
+})
+
+function connectivity(online:boolean) {
+ vi.spyOn(navigator,'onLine','get').mockReturnValue(online)
+ window.dispatchEvent(new Event(online?'online':'offline'))
+}
+afterEach(()=>vi.restoreAllMocks())
+test('offline edit stays readable but form submission cannot write over a surviving transport',async()=>{
+ const w=await render()
+ await w.findAll('button').find(b=>b.text()==='team.edit_task')!.trigger('click')
+ await w.get('#team-task-edit-form textarea').setValue('offline draft')
+ connectivity(false);await flushPromises()
+ await w.get('#team-task-edit-form').trigger('submit');await flushPromises()
+ expect(api.updateTeamTask).not.toHaveBeenCalled()
+ expect(w.get('[form="team-task-edit-form"]').attributes('disabled')).toBeDefined()
+ expect(w.text()).toContain('protected task')
+ expect((w.get('#team-task-edit-form textarea').element as HTMLTextAreaElement).value).toBe('offline draft')
+})
+test('offline creation cannot submit a form opened while online',async()=>{
+ const w=await render();await w.get('[data-testid="team-new-task"]').trigger('click')
+ connectivity(false);await flushPromises()
+ await w.get('#team-task-create-form').trigger('submit');await flushPromises()
+ expect(api.createTeamTask).not.toHaveBeenCalled()
+ expect(w.get('[form="team-task-create-form"]').attributes('disabled')).toBeDefined()
+})
+test('disconnect hides state, holder, session and edit writes; reconnect revalidates before enabling',async()=>{
+ const w=await render();connectivity(false);await flushPromises()
+ expect(w.find('.task-actions').exists()).toBe(false)
+ expect(w.find('.holder-editor').exists()).toBe(false)
+ expect(w.find('.task-linked-action').exists()).toBe(false)
+ expect(w.find('[data-testid="team-new-task"]').exists()).toBe(false)
+ let finish!:(value:unknown)=>void
+ api.listTeamTasks.mockImplementationOnce(()=>new Promise(resolve=>finish=resolve))
+ connectivity(true);await flushPromises()
+ expect(w.find('[data-testid="team-new-task"]').exists()).toBe(false)
+ finish([task]);await flushPromises()
+ expect(w.find('[data-testid="team-new-task"]').exists()).toBe(true)
+ expect(api.updateTeamTask).not.toHaveBeenCalled()
+})
+test('loss of write permission blocks submission of an already open edit',async()=>{
+ const w=await render();await w.findAll('button').find(b=>b.text()==='team.edit_task')!.trigger('click')
+ await w.setProps({writesEnabled:false})
+ await w.get('#team-task-edit-form').trigger('submit');await flushPromises()
+ expect(api.updateTeamTask).not.toHaveBeenCalled()
+})
+
+test('reconnection preserves the edit revision and requires an explicit save without replay',async()=>{
+ const w=await render();await w.findAll('button').find(b=>b.text()==='team.edit_task')!.trigger('click')
+ await w.get('#team-task-edit-form textarea').setValue('retained draft')
+ connectivity(false);await flushPromises()
+ api.listTeamTasks.mockResolvedValue([{...task,revision:2,background:'another member update'}])
+ connectivity(true);await flushPromises()
+ expect(api.updateTeamTask).not.toHaveBeenCalled()
+ expect((w.get('#team-task-edit-form textarea').element as HTMLTextAreaElement).value).toBe('retained draft')
+ await w.get('#team-task-edit-form').trigger('submit');await flushPromises()
+ expect(api.updateTeamTask).toHaveBeenCalledWith(expect.objectContaining({revision:1}),expect.objectContaining({background:'retained draft'}))
 })

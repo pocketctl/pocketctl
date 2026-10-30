@@ -54,28 +54,60 @@ func stepInputPath(auth *protocol.CollaborationAuthorization) string {
 }
 
 func (c *Client) readInputBytes(ctx context.Context, path string, limit int) ([]byte, error) {
+	// Retry only explicit transient contention, within the same Call and the
+	// materialization deadline. Never create another attempt or skip reauthorization.
+	for attempt := 0; ; attempt++ {
+		data, failure, retryable := c.readInputBytesOnce(ctx, path, limit)
+		if !retryable || attempt == 3 {
+			return data, failure
+		}
+		timer := time.NewTimer(time.Duration(1<<attempt) * 250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (c *Client) readInputBytesOnce(ctx context.Context, path string, limit int) ([]byte, error, bool) {
 	token := c.token()
 	if token == "" {
-		return nil, &HTTPError{Status: 401, Code: "authorization_required"}
+		return nil, &HTTPError{Status: 401, Code: "authorization_required"}, false
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, err, false
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	response, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("step_input_transport_unavailable")
+		if ctx.Err() != nil {
+			return nil, ctx.Err(), false
+		}
+		return nil, fmt.Errorf("step_input_transport_unavailable"), false
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 	if err != nil || len(data) > limit {
-		return nil, fmt.Errorf("step_input_response_invalid")
+		return nil, fmt.Errorf("step_input_response_invalid"), false
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, &HTTPError{Status: response.StatusCode, Code: "step_input_unavailable"}
+		var value struct {
+			Error struct {
+				Code      string `json:"code"`
+				Retryable bool   `json:"retryable"`
+			} `json:"error"`
+		}
+		validError := json.Unmarshal(data, &value) == nil
+		code := value.Error.Code
+		if !validError || !artifactID.MatchString(code) {
+			code = "step_input_unavailable"
+		}
+		return nil, &HTTPError{Status: response.StatusCode, Code: code}, response.StatusCode == http.StatusServiceUnavailable && code == "source_busy" && value.Error.Retryable
 	}
-	return data, nil
+	return data, nil, false
 }
 
 func (c *Client) ReadStepInputManifest(ctx context.Context, auth *protocol.CollaborationAuthorization) (StepInputManifest, error) {

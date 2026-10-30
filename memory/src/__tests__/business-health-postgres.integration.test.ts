@@ -1,4 +1,5 @@
 import pg from 'pg'
+import {createScopeControlProjector} from '../governance/membership-projector.js'
 import {afterAll,beforeAll,expect,test,describe} from 'vitest'
 import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
@@ -14,6 +15,27 @@ suite('business health PostgreSQL',()=>{
  async function healthRows(){return (await loadBusinessHealth(pool)).filter(row=>row.installation_id===id)}
  beforeAll(async()=>{pool=new pg.Pool({connectionString:url});await assertMemoryTestDatabase(pool,url!);await applyMemorySchema(pool);await pool.query('TRUNCATE memory_installations CASCADE')})
  afterAll(async()=>{await pool?.end()})
+ test('shared empty control ACK refreshes health; failed ACK still reports stalled',async()=>{
+  const shared='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version,snapshot_required,created_at,last_ack_at) VALUES($1,'pocketctl-memory','active','ready',1,FALSE,NOW()-interval '2 hours',NOW()-interval '301 seconds')`,[shared])
+  try {
+  await pool.query(`INSERT INTO memory_owner_scopes(installation_id,owner_scope_kind,owner_scope_id,state,authorization_epoch) VALUES($1,'team','cccccccc-cccc-4ccc-8ccc-cccccccccccc','active',1)`,[shared])
+  const load=async()=>(await loadBusinessHealth(pool)).find(row=>row.installation_id===shared)!
+  const projector=(fail=false)=>createScopeControlProjector({pool,workerId:'health-test',pullScopeControlFeed:async()=>({installation_id:shared,items:[],next_cursor:'cursor',lease_token:'lease',lease_expires_at:new Date(Date.now()+30000).toISOString()}),ackScopeControlFeed:async()=>{if(fail)throw Error('ACK unavailable');return 0}})
+  expect(evaluateBusinessHealth(await load()).reasons).toContain('feed_stalled')
+  await projector().consumeInstallation(shared)
+  expect(evaluateBusinessHealth(await load()).reasons).not.toContain('feed_stalled')
+  const row=(await pool.query('SELECT last_pull_at,last_ack_at,last_feed_id FROM memory_installations WHERE installation_id=$1',[shared])).rows[0]
+  expect(row.last_pull_at).not.toBeNull();expect(row.last_ack_at).not.toBeNull();expect(String(row.last_feed_id)).toBe('0')
+  await pool.query("UPDATE memory_installations SET last_ack_at=NOW()-interval '301 seconds' WHERE installation_id=$1",[shared])
+  await expect(projector(true).consumeInstallation(shared)).rejects.toThrow('ACK unavailable')
+  expect(evaluateBusinessHealth(await load()).reasons).toContain('feed_stalled')
+  await pool.query("UPDATE memory_installations SET local_status='degraded',last_error_code='evidence_gap' WHERE installation_id=$1",[shared])
+  await projector().consumeInstallation(shared)
+  const degraded=(await pool.query('SELECT local_status,last_error_code FROM memory_installations WHERE installation_id=$1',[shared])).rows[0]
+  expect(degraded).toEqual({local_status:'degraded',last_error_code:'evidence_gap'})
+  } finally { await pool.query('DELETE FROM memory_installations WHERE installation_id=$1',[shared]) }
+ })
  test('faults, heartbeat, readiness and metrics recover from durable database state',async()=>{
   await pool.query(`DELETE FROM memory_installations WHERE installation_id=$1`,[id])
   await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version,created_at,last_pull_at,last_ack_at) VALUES($1,'pocketctl-memory','active','ready',1,NOW()-interval '2 hours',NOW(),NOW())`,[id])

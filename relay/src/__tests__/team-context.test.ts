@@ -33,3 +33,10 @@ describe('Team context delivery', () => {
     expect(first.stableText).not.toContain('\uFFFD')
   })
 })
+
+test('oversized frozen specification has a typed capacity failure before persistence',async()=>{
+ const {TeamContextDeliveryService,TeamContextBudgetError}=await import('../team/context-delivery.js')
+ const query=async(sql:string)=>({rows:sql.includes('FROM collaboration_calls')?[{context_version:0,delivery_task_id:'task',delivery_goal:'测'.repeat(12000),delivery_acceptance:'checks',required_checks:[]}]:[]})
+ const service=new TeamContextDeliveryService({query} as any)
+ await expect(service.prepare('call')).rejects.toBeInstanceOf(TeamContextBudgetError)
+})

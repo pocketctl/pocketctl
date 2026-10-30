@@ -12,7 +12,7 @@ vi.mock('../../composables/useAuth',()=>({useAuth:()=>({user:testUser})}))
 vi.mock('../../composables/useEnv',()=>({getRelayOrigin:()=>''}))
 const journal=()=>new TeamDeliveryOperationJournal()
 const saved=(task='task')=>journal().load(JSON.stringify(['',2]),task)
-const api=vi.hoisted(()=>({getTaskDelivery:vi.fn(),decideTaskDelivery:vi.fn(),getDeliveryReceipt:vi.fn(),getDeliveryHistory:vi.fn(),readDeliveryArtifact:vi.fn()}))
+const api=vi.hoisted(()=>({getTaskDelivery:vi.fn(),decideTaskDelivery:vi.fn(),getDeliveryReceipt:vi.fn(),getDeliveryHistory:vi.fn(),readDeliveryArtifact:vi.fn(),revokeDeliveryArtifact:vi.fn()}))
 vi.mock('../../services/teamDeliveryClient',()=>api)
 const cache=vi.hoisted(()=>({read:vi.fn(),write:vi.fn(),purge:vi.fn(),ticket:()=>1}))
 vi.mock('../../services/teamDeliveryCache',()=>({teamDeliveryCache:cache,deliveryCacheScope:(user:number,origin:string)=>JSON.stringify([origin,user])}))
@@ -28,6 +28,31 @@ function button(w:ReturnType<typeof mount>,name:string){return w.findAll('button
 beforeEach(()=>{vi.resetAllMocks();testUser.value={id:2};vi.stubGlobal('indexedDB',new IDBFactory());vi.stubGlobal('crypto',webcrypto);cache.read.mockResolvedValue(null);cache.write.mockResolvedValue(undefined);cache.purge.mockResolvedValue(undefined);sessionStorage.clear();api.getTaskDelivery.mockResolvedValue(data());api.decideTaskDelivery.mockImplementation(async(_task,input)=>({decision_id:'decision',revision:input.expected_revision+1,submission_id:input.submission_id,decision:input.decision}));api.getDeliveryHistory.mockResolvedValue({executions:[],has_more:false})})
 afterEach(()=>{wrappers.splice(0).forEach(w=>w.unmount());vi.unstubAllGlobals()})
 describe('Task delivery authority UI',()=>{
+ test('refresh reloads visible execution history without switching tabs',async()=>{
+  api.getDeliveryHistory.mockResolvedValue({executions:[{call_id:'call',state:'completed',deliveries:[],export_status:{phase:'waiting_for_files'}}],has_more:false})
+  const w=await render();await button(w,'执行记录').trigger('click');await flushPromises();expect(w.text()).toContain('等待交付文件')
+  api.getDeliveryHistory.mockResolvedValue({executions:[{call_id:'call',state:'completed',deliveries:[],export_status:{phase:'publication_pending'}}],has_more:false})
+  await button(w,'刷新').trigger('click');await flushPromises();expect(w.text()).toContain('交付发布待恢复');expect(w.text()).not.toContain('等待交付文件')
+ })
+ test('authority probe clears preview on revocation while retaining an unresolved original operation',async()=>{
+  vi.stubGlobal('URL',Object.assign(URL,{createObjectURL:vi.fn(()=>'blob:test'),revokeObjectURL:vi.fn()}))
+  api.decideTaskDelivery.mockRejectedValue(new TeamApiError(0,{error:{code:'network_error'}}))
+  api.readDeliveryArtifact.mockResolvedValue(new Blob(['proof']))
+  const w=await render();await button(w,'要求修改').trigger('click');await w.get('textarea').setValue('needs proof');await button(w,'确认提交').trigger('click');await idle(w)
+  const original=api.decideTaskDelivery.mock.calls[0][1]
+  await w.find('.delivery-file').trigger('click');await flushPromises();expect(w.text()).toContain('proof')
+  api.getTaskDelivery.mockRejectedValue(new TeamApiError(404,{error:{code:'team_not_found'}}))
+  window.dispatchEvent(new Event('focus'));await flushPromises()
+  expect(w.find('a[download]').exists()).toBe(false);expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:test')
+  expect((await saved()).some(v=>v.operation.input.request_id===original.request_id)).toBe(true)
+  expect(api.decideTaskDelivery).toHaveBeenCalledTimes(1);expect(api.getDeliveryReceipt).not.toHaveBeenCalled()
+ })
+ test.each(['context_budget_exceeded','context_snapshot_unavailable'])('renders safe context diagnostic %s',async(code)=>{
+  api.getDeliveryHistory.mockResolvedValue({executions:[{call_id:'call',state:'blocked',deliveries:[],failure_code:code}],has_more:false})
+  const w=await render();await button(w,'执行记录').trigger('click');await flushPromises()
+  expect(w.text()).toContain(code);expect(w.text()).toContain(code==='context_budget_exceeded'?'32,000 字节':'旧记录未保留具体原因')
+ })
+
  test.each(['accepted','changes_requested'] as const)('labels the %s decision reason without changing its meaning',async(decision)=>{
   const value=data();value.submissions[0].decision=decision;value.submissions[0].decision_reason='原始审核说明'
   api.getTaskDelivery.mockResolvedValue(value)
@@ -54,6 +79,19 @@ describe('Task delivery authority UI',()=>{
   api.getDeliveryReceipt.mockRejectedValueOnce(new TeamApiError(404,{error:{code}}));await button(w,'查询原操作').trigger('click');await flushPromises()
   expect(button(w,'重试原操作')).toBeUndefined();expect((await saved()).some(v=>v.operation.input.request_id===original.request_id)).toBe(true)
   expect(api.decideTaskDelivery).toHaveBeenCalledTimes(1)
+ })
+ test('execution history shows the safe step initialization failure code and guidance',async()=>{
+  api.getDeliveryHistory.mockResolvedValue({executions:[{call_id:'call',state:'failed',spec_revision:1,deliveries:[],failure_code:'delivery_http_503:source_busy'}],has_more:false})
+  const w=await render();await button(w,'执行记录').trigger('click');await flushPromises()
+  expect(w.text()).toContain('delivery_http_503:source_busy')
+  expect(w.text()).toContain('步骤输入')
+ })
+ test('oversize export explains the exact file limit and recovery',async()=>{
+  api.getDeliveryHistory.mockResolvedValue({executions:[{call_id:'call',state:'completed',spec_revision:1,deliveries:[],export_status:{phase:'blocked',error_code:'artifact_too_large',revision:1}}],has_more:false})
+  const w=await render();await button(w,'执行记录').trigger('click');await flushPromises()
+  expect(w.text()).toContain('2 MiB（2,097,152 字节）')
+  expect(w.text()).toContain('不会截断')
+  expect(w.text()).toContain('重新执行')
  })
  test('execution history separates export failures from native completion and suppresses stale failures after publication',async()=>{
   const execution={call_id:'call',state:'completed',spec_revision:1,deliveries:[],export_status:{phase:'waiting_for_files',error_code:'manifest_unavailable',updated_at:'2026-10-23T01:00:00Z',revision:1}}
@@ -159,4 +197,25 @@ test('step view never accepts a root response and an unknown step decision resol
  api.getTaskDelivery.mockResolvedValue(data());const root=await render();api.getDeliveryReceipt.mockResolvedValue({task_id:'task',attempt_id:attemptId,request_id:original.operation.input.request_id,found:false,receipt:null})
  await button(root,'查询原操作').trigger('click');await flushPromises();expect(api.getDeliveryReceipt).toHaveBeenLastCalledWith('task',original.operation.input.request_id,{userId:2,origin:''},attemptId)
  expect(root.text()).toContain('未查到原操作回执')
+})
+
+test('publisher can cancel then revoke a terminal artifact with a required reason',async()=>{
+ const d=data();d.task_state='completed';d.writes_enabled=false;Object.assign(d.submissions[0],{can_revoke_artifacts:true});api.getTaskDelivery.mockResolvedValue(d)
+ api.readDeliveryArtifact.mockResolvedValue(new Blob(['abc'],{type:'text/plain'}))
+ const w=await render();await w.findAll('button').find(b=>b.text().includes('report.md'))!.trigger('click');await flushPromises()
+ expect(button(w,'撤销附件')).toBeDefined()
+ await button(w,'撤销附件').trigger('click');expect(button(w,'核对撤销').attributes('disabled')).toBeDefined()
+ await w.get('textarea[aria-label="撤销原因"]').setValue('错误附件');await button(w,'核对撤销').trigger('click');await button(w,'返回修改').trigger('click')
+ expect((await saved()).length).toBe(0);expect((w.get('textarea[aria-label="撤销原因"]').element as HTMLTextAreaElement).value).toBe('错误附件')
+})
+test('readers cannot revoke a preview without explicit server authority',async()=>{
+ api.readDeliveryArtifact.mockResolvedValue(new Blob(['abc']));const w=await render();await w.findAll('button').find(b=>b.text().includes('report.md'))!.trigger('click');await flushPromises();expect(button(w,'撤销附件')).toBeUndefined()
+})
+
+test('revocation commits once, clears preview and blocks revoked evidence',async()=>{
+ const d=data();d.submissions[0].can_revoke_artifacts=true;api.getTaskDelivery.mockResolvedValue(d);api.readDeliveryArtifact.mockResolvedValue(new Blob(['abc']))
+ api.revokeDeliveryArtifact.mockImplementation(async(_task,_submission,id,input)=>{const next=structuredClone(d);next.revision++;next.submissions[0].revoked_artifact_ids=[id];api.getTaskDelivery.mockResolvedValue(next);return {revision:input.expected_revision+1,artifact_id:id,state:'revoked'}})
+ let releasePurge!:()=>void;cache.purge.mockImplementation(()=>new Promise<void>(resolve=>{releasePurge=resolve}));
+ const w=await render();await w.findAll('button').find(b=>b.text().includes('report.md'))!.trigger('click');await flushPromises();await button(w,'撤销附件').trigger('click');await w.get('textarea[aria-label="撤销原因"]').setValue('错误附件');await button(w,'核对撤销').trigger('click');await button(w,'确认撤销附件').trigger('click');await vi.waitFor(()=>expect(releasePurge).toBeDefined());expect(w.emitted('changed')).toBeUndefined();releasePurge();await idle(w)
+ expect(api.revokeDeliveryArtifact).toHaveBeenCalledTimes(1);expect(w.find('[aria-label="文件预览"]').exists()).toBe(false);expect(w.text()).toContain('已撤销');expect(button(w,'验收通过').attributes('disabled')).toBeDefined();expect(await saved()).toEqual([]);expect(cache.purge).toHaveBeenCalled()
 })

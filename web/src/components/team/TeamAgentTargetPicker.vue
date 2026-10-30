@@ -15,7 +15,8 @@
         :data-offer-id="binding.offer_id"
         @click="toggleOffer(binding.offer_id)"
       >
-        {{ bindingLabel(binding) }}
+        <span class="target-avatar" aria-hidden="true"><AgentBadge :agent="binding.provider" size="md" /></span>
+        <span class="target-label">{{ bindingLabel(binding) }}</span>
         <span :class="['target-dot', binding.availability]"></span>
       </button>
     </div>
@@ -24,6 +25,7 @@
 </template>
 
 <script setup lang="ts">
+import AgentBadge from '../AgentBadge.vue'
 import { teamProviderLabel } from '../../utils/teamProvider'
 import { useLocale } from "../../composables/useLocale"
 const { t } = useLocale()
@@ -67,4 +69,10 @@ function toggleOffer(offerID: string): void {
 
 .target-picker { position:relative; overflow:visible; min-width:0; }.target-picker .target-trigger { display:flex; align-items:center; gap:6px; padding:5px 7px; border-color:transparent; color:var(--fg-secondary); background:none; font-size:11px; border-radius:6px; }.target-trigger span:nth-child(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:220px; }.target-trigger svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.6; }.target-menu { position:absolute; z-index:60; bottom:calc(100% + 10px); left:0; width:560px; max-height:min(480px,65dvh); overflow-y:auto; max-width:calc(100vw - 40px); padding:6px; border:1px solid var(--border-light); border-radius:8px; background:var(--surface); box-shadow:var(--shadow-lg); display:grid; gap:3px; }.target-menu > button,.target-menu .target-agents button { width:100%; border:0; padding:9px 10px; border-radius:5px; text-align:left; justify-content:flex-start; font-size:12px; }.target-agents { display:grid; border-top:1px solid var(--border); margin-top:3px; padding-top:3px; }.target-menu button:hover { background:var(--surface-hover); }
 @media(max-width:600px){.target-menu{position:fixed;left:0;right:0;bottom:0;width:100%;max-width:100%;max-height:75dvh;box-sizing:border-box;border-radius:16px 16px 0 0;padding:16px}}
+.target-agents button { display:flex; align-items:center; gap:8px; }
+.target-avatar { flex:none; }
+.target-avatar :deep(.agent-badge) { width:28px; height:28px; padding:0; border-radius:8px; justify-content:center; }
+.target-avatar :deep(.agent-text) { display:none; }
+.target-label { flex:1; min-width:0; overflow-wrap:anywhere; }
+.target-dot { flex:none; }
 </style>

@@ -243,3 +243,26 @@ func TestJournalConcurrentSaveAndCorruption(t *testing.T) {
 		t.Fatal("corrupt snapshot overwritten")
 	}
 }
+
+func TestCollectArtifactSizeDiagnostic(t *testing.T) {
+	for _, size := range []int{MaxArtifactBytes, MaxArtifactBytes + 1} {
+		root := fixtureWorkspace(t)
+		if err := os.WriteFile(filepath.Join(root, protocol.TeamDeliveryDirectory("call-1"), "report.pdf"), bytes.Repeat([]byte("A"), size), 0600); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := Collect(root, fixtureJob())
+		if size == MaxArtifactBytes {
+			if err != nil || len(snapshot.Files["report"]) != size {
+				t.Fatalf("exact limit rejected: %v", err)
+			}
+			continue
+		}
+		if snapshot != nil || DiagnosticCode(err) != "delivery_artifact_too_large" {
+			t.Fatalf("expected specific oversize diagnostic without snapshot, got %v", err)
+		}
+		status := exportDiagnostic(fixtureJob(), err)
+		if status.Phase != "blocked" || status.ErrorCode != "artifact_too_large" {
+			t.Fatalf("wrong export status: %+v", status)
+		}
+	}
+}

@@ -1,3 +1,4 @@
+import { finishDatabaseStartup } from './startup-readiness.js';
 import {TeamExternalStopService} from './team/external-stop.js';
 import { registerDeliveryWithdrawalRoutes } from './extensions/delivery-withdrawal-routes.js';
 import {TeamTemplateService} from './team/template-service.js';
@@ -1231,8 +1232,8 @@ async function main() {
   let shuttingDown = false
   let databaseReady = false
   const tPool = (typeof performance !== 'undefined' ? performance.now() : Date.now())
-  // initDB 不阻塞 app.listen：生产重启表已存在，initDB 基本 no-op；全新库首启期间
-  // 表可能短暂不存在，但生产不触发该路径。失败仍致命 → exit。
+  // Listening is independent of readiness. Schema, accounting and required
+  // workers must finish before business requests are admitted; failures are fatal.
   initDB(pools.query)
     .then(async () => {
       if(installConfiguredHistoryReader(pools.query, lifecycleConfig))await enableSessionColdBodies(pools.query)
@@ -1248,13 +1249,11 @@ async function main() {
         const backfillStartedAt = Date.now();
         const backfilled = await backfillSessionTokens(pool);
         if (backfilled > 0) console.log(`[tokens] backfilled ${backfilled} sessions with token usage`);
-        const modelBf = await backfillSessionModel(pool);
-        if (modelBf > 0) console.log(`[tokens] backfilled ${modelBf} sessions with model`);
         if (!tokenFeatures.writeFacts) {
           const statsBf = await backfillTokenDailyStats(pool);
           if (statsBf > 0) console.log(`[tokens] backfilled ${statsBf} token_daily_stats rows`);
         }
-        console.log(`[tokens] startup backfill complete sessions=${backfilled} models=${modelBf} duration_ms=${Date.now() - backfillStartedAt}`);
+        console.log(`[tokens] startup backfill complete sessions=${backfilled} duration_ms=${Date.now() - backfillStartedAt}`);
       } catch (e) { console.error('[tokens] backfill failed:', e); }
       if (tokenFeatures.writeFacts) {
         const initialized = await initializeTokenUsageAccounting(pool, tokenFeatures)
@@ -1285,7 +1284,19 @@ async function main() {
           teamFanout.start()
         }
       }
-      if (!shuttingDown) databaseReady = true
+      await finishDatabaseStartup({
+        isShuttingDown: () => shuttingDown,
+        markReady: () => {
+          databaseReady = true
+          console.log(`[startup] database ready in ${((typeof performance !== 'undefined' ? performance.now() : Date.now()) - tPool).toFixed(0)}ms`)
+        },
+        repairMetadata: async () => {
+          const started = Date.now()
+          const models = await backfillSessionModel(pools.worker)
+          console.log(`[sessions] metadata repair complete models=${models} duration_ms=${Date.now() - started}`)
+        },
+        reportMetadataError: error => console.error('[sessions] optional metadata repair failed:', error),
+      })
     })
     .catch((e) => { console.error('[startup] initDB failed:', e); process.exit(1) })
   const tInit = tPool // listen 不再等 initDB
@@ -2718,7 +2729,7 @@ async function main() {
     await app.listen({ port: PORT, host: listenHost })
     const tListen = (typeof performance !== 'undefined' ? performance.now() : Date.now())
     console.log(`pocketctl relay listening on port ${PORT} [${NODE_ENV}]`)
-    console.log(`[startup] pool=${(tPool - tStart).toFixed(0)}ms initDB=${(tInit - tPool).toFixed(0)}ms listen=${(tListen - tInit).toFixed(0)}ms total=${(tListen - tStart).toFixed(0)}ms`)
+    console.log(`[startup] pool=${(tPool - tStart).toFixed(0)}ms database=${databaseReady ? 'ready' : 'initializing'} listen=${(tListen - tInit).toFixed(0)}ms total=${(tListen - tStart).toFixed(0)}ms`)
   } catch (err) { console.error('failed to start:', err); process.exit(1) }
 
   // Graceful shutdown: tell peers we're restarting, then terminate every WS

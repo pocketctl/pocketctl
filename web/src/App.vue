@@ -111,9 +111,7 @@
         </div>
       </header>
       <HelpModal v-if="shellHelpOpen" @close="shellHelpOpen=false" />
-      <router-view v-slot="{ Component }">
-        <component :is="Component" />
-      </router-view>
+      <AuthenticatedRouteView />
     </main>
   </div>
 </template>
@@ -137,6 +135,7 @@ import PwaUpdateBanner from './components/pwa/PwaUpdateBanner.vue'
 import logoDark from './assets/logo-github-org.svg'
 import logoLight from './assets/logo-github-org-light.svg'
 import { useAgentPlanProgress } from './composables/useAgentPlanProgress'
+import AuthenticatedRouteView from './components/AuthenticatedRouteView.vue'
 import { useSessionHeader } from './composables/useSessionHeader'
 import { useUserPreferences } from './composables/useUserPreferences'
 import { workspaceNotification } from './utils/workspaceNotifications'

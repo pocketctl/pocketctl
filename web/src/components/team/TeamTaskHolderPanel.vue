@@ -25,11 +25,12 @@
 </template>
 <script setup lang="ts">
 import {reactive} from 'vue'
+import type {TeamTask} from '../../types/team'
 import {useLocale} from '../../composables/useLocale'
 import {useTeamTaskHolder} from '../../composables/useTeamTaskHolder'
 const props=defineProps<{taskId:string;teamId:string;currentUserId:number;writesEnabled:boolean}>()
-const emit=defineEmits<{changed:[];revoked:[]}>(),{t}=useLocale()
-const m=reactive(useTeamTaskHolder(props,()=>emit('changed'),()=>emit('revoked')))
+const emit=defineEmits<{changed:[];revoked:[];refreshed:[task:TeamTask]}>(),{t}=useLocale()
+const m=reactive(useTeamTaskHolder(props,()=>emit('changed'),()=>emit('revoked'),task=>emit('refreshed',task)))
 </script>
 <style scoped>
 .holder-panel{border-top:1px solid var(--border);padding-top:12px;margin:12px 0;font-size:13px}.muted{color:var(--fg-secondary)}.confirmation{padding:12px;margin:8px 0;border:1px solid var(--border);border-radius:8px;background:var(--surface)}.holder-panel button{margin:4px 8px 4px 0}

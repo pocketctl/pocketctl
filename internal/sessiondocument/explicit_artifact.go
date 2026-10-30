@@ -1,10 +1,14 @@
 package sessiondocument
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
 )
+
+// ErrArtifactTooLarge distinguishes a hard byte limit from missing/unreadable files.
+var ErrArtifactTooLarge = errors.New("artifact_too_large")
 
 // ReadExplicitArtifact shares the document capture's no-follow file-descriptor
 // traversal, but supports binary artifacts. The caller supplies an authorized
@@ -20,11 +24,17 @@ func ReadExplicitArtifact(root, relative string, maxBytes int) ([]byte, error) {
 	}
 	defer f.Close()
 	before, err := f.Stat()
-	if err != nil || !before.Mode().IsRegular() || before.Size() > int64(maxBytes) {
+	if err != nil || !before.Mode().IsRegular() {
 		return nil, fmt.Errorf("artifact_size_invalid")
 	}
+	if before.Size() > int64(maxBytes) {
+		return nil, ErrArtifactTooLarge
+	}
 	data, err := io.ReadAll(io.LimitReader(f, int64(maxBytes)+1))
-	if err != nil || len(data) > maxBytes || len(data) == 0 {
+	if len(data) > maxBytes {
+		return nil, ErrArtifactTooLarge
+	}
+	if err != nil || len(data) == 0 {
 		return nil, fmt.Errorf("artifact_read_failed")
 	}
 	after, err := f.Stat()

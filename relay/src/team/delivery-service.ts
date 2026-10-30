@@ -1,4 +1,5 @@
 import { TRUSTED_EVIDENCE_COLUMNS } from './evidence-service.js'
+import { deliveryFailureCode } from './delivery-diagnostics.js'
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { requireTeamAccess } from './access.js'
@@ -31,7 +32,30 @@ export async function createInitialTaskSpec(db: DB, taskId: string, actorUserId:
 }
 export async function requireTaskDeliveryComplete(db: DB, taskId: string): Promise<void> {
   const row = (await db.query<{ allowed: boolean }>('SELECT team_task_delivery_complete($1) AS allowed', [taskId])).rows[0]
-  if (!row?.allowed) throw new TeamRepositoryError('acceptance_required', 'current delivery must be accepted before completing this task')
+  if (row?.allowed) return
+  // Diagnose only current delivery heads; historical and unrelated optional files do not block completion.
+  const revoked = (await db.query<{ revoked: boolean }>(`WITH current_submissions AS (
+    SELECT h.latest_submission_id AS submission_id, h.spec_revision FROM team_task_delivery_heads h
+    WHERE h.task_id=$1 AND NOT EXISTS(SELECT 1 FROM team_task_plan_runtime WHERE task_id=$1)
+    UNION ALL
+    SELECT h.latest_submission_id, h.spec_revision FROM team_task_plan_runtime runtime
+    JOIN team_task_plan_steps step ON step.task_id=runtime.task_id AND step.plan_revision=runtime.plan_revision
+    JOIN team_task_step_attempts a ON a.task_id=step.task_id AND a.step_id=step.step_id
+    JOIN team_task_plan_steps old ON old.task_id=a.task_id AND old.plan_revision=a.plan_revision AND old.step_id=a.step_id AND old.step_hash=step.step_hash
+    JOIN team_step_delivery_heads h ON h.attempt_id=a.attempt_id AND h.task_id=a.task_id
+    WHERE runtime.task_id=$1 AND step.definition->>'required'='true'
+      AND NOT EXISTS(SELECT 1 FROM team_task_step_attempts newer WHERE newer.task_id=a.task_id AND newer.step_id=a.step_id AND newer.attempt_no>a.attempt_no)
+  ) SELECT EXISTS(
+    SELECT 1 FROM current_submissions h JOIN team_task_submissions s ON s.submission_id=h.submission_id AND s.task_id=$1 AND s.spec_revision=h.spec_revision
+    JOIN team_task_specs p ON p.task_id=s.task_id AND p.revision=s.spec_revision
+    CROSS JOIN LATERAL jsonb_array_elements(s.manifest) artifact
+    JOIN team_artifact_revocations r ON r.submission_id=s.submission_id AND r.artifact_id=artifact->>'id'
+    WHERE (artifact->>'required')::boolean OR EXISTS(SELECT 1 FROM jsonb_array_elements(s.evidence) e
+      WHERE e->>'artifact_id'=artifact->>'id' AND p.required_checks ? (e->>'check_id'))
+  ) AS revoked`, [taskId])).rows[0]?.revoked
+  throw new TeamRepositoryError('acceptance_required', revoked
+    ? '当前交付的必需附件或验收证据已撤销，无法完成任务。请重新提交有效附件并完成验收；历史验收记录仍保留。'
+    : '当前交付尚未满足完成条件，请确认当前版本已验收通过且必需附件和证据可用。')
 }
 
 /** Small, bounded file snapshots use the same PostgreSQL BYTEA storage model as
@@ -156,7 +180,9 @@ export class TeamDeliveryService {
         JOIN team_task_step_attempts current ON current.task_id=newer.task_id AND current.step_id=newer.step_id
         WHERE current.attempt_id=$1 AND newer.attempt_no>current.attempt_no LIMIT 1`, [this.options.attemptId])).rows[0]
       return { team_id: task.team_id, task_id: taskId, task_state: task.state, specs, revision: Number(head.revision), spec: { ...spec, revision: Number(spec.revision) },
-        latest_submission_id: head.latest_submission_id, submissions, trusted_evidence: trustedEvidence, ...(this.options.attemptId ? { attempt_id: this.options.attemptId } : {}),
+        latest_submission_id: head.latest_submission_id, submissions: submissions.map(s => ({ ...s,
+          can_revoke_artifacts: task.role !== 'viewer' && (Number(s.submitted_by_user_id) === actor || task.role === 'admin')
+            && this.options.writesEnabledForTeam(task.team_id) && (!this.options.attemptId || !!this.options.stepWritesEnabledForTeam?.(task.team_id)) })), trusted_evidence: trustedEvidence, ...(this.options.attemptId ? { attempt_id: this.options.attemptId } : {}),
         writes_enabled: !superseded && !legacyLocked && this.options.writesEnabledForTeam(task.team_id) && task.role !== 'viewer' && (!this.options.attemptId || !!this.options.stepWritesEnabledForTeam?.(task.team_id)) }
     })
   }
@@ -303,7 +329,7 @@ export class TeamDeliveryService {
     }
   }
   async reportExportStatus(taskId: string, actor: number, daemonId: string, callId: string, input: { expected_revision: number; phase: string; error_code: string }) {
-    const codes = ['manifest_unavailable','manifest_invalid','artifact_unavailable','source_changed','transport_unavailable','authorization_changed','revision_conflict','quota_exceeded','retry_pending']
+    const codes = ['manifest_unavailable','manifest_invalid','artifact_too_large','artifact_unavailable','source_changed','transport_unavailable','authorization_changed','revision_conflict','quota_exceeded','retry_pending']
     if (!Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0 ||
       !['waiting_for_files','publication_pending','blocked'].includes(input.phase) || !codes.includes(input.error_code)) {
       throw new TeamRepositoryError('invalid_request', 'invalid export diagnostic')
@@ -524,7 +550,7 @@ export class TeamDeliveryService {
   async executionHistory(taskId: string, actor: number) {
     return this.transaction(async client => {
       await this.task(client, taskId, actor)
-      const executions = (await client.query(`SELECT c.call_id,c.team_session_id,c.offer_id,o.provider,c.state,c.context_version,c.context_snapshot_hash,
+      const executions = (await client.query(`SELECT c.call_id,c.team_session_id,c.offer_id,o.provider,c.state,c.outcome,c.context_version,c.context_snapshot_hash,
         f.spec_revision,c.created_at,c.dispatched_at,c.accepted_at,c.finished_at,
         NULL::timestamptz AS started_at,
         CASE WHEN x.call_id IS NULL THEN NULL ELSE jsonb_build_object('phase',x.phase,'error_code',x.error_code,'revision',x.revision,'updated_at',x.updated_at) END AS export_status,
@@ -537,7 +563,7 @@ export class TeamDeliveryService {
           AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM team_task_step_attempts a WHERE a.attempt_id=$2 AND a.task_id=c.task_id AND a.call_id=c.call_id))
           AND ($2::uuid IS NOT NULL OR NOT EXISTS(SELECT 1 FROM team_task_step_attempts a WHERE a.task_id=c.task_id AND a.call_id=c.call_id))
         ORDER BY c.created_at DESC,c.call_id DESC LIMIT 201`, [taskId, this.options.attemptId ?? null])).rows
-      return { task_id: taskId, executions: executions.slice(0,200), has_more: executions.length > 200, started_at_source: 'unavailable' }
+      return { task_id: taskId, executions: executions.slice(0,200).map(({outcome,...execution})=>({...execution,failure_code:deliveryFailureCode(execution.state,outcome)})), has_more: executions.length > 200, started_at_source: 'unavailable' }
     })
   }
 

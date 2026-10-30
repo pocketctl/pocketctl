@@ -4,7 +4,7 @@
     <ActionList v-if="taskFiltersOpen" :anchor="taskFilterAnchor" :title="t('team.task_filters')" @close="taskFiltersOpen=false"><button v-for="filter in filters" :key="filter" class="action-item" :class="{selected:activeFilter===filter}" @click="activeFilter=filter;taskFiltersOpen=false">{{ t(`team.task_filter.${filter}`) }}<WorkspaceIcon v-if="activeFilter===filter" name="check" class="icon small" /></button></ActionList>
 
     <label v-if="readinessEnabled&&activeFilter==='active'" class="pool-filter">{{ t('team.requirements.pool') }}<ActionSelect><select v-model="poolFilter" :aria-label="t('team.requirements.pool')"><option value="all">{{ t('team.requirements.pool_all') }}</option><option value="unclaimed">{{ t('team.requirements.pool_unclaimed') }}</option><option value="mine">{{ t('team.requirements.pool_mine') }}</option></select></ActionSelect></label>
-    <p v-if="navigationCached" role="status">{{ t('team.offline_navigation') }}</p>
+    <p v-if="navigationCached || !online" role="status">{{ t('team.offline_navigation') }}</p>
     <div v-if="loading" class="panel-empty">{{ t('common.loading') }}</div>
     <div v-else class="kanban task-columns" :class="{'single-column':activeFilter!=='active'}">
       <section v-for="column in taskColumns" :key="column.state" class="kanban-column task-column"><h3 class="row between">{{ t(`team.task_state.${column.state}`) }}<span class="faint">{{ column.tasks.length }}</span></h3>
@@ -23,7 +23,7 @@
       <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
     </form>
 
-    <template #footer><button type="button" class="btn" :disabled="busy" @click="showCreate=false">{{ t('common.cancel') }}</button><button type="submit" form="team-task-create-form" class="btn primary" :disabled="busy">{{ t('team.create_task') }}</button></template></TeamOverlay>
+    <template #footer><button type="button" class="btn" :disabled="busy" @click="showCreate=false">{{ t('common.cancel') }}</button><button type="submit" form="team-task-create-form" class="btn primary" :disabled="busy || !canWriteTasks">{{ t('team.create_task') }}</button></template></TeamOverlay>
     <TeamOverlay v-if="selectedTask" :title="t('replica.task_details')" @close="selectedTaskID = ''; editingTaskID = ''">
       <template v-for="task in [selectedTask]" :key="task.id">
         <span class="task-state" :class="task.state">{{ t(`team.task_state.${task.state}`) }}</span>
@@ -35,14 +35,14 @@
         <div v-else class="task-description">{{ task.background || t('team.no_background') }}</div>
         <div class="holder-row"><span>{{ t('replica.task_holders') }}</span><span v-for="holder in task.holder_user_ids" :key="holder" class="holder-pill">{{ memberLabel(holder) }}</span><span v-if="!task.holder_user_ids.length">{{ t('team.unclaimed') }}</span></div>
         <div v-if="canWriteTasks && currentUserId === teamCreatorId && !['archived','deleted'].includes(task.state)" class="holder-editor"><label v-for="member in members.filter(member => member.user_id !== currentUserId)" :key="member.id"><input type="checkbox" :checked="task.holder_user_ids.includes(member.user_id)" :disabled="busy" @change="mutate(() => setTeamTaskHolder(task, member.user_id, ($event.target as HTMLInputElement).checked))" />{{ member.display_label }}</label></div>
-        <TeamTaskHolderPanel :task-id="task.id" :team-id="teamId" :current-user-id="currentUserId" :writes-enabled="canWriteTasks" @changed="load" @revoked="deliveryRevoked" />
+        <TeamTaskHolderPanel :task-id="task.id" :team-id="teamId" :current-user-id="currentUserId" :writes-enabled="canWriteTasks" @changed="load" @refreshed="refreshTask" @revoked="deliveryRevoked" />
         <button v-if="readinessEnabled||task.requirements" class="text-btn" data-testid="task-requirements-open" @click="showRequirements=!showRequirements">{{ t('team.requirements.title') }}</button>
         <TeamTaskRequirementsPanel v-if="showRequirements&&(readinessEnabled||task.requirements)" :key="task.id" :task-id="task.id" :team-id="teamId" :current-user-id="currentUserId" :team-creator-id="teamCreatorId" :writes-enabled="canWriteTasks&&readinessEnabled===true" :members="members" @changed="load" @revoked="deliveryRevoked" />
         <button v-if="task.has_delivery_contract!==false" class="text-btn" data-testid="task-delivery-open" @click="showDelivery=!showDelivery">{{ showDelivery?'收起交付与验收':'交付与验收' }}</button>
         <TeamTaskDeliveryPanel v-if="showDelivery&&task.has_delivery_contract!==false" :key="task.id" :task-id="task.id" :current-user-id="currentUserId" :members="members" @changed="load" @revoked="deliveryRevoked" />
         <h3 class="detail-section-title">{{ t('replica.linked_sessions') }}</h3>
-        <div v-for="session in sessions.filter(item => item.task_id === task.id)" :key="session.id" class="linked-session"><div><strong>{{ session.title }}</strong><p>{{ t('replica.session_participation',{participants:session.participants.length,agents:session.agent_bindings.length}) }}</p></div><RouterLink :to="{name:'team-session',params:{teamId:teamId,id:session.id}}">{{ t('replica.open') }}</RouterLink></div>
-        <p v-if="!sessions.some(item => item.task_id === task.id)" class="detail-empty">{{ t('replica.no_linked_sessions') }}</p>
+        <div v-for="session in linkedSessions(task)" :key="session.id" class="linked-session"><div><strong>{{ session.title }}</strong><p>{{ t('replica.session_participation',{participants:session.participants.length,agents:session.agent_bindings.length}) }}</p></div><RouterLink :to="{name:'team-session',params:{teamId:teamId,id:session.id}}">{{ t('replica.open') }}</RouterLink></div>
+        <p v-if="!linkedSessions(task).length" class="detail-empty">{{ t('replica.no_linked_sessions') }}</p>
         <button v-if="canWriteTasks && task.state !== 'deleted' && task.state !== 'archived'" class="text-btn task-linked-action" @click="startSession(task.id)"><WorkspaceIcon name="plus" class="icon small" />{{ t('workspace.new_shared_session') }}</button>
         <h3 class="detail-section-title">{{ t('team.task_state_label') }}</h3>
         <div v-if="canWriteTasks" class="task-actions">
@@ -57,7 +57,7 @@
         </div>
         <p v-if="error" class="panel-error" role="alert">{{ error }}</p>
       </template>
-      <template #footer><button type="button" class="btn" :disabled="busy" @click="editingTaskID?editingTaskID='':selectedTaskID=''">{{ t(editingTaskID?'common.cancel':'common.close') }}</button><button v-if="editingTaskID===selectedTask.id" type="submit" form="team-task-edit-form" class="btn primary" :disabled="busy">{{ t('common.save') }}</button><button v-else-if="canWriteTasks && selectedTask.state!=='deleted' && selectedTask.state!=='archived'" class="btn primary" @click="startEdit(selectedTask)">{{ t('team.edit_task') }}</button></template>
+      <template #footer><button type="button" class="btn" :disabled="busy" @click="editingTaskID?editingTaskID='':selectedTaskID=''">{{ t(editingTaskID?'common.cancel':'common.close') }}</button><button v-if="editingTaskID===selectedTask.id" type="submit" form="team-task-edit-form" class="btn primary" :disabled="busy || !canWriteTasks">{{ t('common.save') }}</button><button v-else-if="canWriteTasks && selectedTask.state!=='deleted' && selectedTask.state!=='archived'" class="btn primary" @click="startEdit(selectedTask)">{{ t('team.edit_task') }}</button></template>
     </TeamOverlay>
     <p v-if="error && !showCreate && !selectedTask" class="panel-error" role="status">{{ error }}</p>
   </section>
@@ -99,6 +99,11 @@ watch(()=>props.initialTaskId,id=>{if(id){selectedTaskID.value=id;showDelivery.v
 watch(selectedTaskID,()=>{if(selectedTaskID.value!==props.initialTaskId)showDelivery.value=false})
 const selectedTask = computed(() => tasks.value.find(task => task.id === selectedTaskID.value))
 function memberLabel(id:number):string{return props.members.find(member=>member.user_id===id)?.display_label || t('replica.member_id',{id})}
+function linkedSessions(task: TeamTask): TeamSessionSummary[] { return props.sessions.filter(session => task.session_ids.includes(session.id)) }
+function refreshTask(task: TeamTask): void {
+  if (task.team_id !== props.teamId) return
+  tasks.value = tasks.value.map(current => current.id === task.id && task.revision >= current.revision ? task : current)
+}
 function holderLabels(task: TeamTask): string {return task.holder_user_ids.map(memberLabel).join('、') || t('team.unclaimed')}
 const { t } = useLocale()
 const filters = ['active', 'archived', 'deleted'] as const
@@ -121,14 +126,16 @@ const draftBackground = ref('')
 const editingTaskID = ref('')
 const editTitle = ref('')
 const editBackground = ref('')
+const editRevision = ref(0)
 const visibleTasks = computed(() => tasks.value.filter(task => activeFilter.value === 'active'
   ? task.state !== 'archived' && task.state !== 'deleted'
   : task.state === activeFilter.value))
 
 const taskColumns=computed(()=> (activeFilter.value==='active' ? ['open','in_progress','completed'] : [activeFilter.value]).map(state=>({state,tasks:visibleTasks.value.filter(task=>task.state===state)})))
 
+const online = ref(navigator.onLine)
 const navigationCached = ref(false)
-const canWriteTasks = computed(() => props.writesEnabled && !navigationCached.value && !loading.value)
+const canWriteTasks = computed(() => props.writesEnabled && online.value && !navigationCached.value && !loading.value)
 const navigationScope = () => deliveryCacheScope(props.currentUserId, getRelayOrigin())
 let loadGeneration = 0
 let identityGeneration = 0
@@ -153,6 +160,7 @@ async function load(): Promise<void> {
 }
 function message(failure: unknown): string { return failure instanceof Error ? failure.message : t('common.error') }
 function startSession(taskID: string): void {
+  if (!canWriteTasks.value || busy.value) return
   selectedTaskID.value = ''; editingTaskID.value = ''
   emit('create-session', taskID)
 }
@@ -164,11 +172,13 @@ function nextStates(task: TeamTask): Array<'open' | 'in_progress' | 'completed'>
   return ['completed']
 }
 async function mutate(run: () => Promise<TeamTask>): Promise<boolean> {
+  if (!canWriteTasks.value || !navigator.onLine || busy.value) return false
   const generation = identityGeneration
   busy.value = true; error.value = ''
   try { const result=await run(); if(generation!==identityGeneration)return false; replace(result); return true } catch (failure) { if(generation===identityGeneration)error.value = message(failure); return false } finally { if(generation===identityGeneration)busy.value = false }
 }
 async function createTask(): Promise<void> {
+  if (!canWriteTasks.value || !navigator.onLine || busy.value) return
   const generation = identityGeneration
   busy.value = true; error.value = ''
   try {
@@ -178,11 +188,11 @@ async function createTask(): Promise<void> {
     draftTitle.value = ''; draftBackground.value = ''; showCreate.value = false; activeFilter.value = 'active'
   } catch (failure) { if(generation===identityGeneration)error.value = message(failure) } finally { if(generation===identityGeneration)busy.value = false }
 }
-function startEdit(task: TeamTask): void { editingTaskID.value = task.id; editTitle.value = task.title; editBackground.value = task.background }
-async function saveEdit(task: TeamTask): Promise<void> { if (await mutate(() => updateTeamTask(task, { title: editTitle.value, background: editBackground.value }))) editingTaskID.value = '' }
+function startEdit(task: TeamTask): void { if (!canWriteTasks.value || busy.value) return; editRevision.value = task.revision; editingTaskID.value = task.id; editTitle.value = task.title; editBackground.value = task.background }
+async function saveEdit(task: TeamTask): Promise<void> { if (await mutate(() => updateTeamTask({ ...task, revision: editRevision.value }, { title: editTitle.value, background: editBackground.value }))) editingTaskID.value = '' }
 async function changeState(task: TeamTask, event: Event): Promise<void> { await mutate(() => updateTeamTask(task, { state: (event.target as HTMLSelectElement).value as 'open' | 'in_progress' | 'completed' })) }
 async function archiveTask(task: TeamTask): Promise<void> { await mutate(() => updateTeamTask(task, { state: 'archived' })) }
-async function removeTask(task: TeamTask): Promise<void> { if (confirm(t('team.delete_task_confirm'))) await mutate(() => deleteTeamTask(task)) }
+async function removeTask(task: TeamTask): Promise<void> { if (canWriteTasks.value && !busy.value && confirm(t('team.delete_task_confirm'))) await mutate(() => deleteTeamTask(task)) }
 async function restoreTask(task: TeamTask): Promise<void> { await mutate(() => restoreTeamTask(task)) }
 
 watch([() => props.teamId,()=>props.currentUserId,()=>getRelayOrigin()], () => { clearProtectedTasks(); selectedTaskID.value=props.initialTaskId||''; showDelivery.value=!!props.initialTaskId; activeFilter.value = 'active'; poolFilter.value='all'; void load() })
@@ -194,8 +204,14 @@ function navigationRevoked(event: Event) {
   tasks.value = []; selectedTaskID.value = ''; editingTaskID.value = ''; showCreate.value = false
   navigationCached.value = true
 }
-onMounted(() => { window.addEventListener('team-delivery-cache-revoked', navigationRevoked); void load() })
-onBeforeUnmount(() => { window.removeEventListener('team-delivery-cache-revoked', navigationRevoked); clearProtectedTasks() })
+function connectivity(): void {
+  online.value = navigator.onLine
+  // An old successful transport response cannot grant writes after a disconnect.
+  loadGeneration++; loading.value = false; navigationCached.value = true
+  if (online.value) void load()
+}
+onMounted(() => { window.addEventListener('online', connectivity); window.addEventListener('offline', connectivity); window.addEventListener('team-delivery-cache-revoked', navigationRevoked); void load() })
+onBeforeUnmount(() => { window.removeEventListener('online', connectivity); window.removeEventListener('offline', connectivity); window.removeEventListener('team-delivery-cache-revoked', navigationRevoked); clearProtectedTasks() })
 </script>
 
 <style scoped>

@@ -1,6 +1,6 @@
 /** Known wire controls that never own a chat-timeline row. */
 export const knownNonTimelineControlEventTypes = new Set<string>([
-  'websocket_connected', 'connection_restored', 'pong',
+  'codex_rate_limits_changed', 'websocket_connected', 'connection_restored', 'pong',
   'session_list', 'session_created', 'session_discovered',
   'session_organization_changed',
   'daemon_list', 'daemon_status', 'command_list',

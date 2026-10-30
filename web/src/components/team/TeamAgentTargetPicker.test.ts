@@ -43,3 +43,17 @@ test('deselects the last Agent into discussion while explicit all remains a sepa
  await wrapper.findAll('.target-menu>button')[0].trigger('click')
  expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([{mode:'all',offerIDs:[]}])
 })
+
+test('renders provider avatars without losing recipient identity or offline restrictions',async()=>{
+ const bindings:TeamSessionAgentBinding[]=['codex','claude-code'].map((provider,i)=>({id:`b${i}`,offer_id:`o${i}`,owner_user_id:i+1,daemon_id:`host${i}`,provider:provider as TeamSessionAgentBinding['provider'],state:'active',revision:1,native_session_id:null,availability:i?'offline':'online'}))
+ const w=mount(TeamAgentTargetPicker,{props:{modelValue:{mode:'discussion',offerIDs:[]},bindings}})
+ await w.get('.target-trigger').trigger('click')
+ expect(w.find('[data-offer-id="o0"] .agent-badge.codex svg').exists()).toBe(true)
+ expect(w.find('[data-offer-id="o1"] .agent-badge.claude svg').exists()).toBe(true)
+ expect(w.get('[data-offer-id="o1"]').attributes('disabled')).toBeDefined()
+ await w.get('[data-offer-id="o1"]').trigger('click')
+ expect(w.emitted('update:modelValue')).toBeUndefined()
+ await w.get('[data-offer-id="o0"]').trigger('click')
+ expect(w.emitted('update:modelValue')).toEqual([[{mode:'offers',offerIDs:['o0']}]])
+ w.unmount()
+})
