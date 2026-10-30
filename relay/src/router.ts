@@ -2382,11 +2382,18 @@ export class Router {
     if (msg.type === 'invocation_result') {
       const pending = this.invocationRequests.get(msg.request_id);
       const daemon = this.daemons.get(daemonId);
-      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws && pending.sessionId === sessionId && !pending.reply) {
+      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws && pending.sessionId === (sessionId ?? '') && !pending.reply) {
         const client = this.clients.get(pending.client);
         if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
           clearTimeout(pending.timer);
-          pending.reply = { ...msg, request_id: pending.requestId };
+          pending.reply = pending.sessionId === ''
+            ? { type: 'invocation_result', daemon_id: daemonId, request_id: pending.requestId,
+                ...(msg.error ? {error: ['quota_unavailable','quota_credentials_unavailable','quota_authentication_required','quota_account_changed','busy'].includes(msg.error) ? msg.error : 'quota_unavailable'} : {
+                  invocation: { kind: msg.invocation?.kind, scope_id: msg.invocation?.scope_id,
+                    observed_at: msg.invocation?.observed_at, status: msg.invocation?.status, level: msg.invocation?.level,
+                    windows: Array.isArray(msg.invocation?.windows) ? msg.invocation.windows.slice(0,2).map((w:any)=>({id:w.id,remaining_percent:w.remaining_percent,resets_at:w.resets_at})) : [] },
+                }) }
+            : { ...msg, request_id: pending.requestId };
           this.send(pending.client, pending.reply);
           pending.timer = setTimeout(() => this.invocationRequests.delete(msg.request_id), 60_000);
           pending.timer.unref?.();
@@ -2469,6 +2476,26 @@ export class Router {
   private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    if (msg.type === 'read_zcode_quota') {
+      const reject = (error:string) => this.send(clientWs, {type:'invocation_result',request_id:msg.request_id,daemon_id:msg.daemon_id,error});
+      if (client.userId == null) { reject('forbidden'); return; }
+      if (typeof msg.daemon_id !== 'string' || !msg.daemon_id || msg.daemon_id.length > 256
+        || typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128
+        || msg.session_id != null) { reject('invalid_request'); return; }
+      const daemon=this.daemons.get(msg.daemon_id);
+      if (!daemon) { reject('daemon_unreachable'); return; }
+      if (!this.sameUser(client.userId,daemon.userId)) { reject('forbidden'); return; }
+      if (daemon.ws.readyState !== 1) { reject('daemon_unreachable'); return; }
+      const fingerprint=JSON.stringify([msg.type,msg.daemon_id]);
+      const existing=[...this.invocationRequests.values()].find(p=>p.client===clientWs&&p.requestId===msg.request_id);
+      if (existing) { if(existing.fingerprint!==fingerprint)reject('request_id_conflict');else if(existing.reply)this.send(clientWs,existing.reply);return; }
+      if(this.invocationRequests.size>=2048||[...this.invocationRequests.values()].filter(p=>p.client===clientWs&&!p.reply).length>=4){reject('busy');return;}
+      const id=randomUUID();
+      const timer=setTimeout(()=>{this.invocationRequests.delete(id);reject('quota_unavailable');},20_000);timer.unref?.();
+      this.invocationRequests.set(id,{client:clientWs,daemonId:msg.daemon_id,daemonWs:daemon.ws,sessionId:'',requestId:msg.request_id,fingerprint,timer});
+      this.send(daemon.ws,{type:'read_zcode_quota',request_id:id});
+      return;
+    }
     // These envelopes are authored only by the authenticated Team dispatcher.
     // The personal-session fallback must never become a second dispatch API.
     if (String(msg?.type ?? '').startsWith('collaboration_')

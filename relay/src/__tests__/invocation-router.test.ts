@@ -60,3 +60,39 @@ describe('Codex quota private reads',()=>{
   router.unregisterClient(a);router.unregisterClient(b);router.unregisterClient(foreign)
  })
 })
+
+describe('ZCode host quota private reads',()=>{
+ test('reads without a session and returns only to the owner tab with canonical host identity',async()=>{
+  const {router,r,a,b,d}=fixture()
+  await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'host-quota',url:'https://attacker.invalid'})
+  expect(d.sent).toHaveLength(1)
+  expect(d.sent[0]).toEqual({type:'read_zcode_quota',request_id:expect.any(String)})
+  expect(d.sent[0].request_id).not.toBe('host-quota')
+  router.handleDaemonMessage('d',{type:'invocation_result',request_id:d.sent[0].request_id,daemon_id:'forged',invocation:{kind:'zcode_quota'}})
+  expect(a.sent.at(-1)).toMatchObject({type:'invocation_result',request_id:'host-quota',daemon_id:'d',invocation:{kind:'zcode_quota'}})
+  expect(b.sent).toHaveLength(0)
+  await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'host-quota'})
+  expect(d.sent).toHaveLength(1)
+  router.unregisterClient(a);router.unregisterClient(b);expect(r.invocationRequests.size).toBe(0)
+ })
+ test('rejects foreign hosts and client supplied session references',async()=>{
+  const {router,r,a,d}=fixture();const foreign=socket();router.registerClient(foreign,8)
+  for(const msg of [{type:'read_zcode_quota',daemon_id:'d',request_id:'foreign'},{type:'read_zcode_quota',daemon_id:'d',session_id:'s',request_id:'session'}]){
+   await router.handleClientMessage(msg.request_id==='foreign'?foreign:a,msg)
+  }
+  expect(d.sent).toHaveLength(0);expect(foreign.sent.at(-1)).toMatchObject({type:'invocation_result',error:'forbidden'})
+  expect(a.sent.at(-1)).toMatchObject({type:'invocation_result',error:'invalid_request'})
+  r.daemons.delete('d');await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'offline'})
+  expect(a.sent.at(-1)).toMatchObject({type:'invocation_result',error:'daemon_unreachable'})
+  router.unregisterClient(a);router.unregisterClient(foreign)
+ })
+ test('drops results from another daemon connection',async()=>{
+  const {router,r,a,d}=fixture();await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'origin'})
+  const pending=d.sent[0]?.request_id
+  r.daemons.set('other',{ws:socket(),userId:7})
+  router.handleDaemonMessage('other',{type:'invocation_result',request_id:pending,invocation:{kind:'zcode_quota'}})
+  expect(a.sent).toHaveLength(0)
+  r.daemons.set('d',{ws:socket(),userId:7});router.handleDaemonMessage('d',{type:'invocation_result',request_id:pending,invocation:{kind:'zcode_quota'}})
+  expect(a.sent).toHaveLength(0);router.unregisterClient(a)
+ })
+})

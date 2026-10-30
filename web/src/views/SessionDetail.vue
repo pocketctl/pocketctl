@@ -264,6 +264,8 @@
       <CodexQuota v-if="currentSessionAgent === 'codex' && currentSession?.control_mode === 'managed' && !focusedSubAgentId"
         :key="sessionId" :session-id="sessionId" :daemon-id="currentSession.daemon_id" :hostname="currentSession.hostname"
         :account-label="currentSession.codex_home_label" :daemon-online="currentSession.daemon_online" />
+      <ZcodeQuota v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
+        :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div
         ref="messagesEl"
@@ -797,6 +799,7 @@ import { ContentStreamAssembler, contentStreamDisplayId } from '../utils/content
 import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
 import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../utils/replaySessionTrust'
 import CodexQuota from '../components/session/CodexQuota.vue'
+import ZcodeQuota from '../components/session/ZcodeQuota.vue'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
 import { completedPlanItemCount } from '../utils/agentPlanMerge'
