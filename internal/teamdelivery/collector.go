@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -153,6 +154,9 @@ func Collect(workspace string, job protocol.TeamDeliveryJob) (*Snapshot, error) 
 		}
 		data, err := sessiondocument.ReadExplicitArtifact(workspace, directory+"/"+artifact.Path, MaxArtifactBytes)
 		if err != nil {
+			if errors.Is(err, sessiondocument.ErrArtifactTooLarge) {
+				return nil, fmt.Errorf("delivery_artifact_too_large: %w", err)
+			}
 			return nil, fmt.Errorf("delivery_artifact_unavailable: %w", err)
 		}
 		seenPaths[artifact.Path] = true

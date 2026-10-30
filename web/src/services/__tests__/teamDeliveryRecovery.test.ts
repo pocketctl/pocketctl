@@ -84,3 +84,11 @@ test('omitted activation budget accepts old receipts but rejects unexpected limi
  response.budget={};expect(confirmedDeliveryReceipt(receipt(),'task',op)).toBe(true)
  response.budget={max_concurrent_calls:1};expect(()=>confirmedDeliveryReceipt(receipt(),'task',op)).toThrow()
 })
+
+test('artifact revocation receipt binds operation target and attempt',()=>{
+ const op={kind:'revoke_artifact' as const,submissionId:'s',artifactId:'a',attemptId:'11111111-1111-4111-8111-111111111111',input:{request_id:'r',expected_revision:2,reason:'wrong'}}
+ const result={task_id:'t',request_id:'r',attempt_id:op.attemptId,found:true,receipt:{operation:'revoke:s:a',response:{revision:3,artifact_id:'a',state:'revoked',attempt_id:op.attemptId}}}
+ expect(confirmedDeliveryReceipt(result,'t',op)).toBe(true)
+ for(const patch of [{artifact_id:'other'},{state:'published'},{attempt_id:undefined}])expect(()=>confirmedDeliveryReceipt({...result,receipt:{...result.receipt,response:{...result.receipt.response,...patch}}},'t',op)).toThrow()
+ expect(()=>confirmedDeliveryReceipt({...result,receipt:{...result.receipt,operation:'revoke:other:a'}},'t',op)).toThrow()
+})

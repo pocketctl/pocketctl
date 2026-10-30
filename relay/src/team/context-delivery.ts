@@ -4,6 +4,10 @@ import type { TeamMemoryContextSelection } from './memory-context-bridge.js'
 
 export const TEAM_CONTEXT_INPUT_BUDGET_BYTES = 32_000
 
+export class TeamContextBudgetError extends Error {
+  constructor() { super('task delivery specification exceeds context budget'); this.name = 'TeamContextBudgetError' }
+}
+
 export interface CollaborationContextDelivery {
   schema_version: 1
   context_version: number
@@ -125,17 +129,17 @@ export class TeamContextDeliveryService {
       delivery_output: {
         directory: `.pocketctl-deliveries/${hash(callId)}`,
         manifest: 'submission.json',
-        instruction: 'When work is ready, copy only intended Team deliverables into this call-specific directory and write submission.json LAST. Paths are relative to that directory. Never include credentials or private conversation exports. The daemon snapshots only explicitly listed files after the native Call completes; a final chat message alone is not a delivery.',
+        instruction: 'When work is ready, copy only intended Team deliverables into this call-specific directory and write submission.json LAST. Paths are relative to that directory. Never include credentials or private conversation exports. The daemon snapshots only explicitly listed files after the native Call completes; a final chat message alone is not a delivery. Evidence check_id values must be unique across the entire manifest: include each exact required_checks string once, never repeat a check for multiple files. For a check covering multiple files, validate all of them, list every file in artifacts, and reference one representative artifact_id in that single evidence entry. Use source_kind=agent_claim, result=passed/failed/unverified, and the same code_revision as the manifest. Validate these constraints before writing submission.json.',
         example: {schema_version: 1, publish_scope: 'team', summary: 'Explain the delivered result', code_revision: null, contribution_ids: [],
           artifacts: [{id: 'report', path: 'report.md', mime_type: 'text/markdown', required: true}],
-          evidence: [{check_id: String(call.required_checks?.[0] ?? 'verification'), artifact_id: 'report', result: 'unverified', code_revision: null, source_kind: 'agent_claim'}]},
+          evidence: (call.required_checks ?? []).map((check: string) => ({check_id: check, artifact_id: 'report', result: 'unverified', code_revision: null, source_kind: 'agent_claim'}))},
         limits: {files: 16, bytes_per_file: 2097152},
       },
     })}\n` : ''
     const deliveryBytes = Buffer.byteLength(deliveryText, 'utf8')
     const stepSuffix=call.step_attempt_id ? `\nstep-inputs:${call.step_input_hash}` : ''
     const stepBytes=Buffer.byteLength(stepSuffix,'utf8')
-    if (deliveryText && deliveryBytes+stepBytes > this.budgetBytes - 256) throw new Error('task delivery specification exceeds context budget')
+    if (deliveryText && deliveryBytes+stepBytes > this.budgetBytes - 256) throw new TeamContextBudgetError()
     const built = buildTeamContextStableText({
       goal: String(call.goal ?? ''),
       consensus: Array.isArray(call.consensus) ? call.consensus : [],

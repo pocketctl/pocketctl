@@ -71,6 +71,23 @@ test('a storage event switching accounts fences actions even before auth store u
 
 const pause={kind:'plan_control' as const,input:{request_id:'pause-original',expected_revision:4,plan_revision:2,action:'pause' as const}}
 const paused={task_id:'task',revision:5,plan_revision:2,state:'paused',issued_calls_stopped:false}
+test.each([
+ ['plan invocation limit exhausted','调用次数已达到上限'],
+ ['plan concurrent reservation limit reached','并发调用已达到上限'],
+ ['plan duration limit reached; issued Calls are not stopped','计划执行时限已到'],
+])('distinguishes budget constraint %s',async(message,expected)=>{
+ planAPI.controlTaskPlan.mockRejectedValueOnce(new TeamApiError(409,{error:{code:'budget_exhausted',message}}))
+ const c=await render();await c.state.submit(pause)
+ expect(c.state.error.value).toContain(expected);expect(await records()).toEqual([])
+})
+test.each(['capability_not_supported','acceptance_required','budget_exhausted'])('preserves the actual %s rejection across parent refresh',async(code)=>{
+ planAPI.controlTaskPlan.mockRejectedValueOnce(new TeamApiError(409,{error:{code,message:'specific reason'}}))
+ const c=await render();await c.state.submit(pause)
+ expect(await records()).toEqual([])
+ expect(c.state.error.value).not.toContain('版本已变化')
+ expect(c.state.error.value).toContain(code)
+ expect(c.complete).toHaveBeenCalledWith(c.state.error.value)
+})
 test('plan control unknown result shares the task lock and survives remount without resending',async()=>{
  planAPI.controlTaskPlan.mockRejectedValue(new Error('lost response'))
  const first=await render();await first.state.submit(pause);await first.state.submit(execution)

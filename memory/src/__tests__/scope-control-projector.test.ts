@@ -21,7 +21,7 @@ function envelope(ownerScopeId: string, feedId = '1') {
 
 function projectorFor(item: ReturnType<typeof envelope>) {
   const ack = vi.fn(async () => 0)
-  const pool = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }
+  const pool = { query: vi.fn(async (_sql: string) => ({ rows: [], rowCount: 0 })) }
   const mirror = {
     get: vi.fn(async () => ({
       installation_id: INSTALLATION,
@@ -61,6 +61,13 @@ describe('scope-control projector isolation fences', () => {
     expect(ack).not.toHaveBeenCalled()
   })
 
+  test('failed control ACK never advances the health ACK clock', async () => {
+    const { projector, pool, ack } = projectorFor(envelope(TEAM))
+    ack.mockRejectedValueOnce(new Error('ACK unavailable'))
+    await expect(projector.consumeInstallation(INSTALLATION)).rejects.toThrow('ACK unavailable')
+    expect(pool.query.mock.calls.some(([sql]) => String(sql).includes('last_ack_at = NOW()'))).toBe(false)
+  })
+
   test('projects adjacent feed ids above the JavaScript safe-integer limit', async () => {
     const { projector, pool, ack } = projectorFor(envelope(TEAM, '9007199254740993'))
     await expect(projector.consumeInstallation(INSTALLATION)).resolves.toEqual({ projected: 1, skipped: 0 })
@@ -72,7 +79,7 @@ describe('scope-control projector isolation fences', () => {
     const sequence: string[] = []
     const pool = {
       query: vi.fn(async (sql: string) => {
-        if (sql.includes("local_status = 'ready'")) sequence.push('ready')
+        if (sql.includes('last_ack_at = NOW()')) sequence.push('ready')
         return { rows: [], rowCount: 0 }
       }),
     }

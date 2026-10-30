@@ -3,6 +3,7 @@ export interface DeliverySpec extends ReviewPolicy { task_id: string; revision: 
 export interface DeliveryArtifact { id: string; name: string; mime_type: string; byte_size: number; sha256: string; required: boolean }
 export interface DeliveryEvidence { check_id: string; result: 'passed'|'failed'|'unverified'; source_kind: 'agent_claim'; artifact_id: string; code_revision: string | null }
 export interface TaskSubmission {
+  can_revoke_artifacts?: boolean;
   submission_id: string; spec_revision: string | number; version: string | number | null; state: 'preparing'|'published';
   summary: string; delivery_role: 'primary'|'contribution'; submitted_by_user_id: number; source_call_id: string;
   source_offer_id: string; source_run_id: string | null; context_version: string | number; code_revision: string | null;
@@ -34,6 +35,7 @@ export interface DeliveryReminder {
   team_session_id: string; delivery_revision: string | number; has_revoked_artifacts: boolean;
 }
 export interface DeliveryExecution {
+ failure_code?: string | null
  provider?: string
   export_status?: {phase:'waiting_for_files'|'publication_pending'|'blocked'|'published';error_code:string|null;revision:number;updated_at:string}|null;
   call_id: string; team_session_id: string; offer_id: string; state: string; spec_revision: string | number | null;

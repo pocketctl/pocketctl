@@ -8,7 +8,7 @@ import {teamTaskHolderJournal as journal} from '../services/teamTaskHolderJourna
 import {validHolderOperation,matchesHolderResult,matchesHolderReceipt,type HolderOperation} from '../types/teamTaskHolder'
 import type {TeamTask} from '../types/team'
 const clone=<T>(v:T):T=>JSON.parse(JSON.stringify(v))
-export function useTeamTaskHolder(props:{taskId:string;teamId:string;currentUserId:number;writesEnabled:boolean},changed:()=>void,denied:()=>void){
+export function useTeamTaskHolder(props:{taskId:string;teamId:string;currentUserId:number;writesEnabled:boolean},changed:()=>void,denied:()=>void,refreshed:(task:TeamTask)=>void=()=>{}){
  const auth=useAuth(),{t}=useLocale(),task=ref<TeamTask|null>(null)
  const pending=ref<HolderOperation|null>(null),confirmation=ref<HolderOperation|null>(null),retryConfirm=ref(false),missing=ref(false)
  const busy=ref(false),loading=ref(false),ready=ref(false),online=ref(navigator.onLine),revoked=ref(false),error=ref(''),notice=ref('')
@@ -29,7 +29,7 @@ export function useTeamTaskHolder(props:{taskId:string;teamId:string;currentUser
    if(op&&(op.actor!==actor||op.team!==team))throw Error(t('team.holder.mismatch'))
    const value=await getTeamTask(id,identity(g));if(!current(g))return
    if(value.id!==id||value.team_id!==team||!Number.isSafeInteger(value.revision)||value.revision<1)throw Error(t('team.holder.mismatch'))
-   task.value=value;pending.value=op;ready.value=true;notice.value=''
+   task.value=value;pending.value=op;ready.value=true;notice.value='';refreshed(value)
   }catch(e){if(current(g))fail(e)}finally{if(g===generation)loading.value=false}
  }
  function prepare(){

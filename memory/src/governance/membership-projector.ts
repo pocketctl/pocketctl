@@ -135,6 +135,12 @@ export function createScopeControlProjector(options: ScopeControlProjectorOption
         || envelope.owner_scope.id !== scope.owner_scope_id)) {
         throw new Error('scope-control feed owner scope mismatch')
       }
+      // A valid empty poll is still transport progress. Keep the shared
+      // watermark in the scope mirror; it is not a personal session cursor.
+      await options.pool.query(`
+        UPDATE memory_installations SET last_pull_at = NOW(), updated_at = NOW()
+        WHERE installation_id = $1
+      `, [installationId])
       const items = batch.items
       let projected = 0
       let skipped = 0
@@ -213,11 +219,13 @@ export function createScopeControlProjector(options: ScopeControlProjectorOption
       // v1 inbox ACK provides for personal installations.
       await options.pool.query(`
         UPDATE memory_installations
-        SET local_status = 'ready', last_error_code = NULL, updated_at = NOW()
+        SET last_ack_at = NOW(),
+            local_status = CASE WHEN local_status IN ('discovering', 'syncing') THEN 'ready' ELSE local_status END,
+            last_error_code = CASE WHEN local_status IN ('discovering', 'syncing') THEN NULL ELSE last_error_code END,
+            updated_at = NOW()
         WHERE installation_id = $1
           AND relay_status = 'active'
           AND snapshot_required = FALSE
-          AND local_status IN ('discovering', 'syncing')
       `, [installationId])
       return { projected, skipped }
     },

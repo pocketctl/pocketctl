@@ -5,7 +5,7 @@ import { beforeAll, afterAll, beforeEach, describe, expect, test } from 'vitest'
 import { deleteUserAccount, initDB, userExists } from '../db.js'
 import { initTeamAccountLifecycleSchema } from '../team/account-lifecycle-schema.js'
 import { initTeamDeliverySchema } from '../team/delivery-schema.js'
-import { TeamDeliveryService } from '../team/delivery-service.js'
+import { TeamDeliveryService, requireTaskDeliveryComplete } from '../team/delivery-service.js'
 import { TeamSessionService } from '../team/session-service.js'
 import { TeamTaskService } from '../team/task-service.js'
 import { artifactDigest, DELIVERY_LIMITS, type PrepareSubmission, type AcceptanceInput } from '../team/delivery-contract.js'
@@ -430,6 +430,22 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
     expect(await f.delivery.reportExportStatus(f.taskId,f.users[0],daemon,call,input)).toEqual({revision:1,phase:'published'})
   })
 
+  test('oversize diagnostics survive authorization, persistence and history projection', async () => {
+    const f=await fixture(false,false), call=f.calls[0].call_id
+    const daemon=(await pool.query('SELECT daemon_id FROM team_agent_offers WHERE offer_id=$1',[f.offers[0]])).rows[0].daemon_id
+    await pool.query("UPDATE collaboration_calls SET state='pending',finished_at=NULL WHERE call_id=$1",[call])
+    const dispatch=new TeamDispatchRepository(pool)
+    await dispatch.claim(call)
+    await dispatch.bindNativeSession(call,daemon,f.users[0],'oversize-native')
+    await pool.query("UPDATE collaboration_calls SET state='completed',finished_at=NOW() WHERE call_id=$1",[call])
+    const diagnostic={expected_revision:0,phase:'blocked',error_code:'artifact_too_large'}
+    await expect(f.delivery.reportExportStatus(f.taskId,f.users[1],daemon,call,diagnostic)).rejects.toMatchObject({code:'team_not_found'})
+    expect(await f.delivery.reportExportStatus(f.taskId,f.users[0],daemon,call,diagnostic)).toEqual({revision:1,phase:'blocked'})
+    const history=await f.delivery.executionHistory(f.taskId,f.users[1])
+    expect(history.executions[0].export_status).toMatchObject({phase:'blocked',error_code:'artifact_too_large'})
+    expect(history.executions[0].deliveries).toEqual([])
+  })
+
   test('reviewed tasks block old daemons; export authority follows binding, membership and frozen specification', async () => {
     const f = await fixture(false,false)
     const call = f.calls[0].call_id
@@ -595,13 +611,31 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
     expect((await f.delivery.getDelivery(f.taskId, f.users[1])).latest_submission_id).toBe(main.submission_id)
     await expect(f.delivery.decide(f.taskId, f.users[1], f.decision(contribution.submission_id, 3))).rejects.toMatchObject({ code: 'revision_conflict' })
   })
+  test('revocation authority is independent of terminal delivery and denies viewers/readers', async () => {
+    const f=await fixture(), published=await f.published()
+    expect((await f.delivery.getDelivery(f.taskId,f.users[0])).submissions[0].can_revoke_artifacts).toBe(true)
+    expect((await f.delivery.getDelivery(f.taskId,f.users[1])).submissions[0].can_revoke_artifacts).toBe(false)
+    await f.delivery.decide(f.taskId,f.users[1],f.decision(published.submission_id))
+    await pool.query("UPDATE team_tasks SET state='completed' WHERE task_id=$1",[f.taskId])
+    expect((await f.delivery.getDelivery(f.taskId,f.users[0])).submissions[0].can_revoke_artifacts).toBe(true)
+    await pool.query("UPDATE collaboration_team_memberships SET role='viewer' WHERE team_id=$1 AND user_id=$2",[f.teamId,f.users[0]])
+    expect((await f.delivery.getDelivery(f.taskId,f.users[0])).submissions[0].can_revoke_artifacts).toBe(false)
+    await expect(f.delivery.revokeArtifact(f.taskId,f.users[0],published.submission_id,'proof',{request_id:'denied-revoke',expected_revision:3,reason:'wrong'})).rejects.toMatchObject({code:'team_access_denied'})
+  })
   test('revoked necessary files prevent read/accept/complete and remain separate from the immutable decision', async () => {
     const f = await fixture(), published = await f.published()
     await f.delivery.decide(f.taskId, f.users[1], f.decision(published.submission_id))
     await f.delivery.revokeArtifact(f.taskId, f.users[0], published.submission_id, 'proof', { request_id: 'revoke', expected_revision: 3, reason: 'Published accidentally' })
     await expect(f.delivery.readArtifact(f.taskId, f.users[1], published.submission_id, 'proof')).rejects.toMatchObject({ code: 'artifact_unavailable' })
+    await expect(requireTaskDeliveryComplete(pool, f.taskId)).rejects.toMatchObject({ code: 'acceptance_required', message: '当前交付的必需附件或验收证据已撤销，无法完成任务。请重新提交有效附件并完成验收；历史验收记录仍保留。' })
     await expect(pool.query("UPDATE team_tasks SET state='completed' WHERE task_id=$1", [f.taskId])).rejects.toThrow('acceptance required')
     expect((await pool.query('SELECT decision FROM team_acceptance_decisions')).rows[0].decision).toBe('accepted')
+  })
+  test('an older revoked submission does not misdiagnose the current unaccepted delivery', async () => {
+    const f = await fixture(), first = await f.published()
+    await f.delivery.revokeArtifact(f.taskId, f.users[0], first.submission_id, 'proof', {request_id:'withdraw-old',expected_revision:2,reason:'old'})
+    await f.published('replacement',3)
+    await expect(requireTaskDeliveryComplete(pool,f.taskId)).rejects.toMatchObject({code:'acceptance_required',message:'当前交付尚未满足完成条件，请确认当前版本已验收通过且必需附件和证据可用。'})
   })
   test('a required check keeps its evidence file required even if the manifest marks it optional', async () => {
     const f = await fixture(), payload = f.payload()
@@ -612,6 +646,7 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
     await f.delivery.decide(f.taskId, f.users[1], f.decision(draft.submission_id))
     expect((await pool.query('SELECT team_task_delivery_complete($1) allowed', [f.taskId])).rows[0].allowed).toBe(true)
     await f.delivery.revokeArtifact(f.taskId, f.users[0], draft.submission_id, 'proof', { request_id: 'revoke', expected_revision: 3, reason: 'Withdraw evidence' })
+    await expect(requireTaskDeliveryComplete(pool,f.taskId)).rejects.toThrow('必需附件或验收证据已撤销')
     await expect(f.delivery.uploadArtifact(f.taskId, f.users[0], draft.submission_id, 'proof', f.bytes)).rejects.toMatchObject({ code: 'artifact_unavailable' })
     await expect(pool.query("UPDATE team_tasks SET state='completed' WHERE task_id=$1", [f.taskId])).rejects.toThrow('acceptance required')
   })

@@ -21,7 +21,7 @@ import {
   type DispatchAuthorization,
 } from './dispatch-repository.js'
 import type { TeamEvent } from './types.js'
-import { TeamContextDeliveryService } from './context-delivery.js'
+import { TeamContextDeliveryService, TeamContextBudgetError } from './context-delivery.js'
 import type { TeamMemorySourceProjectorLike } from './memory-source-projector.js'
 import type { TeamMemoryContextBridge } from './memory-context-bridge.js'
 import {
@@ -155,7 +155,7 @@ export class TeamDispatchService {
       teamContext = await this.contextDelivery.prepare(callId, memoryContext)
     } catch (error) {
       if (contextFailureStage === 'context_prepare') teamContextInjectionFailuresTotal.inc({ stage: 'context_prepare' })
-      await this.repository.stop(callId, 'blocked', 'context_snapshot_unavailable')
+      await this.repository.stop(callId, 'blocked', error instanceof TeamContextBudgetError ? 'context_budget_exceeded' : 'context_snapshot_unavailable')
       teamDispatchTotal.inc({ operation: metricOperation, outcome: 'context_blocked' })
       teamDispatchLatencySeconds.observe({ operation: metricOperation, outcome: 'context_blocked' }, Number(process.hrtime.bigint() - startedAt) / 1e9)
       console.error('[team-dispatch] context preparation failed', { callId, error })

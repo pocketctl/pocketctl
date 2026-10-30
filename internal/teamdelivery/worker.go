@@ -190,6 +190,8 @@ func exportDiagnostic(job protocol.TeamDeliveryJob, err error) ExportDiagnostic 
 	switch {
 	case code == "delivery_manifest_unavailable":
 		result.Phase, result.ErrorCode = "waiting_for_files", "manifest_unavailable"
+	case code == "delivery_artifact_too_large":
+		result.Phase, result.ErrorCode = "blocked", "artifact_too_large"
 	case code == "delivery_artifact_unavailable":
 		result.Phase, result.ErrorCode = "waiting_for_files", "artifact_unavailable"
 	case strings.Contains(code, "limit"):

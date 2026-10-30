@@ -35,3 +35,5 @@ export async function readTrustedEvidence(task:string,evidence:import('../types/
  if(hash!==evidence.report_sha256)throw new Error('验证报告校验失败，请刷新后重新读取。')
  return new TextDecoder('utf-8',{fatal:true}).decode(buffer)
 }
+
+export const revokeDeliveryArtifact = (task:string,submission:string,artifact:string,input:{request_id:string;expected_revision:number;reason:string},identity?:TeamRequestIdentity,attempt?:string) => teamRequest(`${base(task,attempt)}/submissions/${encodeURIComponent(submission)}/artifacts/${encodeURIComponent(artifact)}/revoke`,{method:'POST',body:{...input},timeoutMs:30000,identity})

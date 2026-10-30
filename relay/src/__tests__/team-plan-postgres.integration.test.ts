@@ -527,6 +527,7 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
     const source = await acceptedSource(f); await activateFixture(f)
     expect(await complete(f.task)).toBe(true)
     await source.delivery.revokeArtifact(f.task, f.users[0], source.submission, 'proof', { request_id: 'revoke-complete', expected_revision: 3, reason: 'fixture revocation' })
+    await expect(requireTaskDeliveryComplete(pool,f.task)).rejects.toMatchObject({code:'acceptance_required',message:'当前交付的必需附件或验收证据已撤销，无法完成任务。请重新提交有效附件并完成验收；历史验收记录仍保留。'})
     expect(await complete(f.task)).toBe(false)
     const other = await fixture(); other.input.steps[1].required = false; other.input.steps[2].required = false
     await acceptedSource(other); await activateFixture(other)
@@ -671,6 +672,25 @@ const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && Boolean(process.
     expect((await app.inject({method:'GET',url,headers})).statusCode).toBe(503)
     expect((await app.inject({method:'GET',url:base,headers})).statusCode).toBe(503)
     await app.close()
+  })
+  test('step input contention is retryable on the same Call, and history preserves only safe failure codes', async () => {
+    const f=await schedulerFixture(), first=await f.next(), inputs=new TeamStepInputService(pool)
+    expect(await new TeamDispatchRepository(pool,undefined,()=>true).claim(first.call_id!)).not.toBeNull()
+    const holder=await pool.connect()
+    try {
+      await holder.query('BEGIN')
+      await holder.query('SELECT 1 FROM daemons WHERE daemon_id=$1 FOR UPDATE',[f.daemon])
+      await expect(inputs.getManifest(first.call_id!,f.daemon,f.users[0])).rejects.toMatchObject({code:'source_busy'})
+    } finally {await holder.query('ROLLBACK');holder.release()}
+    expect((await inputs.getManifest(first.call_id!,f.daemon,f.users[0])).inputs).toEqual([])
+    const attempt=(await pool.query('SELECT attempt_id FROM team_task_step_attempts WHERE call_id=$1',[first.call_id])).rows[0]
+    const scoped=new TeamDeliveryService(pool,{writesEnabledForTeam:()=>true,attemptId:attempt.attempt_id})
+    await pool.query("UPDATE collaboration_calls SET state='failed',outcome='delivery_http_503:source_busy' WHERE call_id=$1",[first.call_id])
+    const history=await scoped.executionHistory(f.task,f.users[0])
+    expect(history.executions[0].failure_code).toBe('delivery_http_503:source_busy')
+    expect(history.executions[0]).not.toHaveProperty('outcome')
+    await pool.query("UPDATE collaboration_calls SET outcome='private /home/file token=secret' WHERE call_id=$1",[first.call_id])
+    expect((await scoped.executionHistory(f.task,f.users[0])).executions[0].failure_code).toBe('execution_failed')
   })
   test('step input access is rechecked after member removal and original Call uncertainty', async () => {
     const f=await schedulerFixture(), first=await f.next(), inputs=new TeamStepInputService(pool)

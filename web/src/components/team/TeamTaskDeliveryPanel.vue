@@ -44,6 +44,14 @@
       <div class="delivery-toolbar"><h4>{{ preview.name }}</h4><button class="btn" @click="clearPreview">关闭预览</button></div>
       <pre v-if="preview.text!==null">{{ preview.text }}</pre><p v-else>此文件以附件下载后查看。</p>
       <a :href="preview.url" :download="preview.name">下载已校验文件</a>
+      <button v-if="selected.can_revoke_artifacts" class="btn" :disabled="!canRevoke" @click="revokeEditing=true">撤销附件</button>
+      <div v-if="revokeEditing">
+       <label>撤销原因（必填，最多 2000 字符）<textarea v-model="revokeReason" aria-label="撤销原因" maxlength="2000" :disabled="!canRevoke" @input="revokeConfirmation=null" /></label>
+       <p>撤销后团队成员无法再预览或下载此附件，相关证据将不可用。历史记录保留，不会删除私有源文件；已下载的副本无法收回。</p>
+       <button v-if="!revokeConfirmation" class="btn" :disabled="!canRevoke || !revokeReason.trim() || revokeReason.length>2000" @click="prepareRevoke">核对撤销</button>
+       <template v-else><p>确认撤销 {{ preview.name }}？原因：{{ revokeReason }}</p><button class="btn" :disabled="!canRevoke" @click="submitRevoke">确认撤销附件</button><button class="btn" @click="revokeConfirmation=null">返回修改</button></template>
+       <button class="btn" :disabled="operations.busy.value" @click="revokeEditing=false;revokeConfirmation=null">取消撤销</button>
+      </div>
      </section>
      <section class="delivery-section"><h4>验证证据</h4><p>Agent 自述不等于验收通过，请核对对应文件和代码版本。</p>
       <ul class="delivery-evidence"><li v-for="check in selectedSpec?.required_checks || []" :key="check">
@@ -83,7 +91,8 @@
     <p>派发、接收、执行结束与产物保存分别记录。缺少原生开始事实时显示未知。</p>
     <p v-if="historyLoading">正在读取执行记录…</p>
     <article v-for="call in history" :key="call.call_id" class="delivery-execution">
-     <h4>规格 v{{ call.spec_revision || '—' }} · {{ stateLabel(call.state) }}</h4><dl>
+     <h4>规格 v{{ call.spec_revision || '—' }} · {{ stateLabel(call.state) }}</h4>
+     <p v-if="call.failure_code" class="delivery-notice">{{ deliveryFailureReason(call.failure_code) }}<br><small>诊断代码：{{ call.failure_code }}</small></p><dl>
       <dt>派发</dt><dd>{{ date(call.dispatched_at) }}</dd><dt>接收</dt><dd>{{ date(call.accepted_at) }}</dd>
       <dt>原生开始</dt><dd>{{ date(call.started_at) }}</dd><dt>执行结束</dt><dd>{{ date(call.finished_at) }}</dd>
      </dl><p v-if="call.export_status && !call.deliveries.length" class="delivery-notice" role="status"><strong>{{ exportPhase(call.export_status.phase) }}</strong><br>{{ exportReason(call.export_status.error_code) }}<small>状态更新 · {{ date(call.export_status.updated_at) }}</small></p>
@@ -96,6 +105,7 @@
 </template>
 <script setup lang="ts">
 import '../../assets/team-delivery.css'
+import { deliveryFailureReason } from '../../services/teamDeliveryDiagnostics'
 import TeamExternalRecovery from './TeamExternalRecovery.vue'
 import TeamDeliveryMemoryStatus from './TeamDeliveryMemoryStatus.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -117,13 +127,18 @@ const delivery=ref<TaskDelivery|null>(null), selectedId=ref(''), loading=ref(fal
 const managementBusy=ref(false)
 const tab=ref('delivery'), history=ref<DeliveryExecution[]>([]), historyLoading=ref(false), historyMore=ref(false)
 function exportPhase(phase:string){return ({waiting_for_files:'等待交付文件',publication_pending:'交付发布待恢复',blocked:'交付需处理',published:'交付已保存'} as Record<string,string>)[phase]||'交付状态待核对'}
-function exportReason(code:string|null){return ({manifest_unavailable:'尚未找到本次执行的交付清单，执行结束不代表文件已保存。',manifest_invalid:'交付清单或证据格式不符合要求，需要 Agent 修正。',artifact_unavailable:'清单中的文件缺失、不可读或超出限制，需要检查文件。',source_changed:'来源绑定或规格已变化，需要核对当前任务。',transport_unavailable:'连接暂不可用，恢复后会先查询原操作回执。',authorization_changed:'发布权限发生变化，需要核对当前成员和 Agent 权限。',revision_conflict:'交付版本已变化，正在核对原操作与当前版本。',quota_exceeded:'交付存储或文件配额已达到上限，需要处理后再继续。',retry_pending:'发布尚未完成，将保留原文件快照继续恢复。'} as Record<string,string>)[code||'']||'以当前交付文件和发布记录为准。'}
+function exportReason(code:string|null){return ({manifest_unavailable:'尚未找到本次执行的交付清单，执行结束不代表文件已保存。',manifest_invalid:'交付清单或证据格式不符合要求，需要 Agent 修正。',artifact_too_large:'交付文件超过单文件上限 2 MiB（2,097,152 字节），未保存且不会截断。请减小文件或拆分为多个文件后重新执行。',artifact_unavailable:'交付文件缺失或不可读，请检查文件；旧版 Agent 的此错误也可能表示文件超限。',source_changed:'来源绑定或规格已变化，需要核对当前任务。',transport_unavailable:'连接暂不可用，恢复后会先查询原操作回执。',authorization_changed:'发布权限发生变化，需要核对当前成员和 Agent 权限。',revision_conflict:'交付版本已变化，正在核对原操作与当前版本。',quota_exceeded:'交付存储或文件配额已达到上限，需要处理后再继续。',retry_pending:'发布尚未完成，将保留原文件快照继续恢复。'} as Record<string,string>)[code||'']||'以当前交付文件和发布记录为准。'}
 const verifiedChecks=ref<string[]>([]), reason=ref(''), confirmAction=ref<'accepted'|'changes_requested'|null>(null)
-const preview=ref<{ name:string;url:string;text:string|null }|null>(null)
+const revokeEditing=ref(false),revokeReason=ref(''),revokeConfirmation=ref<import('../../services/teamDeliveryRecovery').DeliveryPendingOperation|null>(null)
+const canRevoke=computed(()=>!!preview.value&&selected.value?.can_revoke_artifacts===true&&!selected.value.revoked_artifact_ids.includes(preview.value.artifactId)&&verified.value&&online.value&&!loading.value&&!busy.value&&!managementBusy.value&&!operations.blocked.value)
+function prepareRevoke(){if(!canRevoke.value||!selected.value||!preview.value||!delivery.value||!revokeReason.value.trim()||revokeReason.value.length>2000)return;revokeConfirmation.value={kind:'revoke_artifact',submissionId:selected.value.submission_id,artifactId:preview.value.artifactId,attemptId:props.attemptId,input:{request_id:crypto.randomUUID(),expected_revision:delivery.value.revision,reason:revokeReason.value.trim()}}}
+async function submitRevoke(){const op=revokeConfirmation.value;if(!op||!canRevoke.value||op.input.expected_revision!==delivery.value?.revision)return;await operations.submit(op)}
+const preview=ref<{ artifactId:string;name:string;url:string;text:string|null }|null>(null)
 let generation=0, scope=0,ownFileInvalidation=false
-const operations=useTeamDeliveryOperation(()=>props.taskId,()=>props.currentUserId,async()=>{confirmAction.value=null;reason.value='';emit('changed');window.dispatchEvent(new Event('team-delivery-changed'));await load()},()=>{generation++;loading.value=false;busy.value=false;historyLoading.value=false;delivery.value=null;verified.value=false;history.value=[];clearPreview();revokeCached();emit('revoked')})
+let authorityTimer:ReturnType<typeof setInterval>|undefined, authorityReading=false, historyRead=0
+const operations=useTeamDeliveryOperation(()=>props.taskId,()=>props.currentUserId,async()=>{confirmAction.value=null;reason.value='';await load();emit('changed');window.dispatchEvent(new Event('team-delivery-changed'))},()=>{generation++;loading.value=false;busy.value=false;historyLoading.value=false;delivery.value=null;verified.value=false;history.value=[];clearPreview();revokeCached();emit('revoked')})
 const {receiptMissing,confirmRetry}=operations
-const pending=computed(()=>operations.pending.value?.operation.kind==='acceptance'?operations.pending.value.operation.input:null)
+const pending=computed(()=>operations.pending.value && ['acceptance','revoke_artifact'].includes(operations.pending.value.operation.kind)?operations.pending.value.operation.input:null)
 const cacheId=()=>props.attemptId?JSON.stringify([props.taskId,props.attemptId]):props.taskId
 const cacheScope=()=>deliveryCacheScope(props.currentUserId,getRelayOrigin())
 function cacheResult(result:TaskDelivery){if(result.task_id!==props.taskId||(result.attempt_id||undefined)!==props.attemptId)throw Error('交付范围不匹配，请刷新。');delivery.value=result;if(!result.submissions.some(s=>s.submission_id===selectedId.value))selectedId.value=result.latest_submission_id||result.submissions.at(-1)?.submission_id||''}
@@ -146,7 +161,7 @@ function memberName(id?:number){return props.members.find(m=>m.user_id===Number(
 function date(value:string|null){return value?new Date(value).toLocaleString():'未知'}
 function stateLabel(value:string){return ({pending:'等待派发',dispatched:'已派发',accepted:'已接收',completed:'执行结束',failed:'失败',blocked:'阻塞',cancelled:'已取消',uncertain:'结果待核对'} as Record<string,string>)[value]||value}
 function evidenceLabel(id:string){const e=selected.value?.evidence.find(e=>e.check_id===id);return !checkAvailable(id)?'证据缺失或不可用':selected.value?.decision==='accepted'?'已由验收人核对':e?.result==='passed'?'声明通过，待人工核对':'未验证，待人工核对'}
-function clearPreview(){if(preview.value)URL.revokeObjectURL(preview.value.url);preview.value=null}
+function clearPreview(){revokeEditing.value=false;revokeConfirmation.value=null;revokeReason.value='';if(preview.value)URL.revokeObjectURL(preview.value.url);preview.value=null}
 
 function failure(e:unknown){error.value=e instanceof TeamApiError&&['artifact_unavailable','artifact_integrity'].includes(e.code)?'文件不可用，请刷新后重新读取。':e instanceof TeamApiError&&(e.status===0||e.status>=500)?'交付暂时无法刷新，请恢复连接后重试。':e instanceof Error?e.message:'读取失败，请重试';if(e instanceof TeamApiError && ([401,403].includes(e.status)||e.status===404&&e.code==='team_not_found')){operations.revoke()}}
 async function load(){if(operations.busy.value||operations.revoked.value)return;void operations.refresh();const g=++generation,owner=cacheScope(),ticket=teamDeliveryCache.ticket();loading.value=true;verified.value=false;error.value='';legacy.value=false;verifiedChecks.value=[];confirmAction.value=null;historyLoading.value=false;clearPreview();try{
@@ -159,11 +174,12 @@ async function load(){if(operations.busy.value||operations.revoked.value)return;
   ownFileInvalidation=true;const cleanup=teamDeliveryCache.purge(owner,{task:props.taskId,filesOnly:true}),nextTicket=teamDeliveryCache.ticket();await cleanup.catch(()=>{});ownFileInvalidation=false;if(g!==generation)return
   void teamDeliveryCache.write(owner,'detail',cacheId(),result.team_id||'', [props.taskId],result,nextTicket).catch(()=>{})
  }else void teamDeliveryCache.write(owner,'detail',cacheId(),result.team_id||'',[props.taskId],result,ticket).catch(()=>{})
+  if(tab.value==='history')await loadHistory()
  }catch(e){if(g!==generation)return;if(e instanceof TeamApiError&&e.code==='capability_not_supported'){legacy.value=true;delivery.value=null;revokeCached()}else failure(e)}finally{if(g===generation)loading.value=false}}
-async function loadHistory(){const g=generation,owner=cacheScope(),ticket=teamDeliveryCache.ticket();historyLoading.value=true;try{
- const saved=await teamDeliveryCache.read<{executions:DeliveryExecution[];has_more:boolean}>(owner,'history',cacheId()).catch(()=>null);if(g!==generation)return;if(saved){history.value=saved.data.executions;historyMore.value=saved.data.has_more}
- const result=await getDeliveryHistory(props.taskId,props.attemptId);if(g!==generation)return;history.value=result.executions;historyMore.value=result.has_more;void teamDeliveryCache.write(owner,'history',cacheId(),delivery.value?.team_id||'',[props.taskId],result,ticket).catch(()=>{})
- }catch(e){if(g===generation)failure(e)}finally{if(g===generation)historyLoading.value=false}}
+async function loadHistory(){const r=++historyRead,g=generation,owner=cacheScope(),ticket=teamDeliveryCache.ticket();historyLoading.value=true;try{
+ const saved=await teamDeliveryCache.read<{executions:DeliveryExecution[];has_more:boolean}>(owner,'history',cacheId()).catch(()=>null);if(g!==generation||r!==historyRead)return;if(saved){history.value=saved.data.executions;historyMore.value=saved.data.has_more}
+ const result=await getDeliveryHistory(props.taskId,props.attemptId);if(g!==generation||r!==historyRead)return;history.value=result.executions;historyMore.value=result.has_more;void teamDeliveryCache.write(owner,'history',cacheId(),delivery.value?.team_id||'',[props.taskId],result,ticket).catch(()=>{})
+ }catch(e){if(g===generation&&r===historyRead)failure(e)}finally{if(g===generation&&r===historyRead)historyLoading.value=false}}
 async function openFile(file:DeliveryArtifact){if(!selected.value||selected.value.revoked_artifact_ids.includes(file.id))return;const g=generation, owner=scope,cacheOwner=cacheScope(),ticket=teamDeliveryCache.ticket(),id=selected.value.submission_id,key=JSON.stringify(props.attemptId?[props.taskId,props.attemptId,id,file.id,file.sha256]:[props.taskId,id,file.id,file.sha256]);busy.value=true;error.value='';try{
  let blob:Blob
  try{if(!verified.value||!online.value)throw new TeamApiError(0,{error:{code:'offline',message:'离线'}});blob=await readDeliveryArtifact(props.taskId,id,file,props.attemptId);const bytes=await blob.arrayBuffer();if(g!==generation)return;void teamDeliveryCache.write(cacheOwner,'file',key,delivery.value?.team_id||'',[props.taskId],bytes,ticket).catch(()=>{})}
@@ -174,7 +190,7 @@ async function openFile(file:DeliveryArtifact){if(!selected.value||selected.valu
   blob=new Blob([saved.data]);error.value='正在查看已校验的离线文件快照。'
  }
  const text=file.mime_type.startsWith('text/')||file.mime_type==='application/json'?await blob.text():null
- if(g!==generation||selected.value?.submission_id!==id)return;clearPreview();preview.value={name:file.name,url:URL.createObjectURL(blob),text}
+ if(g!==generation||selected.value?.submission_id!==id)return;clearPreview();preview.value={artifactId:file.id,name:file.name,url:URL.createObjectURL(blob),text}
  }catch(e){if(g===generation)failure(e)}finally{if(owner===scope)busy.value=false}}
 async function submitDecision(){if(!canReview.value||!selected.value||!delivery.value||!confirmAction.value||operations.blocked.value||busy.value)return
  if(confirmAction.value==='accepted'&&!canAccept.value)return
@@ -182,11 +198,21 @@ async function submitDecision(){if(!canReview.value||!selected.value||!delivery.
  await operations.submit({kind:'acceptance',input,...(props.attemptId?{attemptId:props.attemptId}:{})})
 }
 
+
+// Authorization reads must continue while a mutation awaits its original receipt.
+// Do not replace the displayed snapshot or resolve/replay that mutation here.
+async function checkAuthority(){
+ if(authorityReading||!navigator.onLine||operations.revoked.value)return
+ const g=generation,owner=cacheScope(),task=props.taskId,attempt=props.attemptId
+ authorityReading=true
+ try{await getTaskDelivery(task,attempt)}catch(e){if(g===generation&&owner===cacheScope())failure(e)}finally{authorityReading=false}
+}
+watch(canRevoke,allowed=>{if(!allowed)revokeConfirmation.value=null})
 function connectivity(){online.value=navigator.onLine;verified.value=false;clearPreview();if(online.value)void load()}
 watch([()=>props.taskId,()=>props.attemptId,()=>props.currentUserId,()=>getRelayOrigin()],()=>{generation++;scope++;tab.value='delivery';delivery.value=null;historyLoading.value=false;reason.value='';verifiedChecks.value=[];history.value=[];selectedId.value='';busy.value=false;confirmAction.value=null;clearPreview();void load()},{immediate:true})
 watch(selectedId,()=>{verifiedChecks.value=[];confirmAction.value=null;clearPreview()})
-onMounted(()=>{window.addEventListener('team-delivery-cache-revoked',cacheRevoked);window.addEventListener('online',connectivity);window.addEventListener('offline',connectivity)})
-onBeforeUnmount(()=>{window.removeEventListener('team-delivery-cache-revoked',cacheRevoked);generation++;scope++;clearPreview();window.removeEventListener('online',connectivity);window.removeEventListener('offline',connectivity)})
+onMounted(()=>{authorityTimer=setInterval(()=>void checkAuthority(),15000);window.addEventListener('focus',checkAuthority);window.addEventListener('team-delivery-cache-revoked',cacheRevoked);window.addEventListener('online',connectivity);window.addEventListener('offline',connectivity)})
+onBeforeUnmount(()=>{clearInterval(authorityTimer);window.removeEventListener('focus',checkAuthority);window.removeEventListener('team-delivery-cache-revoked',cacheRevoked);generation++;scope++;clearPreview();window.removeEventListener('online',connectivity);window.removeEventListener('offline',connectivity)})
 </script>
 <style scoped>
 .delivery-panel{font-size:13px;line-height:1.7;color:var(--fg)}.delivery-toolbar,.delivery-version{display:flex;align-items:center;justify-content:space-between;gap:12px}.delivery-toolbar h3{margin:0}.delivery-tabs{display:flex;gap:16px;border-bottom:1px solid var(--border);margin:18px 0}.delivery-tabs button{padding:10px 0;border:0;border-bottom:2px solid transparent;background:none;color:var(--fg-secondary);cursor:pointer}.delivery-tabs button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent)}.delivery-section{padding:18px 0;border-bottom:1px solid var(--border)}h4{margin:0 0 10px;font-size:13px;font-weight:600}p{color:var(--fg-secondary)}.delivery-copy{white-space:pre-wrap;overflow-wrap:anywhere}.delivery-file{display:flex;justify-content:space-between;align-items:center;width:100%;padding:13px 0;background:none;color:var(--fg);border:0;border-bottom:1px solid var(--border);text-align:left;cursor:pointer}.delivery-file span{min-width:0;overflow-wrap:anywhere}small{display:block;color:var(--fg-secondary);font-size:11px}.delivery-notice{padding:12px;border:1px solid var(--border);border-radius:7px;background:var(--surface)}.delivery-error{color:var(--error)}.delivery-evidence{list-style:none;padding:0}.delivery-evidence label{display:flex;gap:10px;align-items:flex-start;padding:8px 0}.delivery-evidence input{accent-color:var(--accent);margin-top:5px}.delivery-review{padding:18px 0}.delivery-review .btn{margin-right:8px}.delivery-review label{display:grid;gap:8px}textarea{width:100%;box-sizing:border-box;padding:10px;background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:6px;font:inherit}dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 16px}dt{color:var(--fg-secondary)}dd{margin:0;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;padding:12px;background:var(--surface);font-size:12px}a{color:var(--accent)}summary{cursor:pointer}.delivery-execution{padding:14px 0;border-bottom:1px solid var(--border)}button:disabled{opacity:.5;cursor:not-allowed}
