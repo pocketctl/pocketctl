@@ -24,10 +24,10 @@ describe('session lifecycle policy', () => {
       .toMatchObject({ action: null, archiveAt: null, purgeAt: null, blockedReasons: ['demo_excluded'] })
   })
   test.each([
-    ['2026-03-02T00:00:00.000000Z', null],
-    ['2026-03-02T00:00:00.000001Z', 'archive'],
-    ['2026-04-01T00:00:00.000000Z', 'archive'],
-    ['2026-04-01T00:00:00.000001Z', 'purge'],
+    ['2026-01-31T00:00:00.000000Z', null],
+    ['2026-01-31T00:00:00.000001Z', 'archive'],
+    ['2026-03-02T00:00:00.000000Z', 'archive'],
+    ['2026-03-02T00:00:00.000001Z', 'purge'],
   ])('strict microsecond threshold %s', (now, action) => {
     expect(evaluateLifecycle(session, now, config).action).toBe(action)
   })
@@ -35,14 +35,14 @@ describe('session lifecycle policy', () => {
     expect(
       evaluateLifecycle(
         { ...session, archiveReason: 'manual', pinned: true },
-        '2026-03-02T00:00:00.000001Z',
+        '2026-01-31T00:00:00.000001Z',
         config,
       ).action,
     ).toBe('cool')
     expect(
       evaluateLifecycle(
         { ...session, archiveReason: 'manual', pinned: true },
-        '2026-04-01T00:00:00.000001Z',
+        '2026-03-02T00:00:00.000001Z',
         config,
       ).action,
     ).toBe('purge')
@@ -52,7 +52,7 @@ describe('session lifecycle policy', () => {
       expect(
         evaluateLifecycle(
           { ...session, archiveReason: 'inactivity', contentState },
-          '2026-03-03T00:00:00Z',
+          '2026-02-02T00:00:00Z',
           config,
         ).action,
       ).toBe(contentState==='mixed'?'cool':null)
@@ -137,7 +137,7 @@ describe('session lifecycle policy', () => {
   })
   test('timezone offsets give the same precise result', () => {
     expect(
-      evaluateLifecycle(session, '2026-03-02T08:00:00.000001+08:00', config)
+      evaluateLifecycle(session, '2026-01-31T08:00:00.000001+08:00', config)
         .action,
     ).toBe('archive')
   })

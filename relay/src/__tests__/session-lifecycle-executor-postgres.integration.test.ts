@@ -37,9 +37,10 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
     userId=(await pool.query("INSERT INTO users(email,password_hash) VALUES('execute@test.invalid','x') RETURNING id")).rows[0].id
     await pool.query("INSERT INTO daemons(daemon_id,user_id,alias) VALUES('host',$1,'Fixture host')",[userId])
     await pool.query(`INSERT INTO sessions(session_id,user_id,daemon_id,status,title,last_activity_at,last_business_activity_at,activity_verified)
-      VALUES('root',$1,'host','idle','真实自动归档',NOW()-interval '70 days',NOW()-interval '70 days',true)`,[userId])
+      VALUES('root',$1,'host','idle','真实自动归档',NOW()-interval '40 days',NOW()-interval '40 days',true)`,[userId])
     await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status) VALUES('root','user_text','{"text":"exact content"}','completed'),
       ('root','agent_text','{"text":"exact response","usage":{"input_tokens":10,"output_tokens":3}}','completed')`)
+    await pool.query("UPDATE events SET created_at=NOW()-interval '40 days'")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
     onPut=undefined;failPut=false
   })
@@ -68,6 +69,7 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
       VALUES('doc',$1,'root','设计.md','markdown','available','turn','source',NOW())`,[userId])
     await pool.query(`INSERT INTO session_document_versions(version_id,user_id,session_id,document_id,source_turn_id,source_event_id,byte_size,sha256,captured_at,content_bytes)
       VALUES('version',$1,'root','doc','turn','source',$2,$3,NOW(),$4)`,[userId,bytes.length,sha,bytes])
+    await pool.query("UPDATE session_document_versions SET committed_at=NOW()-interval '40 days'")
     expect(await executor.execute(await lease())).toBe('succeeded')
     const version=(await pool.query("SELECT * FROM session_document_versions WHERE version_id='version'")).rows[0]
     expect(version.content_bytes).toBeNull()
@@ -110,6 +112,7 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
   test('bounded passes publish a prefix and retry remaining bodies without rewriting published objects',async()=>{
     await pool.query('DELETE FROM events')
     for(let index=0;index<8;index++)await pool.query("INSERT INTO events(session_id,event_type,payload,effect_status) VALUES('root','user_text',$1,'completed')",[JSON.stringify({text:'a'.repeat(6000),index})])
+    await pool.query("UPDATE events SET created_at=NOW()-interval '40 days'")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
     const bounded=new SessionLifecycleExecutor(pool,{...config,batchBytes:20000,maxChunkBytes:8000,maxCompressedBytes:10000},adapter,'fixture-secret')
     const first=await lease()
@@ -126,9 +129,10 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
     expect((await pool.query('SELECT content_state FROM sessions')).rows[0].content_state).toBe('cold')
     expect((await withSessionHistoryScope({userId},()=>getSessionAllEvents(pool,'root'))).map(row=>row.payload.index)).toEqual([0,1,2,3,4,5,6,7])
   })
-  test('90-day purge commits durable tombstone, removes every body and completes only after object compensation',async()=>{
+  test('60-day purge commits durable tombstone, removes every body and completes only after object compensation',async()=>{
     expect(await executor.execute(await lease())).toBe('succeeded')
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     const purging=await lease('purge')
     expect(await executor.execute(purging,{extensionMode:'enabled'})).toBe('partial')
     expect((await pool.query("SELECT 1 FROM sessions WHERE session_id='root'")).rows).toEqual([])
@@ -153,7 +157,8 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
   })
   test('remote deletion failure remains pending; expired notices never resurrect when cleanup later completes',async()=>{
     expect(await executor.execute(await lease())).toBe('succeeded')
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     const purging=await lease('purge')
     expect(await executor.execute(purging,{extensionMode:'enabled'})).toBe('partial')
     await pool.query('UPDATE session_archive_object_deletions SET next_attempt_at=NOW()')
@@ -181,6 +186,7 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
       await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status)
         SELECT 'root','user_text',value,'completed' FROM jsonb_array_elements($1::jsonb)`,[JSON.stringify(payloads)])
     }
+    await pool.query("UPDATE events SET created_at=NOW()-interval '40 days'")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
     const before=(await pool.query(`SELECT sum(pg_column_size(payload))::text AS payload_bytes,pg_total_relation_size('events')::text AS relation_bytes FROM events`)).rows[0]
     const started=performance.now()

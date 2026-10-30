@@ -34,9 +34,11 @@ export class ArchiveObjectCollector {
         const done=await this.pool.query(`UPDATE session_archive_object_deletions SET state='deleted',completed_at=NOW(),lease_token=NULL,lease_until=NULL,last_error_code=NULL
           WHERE storage_namespace=$1 AND object_key=$2 AND state='running' AND lease_token=$3 AND lease_until>NOW()`,[this.storage.namespace,claimed.object_key,token])
         completed+=done.rowCount??0
-      }catch{
-        await this.pool.query(`UPDATE session_archive_object_deletions SET state='pending',lease_token=NULL,lease_until=NULL,next_attempt_at=NOW()+interval '1 minute',last_error_code='object_delete_failed'
-          WHERE storage_namespace=$1 AND object_key=$2 AND state='running' AND lease_token=$3`,[this.storage.namespace,claimed.object_key,token])
+      }catch(error){
+        const code=(error as NodeJS.ErrnoException).code
+        const errorCode=['EACCES','EPERM','ENOSPC','EROFS'].includes(code??'')?`object_delete_${code!.toLowerCase()}`:'object_delete_failed'
+        await this.pool.query(`UPDATE session_archive_object_deletions SET state='pending',lease_token=NULL,lease_until=NULL,next_attempt_at=NOW()+(LEAST(3600,60*power(2,LEAST(attempt-1,6)))::int*interval '1 second'),last_error_code=$4
+          WHERE storage_namespace=$1 AND object_key=$2 AND state='running' AND lease_token=$3`,[this.storage.namespace,claimed.object_key,token,errorCode])
       }
     }
     await this.pool.query(`UPDATE session_lifecycle_deletions d SET objects_completed_at=NOW() WHERE objects_completed_at IS NULL

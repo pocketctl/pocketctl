@@ -5,9 +5,9 @@ describe('session lifecycle config', () => {
   test('defaults are versioned and enabled', () => {
     expect(sessionLifecycleConfig({})).toMatchObject({
       mode: 'enforce',
-      archiveDays: 60,
-      purgeDays: 90,
-      policyVersion: 'session-lifecycle-v1',
+      archiveDays: 30,
+      purgeDays: 60,
+      policyVersion: 'session-lifecycle-v2',
       notificationRetentionDays: 90,
       scanIntervalMs: 3_600_000,
       continuationDelayMs: 5_000,
@@ -18,7 +18,7 @@ describe('session lifecycle config', () => {
   test.each([
     { SESSION_LIFECYCLE_MODE: 'on' },
     { SESSION_LIFECYCLE_ARCHIVE_DAYS: '90' },
-    { SESSION_LIFECYCLE_PURGE_DAYS: '60' },
+    { SESSION_LIFECYCLE_PURGE_DAYS: '90' },
     { SESSION_LIFECYCLE_BATCH_SESSIONS: '20junk' },
     { SESSION_LIFECYCLE_CONTINUATION_DELAY_MS: '0' },
     { SESSION_LIFECYCLE_TRANSFER_CONCURRENCY: '0' },

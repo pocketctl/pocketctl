@@ -35,7 +35,7 @@ suite('session lifecycle jobs PostgreSQL', () => {
       userId,
       sessionId: 'session-1',
       action: 'archive',
-      policyVersion: 'session-lifecycle-v1',
+      policyVersion: 'session-lifecycle-v2',
       activityEpoch: '0',
     })
   test('incremental schema reruns and keeps existing hot payloads', async () => {

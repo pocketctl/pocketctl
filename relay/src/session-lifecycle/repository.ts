@@ -66,16 +66,18 @@ export class LifecycleJobRepository {
     return job(result.rows[0])
   }
 
-  async claim(owner: string, leaseMs: number): Promise<LifecycleJob | null> {
+  async claim(owner: string, leaseMs: number, filter?: { policyVersion: string; action: 'archive' | 'purge' }): Promise<LifecycleJob | null> {
     if (!owner || owner.length > 128 || milliseconds(leaseMs) === 0)
       throw new Error('invalid lifecycle lease')
     const result = await this.pool.query(
       `
       WITH candidate AS (
         SELECT operation_id FROM session_lifecycle_jobs
-        WHERE (state IN ('queued','failed','partial') AND next_attempt_at <= NOW()
+        WHERE ($4::text IS NULL OR policy_version=$4)
+          AND ($5::text IS NULL OR action=ANY(CASE WHEN $5='archive' THEN ARRAY['archive','cool'] ELSE ARRAY['purge'] END))
+          AND ((state IN ('queued','failed','partial') AND next_attempt_at <= NOW()
           AND NOT EXISTS(SELECT 1 FROM session_lifecycle_deletions d WHERE d.operation_id=session_lifecycle_jobs.operation_id))
-           OR (state='running' AND lease_until <= NOW())
+           OR (state='running' AND lease_until <= NOW()))
         ORDER BY next_attempt_at, created_at, operation_id
         FOR UPDATE SKIP LOCKED LIMIT 1
       )
@@ -84,7 +86,7 @@ export class LifecycleJobRepository {
           lease_until=NOW()+($3::bigint * interval '1 millisecond'),
           attempt=attempt+1, updated_at=NOW()
       FROM candidate WHERE j.operation_id=candidate.operation_id RETURNING j.*`,
-      [owner, randomUUID(), leaseMs],
+      [owner, randomUUID(), leaseMs, filter?.policyVersion ?? null, filter?.action ?? null],
     )
     return result.rows[0] ? job(result.rows[0]) : null
   }

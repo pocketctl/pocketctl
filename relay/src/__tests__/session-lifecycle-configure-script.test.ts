@@ -48,7 +48,7 @@ describe('atomic filesystem lifecycle configuration script', () => {
     expect(content).toContain(`SESSION_LIFECYCLE_OBJECT_DIRECTORY=${archive}\n`)
     expect(content).toContain(`SESSION_LIFECYCLE_RELEASE_FILE=${releaseFile}\n`)
     const release = JSON.parse(readFileSync(releaseFile, 'utf8'))
-    expect(release).toMatchObject({ policyVersion: 'session-lifecycle-v1', publishedAt: null, effectiveAt: null, transitionDeadline: null, evidence: {} })
+    expect(release).toMatchObject({ policyVersion: 'session-lifecycle-v2', publishedAt: null, effectiveAt: null, transitionDeadline: null, evidence: {} })
     expect(release.storageNamespace).toBe(createHash('sha256').update(JSON.stringify(['filesystem-v1', archive])).digest('hex'))
     expect(statSync(envFile).mode & 0o777).toBe(0o600)
     expect(statSync(releaseFile).mode & 0o777).toBe(0o640)

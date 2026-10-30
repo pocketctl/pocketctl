@@ -51,6 +51,29 @@ export class SessionLifecycleExecutor {
     if((await db.query('SELECT 1 FROM daemons WHERE daemon_id=$1 AND user_id=$2',[current.root.daemon_id,lease.userId])).rows.length!==1)throw new Superseded()
     return current
   }
+  private async settleStale(db:pg.PoolClient,lease:LifecycleJob,current:LifecycleEligibility){
+    const evidence=current.staleEvidence
+    if(!evidence)return
+    await db.query(`INSERT INTO session_lifecycle_stale_audit(operation_id,session_id,stable_since,pending_effects,pending_inbox,previous_states)
+      VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT DO NOTHING`,
+      [lease.operationId,lease.sessionId,evidence.activityAt,evidence.pendingEffects,evidence.pendingInbox,JSON.stringify(evidence.states)])
+    // Explicitly abandoned, never reported as successfully executed. Old usage
+    // counters/facts remain unchanged; no historical command or effect replay.
+    await db.query(`UPDATE events SET effect_status='abandoned' WHERE session_id=ANY($1::varchar[]) AND effect_status='pending'`,[current.sessionIds])
+    await db.query(`UPDATE event_inbox SET status=3,last_error='lifecycle_abandoned_stale',claimed_at=NULL,claimed_by=NULL,completed_at=NOW()
+      WHERE session_id=ANY($1::varchar[]) AND status IN (0,1)`,[current.sessionIds])
+    const settled=(await db.query(`UPDATE sessions SET status=CASE WHEN status IN ('running','busy','retry','waiting','waiting_approval','waiting_question')
+      OR turn_started_at IS NOT NULL THEN 'abandoned' ELSE status END,turn_started_at=NULL,
+      last_activity_at=GREATEST(last_activity_at,$2::timestamptz) WHERE session_id=ANY($1::varchar[]) RETURNING session_id,activity_epoch::text AS epoch,status`,[current.sessionIds,evidence.activityAt])).rows
+    // A source-status transition advances the existing fence epoch. Transfer
+    // and sibling jobs must bind to that new epoch, never the pre-settlement one.
+    for(const row of settled){const member=current.members.find(value=>value.session_id===row.session_id);if(member){member.epoch=row.epoch;member.status=row.status}}
+    const epoch=current.root!.epoch
+    if(epoch!==lease.activityEpoch){
+      await db.query('UPDATE session_lifecycle_jobs SET activity_epoch=$2 WHERE operation_id=$1',[lease.operationId,epoch])
+      lease.activityEpoch=epoch
+    }
+  }
   private async record(db:pg.PoolClient,lease:LifecycleJob,snapshot:LifecycleEligibility,state:'running'|'succeeded'|'partial'|'failed'|'cancelled',reason:string,stages:Record<string,'pending'|'succeeded'|'failed'|'not_applicable'>,notificationId=randomUUID()){
     const root=snapshot.root!
     await this.notifications.recordResultInTransaction(db,{operationId:lease.operationId,notificationId,userId:lease.userId,
@@ -67,11 +90,12 @@ export class SessionLifecycleExecutor {
     try{
       snapshot=await this.transaction(async db=>{
         const current=await this.fenced(db,lease)
+        await this.settleStale(db,lease,current)
         if(lease.action==='archive'){
           await db.query(`UPDATE sessions SET archived_at=COALESCE(archived_at,NOW()),archive_reason=COALESCE(archive_reason,'inactivity'),
             organization_revision=organization_revision+1,updated_at=NOW() WHERE session_id=$1`,[lease.sessionId])
           archived=true
-          await this.record(db,lease,current,'running','inactivity_60_days',{archive:'succeeded',cool:'pending'})
+          await this.record(db,lease,current,'running','inactivity_30_days',{archive:'succeeded',cool:'pending'})
         }
         await db.query("UPDATE sessions SET content_state='cooling',cooling_operation_id=$2 WHERE session_id=$1",[lease.sessionId,lease.operationId])
         return current
@@ -156,8 +180,8 @@ export class SessionLifecycleExecutor {
         if(hot&&!budgetReached)throw new Superseded()
         publishedPartial=hot
         await db.query("UPDATE sessions SET content_state=$2,cooling_operation_id=NULL,updated_at=NOW() WHERE session_id=$1",[lease.sessionId,hot?'mixed':'cold'])
-        await this.record(db,lease,current,hot?'partial':'succeeded',hot?'transfer_budget_reached':'inactivity_60_days',{archive:archived?'succeeded':'not_applicable',cool:hot?'pending':'succeeded'})
-        if(!await new LifecycleJobRepository(db).finish(lease,hot?'partial':'succeeded',{reason:hot?'transfer_budget_reached':'inactivity_60_days',chunks:chunks.length,bytes:bytesTransferred}))throw new Superseded()
+        await this.record(db,lease,current,hot?'partial':'succeeded',hot?'transfer_budget_reached':'inactivity_30_days',{archive:archived?'succeeded':'not_applicable',cool:hot?'pending':'succeeded'})
+        if(!await new LifecycleJobRepository(db).finish(lease,hot?'partial':'succeeded',{reason:hot?'transfer_budget_reached':'inactivity_30_days',chunks:chunks.length,bytes:bytesTransferred}))throw new Superseded()
       })
       return publishedPartial?'partial':'succeeded'
     }catch(error){
@@ -183,6 +207,7 @@ export class SessionLifecycleExecutor {
     try{
       await this.transaction(async db=>{
         const current=await this.fenced(db,lease),notificationId=randomUUID(),operations:LifecycleJob[]=[]
+        await this.settleStale(db,lease,current)
         // One component transaction: removing a parent cannot strand children
         // behind an unknown-ancestor guard. Adopt only unclaimed sibling jobs.
         for(const member of current.members){
@@ -196,7 +221,7 @@ export class SessionLifecycleExecutor {
           await deleteSessionInTransaction(db,member.session_id,options)
           await db.query('UPDATE session_lifecycle_deletions SET operation_id=$2 WHERE session_id=$1',[member.session_id,operation.operationId])
           const stages={database:'succeeded',objects:'pending',memory:'pending'} as const
-          await this.record(db,operation,{...current,root:member},'partial','inactivity_90_days',stages,notificationId)
+          await this.record(db,operation,{...current,root:member},'partial','inactivity_60_days',stages,notificationId)
           if(operation.operationId===lease.operationId){
             if(!await new LifecycleJobRepository(db).finish(lease,'partial',{reason:'external_cleanup_pending'},86400000))throw new Superseded()
           }else await db.query(`UPDATE session_lifecycle_jobs SET state='partial',result='{"reason":"external_cleanup_pending"}',

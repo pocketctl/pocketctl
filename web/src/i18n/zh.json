@@ -1971,8 +1971,8 @@
   "attention.notification.result.cancelled": "已取消",
   "attention.notification.reason.fixture": "本地测试操作",
   "attention.notification.reason.resumed": "新的有效交互",
-  "attention.notification.reason.purge": "连续超过 90 天没有有效活动",
-  "attention.notification.reason.archive": "连续超过 60 天没有有效活动",
+  "attention.notification.reason.purge": "连续超过 60 天没有有效活动",
+  "attention.notification.reason.archive": "连续超过 30 天没有有效活动",
   "session.history_read_failed": "历史正文暂时无法读取，请重试。",
   "attention.notification.stage.database": "会话数据",
   "attention.notification.stage.objects": "冷存储正文",
@@ -2152,5 +2152,7 @@
   "zcode_quota.unavailable": "暂时无法获取官方额度，请稍后刷新重试。",
   "zcode_quota.partial": "部分额度暂未取得，缺失窗口保持未知。",
   "zcode_quota.zero": "存在剩余 0% 的窗口，可用状态以实际请求结果为准。",
-  "zcode_quota.low": "额度偏低"
+  "zcode_quota.low": "额度偏低",
+  "attention.notification.reason.legacy60": "连续超过 60 天没有有效活动",
+  "attention.notification.reason.legacy90": "连续超过 90 天没有有效活动"
 }

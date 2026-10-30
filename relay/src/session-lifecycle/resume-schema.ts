@@ -25,11 +25,11 @@ export async function initLifecycleResumeSchema(db:Pick<pg.Pool,'query'>):Promis
       IF host_name IS NULL THEN RETURN NEW; END IF;
       operation=gen_random_uuid();notification=gen_random_uuid();
       INSERT INTO session_lifecycle_jobs(operation_id,user_id,session_id,action,policy_version,activity_epoch,state,result)
-        VALUES(operation,NEW.user_id,NEW.session_id,'resume','session-lifecycle-v1',NEW.activity_epoch,'succeeded','{"reason":"business_activity"}');
+        VALUES(operation,NEW.user_id,NEW.session_id,'resume','session-lifecycle-v2',NEW.activity_epoch,'succeeded','{"reason":"business_activity"}');
       INSERT INTO session_lifecycle_results(operation_id,user_id,session_id,daemon_id,title_snapshot,daemon_name_snapshot,action,state,activity_at,
         executed_at,effective_purge_at,reason_code,stages,notification_id,notification_revision)
         VALUES(operation,NEW.user_id,NEW.session_id,NEW.daemon_id,left(COALESCE(NEW.title,''),512),left(host_name,255),'resume','succeeded',NEW.last_activity_at,
-          NOW(),NEW.last_activity_at+interval '90 days','business_activity','{"resume":"succeeded","cold_history":"succeeded"}',notification,1);
+          NOW(),NEW.last_activity_at+interval '60 days','business_activity','{"resume":"succeeded","cold_history":"succeeded"}',notification,1);
       INSERT INTO attention_notifications(notification_id,user_id,expires_at,completed_at) VALUES(notification,NEW.user_id,NOW()+interval '90 days',NOW());
       INSERT INTO attention_notification_subjects(subject_id,notification_id,user_id,operation_id,session_id,daemon_id,title_snapshot,daemon_name_snapshot,
         action,state,activity_at,executed_at,effective_purge_at,reason_code)

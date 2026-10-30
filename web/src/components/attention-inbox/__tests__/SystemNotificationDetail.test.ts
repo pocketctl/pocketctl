@@ -6,7 +6,7 @@ import type { LifecycleNotificationSubject, SystemNotification } from '../../../
 import { useLocale } from '../../../composables/useLocale'
 const api = vi.hoisted(() => ({ listNotificationSubjects: vi.fn(), getNotificationSubject: vi.fn() }))
 vi.mock('../../../services/attentionInboxClient', async original => ({ ...(await original<any>()), ...api }))
-const subject: LifecycleNotificationSubject = { subject_id: 'subject1', session_id: 'session1', daemon_id: 'host1', title: '<script>long title</script>', daemon_name: 'Host', action: 'cool', result: 'succeeded', last_activity_at: '2026-07-01T00:00:00Z', executed_at: null, effective_purge_at: null, reason_code: 'inactivity_60_days', navigation: { type: 'session', id: 'session1' } }
+const subject: LifecycleNotificationSubject = { subject_id: 'subject1', session_id: 'session1', daemon_id: 'host1', title: '<script>long title</script>', daemon_name: 'Host', action: 'cool', result: 'succeeded', last_activity_at: '2026-07-01T00:00:00Z', executed_at: null, effective_purge_at: null, reason_code: 'inactivity_30_days', navigation: { type: 'session', id: 'session1' } }
 const notice: SystemNotification = { notification_id: 'notice1', revision: 1, kind: 'system', topic: 'session_lifecycle', created_at: '2026-10-12T00:00:00Z', read_at: null, expires_at: '2027-01-01T00:00:00Z', subject_count: 2, subject_preview: [subject], subjects_next_cursor: 'preview', requires_approval: false }
 beforeEach(() => { vi.resetAllMocks() })
 async function render() {

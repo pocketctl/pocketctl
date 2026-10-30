@@ -494,6 +494,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
   // Keep attribution after the short-lived transport inbox is pruned. The
   // source FK is private metadata, never part of the shared event view.
   await db.query(`ALTER TABLE collaboration_events ADD COLUMN IF NOT EXISTS native_source_event_id BIGINT REFERENCES events(id) ON DELETE SET NULL`)
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_collaboration_events_native_source ON collaboration_events(native_source_event_id)`)
   await db.query(`WITH exact_links AS (
     SELECT e.event_id,MIN(i.materialized_event_id) source_id
     FROM collaboration_events e JOIN collaboration_calls c ON c.call_id=e.call_id

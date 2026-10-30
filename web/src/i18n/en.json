@@ -1971,8 +1971,8 @@
   "attention.notification.result.cancelled": "Cancelled",
   "attention.notification.reason.fixture": "Local test operation",
   "attention.notification.reason.resumed": "New business interaction",
-  "attention.notification.reason.purge": "More than 90 days without business activity",
-  "attention.notification.reason.archive": "More than 60 days without business activity",
+  "attention.notification.reason.purge": "More than 60 days without business activity",
+  "attention.notification.reason.archive": "More than 30 days without business activity",
   "session.history_read_failed": "History content is temporarily unavailable. Please retry.",
   "attention.notification.stage.database": "Session data",
   "attention.notification.stage.objects": "Cold stored bodies",
@@ -2152,5 +2152,7 @@
   "zcode_quota.unavailable": "Official usage limits unavailable. Try refreshing later.",
   "zcode_quota.partial": "Some limits are unavailable. Missing windows remain unknown.",
   "zcode_quota.zero": "A window shows 0% remaining. Availability depends on actual request results.",
-  "zcode_quota.low": "Usage is running low"
+  "zcode_quota.low": "Usage is running low",
+  "attention.notification.reason.legacy60": "More than 60 days without business activity",
+  "attention.notification.reason.legacy90": "More than 90 days without business activity"
 }
