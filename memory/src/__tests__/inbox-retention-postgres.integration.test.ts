@@ -135,6 +135,34 @@ describeDb('two-stage inbox retention (PostgreSQL)', () => {
     expect((await checkpoint()).gc_feed_id).toBe('0')
   })
 
+  test.each(['pending', 'quarantined', 'purged'])('numeric feed order preserves a %s blocker across digit boundaries', async state => {
+    await seed(1, '20 days')
+    await seed(2, '20 days')
+    await seed(10, '20 days')
+    await pool.query(`UPDATE memory_feed_inbox SET projection_state=$2 WHERE installation_id=$1 AND feed_id=2`, [id, state])
+    expect(await sweep({ batchSize: 2 })).toMatchObject({ reclaimed: 2, deleted: 1, metadataBlocked: true })
+    expect(await receipt(1)).toBeUndefined()
+    expect((await receipt(2)).projection_state).toBe(state)
+    expect(await receipt(10)).toBeDefined()
+    expect((await checkpoint()).gc_feed_id).toBe('1')
+  })
+
+  test('numeric metadata order preserves a young receipt and bounds deletion to the batch size', async () => {
+    await seed(1, '20 days')
+    await seed(2, '1 day')
+    await seed(10, '20 days')
+    expect(await sweep({ batchSize: 2 })).toMatchObject({ reclaimed: 2, deleted: 1, metadataBlocked: true })
+    expect((await receipt(2)).body_reclaimed_at).toBeNull()
+    expect(await receipt(10)).toBeDefined()
+    expect((await checkpoint()).gc_feed_id).toBe('1')
+    await pool.query(`UPDATE memory_feed_inbox SET projected_at=NOW()-INTERVAL '20 days' WHERE feed_id=2`)
+    expect(await sweep({ batchSize: 1 })).toMatchObject({ reclaimed: 1, deleted: 1 })
+    expect((await checkpoint()).gc_feed_id).toBe('2')
+    expect(await receipt(10)).toBeDefined()
+    expect(await sweep({ batchSize: 1 })).toMatchObject({ reclaimed: 0, deleted: 1 })
+    expect((await checkpoint()).gc_feed_id).toBe('10')
+  })
+
   test('source/receipt age is irrelevant: both thresholds use successful projection time', async () => {
     await seed(1, '7 days - 1 minute'); await seed(2, '7 days + 1 minute')
     await pool.query(`UPDATE memory_feed_inbox SET received_at=NOW()-INTERVAL '100 days'`)
@@ -163,6 +191,24 @@ describeDb('two-stage inbox retention (PostgreSQL)', () => {
       expect((await checkpoint()).gc_feed_id).toBe('0')
     } finally {
       await pool.query('DROP TRIGGER retention_test_fail_gc ON memory_inbox_checkpoints; DROP FUNCTION retention_test_fail_gc()')
+    }
+  })
+
+  test('a partial prefix deletion rolls back instead of advancing the replay floor', async () => {
+    await seed(1, '20 days'); await seed(2, '20 days')
+    await pool.query(`CREATE FUNCTION retention_test_skip_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF OLD.feed_id=2 THEN RETURN NULL; END IF; RETURN OLD; END $$;
+      CREATE TRIGGER retention_test_skip_delete BEFORE DELETE ON memory_feed_inbox
+      FOR EACH ROW EXECUTE FUNCTION retention_test_skip_delete()`)
+    try {
+      await expect(sweep()).rejects.toThrow('inbox_retention_prefix_changed')
+      for (const feedId of [1, 2]) {
+        expect((await receipt(feedId)).data).toEqual(envelope(feedId).data)
+        expect((await receipt(feedId)).body_reclaimed_at).toBeNull()
+      }
+      expect((await checkpoint()).gc_feed_id).toBe('0')
+    } finally {
+      await pool.query('DROP TRIGGER retention_test_skip_delete ON memory_feed_inbox; DROP FUNCTION retention_test_skip_delete()')
     }
   })
 

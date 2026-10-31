@@ -69,21 +69,24 @@ export async function retainInboxInstallation(
             AND projected_at < NOW()-($2::integer*INTERVAL '1 day')
             AND feed_id<=$3::bigint) IS TRUE AS eligible
           FROM memory_feed_inbox WHERE installation_id=$1 AND feed_id>$4::bigint
-          ORDER BY feed_id LIMIT $5`,
+          ORDER BY memory_feed_inbox.feed_id LIMIT $5`,
         [installationId, settings.metadataDays, state.last_ack_feed_id, state.gc_feed_id, settings.batchSize])
         let through: string | undefined
+        let prefixCount = 0
         for (const row of receipts.rows) {
           if (!row.eligible) { result.metadataBlocked = true; break }
           through = row.feed_id
+          prefixCount++
         }
         if (through) {
           const deleted = await client.query(`DELETE FROM memory_feed_inbox
             WHERE installation_id=$1 AND feed_id>$2::bigint AND feed_id<=$3::bigint`,
           [installationId, state.gc_feed_id, through])
+          result.deleted = deleted.rowCount ?? 0
+          if (result.deleted !== prefixCount) throw new Error('inbox_retention_prefix_changed')
           await client.query(`UPDATE memory_inbox_checkpoints
             SET gc_feed_id=GREATEST(gc_feed_id,$2::bigint),updated_at=NOW() WHERE installation_id=$1`,
           [installationId, through])
-          result.deleted = deleted.rowCount ?? 0
         }
       }
     }
