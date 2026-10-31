@@ -4,6 +4,7 @@ import type { LifecycleAction, LifecycleJobState } from './types.js'
 
 export interface LifecycleJob {
   operationId: string
+  maintenanceScheduledAt?: Date | null
   userId: number
   sessionId: string
   action: LifecycleAction
@@ -17,6 +18,7 @@ export interface LifecycleJob {
 function job(row: any): LifecycleJob {
   return {
     operationId: row.operation_id,
+    maintenanceScheduledAt: row.maintenance_scheduled_at??null,
     userId: row.user_id,
     sessionId: row.session_id,
     action: row.action,
@@ -44,13 +46,14 @@ export class LifecycleJobRepository {
     action: LifecycleAction
     policyVersion: string
     activityEpoch: string
+    scheduledAt?: Date
   }): Promise<LifecycleJob> {
     if (!/^\d+$/.test(input.activityEpoch))
       throw new Error('invalid lifecycle epoch')
     const result = await this.pool.query(
       `
-      INSERT INTO session_lifecycle_jobs(operation_id,user_id,session_id,action,policy_version,activity_epoch)
-      VALUES($1,$2,$3,$4,$5,$6)
+      INSERT INTO session_lifecycle_jobs(operation_id,user_id,session_id,action,policy_version,activity_epoch,maintenance_scheduled_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7)
       ON CONFLICT(user_id,session_id,action,activity_epoch,policy_version)
       DO UPDATE SET operation_id=session_lifecycle_jobs.operation_id
       RETURNING *`,
@@ -61,6 +64,7 @@ export class LifecycleJobRepository {
         input.action,
         input.policyVersion,
         input.activityEpoch,
+        input.scheduledAt??null,
       ],
     )
     return job(result.rows[0])

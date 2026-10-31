@@ -26,6 +26,7 @@ export async function initSessionLifecycleSchema(
       PRIMARY KEY(policy_version,action,scheduled_at),
       CHECK((lease_token IS NULL)=(lease_until IS NULL))
     );
+    ALTER TABLE session_lifecycle_daily_runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS session_lifecycle_scan_state (
       policy_version TEXT PRIMARY KEY,
       after_row_id BIGINT NOT NULL DEFAULT 0 CHECK (after_row_id >= 0),
@@ -97,11 +98,13 @@ export async function initSessionLifecycleSchema(
           WHERE operation_id=NEW.operation_id AND state IN ('running','partial','failed') RETURNING notification_id INTO notice;
         IF notice IS NOT NULL THEN
           UPDATE attention_notification_subjects SET state='cancelled',reason_code='superseded',executed_at=NOW() WHERE operation_id=NEW.operation_id;
-          UPDATE attention_notifications SET revision=revision+1,read_at=NULL,completed_at=NOW(),updated_at=NOW() WHERE notification_id=notice;
+          UPDATE attention_notifications SET revision=revision+1,completed_at=NOW(),updated_at=NOW() WHERE notification_id=notice;
           INSERT INTO notification_delivery_outbox(user_id,notification_id,revision,operation)
-            SELECT user_id,notification_id,revision,'changed' FROM attention_notifications WHERE notification_id=notice ON CONFLICT DO NOTHING;
+            SELECT user_id,notification_id,revision,'changed' FROM attention_notifications WHERE notification_id=notice AND published_at IS NOT NULL ON CONFLICT DO NOTHING;
+          IF EXISTS(SELECT 1 FROM attention_notifications WHERE notification_id=notice AND published_at IS NOT NULL) THEN
           PERFORM pg_notify('pocketctl_attention',json_build_object('entity','notification','user_id',NEW.user_id,'item_id',notice,
             'revision',(SELECT revision FROM attention_notifications WHERE notification_id=notice),'operation','changed')::text);
+          END IF;
         END IF;
       END IF;
       RETURN NEW;
@@ -110,6 +113,7 @@ export async function initSessionLifecycleSchema(
     CREATE TRIGGER lifecycle_attempt_journal AFTER UPDATE ON session_lifecycle_jobs
       FOR EACH ROW EXECUTE FUNCTION journal_session_lifecycle_attempt();
 
+    ALTER TABLE session_lifecycle_jobs ADD COLUMN IF NOT EXISTS maintenance_scheduled_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS session_lifecycle_results (
       operation_id UUID PRIMARY KEY REFERENCES session_lifecycle_jobs(operation_id) ON DELETE CASCADE,
       user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

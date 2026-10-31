@@ -1,3 +1,4 @@
+import { DAILY_MAINTENANCE_MIGRATION } from './maintenance/daily.js'
 import { DATA_RETENTION_MIGRATION } from './retention/migration.js'
 import { GIT_MANAGED_SETUP_MIGRATION } from './git-sync/managed-migration.js'
 import { CANDIDATE_REVIEW_EXPIRY_MIGRATION } from './claims/candidate-expiry-migration.js'
@@ -2248,6 +2249,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   {version: 74, statements: [
     `ALTER TABLE memory_source_snapshots ADD COLUMN selection JSONB DEFAULT NULL`,
   ]},
+  DAILY_MAINTENANCE_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

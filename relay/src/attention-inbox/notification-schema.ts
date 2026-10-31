@@ -18,6 +18,8 @@ export async function initAttentionNotificationSchema(
       UNIQUE(notification_id,user_id)
     );
     ALTER TABLE attention_notifications ADD COLUMN IF NOT EXISTS maintenance_day DATE;
+    ALTER TABLE attention_notifications ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ DEFAULT NOW();
+    ALTER TABLE attention_notifications ADD COLUMN IF NOT EXISTS maintenance_summary JSONB;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_attention_notifications_daily
       ON attention_notifications(user_id,maintenance_day) WHERE maintenance_day IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_attention_notifications_user_order

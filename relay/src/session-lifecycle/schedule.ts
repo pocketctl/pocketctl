@@ -5,7 +5,7 @@ import type { SessionLifecycleConfig } from './types.js'
 export type MaintenanceAction = 'archive' | 'purge'
 const DAY = 86_400_000
 const OFFSET = 8 * 3_600_000
-export const maintenanceHours = { archive: 1, purge: 3 } as const
+export const maintenanceHours = { archive: 3, purge: 3 } as const
 
 /** Fixed Asia/Shanghai civil time; each action has one durable run per day. */
 export function maintenanceSlot(action: MaintenanceAction, now: Date): Date {
@@ -45,10 +45,8 @@ export class DailyMaintenanceSchedule {
       SELECT policy_version,action,scheduled_at FROM session_lifecycle_daily_runs r
       WHERE policy_version=$1 AND completed_at IS NULL AND scheduled_at<=$2
         AND (lease_until IS NULL OR lease_until<=NOW())
-      ORDER BY CASE WHEN action='purge' AND EXISTS(SELECT 1 FROM session_lifecycle_daily_runs a
-        WHERE a.policy_version=$1 AND a.action='archive' AND a.completed_at IS NULL AND a.after_row_id>0 AND a.scheduled_at<r.scheduled_at) THEN 0 ELSE 1 END,
-        scheduled_at,action FOR UPDATE SKIP LOCKED LIMIT 1)
-      UPDATE session_lifecycle_daily_runs r SET lease_token=$3,lease_until=NOW()+($4::int*interval '1 millisecond'),updated_at=NOW()
+      ORDER BY scheduled_at,CASE WHEN action='archive' THEN 0 ELSE 1 END FOR UPDATE SKIP LOCKED LIMIT 1)
+      UPDATE session_lifecycle_daily_runs r SET started_at=COALESCE(r.started_at,NOW()),lease_token=$3,lease_until=NOW()+($4::int*interval '1 millisecond'),updated_at=NOW()
       FROM candidate c WHERE r.policy_version=c.policy_version AND r.action=c.action AND r.scheduled_at=c.scheduled_at
       RETURNING r.*`, [config.policyVersion, now, token, config.runBudgetMs + 120_000])).rows[0]
     return row ? { policyVersion: row.policy_version, action: row.action, scheduledAt: row.scheduled_at,

@@ -1,3 +1,4 @@
+import {initMaintenanceSummarySchema} from './session-lifecycle/maintenance-summary.js';
 import { initSessionShareSchema } from './session-share/store.js';
 import { initPreferenceSchema } from './user-preferences.js';
 import pg from 'pg';
@@ -861,6 +862,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // ADR-0003: extension tables exist in every flag mode so flipping
   // RELAY_EXTENSIONS never needs a schema deployment window.
   await initExtensionSchema(pool);
+  await initMaintenanceSummarySchema(pool);
   // Team Memory bindings reference pre-existing Extension installations.
   await initTeamSchema(pool);
   // The lifecycle fence trigger targets collaboration_session_agent_bindings,

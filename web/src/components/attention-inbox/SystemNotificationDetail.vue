@@ -2,7 +2,8 @@
   <section class="notification-detail queue-detail" data-testid="notification-detail">
     <button v-if="mobile" class="btn btn-secondary" type="button" @click="$emit('close')">← {{ t('attention.queue') }}</button>
     <small class="detail-tag">{{ t('attention.notification.system') }} · {{ t('attention.notification.no_action') }}</small>
-    <h2>{{ t('attention.notification.title') }}</h2>
+    <h2>{{ t(item.maintenance ? 'attention.maintenance.title' : 'attention.notification.title') }}</h2>
+    <MaintenanceSummary v-if="item.maintenance && !error && !loading" :summary="item.maintenance" />
     <p>{{ t('attention.notification.subject_count', { count: count }) }} · {{ new Date(item.created_at).toLocaleString() }}</p>
     <div v-if="error" class="detail-error" role="alert"><p>{{ t(error) }}</p><button type="button" class="btn btn-secondary" @click="load(false)">{{ t('common.retry') }}</button></div>
     <template v-else>
@@ -36,6 +37,7 @@
   </section>
 </template>
 <script setup lang="ts">
+import MaintenanceSummary from './MaintenanceSummary.vue'
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'

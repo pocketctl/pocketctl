@@ -212,7 +212,7 @@ export class SessionLifecycleExecutor {
         // behind an unknown-ancestor guard. Adopt only unclaimed sibling jobs.
         for(const member of current.members){
           const operation=member.session_id===lease.sessionId?lease:await new LifecycleJobRepository(db).enqueue({userId:lease.userId,
-            sessionId:member.session_id,action:'purge',activityEpoch:member.epoch,policyVersion:lease.policyVersion})
+            sessionId:member.session_id,action:'purge',activityEpoch:member.epoch,policyVersion:lease.policyVersion,scheduledAt:lease.maintenanceScheduledAt??undefined})
           if(operation.operationId!==lease.operationId&&operation.state==='running')throw new Superseded()
           operations.push(operation)
         }

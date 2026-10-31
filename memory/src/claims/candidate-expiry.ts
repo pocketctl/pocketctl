@@ -11,7 +11,7 @@ export async function expireCandidateIfDue(client: pg.PoolClient, installationId
 }
 
 /** Preserve the candidate and evidence for audit; expiration is not deletion. */
-export async function expirePendingCandidates(pool: pg.Pool, batchSize = 500): Promise<number> {
+export async function expirePendingCandidates(pool: pg.Pool, batchSize = 500, installationId?: string): Promise<number> {
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 5000) throw new Error('invalid_candidate_expiry_batch')
   const client = await pool.connect()
   try {
@@ -20,11 +20,11 @@ export async function expirePendingCandidates(pool: pg.Pool, batchSize = 500): P
     await client.query("SET LOCAL lock_timeout='1s'")
     const result = await client.query(`WITH due AS MATERIALIZED (
       SELECT candidate_id FROM memory_candidates WHERE status IN ('validated','conflict')
-        AND review_expires_at<=statement_timestamp()
+        AND review_expires_at<=statement_timestamp() AND ($2::uuid IS NULL OR installation_id=$2::uuid)
       ORDER BY review_expires_at,candidate_id LIMIT $1 FOR UPDATE SKIP LOCKED
     ) UPDATE memory_candidates c SET status='expired',revision=revision+1,
         validation=c.validation||'{"expiry_reason":"review_ttl_elapsed"}'::jsonb
-      FROM due WHERE c.candidate_id=due.candidate_id`, [batchSize])
+      FROM due WHERE c.candidate_id=due.candidate_id`, [batchSize, installationId??null])
     await client.query('COMMIT')
     return result.rowCount ?? 0
   } catch (error) {

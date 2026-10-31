@@ -5,6 +5,7 @@ export interface InboxRetentionSettings {
   bodyDays: number
   metadataDays: number
   batchSize: number
+  /** Legacy standalone helper cadence; the production Worker uses daily maintenance. */
   intervalMs: number
 }
 

@@ -1,3 +1,4 @@
+import {publishMaintenanceSummaries} from './maintenance-summary.js'
 import type pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import type { ArchiveStorage } from '../session-archive/storage.js'
@@ -51,6 +52,7 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
     // Committed cleanup continues with the maintenance switch off.
     if(collector)report.objectsDeleted=await collector.runOnce(config.batchSessions)
     await reconcile()
+    await publishMaintenanceSummaries(pool,config.policyVersion,config.mode==='enforce',new Date())
     await notices.expire(Math.min(100,config.batchSessions));await notices.deliverPending(100)
     if(config.mode==='off'){emit();return}
     if(config.mode==='observe'){
@@ -84,7 +86,7 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
           const action=inspection.prediction.action
           const matching=run.action==='purge'?action==='purge':action==='archive'||action==='cool'
           if(root&&action&&matching&&!(action==='purge'&&inspection.members.some(member=>Number(member.id)<row.id)))
-            await executor.jobs.enqueue({userId:root.user_id,sessionId:root.session_id,action,policyVersion:config.policyVersion,activityEpoch:root.epoch})
+            await executor.jobs.enqueue({userId:root.user_id,sessionId:root.session_id,action,policyVersion:config.policyVersion,activityEpoch:root.epoch,scheduledAt:run.scheduledAt})
           afterRowId=Number(row.id);inspected++;report.scanned=inspected
         }
         scanComplete=inspected===rows.length

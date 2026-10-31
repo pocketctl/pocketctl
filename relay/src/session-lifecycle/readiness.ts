@@ -23,7 +23,7 @@ export function sessionLifecycleReadiness(config: SessionLifecycleConfig, reader
     policy_version: config.policyVersion,
     archive_days: config.archiveDays,
     purge_days: config.purgeDays,
-    schedule: { timezone: 'Asia/Shanghai', archive: '01:00', purge: '03:00', daily_notification: true },
+    schedule: { timezone: 'Asia/Shanghai', archive: '03:00', purge: '03:00', daily_notification: true },
     policy_published_at: config.release?.publishedAt ?? null,
     policy_effective_at: config.effectiveAt,
     historical_transition_deadline: config.transitionDeadline,

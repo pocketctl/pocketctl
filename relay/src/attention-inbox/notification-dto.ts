@@ -1,3 +1,4 @@
+import type {MaintenanceSummary} from '../session-lifecycle/maintenance-summary.js'
 import type {
   LifecycleAction,
   LifecycleJobState,
@@ -29,6 +30,7 @@ export interface SystemNotification {
   subjectCount: number
   subjects: NotificationSubject[]
   subjectsNextCursor: string | null
+  maintenance?: MaintenanceSummary
   requiresApproval: false
 }
 export function serializeNotificationSubject(s: NotificationSubject) {
@@ -60,6 +62,7 @@ export function serializeSystemNotification(n: SystemNotification) {
     subject_count: n.subjectCount,
     subject_preview: n.subjects.map(serializeNotificationSubject),
     subjects_next_cursor: n.subjectsNextCursor,
+    ...(n.maintenance?{maintenance:n.maintenance}:{}),
     requires_approval: false,
   }
 }

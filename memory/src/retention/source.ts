@@ -5,6 +5,7 @@ export interface SourceRetentionSettings {
   mode: 'off' | 'enabled'
   bodyDays: number
   batchSize: number
+  /** Legacy standalone helper cadence; the production Worker uses daily maintenance. */
   intervalMs: number
   reportDirectory?: string
 }
@@ -64,18 +65,18 @@ const eligibilityFrom = `FROM work_episodes e
       (EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id AND s.source_event_id=k.source_event_id)
        OR EXISTS(SELECT 1 FROM source_artifacts a WHERE a.installation_id=e.installation_id AND a.turn_id=e.turn_id AND a.artifact_id=k.artifact_id)))`
 
-export interface RetentionPreviewCursor {eligibleEpisodeId?:string;receiptInstallationId?:string;receiptTurnId?:string}
+export interface RetentionPreviewCursor {installationId?:string;eligibleEpisodeId?:string;receiptInstallationId?:string;receiptTurnId?:string}
 export async function previewSourceRetention(pool: pg.Pool, bodyDays = 14, limit = 20, cursor:RetentionPreviewCursor={}) {
   if (!Number.isInteger(bodyDays) || bodyDays < 14 || bodyDays > 365) throw new Error('invalid_source_retention_days')
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('invalid_retention_preview_limit')
   return readRetentionPlan(pool,async client=>{
   const result = await client.query(`SELECT e.installation_id,e.session_id,e.turn_id,e.episode_id,
       success.completed_at AS extraction_completed_at ${eligibilityFrom}
-    AND ($3::uuid IS NULL OR e.episode_id>$3::uuid) ORDER BY e.episode_id LIMIT $2`, [bodyDays, limit, cursor.eligibleEpisodeId??null])
+    AND ($4::uuid IS NULL OR e.installation_id=$4::uuid) AND ($3::uuid IS NULL OR e.episode_id>$3::uuid) ORDER BY e.episode_id LIMIT $2`, [bodyDays, limit, cursor.eligibleEpisodeId??null,cursor.installationId??null])
   const pending = await client.query(`SELECT installation_id,session_id,turn_id,episode_id
-    FROM memory_source_retention_receipts WHERE state='reclaiming'
+    FROM memory_source_retention_receipts WHERE state='reclaiming' AND ($4::uuid IS NULL OR installation_id=$4::uuid)
       AND ($2::uuid IS NULL OR (installation_id,turn_id)>($2::uuid,$3::text))
-      ORDER BY installation_id,turn_id LIMIT $1`, [limit,cursor.receiptInstallationId??null,cursor.receiptTurnId??null])
+      ORDER BY installation_id,turn_id LIMIT $1`, [limit,cursor.receiptInstallationId??null,cursor.receiptTurnId??null,cursor.installationId??null])
   return { eligible: result.rows, reclaiming: pending.rows, previewLimit: limit }
   })
 }

@@ -1,3 +1,4 @@
+import {registerMaintenanceRoutes} from './extensions/maintenance-routes.js'
 import { finishDatabaseStartup } from './startup-readiness.js';
 import {TeamExternalStopService} from './team/external-stop.js';
 import { registerDeliveryWithdrawalRoutes } from './extensions/delivery-withdrawal-routes.js';
@@ -1533,6 +1534,7 @@ async function main() {
     providerPublicOrigins: extensionConfig.providerPublicOrigins,
     grantKeys: extensionGrantKeys,
   });
+  registerMaintenanceRoutes(app,{pool,mode:extensionConfig.mode,providerJwtSecret:extensionConfig.providerJwtSecret,issuer:publicIssuer});
   registerStatusRoutes(app, {
     pool,
     mode: extensionConfig.mode,
