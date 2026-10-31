@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Git Ops project acceptance fixture</title></head>
+<body><main id="app"></main><script type="module">
+  import { createApp, h } from 'vue'
+  import { createRouter, createMemoryHistory } from 'vue-router'
+  import MemoryGitProjects from '../../src/components/memory/MemoryGitProjects.vue'
+  import { useAuth } from '../../src/composables/useAuth'
+  import '../../src/assets/web-shared.css'
+  import '../../src/components/memory/memory-workbench.css'
+  if (!import.meta.env.DEV || !['localhost', '127.0.0.1'].includes(location.hostname)) throw new Error('Local acceptance fixture only')
+  const identity = await (await fetch('/api/fixture/identity')).json()
+  const auth = useAuth(); auth.user.value = { id: identity.user_id, email: 'fixture@example.test', phone: null, display_name: 'Fixture' }; auth.accessToken.value = identity.token
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/teams', component: { template: '<p>Fixture teams</p>' } }] })
+  createApp({ render: () => h('div', { class: 'memory-workbench memory-layout-v2', style: 'max-width:1000px;margin:24px auto;padding:16px' }, [h(MemoryGitProjects)]) }).use(router).mount('#app')
+</script></body></html>

@@ -107,10 +107,13 @@
             v-model:installation-id="wikiTarget" :scopes="wikiScopes"
             :legacy-grant="wikiUsesLegacyGrant"
             :can-contribute="canContributePhase4" :can-publish="canPublishPhase4" />
-          <MemoryCodeGraphPanel v-if="active === 'codegraph'" v-model:repository-id="phase4RepositoryId" />
+          <MemoryCodeGraphPanel v-if="active === 'codegraph'" v-model:repository-id="phase4RepositoryId"
+            v-model:installation-id="graphTarget" :scopes="wikiScopes" :legacy-grant="graphUsesLegacyGrant"
+            :can-enable-upload="graphIsPersonal" :upload-enabled="installation.enabled_services.includes('memory.codegraph.write')"
+            :enabling-upload="graphUploadBusy" :upload-error="graphUploadError" @enable-upload="enableGraphUpload" />
           <template v-if="active === 'skills'">
             <div v-if="governanceScopesError" class="memory-notice is-error" role="alert" data-testid="skill-scope-error">
-              <strong>{{ t('memory.skills.scope_failed') }}</strong><p>{{ governanceScopesError }}</p>
+              <strong>{{ t(governanceScopesDisabled ? 'memory.skills.scope_disabled_title' : 'memory.skills.scope_failed') }}</strong><p>{{ governanceScopesError }}</p>
               <button class="memory-button" :disabled="governanceScopesLoading" data-testid="skill-scope-retry" @click="loadGovernanceScopes">{{ t('memory.skills.retry') }}</button>
             </div>
             <p v-else-if="governanceScopesLoading" role="status">{{ t('memory.skills.loading') }}</p>
@@ -120,6 +123,7 @@
             </template>
           </template>
           <template v-if="active === 'git'">
+            <MemoryGitProjects @changed="loadGovernanceScopes" />
             <div v-if="governanceScopesError" class="memory-notice is-error" role="alert" data-testid="git-scope-error"><p>{{ governanceScopesError }}</p><button class="memory-button" :disabled="governanceScopesLoading" @click="loadGovernanceScopes">{{ t('memory.git.refresh') }}</button></div>
             <p v-else-if="governanceScopesLoading" role="status">{{ t('memory.git.loading') }}</p>
             <template v-else>
@@ -211,6 +215,7 @@ import MemoryCodeGraphPanel from '../components/memory/MemoryCodeGraphPanel.vue'
 import MemorySkillsView from './MemorySkillsView.vue'
 import MemoryFeatureIntro from '../components/memory/MemoryFeatureIntro.vue'
 import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
+import MemoryGitProjects from '../components/memory/MemoryGitProjects.vue'
 import MemoryModuleNavigation from '../components/memory/MemoryModuleNavigation.vue'
 import { MEMORY_MODULE_GROUPS, type MemoryModule } from '../components/memory/memoryModules'
 
@@ -223,15 +228,33 @@ const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
 const route = useRoute()
-const active = ref<MemoryModule>(route?.query.tab === 'review' ? 'review' : 'search')
+const active = ref<MemoryModule>(route?.query.tab === 'review' ? 'review' : route?.query.tab === 'codegraph' ? 'codegraph' : 'search')
 const deliveryReview = computed(() => {
   const submissionId = route?.query.submission, decisionId = route?.query.decision
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
   return typeof submissionId === 'string' && typeof decisionId === 'string' && uuid.test(submissionId) && uuid.test(decisionId)
     ? { submissionId, decisionId } : undefined
 })
-watch(() => route?.query.tab, value => { if (value === 'review') active.value = 'review' })
-const phase4RepositoryId = ref('')
+watch(() => route?.query.tab, value => { if (value === 'review' || value === 'codegraph') active.value = value })
+const queryUUID = (value:unknown):string => typeof value==='string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : ''
+const phase4RepositoryId = ref(queryUUID(route?.query.repository_id))
+const queryScope=(value:unknown):string=>value==null || value==='' ? '' : queryUUID(value)||'invalid-scope'
+const graphTarget=ref(queryScope(route?.query.installation_id))
+const graphUploadBusy=ref(false),graphUploadError=ref('')
+const graphIsPersonal=computed(()=>Boolean(graphTarget.value && graphTarget.value===installation.value?.installation_id))
+const graphUsesLegacyGrant=computed(()=>graphIsPersonal.value && !governanceScopes.value.some(s=>s.installation_id===graphTarget.value))
+watch(()=>[route?.query.repository_id,route?.query.installation_id],([repository,scope])=>{
+ graphTarget.value=queryScope(scope)||installation.value?.installation_id||''
+ phase4RepositoryId.value=queryUUID(repository)
+})
+async function enableGraphUpload():Promise<void> {
+ const current=installation.value
+ if(!current || !graphIsPersonal.value || graphUploadBusy.value)return
+ graphUploadBusy.value=true;graphUploadError.value=''
+ try {installation.value=await enableMemoryServices(current.installation_id,Number(current.config_version),[...new Set([...current.enabled_services,'memory.codegraph.write'])])}
+ catch(error){graphUploadError.value=error instanceof Error ? error.message : t('memory.phase4.request_failed')}
+ finally{graphUploadBusy.value=false}
+}
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
 const reviewCount = ref<number | null>(null)
@@ -239,6 +262,7 @@ const reviewList = ref<InstanceType<typeof CandidateReviewList> | null>(null)
 const governanceScopes = ref<MemoryGovernanceScope[]>([])
 const governanceScopesLoading = ref(false)
 const governanceScopesError = ref('')
+const governanceScopesDisabled = ref(false)
 const governanceTarget = ref('')
 const wikiTarget = ref('')
 const governanceQueue = ref<MemoryGovernanceQueueEntry[]>([])
@@ -350,6 +374,7 @@ function selectClaim(id: string, hit?: { installationId?: string; ownerScopeKind
 async function loadGovernanceScopes(): Promise<void> {
   governanceScopesLoading.value = true
   governanceScopesError.value = ''
+  governanceScopesDisabled.value = false
   try {
     const previous = governanceTarget.value
     governanceScopes.value = (await listGovernanceScopes()).scopes
@@ -362,12 +387,18 @@ async function loadGovernanceScopes(): Promise<void> {
       ?? wikiScopes.value.find(scope => scope.owner_scope_kind === 'personal')
       ?? wikiScopes.value[0]
     wikiTarget.value = wikiPreferred?.installation_id ?? ''
+    if(!graphTarget.value)graphTarget.value=installation.value?.installation_id ?? ''
   } catch (err) {
     governanceError.value = err instanceof Error ? err.message : 'governance unavailable'
     const status = err && typeof err === 'object' && 'status' in err ? Number(err.status) : 0
-    const kind = status === 403 ? 'forbidden' : status === 503 ? 'off' : 'request_failed'
-    governanceScopesError.value = `${t(`memory.skills.${kind}`)} · ${governanceError.value}`
+    const code = err && typeof err === 'object' && 'code' in err ? err.code : ''
+    governanceScopesDisabled.value = status === 503 && code === 'feature_disabled'
+    const kind = status === 403 ? 'forbidden' : status === 503 ? 'scope_unavailable' : 'request_failed'
+    governanceScopesError.value = governanceScopesDisabled.value
+      ? t('memory.skills.scope_disabled')
+      : `${t(`memory.skills.${kind}`)} · ${governanceError.value}`
     wikiTarget.value = installation.value?.installation_id ?? ''
+    if(!graphTarget.value)graphTarget.value=installation.value?.installation_id ?? ''
   } finally {
     governanceScopesLoading.value = false
   }

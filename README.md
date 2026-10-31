@@ -117,6 +117,7 @@ Repositories and agent processes stay on your development machine. Session conte
 - Depending on service configuration, title generation and Memory extraction can send relevant text to server-side model providers.
 - Read-only share links allow anonymous access, expire after 15 minutes, and can be revoked early. Revocation cannot retract content already loaded or saved.
 - Teams share explicitly contributed collaboration content, not native private session logs automatically.
+- Explicit `pocketctl memory sync-repo` uploads filtered committed source to the configured Memory service for Code Graph; `--dry-run` stays local.
 
 See [data processing and experimental retention](docs/security-and-data.md) and the [Privacy Policy](https://www.pocketctl.me/privacy.html).
 
@@ -147,7 +148,7 @@ See [data processing and experimental retention](docs/security-and-data.md) and 
 
 ## Experimental features
 
-**Memory** manages reviewed project knowledge, dependencies, and skill documents in the Web workbench, and supplies context for later agent tasks. Model-assisted extraction requires a configured server-side model provider.
+**Memory** manages reviewed project knowledge, dependencies, and skill documents in the Web workbench, and supplies context for later agent tasks. Model-assisted extraction requires a configured server-side model provider. For repository sync, run `pocketctl memory --help`; see the [Code Graph usage and rollout status](docs/memory-codegraph-guide.md).
 
 **Teams** support members, shared tasks and sessions, and agents explicitly contributed by members. Multi-agent coordination and shared Memory require separate enablement; joining a Team does not automatically share private sessions or grant knowledge access.
 

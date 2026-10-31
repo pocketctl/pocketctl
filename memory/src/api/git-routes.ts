@@ -18,11 +18,14 @@ import {assertGitGrantClock,type GitPermission } from '../git-sync/authorization
 import { registerMemoryCors } from './cors.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
+import type { createGitProjectSetupService } from '../git-sync/project-setup.js'
+import { gitBundleZip } from '../git-sync/zip-bundle.js'
 
 export interface GitWebhookRegistration { installationId:string; provider:'github'|'gitee'; providerRepositoryId:string; targetBranch:string; secret:string; eventType:string }
 export interface GitRouteDeps extends GitReadDeps {
   guard:GrantGuard;policy:CorsHostPolicy;recoveryReads?:GitRecoveryReadRegistry
   webhookRegistration?:(connectionId:string)=>Promise<GitWebhookRegistration|null>
+  projectSetup?:ReturnType<typeof createGitProjectSetupService>
 }
 const Empty=z.object({}).strict(),Params=z.object({id:z.uuid()}).strict()
 const revision=z.string().regex(/^[1-9][0-9]{0,18}$/),digest=z.string().regex(/^[a-f0-9]{64}$/)
@@ -95,6 +98,27 @@ export function registerGitRoutes(app:FastifyInstance,deps:GitRouteDeps) {
     return connection
   }
   route('GET','/connections','connection','read',c=>reads.connections(c.id,c.r.query))
+  route('GET','/projects/:id','connection','read',async c=>{
+    if(!deps.projectSetup||deps.config.mode==='off')throw new GitApiError('feature_disabled')
+    const permissions=c.id.grant.scopeBindings.find(b=>b.installation_id===c.id.installationId)?.permissions??[]
+    return {project:await deps.projectSetup.get(c.id,c.resourceId),can_configure:permissions.includes('scope_admin'),can_link_identity:permissions.includes('contribute')}
+  })
+  route('POST','/projects/:id/connect','connection','scope_admin',async c=>{
+    if(!deps.projectSetup||deps.config.mode!=='enabled')throw new GitApiError('feature_disabled')
+    const b=c.r.body as {project_id?:unknown}|undefined
+    if(b?.project_id!==c.resourceId)throw new GitApiError('invalid_request')
+    return {project:await deps.projectSetup.connect(c.id,c.r.body,keySchema.parse(c.r.headers['idempotency-key']))}
+  })
+  route('POST','/projects/:id/disconnect','connection','scope_admin',async c=>{
+    if(!deps.projectSetup)throw new GitApiError('feature_disabled')
+    const b=Expected.parse(c.r.body)
+    return {project:await deps.projectSetup.disconnect(c.id,c.resourceId,b.expected_generation)}
+  })
+  route('POST','/projects/:id/identity','connection','contribute',async c=>{
+    if(!deps.projectSetup||deps.config.mode!=='enabled')throw new GitApiError('feature_disabled')
+    return {project:await deps.projectSetup.linkIdentity(c.id,c.resourceId,c.r.body,keySchema.parse(c.r.headers['idempotency-key']))}
+  })
+  route('GET','/connections/:id/assets','snapshot','contribute',c=>reads.assets(c.id,c.resourceId))
   route('GET','/connections/:id/proposals','import','read',c=>reads.children(c.id,c.resourceId,'proposals',c.r.query))
   route('GET','/connections/:id/cleanup','reconcile','read',c=>reads.children(c.id,c.resourceId,'cleanup',c.r.query))
   route('POST','/connections','connection','scope_admin',async c=>{
@@ -107,20 +131,31 @@ export function registerGitRoutes(app:FastifyInstance,deps:GitRouteDeps) {
     if(deps.config.mode==='off')throw new GitApiError('feature_disabled')
     return mutate(c,b,async bound=>{const updated=await createGitRepository(bound).updateConnection(c.id.grant,{installationId:c.id.installationId,connectionId:c.resourceId,expectedGeneration:b.expected_generation,syncMode:b.sync_mode,writeMode:b.write_mode,state:b.state});return {connectionId:updated.connectionId}},m=>reads.connection(c.id,String(m.connectionId)))
   })
-  route('POST','/connections/:id/previews','snapshot','contribute',async c=>{
+  for(const purpose of ['local_preview','external_export'] as const)route('POST',`/connections/:id/${purpose==='local_preview'?'previews':'exports'}`,'snapshot','contribute',async c=>{
     const b=Preview.parse(c.r.body)
     await live(c.id,c.resourceId,b.expected_generation)
     return mutate(c,b,async bound=>{
       if(!bound.keys)throw new GitApiError('feature_disabled')
       const connection=await createGitReadService(bound).connection(c.id,c.resourceId)
-      // Local preview is anchored to the retained source commit, never claimed as
-      // a verified remote branch head or an externally publishable export.
-      const row=(await bound.pool.query(`SELECT commit_sha FROM repo_snapshots WHERE installation_id=$1 AND repository_id=$2 ORDER BY observed_at DESC,repo_snapshot_id DESC LIMIT 1`,[c.id.installationId,connection.repositoryId])).rows[0]
-      if(!row)throw new GitApiError('source_invalid')
-      const bundle=await createGitExportService({...bound,keys:bound.keys}).export(c.id.grant,{installationId:c.id.installationId,connectionId:c.resourceId,expectedGeneration:b.expected_generation,assets:b.assets,baseCommit:row.commit_sha,purpose:'local_preview'})
+      // Managed targets use the branch head verified during authorization;
+      // legacy targets use a retained observation. Neither is a fresh head probe.
+      const row=(await bound.pool.query(`SELECT COALESCE(
+        (SELECT target->>'verifiedHead' FROM memory_git_project_targets WHERE installation_id=$1 AND connection_id=$4 AND token_cipher IS NOT NULL AND consent_until>clock_timestamp()),
+        (SELECT commit_sha FROM repo_snapshots WHERE installation_id=$1 AND repository_id=$2 AND (branch=$3 OR branch IS NULL) ORDER BY observed_at DESC,repo_snapshot_id DESC LIMIT 1)) AS commit_sha`,[c.id.installationId,connection.repositoryId,connection.targetBranch,c.resourceId])).rows[0]
+      if(!row?.commit_sha)throw new GitApiError('source_invalid')
+      const bundle=await createGitExportService({...bound,keys:bound.keys}).export(c.id.grant,{installationId:c.id.installationId,connectionId:c.resourceId,expectedGeneration:b.expected_generation,assets:b.assets,baseCommit:row.commit_sha,purpose})
       await audit(c.id,'snapshot','ok',bound.pool,'allowed')
       return {connectionId:c.resourceId,exportId:bundle.exportId,generation:bundle.generation}
     },m=>reads.preview(c.id,String(m.connectionId),String(m.exportId)))
+  })
+  route('GET','/exports/:id/bundle','snapshot','contribute',async c=>{
+    const pointer=(await deps.pool.query(`SELECT connection_id FROM memory_git_snapshots WHERE installation_id=$1 AND export_id=$2`,[c.id.installationId,c.resourceId])).rows[0]
+    if(!pointer||!deps.keys)throw new GitApiError('not_found')
+    const connection=await live(c.id,pointer.connection_id)
+    const bundle=await createGitExportService({...deps,keys:deps.keys}).loadRegisteredBase(c.id.grant,{installationId:c.id.installationId,connectionId:connection.connectionId,expectedGeneration:connection.generation,exportId:c.resourceId})
+    if(!bundle.publishable)throw new GitApiError('external_export_required')
+    return {export_id:bundle.exportId,branch:`pocketctl/export/${bundle.exportId}`,base_commit:bundle.baseCommit,publishable:bundle.publishable,
+      archive:{name:`pocketctl-export-${bundle.exportId}.zip`,content:gitBundleZip(bundle.files).toString('base64')}}
   })
   route('POST','/connections/:id/sync','reconcile','contribute',async c=>{
     const b=Sync.parse(c.r.body);await live(c.id,c.resourceId,b.expected_generation)

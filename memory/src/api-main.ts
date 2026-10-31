@@ -18,6 +18,7 @@ import { registerGitRoutes } from './api/git-routes.js'
 import { createGitReadService } from './git-sync/read-service.js'
 import { createFileSkillCaseRegistry } from './skills/case-registry.js'
 import { createGitRuntime } from './git-sync/runtime.js'
+import { createGitProjectSetupService } from './git-sync/project-setup.js'
 import { createGitRecoveryService } from './git-sync/recovery-service.js'
 import { loadGitSyncConfig } from './git-sync/config.js'
 import { createGitRepository } from './git-sync/repository.js'
@@ -142,7 +143,7 @@ async function main(): Promise<void> {
   const skillContext = { globalMode: config.mode, sharedMode: config.sharedScopesMode, config: config.skill }
   const skillCases = createFileSkillCaseRegistry(process.env.MEMORY_SKILL_REPLAY_REGISTRY_PATH)
   const gitConfig=config.gitSync??loadGitSyncConfig({})
-  const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode})
+  const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode,vaultSecret:process.env.MEMORY_GIT_CREDENTIAL_KEY??config.hmacKey})
   const gitDeps={tombstoneHmacKeys:config.tombstoneHmacKeys,pool,config:gitConfig,targets:gitRuntime.targets,keys:gitRuntime.keys,scopeMode:gitRuntime.scopeMode,
     recoveryReads:gitRuntime.recoveryReads,webhookRegistration:gitRuntime.webhookRegistration,skill:{context:skillContext,cases:skillCases},outcomeKind:'natural' as const}
   const gitReads=createGitReadService(gitDeps)
@@ -161,7 +162,9 @@ async function main(): Promise<void> {
   })
   registerSkillRoutes(app, { pool, policy, guard: createGrantGuard({ pool, relayUrl: config.relayUrl, relayIssuer: config.relayIssuer }),
     context: skillContext, cursorSigningKey: config.hmacKey, cases: skillCases, metrics: metrics.phase5 })
-  registerGitRoutes(app,{...gitDeps,policy,guard:createGrantGuard({pool,relayUrl:config.relayUrl,relayIssuer:config.relayIssuer})})
+  const gitVaultSecret=process.env.MEMORY_GIT_CREDENTIAL_KEY??config.hmacKey
+  registerGitRoutes(app,{...gitDeps,policy,guard:createGrantGuard({pool,relayUrl:config.relayUrl,relayIssuer:config.relayIssuer}),
+    ...(Buffer.byteLength(gitVaultSecret)>=32&&config.sharedScopesMode==='enabled'?{projectSetup:createGitProjectSetupService({pool,secret:gitVaultSecret})}:{})})
   // Git and Skill reads report their own disabled/shadow states explicitly.
   if(config.mode!=='enabled')registerMcpRoute(app,{pool,policy,guard:createGrantGuard({pool,relayUrl:config.relayUrl,relayIssuer:config.relayIssuer}),
     skillContext,gitReads,gitOnly:true,providerVersion:config.providerVersion,recallEmbeddingTimeoutMs:config.recallEmbeddingTimeoutMs,cursorSigningKey:config.hmacKey,sharedScopesEnabled:false})

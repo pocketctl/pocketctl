@@ -320,6 +320,10 @@ export function createGitSyncWorker(deps:GitWorkerDeps) {
       if(!merge.merged){await withRun(r,fence,async client=>{if(controller.signal.aborted)throw new GitReadError('request_aborted');await finish(client,r,fence,'observed')});return}
       const commit=parseGitRead(CommitRead,await request({operation:'commit',sha:merge.mergeCommit}))
       if(commit.sha!==merge.mergeCommit)throw new GitReadError('provider_unverifiable')
+      if(capability.kind==='live'&&c.provider==='github'&&merge.headCommit) {
+        const author=parseGitRead(CommitRead,await request({operation:'commit',sha:merge.headCommit,proofFor:{mergeCommit:merge.mergeCommit,tree:commit.tree}}))
+        merge.actorId=author.sha===merge.headCommit&&author.tree===commit.tree?author.actorId??null:null
+      }
       const duplicate=await withRun(r,fence,async client=>{
         await client.query(`INSERT INTO memory_git_merge_receipts(installation_id,connection_id,generation,commit_sha,run_id,tree_sha)
           VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,[r.installation_id,r.connection_id,r.generation,merge.mergeCommit,r.run_id,commit.tree])

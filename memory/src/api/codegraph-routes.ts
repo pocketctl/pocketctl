@@ -6,11 +6,12 @@ import { MemoryApiError, errorBody } from '../api/errors.js'
 import { UUIDSchema } from '../api/schemas.js'
 import {
   CodeSnapshotBatchSchema,
+  CodeSnapshotManifestSchema,
   FinalizeCodeSnapshotRequestSchema,
   StartCodeSnapshotRequestSchema,
 } from '../codegraph/source-repository.js'
 import { createSourceIngestService, SnapshotIngestError } from '../codegraph/ingest-service.js'
-import {SourceLifecycleFenceError} from '../codegraph/lifecycle.js'
+import {requireSourceAuthority,assertSourceGrantClock,SourceLifecycleFenceError} from '../codegraph/lifecycle.js'
 import {TargetBindingError} from '../governance/authorization.js'
 import { SourceRepositoryTombstonedError } from '../codegraph/source-repository.js'
 import { createCodeGraphReadService } from '../codegraph/read-service.js'
@@ -138,7 +139,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
     return binding?.owner_scope_kind === 'personal' ? 'personal' : 'shared'
   }
 
-  app.post('/api/v1/memory/code-snapshots', { bodyLimit: 8 * 1024 }, async (request, reply) => {
+  app.post('/api/v1/memory/code-snapshots', { bodyLimit: 128 * 1024 }, async (request, reply) => {
     const grant = await authenticate(request, reply)
     if (!grant) return reply
     if (!await requireMutationMode(reply, grant)) return reply
@@ -161,6 +162,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
         installationId: grant.installationId,
         grant,
         repository: parsed.data.repository,
+        selection: parsed.data.selection,
         gitObjectFormat: parsed.data.git_object_format,
         commitSha: parsed.data.commit_sha,
         manifestSha256: parsed.data.manifest_sha256,
@@ -174,6 +176,51 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
       fail(reply, error)
       return reply
     }
+  })
+
+  app.post('/api/v1/memory/code-snapshots/:snapshotId/manifest', {bodyLimit:1024*1024}, async(request,reply)=>{
+    const grant = await authenticate(request,reply)
+    if (!grant || !await requireMutationMode(reply,grant)) return reply
+    const id = UUIDSchema.safeParse((request.params as {snapshotId?:string}).snapshotId)
+    const body = CodeSnapshotManifestSchema.safeParse(request.body)
+    if (!id.success || !body.success) return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid manifest batch')))
+    try { return await ingest.registerManifest({installationId:grant.installationId,grant,snapshotId:id.data,entries:body.data.entries}) }
+    catch(error) { fail(reply,error);return reply }
+  })
+
+  app.get('/api/v1/memory/codegraph/repositories', async(request,reply)=>{
+    const grant = await authenticateReadGrant(request,reply,deps.guard)
+    if (!grant) return reply
+    const query = z.object({limit:z.coerce.number().int().min(1).max(100).default(50),
+      after:UUIDSchema.optional(),repository_id:UUIDSchema.optional()}).strict().safeParse(request.query)
+    if (!query.success) return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid repository query')))
+    const client = await deps.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      await requireSourceAuthority(client,{installationId:grant.installationId,grant},'read')
+      const result = await client.query(`
+        SELECT r.repository_id::text,r.repository_key,r.canonical_remote,
+          s.snapshot_id::text,s.commit_sha,s.state,s.file_count,s.byte_count,s.selection,
+          g.graph_version_id::text,CASE WHEN g.graph_version_id IS NOT NULL AND gs.selection IS NULL THEN 'partial' ELSE g.coverage END AS coverage,g.parser_version,gs.commit_sha AS graph_commit_sha
+        FROM repositories r
+        JOIN LATERAL (SELECT * FROM memory_source_snapshots s WHERE s.installation_id=r.installation_id
+          AND s.repository_id=r.repository_id ORDER BY s.created_at DESC,s.snapshot_id DESC LIMIT 1) s ON TRUE
+        LEFT JOIN memory_code_graph_heads h ON h.installation_id=r.installation_id AND h.repository_id=r.repository_id
+        LEFT JOIN memory_code_graph_versions g ON g.installation_id=h.installation_id
+          AND g.graph_version_id=h.active_graph_version_id AND g.state='active'
+        LEFT JOIN memory_source_snapshots gs ON gs.installation_id=g.installation_id AND gs.snapshot_id=g.snapshot_id
+        WHERE r.installation_id=$1 AND ($2::uuid IS NULL OR r.repository_id>$2)
+          AND ($4::uuid IS NULL OR r.repository_id=$4)
+          AND NOT EXISTS (SELECT 1 FROM memory_repository_tombstones t WHERE t.installation_id=r.installation_id AND t.repository_id=r.repository_id)
+        ORDER BY r.repository_id LIMIT $3
+      `,[grant.installationId,query.data.after??null,query.data.limit+1,query.data.repository_id??null])
+      await assertSourceGrantClock(client,{installationId:grant.installationId,grant})
+      await client.query('COMMIT')
+      const rows = result.rows.slice(0,query.data.limit)
+      return {repositories:rows.map(row=>({...row,file_count:Number(row.file_count),byte_count:Number(row.byte_count)})),
+        next_cursor:result.rows.length>query.data.limit?rows.at(-1)?.repository_id:null}
+    } catch(error) {await client.query('ROLLBACK');fail(reply,error);return reply}
+    finally {client.release()}
   })
 
   app.put('/api/v1/memory/code-snapshots/:snapshotId/files', { bodyLimit: 1024 * 1024 }, async (request, reply) => {
@@ -196,6 +243,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
         grant,
         snapshotId: snapshotId.data,
         batchIndex: parsed.data.batch_index,
+        batchKey: parsed.data.batch_key,
         entries: parsed.data.entries,
       })
       return { accepted: result.accepted }

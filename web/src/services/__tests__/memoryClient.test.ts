@@ -19,6 +19,8 @@ const {
   correctMemoryClaim,
   sendMemoryFeedback,
   MemoryClientError,
+  listGovernanceScopes,
+  scopedMemoryJson,
 } = await import('../../services/memoryClient')
 
 const INSTALLATION = {
@@ -30,6 +32,18 @@ const INSTALLATION = {
   enabled_services: ['memory.search', 'memory.recall', 'memory.manage'],
   config_version: '3',
 }
+
+test('a scoped grant cannot send a credential body after account identity changes while it is being minted',async()=>{
+  let finish!:(response:Response)=>void
+  const fetcher=vi.fn((_input:string|URL,_init?:RequestInit)=>new Promise<Response>(resolve=>{finish=resolve}))
+  vi.stubGlobal('fetch',fetcher)
+  const pending=scopedMemoryJson('shared-scope','memory.manage','/api/v1/memory/git/projects/project/connect',{method:'POST',body:JSON.stringify({access_token:'TEST_ONLY_TOKEN'})})
+  accessToken.value='different-account-token'
+  finish(Response.json({grant:'old-grant',expires_in:300,provider_public_origin:'https://memory.example'}))
+  await expect(pending).rejects.toMatchObject({code:'identity_changed'})
+  expect(fetcher).toHaveBeenCalledTimes(1)
+  expect(String(fetcher.mock.calls[0]?.[0])).not.toContain('TEST_ONLY_TOKEN')
+})
 
 function relayAndProviderFetch(options: {
   grantResponse?: unknown
@@ -84,6 +98,27 @@ afterEach(() => {
 })
 
 describe('memoryClient', () => {
+  test.each(['scopes', 'installations'])('preserves the Relay feature gate error from %s discovery', async resource => {
+    const fetchImpl = vi.fn(async (input: string | URL) => {
+      const path = new URL(String(input)).pathname
+      if (path.endsWith(`/${resource}`)) return new Response(JSON.stringify({
+        error: { code: 'feature_disabled', message: 'scope access is not enabled' },
+      }), { status: 503 })
+      return new Response(JSON.stringify({ scopes: [] }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    await expect(listGovernanceScopes()).rejects.toMatchObject({
+      status: 503, code: 'feature_disabled', message: 'scope access is not enabled',
+    })
+  })
+
+  test('keeps a non-JSON scope outage distinct from a disabled feature', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Service unavailable', { status: 503 })))
+    await expect(listGovernanceScopes()).rejects.toMatchObject({
+      status: 503, code: 'governance_unavailable', message: 'governance scopes unavailable',
+    })
+  })
+
   test('discovers the pocketctl-memory installation via the relay', async () => {
     const { calls } = relayAndProviderFetch({})
     const installation = await discoverMemoryInstallation()
@@ -314,6 +349,20 @@ describe('memoryClient', () => {
     expect(JSON.parse(String(lock.init.body))).toEqual({ expected_lock_version: 4 })
     expect(calls.filter(call => call.origin === 'https://memory.example').every(call =>
       (call.init.headers as Record<string, string>).Authorization === 'Bearer grant-token-1')).toBe(true)
+  })
+
+  test('scoped graph catalog, graph and impact all use the selected v2 grant',async()=>{
+    const {calls}=relayAndProviderFetch({providerHandler:()=>new Response('{}',{status:200,headers:{'content-type':'application/json'}})})
+    const client=await import('../../services/memoryClient')
+    const scope={installationId:'11111111-1111-4111-8111-111111111111',signal:new AbortController().signal}
+    await client.listMemoryCodeRepositories(scope)
+    await client.getMemoryCodeGraph('repo-1',null,50,scope)
+    await client.analyzeMemoryChangeImpact('repo-1',{entry_paths:['src/a.ts']},scope)
+    const grant=calls.find(c=>c.path==='/api/extensions/v2/grants')!
+    expect(JSON.parse(String(grant.init.body))).toEqual({installation_ids:[scope.installationId],caller_type:'web',services:['memory.search']})
+    const reads=calls.filter(c=>c.origin==='https://memory.example')
+    expect(reads).toHaveLength(3)
+    for(const read of reads){expect(new Headers(read.init.headers).get('authorization')).toBe('Bearer scoped-grant-token');expect(read.init.signal).toBe(scope.signal)}
   })
 
   test('scoped Wiki calls bind every request to installation, repository, and active version', async () => {

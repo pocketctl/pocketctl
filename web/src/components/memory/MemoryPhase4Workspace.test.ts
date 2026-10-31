@@ -9,6 +9,7 @@ vi.mock('../../composables/useLocale', () => ({
 
 const memoryClient = vi.hoisted(() => ({
   getMemoryCodeGraph: vi.fn(),
+  listMemoryCodeRepositories: vi.fn(async()=>({repositories:[],next_cursor:null})),
   analyzeMemoryChangeImpact: vi.fn(),
   getMemoryWiki: vi.fn(),
   listMemoryWikiBuilds: vi.fn(),
@@ -210,4 +211,49 @@ describe('Memory Wiki workspace', () => {
     expect(allowed.emitted('save')?.[0]).toEqual(['Updated runbook'])
     expect(allowed.emitted('lock')).toHaveLength(1)
   })
+})
+
+describe('Code Graph repository/scope lifecycle',()=>{
+ const personal='22222222-2222-4222-8222-222222222222',team='33333333-3333-4333-8333-333333333333'
+ const scopes=[{installation_id:personal,owner_scope_kind:'personal',owner_scope_id:personal,authorization_epoch:'1',permissions:['read','contribute'],state:'active',name:'Personal'},
+  {installation_id:team,owner_scope_kind:'team',owner_scope_id:team,authorization_epoch:'1',permissions:['read','contribute'],state:'active',name:'PocketCTL'}] as any
+ beforeEach(()=>{vi.clearAllMocks();memoryClient.listMemoryCodeRepositories.mockResolvedValue({repositories:[],next_cursor:null})})
+ test('discovers named repositories and provides a scope-specific CLI command',async()=>{
+  memoryClient.listMemoryCodeRepositories.mockResolvedValue({repositories:[{repository_id:repositoryId,repository_key:'github.com/example/project',state:'ready',commit_sha:'abc',file_count:2,graph_version_id:null}],next_cursor:null} as any)
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId:'',installationId:team,scopes,legacyGrant:false}})
+  await flushPromises()
+  expect(wrapper.get('[data-testid="memory-codegraph-catalog"]').text()).toContain('github.com/example/project')
+  expect(wrapper.get('[data-testid="memory-codegraph-command"]').text()).toContain('--scope-installation-id '+team)
+  expect(memoryClient.listMemoryCodeRepositories).toHaveBeenCalledWith(expect.objectContaining({installationId:team,legacyGrant:false}),undefined)
+  await wrapper.get('[data-testid="memory-codegraph-catalog"]').setValue(repositoryId)
+  expect(wrapper.emitted('update:repositoryId')?.[0]).toEqual([repositoryId]);wrapper.unmount()
+ })
+ test('discards graph responses after the selected scope changes',async()=>{
+  let resolveOld!:(value:ReturnType<typeof graphResult>)=>void
+  memoryClient.getMemoryCodeGraph.mockReturnValueOnce(new Promise(resolve=>{resolveOld=resolve})).mockResolvedValue(graphResult([]))
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId,installationId:personal,scopes,legacyGrant:false}})
+  await flushPromises()
+  const signal=memoryClient.getMemoryCodeGraph.mock.calls[0]![3].signal
+  await wrapper.setProps({installationId:team,repositoryId:''})
+  resolveOld(graphResult());await flushPromises()
+  expect(signal.aborted).toBe(true)
+  expect(wrapper.find('[data-testid="memory-codegraph-provenance"]').exists()).toBe(false)
+  wrapper.unmount()
+ })
+ test('an unavailable explicit shared target never falls back to personal',async()=>{
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId,installationId:team,scopes:[scopes[0]],legacyGrant:false}})
+  await flushPromises();expect(memoryClient.getMemoryCodeGraph).not.toHaveBeenCalled();expect(memoryClient.listMemoryCodeRepositories).not.toHaveBeenCalled()
+  wrapper.unmount()
+ })
+ test('a delayed impact response cannot refill a different repository',async()=>{
+  const MemoryImpactPanel=(await import('./MemoryImpactPanel.vue')).default
+  let resolve!:(value:any)=>void
+  memoryClient.analyzeMemoryChangeImpact.mockReturnValue(new Promise(r=>{resolve=r}))
+  const wrapper=mount(MemoryImpactPanel,{props:{repositoryId,installationId:team,legacyGrant:false}})
+  await wrapper.get('textarea').setValue('src/a.ts');await wrapper.get('[data-testid="memory-impact-run"]').trigger('click')
+  expect(memoryClient.analyzeMemoryChangeImpact).toHaveBeenCalledWith(repositoryId,expect.anything(),expect.objectContaining({installationId:team,legacyGrant:false}))
+  await wrapper.setProps({repositoryId:'44444444-4444-4444-8444-444444444444'})
+  resolve({coverage:'partial',paths:['secret-old.ts']});await flushPromises()
+  expect(wrapper.find('[data-testid="memory-impact-result"]').exists()).toBe(false);expect(wrapper.text()).not.toContain('secret-old');wrapper.unmount()
+ })
 })

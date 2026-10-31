@@ -113,6 +113,7 @@ Codex 会话，查看输出并发送后续消息。受管 CLI 会话支持交互
 - 按服务配置，标题生成和 Memory 提炼可能将相关文本发送给服务端模型供应商。
 - 只读分享链接允许匿名访问，15 分钟后过期，也可提前撤销；撤销不能收回他人已加载或保存的内容。
 - Team 只共享明确提供的协作内容，不会自动共享原生私人会话日志。
+- 显式执行 `pocketctl memory sync-repo` 会把筛选后的已提交源码上传到配置的 Memory 服务，用于构建代码图谱；`--dry-run` 仅在本地预览。
 
 详见[数据处理与实验性保留策略](docs/security-and-data.zh-CN.md)及[隐私政策](https://www.pocketctl.me/privacy.html)。
 
@@ -141,7 +142,7 @@ Codex 会话，查看输出并发送后续消息。受管 CLI 会话支持交互
 
 ## 实验性功能
 
-**Memory** 在 Web 工作台中管理经过评审的项目知识、依赖关系和 Skill 文档，并为后续 Agent 任务提供上下文。模型辅助提炼需要配置服务端模型 Provider。
+**Memory** 在 Web 工作台中管理经过评审的项目知识、依赖关系和 Skill 文档，并为后续 Agent 任务提供上下文。模型辅助提炼需要配置服务端模型 Provider。仓库同步可运行 `pocketctl memory --help`，详见[代码图谱使用说明与发布状态](docs/memory-codegraph-guide.md)。
 
 **Team** 支持成员、共享任务与会话，以及调用成员明确提供的 Agent。多 Agent 协作和共享 Memory 需要分别启用；加入 Team 不会自动共享私人会话或授予知识访问权限。
 

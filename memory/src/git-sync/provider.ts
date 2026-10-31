@@ -31,7 +31,7 @@ export function verifyGitWebhook(input:{rawBody:Uint8Array;signature:string;even
 /** One request means exactly one HTTP attempt. Adapters MUST NOT retry, page or
  * redirect internally. Runtime composition supplies separately consented reads;
  * no write operation or credential is available through this port. */
-export type GitReadRequest={operation:'repository'}|{operation:'merge';number:string}|{operation:'commit';sha:string}
+export type GitReadRequest={operation:'repository'}|{operation:'merge';number:string}|{operation:'commit';sha:string;proofFor?:{mergeCommit:string;tree:string}}
   |{operation:'tree';commit:string;tree:string;cursor:string|null}|{operation:'poll';cursor:string|null}
 export interface GitReadResponse {status:number;body?:unknown;retryAfterMs?:number
   /** Concrete HTTP adapters report bounded decoded response bytes; fixture adapters may
@@ -49,9 +49,9 @@ export class GitReadError extends Error {
 const sha=z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/)
 const text=z.string().min(1).max(256)
 export const MergeRead=z.object({providerRepositoryId:text,number:z.string().regex(/^[1-9][0-9]{0,14}$/),baseBranch:text,
-  merged:z.literal(true),mergeCommit:sha,exportId:z.uuid(),actorId:text.nullable()}).strict()
+  merged:z.literal(true),mergeCommit:sha,exportId:z.uuid(),actorId:text.nullable(),headCommit:sha.optional()}).strict()
 export const MergeObservation=z.discriminatedUnion('merged',[MergeRead,MergeRead.omit({mergeCommit:true}).extend({merged:z.literal(false)})])
-export const CommitRead=z.object({sha,tree:sha}).strict()
+export const CommitRead=z.object({sha,tree:sha,actorId:text.nullable().optional()}).strict()
 export const TreeRead=z.object({commit:sha,tree:sha,files:z.array(z.object({path:z.string().max(512),mode:z.literal('100644'),bytes:z.instanceof(Uint8Array)}).strict()).max(256),
   nextCursor:z.string().min(1).max(1024).nullable()}).strict()
 export const PollRead=z.object({providerRepositoryId:text,branch:text,changes:z.array(z.object({number:z.string().regex(/^[1-9][0-9]{0,14}$/),exportId:z.uuid().optional()}).strict()).max(128),

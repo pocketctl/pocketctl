@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Code Graph local acceptance fixture</title></head>
+<body><main id="app"></main><script type="module">
+ import {createApp,h,ref} from 'vue'
+ import MemoryCodeGraphPanel from '../../src/components/memory/MemoryCodeGraphPanel.vue'
+ import {useAuth} from '../../src/composables/useAuth'
+ import {useLocale} from '../../src/composables/useLocale'
+ import '../../src/assets/web-shared.css'
+ import '../../src/components/memory/memory-workbench.css'
+ if(!import.meta.env.DEV || !['127.0.0.1','localhost'].includes(location.hostname))throw new Error('Local fixture only')
+ const identity=await(await fetch('/api/fixture/identity')).json()
+ const auth=useAuth();auth.user.value={id:900001,email:'codegraph-fixture@example.test',phone:null,display_name:'Fixture'};auth.accessToken.value='local-codegraph-fixture'
+ useLocale().setLocale('zh')
+ const installation=ref(identity.scopes[0].installation_id),repository=ref('')
+ createApp({render:()=>h('main',{class:'memory-workbench memory-layout-v2',style:'max-width:1050px;margin:24px auto;padding:16px'},[
+  h('h1','代码图谱 · 本地验收'),h('p','仅使用合成仓库、隔离 PostgreSQL 和模拟登录；图谱与影响分析运行真实服务。'),
+  h(MemoryCodeGraphPanel,{repositoryId:repository.value,installationId:installation.value,scopes:identity.scopes,legacyGrant:false,uploadEnabled:true,
+   'onUpdate:repositoryId':value=>repository.value=value,'onUpdate:installationId':value=>installation.value=value})
+ ])}).mount('#app')
+</script></body></html>

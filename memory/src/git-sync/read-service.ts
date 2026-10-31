@@ -18,6 +18,9 @@ const errorCodes = {
   invalid_request:400, signature_invalid:400, forbidden:403, not_found:404, conflict:409,
   source_invalid:409, policy_changed:409, authorization_stale:409, size_limit:413,
   budget_limit:429, feature_disabled:503, external_write_disabled:503, internal_error:500,
+  repository_authorization_failed:422, repository_not_found:422, provider_unavailable:502,
+  credential_store_unavailable:503,
+  external_export_required:409,
 } as const
 export class GitApiError extends Error {
   constructor(readonly code: keyof typeof errorCodes) { super(code) }
@@ -98,9 +101,10 @@ export function createGitReadService(deps: GitReadDeps) {
       })
     },
     async connections(id:GitIdentity,raw:unknown={}) {
-      const query=GitListQuery.parse(raw)
+      const query=GitListQuery.extend({connection_id:z.uuid().optional()}).parse(raw)
       const page=await transaction(id,'read',async client=>(await client.query<{connection_id:string}>(`SELECT connection_id FROM memory_git_connections
-        WHERE installation_id=$1 AND ($2::uuid IS NULL OR connection_id>$2) ORDER BY connection_id LIMIT $3`,[id.installationId,query.cursor??null,query.limit+1])).rows)
+        WHERE installation_id=$1 AND ($2::uuid IS NULL OR connection_id>$2) AND ($4::uuid IS NULL OR connection_id=$4)
+        ORDER BY connection_id LIMIT $3`,[id.installationId,query.cursor??null,query.limit+1,query.connection_id??null])).rows)
       const items=[]
       for(const pointer of page.slice(0,query.limit)) {
         const c=await connection(id,pointer.connection_id)
@@ -118,6 +122,21 @@ export function createGitReadService(deps: GitReadDeps) {
         items.push({...c,...state,capabilities:await capabilities(id,c)})
       }
       return {items,next_cursor:page.length>query.limit?page[query.limit-1].connection_id:null}
+    },
+    async assets(id:GitIdentity,connectionId:string) {
+      const c=await connection(id,connectionId)
+      return transaction(id,'contribute',async client=>({items:(await client.query(`
+        SELECT CASE WHEN k.claim_type IN('repository_convention','test_invariant') THEN 'rule' ELSE 'claim' END AS kind,
+          k.claim_id AS id,left(v.statement,160) AS label
+        FROM knowledge_claims k JOIN knowledge_versions v ON v.installation_id=k.installation_id AND v.version_id=k.current_version_id
+        WHERE k.installation_id=$1 AND k.state='active' AND v.authority=$3
+          AND (v.repository_id=$2 OR (v.repository_id IS NULL AND k.scope_kind='repository' AND k.scope_key IN($2::text,(SELECT repository_key FROM repositories WHERE repository_id=$2))))
+        UNION ALL SELECT 'wiki',w.wiki_id,'Wiki' FROM memory_wikis w JOIN memory_wiki_heads h USING(installation_id,wiki_id)
+          WHERE w.installation_id=$1 AND w.repository_id=$2 AND w.state='active'
+        UNION ALL SELECT 'skill',s.skill_id,left(v.document->>'name',160) FROM memory_skills s
+          JOIN memory_skill_tasks t USING(installation_id,task_id) JOIN memory_skill_publication_heads h USING(installation_id,skill_id)
+          JOIN memory_skill_versions v ON v.installation_id=h.installation_id AND v.version_id=h.current_version_id
+          WHERE s.installation_id=$1 AND t.repository_id=$2 AND h.state='active' ORDER BY kind,id LIMIT 254`,[id.installationId,c.repositoryId,`${c.ownerScopeKind}_published`])).rows}))
     },
     async preview(id:GitIdentity,connectionId:string,exportId:string) {
       const c=await connection(id,connectionId)

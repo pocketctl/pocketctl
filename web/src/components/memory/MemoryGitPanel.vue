@@ -6,20 +6,23 @@ import {useLocale} from '../../composables/useLocale'
 import {memoryGit} from '../../services/memoryGit'
 import type {MemoryGitConnection,MemoryGitExpected,MemoryGitPage,MemoryGitProposal} from '../../types/memoryGit'
 import {createClientId} from '../../utils/clientId'
-const props=defineProps<{scopeId:string}>(),{t}=useLocale()
+const props=defineProps<{scopeId:string;connectionId?:string}>(),{t}=useLocale()
 const page=ref<MemoryGitPage|null>(null),selected=ref(''),detail=ref<MemoryGitProposal|null>(null),error=ref(''),loading=ref(false),busy=ref(false),unavailable=ref(false)
 const exportId=ref(''),assetId=ref(''),assetKind=ref<'claim'|'rule'|'wiki'|'skill'>('rule')
+const assets=ref<Array<{kind:'claim'|'rule'|'wiki'|'skill';id:string;label:string}>>([]),assetChoice=ref(''),assetsLoaded=ref(false)
+const bundleInfo=ref<{branch:string;base_commit:string}|null>(null)
+let assetsRequest:AbortController|undefined
 const connection=computed(()=>page.value?.items.find(c=>c.connectionId===selected.value)??null)
 let listRequest:AbortController|undefined,detailRequest:AbortController|undefined,actionRequest:AbortController|undefined,epoch=0
 let proposalPageRequest:AbortController|undefined,cleanupPageRequest:AbortController|undefined,childEpoch=0
 const proposalPageLoading=ref(false),cleanupPageLoading=ref(false),proposalContinued=ref(false),cleanupContinued=ref(false)
 const childPositions=new Map<string,{proposals:boolean;cleanup:boolean}>()
 function cancelChildren(){proposalPageRequest?.abort();cleanupPageRequest?.abort();childEpoch++;proposalPageLoading.value=false;cleanupPageLoading.value=false}
-type Operation='review'|'apply'|'resolve'|'preview'|'enroll'|'poll'|'recover'
+type Operation='review'|'apply'|'resolve'|'preview'|'export'|'enroll'|'poll'|'recover'
 type Intent={scope:string;connection:string;resource:string;operation:Operation;key:string;state:'pending'|'unknown';createdAt:number;request?:string}
 // Attempt ownership is transient, never part of the durable intent metadata.
 const intentAttempts=new Map<string,AbortController>()
-const intentStorage='memory.git.intents.v1',operations:Operation[]=['review','apply','resolve','preview','enroll','poll','recover'],storageWarning=ref(false)
+const intentStorage='memory.git.intents.v1',operations:Operation[]=['review','apply','resolve','preview','export','enroll','poll','recover'],storageWarning=ref(false)
 function restoreIntents():Intent[]{
   try {
     const raw=sessionStorage.getItem(intentStorage);if(!raw)return []
@@ -54,8 +57,8 @@ function observeGeneration(scope:string,connectionId:string,generation:string){
 function retryable(intent:Intent){const age=Date.now()-intent.createdAt;return !!intent.request&&intent.scope===props.scopeId&&age>=0&&age<23*60*60*1000}
 function handled(intent:Intent){if(intent.state==='pending')return;intents.value=intents.value.filter(i=>i.key!==intent.key);persistIntents()}
 const slots=['base','memory','git'] as const
-function clear(){detail.value=null;page.value=null;selected.value='';exportId.value='';childPositions.clear()}
-function cancel(){listRequest?.abort();detailRequest?.abort();actionRequest?.abort();cancelChildren();epoch++}
+function clear(){detail.value=null;page.value=null;selected.value='';exportId.value='';childPositions.clear();assets.value=[];assetChoice.value='';assetsLoaded.value=false;bundleInfo.value=null}
+function cancel(){listRequest?.abort();detailRequest?.abort();actionRequest?.abort();assetsRequest?.abort();cancelChildren();epoch++}
 function failed(reason:unknown){
   const value=reason as {status?:number;code?:string;message?:string}
   error.value=value?.message??t('memory.git.request_failed')
@@ -73,6 +76,7 @@ async function choose(c:MemoryGitConnection){
   cancelChildren();const position=childPositions.get(c.connectionId)
   proposalContinued.value=position?.proposals??false;cleanupContinued.value=position?.cleanup??false
   detailRequest?.abort();suspendIntents();detail.value=null;error.value='';selected.value=c.connectionId;exportId.value=c.exports[0]?.export_id??''
+  assetsRequest?.abort();assets.value=[];assetsLoaded.value=false;assetChoice.value='';bundleInfo.value=null
   if(c.proposals[0])await loadProposal(c.proposals[0].proposal_id)
 }
 async function refresh(cursor?:string){
@@ -80,7 +84,7 @@ async function refresh(cursor?:string){
   listRequest?.abort();listRequest=new AbortController();const controller=listRequest,scope=props.scopeId,started=epoch
   if(!scope){clear();return}loading.value=true;error.value=''
   try {
-    const value=await memoryGit.connections(scope,cursor,controller.signal)
+    const value=props.connectionId?await memoryGit.connections(scope,cursor,controller.signal,props.connectionId):await memoryGit.connections(scope,cursor,controller.signal)
     if(controller.signal.aborted||started!==epoch)return
     for(const c of value.items)observeGeneration(scope,c.connectionId,c.generation)
     childPositions.clear();proposalContinued.value=false;cleanupContinued.value=false
@@ -131,6 +135,7 @@ async function retryIntent(intent:Intent){
     else if(intent.operation==='review')await memoryGit.review(intent.scope,intent.resource,body,intent.key,controller.signal)
     else if(intent.operation==='apply')await memoryGit.apply(intent.scope,intent.resource,body,intent.key,controller.signal)
     else if(intent.operation==='resolve')await memoryGit.resolve(intent.scope,intent.resource,body,intent.key,controller.signal)
+    else if(intent.operation==='export'){const value=await memoryGit.export(intent.scope,intent.resource,body,intent.key,controller.signal);if(ownsIntent())exportId.value=value.export_id}
     else await memoryGit.preview(intent.scope,intent.resource,body,intent.key,controller.signal)
     if(ownsIntent()){intentAttempts.delete(intent.key);intents.value=intents.value.filter(i=>i.key!==intent.key);persistIntents();await refresh()}
   }
@@ -152,8 +157,28 @@ function apply(){const d=detail.value;if(d?.capabilities.can_apply)action('apply
 function resolve(side:'memory'|'git'){const d=detail.value;if(!d?.capabilities.can_resolve)return;const v=d.versions[side]
   action('resolve',d.proposal_id,{...expected(d),expected_inputs:d.expected_inputs,resolution:{path:v.path,deleted:v.deleted,editable:v.editable}})}
 function sync(kind:'enroll'|'poll'|'recover',id=exportId.value){const c=connection.value;if(c?.capabilities.can_sync&&id)action(kind,c.connectionId,{expected_generation:c.generation,export_id:id,action:kind})}
-function preview(){const c=connection.value;if(c?.capabilities.can_preview&&assetId.value)action('preview',c.connectionId,{expected_generation:c.generation,assets:[{kind:assetKind.value,id:assetId.value}],reason_code:'manual_preview'})}
-watch(()=>props.scopeId,()=>{suspendIntents(true);cancel();clear();error.value='';busy.value=false;loading.value=false;unavailable.value=false;assetId.value='';void refresh()},{immediate:true,flush:'sync'})
+function preview(external=false){const c=connection.value;if(c?.capabilities.can_preview&&assetId.value)action(external?'export':'preview',c.connectionId,{expected_generation:c.generation,assets:[{kind:assetKind.value,id:assetId.value}],reason_code:'manual_preview'})}
+async function loadAssets(){
+  const c=connection.value;if(!c)return
+  assetsRequest?.abort();assetsRequest=new AbortController();const controller=assetsRequest,started=epoch
+  try{const result=await memoryGit.assets(props.scopeId,c.connectionId,controller.signal);if(started===epoch&&!controller.signal.aborted&&selected.value===c.connectionId){assets.value=result.items;assetsLoaded.value=true}}
+  catch(reason){if(started===epoch&&!controller.signal.aborted)failed(reason)}
+}
+function selectAsset(){const asset=assets.value.find(a=>`${a.kind}:${a.id}`===assetChoice.value);if(asset){assetKind.value=asset.kind;assetId.value=asset.id}}
+async function download(){
+  const c=connection.value;if(!c||!exportId.value||busy.value)return
+  actionRequest?.abort();actionRequest=new AbortController();const controller=actionRequest,started=epoch
+  busy.value=true;error.value=''
+  try{const value=await memoryGit.bundle(props.scopeId,exportId.value,controller.signal)
+    if(started!==epoch||controller.signal.aborted)return
+    if(!value.publishable){error.value=t('memory.git_setup.external_required');return}
+    const data=Uint8Array.from(atob(value.archive.content),char=>char.charCodeAt(0)),url=URL.createObjectURL(new Blob([data],{type:'application/zip'}))
+    const link=document.createElement('a');link.href=url;link.download=value.archive.name;link.click();URL.revokeObjectURL(url)
+    bundleInfo.value={branch:value.branch,base_commit:value.base_commit}
+  }catch(reason){if(started===epoch&&!controller.signal.aborted){if((reason as {code?:string})?.code==='external_export_required')error.value=t('memory.git_setup.external_required');else failed(reason)}}
+  finally{if(actionRequest===controller){actionRequest=undefined;busy.value=false}}
+}
+watch(()=>[props.scopeId,props.connectionId],()=>{suspendIntents(true);cancel();clear();error.value='';busy.value=false;loading.value=false;unavailable.value=false;assetId.value='';void refresh()},{immediate:true,flush:'sync'})
 onBeforeUnmount(()=>{suspendIntents(true);cancel()})
 </script>
 
@@ -193,10 +218,18 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
         <div class="memory-git-actions"><label>{{ t('memory.git.export') }}<ActionSelect><select v-model="exportId"><option v-for="e in connection.exports" :key="e.export_id" :value="e.export_id">{{ e.export_id }}</option></select></ActionSelect></label>
           <button class="memory-button" :disabled="busy || !exportId || !connection.capabilities.can_sync" @click="sync('enroll')">{{ t('memory.git.enroll') }}</button>
           <button class="memory-button" :disabled="busy || !exportId || !connection.capabilities.can_sync" @click="sync('poll')">{{ t('memory.git.sync') }}</button></div>
+        <button class="memory-button" :disabled="busy||!exportId||!connection.capabilities.can_preview" @click="download">{{t('memory.git_setup.download')}}</button>
+        <p v-if="bundleInfo" class="memory-notice">{{t('memory.git_setup.manual_export')}}<br><code>{{bundleInfo.branch}}</code><br>{{t('memory.git_setup.base_commit')}} <code>{{bundleInfo.base_commit}}</code></p>
+        <details><summary>{{t('memory.git_setup.author_requirements')}}</summary><p class="memory-git-muted">{{t('memory.git_setup.author_proof')}}</p></details>
         <p class="memory-git-muted">{{ t('memory.git.enrollment_description') }}</p>
-        <details v-if="connection.capabilities.can_preview" class="memory-git-preview"><summary>{{ t('memory.git.preview') }}</summary><form class="memory-git-actions" @submit.prevent="preview">
-          <label>{{ t('memory.git.asset_kind') }}<ActionSelect><select v-model="assetKind"><option>claim</option><option>rule</option><option>wiki</option><option>skill</option></select></ActionSelect></label>
-          <label>{{ t('memory.git.asset_id') }}<input v-model="assetId" required /></label><button class="memory-button" :disabled="busy || !assetId">{{ t('memory.git.preview') }}</button></form></details>
+        <details v-if="connection.capabilities.can_preview" class="memory-git-preview"><summary>{{ t('memory.git.preview') }}</summary>
+          <button class="memory-button" :disabled="busy" @click="loadAssets">{{t('memory.git_setup.choose_assets')}}</button>
+          <p v-if="assetsLoaded&&!assets.length">{{t('memory.git_setup.no_assets')}}</p>
+          <label v-if="assets.length">{{t('memory.git_setup.asset')}}<ActionSelect><select v-model="assetChoice" @change="selectAsset"><option value="">{{t('memory.git_setup.choose_assets')}}</option><option v-for="a in assets" :key="`${a.kind}:${a.id}`" :value="`${a.kind}:${a.id}`">{{a.kind}} · {{a.label||a.id}}</option></select></ActionSelect></label>
+          <form class="memory-git-actions" @submit.prevent="preview()">
+          <details><summary>{{t('memory.git_setup.manual_asset')}}</summary><label>{{ t('memory.git.asset_kind') }}<ActionSelect><select v-model="assetKind"><option>claim</option><option>rule</option><option>wiki</option><option>skill</option></select></ActionSelect></label>
+          <label>{{ t('memory.git.asset_id') }}<input v-model="assetId" required /></label></details><button class="memory-button" :disabled="busy || !assetId">{{ t('memory.git.preview') }}</button>
+          <button class="memory-button is-primary" type="button" :disabled="busy||!assetId" @click="preview(true)">{{t('memory.git_setup.create_export')}}</button></form></details>
         <nav class="memory-git-proposals" :aria-label="t('memory.git.proposals')"><button v-for="p in connection.proposals" :key="p.proposal_id" class="memory-button" :aria-pressed="detail?.proposal_id===p.proposal_id" @click="loadProposal(p.proposal_id)">{{ p.state }} · {{ p.revision }}</button></nav>
         <p>{{ t('memory.git.proposal_total') }}: {{ connection.proposal_total ?? connection.proposals.length }}</p>
         <div class="memory-git-actions"><button v-if="proposalContinued" class="memory-button" data-testid="git-proposals-first" :disabled="proposalPageLoading" @click="loadChildren('proposals')">{{ t('memory.git.first_page') }}</button>

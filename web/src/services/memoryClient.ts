@@ -499,17 +499,31 @@ function wikiJson<T>(
     : memoryJson<T>(service, path, scopedInit)
 }
 
+export type MemoryGraphScopeContext = Pick<MemoryWikiScopeContext, 'installationId' | 'signal' | 'legacyGrant'>
+
+function graphJson<T>(path:string,scope?:MemoryGraphScopeContext,init:RequestInit={}):Promise<T> {
+ const request = {...init,...(scope?.signal ? {signal:scope.signal} : {})}
+ return scope && !scope.legacyGrant
+  ? scopedMemoryJson<T>(scope.installationId,'memory.search',path,request)
+  : memoryJson<T>('memory.search',path,request)
+}
+
+export function listMemoryCodeRepositories(scope?:MemoryGraphScopeContext,after?:string|null,repositoryId?:string):Promise<import('../types/memory').MemoryCodeRepositoryList> {
+ const query = new URLSearchParams({limit:'50'})
+ if (after) query.set('after',after)
+ if (repositoryId) query.set('repository_id',repositoryId)
+ return graphJson(`/api/v1/memory/codegraph/repositories?${query}`,scope)
+}
+
 export function getMemoryCodeGraph(
   repositoryId: string,
   cursor?: string | null,
   limit = 50,
+  scope?:MemoryGraphScopeContext,
 ): Promise<MemoryCodeGraphPage> {
   const query = new URLSearchParams({ limit: String(limit) })
   if (cursor) query.set('cursor', cursor)
-  return memoryJson(
-    'memory.search',
-    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/codegraph?${query.toString()}`,
-  )
+  return graphJson(`/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/codegraph?${query}`,scope)
 }
 
 export function analyzeMemoryChangeImpact(
@@ -520,10 +534,10 @@ export function analyzeMemoryChangeImpact(
     max_nodes?: number
     max_edges?: number
   },
+  scope?:MemoryGraphScopeContext,
 ): Promise<MemoryChangeImpact> {
-  return memoryJson(
-    'memory.search',
-    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/impact`,
+  return graphJson(
+    `/api/v1/memory/repositories/${encodeURIComponent(repositoryId)}/impact`,scope,
     { method: 'POST', body: JSON.stringify(input) },
   )
 }
@@ -794,6 +808,7 @@ export function resetScopedMemoryAuthorization(): void {
 }
 
 async function mintV2Grant(installationIds: string[], services: string[] = []): Promise<V2GrantState> {
+  const scope = personalScope()
   if (v2Grant && v2Grant.expiresAt > Date.now() + 5_000
     && v2Grant.installationIds.join(',') === installationIds.join(',')
     && v2Grant.services.join(',') === services.join(',')) {
@@ -809,9 +824,10 @@ async function mintV2Grant(installationIds: string[], services: string[] = []): 
     }),
   })
   if (!response.ok) {
-    throw new MemoryClientError(response.status, 'feature_disabled', 'v2 grant mint failed')
+    throw await governanceDiscoveryError(response, 'v2 grant mint failed')
   }
   const body = await response.json() as { grant: string; expires_in: number; provider_public_origin?: string }
+  assertPersonalScope(scope)
   if (!body.provider_public_origin) {
     throw new MemoryClientError(503, 'no_provider_origin', 'provider origin is not configured')
   }
@@ -831,8 +847,11 @@ async function governanceFetch(
   init: RequestInit = {},
   services: string[] = [],
 ): Promise<Response> {
+  const scope = personalScope()
   const grant = await mintV2Grant(installationIds, services)
-  return fetch(`${grant.origin}${path}`, {
+  assertPersonalScope(scope)
+  init.signal?.throwIfAborted()
+  const response = await fetch(`${grant.origin}${path}`, {
     ...init,
     redirect: 'error',
     headers: {
@@ -841,6 +860,8 @@ async function governanceFetch(
       ...(init.headers ?? {}),
     },
   })
+  assertPersonalScope(scope)
+  return response
 }
 
 async function governanceJson<T>(
@@ -882,7 +903,7 @@ export function scopedMemoryJson<T>(
 export async function listGovernanceScopes(): Promise<{ scopes: MemoryGovernanceScope[] }> {
   const response = await relayFetch('/api/extensions/v2/scopes')
   if (!response.ok) {
-    throw new MemoryClientError(response.status, 'governance_unavailable', 'governance scopes unavailable')
+    throw await governanceDiscoveryError(response, 'governance scopes unavailable')
   }
   const body = await response.json() as {
     scopes: Array<{
@@ -898,7 +919,7 @@ export async function listGovernanceScopes(): Promise<{ scopes: MemoryGovernance
   }
   const installations = await relayFetch('/api/extensions/v2/installations')
   if (!installations.ok) {
-    throw new MemoryClientError(installations.status, 'governance_unavailable', 'governance installations unavailable')
+    throw await governanceDiscoveryError(installations, 'governance installations unavailable')
   }
   const installationBody = await installations.json() as {
     installations: Array<{
@@ -928,6 +949,13 @@ export async function listGovernanceScopes(): Promise<{ scopes: MemoryGovernance
       }]
     }),
   }
+}
+
+async function governanceDiscoveryError(response: Response, fallback: string): Promise<MemoryClientError> {
+  const body = await response.json().catch(() => null)
+  const code = typeof body?.error?.code === 'string' ? body.error.code : 'governance_unavailable'
+  const message = typeof body?.error?.message === 'string' ? body.error.message : fallback
+  return new MemoryClientError(response.status, code, message)
 }
 
 export async function listScopeMembers(scope: MemoryGovernanceScope): Promise<{ members: MemoryScopeMember[] }> {

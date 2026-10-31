@@ -16,15 +16,22 @@ type RepositoryRef struct {
 
 // StartCodeSnapshotRequest is the frozen start body (plan §3.3). Strict
 // server-side schemas reject unknown fields.
+type SnapshotSelection struct {
+	IncludePaths   []string       `json:"include_paths,omitempty"`
+	ExcludedCounts map[string]int `json:"excluded_counts,omitempty"`
+	Partial        bool           `json:"partial"`
+}
+
 type StartCodeSnapshotRequest struct {
-	Repository          RepositoryRef `json:"repository"`
-	GitObjectFormat     string        `json:"git_object_format"`
-	CommitSHA           string        `json:"commit_sha"`
-	ManifestSHA256      string        `json:"manifest_sha256"`
-	ExpectedFileCount   int           `json:"expected_file_count"`
-	ExpectedByteCount   int64         `json:"expected_byte_count"`
-	ParserMatrixVersion string        `json:"parser_matrix_version"`
-	IdempotencyKey      string        `json:"idempotency_key"`
+	Selection           *SnapshotSelection `json:"selection,omitempty"`
+	Repository          RepositoryRef      `json:"repository"`
+	GitObjectFormat     string             `json:"git_object_format"`
+	CommitSHA           string             `json:"commit_sha"`
+	ManifestSHA256      string             `json:"manifest_sha256"`
+	ExpectedFileCount   int                `json:"expected_file_count"`
+	ExpectedByteCount   int64              `json:"expected_byte_count"`
+	ParserMatrixVersion string             `json:"parser_matrix_version"`
+	IdempotencyKey      string             `json:"idempotency_key"`
 }
 
 // CodeSnapshotFileEntry is one uploaded file: content-addressed by SHA-256
@@ -42,7 +49,8 @@ type CodeSnapshotFileEntry struct {
 // CodeSnapshotFileBatch is one bounded PUT body. A retry of the same
 // (snapshot_id, batch_index) must be byte-identical.
 type CodeSnapshotFileBatch struct {
-	BatchIndex int                    `json:"batch_index"`
+	BatchKey   string                  `json:"batch_key,omitempty"`
+	BatchIndex int                     `json:"batch_index"`
 	Entries    []CodeSnapshotFileEntry `json:"entries"`
 }
 
@@ -58,6 +66,7 @@ type FinalizeCodeSnapshotRequest struct {
 type StartResult struct {
 	SnapshotID   string `json:"snapshot_id"`
 	RepositoryID string `json:"repository_id"`
+	State        string `json:"state"`
 }
 
 // FinalizeResult reflects the post-finalization snapshot state.
@@ -93,4 +102,14 @@ func DefaultLimits() Limits {
 		MaxTotalBytes:    defaultMaxTotalBytes,
 		MaxFileBytes:     defaultMaxFileBytes,
 	}
+}
+
+// Manifest entries carry metadata only; bodies are requested only when unavailable.
+type ManifestFileEntry struct {
+	Path       string `json:"path"`
+	GitMode    string `json:"git_mode"`
+	Language   string `json:"language"`
+	Capability string `json:"capability"`
+	BlobSHA256 string `json:"blob_sha256"`
+	ByteCount  int64  `json:"byte_count"`
 }

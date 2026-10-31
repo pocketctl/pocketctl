@@ -33,12 +33,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { analyzeMemoryChangeImpact } from '../../services/memoryClient'
 import type { MemoryChangeImpact } from '../../types/memory'
 
-const props = defineProps<{ repositoryId: string }>()
+const props = defineProps<{ repositoryId:string;installationId?:string;legacyGrant?:boolean }>()
 const { t } = useLocale()
 const rawPaths = ref('')
 const loading = ref(false)
@@ -46,19 +46,27 @@ const error = ref('')
 const result = ref<MemoryChangeImpact | null>(null)
 const paths = computed(() => [...new Set(rawPaths.value.split(/[\n,]/).map(path => path.trim()).filter(Boolean))].slice(0, 20))
 
+let epoch=0, controller:AbortController|undefined
+function reset():void {epoch++;controller?.abort();loading.value=false;result.value=null;error.value=''}
+watch(()=>[props.repositoryId,props.installationId,props.legacyGrant],()=>{reset();rawPaths.value=''})
+watch(rawPaths,reset)
+onBeforeUnmount(reset)
 async function run(): Promise<void> {
   if (!props.repositoryId || paths.value.length === 0) return
+  const current=++epoch;controller?.abort();controller=new AbortController()
   loading.value = true
   error.value = ''
   try {
-    result.value = await analyzeMemoryChangeImpact(props.repositoryId, {
+    const response = await analyzeMemoryChangeImpact(props.repositoryId, {
       entry_paths: paths.value, depth: 3, max_nodes: 500, max_edges: 2000,
-    })
+    },props.installationId ? {installationId:props.installationId,legacyGrant:props.legacyGrant,signal:controller.signal} : undefined)
+    if(current===epoch)result.value=response
   } catch (cause) {
+    if(current!==epoch)return
     result.value = null
     error.value = cause instanceof Error ? cause.message : t('memory.phase4.request_failed')
   } finally {
-    loading.value = false
+    if(current===epoch)loading.value = false
   }
 }
 

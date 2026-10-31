@@ -360,7 +360,7 @@ async function main(): Promise<void> {
       onError: loopError('jobs'),
     })
     const gitConfig=config.gitSync??loadGitSyncConfig({})
-    const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode})
+    const gitRuntime=await createGitRuntime({pool,config:gitConfig,globalMode:config.mode,sharedMode:config.sharedScopesMode,vaultSecret:process.env.MEMORY_GIT_CREDENTIAL_KEY??config.hmacKey})
     const gitDeps={pool,config:gitConfig,...gitRuntime,outcomeKind:'natural' as const,
       skill:{context:{globalMode:config.mode,sharedMode:config.sharedScopesMode,config:config.skill},cases:createFileSkillCaseRegistry(process.env.MEMORY_SKILL_REPLAY_REGISTRY_PATH)}}
     const gitWorker=createGitSyncWorker(gitDeps)

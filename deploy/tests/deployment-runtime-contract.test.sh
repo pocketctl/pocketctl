@@ -17,6 +17,8 @@ fail() {
 [[ -f "$helpers" ]] || fail "missing deployment helper library"
 grep -q 'load_relay_env_value RELAY_EXTENSIONS RELAY_EXTENSIONS RELAY_EXTENSIONS' "$deploy_script" \
   || fail "redeploy does not preserve the Extension mode"
+grep -q 'load_relay_env_value RELAY_EXTENSION_V2 RELAY_EXTENSION_V2 RELAY_EXTENSION_V2' "$deploy_script" \
+  || fail "redeploy does not preserve the v2 scope mode required by Skills"
 extension_validation_line=$(grep -n 'validate-production-env.js.*RELAY_ENV_STAGED' "$deploy_script" | cut -d: -f1)
 postgres_mutation_line=$(grep -n '^# ---------- 5\. 配置 PostgreSQL' "$deploy_script" | cut -d: -f1)
 [[ -n "$extension_validation_line" && -n "$postgres_mutation_line" \
@@ -100,6 +102,7 @@ POSTGRES_APP_PASSWORD='safe-Database_Password.0123456789~'
 JWT_SECRET_VALUE='jwt-secret-0123456789abcdef0123456789abcdef'
 AUTH_CODE_PEPPER_VALUE='pepper-0123456789abcdef0123456789abcdef'
 RELAY_EXTENSIONS=enabled
+RELAY_EXTENSION_V2=enabled
 EXTENSION_PROVIDER_JWT_SECRET_VALUE='provider-jwt-secret-0123456789abcdef'
 EXTENSION_CURSOR_SECRET_VALUE='cursor-secret-0123456789abcdef0123'
 grant_private_key="$fixture/extension-grant-private.pem"
@@ -140,6 +143,7 @@ for expected in \
 done
 for expected in \
   'RELAY_EXTENSIONS=enabled' \
+  'RELAY_EXTENSION_V2=enabled' \
   'EXTENSION_PROVIDER_JWT_SECRET=provider-jwt-secret-0123456789abcdef' \
   'EXTENSION_CURSOR_SECRET=cursor-secret-0123456789abcdef0123' \
   'EXTENSION_GRANT_KEY_ID=grant-key-2026-08' \
@@ -156,6 +160,17 @@ grep -qxF "EXTENSION_GRANT_PUBLIC_KEY_B64=$EXTENSION_GRANT_PUBLIC_KEY_B64_VALUE"
 node "$extension_env_validator" "$env_file" >/dev/null \
   || fail "valid production Extension EnvironmentFile failed runtime validation"
 invalid_env_file="$fixture/relay-invalid-key.env"
+for v2_mode in off shadow enabled; do
+  RELAY_EXTENSION_V2="$v2_mode" pocketctl_write_relay_production_env "$fixture/v2-$v2_mode.env"
+  grep -qxF "RELAY_EXTENSION_V2=$v2_mode" "$fixture/v2-$v2_mode.env" \
+    || fail "production env changed the chosen v2 scope mode"
+done
+v2_env_before=$(shasum -a 256 "$env_file")
+if RELAY_EXTENSION_V2=invalid pocketctl_write_relay_production_env "$env_file" >/dev/null 2>&1; then
+  fail "invalid v2 scope mode was accepted"
+fi
+[[ "$v2_env_before" == "$(shasum -a 256 "$env_file")" ]] \
+  || fail "invalid v2 scope mode replaced the current production env"
 invalid_private_key_b64=$(printf 'not-a-private-key%.0s' {1..3} | openssl base64 -A)
 awk -v replacement="EXTENSION_GRANT_PRIVATE_KEY_B64=$invalid_private_key_b64" \
   '/^EXTENSION_GRANT_PRIVATE_KEY_B64=/{print replacement; next} {print}' \

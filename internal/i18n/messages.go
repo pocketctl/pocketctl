@@ -28,6 +28,7 @@ Commands:
   agent claude-code enable|disable|status Manage Claude terminal approval relay
   agent codex enable|disable|status      Manage Codex CLI terminal control (Desktop is read-only)
   agent zcode sync enable|disable|status Sync ZCode sessions read-only (view in Web/iOS)
+  memory sync-repo  Sync committed source for Code Graph (see memory --help)
   task-tools status|enable|disable|reset  Configure native task tools (see task-tools --help)
   daemon start   Start the daemon (connects to relay)
   daemon stop    Stop the running daemon
@@ -191,6 +192,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   agent claude-code enable|disable|status 管理 Claude 终端审批中继
   agent codex enable|disable|status      管理 Codex CLI 终端控制（Desktop 只读）
   agent zcode sync enable|disable|status 只读同步 ZCode 会话（在 Web/iOS 查看）
+  memory sync-repo  同步已提交源码到代码图谱（详见 memory --help）
   task-tools status|enable|disable|reset  配置原生任务工具（详见 task-tools --help）
   daemon start   启动 daemon（连接 relay）
   daemon stop    停止运行中的 daemon

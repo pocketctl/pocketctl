@@ -11,6 +11,7 @@ import {
   PHASE4_PARSER_MATRIX_VERSION,
   languageCapabilityFor,
   normalizeSourcePath,
+  canonicalJsonStringify,
 } from './types.js'
 
 /**
@@ -23,7 +24,14 @@ import {
 export const BlobHashSchema = z.string().regex(/^[0-9a-f]{64}$/)
 const CommitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)
 
+export const SnapshotSelectionSchema = z.object({
+  include_paths: z.array(z.string().max(1024).refine(path => path === '.' || normalizeSourcePath(path) !== null)).max(100).optional(),
+  excluded_counts: z.record(z.string().regex(/^[a-z_]{1,64}$/), z.number().int().min(0).max(10_000_000)).optional(),
+  partial: z.boolean(),
+}).strict().refine(value => value.partial || (!value.include_paths?.length && !Object.values(value.excluded_counts ?? {}).some(count => count > 0)))
+
 export const StartCodeSnapshotRequestSchema = z.object({
+  selection: SnapshotSelectionSchema.optional(),
   repository: z.object({
     repository_key: z.string().min(1).max(512),
     canonical_remote: z.string().min(1).max(1024).optional(),
@@ -31,13 +39,14 @@ export const StartCodeSnapshotRequestSchema = z.object({
   git_object_format: z.enum(['sha1', 'sha256']),
   commit_sha: CommitShaSchema,
   manifest_sha256: BlobHashSchema,
-  expected_file_count: z.number().int().min(1).max(CODE_SNAPSHOT_MAX_FILES),
-  expected_byte_count: z.number().int().min(1).max(CODE_SNAPSHOT_MAX_TOTAL_BYTES),
+  expected_file_count: z.number().int().min(0).max(CODE_SNAPSHOT_MAX_FILES),
+  expected_byte_count: z.number().int().min(0).max(CODE_SNAPSHOT_MAX_TOTAL_BYTES),
   parser_matrix_version: z.literal(PHASE4_PARSER_MATRIX_VERSION),
   idempotency_key: z.string().min(1).max(256),
 }).strict()
 
 export const CodeSnapshotBatchSchema = z.object({
+  batch_key: BlobHashSchema.optional(),
   batch_index: z.number().int().min(0).max(999_999),
   entries: z.array(z.object({
     path: z.string().refine(path => normalizeSourcePath(path) !== null),
@@ -50,10 +59,14 @@ export const CodeSnapshotBatchSchema = z.object({
   })).min(1).max(512),
 }).strict()
 
+export const CodeSnapshotManifestSchema = z.object({
+ entries: z.array(CodeSnapshotBatchSchema.shape.entries.element.omit({ content_base64: true }).strict()).min(1).max(512),
+}).strict()
+
 export const FinalizeCodeSnapshotRequestSchema = z.object({
   manifest_sha256: BlobHashSchema,
-  expected_file_count: z.number().int().min(1).max(CODE_SNAPSHOT_MAX_FILES),
-  expected_byte_count: z.number().int().min(1).max(CODE_SNAPSHOT_MAX_TOTAL_BYTES),
+  expected_file_count: z.number().int().min(0).max(CODE_SNAPSHOT_MAX_FILES),
+  expected_byte_count: z.number().int().min(0).max(CODE_SNAPSHOT_MAX_TOTAL_BYTES),
   idempotency_key: z.string().min(1).max(256),
 }).strict()
 
@@ -94,6 +107,7 @@ export interface SourceSnapshotRecord {
   generation: number
   fileCount: number
   byteCount: number
+  selection: z.infer<typeof SnapshotSelectionSchema> | null
 }
 
 type Queryable = pg.Pool | pg.PoolClient
@@ -161,13 +175,14 @@ export function createSourceRepository(pool: pg.Pool) {
       manifestHash: string
       expectedFileCount: number
       expectedByteCount: number
+      selection?: z.infer<typeof SnapshotSelectionSchema>
     }, client?: Queryable): Promise<SourceSnapshotRecord> {
       const query = client ?? pool
       const result = await query.query<SourceSnapshotRow>(`
         INSERT INTO memory_source_snapshots
           (snapshot_id, installation_id, repository_id, commit_sha, git_object_format,
-           manifest_hash, state, generation, parser_matrix_version, file_count, byte_count)
-        SELECT $1, $2, $3, $4, $5, $6, 'staging', 0, $7, $8, $9
+           manifest_hash, state, generation, parser_matrix_version, file_count, byte_count, selection)
+        SELECT $1, $2, $3, $4, $5, $6, 'staging', 0, $7, $8, $9, $10::jsonb
         WHERE NOT EXISTS (
           SELECT 1 FROM memory_repository_tombstones rt
           WHERE rt.installation_id = $2 AND rt.repository_id = $3
@@ -178,7 +193,7 @@ export function createSourceRepository(pool: pg.Pool) {
         ON CONFLICT (installation_id, repository_id, commit_sha, manifest_hash)
           DO UPDATE SET created_at = memory_source_snapshots.created_at
         RETURNING snapshot_id::text, repository_id::text, commit_sha, manifest_hash,
-                  state, generation, file_count, byte_count
+                  state, generation, file_count, byte_count, selection
       `, [
         randomUUID(),
         input.installationId,
@@ -189,8 +204,13 @@ export function createSourceRepository(pool: pg.Pool) {
         PHASE4_PARSER_MATRIX_VERSION,
         input.expectedFileCount,
         input.expectedByteCount,
+        JSON.stringify(input.selection ?? null),
       ])
-      if (result.rows[0]) return toSnapshotRecord(result.rows[0])
+      if (result.rows[0]) {
+        const record = toSnapshotRecord(result.rows[0])
+        if (record.selection !== null && input.selection && canonicalJsonStringify(record.selection) !== canonicalJsonStringify(input.selection)) throw new SourceLifecycleFenceError('state_conflict')
+        return record
+      }
       throw new SourceRepositoryTombstonedError('snapshot_tombstoned')
     },
 
@@ -201,7 +221,7 @@ export function createSourceRepository(pool: pg.Pool) {
       const query = client ?? pool
       const result = await query.query<SourceSnapshotRow>(`
         SELECT snapshot_id::text, repository_id::text, commit_sha, manifest_hash,
-               state, generation, file_count, byte_count
+               state, generation, file_count, byte_count, selection
         FROM memory_source_snapshots
         WHERE installation_id = $1 AND snapshot_id = $2
       `, [input.installationId, input.snapshotId])
@@ -365,6 +385,7 @@ interface SourceSnapshotRow {
   generation: string | number
   file_count: string | number
   byte_count: string | number
+  selection: z.infer<typeof SnapshotSelectionSchema> | null
 }
 
 function toSnapshotRecord(row: SourceSnapshotRow): SourceSnapshotRecord {
@@ -377,6 +398,7 @@ function toSnapshotRecord(row: SourceSnapshotRow): SourceSnapshotRecord {
     generation: Number(row.generation),
     fileCount: Number(row.file_count),
     byteCount: Number(row.byte_count),
+    selection: row.selection,
   }
 }
 

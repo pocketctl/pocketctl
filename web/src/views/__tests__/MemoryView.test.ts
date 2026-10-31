@@ -23,6 +23,7 @@ vi.mock('../../composables/useLocale', async () => {
 })
 
 const memoryRoute = { query: {} as Record<string, string> }
+vi.mock('../../components/memory/MemoryGitProjects.vue', () => ({ default: { template: '<section data-testid="git-projects-entry" />' } }))
 vi.mock('vue-router', async () => ({ ...(await vi.importActual('vue-router')), useRoute: () => memoryRoute }))
 
 const memoryInstallation = ref<any>(null)
@@ -94,6 +95,7 @@ const memoryClient = vi.hoisted(() => ({
   startScopeTransfer: vi.fn(async () => undefined),
   proposeGovernanceClaim: vi.fn(async () => ({ candidate: { candidate_id: 'proposal-1' } })),
   getMemoryCodeGraph: vi.fn(async () => null),
+  listMemoryCodeRepositories: vi.fn(async()=>({repositories:[],next_cursor:null})),
   analyzeMemoryChangeImpact: vi.fn(async () => null),
   getMemoryWiki: vi.fn(async () => null),
   listMemoryWikiBuilds: vi.fn(async () => ({ builds: [], next_cursor: null })),
@@ -137,6 +139,27 @@ describe('MemoryView', () => {
     const view = mountView(); await flushPromises()
     expect(view.text()).toContain('当前仅查看所选交付及验收记录的个人候选')
     expect(memoryClient.listMemoryCandidates).toHaveBeenCalledWith({ submissionId: memoryRoute.query.submission, decisionId: memoryRoute.query.decision })
+    view.unmount()
+  })
+
+  test('personal source-upload authorization is explicit and preserves existing services',async()=>{
+    memoryRoute.query={tab:'codegraph'}
+    memoryInstallation.value=activeInstallation({enabled_services:['memory.search','memory.recall','memory.manage','memory.context','memory.mcp']})
+    const view=mountView();await flushPromises()
+    expect(memoryClient.enableMemoryServices).not.toHaveBeenCalled()
+    await view.get('[data-testid="memory-codegraph-enable"]').trigger('click');await flushPromises()
+    expect(memoryClient.enableMemoryServices).toHaveBeenCalledWith('inst-1',3,['memory.search','memory.recall','memory.manage','memory.context','memory.mcp','memory.codegraph.write'])
+    expect(view.find('[data-testid="memory-codegraph-enable"]').exists()).toBe(false)
+    view.unmount()
+  })
+
+  test('Code Graph deep link keeps a requested unavailable shared scope blocked',async()=>{
+    memoryRoute.query={tab:'codegraph',repository_id:'11111111-1111-4111-8111-111111111111',installation_id:'22222222-2222-4222-8222-222222222222'}
+    memoryInstallation.value=activeInstallation()
+    const view=mountView();await flushPromises()
+    expect(view.find('[data-testid="memory-codegraph-panel"]').exists()).toBe(true)
+    expect(memoryClient.getMemoryCodeGraph).not.toHaveBeenCalled()
+    expect(memoryClient.listMemoryCodeRepositories).not.toHaveBeenCalled()
     view.unmount()
   })
 
@@ -231,6 +254,7 @@ describe('MemoryView', () => {
         {installation_id:'team-authorized',owner_scope_kind:'team',state:'active',permissions:['read'],owner_scope_id:'team',authorization_epoch:'1'}]})
     const view=mount(MemoryView,{global:{stubs:{MemoryGitPanel:{props:['scopeId'],template:'<div data-testid="git-selected-scope">{{ scopeId }}</div>'}}}})
     await flushPromises();await view.get('[data-testid="memory-tab-git"]').trigger('click')
+    expect(view.find('[data-testid="git-projects-entry"]').exists()).toBe(true)
     expect(view.get('[data-testid="git-scope-error"]').text()).toContain('scope unavailable')
     expect(view.find('[data-testid="git-selected-scope"]').exists()).toBe(false)
     await view.get('[data-testid="git-scope-error"] button').trigger('click');await flushPromises()
@@ -249,10 +273,32 @@ describe('MemoryView', () => {
     await flushPromises(); await view.get('[data-testid="memory-tab-skills"]').trigger('click')
     expect(view.get('[data-testid="skill-scope-error"]').text()).toContain(String(status))
     expect(view.get('[data-testid="skill-scope-error"]').text()).toContain('scope lookup failed')
+    expect(view.get('[data-testid="skill-scope-error"]').text()).not.toContain('门禁未开放')
     expect(view.find('[data-testid="recovered-skills"]').exists()).toBe(false)
     await view.get('[data-testid="skill-scope-retry"]').trigger('click'); await flushPromises()
     expect(view.find('[data-testid="skill-scope-error"]').exists()).toBe(false)
     expect(view.get('[data-testid="recovered-skills"]').text()).toBe('scope-recovered')
+  })
+
+  test('Skills explains an explicit disabled gate and recovers after an administrator enables it', async () => {
+    memoryInstallation.value = activeInstallation()
+    memoryClient.listGovernanceScopes.mockRejectedValueOnce(Object.assign(
+      new Error('scope reads require RELAY_EXTENSION_V2=shadow or enabled'),
+      { status: 503, code: 'feature_disabled' },
+    )).mockResolvedValueOnce({ scopes: [] })
+    const view = mountView()
+    await flushPromises()
+    await view.get('[data-testid="memory-tab-skills"]').trigger('click')
+    const notice = view.get('[data-testid="skill-scope-error"]')
+    expect(notice.text()).toContain('技能库尚未开放')
+    expect(notice.text()).toContain('请联系管理员启用后重试')
+    expect(notice.text()).not.toContain('RELAY_EXTENSION_V2')
+    expect(view.find('[data-testid="memory-skills-panel"]').exists()).toBe(false)
+    await view.get('[data-testid="skill-scope-retry"]').trigger('click')
+    await flushPromises()
+    expect(view.find('[data-testid="skill-scope-error"]').exists()).toBe(false)
+    expect(view.find('[data-testid="memory-skills-panel"]').exists()).toBe(true)
+    view.unmount()
   })
 
   test('claims header keeps the design create action visible but disabled without an API', async () => {

@@ -113,9 +113,9 @@ func TestMemorySyncRepoExplicitSyncCollectsAndUploads(t *testing.T) {
 			collect: func(ctx context.Context, repoPath string) (*memorysync.Snapshot, error) {
 				return memorysync.Collect(ctx, repoPath, memorysync.DefaultLimits())
 			},
-			upload: func(ctx context.Context, snapshot *memorysync.Snapshot) (string, error) {
+			upload: func(ctx context.Context, snapshot *memorysync.Snapshot) (memorysync.SyncResult, error) {
 				uploaded = snapshot
-				return "snap-test-1", nil
+				return memorysync.SyncResult{SnapshotID: "snap-test-1", Repository: "repo-test-1", State: "ready"}, nil
 			},
 		})
 	if code != 0 {
@@ -126,5 +126,72 @@ func TestMemorySyncRepoExplicitSyncCollectsAndUploads(t *testing.T) {
 	}
 	if len(uploaded.Entries) != 1 || uploaded.Entries[0].Path != "src/a.ts" {
 		t.Fatalf("uploaded entries: %+v", uploaded.Entries)
+	}
+}
+
+func TestMemoryHelpDoesNotCollectOrUpload(t *testing.T) {
+	for _, args := range [][]string{nil, {"--help"}, {"-h"}, {"sync-repo", "--help"}, {"sync-repo", "--repo", "missing", "-h"}} {
+		var out bytes.Buffer
+		code := runMemorySyncRepoWith(&out, &out, args, memorySyncDeps{})
+		if code != 0 || !strings.Contains(out.String(), "--committed") || !strings.Contains(out.String(), "--scope-installation-id") {
+			t.Fatalf("help %v: %d %s", args, code, out.String())
+		}
+	}
+}
+
+func TestMemorySyncCommittedDryRunPreservesDirtyFiles(t *testing.T) {
+	_, dir := buildSyncRepo(t)
+	path := filepath.Join(dir, "src", "a.ts")
+	dirty := []byte("export const dirty = 42;\n")
+	if err := os.WriteFile(path, dirty, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := runMemorySyncRepo(&out, &out, []string{"sync-repo", "--repo", dir, "--committed", "--dry-run", "--include", "src"}); code != 0 {
+		t.Fatal(out.String())
+	}
+	if !strings.Contains(out.String(), "total_bytes: 20") {
+		t.Fatal(out.String())
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(after, dirty) {
+		t.Fatal("worktree mutated")
+	}
+}
+
+func TestMemorySyncPartialRequiresExplicitConsentAndPrintsRepository(t *testing.T) {
+	var out bytes.Buffer
+	calls := 0
+	deps := memorySyncDeps{
+		collect: func(context.Context, string) (*memorysync.Snapshot, error) {
+			return &memorysync.Snapshot{Entries: []memorysync.CollectedEntry{{Path: "a.ts"}}, TotalBytes: 1, Excluded: []memorysync.Exclusion{{Path: "b.ts", Reason: "too_many_files"}}}, nil
+		},
+		upload: func(context.Context, *memorysync.Snapshot) (memorysync.SyncResult, error) {
+			calls++
+			return memorysync.SyncResult{Repository: "repo-id", SnapshotID: "snapshot-id", State: "ready", UploadedFiles: 1}, nil
+		},
+	}
+	args := []string{"sync-repo", "--repo", "."}
+	if code := runMemorySyncRepoWith(&out, &out, args, deps); code == 0 || calls != 0 {
+		t.Fatal("truncation silently uploaded")
+	}
+	out.Reset()
+	if code := runMemorySyncRepoWith(&out, &out, append(args, "--allow-partial"), deps); code != 0 {
+		t.Fatal(out.String())
+	}
+	for _, want := range []string{"repository_id: repo-id", "snapshot_id: snapshot-id", "state: ready", "uploaded_files: 1"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %s: %s", want, out.String())
+		}
+	}
+}
+
+func TestMemoryGraphViewURLUsesAppRouteAndStripsRelayCredentials(t *testing.T) {
+	got := memoryCodeGraphViewURL("wss://user:password@example.test/ws?token=secret#old", "repo", "scope")
+	if got != "https://example.test/app/memory?installation_id=scope&repository_id=repo&tab=codegraph" {
+		t.Fatal(got)
+	}
+	if got := memoryCodeGraphViewURL("file:///tmp/relay", "repo", ""); got != "" {
+		t.Fatal(got)
 	}
 }

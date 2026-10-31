@@ -167,6 +167,10 @@ func main() {
 	case "uninstall":
 		cmdUninstall(os.Args[2:])
 	case "help", "--help", "-h":
+		if len(os.Args) > 2 && os.Args[2] == "memory" {
+			cmdMemory(append(os.Args[3:], "--help"))
+			return
+		}
 		printUsage()
 	default:
 		fmt.Fprintln(os.Stderr, i18n.T("error.unknown_command", os.Args[1]))

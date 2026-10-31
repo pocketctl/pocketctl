@@ -41,7 +41,7 @@ export function createCodeGraphReadService(pool: pg.Pool, cursorKey: string) {
       owner_scope_id: string | null
     }>(`
       SELECT r.repository_id::text, s.snapshot_id::text, s.commit_sha,
-             g.graph_version_id::text, g.parser_version, g.coverage,
+             g.graph_version_id::text, g.parser_version, CASE WHEN s.selection IS NULL THEN 'partial' ELSE g.coverage END AS coverage,
              g.content_hash, os.owner_scope_kind, os.owner_scope_id::text
       FROM repositories r
       JOIN memory_code_graph_heads h
@@ -183,6 +183,17 @@ export function createCodeGraphReadService(pool: pg.Pool, cursorKey: string) {
         },
         contentHash: head.content_hash,
       }
+      const impact = analyzeImpact({
+        graph,
+        entryPaths: input.entryPaths,
+        ...(input.depth !== undefined ? { depth: input.depth } : {}),
+        ...(input.maxNodes !== undefined ? { maxNodes: input.maxNodes } : {}),
+        ...(input.maxEdges !== undefined ? { maxEdges: input.maxEdges } : {}),
+      })
+      if (head.coverage !== 'complete' && (impact.coverage === 'complete' || impact.coverage === 'partial')) {
+        if (impact.coverage === 'complete') impact.coverage = 'partial'
+        impact.reasons = [...new Set([...impact.reasons, 'source_graph_partial'])]
+      }
       return {
         repository_id: head.repository_id,
         owner_scope_kind: head.owner_scope_kind,
@@ -190,13 +201,7 @@ export function createCodeGraphReadService(pool: pg.Pool, cursorKey: string) {
         snapshot_id: head.snapshot_id,
         commit_sha: head.commit_sha,
         graph_version_id: head.graph_version_id,
-        ...analyzeImpact({
-          graph,
-          entryPaths: input.entryPaths,
-          ...(input.depth !== undefined ? { depth: input.depth } : {}),
-          ...(input.maxNodes !== undefined ? { maxNodes: input.maxNodes } : {}),
-          ...(input.maxEdges !== undefined ? { maxEdges: input.maxEdges } : {}),
-        }),
+        ...impact,
       }
     },
   }
