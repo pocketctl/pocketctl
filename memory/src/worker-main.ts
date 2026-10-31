@@ -388,6 +388,7 @@ async function main(): Promise<void> {
     purgeWorker.start()
 
     const projection = createProjectionHandler(pool, {
+      stabilizationMs: config.episodeStabilizationMs,
       purge: purgeRepository,
       onInvalidated: (scope, count) => {
         metrics.phase1.purgeInvalidations.inc({ scope }, count)
