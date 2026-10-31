@@ -44,6 +44,7 @@ import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleTextGenerator } from './model/openai-compatible-text.js'
 import { createMimoRealtimeTextGenerator } from './model/mimo-realtime-text.js'
 import { createExtractionTextRoute, withTimeoutFallback } from './model/text-fallback.js'
+import { createCandidateExpiryWorker } from './claims/candidate-expiry.js'
 import { createClaimRepository } from './claims/repository.js'
 import { createLifecycleService } from './claims/lifecycle-service.js'
 import { createClaimIndexer } from './retrieval/indexer.js'
@@ -235,9 +236,18 @@ async function main(): Promise<void> {
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
+  let candidateExpiry: ReturnType<typeof createCandidateExpiryWorker> | undefined
   let inboxRetention: ReturnType<typeof createInboxRetentionWorker> | undefined
   const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
+    candidateExpiry = createCandidateExpiryWorker({ pool, signal,
+      onExpired: count => {
+        metrics.phase1.candidateStatus.inc({ status: 'expired' }, count)
+        logger.log('info', 'candidate_review_expired', { count })
+      },
+      onError: loopError('candidate_review_expiry'),
+    })
+    candidateExpiry.start()
     if (config.inboxRetention) {
       inboxRetention = createInboxRetentionWorker({
         pool, settings: config.inboxRetention, signal,
@@ -843,6 +853,7 @@ async function main(): Promise<void> {
   clearInterval(gaugeTimer)
   clearInterval(retentionTimer)
   await Promise.all([
+    candidateExpiry?.stop(),
     inboxRetention?.stop(),
     gitPolling?.stop(),
     purgeWorker?.stop(),

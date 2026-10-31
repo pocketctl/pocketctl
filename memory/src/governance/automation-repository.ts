@@ -27,7 +27,7 @@ export function createAutomationRepository(pool:pg.Pool){
    const reviewPolicy=await loadEffectiveReviewPolicySnapshot(c,input.installationId)
    snapshot={...row,evidence,reviewPolicy,bundleVerified:row.revision_bundle!==null&&verifyRevisionBundle(row,evidence)}
   }else{
-   const row=(await c.query(`SELECT to_jsonb(c) AS candidate,e.source_digest,r.episode_source_digest FROM memory_candidates c JOIN work_episodes e ON e.installation_id=c.installation_id AND e.episode_id=c.episode_id JOIN memory_extraction_runs r ON r.run_id=c.run_id WHERE c.installation_id=$1 AND c.candidate_id=$2 AND c.status IN('validated','conflict','shadow') AND e.source_digest=r.episode_source_digest AND (c.valid_until IS NULL OR c.valid_until>clock_timestamp()) FOR SHARE OF c,e,r`,[input.installationId,input.candidateId])).rows[0]
+   const row=(await c.query(`SELECT to_jsonb(c) AS candidate,e.source_digest,r.episode_source_digest FROM memory_candidates c JOIN work_episodes e ON e.installation_id=c.installation_id AND e.episode_id=c.episode_id JOIN memory_extraction_runs r ON r.run_id=c.run_id WHERE c.installation_id=$1 AND c.candidate_id=$2 AND c.status IN('validated','conflict','shadow') AND c.review_expires_at>clock_timestamp() AND e.source_digest=r.episode_source_digest AND (c.valid_until IS NULL OR c.valid_until>clock_timestamp()) FOR SHARE OF c,e,r`,[input.installationId,input.candidateId])).rows[0]
    if(!row)return null
    snapshot={...row.candidate,revision:Number(row.candidate.revision),evidence:[],sourceDigest:row.source_digest}
   }

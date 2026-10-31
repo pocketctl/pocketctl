@@ -3,14 +3,14 @@ import { ref, nextTick } from 'vue'
 import { beforeEach, test, expect, vi } from 'vitest'
 import CodexQuota from '../CodexQuota.vue'
 import { useLocale } from '../../../composables/useLocale'
-const fixture=vi.hoisted(()=>({snapshot:null as any,refresh:vi.fn()}))
-vi.mock('../../../composables/useCodexQuota',()=>({useCodexQuota:()=>({snapshot:fixture.snapshot,loading:ref(false),failed:ref(false),online:ref(true),stale:ref(false),refresh:fixture.refresh})}))
+const fixture=vi.hoisted(()=>({snapshot:null as any,stale:null as any,refresh:vi.fn()}))
+vi.mock('../../../composables/useCodexQuota',()=>({useCodexQuota:()=>({snapshot:fixture.snapshot,loading:ref(false),failed:ref(false),online:ref(true),stale:fixture.stale,refresh:fixture.refresh})}))
 vi.mock('../../../composables/useWebSocket',()=>({useWebSocket:()=>({send:vi.fn(),onEvent:()=>()=>{}})}))
 vi.mock('../../../composables/useAuth',()=>({useAuth:()=>({user:ref({id:7})})}))
 vi.mock('../../../composables/useEnv',()=>({getRelayWs:()=> 'ws://fixture'}))
 const window=(duration:number,remaining=8)=>({remaining_percent:remaining,duration_minutes:duration,resets_at:null})
 const snapshot=(plan='pro',count:number|null=0,windows=[window(10080)])=>({kind:'codex_rate_limits',scope_id:'account',status:'ok',plan_type:plan,exhausted:false,observed_at:'2026-10-31T01:00:00Z',buckets:[{id:'codex',name:'Codex',exhausted:false,windows}],reset_credits:count===null?null:{available_count:count,credits:null}})
-beforeEach(()=>{useLocale().setLocale('en');fixture.snapshot=ref(snapshot());fixture.refresh.mockClear()})
+beforeEach(()=>{useLocale().setLocale('en');fixture.snapshot=ref(snapshot());fixture.stale=ref(false);fixture.refresh.mockClear()})
 function start(variant:'agent'|'session'='agent'){return mount(CodexQuota,{attachTo:document.body,props:{sessionId:'s',daemonId:'d',hostname:'Mac',variant}})}
 test('opens real duration windows and restores focus on close',async()=>{
  fixture.snapshot.value=snapshot('plus',0,[window(300)])
@@ -35,4 +35,17 @@ test('session mode takes no conversation space and exposes only menu metadata an
 test('a missing Plus five-hour window stays unknown instead of being treated as unrestricted',async()=>{
  fixture.snapshot.value=snapshot('plus',0);const wrapper=start();await wrapper.get('button').trigger('click')
  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('5-hour limit');expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Unknown');wrapper.unmount()
+})
+test('session notice requires the CLI policy signal, clears after recovery and hides stale data',async()=>{
+ const wrapper=start('session');expect(wrapper.find('.codex-quota-session-notice').exists()).toBe(false)
+ fixture.snapshot.value={...snapshot(),usage_notice:window(10080,8)};await nextTick()
+ const notice=wrapper.get('.codex-quota-session-notice');expect(notice.text()).toContain('Weekly limit · 8% left');expect(notice.text()).not.toMatch(/reset/i)
+ await notice.trigger('click');expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+ fixture.stale.value=true;await nextTick();expect(wrapper.find('.codex-quota-session-notice').exists()).toBe(false)
+ fixture.stale.value=false;fixture.snapshot.value=snapshot();await nextTick();expect(wrapper.find('.codex-quota-session-notice').exists()).toBe(false);wrapper.unmount()
+})
+test('a rounded zero CLI notice uses less than one percent without claiming a hard stop',async()=>{
+ fixture.snapshot.value={...snapshot(),usage_notice:window(10080,0)};const wrapper=start('session')
+ expect(wrapper.get('.codex-quota-session-notice').text()).toContain('<1% left')
+ fixture.snapshot.value={...fixture.snapshot.value,exhausted:true};await nextTick();expect(wrapper.find('.codex-quota-session-notice').exists()).toBe(false);wrapper.unmount()
 })

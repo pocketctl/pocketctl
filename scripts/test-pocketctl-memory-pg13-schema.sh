@@ -59,6 +59,7 @@ RUN_MEMORY_POSTGRES_INTEGRATION=1 \
 MEMORY_TEST_DATABASE_URL="postgresql://pocketctl_memory_pg13_test:pocketctl_memory_pg13_test@127.0.0.1:${host_port}/pocketctl_memory_pg13_test" \
   npx vitest run --no-file-parallelism \
     src/__tests__/schema-postgres.integration.test.ts \
+    src/__tests__/candidate-expiry-postgres.integration.test.ts \
     src/__tests__/inbox-retention-postgres.integration.test.ts
 
 echo 'Memory PostgreSQL 13 schema gate passed'

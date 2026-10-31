@@ -386,6 +386,11 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
         reply.code(404).send(errorBody(new MemoryApiError('not_found', 'resource not found')))
         return undefined
       }
+      if (error?.code === 'candidate_expired') {
+        reply.code(409).send({ error: { code: 'revision_conflict', reason_code: 'candidate_expired',
+          message: 'candidate review deadline elapsed; refresh the review queue', state: 'expired' } })
+        return undefined
+      }
       if (error?.code === 'candidate_evidence_stale' || error?.code === 'tombstoned_identity' || error?.code === 'source_discovery_changed') {
         reply.code(409).send({ error: {
           code: 'revision_conflict',

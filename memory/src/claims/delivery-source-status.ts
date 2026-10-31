@@ -27,7 +27,7 @@ export async function deliverySourceStatus(pool: Pick<pg.Pool, 'query'>, input: 
         WHERE installation_id=$1 AND EXISTS(SELECT 1 FROM personal) AND source_provenance @> $2::jsonb
     ),
     candidates AS (
-      SELECT c.status, (r.episode_source_digest=e.source_digest AND NOT EXISTS(
+      SELECT c.status, c.review_expires_at>clock_timestamp() AS reviewable, (r.episode_source_digest=e.source_digest AND NOT EXISTS(
         SELECT 1 FROM memory_feed_inbox gap WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
           AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
           AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))) AS fresh
@@ -44,8 +44,8 @@ export async function deliverySourceStatus(pool: Pick<pg.Pool, 'query'>, input: 
     )
     SELECT (SELECT source FROM provenance LIMIT 1) AS source,
       NOT EXISTS(SELECT 1 FROM provenance WHERE NOT memory_delivery_source_available(source)) AS available,
-      (SELECT count(*)::int FROM candidates WHERE status IN ('validated','conflict') AND fresh) AS pending,
-      (SELECT count(*)::int FROM candidates WHERE status IN ('validated','conflict') AND NOT fresh) AS stale,
+      (SELECT count(*)::int FROM candidates WHERE status IN ('validated','conflict') AND reviewable AND fresh) AS pending,
+      (SELECT count(*)::int FROM candidates WHERE status IN ('validated','conflict') AND reviewable AND NOT fresh) AS stale,
       (SELECT count(*)::int FROM candidates WHERE status='rejected') AS rejected,
       (SELECT count(DISTINCT claim_id)::int FROM personal_claims) AS confirmed,
       (SELECT count(DISTINCT claim_id)::int FROM personal_claims WHERE current) AS current,

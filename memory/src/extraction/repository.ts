@@ -467,6 +467,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
                   AND c.valid_from IS NOT DISTINCT FROM $8::timestamptz
                   AND c.valid_until IS NOT DISTINCT FROM $9::timestamptz
                   AND c.status IN ('validated', 'conflict')
+                  AND c.review_expires_at>clock_timestamp()
                   AND r.episode_source_digest = e.source_digest
                   AND NOT (c.run_id = $10 AND c.ordinal = $11)
                   AND c.claim_type = $12 AND c.scope_key = $13

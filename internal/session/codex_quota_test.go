@@ -161,3 +161,38 @@ func TestCodexQuotaRejectsAccountChangeDuringRead(t *testing.T) {
 		t.Fatalf("mixed-account snapshot accepted: %v", err)
 	}
 }
+
+func TestCodexQuotaCLIRemainingNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name, plan, bucket string
+		remaining          float64
+		visible            bool
+	}{
+		{"Plus below five-hour threshold", "plus", `{"primary":{"usedPercent":49,"windowDurationMins":300}}`, 0, false},
+		{"Plus five-hour boundary", "plus", `{"primary":{"usedPercent":50,"windowDurationMins":300}}`, 50, true},
+		{"weekly below threshold", "pro", `{"primary":{"usedPercent":74,"windowDurationMins":10080}}`, 0, false},
+		{"weekly boundary", "pro", `{"primary":{"usedPercent":75,"windowDurationMins":10080}}`, 25, true},
+		{"unknown percentage is not zero", "plus", `{"primary":{"windowDurationMins":300}}`, 0, false},
+		{"rounded zero is not a hard stop", "pro", `{"primary":{"usedPercent":100,"windowDurationMins":10080}}`, 0, true},
+		{"explicit limit has its own surface", "pro", `{"rateLimitReachedType":"rate_limit_reached","primary":{"usedPercent":100}}`, 0, false},
+		{"spend control", "pro", `{"spendControlReached":true,"primary":{"usedPercent":95}}`, 0, false},
+		{"usable credits suppress notice", "pro", `{"credits":{"hasCredits":true},"primary":{"usedPercent":95}}`, 0, false},
+		{"unlimited credits suppress notice", "pro", `{"credits":{"unlimited":true},"primary":{"usedPercent":95}}`, 0, false},
+		{"additional model is not ordinary quota", "pro", `{"limitId":"review","primary":{"usedPercent":95}}`, 0, false},
+		{"lowest eligible remaining window", "plus", `{"primary":{"usedPercent":65,"windowDurationMins":300},"secondary":{"usedPercent":80,"windowDurationMins":10080}}`, 20, true},
+		{"window plan preferred", "pro", `{"planType":"plus","secondary":{"usedPercent":50,"windowDurationMins":285}}`, 50, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sm, _, rpc, _ := invocationFixture(t)
+			rpc.results["account/read"] = json.RawMessage(`{"account":{"type":"chatgpt","planType":"` + tc.plan + `"}}`)
+			rpc.results["account/rateLimits/read"] = json.RawMessage(`{"rateLimits":` + tc.bucket + `}`)
+			got, err := sm.ReadCodexRateLimits(context.Background(), "s")
+			if err != nil || (got.UsageNotice != nil) != tc.visible {
+				t.Fatalf("notice visibility: %+v %v", got, err)
+			}
+			if tc.visible && got.UsageNotice.RemainingPercent != tc.remaining {
+				t.Fatalf("wrong notice: %+v", got.UsageNotice)
+			}
+		})
+	}
+}

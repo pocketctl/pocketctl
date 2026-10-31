@@ -3894,7 +3894,7 @@ function attentionNativeCommand(command:Record<string,any>,capabilities?:string[
 // Deliberately omit credentials, account IDs, upsells and redeemable credit IDs.
 function sanitizeCodexQuota(value:any):any {
  if(value?.kind!=='codex_rate_limits')return null;
- return {kind:value.kind,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,plan_type:value.plan_type,exhausted:value.exhausted,
+ return {kind:value.kind,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,plan_type:value.plan_type,exhausted:value.exhausted,usage_notice:value.usage_notice==null?null:{remaining_percent:value.usage_notice.remaining_percent,duration_minutes:value.usage_notice.duration_minutes,resets_at:value.usage_notice.resets_at},
  buckets:Array.isArray(value.buckets)?value.buckets.slice(0,32).map((b:any)=>({id:b.id,name:b.name,plan_type:b.plan_type,exhausted:b.exhausted,windows:Array.isArray(b.windows)?b.windows.slice(0,2).map((w:any)=>({remaining_percent:w.remaining_percent,duration_minutes:w.duration_minutes,resets_at:w.resets_at})):[]})):[],
  reset_credits:value.reset_credits==null?null:{available_count:value.reset_credits.available_count,credits:Array.isArray(value.reset_credits.credits)?value.reset_credits.credits.slice(0,64).map((c:any)=>({expires_at:c.expires_at})):null}};
 }

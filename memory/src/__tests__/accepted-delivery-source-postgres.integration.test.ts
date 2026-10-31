@@ -151,6 +151,16 @@ suite('accepted delivery Memory projection (isolated PostgreSQL)', () => {
     expect(await deliverySourceStatus(pool, { ...input, decisionId: '99999999-9999-4999-8999-999999999999' })).toEqual({ source: null })
   })
 
+  test('source status stops counting expired candidates before the expiry worker runs', async () => {
+    const packet = records.slice(0, 3), identity = packet[0].payload.accepted_delivery
+    const input = { installationId: PERSONAL, submissionId: identity.submission_id, decisionId: identity.decision_id }
+    await enqueue(packet); await projector().projectOnce(PERSONAL); await extract(packet)
+    expect(await deliverySourceStatus(pool, input)).toMatchObject({ candidates: { pending: 1 } })
+    await pool.query("UPDATE memory_candidates SET created_at=clock_timestamp()-INTERVAL '336 hours' WHERE installation_id=$1", [PERSONAL])
+    expect(await deliverySourceStatus(pool, input)).toMatchObject({ candidates: { pending: 0, stale: 0, rejected: 0 } })
+    expect((await pool.query('SELECT status FROM memory_candidates WHERE installation_id=$1', [PERSONAL])).rows[0].status).toBe('validated')
+  })
+
   test('source status does not label stale candidates or outdated extraction as reviewable', async () => {
     const packet = records.slice(0, 3), identity = packet[0].payload.accepted_delivery
     const input = { installationId: PERSONAL, submissionId: identity.submission_id, decisionId: identity.decision_id }

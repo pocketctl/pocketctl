@@ -24,6 +24,7 @@ type CodexQuotaSnapshot struct {
 	Exhausted    bool               `json:"exhausted"`
 	Buckets      []CodexQuotaBucket `json:"buckets"`
 	ResetCredits *CodexResetCredits `json:"reset_credits"`
+	UsageNotice  *CodexQuotaWindow  `json:"usage_notice"`
 }
 type CodexResetCredits struct {
 	AvailableCount int64              `json:"available_count"`
@@ -57,6 +58,10 @@ type codexNativeQuotaBucket struct {
 	Secondary            *codexNativeQuotaWindow `json:"secondary"`
 	SpendControlReached  *bool                   `json:"spendControlReached"`
 	RateLimitReachedType string                  `json:"rateLimitReachedType"`
+	Credits              *struct {
+		HasCredits bool `json:"hasCredits"`
+		Unlimited  bool `json:"unlimited"`
+	} `json:"credits"`
 }
 type codexQuotaCaller interface {
 	Call(context.Context, string, any, any) error
@@ -221,7 +226,50 @@ func readCodexQuota(ctx context.Context, client codexQuotaCaller, homeID string)
 			}
 		}
 	}
+	// The CLI's persistent usage notice is derived locally, not emitted as an
+	// app-server notification. Match rust-v0.166.0 usage_notice.rs, using only
+	// the ordinary Codex bucket (never an additional model's quota).
+	noticeBucket := raw.RateLimits
+	if main, ok := raw.RateLimitsByLimitID["codex"]; ok {
+		noticeBucket = main
+	}
+	if !result.Exhausted {
+		result.UsageNotice = codexCLIUsageNotice(noticeBucket, result.PlanType)
+	}
 	return result, nil
+}
+
+func codexCLIUsageNotice(bucket codexNativeQuotaBucket, accountPlan string) *CodexQuotaWindow {
+	if bucket.LimitID != "" && bucket.LimitID != "codex" || bucket.RateLimitReachedType != "" || bucket.SpendControlReached != nil && *bucket.SpendControlReached || bucket.Credits != nil && (bucket.Credits.HasCredits || bucket.Credits.Unlimited) {
+		return nil
+	}
+	plan := quotaPlan(bucket.PlanType)
+	if plan == "unknown" {
+		plan = accountPlan
+	}
+	var selected *CodexQuotaWindow
+	// CLI gives primary precedence for equal usage.
+	for _, window := range []*codexNativeQuotaWindow{bucket.Primary, bucket.Secondary} {
+		if window == nil || window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) || *window.UsedPercent < 0 || *window.UsedPercent > 100 {
+			continue
+		}
+		threshold := 75.0
+		if (plan == "plus" || plan == "team") && window.WindowDurationMins != nil && *window.WindowDurationMins >= 285 && *window.WindowDurationMins <= 315 {
+			threshold = 50
+		}
+		if *window.UsedPercent < threshold {
+			continue
+		}
+		remaining := 100 - *window.UsedPercent
+		if selected == nil || remaining < selected.RemainingPercent {
+			duration := window.WindowDurationMins
+			if duration != nil && *duration <= 0 {
+				duration = nil
+			}
+			selected = &CodexQuotaWindow{remaining, duration, quotaTimestamp(window.ResetsAt)}
+		}
+	}
+	return selected
 }
 
 // Sparse native updates invalidate rather than overwrite a complete read. No

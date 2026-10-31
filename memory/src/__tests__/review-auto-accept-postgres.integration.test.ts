@@ -49,6 +49,15 @@ suite('A2 closed gate and exact personal facts',()=>{
   await createLifecycleService(pool,createClaimRepository(pool)).revokeClaim({installationId:input.installationId,claimId:first.claimId!,expectedRevision:1})
   expect(await service.accept(input)).toMatchObject({accepted:false,reason:'human_override'})
  })
+ test('expired personal candidates cannot enter automatic authority or automation advice',async()=>{
+  const {input,deps}=await eligibleFixture()
+  await pool.query("UPDATE memory_candidates SET created_at=clock_timestamp()-INTERVAL '336 hours' WHERE candidate_id=$1",[input.candidateId])
+  expect(await createAutomationRepository(pool).prepare({installationId:input.installationId,candidateId:input.candidateId,subjectKind:'personal'})).toBeNull()
+  expect(await createAutomationAcceptanceService(deps).accept(input)).toEqual({accepted:false,reason:'candidate_expired'})
+  for(const [table,column] of [['knowledge_versions','source_candidate_id'],['memory_automation_authority_records','candidate_id'],['memory_feedback','candidate_id']]){
+   expect((await pool.query(`SELECT count(*)::int n FROM ${table} WHERE ${column}=$1`,[input.candidateId])).rows[0].n).toBe(0)
+  }
+ })
  test('incremental backfill preserves populated independent machine authority',async()=>{
   const {input,deps}=await eligibleFixture();expect((await createAutomationAcceptanceService(deps).accept(input)).accepted).toBe(true)
   const before=(await pool.query('SELECT to_jsonb(a) AS row FROM memory_automation_authority_records a')).rows

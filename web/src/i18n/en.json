@@ -2100,6 +2100,7 @@
   "team.requirements.pool_unclaimed": "Unclaimed",
   "team.requirements.pool_mine": "Claimed by me",
   "team.requirements.unsaved": "Requirements have not been saved",
+  "codex_quota.cli_notice": "Codex CLI notice: {{window}} · {{remaining}} left",
   "codex_quota.title": "Codex usage limits",
   "codex_quota.stale_note": "Current usage is unknown; showing the last record",
   "codex_quota.offline": "Waiting for host connection",

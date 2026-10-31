@@ -381,7 +381,7 @@ const EXTRACTION_MODES = new Set(['shadow', 'enabled'])
 const TOKEN_DIRECTIONS = new Set(['input', 'output'])
 const CANDIDATE_STATUSES = new Set([
   'shadow', 'validated', 'duplicate', 'conflict',
-  'rejected_by_validator', 'rejected', 'accepted',
+  'rejected_by_validator', 'rejected', 'accepted', 'expired',
 ])
 const REVIEW_DECISIONS = new Set([
   'accepted_as_is', 'light_edit', 'major_edit', 'rejected',

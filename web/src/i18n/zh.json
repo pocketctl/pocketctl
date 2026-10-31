@@ -2100,6 +2100,7 @@
   "team.requirements.pool_unclaimed": "待认领",
   "team.requirements.pool_mine": "我认领的",
   "team.requirements.unsaved": "尚未保存需求",
+  "codex_quota.cli_notice": "Codex CLI 提醒：{{window}}剩余 {{remaining}}",
   "codex_quota.title": "Codex 额度",
   "codex_quota.stale_note": "当前额度未知，以下为上次记录",
   "codex_quota.offline": "等待主机连接",
