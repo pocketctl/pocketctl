@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import { classifyArtifact } from '../projection/artifact-classifier.js'
+import { withTransaction } from '../db.js'
 
 /**
  * SQL rendering of the frozen canonical-event-key priority chain, identical
@@ -27,6 +28,13 @@ function canonicalEventKeySql(jsonb: string): string {
       THEN 'call:' || (${jsonb}->>'call_id') || ':' || (${jsonb}->>'event_type')
     ELSE NULL
   END)`
+}
+
+/** Recovery must not clear a privacy fence or a rejected expired replay. */
+async function assertSnapshotInstallation(client: pg.PoolClient, installationId: string): Promise<void> {
+  const available = await client.query(`SELECT 1 FROM memory_installations WHERE installation_id=$1
+    AND relay_status NOT IN ('revoking','revoked') AND local_status NOT IN ('purging','purged','integrity_error')`, [installationId])
+  if (!available.rowCount) throw new Error('snapshot_installation_unavailable')
 }
 
 /**
@@ -87,25 +95,29 @@ export function createSnapshotRepository(pool: pg.Pool) {
      * bounded, self-healing damage.
      */
     async startRun(installationId: string): Promise<{ runId: string; generation: number }> {
-      await pool.query(`
-        UPDATE memory_snapshot_runs
-        SET state = 'failed', error_code = 'stale_running', completed_at = NOW()
-        WHERE installation_id = $1 AND state = 'running'
-          AND started_at < NOW() - INTERVAL '30 minutes'
-      `, [installationId])
-      const result = await pool.query<{ run_id: string; generation: string }>(`
-        WITH next AS (
-          SELECT COALESCE(MAX(generation), 0) + 1 AS generation
-          FROM memory_snapshot_runs WHERE installation_id = $1
-        )
-        INSERT INTO memory_snapshot_runs (run_id, installation_id, generation, state)
-        SELECT gen_random_uuid(), $1, next.generation, 'running' FROM next
-        RETURNING run_id, generation::text
-      `, [installationId])
-      return {
-        runId: result.rows[0].run_id,
-        generation: Number(result.rows[0].generation),
-      }
+      return withTransaction(pool, async client => {
+        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`, [installationId])
+        await assertSnapshotInstallation(client, installationId)
+        await client.query(`
+          UPDATE memory_snapshot_runs
+          SET state = 'failed', error_code = 'stale_running', completed_at = NOW()
+          WHERE installation_id = $1 AND state = 'running'
+            AND started_at < NOW() - INTERVAL '30 minutes'
+        `, [installationId])
+        const result = await client.query<{ run_id: string; generation: string }>(`
+          WITH next AS (
+            SELECT COALESCE(MAX(generation), 0) + 1 AS generation
+            FROM memory_snapshot_runs WHERE installation_id = $1
+          )
+          INSERT INTO memory_snapshot_runs (run_id, installation_id, generation, state, started_at)
+          SELECT gen_random_uuid(), $1, next.generation, 'running', clock_timestamp() FROM next
+          RETURNING run_id, generation::text
+        `, [installationId])
+        return {
+          runId: result.rows[0].run_id,
+          generation: Number(result.rows[0].generation),
+        }
+      })
     },
 
     async failRun(installationId: string, generation: number, errorCode: string): Promise<void> {
@@ -182,6 +194,8 @@ export function createSnapshotRepository(pool: pg.Pool) {
       try {
         await client.query('BEGIN')
         try {
+          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`, [input.installationId])
+          await assertSnapshotInstallation(client, input.installationId)
           // Turns reference source events (first/last ids); clear derived rows
           // before rebuilding the events underneath them. Deletion is scoped
           // to the whole installation — the drained inventory is the complete
@@ -260,6 +274,7 @@ export function createSnapshotRepository(pool: pg.Pool) {
             SET projection_state = 'pending', projected_at = NULL
             WHERE i.installation_id = $1
               AND i.projection_state = 'projected'
+              AND i.body_reclaimed_at IS NULL
               AND i.session_id IS NOT NULL AND i.session_id = ANY($2::text[])
               AND ${canonicalEventKeySql('i.data')} IS NOT NULL
               AND i.projected_at >= (

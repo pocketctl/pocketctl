@@ -27,6 +27,8 @@ vi.mock('../../composables/useResponsiveLayout', () => ({
 vi.mock('../../composables/useWebSocket', () => ({
   useWebSocket: () => ({
     connect: vi.fn(),
+    connected: ref(false),
+    daemons: ref(new Map()),
     send: vi.fn(() => true),
     onEvent: (type: string, handler: (event: any) => void) => {
       handlers.set(type, handler)
@@ -51,6 +53,7 @@ vi.mock('../../composables/useQuota', () => ({
 
 vi.mock('../../composables/useEnv', () => ({
   getRelayOrigin: () => '',
+  getRelayWs: () => 'ws://fixture',
 }))
 
 const offline = {

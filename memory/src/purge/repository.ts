@@ -739,7 +739,7 @@ async function purgeInstallationRows(
     'memory_authority_records','memory_publication_delegations','memory_automation_authority_records','memory_governance_executor_principals',
     'memory_review_automation_runs','memory_review_automation_policy_heads','memory_review_automation_policies',
     'memory_session_tombstones', 'memory_dead_letters', 'memory_jobs', 'memory_usage_outbox',
-    'memory_snapshot_runs', 'memory_snapshot_events', 'memory_feed_inbox',
+    'memory_snapshot_runs', 'memory_snapshot_events', 'memory_feed_inbox', 'memory_inbox_checkpoints',
     'knowledge_tombstones', 'memory_idempotency_keys', 'memory_feedback',
     'claim_search_documents', 'knowledge_evidence', 'knowledge_evidence_capsules', 'memory_candidates',
     'memory_extraction_runs', 'knowledge_versions', 'knowledge_claims',

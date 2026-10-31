@@ -103,6 +103,7 @@ export const MEMORY_TEST_DATABASE_TABLES = [
   'memory_installations',
   'knowledge_evidence_capsules',
   'memory_feed_inbox',
+  'memory_inbox_checkpoints',
   'memory_snapshot_runs',
   'memory_snapshot_events',
   'source_sessions',

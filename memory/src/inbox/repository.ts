@@ -10,6 +10,15 @@ export class FeedIntegrityError extends Error {
   }
 }
 
+/** Per-event receipts no longer exist below the GC watermark. Never accept
+ * such a replay as a new, unverified event or silently ACK it. */
+export class FeedReplayExpiredError extends Error {
+  constructor() {
+    super('inbox replay window expired')
+    this.name = 'FeedReplayExpiredError'
+  }
+}
+
 export interface QuarantinedInput {
   feed_id: string
   error_code: 'unsupported_envelope_version' | 'invalid_envelope' | 'oversized_content' | 'oversized_discovery'
@@ -52,10 +61,16 @@ export function createInboxRepository(pool: pg.Pool) {
               await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))`, [input.installationId, sessionId])
             }
             await client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))`, [input.installationId])
-            const installation = await client.query(`SELECT 1 FROM memory_installations
-              WHERE installation_id=$1 AND relay_status NOT IN ('revoking','revoked')
-                AND local_status NOT IN ('purging','purged','integrity_error') FOR SHARE`, [input.installationId])
+            const installation = await client.query<{gc_feed_id: string}>(`
+              SELECT COALESCE(c.gc_feed_id,0)::text AS gc_feed_id FROM memory_installations i
+              LEFT JOIN memory_inbox_checkpoints c USING(installation_id)
+              WHERE i.installation_id=$1 AND i.relay_status NOT IN ('revoking','revoked')
+                AND i.local_status NOT IN ('purging','purged','integrity_error') FOR SHARE OF i`, [input.installationId])
             if (!installation.rowCount) throw new Error('feed_installation_unavailable')
+            const gcFeedId = BigInt(installation.rows[0].gc_feed_id)
+            for (const row of [...input.envelopes, ...input.rawQuarantined]) {
+              if (BigInt(row.feed_id) <= gcFeedId) throw new FeedReplayExpiredError()
+            }
             for (const envelope of input.envelopes) {
               const feedId = envelope.feed_id
               maxFeedId = maxDecimal(maxFeedId, feedId)
@@ -153,12 +168,17 @@ export function createInboxRepository(pool: pg.Pool) {
           client.release()
         }
       } catch (error) {
-        if (error instanceof FeedIntegrityError) {
+        if (error instanceof FeedIntegrityError || error instanceof FeedReplayExpiredError) {
           await pool.query(`
+            WITH held AS MATERIALIZED (
+              SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))
+            )
             UPDATE memory_installations
-            SET local_status = 'integrity_error', last_error_code = 'feed_integrity', updated_at = NOW()
-            WHERE installation_id = $1
-          `, [input.installationId])
+            SET local_status = 'integrity_error', last_error_code = $2, updated_at = NOW()
+            FROM held
+            WHERE installation_id = $1::uuid
+              AND relay_status NOT IN ('revoking','revoked') AND local_status NOT IN ('purging','purged')
+          `, [input.installationId, error instanceof FeedReplayExpiredError ? 'inbox_replay_expired' : 'feed_integrity'])
         }
         throw error
       }
@@ -166,11 +186,24 @@ export function createInboxRepository(pool: pg.Pool) {
       // Durable commit done — now (and only now) tell Relay. An ack failure
       // throws so the loop retries the ack on the next redelivery, where the
       // rows above collapse idempotently.
-      await input.ack({
+      const ackFeedId = await input.ack({
         installation_id: input.installationId,
         cursor: input.cursor,
         lease_token: input.leaseToken,
       })
+      if (!Number.isSafeInteger(ackFeedId) || ackFeedId < 0) throw new Error('invalid_ack_feed_id')
+      await pool.query(`
+        WITH held AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))
+        )
+        INSERT INTO memory_inbox_checkpoints(installation_id,last_ack_feed_id)
+        SELECT i.installation_id,$2::bigint FROM memory_installations i CROSS JOIN held
+        WHERE i.installation_id=$1::uuid AND i.relay_status NOT IN ('revoking','revoked')
+          AND i.local_status NOT IN ('purging','purged')
+        ON CONFLICT(installation_id) DO UPDATE SET
+          last_ack_feed_id=GREATEST(memory_inbox_checkpoints.last_ack_feed_id,EXCLUDED.last_ack_feed_id),
+          updated_at=NOW()
+      `, [input.installationId, String(ackFeedId)])
       await pool.query(`
         UPDATE memory_installations
         SET last_ack_at = NOW(),

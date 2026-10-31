@@ -16,6 +16,9 @@ import (
 )
 
 type CodexRuntimeProvider struct {
+	quotaMu    sync.Mutex
+	quotaCache map[string]codexHostQuotaCache
+
 	recovering         atomic.Int32
 	projectsMu         sync.Mutex
 	projects           map[string]*codexCoordinator

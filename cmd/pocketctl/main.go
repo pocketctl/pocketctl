@@ -4238,14 +4238,24 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(protocol.DaemonEvent{Type: "invocation_result", RequestID: cmd.RequestID, Error: "busy"})
 				}
 
-			case "read_codex_rate_limits":
+			case "read_codex_rate_limits", "read_codex_host_rate_limits":
 				select {
 				case quotaReadSlots <- struct{}{}:
 					go func(cmd protocol.ClientMessage) {
 						defer func() { <-quotaReadSlots }()
 						readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 						defer cancel()
-						snapshot, err := sm.ReadCodexRateLimits(readCtx, cmd.SessionID)
+						var snapshot *session.CodexQuotaSnapshot
+						var err error
+						if cmd.Type == "read_codex_host_rate_limits" {
+							if cmd.SessionID != "" {
+								err = errors.New("quota_unavailable")
+							} else {
+								snapshot, err = sm.ReadCodexHostRateLimits(readCtx, cmd.CodexHomeID)
+							}
+						} else {
+							snapshot, err = sm.ReadCodexRateLimits(readCtx, cmd.SessionID)
+						}
 						event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID}
 						if err != nil {
 							event.Error = err.Error()

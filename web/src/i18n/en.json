@@ -2154,5 +2154,22 @@
   "zcode_quota.zero": "A window shows 0% remaining. Availability depends on actual request results.",
   "zcode_quota.low": "Usage is running low",
   "attention.notification.reason.legacy60": "More than 60 days without business activity",
-  "attention.notification.reason.legacy90": "More than 90 days without business activity"
+  "attention.notification.reason.legacy90": "More than 90 days without business activity",
+  "codex_quota.with_cards": "Codex limits and reset credits",
+  "codex_quota.cards": "Reset credits",
+  "codex_quota.card_count": "{{n}} credits",
+  "codex_quota.cards_previous": "Previously available",
+  "codex_quota.cards_available": "Available reset credits",
+  "codex_quota.cards_unknown": "Reset credit information is unavailable; this does not mean there are no credits.",
+  "codex_quota.card_details_unknown": "The count is available; credit details and expiry dates are unavailable.",
+  "codex_quota.card_expiries": "View credit expiry dates",
+  "codex_quota.card_name": "Codex rate-limit reset",
+  "codex_quota.card_no_expiry": "No expiry date",
+  "codex_quota.card_expires": "Expires",
+  "codex_quota.card_details_partial": "{{total}} available; details for {{n}} credits received.",
+  "codex_quota.cards_read_only": "Read-only credit count and expiry dates. Refreshing does not redeem credits.",
+  "codex_quota.official": "Official Codex account limits",
+  "codex_quota.signed_out": "Sign in to Codex CLI on this host, then refresh.",
+  "codex_quota.unsupported": "This authentication method or provider does not supply account limits.",
+  "codex_quota.refresh_with_cards": "Refresh limits and reset credits"
 }

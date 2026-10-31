@@ -217,6 +217,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
+          <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
           <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
             :aria-checked="mobileShowToolCalls" data-toolbar-action="show-tool-calls" @click="toggleMobileToolCalls">
             <span><span>{{ t('session.show_tool_calls') }}</span><small class="tool-visibility-hint">{{ t('session.tool_visibility_hint') }}</small></span>
@@ -261,7 +262,7 @@
         </div>
       </div>
 
-      <CodexQuota v-if="currentSessionAgent === 'codex' && currentSession?.control_mode === 'managed' && !focusedSubAgentId"
+      <CodexQuota ref="codexQuota" variant="session" v-if="currentSessionAgent === 'codex' && currentSession?.control_mode === 'managed' && !focusedSubAgentId"
         :key="sessionId" :session-id="sessionId" :daemon-id="currentSession.daemon_id" :hostname="currentSession.hostname"
         :account-label="currentSession.codex_home_label" :daemon-online="currentSession.daemon_online" />
       <ZcodeQuota v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
@@ -895,6 +896,11 @@ const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
 const toolbarOverflowOpen = ref(false)
 const toolbarOverflowEl = ref<HTMLElement | null>(null)
+const codexQuota = ref<InstanceType<typeof CodexQuota>|null>(null)
+function openCodexQuota(){
+ toolbarOverflowOpen.value=false
+ nextTick(()=>{toolbarOverflowEl.value?.querySelector<HTMLButtonElement>('.toolbar-more-btn')?.focus();codexQuota.value?.show()})
+}
 const agentFilterOpen = ref(false)
 const agentFilterEl = ref<HTMLElement | null>(null)
 const hostFilterOpen = ref(false)

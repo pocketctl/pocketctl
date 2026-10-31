@@ -28,6 +28,7 @@ import { createUsageWorker } from './reporting/usage-worker.js'
 import { createPurgeRepository } from './purge/repository.js'
 import { createPurgeWorker } from './purge/worker.js'
 import { createFeedConsumer } from './inbox/feed-worker.js'
+import { createInboxRetentionWorker } from './inbox/retention.js'
 import { createProjectionHandler } from './projection/repository.js'
 import { createEpisodeRepository } from './episodes/repository.js'
 import { createCodeGraphBuildService } from './codegraph/build-service.js'
@@ -234,8 +235,23 @@ async function main(): Promise<void> {
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
+  let inboxRetention: ReturnType<typeof createInboxRetentionWorker> | undefined
   const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
+    if (config.inboxRetention) {
+      inboxRetention = createInboxRetentionWorker({
+        pool, settings: config.inboxRetention, signal,
+        onResult: result => {
+          metrics.inboxRetentionRows.inc({ action: 'body_reclaimed' }, result.reclaimed)
+          metrics.inboxRetentionRows.inc({ action: 'metadata_deleted' }, result.deleted)
+          if (result.reclaimed || result.deleted) logger.log('info', 'inbox_retention_completed', {
+            reclaimed: result.reclaimed, deleted: result.deleted, metadata_blocked: result.metadataBlocked,
+          })
+        },
+        onError: loopError('inbox_retention'),
+      })
+      inboxRetention.start()
+    }
     const http: RelayHttpClient = createRelayHttpClient({
       baseUrl: config.relayUrl,
       timeoutMs: config.httpTimeoutMs,
@@ -827,6 +843,7 @@ async function main(): Promise<void> {
   clearInterval(gaugeTimer)
   clearInterval(retentionTimer)
   await Promise.all([
+    inboxRetention?.stop(),
     gitPolling?.stop(),
     purgeWorker?.stop(),
     statusWorker?.stop(),

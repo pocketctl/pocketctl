@@ -2154,5 +2154,22 @@
   "zcode_quota.zero": "存在剩余 0% 的窗口，可用状态以实际请求结果为准。",
   "zcode_quota.low": "额度偏低",
   "attention.notification.reason.legacy60": "连续超过 60 天没有有效活动",
-  "attention.notification.reason.legacy90": "连续超过 90 天没有有效活动"
+  "attention.notification.reason.legacy90": "连续超过 90 天没有有效活动",
+  "codex_quota.with_cards": "Codex 额度与重置卡",
+  "codex_quota.cards": "重置卡",
+  "codex_quota.card_count": "{{n}} 张",
+  "codex_quota.cards_previous": "上次可用",
+  "codex_quota.cards_available": "可用重置卡",
+  "codex_quota.cards_unknown": "暂未取得重置卡信息，不代表没有可用卡片。",
+  "codex_quota.card_details_unknown": "已取得数量，卡片详情与有效期暂未提供。",
+  "codex_quota.card_expiries": "查看卡片有效期",
+  "codex_quota.card_name": "Codex 额度重置卡",
+  "codex_quota.card_no_expiry": "无到期时间",
+  "codex_quota.card_expires": "到期时间",
+  "codex_quota.card_details_partial": "共 {{total}} 张可用，已取得 {{n}} 张详情。",
+  "codex_quota.cards_read_only": "此处仅展示重置卡数量与有效期。刷新不会使用卡片。",
+  "codex_quota.official": "Codex 官方账户额度",
+  "codex_quota.signed_out": "请在当前主机登录 Codex CLI 后刷新。",
+  "codex_quota.unsupported": "当前登录方式或服务商未提供账户额度。",
+  "codex_quota.refresh_with_cards": "刷新额度与重置卡"
 }

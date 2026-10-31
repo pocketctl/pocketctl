@@ -2,7 +2,7 @@ import type pg from 'pg'
 import type { FeedBatch } from '../relay/contracts.js'
 import { classifyEnvelope } from '../relay/validation.js'
 import { RelayRequestError } from '../relay/errors.js'
-import { createInboxRepository, FeedIntegrityError, type QuarantinedInput } from './repository.js'
+import { createInboxRepository, FeedIntegrityError, FeedReplayExpiredError, type QuarantinedInput } from './repository.js'
 import { createScopeControlProjector } from '../governance/membership-projector.js'
 
 export interface FeedConsumerOptions {
@@ -110,7 +110,7 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
       leaseToken: pulled.lease_token,
       ack: input => options.ackFeed(input),
     }).catch(error => {
-      if (error instanceof FeedIntegrityError) {
+      if (error instanceof FeedIntegrityError || error instanceof FeedReplayExpiredError) {
         // The installation is already fenced; rethrow nothing — the next
         // pass skips it because of the integrity_error local status.
         return

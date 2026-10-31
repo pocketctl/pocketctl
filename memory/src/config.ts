@@ -6,6 +6,7 @@
 
 import { loadSkillConfig, type SkillConfig } from './skills/config.js'
 import { loadGitSyncConfig, type GitSyncConfig } from './git-sync/config.js'
+import type { InboxRetentionSettings } from './inbox/retention.js'
 
 export type MemoryMode = 'off' | 'shadow' | 'enabled'
 export type MemoryLogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -66,6 +67,8 @@ export interface WikiProviderBudgetSettings {
 }
 
 export interface MemoryConfig {
+  /** Optional only for historical explicit fixtures. Always populated by the loader. */
+  inboxRetention?: InboxRetentionSettings
   delegatedPublishMode?: 'off'|'enabled'
   personalAutoAcceptMode?: 'off'|'assist'
   reviewAutomationMode?: 'off'|'shadow'|'assist'
@@ -556,7 +559,19 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     throw new ConfigError('MEMORY_DB_POOL_MAX must be at least 3 when Skill is active')
   }
 
+  const inboxRetention: InboxRetentionSettings = {
+    mode: parseEnum('MEMORY_INBOX_RETENTION_MODE', env.MEMORY_INBOX_RETENTION_MODE, ['off', 'enabled'] as const, 'enabled'),
+    bodyDays: parseBoundedInteger('MEMORY_INBOX_BODY_RETENTION_DAYS', env.MEMORY_INBOX_BODY_RETENTION_DAYS, 7, 1, 365),
+    metadataDays: parseBoundedInteger('MEMORY_INBOX_METADATA_RETENTION_DAYS', env.MEMORY_INBOX_METADATA_RETENTION_DAYS, 14, 1, 365),
+    batchSize: parseBoundedInteger('MEMORY_INBOX_RETENTION_BATCH_SIZE', env.MEMORY_INBOX_RETENTION_BATCH_SIZE, 500, 1, 5000),
+    intervalMs: parseBoundedInteger('MEMORY_INBOX_RETENTION_INTERVAL_MS', env.MEMORY_INBOX_RETENTION_INTERVAL_MS, 60_000, 1000, 3_600_000),
+  }
+  if (inboxRetention.metadataDays <= inboxRetention.bodyDays) {
+    throw new ConfigError('MEMORY_INBOX_METADATA_RETENTION_DAYS must exceed MEMORY_INBOX_BODY_RETENTION_DAYS')
+  }
+
   return {
+    inboxRetention,
     mode,
     delegatedPublishMode:parseEnum('MEMORY_DELEGATED_PUBLISH_MODE',env.MEMORY_DELEGATED_PUBLISH_MODE,['off','enabled'] as const,'off'),
     personalAutoAcceptMode:parseEnum('MEMORY_PERSONAL_AUTO_ACCEPT_MODE',env.MEMORY_PERSONAL_AUTO_ACCEPT_MODE,['off','assist'] as const,'off'),

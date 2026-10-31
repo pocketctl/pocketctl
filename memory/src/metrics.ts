@@ -40,6 +40,13 @@ export function createMemoryMetrics() {
     registers: [registry],
   })
 
+  const inboxRetentionRows = new Counter({
+    name: 'pocketctl_memory_inbox_retention_rows_total',
+    help: 'Committed inbox bodies reclaimed and metadata receipts deleted; not filesystem bytes freed',
+    labelNames: ['action'] as const,
+    registers: [registry],
+  })
+
   const feedPulls = new Counter({
     name: 'pocketctl_memory_feed_pulls_total',
     help: 'Relay feed pulls by result',
@@ -127,6 +134,7 @@ export function createMemoryMetrics() {
     registry,
     businessAlerts, evidenceGaps, extractionOutcomes, budgetUncertainty,
     installations,
+    inboxRetentionRows,
     feedPulls,
     feedAcks,
     feedLag,

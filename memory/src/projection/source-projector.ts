@@ -22,6 +22,7 @@ interface InboxRow {
   recorded_at: Date
   classification: Record<string, unknown>
   data: Record<string, unknown>
+  body_reclaimed_at?: Date | null
 }
 
 export interface SourceProjectorOptions {
@@ -65,7 +66,7 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
         // natural/adapted sessions first, lock the union in stable order, then
         // claim and recheck the batch without taking a new session lock late.
         const observed=await client.query<InboxRow>(`
-          SELECT feed_id::text,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,classification,data
+          SELECT feed_id::text,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,classification,data,body_reclaimed_at
           FROM memory_feed_inbox WHERE installation_id=$1 AND projection_state='pending'
           ORDER BY feed_id LIMIT $2`,[installationId,batchSize])
         const rowSession=(row:InboxRow)=>{ deliveryWithdrawal(row); return adaptTeamSource(row)?.sessionId??row.session_id }
@@ -74,7 +75,7 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
         await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
         const claimed = await client.query<InboxRow>(`
           SELECT feed_id::text, topic, source_kind, source_id, session_id, turn_id, event_type, recorded_at,
-                 classification, data
+                 classification, data, body_reclaimed_at
           FROM memory_feed_inbox
           WHERE installation_id = $1 AND projection_state = 'pending'
           ORDER BY feed_id ASC
@@ -88,6 +89,7 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
         let projected = 0
         let invalidated = 0
         for (const row of claimed.rows) {
+          if (row.body_reclaimed_at) throw new Error('inbox_body_unavailable')
           if (options.failOnEventType === row.event_type) {
             throw new Error(`injected failure for ${row.event_type}`)
           }
