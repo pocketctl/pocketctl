@@ -206,10 +206,14 @@ export function createSnapshotRepository(pool: pg.Pool) {
           // relay inventory correctness and only self-heals on the next
           // reconcile.
           await client.query(`
-            DELETE FROM source_turns WHERE installation_id = $1
+            DELETE FROM source_turns s WHERE installation_id = $1
+              AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r
+                WHERE r.installation_id=s.installation_id AND r.turn_id=s.turn_id)
           `, [input.installationId])
           await client.query(`
-            DELETE FROM source_events WHERE installation_id = $1
+            DELETE FROM source_events s WHERE installation_id = $1
+              AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r
+                WHERE r.installation_id=s.installation_id AND r.turn_id=s.turn_id)
           `, [input.installationId])
           // Same authority rule for the durable snapshot landing itself:
           // rows for departed sessions — and for tombstoned sessions Relay
@@ -319,6 +323,7 @@ export function createSnapshotRepository(pool: pg.Pool) {
             DELETE FROM source_sessions s
             WHERE s.installation_id = $1
               AND s.session_id <> ALL($2::text[])
+              AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=s.installation_id AND r.session_id=s.session_id)
               AND NOT EXISTS (
                 SELECT 1 FROM memory_session_tombstones t
                 WHERE t.installation_id = s.installation_id AND t.session_id = s.session_id
@@ -347,6 +352,7 @@ export function createSnapshotRepository(pool: pg.Pool) {
             FROM source_turns t
             WHERE t.installation_id = $1 AND t.session_id = ANY($2::text[])
               AND t.terminal_at IS NOT NULL
+              AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=t.installation_id AND r.turn_id=t.turn_id)
             ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
               state = 'pending', available_at = NOW(), attempts = 0,
               claimed_by = NULL, claim_expires_at = NULL,
@@ -423,7 +429,8 @@ async function rebuildTurns(
              NULLIF(payload->>'reason', '') AS reason
       FROM source_events
       WHERE installation_id = $1 AND origin = 'snapshot'
-        AND session_id = ANY($2::text[]) AND turn_id IS NOT NULL
+        AND session_id = ANY($2::text[]) AND turn_id IS NOT NULL AND body_reclaimed_at IS NULL
+        AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=source_events.installation_id AND r.turn_id=source_events.turn_id)
     ) ev
     GROUP BY turn_id
   `, [installationId, inventorySessionIds])
@@ -454,7 +461,7 @@ async function rebuildArtifacts(
       SELECT source_event_id::text, session_id, turn_id, event_type, payload, occurred_at
       FROM source_events
       WHERE installation_id = $1 AND origin = 'snapshot'
-        AND session_id = ANY($2::text[]) AND source_event_id > $3::uuid
+        AND session_id = ANY($2::text[]) AND source_event_id > $3::uuid AND body_reclaimed_at IS NULL
       ORDER BY source_event_id
       LIMIT $4
     `, [installationId, inventorySessionIds, afterEventId, pageSize])

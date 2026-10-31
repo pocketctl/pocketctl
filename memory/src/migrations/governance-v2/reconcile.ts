@@ -1,14 +1,18 @@
+import {reclaimReceiptBatch,type SourceRetentionReceipt} from '../../retention/source.js'
+import {assertMigrationOpen} from '../../retention/transaction.js'
 import type pg from 'pg'
 import {migrationTransaction,backfillClaim,recordMigrationAction,BACKFILL_FAMILIES,type MigrationBaseline} from './backfill.js'
 /** Replay the complete overlap after the starting watermark. Sequence allocation
  * is not commit order: the final pass runs after the writer barrier, not from an
  * optimistic previous MAX(sequence). No source/authority body is resurrected. */
 export async function reconcileGovernanceChanges(pool:pg.Pool,input:{runId:string}){
+ await migrationTransaction(pool,c=>assertMigrationOpen(c,input.runId))
  const run=(await pool.query('SELECT manifest FROM memory_governance_migration_runs WHERE run_id=$1',[input.runId])).rows[0]
  if(!run)throw new Error('migration_run_missing')
  const m=run.manifest as MigrationBaseline;let after=m.startWatermark,processed=0
  while(true){const batch=(await pool.query(`SELECT * FROM memory_governance_migration_changes WHERE installation_id=ANY($1::uuid[]) AND sequence>$2 ORDER BY sequence LIMIT 200`,[m.installationIds,after])).rows
   for(const change of batch){await migrationTransaction(pool,async c=>{
+   await assertMigrationOpen(c,input.runId)
    await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[change.installation_id])
    await c.query("SELECT pg_advisory_xact_lock(hashtextextended('migration:'||$1,0))",[change.installation_id])
    const key=JSON.parse(change.entity_id)
@@ -29,11 +33,15 @@ export interface PrivacyWatermarks {
  tombstones:Record<string,any>[]
  principals:Record<string,any>[]
  delegations:Record<string,any>[]
+ sourceRetention:Record<string,any>[]
+ migrationClosures:Record<string,any>[]
  capturedAt:string
 }
 /** Keep this recovery capsule in a restricted store; it contains no plaintext
  * evidence, model prompts, credentials or HMAC keys. It is not a public report. */
 export async function capturePrivacyWatermarks(pool:pg.Pool):Promise<PrivacyWatermarks>{return migrationTransaction(pool,async c=>({
+ sourceRetention:(await c.query(`SELECT r.*,encode(source_digest,'hex') digest_hex FROM memory_source_retention_receipts r ORDER BY installation_id,turn_id`)).rows,
+ migrationClosures:(await c.query(`SELECT s.*,r.sealed_at,r.abandoned_at FROM memory_governance_migration_summaries s JOIN memory_governance_migration_runs r USING(run_id) WHERE r.sealed_at IS NOT NULL OR r.abandoned_at IS NOT NULL ORDER BY run_id`)).rows,
  principals:(await c.query('SELECT installation_id,principal_id,state,permission_revision::text,valid_until FROM memory_governance_executor_principals ORDER BY installation_id,principal_id')).rows,
  delegations:(await c.query('SELECT installation_id,delegation_id,state,valid_until FROM memory_publication_delegations ORDER BY installation_id,delegation_id')).rows,
  installations:(await c.query('SELECT installation_id,local_status,relay_status,config_version::text FROM memory_installations ORDER BY installation_id')).rows,
@@ -46,6 +54,7 @@ export async function capturePrivacyWatermarks(pool:pg.Pool):Promise<PrivacyWate
 }))}
 export async function replayPrivacyWatermarks(pool:pg.Pool,w:PrivacyWatermarks,input:{purgeHmacKey:string}){
  const {createPurgeRepository}=await import('../../purge/repository.js'),{randomUUID}=await import('node:crypto')
+ if(!Array.isArray(w.sourceRetention)||!Array.isArray(w.migrationClosures))throw new Error('restore_retention_watermarks_required')
  if(!Array.isArray(w.principals)||!Array.isArray(w.delegations))throw new Error('restore_executor_watermarks_required')
  const purge=createPurgeRepository(pool,{hmacKey:input.purgeHmacKey})
  for(const row of w.installations.filter(i=>i.local_status==='purged'||i.relay_status==='revoked'||i.relay_status==='revoking')){
@@ -71,6 +80,32 @@ export async function replayPrivacyWatermarks(pool:pg.Pool,w:PrivacyWatermarks,i
   for(const p of w.principals??[])await c.query(`UPDATE memory_governance_executor_principals SET state='disabled',permission_revision=GREATEST(permission_revision,$3::bigint) WHERE installation_id=$1 AND principal_id=$2 AND ($4='disabled' OR permission_revision<$3::bigint OR valid_until>$5::timestamptz)`,[p.installation_id,p.principal_id,p.permission_revision,p.state,p.valid_until])
   for(const d of w.delegations??[])await c.query(`UPDATE memory_publication_delegations SET state='revoked' WHERE installation_id=$1 AND delegation_id=$2 AND state='active' AND ($3<>'active' OR valid_until>$4::timestamptz)`,[d.installation_id,d.delegation_id,d.state,d.valid_until])
 
+ })
+ // Recovery runs while installations are held. Restore reclamation fences
+ // BEFORE consumers may be restarted, then clear any body from the older backup.
+ for(const row of w.sourceRetention){
+  let done=false
+  while(!done)done=await migrationTransaction(pool,async c=>{
+   await c.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`,[row.installation_id])
+   if(!(await c.query(`SELECT 1 FROM memory_installations i WHERE installation_id=$1 AND local_status<>'purged'
+      AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=i.installation_id AND t.session_id=$2)`,[row.installation_id,row.session_id])).rowCount)return true
+   const receipt=(await c.query<SourceRetentionReceipt>(`INSERT INTO memory_source_retention_receipts
+    (installation_id,turn_id,session_id,episode_id,source_digest,compiler_version,extraction_completed_at,state,reclaimed_at,late_events)
+    VALUES($1,$2,$3,$4,decode($5,'hex'),$6,$7,'reclaiming',$8,$9)
+    ON CONFLICT(installation_id,turn_id) DO UPDATE SET reclaimed_at=LEAST(memory_source_retention_receipts.reclaimed_at,EXCLUDED.reclaimed_at)
+    RETURNING *`,[row.installation_id,row.turn_id,row.session_id,row.episode_id,row.digest_hex,row.compiler_version,row.extraction_completed_at,row.reclaimed_at,row.late_events])).rows[0]
+   return (await reclaimReceiptBatch(c,receipt,500)).finished
+  })
+ }
+ await migrationTransaction(pool,async c=>{
+  for(const row of w.migrationClosures){
+   if(!(await c.query('SELECT 1 FROM memory_governance_migration_runs WHERE run_id=$1',[row.run_id])).rowCount)continue
+   await c.query(`INSERT INTO memory_governance_migration_summaries(run_id,migration_kind,scope_ids,schema_version,environment_fingerprint,
+    started_at,completed_at,outcome,action_counts,verification,details_reclaimed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
+    [row.run_id,row.migration_kind,row.scope_ids,row.schema_version,row.environment_fingerprint,row.started_at,row.completed_at,row.outcome,row.action_counts,row.verification,row.details_reclaimed_at])
+   await c.query(`UPDATE memory_governance_migration_runs SET state=$2,sealed_at=$3,abandoned_at=$4,completed_at=$5
+    WHERE run_id=$1 AND sealed_at IS NULL AND abandoned_at IS NULL`,[row.run_id,row.outcome==='complete'?'complete':'failed',row.sealed_at,row.abandoned_at,row.completed_at])
+  }
  })
  return {heldInstallations:w.installations.length,sessionPurges:w.sessions.length,productionEstimate:false}
 }

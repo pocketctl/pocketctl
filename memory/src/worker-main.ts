@@ -1,3 +1,4 @@
+import {createDataRetentionWorker} from './retention/worker.js'
 import { createDeliveryWithdrawalClient } from './relay/delivery-withdrawal-client.js'
 import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-consumer.js'
 import {updateBusinessHealthGauges} from './metrics.js'
@@ -236,6 +237,7 @@ async function main(): Promise<void> {
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
+  let dataRetention: ReturnType<typeof createDataRetentionWorker> | undefined
   let candidateExpiry: ReturnType<typeof createCandidateExpiryWorker> | undefined
   let inboxRetention: ReturnType<typeof createInboxRetentionWorker> | undefined
   const feedInFlight = new Set<Promise<void>>()
@@ -248,6 +250,14 @@ async function main(): Promise<void> {
       onError: loopError('candidate_review_expiry'),
     })
     candidateExpiry.start()
+    if (config.dataRetention) {
+      dataRetention = createDataRetentionWorker({pool,settings:config.dataRetention,signal,
+        onResult: counts => {
+          for(const [action,count] of Object.entries(counts)) metrics.dataRetentionRows.inc({action},count)
+          if(Object.values(counts).some(n=>n>0)) logger.log('info','data_retention_completed',counts)
+        }, onSkipped: reason => metrics.dataRetentionSkips.inc({reason}), onError: loopError('data_retention')})
+      dataRetention.start()
+    }
     if (config.inboxRetention) {
       inboxRetention = createInboxRetentionWorker({
         pool, settings: config.inboxRetention, signal,
@@ -853,6 +863,7 @@ async function main(): Promise<void> {
   clearInterval(gaugeTimer)
   clearInterval(retentionTimer)
   await Promise.all([
+    dataRetention?.stop(),
     candidateExpiry?.stop(),
     inboxRetention?.stop(),
     gitPolling?.stop(),

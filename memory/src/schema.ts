@@ -1,3 +1,4 @@
+import { DATA_RETENTION_MIGRATION } from './retention/migration.js'
 import { CANDIDATE_REVIEW_EXPIRY_MIGRATION } from './claims/candidate-expiry-migration.js'
 import { INBOX_RETENTION_MIGRATION } from './inbox/retention-migration.js'
 import { DELIVERY_WITHDRAWAL_STREAM_MIGRATION } from './episodes/delivery-withdrawal-stream-migration.js'
@@ -2241,6 +2242,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   DELIVERY_WITHDRAWAL_STREAM_MIGRATION,
   INBOX_RETENTION_MIGRATION,
   CANDIDATE_REVIEW_EXPIRY_MIGRATION,
+  DATA_RETENTION_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

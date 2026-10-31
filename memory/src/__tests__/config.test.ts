@@ -17,6 +17,11 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('memory config', () => {
+  test('data retention has a fourteen-day floor, daily default and independent switch',()=>{
+    expect(loadMemoryConfig(baseEnv()).dataRetention).toEqual({mode:'enabled',bodyDays:14,batchSize:500,intervalMs:86400000,reportDirectory:undefined})
+    expect(loadMemoryConfig(baseEnv({MEMORY_DATA_RETENTION_MODE:'off'})).dataRetention?.mode).toBe('off')
+    for(const overrides of ([{MEMORY_SOURCE_BODY_RETENTION_DAYS:'13'},{MEMORY_DATA_RETENTION_BATCH_SIZE:'5001'},{MEMORY_DATA_RETENTION_MODE:'shadow'},{MEMORY_DATA_RETENTION_INTERVAL_MS:'0'}] as Array<Record<string,string>>))expect(()=>loadMemoryConfig(baseEnv(overrides))).toThrow(/MEMORY_(DATA|SOURCE)/)
+  })
   test('inbox retention defaults to 7/14 days and validates staged, bounded settings', () => {
     expect(loadMemoryConfig(baseEnv()).inboxRetention).toEqual({
       mode: 'enabled', bodyDays: 7, metadataDays: 14, batchSize: 500, intervalMs: 60_000,

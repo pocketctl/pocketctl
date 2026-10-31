@@ -199,6 +199,17 @@ async function projectRow(
       )
       return 0
     }
+    // An archived turn is a receipt, never an incomplete new compilation.
+    if (sourceRow.turn_id && (await client.query(`SELECT 1 FROM memory_source_retention_receipts
+      WHERE installation_id=$1 AND turn_id=$2`, [installationId, sourceRow.turn_id])).rowCount) {
+      const event = await insertSourceEvent(client, installationId, sourceRow)
+      if (event.inserted) await client.query(`UPDATE memory_source_retention_receipts SET late_events=late_events+1
+        WHERE installation_id=$1 AND turn_id=$2`, [installationId, sourceRow.turn_id])
+      await client.query(`UPDATE memory_feed_inbox SET projection_state='projected',projected_at=NOW(),
+        data='{}',classification='{}',body_reclaimed_at=COALESCE(body_reclaimed_at,NOW()),error_code='source_body_reclaimed'
+        WHERE installation_id=$1 AND feed_id=$2`, [installationId,row.feed_id])
+      return 0
+    }
     await upsertSession(client, installationId, sourceRow)
   }
 

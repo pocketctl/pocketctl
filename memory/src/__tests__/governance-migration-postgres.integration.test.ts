@@ -147,7 +147,7 @@ suite('v50 durable backfill and cutover',()=>{
   expect((await pool.query("SELECT COUNT(*)::int n FROM memory_governance_v2_states WHERE phase<>'hold'")).rows[0].n).toBe(0)
   expect((await pool.query("SELECT COUNT(*)::int n FROM knowledge_claims WHERE state='active' AND consumption_hold_reason IS NULL")).rows[0].n).toBe(0)
   expect((await validateGovernanceMigration(pool,runId)).violations).toEqual([])
-  await writeFile('/reports/migration-measurements.json',JSON.stringify({kind:'isolated_v50_fixture',durationMs:Date.now()-started,recovery,lockTimeoutMs:1000,statementTimeoutMs:5000,lockWaitMeasurement:'real blocking barriers; no production latency estimate',invariants:(await validateGovernanceMigration(pool,runId)).invariants,remediation:(await pool.query('SELECT consumption_hold_reason,COUNT(*)::int n FROM knowledge_claims WHERE consumption_hold_reason IS NOT NULL GROUP BY consumption_hold_reason')).rows},null,2))
+  await writeFile((process.env.MEMORY_UPGRADE_REPORT_DIR??'/reports')+'/migration-measurements.json',JSON.stringify({kind:'isolated_v50_fixture',durationMs:Date.now()-started,recovery,lockTimeoutMs:1000,statementTimeoutMs:5000,lockWaitMeasurement:'real blocking barriers; no production latency estimate',invariants:(await validateGovernanceMigration(pool,runId)).invariants,remediation:(await pool.query('SELECT consumption_hold_reason,COUNT(*)::int n FROM knowledge_claims WHERE consumption_hold_reason IS NOT NULL GROUP BY consumption_hold_reason')).rows},null,2))
   await expect(startGovernanceBackfill(pool,{installationIds:[V50_IDS.team],environmentFingerprint:fingerprint})).rejects.toThrow('migration_scope_held')
  },60000)
 

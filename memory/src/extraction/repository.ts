@@ -103,7 +103,8 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
         JOIN source_sessions s
           ON s.installation_id = e.installation_id AND s.session_id = e.session_id
         LEFT JOIN memory_feature_settings f ON f.installation_id = e.installation_id
-        WHERE e.installation_id = $1 AND e.turn_id = $2 AND e.compiled_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+        WHERE e.installation_id = $1 AND e.turn_id = $2 AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -171,7 +172,8 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             JOIN memory_feature_settings f ON f.installation_id=e.installation_id
             JOIN memory_installations i ON i.installation_id=e.installation_id
             WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3
-              AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+              AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -184,7 +186,8 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
               JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
               JOIN memory_feature_settings f ON f.installation_id=e.installation_id
               JOIN memory_installations i ON i.installation_id=e.installation_id
-              WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+              WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -291,7 +294,8 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
         JOIN memory_feature_settings f ON f.installation_id=e.installation_id
         JOIN memory_installations i ON i.installation_id=e.installation_id
         WHERE r.state='failed' AND r.error_code IN('budget_exceeded','budget_unavailable')
-          AND r.episode_source_digest=e.source_digest AND e.compiled_at IS NOT NULL
+          AND r.episode_source_digest=e.source_digest AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id)
           AND f.extraction_mode IN('shadow','enabled') AND f.extraction_consent_fingerprint=$1
           AND i.local_status='ready' AND i.relay_status='active'
           AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs done WHERE done.installation_id=e.installation_id

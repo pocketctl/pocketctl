@@ -581,7 +581,7 @@ async function purgeSessionRows(
 
   for (const table of [
     'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
-    'memory_snapshot_events',
+    'memory_snapshot_events', 'memory_source_retention_receipts',
   ]) {
     await client.query(
       `DELETE FROM ${table} WHERE installation_id = $1 AND session_id = $2`,
@@ -745,7 +745,7 @@ async function purgeInstallationRows(
     'memory_extraction_runs', 'knowledge_versions', 'knowledge_claims',
     'memory_feature_settings',
     'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
-    'repo_snapshots', 'repositories', 'source_sessions',
+    'memory_source_retention_receipts', 'repo_snapshots', 'repositories', 'source_sessions',
     'memory_context_feedback', 'memory_context_injections',
     'memory_context_pack_evidence', 'memory_context_pack_items',
     'memory_context_packs', 'memory_retrieval_candidates',

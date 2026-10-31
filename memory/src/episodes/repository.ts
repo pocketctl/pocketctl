@@ -46,6 +46,9 @@ export function createEpisodeRepository(
             return
           }
 
+          if ((await client.query(`SELECT 1 FROM memory_source_retention_receipts WHERE installation_id=$1 AND turn_id=$2`,
+            [installationId, turnId])).rowCount) { await client.query('COMMIT'); return }
+
           const turn = await client.query<{
             session_id: string
             state: string
@@ -228,6 +231,9 @@ export function createEpisodeRepository(
             SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0)),
                    pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
           `, [installationId, row.session_id])
+          if ((await client.query(`SELECT 1 FROM memory_source_retention_receipts WHERE installation_id=$1 AND turn_id=$2`,
+            [installationId, turnId])).rowCount) { await client.query('COMMIT'); return }
+
 
           await client.query(`
             INSERT INTO work_episodes

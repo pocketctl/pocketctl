@@ -6,6 +6,7 @@
 
 import { loadSkillConfig, type SkillConfig } from './skills/config.js'
 import { loadGitSyncConfig, type GitSyncConfig } from './git-sync/config.js'
+import type { SourceRetentionSettings } from './retention/source.js'
 import type { InboxRetentionSettings } from './inbox/retention.js'
 
 export type MemoryMode = 'off' | 'shadow' | 'enabled'
@@ -68,6 +69,7 @@ export interface WikiProviderBudgetSettings {
 
 export interface MemoryConfig {
   /** Optional only for historical explicit fixtures. Always populated by the loader. */
+  dataRetention?: SourceRetentionSettings
   inboxRetention?: InboxRetentionSettings
   delegatedPublishMode?: 'off'|'enabled'
   personalAutoAcceptMode?: 'off'|'assist'
@@ -559,6 +561,13 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     throw new ConfigError('MEMORY_DB_POOL_MAX must be at least 3 when Skill is active')
   }
 
+  const dataRetention: SourceRetentionSettings = {
+    mode: parseEnum('MEMORY_DATA_RETENTION_MODE', env.MEMORY_DATA_RETENTION_MODE, ['off', 'enabled'] as const, 'enabled'),
+    bodyDays: parseBoundedInteger('MEMORY_SOURCE_BODY_RETENTION_DAYS', env.MEMORY_SOURCE_BODY_RETENTION_DAYS, 14, 14, 365),
+    batchSize: parseBoundedInteger('MEMORY_DATA_RETENTION_BATCH_SIZE', env.MEMORY_DATA_RETENTION_BATCH_SIZE, 500, 1, 5000),
+    intervalMs: parseBoundedInteger('MEMORY_DATA_RETENTION_INTERVAL_MS', env.MEMORY_DATA_RETENTION_INTERVAL_MS, 86400000, 1000, 604800000),
+    reportDirectory: env.MEMORY_RETENTION_REPORT_DIRECTORY?.trim() || undefined,
+  }
   const inboxRetention: InboxRetentionSettings = {
     mode: parseEnum('MEMORY_INBOX_RETENTION_MODE', env.MEMORY_INBOX_RETENTION_MODE, ['off', 'enabled'] as const, 'enabled'),
     bodyDays: parseBoundedInteger('MEMORY_INBOX_BODY_RETENTION_DAYS', env.MEMORY_INBOX_BODY_RETENTION_DAYS, 7, 1, 365),
@@ -571,6 +580,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   }
 
   return {
+    dataRetention,
     inboxRetention,
     mode,
     delegatedPublishMode:parseEnum('MEMORY_DELEGATED_PUBLISH_MODE',env.MEMORY_DELEGATED_PUBLISH_MODE,['off','enabled'] as const,'off'),

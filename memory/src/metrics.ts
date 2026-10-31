@@ -40,6 +40,9 @@ export function createMemoryMetrics() {
     registers: [registry],
   })
 
+  const dataRetentionSkips = new Counter({name:'pocketctl_memory_data_retention_skips_total',help:'Rechecks skipped under lifecycle locks',labelNames:['reason'] as const,registers:[registry]})
+  const dataRetentionRows = new Counter({name:'pocketctl_memory_data_retention_rows_total',
+    help:'Committed source and migration detail reclamation; not filesystem bytes freed',labelNames:['action'] as const,registers:[registry]})
   const inboxRetentionRows = new Counter({
     name: 'pocketctl_memory_inbox_retention_rows_total',
     help: 'Committed inbox bodies reclaimed and metadata receipts deleted; not filesystem bytes freed',
@@ -134,6 +137,8 @@ export function createMemoryMetrics() {
     registry,
     businessAlerts, evidenceGaps, extractionOutcomes, budgetUncertainty,
     installations,
+    dataRetentionSkips,
+    dataRetentionRows,
     inboxRetentionRows,
     feedPulls,
     feedAcks,

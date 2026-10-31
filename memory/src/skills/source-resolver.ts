@@ -107,6 +107,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
     }>(`SELECT e.session_id, e.repository_id, e.repo_snapshot_id, e.document, e.evidence_manifest, e.source_digest
       FROM work_episodes e JOIN source_sessions s USING (installation_id,session_id)
       WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.state='ready' AND e.outcome='completed'
+        AND e.body_reclaimed_at IS NULL AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=e.installation_id AND r.turn_id=e.turn_id)
         AND e.compiled_at IS NOT NULL AND e.ready_at <= NOW() AND s.deleted_at IS NULL
         AND e.repository_id IS NOT NULL AND e.repo_snapshot_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM memory_session_tombstones t
