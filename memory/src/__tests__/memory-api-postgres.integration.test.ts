@@ -335,6 +335,20 @@ describeWithDatabase('memory api under real capability grants (PostgreSQL)', () 
     expect(candidateStatusMetrics).toBe(1)
   })
 
+  test('an expired candidate is hidden and its old accept request returns a bounded 409 without ledger writes', async () => {
+    await pool.query(`UPDATE memory_candidates SET created_at=clock_timestamp()-INTERVAL '336 hours' WHERE candidate_id=$1`, [candidateId])
+    const response = await app.inject({
+      method: 'POST', url: `/api/v1/memory/candidates/${candidateId}/accept`,
+      headers: { ...authHeaders(['memory.manage']), 'idempotency-key': 'accept-expired' },
+      payload: { expected_revision: 1 },
+    })
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toMatchObject({ error: { code: 'revision_conflict', reason_code: 'candidate_expired', state: 'expired' } })
+    expect((await pool.query('SELECT count(*)::int n FROM knowledge_claims')).rows[0].n).toBe(0)
+    expect((await pool.query('SELECT count(*)::int n FROM memory_feedback')).rows[0].n).toBe(0)
+    expect(reviewDecisionMetrics).toBe(0)
+  })
+
   test('a stale revision surfaces only the current revision and state', async () => {
     const response = await app.inject({
       method: 'POST', url: `/api/v1/memory/candidates/${candidateId}/accept`,

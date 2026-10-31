@@ -3,6 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createSourceProjector } from '../projection/source-projector.js'
+import { createProjectionHandler } from '../projection/repository.js'
+import { loadMemoryConfig } from '../config.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import { createPurgeRepository } from '../purge/repository.js'
 import { createJobRepository } from '../jobs/repository.js'
@@ -69,6 +71,50 @@ describeWithDatabase('L0/L0.5 source projector (PostgreSQL)', () => {
         (installation_id, provider_id, relay_status, local_status, config_version)
       VALUES ($1, 'pocketctl-memory', 'active', 'ready', 1)
     `, [INSTALLATION])
+  })
+
+  test.each([
+    { name: 'default', value: undefined, expectedMs: 30_000 },
+    { name: 'zero', value: '0', expectedMs: 0 },
+    { name: 'custom', value: '7250', expectedMs: 7250 },
+  ])('$name stabilization window schedules initial and late-event compiles consistently', async ({ value, expectedMs }) => {
+    const config = loadMemoryConfig({
+      NODE_ENV: 'test',
+      MEMORY_EPISODE_STABILIZATION_MS: value,
+    })
+    const handler = createProjectionHandler(pool, { stabilizationMs: config.episodeStabilizationMs })
+    const project = () => handler.handleProjectFeed({
+      job_id: '00000000-0000-4000-8000-000000000001',
+      installation_id: INSTALLATION,
+      job_type: 'project_feed',
+      idempotency_key: 'project:stabilization-test',
+      payload: {}, attempts: 0, claim_epoch: 1,
+    }, new AbortController().signal)
+    const delay = async (feedId: number) => (await pool.query<{ delay_ms: number }>(`
+      SELECT (EXTRACT(EPOCH FROM (j.available_at-i.projected_at))*1000)::int AS delay_ms
+      FROM memory_jobs j JOIN memory_feed_inbox i USING (installation_id)
+      WHERE j.installation_id=$1 AND j.job_type='compile_episode'
+        AND j.idempotency_key='compile_episode:stabilization-turn' AND i.feed_id=$2
+    `, [INSTALLATION, feedId])).rows[0].delay_ms
+
+    await insertInboxRow(pool, {
+      feed_id: 1, session_id: 'stabilization-session', turn_id: 'stabilization-turn',
+      event_type: 'turn_status', data: { status: 'completed' },
+    })
+    await project()
+    expect(await delay(1)).toBe(expectedMs)
+
+    // Late events revive a finished job using the same configured window.
+    await pool.query(`UPDATE memory_jobs SET state='completed',completed_at=NOW()
+      WHERE installation_id=$1 AND job_type='compile_episode'`, [INSTALLATION])
+    await insertInboxRow(pool, {
+      feed_id: 2, session_id: 'stabilization-session', turn_id: 'stabilization-turn',
+      data: { text: 'late evidence' },
+    })
+    await project()
+    expect(await delay(2)).toBe(expectedMs)
+    expect((await pool.query(`SELECT state FROM memory_jobs
+      WHERE installation_id=$1 AND job_type='compile_episode'`, [INSTALLATION])).rows[0].state).toBe('pending')
   })
 
   test('projects inbox rows in strict feed order and marks them projected', async () => {

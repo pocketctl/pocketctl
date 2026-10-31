@@ -47,7 +47,7 @@ suite('Attention system notifications PostgreSQL', () => {
       userId,
       sessionId,
       action: 'archive',
-      policyVersion: 'session-lifecycle-v1',
+      policyVersion: 'session-lifecycle-v2',
       activityEpoch: '1',
     })
     const client = await pool.connect()
@@ -370,4 +370,20 @@ suite('Attention system notifications PostgreSQL', () => {
       await app.close()
     }
   })
+  test('a user gets one daily message across hosts and archive/purge actions',async()=>{
+    const archive=await record('daily-archive','host-a')
+    const operation=await new LifecycleJobRepository(pool).enqueue({userId,sessionId:'daily-purge',action:'purge',policyVersion:'session-lifecycle-v2',activityEpoch:'1'})
+    const client=await pool.connect()
+    try{
+      await client.query('BEGIN')
+      const purge=await repository.recordResultInTransaction(client,{operationId:operation.operationId,notificationId:randomUUID(),
+        userId,sessionId:'daily-purge',daemonId:'host-b',titleSnapshot:'purge',daemonNameSnapshot:'host-b',action:'purge',state:'partial',
+        activityAt:'2026-01-01T00:00:00Z',reasonCode:'inactivity_60_days',retentionDays:90})
+      await client.query('COMMIT')
+      expect(purge.notificationId).toBe(archive.notificationId)
+      expect((await repository.get(userId,archive.notificationId))?.subjectCount).toBe(2)
+      expect((await repository.list({userId,limit:10})).notifications).toHaveLength(1)
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+  })
+
 })

@@ -97,6 +97,11 @@ multiple accounts, and diagnostic commands.
 
 Discovery does not grant control. See the [full capabilities and limitations](docs/agent-support.md).
 
+Web and iOS client source now includes read-only Codex account limits and reset
+credit details, plus ZCode Coding Plan usage. Availability depends on the host's
+connected account and provider support; refreshing does not redeem reset credits.
+These client changes require a corresponding Web deployment or iOS app update.
+
 ## FAQ
 
 **Does my computer need to stay on?** To keep an agent working, send instructions, or handle approvals, your development machine must stay awake and online with the daemon and relevant agent service running. PocketCtl does not move local tasks onto your phone.
@@ -148,6 +153,11 @@ See [data processing and experimental retention](docs/security-and-data.md) and 
 ## Experimental features
 
 **Memory** manages reviewed project knowledge, dependencies, and skill documents in the Web workbench, and supplies context for later agent tasks. Model-assisted extraction requires a configured server-side model provider.
+
+Unconfirmed candidates expire after 14 days. Configurable retention workers can
+reclaim old Feed and source bodies and migration details while preserving replay
+checks and protecting evidence still in use; operators must enable the retention
+policies in their Memory deployment.
 
 **Teams** support members, shared tasks and sessions, and agents explicitly contributed by members. Multi-agent coordination and shared Memory require separate enablement; joining a Team does not automatically share private sessions or grant knowledge access.
 

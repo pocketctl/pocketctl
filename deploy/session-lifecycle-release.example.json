@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "policyVersion": "session-lifecycle-v1",
+  "policyVersion": "session-lifecycle-v2",
   "publishedAt": null,
   "effectiveAt": null,
   "transitionDeadline": null,

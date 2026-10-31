@@ -54,7 +54,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.5.11"
+var version = "0.5.12"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -3934,6 +3934,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 	directorySlots := make(chan struct{}, 2)
 	modelSlots := make(chan struct{}, 2)
 	quotaReadSlots := make(chan struct{}, 4)
+	zcodeQuotaReader := zcode.NewQuotaReader()
 	var directoryRequests sync.Map
 	for {
 		select {
@@ -4215,14 +4216,46 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				}
 				client.SendMsg(event)
 
-			case "read_codex_rate_limits":
+			case "read_zcode_quota":
 				select {
 				case quotaReadSlots <- struct{}{}:
 					go func(cmd protocol.ClientMessage) {
 						defer func() { <-quotaReadSlots }()
 						readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 						defer cancel()
-						snapshot, err := sm.ReadCodexRateLimits(readCtx, cmd.SessionID)
+						event := protocol.DaemonEvent{Type: "invocation_result", RequestID: cmd.RequestID}
+						if cmd.SessionID != "" {
+							event.Error = "quota_unavailable"
+						} else if snapshot, err := zcodeQuotaReader.Read(readCtx); err != nil {
+							event.Error = err.Error()
+						} else {
+							raw, _ := json.Marshal(snapshot)
+							_ = json.Unmarshal(raw, &event.Invocation)
+						}
+						client.SendMsg(event)
+					}(cmd)
+				default:
+					client.SendMsg(protocol.DaemonEvent{Type: "invocation_result", RequestID: cmd.RequestID, Error: "busy"})
+				}
+
+			case "read_codex_rate_limits", "read_codex_host_rate_limits":
+				select {
+				case quotaReadSlots <- struct{}{}:
+					go func(cmd protocol.ClientMessage) {
+						defer func() { <-quotaReadSlots }()
+						readCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+						defer cancel()
+						var snapshot *session.CodexQuotaSnapshot
+						var err error
+						if cmd.Type == "read_codex_host_rate_limits" {
+							if cmd.SessionID != "" {
+								err = errors.New("quota_unavailable")
+							} else {
+								snapshot, err = sm.ReadCodexHostRateLimits(readCtx, cmd.CodexHomeID)
+							}
+						} else {
+							snapshot, err = sm.ReadCodexRateLimits(readCtx, cmd.SessionID)
+						}
 						event := protocol.DaemonEvent{Type: "invocation_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID}
 						if err != nil {
 							event.Error = err.Error()

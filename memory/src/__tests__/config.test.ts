@@ -17,6 +17,26 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('memory config', () => {
+  test('data retention has a fourteen-day floor, daily default and independent switch',()=>{
+    expect(loadMemoryConfig(baseEnv()).dataRetention).toEqual({mode:'enabled',bodyDays:14,batchSize:500,intervalMs:86400000,reportDirectory:undefined})
+    expect(loadMemoryConfig(baseEnv({MEMORY_DATA_RETENTION_MODE:'off'})).dataRetention?.mode).toBe('off')
+    for(const overrides of ([{MEMORY_SOURCE_BODY_RETENTION_DAYS:'13'},{MEMORY_DATA_RETENTION_BATCH_SIZE:'5001'},{MEMORY_DATA_RETENTION_MODE:'shadow'},{MEMORY_DATA_RETENTION_INTERVAL_MS:'0'}] as Array<Record<string,string>>))expect(()=>loadMemoryConfig(baseEnv(overrides))).toThrow(/MEMORY_(DATA|SOURCE)/)
+  })
+  test('inbox retention defaults to 7/14 days and validates staged, bounded settings', () => {
+    expect(loadMemoryConfig(baseEnv()).inboxRetention).toEqual({
+      mode: 'enabled', bodyDays: 7, metadataDays: 14, batchSize: 500, intervalMs: 60_000,
+    })
+    expect(loadMemoryConfig(baseEnv({ MEMORY_INBOX_RETENTION_MODE: 'off' })).inboxRetention?.mode).toBe('off')
+    const invalidSettings: Array<Record<string, string>> = [
+      { MEMORY_INBOX_BODY_RETENTION_DAYS: '0' },
+      { MEMORY_INBOX_METADATA_RETENTION_DAYS: '7' },
+      { MEMORY_INBOX_BODY_RETENTION_DAYS: '15' },
+      { MEMORY_INBOX_RETENTION_BATCH_SIZE: '5001' },
+      { MEMORY_INBOX_RETENTION_INTERVAL_MS: '0' },
+      { MEMORY_INBOX_RETENTION_MODE: 'shadow' },
+    ]
+    for (const overrides of invalidSettings) expect(() => loadMemoryConfig(baseEnv(overrides))).toThrow(/MEMORY_INBOX/)
+  })
   test('delegated publishing has a distinct switch, defaulting off',()=>{
     expect(loadMemoryConfig(baseEnv()).delegatedPublishMode).toBe('off')
     expect(loadMemoryConfig(baseEnv({MEMORY_REVIEW_AUTOMATION_MODE:'assist'})).delegatedPublishMode).toBe('off')

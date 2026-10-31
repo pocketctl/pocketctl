@@ -1,3 +1,4 @@
+import { expireCandidateIfDue } from './candidate-expiry.js'
 import {candidateReviewHash} from './review-hash.js'
 import {normalizeFeedbackReason} from './feedback-policy.js'
 export {normalizeFeedbackReason} from './feedback-policy.js'
@@ -30,6 +31,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 export type LedgerError =
   | { code: 'candidate_not_found' }
   | { code: 'candidate_not_reviewable' }
+  | { code: 'candidate_expired' }
   | { code: 'candidate_evidence_stale' }
   | { code: 'source_discovery_changed' }
   | { code: 'tombstoned_identity' }
@@ -140,6 +142,10 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             await client.query('ROLLBACK')
             return {ok:false,error:{code:'source_discovery_changed'}}
           }
+          if (row.status === 'expired' || await expireCandidateIfDue(client, input.installationId, input.candidateId)) {
+            await client.query('COMMIT')
+            return { ok: false, error: { code: 'candidate_expired' } }
+          }
           if(input.expectedHash!==undefined&&candidateReviewHash(row as unknown as Record<string,unknown>)!==input.expectedHash){await client.query('ROLLBACK');return {ok:false,error:{code:'revision_conflict',currentRevision:Number(row.revision),state:row.status}}}
           if (row.status !== 'validated' && row.status !== 'conflict') {
             await client.query('ROLLBACK')
@@ -236,7 +242,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             WHERE installation_id = $1 AND claim_id = $3
           `, [input.installationId, versionId, claimId])
           await client.query(`
-            UPDATE memory_candidates SET status = 'accepted', reviewed_at = NOW(), revision = revision + 1
+            UPDATE memory_candidates SET status = 'accepted', reviewed_at = clock_timestamp(), revision = revision + 1
             WHERE installation_id = $1 AND candidate_id = $2
           `, [input.installationId, input.candidateId])
           await client.query(`
@@ -259,6 +265,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           }
         } catch (error) {
           await client.query('ROLLBACK')
+          if ((error as { code?: string })?.code === 'PCE01') return { ok: false, error: { code: 'candidate_expired' } }
           if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
           if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
           throw error
@@ -292,6 +299,10 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_not_found' } }
           }
+          if (row.status === 'expired' || await expireCandidateIfDue(client, input.installationId, input.candidateId)) {
+            await client.query('COMMIT')
+            return { ok: false, error: { code: 'candidate_expired' } }
+          }
           if(input.expectedHash!==undefined&&candidateReviewHash(row.candidate)!==input.expectedHash){await client.query('ROLLBACK');return {ok:false,error:{code:'revision_conflict',currentRevision:Number(row.revision),state:row.status}}}
           if (row.status !== 'validated' && row.status !== 'conflict') {
             await client.query('ROLLBACK')
@@ -302,7 +313,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             return { ok: false, error: { code: 'revision_conflict', currentRevision: Number(row.revision), state: row.status } }
           }
           await client.query(`
-            UPDATE memory_candidates SET status = 'rejected', reviewed_at = NOW(), revision = revision + 1
+            UPDATE memory_candidates SET status = 'rejected', reviewed_at = clock_timestamp(), revision = revision + 1
             WHERE installation_id = $1 AND candidate_id = $2
           `, [input.installationId, input.candidateId])
           await client.query(`
@@ -313,6 +324,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           return { ok: true }
         } catch (error) {
           await client.query('ROLLBACK')
+          if ((error as { code?: string })?.code === 'PCE01') return { ok: false, error: { code: 'candidate_expired' } }
           if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
           if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
           throw error

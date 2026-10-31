@@ -33,6 +33,8 @@
             {{ upgrading === agent.raw ? t('common.processing') : t('settings.upgrade_btn') }}
           </button>
           <span v-else class="mobile-agent-current">✓ {{ t('settings.installed') }}</span>
+          <ZcodeQuota v-if="agent.raw==='zcode'" :daemon-id="daemon.daemon_id" :hostname="displayName" :daemon-online="daemon.daemon_online" variant="agent" style="flex-basis:100%" />
+          <CodexQuota v-if="agent.raw==='codex'" :daemon-id="daemon.daemon_id" :hostname="displayName" :daemon-online="daemon.daemon_online" variant="agent" style="flex-basis:100%" />
         </article>
       </div>
       <div v-else class="mobile-agent-empty">{{ t('hosts.agent_none') }}</div>
@@ -45,6 +47,8 @@ import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { agentDisplayName, agentShortLabel } from '../../utils/agentDisplay'
 import { isReadOnlyObserverAgent } from '../../utils/observerSession'
+import CodexQuota from '../session/CodexQuota.vue'
+import ZcodeQuota from '../session/ZcodeQuota.vue'
 
 const props = defineProps<{
   daemon: any
@@ -76,6 +80,7 @@ const agents = computed(() => (Array.isArray(props.daemon.agents) ? props.daemon
 </script>
 
 <style scoped>
+.mobile-agent-card:has(.zcode-quota, .codex-quota-entry){flex-wrap:wrap}
 .mobile-agent-manager { display: none; }
 @media (max-width: 768px) {
   .mobile-agent-manager {

@@ -87,6 +87,26 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
     ]))
   })
 
+  test('v70 preserves legacy inbox bodies and does not infer ACK from last_ack_at', async () => {
+    await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public')
+    for (const migration of MEMORY_MIGRATIONS.filter(entry => entry.version <= 69)) {
+      for (const statement of migration.statements) await pool.query(statement)
+      await pool.query('INSERT INTO memory_schema_migrations(version) VALUES($1)', [migration.version])
+    }
+    const installationId = '70707070-7070-4070-8070-707070707070'
+    await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version,last_ack_at)
+      VALUES($1,'pocketctl-memory','active','ready',1,NOW())`, [installationId])
+    await pool.query(`INSERT INTO memory_feed_inbox(installation_id,feed_id,envelope_version,topic,source_kind,source_id,
+      event_type,recorded_at,data,payload_hash,projection_state,projected_at)
+      VALUES($1,1,1,'session.event.v1','canonical_event','legacy','agent_text',NOW(),'{"text":"legacy"}',decode('aa','hex'),'projected',NOW()-INTERVAL '20 days')`, [installationId])
+    await applyMemorySchema(pool)
+    await applyMemorySchema(pool)
+    expect((await pool.query('SELECT data,body_reclaimed_at FROM memory_feed_inbox')).rows)
+      .toEqual([{ data: { text: 'legacy' }, body_reclaimed_at: null }])
+    expect((await pool.query('SELECT * FROM memory_inbox_checkpoints')).rows).toEqual([])
+    expect((await pool.query(`SELECT indisvalid FROM pg_index WHERE indexrelid='idx_memory_inbox_body_retention'::regclass`)).rows[0].indisvalid).toBe(true)
+  })
+
   test('v48 converts existing accepted personal evidence into independent capsules in place', async () => {
     await pool.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`)
     for (const migration of MEMORY_MIGRATIONS.filter(entry => entry.version <= 47)) {

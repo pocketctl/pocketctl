@@ -13,6 +13,19 @@ export async function initSessionLifecycleSchema(
       CHECK (content_state IN ('hot','cooling','cold','mixed','deleting','deleted'));
     ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cooling_operation_id UUID;
 
+    CREATE TABLE IF NOT EXISTS session_lifecycle_daily_runs (
+      policy_version TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('archive','purge')),
+      scheduled_at TIMESTAMPTZ NOT NULL,
+      after_row_id BIGINT NOT NULL DEFAULT 0,
+      scan_complete BOOLEAN NOT NULL DEFAULT false,
+      completed_at TIMESTAMPTZ,
+      lease_token UUID,
+      lease_until TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(policy_version,action,scheduled_at),
+      CHECK((lease_token IS NULL)=(lease_until IS NULL))
+    );
     CREATE TABLE IF NOT EXISTS session_lifecycle_scan_state (
       policy_version TEXT PRIMARY KEY,
       after_row_id BIGINT NOT NULL DEFAULT 0 CHECK (after_row_id >= 0),
@@ -42,6 +55,15 @@ export async function initSessionLifecycleSchema(
       UNIQUE (user_id, session_id, action, activity_epoch, policy_version),
       CHECK ((state = 'running' AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_until IS NOT NULL)
         OR (state <> 'running' AND lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL))
+    );
+    CREATE TABLE IF NOT EXISTS session_lifecycle_stale_audit (
+      operation_id UUID PRIMARY KEY REFERENCES session_lifecycle_jobs(operation_id) ON DELETE CASCADE,
+      session_id VARCHAR(128) NOT NULL,
+      stable_since TIMESTAMPTZ NOT NULL,
+      pending_effects INT NOT NULL,
+      pending_inbox INT NOT NULL,
+      previous_states JSONB NOT NULL,
+      recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_lifecycle_jobs_claim
       ON session_lifecycle_jobs(next_attempt_at, created_at, operation_id)
@@ -140,6 +162,16 @@ export async function initSessionLifecycleSchema(
     ALTER TABLE session_archive_manifests ADD COLUMN IF NOT EXISTS storage_namespace TEXT;
     ALTER TABLE session_archive_manifests ADD COLUMN IF NOT EXISTS operation_id UUID;
     ALTER TABLE session_archive_manifests ADD COLUMN IF NOT EXISTS upload_deadline TIMESTAMPTZ;
+    -- Predicates match the per-member latest timestamp and pending probes.
+    CREATE INDEX IF NOT EXISTS idx_events_lifecycle_activity
+      ON events(session_id,created_at DESC) WHERE event_type NOT IN
+        ('session_discovered','session_status','session_meta','command_list','subagent_discovered');
+    CREATE INDEX IF NOT EXISTS idx_events_lifecycle_pending
+      ON events(session_id) WHERE effect_status='pending';
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_lifecycle_activity
+      ON event_inbox(session_id,received_at DESC) WHERE event_type NOT IN
+        ('session_discovered','session_status','session_meta','command_list','subagent_discovered')
+        AND payload->>'resync' IS DISTINCT FROM 'true';
     CREATE INDEX IF NOT EXISTS idx_sessions_lifecycle_root ON sessions(root_session_id);
     CREATE INDEX IF NOT EXISTS idx_subagents_lifecycle_agent ON subagents(agent_id);
   `)

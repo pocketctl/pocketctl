@@ -38,7 +38,8 @@ export class LifecycleScanProgress {
     const result = await this.db.query(`SELECT EXTRACT(EPOCH FROM (LEAST(
       (SELECT GREATEST(next_scan_at,COALESCE(lease_until,NOW())) FROM session_lifecycle_scan_state WHERE policy_version=$1),
       (SELECT min(CASE WHEN state='running' THEN lease_until ELSE next_attempt_at END)
-        FROM session_lifecycle_jobs WHERE policy_version=$1 AND state IN ('queued','failed','partial','running'))
+        FROM session_lifecycle_jobs WHERE policy_version=$1 AND state IN ('queued','failed','partial','running')
+          AND NOT EXISTS(SELECT 1 FROM session_lifecycle_deletions d WHERE d.operation_id=session_lifecycle_jobs.operation_id))
       )-NOW()))*1000 AS delay_ms`, [policyVersion])
     const delay = result.rows[0]?.delay_ms
     return Math.min(sweepIntervalMs, Math.max(minimumMs, delay === null ? sweepIntervalMs : Number(delay)))

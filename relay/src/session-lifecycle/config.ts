@@ -3,9 +3,9 @@ import type { SessionLifecycleConfig } from './types.js'
 import { loadSessionLifecycleRelease } from './release.js'
 
 const POLICY = {
-  version: 'session-lifecycle-v1',
-  archiveDays: 60,
-  purgeDays: 90,
+  version: 'session-lifecycle-v2',
+  archiveDays: 30,
+  purgeDays: 60,
   notificationRetentionDays: 90,
 }
 

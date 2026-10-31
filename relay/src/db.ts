@@ -2080,7 +2080,7 @@ export async function persistEventWithEffect(
         inserted,
         // `none` marks rows created before/without durable effects and must not
         // replay historical side effects after this migration.
-        completed: row.effect_status === 'completed' || row.effect_status === 'none',
+        completed: ['completed', 'none', 'abandoned'].includes(row.effect_status),
         nextStep: Number(row.effect_step) || 0,
       };
     } catch (e) {
@@ -2124,7 +2124,7 @@ export async function persistReplayContentBatch(client: Pick<pg.PoolClient, 'que
     const row = indexed.get(item.event_hash);
     // An older pending ledger can have unfinished effects even when today's
     // duplicate payload omits them. Roll back and run the original effect path.
-    if (!row || !['completed', 'none'].includes(row.effect_status) || Number(row.user_id) !== item.user_id) {
+    if (!row || !['completed', 'none', 'abandoned'].includes(row.effect_status) || Number(row.user_id) !== item.user_id) {
       throw new Error('replay content batch requires ordinary materialization');
     }
     return { rowID: Number(row.id), inserted: row.inserted === true || row.inserted === 't', completed: true, nextStep: Number(row.effect_step) || 0 };
@@ -2132,7 +2132,7 @@ export async function persistReplayContentBatch(client: Pick<pg.PoolClient, 'que
 }
 
 export async function completeEventEffect(pool: pg.Pool, eventID: number): Promise<void> {
-  await pool.query(`UPDATE events SET effect_status = 'completed' WHERE id = $1`, [eventID]);
+  await pool.query(`UPDATE events SET effect_status = 'completed' WHERE id = $1 AND effect_status <> 'abandoned'`, [eventID]);
 }
 
 /**
@@ -2167,7 +2167,7 @@ export async function getEventEffectState(
   const row = result.rows[0];
   if (!row) return null;
   return {
-    completed: row.effect_status === 'completed' || row.effect_status === 'none',
+    completed: ['completed', 'none', 'abandoned'].includes(row.effect_status),
     nextStep: Number(row.effect_step) || 0,
   };
 }

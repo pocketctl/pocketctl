@@ -1,8 +1,10 @@
+import {assertMigrationOpen} from '../../retention/transaction.js'
 import type pg from 'pg'
 import {decodeMigrationBaseline} from './baseline-snapshot.js'
 import {migrationTransaction,captureMigrationBaseline,type MigrationBaseline} from './backfill.js'
 export interface MigrationValidation {invariants:{number:number;name:string;passed:boolean}[];counts:{updated:number;unchanged:number;quarantined:number;retry:number};violations:string[]}
 export async function validateGovernanceMigration(pool:pg.Pool,runId:string):Promise<MigrationValidation>{return migrationTransaction(pool,async c=>{
+ await assertMigrationOpen(c,runId)
  const run=(await c.query('SELECT manifest FROM memory_governance_migration_runs WHERE run_id=$1',[runId])).rows[0];if(!run)throw new Error('migration_run_missing')
  const before=decodeMigrationBaseline(run.manifest),after=await captureMigrationBaseline(c,before.installationIds)
  const immutable=['knowledge_versions','knowledge_evidence','knowledge_evidence_capsules','memory_promotion_candidate_versions','memory_promotion_evidence','memory_authority_records','memory_review_policy_versions','memory_review_decisions','memory_review_automation_policies','memory_review_automation_runs','memory_review_automation_decisions']

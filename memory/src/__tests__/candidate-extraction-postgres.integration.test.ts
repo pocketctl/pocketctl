@@ -303,6 +303,24 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
     expect(runs.rows[0].count).toBe(2)
   })
 
+  test.each([false, true])('pending dedup only considers candidates still inside their TTL (expired=%s)', async expired => {
+    const extractor = (fingerprint: string) => createCandidateExtractor({ store,
+      textGenerator: { generateJson: generator([okResult(validOutput())]) as never },
+      provider: 'openai-compatible', model: 'extractor-small', modelConfigFingerprint: fingerprint,
+      timeoutMs: 5_000, deduper: createCandidateDeduper(pool),
+    })
+    await extractor('ttl-provider-a').extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })
+    if (expired) await pool.query("UPDATE memory_candidates SET created_at=clock_timestamp()-INTERVAL '336 hours'")
+    await extractor('ttl-provider-b').extract({
+      installationId: INSTALLATION, turnId: 'turn-1', signal: new AbortController().signal,
+    })
+    const counts = (await pool.query(`SELECT count(*) FILTER(WHERE status='validated')::int validated,
+      count(*) FILTER(WHERE status='duplicate')::int duplicate FROM memory_candidates`)).rows[0]
+    expect(counts).toEqual(expired ? { validated: 4, duplicate: 0 } : { validated: 2, duplicate: 2 })
+  })
+
   test('concurrent extractors race to exactly one model call', async () => {
     const fn = generator([okResult(validOutput())])
     const extractor = extractorWith(fn)

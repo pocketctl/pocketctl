@@ -13,6 +13,9 @@
     "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
     "eval": "tsx src/eval/run.ts",
+    "retention:plan": "tsx src/retention/cli.ts plan",
+    "retention:apply": "tsx src/retention/cli.ts apply",
+    "retention:report": "tsx src/retention/cli.ts report",
     "migration:plan": "tsx src/migrations/governance-v2/cli.ts plan"
   },
   "dependencies": {

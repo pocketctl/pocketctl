@@ -40,6 +40,16 @@ export function createMemoryMetrics() {
     registers: [registry],
   })
 
+  const dataRetentionSkips = new Counter({name:'pocketctl_memory_data_retention_skips_total',help:'Rechecks skipped under lifecycle locks',labelNames:['reason'] as const,registers:[registry]})
+  const dataRetentionRows = new Counter({name:'pocketctl_memory_data_retention_rows_total',
+    help:'Committed source and migration detail reclamation; not filesystem bytes freed',labelNames:['action'] as const,registers:[registry]})
+  const inboxRetentionRows = new Counter({
+    name: 'pocketctl_memory_inbox_retention_rows_total',
+    help: 'Committed inbox bodies reclaimed and metadata receipts deleted; not filesystem bytes freed',
+    labelNames: ['action'] as const,
+    registers: [registry],
+  })
+
   const feedPulls = new Counter({
     name: 'pocketctl_memory_feed_pulls_total',
     help: 'Relay feed pulls by result',
@@ -127,6 +137,9 @@ export function createMemoryMetrics() {
     registry,
     businessAlerts, evidenceGaps, extractionOutcomes, budgetUncertainty,
     installations,
+    dataRetentionSkips,
+    dataRetentionRows,
+    inboxRetentionRows,
     feedPulls,
     feedAcks,
     feedLag,
@@ -373,7 +386,7 @@ const EXTRACTION_MODES = new Set(['shadow', 'enabled'])
 const TOKEN_DIRECTIONS = new Set(['input', 'output'])
 const CANDIDATE_STATUSES = new Set([
   'shadow', 'validated', 'duplicate', 'conflict',
-  'rejected_by_validator', 'rejected', 'accepted',
+  'rejected_by_validator', 'rejected', 'accepted', 'expired',
 ])
 const REVIEW_DECISIONS = new Set([
   'accepted_as_is', 'light_edit', 'major_edit', 'rejected',

@@ -187,7 +187,19 @@ export class AttentionNotificationRepository {
       }
     if (previous?.expired && previous.notification_id)
       throw new Error('lifecycle notification expired')
-    const id = previous?.notification_id ?? input.notificationId
+    let id = previous?.notification_id ?? input.notificationId
+    let dailyCreated = false
+    // One cross-host, cross-action maintenance message per user/Shanghai day.
+    // Compensation always updates the original operation's message.
+    if (!previous && input.action !== 'resume') {
+      const daily = (await db.query(`INSERT INTO attention_notifications(notification_id,user_id,expires_at,maintenance_day,completed_at)
+        VALUES($1,$2,NOW()+($3::int*interval '1 day'),(NOW() AT TIME ZONE 'Asia/Shanghai')::date,CASE WHEN $4='running' THEN NULL ELSE NOW() END)
+        ON CONFLICT(user_id,maintenance_day) WHERE maintenance_day IS NOT NULL
+        DO UPDATE SET maintenance_day=EXCLUDED.maintenance_day RETURNING notification_id,(xmax=0) AS newly_created`,
+        [id,input.userId,input.retentionDays,input.state])).rows[0]
+      id = daily.notification_id
+      dailyCreated = daily.newly_created
+    }
     const title = input.titleSnapshot.trim().slice(0, 512) || '未命名会话'
     const daemonName = input.daemonNameSnapshot.trim().slice(0, 255) || '主机'
     await db.query(
@@ -235,7 +247,7 @@ export class AttentionNotificationRepository {
       [randomUUID(), id, input.operationId],
     )
     let revision = Number(notification.revision)
-    if (!inserted.rows[0]) {
+    if (!inserted.rows[0] && !dailyCreated) {
       revision = Number(
         (
           await db.query(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math"
 	"sort"
@@ -13,17 +14,29 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
-// Deliberately excludes raw account IDs, credit balances, upsell and auth data.
+// Account usage is private transient metadata, never conversation history.
 type CodexQuotaSnapshot struct {
-	Kind       string             `json:"kind"`
-	ScopeID    string             `json:"scope_id"`
-	ObservedAt string             `json:"observed_at"`
-	Exhausted  bool               `json:"exhausted"`
-	Buckets    []CodexQuotaBucket `json:"buckets"`
+	Kind         string             `json:"kind"`
+	ScopeID      string             `json:"scope_id"`
+	ObservedAt   string             `json:"observed_at"`
+	Status       string             `json:"status"`
+	PlanType     string             `json:"plan_type"`
+	Exhausted    bool               `json:"exhausted"`
+	Buckets      []CodexQuotaBucket `json:"buckets"`
+	ResetCredits *CodexResetCredits `json:"reset_credits"`
+	UsageNotice  *CodexQuotaWindow  `json:"usage_notice"`
+}
+type CodexResetCredits struct {
+	AvailableCount int64              `json:"available_count"`
+	Credits        []CodexResetCredit `json:"credits"`
+}
+type CodexResetCredit struct {
+	ExpiresAt *int64 `json:"expires_at"`
 }
 type CodexQuotaBucket struct {
 	ID        string             `json:"id"`
 	Name      string             `json:"name"`
+	PlanType  string             `json:"plan_type"`
 	Exhausted bool               `json:"exhausted"`
 	Windows   []CodexQuotaWindow `json:"windows"`
 }
@@ -38,15 +51,23 @@ type codexNativeQuotaWindow struct {
 	ResetsAt           *int64   `json:"resetsAt"`
 }
 type codexNativeQuotaBucket struct {
-	LimitID             string                  `json:"limitId"`
-	LimitName           string                  `json:"limitName"`
-	Primary             *codexNativeQuotaWindow `json:"primary"`
-	Secondary           *codexNativeQuotaWindow `json:"secondary"`
-	SpendControlReached *bool                   `json:"spendControlReached"`
+	LimitID              string                  `json:"limitId"`
+	LimitName            string                  `json:"limitName"`
+	PlanType             string                  `json:"planType"`
+	Primary              *codexNativeQuotaWindow `json:"primary"`
+	Secondary            *codexNativeQuotaWindow `json:"secondary"`
+	SpendControlReached  *bool                   `json:"spendControlReached"`
+	RateLimitReachedType string                  `json:"rateLimitReachedType"`
+	Credits              *struct {
+		HasCredits bool `json:"hasCredits"`
+		Unlimited  bool `json:"unlimited"`
+	} `json:"credits"`
+}
+type codexQuotaCaller interface {
+	Call(context.Context, string, any, any) error
 }
 
-// A read never resumes a thread, configures skills or starts a turn. Terminal and
-// project managed sessions both use their actual coordinator's authenticated RPC.
+// Reads the actual session runtime, without resuming a thread or starting a turn.
 func (sm *SessionManager) ReadCodexRateLimits(ctx context.Context, id string) (*CodexQuotaSnapshot, error) {
 	sm.mu.RLock()
 	ps := sm.sessions[id]
@@ -60,31 +81,93 @@ func (sm *SessionManager) ReadCodexRateLimits(ctx context.Context, id string) (*
 	}
 	client, generation, ok := b.coord.backendClient()
 	if !ok {
-		return nil, errors.New("Codex runtime disconnected")
+		return nil, errors.New("quota_unavailable")
 	}
 	revision := b.coord.quotaRevision.Load()
+	result, err := readCodexQuota(ctx, client, b.coord.codexHomeID)
+	if err != nil {
+		return nil, err
+	}
+	sm.mu.RLock()
+	current := sm.sessions[id]
+	same := current != nil && current.Backend == b
+	sm.mu.RUnlock()
+	_, nextGeneration, currentOK := b.coord.backendClient()
+	if !same || !currentOK || nextGeneration != generation || revision != b.coord.quotaRevision.Load() {
+		return nil, errors.New("quota_account_changed")
+	}
+	return result, nil
+}
+
+func quotaPlan(value string) string {
+	switch value {
+	case "free", "go", "plus", "pro", "prolite", "promax", "team", "self_serve_business_prolite", "self_serve_business_usage_based", "business", "ent26", "enterprise_cbp_automation", "enterprise_cbp_usage_based", "enterprise", "edu", "edu_plus", "edu_pro", "sci", "sci_plus":
+		return value
+	default:
+		return "unknown"
+	}
+}
+func quotaTimestamp(value *int64) *int64 {
+	if value != nil && (*value <= 0 || *value > 253402300799) {
+		return nil
+	}
+	return value
+}
+func readCodexQuota(ctx context.Context, client codexQuotaCaller, homeID string) (*CodexQuotaSnapshot, error) {
+	var before struct {
+		Account json.RawMessage `json:"account"`
+	}
+	if err := client.Call(ctx, "account/read", map[string]any{"refreshToken": false}, &before); err != nil {
+		return nil, errors.New("quota_unavailable")
+	}
+	var account struct {
+		Type     string `json:"type"`
+		PlanType string `json:"planType"`
+	}
+	_ = json.Unmarshal(before.Account, &account)
+	scope := sha256.Sum256(append([]byte(homeID+"\x00"), before.Account...))
+	result := &CodexQuotaSnapshot{Kind: "codex_rate_limits", ScopeID: hex.EncodeToString(scope[:16]), ObservedAt: time.Now().UTC().Format(time.RFC3339), Status: "ok", PlanType: quotaPlan(account.PlanType), Buckets: []CodexQuotaBucket{}}
+	if string(before.Account) == "null" {
+		result.Status = "unauthenticated"
+		return result, nil
+	}
+	if account.Type != "" && account.Type != "chatgpt" {
+		result.Status = "unsupported"
+		return result, nil
+	}
 	var raw struct {
 		AccountID            string                            `json:"accountId"`
 		OrdinaryUsageAllowed *bool                             `json:"ordinaryUsageAllowed"`
 		RateLimits           codexNativeQuotaBucket            `json:"rateLimits"`
 		RateLimitsByLimitID  map[string]codexNativeQuotaBucket `json:"rateLimitsByLimitId"`
+		ResetCredits         *struct {
+			AvailableCount *int64 `json:"availableCount"`
+			Credits        *[]struct {
+				ID        string `json:"id"`
+				ResetType string `json:"resetType"`
+				Status    string `json:"status"`
+				ExpiresAt *int64 `json:"expiresAt"`
+			} `json:"credits"`
+		} `json:"rateLimitResetCredits"`
 	}
 	if err := client.Call(ctx, "account/rateLimits/read", map[string]any{}, &raw); err != nil {
-		return nil, errors.New("Codex quota unavailable")
+		return nil, errors.New("quota_unavailable")
 	}
-	sm.mu.RLock()
-	current := sm.sessions[id]
-	sameBackend := current != nil && current.Backend == b
-	sm.mu.RUnlock()
-	if !sameBackend {
-		return nil, errors.New("Codex session runtime changed; refresh required")
+	var after struct {
+		Account json.RawMessage `json:"account"`
 	}
-	_, currentGeneration, currentOK := b.coord.backendClient()
-	if !currentOK || currentGeneration != generation || revision != b.coord.quotaRevision.Load() {
-		return nil, errors.New("Codex account or quota changed; refresh required")
+	if err := client.Call(ctx, "account/read", map[string]any{"refreshToken": false}, &after); err != nil {
+		return nil, errors.New("quota_unavailable")
 	}
-	scope := sha256.Sum256([]byte(b.coord.codexHomeID + "\x00" + raw.AccountID))
-	result := &CodexQuotaSnapshot{Kind: "codex_rate_limits", ScopeID: hex.EncodeToString(scope[:16]), ObservedAt: time.Now().UTC().Format(time.RFC3339), Exhausted: raw.OrdinaryUsageAllowed != nil && !*raw.OrdinaryUsageAllowed, Buckets: []CodexQuotaBucket{}}
+	if string(before.Account) != string(after.Account) {
+		return nil, errors.New("quota_account_changed")
+	}
+	scope = sha256.Sum256([]byte(homeID + "\x00" + raw.AccountID + "\x00" + string(before.Account)))
+	result.ScopeID = hex.EncodeToString(scope[:16])
+	result.Exhausted = raw.OrdinaryUsageAllowed != nil && !*raw.OrdinaryUsageAllowed
+	if plan := quotaPlan(raw.RateLimits.PlanType); plan != "unknown" {
+		result.PlanType = plan
+	}
 	buckets := raw.RateLimitsByLimitID
 	if len(buckets) == 0 {
 		id := raw.RateLimits.LimitID
@@ -103,7 +186,10 @@ func (sm *SessionManager) ReadCodexRateLimits(ctx context.Context, id string) (*
 			break
 		}
 		native := buckets[key]
-		bucket := CodexQuotaBucket{ID: key, Name: native.LimitName, Exhausted: native.SpendControlReached != nil && *native.SpendControlReached, Windows: []CodexQuotaWindow{}}
+		if result.PlanType == "unknown" && key == "codex" {
+			result.PlanType = quotaPlan(native.PlanType)
+		}
+		bucket := CodexQuotaBucket{ID: key, Name: native.LimitName, PlanType: quotaPlan(native.PlanType), Exhausted: native.SpendControlReached != nil && *native.SpendControlReached || native.RateLimitReachedType != "", Windows: []CodexQuotaWindow{}}
 		if len(bucket.ID) > 128 || len(bucket.Name) > 256 {
 			continue
 		}
@@ -114,16 +200,76 @@ func (sm *SessionManager) ReadCodexRateLimits(ctx context.Context, id string) (*
 			if w.WindowDurationMins != nil && *w.WindowDurationMins <= 0 {
 				w.WindowDurationMins = nil
 			}
-			if w.ResetsAt != nil && (*w.ResetsAt <= 0 || *w.ResetsAt > 253402300799) {
-				w.ResetsAt = nil
-			}
-			bucket.Windows = append(bucket.Windows, CodexQuotaWindow{100 - *w.UsedPercent, w.WindowDurationMins, w.ResetsAt})
+			bucket.Windows = append(bucket.Windows, CodexQuotaWindow{100 - *w.UsedPercent, w.WindowDurationMins, quotaTimestamp(w.ResetsAt)})
 		}
 		if len(bucket.Windows) > 0 || bucket.Exhausted {
 			result.Buckets = append(result.Buckets, bucket)
 		}
 	}
+	if r := raw.ResetCredits; r != nil && r.AvailableCount != nil && *r.AvailableCount >= 0 && *r.AvailableCount <= 1000000 {
+		result.ResetCredits = &CodexResetCredits{AvailableCount: *r.AvailableCount}
+		if r.Credits != nil {
+			result.ResetCredits.Credits = []CodexResetCredit{}
+			seen := map[string]bool{}
+			for _, c := range *r.Credits {
+				if len(result.ResetCredits.Credits) >= 64 || int64(len(result.ResetCredits.Credits)) >= *r.AvailableCount {
+					break
+				}
+				if c.ID == "" || len(c.ID) > 256 || seen[c.ID] || c.Status != "available" || c.ResetType != "codexRateLimits" {
+					continue
+				}
+				seen[c.ID] = true
+				if c.ExpiresAt != nil && quotaTimestamp(c.ExpiresAt) == nil {
+					continue
+				}
+				result.ResetCredits.Credits = append(result.ResetCredits.Credits, CodexResetCredit{ExpiresAt: c.ExpiresAt})
+			}
+		}
+	}
+	// The CLI's persistent usage notice is derived locally, not emitted as an
+	// app-server notification. Match rust-v0.166.0 usage_notice.rs, using only
+	// the ordinary Codex bucket (never an additional model's quota).
+	noticeBucket := raw.RateLimits
+	if main, ok := raw.RateLimitsByLimitID["codex"]; ok {
+		noticeBucket = main
+	}
+	if !result.Exhausted {
+		result.UsageNotice = codexCLIUsageNotice(noticeBucket, result.PlanType)
+	}
 	return result, nil
+}
+
+func codexCLIUsageNotice(bucket codexNativeQuotaBucket, accountPlan string) *CodexQuotaWindow {
+	if bucket.LimitID != "" && bucket.LimitID != "codex" || bucket.RateLimitReachedType != "" || bucket.SpendControlReached != nil && *bucket.SpendControlReached || bucket.Credits != nil && (bucket.Credits.HasCredits || bucket.Credits.Unlimited) {
+		return nil
+	}
+	plan := quotaPlan(bucket.PlanType)
+	if plan == "unknown" {
+		plan = accountPlan
+	}
+	var selected *CodexQuotaWindow
+	// CLI gives primary precedence for equal usage.
+	for _, window := range []*codexNativeQuotaWindow{bucket.Primary, bucket.Secondary} {
+		if window == nil || window.UsedPercent == nil || math.IsNaN(*window.UsedPercent) || math.IsInf(*window.UsedPercent, 0) || *window.UsedPercent < 0 || *window.UsedPercent > 100 {
+			continue
+		}
+		threshold := 75.0
+		if (plan == "plus" || plan == "team") && window.WindowDurationMins != nil && *window.WindowDurationMins >= 285 && *window.WindowDurationMins <= 315 {
+			threshold = 50
+		}
+		if *window.UsedPercent < threshold {
+			continue
+		}
+		remaining := 100 - *window.UsedPercent
+		if selected == nil || remaining < selected.RemainingPercent {
+			duration := window.WindowDurationMins
+			if duration != nil && *duration <= 0 {
+				duration = nil
+			}
+			selected = &CodexQuotaWindow{remaining, duration, quotaTimestamp(window.ResetsAt)}
+		}
+	}
+	return selected
 }
 
 // Sparse native updates invalidate rather than overwrite a complete read. No
@@ -134,6 +280,10 @@ func (c *codexCoordinator) invalidateQuota(accountChanged bool) {
 		return
 	}
 	c.sm.mu.RLock()
+	select {
+	case c.sm.outputCh <- protocol.DaemonEvent{Type: "codex_rate_limits_changed", CodexHomeID: c.codexHomeID, Resync: accountChanged}:
+	default:
+	}
 	ids := []string{}
 	for id, ps := range c.sm.sessions {
 		if b, ok := ps.Backend.(*CodexAppServerBackend); ok && b.coord == c {

@@ -80,7 +80,7 @@ try {
       if (!present) { fs.chownSync(directory, process.getuid(), group); fs.chmodSync(directory, 0o750) }
       const stat = fs.lstatSync(directory)
       if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o022)) throw new Error('invalid_release_directory')
-      const draft = { schemaVersion: 1, policyVersion: 'session-lifecycle-v1', publishedAt: null,
+      const draft = { schemaVersion: 1, policyVersion: 'session-lifecycle-v2', publishedAt: null,
         effectiveAt: null, transitionDeadline: null, storageNamespace: storage.namespace, evidence: {} }
       atomicWrite(releaseFile, JSON.stringify(draft, null, 2) + '\n', 0o640, process.getuid(), group)
     }

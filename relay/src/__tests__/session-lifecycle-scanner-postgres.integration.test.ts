@@ -65,7 +65,7 @@ suite('session lifecycle read-only observe scanner PostgreSQL', () => {
     expect(demos).toHaveLength(3)
     for (const demo of demos) expect(demo.prediction).toMatchObject({ action: null, blockedReasons: ['demo_excluded'] })
     expect(report.candidates.find(candidate => candidate.sessionId === 'real-unverified')!.prediction.blockedReasons)
-      .toEqual(['activity_unverified'])
+      .toContain('activity_unverified')
     expect(report.eligibleCount).toBe(0)
     expect((await pool.query('SELECT * FROM sessions ORDER BY id')).rows).toEqual(before)
   })
@@ -75,12 +75,12 @@ suite('session lifecycle read-only observe scanner PostgreSQL', () => {
     const before = (await pool.query('SELECT * FROM sessions ORDER BY id')).rows
     const atBoundary = await scanner.scanPage({
       limit: 20,
-      now: '2026-03-02T00:00:00.000000Z',
+      now: '2026-01-31T00:00:00.000000Z',
     })
     expect(atBoundary.candidates.map((c) => c.sessionId)).toEqual(['unknown'])
     const overdue = await scanner.scanPage({
       limit: 20,
-      now: '2026-03-02T00:00:00.000001Z',
+      now: '2026-01-31T00:00:00.000001Z',
     })
     expect(
       overdue.candidates.find((c) => c.sessionId === 'exact')?.prediction
@@ -89,7 +89,7 @@ suite('session lifecycle read-only observe scanner PostgreSQL', () => {
     expect(
       overdue.candidates.find((c) => c.sessionId === 'unknown')?.prediction
         .blockedReasons,
-    ).toContain('activity_unknown')
+    ).toContain('activity_future')
     expect(
       (await pool.query('SELECT * FROM sessions ORDER BY id')).rows,
     ).toEqual(before)

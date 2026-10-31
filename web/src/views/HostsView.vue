@@ -2,7 +2,14 @@
   <div class="page-container design-surface content hosts-page">
     <section v-if="isMobile && route.query.view === 'agents'" class="workspace-agent-list">
       <ActionSelect><select v-model="selectedId" :aria-label="t('token.host')"><option v-for="daemon in daemons" :key="daemon.daemon_id" :value="daemon.daemon_id">{{ daemon.daemon_alias || daemon.hostname || daemon.daemon_id }}</option></select></ActionSelect>
-      <section v-if="selectedDaemon" class="card mobile-agent-installations"><div v-for="agent in agentCards(selectedDaemon)" :key="agentRawName(agent)" class="setting-row"><div class="grow"><AgentBadge :agent="agentRawName(agent)" size="md" /><p>{{ agentVersionLabel(agent) }} · {{ agentMetaLabel(agent) }}</p></div><button class="btn small" :disabled="!selectedDaemon.daemon_online" @click="openMobileAgentManager(selectedDaemon)">{{ t('mobile.host_agent_manage') }}</button></div><div v-if="!agentCards(selectedDaemon).length" class="card-body sub">{{ t('hosts.agent_none') }}</div></section>
+      <section v-if="selectedDaemon" class="card mobile-agent-installations">
+        <div v-for="agent in agentCards(selectedDaemon)" :key="agentRawName(agent)" class="setting-row">
+          <div class="grow"><AgentBadge :agent="agentRawName(agent)" size="md" /><p>{{ agentVersionLabel(agent) }} · {{ agentMetaLabel(agent) }}</p>
+            <ZcodeQuota v-if="agentRawName(agent)==='zcode'" :daemon-id="selectedDaemon.daemon_id" :hostname="selectedDaemon.daemon_alias || selectedDaemon.hostname" :daemon-online="selectedDaemon.daemon_online" variant="agent" />
+            <CodexQuota v-if="agentRawName(agent)==='codex'" :daemon-id="selectedDaemon.daemon_id" :hostname="selectedDaemon.daemon_alias || selectedDaemon.hostname" :daemon-online="selectedDaemon.daemon_online" variant="agent" />
+          </div><button class="btn small" :disabled="!selectedDaemon.daemon_online" @click="openMobileAgentManager(selectedDaemon)">{{ t('mobile.host_agent_manage') }}</button>
+        </div><div v-if="!agentCards(selectedDaemon).length" class="card-body sub">{{ t('hosts.agent_none') }}</div>
+      </section>
       <p v-else class="empty-state">{{ t('hosts.no_match') }}</p>
     </section>
     <div class="mobile-hosts-heading">
@@ -121,6 +128,8 @@
                 <span v-else-if="isReadOnlyObserver(a)" class="ag-readonly">{{ t('hosts.agent_readonly_sync') }}</span>
                 <span v-else-if="!agentManageable(a)" class="ag-sysinstall">{{ t(agentRawName(a) === 'dsh' ? 'hosts.dsh_native_host' : 'hosts.agent_system_install') }}</span>
                 <span v-else-if="isAgentLatest(a)" class="ag-latest">✓ {{ t('settings.installed') }}</span>
+                <ZcodeQuota v-if="agentRawName(a)==='zcode'" :daemon-id="selectedDaemon.daemon_id" :hostname="selectedDaemon.daemon_alias || selectedDaemon.hostname" :daemon-online="selectedDaemon.daemon_online" variant="agent" style="flex-basis:100%" />
+                <CodexQuota v-if="agentRawName(a)==='codex'" :daemon-id="selectedDaemon.daemon_id" :hostname="selectedDaemon.daemon_alias || selectedDaemon.hostname" :daemon-online="selectedDaemon.daemon_online" variant="agent" style="flex-basis:100%" />
               </div>
             </template>
             <div v-else class="agent-card">
@@ -295,6 +304,8 @@ import MobileHostCard from '../components/hosts/MobileHostCard.vue'
 import HostActionsMenu from '../components/hosts/HostActionsMenu.vue'
 import MobileAgentManager from '../components/hosts/MobileAgentManager.vue'
 import AgentBadge from '../components/AgentBadge.vue'
+import CodexQuota from '../components/session/CodexQuota.vue'
+import ZcodeQuota from '../components/session/ZcodeQuota.vue'
 import ActionSelect from '../components/ActionSelect.vue'
 import { getRelayOrigin } from '../composables/useEnv'
 import { formatTokenCount } from '../utils/tokenFormat'
@@ -881,6 +892,7 @@ onUnmounted(() => {
 
 /* Agent Card */
 .agent-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md); margin-bottom: 10px; transition: border-color 0.15s; }
+.agent-card:has(.zcode-quota, .codex-quota-entry){flex-wrap:wrap}
 .agent-card:last-child { margin-bottom: 0; }
 .agent-card .ag-icon { width: 32px; height: 32px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; font-weight: 700; }
 .agent-card .ag-icon.claude { background: rgba(88,166,255,0.15); color: var(--accent); }

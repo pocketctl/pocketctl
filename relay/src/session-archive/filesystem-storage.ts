@@ -62,6 +62,10 @@ export class FilesystemArchiveStorage implements ArchiveStorage {
 
   async put(key: string, bytes: Buffer): Promise<void> {
     assertArchiveObjectKey(key)
+    // Operational one-shot tools must use the same account as the services.
+    // Otherwise private root-owned chunks become unreadable to the Relay.
+    if (typeof process.getuid === 'function' && lstatSync(this.root).uid !== process.getuid())
+      throw new Error('archive writer account mismatch')
     if (!bytes.length || bytes.length > this.maximum) throw new Error('archive object byte limit exceeded')
     const file = await this.file(key, true), temporary = join(dirname(file), `.${basename(file)}.${randomUUID()}.tmp`)
     const space = await statfs(this.root, { bigint: true })

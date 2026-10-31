@@ -41,7 +41,7 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
                c.scope_kind, c.scope_key,
                c.confidence::text, c.freshness_at, c.status, c.revision::text, c.episode_id::text,
                c.repository_id::text, c.repo_snapshot_id::text, c.branch, c.evidence_handles,
-               c.duplicate_of_claim_id::text, c.created_at, c.validation,
+               c.duplicate_of_claim_id::text, c.created_at, c.review_expires_at, c.validation,
                e.document AS episode_document, e.evidence_manifest,
                e.summary->'references'->'source' AS episode_source,
                memory_delivery_source_available(e.summary->'references'->'source') AS source_available
@@ -51,6 +51,7 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
         JOIN memory_extraction_runs r
           ON r.installation_id = c.installation_id AND r.run_id = c.run_id
         WHERE c.installation_id = $1 AND c.status IN ('validated', 'conflict')
+          AND c.review_expires_at>clock_timestamp()
           AND ($3::jsonb IS NULL OR e.summary->'references'->'source' @> $3::jsonb)
           AND r.episode_source_digest = e.source_digest
           AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap

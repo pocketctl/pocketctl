@@ -28,6 +28,17 @@ export async function inventoryMemory(pool:pg.Pool,options:InventoryOptions={}):
    await scalar(key,`SELECT COUNT(*)::bigint AS n FROM ${table}`)
    manifest.tableBytes[table]=Number((await client.query('SELECT pg_total_relation_size($1::regclass)::bigint AS n',[table])).rows[0].n)
   }
+  // Schema 50 inventory stays supported; retention counts only exist at v72.
+  if(manifest.schemaVersion>=72){
+   for(const table of ['source_events','source_artifacts','work_episodes','memory_candidates'])await scalar(`retention.${table}.reclaimed`,
+    `SELECT count(*) AS n FROM ${table} WHERE body_reclaimed_at IS NOT NULL`)
+   await scalar('retention.turns.reclaiming',`SELECT count(*) AS n FROM memory_source_retention_receipts WHERE state='reclaiming'`)
+   await scalar('retention.turns.reclaimed',`SELECT count(*) AS n FROM memory_source_retention_receipts WHERE state='reclaimed'`)
+   await scalar('retention.migrations.stalled',`SELECT count(*) AS n FROM memory_governance_migration_runs WHERE sealed_at IS NULL AND abandoned_at IS NULL AND started_at<CURRENT_TIMESTAMP-INTERVAL '14 days'`)
+   await scalar('retention.episodes.unextractedOverdue',`SELECT count(*) AS n FROM work_episodes e WHERE e.body_reclaimed_at IS NULL
+    AND COALESCE(e.terminal_at,e.updated_at)<CURRENT_TIMESTAMP-INTERVAL '14 days' AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs r
+      WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id AND r.episode_source_digest=e.source_digest AND r.state='succeeded')`)
+  }
   async function rule(key:string,sql:string,kind:string,reason:string,action:MigrationInventoryItem['action'],certainty:FindingCertainty,parameters:unknown[]=[]){
    const n=Number((await client.query(`SELECT COUNT(*)::bigint AS n FROM (${sql}) finding`,parameters)).rows[0].n)
    manifest.counts[key]=n;manifest.findingCounts[certainty]+=n

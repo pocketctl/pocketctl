@@ -27,11 +27,11 @@ export class SessionLifecycleScanner {
     const rows=(await this.db.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND (last_activity_at IS NULL
       OR last_activity_at<$2::timestamptz-($3::int*interval '1 day')) ORDER BY id LIMIT $4`,[input.afterRowId??0,clock,this.config.archiveDays,input.limit+1])).rows
     for(const row of rows.slice(0,input.limit)){
-      const inspection=await inspectLifecycleEligibility(this.db,row.session_id,this.config,{now:clock}),root=inspection.root
+      const inspection=await inspectLifecycleEligibility(this.db,row.session_id,this.config,{now:clock,includeStatistics:true}),root=inspection.root
       if(root&&inspection.members.every(member=>Number(member.id)>=row.id)){
         report.candidates.push({rowId:row.id,sessionId:row.session_id,userId:root.user_id,activityEpoch:root.epoch,
-          dependencyCount:inspection.members.length,eventCount:inspection.eventCount,
-          logicalPayloadBytes:(BigInt(inspection.hotEventBytes)+BigInt(inspection.hotDocumentBytes)).toString(),countsScope:'dependency_component',
+          dependencyCount:inspection.members.length,eventCount:inspection.eventCount!,
+          logicalPayloadBytes:(BigInt(inspection.hotEventBytes!)+BigInt(inspection.hotDocumentBytes!)).toString(),countsScope:'dependency_component',
           projectedAction:inspection.prediction.action,prediction:inspection.prediction})
       }
     }

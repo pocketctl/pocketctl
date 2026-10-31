@@ -7,7 +7,7 @@ import { sessionLifecycleConfig } from '../session-lifecycle/config.js'
 export function releaseFixture(storageNamespace: string, patch: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
-    policyVersion: 'session-lifecycle-v1',
+    policyVersion: 'session-lifecycle-v2',
     publishedAt: '2025-12-01T00:00:00Z',
     effectiveAt: '2026-01-01T00:00:00Z',
     transitionDeadline: '2026-02-01T00:00:00Z',

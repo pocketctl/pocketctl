@@ -73,6 +73,7 @@ export interface LifecycleInput {
   dependencyActivityAt?: (string | null)[]
   status: string | null
   turnActive?: boolean
+  staleSnapshot?: boolean
   archiveReason: 'manual' | 'inactivity' | null
   contentState: ContentState
   historical?: boolean

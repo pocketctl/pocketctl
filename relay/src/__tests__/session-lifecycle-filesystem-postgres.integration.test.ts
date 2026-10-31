@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
-import { initDB, getSessionAllEvents } from '../db.js'
+import { initDB, getSessionAllEvents, advanceSessionActivity } from '../db.js'
 import { lifecycleTestPool } from './session-lifecycle-test-database.js'
 import { releasedConfig } from './session-lifecycle-release-fixture.js'
 import { sessionLifecycleConfig } from '../session-lifecycle/config.js'
@@ -12,6 +12,7 @@ import { SessionLifecycleExecutor } from '../session-lifecycle/executor.js'
 import { enableSessionColdBodies } from '../session-lifecycle/cold-schema.js'
 import { configuredArchiveStorage, installConfiguredHistoryReader } from '../session-history/runtime.js'
 import { withSessionHistoryScope } from '../session-history/postgres-reader.js'
+import { maintenanceSlot } from '../session-lifecycle/schedule.js'
 import type { ArchiveStorage } from '../session-archive/storage.js'
 
 const suite = process.env.RUN_SESSION_LIFECYCLE_POSTGRES === '1' ? describe : describe.skip
@@ -27,13 +28,14 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     storage = configuredArchiveStorage(pool)!
     await pool.query('TRUNCATE users,daemons,sessions,events,subagents,deleted_sessions,extension_source_outbox,extension_feed RESTART IDENTITY CASCADE')
     await pool.query('TRUNCATE session_lifecycle_deletions,extension_session_deletions,session_archive_object_deletions')
-    await pool.query('TRUNCATE session_lifecycle_scan_state')
+    await pool.query('TRUNCATE session_lifecycle_scan_state,session_lifecycle_daily_runs')
     userId = (await pool.query("INSERT INTO users(email,password_hash) VALUES('disk-release@test.invalid','x') RETURNING id")).rows[0].id
     await pool.query("INSERT INTO daemons(daemon_id,user_id,alias) VALUES('host',$1,'Disk fixture host')", [userId])
     await pool.query(`INSERT INTO sessions(session_id,user_id,daemon_id,status,title,last_activity_at,last_business_activity_at,activity_verified)
-      VALUES('root',$1,'host','idle','Production disk fixture',NOW()-interval '70 days',NOW()-interval '70 days',true)`, [userId])
+      VALUES('root',$1,'host','idle','Production disk fixture',NOW()-interval '40 days',NOW()-interval '40 days',true)`, [userId])
     await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status) VALUES
       ('root','user_text','{"text":"exact original 中文"}','completed'),('root','agent_text','{"text":"exact original response"}','completed')`)
+    await pool.query("UPDATE events SET created_at=NOW()-interval '40 days'")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
   })
   afterEach(() => { vi.unstubAllEnvs(); if (directory) rmSync(directory, { recursive: true, force: true }) })
@@ -81,11 +83,37 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     const rows = await withSessionHistoryScope({ userId }, () => getSessionAllEvents(pool, 'root'))
     expect(rows.map(row => row.payload.text)).toEqual(['exact original 中文', 'exact original response'])
   })
+  test('budget-limited cold transfer continues after restart in the same daily batch and notification', async () => {
+    await pool.query("INSERT INTO session_lifecycle_daily_runs(policy_version,action,scheduled_at,completed_at) VALUES('session-lifecycle-v2','purge',$1,NOW())", [maintenanceSlot('purge', new Date())])
+    await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status,created_at)
+      SELECT 'root','agent_text',jsonb_build_object('text',repeat('x',100),'sequence',i),'completed',NOW()-interval '40 days'
+      FROM generate_series(1,100) i`)
+    await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
+    const expected = (await pool.query('SELECT payload FROM events ORDER BY id')).rows.map(r => r.payload)
+    const config = { ...releasedConfig(storage.namespace!, {}, env), batchBytes: 8192, maxChunkBytes: 4096 }
+    expect(await run(config)).toMatchObject({ executed: 1, dailyRunComplete: false })
+    const first = (await pool.query("SELECT count(*)::int n FROM events WHERE body_storage='cold'")).rows[0].n
+    expect(first).toBeGreaterThan(0)
+    expect(first).toBeLessThan(expected.length)
+    expect((await pool.query("SELECT count(*)::int n FROM session_lifecycle_daily_runs WHERE action='archive' AND completed_at IS NULL")).rows[0].n).toBe(1)
+    expect(await run(config)).toMatchObject({ scanned: 0, executed: 0, dailyRunComplete: false })
+    for (let i = 0; i < 10; i++) {
+      await pool.query("UPDATE session_lifecycle_jobs SET next_attempt_at=NOW() WHERE state='partial'")
+      const report = await run(config)
+      if (report.dailyRunComplete) break
+    }
+    expect((await pool.query('SELECT state FROM session_lifecycle_jobs')).rows).toEqual([{ state: 'succeeded' }])
+    expect((await pool.query('SELECT content_state FROM sessions')).rows[0].content_state).toBe('cold')
+    expect((await pool.query('SELECT count(*)::int n FROM attention_notifications')).rows[0].n).toBe(1)
+    expect((await withSessionHistoryScope({ userId }, () => getSessionAllEvents(pool, 'root'))).map(r => r.payload)).toEqual(expected)
+    expect(await run(config)).not.toHaveProperty('scheduledAction')
+  })
   test('production purge commits deletion and disk compensation completes with enforcement off', async () => {
     await run()
     const keys = (await pool.query('SELECT object_key FROM session_archive_chunks')).rows.map(row => row.object_key)
     expect(keys.length).toBeGreaterThan(0)
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     expect(await run()).toMatchObject({ executed: 1 })
     expect((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE session_id='root'")).rows[0].n).toBe(0)
     expect((await pool.query('SELECT count(*)::int AS n FROM session_lifecycle_deletions')).rows[0].n).toBe(1)
@@ -102,7 +130,7 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
   })
   test('executor independently rejects missing release evidence before mutating a session', async () => {
     const executor = new SessionLifecycleExecutor(pool, sessionLifecycleConfig(env), storage, 'disk-test-secret')
-    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v1' })
+    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v2' })
     const lease = (await executor.jobs.claim('direct-fixture', 300_000))!
     await expect(executor.execute(lease)).rejects.toThrow('production_release_not_ready')
     expect((await pool.query("SELECT archive_reason,content_state FROM sessions WHERE session_id='root'")).rows[0])
@@ -114,7 +142,7 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     expect(await run(config)).toMatchObject({ executed: 0, readinessBlockers: ['policy_not_effective'] })
     expect((await pool.query('SELECT count(*)::int AS n FROM session_lifecycle_jobs')).rows[0].n).toBe(0)
     const executor = new SessionLifecycleExecutor(pool, config, storage, 'disk-test-secret')
-    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v1' })
+    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v2' })
     await expect(executor.execute((await executor.jobs.claim('future-direct', 300_000))!)).rejects.toThrow('policy_not_effective')
   })
   test('a historical session past 90 days is not purged before the transition deadline', async () => {
@@ -135,4 +163,26 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
       .toEqual(['exact original 中文', 'exact original response'])
     expect((await pool.query('SELECT state FROM session_lifecycle_jobs')).rows[0].state).toBe('partial')
   })
+  test('stale pending work is abandoned under the fence, preserving exact cold bodies and counters',async()=>{
+    await pool.query("UPDATE sessions SET status='running',turn_started_at=NOW()-interval '40 days',total_tokens=123")
+    await pool.query("UPDATE events SET effect_status='pending'")
+    expect(await run()).toMatchObject({executed:1})
+    expect((await pool.query("SELECT status,turn_started_at,content_state,total_tokens FROM sessions WHERE session_id='root'")).rows[0])
+      .toMatchObject({status:'abandoned',turn_started_at:null,content_state:'cold',total_tokens:'123'})
+    expect((await pool.query('SELECT DISTINCT effect_status FROM events')).rows).toEqual([{effect_status:'abandoned'}])
+    expect((await pool.query('SELECT pending_effects FROM session_lifecycle_stale_audit')).rows[0].pending_effects).toBe(2)
+    expect((await withSessionHistoryScope({userId},()=>getSessionAllEvents(pool,'root'))).map(row=>row.payload.text))
+      .toEqual(['exact original 中文','exact original response'])
+  })
+
+  test('new business data arriving during stale-session transfer cancels publication',async()=>{
+    await pool.query("UPDATE sessions SET status='running',turn_started_at=NOW()-interval '40 days'")
+    const original=storage.put.bind(storage)
+    storage.put=async(key,bytes)=>{await original(key,bytes);await advanceSessionActivity(pool,'root',new Date())}
+    expect(await run()).toMatchObject({executed:1})
+    expect(['hot','mixed']).toContain((await pool.query("SELECT content_state FROM sessions WHERE session_id='root'")).rows[0].content_state)
+    expect((await pool.query('SELECT payload FROM events')).rows.every(row=>row.payload!==null)).toBe(true)
+    expect((await pool.query("SELECT state FROM session_lifecycle_jobs WHERE action='archive'")).rows[0].state).toBe('cancelled')
+  })
+
 })

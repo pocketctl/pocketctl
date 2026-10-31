@@ -17,6 +17,9 @@ export async function initAttentionNotificationSchema(
       expires_at TIMESTAMPTZ NOT NULL,
       UNIQUE(notification_id,user_id)
     );
+    ALTER TABLE attention_notifications ADD COLUMN IF NOT EXISTS maintenance_day DATE;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_attention_notifications_daily
+      ON attention_notifications(user_id,maintenance_day) WHERE maintenance_day IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_attention_notifications_user_order
       ON attention_notifications(user_id,created_at DESC,notification_id DESC);
     CREATE INDEX IF NOT EXISTS idx_attention_notifications_expiry ON attention_notifications(expires_at);

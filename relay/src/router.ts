@@ -285,7 +285,7 @@ export class Router {
   private teamDispatchBroker?: RouterOptions['teamDispatchBroker'];
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
-  private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; reply?: any; timer: ReturnType<typeof setTimeout> }>();
+  private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; hostQuotaKind?: 'zcode'|'codex'; reply?: any; timer: ReturnType<typeof setTimeout> }>();
   private documentResolveLimiter = new SessionDocumentReadLimiter(20, 10);
   private documentRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
@@ -2369,24 +2369,31 @@ export class Router {
       }).catch((error) => this.logBestEffortFailure('session_title_update authorization', error));
       return;
     }
-    if (sessionId && msg.type === 'codex_rate_limits_changed') {
+    if (msg.type === 'codex_rate_limits_changed') {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
       const daemon = this.daemons.get(daemonId);
-      void this.authorizeEphemeralTitleSession(daemonId, sessionId).then(allowed => {
+      void (sessionId ? this.authorizeEphemeralTitleSession(daemonId, sessionId) : Promise.resolve(true)).then(allowed => {
         if (!allowed || !daemon?.userId || this.daemons.get(daemonId) !== daemon) return;
         this.broadcastToUser(daemon.userId, { type: 'codex_rate_limits_changed',
-          session_id: sessionId, daemon_id: daemonId, resync: msg.resync === true });
+          ...(sessionId ? {session_id:sessionId} : {codex_home_id:msg.codex_home_id}), daemon_id: daemonId, resync: msg.resync === true });
       }).catch(error => this.logBestEffortFailure('quota invalidation authorization', error));
       return;
     }
     if (msg.type === 'invocation_result') {
       const pending = this.invocationRequests.get(msg.request_id);
       const daemon = this.daemons.get(daemonId);
-      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws && pending.sessionId === sessionId && !pending.reply) {
+      if (pending && pending.daemonId === daemonId && pending.daemonWs === daemon?.ws && pending.sessionId === (sessionId ?? '') && !pending.reply) {
         const client = this.clients.get(pending.client);
         if (client && daemon && this.sameUser(client.userId, daemon.userId)) {
           clearTimeout(pending.timer);
-          pending.reply = { ...msg, request_id: pending.requestId };
+          pending.reply = pending.sessionId === ''
+            ? { type: 'invocation_result', daemon_id: daemonId, request_id: pending.requestId,
+                ...(msg.error ? {error: ['quota_unavailable','quota_credentials_unavailable','quota_authentication_required','quota_account_changed','busy'].includes(msg.error) ? msg.error : 'quota_unavailable'} : {
+                  invocation: pending.hostQuotaKind === 'codex' ? sanitizeCodexQuota(msg.invocation) : { kind: msg.invocation?.kind, scope_id: msg.invocation?.scope_id,
+                    observed_at: msg.invocation?.observed_at, status: msg.invocation?.status, level: msg.invocation?.level,
+                    windows: Array.isArray(msg.invocation?.windows) ? msg.invocation.windows.slice(0,2).map((w:any)=>({id:w.id,remaining_percent:w.remaining_percent,resets_at:w.resets_at})) : [] },
+                }) }
+            : { ...msg, request_id: pending.requestId };
           this.send(pending.client, pending.reply);
           pending.timer = setTimeout(() => this.invocationRequests.delete(msg.request_id), 60_000);
           pending.timer.unref?.();
@@ -2469,6 +2476,26 @@ export class Router {
   private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    if (msg.type === 'read_zcode_quota' || msg.type === 'read_codex_host_rate_limits') {
+      const reject = (error:string) => this.send(clientWs, {type:'invocation_result',request_id:msg.request_id,daemon_id:msg.daemon_id,error});
+      if (client.userId == null) { reject('forbidden'); return; }
+      if (typeof msg.daemon_id !== 'string' || !msg.daemon_id || msg.daemon_id.length > 256
+        || typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128
+        || msg.session_id != null || (msg.type === 'read_codex_host_rate_limits' && msg.codex_home_id != null && (typeof msg.codex_home_id !== 'string' || (msg.codex_home_id !== '' && !/^codex-home-[a-f0-9]{24}$/.test(msg.codex_home_id))))) { reject('invalid_request'); return; }
+      const daemon=this.daemons.get(msg.daemon_id);
+      if (!daemon) { reject('daemon_unreachable'); return; }
+      if (!this.sameUser(client.userId,daemon.userId)) { reject('forbidden'); return; }
+      if (daemon.ws.readyState !== 1) { reject('daemon_unreachable'); return; }
+      const fingerprint=JSON.stringify([msg.type,msg.daemon_id,msg.codex_home_id ?? '']);
+      const existing=[...this.invocationRequests.values()].find(p=>p.client===clientWs&&p.requestId===msg.request_id);
+      if (existing) { if(existing.fingerprint!==fingerprint)reject('request_id_conflict');else if(existing.reply)this.send(clientWs,existing.reply);return; }
+      if(this.invocationRequests.size>=2048||[...this.invocationRequests.values()].filter(p=>p.client===clientWs&&!p.reply).length>=4){reject('busy');return;}
+      const id=randomUUID();
+      const timer=setTimeout(()=>{this.invocationRequests.delete(id);reject('quota_unavailable');},20_000);timer.unref?.();
+      this.invocationRequests.set(id,{client:clientWs,daemonId:msg.daemon_id,daemonWs:daemon.ws,sessionId:'',requestId:msg.request_id,fingerprint,hostQuotaKind:msg.type === 'read_codex_host_rate_limits' ? 'codex' : 'zcode',timer});
+      this.send(daemon.ws,{type:msg.type,request_id:id,...(msg.type === 'read_codex_host_rate_limits' ? {codex_home_id:msg.codex_home_id ?? ''} : {})});
+      return;
+    }
     // These envelopes are authored only by the authenticated Team dispatcher.
     // The personal-session fallback must never become a second dispatch API.
     if (String(msg?.type ?? '').startsWith('collaboration_')
@@ -3862,4 +3889,12 @@ function attentionNativeCommand(command:Record<string,any>,capabilities?:string[
  }
  if(command.type==='question_response')return {type:command.type,session_id:command.session_id,request_id:command.request_id,answers:command.answers}
  return {type:command.type,session_id:command.session_id,request_id:command.request_id}
+}
+
+// Deliberately omit credentials, account IDs, upsells and redeemable credit IDs.
+function sanitizeCodexQuota(value:any):any {
+ if(value?.kind!=='codex_rate_limits')return null;
+ return {kind:value.kind,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,plan_type:value.plan_type,exhausted:value.exhausted,usage_notice:value.usage_notice==null?null:{remaining_percent:value.usage_notice.remaining_percent,duration_minutes:value.usage_notice.duration_minutes,resets_at:value.usage_notice.resets_at},
+ buckets:Array.isArray(value.buckets)?value.buckets.slice(0,32).map((b:any)=>({id:b.id,name:b.name,plan_type:b.plan_type,exhausted:b.exhausted,windows:Array.isArray(b.windows)?b.windows.slice(0,2).map((w:any)=>({remaining_percent:w.remaining_percent,duration_minutes:w.duration_minutes,resets_at:w.resets_at})):[]})):[],
+ reset_credits:value.reset_credits==null?null:{available_count:value.reset_credits.available_count,credits:Array.isArray(value.reset_credits.credits)?value.reset_credits.credits.slice(0,64).map((c:any)=>({expires_at:c.expires_at})):null}};
 }

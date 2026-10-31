@@ -1,3 +1,4 @@
+import {lockRetentionLifecycle,assertMigrationOpen} from '../../retention/transaction.js'
 import {createHash,randomUUID} from 'node:crypto'
 import type pg from 'pg'
 import {automationHash} from '../../governance/automation-policy.js'
@@ -17,10 +18,10 @@ export const BACKFILL_FAMILIES=Object.freeze([
  'memory_governance_executor_principals','memory_automation_authority_records','memory_publication_delegations',
  'memory_review_automation_policy_heads','memory_review_automation_policies','memory_review_automation_runs','memory_review_automation_decisions',
 ])
-export async function migrationTransaction<T>(pool:pg.Pool,fn:(c:pg.PoolClient)=>Promise<T>):Promise<T>{
+export async function migrationTransaction<T>(pool:pg.Pool,fn:(c:pg.PoolClient)=>Promise<T>,options:{repeatableRead?:boolean}={}):Promise<T>{
  const c=await pool.connect();let failed=false
  const onError=()=>{failed=true};c.on?.('error',onError)
- try{await c.query('BEGIN');await c.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'; SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");const r=await fn(c);await c.query('COMMIT');return r}
+ try{await c.query(options.repeatableRead?'BEGIN ISOLATION LEVEL REPEATABLE READ':'BEGIN');await c.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'; SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");await lockRetentionLifecycle(c);await c.query('SELECT generation FROM memory_retention_control WHERE singleton FOR UPDATE');const r=await fn(c);await c.query('COMMIT');return r}
  catch(e){failed=true;await c.query('ROLLBACK').catch(()=>undefined);throw e}
  finally{if(!failed)c.removeListener?.('error',onError);c.release(failed)}
 }
@@ -60,7 +61,7 @@ function preservedBody(table:string,row:Record<string,unknown>){
 export async function captureMigrationBaseline(c:Pick<pg.PoolClient,'query'>,installationIds:string[]):Promise<MigrationBaseline>{
  const rows:MigrationBaseline['rows']={},owners:MigrationBaseline['owners']={}
  for(const table of BACKFILL_FAMILIES){rows[table]={};owners[table]={};let after='';while(true){const batch=await migrationRows(c,table,installationIds,after);for(const r of batch){rows[table][r.id]=automationHash(preservedBody(table,r.row));owners[table][r.id]=r.row.installation_id?[r.row.installation_id]:r.row.target_installation_id?[r.row.target_installation_id]:(await c.query('SELECT memory_governance_change_scopes($1,$2::jsonb) ids',[table,r.row])).rows[0].ids;}if(batch.length<200)break;after=batch.at(-1)!.id}}
- return {installationIds,rows,owners,startWatermark:(await c.query('SELECT COALESCE(MAX(sequence),0)::text n FROM memory_governance_migration_changes')).rows[0].n,createdAt:(await c.query('SELECT clock_timestamp()::text n')).rows[0].n}
+ return {installationIds,rows,owners,startWatermark:(await c.query('SELECT change_gc_floor::text n FROM memory_retention_control WHERE singleton')).rows[0].n,createdAt:(await c.query('SELECT clock_timestamp()::text n')).rows[0].n}
 }
 export async function governanceEnvironmentFingerprint(pool:Pick<pg.Pool,'query'>){
  const identity=(await pool.query('SELECT current_database() AS db,current_user AS role,version() AS version,inet_server_addr()::text AS server,pg_postmaster_start_time()::text AS started')).rows[0]
@@ -70,7 +71,6 @@ export async function startGovernanceBackfill(pool:pg.Pool,input:{installationId
  if(await governanceEnvironmentFingerprint(pool)!==input.environmentFingerprint)throw new Error('migration_environment_mismatch')
  if(!input.installationIds.length||input.installationIds.length>100||!input.environmentFingerprint)throw new Error('explicit_migration_scope_required')
  return migrationTransaction(pool,async c=>{
-  await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
   const version=Number((await c.query('SELECT MAX(version) n FROM memory_schema_migrations')).rows[0].n)
   if(version!==Math.max(...MEMORY_MIGRATIONS.map(m=>m.version)))throw new Error('migration_schema_incompatible')
   for(const id of [...input.installationIds].sort()){
@@ -81,7 +81,7 @@ export async function startGovernanceBackfill(pool:pg.Pool,input:{installationId
   }
   const manifest=await captureMigrationBaseline(c,input.installationIds),runId=randomUUID()
   await c.query(`INSERT INTO memory_governance_migration_runs(run_id,environment_fingerprint,schema_version,manifest,state) VALUES($1,$2,$3,$4,'running')`,[runId,input.environmentFingerprint,version,encodeMigrationBaseline(manifest)]);return runId
- })
+ },{repeatableRead:true})
 }
 export async function recordMigrationAction(c:pg.PoolClient,input:{runId:string;installationId:string;table:string;id:string;row:Record<string,any>;action:'updated'|'unchanged'|'quarantined'|'retry';reason:string;afterHash?:string}){
  const hash=automationHash(input.row)
@@ -119,11 +119,13 @@ export async function backfillClaim(c:pg.PoolClient,runId:string,installationId:
  await recordMigrationAction(c,{runId,installationId,table:'knowledge_claims',id,row:current,action:reason?'quarantined':automationHash(current)===automationHash(changed)?'unchanged':'updated',reason:reason??'verified_identity_projection',afterHash:automationHash(changed)})
 }
 export async function backfillGovernance(pool:pg.Pool,input:{runId:string;batchSize?:number;interruptAfterBatch?:number}){
+ await migrationTransaction(pool,c=>assertMigrationOpen(c,input.runId))
  const size=Math.min(200,Math.max(1,input.batchSize??200)),run=(await pool.query('SELECT manifest FROM memory_governance_migration_runs WHERE run_id=$1',[input.runId])).rows[0]
  if(!run)throw new Error('migration_run_missing')
  const ids=(run.manifest as MigrationBaseline).installationIds;let batches=0,processed=0
  for(const installationId of ids)for(const table of BACKFILL_FAMILIES){
   while(true){const n=await migrationTransaction(pool,async c=>{
+   await assertMigrationOpen(c,input.runId)
    await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[installationId])
    await c.query("SELECT pg_advisory_xact_lock(hashtextextended('migration:'||$1,0))",[installationId])
    const cp=(await c.query('SELECT last_id FROM memory_governance_migration_checkpoints WHERE run_id=$1 AND installation_id=$2 AND entity_kind=$3 FOR UPDATE',[input.runId,installationId,table])).rows[0]

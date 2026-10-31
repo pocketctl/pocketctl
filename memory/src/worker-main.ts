@@ -1,3 +1,4 @@
+import {createDataRetentionWorker} from './retention/worker.js'
 import { createDeliveryWithdrawalClient } from './relay/delivery-withdrawal-client.js'
 import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-consumer.js'
 import {updateBusinessHealthGauges} from './metrics.js'
@@ -28,6 +29,7 @@ import { createUsageWorker } from './reporting/usage-worker.js'
 import { createPurgeRepository } from './purge/repository.js'
 import { createPurgeWorker } from './purge/worker.js'
 import { createFeedConsumer } from './inbox/feed-worker.js'
+import { createInboxRetentionWorker } from './inbox/retention.js'
 import { createProjectionHandler } from './projection/repository.js'
 import { createEpisodeRepository } from './episodes/repository.js'
 import { createCodeGraphBuildService } from './codegraph/build-service.js'
@@ -43,6 +45,7 @@ import { validateTombstoneKeyring } from './claims/tombstones.js'
 import { createOpenAICompatibleTextGenerator } from './model/openai-compatible-text.js'
 import { createMimoRealtimeTextGenerator } from './model/mimo-realtime-text.js'
 import { createExtractionTextRoute, withTimeoutFallback } from './model/text-fallback.js'
+import { createCandidateExpiryWorker } from './claims/candidate-expiry.js'
 import { createClaimRepository } from './claims/repository.js'
 import { createLifecycleService } from './claims/lifecycle-service.js'
 import { createClaimIndexer } from './retrieval/indexer.js'
@@ -234,8 +237,41 @@ async function main(): Promise<void> {
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
+  let dataRetention: ReturnType<typeof createDataRetentionWorker> | undefined
+  let candidateExpiry: ReturnType<typeof createCandidateExpiryWorker> | undefined
+  let inboxRetention: ReturnType<typeof createInboxRetentionWorker> | undefined
   const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
+    candidateExpiry = createCandidateExpiryWorker({ pool, signal,
+      onExpired: count => {
+        metrics.phase1.candidateStatus.inc({ status: 'expired' }, count)
+        logger.log('info', 'candidate_review_expired', { count })
+      },
+      onError: loopError('candidate_review_expiry'),
+    })
+    candidateExpiry.start()
+    if (config.dataRetention) {
+      dataRetention = createDataRetentionWorker({pool,settings:config.dataRetention,signal,
+        onResult: counts => {
+          for(const [action,count] of Object.entries(counts)) metrics.dataRetentionRows.inc({action},count)
+          if(Object.values(counts).some(n=>n>0)) logger.log('info','data_retention_completed',counts)
+        }, onSkipped: reason => metrics.dataRetentionSkips.inc({reason}), onError: loopError('data_retention')})
+      dataRetention.start()
+    }
+    if (config.inboxRetention) {
+      inboxRetention = createInboxRetentionWorker({
+        pool, settings: config.inboxRetention, signal,
+        onResult: result => {
+          metrics.inboxRetentionRows.inc({ action: 'body_reclaimed' }, result.reclaimed)
+          metrics.inboxRetentionRows.inc({ action: 'metadata_deleted' }, result.deleted)
+          if (result.reclaimed || result.deleted) logger.log('info', 'inbox_retention_completed', {
+            reclaimed: result.reclaimed, deleted: result.deleted, metadata_blocked: result.metadataBlocked,
+          })
+        },
+        onError: loopError('inbox_retention'),
+      })
+      inboxRetention.start()
+    }
     const http: RelayHttpClient = createRelayHttpClient({
       baseUrl: config.relayUrl,
       timeoutMs: config.httpTimeoutMs,
@@ -352,6 +388,7 @@ async function main(): Promise<void> {
     purgeWorker.start()
 
     const projection = createProjectionHandler(pool, {
+      stabilizationMs: config.episodeStabilizationMs,
       purge: purgeRepository,
       onInvalidated: (scope, count) => {
         metrics.phase1.purgeInvalidations.inc({ scope }, count)
@@ -827,6 +864,9 @@ async function main(): Promise<void> {
   clearInterval(gaugeTimer)
   clearInterval(retentionTimer)
   await Promise.all([
+    dataRetention?.stop(),
+    candidateExpiry?.stop(),
+    inboxRetention?.stop(),
     gitPolling?.stop(),
     purgeWorker?.stop(),
     statusWorker?.stop(),

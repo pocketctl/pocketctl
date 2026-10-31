@@ -60,3 +60,63 @@ describe('Codex quota private reads',()=>{
   router.unregisterClient(a);router.unregisterClient(b);router.unregisterClient(foreign)
  })
 })
+
+describe('ZCode host quota private reads',()=>{
+ test('reads without a session and returns only to the owner tab with canonical host identity',async()=>{
+  const {router,r,a,b,d}=fixture()
+  await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'host-quota',url:'https://attacker.invalid'})
+  expect(d.sent).toHaveLength(1)
+  expect(d.sent[0]).toEqual({type:'read_zcode_quota',request_id:expect.any(String)})
+  expect(d.sent[0].request_id).not.toBe('host-quota')
+  router.handleDaemonMessage('d',{type:'invocation_result',request_id:d.sent[0].request_id,daemon_id:'forged',invocation:{kind:'zcode_quota'}})
+  expect(a.sent.at(-1)).toMatchObject({type:'invocation_result',request_id:'host-quota',daemon_id:'d',invocation:{kind:'zcode_quota'}})
+  expect(b.sent).toHaveLength(0)
+  await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'host-quota'})
+  expect(d.sent).toHaveLength(1)
+  router.unregisterClient(a);router.unregisterClient(b);expect(r.invocationRequests.size).toBe(0)
+ })
+ test('rejects foreign hosts and client supplied session references',async()=>{
+  const {router,r,a,d}=fixture();const foreign=socket();router.registerClient(foreign,8)
+  for(const msg of [{type:'read_zcode_quota',daemon_id:'d',request_id:'foreign'},{type:'read_zcode_quota',daemon_id:'d',session_id:'s',request_id:'session'}]){
+   await router.handleClientMessage(msg.request_id==='foreign'?foreign:a,msg)
+  }
+  expect(d.sent).toHaveLength(0);expect(foreign.sent.at(-1)).toMatchObject({type:'invocation_result',error:'forbidden'})
+  expect(a.sent.at(-1)).toMatchObject({type:'invocation_result',error:'invalid_request'})
+  r.daemons.delete('d');await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'offline'})
+  expect(a.sent.at(-1)).toMatchObject({type:'invocation_result',error:'daemon_unreachable'})
+  router.unregisterClient(a);router.unregisterClient(foreign)
+ })
+ test('drops results from another daemon connection',async()=>{
+  const {router,r,a,d}=fixture();await router.handleClientMessage(a,{type:'read_zcode_quota',daemon_id:'d',request_id:'origin'})
+  const pending=d.sent[0]?.request_id
+  r.daemons.set('other',{ws:socket(),userId:7})
+  router.handleDaemonMessage('other',{type:'invocation_result',request_id:pending,invocation:{kind:'zcode_quota'}})
+  expect(a.sent).toHaveLength(0)
+  r.daemons.set('d',{ws:socket(),userId:7});router.handleDaemonMessage('d',{type:'invocation_result',request_id:pending,invocation:{kind:'zcode_quota'}})
+  expect(a.sent).toHaveLength(0);router.unregisterClient(a)
+ })
+})
+
+describe('Codex host quota private reads',()=>{
+ test('allows an owner to read an allowlisted home without a session and strips credit/account identifiers',async()=>{
+  const {router,a,b,d}=fixture(),home='codex-home-aaaaaaaaaaaaaaaaaaaaaaaa'
+  await router.handleClientMessage(a,{type:'read_codex_host_rate_limits',daemon_id:'d',codex_home_id:home,request_id:'host',url:'https://invalid.example'})
+  expect(d.sent[0]).toEqual({type:'read_codex_host_rate_limits',codex_home_id:home,request_id:expect.any(String)})
+  router.handleDaemonMessage('d',{type:'invocation_result',request_id:d.sent[0].request_id,invocation:{kind:'codex_rate_limits',scope_id:'scope',observed_at:'2026-10-31T00:00:00Z',status:'ok',plan_type:'pro',exhausted:false,usage_notice:{remaining_percent:25,duration_minutes:10080,resets_at:null,private:'secret-notice'},accountId:'secret-account',buckets:[{id:'codex',name:'Codex',plan_type:'pro',exhausted:false,windows:[{remaining_percent:70,duration_minutes:10080,resets_at:null}]}],reset_credits:{available_count:2,credits:[{id:'secret-credit',expires_at:null}]}}})
+  const reply=a.sent.at(-1);expect(reply).toMatchObject({daemon_id:'d',request_id:'host',invocation:{plan_type:'pro',usage_notice:{remaining_percent:25,duration_minutes:10080,resets_at:null},reset_credits:{available_count:2,credits:[{expires_at:null}]}}});expect(JSON.stringify(reply)).not.toMatch(/secret-credit|secret-account|secret-notice/);expect(b.sent).toHaveLength(0)
+  router.unregisterClient(a);router.unregisterClient(b)
+ })
+ test('rejects other owners, arbitrary home paths and session references',async()=>{
+  const {router,a,d}=fixture(),foreign=socket();router.registerClient(foreign,8)
+  await router.handleClientMessage(foreign,{type:'read_codex_host_rate_limits',daemon_id:'d',request_id:'foreign'});expect(foreign.sent.at(-1)).toMatchObject({error:'forbidden'})
+  for(const extras of [{codex_home_id:'/tmp/credential'},{session_id:'s'}]){await router.handleClientMessage(a,{type:'read_codex_host_rate_limits',daemon_id:'d',request_id:'invalid',...extras});expect(a.sent.at(-1)).toMatchObject({error:'invalid_request'})}
+  expect(d.sent).toHaveLength(0);router.unregisterClient(a);router.unregisterClient(foreign)
+ })
+ test('host invalidations contain only scope and reach only the owner',async()=>{
+  const {router,a,b}=fixture(),foreign=socket();router.registerClient(foreign,8)
+  router.handleDaemonMessage('d',{type:'codex_rate_limits_changed',codex_home_id:'home',resync:true,accountId:'secret'})
+  await new Promise(resolve=>setTimeout(resolve,0))
+  expect(a.sent.at(-1)).toEqual({type:'codex_rate_limits_changed',codex_home_id:'home',daemon_id:'d',resync:true});expect(b.sent.at(-1)).toEqual(a.sent.at(-1));expect(foreign.sent).toHaveLength(0)
+  router.unregisterClient(a);router.unregisterClient(b);router.unregisterClient(foreign)
+ })
+})

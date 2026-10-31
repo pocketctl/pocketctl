@@ -8,7 +8,7 @@ import { inspectLifecycleEligibility } from '../session-lifecycle/eligibility.js
 const suite=process.env.RUN_SESSION_LIFECYCLE_POSTGRES==='1'?describe:describe.skip
 suite('final fenced lifecycle eligibility PostgreSQL',()=>{
   let pool:pg.Pool,userId:number
-  const config=sessionLifecycleConfig({}),now='2026-03-12T00:00:00.000001Z'
+  const config=sessionLifecycleConfig({}),now='2026-02-10T00:00:00.000001Z'
   beforeAll(async()=>{pool=await lifecycleTestPool();await initDB(pool)},30000)
   afterAll(async()=>{await pool?.end()})
   beforeEach(async()=>{
@@ -53,11 +53,12 @@ suite('final fenced lifecycle eligibility PostgreSQL',()=>{
   test('nested independent sessions and completed parent event buckets are distinguished',async()=>{
     await add();await add('child','root');await add('leaf','child')
     await pool.query("INSERT INTO subagents(parent_session_id,agent_id,kind,status) VALUES('root','bucket','claude_subagent','completed')")
+    await pool.query("UPDATE subagents SET created_at='2026-01-01'")
     expect((await inspect()).sessionIds).toEqual(['child','leaf','root'])
     expect((await inspect()).prediction.action).toBe('archive')
-    await pool.query("UPDATE sessions SET status='running' WHERE session_id='leaf'")
+    await pool.query("UPDATE sessions SET status='running',turn_started_at=NOW() WHERE session_id='leaf'")
     expect((await inspect()).prediction.blockedReasons).toContain('session_active')
-    await pool.query("UPDATE sessions SET status='idle',last_activity_at='2026-03-11' WHERE session_id='leaf'")
+    await pool.query("UPDATE sessions SET status='idle',turn_started_at=NULL,last_activity_at='2026-02-09' WHERE session_id='leaf'")
     expect((await inspect()).prediction.action).toBeNull()
     await pool.query("UPDATE sessions SET last_activity_at='2026-01-01' WHERE session_id='leaf'")
     await pool.query("UPDATE subagents SET kind='sdk_session' WHERE agent_id='bucket'")
@@ -87,7 +88,7 @@ suite('final fenced lifecycle eligibility PostgreSQL',()=>{
     const prediction=(await inspect()).prediction
     expect(prediction.blockedReasons).toContain('effect_pending')
     expect(prediction.blockedReasons).toContain('attention_pending')
-    await pool.query("UPDATE events SET effect_status='completed'")
+    await pool.query("UPDATE events SET effect_status='completed',created_at='2026-01-01'")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
     expect((await inspect()).prediction.action).toBe('archive')
   })
@@ -108,4 +109,54 @@ suite('final fenced lifecycle eligibility PostgreSQL',()=>{
     expect(BigInt(after.root!.epoch)).toBeGreaterThan(BigInt(before))
     expect(after.prediction.blockedReasons).toContain('scope_excluded')
   })
+  test('indexed eligibility omits diagnostic body scans without changing the decision or pending audit',async()=>{
+    await add()
+    await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status,created_at)
+      SELECT CASE WHEN i<=6000 THEN 'root' ELSE 'other' END,'agent_text',jsonb_build_object('text',repeat('x',100)),
+        CASE WHEN i=1 THEN 'pending' ELSE 'completed' END,'2026-01-01'::timestamptz
+      FROM generate_series(1,12000) i`)
+    await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
+    await pool.query('ANALYZE events')
+    let plan=''
+    const db={query:async(sql:string,args?:any[])=>{
+      if(sql.startsWith('SELECT\n    EXISTS'))plan=JSON.stringify((await pool.query('EXPLAIN(FORMAT JSON) '+sql,args)).rows)
+      return pool.query(sql,args)
+    }} as Pick<pg.Pool,'query'>
+    const fast=await inspectLifecycleEligibility(db,'root',config,{now})
+    expect(fast).toMatchObject({eventCount:null,hotEventBytes:null,hotDocumentBytes:null,staleEvidence:{pendingEffects:1}})
+    expect(plan).toContain('idx_events_lifecycle_activity')
+    expect(plan).toContain('idx_events_lifecycle_pending')
+    const exact=await inspectLifecycleEligibility(pool,'root',config,{now,includeStatistics:true})
+    expect(exact.prediction).toEqual(fast.prediction)
+    expect(exact.staleEvidence).toEqual(fast.staleEvidence)
+    expect(exact.eventCount).toBe('6000')
+    expect(BigInt(exact.hotEventBytes!)).toBeGreaterThan(600000n)
+  })
+  test('latest activity ignores null timestamps and metadata, and includes meaningful data from any member',async()=>{
+    await add();await add('child','root')
+    await pool.query(`INSERT INTO events(session_id,event_type,payload,created_at) VALUES
+      ('root','agent_text','{}',NULL),('child','agent_text','{}','2026-02-09'),('root','session_meta','{}','2026-02-10')`)
+    await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
+    const result=await inspect()
+    expect(result.prediction.activityAt).toBe('2026-02-09T00:00:00.000000Z')
+    expect(result.prediction.action).toBeNull()
+  })
+  test('stable old running and pending effects expire, while new content protects the entire component',async()=>{
+    await add()
+    await pool.query("UPDATE sessions SET status='running',activity_verified=false,created_at='2026-01-01',turn_started_at='2026-01-01'")
+    await pool.query("INSERT INTO events(session_id,event_type,payload,effect_status,created_at) VALUES('root','agent_text','{}','pending','2026-01-01')")
+    await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
+    expect((await inspect()).prediction.action).toBe('archive')
+    expect((await inspect()).staleEvidence?.pendingEffects).toBe(1)
+    await pool.query(`INSERT INTO event_inbox(daemon_id,daemon_generation,seq,dedup_key,event_type,priority_class,session_id,payload)
+      VALUES('host',1,1,'reconnect-meta','session_meta',0,'root','{}')`)
+    expect((await inspect()).prediction.action).toBe('archive')
+    const purge=await inspectLifecycleEligibility(pool,'root',config,{now:'2026-04-01T00:00:00Z'})
+    expect(purge.prediction.action).toBe('purge')
+    await pool.query("INSERT INTO events(session_id,event_type,payload,effect_status,created_at) VALUES('root','agent_text','{}','completed','2026-02-09')")
+    await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
+    expect((await inspect()).prediction.action).toBeNull()
+    expect((await inspect()).prediction.blockedReasons).toContain('session_active')
+  })
+
 })

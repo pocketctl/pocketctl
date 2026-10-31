@@ -1,3 +1,4 @@
+import {assertMigrationOpen} from '../../retention/transaction.js'
 import type pg from 'pg'
 import {createTransactionBoundPool} from '../../api/transaction-bound-pool.js'
 import {migrationTransaction,type MigrationBaseline} from './backfill.js'
@@ -19,11 +20,13 @@ export async function ensureGovernanceIndexes(pool:pg.Pool){
 }
 export async function cutoverGovernance(pool:pg.Pool,input:{runId:string;installationId:string;writerProof:string[]}){
  if(!['api:identity_v2','worker:identity_v2','relay:identity_v2'].every(w=>input.writerProof.includes(w)))throw new Error('writer_proof_required')
+ await migrationTransaction(pool,c=>assertMigrationOpen(c,input.runId))
  const run=(await pool.query('SELECT manifest FROM memory_governance_migration_runs WHERE run_id=$1',[input.runId])).rows[0]
  if(!(run?.manifest as MigrationBaseline)?.installationIds.includes(input.installationId))throw new Error('migration_scope_mismatch')
  await ensureGovernanceIndexes(pool);await reconcileGovernanceChanges(pool,{runId:input.runId})
  const validation=await validateGovernanceMigration(pool,input.runId);if(validation.violations.length)throw new Error('migration_validation_failed')
  await migrationTransaction(pool,async c=>{
+  await assertMigrationOpen(c,input.runId)
   await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
   const scope=(await c.query(`SELECT 1 FROM memory_installations i JOIN memory_owner_scopes s USING(installation_id) WHERE i.installation_id=$1 AND i.local_status NOT IN('purging','purged','integrity_error') AND i.relay_status='active' AND s.state='active' FOR SHARE OF i,s`,[input.installationId])).rows[0]
   if(!scope)throw new Error('migration_scope_stale')
