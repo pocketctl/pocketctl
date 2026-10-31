@@ -11,9 +11,10 @@ export interface LifecycleEligibility {
   sessionIds:string[]
   evaluatedAt:string
   prediction:LifecycleEvaluation
-  eventCount:string
-  hotEventBytes:string
-  hotDocumentBytes:string
+  /** Exact diagnostic totals are opt-in; execution never scans all payloads. */
+  eventCount:string|null
+  hotEventBytes:string|null
+  hotDocumentBytes:string|null
   staleEvidence?:{activityAt:string;pendingEffects:number;pendingInbox:number;states:Record<string,string>}
 }
 const inactive=new Set(['idle','exited','completed','failed','stopped','terminated','abandoned','error','killed'])
@@ -22,7 +23,7 @@ const buckets=new Set(['claude_subagent','codex_subagent','zcode_subagent'])
 
 /** Final factual eligibility, usable on the fenced executor connection. No
  * upload or mutation occurs here. BFS queries stop after 1001 identifiers. */
-export async function inspectLifecycleEligibility(db:Database,sessionId:string,config:SessionLifecycleConfig,options:{now?:string;ownCoolingEpochs?:ReadonlyMap<string,string>}={}):Promise<LifecycleEligibility> {
+export async function inspectLifecycleEligibility(db:Database,sessionId:string,config:SessionLifecycleConfig,options:{now?:string;ownCoolingEpochs?:ReadonlyMap<string,string>;includeStatistics?:boolean}={}):Promise<LifecycleEligibility> {
   const clock=(await db.query(`SELECT to_char(COALESCE($1::timestamptz,NOW()) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS time`,[options.now??null])).rows[0].time
   const members=new Map<string,Record<string,any>>(),seen=new Set<string>(),bucketRows=new Map<string,Record<string,any>>()
   const blocked=new Set<LifecycleBlocker>()
@@ -60,29 +61,35 @@ export async function inspectLifecycleEligibility(db:Database,sessionId:string,c
   const p=(await db.query(`SELECT
     EXISTS(SELECT 1 FROM session_message_admissions WHERE state IN ('issued','uncertain') AND (session_id=ANY($1::varchar[]) OR canonical_session_id=ANY($1::varchar[]) OR session_aliases ?| $1::text[]))
       OR EXISTS(SELECT 1 FROM quota_reservations WHERE session_id=ANY($1::varchar[]) AND state IN ('pending','uncertain')) AS admission,
-    EXISTS(SELECT 1 FROM event_inbox WHERE session_id=ANY($1::varchar[]) AND status IN (0,1)) AS inbox,
     EXISTS(SELECT 1 FROM realtime_outbox WHERE session_id=ANY($1::varchar[]) AND delivered_at IS NULL) AS outbox,
-    EXISTS(SELECT 1 FROM events WHERE session_id=ANY($1::varchar[]) AND effect_status='pending') AS effect,
     EXISTS(SELECT 1 FROM attention_items WHERE session_id=ANY($1::varchar[]) AND state IN ('open','snoozed','submitting','result_unknown')) AS attention,
     EXISTS(SELECT 1 FROM session_document_uploads WHERE session_id=ANY($1::varchar[])) AS uploads,
     EXISTS(SELECT 1 FROM collaboration_calls WHERE native_session_id=ANY($1::varchar[]) AND state IN ('pending','dispatched','accepted','blocked','uncertain')) AS collaboration,
     EXISTS(SELECT 1 FROM deleted_sessions WHERE session_id=ANY($1::varchar[])) AS tombstone,
     EXISTS(SELECT 1 FROM extension_source_outbox o WHERE o.session_id=ANY($1::varchar[])) AS extension,
     EXISTS(SELECT 1 FROM events e WHERE e.session_id=ANY($1::varchar[]) AND e.id>COALESCE((SELECT last_event_id FROM attention_projection_cursor WHERE projector_name='attention-inbox-v1'),0)) AS projection,
-    (SELECT count(*)::text FROM events WHERE session_id=ANY($1::varchar[])) AS event_count,
     (SELECT count(*)::int FROM events WHERE session_id=ANY($1::varchar[]) AND effect_status='pending') AS pending_effects,
     (SELECT count(*)::int FROM event_inbox WHERE session_id=ANY($1::varchar[]) AND status IN (0,1)) AS pending_inbox,
     to_char(GREATEST(
-      (SELECT max(created_at) FROM events WHERE session_id=ANY($1::varchar[]) AND event_type NOT IN
-        ('session_discovered','session_status','session_meta','command_list','subagent_discovered')),
-      (SELECT max(received_at) FROM event_inbox WHERE session_id=ANY($1::varchar[])
-        AND event_type NOT IN ('session_discovered','session_status','session_meta','command_list','subagent_discovered')
-        AND payload->>'resync' IS DISTINCT FROM 'true'),
+      (SELECT max(latest.created_at) FROM unnest($1::varchar[]) member(session_id)
+        CROSS JOIN LATERAL (SELECT created_at FROM events WHERE session_id=member.session_id AND created_at IS NOT NULL AND event_type NOT IN
+          ('session_discovered','session_status','session_meta','command_list','subagent_discovered')
+          ORDER BY created_at DESC LIMIT 1) latest),
+      (SELECT max(latest.received_at) FROM unnest($1::varchar[]) member(session_id)
+        CROSS JOIN LATERAL (SELECT received_at FROM event_inbox WHERE session_id=member.session_id
+          AND event_type NOT IN ('session_discovered','session_status','session_meta','command_list','subagent_discovered')
+          AND payload->>'resync' IS DISTINCT FROM 'true' ORDER BY received_at DESC LIMIT 1) latest),
       (SELECT max(claimed_at) FROM event_inbox WHERE session_id=ANY($1::varchar[]) AND status=1),
       (SELECT max(committed_at) FROM session_document_versions WHERE session_id=ANY($1::varchar[]))
-    ) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS latest_data_at,
-    (SELECT COALESCE(sum(pg_column_size(payload)),0)::text FROM events WHERE session_id=ANY($1::varchar[]) AND body_storage='hot') AS event_bytes,
-    (SELECT COALESCE(sum(byte_size),0)::text FROM session_document_versions WHERE session_id=ANY($1::varchar[]) AND body_storage='hot') AS document_bytes`,[ids])).rows[0]
+    ) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS latest_data_at`,[ids])).rows[0]
+  p.effect=p.pending_effects>0;p.inbox=p.pending_inbox>0
+  // Observe callers can request exact totals. Keep those scans out of the
+  // eligibility/fenced execution path, especially for large hot histories.
+  const statistics=options.includeStatistics?(await db.query(`SELECT count(*)::text AS event_count,
+    COALESCE(sum(pg_column_size(payload)) FILTER(WHERE body_storage='hot'),0)::text AS event_bytes,
+    (SELECT COALESCE(sum(byte_size),0)::text FROM session_document_versions
+      WHERE session_id=ANY($1::varchar[]) AND body_storage='hot') AS document_bytes
+    FROM events WHERE session_id=ANY($1::varchar[])`,[ids])).rows[0]:null
   const activitySources=[...rows.flatMap(row=>[row.activity_time,row.last_business_activity_at,row.turn_started_at]),
     ...[...bucketRows.values()].map(row=>row.created_at),p.latest_data_at]
   // Creation is only a fallback for source-less historical rows. It never
@@ -120,5 +127,5 @@ export async function inspectLifecycleEligibility(db:Database,sessionId:string,c
     activityVerified:stale||(root?.activity_verified??false),staleSnapshot:stale,status:root?.status??null,turnActive:!!root?.turn_started_at,archiveReason:root?.archive_reason??null,
     contentState:coolingOwned?'hot':root?.content_state??'hot',dependencyActivityAt:stale?[]:rows.map(row=>row.activity_time??null),
     historical:!!config.effectiveAt&&rows.some(row=>row.activity_time&&timestampMicros(row.activity_time)<timestampMicros(config.effectiveAt!)),blockers:[...blocked]}
-  return {root,members:rows,sessionIds:ids,evaluatedAt:clock,prediction:evaluateLifecycle(input,clock,config),eventCount:p.event_count,hotEventBytes:p.event_bytes,hotDocumentBytes:p.document_bytes,staleEvidence:stale?{activityAt:latestAt!,pendingEffects:p.pending_effects,pendingInbox:p.pending_inbox,states:Object.fromEntries([...rows.map(row=>[row.session_id,row.status]),...[...bucketRows.values()].map(row=>[`${row.parent_session_id}:${row.agent_id}`,row.status])])}:undefined}
+  return {root,members:rows,sessionIds:ids,evaluatedAt:clock,prediction:evaluateLifecycle(input,clock,config),eventCount:statistics?.event_count??null,hotEventBytes:statistics?.event_bytes??null,hotDocumentBytes:statistics?.document_bytes??null,staleEvidence:stale?{activityAt:latestAt!,pendingEffects:p.pending_effects,pendingInbox:p.pending_inbox,states:Object.fromEntries([...rows.map(row=>[row.session_id,row.status]),...[...bucketRows.values()].map(row=>[`${row.parent_session_id}:${row.agent_id}`,row.status])])}:undefined}
 }

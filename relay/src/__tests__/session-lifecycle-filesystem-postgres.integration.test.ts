@@ -12,6 +12,7 @@ import { SessionLifecycleExecutor } from '../session-lifecycle/executor.js'
 import { enableSessionColdBodies } from '../session-lifecycle/cold-schema.js'
 import { configuredArchiveStorage, installConfiguredHistoryReader } from '../session-history/runtime.js'
 import { withSessionHistoryScope } from '../session-history/postgres-reader.js'
+import { maintenanceSlot } from '../session-lifecycle/schedule.js'
 import type { ArchiveStorage } from '../session-archive/storage.js'
 
 const suite = process.env.RUN_SESSION_LIFECYCLE_POSTGRES === '1' ? describe : describe.skip
@@ -81,6 +82,31 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     installConfiguredHistoryReader(pool, sessionLifecycleConfig(env), env)
     const rows = await withSessionHistoryScope({ userId }, () => getSessionAllEvents(pool, 'root'))
     expect(rows.map(row => row.payload.text)).toEqual(['exact original 中文', 'exact original response'])
+  })
+  test('budget-limited cold transfer continues after restart in the same daily batch and notification', async () => {
+    await pool.query("INSERT INTO session_lifecycle_daily_runs(policy_version,action,scheduled_at,completed_at) VALUES('session-lifecycle-v2','purge',$1,NOW())", [maintenanceSlot('purge', new Date())])
+    await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status,created_at)
+      SELECT 'root','agent_text',jsonb_build_object('text',repeat('x',100),'sequence',i),'completed',NOW()-interval '40 days'
+      FROM generate_series(1,100) i`)
+    await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
+    const expected = (await pool.query('SELECT payload FROM events ORDER BY id')).rows.map(r => r.payload)
+    const config = { ...releasedConfig(storage.namespace!, {}, env), batchBytes: 8192, maxChunkBytes: 4096 }
+    expect(await run(config)).toMatchObject({ executed: 1, dailyRunComplete: false })
+    const first = (await pool.query("SELECT count(*)::int n FROM events WHERE body_storage='cold'")).rows[0].n
+    expect(first).toBeGreaterThan(0)
+    expect(first).toBeLessThan(expected.length)
+    expect((await pool.query("SELECT count(*)::int n FROM session_lifecycle_daily_runs WHERE action='archive' AND completed_at IS NULL")).rows[0].n).toBe(1)
+    expect(await run(config)).toMatchObject({ scanned: 0, executed: 0, dailyRunComplete: false })
+    for (let i = 0; i < 10; i++) {
+      await pool.query("UPDATE session_lifecycle_jobs SET next_attempt_at=NOW() WHERE state='partial'")
+      const report = await run(config)
+      if (report.dailyRunComplete) break
+    }
+    expect((await pool.query('SELECT state FROM session_lifecycle_jobs')).rows).toEqual([{ state: 'succeeded' }])
+    expect((await pool.query('SELECT content_state FROM sessions')).rows[0].content_state).toBe('cold')
+    expect((await pool.query('SELECT count(*)::int n FROM attention_notifications')).rows[0].n).toBe(1)
+    expect((await withSessionHistoryScope({ userId }, () => getSessionAllEvents(pool, 'root'))).map(r => r.payload)).toEqual(expected)
+    expect(await run(config)).not.toHaveProperty('scheduledAction')
   })
   test('production purge commits deletion and disk compensation completes with enforcement off', async () => {
     await run()

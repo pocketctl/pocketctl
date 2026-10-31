@@ -32,7 +32,13 @@ export class DailyMaintenanceSchedule {
       const slot = maintenanceSlot(action, now)
       if (config.effectiveAt && slot.getTime() < new Date(config.effectiveAt).getTime()) continue
       await this.db.query(`INSERT INTO session_lifecycle_daily_runs(policy_version,action,scheduled_at)
-        VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, [config.policyVersion, action, slot])
+        VALUES($1,$2,$3) ON CONFLICT(policy_version,action,scheduled_at) DO UPDATE
+        SET completed_at=NULL,updated_at=NOW()
+        WHERE $2='archive' AND session_lifecycle_daily_runs.completed_at IS NOT NULL
+          AND EXISTS(SELECT 1 FROM session_lifecycle_jobs j WHERE j.policy_version=$1
+            AND j.action IN ('archive','cool') AND j.state='partial'
+            AND j.result->>'reason'='transfer_budget_reached'
+            AND j.created_at<=session_lifecycle_daily_runs.completed_at)`, [config.policyVersion, action, slot])
     }
     const token = randomUUID()
     const row = (await this.db.query(`WITH candidate AS (

@@ -162,6 +162,16 @@ export async function initSessionLifecycleSchema(
     ALTER TABLE session_archive_manifests ADD COLUMN IF NOT EXISTS storage_namespace TEXT;
     ALTER TABLE session_archive_manifests ADD COLUMN IF NOT EXISTS operation_id UUID;
     ALTER TABLE session_archive_manifests ADD COLUMN IF NOT EXISTS upload_deadline TIMESTAMPTZ;
+    -- Predicates match the per-member latest timestamp and pending probes.
+    CREATE INDEX IF NOT EXISTS idx_events_lifecycle_activity
+      ON events(session_id,created_at DESC) WHERE event_type NOT IN
+        ('session_discovered','session_status','session_meta','command_list','subagent_discovered');
+    CREATE INDEX IF NOT EXISTS idx_events_lifecycle_pending
+      ON events(session_id) WHERE effect_status='pending';
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_lifecycle_activity
+      ON event_inbox(session_id,received_at DESC) WHERE event_type NOT IN
+        ('session_discovered','session_status','session_meta','command_list','subagent_discovered')
+        AND payload->>'resync' IS DISTINCT FROM 'true';
     CREATE INDEX IF NOT EXISTS idx_sessions_lifecycle_root ON sessions(root_session_id);
     CREATE INDEX IF NOT EXISTS idx_subagents_lifecycle_agent ON subagents(agent_id);
   `)

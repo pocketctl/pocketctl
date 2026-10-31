@@ -127,6 +127,35 @@ suite('bounded lifecycle backlog scheduling and durable scan progress PostgreSQL
     expect(report.nextDelayMs).toBeLessThanOrEqual(60_000)
     expect((await pool.query("SELECT completed_at IS NOT NULL AS done FROM session_lifecycle_daily_runs WHERE action='archive'")).rows[0].done).toBe(true)
   })
+  test('budget continuations survive restart in the same daily run and wait for their retry time', async () => {
+    await seed(1)
+    await new LifecycleJobRepository(pool).enqueue({ userId, sessionId: 'scan-1', activityEpoch: '0', action: 'archive', policyVersion: config.policyVersion })
+    await pool.query(`UPDATE session_lifecycle_jobs SET state='partial',result='{"reason":"transfer_budget_reached"}',next_attempt_at=NOW()+interval '1 minute'`)
+    const first = await run()
+    expect(first).toMatchObject({ scanned: 1, executed: 0, scanComplete: true, dailyRunComplete: false })
+    expect(first.nextDelayMs).toBeGreaterThan(50_000)
+    expect(first.nextDelayMs).toBeLessThanOrEqual(60_000)
+    // Recover a batch the previous release completed before its retry time.
+    await pool.query("UPDATE session_lifecycle_daily_runs SET completed_at=NOW() WHERE action='archive'")
+    expect(await run()).toMatchObject({ scanned: 0, executed: 0, scanComplete: true, dailyRunComplete: false })
+    expect((await pool.query("SELECT completed_at FROM session_lifecycle_daily_runs WHERE action='archive'")).rows[0].completed_at).toBeNull()
+    await pool.query("UPDATE session_lifecycle_jobs SET state='succeeded'")
+    expect(await run()).toMatchObject({ scanned: 0, scanComplete: true, dailyRunComplete: true })
+  })
+  test('a future storage-failure retry does not reopen a completed daily run', async () => {
+    await seed(1)
+    await new LifecycleJobRepository(pool).enqueue({ userId, sessionId: 'scan-1', activityEpoch: '0', action: 'archive', policyVersion: config.policyVersion })
+    await pool.query(`UPDATE session_lifecycle_jobs SET state='partial',result='{"reason":"cold_transfer_failed"}',next_attempt_at=NOW()+interval '1 minute'`)
+    expect(await run()).toMatchObject({ dailyRunComplete: true })
+    expect(await run()).not.toHaveProperty('scheduledAction')
+  })
+  test('another worker active lease keeps the daily run open without rapid polling', async () => {
+    await seed(1)
+    const jobs = new LifecycleJobRepository(pool)
+    await jobs.enqueue({ userId, sessionId: 'scan-1', activityEpoch: '0', action: 'archive', policyVersion: config.policyVersion })
+    expect(await jobs.claim('other-worker', 300_000)).not.toBeNull()
+    expect(await run()).toMatchObject({ scanned: 1, executed: 0, dailyRunComplete: false, nextDelayMs: 60_000 })
+  })
   test('all event-reference foreign keys have usable leading-column indexes for deletion', async () => {
     const missing = await pool.query(`SELECT c.conname FROM pg_constraint c
       WHERE c.contype='f' AND c.confrelid='events'::regclass AND NOT EXISTS(

@@ -70,7 +70,7 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
     const run=await scheduleRuns.claim(config)
     if(!run){emit();return}
     report.scheduledAction=run.action;report.scheduledAt=run.scheduledAt
-    let afterRowId=run.afterRowId,scanComplete=run.scanComplete,completed=false
+    let afterRowId=run.afterRowId,scanComplete=run.scanComplete,completed=false,continuationWakeAt:number|null=null
     try{
       if(!scanComplete){
         const rows=(await pool.query(`SELECT id,session_id FROM sessions WHERE id>$1
@@ -98,16 +98,22 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
         report.bytes=Number(report.bytes)+Number(result?.bytes??0)
         if(Number(report.bytes)>=config.batchBytes||lease.action==='archive'||lease.action==='cool')break
       }
-      const due=(await pool.query(`SELECT EXISTS(SELECT 1 FROM session_lifecycle_jobs j
-        WHERE policy_version=$1 AND action=ANY($2::text[])
-          AND ((state IN ('queued','failed','partial') AND next_attempt_at<=NOW()) OR (state='running' AND lease_until<=NOW()))
-          AND NOT EXISTS(SELECT 1 FROM session_lifecycle_deletions d WHERE d.operation_id=j.operation_id)) AS pending`,
-        [config.policyVersion,run.action==='purge'?['purge']:['archive','cool']])).rows[0].pending
-      completed=scanComplete&&!due
+      // Published budget-limited transfers continue in the same batch after
+      // their retry delay. Actual failures retain the existing daily retry.
+      // Active leases must also finish before this run can be declared complete.
+      const pending=(await pool.query(`SELECT min(CASE WHEN state='running' THEN lease_until ELSE next_attempt_at END) AS wake_at
+        FROM session_lifecycle_jobs j WHERE policy_version=$1 AND action=ANY($2::text[])
+          AND ((state IN ('queued','failed','partial') AND next_attempt_at<=NOW()) OR state='running'
+            OR (state='partial' AND result->>'reason'='transfer_budget_reached'))
+          AND NOT EXISTS(SELECT 1 FROM session_lifecycle_deletions d WHERE d.operation_id=j.operation_id)`,
+        [config.policyVersion,run.action==='purge'?['purge']:['archive','cool']])).rows[0]
+      continuationWakeAt=pending.wake_at?new Date(pending.wake_at).getTime():null
+      completed=scanComplete&&continuationWakeAt===null
     }finally{
       report.scanCursor=afterRowId;report.scanComplete=scanComplete;report.dailyRunComplete=completed
       report.scanCheckpointSaved=await scheduleRuns.finish(run,afterRowId,scanComplete,completed)
-      nextDelayMs=completed?60_000:continuationDelayMs
+      nextDelayMs=completed?60_000:scanComplete&&continuationWakeAt!==null&&continuationWakeAt>Date.now()
+        ?Math.min(60_000,Math.max(1,continuationWakeAt-Date.now())):continuationDelayMs
     }
     emit()
   }
