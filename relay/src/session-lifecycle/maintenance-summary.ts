@@ -43,7 +43,7 @@ export async function publishMaintenanceSummaries(pool:pg.Pool,policyVersion:str
    const day=typeof user.maintenance_day==='string'?user.maintenance_day.slice(0,10):new Date(user.maintenance_day).toLocaleDateString('en-CA',{timeZone:'UTC'})
    const scheduledAt=new Date(day+'T03:00:00+08:00')
    await db.query("SET LOCAL lock_timeout='1s';SET LOCAL statement_timeout='5s'")
-   const locked=(await db.query(`SELECT pg_try_advisory_xact_lock(hashtextextended('maintenance-summary:'||$1||':'||$2,0)) locked`,[String(user.user_id),day])).rows[0].locked
+   const locked=(await db.query(`SELECT pg_try_advisory_xact_lock(hashtextextended('maintenance-summary:'||$1||':'||$2,0)) AS locked`,[String(user.user_id),day])).rows[0].locked
    if(!locked){await db.query('ROLLBACK');continue}
    if(scheduledAt>now){await db.query('ROLLBACK');continue}
    const providers=(await db.query(`SELECT i.installation_id,r.state,r.counts,r.last_error_code,r.started_at,r.completed_at
