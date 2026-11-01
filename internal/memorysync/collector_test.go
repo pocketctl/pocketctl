@@ -500,3 +500,35 @@ func TestCollectDerivesInstallationScopedRepositoryIdentity(t *testing.T) {
 		t.Fatalf("canonical remote leaks credentials: %q", snap3.CanonicalRemote)
 	}
 }
+
+func TestCollectCommittedReadsPinnedBlobsAndInclude(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("src/a.ts", "export const a=1;\n")
+	r.write("other/b.ts", "export const b=1;\n")
+	r.run(r.dir, "add", "-A")
+	r.run(r.dir, "commit", "-qm", "initial")
+	r.write("src/a.ts", "export const staged=2;\n")
+	r.run(r.dir, "add", "src/a.ts")
+	r.write("src/a.ts", "export const worktree=3;\n")
+	r.write("src/untracked.ts", "export const untracked=4;\n")
+	before := r.run(r.dir, "status", "--porcelain")
+	snapshot, err := CollectWithOptions(context.Background(), r.dir, DefaultLimits(), CollectOptions{ReadCommitted: true, IncludePaths: []string{"src"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Entries) != 1 || string(snapshot.Entries[0].Content) != "export const a=1;\n" || !snapshot.Selection.Partial {
+		t.Fatalf("wrong committed selection: %+v", snapshot)
+	}
+	if after := r.run(r.dir, "status", "--porcelain"); after != before {
+		t.Fatal("index/worktree modified")
+	}
+	for _, prefix := range []string{"../src", "/src", "src/../other", "src\\a", ""} {
+		if _, err := CollectWithOptions(context.Background(), r.dir, DefaultLimits(), CollectOptions{ReadCommitted: true, IncludePaths: []string{prefix}}); err == nil {
+			t.Fatalf("accepted invalid prefix %q", prefix)
+		}
+	}
+	all, err := CollectWithOptions(context.Background(), r.dir, DefaultLimits(), CollectOptions{ReadCommitted: true, IncludePaths: []string{"."}})
+	if err != nil || len(all.Entries) != 2 {
+		t.Fatalf("root selection: %v %+v", err, all)
+	}
+}

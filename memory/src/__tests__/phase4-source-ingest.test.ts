@@ -43,7 +43,7 @@ describe('phase4 snapshot wire schemas', () => {
       ...validStart(), commit_sha: 'deadbeef',
     }).success).toBe(false)
     expect(StartCodeSnapshotRequestSchema.safeParse({
-      ...validStart(), expected_file_count: 0,
+      ...validStart(), expected_file_count: -1,
     }).success).toBe(false)
   })
 

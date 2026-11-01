@@ -52,6 +52,7 @@ type Snapshot struct {
 	TotalBytes          int64
 	Entries             []CollectedEntry
 	Excluded            []Exclusion
+	Selection           SnapshotSelection
 }
 
 // CollectError carries a bounded machine code for CLI display.
@@ -64,7 +65,37 @@ func codeErr(code string) error { return &CollectError{Code: code} }
 // Collect enumerates exactly the clean committed HEAD tree of the repository
 // containing repoPath. Dirty index/worktree states are rejected; untracked
 // and ignored files are never read.
+type CollectOptions struct {
+	ReadCommitted bool
+	IncludePaths  []string
+}
+
 func Collect(ctx context.Context, repoPath string, limits Limits) (*Snapshot, error) {
+	return CollectWithOptions(ctx, repoPath, limits, CollectOptions{})
+}
+
+func CollectWithOptions(ctx context.Context, repoPath string, limits Limits, options CollectOptions) (*Snapshot, error) {
+	if len(options.IncludePaths) > 100 {
+		return nil, codeErr("too_many_include_paths")
+	}
+	prefixes := map[string]bool{}
+	for _, prefix := range options.IncludePaths {
+		if len(prefix) > 1024 || prefix == "" || strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "\\\t\r\n\x00") {
+			return nil, codeErr("invalid_include_path")
+		}
+		for _, segment := range strings.Split(prefix, "/") {
+			if segment == ".." {
+				return nil, codeErr("invalid_include_path")
+			}
+		}
+		prefixes[path.Clean(prefix)] = true
+	}
+	options.IncludePaths = nil
+	for prefix := range prefixes {
+		options.IncludePaths = append(options.IncludePaths, prefix)
+	}
+	sort.Strings(options.IncludePaths)
+
 	root, err := gitText(ctx, repoPath, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, codeErr("not_a_git_repository")
@@ -78,11 +109,13 @@ func Collect(ctx context.Context, repoPath string, limits Limits) (*Snapshot, er
 		return nil, codeErr("unsupported_object_format")
 	}
 
-	if err := requireClean(ctx, root); err != nil {
-		return nil, err
+	if !options.ReadCommitted {
+		if err := requireClean(ctx, root); err != nil {
+			return nil, err
+		}
 	}
 
-	tree, err := listTree(ctx, root)
+	tree, err := listTree(ctx, root, commit)
 	if err != nil {
 		return nil, codeErr("tree_unreadable")
 	}
@@ -92,6 +125,7 @@ func Collect(ctx context.Context, repoPath string, limits Limits) (*Snapshot, er
 		CommitSHA:           commit,
 		GitObjectFormat:     objectFormat,
 		ParserMatrixVersion: ParserMatrixVersion,
+		Selection:           SnapshotSelection{IncludePaths: options.IncludePaths, ExcludedCounts: map[string]int{}},
 	}
 	applyRepositoryIdentity(ctx, root, snapshot)
 
@@ -113,6 +147,19 @@ func Collect(ctx context.Context, repoPath string, limits Limits) (*Snapshot, er
 	acceptedCount := 0
 	var acceptedBytes int64
 	for _, item := range tree {
+		if len(options.IncludePaths) > 0 {
+			included := false
+			for _, prefix := range options.IncludePaths {
+				if prefix == "." || item.path == prefix || strings.HasPrefix(item.path, strings.TrimSuffix(prefix, "/")+"/") {
+					included = true
+					break
+				}
+			}
+			if !included {
+				snapshot.Excluded = append(snapshot.Excluded, Exclusion{Path: item.path, Reason: "outside_selection"})
+				continue
+			}
+		}
 		if reason, denied := hardDenyReason(item.path); denied {
 			snapshot.Excluded = append(snapshot.Excluded, Exclusion{Path: item.path, Reason: reason})
 			continue
@@ -137,6 +184,10 @@ func Collect(ctx context.Context, repoPath string, limits Limits) (*Snapshot, er
 		content, err := gitBlob(ctx, root, item.object)
 		if err != nil {
 			snapshot.Excluded = append(snapshot.Excluded, Exclusion{Path: item.path, Reason: "unreadable_blob"})
+			continue
+		}
+		if len(content) == 0 {
+			snapshot.Excluded = append(snapshot.Excluded, Exclusion{Path: item.path, Reason: "empty_file"})
 			continue
 		}
 		if int64(len(content)) > limits.MaxFileBytes {
@@ -178,6 +229,10 @@ func Collect(ctx context.Context, repoPath string, limits Limits) (*Snapshot, er
 	})
 	snapshot.TotalBytes = acceptedBytes
 	snapshot.ManifestSHA256 = manifestHash(snapshot.Entries)
+	for _, exclusion := range snapshot.Excluded {
+		snapshot.Selection.ExcludedCounts[exclusion.Reason]++
+	}
+	snapshot.Selection.Partial = len(options.IncludePaths) > 0 || len(snapshot.Excluded) > 0
 	return snapshot, nil
 }
 
@@ -200,8 +255,8 @@ type treeItem struct {
 	path   string
 }
 
-func listTree(ctx context.Context, root string) ([]treeItem, error) {
-	raw, err := gitBytes(ctx, root, "ls-tree", "-r", "-z", "--long", "HEAD")
+func listTree(ctx context.Context, root, commit string) ([]treeItem, error) {
+	raw, err := gitBytes(ctx, root, "ls-tree", "-r", "-z", "--long", commit)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +366,7 @@ func applyRepositoryIdentity(ctx context.Context, root string, snapshot *Snapsho
 		}
 		return
 	}
-	rootCommit, err := gitText(ctx, root, "rev-list", "--max-parents=0", "HEAD")
+	rootCommit, err := gitText(ctx, root, "rev-list", "--max-parents=0", snapshot.CommitSHA)
 	if err == nil && rootCommit != "" {
 		snapshot.RepositoryKey = "local:" + rootCommit
 		return

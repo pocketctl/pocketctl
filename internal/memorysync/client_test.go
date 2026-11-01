@@ -42,13 +42,13 @@ func (f *fakeGrantSource) callCount() int {
 
 func smallSnapshot() *Snapshot {
 	return &Snapshot{
-		CommitSHA:          strings.Repeat("a", 40),
-		GitObjectFormat:    "sha1",
-		RepositoryKey:      "github.com/example/repo",
-		CanonicalRemote:    "https://github.com/example/repo.git",
-		ManifestSHA256:     strings.Repeat("b", 64),
+		CommitSHA:           strings.Repeat("a", 40),
+		GitObjectFormat:     "sha1",
+		RepositoryKey:       "github.com/example/repo",
+		CanonicalRemote:     "https://github.com/example/repo.git",
+		ManifestSHA256:      strings.Repeat("b", 64),
 		ParserMatrixVersion: ParserMatrixVersion,
-		TotalBytes:         3,
+		TotalBytes:          3,
 		Entries: []CollectedEntry{{
 			Path:       "src/a.ts",
 			GitMode:    "100644",
@@ -80,13 +80,13 @@ func TestUploadClientRetriesTransientServerErrors(t *testing.T) {
 				return
 			}
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"snapshot_id":"snap-1"}`))
+			_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","repository_id":"repo-1"}`))
 		case r.URL.Path == "/api/v1/memory/code-snapshots/snap-1/files" && r.Method == "PUT":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"accepted":1}`))
 		case r.URL.Path == "/api/v1/memory/code-snapshots/snap-1/finalize" && r.Method == "POST":
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","state":"ready"}`))
+			_, _ = w.Write([]byte(`{"snapshot_id":"snap-1","repository_id":"repo-1","state":"ready"}`))
 		default:
 			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -94,7 +94,7 @@ func TestUploadClientRetriesTransientServerErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewUploadClient(UploadClientOptions{
+	client := NewUploadClient(UploadClientOptions{FullUpload: true,
 		MemoryOrigin: server.URL,
 		GrantSource:  &fakeGrantSource{tokens: []string{"grant-1"}},
 		RetryWait:    time.Millisecond,
@@ -137,12 +137,12 @@ func TestUploadClientRefreshesGrantOnAuthorizationFailure(t *testing.T) {
 			return
 		}
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"snapshot_id":"snap-2"}`))
+		_, _ = w.Write([]byte(`{"snapshot_id":"snap-2","repository_id":"repo-2"}`))
 	}))
 	defer server.Close()
 
 	source := &fakeGrantSource{tokens: []string{"stale-grant", "fresh-grant"}}
-	client := NewUploadClient(UploadClientOptions{
+	client := NewUploadClient(UploadClientOptions{FullUpload: true,
 		MemoryOrigin: server.URL,
 		GrantSource:  source,
 		RetryWait:    time.Millisecond,
@@ -178,7 +178,7 @@ func TestUploadClientRedactsServerErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewUploadClient(UploadClientOptions{
+	client := NewUploadClient(UploadClientOptions{FullUpload: true,
 		MemoryOrigin: server.URL,
 		GrantSource:  &fakeGrantSource{tokens: []string{"g"}},
 		RetryWait:    time.Millisecond,
@@ -200,7 +200,7 @@ func TestUploadClientRedactsServerErrors(t *testing.T) {
 }
 
 func TestUploadClientRejectsGrantRefusalWithBoundedCode(t *testing.T) {
-	client := NewUploadClient(UploadClientOptions{
+	client := NewUploadClient(UploadClientOptions{FullUpload: true,
 		MemoryOrigin: "http://127.0.0.1:1",
 		GrantSource:  &fakeGrantSource{}, // returns no_installation
 		RetryWait:    time.Millisecond,
@@ -217,7 +217,7 @@ func TestBatchingKeepsRequestsUnderTheBodyBudget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
 			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(`{"snapshot_id":"snap-5"}`))
+			_, _ = w.Write([]byte(`{"snapshot_id":"snap-5","repository_id":"repo-5"}`))
 			return
 		}
 		raw, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
@@ -248,7 +248,7 @@ func TestBatchingKeepsRequestsUnderTheBodyBudget(t *testing.T) {
 		})
 	}
 
-	client := NewUploadClient(UploadClientOptions{
+	client := NewUploadClient(UploadClientOptions{FullUpload: true,
 		MemoryOrigin: server.URL,
 		GrantSource:  &fakeGrantSource{tokens: []string{"g"}},
 		RetryWait:    time.Millisecond,

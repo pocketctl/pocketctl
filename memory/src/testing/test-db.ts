@@ -58,10 +58,13 @@ export async function assertMemoryTestDatabase(
 }
 
 export const MEMORY_TEST_DATABASE_TABLES = [
-  'memory_source_retention_receipts', 'memory_governance_migration_summaries', 'memory_retention_control',
+  'memory_maintenance_runs', 'memory_source_retention_receipts', 'memory_governance_migration_summaries', 'memory_retention_control',
   'memory_delivery_withdrawal_checkpoint', 'memory_delivery_withdrawal_receipts',
   'memory_team_delivery_withdrawals',
   'memory_git_attestation_keys',
+  'memory_git_project_setup_requests',
+  'memory_git_project_targets',
+  'memory_git_managed_signer',
   'memory_git_snapshot_keys',
   'memory_git_sync_principals',
   'memory_git_run_receipts',

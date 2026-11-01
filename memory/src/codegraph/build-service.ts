@@ -139,7 +139,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           throw new GraphBuildFenceError(`validation_failed:${verdict.errors[0] ?? 'unknown'}`)
         }
 
-        const coverage = graph.coverage.summary.unsupported > 0 || graph.edges.some(edge => edge.resolution !== 'resolved')
+        const coverage = snapshot.selection === null || snapshot.selection?.partial === true || graph.coverage.summary.unsupported > 0 || graph.edges.some(edge => edge.resolution !== 'resolved')
           ? 'partial' as const
           : 'complete' as const
 

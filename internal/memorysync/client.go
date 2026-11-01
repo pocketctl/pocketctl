@@ -3,6 +3,7 @@ package memorysync
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -40,13 +41,18 @@ type UploadClientOptions struct {
 	HTTPClient   *http.Client
 	RetryWait    time.Duration
 	RetryMax     int
+	FullUpload   bool
 }
 
-// SyncResult is the terminal outcome of one full upload.
+// SyncResult reports a complete snapshot sync and its actual body transfer.
 type SyncResult struct {
-	SnapshotID string
-	Repository string
-	State      string
+	SnapshotID    string
+	Repository    string
+	State         string
+	UploadedFiles int
+	UploadedBytes int64
+	ReusedFiles   int
+	ViewURL       string
 }
 
 // NewUploadClient builds the bounded uploader.
@@ -63,7 +69,7 @@ func NewUploadClient(options UploadClientOptions) *UploadClient {
 	return &UploadClient{options: options}
 }
 
-// SyncSnapshot uploads the whole snapshot: start, batched files, finalize.
+// SyncSnapshot verifies a complete snapshot, reusing retained bodies by default.
 func (u *UploadClient) SyncSnapshot(ctx context.Context, idempotencyKey string, snapshot *Snapshot) (SyncResult, error) {
 	grant, err := u.options.GrantSource.Grant(ctx, "")
 	if err != nil {
@@ -83,13 +89,72 @@ func (u *UploadClient) SyncSnapshot(ctx context.Context, idempotencyKey string, 
 		ParserMatrixVersion: snapshot.ParserMatrixVersion,
 		IdempotencyKey:      idempotencyKey,
 	}
+	start.Selection = &snapshot.Selection
 	var startResult StartResult
 	if err := u.call(ctx, http.MethodPost, "/api/v1/memory/code-snapshots", idempotencyKey, start, &startResult, &grant); err != nil {
 		return SyncResult{}, err
 	}
 
-	batches := buildBatches(snapshot.Entries)
+	if startResult.SnapshotID == "" || startResult.RepositoryID == "" {
+		return SyncResult{}, fmt.Errorf("invalid_response")
+	}
+	result := SyncResult{SnapshotID: startResult.SnapshotID, Repository: startResult.RepositoryID, State: startResult.State}
+	if startResult.State == "active" || startResult.State == "ready" || startResult.State == "parsing" || startResult.State == "superseded" {
+		result.ReusedFiles = len(snapshot.Entries)
+		return result, nil
+	}
+	entries := snapshot.Entries
+	if !u.options.FullUpload {
+		entries = nil
+		for offset := 0; offset < len(snapshot.Entries); {
+			manifest := make([]ManifestFileEntry, 0, 256)
+			requestBytes := int64(64)
+			end := offset
+			for end < len(snapshot.Entries) && len(manifest) < 256 {
+				e := snapshot.Entries[end]
+				wire := ManifestFileEntry{e.Path, e.GitMode, e.Language, e.Capability, e.BlobSHA256, e.ByteCount}
+				encoded, _ := json.Marshal(wire)
+				entryBytes := int64(len(encoded) + 1)
+				if len(manifest) > 0 && requestBytes+entryBytes > MaxRequestBytes {
+					break
+				}
+				manifest = append(manifest, wire)
+				requestBytes += entryBytes
+				end++
+			}
+			var response struct {
+				MissingPaths []string `json:"missing_paths"`
+			}
+			err := u.call(ctx, http.MethodPost, "/api/v1/memory/code-snapshots/"+startResult.SnapshotID+"/manifest", idempotencyKey, map[string]any{"entries": manifest}, &response, &grant)
+			if err != nil {
+				return SyncResult{}, fmt.Errorf("manifest negotiation: %w; upgrade Memory, or use --full if manifest negotiation is unavailable", err)
+			}
+			if response.MissingPaths == nil {
+				return SyncResult{}, fmt.Errorf("invalid_response")
+			}
+			missing := map[string]bool{}
+			for _, path := range response.MissingPaths {
+				missing[path] = true
+			}
+			for _, e := range snapshot.Entries[offset:end] {
+				if missing[e.Path] {
+					entries = append(entries, e)
+					delete(missing, e.Path)
+				}
+			}
+			if len(missing) > 0 {
+				return SyncResult{}, fmt.Errorf("invalid_response")
+			}
+			offset = end
+		}
+	}
+	result.ReusedFiles = len(snapshot.Entries) - len(entries)
+	batches := buildBatches(entries)
 	for _, batch := range batches {
+		if !u.options.FullUpload {
+			encoded, _ := json.Marshal(batch.Entries)
+			batch.BatchKey = fmt.Sprintf("%x", sha256.Sum256(encoded))
+		}
 		var uploadResult struct {
 			Accepted int `json:"accepted"`
 		}
@@ -97,6 +162,10 @@ func (u *UploadClient) SyncSnapshot(ctx context.Context, idempotencyKey string, 
 			"/api/v1/memory/code-snapshots/"+startResult.SnapshotID+"/files",
 			idempotencyKey, batch, &uploadResult, &grant); err != nil {
 			return SyncResult{}, err
+		}
+		result.UploadedFiles += len(batch.Entries)
+		for _, e := range batch.Entries {
+			result.UploadedBytes += e.ByteCount
 		}
 	}
 
@@ -112,11 +181,9 @@ func (u *UploadClient) SyncSnapshot(ctx context.Context, idempotencyKey string, 
 		idempotencyKey, finalize, &finalizeResult, &grant); err != nil {
 		return SyncResult{}, err
 	}
-	return SyncResult{
-		SnapshotID: finalizeResult.SnapshotID,
-		Repository: startResult.RepositoryID,
-		State:      finalizeResult.State,
-	}, nil
+	result.SnapshotID = finalizeResult.SnapshotID
+	result.State = finalizeResult.State
+	return result, nil
 }
 
 // buildBatches packs entries into requests bounded by MaxRequestBytes on the
@@ -142,8 +209,9 @@ func buildBatches(entries []CollectedEntry) []CodeSnapshotFileBatch {
 			ByteCount:     entry.ByteCount,
 			ContentBase64: base64.StdEncoding.EncodeToString(entry.Content),
 		}
-		entryBytes := int64(len(wire.ContentBase64) + len(wire.Path) + 512)
-		if currentBytes+entryBytes > MaxRequestBytes && len(current.Entries) > 0 {
+		encoded, _ := json.Marshal(wire)
+		entryBytes := int64(len(encoded) + 1)
+		if (currentBytes+entryBytes+256 > MaxRequestBytes || len(current.Entries) >= 512) && len(current.Entries) > 0 {
 			flush()
 		}
 		currentBytes += entryBytes

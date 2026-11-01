@@ -1,3 +1,4 @@
+import {dailyMaintenanceSchedule} from './maintenance/daily.js'
 /**
  * Strict environment parsing for the pocketctl-memory service. Every value is
  * validated at startup: production must fail fast on missing infrastructure
@@ -69,6 +70,7 @@ export interface WikiProviderBudgetSettings {
 
 export interface MemoryConfig {
   /** Optional only for historical explicit fixtures. Always populated by the loader. */
+  maintenanceSchedule?: typeof dailyMaintenanceSchedule
   dataRetention?: SourceRetentionSettings
   inboxRetention?: InboxRetentionSettings
   delegatedPublishMode?: 'off'|'enabled'
@@ -580,6 +582,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   }
 
   return {
+    maintenanceSchedule: dailyMaintenanceSchedule,
     dataRetention,
     inboxRetention,
     mode,

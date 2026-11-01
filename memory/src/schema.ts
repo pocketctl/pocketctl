@@ -1,4 +1,6 @@
+import { DAILY_MAINTENANCE_MIGRATION } from './maintenance/daily.js'
 import { DATA_RETENTION_MIGRATION } from './retention/migration.js'
+import { GIT_MANAGED_SETUP_MIGRATION } from './git-sync/managed-migration.js'
 import { CANDIDATE_REVIEW_EXPIRY_MIGRATION } from './claims/candidate-expiry-migration.js'
 import { INBOX_RETENTION_MIGRATION } from './inbox/retention-migration.js'
 import { DELIVERY_WITHDRAWAL_STREAM_MIGRATION } from './episodes/delivery-withdrawal-stream-migration.js'
@@ -2243,6 +2245,11 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   INBOX_RETENTION_MIGRATION,
   CANDIDATE_REVIEW_EXPIRY_MIGRATION,
   DATA_RETENTION_MIGRATION,
+  GIT_MANAGED_SETUP_MIGRATION,
+  {version: 74, statements: [
+    `ALTER TABLE memory_source_snapshots ADD COLUMN selection JSONB DEFAULT NULL`,
+  ]},
+  DAILY_MAINTENANCE_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

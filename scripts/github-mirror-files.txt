@@ -60,6 +60,7 @@ docs/security-and-data.md
 docs/security-and-data.zh-CN.md
 docs/experimental-features.md
 docs/experimental-features.zh-CN.md
+docs/memory-codegraph-guide.md
 docs/images/iphone-validation-demo.png
 docs/images/iphone-completion-demo.png
 docs/images/iphone-session-demo-en.png

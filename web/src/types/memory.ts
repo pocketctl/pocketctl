@@ -526,3 +526,20 @@ export interface MemoryBulkDecisionItem {candidate_id:string;expected_revision:n
 export interface MemoryBulkDecisionResult {candidate_id:string;status:'success'|'conflict'|'revoked'|'unavailable';code?:string}
 
 export interface MemoryExecutorPrincipal {principal_id:string;provider_client_id:string;permission_revision:string;valid_until:string}
+
+export interface MemoryCodeRepository {
+ repository_id: string
+ repository_key: string
+ canonical_remote: string | null
+ snapshot_id: string
+ commit_sha: string
+ state: string
+ file_count: number
+ byte_count: number
+ selection: {partial:boolean;include_paths?:string[];excluded_counts?:Record<string,number>} | null
+ graph_version_id: string | null
+ graph_commit_sha: string | null
+ coverage: string | null
+ parser_version: string | null
+}
+export interface MemoryCodeRepositoryList {repositories:MemoryCodeRepository[];next_cursor:string|null}

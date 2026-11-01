@@ -152,7 +152,16 @@ export interface LifecycleNotificationSubject {
   navigation: { type: 'session' | 'lifecycle_detail'; id: string }
 }
 
+export interface MaintenanceSummary {
+  scheduled_at: string
+  state: 'completed' | 'partial'
+  duration_seconds: number
+  counts: Record<string, number>
+  pending_installations: number
+  failed_installations: number
+}
 export interface SystemNotification {
+  maintenance?: MaintenanceSummary
   notification_id: string
   revision: number
   kind: 'system'

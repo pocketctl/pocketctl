@@ -2,8 +2,9 @@
   <button type="button" class="notification-row" :class="{ selected, unread: !item.read_at }" :data-notification-id="item.notification_id" @click="$emit('select')">
     <span class="notification-mark" aria-hidden="true">i</span>
     <span class="notification-copy"><small>{{ t('attention.notification.system') }} · {{ t('attention.notification.no_action') }}</small>
-      <strong>{{ t('attention.notification.title') }}</strong>
-      <span>{{ item.subject_preview.map(subject => subject.title).join(' · ') || t('attention.notification.title') }}</span>
+      <strong>{{ t(item.maintenance ? 'attention.maintenance.title' : 'attention.notification.title') }}</strong>
+      <span v-if="item.maintenance">{{ t(`attention.maintenance.${item.maintenance.state}`) }}</span>
+      <span v-else>{{ item.subject_preview.map(subject => subject.title).join(' · ') || t('attention.notification.title') }}</span>
       <small>{{ t('attention.notification.subject_count', { count: item.subject_count }) }} · {{ new Date(item.created_at).toLocaleString() }}</small>
     </span>
     <span class="read-state">{{ t(item.read_at ? 'attention.notification.read' : 'attention.notification.unread') }}</span>

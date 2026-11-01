@@ -2,6 +2,7 @@ import { initTeamTaskReadinessSchema } from './task-readiness-schema.js'
 import { initTeamTemplateSchema } from './template-schema.js'
 import { initTeamDeliveryMemorySchema } from './delivery-memory-schema.js'
 import type pg from 'pg'
+import { initGitProjectSchema } from './git-projects.js'
 import { initTeamDeliverySchema } from './delivery-schema.js'
 import { initTeamAccountLifecycleSchema } from './account-lifecycle-schema.js'
 import { initTeamEvidenceSchema } from './evidence-schema.js'
@@ -515,4 +516,5 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
   await initTeamTemplateSchema(db)
   await initTeamEvidenceSchema(db)
   await initTeamTaskReadinessSchema(db)
+  await initGitProjectSchema(db)
 }

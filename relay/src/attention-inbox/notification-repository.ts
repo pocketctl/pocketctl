@@ -1,3 +1,4 @@
+import { maintenanceSlot } from '../session-lifecycle/schedule.js'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import type pg from 'pg'
 import type {
@@ -44,6 +45,11 @@ const visibility = `s.user_id=$1 AND ($2::text IS NULL OR s.daemon_id=$2)
   AND EXISTS(SELECT 1 FROM daemons d WHERE d.daemon_id=s.daemon_id AND d.user_id=$1)
   AND NOT EXISTS(SELECT 1 FROM sessions live WHERE live.session_id=s.session_id
     AND (live.user_id IS DISTINCT FROM $1 OR live.daemon_id IS DISTINCT FROM s.daemon_id))`
+const noticeVisibility = `(EXISTS(SELECT 1 FROM attention_notification_subjects s
+  WHERE s.notification_id=n.notification_id AND ${visibility}) OR ($2::text IS NULL AND n.maintenance_summary IS NOT NULL
+  AND EXISTS(SELECT 1 FROM maintenance_provider_results mr JOIN extension_installations mi USING(installation_id)
+    WHERE mi.owner_user_id=$1 AND mi.owner_type='user' AND mi.status IN('active','paused')
+      AND (mr.scheduled_at AT TIME ZONE 'Asia/Shanghai')::date=n.maintenance_day)))`
 const iso = (value: Date | string | null): string | null =>
   value === null ? null : new Date(value).toISOString()
 function subject(row: any): NotificationSubject {
@@ -151,7 +157,7 @@ export class AttentionNotificationRepository {
     if (stages.length > 4096)
       throw new Error('lifecycle stage metadata too large')
     const bound = await db.query(
-      `SELECT j.operation_id FROM session_lifecycle_jobs j
+      `SELECT j.operation_id,j.maintenance_scheduled_at FROM session_lifecycle_jobs j
       WHERE operation_id=$1 AND user_id=$2 AND session_id=$3 AND action=$4
         AND EXISTS(SELECT 1 FROM daemons WHERE daemon_id=$5 AND user_id=$2)
         AND NOT EXISTS(SELECT 1 FROM sessions live WHERE live.session_id=$3
@@ -165,6 +171,8 @@ export class AttentionNotificationRepository {
       ],
     )
     if (!bound.rows[0]) throw new Error('lifecycle result ownership mismatch')
+    const scheduledAt=bound.rows[0].maintenance_scheduled_at
+    const dayAt=scheduledAt??maintenanceSlot('archive',new Date())
     const previous = (
       await db.query(
         `SELECT r.notification_id,r.state,r.reason_code,r.stages,
@@ -192,11 +200,11 @@ export class AttentionNotificationRepository {
     // One cross-host, cross-action maintenance message per user/Shanghai day.
     // Compensation always updates the original operation's message.
     if (!previous && input.action !== 'resume') {
-      const daily = (await db.query(`INSERT INTO attention_notifications(notification_id,user_id,expires_at,maintenance_day,completed_at)
-        VALUES($1,$2,NOW()+($3::int*interval '1 day'),(NOW() AT TIME ZONE 'Asia/Shanghai')::date,CASE WHEN $4='running' THEN NULL ELSE NOW() END)
+      const daily = (await db.query(`INSERT INTO attention_notifications(notification_id,user_id,expires_at,maintenance_day,completed_at,published_at)
+        VALUES($1,$2,NOW()+($3::int*interval '1 day'),($5::timestamptz AT TIME ZONE 'Asia/Shanghai')::date,CASE WHEN $4='running' THEN NULL ELSE NOW() END,CASE WHEN $6 THEN NULL ELSE NOW() END)
         ON CONFLICT(user_id,maintenance_day) WHERE maintenance_day IS NOT NULL
         DO UPDATE SET maintenance_day=EXCLUDED.maintenance_day RETURNING notification_id,(xmax=0) AS newly_created`,
-        [id,input.userId,input.retentionDays,input.state])).rows[0]
+        [id,input.userId,input.retentionDays,input.state,dayAt,Boolean(scheduledAt)])).rows[0]
       id = daily.notification_id
       dailyCreated = daily.newly_created
     }
@@ -231,7 +239,7 @@ export class AttentionNotificationRepository {
     )
     const notification = (
       await db.query(
-        `SELECT revision FROM attention_notifications
+        `SELECT revision,published_at FROM attention_notifications
       WHERE notification_id=$1 AND user_id=$2 FOR UPDATE`,
         [id, input.userId],
       )
@@ -251,7 +259,7 @@ export class AttentionNotificationRepository {
       revision = Number(
         (
           await db.query(
-            `UPDATE attention_notifications SET revision=revision+1,read_at=NULL,
+            `UPDATE attention_notifications SET revision=revision+1,
         completed_at=CASE WHEN $3='running' THEN NULL ELSE NOW() END,
         expires_at=NOW()+($4::int*interval '1 day'),updated_at=NOW()
         WHERE notification_id=$1 AND user_id=$2 RETURNING revision`,
@@ -260,7 +268,7 @@ export class AttentionNotificationRepository {
         ).rows[0].revision,
       )
     }
-    await this.notify(db, input.userId, id, revision, 'changed')
+    if(notification.published_at&&!scheduledAt) await this.notify(db, input.userId, id, revision, 'changed')
     await db.query(
       `UPDATE session_lifecycle_results SET notification_id=$2,notification_revision=$3
       WHERE operation_id=$1`,
@@ -283,9 +291,9 @@ export class AttentionNotificationRepository {
     }
     const cursor = this.parse(input.cursor, scope)
     const params = [input.userId, input.daemonId ?? null, input.read ?? null]
-    const predicate = `n.user_id=$1 AND n.expires_at>NOW()
+    const predicate = `n.user_id=$1 AND n.expires_at>NOW() AND n.published_at IS NOT NULL
       AND ($3::boolean IS NULL OR (n.read_at IS NOT NULL)=$3)
-      AND EXISTS(SELECT 1 FROM attention_notification_subjects s WHERE s.notification_id=n.notification_id AND ${visibility})`
+      AND ${noticeVisibility}`
     const rows = await this.pool.query(
       `SELECT n.*,
       to_char(n.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_time
@@ -296,9 +304,8 @@ export class AttentionNotificationRepository {
     )
     const counts = await this.pool.query(
       `SELECT count(*)::int AS unread FROM attention_notifications n
-      WHERE n.user_id=$1 AND n.expires_at>NOW() AND n.read_at IS NULL
-        AND EXISTS(SELECT 1 FROM attention_notification_subjects s
-          WHERE s.notification_id=n.notification_id AND ${visibility})`,
+      WHERE n.user_id=$1 AND n.expires_at>NOW() AND n.published_at IS NOT NULL AND n.read_at IS NULL
+        AND ${noticeVisibility}`,
       params.slice(0, 2),
     )
     const page = rows.rows.slice(0, input.limit)
@@ -333,8 +340,8 @@ export class AttentionNotificationRepository {
     const row = (
       await this.pool.query(
         `SELECT n.* FROM attention_notifications n
-      WHERE n.notification_id=$3 AND n.user_id=$1 AND n.expires_at>NOW()
-      AND EXISTS(SELECT 1 FROM attention_notification_subjects s WHERE s.notification_id=n.notification_id AND ${visibility})`,
+      WHERE n.notification_id=$3 AND n.user_id=$1 AND n.expires_at>NOW() AND n.published_at IS NOT NULL
+      AND ${noticeVisibility}`,
         [userId, daemonId ?? null, id],
       )
     ).rows[0]
@@ -345,7 +352,23 @@ export class AttentionNotificationRepository {
       daemonId,
       limit: 3,
     })
-    if (!page || page.total === 0) return null
+    if ((!page || page.total === 0) && !row.maintenance_summary) return null
+    let maintenance=row.maintenance_summary
+    if(maintenance){
+      // Re-authorize summary counters on every read, just like subjects. A
+      // previous snapshot must not expose counters after host/owner transfer.
+      const counts:Record<string,number>={}
+      if(!daemonId){
+        const reports=await this.pool.query(`SELECT mr.counts FROM maintenance_provider_results mr
+          JOIN extension_installations mi USING(installation_id) WHERE mi.owner_user_id=$1 AND mi.owner_type='user'
+          AND mi.status IN('active','paused') AND (mr.scheduled_at AT TIME ZONE 'Asia/Shanghai')::date=$2`,[userId,row.maintenance_day])
+        for(const report of reports.rows)for(const [key,n] of Object.entries(report.counts))counts[key]=(counts[key]??0)+Number(n)
+      }
+      const actions=await this.pool.query(`SELECT s.action,count(*)::int n FROM attention_notification_subjects s
+        WHERE s.notification_id=$3 AND ${visibility} GROUP BY s.action`,[userId,daemonId??null,id])
+      for(const action of actions.rows)counts['session_'+action.action]=action.n
+      maintenance={...maintenance,counts}
+    }
     return {
       id,
       revision: Number(row.revision),
@@ -354,9 +377,10 @@ export class AttentionNotificationRepository {
       createdAt: iso(row.created_at)!,
       readAt: iso(row.read_at),
       expiresAt: iso(row.expires_at)!,
-      subjectCount: page.total,
-      subjects: page.subjects,
-      subjectsNextCursor: page.nextCursor,
+      subjectCount: page?.total??0,
+      subjects: page?.subjects??[],
+      subjectsNextCursor: page?.nextCursor??null,
+      maintenance: !daemonId?maintenance??undefined:undefined,
       requiresApproval: false,
     }
   }
@@ -374,7 +398,7 @@ export class AttentionNotificationRepository {
     }
     const cursor = this.parse(input.cursor, scope)
     const params = [input.userId, input.daemonId ?? null, input.notificationId]
-    const predicate = `n.user_id=$1 AND n.notification_id=$3 AND n.expires_at>NOW() AND ${visibility}`
+    const predicate = `n.user_id=$1 AND n.notification_id=$3 AND n.expires_at>NOW() AND n.published_at IS NOT NULL AND ${visibility}`
     const rows = await this.pool.query(
       `SELECT s.*,(SELECT r.stages FROM session_lifecycle_results r WHERE r.operation_id=s.operation_id) AS stages, EXISTS(SELECT 1 FROM sessions live
       WHERE live.session_id=s.session_id AND live.user_id=$1 AND live.daemon_id=s.daemon_id
@@ -389,7 +413,11 @@ export class AttentionNotificationRepository {
       JOIN attention_notifications n USING(notification_id) WHERE ${predicate}`,
       params,
     )
-    if (count.rows[0].total === 0) return null
+    if (count.rows[0].total === 0) {
+      const visible=await this.pool.query(`SELECT 1 FROM attention_notifications n WHERE n.user_id=$1 AND n.notification_id=$3
+        AND n.expires_at>NOW() AND n.published_at IS NOT NULL AND ${noticeVisibility}`,params)
+      if(!visible.rowCount)return null
+    }
     const page = rows.rows.slice(0, input.limit)
     return {
       subjects: page.map(subject),
@@ -412,7 +440,7 @@ export class AttentionNotificationRepository {
       WHERE live.session_id=s.session_id AND live.user_id=$1 AND live.daemon_id=s.daemon_id
         AND live.content_state NOT IN ('deleting','deleted')) AS accessible
       FROM attention_notification_subjects s JOIN attention_notifications n USING(notification_id)
-      WHERE n.user_id=$1 AND n.notification_id=$3 AND n.expires_at>NOW() AND s.subject_id=$4 AND ${visibility}`,
+      WHERE n.user_id=$1 AND n.notification_id=$3 AND n.expires_at>NOW() AND n.published_at IS NOT NULL AND s.subject_id=$4 AND ${visibility}`,
         [userId, daemonId ?? null, notificationId, subjectId],
       )
     ).rows[0]
@@ -430,8 +458,8 @@ export class AttentionNotificationRepository {
       const row = (
         await db.query(
           `SELECT n.revision,n.read_at FROM attention_notifications n
-        WHERE n.user_id=$1 AND n.notification_id=$3 AND n.expires_at>NOW()
-        AND EXISTS(SELECT 1 FROM attention_notification_subjects s WHERE s.notification_id=n.notification_id AND ${visibility})
+        WHERE n.user_id=$1 AND n.notification_id=$3 AND n.expires_at>NOW() AND n.published_at IS NOT NULL
+        AND ${noticeVisibility}
         FOR UPDATE`,
           [userId, daemonId ?? null, id],
         )

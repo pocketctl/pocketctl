@@ -199,29 +199,17 @@ suite('bounded lifecycle backlog scheduling and durable scan progress PostgreSQL
     if (process.env.SESSION_LIFECYCLE_BENCHMARK_REPORT)
       writeFileSync(process.env.SESSION_LIFECYCLE_BENCHMARK_REPORT, JSON.stringify(benchmark, null, 2)+'\n')
   }, 60_000)
-  test('durable daily runs execute once at 01:00/03:00 Shanghai and survive restart',async()=>{
+  test('03:00 archive and purge share one durable daily slot and survive restart',async()=>{
     await pool.query('TRUNCATE session_lifecycle_daily_runs')
     const daily=new DailyMaintenanceSchedule(pool),cfg={...config,effectiveAt:'2026-10-30T00:00:00+08:00'}
-    expect(await daily.claim(cfg,new Date('2026-10-30T00:59:59+08:00'))).toBeNull()
-    const archive=(await daily.claim(cfg,new Date('2026-10-30T01:00:00+08:00')))!
+    expect(await daily.claim(cfg,new Date('2026-10-30T02:59:59+08:00'))).toBeNull()
+    const archive=(await daily.claim(cfg,new Date('2026-10-30T03:00:00+08:00')))!
     expect(archive.action).toBe('archive')
-    expect(await daily.claim(cfg,new Date('2026-10-30T01:00:00+08:00'))).toBeNull()
     await daily.finish(archive,10,true,true)
-    expect(await new DailyMaintenanceSchedule(pool).claim(cfg,new Date('2026-10-30T02:59:59+08:00'))).toBeNull()
-    const purge=(await daily.claim(cfg,new Date('2026-10-30T03:00:00+08:00')))!
-    expect(purge.action).toBe('purge')
+    const purge=(await new DailyMaintenanceSchedule(pool).claim(cfg,new Date('2026-10-30T03:00:01+08:00')))!
+    expect(purge.action).toBe('purge');expect(purge.scheduledAt).toEqual(archive.scheduledAt)
     await daily.finish(purge,10,true,true)
     expect(await daily.claim(cfg,new Date('2026-10-30T23:00:00+08:00'))).toBeNull()
-    expect((await daily.claim(cfg,new Date('2026-10-31T01:00:00+08:00')))?.action).toBe('archive')
+    expect((await daily.claim(cfg,new Date('2026-10-31T03:00:00+08:00')))?.action).toBe('archive')
   })
-
-  test('03:00 purge starts even when the 01:00 archive batch has more pages',async()=>{
-    await pool.query('TRUNCATE session_lifecycle_daily_runs')
-    const daily=new DailyMaintenanceSchedule(pool),cfg={...config,effectiveAt:'2026-10-30T00:00:00+08:00'}
-    const archive=(await daily.claim(cfg,new Date('2026-10-30T01:00:00+08:00')))!
-    await daily.finish(archive,20,false,false)
-    const purge=(await daily.claim(cfg,new Date('2026-10-30T03:00:00+08:00')))!
-    expect(purge.action).toBe('purge')
-  })
-
 })

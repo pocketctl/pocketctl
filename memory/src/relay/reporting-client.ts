@@ -12,6 +12,11 @@ export function createReportingClient(options: ReportingClientOptions) {
   const { http, tokens } = options
 
   return {
+    async reportMaintenance(input: Record<string, unknown>): Promise<void> {
+      await withProviderAuthRetry(tokens, 'report_maintenance', token => http.request('POST', '/api/extensions/v1/maintenance', {
+        operation: 'report_maintenance', token, body: input,
+      }))
+    },
     async reportStatus(input: Record<string, unknown>): Promise<void> {
       await withProviderAuthRetry(tokens, 'report_status', token =>
         http.request('POST', '/api/extensions/v1/status', {

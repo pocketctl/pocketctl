@@ -14,6 +14,9 @@ import {
   computeManifestHash,
   createSourceRepository,
   SourceRepositoryTombstonedError,
+  type StartCodeSnapshotRequest,
+  type CodeSnapshotBatch,
+  type SourceSnapshotRecord,
 } from './source-repository.js'
 import type { Phase4Metrics } from '../metrics.js'
 
@@ -64,14 +67,14 @@ export function createSourceIngestService(
     installationId: string
     snapshotId: string
     repositoryId?: string
-  }): Promise<void> => {
+  }): Promise<SourceSnapshotRecord> => {
     const snapshot = await repository.getSnapshot({
       installationId: input.installationId,
       snapshotId: input.snapshotId,
     })
     if (snapshot) {
       if (snapshot.state === 'failed') throw new SnapshotIngestError('state_conflict')
-      return
+      return snapshot
     }
     const snapshotTombstone = await pool.query(`
       SELECT 1 FROM memory_source_snapshot_tombstones
@@ -106,11 +109,15 @@ export function createSourceIngestService(
       expectedByteCount: number
       idempotencyKey: string
       sourceKind?: 'personal' | 'shared'
+      selection?: StartCodeSnapshotRequest['selection']
     }): Promise<{ snapshotId: string; repositoryId: string; state: string }> {
       if (input.gitObjectFormat !== 'sha1' && input.gitObjectFormat !== 'sha256') {
         throw new SnapshotIngestError('invalid_request')
       }
-      if (input.expectedFileCount > CODE_SNAPSHOT_MAX_FILES
+      if (!Number.isInteger(input.expectedFileCount) || input.expectedFileCount < 0
+        || !Number.isInteger(input.expectedByteCount) || input.expectedByteCount < 0
+        || (input.expectedFileCount === 0) !== (input.expectedByteCount === 0)
+        || input.expectedFileCount > CODE_SNAPSHOT_MAX_FILES
         || input.expectedByteCount > CODE_SNAPSHOT_MAX_TOTAL_BYTES) {
         throw new SnapshotIngestError('invalid_request')
       }
@@ -158,6 +165,7 @@ export function createSourceIngestService(
           manifest_sha256: input.manifestSha256,
           expected_file_count: input.expectedFileCount,
           expected_byte_count: input.expectedByteCount,
+          ...(input.selection ? {selection:input.selection} : {}),
         }),
         run: async client => {
           try {
@@ -175,6 +183,7 @@ export function createSourceIngestService(
               manifestHash: input.manifestSha256,
               expectedFileCount: input.expectedFileCount,
               expectedByteCount: input.expectedByteCount,
+              selection:input.selection,
             }, client)
             if(snapshot.state==='failed')throw new SnapshotIngestError('state_conflict')
             return { ok: true, metadata: {
@@ -188,13 +197,62 @@ export function createSourceIngestService(
         },
       })
       if (result.kind === 'replayed') {
-        await assertReplayTarget({
+        const current = await assertReplayTarget({
           installationId: input.installationId,
           snapshotId: String(result.metadata.snapshotId),
           repositoryId: String(result.metadata.repositoryId),
         })
+        // The receipt freezes identity, not runtime state. A later sync must
+        // observe active/ready instead of trying to upload to a finished source.
+        return { ...idempotencyResult<{ snapshotId: string; repositoryId: string; state: string }>(result), state: current.state }
       }
       return idempotencyResult<{ snapshotId: string; repositoryId: string; state: string }>(result)
+    },
+
+    /** Register retained bodies against a full manifest; a retry rechecks retention. */
+    async registerManifest(input: {
+      installationId: string; grant?: SourceMutationGrant; snapshotId: string
+      entries: Array<Omit<CodeSnapshotBatch['entries'][number], 'content_base64'>>
+    }): Promise<{missing_paths: string[]}> {
+      const seen = new Set<string>()
+      for (const entry of input.entries) {
+        if (seen.has(entry.path) || languageCapabilityFor(entry.path) !== entry.capability) throw new SnapshotIngestError('invalid_request')
+        seen.add(entry.path)
+      }
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+        await requireSourceAuthority(client,input)
+        await lockSourceSnapshot(client,input)
+        const snapshot = await repository.getSnapshot(input,client)
+        if (!snapshot) throw new SnapshotIngestError('not_found')
+        if (snapshot.state !== 'staging') throw new SnapshotIngestError('state_conflict')
+        const missing: string[] = []
+        for (const entry of [...input.entries].sort((a,b)=>a.blob_sha256.localeCompare(b.blob_sha256)||a.path.localeCompare(b.path))) {
+          // A hash alone cannot import data from another repository or scope.
+          const found = await client.query<{utf8_content:string;byte_count:string}>(`
+            SELECT b.utf8_content,b.byte_count FROM memory_source_blobs b
+            WHERE b.installation_id=$1 AND b.blob_hash=$2 AND b.utf8_content IS NOT NULL
+              AND EXISTS (SELECT 1 FROM memory_source_snapshot_entries e
+                JOIN memory_source_snapshots s ON s.snapshot_id=e.snapshot_id AND s.installation_id=e.installation_id
+                WHERE e.installation_id=b.installation_id AND e.blob_hash=b.blob_hash
+                  AND s.repository_id=$3 AND s.state IN ('staging','ready','parsing','active'))
+            FOR SHARE OF b
+          `,[input.installationId,entry.blob_sha256,snapshot.repositoryId])
+          const blob = found.rows[0]
+          if (!blob) { missing.push(entry.path); continue }
+          if (Number(blob.byte_count)!==entry.byte_count || Buffer.byteLength(blob.utf8_content)!==entry.byte_count
+            || createHash('sha256').update(blob.utf8_content).digest('hex')!==entry.blob_sha256) throw new SnapshotIngestError('integrity_mismatch')
+          const outcome = await repository.insertEntry({installationId:input.installationId,snapshotId:input.snapshotId,
+            path:entry.path,blobHash:entry.blob_sha256,language:entry.language,capability:entry.capability,
+            byteCount:entry.byte_count,mode:entry.git_mode},client)
+          if (outcome==='conflict') throw new SnapshotIngestError('integrity_mismatch')
+        }
+        await assertSourceGrantClock(client,input)
+        await client.query('COMMIT')
+        return {missing_paths:missing}
+      } catch(error) { await client.query('ROLLBACK'); throw error }
+      finally { client.release() }
     },
 
     async uploadBatch(input: {
@@ -202,6 +260,7 @@ export function createSourceIngestService(
       grant?: SourceMutationGrant
       snapshotId: string
       batchIndex: number
+      batchKey?: string
       entries: Array<{
         path: string
         git_mode: string
@@ -243,7 +302,7 @@ export function createSourceIngestService(
         if (digest !== entry.blob_sha256) {
           throw new SnapshotIngestError('integrity_mismatch')
         }
-        if (content.includes(0)) throw new SnapshotIngestError('invalid_request')
+        if (content.includes(0) || !Buffer.from(content.toString('utf8')).equals(content)) throw new SnapshotIngestError('invalid_request')
         validated.push({ entry, content })
       }
       const result = await idempotency.execute({
@@ -255,10 +314,10 @@ export function createSourceIngestService(
         isolation: 'read_committed',
         installationId: input.installationId,
         operation: `code_snapshot_batch:${input.snapshotId}`,
-        key: String(input.batchIndex),
+        key: input.batchKey ?? String(input.batchIndex),
         requestCanonical: canonicalJsonStringify({
           snapshot_id: input.snapshotId,
-          batch_index: input.batchIndex,
+          ...(input.batchKey ? {batch_key:input.batchKey} : {batch_index:input.batchIndex}),
           entries: input.entries,
         }),
         run: async client => {
@@ -360,6 +419,10 @@ export function createSourceIngestService(
               snapshotId: input.snapshotId,
             }, client)
             if (!snapshot) throw new SnapshotIngestError('not_found')
+            if (snapshot.manifestHash !== input.manifestSha256
+              || (snapshot.state !== 'staging' && (snapshot.fileCount !== input.expectedFileCount || snapshot.byteCount !== input.expectedByteCount))) {
+              throw new SnapshotIngestError('manifest_mismatch')
+            }
             if (snapshot.state === 'ready') {
               return { ok: true, metadata: {
                 snapshotId: snapshot.snapshotId,

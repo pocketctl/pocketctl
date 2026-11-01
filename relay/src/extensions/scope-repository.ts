@@ -280,7 +280,14 @@ export async function createOrganizationWithCreator(
   db: ScopeDb,
   input: { organizationId?: string; name: string; createdByUserId: number },
 ): Promise<{ organization: ExtensionOrganization; creatorMembership: ExtensionScopeMembership }> {
-  return runInScopeTransaction(db, async client => {
+  return runInScopeTransaction(db, client => createOrganizationWithCreatorInTx(client, input))
+}
+
+/** Compose scope creation with a caller-owned transaction (for Team setup). */
+export async function createOrganizationWithCreatorInTx(
+  client: ScopeClient,
+  input: { organizationId?: string; name: string; createdByUserId: number },
+): Promise<{ organization: ExtensionOrganization; creatorMembership: ExtensionScopeMembership }> {
     const organization = await createOrganization(client, input)
     await appendLifecycleEvent(client, {
       scopeKind: 'organization',
@@ -311,7 +318,6 @@ export async function createOrganizationWithCreator(
       },
     })
     return { organization, creatorMembership }
-  })
 }
 
 /** Same atomic creation for a Team: creator becomes the team scope_administrator. */

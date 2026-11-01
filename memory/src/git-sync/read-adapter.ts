@@ -9,7 +9,7 @@ export const FixedGitTarget=z.object({providerRepositoryId:z.string().regex(/^[1
 export type FixedGitTarget=z.infer<typeof FixedGitTarget>
 const sha=z.string().regex(/^[a-f0-9]{40}$/),id=z.union([z.string(),z.number().int().safe()])
 const repo=z.object({id,full_name:z.string(),private:z.boolean()})
-const reference=z.object({ref:z.string(),repo})
+const reference=z.object({ref:z.string(),repo,sha:sha.optional()})
 const pr=z.object({number:z.number().int().positive(),merged:z.boolean(),merge_commit_sha:sha.nullable().optional(),head:reference,base:reference})
 const entry=z.object({path:z.string(),mode:z.string(),type:z.string(),sha,size:z.number().int().nonnegative().optional()})
 const parse=<T>(schema:z.ZodType<T>,raw:unknown):T=>{const value=schema.safeParse(raw);if(!value.success)throw new GitReadError('provider_unverifiable');return value.data}
@@ -17,13 +17,14 @@ export function createFixedGitReadCapability(provider:'github'|'gitee',options:{
   const parsed=FixedGitTarget.safeParse(options.target);if(!parsed.success)throw new GitReadError('provider_target_invalid')
   const target=parsed.data,root=['repos',target.owner,target.repository]
   let continuation:{token:string;commit:string;tree:string;entries:z.infer<typeof entry>[];index:number}|undefined
+  let mergeHead:{merge:string;head:string}|undefined,mergeProof:{sha:string;tree:string;parents:string[]}|undefined
   function assertRepo(value:z.infer<typeof repo>){if(String(value.id)!==target.providerRepositoryId||value.full_name!==`${target.owner}/${target.repository}`||value.private!==target.private)throw new GitReadError('provider_target_mismatch')}
   return {kind:'live',target:{provider,providerRepositoryId:target.providerRepositoryId,branch:target.branch,origin:GIT_ORIGINS[provider]},
     async request(request,signal){
       let segments:string[],query:Record<string,string>|undefined
       if(request.operation==='repository')segments=root
       else if(request.operation==='merge') {if(!/^[1-9][0-9]{0,14}$/.test(request.number))throw new GitReadError('provider_unverifiable');segments=[...root,'pulls',request.number]}
-      else if(request.operation==='commit'){parse(sha,request.sha);segments=provider==='github'?[...root,'git','commits',request.sha]:[...root,'commits',request.sha]}
+      else if(request.operation==='commit'){parse(sha,request.sha);segments=provider==='github'&&!request.proofFor?[...root,'git','commits',request.sha]:[...root,'commits',request.sha]}
       else if(request.operation==='poll') {
         const page=request.cursor??'1';if(!/^[1-9][0-9]{0,2}$/.test(page)||Number(page)>128)throw new GitReadError('provider_cursor_invalid')
         segments=[...root,'pulls'];query={state:'all',base:target.branch,per_page:'100',page}
@@ -45,13 +46,33 @@ export function createFixedGitReadCapability(provider:'github'|'gitee',options:{
           const value=parse(pr,response.body);assertRepo(value.head.repo);assertRepo(value.base.repo)
           const exportId=value.head.ref.match(/^pocketctl\/export\/([0-9a-f-]{36})$/)?.[1]
           if(!exportId||!z.uuid().safeParse(exportId).success||String(value.number)!==request.number||value.base.ref!==target.branch||value.merged&&!value.merge_commit_sha)throw new GitReadError('provider_unverifiable')
+          mergeHead=value.merged&&value.merge_commit_sha&&value.head.sha?{merge:value.merge_commit_sha,head:value.head.sha}:undefined
           body={providerRepositoryId:target.providerRepositoryId,number:request.number,baseBranch:target.branch,merged:value.merged,exportId,actorId:null,
+            ...(provider==='github'&&mergeHead?{headCommit:mergeHead.head}:{}),
             ...(value.merged?{mergeCommit:value.merge_commit_sha}:{})}
         } else if(request.operation==='commit') {
-          const value=provider==='github'?parse(z.object({sha,tree:z.object({sha})}),response.body)
+          if(request.proofFor) {
+            // A PR opener or merger is never authorship proof. Only a verified
+            // signature by the same author/committer over the exact imported
+            // tree can identify the person taking responsibility for its bytes.
+            const proof=z.object({sha,author:z.object({id}).nullable(),committer:z.object({id}).nullable(),commit:z.object({tree:z.object({sha}),
+              author:z.object({email:z.string()}),committer:z.object({email:z.string()}),
+              verification:z.object({verified:z.boolean(),reason:z.string(),signature:z.string().nullable(),payload:z.string().nullable()})})}).safeParse(response.body)
+            let actorId:string|null=null
+            if(provider==='github'&&proof.success&&mergeHead&&mergeProof&&request.sha===mergeHead.head&&request.proofFor.mergeCommit===mergeHead.merge
+              &&mergeProof.sha===mergeHead.merge&&mergeProof.parents.includes(mergeHead.head)&&mergeProof.tree===request.proofFor.tree) {
+              const p=proof.data,v=p.commit.verification
+              if(p.sha===request.sha&&p.commit.tree.sha===request.proofFor.tree&&p.author&&p.committer&&String(p.author.id)===String(p.committer.id)
+                &&p.commit.author.email===p.commit.committer.email&&v.verified&&v.reason==='valid'&&v.signature&&v.payload?.startsWith(`tree ${request.proofFor.tree}\n`))actorId=String(p.author.id)
+            }
+            body={sha:request.sha,tree:request.proofFor.tree,actorId}
+          } else {
+          const value=provider==='github'?parse(z.object({sha,tree:z.object({sha}),parents:z.array(z.object({sha})).optional()}),response.body)
             :(()=>{const v=parse(z.object({sha,commit:z.object({tree:z.object({sha})})}),response.body);return {sha:v.sha,tree:v.commit.tree}})()
           if(value.sha!==request.sha)throw new GitReadError('provider_unverifiable')
+          if(provider==='github')mergeProof={sha:value.sha,tree:value.tree.sha,parents:(parse(z.object({parents:z.array(z.object({sha})).optional()}),response.body).parents??[]).map(p=>p.sha)}
           body={sha:value.sha,tree:value.tree.sha}
+          }
         } else if(request.operation==='poll') {
           const values=parse(z.array(z.unknown()).max(100),response.body),changes:{number:string;exportId:string}[]=[]
           for(const raw of values){

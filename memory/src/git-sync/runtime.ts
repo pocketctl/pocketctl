@@ -16,6 +16,7 @@ import type { GitConnection,GitTargetRegistry } from './repository.js'
 import { parseStrictJson } from './strict-json.js'
 import type { GitRecoveryReadRegistry } from './recovery-service.js'
 import { gitWriteEndpoint } from './write-protocol.js'
+import { createGitCredentialVault, createManagedGitKeys } from './credential-vault.js'
 const mode=z.enum(['off','shadow','enabled']),uuid=z.uuid()
 const registration=FixedGitTarget.extend({installationId:uuid,repositoryId:uuid,targetId:z.string().min(1).max(256),
   provider:z.enum(['github','gitee']),credentialRef:z.string().min(1).max(512),credentialFile:z.string().min(1).max(1024),scopeMode:mode,
@@ -33,12 +34,40 @@ async function readRuntimeFile(path:string,secret=false):Promise<Buffer>{
   }catch{throw new GitReadError('git_runtime_config_invalid')}finally{await file?.close()}
 }
 export async function createGitRuntime(deps:{pool:pg.Pool;config:GitSyncConfig;globalMode:GitSyncMode;sharedMode:GitSyncMode;
-  env?:Record<string,string|undefined>;readFile?:(path:string)=>Promise<Buffer>;fetch?:typeof fetch}) {
+  env?:Record<string,string|undefined>;readFile?:(path:string)=>Promise<Buffer>;fetch?:typeof fetch;vaultSecret?:string}) {
   const env=deps.env??process.env,read=deps.readFile??readRuntimeFile
+  const secret=deps.vaultSecret??env.MEMORY_GIT_CREDENTIAL_KEY??env.MEMORY_HMAC_KEY??''
+  const vault=Buffer.byteLength(secret)>=32?createGitCredentialVault(secret):undefined
+  type Target=z.infer<typeof registration>&{managedProjectId?:string;authorizationRevision?:string}
   const disabled=deps.config.mode==='off'||deps.globalMode==='off'
-  const readTargets=async()=>{if(disabled||!env.MEMORY_GIT_TARGET_REGISTRY_PATH)return []
-    try{return registrySchema.parse(parseStrictJson(await read(env.MEMORY_GIT_TARGET_REGISTRY_PATH))).targets}catch{throw new GitReadError('git_runtime_config_invalid')}}
-  async function targetFor(c:GitConnection){const values=(await readTargets()).filter(t=>t.installationId===c.installationId&&t.repositoryId===c.repositoryId&&t.provider===c.provider&&t.providerRepositoryId===c.providerRepositoryId&&t.branch===c.targetBranch)
+  const readTargets=async():Promise<Target[]>=>{if(disabled)return []
+    let files:Target[]=[]
+    if(env.MEMORY_GIT_TARGET_REGISTRY_PATH)try{files=registrySchema.parse(parseStrictJson(await read(env.MEMORY_GIT_TARGET_REGISTRY_PATH))).targets}catch{throw new GitReadError('git_runtime_config_invalid')}
+    if(!vault)return files
+    const rows=(await deps.pool.query(`SELECT p.installation_id,p.project_id,c.repository_id,p.target
+      FROM memory_git_project_targets p JOIN memory_git_connections c USING(installation_id,connection_id)
+      JOIN memory_scope_memberships m ON m.installation_id=p.installation_id AND m.membership_id=p.authorized_membership_id
+      JOIN memory_owner_scopes s ON s.installation_id=p.installation_id
+      WHERE p.token_cipher IS NOT NULL AND p.consent_until>clock_timestamp() AND c.state='active' AND m.state='active'
+      AND m.roles @> ARRAY['scope_administrator']::text[] AND m.membership_revision::text=p.target->>'membershipRevision'
+      AND s.state='active' AND s.authorization_epoch::text=p.target->>'authorizationEpoch'
+      AND (m.valid_from IS NULL OR m.valid_from<=clock_timestamp()) AND (m.valid_until IS NULL OR m.valid_until>clock_timestamp())`)).rows
+    const managed:Target[]=rows.map(r=>({...registration.parse({...FixedGitTarget.strip().parse(r.target),provider:r.target.provider,
+      installationId:r.installation_id,repositoryId:r.repository_id,targetId:r.target.targetId,credentialRef:r.target.credentialRef,
+      credentialFile:'managed',scopeMode:'enabled'}),managedProjectId:r.project_id,authorizationRevision:r.target.authorizationRevision}))
+    return [...files,...managed]
+  }
+  const credential=async(target:Target)=>{
+    if(!target.managedProjectId)return deps.readFile?read(target.credentialFile):readRuntimeFile(target.credentialFile,true)
+    const row=(await deps.pool.query(`SELECT token_cipher FROM memory_git_project_targets WHERE installation_id=$1 AND project_id=$2
+      AND consent_until>clock_timestamp() AND target->>'authorizationRevision'=$3`,[target.installationId,target.managedProjectId,target.authorizationRevision])).rows[0]
+    if(!row?.token_cipher||!vault)throw new GitReadError('read_not_authorized')
+    return Buffer.from(vault.open(row.token_cipher,`${target.installationId}:${target.managedProjectId}`))
+  }
+  async function targetFor(c:GitConnection){
+    const managed=vault?(await deps.pool.query(`SELECT project_id FROM memory_git_project_targets WHERE installation_id=$1 AND connection_id=$2`,[c.installationId,c.connectionId])).rows[0]:null
+    const values=(await readTargets()).filter(t=>t.installationId===c.installationId&&t.repositoryId===c.repositoryId&&t.provider===c.provider&&t.providerRepositoryId===c.providerRepositoryId&&t.branch===c.targetBranch
+      &&(managed?t.managedProjectId===managed.project_id:!t.managedProjectId))
     if(values.length!==1)return null;return values[0]}
   const scopeMode=async(c:GitConnection):Promise<GitSyncMode>=>{if(disabled)return 'off';const target=await targetFor(c);if(!target)return 'off'
     return gitSyncModeForScope({globalMode:deps.globalMode,syncMode:deps.config.mode,connectionMode:c.syncMode,scopeMode:target.scopeMode,
@@ -52,9 +81,11 @@ export async function createGitRuntime(deps:{pool:pg.Pool;config:GitSyncConfig;g
       keys=createDatabaseAttestationRegistry({pool:deps.pool,signer:{keyId:env.MEMORY_GIT_SIGNING_KEY_ID,privateKey:createPrivateKey(bytes)}})
       await keys.registerSigner()
     }catch{throw new GitReadError('git_runtime_key_invalid')}
-  }else if(!disabled)keys=createDatabaseAttestationRegistry({pool:deps.pool}) // verification only; never generate a signing key
+  }else if(!disabled)keys=vault?createManagedGitKeys(deps.pool,secret):createDatabaseAttestationRegistry({pool:deps.pool})
   const consented=async(c:GitConnection)=>{
-    if(await scopeMode(c)!=='enabled'||!env.MEMORY_GIT_READ_CONSENT_FILE)return false
+    if(await scopeMode(c)!=='enabled')return false
+    if((await targetFor(c))?.managedProjectId)return true
+    if(!env.MEMORY_GIT_READ_CONSENT_FILE)return false
     try{const entries=consentSchema.parse(parseStrictJson(await read(env.MEMORY_GIT_READ_CONSENT_FILE))).consents
       return entries.some(v=>v.installationId===c.installationId&&v.connectionId===c.connectionId&&v.providerRepositoryId===c.providerRepositoryId&&v.branch===c.targetBranch&&Date.parse(v.expiresAt)>Date.now())
     }catch{return false}
@@ -65,7 +96,7 @@ export async function createGitRuntime(deps:{pool:pg.Pool;config:GitSyncConfig;g
     const current=(await deps.pool.query<{target_id:string;credential_ref:string}>(`SELECT target_id,credential_ref FROM memory_git_connections WHERE installation_id=$1 AND connection_id=$2`,[c.installationId,c.connectionId])).rows[0]
     if(!current||current.target_id!==target.targetId||current.credential_ref!==target.credentialRef)return null
     const fixed=FixedGitTarget.parse({providerRepositoryId:target.providerRepositoryId,owner:target.owner,repository:target.repository,branch:target.branch,private:target.private})
-    const bytes=deps.readFile?await read(target.credentialFile):await readRuntimeFile(target.credentialFile,true),token=bytes.toString('utf8').trim()
+    const bytes=await credential(target),token=bytes.toString('utf8').trim()
     const cap=(target.provider==='github'?createGitHubReadCapability:createGiteeReadCapability)({target:fixed,transport:createGitTransport({provider:target.provider,token,maxResponseBytes:deps.config.maxTotalBytes,fetch:deps.fetch})})
     const original=cap.request.bind(cap)
     cap.request=async(request,signal)=>{const fresh=await targetFor(c)
@@ -79,7 +110,7 @@ export async function createGitRuntime(deps:{pool:pg.Pool;config:GitSyncConfig;g
     const current=(await deps.pool.query<{target_id:string;credential_ref:string}>(`SELECT target_id,credential_ref FROM memory_git_connections WHERE installation_id=$1 AND connection_id=$2`,[c.installationId,c.connectionId])).rows[0]
     if(!current||current.target_id!==target.targetId||current.credential_ref!==target.credentialRef)return null
     const fixed=FixedGitTarget.parse({providerRepositoryId:target.providerRepositoryId,owner:target.owner,repository:target.repository,branch:target.branch,private:target.private})
-    const bytes=deps.readFile?await read(target.credentialFile):await readRuntimeFile(target.credentialFile,true)
+    const bytes=await credential(target)
     const transport=createGitTransport({provider:target.provider,token:bytes.toString('utf8').trim(),maxResponseBytes:deps.config.maxTotalBytes,fetch:deps.fetch})
     return {kind:'live',provider:target.provider,target:fixed,request:async(request,signal)=>{
       const fresh=await targetFor(c)

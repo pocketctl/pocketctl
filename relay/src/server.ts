@@ -1,3 +1,4 @@
+import {registerMaintenanceRoutes} from './extensions/maintenance-routes.js'
 import { finishDatabaseStartup } from './startup-readiness.js';
 import {TeamExternalStopService} from './team/external-stop.js';
 import { registerDeliveryWithdrawalRoutes } from './extensions/delivery-withdrawal-routes.js';
@@ -124,6 +125,9 @@ import { TeamRunService } from './team/run-service.js';
 import { registerTeamRunRoutes } from './team/run-routes.js';
 import { createTeamMemoryBindingService } from './team/memory-binding-service.js';
 import { registerTeamMemoryBindingRoutes } from './team/memory-binding-routes.js';
+import { registerGitProjectRoutes } from './team/git-project-routes.js';
+import { createGitProjectService } from './team/git-projects.js';
+import { initializeGitTeamMemory } from './team/git-memory-setup.js';
 import { TeamMemorySourceProjector } from './team/memory-source-projector.js';
 import { TeamMemoryContextBridge } from './team/memory-context-bridge.js';
 import {
@@ -1358,6 +1362,13 @@ async function main() {
     revalidateTeamSubscriptions: () => router.revalidateTeamSubscriptions(),
     isDaemonOnline: (daemonId, ownerUserId) => router.isSharedTeamDaemonOnline(daemonId, ownerUserId),
   });
+  registerGitProjectRoutes(app, {
+    service: createGitProjectService(pool),
+    initializeMemory: async (teamId, actor) => { if (!teamMemoryBridgeEnabled) throw new Error('team_feature_disabled'); return initializeGitTeamMemory(pool, teamId, actor) },
+    enabled: () => teamConfig.collaboration === 'on' && extensionConfig.mode === 'enabled' && extensionV2Mode === 'enabled',
+    getDatabaseReady: () => databaseReady,
+    verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
+  });
   registerTeamEvidenceRoutes(app, {
     service: new TeamEvidenceService(pool, teamEvidenceConnectors, teamId => teamConfig.trustedEvidence === 'on' && teamDeliveryEnabled(teamConfig, teamId)),
     verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
@@ -1523,6 +1534,7 @@ async function main() {
     providerPublicOrigins: extensionConfig.providerPublicOrigins,
     grantKeys: extensionGrantKeys,
   });
+  registerMaintenanceRoutes(app,{pool,mode:extensionConfig.mode,providerJwtSecret:extensionConfig.providerJwtSecret,issuer:publicIssuer});
   registerStatusRoutes(app, {
     pool,
     mode: extensionConfig.mode,

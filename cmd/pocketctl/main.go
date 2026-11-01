@@ -54,7 +54,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.5.12"
+var version = "0.5.13"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -167,6 +167,10 @@ func main() {
 	case "uninstall":
 		cmdUninstall(os.Args[2:])
 	case "help", "--help", "-h":
+		if len(os.Args) > 2 && os.Args[2] == "memory" {
+			cmdMemory(append(os.Args[3:], "--help"))
+			return
+		}
 		printUsage()
 	default:
 		fmt.Fprintln(os.Stderr, i18n.T("error.unknown_command", os.Args[1]))

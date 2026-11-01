@@ -7,8 +7,8 @@ import { createGitExportService } from '../git-sync/export-service.js'
 import { createGitProposalService } from '../git-sync/proposal-service.js'
 import type { RepositoryFile } from '../git-sync/types.js'
 
-/** Entirely synthetic exact-edit provider identity. No real person or provider
- * provenance is claimed; production readers deliberately produce actorId=null. */
+/** Synthetic exact-edit identity, never real provider provenance. Live readers
+ * require exact signed-tree proof and cannot substitute PR opener or merger. */
 export async function gitImportFixture(pool:pg.Pool,kinds=['rule'],unlockedWiki=false,
   beforeExport?: (fixture:Awaited<ReturnType<typeof gitExportFixture>>)=>Promise<void>) {
   const f=await gitExportFixture(pool),keys=attestationFixture(),deps={pool,keys:keys.registry,skill:{context:f.skill.context,cases:f.skill.cases}}
