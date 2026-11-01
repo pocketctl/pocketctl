@@ -1364,7 +1364,9 @@ async function main() {
   });
   registerGitProjectRoutes(app, {
     service: createGitProjectService(pool),
-    initializeMemory: async (teamId, actor) => { if (!teamMemoryBridgeEnabled) throw new Error('team_feature_disabled'); return initializeGitTeamMemory(pool, teamId, actor) },
+    // Git Ops provisions metadata after explicit creator consent. The separate
+    // Team bridge controls shared content projection/context, not this setup.
+    initializeMemory: (teamId, actor) => initializeGitTeamMemory(pool, teamId, actor),
     enabled: () => teamConfig.collaboration === 'on' && extensionConfig.mode === 'enabled' && extensionV2Mode === 'enabled',
     getDatabaseReady: () => databaseReady,
     verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),

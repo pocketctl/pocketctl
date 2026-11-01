@@ -25,7 +25,7 @@ const canLinkIdentity=ref(false),identityConsent=ref(false)
 const identityToken=ref('')
 function failure(reason:unknown) {
   const value=reason as {code?:string;status?:number}
-  const keys:Record<string,string>={forbidden:'permission',repository_authorization_failed:'token_failed',repository_not_found:'repo_failed',conflict:'conflict',feature_disabled:'unavailable',source_invalid:'source_invalid',provider_unavailable:'provider_failed',credential_store_unavailable:'credential_store_unavailable'}
+  const keys:Record<string,string>={forbidden:'permission',team_access_denied:'permission',creator_required:'creator_required',team_feature_disabled:'initialize_unavailable',memory_provider_unavailable:'initialize_provider_unavailable',memory_initialization_failed:'initialize_failed',repository_authorization_failed:'token_failed',repository_not_found:'repo_failed',conflict:'conflict',feature_disabled:'unavailable',source_invalid:'source_invalid',provider_unavailable:'provider_failed',credential_store_unavailable:'credential_store_unavailable'}
   error.value=t(`memory.git_setup.${keys[value.code??'']??'failed'}`)
   if([401,403,404,410].includes(value.status??0)){connection.value=null;expanded.value=false;canAdmin.value=false;token.value='';identityToken.value='';consent.value=false}
 }

@@ -33,7 +33,9 @@ func TestGrantClientPersonalFlowResolvesActiveInstallationAndMints(t *testing.T)
 			if len(services) != 1 || services[0] != "memory.codegraph.write" {
 				t.Errorf("wrong services: %v", body["services"])
 			}
-			_, _ = w.Write([]byte(`{"token":"grant-token","token_type":"extension_capability","expires_in":60,"installation_id":"i-active","provider_public_origin":"https://memory.example"}`))
+			// Match Relay's actual v1 wire response: `grant`, without an
+			// installation_id (the client already resolved it above).
+			_, _ = w.Write([]byte(`{"grant":"grant-token","token_type":"extension_capability","expires_in":60,"provider_public_origin":"https://memory.example"}`))
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)

@@ -257,3 +257,60 @@ describe('Code Graph repository/scope lifecycle',()=>{
   expect(wrapper.find('[data-testid="memory-impact-result"]').exists()).toBe(false);expect(wrapper.text()).not.toContain('secret-old');wrapper.unmount()
  })
 })
+
+describe('Code Graph scope discovery and copy actions', () => {
+ const personal='22222222-2222-4222-8222-222222222222',team='33333333-3333-4333-8333-333333333333'
+ const scopes=[{installation_id:personal,owner_scope_kind:'personal',owner_scope_id:personal,authorization_epoch:'1',permissions:['read','contribute'],state:'active',name:'Personal'},
+  {installation_id:team,owner_scope_kind:'team',owner_scope_id:team,authorization_epoch:'1',permissions:['read','contribute'],state:'active',name:'PocketCTL'}] as any
+ const writeText=vi.fn()
+ beforeEach(()=>{
+  vi.clearAllMocks()
+  memoryClient.listMemoryCodeRepositories.mockResolvedValue({repositories:[],next_cursor:null})
+  writeText.mockResolvedValue(undefined)
+  Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true})
+ })
+ test('copies the current UUID and distinct preview/upload commands for personal and shared scopes',async()=>{
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId:'',installationId:personal,scopes,legacyGrant:false}})
+  await flushPromises()
+  expect(wrapper.get('[data-testid="memory-codegraph-installation"]').text()).toContain(personal)
+  await wrapper.get('[data-testid="memory-codegraph-copy-id"]').trigger('click');await flushPromises()
+  expect(writeText).toHaveBeenLastCalledWith(personal)
+  await wrapper.get('[data-testid="memory-codegraph-copy-preview"]').trigger('click');await flushPromises()
+  expect(writeText).toHaveBeenLastCalledWith(`pocketctl memory sync-repo --repo '/path/to/repository' --scope-installation-id ${personal} --dry-run`)
+  await wrapper.setProps({installationId:team})
+  expect(wrapper.find('[data-testid="memory-codegraph-copy-status"]').exists()).toBe(false)
+  await wrapper.get('[data-testid="memory-codegraph-copy-sync"]').trigger('click');await flushPromises()
+  expect(writeText).toHaveBeenLastCalledWith(`pocketctl memory sync-repo --repo '/path/to/repository' --scope-installation-id ${team}`)
+  expect(wrapper.get('[data-testid="memory-codegraph-copy-status"]').text()).toBe('memory.codegraph.copy_done')
+  wrapper.unmount()
+ })
+ test('reports clipboard failure while keeping selectable UUID and command text',async()=>{
+  writeText.mockRejectedValue(new Error('clipboard permission denied'))
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId:'',installationId:personal,scopes,legacyGrant:false}})
+  await wrapper.get('[data-testid="memory-codegraph-copy-id"]').trigger('click');await flushPromises()
+  expect(wrapper.get('[data-testid="memory-codegraph-copy-status"]').text()).toBe('memory.codegraph.copy_failed')
+  expect(wrapper.get('[data-testid="memory-codegraph-installation"]').text()).toContain(personal)
+  expect(wrapper.get('[data-testid="memory-codegraph-command"]').text()).toContain(personal)
+  wrapper.unmount()
+ })
+ test('keeps the legacy personal sync command usable without a v2 endpoint',async()=>{
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId:'',installationId:personal,scopes:[scopes[0]],legacyGrant:true}})
+  await wrapper.get('[data-testid="memory-codegraph-copy-sync"]').trigger('click');await flushPromises()
+  expect(writeText).toHaveBeenLastCalledWith("pocketctl memory sync-repo --repo '/path/to/repository'")
+  expect(wrapper.get('[data-testid="memory-codegraph-installation"]').text()).toContain(personal)
+  wrapper.unmount()
+ })
+ test('ignores delayed copy completion after a scope switch and hides unavailable scope actions',async()=>{
+  let complete!:()=>void
+  writeText.mockReturnValue(new Promise<void>(resolve=>{complete=resolve}))
+  const wrapper=mount(MemoryCodeGraphPanel,{props:{repositoryId:'',installationId:personal,scopes,legacyGrant:false}})
+  await wrapper.get('[data-testid="memory-codegraph-copy-id"]').trigger('click')
+  await wrapper.setProps({installationId:team})
+  complete();await flushPromises()
+  expect(wrapper.find('[data-testid="memory-codegraph-copy-status"]').exists()).toBe(false)
+  await wrapper.setProps({scopes:[scopes[0]]})
+  expect(wrapper.find('[data-testid="memory-codegraph-copy-id"]').exists()).toBe(false)
+  expect(wrapper.find('[data-testid="memory-codegraph-copy-sync"]').exists()).toBe(false)
+  wrapper.unmount()
+ })
+})

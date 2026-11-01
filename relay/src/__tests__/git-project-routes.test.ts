@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import { describe, expect, test, vi } from 'vitest'
 import { GitProjectError, parseGitProject } from '../team/git-projects.js'
 import { registerGitProjectRoutes } from '../team/git-project-routes.js'
+import { TeamRepositoryError } from '../team/repository.js'
 
 const input = { name: 'PocketCTL', repository_url: 'git@github.com:pocketctl/pocketctl.git', branch: 'main', request_id: 'create-project-1' }
 describe('Git Ops project input', () => {
@@ -44,6 +45,58 @@ describe('Git Ops project routes', () => {
     const { app, service } = fixture(); service.list.mockRejectedValue(new Error('private SQL and credentials'))
     const response = await app.inject({ url: '/api/team/git-projects', headers: { authorization: 'Bearer valid' } })
     expect(response.statusCode).toBe(500); expect(response.body).not.toContain('private SQL')
+    await app.close()
+  })
+})
+
+describe('Git Ops shared Memory initialization', () => {
+  function setup(enabled = true) {
+    const app = Fastify()
+    const initializeMemory = vi.fn(async () => ({ installation_id: 'new-installation' }))
+    registerGitProjectRoutes(app, {
+      service: { list: vi.fn(), create: vi.fn() }, enabled: () => enabled, getDatabaseReady: () => true,
+      verifyAccessToken: async token => token === 'valid' ? { userId: 7 } : null, initializeMemory,
+    })
+    const request = { method: 'POST' as const, url: '/api/team/teams/ctm_example/git-memory', headers: { authorization: 'Bearer valid' }, payload: { confirm_shared_memory: true } }
+    return { app, initializeMemory, request }
+  }
+  test('requires authenticated explicit consent and rejects caller-supplied authority', async () => {
+    const { app, initializeMemory, request } = setup()
+    expect((await app.inject({ ...request, headers: {} })).statusCode).toBe(401)
+    for (const payload of [{}, { confirm_shared_memory: false }, { confirm_shared_memory: true, actor_user_id: 8 }]) {
+      expect((await app.inject({ ...request, payload })).statusCode).toBe(400)
+    }
+    expect(initializeMemory).not.toHaveBeenCalled()
+    const result = await app.inject(request)
+    expect(result.statusCode).toBe(200)
+    expect(result.json()).toEqual({ installation_id: 'new-installation' })
+    expect(initializeMemory).toHaveBeenCalledWith('ctm_example', 7)
+    await app.close()
+  })
+  test('retains the Team/Extension gate without treating it as a retryable initialization failure', async () => {
+    const { app, initializeMemory, request } = setup(false)
+    const result = await app.inject(request)
+    expect(result.statusCode).toBe(503)
+    expect(result.json().error.code).toBe('team_feature_disabled')
+    expect(initializeMemory).not.toHaveBeenCalled()
+    await app.close()
+  })
+  test('distinguishes creator denial, provider unavailability, and an internal initialization failure', async () => {
+    const { app, initializeMemory, request } = setup()
+    initializeMemory.mockRejectedValueOnce(new GitProjectError('creator_required'))
+    const forbidden = await app.inject(request)
+    expect(forbidden.statusCode).toBe(403); expect(forbidden.json().error.code).toBe('creator_required')
+    initializeMemory.mockRejectedValueOnce(new TeamRepositoryError('team_access_denied', 'private account state'))
+    const revoked = await app.inject(request)
+    expect(revoked.statusCode).toBe(403); expect(revoked.json().error.code).toBe('team_access_denied')
+    expect(revoked.body).not.toContain('private account')
+    initializeMemory.mockRejectedValueOnce(new Error('memory_provider_disabled'))
+    const provider = await app.inject(request)
+    expect(provider.statusCode).toBe(503); expect(provider.json().error.code).toBe('memory_provider_unavailable')
+    initializeMemory.mockRejectedValueOnce(Object.assign(new Error('SQL query with private connection data'), { code: '42601' }))
+    const internal = await app.inject(request)
+    expect(internal.statusCode).toBe(500); expect(internal.json().error.code).toBe('memory_initialization_failed')
+    expect(internal.body).not.toContain('private'); expect(internal.body).not.toContain('SQL')
     await app.close()
   })
 })

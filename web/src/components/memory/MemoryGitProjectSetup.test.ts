@@ -92,3 +92,19 @@ test('an old active generation cannot falsely confirm a lost renewal response',a
   await w.findAll('button').find(b=>b.text()==='刷新')!.trigger('click');await flushPromises()
   expect(w.text()).not.toContain('连接结果尚未确认');w.unmount()
 })
+
+test.each([
+ ['team_feature_disabled','团队记忆初始化功能暂不可用'],
+ ['memory_provider_unavailable','Memory 服务尚未就绪'],
+ ['memory_initialization_failed','团队记忆初始化失败'],
+ ['creator_required','请由团队创建者初始化共享记忆'],
+ ['team_access_denied','当前账号没有此共享记忆的所需权限'],
+])('initialization explains %s instead of showing a generic refresh error',async(code,message)=>{
+ api.initialize.mockRejectedValue({status:code==='creator_required'||code==='team_access_denied'?403:503,code})
+ const w=await panel({...project,memory_installation_id:'',memory_status:'pending'})
+ await w.get('input[type=checkbox]').setValue(true);await w.get('button').trigger('click');await flushPromises()
+ expect(w.get('[role="alert"]').text()).toContain(message)
+ expect(w.text()).not.toContain('操作未完成，请刷新核对当前状态后重试。')
+ expect(w.emitted('changed')).toBeUndefined()
+ w.unmount()
+})

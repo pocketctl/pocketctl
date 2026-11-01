@@ -119,6 +119,9 @@ func memorySyncRepoOptionsFromContext(ctx context.Context) memorySyncRepoOptions
 }
 
 func runMemorySyncRepoWith(stdout, stderr io.Writer, args []string, deps memorySyncDeps) int {
+	if len(args) > 0 && args[0] == "scopes" {
+		return runMemoryScopes(stdout, stderr, args[1:])
+	}
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		fmt.Fprint(stdout, memoryHelp())
 		return 0

@@ -67,21 +67,20 @@ func (c *GrantClient) CodegraphGrant(ctx context.Context, scopeInstallationID st
 		"services":        []string{codegraphService},
 	}
 	var result struct {
-		Token                 string `json:"token"`
-		ExpiresIn             int    `json:"expires_in"`
-		InstallationID        string `json:"installation_id"`
-		ProviderPublicOrigin  string `json:"provider_public_origin"`
+		Grant                string `json:"grant"`
+		ExpiresIn            int    `json:"expires_in"`
+		ProviderPublicOrigin string `json:"provider_public_origin"`
 	}
 	if err := c.postJSON(ctx, "/api/extensions/v1/grants", body, &result); err != nil {
 		return Grant{}, err
 	}
-	if result.Token == "" {
+	if result.Grant == "" {
 		return Grant{}, fmt.Errorf("empty_grant")
 	}
 	return Grant{
-		Token:          result.Token,
+		Token:          result.Grant,
 		ExpiresIn:      result.ExpiresIn,
-		InstallationID: result.InstallationID,
+		InstallationID: installationID,
 		Origin:         result.ProviderPublicOrigin,
 	}, nil
 }

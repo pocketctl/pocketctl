@@ -28,8 +28,22 @@
     <details v-if="!scopeUnavailable" class="memory-codegraph-setup" :open="!repositoryId">
       <summary>{{ t('memory.codegraph.sync_title') }}</summary>
       <p>{{ t('memory.codegraph.sync_copy') }}</p>
+      <div v-if="installationId" class="memory-codegraph-scope-id" data-testid="memory-codegraph-installation">
+        <span>{{ t('memory.codegraph.installation_id') }}</span>
+        <code>{{ installationId }}</code>
+        <button type="button" class="memory-button" data-testid="memory-codegraph-copy-id"
+          @click="copySetup('id')">{{ t('memory.codegraph.copy_id') }}</button>
+      </div>
+      <div class="memory-codegraph-copy-actions">
+        <button type="button" class="memory-button" :disabled="!installationId"
+          data-testid="memory-codegraph-copy-preview" @click="copySetup('preview')">{{ t('memory.codegraph.copy_preview') }}</button>
+        <button type="button" class="memory-button" :disabled="!installationId"
+          data-testid="memory-codegraph-copy-sync" @click="copySetup('sync')">{{ t('memory.codegraph.copy_sync') }}</button>
+      </div>
+      <p v-if="copyStatus" role="status" aria-live="polite" data-testid="memory-codegraph-copy-status">{{ t('memory.codegraph.' + copyStatus) }}</p>
       <pre data-testid="memory-codegraph-command">{{ syncCommand }} --dry-run
 {{ syncCommand }}</pre>
+      <p>{{ t('memory.codegraph.command_path') }}</p>
       <p>{{ t('memory.codegraph.sync_options') }}</p>
       <p>{{ t('memory.codegraph.gates') }}</p>
       <button v-if="canEnableUpload && !uploadEnabled" type="button" class="memory-button"
@@ -135,7 +149,23 @@ const repositories = ref<MemoryCodeRepository[]>([])
 const catalogLoading = ref(false), catalogError = ref(''), catalogCursor = ref<string|null>(null)
 const scopeUnavailable = computed(()=>props.scopes.length>0 ? !props.scopes.some(s=>s.installation_id===props.installationId) : Boolean(props.installationId && !props.legacyGrant))
 const selectedRepository = computed(()=>repositories.value.find(r=>r.repository_id===props.repositoryId))
-const syncCommand = computed(()=>`pocketctl memory sync-repo --repo <repository-path>${props.installationId && !props.scopes.some(s=>s.installation_id===props.installationId && s.owner_scope_kind==='personal') ? ' --scope-installation-id '+props.installationId : ''}`)
+const syncCommand = computed(()=>`pocketctl memory sync-repo --repo '/path/to/repository'${props.installationId && (!props.legacyGrant || !props.scopes.some(scope => scope.installation_id === props.installationId && scope.owner_scope_kind === 'personal')) ? ' --scope-installation-id '+props.installationId : ''}`)
+const copyStatus = ref<'' | 'copy_done' | 'copy_failed'>('')
+let copyEpoch = 0
+async function copySetup(kind: 'id' | 'preview' | 'sync'): Promise<void> {
+  if (!props.installationId || scopeUnavailable.value) return
+  const epoch = ++copyEpoch, installationId = props.installationId
+  const text = kind === 'id' ? installationId : syncCommand.value + (kind === 'preview' ? ' --dry-run' : '')
+  copyStatus.value = ''
+  try {
+    await navigator.clipboard.writeText(text)
+    if (epoch === copyEpoch && installationId === props.installationId && !scopeUnavailable.value) copyStatus.value = 'copy_done'
+  } catch {
+    if (epoch === copyEpoch && installationId === props.installationId && !scopeUnavailable.value) copyStatus.value = 'copy_failed'
+  }
+}
+watch(() => [props.installationId, scopeUnavailable.value], () => { copyEpoch++; copyStatus.value = '' })
+onBeforeUnmount(() => { copyEpoch++ })
 let graphEpoch=0,catalogEpoch=0
 let graphController:AbortController|undefined,catalogController:AbortController|undefined
 function context(signal:AbortSignal):MemoryGraphScopeContext|undefined {
@@ -212,6 +242,8 @@ function oppositeKey(edge: MemoryCodeGraphEdge): string {
 .memory-codegraph-setup summary { cursor: pointer; font-weight: 600; }
 .memory-codegraph-setup p { color: var(--fg-secondary); line-height: 1.6; }
 .memory-codegraph-setup pre { overflow-x: auto; padding: 12px; border-radius: 8px; background: var(--bg-secondary); font-size: 12px; }
+.memory-codegraph-scope-id, .memory-codegraph-copy-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.memory-codegraph-scope-id code { overflow-wrap: anywhere; min-width: 0; user-select: text; }
 .memory-phase4-repository-field select { width: 100%; max-width: 100%; min-width: 0; height: 37px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg); background: var(--surface); font-size: 12px; }
 :deep(.memory-scope-chip-personal) { color: var(--fg); }
 </style>

@@ -676,15 +676,15 @@ export function phase4ModeForScope(
 }
 
 /**
- * ADR-P3-13: the Memory shared-scope flag is independent of MEMORY_MODE and
- * never implicitly changes extraction, embedding, or Context settings. The
- * default and every production example stay `off`.
+ * CodeGraph is enabled by default. Repository uploads still require explicit
+ * account authorization; shared scopes are additionally gated by their mode.
+ * This does not enable Wiki generation or change model-provider settings.
  */
 export function codegraphModeFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): SharedScopesMode {
   const raw = env.MEMORY_CODEGRAPH_MODE?.trim() ?? ''
-  if (!raw) return 'off'
+  if (!raw) return 'enabled'
   if (raw !== 'off' && raw !== 'shadow' && raw !== 'enabled') {
     throw new Error(`invalid MEMORY_CODEGRAPH_MODE value: ${raw} (expected off | shadow | enabled)`)
   }

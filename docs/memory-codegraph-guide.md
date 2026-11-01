@@ -1,6 +1,6 @@
 # Memory 代码图谱使用说明
 
-本轮代码为本地实现，未部署线上；需要一起更新 CLI、Web、Memory API 和 Worker，Memory 启动时应用 migration 74。升级前的 CLI 仍是全量正文传输，不能使用新参数；新 CLI 不能凭帮助说明推断线上已经开放代码图谱。代码同步由命令主动执行，无需重启主机 daemon。
+代码图谱需要配套的 CLI、Web、Memory API 和 Worker，数据库至少为 schema 74。v0.5.13 已包含这些组件；2026-11-01 起服务端代码图谱默认开启，线上开关由独立实例配置持久保留。升级前的 CLI 仍是全量正文传输，不能使用新参数；新 CLI 不能凭帮助说明推断目标服务的实际配置。代码同步由命令主动执行，无需重启主机 daemon。
 
 ## 先查看帮助
 
@@ -16,7 +16,7 @@ pocketctl memory sync-repo --help
 ## 首次同步个人仓库
 
 1. 使用 `pocketctl login` 登录。在 Web 的「Memory → 代码图谱」展开「同步仓库与使用说明」，点击「允许个人范围的代码上传」。此操作只增加 `memory.codegraph.write` 授权，不执行上传。
-2. 管理员确认 Memory API/Worker 的 `MEMORY_CODEGRAPH_MODE=enabled`。这是服务端开关，与账号服务授权分开。API 和 Worker 都须更新；仅显示模块不表示解析已运行。
+2. 管理员确认 Memory API/Worker 的 `MEMORY_CODEGRAPH_MODE=enabled`（默认值）。这是服务端开关，与账号服务授权分开；已有部署显式配置的 `off` 需迁移，不能只升级代码。API 和 Worker 都须更新；仅显示模块不表示解析已运行。
 3. 在仓库主机先预览，再上传：
 
 ```sh
@@ -29,6 +29,27 @@ pocketctl memory sync-repo --repo /path/to/repo
 成功后输出 `repository_id`、`snapshot_id`、状态、上传文件数/字节数、复用文件数及 `view_url`。打开该链接，或在 Web 选择个人范围和仓库名称。`repository_id` 是仓库 UUID；`snapshot_id` 是某次提交快照 UUID，两者不可互换。
 
 上传完成的 `ready` 表示等待 Worker；`parsing` 表示解析中，`active` 表示图谱已发布。刷新列表和图谱读取最新结果。若新提交尚未解析，旧图谱继续标明其原提交，不把旧图谱当作最新提交。
+
+## 获取范围与安装 UUID
+
+本次源码新增的 Web/CLI 获取入口尚未发布；旧版可继续使用 v0.5.13 的显式范围兼容命令。
+个人同步默认自动识别安装，无需先查询 UUID。选择共享范围或兼容旧版时可先运行：
+
+```sh
+pocketctl memory scopes
+pocketctl memory scopes --json
+```
+
+查询只读取当前登录账号可见的安装和成员权限，不签发 grant、不上传代码。输出名称、类型、
+状态、`installation_id` 与服务端返回的权限；空权限表示未提供信息。JSON 的
+`shared_scopes_available=false` 及 stderr 提示说明旧 Relay 仅能查询个人安装，不是共享范围为空。
+认证、网络或服务异常会报错，不以空列表代替。只对 `active` 且满足后续权限检查的目标执行同步。
+
+Web「Memory → 代码图谱」的「同步仓库与使用说明」显示当前范围安装 UUID，提供 UUID、
+预检命令、同步命令复制按钮；支持 v2 时个人和共享命令均包含所选范围 UUID；旧 Relay 的个人命令省略该参数，由修复版 CLI 自动识别。替换命令中的
+`/path/to/repository` 为本机仓库路径后再执行。切换范围清除旧复制反馈；剪贴板不可用时保留
+可选文本并提示手动复制。复制不会触发同步。`YOUR_MEMORY_INSTALLATION_UUID` 是占位符，
+`MEMORY_INSTALLATION_ID` 是保存该值的 shell 变量，两者不是不同的 ID。
 
 ## 未提交改动与大仓库
 
@@ -92,6 +113,7 @@ pocketctl memory sync-repo --repo . --scope-installation-id <范围UUID>
 | `partial_snapshot_requires_consent` | 用 `--include` 或已提交 ignore 缩小范围；确实接受截断再加 `--allow-partial` |
 | `empty_selection` | 检查入选范围；确实要清空图谱时加 `--allow-empty` |
 | `service_disabled` / 403 | 检查上传服务授权与目标范围贡献权限 |
+| `empty_grant`（v0.5.13 CLI 的个人同步） | 该版 CLI 错把 Relay 返回的 `grant` 读取为 `token`。源码已修复，使用修复版 CLI；旧版可显式指定个人范围的 `--scope-installation-id <installation UUID>` 走 v2 授权，不更换目标范围 |
 | 503 | 管理员检查 Code Graph 和共享范围服务端开关，不是重启主机 daemon |
 | `ready` 长时间不变 | 检查 Memory Worker 版本、运行状态、队列与代码图谱开关 |
 | 404 / 无已发布图谱 | 选择同一范围，完成同步后等待解析并刷新；不要把快照 ID 当仓库 ID |
