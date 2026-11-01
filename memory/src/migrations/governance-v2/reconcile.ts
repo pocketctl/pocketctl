@@ -1,9 +1,11 @@
 import {reclaimReceiptBatch,type SourceRetentionReceipt} from '../../retention/source.js'
 import {assertMigrationOpen} from '../../retention/transaction.js'
 import type pg from 'pg'
-import {migrationTransaction,backfillClaim,recordMigrationAction,BACKFILL_FAMILIES,type MigrationBaseline} from './backfill.js'
+import {migrationTransaction,backfillClaim,recordMigrationActions,BACKFILL_FAMILIES,type MigrationBaseline,type MigrationActionInput} from './backfill.js'
+import {automationHash} from '../../governance/automation-policy.js'
 /** Replay the complete overlap after the starting watermark. Sequence allocation
- * is not commit order: the final pass runs after the writer barrier, not from an
+ * is not commit order: cutover replays under its writer barrier; seal proves an
+ * unchanged COUNT/MAX overlap under its final barrier. Never resume from an
  * optimistic previous MAX(sequence). No source/authority body is resurrected. */
 export async function reconcileGovernanceChanges(pool:pg.Pool,input:{runId:string}){
  await migrationTransaction(pool,c=>assertMigrationOpen(c,input.runId))
@@ -11,14 +13,36 @@ export async function reconcileGovernanceChanges(pool:pg.Pool,input:{runId:strin
  if(!run)throw new Error('migration_run_missing')
  const m=run.manifest as MigrationBaseline;let after=m.startWatermark,processed=0
  while(true){const batch=(await pool.query(`SELECT * FROM memory_governance_migration_changes WHERE installation_id=ANY($1::uuid[]) AND sequence>$2 ORDER BY sequence LIMIT 200`,[m.installationIds,after])).rows
-  for(const change of batch){await migrationTransaction(pool,async c=>{
+  if(batch.length)await migrationTransaction(pool,async c=>{
    await assertMigrationOpen(c,input.runId)
-   await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[change.installation_id])
-   await c.query("SELECT pg_advisory_xact_lock(hashtextextended('migration:'||$1,0))",[change.installation_id])
-   const key=JSON.parse(change.entity_id)
-   if(change.entity_kind==='knowledge_claims'&&key.claim_id){const row=(await c.query('SELECT to_jsonb(c) AS row FROM knowledge_claims c WHERE installation_id=$1 AND claim_id=$2',[change.installation_id,key.claim_id])).rows[0]?.row;if(row)await backfillClaim(c,input.runId,change.installation_id,JSON.stringify([key.claim_id]),row)}
-   else if(BACKFILL_FAMILIES.includes(change.entity_kind))await recordMigrationAction(c,{runId:input.runId,installationId:change.installation_id,table:change.entity_kind,id:change.entity_id,row:{sequence:String(change.sequence),operation:change.operation,source_revision:change.source_revision},action:'unchanged',reason:change.operation==='DELETE'?'captured_source_deletion':'captured_immutable_change'})
-  });processed++}
+   const activeV2=new Set<string>()
+   for(const installationId of [...new Set<string>(batch.map(r=>r.installation_id))].sort()){
+    await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[installationId])
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended('migration:'||$1,0))",[installationId])
+    if((await c.query(`SELECT 1 FROM memory_governance_v2_states WHERE installation_id=$1 AND identity_generation=2 AND phase='active'`,[installationId])).rowCount)activeV2.add(installationId)
+   }
+   const actions:MigrationActionInput[]=[]
+   for(const change of batch){
+    const key=JSON.parse(change.entity_id)
+    if(change.entity_kind==='knowledge_claims'&&key.claim_id){
+     const row=(await c.query('SELECT to_jsonb(c) AS row FROM knowledge_claims c WHERE installation_id=$1 AND claim_id=$2',[change.installation_id,key.claim_id])).rows[0]?.row
+     if(row){
+      if(activeV2.has(change.installation_id)&&row.identity_generation===2){
+       // Current v2 authority is already governed by the live writer. Closing
+       // an old migration must not re-run historical projections/hold rules
+       // over newer accepted knowledge or overwrite its current authority.
+       await c.query(`UPDATE memory_governance_migration_actions SET change_summary=jsonb_set(change_summary,'{resolved_by}',$4::jsonb)
+        WHERE run_id=$1 AND installation_id=$2 AND entity_kind='knowledge_claims' AND action='retry' AND change_summary->>'recordId'=$3`,
+       [input.runId,change.installation_id,JSON.stringify([key.claim_id]),JSON.stringify(automationHash(row))])
+       actions.push({runId:input.runId,installationId:change.installation_id,table:change.entity_kind,id:change.entity_id,
+        row:{sequence:String(change.sequence),operation:change.operation,source_revision:change.source_revision},action:'unchanged',reason:'captured_v2_claim_change'})
+      }else await backfillClaim(c,input.runId,change.installation_id,JSON.stringify([key.claim_id]),row)
+     }
+    }
+    else if(BACKFILL_FAMILIES.includes(change.entity_kind))actions.push({runId:input.runId,installationId:change.installation_id,table:change.entity_kind,id:change.entity_id,row:{sequence:String(change.sequence),operation:change.operation,source_revision:change.source_revision},action:'unchanged',reason:change.operation==='DELETE'?'captured_source_deletion':'captured_immutable_change'})
+   }
+   await recordMigrationActions(c,actions)
+  });processed+=batch.length
   if(batch.length<200)break;after=String(batch.at(-1)!.sequence)
  }
  return {processed,overlapFrom:m.startWatermark}
@@ -102,7 +126,7 @@ export async function replayPrivacyWatermarks(pool:pg.Pool,w:PrivacyWatermarks,i
    if(!(await c.query('SELECT 1 FROM memory_governance_migration_runs WHERE run_id=$1',[row.run_id])).rowCount)continue
    await c.query(`INSERT INTO memory_governance_migration_summaries(run_id,migration_kind,scope_ids,schema_version,environment_fingerprint,
     started_at,completed_at,outcome,action_counts,verification,details_reclaimed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
-    [row.run_id,row.migration_kind,row.scope_ids,row.schema_version,row.environment_fingerprint,row.started_at,row.completed_at,row.outcome,row.action_counts,row.verification,row.details_reclaimed_at])
+    [row.run_id,row.migration_kind,row.scope_ids,row.schema_version,row.environment_fingerprint,row.started_at,row.completed_at,row.outcome,JSON.stringify(row.action_counts),JSON.stringify(row.verification),row.details_reclaimed_at])
    await c.query(`UPDATE memory_governance_migration_runs SET state=$2,sealed_at=$3,abandoned_at=$4,completed_at=$5
     WHERE run_id=$1 AND sealed_at IS NULL AND abandoned_at IS NULL`,[row.run_id,row.outcome==='complete'?'complete':'failed',row.sealed_at,row.abandoned_at,row.completed_at])
   }

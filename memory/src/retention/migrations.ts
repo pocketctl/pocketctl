@@ -1,8 +1,7 @@
 import type pg from 'pg'
-import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {BACKFILL_FAMILIES,migrationTransaction} from '../migrations/governance-v2/backfill.js'
 import {reconcileGovernanceChanges} from '../migrations/governance-v2/reconcile.js'
-import {validateGovernanceMigration} from '../migrations/governance-v2/validate.js'
+import {validateGovernanceMigration,migrationChangeStamp} from '../migrations/governance-v2/validate.js'
 import {assertMigrationOpen,retentionTransaction,readRetentionPlan} from './transaction.js'
 
 /** One scope still ranking in the latest two retains the entire multi-scope run. */
@@ -35,25 +34,40 @@ async function summarize(c:pg.PoolClient,run:any,outcome:'complete'|'abandoned',
 }
 
 export async function sealGovernanceMigration(pool:pg.Pool,runId:string) {
- return migrationTransaction(pool,async c=>{
+ const started=performance.now();let barrierStarted=0
+ await migrationTransaction(pool,c=>assertMigrationOpen(c,runId))
+ const pending=(await pool.query('SELECT scope_ids FROM memory_governance_migration_runs WHERE run_id=$1',[runId])).rows[0]
+ if(!pending?.scope_ids.length)throw new Error('migration_scope_missing')
+ if((await pool.query(`SELECT 1 FROM memory_governance_v2_states WHERE installation_id=ANY($1::uuid[])
+  AND phase='active' AND writer_floor='identity_v2' AND identity_generation=2`,[pending.scope_ids])).rowCount!==pending.scope_ids.length)throw new Error('migration_cutover_required')
+ // Potentially large overlap replay and body hashing run before writer locks.
+ // Finalization only checks a repeatable-read proof under a short barrier.
+ const replay=await reconcileGovernanceChanges(pool,{runId})
+ const validation=await validateGovernanceMigration(pool,runId,{prepareSeal:true})
+ if(validation.violations.length||!validation.sealProof)throw new Error('migration_validation_failed')
+ const proof=validation.sealProof
+ const result=await migrationTransaction(pool,async c=>{
   await assertMigrationOpen(c,runId)
-  const run=(await c.query('SELECT * FROM memory_governance_migration_runs WHERE run_id=$1 FOR UPDATE',[runId])).rows[0]
+  const run=(await c.query(`SELECT run_id,migration_kind,scope_ids,schema_version,environment_fingerprint,started_at,xmin::text AS revision
+   FROM memory_governance_migration_runs WHERE run_id=$1 FOR UPDATE`,[runId])).rows[0]
+  if(run.revision!==proof.runXmin||JSON.stringify([...run.scope_ids].sort())!==JSON.stringify([...proof.installationIds].sort()))throw new Error('migration_validation_stale')
   if(!run.scope_ids.length)throw new Error('migration_scope_missing')
   for(const id of [...run.scope_ids].sort())await c.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))`,[id])
   const active=await c.query(`SELECT installation_id FROM memory_governance_v2_states WHERE installation_id=ANY($1::uuid[])
     AND phase='active' AND writer_floor='identity_v2' AND identity_generation=2 FOR SHARE`,[run.scope_ids])
   if(active.rowCount!==run.scope_ids.length)throw new Error('migration_cutover_required')
+  barrierStarted=performance.now()
   await c.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))")
   // NOWAIT prevents blocking production writers while a final proof is made.
   await c.query(`LOCK TABLE ${BACKFILL_FAMILIES.join(',')} IN SHARE ROW EXCLUSIVE MODE NOWAIT`)
-  const bound=createTransactionBoundPool(c)
-  await reconcileGovernanceChanges(bound,{runId})
-  const validation=await validateGovernanceMigration(bound,runId)
-  if(validation.violations.length)throw new Error('migration_validation_failed')
+  await c.query('LOCK TABLE memory_governance_migration_changes IN SHARE ROW EXCLUSIVE MODE NOWAIT')
+  const current=await migrationChangeStamp(c,proof.installationIds,proof.startWatermark)
+  if(current.count!==proof.changes.count||current.maximum!==proof.changes.maximum)throw new Error('migration_validation_stale')
   await summarize(c,run,'complete',validation)
   await c.query(`UPDATE memory_governance_migration_runs SET state='complete',sealed_at=clock_timestamp(),completed_at=clock_timestamp() WHERE run_id=$1`,[runId])
   return {runId,sealed:true,validation}
  })
+ return {...result,measurements:{reconciledChanges:replay.processed,preparationMs:Math.round(barrierStarted-started),writerBarrierMs:Math.round(performance.now()-barrierStarted)}}
 }
 
 /** Failure alone is resumable; abandoning it is an explicit operator action. */

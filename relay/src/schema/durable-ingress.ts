@@ -61,8 +61,7 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
     ALTER TABLE event_inbox_receipt
     ALTER COLUMN inbox_id DROP NOT NULL;
 
-    CREATE INDEX IF NOT EXISTS idx_event_inbox_receipt_daemon_seq
-    ON event_inbox_receipt (daemon_id, daemon_generation, seq);
+    -- The UNIQUE constraint above already indexes this exact stream key.
 
     CREATE TABLE IF NOT EXISTS daemon_ack_checkpoint (
       daemon_id VARCHAR(64) NOT NULL,
