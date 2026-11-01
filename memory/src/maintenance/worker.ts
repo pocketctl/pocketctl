@@ -62,7 +62,7 @@ export function createDailyMaintenanceWorker(options:{
    try{
     await client.query('BEGIN')
     await client.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'")
-    const locked=(await client.query(`SELECT pg_try_advisory_xact_lock(hashtextextended('memory:daily-maintenance',0)) locked`)).rows[0].locked
+    const locked=(await client.query(`SELECT pg_try_advisory_xact_lock(hashtextextended('memory:daily-maintenance',0)) AS locked`)).rows[0].locked
     const row=locked?(await client.query(`SELECT * FROM memory_maintenance_runs WHERE scheduled_at=$1 AND scope_key=$2
      AND state='running' AND next_attempt_at<=NOW() FOR UPDATE SKIP LOCKED`,[candidate.scheduled_at,candidate.scope_key])).rows[0]:undefined
     if(row&&row.stage===candidate.stage&&JSON.stringify(row.cursor)===JSON.stringify(candidate.cursor)){

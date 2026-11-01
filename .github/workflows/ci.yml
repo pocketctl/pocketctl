@@ -64,3 +64,50 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+
+  maintenance-postgres-13:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13-alpine
+        env:
+          POSTGRES_PASSWORD: local-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Memory and Relay dependencies
+        run: |
+          npm ci --prefix memory
+          npm ci --prefix relay
+      - name: Prepare isolated application databases
+        env:
+          PGPASSWORD: local-test
+        run: |
+          psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE pocketctl_memory_maintenance_test LOGIN NOSUPERUSER PASSWORD 'local-test';
+          CREATE DATABASE pocketctl_memory_maintenance_test OWNER pocketctl_memory_maintenance_test;
+          CREATE ROLE pocketctl_session_lifecycle_test LOGIN NOSUPERUSER PASSWORD 'local-test';
+          CREATE DATABASE pocketctl_session_lifecycle_test OWNER pocketctl_session_lifecycle_test;
+          SQL
+          psql -h 127.0.0.1 -U postgres -d pocketctl_memory_maintenance_test -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION pg_trgm; CREATE EXTENSION pgcrypto;'
+      - name: Memory daily maintenance on the production PostgreSQL major
+        working-directory: memory
+        env:
+          MEMORY_TEST_DATABASE_URL: postgresql://pocketctl_memory_maintenance_test:local-test@127.0.0.1:5432/pocketctl_memory_maintenance_test
+          RUN_MEMORY_POSTGRES_INTEGRATION: '1'
+        run: npx vitest run src/__tests__/daily-maintenance-postgres.integration.test.ts --maxWorkers=1 --no-file-parallelism
+      - name: Relay maintenance summaries on the production PostgreSQL major
+        working-directory: relay
+        env:
+          TEST_DATABASE_URL: postgresql://pocketctl_session_lifecycle_test:local-test@127.0.0.1:5432/pocketctl_session_lifecycle_test
+          RUN_SESSION_LIFECYCLE_POSTGRES: '1'
+        run: npx vitest run src/__tests__/maintenance-summary-postgres.integration.test.ts --maxWorkers=1 --no-file-parallelism
