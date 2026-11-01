@@ -1,0 +1,15 @@
+[Unit]
+Description=PocketCtl verified database backup retention
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/node /usr/local/lib/pocketctl-ops/cleanup-production-backups.mjs --apply
+TimeoutStartSec=10min
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
