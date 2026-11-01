@@ -61,6 +61,43 @@ func smallSnapshot() *Snapshot {
 	}
 }
 
+func TestUploadClientExplicitRetryHasOneIdentityAcrossTransportRetriesAndNoBodyUpload(t *testing.T) {
+	var keys []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/memory/code-snapshots" || r.Method != http.MethodPost {
+			t.Errorf("unexpected body transfer: %s", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var body StartCodeSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if !body.RetryFailed || body.IdempotencyKey != r.Header.Get("Idempotency-Key") {
+			t.Error("missing explicit intent or inconsistent retry identity")
+		}
+		keys = append(keys, body.IdempotencyKey)
+		if len(keys) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"snapshot_id":"snap-1","repository_id":"repo-1","state":"ready"}`)
+	}))
+	defer server.Close()
+	client := NewUploadClient(UploadClientOptions{MemoryOrigin: server.URL, RetryFailed: true,
+		GrantSource: &fakeGrantSource{tokens: []string{"grant-1"}}, RetryWait: time.Millisecond})
+	for i := 0; i < 2; i++ {
+		result, err := client.SyncSnapshot(context.Background(), "same-source", smallSnapshot())
+		if err != nil || result.State != "ready" || result.UploadedFiles != 0 {
+			t.Fatalf("retry result: %+v, %v", result, err)
+		}
+	}
+	if len(keys) != 3 || keys[0] != keys[1] || keys[1] == keys[2] || !strings.HasPrefix(keys[0], "same-source:retry:") {
+		t.Fatalf("unexpected request identities: %v", keys)
+	}
+}
+
 func TestUploadClientRetriesTransientServerErrors(t *testing.T) {
 	var attempts int32
 	idempotencyKeys := sync.Map{}

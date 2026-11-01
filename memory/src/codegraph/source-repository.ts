@@ -32,6 +32,7 @@ export const SnapshotSelectionSchema = z.object({
 
 export const StartCodeSnapshotRequestSchema = z.object({
   selection: SnapshotSelectionSchema.optional(),
+  retry_failed: z.boolean().optional(),
   repository: z.object({
     repository_key: z.string().min(1).max(512),
     canonical_remote: z.string().min(1).max(1024).optional(),
@@ -357,6 +358,18 @@ export function createSourceRepository(pool: pg.Pool) {
         return true
       }catch(error){if(!transactionClient)await client.query('ROLLBACK');throw error}
       finally{if(!transactionClient)client.release()}
+    },
+
+    /** Read a bounded caller-selected batch, never across installations. */
+    async getBlobs(input: {
+      installationId: string
+      blobHashes: string[]
+    }, client?: Queryable): Promise<Map<string, string>> {
+      const result = await (client ?? pool).query<{ blob_hash: string; utf8_content: string }>(`
+        SELECT blob_hash, utf8_content FROM memory_source_blobs
+        WHERE installation_id = $1 AND blob_hash = ANY($2::text[])
+      `, [input.installationId, input.blobHashes])
+      return new Map(result.rows.map(row => [row.blob_hash, row.utf8_content]))
     },
 
     /** Read one blob's content (never cross-installation). */

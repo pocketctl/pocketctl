@@ -30,6 +30,7 @@ type memorySyncRepoOptions struct {
 	AllowPartial        bool
 	AllowEmpty          bool
 	Full                bool
+	RetryFailed         bool
 }
 
 var scopeInstallationIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -58,6 +59,8 @@ func parseMemorySyncRepoFlags(args []string) (memorySyncRepoOptions, error) {
 			options.AllowPartial = true
 		case "--full":
 			options.Full = true
+		case "--retry-failed":
+			options.RetryFailed = true
 		case "--include":
 			if i+1 >= len(args) {
 				return options, fmt.Errorf("--include requires a repository-relative path")
@@ -100,6 +103,7 @@ func runMemorySyncRepo(stdout, stderr io.Writer, args []string) int {
 			client := memorysync.NewUploadClient(memorysync.UploadClientOptions{
 				GrantSource: grantSource,
 				FullUpload:  options.Full,
+				RetryFailed: options.RetryFailed,
 			})
 			result, err := client.SyncSnapshot(ctx, idempotencyKeyFor(snapshot), snapshot)
 			if err != nil {

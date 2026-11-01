@@ -343,6 +343,18 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     expect(letters.rows[0].payload_present).toBe(false)
   })
 
+  test('a terminal failure dies on its first attempt and cannot be reclaimed', async () => {
+    await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'parse_code_snapshot', idempotencyKey: 'terminal-parse' })
+    const [claim] = await jobs.claimJobs({ workerId: 'terminal-worker', limit: 1, leaseMs: 60_000 })
+    await expect(jobs.rescheduleJob({ jobId: claim.job_id, claimedBy: 'terminal-worker', claimEpoch: claim.claim_epoch,
+      errorCode: 'handler_failed_codegraph_parse_timeout', terminal: true })).resolves.toBe(true)
+    expect((await pool.query('SELECT state,attempts,last_error_code FROM memory_jobs WHERE job_id=$1', [claim.job_id])).rows[0])
+      .toMatchObject({ state: 'dead', attempts: 1, last_error_code: 'handler_failed_codegraph_parse_timeout' })
+    expect((await pool.query('SELECT error_code FROM memory_dead_letters WHERE job_id=$1', [claim.job_id])).rows[0].error_code)
+      .toBe('handler_failed_codegraph_parse_timeout')
+    expect(await jobs.claimJobs({ workerId: 'next-worker', limit: 1, leaseMs: 60_000 })).toEqual([])
+  })
+
   test('dead-lettering a Wiki build closes the run instead of blocking future builds', async () => {
     const fixture = await insertWikiCandidateFixture(pool, 'dead-wiki-build')
     await pool.query(`

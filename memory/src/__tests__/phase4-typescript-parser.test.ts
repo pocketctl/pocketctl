@@ -37,6 +37,23 @@ describe('phase4 deterministic TypeScript parser (fixture commit A)', () => {
   const files = collectFiles(FIXTURE_ROOT)
   const parsed = parseCodeSnapshot({ files, parserVersion: PARSER_VERSION })
 
+  test('indexed lookups preserve the v1 graph for aliases, overloads, namespaces and Unicode', () => {
+    const corpus = JSON.parse(readFileSync(join(FIXTURE_ROOT, '../lookup-regression.json'), 'utf8'))
+    // Recorded using the pre-optimization parser at 44610c91.
+    expect(parseCodeSnapshot({ files: corpus }).contentHash)
+      .toBe('8eb253f8245ad27baf4b8348095183f35973a7aaf7fce45348b3c3e3389bfa18')
+  })
+
+  test('refreshing semantic caches preserves cross-batch references and v1 content identity', () => {
+    const corpus = Array.from({ length: 130 }, (_, i) => ({
+      path: `src/module${String(i).padStart(3, '0')}.ts`,
+      content: `${i ? `import { Worker as Previous } from './module${String(i - 1).padStart(3, '0')}.js';\n` : ''}export class Worker { run() { return ${i} } }\nexport function use() { return ${i ? 'new Previous().run()' : 'new Worker().run()'} }\n`,
+    }))
+    const graph = parseCodeSnapshot({ files: corpus })
+    expect(graph.contentHash).toBe('ab30bf7d1f43c4c0edcbd6ea15ef244791513b0969879dc113802bfdd702fa3c')
+    expect(validateGraphCandidate(graph).ok).toBe(true)
+  })
+
   const nodeKeys = () => new Set(parsed.nodes.map(node => node.stableKey))
   const edgesOf = (kind: string) => parsed.edges.filter(edge => edge.kind === kind)
   const findEdge = (kind: string, from: string, to: string) => parsed.edges.find(edge =>

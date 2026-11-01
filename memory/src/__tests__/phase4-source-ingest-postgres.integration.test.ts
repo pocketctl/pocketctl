@@ -5,6 +5,7 @@ import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createSourceIngestService } from '../codegraph/ingest-service.js'
 import { createMemoryMetrics } from '../metrics.js'
+import { createJobRepository } from '../jobs/repository.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -35,6 +36,24 @@ function contentEntry(path: string, content: string, overrides: Record<string, u
     content_base64: Buffer.from(content).toString('base64'),
     ...overrides,
   }
+}
+
+async function failedBuild(pool: pg.Pool, installationId: string, key: string) {
+  const service = createSourceIngestService(pool)
+  const content = `export const recovery = '${key}';\n`
+  const entry = contentEntry('src/recovery.ts', content)
+  const input = { installationId, repository: { repository_key: `fixture/${key}` }, gitObjectFormat: 'sha1',
+    commitSha: 'f'.repeat(40), manifestSha256: manifestFor([{ path: entry.path, sha: entry.blob_sha256, bytes: entry.byte_count }]),
+    expectedFileCount: 1, expectedByteCount: entry.byte_count, idempotencyKey: `start-${key}` }
+  const started = await service.startSnapshot(input)
+  await service.uploadBatch({ installationId, snapshotId: started.snapshotId, batchIndex: 0, entries: [entry] })
+  await service.finalizeSnapshot({ ...input, snapshotId: started.snapshotId, idempotencyKey: `finalize-${key}` })
+  const job = (await pool.query(`UPDATE memory_jobs SET state='running',attempts=1,claimed_by='failure-worker',
+    claim_epoch=1,claim_expires_at=clock_timestamp()+interval '1 minute'
+    WHERE installation_id=$1 AND payload->>'snapshot_id'=$2 RETURNING job_id`, [installationId, started.snapshotId])).rows[0]
+  await createJobRepository(pool).rescheduleJob({ jobId: job.job_id, claimedBy: 'failure-worker', claimEpoch: 1,
+    errorCode: 'handler_failed_codegraph_parse_timeout', terminal: true })
+  return { service, input, started, entry, content, jobId: job.job_id as string }
 }
 
 describeWithDatabase('phase4 source snapshot ingestion', () => {
@@ -431,4 +450,48 @@ describeWithDatabase('phase4 source snapshot ingestion', () => {
     await expect(service.abortSnapshot({ installationId: installationB, snapshotId: start.snapshotId }))
       .rejects.toThrow(/not_found/)
   })
+  test('explicit retry reuses a complete failed source, preserves its DLQ, and queues one new generation', async () => {
+    const f = await failedBuild(pool, installationA, 'explicit-recovery')
+    await expect(f.service.startSnapshot(f.input)).rejects.toThrow(/state_conflict/)
+    const request = { ...f.input, retryFailed: true, idempotencyKey: 'explicit-recovery-1' }
+    const retry = await f.service.startSnapshot(request)
+    expect(retry).toMatchObject({ snapshotId: f.started.snapshotId, state: 'ready' })
+    await expect(f.service.startSnapshot(request)).resolves.toEqual(retry)
+    await Promise.all(['concurrent-1', 'concurrent-2'].map(idempotencyKey =>
+      f.service.startSnapshot({ ...request, idempotencyKey })))
+    const jobs = (await pool.query(`SELECT job_id,state,idempotency_key FROM memory_jobs
+      WHERE installation_id=$1 AND payload->>'snapshot_id'=$2 ORDER BY created_at`, [installationA, retry.snapshotId])).rows
+    expect(jobs).toHaveLength(2)
+    expect(jobs.find(job => job.job_id === f.jobId).state).toBe('dead')
+    expect(jobs.filter(job => job.state === 'pending')).toHaveLength(1)
+    expect((await pool.query('SELECT error_code FROM memory_dead_letters WHERE job_id=$1', [f.jobId])).rows[0].error_code)
+      .toBe('handler_failed_codegraph_parse_timeout')
+    expect((await pool.query('SELECT generation::int FROM memory_source_snapshots WHERE snapshot_id=$1', [retry.snapshotId])).rows[0].generation).toBe(1)
+    expect((await pool.query('SELECT utf8_content FROM memory_source_blobs WHERE installation_id=$1 AND blob_hash=$2', [installationA, f.entry.blob_sha256])).rows[0].utf8_content).toBe(f.content)
+
+    // Replaying a successful retry receipt after another failure cannot
+    // create another run. A new user action needs a new request identity.
+    await pool.query("UPDATE memory_jobs SET state='dead' WHERE job_id=$1", [jobs.find(job => job.state === 'pending').job_id])
+    await pool.query("UPDATE memory_source_snapshots SET state='failed' WHERE snapshot_id=$1", [retry.snapshotId])
+    await expect(f.service.startSnapshot(request)).rejects.toThrow(/state_conflict/)
+    expect((await pool.query("SELECT count(*)::int n FROM memory_jobs WHERE payload->>'snapshot_id'=$1", [retry.snapshotId])).rows[0].n).toBe(2)
+  })
+
+  test.each(['incomplete', 'corrupt', 'revoked', 'live_job'] as const)('retry refuses %s sources without queuing a new run', async cause => {
+    const f = await failedBuild(pool, installationB, `refuse-${cause}`)
+    if (cause === 'incomplete') await pool.query('DELETE FROM memory_source_snapshot_entries WHERE snapshot_id=$1', [f.started.snapshotId])
+    if (cause === 'corrupt') await pool.query("UPDATE memory_source_blobs SET utf8_content='tampered' WHERE installation_id=$1 AND blob_hash=$2", [installationB, f.entry.blob_sha256])
+    if (cause === 'revoked') await pool.query("UPDATE memory_installations SET relay_status='revoked' WHERE installation_id=$1", [installationB])
+    if (cause === 'live_job') await pool.query("UPDATE memory_jobs SET state='pending' WHERE job_id=$1", [f.jobId])
+    try {
+      await expect(f.service.startSnapshot({ ...f.input, retryFailed: true, idempotencyKey: `retry-${cause}` })).rejects.toThrow()
+      expect((await pool.query('SELECT state,generation::int FROM memory_source_snapshots WHERE snapshot_id=$1', [f.started.snapshotId])).rows[0])
+        .toMatchObject({ state: 'failed', generation: 0 })
+      expect((await pool.query("SELECT count(*)::int n FROM memory_jobs WHERE payload->>'snapshot_id'=$1", [f.started.snapshotId])).rows[0].n).toBe(1)
+    } finally {
+      if (cause === 'revoked') await pool.query("UPDATE memory_installations SET relay_status='active' WHERE installation_id=$1", [installationB])
+    }
+  })
+
+
 })

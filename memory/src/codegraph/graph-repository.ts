@@ -50,6 +50,7 @@ export function createGraphRepository(pool: pg.Pool) {
       graph: ParsedGraph
       coverage: 'complete' | 'partial' | 'unsupported' | 'degraded'
       client?: pg.PoolClient
+      signal?: AbortSignal
     }): Promise<GraphVersionRecord> {
       const run = async (queryable: pg.PoolClient): Promise<GraphVersionRecord> => {
         const version = await queryable.query<GraphVersionRow>(`
@@ -71,36 +72,54 @@ export function createGraphRepository(pool: pg.Pool) {
           SELECT COUNT(*)::text AS count FROM memory_code_nodes WHERE graph_version_id = $1
         `, [record.graphVersionId])
         if (Number(existingNodes.rows[0]!.count) === 0) {
-          for (const node of input.graph.nodes) {
+          const nodeIds = new Map(input.graph.nodes.map(node => [node.stableKey, node.nodeId]))
+          const batchSize = 500
+          for (let offset = 0; offset < input.graph.nodes.length; offset += batchSize) {
+            input.signal?.throwIfAborted()
+            const batch = input.graph.nodes.slice(offset, offset + batchSize).map(node => ({
+              node_id: node.nodeId, kind: node.kind, stable_key: node.stableKey,
+              path: node.path, name: node.name, symbol_kind: node.symbolKind ?? null,
+              start_line: node.startLine ?? null, start_column: node.startColumn ?? null,
+              end_line: node.endLine ?? null, end_column: node.endColumn ?? null,
+              signature_hash: node.signatureHash ?? null, metadata: node.metadata ?? {},
+            }))
             await queryable.query(`
               INSERT INTO memory_code_nodes
                 (graph_version_id, installation_id, node_id, kind, stable_key, path, name,
                  symbol_kind, start_line, start_column, end_line, end_column, signature_hash, metadata)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+              SELECT $1::uuid, $2::uuid, n.node_id, n.kind, n.stable_key, n.path, n.name,
+                     n.symbol_kind, n.start_line, n.start_column, n.end_line, n.end_column,
+                     n.signature_hash, n.metadata
+              FROM jsonb_to_recordset($3::jsonb) AS n(
+                node_id uuid, kind text, stable_key text, path text, name text,
+                symbol_kind text, start_line integer, start_column integer,
+                end_line integer, end_column integer, signature_hash text, metadata jsonb)
               ON CONFLICT DO NOTHING
-            `, [
-              record.graphVersionId, input.installationId, node.nodeId, node.kind,
-              node.stableKey, node.path, node.name, node.symbolKind ?? null,
-              node.startLine ?? null, node.startColumn ?? null,
-              node.endLine ?? null, node.endColumn ?? null,
-              node.signatureHash ?? null, JSON.stringify(node.metadata ?? {}),
-            ])
+            `, [record.graphVersionId, input.installationId, JSON.stringify(batch)])
           }
-          for (const edge of input.graph.edges) {
-            const fromId = input.graph.nodes.find(candidate => candidate.stableKey === edge.fromStableKey)?.nodeId
-            const toId = input.graph.nodes.find(candidate => candidate.stableKey === edge.toStableKey)?.nodeId
-            if (!fromId || !toId) continue
+          for (let offset = 0; offset < input.graph.edges.length; offset += batchSize) {
+            input.signal?.throwIfAborted()
+            const batch = input.graph.edges.slice(offset, offset + batchSize).map(edge => {
+              const fromId = nodeIds.get(edge.fromStableKey)
+              const toId = nodeIds.get(edge.toStableKey)
+              if (!fromId || !toId) throw new Error('codegraph_dangling_edge')
+              return {
+                edge_id: edge.edgeId, kind: edge.kind, from_node_id: fromId, to_node_id: toId,
+                source_path: edge.sourcePath, source_line: edge.sourceLine ?? null,
+                resolution: edge.resolution, metadata: edge.metadata ?? {},
+              }
+            })
             await queryable.query(`
               INSERT INTO memory_code_edges
                 (graph_version_id, installation_id, edge_id, kind, from_node_id, to_node_id,
                  source_path, source_line, resolution, metadata)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+              SELECT $1::uuid, $2::uuid, e.edge_id, e.kind, e.from_node_id, e.to_node_id,
+                     e.source_path, e.source_line, e.resolution, e.metadata
+              FROM jsonb_to_recordset($3::jsonb) AS e(
+                edge_id uuid, kind text, from_node_id uuid, to_node_id uuid,
+                source_path text, source_line integer, resolution text, metadata jsonb)
               ON CONFLICT DO NOTHING
-            `, [
-              record.graphVersionId, input.installationId, edge.edgeId, edge.kind,
-              fromId, toId, edge.sourcePath, edge.sourceLine ?? null,
-              edge.resolution, JSON.stringify(edge.metadata ?? {}),
-            ])
+            `, [record.graphVersionId, input.installationId, JSON.stringify(batch)])
           }
         }
         return record

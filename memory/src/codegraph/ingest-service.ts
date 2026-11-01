@@ -110,6 +110,7 @@ export function createSourceIngestService(
       idempotencyKey: string
       sourceKind?: 'personal' | 'shared'
       selection?: StartCodeSnapshotRequest['selection']
+      retryFailed?: boolean
     }): Promise<{ snapshotId: string; repositoryId: string; state: string }> {
       if (input.gitObjectFormat !== 'sha1' && input.gitObjectFormat !== 'sha256') {
         throw new SnapshotIngestError('invalid_request')
@@ -166,6 +167,7 @@ export function createSourceIngestService(
           expected_file_count: input.expectedFileCount,
           expected_byte_count: input.expectedByteCount,
           ...(input.selection ? {selection:input.selection} : {}),
+          ...(input.retryFailed ? { retry_failed: true } : {}),
         }),
         run: async client => {
           try {
@@ -185,7 +187,50 @@ export function createSourceIngestService(
               expectedByteCount: input.expectedByteCount,
               selection:input.selection,
             }, client)
-            if(snapshot.state==='failed')throw new SnapshotIngestError('state_conflict')
+            if (snapshot.state === 'failed') {
+              if (!input.retryFailed) throw new SnapshotIngestError('state_conflict')
+              // start's authority/repository/source locks precede receipt and
+              // job locks. Explicit retries retain the old job and DLQ cause.
+              const previous = await client.query<{ state: string }>(`
+                SELECT state FROM memory_jobs
+                WHERE installation_id=$1 AND job_type='parse_code_snapshot'
+                  AND payload->>'snapshot_id'=$2
+                FOR UPDATE
+              `, [input.installationId, snapshot.snapshotId])
+              if (!previous.rows.length || previous.rows.some(job => !['dead', 'completed'].includes(job.state))) {
+                throw new SnapshotIngestError('state_conflict')
+              }
+              const entries = await repository.listEntries({ installationId: input.installationId, snapshotId: snapshot.snapshotId }, client)
+              if (entries.length !== input.expectedFileCount || snapshot.fileCount !== input.expectedFileCount
+                || entries.reduce((total, entry) => total + entry.byteCount, 0) !== input.expectedByteCount
+                || snapshot.byteCount !== input.expectedByteCount
+                || computeManifestHash(entries) !== snapshot.manifestHash) {
+                // Aborted or partially retained uploads cannot be resurrected.
+                throw new SnapshotIngestError('state_conflict')
+              }
+              for (let offset = 0; offset < entries.length; offset += 64) {
+                const batch = entries.slice(offset, offset + 64)
+                const blobs = await repository.getBlobs({ installationId: input.installationId,
+                  blobHashes: [...new Set(batch.map(entry => entry.blobSha256))] }, client)
+                for (const entry of batch) {
+                  const content = blobs.get(entry.blobSha256)
+                  if (typeof content !== 'string' || Buffer.byteLength(content) !== entry.byteCount
+                    || createHash('sha256').update(content).digest('hex') !== entry.blobSha256) {
+                    throw new SnapshotIngestError('integrity_mismatch')
+                  }
+                }
+              }
+              const generation = snapshot.generation + 1
+              await client.query(`UPDATE memory_source_snapshots SET state='ready',generation=$3
+                WHERE installation_id=$1 AND snapshot_id=$2 AND state='failed'`,
+              [input.installationId, snapshot.snapshotId, generation])
+              await client.query(`INSERT INTO memory_jobs
+                (job_id,installation_id,job_type,idempotency_key,priority,payload,available_at)
+                VALUES ($1,$2,'parse_code_snapshot',$3,70,$4::jsonb,NOW())`,
+              [randomUUID(), input.installationId, `parse_code_snapshot:${snapshot.snapshotId}:${generation}`,
+                JSON.stringify({ snapshot_id: snapshot.snapshotId })])
+              snapshot.state = 'ready'
+            }
             return { ok: true, metadata: {
               snapshotId: snapshot.snapshotId,
               repositoryId: snapshot.repositoryId,

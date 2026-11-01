@@ -31,6 +31,7 @@ const memoryHelpZh = `用法:
   --scope-installation-id <UUID>  显式选择 Memory 范围；省略则自动识别个人范围
   --allow-partial                 明确允许达到文件数/总大小上限后的截断快照
   --allow-empty                  明确允许发布空图谱（例如删除所有入选代码后）
+  --retry-failed                 显式重建失败的完整快照，复用已校验正文；需配套新服务端
   --full                         传输全部入选文件正文；默认协商复用已有正文
   -h, --help                     显示帮助并成功退出
 
@@ -85,6 +86,7 @@ Options:
   --scope-installation-id <UUID> Select a Memory scope explicitly; defaults to personal discovery
   --allow-partial                 Allow truncation at the file-count/total-byte limits
   --allow-empty                  Allow publishing an empty graph (e.g. all selected files deleted)
+  --retry-failed                 Rebuild a failed complete snapshot using verified retained bodies; requires updated server
   --full                         Transfer all selected bodies; default reuses retained content
   -h, --help                     Show this help and exit successfully
 

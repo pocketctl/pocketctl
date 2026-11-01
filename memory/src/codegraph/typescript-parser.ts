@@ -152,25 +152,29 @@ export function parseCodeSnapshot(input: {
     }),
   }
 
-  const program = ts.createProgram(
-    [...sourceMap.keys()],
-    {
-      noResolve: false,
-      allowJs: true,
-      noLib: true,
-      skipLibCheck: true,
-      skipDefaultLibCheck: true,
-      module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-      target: ts.ScriptTarget.ES2022,
-      types: [],
-    },
-    host,
-  )
-  const checker = program.getTypeChecker()
+  const compilerOptions: ts.CompilerOptions = {
+    noResolve: false,
+    allowJs: true,
+    noLib: true,
+    skipLibCheck: true,
+    skipDefaultLibCheck: true,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    target: ts.ScriptTarget.ES2022,
+    types: [],
+  }
+  const createChecker = (): ts.TypeChecker =>
+    ts.createProgram([...sourceMap.keys()], compilerOptions, host).getTypeChecker()
+  let checker: ts.TypeChecker | undefined = createChecker()
 
   const nodes = new Map<string, ParsedNode>()
   const edges = new Map<string, ParsedEdge>()
+  // Preserve insertion order (including same-name declarations) while keeping
+  // reference lookups independent of the size of the whole repository.
+  const symbolsByPath = new Map<string, ParsedNode[]>()
+  const symbolsByPathAndLine = new Map<string, Map<number, string[]>>()
+  const firstSymbolByPathAndName = new Map<string, Map<string, string>>()
+  const symbolKeyCache = new WeakMap<ts.Symbol, string | null>()
   const declaredDependencies = readDeclaredDependencies(input.files)
   const fileNode = (path: string): ParsedNode => {
     const stableKey = `file:${path}`
@@ -216,7 +220,6 @@ export function parseCodeSnapshot(input: {
     fileNode(file.path)
 
     const sourceFile = sourceMap.get(virtualRoot + file.path)!
-    const symbolByDeclaration = new Map<ts.Node, string>()
 
     const registerSymbol = (
       name: string,
@@ -242,7 +245,18 @@ export function parseCodeSnapshot(input: {
           endColumn: end.character + 1,
           metadata: {},
         })
-        symbolByDeclaration.set(declaration, stableKey)
+        const symbol = nodes.get(stableKey)!
+        const fileSymbols = symbolsByPath.get(file.path) ?? []
+        fileSymbols.push(symbol)
+        symbolsByPath.set(file.path, fileSymbols)
+        const lines = symbolsByPathAndLine.get(file.path) ?? new Map<number, string[]>()
+        const lineKeys = lines.get(start.line + 1) ?? []
+        lineKeys.push(stableKey)
+        lines.set(start.line + 1, lineKeys)
+        symbolsByPathAndLine.set(file.path, lines)
+        const names = firstSymbolByPathAndName.get(file.path) ?? new Map<string, string>()
+        if (!names.has(name)) names.set(name, stableKey)
+        firstSymbolByPathAndName.set(file.path, names)
       }
       return { stableKey, fqn }
     }
@@ -355,25 +369,27 @@ export function parseCodeSnapshot(input: {
     collectImports(sourceFile)
 
     // Definition edges bind symbols to their file.
-    for (const [stableKey, node2] of nodes) {
-      if (stableKey.startsWith(`symbol:${file.path}#`) && !edges.has(`definition\n${fileStableKey}\n${stableKey}\n${file.path}\n0\nresolved`)) {
-        addEdge({
-          kind: 'definition',
-          fromStableKey: fileStableKey,
-          toStableKey: stableKey,
-          sourcePath: file.path,
-          sourceLine: node2.startLine,
-          resolution: 'resolved',
-          metadata: {},
-        })
-      }
+    for (const node2 of symbolsByPath.get(file.path) ?? []) {
+      const stableKey = node2.stableKey
+      addEdge({
+        kind: 'definition',
+        fromStableKey: fileStableKey,
+        toStableKey: stableKey,
+        sourcePath: file.path,
+        sourceLine: node2.startLine,
+        resolution: 'resolved',
+        metadata: {},
+      })
     }
   }
 
   // Reference and call edges through the type checker. The checker is the
   // single symbol authority; identifiers that resolve to extracted symbols
   // become reference edges and static callees become call edges.
-  for (const file of symbolFiles) {
+  for (const [index, file] of symbolFiles.entries()) {
+    // Type inference caches grow with every visited file. Reuse the same
+    // immutable AST and complete manifest, but bound each checker's lifetime.
+    if (index > 0 && index % 64 === 0) checker = createChecker()
     const sourceFile = sourceMap.get(virtualRoot + file.path)!
     const fileStableKey = `file:${file.path}`
     const pathPrefix = `symbol:${file.path}#`
@@ -385,7 +401,7 @@ export function parseCodeSnapshot(input: {
       const pushed = maybePushContainer(node)
       if (ts.isCallExpression(node)) {
         const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
-        const calleeSymbol = resolveAliased(checker.getSymbolAtLocation(node.expression))
+        const calleeSymbol = resolveAliased(checker!.getSymbolAtLocation(node.expression))
         const calleeKey = calleeSymbol ? symbolKeyFor(calleeSymbol) : undefined
         if (calleeKey && nodes.has(calleeKey)) {
           addEdge({
@@ -411,7 +427,7 @@ export function parseCodeSnapshot(input: {
           })
         }
       } else if (ts.isIdentifier(node)) {
-        const referenced = resolveAliased(checker.getSymbolAtLocation(node))
+        const referenced = resolveAliased(checker!.getSymbolAtLocation(node))
         if (referenced && !isDeclarationName(node)) {
           const targetKey = symbolKeyFor(referenced)
           if (targetKey && targetKey.startsWith(pathPrefix) === false && nodes.has(targetKey)) {
@@ -451,32 +467,26 @@ export function parseCodeSnapshot(input: {
 
   function findSymbolKeyInRange(path: string, name: string, node: ts.Node, sourceFile: ts.SourceFile): string | undefined {
     const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
-    for (const key of nodes.keys()) {
-      if (key.startsWith(`symbol:${path}#${buildFqnPrefix(name)}`) && key.endsWith(`:${start}`)) {
+    for (const key of symbolsByPathAndLine.get(path)?.get(start) ?? []) {
+      if (key.startsWith(`symbol:${path}#${name}`)) {
         return key
       }
     }
     // Nested containers (Repository.add) are keyed by fqn; fall back to any
     // symbol on this path whose name segment matches.
-    for (const key of nodes.keys()) {
-      if (key.startsWith(`symbol:${path}#`) && key.includes(`.${name}:`)) {
-        const line = Number(key.slice(key.lastIndexOf(':') + 1))
-        const nodeStart = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
-        if (Math.abs(line - nodeStart) <= 1) return key
+    for (const symbol of symbolsByPath.get(path) ?? []) {
+      if (symbol.stableKey.includes(`.${name}:`)) {
+        if (Math.abs(symbol.startLine! - start) <= 1) return symbol.stableKey
       }
     }
     return undefined
-  }
-
-  function buildFqnPrefix(name: string): string {
-    return name
   }
 
   function resolveAliased(symbol: ts.Symbol | undefined): ts.Symbol | undefined {
     if (!symbol) return undefined
     if (symbol.flags & ts.SymbolFlags.Alias) {
       try {
-        const resolved = checker.getAliasedSymbol(symbol)
+        const resolved = checker!.getAliasedSymbol(symbol)
         return resolved && resolved.declarations?.length ? resolved : symbol
       } catch {
         return symbol
@@ -486,16 +496,19 @@ export function parseCodeSnapshot(input: {
   }
 
   function symbolKeyFor(symbol: ts.Symbol): string | undefined {
+    const cached = symbolKeyCache.get(symbol)
+    if (cached !== undefined) return cached ?? undefined
+    const name = symbol.getName()
     for (const declaration of symbol.declarations ?? []) {
-      for (const [key, node] of nodes) {
-        if (node.kind === 'symbol' && node.path && node.name === symbol.getName()) {
-          // Same-name disambiguation: prefer declarations in the same file.
-          if (declaration.getSourceFile().fileName === `/${node.path}`) {
-            return key
-          }
-        }
+      const fileName = declaration.getSourceFile().fileName
+      const key = fileName.startsWith('/')
+        ? firstSymbolByPathAndName.get(fileName.slice(1))?.get(name) : undefined
+      if (key !== undefined) {
+        symbolKeyCache.set(symbol, key)
+        return key
       }
     }
+    symbolKeyCache.set(symbol, null)
     return undefined
   }
 
@@ -509,6 +522,11 @@ export function parseCodeSnapshot(input: {
       || ts.isEnumDeclaration(parent) || ts.isVariableDeclaration(parent)
       || ts.isMethodDeclaration(parent)) && named.name === node
   }
+
+  // No AST or semantic caches are needed while sorting/serializing the
+  // graph. Drop strong references before allocating the final projections.
+  checker = undefined
+  sourceMap.clear()
 
   const orderedNodes = [...nodes.values()].sort((a, b) => (a.stableKey < b.stableKey ? -1 : a.stableKey > b.stableKey ? 1 : 0))
   const orderedEdges = [...edges.values()].sort((a, b) => {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { createJobWorker, type JobWorkerOptions } from '../jobs/worker.js'
 import type { JobRepository } from '../jobs/repository.js'
-import type { JobClaim, JobFence } from '../jobs/types.js'
+import { JobTerminalError, type JobClaim, type JobFence } from '../jobs/types.js'
 
 function claim(overrides: Partial<JobClaim> = {}): JobClaim {
   return {
@@ -56,6 +56,25 @@ function workerOptions(overrides: Partial<JobWorkerOptions> = {}): JobWorkerOpti
 }
 
 describe('job worker per-claim lease renewal', () => {
+  test('terminal failures retain bounded specific codes and request no automatic retry', async () => {
+    const { jobs } = fakeJobs([claim()])
+    const failures: Array<Parameters<JobRepository['rescheduleJob']>[0]> = []
+    jobs.rescheduleJob = async input => { failures.push(input); return true }
+    const worker = createJobWorker(workerOptions({ jobs }))
+    worker.register('compile_episode', async () => { throw new JobTerminalError('codegraph_parse_timeout') })
+    await worker.tick()
+    expect(failures).toMatchObject([{ terminal: true, errorCode: 'handler_failed_codegraph_parse_timeout' }])
+  })
+
+  test('terminal diagnostics never persist unbounded private error details', async () => {
+    const { jobs } = fakeJobs([claim()])
+    let code = ''
+    jobs.rescheduleJob = async input => { code = input.errorCode; return true }
+    const worker = createJobWorker(workerOptions({ jobs }))
+    worker.register('compile_episode', async () => { throw new JobTerminalError('private/path: source body') })
+    await worker.tick()
+    expect(code).toBe('handler_failed_terminal_error')
+  })
   test('an idle slot starts the next short job while an earlier slow job is still running',async()=>{
     let release!:()=>void
     const gate=new Promise<void>(resolve=>{release=resolve})
