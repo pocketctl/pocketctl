@@ -10,6 +10,7 @@ func memoryHelp() string {
 }
 
 const memoryHelpZh = `用法:
+  pocketctl memory scopes [--json]
   pocketctl memory sync-repo --repo <仓库路径> [选项]
   pocketctl memory --help
   pocketctl memory sync-repo --help
@@ -17,12 +18,17 @@ const memoryHelpZh = `用法:
 将已提交的代码同步到 Memory，供 Web「Memory → 代码图谱」查看依赖和分析变更影响。
 此命令主动上传筛选后的源代码；不会由 daemon 自动执行，也不需要重启 daemon。
 
+查询范围:
+  pocketctl memory scopes         列出范围名称、类型、状态、安装 UUID 和服务端返回的权限
+  pocketctl memory scopes --json  输出 JSON；- 或空权限列表表示未提供权限信息，不代表无权限
+  仅查询当前登录账号可见范围，不创建授权或上传源码；旧 Relay 会明确提示仅列出个人范围。
+
 选项:
   --repo <路径>                  必填，Git 仓库内的目录
   --dry-run                      本地预览清单、大小和排除原因，不登录、不联网、不上传
   --committed                    忽略暂存区/工作区改动，只读取固定的已提交 HEAD
   --include <仓库相对路径>         仅选择该文件/目录，可重复，例如 --include web/src
-  --scope-installation-id <UUID>  上传到团队/组织 Memory；省略则使用个人范围
+  --scope-installation-id <UUID>  显式选择 Memory 范围；省略则自动识别个人范围
   --allow-partial                 明确允许达到文件数/总大小上限后的截断快照
   --allow-empty                  明确允许发布空图谱（例如删除所有入选代码后）
   --full                         传输全部入选文件正文；默认协商复用已有正文
@@ -57,6 +63,7 @@ const memoryHelpZh = `用法:
 `
 
 const memoryHelpEn = `Usage:
+  pocketctl memory scopes [--json]
   pocketctl memory sync-repo --repo <path> [options]
   pocketctl memory --help
   pocketctl memory sync-repo --help
@@ -64,12 +71,18 @@ const memoryHelpEn = `Usage:
 Upload committed source to Memory for Web Memory → Code Graph and change-impact analysis.
 This is an explicit source upload, independent of daemon startup; no daemon restart is needed.
 
+Scope discovery:
+  pocketctl memory scopes         List names, kinds, status, installation UUIDs, and reported permissions
+  pocketctl memory scopes --json  JSON output; - or an empty permissions list means not reported, not denied
+  Read-only discovery for the signed-in account; no grants or source uploads.
+  Older Relays explicitly report when only personal discovery is available.
+
 Options:
   --repo <path>                  Required: a directory inside a Git repository
   --dry-run                      Local preview; no login, network, or upload
   --committed                    Read only pinned committed HEAD, ignoring index/worktree edits
   --include <relative-path>       Select a file/directory prefix; repeatable
-  --scope-installation-id <UUID> Target a team/organization Memory; defaults to personal
+  --scope-installation-id <UUID> Select a Memory scope explicitly; defaults to personal discovery
   --allow-partial                 Allow truncation at the file-count/total-byte limits
   --allow-empty                  Allow publishing an empty graph (e.g. all selected files deleted)
   --full                         Transfer all selected bodies; default reuses retained content

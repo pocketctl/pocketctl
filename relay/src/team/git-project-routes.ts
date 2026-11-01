@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { GitProjectError, parseGitProject, type GitProjectService } from './git-projects.js'
+import { TeamRepositoryError } from './repository.js'
 
 export function registerGitProjectRoutes(app: FastifyInstance, deps: {
   service: GitProjectService; enabled: () => boolean; getDatabaseReady: () => boolean
@@ -42,6 +43,14 @@ export function registerGitProjectRoutes(app: FastifyInstance, deps: {
     const body = request.body as Record<string,unknown> | null
     if (!/^ctm_[a-zA-Z0-9-]{1,100}$/.test(teamId) || !body || Object.keys(body).length !== 1 || body.confirm_shared_memory !== true) return fail(400,'invalid_request')
     try { return await deps.initializeMemory(teamId, actor.userId) }
-    catch (error) { return fail(error instanceof GitProjectError ? 403 : 503, error instanceof GitProjectError ? error.code : 'team_feature_disabled') }
+    catch (error) {
+      if (error instanceof GitProjectError || error instanceof TeamRepositoryError && error.code === 'team_access_denied') {
+        return fail(error.code === 'invalid_request' ? 400 : 403, error.code)
+      }
+      if (error instanceof Error && error.message === 'memory_provider_disabled') return fail(503, 'memory_provider_unavailable')
+      const sqlCode = (error as { code?: unknown } | null)?.code
+      app.log.error({ code: typeof sqlCode === 'string' && /^[0-9A-Z]{5}$/.test(sqlCode) ? sqlCode : 'unexpected' }, 'Git team Memory initialization failed')
+      return fail(500, 'memory_initialization_failed')
+    }
   })
 }

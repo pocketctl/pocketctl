@@ -9,6 +9,8 @@ const BASE_ENV: Record<string, string | undefined> = {
   MEMORY_PROVIDER_CLIENT_ID: 'client-1',
   MEMORY_PROVIDER_CLIENT_SECRET: 'secret-1',
   MEMORY_HMAC_KEY: 'hmac-key-0123456789abcdef0123456789abcdef',
+  MEMORY_CODEGRAPH_MAX_CONCURRENCY: '1',
+  MEMORY_CODE_SNAPSHOT_RETENTION_DAYS: '30',
 }
 
 const TEXT_ENV = {

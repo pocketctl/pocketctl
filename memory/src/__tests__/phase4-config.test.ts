@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { describe, expect, test } from 'vitest'
 
-import { loadMemoryConfig, phase4ModeForScope } from '../config.js'
+import { codegraphModeFromEnv, loadMemoryConfig, phase4ModeForScope } from '../config.js'
 
 const REPOSITORY_ROOT = resolve(__dirname, '../../..')
 
@@ -89,9 +89,9 @@ describe('phase4 configuration', () => {
     }))).toThrow(/MEMORY_TEXT_API_KEY_MIMO/)
   })
 
-  test('defaults both independent features off with frozen safe bounds', () => {
+  test('defaults CodeGraph on and Wiki off with frozen safe bounds', () => {
     const config = loadMemoryConfig(baseEnv())
-    expect(config.codegraphMode).toBe('off')
+    expect(config.codegraphMode).toBe('enabled')
     expect(config.wikiMode).toBe('off')
     expect(config.codegraphMaxConcurrency).toBe(1)
     expect(config.wikiMaxConcurrency).toBe(1)
@@ -99,6 +99,27 @@ describe('phase4 configuration', () => {
     expect(config.wikiMaxSections).toBe(256)
     expect(config.wikiMaxSourceChars).toBe(200_000)
     expect(config.codeSnapshotRetentionDays).toBe(30)
+  })
+
+  test.each([undefined, '', '   '])('defaults an unset or empty CodeGraph mode to enabled (%s)', value => {
+    expect(codegraphModeFromEnv({ MEMORY_CODEGRAPH_MODE: value })).toBe('enabled')
+  })
+
+  test('rejects an invalid CodeGraph mode', () => {
+    expect(() => codegraphModeFromEnv({ MEMORY_CODEGRAPH_MODE: 'true' })).toThrow(/MEMORY_CODEGRAPH_MODE/)
+  })
+
+  test('production defaults still require explicit CodeGraph bounds', () => {
+    const production = baseEnv({
+      NODE_ENV: 'production',
+      MEMORY_TOMBSTONE_HMAC_KEYS: 'v1=tombstone-key-0123456789abcdef-0123456789abcdef',
+    })
+    expect(() => loadMemoryConfig(production)).toThrow(/MEMORY_CODEGRAPH_MAX_CONCURRENCY/)
+    production.MEMORY_CODEGRAPH_MAX_CONCURRENCY = '1'
+    expect(() => loadMemoryConfig(production)).toThrow(/MEMORY_CODE_SNAPSHOT_RETENTION_DAYS/)
+    production.MEMORY_CODE_SNAPSHOT_RETENTION_DAYS = '30'
+    expect(loadMemoryConfig(production).codegraphMode).toBe('enabled')
+    expect(loadMemoryConfig({ ...production, MEMORY_CODEGRAPH_MODE: 'off' }).codegraphMode).toBe('off')
   })
 
   test.each(['off', 'shadow', 'enabled'] as const)('accepts the %s feature mode', mode => {
@@ -219,6 +240,7 @@ describe('phase4 configuration', () => {
         MEMORY_PROVIDER_CLIENT_ID: 'compose-client',
         MEMORY_PROVIDER_CLIENT_SECRET: 'compose-secret',
         MEMORY_HMAC_KEY: 'compose-hmac-key-0123456789abcdef0123456789',
+        MEMORY_CODEGRAPH_MODE: '',
       },
     })
     const compose = JSON.parse(output) as { services: Record<string, { environment: Record<string, string> }> }
@@ -235,6 +257,7 @@ describe('phase4 configuration', () => {
     for (const serviceName of ['memory-api', 'memory-worker']) {
       const environment = compose.services[serviceName]!.environment
       for (const name of required) expect(environment, `${serviceName}:${name}`).toHaveProperty(name)
+      expect(environment.MEMORY_CODEGRAPH_MODE, serviceName).toBe('enabled')
     }
   })
 })
