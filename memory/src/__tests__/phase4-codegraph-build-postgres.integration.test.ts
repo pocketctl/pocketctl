@@ -29,12 +29,12 @@ interface Ctx {
   jobId: string
 }
 
-async function ingestFixture(pool: pg.Pool, installationId: string, suffix: string): Promise<{
+async function ingestFixture(pool: pg.Pool, installationId: string, suffix: string, files = FIXTURE): Promise<{
   snapshotId: string
   jobId: string
 }> {
   const service = createSourceIngestService(pool)
-  const manifest = computeManifestHash(FIXTURE.map(file => ({
+  const manifest = computeManifestHash(files.map(file => ({
     path: file.path,
     gitMode: '100644',
     language: languageForEntry(file.path),
@@ -48,30 +48,32 @@ async function ingestFixture(pool: pg.Pool, installationId: string, suffix: stri
     gitObjectFormat: 'sha1',
     commitSha: 'a'.repeat(40),
     manifestSha256: manifest,
-    expectedFileCount: FIXTURE.length,
-    expectedByteCount: FIXTURE.reduce((total, file) => total + Buffer.byteLength(file.content), 0),
+    expectedFileCount: files.length,
+    expectedByteCount: files.reduce((total, file) => total + Buffer.byteLength(file.content), 0),
     idempotencyKey: `idem-${suffix}`,
   })
-  await service.uploadBatch({
-    installationId,
-    snapshotId: start.snapshotId,
-    batchIndex: 0,
-    entries: FIXTURE.map(file => ({
-      path: file.path,
-      git_mode: '100644',
-      language: languageForEntry(file.path),
-      capability: capabilityForEntry(file.path),
-      blob_sha256: sha256(file.content),
-      byte_count: Buffer.byteLength(file.content),
-      content_base64: Buffer.from(file.content).toString('base64'),
-    })),
-  })
+  for (let offset = 0; offset < files.length; offset += 256) {
+    await service.uploadBatch({
+      installationId,
+      snapshotId: start.snapshotId,
+      batchIndex: offset / 256,
+      entries: files.slice(offset, offset + 256).map(file => ({
+        path: file.path,
+        git_mode: '100644',
+        language: languageForEntry(file.path),
+        capability: capabilityForEntry(file.path),
+        blob_sha256: sha256(file.content),
+        byte_count: Buffer.byteLength(file.content),
+        content_base64: Buffer.from(file.content).toString('base64'),
+      })),
+    })
+  }
   await service.finalizeSnapshot({
     installationId,
     snapshotId: start.snapshotId,
     manifestSha256: manifest,
-    expectedFileCount: FIXTURE.length,
-    expectedByteCount: FIXTURE.reduce((total, file) => total + Buffer.byteLength(file.content), 0),
+    expectedFileCount: files.length,
+    expectedByteCount: files.reduce((total, file) => total + Buffer.byteLength(file.content), 0),
     idempotencyKey: `idem-f-${suffix}`,
   })
   const job = await pool.query<{ job_id: string; installation_id: string }>(`
@@ -322,4 +324,40 @@ describeWithDatabase('phase4 code graph build and activation', () => {
     `, [start.snapshotId])
     expect(versions.rows[0]!.count).toBe(0)
   })
+  test('a larger graph crosses batch boundaries without per-node writes or per-file body reads', async () => {
+    const files = Array.from({ length: 640 }, (_, i) => ({
+      path: `src/unit${String(i).padStart(4, '0')}.ts`,
+      content: `${i ? `import { run as previous } from './unit${String(i - 1).padStart(4, '0')}.js';\n` : ''}export function run() { return ${i ? 'previous()' : '1'} }\n`,
+    }))
+    const pending = await ingestFixture(base.pool, base.installationId, 'bulk-boundaries', files)
+    const counts = { nodes: 0, edges: 0, bodies: 0 }
+    const observe = (sql: string) => {
+      if (sql.includes('INSERT INTO memory_code_nodes')) counts.nodes++
+      if (sql.includes('INSERT INTO memory_code_edges')) counts.edges++
+      if (sql.includes('SELECT blob_hash, utf8_content')) counts.bodies++
+    }
+    const traced = new Proxy(base.pool, { get(target, key) {
+      if (key === 'connect') return async () => {
+        const client = await target.connect()
+        return new Proxy(client, { get(current, member) {
+          if (member === 'query') return (sql: string, ...args: unknown[]) => { observe(sql); return Reflect.apply(current.query, current, [sql, ...args]) }
+          const value = Reflect.get(current, member); return typeof value === 'function' ? value.bind(current) : value
+        } })
+      }
+      if (key === 'query') return (sql: string, ...args: unknown[]) => { observe(sql); return Reflect.apply(target.query, target, [sql, ...args]) }
+      const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value
+    } })
+    await runHandler(traced, { job_id: pending.jobId }, base.installationId)
+    const expected = parseCodeSnapshot({ files })
+    const version = (await base.pool.query('SELECT graph_version_id,content_hash FROM memory_code_graph_versions WHERE snapshot_id=$1', [pending.snapshotId])).rows[0]
+    expect(version.content_hash).toBe(expected.contentHash)
+    expect(Number((await base.pool.query('SELECT count(*) FROM memory_code_nodes WHERE graph_version_id=$1', [version.graph_version_id])).rows[0].count)).toBe(expected.nodes.length)
+    expect(Number((await base.pool.query('SELECT count(*) FROM memory_code_edges WHERE graph_version_id=$1', [version.graph_version_id])).rows[0].count)).toBe(expected.edges.length)
+    expect(counts.nodes).toBeGreaterThan(1)
+    expect(counts.edges).toBeGreaterThan(1)
+    expect(counts.nodes).toBeLessThan(20)
+    expect(counts.edges).toBeLessThan(20)
+    expect(counts.bodies).toBeLessThan(20)
+  })
+
 })

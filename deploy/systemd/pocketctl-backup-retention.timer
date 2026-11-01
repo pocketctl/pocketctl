@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily PocketCtl backup retention
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 Asia/Shanghai
+RandomizedDelaySec=15min
+Persistent=true
+Unit=pocketctl-backup-retention.service
+
+[Install]
+WantedBy=timers.target

@@ -163,6 +163,7 @@ export function registerCodegraphRoutes(app: FastifyInstance, deps: CodegraphRou
         grant,
         repository: parsed.data.repository,
         selection: parsed.data.selection,
+        retryFailed: parsed.data.retry_failed,
         gitObjectFormat: parsed.data.git_object_format,
         commitSha: parsed.data.commit_sha,
         manifestSha256: parsed.data.manifest_sha256,

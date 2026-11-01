@@ -3,6 +3,7 @@ package memorysync
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -42,6 +43,7 @@ type UploadClientOptions struct {
 	RetryWait    time.Duration
 	RetryMax     int
 	FullUpload   bool
+	RetryFailed  bool
 }
 
 // SyncResult reports a complete snapshot sync and its actual body transfer.
@@ -71,12 +73,21 @@ func NewUploadClient(options UploadClientOptions) *UploadClient {
 
 // SyncSnapshot verifies a complete snapshot, reusing retained bodies by default.
 func (u *UploadClient) SyncSnapshot(ctx context.Context, idempotencyKey string, snapshot *Snapshot) (SyncResult, error) {
+	if u.options.RetryFailed {
+		// One new explicit run, but one stable identity across HTTP retries.
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return SyncResult{}, fmt.Errorf("retry_identity_failed")
+		}
+		idempotencyKey = fmt.Sprintf("%s:retry:%x", idempotencyKey, nonce)
+	}
 	grant, err := u.options.GrantSource.Grant(ctx, "")
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("grant: %w", err)
 	}
 
 	start := StartCodeSnapshotRequest{
+		RetryFailed: u.options.RetryFailed,
 		Repository: RepositoryRef{
 			RepositoryKey:   snapshot.RepositoryKey,
 			CanonicalRemote: snapshot.CanonicalRemote,

@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import { JobDeferredError, type JobClaim, type JobFence, type JobType } from './types.js'
+import { JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
 import type { JobRepository } from './repository.js'
 
 export interface JobHandlerContext {
@@ -144,6 +144,7 @@ export function createJobWorker(options: JobWorkerOptions) {
             claimedBy: options.workerId,
             claimEpoch: claim.claim_epoch,
             errorCode: boundedErrorCode(error),
+            ...(error instanceof JobTerminalError ? { terminal: true } : {}),
           }).catch(() => undefined)
         } finally {
           release()
@@ -163,6 +164,10 @@ export function createJobWorker(options: JobWorkerOptions) {
   }
 
   function boundedErrorCode(error: unknown): string {
+    if (error instanceof JobTerminalError) {
+      return /^[a-z][a-z0-9_]{0,48}$/.test(error.errorCode)
+        ? `handler_failed_${error.errorCode}` : 'handler_failed_terminal_error'
+    }
     const name = error instanceof Error ? error.name : 'unknown'
     return `handler_failed_${name}`.slice(0, 64)
   }

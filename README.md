@@ -157,6 +157,8 @@ See [data processing and experimental retention](docs/security-and-data.md) and 
 
 The current source adds read-only `pocketctl memory scopes [--json]` discovery and installation UUID and sync-command copy actions under Web **Code Graph → Sync repository and usage**. These additions require an updated CLI or Web client and are not included in the v0.5.13 release. Code Graph defaults to enabled in the updated service configuration; uploads still require account authorization and an explicit sync command.
 
+The current source also adds `pocketctl memory sync-repo --retry-failed` to explicitly rebuild a failed snapshot using verified retained source. It requires the matching updated CLI and Memory service; incomplete or unauthorized sources are rejected, and previous failure records are retained. This command is not included in the v0.5.13 release.
+
 Unconfirmed candidates expire after 14 days. Configurable retention workers can
 reclaim old Feed and source bodies and migration details while preserving replay
 checks and protecting evidence still in use; operators must enable the retention

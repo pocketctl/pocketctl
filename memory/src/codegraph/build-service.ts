@@ -1,16 +1,15 @@
+import { createHash } from 'node:crypto'
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import type pg from 'pg'
 import {requireSourceAuthority,lockSourceSnapshot,SourceLifecycleFenceError} from './lifecycle.js'
 
-import type { JobClaim, JobFence } from '../jobs/types.js'
-import { createSourceRepository } from './source-repository.js'
+import { JobTerminalError, type JobClaim, type JobFence } from '../jobs/types.js'
+import { computeManifestHash, createSourceRepository } from './source-repository.js'
 import { createGraphRepository } from './graph-repository.js'
 import {
-  assembleIncrementalGraph,
   PARSER_VERSION,
   type ParsedGraph,
 } from './typescript-parser.js'
-import { canonicalGraphHash } from './typescript-parser.js'
 import { validateGraphCandidate } from './validator.js'
 import { createWikiStaleService } from '../wiki/stale-service.js'
 import type { Phase4Metrics } from '../metrics.js'
@@ -23,19 +22,10 @@ import { CodeGraphParseError, parseCodeSnapshotIsolated } from './isolated-parse
  * validator failure keeps the previous active graph untouched.
  */
 
-async function graphPoolQueryOne(pool: pg.Pool, sql: string, params: unknown[]): Promise<Record<string, unknown> | null> {
-  const result = await pool.query(sql, params)
-  return result.rows[0] ?? null
-}
-
-async function graphPoolQuery(pool: pg.Pool, sql: string, params: unknown[]): Promise<Array<Record<string, unknown>>> {
-  const result = await pool.query(sql, params)
-  return result.rows
-}
-
-export class GraphBuildFenceError extends Error {
+export class GraphBuildFenceError extends JobTerminalError {
   constructor(readonly code: string) {
-    super(code)
+    super(`codegraph_${code.startsWith('validation_failed:') ? 'validation_failed' : code}`)
+    this.name = 'GraphBuildFenceError'
   }
 }
 
@@ -67,7 +57,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
       signal: AbortSignal,
       ctx?: { fence: JobFence },
     ): Promise<void> {
-      let incremental: 'true' | 'false' = 'false'
+      const incremental = 'false'
       const mode = deps.mode ?? 'shadow'
       try {
         const fence = ctx?.fence
@@ -92,7 +82,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
             await recheckFence(client,fence)
             const snapshot=await sources.getSnapshot({installationId:claim.installation_id!,snapshotId},client)
             if(!snapshot)throw new GraphBuildFenceError('not_found')
-            if(!['ready','parsing','active'].includes(snapshot.state))throw new GraphBuildFenceError('not_ready')
+            if(!['ready','parsing','active'].includes(snapshot.state))throw new GraphBuildFenceError(snapshot.state === 'failed' ? 'snapshot_failed' : 'not_ready')
             const result=await work(client,snapshot)
             signal.throwIfAborted()
             await recheckFence(client,fence)
@@ -117,24 +107,33 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           snapshotId,
         })
         const files: Array<{ path: string; content: string }> = []
-        for (const entry of entries) {
-          signal.throwIfAborted()
-          const content = await sources.getBlob({
-            installationId: claim.installation_id!,
-            blobHash: entry.blobSha256,
-          })
-          files.push({ path: entry.path, content: content ?? '' })
+        if (entries.length !== snapshot.fileCount
+          || entries.reduce((total, entry) => total + entry.byteCount, 0) !== snapshot.byteCount
+          || computeManifestHash(entries) !== snapshot.manifestHash) {
+          throw new GraphBuildFenceError('source_integrity_mismatch')
         }
-        const built = await buildGraphIncrementalOrFull({
-          pool,
-          installationId: claim.installation_id!,
-          repositoryId: snapshot.repositoryId,
-          currentSnapshotId: snapshotId,
-          entries,
-          files,
-          parse,
-          signal,
-        }).catch(async error => {
+        // Bound each read to 64 files (at most 16 MiB), rather than one
+        // round trip per file or an unbounded repository-wide result.
+        for (let offset = 0; offset < entries.length; offset += 64) {
+          signal.throwIfAborted()
+          const batch = entries.slice(offset, offset + 64)
+          const blobs = await sources.getBlobs({
+            installationId: claim.installation_id!,
+            blobHashes: [...new Set(batch.map(entry => entry.blobSha256))],
+          })
+          for (const entry of batch) {
+            const content = blobs.get(entry.blobSha256)
+            if (content === undefined || Buffer.byteLength(content) !== entry.byteCount
+              || createHash('sha256').update(content).digest('hex') !== entry.blobSha256) {
+              throw new GraphBuildFenceError('source_integrity_mismatch')
+            }
+            files.push({ path: entry.path, content })
+          }
+        }
+        // One deterministic full parse is sufficient. The previous online
+        // incremental path parsed the whole tree twice, then loaded the
+        // previous graph only to compare against the full result.
+        const graph = await Promise.resolve().then(() => parse({ files }, signal)).catch(async error => {
           if (error instanceof CodeGraphParseError && error.code !== 'aborted') {
             await withSource(async (client, current) => {
               if (current.state !== 'active') await graphs.markSnapshotState({
@@ -144,8 +143,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           }
           throw error
         })
-        const graph = built.graph
-        incremental = built.incremental ? 'true' : 'false'
+        signal.throwIfAborted()
 
         const verdict = validateGraphCandidate(graph)
         if (!verdict.ok) {
@@ -161,7 +159,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           const existing=await activation.query('SELECT 1 FROM memory_code_graph_versions WHERE installation_id=$1 AND snapshot_id=$2 AND parser_version=$3',[claim.installation_id!,snapshotId,PARSER_VERSION])
           if(existing.rows[0])return
           const generation=await graphs.nextGeneration({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,client:activation})
-          const candidate=await graphs.persistCandidate({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,snapshotId,generation,graph,coverage,client:activation})
+          const candidate=await graphs.persistCandidate({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,snapshotId,generation,graph,coverage,client:activation,signal})
           await wikiStale.markForGraphActivation({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,graphVersionId:candidate.graphVersionId,snapshotId,client:activation})
           await graphs.activateHead({installationId:claim.installation_id!,repositoryId:snapshot.repositoryId,graphVersionId:candidate.graphVersionId,client:activation})
           await graphs.markSnapshotState({installationId:claim.installation_id!,snapshotId,state:'active',client:activation})
@@ -176,129 +174,3 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
 }
 
 export type CodeGraphBuildService = ReturnType<typeof createCodeGraphBuildService>
-
-/**
- * Incremental assembly with a fail-closed equivalence check (plan §3.6):
- * unchanged nodes/edges are copied from the repository's active graph for
- * the same parser version, changed blobs are collected fresh, and the merged
- * result must hash identically to a clean full rebuild — otherwise the
- * incremental publication fails closed and the full parse is used.
- */
-async function buildGraphIncrementalOrFull(input: {
-  pool: pg.Pool
-  installationId: string
-  repositoryId: string
-  currentSnapshotId: string
-  entries: Array<{ path: string; blobSha256: string }>
-  files: Array<{ path: string; content: string }>
-  parse: (input: { files: Array<{ path: string; content: string }> }, signal: AbortSignal) => ParsedGraph | Promise<ParsedGraph>
-  signal: AbortSignal
-}): Promise<{ graph: ParsedGraph; incremental: boolean }> {
-  const full = await input.parse({ files: input.files }, input.signal)
-  input.signal.throwIfAborted()
-  const previous = await loadActiveGraphContext(input.pool, input.installationId, input.repositoryId, input.currentSnapshotId)
-  if (!previous) return { graph: full, incremental: false }
-
-  const changed = new Set<string>()
-  const previousHashes = new Map(previous.entries.map(entry => [entry.path, entry.blobHash]))
-  for (const entry of input.entries) {
-    if (previousHashes.get(entry.path) !== entry.blobSha256) changed.add(entry.path)
-  }
-  for (const path of previousHashes.keys()) {
-    if (!input.entries.some(entry => entry.path === path)) changed.add(path)
-  }
-
-  const collected = await parseCodeSnapshotIsolated({
-    files: input.files,
-    parserVersion: PARSER_VERSION,
-    collectPaths: changed,
-  }, { signal: input.signal })
-  const merged = assembleIncrementalGraph({
-    previousNodes: previous.nodes,
-    previousEdges: previous.edges,
-    changedPaths: changed,
-    collected,
-  })
-  const incrementalHash = canonicalGraphHash(merged.nodes, merged.edges)
-  if (incrementalHash === canonicalGraphHash(full.nodes, full.edges)) {
-    // Incremental output is byte-identical to the full rebuild: persist the
-    // full projection so coverage metadata stays complete.
-    return { graph: full, incremental: true }
-  }
-  // Divergence (e.g. a tampered previous graph) fails closed: publish only
-  // the deterministic full rebuild.
-  return { graph: full, incremental: false }
-}
-
-interface ActiveGraphContext {
-  parserVersion: string
-  nodes: import('./typescript-parser.js').ParsedNode[]
-  edges: import('./typescript-parser.js').ParsedEdge[]
-  entries: Array<{ path: string; blobHash: string }>
-}
-
-async function loadActiveGraphContext(
-  pool: pg.Pool,
-  installationId: string,
-  repositoryId: string,
-  excludeSnapshotId: string,
-): Promise<ActiveGraphContext | null> {
-  const version = await graphPoolQueryOne(pool, `
-    SELECT v.graph_version_id::text, v.parser_version, v.snapshot_id::text
-    FROM memory_code_graph_versions v
-    JOIN memory_code_graph_heads h
-      ON h.installation_id = v.installation_id
-     AND h.active_graph_version_id = v.graph_version_id
-    WHERE v.installation_id = $1 AND v.repository_id = $2 AND v.snapshot_id <> $3
-  `, [installationId, repositoryId, excludeSnapshotId])
-  if (!version) return null
-  if (version.parser_version !== PARSER_VERSION) return null
-
-  const nodes = await graphPoolQuery(pool, `
-    SELECT node_id, kind, stable_key, path, name, symbol_kind,
-           start_line, start_column, end_line, end_column, metadata
-    FROM memory_code_nodes WHERE graph_version_id = $1
-  `, [version.graph_version_id])
-  const edges = await graphPoolQuery(pool, `
-    SELECT e.edge_id, e.kind, n1.stable_key AS from_stable_key, n2.stable_key AS to_stable_key,
-           e.source_path, e.source_line, e.resolution, e.metadata
-    FROM memory_code_edges e
-    JOIN memory_code_nodes n1 ON n1.graph_version_id = e.graph_version_id AND n1.node_id = e.from_node_id
-    JOIN memory_code_nodes n2 ON n2.graph_version_id = e.graph_version_id AND n2.node_id = e.to_node_id
-    WHERE e.graph_version_id = $1
-  `, [version.graph_version_id])
-  const entries = await graphPoolQuery(pool, `
-    SELECT path, blob_hash FROM memory_source_snapshot_entries WHERE snapshot_id = $1
-  `, [version.snapshot_id])
-
-  return {
-    parserVersion: version.parser_version,
-    nodes: nodes.map((node: Record<string, unknown>) => ({
-      nodeId: String(node.node_id),
-      kind: node.kind as never,
-      stableKey: node.stable_key as string,
-      path: (node.path ?? null) as string | null,
-      name: node.name as string,
-      ...(node.symbol_kind ? { symbolKind: node.symbol_kind as string } : {}),
-      ...(node.start_line ? { startLine: Number(node.start_line) } : {}),
-      ...(node.start_column ? { startColumn: Number(node.start_column) } : {}),
-      ...(node.end_line ? { endLine: Number(node.end_line) } : {}),
-      ...(node.end_column ? { endColumn: Number(node.end_column) } : {}),
-      metadata: (node.metadata ?? {}) as Record<string, unknown>,
-    })),
-    edges: edges.map((edge: Record<string, unknown>) => ({
-      edgeId: String(edge.edge_id),
-      kind: edge.kind as never,
-      fromStableKey: edge.from_stable_key as string,
-      toStableKey: edge.to_stable_key as string,
-      sourcePath: edge.source_path as string,
-      ...(edge.source_line ? { sourceLine: Number(edge.source_line) } : {}),
-      resolution: edge.resolution as never,
-      metadata: (edge.metadata ?? {}) as Record<string, unknown>,
-    })),
-    entries: entries.map((entry: Record<string, unknown>) => ({
-      path: entry.path as string,
-      blobHash: entry.blob_hash as string,
-    })),
-  }
-}

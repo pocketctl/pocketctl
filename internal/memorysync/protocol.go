@@ -23,6 +23,7 @@ type SnapshotSelection struct {
 }
 
 type StartCodeSnapshotRequest struct {
+	RetryFailed         bool               `json:"retry_failed,omitempty"`
 	Selection           *SnapshotSelection `json:"selection,omitempty"`
 	Repository          RepositoryRef      `json:"repository"`
 	GitObjectFormat     string             `json:"git_object_format"`

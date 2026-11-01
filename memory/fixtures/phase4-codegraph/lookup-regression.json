@@ -1,0 +1,5 @@
+[
+ {"path":"src/a.ts","content":"export namespace Outer { export class Worker { run() { return 1 } } }\nexport class Worker { run() { return 2 } get value() { return 3 } set value(v: number) {} }\nexport function repeat(x: number): number;\nexport function repeat(x: string): string;\nexport function repeat(x: any) { return x }\nexport const 标签 = '中文';\n"},
+ {"path":"src/b.ts","content":"import { Worker as Alias, Outer, repeat, 标签 } from './a.js';\nexport function use() { const a = new Alias(); return [a.run(), new Outer.Worker().run(), repeat(标签), a.value, missing?.()] }\n"},
+ {"path":"src/c.js","content":"import { use } from './b.js';\nexport function run() { return use() }\nexport const repeated = () => run();\n"}
+]

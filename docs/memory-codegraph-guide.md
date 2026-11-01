@@ -30,6 +30,23 @@ pocketctl memory sync-repo --repo /path/to/repo
 
 上传完成的 `ready` 表示等待 Worker；`parsing` 表示解析中，`active` 表示图谱已发布。刷新列表和图谱读取最新结果。若新提交尚未解析，旧图谱继续标明其原提交，不把旧图谱当作最新提交。
 
+## 显式重建失败快照
+
+以下入口需要本轮配套的新 CLI 与 Memory 服务端；尚未包含在 v0.5.13 发布包中。
+修复解析问题后，在原提交、相同入选范围下执行：
+
+```sh
+pocketctl memory sync-repo --repo /path/to/repo --retry-failed --dry-run
+pocketctl memory sync-repo --repo /path/to/repo --retry-failed
+```
+
+原命令使用了 `--include` 等选择参数时需保留。服务端重新校验清单和所有已保留正文，
+复用同一个快照并创建一次新的构建任务，不重复传输正文。网络重发复用同一次请求身份；
+另一次显式命令才使用新身份。旧失败任务和死信原因继续保留，旧有效图谱在新图谱成功前保持可用。
+
+普通同步不会自动重建失败快照。已中止或不完整的上传、正文被清理或损坏、仍有旧任务执行、
+来源已撤权或删除时拒绝重建。`--full` 也不绕过这些校验。
+
 ## 获取范围与安装 UUID
 
 Web 获取入口已于 2026-11-01 部署。`memory scopes` 与个人 grant 解析修复尚未包含在 v0.5.13 CLI 发布包中，需使用新构建的 CLI；旧版可继续使用显式范围兼容命令。
@@ -105,7 +122,9 @@ pocketctl memory sync-repo --repo . --scope-installation-id <范围UUID>
 
 在「改动影响」输入仓库相对路径（每行一个），运行分析。分析有深度、节点和边数上限；`partial` 表示结果有覆盖限制，不是证明其他文件绝不受影响。源码同步、代码图谱与 Git Ops 文档同步是不同入口；Git Ops 创建项目不会自动运行主机的源码同步。
 
-本次源码将全量及增量符号解析移到独立线程，避免长时间的 TypeScript 计算阻塞 Worker 心跳、Feed 投影事务和读取锁。每个解析阶段最多运行 5 分钟，线程 V8 老生代上限为 768 MiB；这不是整个进程 RSS 的硬上限。停止 Worker 或失去任务后会取消线程，解析失败仍保留原有活动图谱，发布前继续校验当前任务与来源权限。该修复需部署配套 Worker，不包含在原 v0.5.13 发布包中。
+符号解析在独立线程运行，避免长时间的 TypeScript 计算阻塞 Worker 心跳、Feed 投影事务和读取锁。每个解析阶段最多运行 5 分钟，线程 V8 老生代上限为 768 MiB；这不是整个进程 RSS 的硬上限。停止 Worker 或失去任务后会取消线程，解析失败仍保留原有活动图谱，发布前继续校验当前任务与来源权限。该修复需部署配套 Worker，不包含在原 v0.5.13 发布包中。
+
+本轮源码增加符号索引、每 64 个文件刷新语义检查器缓存，并分批读取及校验正文、批量写入节点和边。每次构建只做一次完整解析，不再同时执行一次全量解析和一次重复采集解析；上传时的正文复用仍保留。以上是本地实现，线上性能需部署后单独验收。
 
 ## 常见问题
 
@@ -118,6 +137,6 @@ pocketctl memory sync-repo --repo . --scope-installation-id <范围UUID>
 | `empty_grant`（v0.5.13 CLI 的个人同步） | 该版 CLI 错把 Relay 返回的 `grant` 读取为 `token`。源码已修复，使用修复版 CLI；旧版可显式指定个人范围的 `--scope-installation-id <installation UUID>` 走 v2 授权，不更换目标范围 |
 | 503 | 管理员检查 Code Graph 和共享范围服务端开关，不是重启主机 daemon |
 | `ready` 长时间不变 | 检查 Memory Worker 版本、运行状态、队列与代码图谱开关 |
-| `handler_failed_CodeGraphParseTimeoutError` / `handler_failed_CodeGraphParseMemoryLimitError` | 解析达到时长或堆内存限制；用 `--include` 或已提交 ignore 缩小范围后重新同步，不增加模块授权或自动替换旧图谱 |
+| `handler_failed_codegraph_parse_timeout` / `handler_failed_codegraph_parse_memory_limit`（旧版为 `handler_failed_CodeGraphParseTimeoutError` / `handler_failed_CodeGraphParseMemoryLimitError`） | 解析达到时长或堆内存限制；新版本将该次构建终止并保留具体原因。修复后用配套 CLI 的 `--retry-failed` 显式重建；不自动覆盖旧有效图谱 |
 | 404 / 无已发布图谱 | 选择同一范围，完成同步后等待解析并刷新；不要把快照 ID 当仓库 ID |
 | `manifest_mismatch` / `integrity_mismatch` | 清单、内容或重试输入不一致；修复原因后重试，不跳过校验 |

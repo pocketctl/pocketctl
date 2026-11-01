@@ -210,6 +210,7 @@ export function createJobRepository(pool: pg.Pool) {
       claimedBy: string
       claimEpoch: number
       errorCode: string
+      terminal?: boolean
     }): Promise<boolean> {
       const client = await pool.connect()
       try {
@@ -241,7 +242,7 @@ export function createJobRepository(pool: pg.Pool) {
             return false
           }
           const attempts = Number(row.attempts)
-          if (row.last_error_code === 'rerun_required') {
+          if (row.last_error_code === 'rerun_required' && !input.terminal) {
             await client.query(`
               UPDATE memory_jobs
               SET state = 'pending', attempts = 0,
@@ -252,7 +253,7 @@ export function createJobRepository(pool: pg.Pool) {
             await client.query('COMMIT')
             return false
           }
-          if (attempts >= JOB_DEAD_LETTER_ATTEMPTS) {
+          if (input.terminal || attempts >= JOB_DEAD_LETTER_ATTEMPTS) {
             const job = await client.query<{
               installation_id: string | null
               job_type: JobType

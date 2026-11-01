@@ -79,7 +79,7 @@ func TestMemorySyncRepoParsesFlags(t *testing.T) {
 	options, err := parseMemorySyncRepoFlags([]string{
 		"--repo", "/tmp/somewhere",
 		"--scope-installation-id", "22222222-2222-4222-8222-222222222222",
-		"--dry-run",
+		"--dry-run", "--retry-failed",
 	})
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -90,7 +90,7 @@ func TestMemorySyncRepoParsesFlags(t *testing.T) {
 	if options.ScopeInstallationID != "22222222-2222-4222-8222-222222222222" {
 		t.Fatalf("scope: %q", options.ScopeInstallationID)
 	}
-	if !options.DryRun {
+	if !options.DryRun || !options.RetryFailed {
 		t.Fatal("dry run flag lost")
 	}
 

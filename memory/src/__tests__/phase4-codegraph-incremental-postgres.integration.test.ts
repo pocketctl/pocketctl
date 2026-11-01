@@ -94,7 +94,7 @@ async function runBuild(pool: pg.Pool, jobId: string, installationId: string, cl
   )
 }
 
-describeWithDatabase('phase4 incremental rebuild equivalence and diff', () => {
+describeWithDatabase('phase4 full rebuild equivalence and diff', () => {
   let pool: pg.Pool
   let incrementalInstallation: string
   let cleanInstallation: string
@@ -123,8 +123,8 @@ describeWithDatabase('phase4 incremental rebuild equivalence and diff', () => {
     await pool?.end()
   })
 
-  test('commit B incremental graph equals a clean full rebuild byte-for-byte', async () => {
-    // Incremental path: commit A active first, then commit B on top.
+  test('commit B after an active graph equals a clean full rebuild byte-for-byte', async () => {
+    // Existing-head path: commit A active first, then build B once.
     const a = await ingestAndBuild(pool, incrementalInstallation, COMMIT_A, 'inc-a')
     await runBuild(pool, a.jobId, incrementalInstallation)
     const b = await ingestAndBuild(pool, incrementalInstallation, COMMIT_B, 'inc-b')
@@ -204,9 +204,9 @@ describeWithDatabase('phase4 incremental rebuild equivalence and diff', () => {
     expect(diff.removedEdges).toHaveLength(0)
   })
 
-  test('a divergent incremental result fails closed and retries as a full rebuild', async () => {
+  test('a tampered previous graph cannot influence the next full rebuild', async () => {
     // Build A on a third installation, then poison the persisted A graph so
-    // the incremental copy diverges from the deterministic full parse.
+    // stale persisted rows must not be copied into the next graph.
     const installation = (await pool.query<{ id: string }>(`
       INSERT INTO memory_installations
         (installation_id, provider_id, relay_status, local_status, config_version,
@@ -219,16 +219,15 @@ describeWithDatabase('phase4 incremental rebuild equivalence and diff', () => {
     await runBuild(pool, a.jobId, installation)
     await pool.query(`
       UPDATE memory_code_nodes SET name = 'TAMPERED' WHERE node_id = (
-        SELECT node_id FROM memory_code_nodes LIMIT 1
+        SELECT node_id FROM memory_code_nodes WHERE graph_version_id IN (SELECT graph_version_id FROM memory_code_graph_versions WHERE snapshot_id=$1) LIMIT 1
       )
-    `)
+    `, [a.snapshotId])
 
     const b = await ingestAndBuild(pool, installation, COMMIT_B, 'poison-b')
     await runBuild(pool, b.jobId, installation)
 
     // Even after a tampered previous graph, the activated B version equals
-    // the deterministic full rebuild hash: the equivalence check failed the
-    // incremental path closed and republished from the full parse.
+    // the deterministic full rebuild hash, without a second collection parse.
     const version = await pool.query<{ content_hash: string }>(`
       SELECT content_hash FROM memory_code_graph_versions WHERE snapshot_id = $1
     `, [b.snapshotId])

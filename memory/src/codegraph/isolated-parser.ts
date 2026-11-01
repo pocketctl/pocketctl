@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads'
 import type { ParseInputFile, ParsedGraph } from './typescript-parser.js'
+import { JobTerminalError } from '../jobs/types.js'
 
 export interface IsolatedParseInput {
   files: readonly ParseInputFile[]
@@ -7,7 +8,7 @@ export interface IsolatedParseInput {
   collectPaths?: ReadonlySet<string>
 }
 
-export class CodeGraphParseError extends Error {
+export class CodeGraphParseError extends JobTerminalError {
   constructor(readonly code: 'aborted' | 'timeout' | 'memory_limit' | 'failed') {
     super(`codegraph_parse_${code}`)
     this.name = `CodeGraphParse${({ aborted: 'Aborted', timeout: 'Timeout', memory_limit: 'MemoryLimit', failed: 'Failed' } as const)[code]}Error`

@@ -91,6 +91,14 @@ export const JOB_PRIORITIES = Object.freeze({
 
 export const JOB_DEAD_LETTER_ATTEMPTS = 12
 
+/** A deterministic failure that requires a new, explicitly requested run. */
+export class JobTerminalError extends Error {
+  constructor(readonly errorCode: string) {
+    super(errorCode)
+    this.name = 'JobTerminalError'
+  }
+}
+
 export interface JobClaim {
   job_id: string
   installation_id: string | null
