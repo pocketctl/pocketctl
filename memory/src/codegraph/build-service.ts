@@ -7,7 +7,6 @@ import { createSourceRepository } from './source-repository.js'
 import { createGraphRepository } from './graph-repository.js'
 import {
   assembleIncrementalGraph,
-  parseCodeSnapshot,
   PARSER_VERSION,
   type ParsedGraph,
 } from './typescript-parser.js'
@@ -15,6 +14,7 @@ import { canonicalGraphHash } from './typescript-parser.js'
 import { validateGraphCandidate } from './validator.js'
 import { createWikiStaleService } from '../wiki/stale-service.js'
 import type { Phase4Metrics } from '../metrics.js'
+import { CodeGraphParseError, parseCodeSnapshotIsolated } from './isolated-parser.js'
 
 /**
  * Phase 4 parse job service (ADR-0006 §4): `parse_code_snapshot` builds the
@@ -41,7 +41,7 @@ export class GraphBuildFenceError extends Error {
 
 export interface CodeGraphBuildDeps {
   pool: pg.Pool
-  parse?: (input: { files: Array<{ path: string; content: string }> }) => ParsedGraph
+  parse?: (input: { files: Array<{ path: string; content: string }> }) => ParsedGraph | Promise<ParsedGraph>
   metrics?: Phase4Metrics
   mode?: 'shadow' | 'enabled'
 }
@@ -51,8 +51,8 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
   const sources = createSourceRepository(pool)
   const graphs = createGraphRepository(pool)
   const wikiStale = createWikiStaleService(pool)
-  const parse = deps.parse ?? ((input: { files: Array<{ path: string; content: string }> }) =>
-    parseCodeSnapshot({ files: input.files, parserVersion: PARSER_VERSION }))
+  const parse = (input: { files: Array<{ path: string; content: string }> }, signal: AbortSignal) =>
+    deps.parse ? deps.parse(input) : parseCodeSnapshotIsolated({ ...input, parserVersion: PARSER_VERSION }, { signal })
 
   async function recheckFence(client: pg.PoolClient, fence: JobFence): Promise<void> {
     try{await assertJobFence(client,fence)}catch(error){
@@ -64,7 +64,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
   return {
     async handleParseCodeSnapshot(
       claim: JobClaim,
-      _signal: AbortSignal,
+      signal: AbortSignal,
       ctx?: { fence: JobFence },
     ): Promise<void> {
       let incremental: 'true' | 'false' = 'false'
@@ -82,6 +82,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           throw new GraphBuildFenceError('payload_missing')
         }
         const withSource = async <T>(work:(client:pg.PoolClient,snapshot:NonNullable<Awaited<ReturnType<typeof sources.getSnapshot>>>)=>Promise<T>):Promise<T> => {
+          signal.throwIfAborted()
           const client=await pool.connect()
           try {
             await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
@@ -93,6 +94,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
             if(!snapshot)throw new GraphBuildFenceError('not_found')
             if(!['ready','parsing','active'].includes(snapshot.state))throw new GraphBuildFenceError('not_ready')
             const result=await work(client,snapshot)
+            signal.throwIfAborted()
             await recheckFence(client,fence)
             await client.query('COMMIT')
             return result
@@ -116,6 +118,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
         })
         const files: Array<{ path: string; content: string }> = []
         for (const entry of entries) {
+          signal.throwIfAborted()
           const content = await sources.getBlob({
             installationId: claim.installation_id!,
             blobHash: entry.blobSha256,
@@ -130,6 +133,16 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
           entries,
           files,
           parse,
+          signal,
+        }).catch(async error => {
+          if (error instanceof CodeGraphParseError && error.code !== 'aborted') {
+            await withSource(async (client, current) => {
+              if (current.state !== 'active') await graphs.markSnapshotState({
+                installationId: claim.installation_id!, snapshotId, state: 'failed', client,
+              })
+            })
+          }
+          throw error
         })
         const graph = built.graph
         incremental = built.incremental ? 'true' : 'false'
@@ -178,9 +191,11 @@ async function buildGraphIncrementalOrFull(input: {
   currentSnapshotId: string
   entries: Array<{ path: string; blobSha256: string }>
   files: Array<{ path: string; content: string }>
-  parse: (input: { files: Array<{ path: string; content: string }> }) => ParsedGraph
+  parse: (input: { files: Array<{ path: string; content: string }> }, signal: AbortSignal) => ParsedGraph | Promise<ParsedGraph>
+  signal: AbortSignal
 }): Promise<{ graph: ParsedGraph; incremental: boolean }> {
-  const full = input.parse({ files: input.files })
+  const full = await input.parse({ files: input.files }, input.signal)
+  input.signal.throwIfAborted()
   const previous = await loadActiveGraphContext(input.pool, input.installationId, input.repositoryId, input.currentSnapshotId)
   if (!previous) return { graph: full, incremental: false }
 
@@ -193,11 +208,11 @@ async function buildGraphIncrementalOrFull(input: {
     if (!input.entries.some(entry => entry.path === path)) changed.add(path)
   }
 
-  const collected = parseCodeSnapshot({
+  const collected = await parseCodeSnapshotIsolated({
     files: input.files,
     parserVersion: PARSER_VERSION,
     collectPaths: changed,
-  })
+  }, { signal: input.signal })
   const merged = assembleIncrementalGraph({
     previousNodes: previous.nodes,
     previousEdges: previous.edges,
