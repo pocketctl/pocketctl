@@ -155,6 +155,8 @@ See [data processing and experimental retention](docs/security-and-data.md) and 
 
 **Memory** manages reviewed project knowledge, dependencies, and skill documents in the Web workbench, and supplies context for later agent tasks. Model-assisted extraction requires a configured server-side model provider. For repository sync, run `pocketctl memory --help`; see the [Code Graph usage and rollout status](docs/memory-codegraph-guide.md).
 
+The current source adds read-only `pocketctl memory scopes [--json]` discovery and installation UUID and sync-command copy actions under Web **Code Graph → Sync repository and usage**. These additions require an updated CLI or Web client and are not included in the v0.5.13 release. Code Graph defaults to enabled in the updated service configuration; uploads still require account authorization and an explicit sync command.
+
 Unconfirmed candidates expire after 14 days. Configurable retention workers can
 reclaim old Feed and source bodies and migration details while preserving replay
 checks and protecting evidence still in use; operators must enable the retention

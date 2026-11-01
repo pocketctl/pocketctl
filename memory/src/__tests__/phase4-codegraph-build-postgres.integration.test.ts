@@ -4,8 +4,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createSourceIngestService } from '../codegraph/ingest-service.js'
-import { createCodeGraphBuildService } from '../codegraph/build-service.js'
-import { loadFixtureFiles, PARSER_VERSION } from '../codegraph/typescript-parser.js'
+import { createCodeGraphBuildService, type CodeGraphBuildDeps } from '../codegraph/build-service.js'
+import { CodeGraphParseError } from '../codegraph/isolated-parser.js'
+import { loadFixtureFiles, parseCodeSnapshot, PARSER_VERSION } from '../codegraph/typescript-parser.js'
 import { languageCapabilityFor } from '../codegraph/types.js'
 import { computeManifestHash } from '../codegraph/source-repository.js'
 import { createMemoryMetrics, type Phase4Metrics } from '../metrics.js'
@@ -98,8 +99,8 @@ function sha256(content: string): string {
   return createHash('sha256').update(content).digest('hex')
 }
 
-async function runHandler(pool: pg.Pool, claim: { job_id: string }, installationId: string, overrides: { claimedBy?: string; claimEpoch?: number; metrics?: Phase4Metrics } = {}): Promise<void> {
-  const build = createCodeGraphBuildService({ pool, metrics: overrides.metrics, mode: 'shadow' })
+async function runHandler(pool: pg.Pool, claim: { job_id: string }, installationId: string, overrides: { claimedBy?: string; claimEpoch?: number; metrics?: Phase4Metrics; parse?: CodeGraphBuildDeps['parse']; signal?: AbortSignal } = {}): Promise<void> {
+  const build = createCodeGraphBuildService({ pool, metrics: overrides.metrics, mode: 'shadow', parse: overrides.parse })
   // Simulate the worker claim that precedes dispatch.
   await pool.query(`
     UPDATE memory_jobs
@@ -118,7 +119,7 @@ async function runHandler(pool: pg.Pool, claim: { job_id: string }, installation
       payload: (row?.payload as Record<string, unknown>) ?? {},
       attempts: 1, claim_epoch: overrides.claimEpoch ?? 1,
     },
-    new AbortController().signal,
+    overrides.signal ?? new AbortController().signal,
     { fence: { jobId: claim.job_id, claimedBy: overrides.claimedBy ?? 'worker-test', claimEpoch: overrides.claimEpoch ?? 1 } },
   )
 }
@@ -190,6 +191,26 @@ describeWithDatabase('phase4 code graph build and activation', () => {
     )
   })
 
+  test('cancellation during asynchronous parsing cannot publish a new graph', async () => {
+    const pending = await ingestFixture(base.pool, base.installationId, 'abort-parse')
+    const controller = new AbortController()
+    let started!: () => void, release!: () => void
+    const parsing = new Promise<void>(resolve => { started = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const handled = runHandler(base.pool, { job_id: pending.jobId }, base.installationId, {
+      signal: controller.signal,
+      parse: async input => { started(); await gate; return parseCodeSnapshot(input) },
+    })
+    const rejected = expect(handled).rejects.toMatchObject({ name: 'AbortError' })
+    await parsing
+    // CPU work is outside the activation transaction; unrelated database work continues.
+    expect((await base.pool.query('SELECT 1 AS ready')).rows[0].ready).toBe(1)
+    controller.abort()
+    release()
+    await rejected
+    expect((await base.pool.query('SELECT 1 FROM memory_code_graph_versions WHERE snapshot_id=$1', [pending.snapshotId])).rowCount).toBe(0)
+  })
+
   test('re-running the same job is idempotent: no duplicate candidate, head unchanged', async () => {
     const before = await base.pool.query<{ revision: string }>(`
       SELECT revision::text FROM memory_code_graph_heads
@@ -205,6 +226,28 @@ describeWithDatabase('phase4 code graph build and activation', () => {
       WHERE installation_id = $1 AND repository_id = $2
     `, [base.installationId, base.repositoryId])
     expect(after.rows[0]!.revision).toBe(before.rows[0]!.revision)
+  })
+
+  test('bounded parser failure marks the snapshot failed without deleting its source', async () => {
+    const pending = await ingestFixture(base.pool, base.installationId, 'bounded-failure')
+    await expect(runHandler(base.pool, { job_id: pending.jobId }, base.installationId, {
+      parse: () => { throw new CodeGraphParseError('timeout') },
+    })).rejects.toMatchObject({ code: 'timeout' })
+    expect((await base.pool.query('SELECT state FROM memory_source_snapshots WHERE snapshot_id=$1', [pending.snapshotId])).rows[0].state).toBe('failed')
+    expect((await base.pool.query('SELECT count(*)::int AS n FROM memory_source_snapshot_entries WHERE snapshot_id=$1', [pending.snapshotId])).rows[0].n).toBeGreaterThan(0)
+    expect((await base.pool.query('SELECT 1 FROM memory_code_graph_versions WHERE snapshot_id=$1', [pending.snapshotId])).rowCount).toBe(0)
+    expect((await base.pool.query('SELECT revision::text FROM memory_code_graph_heads WHERE installation_id=$1 AND repository_id=$2', [base.installationId, base.repositoryId])).rows[0].revision).toBe('1')
+  })
+
+  test('a parser failure cannot change snapshot state after losing the job fence', async () => {
+    const pending = await ingestFixture(base.pool, base.installationId, 'bounded-lost-fence')
+    await expect(runHandler(base.pool, { job_id: pending.jobId }, base.installationId, {
+      parse: async () => {
+        await base.pool.query('UPDATE memory_jobs SET claim_epoch=claim_epoch+1 WHERE job_id=$1', [pending.jobId])
+        throw new CodeGraphParseError('timeout')
+      },
+    })).rejects.toMatchObject({ code: 'job_fence_lost' })
+    expect((await base.pool.query('SELECT state FROM memory_source_snapshots WHERE snapshot_id=$1', [pending.snapshotId])).rows[0].state).toBe('parsing')
   })
 
   test('a parser or validation failure retains the previous active graph', async () => {

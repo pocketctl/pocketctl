@@ -32,7 +32,7 @@ pocketctl memory sync-repo --repo /path/to/repo
 
 ## 获取范围与安装 UUID
 
-本次源码新增的 Web/CLI 获取入口尚未发布；旧版可继续使用 v0.5.13 的显式范围兼容命令。
+Web 获取入口已于 2026-11-01 部署。`memory scopes` 与个人 grant 解析修复尚未包含在 v0.5.13 CLI 发布包中，需使用新构建的 CLI；旧版可继续使用显式范围兼容命令。
 个人同步默认自动识别安装，无需先查询 UUID。选择共享范围或兼容旧版时可先运行：
 
 ```sh
@@ -105,6 +105,8 @@ pocketctl memory sync-repo --repo . --scope-installation-id <范围UUID>
 
 在「改动影响」输入仓库相对路径（每行一个），运行分析。分析有深度、节点和边数上限；`partial` 表示结果有覆盖限制，不是证明其他文件绝不受影响。源码同步、代码图谱与 Git Ops 文档同步是不同入口；Git Ops 创建项目不会自动运行主机的源码同步。
 
+本次源码将全量及增量符号解析移到独立线程，避免长时间的 TypeScript 计算阻塞 Worker 心跳、Feed 投影事务和读取锁。每个解析阶段最多运行 5 分钟，线程 V8 老生代上限为 768 MiB；这不是整个进程 RSS 的硬上限。停止 Worker 或失去任务后会取消线程，解析失败仍保留原有活动图谱，发布前继续校验当前任务与来源权限。该修复需部署配套 Worker，不包含在原 v0.5.13 发布包中。
+
 ## 常见问题
 
 | 提示 | 处理 |
@@ -116,5 +118,6 @@ pocketctl memory sync-repo --repo . --scope-installation-id <范围UUID>
 | `empty_grant`（v0.5.13 CLI 的个人同步） | 该版 CLI 错把 Relay 返回的 `grant` 读取为 `token`。源码已修复，使用修复版 CLI；旧版可显式指定个人范围的 `--scope-installation-id <installation UUID>` 走 v2 授权，不更换目标范围 |
 | 503 | 管理员检查 Code Graph 和共享范围服务端开关，不是重启主机 daemon |
 | `ready` 长时间不变 | 检查 Memory Worker 版本、运行状态、队列与代码图谱开关 |
+| `handler_failed_CodeGraphParseTimeoutError` / `handler_failed_CodeGraphParseMemoryLimitError` | 解析达到时长或堆内存限制；用 `--include` 或已提交 ignore 缩小范围后重新同步，不增加模块授权或自动替换旧图谱 |
 | 404 / 无已发布图谱 | 选择同一范围，完成同步后等待解析并刷新；不要把快照 ID 当仓库 ID |
 | `manifest_mismatch` / `integrity_mismatch` | 清单、内容或重试输入不一致；修复原因后重试，不跳过校验 |
