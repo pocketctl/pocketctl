@@ -107,7 +107,7 @@ const memoryClient = vi.hoisted(() => ({
   setMemoryWikiSectionLock: vi.fn(async () => null),
 }))
 
-vi.mock('../../services/memoryClient', () => memoryClient)
+vi.mock('../../services/memoryClient', async original => ({...await original<typeof import('../../services/memoryClient')>(),...memoryClient}))
 
 const MemoryView = (await import('../MemoryView.vue')).default
 
@@ -344,7 +344,7 @@ describe('MemoryView', () => {
     view.unmount()
   })
 
-  test('claims header keeps the design create action visible but disabled without an API', async () => {
+  test('claims header exposes manual creation without changing the knowledge layout', async () => {
     memoryInstallation.value = activeInstallation()
     const view = mountView()
     await flushPromises()
@@ -353,10 +353,20 @@ describe('MemoryView', () => {
     await flushPromises()
 
     const create = view.get('[data-testid="memory-claim-create"]')
-    expect(create.attributes('disabled')).toBeDefined()
+    expect(create.attributes('disabled')).toBeUndefined()
     expect(create.text()).toContain('新建知识')
     expect(view.get('[data-testid="memory-workspace-description"]').text()).toContain('版本、来源与变更记录')
     expect(view.get('[data-testid="memory-module-stage"]').get('[role="tabpanel"]').attributes('aria-label')).toBe('知识库')
+    await create.trigger('click')
+    await flushPromises()
+    const dialog=view.findComponent({name:'MemoryManualClaimDialog'})
+    expect(dialog.exists()).toBe(true)
+    dialog.vm.$emit('created','manual-created')
+    await flushPromises()
+    expect(view.findComponent({name:'MemoryManualClaimDialog'}).exists()).toBe(false)
+    expect(memoryClient.getMemoryClaim).toHaveBeenCalledWith('manual-created')
+    expect(memoryClient.listMemoryClaims.mock.calls.length).toBeGreaterThan(1)
+    view.unmount()
   })
 
   test('knowledge tab loads active claims after a fresh view without search or acceptance', async () => {
@@ -536,8 +546,17 @@ describe('MemoryView', () => {
 
     await view.get('[data-testid="memory-claim-propose"]').trigger('click')
     await flushPromises()
-    const targets = view.get('.memory-promotion-target').findAll('option').map(option => option.attributes('value'))
+    const targets = [...document.querySelectorAll('.memory-promotion-target option')].map(option=>option.getAttribute('value'))
     expect(targets).toEqual(['', organizationId])
+    const dialog=view.findComponent({name:'MemoryPromotionDialog'})
+    memoryClient.proposeGovernanceClaim.mockRejectedValueOnce(Error('proposal connection lost'))
+    dialog.vm.$emit('confirm',{targetInstallationId:organizationId,evidenceIds:['evidence-1']});await flushPromises()
+    expect(dialog.props('error')).toBe('proposal connection lost')
+    const first=memoryClient.proposeGovernanceClaim.mock.calls.at(-1)
+    dialog.vm.$emit('confirm',{targetInstallationId:organizationId,evidenceIds:['evidence-1']});await flushPromises()
+    expect(memoryClient.proposeGovernanceClaim.mock.calls.at(-1)).toEqual(first)
+    view.unmount()
+
   })
 
   test('candidate review renders exact scope and resolved evidence excerpts', async () => {

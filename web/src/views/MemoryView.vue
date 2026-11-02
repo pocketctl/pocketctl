@@ -54,7 +54,7 @@
             </div>
           </header>
           <div v-if="active === 'claims'" class="memory-knowledge-heading"><h3>{{ t('memory.knowledge_versions') }}</h3>
-            <button type="button" class="memory-button" data-testid="memory-claim-create" :title="t('memory.new_claim_unavailable')" disabled>+ {{ t('memory.new_claim') }}</button>
+            <button type="button" class="memory-button" data-testid="memory-claim-create" @click="manualClaimOpen = true">+ {{ t('memory.new_claim') }}</button>
           </div>
 
       <div class="memory-module-stage" data-testid="memory-module-stage">
@@ -96,7 +96,7 @@
               @changed="refreshReview" @count="reviewCount = $event"/>
             </section>
           </template>
-          <ClaimDetailPanel v-if="active === 'claims'" :claim-id="claimId"
+          <ClaimDetailPanel :key="`${installation.installation_id}:${manualClaimRevision}`" v-if="active === 'claims'" :claim-id="claimId"
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
             @propose="openPromotion"/>
           <MemoryWikiPanel v-if="active === 'wiki'" v-model:repository-id="phase4RepositoryId"
@@ -148,8 +148,9 @@
       </div>
     </section>
   </div>
+  <MemoryManualClaimDialog v-if="manualClaimOpen && installation" :installation-id="installation.installation_id" @close="manualClaimOpen = false" @created="manualClaimCreated" />
   <MemoryPromotionDialog :claim="promotionClaim" :evidence="promotionEvidence"
-    :targets="promotionTargets" @confirm="confirmPromotion" @cancel="closePromotion" />
+    :targets="promotionTargets" :busy="promotionBusy" :error="promotionError" :uncertain="promotionUncertain" @confirm="confirmPromotion" @cancel="closePromotion" />
   <div v-if="pendingLifecycleState && selectedGovernanceScope" class="memory-modal-backdrop"
     @click.self="pendingLifecycleState = null">
     <section class="memory-modal" role="alertdialog" aria-modal="true"
@@ -172,6 +173,7 @@
 
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
+import MemoryManualClaimDialog from '../components/memory/MemoryManualClaimDialog.vue'
 import ActionSelect from '../components/ActionSelect.vue'
 import WorkspaceIcon from '../components/WorkspaceIcon.vue'
 import MemoryContextSettings from '../components/memory/MemoryContextSettings.vue'
@@ -181,11 +183,11 @@ import MemoryPersonaPanel from '../components/memory/MemoryPersonaPanel.vue'
 import MemoryPolicyEditor from '../components/memory/MemoryPolicyEditor.vue'
 import MemoryLoadoutEditor from '../components/memory/MemoryLoadoutEditor.vue'
 
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import {
-  currentMemoryInstallation, decideGovernanceCandidate, discoverMemoryInstallation,
+  MemoryClientError, currentMemoryInstallation, decideGovernanceCandidate, discoverMemoryInstallation,
   listPublicationExecutors,delegatePublication,revokePublicationDelegation,reviseGovernanceCandidate,bulkDecideGovernance,getAutomationReviewPolicy,saveAutomationReviewPolicy,enableMemoryServices, getReviewPolicy, listGovernanceQueue, listGovernanceScopes,
   listScopeMembers, publishGovernanceCandidate, saveReviewPolicy, updateScopeMember,
   proposeGovernanceClaim, startScopeTransfer, updateScopeLifecycle,
@@ -251,6 +253,9 @@ async function enableGraphUpload():Promise<void> {
  catch(error){graphUploadError.value=error instanceof Error ? error.message : t('memory.phase4.request_failed')}
  finally{graphUploadBusy.value=false}
 }
+const manualClaimOpen=ref(false),manualClaimRevision=ref(0)
+watch(()=>installation.value?.installation_id,()=>{manualClaimOpen.value=false;closePromotion()})
+function manualClaimCreated(id:string){manualClaimOpen.value=false;claimSourceInstallationId.value=null;claimId.value=id;manualClaimRevision.value++;active.value='claims'}
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
 const reviewCount = ref<number | null>(null)
@@ -273,6 +278,9 @@ const governanceMembers = ref<MemoryScopeMember[]>([])
 const governanceMembersLoading = ref(false)
 const reviewPolicyDocument = ref<MemoryReviewPolicyDocument | null>(null)
 const reviewPolicyRevision = ref(0)
+const promotionBusy=ref(false),promotionUncertain=ref(false),promotionError=ref('')
+onUnmounted(()=>{promotionEpoch++})
+let promotionEpoch=0,promotionRequest:{canonical:string;key:string}|undefined
 const promotionClaim = ref<MemoryClaimDetail | null>(null)
 const promotionEvidence = ref<MemoryEvidence[]>([])
 const promotionSourceInstallationId = ref<string | null>(null)
@@ -557,6 +565,7 @@ function openPromotion(
   evidence: MemoryEvidence[],
   sourceInstallationId: string | null,
 ): void {
+  promotionEpoch++;promotionBusy.value=false;promotionUncertain.value=false;promotionError.value='';promotionRequest=undefined
   promotionClaim.value = claim
   promotionEvidence.value = evidence
   promotionSourceInstallationId.value = sourceInstallationId
@@ -565,6 +574,7 @@ function openPromotion(
 }
 
 function closePromotion(): void {
+  promotionEpoch++;promotionBusy.value=false;promotionUncertain.value=false;promotionError.value='';promotionRequest=undefined
   promotionClaim.value = null
   promotionEvidence.value = []
   promotionSourceInstallationId.value = null
@@ -574,26 +584,34 @@ async function confirmPromotion(input: {
   targetInstallationId: string
   evidenceIds: string[]
 }): Promise<void> {
-  if (!promotionClaim.value || !promotionSourceInstallationId.value) return
+  if (!promotionClaim.value || !promotionSourceInstallationId.value || promotionBusy.value) return
   const target = governanceScopes.value.find(scope =>
     scope.installation_id === input.targetInstallationId)
-  if (!target) return
+  if (!target || !promotionTargets.value.some(t=>t.installation_id===target.installation_id)) return
+  const epoch=promotionEpoch,claim=promotionClaim.value,sourceId=promotionSourceInstallationId.value
+  const evidenceIds=[...new Set(input.evidenceIds)].sort()
+  const canonical=JSON.stringify([target.installation_id,target.authorization_epoch,sourceId,claim.claim.claim_id,claim.claim.current_version_id,evidenceIds])
+  if(promotionUncertain.value&&promotionRequest?.canonical!==canonical)return
+  if(promotionRequest?.canonical!==canonical)promotionRequest={canonical,key:`web-propose-${crypto.randomUUID()}`}
+  promotionBusy.value=true;promotionError.value=''
   try {
     await proposeGovernanceClaim({
-      installationIds: [target.installation_id, promotionSourceInstallationId.value],
+      installationIds: [target.installation_id, sourceId],
       targetInstallationId: target.installation_id,
       expectedRevision: Number(target.authorization_epoch),
-      sourceInstallationId: promotionSourceInstallationId.value,
-      sourceClaimId: promotionClaim.value.claim.claim_id,
-      evidenceIds: input.evidenceIds,
+      sourceInstallationId: sourceId,
+      sourceClaimId: claim.claim.claim_id,
+      idempotencyKey: promotionRequest!.key,
+      evidenceIds,
     })
+    if(epoch!==promotionEpoch)return
     closePromotion()
     governanceTarget.value = target.installation_id
     active.value = 'review'
     await loadGovernanceWorkspace()
   } catch (err) {
-    governanceError.value = err instanceof Error ? err.message : 'proposal failed'
-  }
+    if(epoch===promotionEpoch){promotionError.value=err instanceof Error?err.message:t('memory.claim_operation_failed');promotionUncertain.value=!(err instanceof MemoryClientError)||err.status===0||err.status>=500}
+  }finally{if(epoch===promotionEpoch)promotionBusy.value=false}
 }
 
 async function confirmLifecycle(): Promise<void> {

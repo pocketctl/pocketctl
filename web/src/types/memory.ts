@@ -173,7 +173,7 @@ export interface MemoryClaimList {
 export interface MemoryEvidenceRow {
   evidence_id: string
   evidence_kind: string
-  episode_id: string
+  episode_id: string | null
   excerpt: string
   truncated: boolean
   occurred_at: string

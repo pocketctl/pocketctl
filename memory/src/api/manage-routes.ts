@@ -1,6 +1,9 @@
+import {writeManualEntry} from '../claims/manual-entry.js'
+import {ClaimIdentityWriteError} from '../claims/identity-writer.js'
+import {ManualClaimRequestSchema,ManualClaimRevisionSchema} from './schemas.js'
 import {z} from 'zod'
 import {listExtractionIssues,scheduleExtractionRetry} from '../extraction/recovery.js'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import type pg from 'pg'
 import type { GrantGuard } from '../auth/grant-guard.js'
 import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
@@ -67,7 +70,7 @@ export interface ModelDisclosure {
   }
 }
 
-interface ManageGrant { installationId: string; configVersion?: string; expiresAt?: number }
+interface ManageGrant { callerType?: string; installationId: string; configVersion?: string; expiresAt?: number }
 
 class SourceDiscoveryChangedError extends Error {}
 
@@ -354,6 +357,11 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
             "SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))",[grant.installationId,session])
           await requireCurrentInstallationAuthority(client,grant)
         }
+        if(operation==='create_manual_claim'||operation==='revise_manual_claim'){
+          if(grant.callerType!=='web')throw new TargetBindingError('explicit web user required')
+          const personal=await client.query(`SELECT 1 FROM memory_owner_scopes WHERE installation_id=$1 AND owner_scope_kind='personal' AND state='active' FOR SHARE`,[grant.installationId])
+          if(!personal.rowCount)throw new TargetBindingError('personal scope required')
+        }
       },
       beforeCommit: client => assertCurrentGrantClock(client, grant),
       installationId: grant.installationId,
@@ -442,6 +450,23 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     }
     return outcome.metadata
   }
+
+  async function manualMutation(request: FastifyRequest, reply: FastifyReply, revision: boolean) {
+    const parsed=(revision?ManualClaimRevisionSchema:ManualClaimRequestSchema).safeParse(request.body)
+    if(!parsed.success){reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid manual entry')));return}
+    const claimId=(request.params as {id?:string})?.id
+    if(revision&&!resourceId(claimId??'',reply))return
+    return mutation(request,reply,revision?'revise_manual_claim':'create_manual_claim',async(grant,_pool,client)=>{
+      if(grant.callerType!=='web')throw new TargetBindingError('explicit web user required')
+      const body=parsed.data
+      try{return await writeManualEntry(client,{installationId:grant.installationId,statement:body.statement,
+        claimType:'claim_type' in body?body.claim_type:'work_method',repositoryId:'repository_id' in body?body.repository_id??null:null,
+        ...(revision?{claimId:claimId!,expectedRevision:('expected_revision' in body?body.expected_revision:undefined)}:{})},deps.tombstoneHmacKeys)}
+      catch(error){if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}};throw error}
+    })
+  }
+  app.post('/api/v1/memory/claims',{bodyLimit:24*1024},async(request,reply)=>manualMutation(request,reply,false))
+  app.post('/api/v1/memory/claims/:id/manual-revisions',{bodyLimit:24*1024},async(request,reply)=>manualMutation(request,reply,true))
 
   app.get('/api/v1/memory/extraction-issues', async (request, reply) => {
     const grant=await guardManage(request,reply)
@@ -535,14 +560,15 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       return
     }
     const result = await mutation(request, reply, 'correct_claim', async (grant, transactionPool) => {
-      const transactionClaims = createClaimRepository(transactionPool)
+      const transactionClaims = createClaimRepository(transactionPool, {tombstoneHmacKeys:deps.tombstoneHmacKeys})
       const transactionLifecycle = createLifecycleService(transactionPool, transactionClaims)
       const corrected = await transactionLifecycle.correctClaim({
         installationId: grant.installationId,
         claimId: id,
         expectedRevision: parsed.data.expected_revision,
         statement: parsed.data.statement,
-        evidence: parsed.data.evidence.map(item => ({
+        inheritCurrentEvidence: 'inherit_current_evidence' in parsed.data,
+        evidence: ('evidence' in parsed.data ? parsed.data.evidence : []).map(item => ({
           evidenceKind: item.evidence_kind,
           episodeId: item.episode_id ?? null,
           sourceEventId: item.evidence_kind === 'event' ? item.source_event_id : null,
@@ -732,6 +758,7 @@ function isManageRequest(method: string, rawUrl: string): boolean {
   const path = rawUrl.split('?')[0]
   if (method === 'GET' && (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/settings')) return true
   if (method === 'GET' && /^\/api\/v1\/memory\/delivery-sources\/[^/]+\/decisions\/[^/]+$/.test(path)) return true
+  if (method === 'POST' && (path === '/api/v1/memory/claims' || /^\/api\/v1\/memory\/claims\/[^/]+\/manual-revisions$/.test(path))) return true
   if (method === 'GET' && path === '/api/v1/memory/extraction-issues') return true
   if (method === 'POST' && /^\/api\/v1\/memory\/extraction-issues\/[^/]+\/retry$/.test(path)) return true
   if (method === 'POST' && path === '/api/v1/memory/feedback') return true

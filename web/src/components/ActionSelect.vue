@@ -4,7 +4,7 @@
     <button ref="trigger" type="button" class="action-select-trigger" :disabled="disabled" :aria-label="accessibleLabel" aria-haspopup="listbox" :aria-expanded="open" :aria-controls="menuId" @click="toggle" @keydown="onTriggerKey">
       <span>{{ selectedLabel }}</span><WorkspaceIcon name="down" />
     </button>
-    <Teleport to="body">
+    <Teleport :to="teleportTo">
       <section v-if="open" :id="menuId" ref="menu" class="action-select-content" role="listbox" :aria-label="accessibleLabel" :style="position" @keydown="onMenuKey">
         <template v-for="(item, index) in items" :key="index">
           <div v-if="item.group && (index === 0 || items[index - 1]?.group !== item.group)" class="action-select-group">{{ item.group }}</div>
@@ -22,6 +22,7 @@ import '../assets/action-select.css'
 import WorkspaceIcon from './WorkspaceIcon.vue'
 // Keep the original select and its Vue v-model handler as the source of truth.
 // This preserves numbers, undefined values, object options and all existing change handlers.
+const {teleportTo='body'}=defineProps<{teleportTo?:string|HTMLElement}>()
 const root = ref<HTMLElement>(), trigger = ref<HTMLButtonElement>(), menu = ref<HTMLElement>()
 const menuId = `action-select-${useId()}`
 const open = ref(false), disabled = ref(false), hasSelect = ref(false), label = ref(''), focused = ref(0)
