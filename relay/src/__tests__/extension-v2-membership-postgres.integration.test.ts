@@ -404,6 +404,11 @@ describeWithDatabase('extension v2 scope membership routes (PostgreSQL)', () => 
     const personal = scopes.find(scope => scope.owner_scope_kind === 'personal')
     const shared = scopes.find(scope => scope.owner_scope_kind === 'organization')
     expect(personal?.owner_scope_id).toBe(ORG_ID)
+    // The graph/Wiki scope selector filters by read permission even when a
+    // shared scope exists. Discovery must expose the owner's grant permissions.
+    expect(personal?.permissions).toEqual([
+      'read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin',
+    ])
     expect(shared?.permissions).toContain('scope_admin')
     expect(MEMBERSHIP_PATTERN.test(String(shared?.membership_id))).toBe(true)
   })

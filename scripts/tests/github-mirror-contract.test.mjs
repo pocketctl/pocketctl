@@ -163,4 +163,13 @@ assert.ok(
   'stale Homebrew formula must not be published',
 )
 
+// The private source owns the exporter; the public mirror only needs its copy helper.
+const syncPath = path.join(repoRoot, 'scripts', 'sync-github.sh')
+if (fs.existsSync(syncPath)) {
+const syncScript = fs.readFileSync(syncPath, 'utf8')
+assert.match(syncScript, /bash "\$SCRIPT_DIR\/lib\/github-mirror-copy\.sh"/, 'mirror must export committed files through the safe copier')
+assert.doesNotMatch(syncScript, /cp -a "\$\{REPO_ROOT\}\/\$\{entry\}"/, 'mirror must not copy working-tree directories')
+}
+assert.ok(mirrored.has('scripts/lib/github-mirror-copy.sh'))
+assert.ok(mirrored.has('scripts/tests/github-mirror-copy.test.mjs'))
 console.log('github mirror contract tests passed')
