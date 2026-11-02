@@ -686,7 +686,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
       END IF;
     END $$
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_token_session_daily_stats_owner_session_date ON token_session_daily_stats(user_id, session_id, date)`);
+  // The primary key above provides the same owner/session/date access path.
 
   // Singleton migration markers make one-time baseline conversions safe across
   // process restarts and multi-instance Relay startup.

@@ -526,6 +526,7 @@ async function main(): Promise<void> {
           signal,
           fence: ctx?.fence,
           expectedSourceDigest:typeof job.payload.expected_source_digest==='string'?job.payload.expected_source_digest:undefined,
+          userRetry: typeof job.payload.retry_extraction_run_id==='string' ? {runId:job.payload.retry_extraction_run_id,jobId:job.job_id} : undefined,
           retryFailedRunId: typeof job.payload.retry_failed_run_id === 'string' ? job.payload.retry_failed_run_id : undefined,
         })
         const result = outcome.kind === 'succeeded'

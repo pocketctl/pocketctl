@@ -62,7 +62,7 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
         AND indexname IN (
           'idx_event_inbox_dedup',
           'idx_event_inbox_pending_claim',
-          'idx_event_inbox_receipt_daemon_seq',
+          'event_inbox_receipt_daemon_id_daemon_generation_seq_key',
           'idx_event_inbox_completed_cleanup',
           'idx_event_inbox_stream_unresolved',
           'idx_realtime_outbox_undelivered'
@@ -70,10 +70,10 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
       ORDER BY indexname
     `)
     expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      'event_inbox_receipt_daemon_id_daemon_generation_seq_key',
       'idx_event_inbox_completed_cleanup',
       'idx_event_inbox_dedup',
       'idx_event_inbox_pending_claim',
-      'idx_event_inbox_receipt_daemon_seq',
       'idx_event_inbox_stream_unresolved',
       'idx_realtime_outbox_undelivered',
     ])
@@ -476,8 +476,9 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
 
     const user = await pool.query<{ id: number }>(
       `INSERT INTO users (id, email, password_hash)
-       SELECT COALESCE(MAX(id), 0) + 1, 'durable-schema-cascade@example.test', 'hash'
-       FROM users
+       SELECT GREATEST(COALESCE((SELECT MAX(id) FROM users),0),
+                       COALESCE((SELECT MAX(actor_user_id) FROM team_actor_identities),0))+1,
+              'durable-schema-cascade@example.test', 'hash'
        RETURNING id`,
     )
     const materialized = await pool.query<{ id: string }>(
@@ -550,8 +551,9 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
 
     const outboxUser = await pool.query<{ id: number }>(
       `INSERT INTO users (id, email, password_hash)
-       SELECT COALESCE(MAX(id), 0) + 1, 'durable-schema-outbox-user@example.test', 'hash'
-       FROM users
+       SELECT GREATEST(COALESCE((SELECT MAX(id) FROM users),0),
+                       COALESCE((SELECT MAX(actor_user_id) FROM team_actor_identities),0))+1,
+              'durable-schema-outbox-user@example.test', 'hash'
        RETURNING id`,
     )
     const directDeleteEvent = await pool.query<{ id: string }>(

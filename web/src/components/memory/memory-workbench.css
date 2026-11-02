@@ -1298,13 +1298,15 @@
 
 /* Latest team-collaboration.html Memory layout, shared by the real modules. */
 .memory-layout-v2.memory-workbench { width:100%; max-width:1560px; min-height:100dvh; padding:0 32px 36px; font-size:14px; line-height:1.5; }
-.memory-layout-v2 .memory-page-head { display:flex; justify-content:space-between; align-items:center; gap:20px; min-height:98px; margin:0; border-bottom:1px solid var(--border); }
 .memory-page-brand { display:flex; align-items:center; gap:12px; }
 .memory-layout-v2 .memory-page-copy h1 { font-size:20px; font-weight:650; letter-spacing:-.025em; margin:0 0 5px; line-height:1.5; }
 .memory-layout-v2 .memory-subtitle { margin:0; font-size:11px; color:var(--fg-secondary); }
 .memory-brand-mark { display:grid; place-items:center; width:36px; height:36px; margin-right:3px; border:1px solid var(--border-light); border-radius:10px; color:var(--accent); background:var(--accent-subtle); }
 .memory-brand-mark svg { width:23px; height:23px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
 .memory-page-status { display:flex; align-items:center; gap:7px; font-size:10px; color:var(--fg-tertiary); }
+.memory-page-status-row { display:flex; flex:none; min-width:0; align-items:center; gap:6px; }
+.memory-page-status-row .memory-page-status { flex-shrink:0; white-space:nowrap; }
+
 .memory-layout-v2 .memory-workspace-shell { display:grid; grid-template-columns:164px minmax(0,1fr); gap:30px; align-items:start; min-height:0; overflow:visible; border:0; border-radius:0; background:none; box-shadow:none; }
 .memory-layout-v2 .memory-module-navigation { position:sticky; top:0; display:block; min-width:0; padding:26px 18px 24px 0; border-right:1px solid var(--border); max-height:100dvh; overflow:auto; scrollbar-width:thin; background:none; }
 .memory-rail-title { font-size:10px; color:var(--fg-tertiary); padding:0 10px 10px; margin:0; letter-spacing:.08em; }
@@ -1318,7 +1320,12 @@
 .memory-layout-v2 .memory-tab-badge { margin-left:auto; min-width:17px; border-radius:4px; padding:2px 4px; font-size:10px; }
 .memory-rail-foot { display:flex; align-items:center; gap:7px; margin:26px 10px 0; font-size:10px; color:var(--fg-tertiary); }
 .memory-layout-v2 .memory-workspace-main { min-width:0; padding:20px 0 0; background:none; }
-.memory-module-header { margin-bottom:16px; }
+.memory-module-header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:26px; }
+.memory-module-heading { min-width:0; }
+.memory-layout-v2.memory-page .memory-module-heading h2 { margin:0; font-size:18px; font-weight:650; line-height:1.5; }
+.memory-layout-v2.memory-page .memory-module-heading p { margin-top:8px; }
+.memory-layout-v2.memory-page .memory-page-status { font-size:12px; }
+.memory-module-header .memory-page-status { display:flex; min-height:32px; }
 .memory-module-header p { font-size:12px; line-height:1.7; color:var(--fg-secondary); margin:0; }
 .memory-layout-v2 .memory-module-stage { padding:0; min-height:440px; border:0; border-radius:0; background:none; box-shadow:none; container-type:inline-size; }
 .memory-layout-v2 .memory-module-body { min-height:0; }
@@ -1406,11 +1413,11 @@
 }
 @media(max-width:768px) {
   .memory-layout-v2.memory-workbench { padding:0 18px 28px; }
-  .memory-layout-v2 .memory-page-head { display:none; }
+
   .memory-layout-v2 .memory-page-copy h1 { font-size:18px; }
   .memory-layout-v2 .memory-subtitle,.memory-brand-mark,.memory-page-status { display:none; }
   .memory-layout-v2 .memory-workspace-main { padding-top:20px; }
-  .memory-module-header { margin-bottom:12px; }
+  .memory-module-header { flex-wrap:wrap; gap:10px; margin-bottom:12px; }
   .memory-module-picker { margin-bottom:12px; }
   .memory-layout-v2 .memory-module-picker select { flex:1; min-width:0; min-height:40px; }
   .memory-layout-v2 .memory-module-stage { min-height:360px; }

@@ -438,3 +438,32 @@ test('late personal grants cannot repopulate authorization or call the provider 
   await expect(request).rejects.toMatchObject({ code: 'identity_changed' })
   expect(fetcher).toHaveBeenCalledTimes(2)
 })
+
+test('extraction retry requires the matching personal installation and reuses the same request key',async()=>{
+ const {listMemoryExtractionIssues,retryMemoryExtraction}=await import('../memoryClient')
+ const {calls,fetchImpl}=relayAndProviderFetch({providerHandler:()=>Response.json({job_id:'job',state:'pending'})})
+ vi.stubGlobal('fetch',fetchImpl)
+ await discoverMemoryInstallation()
+ await expect(listMemoryExtractionIssues('different')).rejects.toMatchObject({code:'identity_changed'})
+ expect(calls.filter(c=>c.origin==='https://memory.example')).toHaveLength(0)
+ await retryMemoryExtraction('inst-1','run-1');await retryMemoryExtraction('inst-1','run-1')
+ const retries=calls.filter(c=>c.path.endsWith('/retry'))
+ expect(retries).toHaveLength(2)
+ expect(retries[0]!.init.headers).toEqual(expect.objectContaining({'Idempotency-Key':'extraction-retry:run-1'}))
+ expect(retries[1]!.init.headers).toEqual(retries[0]!.init.headers)
+ expect(retries[0]!.init.body).toBe('{}')
+})
+
+test('extraction issue deadline covers installation discovery and prevents a late retry dispatch',async()=>{
+ vi.useFakeTimers()
+ try{
+  const {retryMemoryExtraction}=await import('../memoryClient')
+  let finish!:(response:Response)=>void
+  const fetcher=vi.fn(()=>new Promise<Response>(resolve=>{finish=resolve}))
+  vi.stubGlobal('fetch',fetcher)
+  const pending=expect(retryMemoryExtraction('inst-1','run-1')).rejects.toMatchObject({code:'request_unknown'})
+  await vi.advanceTimersByTimeAsync(10000);await pending
+  finish(Response.json({installations:[INSTALLATION]}));await Promise.resolve();await Promise.resolve()
+  expect(fetcher).toHaveBeenCalledTimes(1)
+ }finally{vi.useRealTimers()}
+})

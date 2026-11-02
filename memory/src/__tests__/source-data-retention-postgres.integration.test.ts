@@ -78,6 +78,16 @@ suite('source-chain body reclamation (PostgreSQL)',()=>{
   expect((await reclaimSourceTurn(pool,key(),settings)).skipped).not.toBeNull()
   expect((await read('work_episodes')).document).toEqual({text:'episode body'})
  })
+ test('recovered failure history does not retain source bodies forever; running and later failures remain protected',async()=>{
+  await pool.query(`UPDATE memory_extraction_runs SET started_at=NOW()-INTERVAL '19 days' WHERE run_id=$1`,[runId])
+  const failure=(await pool.query(`INSERT INTO memory_extraction_runs(run_id,installation_id,episode_id,episode_source_digest,extractor_version,prompt_version,model_config_hash,input_digest,mode,state,provider,model,error_code,started_at,completed_at)
+    VALUES(gen_random_uuid(),$1,$2,'x'::bytea,'old','old','x'::bytea,'x'::bytea,'enabled','quarantined','test','test','invalid_output',NOW()-INTERVAL '20 days',NOW()-INTERVAL '20 days') RETURNING run_id`,[installationId,episodeId])).rows[0].run_id
+  expect((await previewSourceRetention(pool)).eligible).toHaveLength(1)
+  await pool.query(`UPDATE memory_extraction_runs SET state='running' WHERE run_id=$1`,[failure])
+  expect((await previewSourceRetention(pool)).eligible).toHaveLength(0)
+  await pool.query(`UPDATE memory_extraction_runs SET state='quarantined',started_at=NOW()-INTERVAL '18 days' WHERE run_id=$1`,[failure])
+  expect((await previewSourceRetention(pool)).eligible).toHaveLength(0)
+ })
  test('zero-candidate success is eligible, session-level observations are retained',async()=>{
   await pool.query('DELETE FROM memory_candidates');await event('3',null)
   expect((await reclaimSourceTurn(pool,key(),{...settings,batchSize:10})).finished).toBe(true)

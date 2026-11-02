@@ -38,6 +38,8 @@ scripts/package-release-candidate.sh
 scripts/verify-release-candidate.sh
 scripts/github-mirror-files.txt
 scripts/lib/github-sync-retry.sh
+scripts/lib/github-mirror-copy.sh
+scripts/tests/github-mirror-copy.test.mjs
 scripts/lib/release-contract.sh
 scripts/tests/github-mirror-contract.test.mjs
 scripts/tests/nginx-online-bootstrap.test.sh

@@ -93,6 +93,13 @@ suite('runtime recovery and sustained failure health',()=>{
   await pool.query(`UPDATE work_episodes SET source_digest='y'::bytea WHERE installation_id=$1`,[id])
   await expect(recoverRuntime(pool,{installationId:id,failedRunIds:[run],apply:true})).rejects.toThrow('not_current')
  })
+ test('a newer running attempt must not hide an unresolved older failure',async()=>{
+  await seedFailure()
+  await pool.query(`INSERT INTO memory_extraction_runs(run_id,installation_id,episode_id,episode_source_digest,extractor_version,prompt_version,model_config_hash,input_digest,mode,state,provider,model) VALUES(gen_random_uuid(),$1,$2,'x'::bytea,'v2','v2','x'::bytea,'x'::bytea,'enabled','running','test','test')`,[id,ep])
+  expect(evaluateBusinessHealth(await health()).reasons).toContain('extraction_failed')
+  await pool.query(`UPDATE memory_extraction_runs SET state='succeeded',completed_at=NOW() WHERE installation_id=$1 AND extractor_version='v2'`,[id])
+  expect(evaluateBusinessHealth(await health()).reasons).not.toContain('extraction_failed')
+ })
  test('sustained current failure alerts independently of queue state and healthy work; recovery clears alert',async()=>{
   await seedFailure()
   let row=await health()

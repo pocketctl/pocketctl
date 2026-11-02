@@ -82,13 +82,14 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
       fence?: JobFence
       expectedSourceDigest?: string
       /** Exact failed run authorized by the bounded operator recovery workflow. */
+      userRetry?: {runId:string;jobId:string}
       retryFailedRunId?: string
     }): Promise<ExtractionOutcome> {
       const episode = await deps.store.loadEpisodeForExtraction(input.installationId, input.turnId)
       if (!episode) return { kind: 'episode_missing' }
       if(input.expectedSourceDigest&&episode.sourceDigest.toString('hex')!==input.expectedSourceDigest)return {kind:'episode_missing'}
       if (episode.extractionMode === 'off') return { kind: 'skipped_mode_off' }
-      if (deps.extractionNotBefore
+      if (!input.userRetry && deps.extractionNotBefore
         && episode.sessionFirstRecordedAt.getTime() < deps.extractionNotBefore.getTime()
         && !episode.hasPriorRunOnOldDigest) {
         return { kind: 'skipped_before_cutoff' }
@@ -121,6 +122,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         fence: input.fence,
         expectedConsentFingerprint:deps.expectedConsentFingerprint,
         retryFailedRunId: input.retryFailedRunId,
+        userRetry: input.userRetry,
       })
       if(reserved.sourceWaiting)return {kind:'deferred_source'}
       if(reserved.sourceUnavailable)return {kind:'episode_missing'}

@@ -251,8 +251,7 @@ export async function initTeamSchema(db: Pick<pg.Pool, 'query'>): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS uq_collaboration_member_event_request
       ON collaboration_events(team_session_id, author_user_id, request_id)
       WHERE author_user_id IS NOT NULL AND request_id IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_collaboration_events_replay
-      ON collaboration_events(team_session_id, event_seq);
+    -- UNIQUE(team_session_id,event_seq) also serves ordered replay reads.
 
     CREATE TABLE IF NOT EXISTS collaboration_runs (
       run_id TEXT PRIMARY KEY,

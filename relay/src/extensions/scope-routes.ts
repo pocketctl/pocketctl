@@ -30,6 +30,7 @@ import {
   type OwnerScopeKind,
   type ScopeRole,
   type SharedScopeKind,
+  PERSONAL_OWNER_PERMISSIONS,
   isSharedScopeKind,
   isSharedScopeState,
   normalizeScopeRoles,
@@ -288,7 +289,7 @@ export function createExtensionScopeRouteService(pool: pg.Pool): ExtensionScopeR
           membership_id: null,
           membership_revision: null,
           roles: [],
-          permissions: [],
+          permissions: [...PERSONAL_OWNER_PERMISSIONS],
         })
       }
       // Shared scopes through active memberships.

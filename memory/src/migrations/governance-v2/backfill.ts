@@ -26,13 +26,14 @@ export async function migrationTransaction<T>(pool:pg.Pool,fn:(c:pg.PoolClient)=
  finally{if(!failed)c.removeListener?.('error',onError);c.release(failed)}
 }
 export interface MigrationBaseline {installationIds:string[];rows:Record<string,Record<string,string>>;owners:Record<string,Record<string,string[]>>;startWatermark:string;createdAt:string}
-export async function migrationRows(c:Pick<pg.PoolClient,'query'>,table:string,installationIds:string[],after='',limit=200){
+export async function migrationRows(c:Pick<pg.PoolClient,'query'>,table:string,installationIds:string[],after='',limit=200,identitiesOnly=false){
  if(!BACKFILL_FAMILIES.includes(table))throw new Error('unknown_migration_family')
  const attributes=(await c.query(`SELECT a.attname,a.atttypid='uuid'::regtype AS uuid_key FROM pg_index i JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) WHERE i.indrelid=$1::regclass AND i.indisprimary ORDER BY a.attnum`,[table])).rows
  const pk=attributes.map(r=>r.attname as string)
  if(!pk.length)throw new Error('migration_primary_key_required')
  const ident=(name:string)=>'"'+name.replace(/"/g,'""')+'"'
  const key=`jsonb_build_array(${pk.map(k=>`t.${ident(k)}::text`).join(',')})::text`
+ const body=identitiesOnly?'NULL::jsonb':'to_jsonb(t)'
  // These source families are directly installation-owned in every supported
  // schema. Avoid converting large payloads to JSON merely to find that owner;
  // the native predicate also gives the planner accurate scope selectivity.
@@ -47,9 +48,9 @@ export async function migrationRows(c:Pick<pg.PoolClient,'query'>,table:string,i
  }
  if(uuidPage){
   const column=`t.${ident(pk[0])}`
-  return (await c.query(`SELECT ${key} AS id,to_jsonb(t) AS row FROM ${ident(table)} t WHERE ($1::text='' OR ${column}>$5::uuid) AND ${scope} AND $2::text IS NOT NULL ORDER BY ${column} LIMIT $4`,[after,table,installationIds,limit,uuidCursor])).rows as {id:string;row:Record<string,any>}[]
+  return (await c.query(`SELECT ${key} AS id,${body} AS row FROM ${ident(table)} t WHERE ($1::text='' OR ${column}>$5::uuid) AND ${scope} AND $2::text IS NOT NULL ORDER BY ${column} LIMIT $4`,[after,table,installationIds,limit,uuidCursor])).rows as {id:string;row:Record<string,any>}[]
  }
- const rows=(await c.query(`SELECT ${key} AS id,to_jsonb(t) AS row FROM ${ident(table)} t WHERE (${key} COLLATE "C")>($1 COLLATE "C") AND ${scope} AND $2::text IS NOT NULL ORDER BY ${key} COLLATE "C" LIMIT $4`,[after,table,installationIds,limit])).rows as {id:string;row:Record<string,any>}[]
+ const rows=(await c.query(`SELECT ${key} AS id,${body} AS row FROM ${ident(table)} t WHERE (${key} COLLATE "C")>($1 COLLATE "C") AND ${scope} AND $2::text IS NOT NULL ORDER BY ${key} COLLATE "C" LIMIT $4`,[after,table,installationIds,limit])).rows as {id:string;row:Record<string,any>}[]
  return rows
 }
 function preservedBody(table:string,row:Record<string,unknown>){
@@ -83,9 +84,26 @@ export async function startGovernanceBackfill(pool:pg.Pool,input:{installationId
   await c.query(`INSERT INTO memory_governance_migration_runs(run_id,environment_fingerprint,schema_version,manifest,state) VALUES($1,$2,$3,$4,'running')`,[runId,input.environmentFingerprint,version,encodeMigrationBaseline(manifest)]);return runId
  },{repeatableRead:true})
 }
-export async function recordMigrationAction(c:pg.PoolClient,input:{runId:string;installationId:string;table:string;id:string;row:Record<string,any>;action:'updated'|'unchanged'|'quarantined'|'retry';reason:string;afterHash?:string}){
- const hash=automationHash(input.row)
- await c.query(`INSERT INTO memory_governance_migration_actions(run_id,installation_id,entity_kind,entity_id,source_revision,action,reason,change_summary) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,[input.runId,input.installationId,input.table,`${input.id}:${hash}:${input.action}:${input.reason}:${input.afterHash??hash}`,String(input.row.revision??input.row.version_number??input.row.revision_number??0),input.action,input.reason,{sourceHash:hash,afterHash:input.afterHash??hash,recordId:input.id}])
+export interface MigrationActionInput {runId:string;installationId:string;table:string;id:string;row:Record<string,any>;action:'updated'|'unchanged'|'quarantined'|'retry';reason:string;afterHash?:string}
+/** Preserve the exact per-change identities while committing a bounded page.
+ * In particular, replaying an overlap must not require one transaction per row. */
+export async function recordMigrationActions(c:pg.PoolClient,inputs:MigrationActionInput[]){
+ if(inputs.length>200)throw new Error('migration_action_batch_too_large')
+ if(!inputs.length)return
+ const records=inputs.map(input=>{
+  const hash=automationHash(input.row)
+  return {run_id:input.runId,installation_id:input.installationId,entity_kind:input.table,
+   entity_id:`${input.id}:${hash}:${input.action}:${input.reason}:${input.afterHash??hash}`,
+   source_revision:String(input.row.revision??input.row.version_number??input.row.revision_number??0),action:input.action,reason:input.reason,
+   change_summary:{sourceHash:hash,afterHash:input.afterHash??hash,recordId:input.id}}
+ })
+ await c.query(`INSERT INTO memory_governance_migration_actions(run_id,installation_id,entity_kind,entity_id,source_revision,action,reason,change_summary)
+  SELECT run_id,installation_id,entity_kind,entity_id,source_revision,action,reason,change_summary
+  FROM jsonb_to_recordset($1::jsonb) AS r(run_id uuid,installation_id uuid,entity_kind text,entity_id text,source_revision text,action text,reason text,change_summary jsonb)
+  ON CONFLICT DO NOTHING`,[JSON.stringify(records)])
+}
+export async function recordMigrationAction(c:pg.PoolClient,input:MigrationActionInput){
+ await recordMigrationActions(c,[input])
 }
 export async function backfillClaim(c:pg.PoolClient,runId:string,installationId:string,id:string,observed:Record<string,any>){
  const current=(await c.query('SELECT to_jsonb(c) AS row FROM knowledge_claims c WHERE installation_id=$1 AND claim_id=$2 FOR UPDATE',[installationId,observed.claim_id])).rows[0]?.row

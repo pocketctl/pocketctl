@@ -1,3 +1,4 @@
+import {UNRESOLVED_EXTRACTION_SOURCE} from '../extraction/recovery.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 
 export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap'] as const
@@ -81,15 +82,8 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
       SELECT COUNT(*)::text AS unresolved_extractions FROM (
         -- Start from failed runs, not every historical episode. Cap the diagnostic
         -- count at 1001; detection stays active even beyond the display limit.
-        SELECT r.episode_id FROM memory_extraction_runs r
-        JOIN work_episodes e ON e.installation_id=r.installation_id AND e.episode_id=r.episode_id AND e.source_digest=r.episode_source_digest
-        JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
-        WHERE r.installation_id=i.installation_id AND r.state IN('failed','quarantined')
-          AND r.completed_at<NOW()-INTERVAL '5 minutes' AND s.deleted_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
-          AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs newer WHERE newer.installation_id=r.installation_id
-            AND newer.episode_id=r.episode_id AND newer.episode_source_digest=r.episode_source_digest
-            AND (newer.started_at,newer.run_id)>(r.started_at,r.run_id))
+        SELECT DISTINCT r.episode_id ${UNRESOLVED_EXTRACTION_SOURCE.replaceAll('$1','i.installation_id')}
+          AND r.completed_at<NOW()-INTERVAL '5 minutes'
         LIMIT 1001
       ) current_failures
     ) unresolved ON TRUE

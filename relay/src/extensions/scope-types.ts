@@ -19,6 +19,11 @@ export type ScopePermission =
   | 'policy_admin'
   | 'scope_admin'
 
+/** Personal ownership grants the same permissions in discovery and capability grants. */
+export const PERSONAL_OWNER_PERMISSIONS: readonly ScopePermission[] = Object.freeze([
+  'read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin',
+])
+
 export type ScopeRole =
   | 'reader'
   | 'contributor'

@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
+import type { MemoryCodeRepository } from '../../types/memory'
 
 vi.mock('../../composables/useResponsiveLayout', () => ({
   useResponsiveLayout: () => ({ isMobile: ref(false) }),
@@ -95,7 +96,7 @@ const memoryClient = vi.hoisted(() => ({
   startScopeTransfer: vi.fn(async () => undefined),
   proposeGovernanceClaim: vi.fn(async () => ({ candidate: { candidate_id: 'proposal-1' } })),
   getMemoryCodeGraph: vi.fn(async () => null),
-  listMemoryCodeRepositories: vi.fn(async()=>({repositories:[],next_cursor:null})),
+  listMemoryCodeRepositories: vi.fn(async()=>({repositories:[] as MemoryCodeRepository[],next_cursor:null})),
   analyzeMemoryChangeImpact: vi.fn(async () => null),
   getMemoryWiki: vi.fn(async () => null),
   listMemoryWikiBuilds: vi.fn(async () => ({ builds: [], next_cursor: null })),
@@ -163,6 +164,41 @@ describe('MemoryView', () => {
     view.unmount()
   })
 
+  test('Code Graph keeps the personal repository selectable alongside an organization', async () => {
+    const personal = '11111111-1111-4111-8111-111111111111'
+    const organization = '22222222-2222-4222-8222-222222222222'
+    const repository = '33333333-3333-4333-8333-333333333333'
+    memoryRoute.query = { tab: 'codegraph' }
+    memoryInstallation.value = activeInstallation({ installation_id: personal })
+    memoryClient.listGovernanceScopes.mockResolvedValueOnce({ scopes: [
+      { installation_id: personal, owner_scope_kind: 'personal', owner_scope_id: personal,
+        authorization_epoch: '1', state: 'active', name: 'personal',
+        permissions: ['read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin'] },
+      { installation_id: organization, owner_scope_kind: 'organization', owner_scope_id: organization,
+        authorization_epoch: '1', state: 'active', name: 'Example', permissions: ['read'] },
+    ] })
+    memoryClient.listMemoryCodeRepositories.mockResolvedValueOnce({ repositories: [{
+      repository_id: repository, repository_key: 'personal-project', state: 'active',
+      commit_sha: 'a'.repeat(40), file_count: 1,
+      canonical_remote: null, snapshot_id: 'snapshot-personal', byte_count: 10,
+      selection: { partial: false }, graph_version_id: 'graph-personal',
+      graph_commit_sha: 'a'.repeat(40), coverage: 'complete', parser_version: 'test',
+    }], next_cursor: null })
+    const view = mountView()
+    await flushPromises()
+    const graph = view.get('[data-testid="memory-codegraph-panel"]')
+    expect(graph.get('.memory-scope-chip-personal').text()).toContain('个人')
+    expect(graph.text()).toContain('Example')
+    const selector = graph.get('[data-testid="memory-codegraph-catalog"]')
+    expect(selector.attributes('disabled')).toBeUndefined()
+    expect(selector.text()).toContain('personal-project')
+    await selector.setValue(repository)
+    await flushPromises()
+    expect(memoryClient.getMemoryCodeGraph).toHaveBeenCalledWith(repository, null, 50,
+      expect.objectContaining({ installationId: personal, legacyGrant: false }))
+    view.unmount()
+  })
+
   test('without an installation the first-run gate explains the requirement', async () => {
     memoryInstallation.value = null
     const view = mountView()
@@ -208,7 +244,14 @@ describe('MemoryView', () => {
     }
     for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'git', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
       expect(view.find(`[data-testid="memory-tab-${tab}"]`).exists()).toBe(true)
+      await view.get(`[data-testid="memory-tab-${tab}"]`).trigger('click')
+      await flushPromises()
+      expect(view.findAll('.memory-module-header')).toHaveLength(1)
+      expect(view.find('.memory-page-head').exists()).toBe(false)
+      expect(view.get('.memory-module-header').find('.memory-page-status').exists()).toBe(true)
     }
+    await view.get('[data-testid="memory-tab-search"]').trigger('click')
+    await flushPromises()
     expect(view.get('[data-testid="memory-tab-search"]').attributes('aria-selected')).toBe('true')
 		expect(view.get('[data-testid="memory-module-group-knowledge"]').text()).toContain('技能')
     expect(view.get('[data-testid="memory-module-group-collaboration"]').text()).toContain('候选审核')

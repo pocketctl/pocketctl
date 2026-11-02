@@ -3,7 +3,7 @@ import type pg from 'pg'
 import { signCapabilityGrantV2, type GrantKeyMaterial, type ScopeBindingV2 } from './capability-grant.js'
 import type { ExtensionMode } from './types.js'
 import { EXTENSION_PROVIDER_CATALOG } from './catalog.js'
-import { permissionsForRoles, normalizeScopeRoles } from './scope-types.js'
+import { PERSONAL_OWNER_PERMISSIONS, permissionsForRoles, normalizeScopeRoles } from './scope-types.js'
 
 /**
  * ADR-P3-05 v2 grant mint service. Relay mints a federated scope grant only
@@ -60,10 +60,6 @@ interface ScopeStateRow {
   state: string
   authorization_epoch: string | number
 }
-
-const PERSONAL_OWNER_PERMISSIONS = Object.freeze([
-  'read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin',
-])
 
 export interface V2GrantServiceDeps {
   pool: pg.Pool
