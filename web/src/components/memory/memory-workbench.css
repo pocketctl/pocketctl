@@ -47,11 +47,15 @@
 }
 
 .memory-workbench button:focus-visible,
-.memory-workbench input:focus-visible,
-.memory-workbench textarea:focus-visible,
 .memory-workbench select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.memory-workbench input:focus-visible,
+.memory-workbench textarea:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
 }
 
 .memory-page-head {
@@ -456,7 +460,7 @@
   box-shadow: 0 8px 26px rgba(0, 0, 0, .08);
 }
 
-.memory-search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+.memory-search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-muted); }
 .memory-search-box > svg { width: 17px; height: 17px; flex: 0 0 auto; fill: none; stroke: var(--fg-tertiary); stroke-width: 1.8; }
 .memory-search-box input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--fg); background: transparent; font-size: 12px; }
 .memory-search-box input:focus-visible { outline: none; }
@@ -610,7 +614,7 @@
   background: var(--bg);
   transition: border-color var(--transition), box-shadow var(--transition);
 }
-.memory-review-filter-query:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
+.memory-review-filter-query:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-muted); }
 .memory-review-filter-query svg { width: 13px; height: 13px; flex: 0 0 auto; fill: none; stroke: var(--fg-tertiary); stroke-linecap: round; stroke-width: 1.8; }
 .memory-review-filter-query input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--fg); background: transparent; font-size: 9.5px; }
 .memory-review-filter-query input:focus-visible { outline: none; }
@@ -805,7 +809,7 @@
 .memory-claims-column { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
 .memory-claim-filterbar { display: flex; align-items: center; gap: 7px; padding: 10px; border-bottom: 1px solid var(--border); }
 .memory-claim-filter-query { min-width: 0; height: 31px; display: flex; align-items: center; gap: 7px; flex: 1; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); }
-.memory-claim-filter-query:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
+.memory-claim-filter-query:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-muted); }
 .memory-claim-filter-query svg { width: 13px; height: 13px; flex: 0 0 auto; fill: none; stroke: var(--fg-tertiary); stroke-linecap: round; stroke-width: 1.8; }
 .memory-claim-filter-query input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--fg); background: transparent; font-size: 9.5px; }
 .memory-claim-filter-query input:focus-visible { outline: none; }
@@ -1532,3 +1536,12 @@
 .memory-policy-field:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
 .memory-governance-queue details { padding: 8px 0; }
 .memory-governance-queue summary { cursor: pointer; font-size: 12px; }
+
+/* Knowledge detail keeps the production split layout and full reading flow. */
+.memory-layout-v2 .memory-claim-current { white-space:pre-wrap; overflow-wrap:anywhere; }
+@container (max-width:700px) {
+  .memory-layout-v2 .memory-claim-detail-close,.memory-layout-v2 .memory-claim-actions>.memory-button { min-width:44px; min-height:44px; }
+  .memory-layout-v2 .memory-correction-panel textarea { font-size:16px; }
+}
+
+.memory-layout-v2 .memory-claim-library-detail { scroll-margin-top:calc(var(--header-h,58px) + 12px); }

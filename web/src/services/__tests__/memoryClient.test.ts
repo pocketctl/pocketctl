@@ -467,3 +467,37 @@ test('extraction issue deadline covers installation discovery and prevents a lat
   expect(fetcher).toHaveBeenCalledTimes(1)
  }finally{vi.useRealTimers()}
 })
+
+test('manual creation is bound to the current personal installation and keeps the caller request key',async()=>{
+ const {createManualMemoryClaim}=await import('../memoryClient')
+ const {calls,fetchImpl}=relayAndProviderFetch({providerHandler:()=>Response.json({claim_id:'new',version_id:'v1'})})
+ vi.stubGlobal('fetch',fetchImpl);await discoverMemoryInstallation()
+ const input={statement:'Explicit personal rule',claim_type:'work_method',confirmed:true as const}
+ await expect(createManualMemoryClaim(input,'key','foreign')).rejects.toMatchObject({code:'identity_changed'})
+ await createManualMemoryClaim(input,'stable-key','inst-1');await createManualMemoryClaim(input,'stable-key','inst-1')
+ const writes=calls.filter(c=>c.path==='/api/v1/memory/claims')
+ expect(writes).toHaveLength(2);expect(writes[0]!.init.headers).toEqual(expect.objectContaining({'idempotency-key':'stable-key'}));expect(writes[1]!.init.body).toBe(writes[0]!.init.body)
+})
+
+test('ordinary revision requests server-owned accepted evidence without resending source material',async()=>{
+ const {reviseAcceptedMemoryClaim}=await import('../memoryClient')
+ const {calls,fetchImpl}=relayAndProviderFetch({providerHandler:()=>Response.json({version_id:'new',version_number:2})})
+ vi.stubGlobal('fetch',fetchImpl);await discoverMemoryInstallation()
+ await reviseAcceptedMemoryClaim('claim-1','Corrected rule',1,'stable-revision')
+ const write=calls.find(c=>c.path==='/api/v1/memory/claims/claim-1/correct')!
+ expect(JSON.parse(String(write.init.body))).toEqual({statement:'Corrected rule',expected_revision:1,inherit_current_evidence:true})
+ expect(write.init.headers).toEqual(expect.objectContaining({'idempotency-key':'stable-revision'}))
+})
+
+test('proposal deadline covers an unfinished grant and blocks a late request body',async()=>{
+ vi.useFakeTimers()
+ try{
+  const {proposeGovernanceClaim,resetScopedMemoryAuthorization}=await import('../memoryClient');resetScopedMemoryAuthorization()
+  let finish!:(response:Response)=>void
+  const fetcher=vi.fn(()=>new Promise<Response>(resolve=>{finish=resolve}));vi.stubGlobal('fetch',fetcher)
+  const pending=expect(proposeGovernanceClaim({installationIds:['team','personal'],targetInstallationId:'team',sourceInstallationId:'personal',sourceClaimId:'claim',expectedRevision:1,evidenceIds:['proof'],idempotencyKey:'original-key'})).rejects.toMatchObject({code:'request_unknown'})
+  await vi.advanceTimersByTimeAsync(10000);await pending
+  finish(Response.json({grant:'late-grant',expires_in:300,provider_public_origin:'https://memory.example'}));await Promise.resolve();await Promise.resolve();await Promise.resolve()
+  expect(fetcher).toHaveBeenCalledTimes(1)
+ }finally{vi.useRealTimers()}
+})

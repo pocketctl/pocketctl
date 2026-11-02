@@ -10,6 +10,8 @@ const memoryClient = vi.hoisted(() => ({
   listMemoryClaims: vi.fn(),
   listVersionEvidence: vi.fn(),
   correctMemoryClaim: vi.fn(),
+  reviseManualMemoryClaim: vi.fn(),
+  reviseAcceptedMemoryClaim: vi.fn(),
   revokeMemoryClaim: vi.fn(),
   deleteMemoryClaim: vi.fn(),
 }))
@@ -83,6 +85,24 @@ describe('ClaimDetailPanel design restoration', () => {
       excerpt: 'Health alone does not prove provider synchronization.', truncated: false,
       occurred_at: '2026-08-28T08:00:00Z',
     }])
+  })
+
+  test('manual knowledge correction writes a new personal assertion without recycling external evidence', async () => {
+    const manual=structuredClone(detail)
+    manual.versions[1]!.structured_content={manual_entry:{source_kind:'manual_entry'}}
+    memoryClient.getMemoryClaim.mockResolvedValue(manual)
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}})
+    await flushPromises()
+    expect(wrapper.get('[data-testid="memory-manual-source"]').text()).toBe('memory.manual.source')
+    await wrapper.get('[data-testid="memory-claim-correct"]').trigger('click')
+    expect(wrapper.get('.memory-correction-panel label').text()).toBe('memory.manual.revision_hint')
+    expect(wrapper.get('[data-testid="memory-correct-save"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="memory-correct-statement"]').setValue('Revised manual assertion')
+    await wrapper.get('[data-testid="memory-correct-save"]').trigger('click')
+    await flushPromises()
+    expect(memoryClient.reviseManualMemoryClaim).toHaveBeenCalledWith(detail.claim.claim_id,'Revised manual assertion',2,expect.stringMatching(/^web-correct-/))
+    expect(memoryClient.correctMemoryClaim).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   test('renders the design claim list and selected claim detail from real data', async () => {
@@ -223,6 +243,42 @@ describe('ClaimDetailPanel design restoration', () => {
     expect(detailPanel.classes()).toContain('mobile-open')
   })
 
+  test('opens details immediately and keeps the last clicked knowledge when reads finish out of order', async () => {
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:null}})
+    await flushPromises()
+    let finishFirst!:(value:typeof detail)=>void
+    let finishSecond!:(value:typeof detail)=>void
+    memoryClient.getMemoryClaim.mockImplementationOnce(()=>new Promise(resolve=>{finishSecond=resolve}))
+    await wrapper.get('[data-testid="memory-claim-row-claim-87654321"]').trigger('click')
+    const panel=wrapper.get('[data-testid="memory-claim-library-detail"]')
+    expect(panel.attributes('aria-hidden')).toBe('false')
+    expect(panel.attributes('aria-busy')).toBe('true')
+    expect(wrapper.find('[data-testid="memory-claim-current"]').exists()).toBe(false)
+    memoryClient.getMemoryClaim.mockImplementationOnce(()=>new Promise(resolve=>{finishFirst=resolve}))
+    await wrapper.get('[data-testid="memory-claim-row-claim-12345678"]').trigger('click')
+    finishFirst(detail);await flushPromises()
+    const second=structuredClone(detail);second.claim.claim_id='claim-87654321';second.versions[1]!.statement='Late stale detail'
+    finishSecond(second);await flushPromises()
+    expect(wrapper.get('[data-testid="memory-claim-current"]').text()).toBe(detail.versions[1]!.statement)
+    expect(panel.attributes('aria-busy')).toBe('false')
+    wrapper.unmount()
+  })
+
+  test('keeps failed details open for retry and lets loading details close without reopening', async () => {
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:null}});await flushPromises()
+    memoryClient.getMemoryClaim.mockRejectedValueOnce(Error('detail temporarily unavailable'))
+    await wrapper.get('[data-testid="memory-claim-row-claim-87654321"]').trigger('click');await flushPromises()
+    expect(wrapper.get('[data-testid="memory-claim-library-detail"]').attributes('aria-hidden')).toBe('false')
+    expect(wrapper.get('[data-testid="memory-claim-error"]').text()).toContain('detail temporarily unavailable')
+    let finish!:(value:typeof detail)=>void
+    memoryClient.getMemoryClaim.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}))
+    await wrapper.get('[data-testid="memory-claim-detail-retry"]').trigger('click')
+    await wrapper.get('[data-testid="memory-claim-detail-close"]').trigger('click')
+    finish(detail);await flushPromises()
+    expect(wrapper.get('[data-testid="memory-claim-library-detail"]').attributes('aria-hidden')).toBe('true')
+    wrapper.unmount()
+  })
+
   test('refreshes both the active summary list and detail after a correction', async () => {
     const wrapper = mount(ClaimDetailPanel, { props: { claimId: 'claim-12345678' } })
     await flushPromises()
@@ -232,8 +288,87 @@ describe('ClaimDetailPanel design restoration', () => {
     await wrapper.get('[data-testid="memory-correct-save"]').trigger('click')
     await flushPromises()
 
-    expect(memoryClient.correctMemoryClaim).toHaveBeenCalled()
+    expect(memoryClient.reviseAcceptedMemoryClaim).toHaveBeenCalledWith(detail.claim.claim_id,'Corrected deployment rule',2,expect.stringMatching(/^web-correct-/))
     expect(memoryClient.listMemoryClaims).toHaveBeenCalledTimes(2)
     expect(memoryClient.getMemoryClaim).toHaveBeenCalledTimes(2)
   })
+  test('unknown correction retries the original request and prevents overlapping lifecycle changes',async()=>{
+    memoryClient.reviseAcceptedMemoryClaim.mockRejectedValueOnce(Error('connection lost')).mockResolvedValueOnce({version_id:'v3'})
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+    await wrapper.get('[data-testid="memory-claim-correct"]').trigger('click')
+    await wrapper.get('[data-testid="memory-correct-statement"]').setValue('Retry this exact assertion')
+    await wrapper.get('[data-testid="memory-correct-save"]').trigger('click');await flushPromises()
+    expect(wrapper.get('[data-testid="memory-correct-statement"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="memory-claim-revoke"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="memory-correct-save"]').trigger('click');await flushPromises()
+    expect(memoryClient.reviseAcceptedMemoryClaim.mock.calls[1]).toEqual(memoryClient.reviseAcceptedMemoryClaim.mock.calls[0])
+    expect(wrapper.get('[data-testid="memory-claim-library-detail"]').attributes('aria-hidden')).toBe('false')
+    wrapper.unmount()
+  })
+  test('completed writes retry only the failed refresh instead of repeating the mutation',async()=>{
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+    memoryClient.listMemoryClaims.mockRejectedValueOnce(Error('refresh unavailable'))
+    await wrapper.get('[data-testid="memory-claim-correct"]').trigger('click')
+    await wrapper.get('[data-testid="memory-correct-statement"]').setValue('Saved once')
+    await wrapper.get('[data-testid="memory-correct-save"]').trigger('click');await flushPromises()
+    expect(wrapper.get('[data-testid="memory-claim-error"]').text()).toContain('memory.claim_saved_refresh_failed')
+    await wrapper.get('[data-testid="memory-claim-refresh"]').trigger('click');await flushPromises()
+    expect(memoryClient.reviseAcceptedMemoryClaim).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+  test('version pagination ignores old knowledge after a different row is selected',async()=>{
+    memoryClient.getMemoryClaim.mockResolvedValueOnce({...detail,next_version_cursor:'older'})
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+    let finish!:(v:unknown)=>void
+    memoryClient.getMemoryClaim.mockImplementationOnce(()=>new Promise(r=>{finish=r}))
+    await wrapper.get('[data-testid="memory-claim-load-older"]').trigger('click')
+    const second=structuredClone(detail);second.claim.claim_id='claim-87654321';second.versions[1]!.statement='Other selected knowledge'
+    memoryClient.getMemoryClaim.mockResolvedValueOnce(second)
+    await wrapper.get('[data-testid="memory-claim-row-claim-87654321"]').trigger('click');await flushPromises()
+    finish({...detail,versions:[{...detail.versions[0],version_id:'stale-older',version_number:'0'}]});await flushPromises()
+    expect(wrapper.get('[data-testid="memory-claim-current"]').text()).toBe('Other selected knowledge')
+    expect(wrapper.get('[data-testid="memory-claim-versions"]').text()).not.toContain('v0')
+    wrapper.unmount()
+  })
+
+  test('confirmed deletion is sent once with CAS and refreshes the remaining active knowledge',async()=>{
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+    let finish!:(v:unknown)=>void;memoryClient.deleteMemoryClaim.mockImplementation(()=>new Promise(r=>{finish=r}))
+    await wrapper.get('[data-testid="memory-claim-delete"]').trigger('click')
+    await wrapper.get('[data-testid="memory-delete-confirm-yes"]').trigger('click')
+    await wrapper.get('[data-testid="memory-delete-confirm-yes"]').trigger('click')
+    expect(memoryClient.deleteMemoryClaim).toHaveBeenCalledTimes(1)
+    expect(memoryClient.deleteMemoryClaim).toHaveBeenCalledWith(detail.claim.claim_id,2,expect.stringMatching(/^web-delete-/))
+    memoryClient.listMemoryClaims.mockResolvedValueOnce({claims:[claimSummaries[1]],next_cursor:null,total_count:1})
+    const remaining=structuredClone(detail);remaining.claim.claim_id='claim-87654321';remaining.versions[1]!.statement='Remaining knowledge';memoryClient.getMemoryClaim.mockResolvedValueOnce(remaining)
+    finish({claim_id:detail.claim.claim_id,state:'deleted'});await flushPromises()
+    expect(wrapper.find('[data-testid="memory-delete-confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="memory-claim-row-claim-12345678"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="memory-claim-current"]').text()).toBe('Remaining knowledge')
+    wrapper.unmount()
+  })
+
+  test('changing knowledge cancels stale proposal preparation and enables the new source',async()=>{
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+    let finish!:(v:unknown)=>void;memoryClient.listVersionEvidence.mockImplementationOnce(()=>new Promise(r=>{finish=r}))
+    await wrapper.get('[data-testid="memory-claim-propose"]').trigger('click')
+    const second=structuredClone(detail);second.claim.claim_id='claim-87654321';memoryClient.getMemoryClaim.mockResolvedValueOnce(second)
+    await wrapper.get('[data-testid="memory-claim-row-claim-87654321"]').trigger('click');await flushPromises()
+    expect(wrapper.get('[data-testid="memory-claim-propose"]').attributes('disabled')).toBeUndefined()
+    finish([{evidence_id:'stale',excerpt:'old proof'}]);await flushPromises()
+    expect(wrapper.emitted('propose')).toBeUndefined();wrapper.unmount()
+  })
+  test('an in-flight personal list page cannot populate a newly selected shared installation',async()=>{
+    memoryClient.listMemoryClaims.mockResolvedValueOnce({claims:pagedClaimSummaries.slice(0,5),next_cursor:'next',total_count:6})
+    const wrapper=mount(ClaimDetailPanel,{props:{claimId:null}});await flushPromises()
+    let finish!:(v:unknown)=>void;memoryClient.listMemoryClaims.mockImplementationOnce(()=>new Promise(r=>{finish=r}))
+    await wrapper.get('[data-testid="memory-claim-next-page"]').trigger('click')
+    const shared=structuredClone(detail);shared.claim.claim_id='shared-claim';memoryClient.getMemoryClaim.mockResolvedValueOnce(shared)
+    await wrapper.setProps({claimId:'shared-claim',installationId:'shared-installation'});await flushPromises()
+    finish({claims:pagedClaimSummaries.slice(5),next_cursor:null,total_count:6});await flushPromises()
+    expect(wrapper.find('[data-testid="memory-claim-row-claim-page-6"]').exists()).toBe(false)
+    expect(memoryClient.getMemoryClaim).toHaveBeenLastCalledWith('shared-claim',null,'shared-installation')
+    wrapper.unmount()
+  })
+
 })

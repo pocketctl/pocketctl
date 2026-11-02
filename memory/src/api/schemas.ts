@@ -86,11 +86,17 @@ const ExplicitEvidenceSchema = z.discriminatedUnion('evidence_kind', [
   }),
 ])
 
-export const CorrectRequestSchema = z.strictObject({
+const CorrectRequestBase = {
   expected_revision: z.number().int().min(1),
   statement: z.string().min(1).max(4000),
+}
+export const CorrectRequestSchema = z.union([z.strictObject({
+  ...CorrectRequestBase,
   evidence: z.array(ExplicitEvidenceSchema).min(1).max(13),
-})
+}), z.strictObject({
+  ...CorrectRequestBase,
+  inherit_current_evidence: z.literal(true),
+})])
 
 export const ListQuerySchema = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(50),
@@ -136,3 +142,14 @@ export const EvidenceContentQuerySchema=EvidenceReferenceQuerySchema.extend({
  source_hash:z.string().regex(/^[a-f0-9]{64}$/).optional(),page:z.coerce.number().int().min(0).max(3).default(0),
  max_chars:z.coerce.number().int().min(1).max(4000).default(4000),
 }).refine(input=>!input.source_hash||Boolean(input.source_version),{message:'source version required for full material'})
+
+/** Explicit personal user assertion; scope and provenance are server-owned. */
+export const ManualClaimRequestSchema = z.strictObject({
+  statement: z.string().trim().min(1).max(4000),
+  claim_type: z.enum(['architecture_decision','repository_convention','bug_root_cause','rejected_hypothesis','test_invariant','implementation_map','operational_runbook','work_method','reusable_skill_candidate']),
+  repository_id: UUID.nullish(),
+  confirmed: z.literal(true),
+})
+export const ManualClaimRevisionSchema = z.strictObject({
+  statement: z.string().trim().min(1).max(4000), expected_revision:z.number().int().positive(), confirmed:z.literal(true),
+})

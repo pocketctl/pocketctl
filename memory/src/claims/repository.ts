@@ -64,6 +64,8 @@ export interface CorrectInput {
   expectedRevision: number
   statement: string
   evidence: readonly EvidenceInput[]
+  /** Server-selected accepted capsule only; never client-authored provenance. */
+  inheritCurrentEvidence?: boolean
 }
 
 export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKeys?: readonly TombstoneHmacKey[] } = {}) {
@@ -341,7 +343,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
     async correctClaim(input: CorrectInput): Promise<
       { ok: true; claimId: string; versionId: string; versionNumber: number } | { ok: false; error: LedgerError }
     > {
-      if (input.evidence.length === 0) {
+      if (input.evidence.length === 0 && !input.inheritCurrentEvidence) {
         return { ok: false, error: { code: 'evidence_required' } }
       }
       if (input.statement.trim().length === 0 || input.statement.trim().length > 4000) {
@@ -431,6 +433,22 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'revision_conflict', currentRevision: Number(row.revision), state: row.state } }
           }
+          if (input.inheritCurrentEvidence && (input.evidence.length || row.structured_content?.manual_entry)) {
+            await client.query('ROLLBACK')
+            return {ok:false,error:{code:'invalid_input',detail:'manual assertions require a new assertion'}}
+          }
+          const inherited = input.inheritCurrentEvidence ? (await client.query<{
+            excerpt:string; occurred_at:Date; evidence_kind:string; capsule_id:string|null; retained:boolean
+          }>(`SELECT e.excerpt,e.occurred_at,e.evidence_kind,e.capsule_id::text,
+              (k.capsule_id IS NOT NULL AND memory_delivery_source_available(COALESCE(e.locator->'source_provenance','{}'::jsonb))) AS retained
+            FROM knowledge_evidence e LEFT JOIN knowledge_evidence_capsules k
+              ON k.installation_id=e.installation_id AND k.version_id=e.version_id AND k.capsule_id=e.capsule_id
+            WHERE e.installation_id=$1 AND e.version_id=$2 ORDER BY e.ordinal FOR SHARE OF e`,
+            [input.installationId,row.current_version_id])).rows : []
+          if(input.inheritCurrentEvidence && (!inherited.length || inherited.length>64 || inherited.some(e=>e.evidence_kind!=='accepted_excerpt'||!e.retained))){
+            await client.query('ROLLBACK')
+            return {ok:false,error:{code:'evidence_required'}}
+          }
           for (const evidence of input.evidence) {
             const provenance = evidence.evidenceKind === 'event'
               ? await client.query(`
@@ -498,7 +516,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             repoSnapshotId: row.repo_snapshot_id,
             branch: row.branch,
             acceptedAt: correctionAt,
-            sourceContent: JSON.stringify(input.evidence.slice(0, 13).map(evidence => ({
+            sourceContent: JSON.stringify(input.inheritCurrentEvidence ? inherited.map(e=>({kind:e.evidence_kind,excerpt:e.excerpt,occurredAt:e.occurred_at})) : input.evidence.slice(0, 13).map(evidence => ({
               kind: evidence.evidenceKind,
               excerpt: evidence.excerpt,
               occurredAt: evidence.occurredAt,
@@ -506,6 +524,14 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           })
 
           let inserted = 0
+          if(input.inheritCurrentEvidence){
+            const copied=await client.query(`INSERT INTO knowledge_evidence
+              (evidence_id,installation_id,version_id,capsule_id,episode_id,source_event_id,artifact_id,evidence_kind,locator,excerpt,excerpt_hash,source_evidence_hash,occurred_at,ordinal)
+              SELECT gen_random_uuid(),installation_id,$3,$4,NULL,NULL,NULL,'accepted_excerpt',locator,excerpt,excerpt_hash,source_evidence_hash,occurred_at,ordinal
+              FROM knowledge_evidence WHERE installation_id=$1 AND version_id=$2`,
+              [input.installationId,row.current_version_id,versionId,capsuleId])
+            inserted=copied.rowCount??0
+          }
           for (const [index, evidence] of input.evidence.slice(0, 13).entries()) {
             if (index >= 64) break
             await insertExplicitEvidence(client, {

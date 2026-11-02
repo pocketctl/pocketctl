@@ -436,7 +436,7 @@ export function revokeMemoryClaim(
   expectedRevision: number,
   idempotencyKey: string,
 ): Promise<{ claim_id: string; state: string }> {
-  return memoryJson('memory.manage', `/api/v1/memory/claims/${claimId}/revoke`, {
+  return personalManageRequest(state.installation?.installation_id, `/api/v1/memory/claims/${claimId}/revoke`, {
     method: 'POST',
     headers: { 'idempotency-key': idempotencyKey },
     body: JSON.stringify({ expected_revision: expectedRevision }),
@@ -448,7 +448,7 @@ export function deleteMemoryClaim(
   expectedRevision: number,
   idempotencyKey: string,
 ): Promise<{ claim_id: string; state: string }> {
-  return memoryJson('memory.manage', `/api/v1/memory/claims/${claimId}`, {
+  return personalManageRequest(state.installation?.installation_id, `/api/v1/memory/claims/${claimId}`, {
     method: 'DELETE',
     headers: { 'idempotency-key': idempotencyKey },
     body: JSON.stringify({ expected_revision: expectedRevision }),
@@ -1060,10 +1060,16 @@ export async function proposeGovernanceClaim(input: {
   sourceInstallationId: string
   sourceClaimId: string
   evidenceIds: string[]
+  idempotencyKey?: string
 }): Promise<{ candidate: { candidate_id: string } }> {
+  const controller=new AbortController()
+  let timer:ReturnType<typeof setTimeout>|undefined
+  const expired=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new MemoryClientError(0,'request_unknown','Proposal result is unknown; retry the original request'))},10000)})
+  const request=async()=>{
   const response = await governanceFetch('/api/v1/memory/governance/proposals', input.installationIds, {
     method: 'POST',
-    headers: { 'idempotency-key': phase2IdempotencyKey('governance-propose') },
+    headers: { 'idempotency-key': input.idempotencyKey ?? phase2IdempotencyKey('governance-propose') },
+    signal: controller.signal,
     body: JSON.stringify({
       target_installation_id: input.targetInstallationId,
       expected_revision: input.expectedRevision,
@@ -1076,6 +1082,8 @@ export async function proposeGovernanceClaim(input: {
     throw new MemoryClientError(response.status, 'proposal_failed', 'proposal failed')
   }
   return response.json()
+  }
+  try{return await Promise.race([request(),expired])}finally{if(timer)clearTimeout(timer)}
 }
 
 export async function decideGovernanceCandidate(input: {
@@ -1161,18 +1169,18 @@ export interface MemoryExtractionIssue {
 }
 export interface MemoryExtractionIssues {issues:MemoryExtractionIssue[];has_more:boolean}
 
-async function extractionIssueRequest<T>(installationId:string,path:string,init:RequestInit={}):Promise<T> {
+async function personalManageRequest<T>(installationId:string|undefined,path:string,init:RequestInit={}):Promise<T> {
   const scope=personalScope()
   const controller=new AbortController()
   let timer:ReturnType<typeof setTimeout>|undefined
   const expired=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{
-    controller.abort();reject(new MemoryClientError(0,'request_unknown','Request result is unknown; check current issues'))
+    controller.abort();reject(new MemoryClientError(0,'request_unknown','Request result is unknown; retry the original request'))
   },10000)})
   const request=async()=>{
     const installation=state.installation??await discoverMemoryInstallation()
     assertPersonalScope(scope)
     if(controller.signal.aborted)throw new MemoryClientError(0,'request_unknown','Request deadline elapsed')
-    if(installation?.installation_id!==installationId)throw new MemoryClientError(409,'identity_changed','Memory installation changed')
+    if(installationId && installation?.installation_id!==installationId)throw new MemoryClientError(409,'identity_changed','Memory installation changed')
     return memoryJson<T>('memory.manage',path,{...init,signal:controller.signal,cache:'no-store'})
   }
   try{return await Promise.race([request(),expired])}
@@ -1180,10 +1188,28 @@ async function extractionIssueRequest<T>(installationId:string,path:string,init:
 }
 
 export function listMemoryExtractionIssues(installationId:string):Promise<MemoryExtractionIssues> {
-  return extractionIssueRequest(installationId,'/api/v1/memory/extraction-issues')
+  return personalManageRequest(installationId,'/api/v1/memory/extraction-issues')
 }
 export function retryMemoryExtraction(installationId:string,runId:string):Promise<{job_id:string;state:string}> {
-  return extractionIssueRequest(installationId,`/api/v1/memory/extraction-issues/${encodeURIComponent(runId)}/retry`,{
+  return personalManageRequest(installationId,`/api/v1/memory/extraction-issues/${encodeURIComponent(runId)}/retry`,{
     method:'POST',body:'{}',headers:{'Idempotency-Key':`extraction-retry:${runId}`},
   })
+}
+
+export interface ManualMemoryClaimInput {
+  statement: string
+  claim_type: string
+  repository_id?: string | null
+  confirmed: true
+}
+export function createManualMemoryClaim(input:ManualMemoryClaimInput,idempotencyKey:string,installationId:string):Promise<{claim_id:string;version_id:string;version_number:number}> {
+  return personalManageRequest(installationId,'/api/v1/memory/claims',{method:'POST',headers:{'idempotency-key':idempotencyKey},body:JSON.stringify(input)})
+}
+export function reviseManualMemoryClaim(claimId:string,statement:string,expectedRevision:number,idempotencyKey:string):Promise<{claim_id:string;version_id:string;version_number:number}> {
+  return personalManageRequest(state.installation?.installation_id,`/api/v1/memory/claims/${encodeURIComponent(claimId)}/manual-revisions`,{method:'POST',headers:{'idempotency-key':idempotencyKey},body:JSON.stringify({statement,expected_revision:expectedRevision,confirmed:true})})
+}
+
+/** The server selects the current retained capsule under the claim revision lock. */
+export function reviseAcceptedMemoryClaim(claimId:string,statement:string,expectedRevision:number,idempotencyKey:string):Promise<{version_id:string;version_number:number}> {
+  return personalManageRequest(state.installation?.installation_id,`/api/v1/memory/claims/${encodeURIComponent(claimId)}/correct`,{method:'POST',headers:{'idempotency-key':idempotencyKey},body:JSON.stringify({statement,expected_revision:expectedRevision,inherit_current_evidence:true})})
 }
