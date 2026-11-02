@@ -1,3 +1,4 @@
+import {EXTRACTION_RECOVERY_MIGRATION} from './extraction/recovery-migration.js'
 import { SCENE_MIGRATION } from './context/scene-migration.js'
 import { DAILY_MAINTENANCE_MIGRATION } from './maintenance/daily.js'
 import { DATA_RETENTION_MIGRATION } from './retention/migration.js'
@@ -2252,6 +2253,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   ]},
   DAILY_MAINTENANCE_MIGRATION,
   SCENE_MIGRATION,
+  EXTRACTION_RECOVERY_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

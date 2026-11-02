@@ -41,7 +41,10 @@ const eligibilityFrom = `FROM work_episodes e
     AND NOT EXISTS(SELECT 1 FROM memory_snapshot_runs r WHERE r.installation_id=e.installation_id
       AND (r.state='running' OR(r.state='completed' AND r.relay_acked_at IS NULL)))
     AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs r WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id
-      AND r.episode_source_digest=e.source_digest AND r.state IN('running','failed','quarantined'))
+      AND r.episode_source_digest=e.source_digest AND (r.state='running' OR(r.state IN('failed','quarantined')
+        AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs resolved WHERE resolved.installation_id=r.installation_id
+          AND resolved.episode_id=r.episode_id AND resolved.episode_source_digest=r.episode_source_digest
+          AND resolved.state='succeeded' AND (resolved.started_at,resolved.run_id)>(r.started_at,r.run_id)))))
     AND NOT EXISTS(SELECT 1 FROM memory_candidates c WHERE c.installation_id=e.installation_id AND c.episode_id=e.episode_id
       AND c.review_expires_at>clock_timestamp())
     AND NOT EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id

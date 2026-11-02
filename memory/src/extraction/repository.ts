@@ -1,3 +1,4 @@
+import {DEFAULT_EXTRACTION_RETRY_KEY} from './recovery.js'
 import type pg from 'pg'
 import type { JobFence } from '../jobs/types.js'
 import { assertJobFence } from '../generation/fence.js'
@@ -153,6 +154,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
       fence?: JobFence
       expectedConsentFingerprint?: string
       /** Exact unknown-result run authorized for one bounded operator retry. */
+      userRetry?: {runId:string;jobId:string}
       retryFailedRunId?: string
     }): Promise<ReservedRun> {
       const effectivePolicyHashValue = input.effectivePolicyHash ?? DEFAULT_POLICY_HASH
@@ -198,12 +200,23 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             observeWork?.('invalidated')
             return {runId:'',owner:false,existingState:null,...(waiting.rowCount?{sourceWaiting:true}:{sourceUnavailable:true})}
           }
+          const retryKey=input.userRetry?.jobId??DEFAULT_EXTRACTION_RETRY_KEY
+          if(input.userRetry){
+            const authorized=await client.query(`SELECT 1 FROM memory_jobs j JOIN memory_extraction_runs r ON r.installation_id=j.installation_id
+              AND r.run_id=$4::uuid WHERE j.installation_id=$1 AND j.job_id=$5::uuid AND j.job_type='extract_candidates' AND j.state='running'
+              AND j.idempotency_key='user-extraction-retry:'||r.run_id::text AND j.payload->>'retry_extraction_run_id'=r.run_id::text
+              AND j.payload->>'expected_source_digest'=encode($3::bytea,'hex') AND r.episode_id=$2 AND r.episode_source_digest=$3
+              AND r.state IN('failed','quarantined') AND r.error_code IS DISTINCT FROM 'provider_result_unknown'`,
+              [input.installationId,input.episodeId,input.sourceDigest,input.userRetry.runId,input.userRetry.jobId])
+            if(!authorized.rowCount)throw new Error('retry_not_authorized')
+          }
           await client.query(`
             DELETE FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
               AND effective_policy_hash = $6 AND prompt_version=$8
+              AND retry_key='00000000-0000-0000-0000-000000000000' AND NOT $10::boolean
               AND ((state = 'failed' AND (error_code IS DISTINCT FROM 'provider_result_unknown' OR run_id = $9::uuid))
                 OR (state = 'running'
                   AND started_at < NOW() - ($7 * INTERVAL '1 millisecond')))
@@ -211,22 +224,23 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,
             Math.max(60_000, input.staleAfterMs),input.promptVersion,
             input.retryFailedRunId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.retryFailedRunId)
-              ? input.retryFailedRunId : null])
+              ? input.retryFailedRunId : null,Boolean(input.userRetry)])
           const existing = await client.query<{ run_id: string; state: ExtractionRunState }>(`
             SELECT run_id::text, state FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-              AND effective_policy_hash = $6 AND prompt_version=$7
+              AND effective_policy_hash = $6 AND prompt_version=$7 AND (retry_key=$8::uuid OR state='succeeded')
+            ORDER BY started_at DESC,run_id DESC LIMIT 1
           `, [input.installationId, input.episodeId, input.sourceDigest,
-            input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,input.promptVersion])
+            input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,input.promptVersion,retryKey])
           if (existing.rows[0]) {
             observeWork?.('reuse')
             await client.query('COMMIT')
             return { runId: existing.rows[0].run_id, owner: false,
               existingState: existing.rows[0].state }
           }
-          if (input.maxRunsPerEpisode !== undefined) {
+          if (!input.userRetry && input.maxRunsPerEpisode !== undefined) {
             // Bound provider calls for this packet revision. A compiler or
             // source revision gets a fresh allowance without erasing history.
             const count = await client.query<{ count: string }>(`
@@ -243,15 +257,15 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             INSERT INTO memory_extraction_runs
               (run_id, installation_id, episode_id, episode_source_digest, extractor_version,
                prompt_version, model_config_hash, input_digest, mode, state, provider, model,
-               effective_policy_hash)
-            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $11)
+               effective_policy_hash,retry_key)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, 'running', $9, $10, $11,$12::uuid)
             ON CONFLICT DO NOTHING
             RETURNING run_id::text
           `, [
             input.installationId, input.episodeId, input.sourceDigest,
             input.extractorVersion, input.promptVersion, input.modelConfigHash,
             input.sourceDigest, input.mode, input.provider, input.model,
-            effectivePolicyHashValue,
+            effectivePolicyHashValue,retryKey,
           ])
           if (inserted.rows[0]) {
             observeWork?.('owner')
@@ -263,8 +277,9 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-              AND effective_policy_hash = $6 AND prompt_version=$7
-          `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,input.promptVersion])
+              AND effective_policy_hash = $6 AND prompt_version=$7 AND (retry_key=$8::uuid OR state='succeeded')
+            ORDER BY started_at DESC,run_id DESC LIMIT 1
+          `, [input.installationId, input.episodeId, input.sourceDigest, input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,input.promptVersion,retryKey])
           await client.query('COMMIT')
           const row = conflicted.rows[0]
           if(row)observeWork?.('reuse')

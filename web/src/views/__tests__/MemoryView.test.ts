@@ -244,7 +244,14 @@ describe('MemoryView', () => {
     }
     for (const tab of ['search', 'review', 'claims', 'wiki', 'codegraph', 'skills', 'git', 'context', 'persona', 'policies', 'loadouts', 'settings']) {
       expect(view.find(`[data-testid="memory-tab-${tab}"]`).exists()).toBe(true)
+      await view.get(`[data-testid="memory-tab-${tab}"]`).trigger('click')
+      await flushPromises()
+      expect(view.findAll('.memory-module-header')).toHaveLength(1)
+      expect(view.find('.memory-page-head').exists()).toBe(false)
+      expect(view.get('.memory-module-header').find('.memory-page-status').exists()).toBe(true)
     }
+    await view.get('[data-testid="memory-tab-search"]').trigger('click')
+    await flushPromises()
     expect(view.get('[data-testid="memory-tab-search"]').attributes('aria-selected')).toBe('true')
 		expect(view.get('[data-testid="memory-module-group-knowledge"]').text()).toContain('技能')
     expect(view.get('[data-testid="memory-module-group-collaboration"]').text()).toContain('候选审核')

@@ -1,3 +1,5 @@
+import {z} from 'zod'
+import {listExtractionIssues,scheduleExtractionRetry} from '../extraction/recovery.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import type { GrantGuard } from '../auth/grant-guard.js'
@@ -335,6 +337,10 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
           const candidateId=(request.params as {id?:string})?.id
           sessions=(await client.query<{session_id:string}>(`SELECT e.session_id FROM memory_candidates c JOIN work_episodes e USING(installation_id,episode_id)
             WHERE c.installation_id=$1 AND c.candidate_id=$2`,[grant.installationId,candidateId])).rows
+        }else if(operation==='retry_extraction'){
+          const runId=(request.params as {id:string}).id
+          sessions=(await client.query<{session_id:string}>(`SELECT e.session_id FROM memory_extraction_runs r JOIN work_episodes e USING(installation_id,episode_id)
+            WHERE r.installation_id=$1 AND r.run_id=$2`,[grant.installationId,runId])).rows
         }else if(operation==='correct_claim'){
           const evidence=(request.body as {evidence?:Array<{episode_id:string}>})?.evidence??[]
           sessions=(await client.query<{session_id:string}>('SELECT session_id FROM work_episodes WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])',[grant.installationId,evidence.map(e=>e.episode_id)])).rows
@@ -436,6 +442,29 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     }
     return outcome.metadata
   }
+
+  app.get('/api/v1/memory/extraction-issues', async (request, reply) => {
+    const grant=await guardManage(request,reply)
+    if(!grant)return
+    reply.header('cache-control','no-store')
+    return listExtractionIssues(deps.pool,grant.installationId,deps.textConfigured?deps.extractionAdapter?.fingerprint:undefined)
+  })
+
+  app.post<{Params:{id:string}}>('/api/v1/memory/extraction-issues/:id/retry', {bodyLimit:1024}, async(request,reply)=>{
+    const id=resourceId(request.params.id,reply)
+    if(!id)return
+    if(!z.strictObject({}).safeParse(request.body).success){
+      reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid retry request')));return
+    }
+    try {
+      return await mutation(request,reply,'retry_extraction',async(grant,_pool,client)=>({ok:true,
+        metadata:await scheduleExtractionRetry(client,{installationId:grant.installationId,runId:id,
+          consentFingerprint:deps.textConfigured?deps.extractionAdapter?.fingerprint:undefined})}))
+    }catch(error){
+      if(error instanceof MemoryApiError){reply.code(error.httpStatus).send(errorBody(error));return}
+      throw error
+    }
+  })
 
   app.post('/api/v1/memory/candidates/:id/accept', { bodyLimit: 8 * 1024 }, async (request, reply) => {
     const id = resourceId((request.params as { id: string }).id, reply)
@@ -703,6 +732,8 @@ function isManageRequest(method: string, rawUrl: string): boolean {
   const path = rawUrl.split('?')[0]
   if (method === 'GET' && (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/settings')) return true
   if (method === 'GET' && /^\/api\/v1\/memory\/delivery-sources\/[^/]+\/decisions\/[^/]+$/.test(path)) return true
+  if (method === 'GET' && path === '/api/v1/memory/extraction-issues') return true
+  if (method === 'POST' && /^\/api\/v1\/memory\/extraction-issues\/[^/]+\/retry$/.test(path)) return true
   if (method === 'POST' && path === '/api/v1/memory/feedback') return true
   if (method === 'POST' && /^\/api\/v1\/memory\/candidates\/[^/]+\/(accept|reject)$/.test(path)) return true
   if (method === 'POST' && /^\/api\/v1\/memory\/claims\/[^/]+\/(correct|expire|revoke)$/.test(path)) return true

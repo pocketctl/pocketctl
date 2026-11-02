@@ -1146,3 +1146,44 @@ export function reviseGovernanceCandidate(input:{targetInstallationId:string;can
 export function listPublicationExecutors(targetInstallationId:string):Promise<{principals:import('../types/memory').MemoryExecutorPrincipal[];mode:'off'|'enabled'}>{return governanceJson(`/api/v1/memory/governance/executor-principals?target_installation_id=${encodeURIComponent(targetInstallationId)}`,[targetInstallationId])}
 export function delegatePublication(input:{targetInstallationId:string;candidateId:string;expectedRevision:number;expectedHash:string;principalId:string;expiresAt:string}):Promise<{delegationId:string}>{return governanceJson('/api/v1/memory/governance/publication-delegations',[input.targetInstallationId],{method:'POST',headers:{'idempotency-key':phase2IdempotencyKey('publication-delegation')},body:JSON.stringify({target_installation_id:input.targetInstallationId,candidate_id:input.candidateId,expected_revision:input.expectedRevision,expected_hash:input.expectedHash,principal_id:input.principalId,expires_at:input.expiresAt})})}
 export function revokePublicationDelegation(targetInstallationId:string,delegationId:string):Promise<unknown>{return governanceJson(`/api/v1/memory/governance/publication-delegations/${encodeURIComponent(delegationId)}/revoke`,[targetInstallationId],{method:'POST',headers:{'idempotency-key':phase2IdempotencyKey('delegation-revoke')},body:JSON.stringify({target_installation_id:targetInstallationId})})}
+
+export interface MemoryExtractionIssue {
+  run_id:string
+  episode_id:string
+  session_id:string
+  turn_id:string
+  completed_at:string
+  reason:'invalid_claim_type'|'invalid_evidence'|'invalid_output'|'provider_result_unknown'|'extraction_failed'
+  status:'unresolved'|'pending'|'running'
+  retry_count:number
+  can_retry:boolean
+  blocked_reason:'operator_required'|'source_unavailable'|'settings_required'|'retry_limit'|'retry_incomplete'|null
+}
+export interface MemoryExtractionIssues {issues:MemoryExtractionIssue[];has_more:boolean}
+
+async function extractionIssueRequest<T>(installationId:string,path:string,init:RequestInit={}):Promise<T> {
+  const scope=personalScope()
+  const controller=new AbortController()
+  let timer:ReturnType<typeof setTimeout>|undefined
+  const expired=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{
+    controller.abort();reject(new MemoryClientError(0,'request_unknown','Request result is unknown; check current issues'))
+  },10000)})
+  const request=async()=>{
+    const installation=state.installation??await discoverMemoryInstallation()
+    assertPersonalScope(scope)
+    if(controller.signal.aborted)throw new MemoryClientError(0,'request_unknown','Request deadline elapsed')
+    if(installation?.installation_id!==installationId)throw new MemoryClientError(409,'identity_changed','Memory installation changed')
+    return memoryJson<T>('memory.manage',path,{...init,signal:controller.signal,cache:'no-store'})
+  }
+  try{return await Promise.race([request(),expired])}
+  finally{if(timer)clearTimeout(timer)}
+}
+
+export function listMemoryExtractionIssues(installationId:string):Promise<MemoryExtractionIssues> {
+  return extractionIssueRequest(installationId,'/api/v1/memory/extraction-issues')
+}
+export function retryMemoryExtraction(installationId:string,runId:string):Promise<{job_id:string;state:string}> {
+  return extractionIssueRequest(installationId,`/api/v1/memory/extraction-issues/${encodeURIComponent(runId)}/retry`,{
+    method:'POST',body:'{}',headers:{'Idempotency-Key':`extraction-retry:${runId}`},
+  })
+}
