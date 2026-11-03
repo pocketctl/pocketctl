@@ -35,6 +35,13 @@ func (sm *SessionManager) claudeCapabilitiesLocked(state *ProcessState) []string
 }
 
 func (sm *SessionManager) sessionCapabilitiesLocked(state *ProcessState) []string {
+	caps := sm.baseSessionCapabilitiesLocked(state)
+	if state != nil && sm.turnEnabled() && (state.Agent == adapter.AgentClaude && state.Source == "daemon" || state.Agent == adapter.AgentDSH || (state.Agent == adapter.AgentCodex || state.Agent == adapter.AgentOpencode) && state.ControlMode == protocol.ControlManaged) {
+		caps = append(caps, "message_queue_v1")
+	}
+	return caps
+}
+func (sm *SessionManager) baseSessionCapabilitiesLocked(state *ProcessState) []string {
 	if state == nil {
 		return nil
 	}

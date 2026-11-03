@@ -1,3 +1,4 @@
+import { MessageQueueService } from './session-message-queue/service.js';
 import { SessionDocumentReadLimiter } from './session-documents/routes.js';
 import type { WebSocket } from 'ws';
 import {
@@ -283,6 +284,46 @@ export class Router {
   private sessionHistoryReadBroker?: SessionHistoryReadBroker;
   private teamSubscriptionAuthorizer?: TeamSubscriptionAuthorizer;
   private teamDispatchBroker?: RouterOptions['teamDispatchBroker'];
+  private messageQueue?: MessageQueueService;
+  startMessageQueue(): void {
+    if (this.messageQueue) return;
+    this.messageQueue = new MessageQueueService(
+      this.controlPool,
+      (id, user) => {
+        const daemon = this.daemons.get(id);
+        return !!daemon && daemon.ws.readyState === 1 && this.sameUser(daemon.userId, user);
+      },
+      async (userId, sessionId, item) => {
+        let rejection: string | undefined;
+        // Reuse the ordinary owner's authorization, quota admission and routing.
+        // This transport only captures synchronous pre-dispatch rejections;
+        // durable daemon evidence reconciles the claimed item afterwards.
+        const virtual = {
+          readyState: 1,
+          send: (data: string) => {
+            const response = JSON.parse(data);
+            if (response.type === 'user_message_nack' || response.type === 'error') {
+              rejection = response.reason ?? response.error ?? 'rejected';
+            }
+          },
+          close: () => {},
+        } as unknown as WebSocket;
+        this.registerClient(virtual, userId);
+        try {
+          await this.handleClientMessage(virtual, {
+            type: 'user_message', session_id: sessionId, content: item.content,
+            msg_id: item.request_id, request_id: item.request_id, queue_dispatch: true,
+          });
+        } finally { this.clients.delete(virtual); }
+        return rejection;
+      },
+      (userId, sessionId, state) => this.broadcastToUser(userId, {
+        type: 'message_queue_state', session_id: sessionId,
+        version: state.version, items: state.items, blocked: state.blocked,
+      }),
+    );
+    this.messageQueue.start();
+  }
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
   private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; hostQuotaKind?: 'zcode'|'codex'; reply?: any; timer: ReturnType<typeof setTimeout> }>();
@@ -942,6 +983,7 @@ export class Router {
   /** Release background resources (push dedup sweeper). Call on shutdown. */
   stop(): void {
     this.pushDeduper.stop();
+    this.messageQueue?.stop();
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     for (const timer of this.pendingOfflineTimers.values()) clearTimeout(timer);
     this.pendingOfflineTimers.clear();
@@ -2495,6 +2537,36 @@ export class Router {
       this.invocationRequests.set(id,{client:clientWs,daemonId:msg.daemon_id,daemonWs:daemon.ws,sessionId:'',requestId:msg.request_id,fingerprint,hostQuotaKind:msg.type === 'read_codex_host_rate_limits' ? 'codex' : 'zcode',timer});
       this.send(daemon.ws,{type:msg.type,request_id:id,...(msg.type === 'read_codex_host_rate_limits' ? {codex_home_id:msg.codex_home_id ?? ''} : {})});
       return;
+    }
+    if (msg.type === 'message_queue') {
+      const reply = (value: Record<string, unknown>) => this.send(clientWs, {
+        type: 'message_queue_state', session_id: msg.session_id, request_id: msg.request_id, ...value,
+      });
+      if (client.userId == null || typeof msg.session_id !== 'string' || !this.messageQueue) {
+        reply({ error: 'queue_unavailable' });
+        return;
+      }
+      if (msg.session_id.length > 64 || typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128) {
+        reply({ error: 'invalid_request' });
+        return;
+      }
+      try {
+        const state = await this.messageQueue.command(client.userId, msg.session_id, msg);
+        reply({ version: state.version, items: state.items, blocked: state.blocked });
+      } catch (error) {
+        const known = ['queue_unavailable', 'daemon_offline', 'invalid_request', 'request_id_conflict',
+          'queue_limit', 'queue_changed', 'already_started', 'execution_unresolved'];
+        reply({ error: error instanceof Error && known.includes(error.message) ? error.message : 'queue_result_unknown' });
+      }
+      return;
+    }
+    if ((msg.type === 'session_interrupt' || (msg.type === 'user_message' && msg.retry_of_turn_id))
+      && client.userId != null && typeof msg.session_id === 'string' && this.messageQueue) {
+      try { await this.messageQueue.hold(client.userId, msg.session_id); }
+      catch {
+        this.send(clientWs, { type: 'error', session_id: msg.session_id, request_id: msg.request_id, error: 'queue_hold_failed' });
+        return;
+      }
     }
     // These envelopes are authored only by the authenticated Team dispatcher.
     // The personal-session fallback must never become a second dispatch API.

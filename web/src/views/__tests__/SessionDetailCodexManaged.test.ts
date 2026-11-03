@@ -1,4 +1,4 @@
-import { shallowMount } from '@vue/test-utils'
+import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { nextTick, reactive, ref } from 'vue'
 import SessionDetail from '../SessionDetail.vue'
@@ -8,6 +8,19 @@ const websocketMock = vi.hoisted(() => ({
   send: vi.fn((_payload: any) => true),
 }))
 const routeMock = vi.hoisted(() => ({ current: null as any }))
+
+// Mounting the session also refreshes its project list and seen marker.
+// Keep these requests local so network failures cannot outlive the test worker.
+vi.mock('../../services/sessionOrganization', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../services/sessionOrganization')>(),
+  listProjects: vi.fn(async () => ({
+    projects: [], ungrouped_count: 0, archived_count: 0,
+    project_order_revision: 0, ungrouped_revision: 0, ungrouped_order_mode: 'activity',
+  })),
+  listOrganizedSessions: vi.fn(async () => ({ sessions: [], has_more: false, next_cursor: null, revision: 0, order_mode: 'activity' })),
+  markSessionSeen: vi.fn(async () => ({ seen: true })),
+  getSessionSummary: vi.fn(async (id: string) => ({ session_id: id })),
+}))
 
 vi.mock('vue-router', () => ({
   useRoute: () => routeMock.current,
@@ -35,10 +48,13 @@ vi.mock('../../composables/useSessionRename', () => ({
 
 const mounted: Array<ReturnType<typeof shallowMount>> = []
 beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network request in managed Codex fixture') }))
   routeMock.current = reactive({ params: { id: 'thr_1' }, query: {} as Record<string, string> })
 })
-afterEach(() => {
+afterEach(async () => {
   for (const wrapper of mounted.splice(0)) wrapper.unmount()
+  await flushPromises()
+  expect(fetch).not.toHaveBeenCalled()
   websocketMock.handlers.clear()
   websocketMock.send.mockClear()
   vi.unstubAllGlobals()

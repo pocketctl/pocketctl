@@ -141,7 +141,7 @@ func TestCodexInvocationModelsAndExportFailure(t *testing.T) {
 	}
 	meta := <-sm.outputCh
 	if meta.Type != "session_meta" || meta.ControlMode != protocol.ControlManaged ||
-		!sameStrings(meta.Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+		!sameStrings(meta.Capabilities, []string{CodexCapabilityMessageAcceptance, "message_queue_v1"}) {
 		t.Fatalf("model selection metadata revoked managed composer: %+v", meta)
 	}
 	rpc.results["thread/turns/list"] = json.RawMessage(`{"data":[],"nextCursor":"same"}`)

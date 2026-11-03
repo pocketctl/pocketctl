@@ -688,6 +688,12 @@ func (c *codexCoordinator) publishProjectedAt(events []protocol.DaemonEvent, rec
 		if discovered, ok := c.applyProjectedEvent(event); ok {
 			c.sm.outputCh <- discovered
 		}
+		if event.Type == "session_discovered" {
+			// The native projection knows only protocol capabilities. Resolve
+			// the full daemon policy after registering the discovered session,
+			// otherwise a late thread/started revokes queue support on clients.
+			event = c.sm.codexSessionMetadata(event)
+		}
 		c.sm.outputCh <- event
 		c.observeTitleEvent(event)
 	}
@@ -1520,7 +1526,8 @@ func (c *codexCoordinator) applyProjectedEvent(event protocol.DaemonEvent) (prot
 		discovered := protocol.DaemonEvent{
 			Type: "session_discovered", SessionID: event.SessionID, Status: ps.Status,
 			Agent: adapter.AgentCodex, Source: ps.Source, ControlMode: ps.ControlMode,
-			CodexHomeID: c.codexHomeID, CodexHomeLabel: c.codexHomeLabel,
+			Capabilities: c.sm.sessionCapabilitiesLocked(ps),
+			CodexHomeID:  c.codexHomeID, CodexHomeLabel: c.codexHomeLabel,
 		}
 		if event.Type == "session_status" && event.Status != "" {
 			ps.Status = event.Status

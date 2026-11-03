@@ -1902,7 +1902,7 @@ describe('SessionDetail processEvent integration', () => {
     },
   )
 
-  test.each(['session_discovered', 'session_organization_changed'])('keeps %s out of the timeline while retaining genuinely unknown live and replay events', (controlType) => {
+  test.each(['session_discovered', 'session_organization_changed', 'queue_dispatch_started', 'message_queue_state'])('keeps %s out of the timeline while retaining genuinely unknown live and replay events', (controlType) => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
     const known = { type: controlType, session_id: 'ses_1', event_id: 'known-control' }

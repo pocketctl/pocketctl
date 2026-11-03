@@ -3750,6 +3750,7 @@ func deliverUserMessage(
 	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
 	defersReceipt := agent == adapter.AgentOpencode && sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
+		QueueDispatch: cmd.QueueDispatch,
 		SessionID:     cmd.SessionID,
 		InvocationID:  cmd.InvocationID,
 		RetryOfTurnID: cmd.RetryOfTurnID,
@@ -3758,6 +3759,9 @@ func deliverUserMessage(
 		MsgID:         cmd.MsgID,
 		InputMode:     protocol.InputModeAuto,
 	})
+	if err == nil && cmd.QueueDispatch {
+		send(protocol.DaemonEvent{Type: "queue_dispatch_started", SessionID: cmd.SessionID, RequestID: cmd.RequestID, MsgID: cmd.MsgID})
+	}
 	if errors.Is(err, adapter.ErrObserverReadOnly) {
 		send(session.ObserverReadOnlyEvent("user_message", cmd.SessionID, cmd.RequestID, cmd.MsgID, err))
 		return err
@@ -3779,7 +3783,7 @@ func deliverUserMessage(
 		})
 		return err
 	}
-	if (errors.Is(err, session.ErrOpenCodeSessionBusy) || errors.Is(err, session.ErrZcodeSessionBusy)) && cmd.MsgID != "" {
+	if (errors.Is(err, session.ErrQueuedSessionBusy) || errors.Is(err, session.ErrOpenCodeSessionBusy) || errors.Is(err, session.ErrZcodeSessionBusy)) && cmd.MsgID != "" {
 		retryable := true
 		send(protocol.DaemonEvent{
 			Type: "user_message_receipt", SessionID: cmd.SessionID,
@@ -3867,7 +3871,7 @@ func handleUserMessageCommand(
 				return nil // deliverUserMessage already sent the single typed nack.
 			}
 			var pending *turn.InterruptPendingError
-			if errors.As(err, &pending) || errors.Is(err, session.ErrOpenCodeSessionBusy) {
+			if errors.As(err, &pending) || errors.Is(err, session.ErrOpenCodeSessionBusy) || errors.Is(err, session.ErrQueuedSessionBusy) {
 				return nil // correlated retryable receipt is the complete client response
 			}
 			logger.Error("send message failed", "error", err)
@@ -4158,7 +4162,11 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 
 			case "user_message":
 				handleUserMessageCommand(ctx, sm, cmd, quotaGrants, stateDirty, logger, func(event protocol.DaemonEvent) {
-					client.SendMsg(event)
+					if cmd.QueueDispatch {
+						client.SendDurableEvent(event)
+					} else {
+						client.SendMsg(event)
+					}
 				})
 
 			case "session_kill":

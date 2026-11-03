@@ -1042,6 +1042,12 @@ func (c *Client) sendHeartbeat() {
 	c.SendMsg(ping)
 }
 
+// SendDurableEvent retains dispatch evidence until Relay acknowledges it, so
+// a socket loss cannot turn a successfully dispatched queue item into a resend.
+func (c *Client) SendDurableEvent(event protocol.DaemonEvent) {
+	c.sendEvent(event)
+}
+
 func (c *Client) SendMsg(v any) {
 	// Collaboration lifecycle and receipts must share the durable ordering of
 	// session output: Relay cannot materialize a receipt before session_created.

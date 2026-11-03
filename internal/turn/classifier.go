@@ -65,6 +65,7 @@ var eventRules = map[string]Classification{
 	"daemon_shutdown":                 {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"command_receipt":                 {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"command_list":                    {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
+	"queue_dispatch_started":          {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"user_message_receipt":            {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"generate_title_request":          {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},
 	"generate_subagent_title_request": {protocol.ActorScopeRoot, protocol.FlowScopeAuxiliary, protocol.ContentClassLifecycle},

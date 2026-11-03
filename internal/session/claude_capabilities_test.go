@@ -27,14 +27,14 @@ func TestClaudeCapabilitiesAreAgentAndSourceScoped(t *testing.T) {
 	}
 }
 
-func TestManagedCodexAdvertisesMessageAcceptanceReceiptOnly(t *testing.T) {
+func TestManagedCodexAdvertisesMessageAcceptanceAndQueue(t *testing.T) {
 	t.Setenv("POCKETCTL_TRUSTED_ACTION_POLICY_V1", "off")
 	sm := NewSessionManager(nil)
 
 	managed := sm.sessionCapabilitiesLocked(&ProcessState{
 		Agent: adapter.AgentCodex, ControlMode: protocol.ControlManaged,
 	})
-	if !sameStrings(managed, []string{"message_acceptance_receipt"}) {
+	if !sameStrings(managed, []string{"message_acceptance_receipt", "message_queue_v1"}) {
 		t.Fatalf("managed Codex capabilities=%v", managed)
 	}
 	if got := sm.sessionCapabilitiesLocked(&ProcessState{
@@ -62,7 +62,7 @@ func TestSessionCapabilitiesAdvertiseTrustedActionPolicyOnlyForManagedCodexAndOp
 	sm := NewSessionManager(nil)
 
 	codex := sm.sessionCapabilitiesLocked(&ProcessState{Agent: adapter.AgentCodex, ControlMode: protocol.ControlManaged})
-	if !sameStrings(codex, []string{CodexCapabilityMessageAcceptance, TrustedActionPolicyCapability}) {
+	if !sameStrings(codex, []string{CodexCapabilityMessageAcceptance, TrustedActionPolicyCapability, "message_queue_v1"}) {
 		t.Fatalf("managed Codex capabilities=%v", codex)
 	}
 	opencode := sm.openCodeCapabilitiesLocked(&ProcessState{Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged})
@@ -113,7 +113,7 @@ func TestListSessionsIncludesManagedCodexAcceptanceCapability(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("sessions=%d, want 1", len(sessions))
 	}
-	if !sameStrings(sessions[0].Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+	if !sameStrings(sessions[0].Capabilities, []string{CodexCapabilityMessageAcceptance, "message_queue_v1"}) {
 		t.Fatalf("managed Codex list capabilities=%v", sessions[0].Capabilities)
 	}
 }
@@ -128,4 +128,33 @@ func sameStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestQueueCapabilityIsLimitedToOwnedSupportedRuntimes(t *testing.T) {
+	sm := NewSessionManager(nil)
+	for _, state := range []*ProcessState{
+		{Agent: adapter.AgentClaude, Source: "daemon"},
+		{Agent: adapter.AgentCodex, ControlMode: protocol.ControlManaged},
+		{Agent: adapter.AgentOpencode, ControlMode: protocol.ControlManaged},
+		{Agent: adapter.AgentDSH, ControlMode: protocol.ControlManaged},
+	} {
+		if !testContainsCapability(sm.sessionCapabilitiesLocked(state), "message_queue_v1") {
+			t.Fatalf("missing capability for %+v", state)
+		}
+	}
+	for _, state := range []*ProcessState{
+		{Agent: adapter.AgentClaude, Source: "terminal"},
+		{Agent: adapter.AgentCodex, ControlMode: protocol.ControlLegacyReadOnly},
+		{Agent: adapter.AgentOpencode, ControlMode: protocol.ControlUnmanagedActive},
+		{Agent: adapter.AgentZcodeManaged, ControlMode: protocol.ControlManaged},
+		{Agent: adapter.AgentCodexDesktop, Source: "observer"},
+	} {
+		if testContainsCapability(sm.sessionCapabilitiesLocked(state), "message_queue_v1") {
+			t.Fatalf("unexpected capability for %+v", state)
+		}
+	}
+	sm.turnMode = turnEnrichmentOff
+	if testContainsCapability(sm.sessionCapabilitiesLocked(&ProcessState{Agent: adapter.AgentCodex, ControlMode: protocol.ControlManaged}), "message_queue_v1") {
+		t.Fatal("queue needs authoritative turns")
+	}
 }

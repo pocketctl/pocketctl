@@ -52,6 +52,7 @@ func TestClassifyGoldenTable(t *testing.T) {
 		"daemon_shutdown":                 lifecycleAux,
 		"command_receipt":                 lifecycleAux,
 		"command_list":                    lifecycleAux,
+		"queue_dispatch_started":          lifecycleAux,
 		"user_message_receipt":            lifecycleAux,
 		"generate_title_request":          lifecycleAux,
 		"generate_subagent_title_request": lifecycleAux,

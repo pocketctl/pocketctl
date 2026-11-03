@@ -46,6 +46,9 @@ func TestCodexCoordinatorProjectsRuntimeEventsIntoSessionManager(t *testing.T) {
 		t.Fatalf("session=%+v", ps)
 	}
 	first, second, third := <-output, <-output, <-output
+	if !testContainsCapability(first.Capabilities, "message_queue_v1") {
+		t.Fatalf("native thread discovery revoked queue capability: %+v", first)
+	}
 	if first.Type != "session_discovered" || second.Type != protocol.EventTypeTurnStatus ||
 		second.SourceTurnID != "turn_1" || third.Type != "session_status" {
 		t.Fatalf("events=%+v %+v %+v", first, second, third)
@@ -339,7 +342,7 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 				}
 				if event.Type == "session_meta" {
 					seenMeta = true
-					if event.ControlMode != protocol.ControlManaged || !sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+					if event.ControlMode != protocol.ControlManaged || !sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance, "message_queue_v1"}) {
 						t.Fatalf("restored metadata revoked managed composer: %+v", event)
 					}
 				}
@@ -379,7 +382,7 @@ func TestCodexInitialModelRefreshPreservesManagedComposer(t *testing.T) {
 	select {
 	case event := <-output:
 		if event.Type != "session_meta" || event.Model != "gpt-5.6" || event.ControlMode != protocol.ControlManaged ||
-			!sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance}) {
+			!sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance, "message_queue_v1"}) {
 			t.Fatalf("initial model metadata revoked managed composer: %+v", event)
 		}
 	case <-time.After(time.Second):
