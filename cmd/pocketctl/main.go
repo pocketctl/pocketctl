@@ -3750,12 +3750,13 @@ func deliverUserMessage(
 	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
 	defersReceipt := agent == adapter.AgentOpencode && sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
-		SessionID:    cmd.SessionID,
-		InvocationID: cmd.InvocationID,
-		Content:      cmd.Content,
-		RequestID:    cmd.RequestID,
-		MsgID:        cmd.MsgID,
-		InputMode:    protocol.InputModeAuto,
+		SessionID:     cmd.SessionID,
+		InvocationID:  cmd.InvocationID,
+		RetryOfTurnID: cmd.RetryOfTurnID,
+		Content:       cmd.Content,
+		RequestID:     cmd.RequestID,
+		MsgID:         cmd.MsgID,
+		InputMode:     protocol.InputModeAuto,
 	})
 	if errors.Is(err, adapter.ErrObserverReadOnly) {
 		send(session.ObserverReadOnlyEvent("user_message", cmd.SessionID, cmd.RequestID, cmd.MsgID, err))

@@ -1,4 +1,8 @@
 {
+  "session.prompt_you": "You",
+  "session.prompt_return": "Return to your latest message: {{text}}",
+  "session.prompt_return_short": "Return to this message",
+  "session.prompt_unavailable": "Unable to locate this message. Please try again.",
   "team.offline_navigation": "Showing previously synced teams and tasks for read-only access. Reconnect and refresh to make changes.",
   "team.holder.title": "Claim and release",
   "team.holder.advisory": "Claiming records responsibility without starting an Agent. Releasing preserves the task and execution history.",
@@ -2367,5 +2371,12 @@
   "memory.manual.types.implementation_map": "Implementation map",
   "memory.manual.types.operational_runbook": "Operational runbook",
   "memory.manual.types.work_method": "Work method",
-  "memory.manual.types.reusable_skill_candidate": "Reusable skill candidate"
+  "memory.manual.types.reusable_skill_candidate": "Reusable skill candidate",
+  "session.reply_copy": "Copy answer",
+  "session.reply_copy_partial": "Copy generated content",
+  "session.reply_streaming": "Replying",
+  "session.reply_waiting": "Waiting for your response",
+  "session.reply_recorded": "Reply recorded",
+  "session.reply_history_partial": "Earlier content is not loaded",
+  "session.reply_new_content": "New content"
 }

@@ -875,6 +875,7 @@ func (c *dshCoordinator) durable(id string, e dshEvent, history bool, currentTur
 		delete(c.correlations, msg.Source.RPCID)
 		c.mu.Unlock()
 		base.RequestID, base.MsgID = corr.RequestID, corr.MsgID
+		base.RetryOfTurnID = corr.RetryOfTurnID
 		c.sm.outputCh <- base
 	case "assistant/message":
 		if data.Usage != nil {

@@ -89,6 +89,7 @@ const (
 
 // Client → Daemon commands
 type ClientMessage struct {
+	RetryOfTurnID string                      `json:"retry_of_turn_id,omitempty"`
 	ForkFrom      string                      `json:"fork_from,omitempty"`
 	InvocationID  string                      `json:"invocation_id,omitempty"`
 	Path          string                      `json:"path,omitempty"`
@@ -217,6 +218,7 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
+	RetryOfTurnID  string                      `json:"retry_of_turn_id,omitempty"`
 	AppliedConfig  *TeamRuntimeConfig          `json:"applied_config,omitempty"`
 	ConfigRevision int64                       `json:"config_revision,omitempty"`
 	ConfigHash     string                      `json:"config_hash,omitempty"`

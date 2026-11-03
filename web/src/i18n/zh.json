@@ -1,4 +1,8 @@
 {
+  "session.prompt_you": "你",
+  "session.prompt_return": "回到你最新发送的消息：{{text}}",
+  "session.prompt_return_short": "回到这条消息",
+  "session.prompt_unavailable": "暂时无法定位这条消息，请重试",
   "team.offline_navigation": "当前显示上次同步的团队与任务。仅供离线查阅，恢复连接并刷新后才能操作。",
   "team.holder.title": "认领与释放",
   "team.holder.advisory": "认领只记录负责人，不会启动 Agent；释放保留任务内容和执行记录。",
@@ -2367,5 +2371,12 @@
   "memory.manual.types.implementation_map": "实现说明",
   "memory.manual.types.operational_runbook": "操作规程",
   "memory.manual.types.work_method": "工作方法",
-  "memory.manual.types.reusable_skill_candidate": "可复用技能候选"
+  "memory.manual.types.reusable_skill_candidate": "可复用技能候选",
+  "session.reply_copy": "复制回答",
+  "session.reply_copy_partial": "复制已生成内容",
+  "session.reply_streaming": "正在回复",
+  "session.reply_waiting": "等待你的处理",
+  "session.reply_recorded": "回复记录",
+  "session.reply_history_partial": "前文尚未加载",
+  "session.reply_new_content": "新内容"
 }

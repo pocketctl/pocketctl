@@ -228,7 +228,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		// would duplicate.
 		if src != "terminal" && agent != adapter.AgentCodex && agent != adapter.AgentDSH {
 			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content,
-				RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID}
+				RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID, RetryOfTurnID: correlation.RetryOfTurnID}
 		}
 		if hidden != nil {
 			if aware, ok := ps.Backend.(interface {
@@ -294,12 +294,13 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		} else {
 			// Emit user_text for UI (the tailer also forwards claude's own records).
 			sm.outputCh <- protocol.DaemonEvent{
-				Type:      "user_text",
-				SessionID: ps.SessionID,
-				Text:      content,
-				RequestID: correlation.RequestID,
-				MsgID:     correlation.MsgID,
-				TurnID:    correlation.TurnID,
+				Type:          "user_text",
+				SessionID:     ps.SessionID,
+				Text:          content,
+				RequestID:     correlation.RequestID,
+				MsgID:         correlation.MsgID,
+				RetryOfTurnID: correlation.RetryOfTurnID,
+				TurnID:        correlation.TurnID,
 			}
 			sm.mu.Lock()
 			ps.Status = protocol.StatusRunning
@@ -428,12 +429,13 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 
 	// claude -p (stream-json) does not echo the user's message, so emit it ourselves.
 	sm.outputCh <- protocol.DaemonEvent{
-		Type:      "user_text",
-		SessionID: ps.SessionID,
-		Text:      content,
-		RequestID: correlation.RequestID,
-		MsgID:     correlation.MsgID,
-		TurnID:    correlation.TurnID,
+		Type:          "user_text",
+		SessionID:     ps.SessionID,
+		Text:          content,
+		RequestID:     correlation.RequestID,
+		MsgID:         correlation.MsgID,
+		RetryOfTurnID: correlation.RetryOfTurnID,
+		TurnID:        correlation.TurnID,
 	}
 	go func() {
 		sm.drainStreamOutput(proc.Stdout(), adp, ps)

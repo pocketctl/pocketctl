@@ -455,6 +455,16 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 	if response.Turn.ID != "" {
 		b.coord.setActiveTurn(threadID, response.Turn.ID)
 		b.reserveNativeTurn(threadID, response.Turn.ID)
+		// Persist retry identity as an authoritative echo. Native user items
+		// can arrive before the RPC reply; clients reconcile by this exact turn.
+		if correlation := userMessageCorrelationFrom(ctx); correlation.RetryOfTurnID != "" {
+			b.sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: threadID,
+				Text: content, MsgID: correlation.MsgID, RequestID: correlation.RequestID,
+				TurnID:        logicalCodexTurnID(threadID, response.Turn.ID),
+				RetryOfTurnID: correlation.RetryOfTurnID,
+				EventID:       "reply-retry:" + correlation.MsgID}
+		}
+
 	}
 	return nil
 }

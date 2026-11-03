@@ -52,6 +52,73 @@ vi.mock('../../services/sessionOrganization', () => ({
 }))
 
 describe('SessionDetail history loading', () => {
+  test('replayed retry echoes retain one question and separate copy ranges', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const vm=wrapper.vm as any
+    for (const event of [
+      {type:'user_text',text:'Question',turn_id:'root',event_id:'q'},
+      {type:'agent_text',text:'Original answer',turn_id:'root'},
+      {type:'user_text',text:'Question',turn_id:'attempt',retry_of_turn_id:'root',msg_id:'retry-id',event_id:'retry-echo'},
+      {type:'user_text',text:'Question',turn_id:'attempt',event_id:'native',part_id:'native-part'},
+      {type:'agent_text',text:'New answer',turn_id:'attempt'},
+    ]) vm.processEvent({...event,session_id:'session-http-lan'})
+    await flushPromises()
+    expect(wrapper.findAll('[data-user-message-id]')).toHaveLength(1)
+    expect(wrapper.findAllComponents({name:'ReplyFooter'}).map(f=>f.props('content'))).toEqual(['Original answer','New answer'])
+    expect(vm.messages.filter((m:any)=>m.role==='user')).toHaveLength(2)
+    expect(vm.latestPrompt.id).toBe(String(vm.messages.find((m:any)=>m.turn_id==='root').id))
+    wrapper.unmount()
+  })
+
+  test('groups all answer paragraphs around tools into one reply and keeps two questions separate', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.messages = [
+      {id:'q1',role:'user',type:'user_text',content:'First question'},
+      {id:'a1',role:'agent',type:'agent_text',content:'First paragraph'},
+      {id:'t1',role:'agent',type:'tool_call',tool:'Read',content:''},
+      {id:'a2',role:'agent',type:'agent_text',content:'Second paragraph'},
+      {id:'q2',role:'user',type:'user_text',content:'Second question'},
+      {id:'a3',role:'agent',type:'agent_text',content:'Another answer'},
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.unified-reply')).toHaveLength(2)
+    expect(wrapper.findAll('.reply-identity')).toHaveLength(2)
+    const footers=wrapper.findAllComponents({name:'ReplyFooter'})
+    expect(footers).toHaveLength(2)
+    expect(footers[0].props('content')).toBe('First paragraph\n\nSecond paragraph')
+    expect(wrapper.findAll('[data-user-message-id]')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  test('only the latest accepted user prompt anchors the stream and a jump stops live following', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.processEvent({ type: 'user_text', session_id: 'session-http-lan', text: 'Original question', msg_id: 'question' })
+    vm.processEvent({ type: 'agent_text', session_id: 'session-http-lan', text: 'A long reply' })
+    vm.messages.push({ id: 'pending', role: 'user', type: 'user_text', content: 'Unsent question', deliveryStatus: 'pending' })
+    await flushPromises()
+    const anchor = wrapper.findComponent({ name: 'SessionPromptAnchor' })
+    expect(anchor.exists()).toBe(true)
+    expect(anchor.props('message')?.text).toBe('Original question')
+    anchor.vm.$emit('navigate')
+    await flushPromises()
+    expect(vm.autoScroll).toBe(false)
+    vm.messages.at(-1).deliveryStatus = 'accepted'
+    await flushPromises()
+    expect(anchor.props('message')?.text).toBe('Unsent question')
+    routeMock.current.params.id = 'another-session'
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'SessionPromptAnchor' }).props('message')).toBeNull()
+    wrapper.unmount()
+  })
+
   test('a failed body read shows retry and does not claim that the conversation is empty', async () => {
     const wrapper = shallowMount(SessionDetail)
     await flushPromises()

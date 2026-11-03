@@ -69,6 +69,7 @@ export type InputMode = 'new_turn' | 'steer' | 'auto'
 /** The only browser-originated command that carries user-provided turn input. */
 export interface UserMessageCommand {
   invocation_id?: string
+  retry_of_turn_id?: string
   type: 'user_message'
   session_id: string
   content: string
