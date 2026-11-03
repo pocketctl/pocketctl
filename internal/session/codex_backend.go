@@ -318,6 +318,9 @@ func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, 
 
 func (b *CodexAppServerBackend) sendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
 	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
+		if userMessageCorrelationFrom(ctx).InputMode == protocol.InputModeNewTurn {
+			return ErrQueuedSessionBusy
+		}
 		// Steering stays addendum-only: no pack, no injection.
 		return b.send(ctx, sessionID, content)
 	}
@@ -348,6 +351,9 @@ func (b *CodexAppServerBackend) send(ctx context.Context, sessionID, content str
 	}
 	input := []map[string]string{{"type": "text", "text": content}}
 	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
+		if userMessageCorrelationFrom(ctx).InputMode == protocol.InputModeNewTurn {
+			return ErrQueuedSessionBusy
+		}
 		params := map[string]any{"threadId": sessionID, "expectedTurnId": turnID, "input": input}
 		if err := b.client.Call(ctx, "turn/steer", params, nil); err != nil {
 			return fmt.Errorf("Codex turn/steer: %w", err)

@@ -762,3 +762,39 @@ func (f grantTransportFunc) RequestContextGrant(ctx context.Context, requestID, 
 func (f grantTransportFunc) RegisterSession(ctx context.Context, requestID, sessionID string) (*protocol.SessionRegistrationAck, error) {
 	return nil, errors.New("unsupported in test")
 }
+
+func TestQueuedMessageNeverSteersActiveTurn(t *testing.T) {
+	for _, mode := range []turnEnrichmentMode{turnEnrichmentObserve, turnEnrichmentEnforce} {
+		sm, pty := newTurnTestManager(t)
+		sm.turnMode = mode
+		if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "turn-sess", Content: "first", RequestID: "first"}); err != nil {
+			t.Fatal(err)
+		}
+		before := pty.String()
+		err := sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "turn-sess", Content: "queued", RequestID: "queued", QueueDispatch: true})
+		if !errors.Is(err, ErrQueuedSessionBusy) {
+			t.Fatalf("mode %v: error=%v", mode, err)
+		}
+		if pty.String() != before {
+			t.Fatal("queued message wrote to active PTY")
+		}
+	}
+}
+
+func TestQueuedMessageStartsFreshTurnAndRequiresCapability(t *testing.T) {
+	sm, pty := newTurnTestManager(t)
+	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "turn-sess", Content: "queued", RequestID: "queued", QueueDispatch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if pty.Len() == 0 {
+		t.Fatal("idle queued message was not dispatched")
+	}
+	sm2, pty2 := newTurnTestManager(t)
+	sm2.turnMode = turnEnrichmentOff
+	if err := sm2.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "turn-sess", Content: "queued", QueueDispatch: true}); err == nil {
+		t.Fatal("queue accepted without turn lifecycle")
+	}
+	if pty2.Len() != 0 {
+		t.Fatal("unsupported queue dispatched")
+	}
+}

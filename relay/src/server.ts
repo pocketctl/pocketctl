@@ -1152,6 +1152,7 @@ async function main() {
       }),
     } : {}),
   });
+  router.startMessageQueue();
   teamDispatchService = new TeamDispatchService(pool, {
     ownsDaemon: (daemonId,ownerUserId) => router.ownsTeamDaemon(daemonId,ownerUserId),
     send: input => router.sendTeamCommand(input.daemonId, input.ownerUserId, input.capability, input.command),

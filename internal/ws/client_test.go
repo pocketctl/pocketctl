@@ -2266,3 +2266,22 @@ func TestRelayRestartingReconnectsWithoutServerClose(t *testing.T) {
 		t.Fatalf("daemon did not reconnect after relay_restarting without server close: connections = %d", got)
 	}
 }
+
+func TestQueuedDispatchEvidenceSurvivesDisconnectedTransport(t *testing.T) {
+	c := newTestClient("ws://example")
+	for _, kind := range []string{"queue_dispatch_started", "user_message_receipt", "error"} {
+		c.SendDurableEvent(protocol.DaemonEvent{Type: kind, SessionID: "queue-session", RequestID: "queue-request"})
+	}
+	if len(c.outBuf) != 3 {
+		t.Fatalf("lost queue evidence: buffered=%d", len(c.outBuf))
+	}
+	for i, event := range c.outBuf {
+		var decoded protocol.DaemonEvent
+		if err := json.Unmarshal(event.data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if event.seq != int64(i+1) || decoded.RequestID != "queue-request" {
+			t.Fatalf("incorrect durable evidence: %+v", decoded)
+		}
+	}
+}

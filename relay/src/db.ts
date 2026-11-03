@@ -1,3 +1,4 @@
+import { initMessageQueueSchema } from './session-message-queue/schema.js';
 import {initMaintenanceSummarySchema} from './session-lifecycle/maintenance-summary.js';
 import { initSessionShareSchema } from './session-share/store.js';
 import { initPreferenceSchema } from './user-preferences.js';
@@ -853,6 +854,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initSessionOrganizationSchema(pool);
   await initSessionLifecycleSchema(pool);
   await initSessionHistoryBodySchema(pool);
+  await initMessageQueueSchema(pool);
   await initArchiveObjectJobSchema(pool);
   await initSessionDocumentBodySchema(pool);
   await initSessionUsageRetentionSchema(pool);

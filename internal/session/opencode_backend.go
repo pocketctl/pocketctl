@@ -1922,7 +1922,7 @@ var opencodeInteractionCapabilities = []string{
 func (sm *SessionManager) OpenCodeInteractionCapabilities(sessionID string) []string {
 	sm.mu.RLock()
 	state := sm.sessions[sessionID]
-	capabilities := sm.openCodeCapabilitiesLocked(state)
+	capabilities := sm.sessionCapabilitiesLocked(state)
 	sm.mu.RUnlock()
 	return capabilities
 }

@@ -2637,3 +2637,19 @@ func TestClassifyCreateErrorCodexConfiguration(t *testing.T) {
 }
 
 func (*recordingDaemonMessageSender) SetAgentInventory([]discovery.AgentInfo) bool { return true }
+
+func TestQueuedDispatchEvidenceRequiresSuccessfulDispatch(t *testing.T) {
+	for _, dispatchErr := range []error{nil, session.ErrQueuedSessionBusy} {
+		var events []protocol.DaemonEvent
+		_ = deliverUserMessage(context.Background(), promptReceiptSessionStub{agent: adapter.AgentCodex, controlMode: protocol.ControlManaged, sendErr: dispatchErr}, protocol.ClientMessage{
+			Type: "user_message", SessionID: "queue-session", MsgID: "queue-message", RequestID: "queue-request", Content: "queued", QueueDispatch: true,
+		}, func(event protocol.DaemonEvent) { events = append(events, event) })
+		if dispatchErr == nil {
+			if len(events) != 2 || events[0].Type != "queue_dispatch_started" || events[0].RequestID != "queue-request" {
+				t.Fatalf("missing dispatch evidence: %+v", events)
+			}
+		} else if len(events) != 1 || events[0].Type != "user_message_receipt" || events[0].Status != "rejected" || events[0].Reason != protocol.ReasonSessionBusy {
+			t.Fatalf("busy dispatch evidence: %+v", events)
+		}
+	}
+}

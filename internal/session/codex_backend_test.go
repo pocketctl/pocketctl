@@ -720,3 +720,23 @@ func TestCodexCreationAppliesEffortAndPermissionAtThreadStart(t *testing.T) {
 		t.Fatalf("native creation settings: %+v", params)
 	}
 }
+
+func TestCodexQueuedNewTurnRejectsNativeBusyWithoutSteering(t *testing.T) {
+	for _, withContext := range []bool{false, true} {
+		b, rpc := nativeMemoryCodexBackend(t)
+		b.coord.setActiveTurn("thread", "active-native-turn")
+		ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{InputMode: protocol.InputModeNewTurn})
+		var err error
+		if withContext {
+			err = b.SendWithContext(ctx, "thread", "queued", nil)
+		} else {
+			err = b.Send(ctx, "thread", "queued")
+		}
+		if !errors.Is(err, ErrQueuedSessionBusy) {
+			t.Fatalf("busy error=%v", err)
+		}
+		if len(rpc.calls) != 0 {
+			t.Fatalf("queued message made native calls: %+v", rpc.calls)
+		}
+	}
+}

@@ -59,6 +59,7 @@ func (sm *SessionManager) turnEnabled() bool { return sm.turnMode != turnEnrichm
 // callers keep the SendMessage wrapper; the relay daemon handler populates
 // RequestID/MsgID so the daemon actually uses the relay-guaranteed ids.
 type UserMessageInput struct {
+	QueueDispatch bool
 	RetryOfTurnID string
 	InvocationID  string
 	SessionID     string
@@ -75,6 +76,8 @@ type UserMessageInput struct {
 	// Relay session-registration ACK timed out. The prompt still dispatches.
 	SkipMemoryContext bool
 }
+
+var ErrQueuedSessionBusy = errors.New("queued session busy")
 
 var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
 
@@ -355,6 +358,23 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	if err != nil {
 		return err
 	}
+	if in.QueueDispatch {
+		sm.mu.RLock()
+		supported := false
+		for _, capability := range sm.sessionCapabilitiesLocked(sm.sessions[in.SessionID]) {
+			if capability == "message_queue_v1" {
+				supported = true
+			}
+		}
+		sm.mu.RUnlock()
+		if !supported {
+			return fmt.Errorf("queue unsupported")
+		}
+		if active, ok := sm.turns.Active(turn.ActorKey{SessionID: in.SessionID}); ok && turn.IsActive(active.State) {
+			return ErrQueuedSessionBusy
+		}
+		in.InputMode = protocol.InputModeNewTurn
+	}
 	if in.RetryOfTurnID != "" {
 		if len(in.RetryOfTurnID) > 256 || in.InvocationID != "" {
 			return fmt.Errorf("invalid reply retry")
@@ -448,7 +468,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	}
 	rec, err := sm.turns.Start(start)
 	if err != nil {
-		if sm.turnMode != turnEnrichmentEnforce && asInterruptPending(err) {
+		if !in.QueueDispatch && sm.turnMode != turnEnrichmentEnforce && asInterruptPending(err) {
 			// observe mode: do not strand the input on a pending interrupt
 			return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 		}

@@ -89,6 +89,7 @@ const (
 
 // Client → Daemon commands
 type ClientMessage struct {
+	QueueDispatch bool                        `json:"queue_dispatch,omitempty"`
 	RetryOfTurnID string                      `json:"retry_of_turn_id,omitempty"`
 	ForkFrom      string                      `json:"fork_from,omitempty"`
 	InvocationID  string                      `json:"invocation_id,omitempty"`
