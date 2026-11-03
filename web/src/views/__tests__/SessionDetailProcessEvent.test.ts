@@ -72,7 +72,7 @@ describe('SessionDetail processEvent integration', () => {
     vm.processEvent({type: 'turn_status', turn_id: 'footer-turn', turn_status: 'interrupted'})
     vm.status = 'idle'
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('.status-text').text()).toBe('workspace.interrupted')
+    expect(wrapper.findAllComponents({ name: 'ReplyFooter' }).at(-1)?.props('status')).toBe('interrupted')
     wrapper.unmount()
   })
 
@@ -135,7 +135,7 @@ describe('SessionDetail processEvent integration', () => {
     restored.unmount()
   })
 
-  test('mobile compacts only replies following visible tool groups', async () => {
+  test('mobile keeps one reply identity around tools and questions', async () => {
     responsiveMock.isMobile.value = true
     localStorage.setItem('pocketctl.mobile.showToolCalls', 'true')
     const wrapper = shallowMount(SessionDetail)
@@ -149,7 +149,8 @@ describe('SessionDetail processEvent integration', () => {
       { id: 'reply2', type: 'agent_text', content: 'After question' },
     ]
     await wrapper.vm.$nextTick()
-    expect(wrapper.findAll('.tool-followup')).toHaveLength(1)
+    expect(wrapper.findAll('.reply-identity')).toHaveLength(1)
+    expect(wrapper.findAll('.reply-paragraph')).toHaveLength(2)
     expect([...vm.toolFollowupIDs]).toEqual(['reply'])
     vm.mobileShowToolCalls = false
     await wrapper.vm.$nextTick()

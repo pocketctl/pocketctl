@@ -59,12 +59,13 @@ func (sm *SessionManager) turnEnabled() bool { return sm.turnMode != turnEnrichm
 // callers keep the SendMessage wrapper; the relay daemon handler populates
 // RequestID/MsgID so the daemon actually uses the relay-guaranteed ids.
 type UserMessageInput struct {
-	InvocationID string
-	SessionID    string
-	Content      string
-	RequestID    string
-	MsgID        string
-	InputMode    string // auto|new_turn|steer; empty = auto
+	RetryOfTurnID string
+	InvocationID  string
+	SessionID     string
+	Content       string
+	RequestID     string
+	MsgID         string
+	InputMode     string // auto|new_turn|steer; empty = auto
 	// HiddenContext is the Phase 2 native hidden-context payload for this
 	// new turn. Content stays the exact user input for echo, receipts,
 	// titles, Relay events and turn identity.
@@ -78,10 +79,11 @@ type UserMessageInput struct {
 var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
 
 type userMessageCorrelation struct {
-	InputMode string
-	RequestID string
-	MsgID     string
-	TurnID    string
+	RetryOfTurnID string
+	InputMode     string
+	RequestID     string
+	MsgID         string
+	TurnID        string
 }
 
 type userMessageCorrelationKey struct{}
@@ -353,8 +355,17 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	if err != nil {
 		return err
 	}
+	if in.RetryOfTurnID != "" {
+		if len(in.RetryOfTurnID) > 256 || in.InvocationID != "" {
+			return fmt.Errorf("invalid reply retry")
+		}
+		if active, ok := sm.turns.Active(turn.ActorKey{SessionID: in.SessionID}); ok && turn.IsActive(active.State) && !active.Restored {
+			return &turn.ActiveTurnError{TurnID: active.TurnID, State: active.State}
+		}
+		in.InputMode = protocol.InputModeNewTurn
+	}
 	ctx = context.WithValue(ctx, codexInvocationKey{}, in.InvocationID)
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode, RetryOfTurnID: in.RetryOfTurnID})
 	if agent == adapter.AgentCodex && (in.InvocationID == "command:review" || in.InvocationID == "command:compact") {
 		_, err := sm.invokeCodexCommand(ctx, in.SessionID, in.Content, in.InvocationID, true)
 		return err
@@ -444,7 +455,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		return err
 	}
 	sm.emitTurnStatus(rec, protocol.TurnStateRunning, "")
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID, RetryOfTurnID: in.RetryOfTurnID})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
 		if !in.SuppressContextReceipt {

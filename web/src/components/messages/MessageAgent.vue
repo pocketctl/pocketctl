@@ -6,7 +6,7 @@
        markdown + highlight + sanitize on every chunk dominates output latency.
        The final content switches back to the full markdown renderer. -->
   <div class="agent-block">
-    <div class="block-role">{{ agentReplyLabel(agentType) }}</div>
+    <div v-if="showLabel !== false" class="block-role">{{ agentReplyLabel(agentType) }}</div>
     <div :class="['agent-body', { streaming }]">
       <div v-if="streaming" class="streaming-text">{{ content }}</div>
       <MarkdownRenderer v-else :content="content" />
@@ -19,7 +19,7 @@
 import MarkdownRenderer from '../MarkdownRenderer.vue'
 import { agentReplyLabel } from '../../utils/agentDisplay'
 
-defineProps<{ content: string; streaming?: boolean; agentType?: string }>()
+defineProps<{ content: string; streaming?: boolean; agentType?: string; showLabel?: boolean }>()
 </script>
 
 <style scoped>

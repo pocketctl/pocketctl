@@ -268,11 +268,15 @@
       <ZcodeQuota v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
         :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
+      <div class="chat-message-viewport">
+      <SessionPromptAnchor :message="latestPrompt" :container="messagesEl" :context="loadKey" @navigate="beginPromptReading" />
       <div
         ref="messagesEl"
         class="chat-messages"
         :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
         @scroll="onMessagesScroll"
+        @wheel.passive="promptReading = false"
+        @touchstart.passive="promptReading = false"
       >
         <button v-if="returnTeamSessionID && returnTeamID" type="button" class="banner banner-info team-return-banner" @click="returnToTeamSession"> {{ t('workspace.return_shared_session') }} </button>
         <div v-if="!isComposerVisible" class="messages-bottom-spacer" aria-hidden="true"></div>
@@ -343,17 +347,19 @@
         </div>
 
         <!-- Messages -->
-        <div v-for="msg in renderMessages" :key="msg.id" class="session-timeline-entry" :data-history-message-id="msg.id">
+        <component v-for="reply in replyRows" :key="reply.id" :is="reply.kind === 'reply' ? 'article' : 'div'"
+          :class="reply.kind === 'reply' ? 'unified-reply' : 'reply-message-entry'" :data-reply-id="reply.kind === 'reply' ? reply.id : undefined"
+          :aria-label="reply.kind === 'reply' ? replyAgentLabel : undefined">
+          <header v-if="reply.kind === 'reply'" class="reply-identity"><span class="reply-mark" aria-hidden="true">{{ replyAgentLabel.slice(0, 1) }}</span>{{ replyAgentLabel }}</header>
+          <p v-if="reply.kind === 'reply' && reply.partial && hasMore" class="reply-partial">{{ t('session.reply_history_partial') }}</p>
+        <div v-for="msg in reply.messages" :key="msg.id" class="session-timeline-entry" :data-history-message-id="msg.id">
           <div v-if="turnHeaderFor(msg)" class="turn-group-header" :data-turn-id="msg.turn_id" :data-turn-segment-id="turnHeaderFor(msg)?.id">
-            <span class="turn-group-label">Turn</span>
-            <span v-if="turnHeaderFor(msg)?.interrupted" class="turn-group-state"> {{ t('workspace.interrupted') }} </span>
-            <span v-else-if="turnHeaderFor(msg)?.status" class="turn-group-state">{{ turnHeaderFor(msg)?.status }}</span>
-            <span v-if="turnHeaderFor(msg)?.continuedAfterInterrupt" class="turn-group-continuation"> {{ t('workspace.continued_after_interrupt') }} </span>
+
             <button v-if="turnHeaderFor(msg)?.auxiliary.length" type="button" class="turn-group-aux-toggle" :aria-expanded="isAuxiliaryExpanded(turnHeaderFor(msg)?.id)" :aria-label="t('workspace.turn_auxiliary_stream', {id:msg.turn_id})" @click="toggleAuxiliary(turnHeaderFor(msg)?.id)">{{ t('workspace.auxiliary_streams', {count:turnHeaderFor(msg)?.auxiliary.length || 0}) }}</button>
           </div>
           <template v-if="!isHiddenAuxiliary(msg) && !isToolGroupContinuation(msg)">
           <!-- User message (right bubble) -->
-          <article v-if="msg.role === 'user'" class="session-message-row member"><span class="message-avatar">{{ (user?.display_name || user?.email || t('team.me')).slice(0,1).toUpperCase() }}</span><div class="message-body"><div class="message-byline">{{ user?.display_name || user?.email?.split('@')[0] || t('team.me') }}</div>
+          <article v-if="msg.role === 'user'" class="session-message-row member" :data-user-message-id="String(msg.id)" tabindex="-1" :aria-label="t('team.me')"><div class="message-body">
           <MessageUser
             :content="cleanContent(msg.content)"
             :data-delivery-status="msg.deliveryStatus || undefined"
@@ -361,9 +367,10 @@
 
           </div></article>
           <!-- Agent text message -->
-          <article v-else-if="msg.type === 'agent_text'" class="session-message-row" :class="{ 'tool-followup': isMobile && toolFollowupIDs.has(msg.id) }"><span class="message-avatar agent">C</span><div class="message-body"><div class="message-byline">{{ (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'claude-code' ? 'Claude Code' : (focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent) === 'codex' ? 'Codex' : currentSessionAgent || 'Agent' }}</div>
+          <article v-else-if="msg.type === 'agent_text'" class="session-message-row reply-paragraph"><div class="message-body">
           <MessageAgent
             :content="cleanContent(msg.content)"
+            :show-label="false"
             :streaming="msg.streaming"
             :agent-type="focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent"
           />
@@ -490,10 +497,16 @@
           </template>
         </div>
 
+          <ReplyFooter v-if="reply.kind === 'reply'" :status="statusForReply(reply)" :content="cleanContent(replyText(reply))"
+            :duration="isLatestReply(reply) ? (isTurnWorking && turnStartTime !== null ? fmtDuration(turnElapsed) : lastTurnDuration !== null ? fmtDuration(lastTurnDuration) : undefined) : undefined"
+            :ended-at="isLatestReply(reply) && completedBarVisible && completedTurnEndedAt ? t('session.ended_at', { time: formatDateTime(completedTurnEndedAt) }) : undefined"
+            :usage="isLatestReply(reply) && lastAgentUsage?.output_tokens ? t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) : undefined"
+            :can-retry="isLatestReply(reply) && !!reply.prompt?.turn_id && canInput && !isTurnWorking && !focusedSubAgentId" @retry="retryLastPrompt" />
+        </component>
         <!-- Turn status bar: lives inside the message stream (visually part of
              it), below the last message. Live timer while working; on completion
              shows total duration + output tokens + a copy button. -->
-        <div v-if="!focusedSubAgentId && (isTurnWorking || completedBarVisible)" class="turn-status-bar" :class="{ done: completedBarVisible }">
+        <div v-if="!focusedSubAgentId && ((isTurnWorking && !replyRows.some(row => row.kind === 'reply' && isLatestReply(row))) || (completedBarVisible && !replyRows.some(row => row.kind === 'reply')))" class="turn-status-bar" :class="{ done: completedBarVisible }">
           <template v-if="isTurnWorking">
             <span class="status-dot working"></span>
             <span class="status-text">{{ t('session.creating') }}</span>
@@ -525,15 +538,16 @@
           @refresh="refreshSessionDocuments"
         />
       </div>
+      </div>
 
       <!-- Chat Input — unified container with embedded controls -->
       <div ref="composerEl" class="chat-input-area" :class="{ ended: !isComposerVisible, 'composer-focused': isInputFocused }">
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
-          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" :title="t('session.scroll_to_bottom')" @click="scrollToBottom">
+          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" :class="{ 'has-unread': hasUnreadReply }" :title="t('session.scroll_to_bottom')" @click="scrollToBottom">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
-          </button>
+          <span v-if="hasUnreadReply">{{ t('session.reply_new_content') }}</span></button>
         </Transition>
         <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
         <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations"> {{ t('memory.git.refresh') }} </button></div>
@@ -760,6 +774,11 @@ import DSHModelSettings from '../components/DSHModelSettings.vue'
 import CommandReceiptCard from '../components/CommandReceiptCard.vue'
 import CommandHelpModal from '../components/CommandHelpModal.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
+import SessionPromptAnchor from '../components/messages/SessionPromptAnchor.vue'
+import { latestSentPrompt } from '../utils/sessionPrompt'
+import ReplyFooter from '../components/messages/ReplyFooter.vue'
+import { associateReplyRetries, projectReplies, replyText, replyStatus, type ReplyGroup } from '../utils/replyProjection'
+import { agentReplyLabel } from '../utils/agentDisplay'
 import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
 import { useLocale } from '../composables/useLocale'
@@ -1265,6 +1284,7 @@ const currentPermLabel = computed(() => permissionTitleKey(currentPermission.val
 const permissionCanChange = computed(() => !isReadOnlyObserverSession.value && permissionMutable.value && !isExecuting.value && !isDisconnected.value && !pendingPermission.value)
 const exitedAt = ref('')
 const autoScroll = ref(true)
+const hasUnreadReply = ref(false)
 const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const composerEl = ref<HTMLElement | null>(null)
@@ -1680,9 +1700,37 @@ const focusedSubAgentTokenTotal = computed(() => {
 })
 // Render source: the focused sub-agent's bucket when focusing, else parent messages.
 const sourceMessages = computed<any[]>(() =>
-  focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value,
+  associateReplyRetries(focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value),
 )
 const renderMessages = computed(() => sourceMessages.value.filter(message => showsMobileMessage(message, showToolCalls.value)))
+const replyRows = computed(() => projectReplies(renderMessages.value))
+const lastQuestionForReply = computed(() => [...sourceMessages.value].reverse().find(m => m.role === 'user' && !m.retry_of_turn_id && (!m.deliveryStatus || m.deliveryStatus === 'accepted')))
+const replyAgentLabel = computed(() => agentReplyLabel(focusedSubAgentId.value ? focusedSubAgentInfo.value?.agentType : currentSessionAgent.value))
+function isLatestReply(reply: ReplyGroup): boolean {
+  const pending = [...sourceMessages.value].reverse().find(m => m.role === 'user')
+  if (pending?.retry_of_turn_id && !pending.turn_id && pending.deliveryStatus !== 'failed') return false
+  return reply === replyRows.value.at(-1) && (!reply.prompt || reply.prompt === lastQuestionForReply.value)
+}
+function statusForReply(reply: ReplyGroup): string {
+  const projected = replyStatus(reply)
+  if (projected === 'waiting' || projected === 'failed') return projected
+  if (isLatestReply(reply) && !focusedSubAgentId.value) {
+    if (isTurnWorking.value) return 'streaming'
+    if (completedBarVisible.value) return completedTurnStatus.value
+  }
+  return projected
+}
+watch(() => {
+  const last = [...sourceMessages.value].reverse().find(m => m.type === 'agent_text')
+  return { session: sessionId.value, agent: focusedSubAgentId.value, id: last?.id, content: last?.content }
+}, (next, previous) => {
+  if (next.session !== previous?.session || next.agent !== previous?.agent || autoScroll.value) hasUnreadReply.value = false
+  else if (previous?.id !== undefined && (next.id !== previous.id || next.content !== previous.content)) hasUnreadReply.value = true
+})
+watch(autoScroll, value => { if (value) hasUnreadReply.value = false })
+const latestPrompt = computed(() => focusedSubAgentId.value ? null : latestSentPrompt(sourceMessages.value, cleanContent))
+const promptReading = ref(false)
+function beginPromptReading() { promptReading.value = true; autoScroll.value = false }
 
 const toolGrouping = computed(() => buildToolCallGrouping(renderMessages.value))
 function toolGroupFor(message: any): any[] | undefined {
@@ -1930,10 +1978,11 @@ const lastAgentUsage = computed(() => {
 })
 const hasLastAgentReply = computed(() =>
   messages.value.some((m: any) => m.type === 'agent_text'))
-// Whether a user prompt exists that can be retried. A retry re-sends the last
-// user message verbatim, so it's gated on a real user_text message existing.
-const hasLastUserPrompt = computed(() =>
-  messages.value.some((m: any) => m.role === 'user' && m.content))
+// Retry requires a durable question identity, including in the legacy footer.
+const hasLastUserPrompt = computed(() => {
+  const prompt = [...messages.value].reverse().find((m: any) => m.role === 'user' && m.content && m.deliveryStatus !== 'failed')
+  return Boolean(prompt && (prompt.retry_of_turn_id || prompt.turn_id))
+})
 // Refresh recovery: a finished session (idle/completed/exited/…) loses
 // lastTurnDuration on reload (it's runtime-only, not in replay). Still surface
 // the "completed" bar — check + label + tokens + copy — as long as history has
@@ -1975,35 +2024,18 @@ function formatDateTime(ts: string): string {
 const replyCopied = ref(false)
 let replyCopyTimer: ReturnType<typeof setTimeout> | null = null
 function copyLastReply() {
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const m = messages.value[i] as any
-    if (m.type === 'agent_text') {
-      navigator.clipboard.writeText(m.content).then(() => {
-        replyCopied.value = true
-        if (replyCopyTimer) clearTimeout(replyCopyTimer)
-        replyCopyTimer = setTimeout(() => { replyCopied.value = false }, 2000)
-      }).catch(() => {})
-      return
-    }
-  }
+  const last = replyRows.value.filter(row => row.kind === 'reply').at(-1)
+  if (last) navigator.clipboard.writeText(replyText(last)).catch(() => {})
 }
 
-// Retry: re-send the last user prompt verbatim. Walks messages backward to the
-// most recent user_text and routes it through sendMessage() (filling messageInput
-// first), so it reuses the full optimistic-echo / ack-timeout / local-command
-// pipeline — the retried bubble is treated exactly like a fresh send. The
-// original content (pre-cleanContent) is used to preserve the user's intent.
-// Guarded in the template by canInput (no retry on ended/disconnected sessions).
+// A retry is an explicit new attempt linked to the original question.
 function retryLastPrompt() {
-  if (!canInput.value) return
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const m = messages.value[i] as any
-    if (m.role === 'user' && m.content) {
-      messageInput.value = m.content
-      sendMessage()
-      return
-    }
-  }
+  if (!canInput.value || isTurnWorking.value || awaitingStart.value) return
+  const prompt = [...messages.value].reverse().find((m: any) => m.role === 'user' && m.content && m.deliveryStatus !== 'failed') as any
+  if (!prompt) return
+  const rootTurn = prompt.retry_of_turn_id || prompt.turn_id
+  if (!rootTurn) return
+  sendPromptText(prompt.content, undefined, rootTurn)
 }
 
 const daemonName = computed(() => {
@@ -2178,6 +2210,7 @@ function exitReasonLabel(reason: string): string {
 function emitNewSession() { showNewSession.value = true }
 
 function scrollToBottom() {
+  promptReading.value = false
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
 
@@ -2480,7 +2513,7 @@ function requestSessionMeta() {
 function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
-  autoScroll.value = scrollHeight - scrollTop - clientHeight < 60
+  autoScroll.value = !promptReading.value && scrollHeight - scrollTop - clientHeight < 60
   if (isMobile.value && historyViewportFill.mode) return
   if (isMobile.value && mobileHistoryNeedsGesture) {
     if (scrollTop >= 60) mobileHistoryNeedsGesture = false
@@ -2853,7 +2886,7 @@ function sendMessage() {
   if (sendPromptText(text)) messageInput.value = ''
 }
 
-function sendPromptText(text: string, invocationID?: string): boolean {
+function sendPromptText(text: string, invocationID?: string, retryOfTurnID?: string): boolean {
   if (invocationID?.startsWith('command:')) {
     const msgId=crypto.randomUUID()
     const sent=sendUserMessage({session_id:sessionId.value,content:text,msg_id:msgId,invocation_id:invocationID})
@@ -2876,11 +2909,12 @@ function sendPromptText(text: string, invocationID?: string): boolean {
     role: 'user',
     content: text,
     __msg_id: msgId,
+    ...(retryOfTurnID ? { retry_of_turn_id: retryOfTurnID } : {}),
     __expects_receipt: supportsMessageAcceptanceReceipt.value,
     deliveryStatus: 'pending',
   })
   nextTick(scrollToBottom)
-  const sent = sendUserMessage({ session_id: sessionId.value, content: text, msg_id: msgId, input_mode: 'auto', ...(invocationID?{invocation_id:invocationID}:{}) })
+  const sent = sendUserMessage({ session_id: sessionId.value, content: text, msg_id: msgId, input_mode: retryOfTurnID ? 'new_turn' : 'auto', ...(retryOfTurnID ? {retry_of_turn_id: retryOfTurnID} : {}), ...(invocationID?{invocation_id:invocationID}:{}) })
   if (!sent) {
     failOrRollbackOptimistic(msgId)  // L1: WebSocket not open
     return false
@@ -3296,7 +3330,7 @@ function withoutExistingUserMessages(page: any[], existing: any[]): any[] {
     || !existing.some(candidate => candidate.type === 'user_text' && sameUserMessage(candidate, message)))
 }
 
-const turnMetadataKeys = ['turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
+const turnMetadataKeys = ['retry_of_turn_id', 'turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
 function eventWithTurnMetadata(evt: any): Record<string, unknown> {
   const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
   const metadata: Record<string, unknown> = {}
@@ -3362,6 +3396,18 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
     const identity = userMessageIdentity(evt)
+    const retryTurn = evt.retry_of_turn_id || evt.payload?.retry_of_turn_id
+    const echoTurn = evt.turn_id || evt.payload?.turn_id
+    const retryEcho = echoTurn && target.find((m: any) => m.role === 'user' && m.turn_id === echoTurn && m.content === text
+      && (retryTurn || (m.retry_of_turn_id && !m.userPartKey && !evt.msg_id && !evt.request_id))
+      && !correlationsConflict(eventCorrelation(evt), messageCorrelation(m)))
+    if (retryEcho) {
+      preserveUserIdentity(retryEcho, identity)
+      preserveTurnMetadata(retryEcho, evt)
+      applyCanonicalCorrelation(retryEcho, eventCorrelation(evt))
+      settleReplayLocalMessage(retryEcho, target)
+      return
+    }
     const existingByIdentity = target.find((message: any) => message.type === 'user_text' && sameUserMessage(message, identity))
     if (existingByIdentity) {
       settleReplayLocalMessage(existingByIdentity, target)
@@ -3904,7 +3950,7 @@ function flushLiveContent(): void {
 function processImmediateLiveEvent(msg: any, options?: { scroll?: boolean }): void {
   flushLiveContent()
   processEvent(msg)
-  if (options?.scroll) nextTick(scrollToBottom)
+  if (options?.scroll && !promptReading.value) nextTick(() => { if (!promptReading.value) scrollToBottom() })
 }
 
 // Exposed for focused integration tests of the actual event-consumer path.
@@ -3919,6 +3965,7 @@ const loadKey = computed(() => sessionId.value + '::' + (route.query.subagent as
 // Watch for session switch / focus change — clear messages and replay new context
 watch(loadKey, (newKey, oldKey) => {
   if (newKey && newKey !== oldKey) {
+    promptReading.value = false
     clearAllToolTimeouts()   // reset tool timeout guards on session switch
     for (const timer of interactionSubmitTimers.values()) clearTimeout(timer)
     interactionSubmitTimers.clear()
@@ -4777,6 +4824,7 @@ onMounted(() => {
 @keyframes menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Messages */
+.chat-message-viewport { position:relative; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
 .chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 24px var(--session-content-gutter) calc(24px + var(--composer-float-clearance)); display: flex; flex-direction: column; align-items: stretch; gap: 14px; position: relative; overflow-anchor: none; scrollbar-gutter: stable; background: var(--bg); }
 /* min-width:0 lets long content (code/URLs) wrap instead of overflowing
    horizontally. max-width + center keeps lines readable on wide screens.
@@ -5275,15 +5323,25 @@ onMounted(() => {
 .message-avatar.agent { border-radius:7px; color:var(--fg); background:var(--surface-active); font-family:var(--font-mono); }
 .message-body { flex:1; min-width:0; }
 .message-byline { margin:1px 0 8px; color:var(--fg); font:550 12px/1.5 var(--font-body); }
-:deep(.msg-user) { width:100%; max-width:none; box-sizing:border-box; color:var(--fg); background:var(--surface); border:1px solid var(--border); border-radius:0 8px 8px 8px; padding:12px 15px; font-size:13px; line-height:1.85; }
-:deep(.msg-user.collapsed .msg-text::after) { background:linear-gradient(transparent,var(--surface)); }
+.session-message-row.member { justify-content:flex-end; }
+.session-message-row.member .message-body { flex:0 1 auto; min-width:0; max-width:85%; }
+.session-message-row.member:focus { outline:none; }
+.session-message-row.member :deep(.msg-user) { max-width:100%; width:fit-content; margin-left:auto; box-sizing:border-box; color:var(--fg); background:var(--accent-muted); border:0; border-radius:12px 12px 3px 12px; padding:13px 17px; font-size:14px; line-height:1.8; }
+.session-message-row.member :deep(.msg-toggle) { color:var(--fg-secondary); }
+.session-message-row.member :deep(.msg-user.collapsed .msg-text::after) { background:linear-gradient(transparent,var(--accent-muted)); }
+.session-message-row.member.prompt-return-highlight :deep(.msg-user) { outline:2px solid var(--accent); outline-offset:4px; }
 :deep(.block-role) { display:none; }
 :deep(.agent-body) { font-size:13px; line-height:1.85; }
 @media(max-width:768px) {
   /* The parent supplies 12px; reduce only tool → assistant transitions to 8px. */
   .session-message-row.tool-followup { margin-top: -4px; }
   .message-byline { margin: 0 0 4px; }
-  .session-message-row {gap:8px} :deep(.msg-user),:deep(.agent-body) {font-size:12px} }
+  .session-message-row {gap:8px} :deep(.agent-body) {font-size:12px}
+  .session-message-row.member .message-body { max-width:calc(100% - 15px); }
+  .session-message-row.member :deep(.msg-user) { background:var(--user-bubble); color:#fff; border-radius:16px 16px 4px 16px; padding:10px 14px; font-size:15px; line-height:1.5; }
+  .session-message-row.member :deep(.msg-toggle) { color:rgba(255,255,255,.85); }
+  .session-message-row.member :deep(.msg-user.collapsed .msg-text::after) { background:linear-gradient(transparent,var(--user-bubble)); }
+}
 
 @media(min-width:769px) { .session-toolbar-back { display:none; } }
 </style>
@@ -5295,3 +5353,9 @@ onMounted(() => {
   .input-meta:has(.dsh-model-settings) .ctx-indicator { display:none; }
 }
 </style>
+
+<style scoped>
+.reply-message-entry{display:contents}.unified-reply{width:100%;min-width:0;align-self:stretch;display:flex;flex-direction:column;gap:14px;font-size:15px;line-height:1.75}.reply-identity{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;margin-bottom:2px}.reply-mark{display:grid;place-items:center;width:23px;height:23px;border-radius:7px;background:var(--accent-muted);color:var(--accent);font-size:12px}.reply-partial{font-size:12px;color:var(--fg-tertiary);margin:0}.unified-reply .message-body{width:100%}.unified-reply :deep(.agent-body),.unified-reply :deep(.markdown-content){font-size:15px;line-height:1.75}.unified-reply :deep(.agent-block){animation:none}.unified-reply :deep(.md-prose p){margin:0 0 14px}.unified-reply :deep(.md-prose p:last-child){margin-bottom:0}.unified-reply .turn-group-header{margin:0}.unified-reply .turn-group-header:empty{display:none}.unified-reply :deep(.reply-footer){margin-top:8px}.unified-reply + .reply-message-entry{margin-top:12px}@media(max-width:768px){.unified-reply{line-height:1.65}.unified-reply :deep(.agent-body),.unified-reply :deep(.markdown-content){font-size:15px;line-height:1.65}}
+</style>
+
+<style scoped>.scroll-to-bottom.has-unread{width:auto;min-width:90px;border-radius:20px;gap:6px;padding:0 12px;font-size:12px;min-height:40px}</style>

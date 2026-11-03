@@ -361,7 +361,7 @@ describe('SessionDetail managed Codex terminal control', () => {
     })
     await nextTick()
 
-    expect(wrapper.get('.status-ended-at').text()).toContain('session.ended_at')
+    expect(wrapper.findAllComponents({ name: 'ReplyFooter' }).at(-1)?.props('endedAt')).toContain('session.ended_at')
   })
 
   test('unmanaged Codex stays read-only after a terminal status', async () => {
