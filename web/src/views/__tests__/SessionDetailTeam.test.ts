@@ -1,8 +1,13 @@
 import { useLocale } from '../../composables/useLocale'
-import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
+import { DOMWrapper, enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { computed, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import View from '../TeamSessionDetail.vue'
+
+// Compile the view during module collection, outside the first test's timeout.
+// Always unmount, including when an assertion fails or a test times out.
+enableAutoUnmount(afterEach)
 
 const sendMessage = vi.hoisted(() => vi.fn())
 const extraEvents: any[] = []
@@ -39,7 +44,6 @@ vi.mock('../../services/teamDeliveryClient', async original => ({
 }))
 
 async function render(attachTo?: HTMLElement) {
-  const View = (await import('../TeamSessionDetail.vue')).default
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/team/:teamId/session/:id', name: 'team-session', component: View },
     { path: '/team/:teamId/sessions', name: 'team-sessions', component: { template: '<div />' } },
