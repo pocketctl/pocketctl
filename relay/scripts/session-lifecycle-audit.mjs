@@ -41,6 +41,7 @@ if (config.mode === 'off') {
     const page = await scanner.scanPage({
       afterRowId,
       limit: config.batchSessions,
+      includeStatistics: process.env.SESSION_LIFECYCLE_AUDIT_STATISTICS === '1',
     })
     await client.query('COMMIT')
     const revision = spawnSync('git', ['rev-parse', 'HEAD'], {
