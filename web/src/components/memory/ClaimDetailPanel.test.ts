@@ -6,6 +6,9 @@ vi.mock('../../composables/useLocale', () => ({
 }))
 
 const memoryClient = vi.hoisted(() => ({
+  getMemoryClaimLifecycle: vi.fn(async()=>({managed:false,source_status:'unknown'})),
+  protectMemoryClaim: vi.fn(),
+  listMemoryLifecycleClaims: vi.fn(),
   getMemoryClaim: vi.fn(),
   listMemoryClaims: vi.fn(),
   listVersionEvidence: vi.fn(),
@@ -371,4 +374,39 @@ describe('ClaimDetailPanel design restoration', () => {
     wrapper.unmount()
   })
 
+})
+
+test('AC-42 machine authority is explicit and reclaimed current body never falls back to historical text',async()=>{
+ memoryClient.listMemoryClaims.mockResolvedValue({claims:claimSummaries,next_cursor:null,total_count:2})
+ memoryClient.getMemoryClaim.mockResolvedValue({...detail,versions:detail.versions.map(v=>v.version_id==='version-2'?{...v,statement:'[content reclaimed]',body_state:'reclaimed',authority:'machine_concluded'}:v)})
+ memoryClient.getMemoryClaimLifecycle.mockResolvedValue({managed:true,authority:'machine_concluded',source_status:'unknown',storage_tier:'cold',body_state:'reclaimed',protection:'none',observation_state:'unknown'} as any)
+ const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+ expect(wrapper.get('[data-testid="memory-claim-current"]').text()).toBe('memory.lifecycle.body_unavailable')
+ expect(wrapper.get('[data-testid="memory-claim-lifecycle"]').text()).toContain('memory.lifecycle.authority_machine_concluded')
+ expect(wrapper.get('[data-testid="memory-claim-correct"]').attributes('disabled')).toBeDefined()
+ expect(wrapper.text()).not.toContain('[content reclaimed]');wrapper.unmount()
+})
+test('AC-43 protection shares revision conflict and uncertain retry boundaries',async()=>{
+ const {MemoryClientError}=await import('../../services/memoryClient')
+ memoryClient.listMemoryClaims.mockResolvedValue({claims:claimSummaries,next_cursor:null,total_count:2})
+ memoryClient.getMemoryClaim.mockResolvedValue(detail)
+ memoryClient.getMemoryClaimLifecycle.mockResolvedValue({managed:true,authority:'user_accepted',source_status:'unknown',storage_tier:'hot',body_state:'present',protection:'none'} as any)
+ memoryClient.protectMemoryClaim.mockRejectedValueOnce(new MemoryClientError(0,'request_unknown','unknown')).mockRejectedValueOnce(new MemoryClientError(409,'revision_conflict','changed'))
+ const wrapper=mount(ClaimDetailPanel,{props:{claimId:detail.claim.claim_id}});await flushPromises()
+ await wrapper.get('[data-testid="memory-claim-protect"]').trigger('click');await flushPromises()
+ expect(wrapper.get('[data-testid="memory-claim-correct"]').attributes('disabled')).toBeDefined()
+ await wrapper.get('[data-testid="memory-claim-protect"]').trigger('click');await flushPromises()
+ expect(memoryClient.protectMemoryClaim.mock.calls[0]).toEqual(memoryClient.protectMemoryClaim.mock.calls[1])
+ expect(memoryClient.protectMemoryClaim.mock.calls[0]?.slice(0,3)).toEqual([detail.claim.claim_id,2,'pinned'])
+ expect(wrapper.find('[data-testid="memory-claim-refresh"]').exists()).toBe(true);wrapper.unmount()
+})
+
+test('AC-42 cold catalog remains inspectable without active retrieval',async()=>{
+ memoryClient.listMemoryClaims.mockResolvedValue({claims:[],next_cursor:null,total_count:0})
+ memoryClient.listMemoryLifecycleClaims.mockResolvedValue({claims:[{...claimSummaries[0],storage_tier:'cold'}],next_cursor:null,total_count:1})
+ memoryClient.getMemoryClaim.mockResolvedValue(detail)
+ const wrapper=mount(ClaimDetailPanel,{props:{claimId:null}});await flushPromises()
+ await wrapper.get('[data-testid="memory-claim-collection"]').setValue('cold');await flushPromises()
+ expect(memoryClient.listMemoryLifecycleClaims).toHaveBeenCalledWith('cold')
+ expect(wrapper.find(`[data-testid="memory-claim-row-${detail.claim.claim_id}"]`).exists()).toBe(true);wrapper.unmount()
 })

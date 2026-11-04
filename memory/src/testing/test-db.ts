@@ -14,20 +14,22 @@ export interface MemoryTestDatabaseConfig {
 
 export function memoryTestDatabaseConfig(raw: string): MemoryTestDatabaseConfig {
   let url: URL
+  let database: string
+  let user: string
   try {
     url = new URL(raw)
+    database = decodeURIComponent(url.pathname.replace(/^\//, ''))
+    user = decodeURIComponent(url.username)
   } catch {
     throw new Error('MEMORY_TEST_DATABASE_URL must be a PostgreSQL URL')
   }
-  const database = decodeURIComponent(url.pathname.replace(/^\//, ''))
-  const user = decodeURIComponent(url.username)
   if (!['postgres:', 'postgresql:'].includes(url.protocol)
     || !LOOPBACK_HOSTS.has(url.hostname)
     || !database.includes('test')
     || user !== database
-    || url.searchParams.has('options')) {
+    || [...url.searchParams.keys()].some(key => ['options', 'host', 'hostaddr', 'port', 'user', 'password', 'database', 'dbname', 'service'].includes(key))) {
     throw new Error(
-      'MEMORY_TEST_DATABASE_URL must target a loopback database whose name contains "test" and whose username equals the database name, without options',
+      'MEMORY_TEST_DATABASE_URL must target a loopback database whose name contains "test" and whose username equals the database name, without options or connection-target overrides',
     )
   }
   return { database, user }
@@ -49,7 +51,7 @@ export async function assertMemoryTestDatabase(
   if (!identity
     || identity.database !== config.database
     || identity.user !== config.user
-    || identity.superuser) {
+    || identity.superuser !== false) {
     throw new Error(
       'Refusing memory integration test: connected database or role is not the isolated test target',
     )

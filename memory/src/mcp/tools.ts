@@ -1,4 +1,5 @@
 import {createEvidenceService} from '../claims/evidence-service.js'
+import {resolveLifecycleReadFrame,listLifecycleReadScenes} from '../context/lifecycle-frame.js'
 import type {SearchServiceDeps} from '../retrieval/search-service.js'
 import { createSkillReadService, SkillReadError, skillJson } from '../skills/read-service.js'
 import { GitApiError, gitApiError, GitListQuery, type GitReadService } from '../git-sync/read-service.js'
@@ -42,6 +43,7 @@ export interface MemoryToolDeps {
   /** Verified grant context — set per request by the MCP route. */
   grant(): VerifiedMemoryGrant | undefined
   sharedScopesEnabled: boolean
+  lifecycleMode?:'off'|'shadow'|'enabled'
   recallEmbeddingTimeoutMs: number
   cursorSigningKey: string
   embed?: EmbeddingProvider & { provider: string; model: string }
@@ -116,12 +118,14 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     'rejected_hypothesis', 'test_invariant', 'implementation_map',
     'operational_runbook', 'work_method', 'reusable_skill_candidate',
   ])
+  server.registerTool('memory_list_scenes',{description:'List bounded active scene metadata in one readable scope; select an allowed destination for search or recall.',inputSchema:{installation_id:z.uuid().optional()},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true}},async args=>textResult(await listLifecycleReadScenes(deps.pool,qualifiedInstallation(args.installation_id))))
 
   server.registerTool('memory_search', {
     description: 'Search active claims in explicitly selected authorized scopes (read-only).',
     inputSchema: {
       query: z.string().min(1).max(2000),
       repository_id: z.string().uuid().optional(),
+      scene_id:z.uuid().optional(),destination:z.enum(['personal','work','shared']).optional(),
       repo_snapshot_id: z.string().uuid().optional(),
       branch: z.string().min(1).max(255).optional(),
       task_scope_key: z.string().min(1).max(512).optional(),
@@ -142,6 +146,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       })
       const scopedContexts=await resolveFederatedScopeContexts(deps.pool,{grant,scopes,
         repositoryId:args.repository_id,repoSnapshotId:args.repo_snapshot_id,branch:args.branch,taskScopeKey:args.task_scope_key})
+      const lifecycleFrames=new Map(await Promise.all(scopes.map(async scope=>[scope.installationId,await resolveLifecycleReadFrame(deps.pool,{installationId:scope.installationId,repositoryId:scopedContexts.contexts.get(scope.installationId)?.context?.repositoryId,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'})] as const)))
       const cursorContext = {
         scopeContextFingerprint:scopedContexts.fingerprint,
         scopes,
@@ -151,6 +156,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
         branch: args.branch,
         taskScopeKey: args.task_scope_key,
         claimTypes: args.claim_types,
+        lifecycleContextFingerprint:JSON.stringify([args.scene_id??null,args.destination??null,[...lifecycleFrames]]),
       }
       const cursor = resolveFederatedCursor({
         cursor: args.cursor,
@@ -169,6 +175,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
           installationId: scope.installationId,
           query: args.query,
           ...resolved.context,
+          lifecycle:lifecycleFrames.get(scope.installationId),
           claimTypes: args.claim_types ?? null,
           asOf: cursor.asOf,
           limit: pageLimit,
@@ -221,6 +228,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     }
     const result = await search.search({
       installationId: installationId(),
+      lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:installationId(),repositoryId:args.repository_id,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'}),
       query: args.query,
       repositoryId: args.repository_id ?? null,
       repoSnapshotId: args.repo_snapshot_id ?? null,
@@ -239,6 +247,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     inputSchema: {
       query: z.string().min(1).max(2000),
       repository_id: z.string().uuid().optional(),
+      scene_id:z.uuid().optional(),destination:z.enum(['personal','work','shared']).optional(),
       repo_snapshot_id: z.string().uuid().optional(),
       branch: z.string().min(1).max(255).optional(),
       task_scope_key: z.string().min(1).max(512).optional(),
@@ -264,6 +273,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
         scope,
         result: await (scopedContexts.contexts.get(scope.installationId)!.context ? recall.recall({
           installationId: scope.installationId,
+          lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:scope.installationId,repositoryId:scopedContexts.contexts.get(scope.installationId)!.context!.repositoryId,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'}),
           query: args.query,
           ...scopedContexts.contexts.get(scope.installationId)!.context!,
           claimTypes: args.claim_types ?? null,
@@ -290,6 +300,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     }
     const result = await recall.recall({
       installationId: installationId(),
+      lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:installationId(),repositoryId:args.repository_id,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'}),
       query: args.query,
       repositoryId: args.repository_id ?? null,
       repoSnapshotId: args.repo_snapshot_id ?? null,

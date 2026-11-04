@@ -30,7 +30,7 @@ function policy() {
 function appWith(deps: Partial<Parameters<typeof registerContextRoutes>[1]>) {
   const app = Fastify()
   registerContextRoutes(app, {
-    pool: {} as never,
+    pool: {query:vi.fn(async()=>({rows:[]}))} as never,
     guard: stubGuard({}),
     policy: policy(),
     compiler: { compile: vi.fn(async () => ({ kind: 'off' })) } as never,
@@ -358,4 +358,29 @@ describe('context route contracts (unit)', () => {
     expect(resolveLoadout).not.toHaveBeenCalled()
     expect(replaceLoadout).not.toHaveBeenCalled()
   })
+})
+
+test.each([['web','user'],['daemon','agent'],['mcp','agent']])('feedback identity comes from authenticated %s caller',async(callerType,actor)=>{
+ const query=vi.fn(async(sql:string,_values?:unknown[])=>{
+  if(sql.includes('SELECT EXISTS'))return{rows:[{visible:true}],rowCount:1}
+  return{rows:[],rowCount:1}
+ })
+ const pool={connect:async()=>({query,release:()=>undefined})}
+ const app=appWith({pool:pool as never,guard:stubGuard({callerType})})
+ const response=await app.inject({method:'POST',url:'/api/v1/memory/context/feedback',headers:{host:'memory.test',authorization:'Bearer fixture','idempotency-key':'fixture-feedback'},payload:{pack_id:'11111111-1111-4111-8111-111111111111',item_id:'22222222-2222-4222-8222-222222222222',action:'used',actor:'user'}})
+ expect(response.statusCode,response.body).toBe(200)
+ const insert=query.mock.calls.find(([sql])=>sql.includes('INSERT INTO memory_context_feedback'))
+ expect(insert?.[1]?.[5]).toBe(actor)
+ await app.close()
+})
+
+test.each(['rate_limited','throws','missing_source','snapshot_context_unavailable','degraded','off','unsupported_adapter','shadow'])('unavailable Context %s resets lifecycle observation',async(kind)=>{
+ const query=vi.fn(async()=>({rows:[]}))
+ const compile=vi.fn(async()=>{if(kind==='throws')throw Error('compiler unavailable');return ['missing_source','snapshot_context_unavailable'].includes(kind)?{kind:'empty',reason:kind,degradedComponents:[]}:{kind,packId:'pack'}})
+ const app=appWith({pool:{query} as never,compiler:{compile} as never,...(kind==='rate_limited'?{rateLimiter:{check:()=>({allowed:false})} as never}:{})})
+ const response=await app.inject({method:'POST',url:'/api/v1/memory/context/compile',headers:{host:'memory.test',authorization:'Bearer fixture'},payload:{schema_version:1,client_request_id:'observation-failure',session_id:'ses-1',agent:'codex',adapter_capability:'native_hidden_v1',query:'q'}})
+ expect(response.statusCode).toBe(kind==='rate_limited'?429:kind==='throws'?500:200)
+ expect(query).toHaveBeenCalledWith('SELECT memory_invalidate_lifecycle_observation($1::uuid)',[INSTALLATION])
+ if(kind==='rate_limited')expect(compile).not.toHaveBeenCalled()
+ await app.close()
 })

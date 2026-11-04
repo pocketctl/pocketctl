@@ -465,7 +465,7 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 		// can arrive before the RPC reply; clients reconcile by this exact turn.
 		if correlation := userMessageCorrelationFrom(ctx); correlation.RetryOfTurnID != "" {
 			b.sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: threadID,
-				Text: content, MsgID: correlation.MsgID, RequestID: correlation.RequestID,
+				MemorySource: correlation.MemorySource, Text: content, MsgID: correlation.MsgID, RequestID: correlation.RequestID,
 				TurnID:        logicalCodexTurnID(threadID, response.Turn.ID),
 				RetryOfTurnID: correlation.RetryOfTurnID,
 				EventID:       "reply-retry:" + correlation.MsgID}

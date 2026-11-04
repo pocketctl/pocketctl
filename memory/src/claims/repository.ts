@@ -493,8 +493,17 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             SELECT clock_timestamp() AS effective_at
           `)
           const correctionAt = effectiveAt.rows[0].effective_at
+          const previousStructured=row.structured_content??{}
+          const lifecycleMetadata=previousStructured.lifecycle
+          // Free text does not authorize a newly parsed value. Retain only
+          // source/logical identity metadata; the old semantic fields remain
+          // solely on the immutable previous version.
+          const correctedStructured=lifecycleMetadata&&typeof lifecycleMetadata==='object'&&!Array.isArray(lifecycleMetadata)
+            ? {lifecycle:Object.fromEntries(Object.entries(lifecycleMetadata).filter(([key])=>['logical_key','space_id','source_kind','bundle_id'].includes(key))),
+              manual_correction:{previous_version_id:row.current_version_id,semantic_fields:'unparsed'}}
+            : previousStructured
           const projection=await projectClaimIdentity(client,{installationId:input.installationId,claimType:row.claim_type,statement:finalStatement,
-            structuredContent:row.structured_content??{},applicability,validFrom:row.valid_from,validUntil:row.valid_until})
+            structuredContent:correctedStructured,applicability,validFrom:row.valid_from,validUntil:row.valid_until})
           await assertIdentityNotTombstoned(client,{installationId:input.installationId,projection,keys:options.tombstoneHmacKeys??[]})
           await assertClaimIdentityAvailable(client,{installationId:input.installationId,claimType:row.claim_type,scopeKey:row.scope_key,projection,excludeClaimId:input.claimId})
           const version = await client.query<{ version_id: string }>(`
@@ -502,11 +511,11 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
               (version_id, installation_id, claim_id, version_number, statement,
                structured_content, authority, confidence, repository_id, repo_snapshot_id, branch,
                freshness_at, valid_from, valid_until,applicability)
-            SELECT gen_random_uuid(), $1, $2, $3, $4, source.structured_content, 'user_corrected', 0.9, $5, $6, $7, $8, source.valid_from,source.valid_until,$9::jsonb
+            SELECT gen_random_uuid(), $1, $2, $3, $4, $11::jsonb, 'user_corrected', 0.9, $5, $6, $7, $8, source.valid_from,source.valid_until,$9::jsonb
             FROM knowledge_versions source WHERE source.installation_id=$1 AND source.version_id=$10
             RETURNING version_id::text
           `, [input.installationId, input.claimId, versionNumber, finalStatement,
-            row.repository_id, row.repo_snapshot_id, row.branch, correctionAt,JSON.stringify(applicability),row.current_version_id])
+            row.repository_id, row.repo_snapshot_id, row.branch, correctionAt,JSON.stringify(applicability),row.current_version_id,JSON.stringify(correctedStructured)])
           const versionId = version.rows[0].version_id
 
           const capsuleId = await insertEvidenceCapsule(client, {
@@ -555,6 +564,17 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
                 revision = revision + 1, updated_at = NOW()
             WHERE installation_id = $1 AND claim_id = $3
           `, [input.installationId, versionId, input.claimId, finalNormalizedKey,projection.keyV2,projection.topicKeyV2,projection.duplicateDigestV2,projection.generation,applicability.canonicalRepositoryKey,applicability.status!=='verified'])
+          // The corrected version is a fresh human assertion. Preserve the
+          // established semantic kind, but protect it from later automation and
+          // expose its new body even when the previous head was cold. Legacy
+          // claims without lifecycle metadata keep their unknown classification.
+          await client.query(`
+            UPDATE memory_claim_lifecycle
+            SET protection='user_corrected',assertion_mode='user_asserted',
+                storage_tier='hot',body_state='present',cold_since=NULL,
+                last_confirmed_at=$3,next_evaluate_at=$3::timestamptz+interval '90 days',revision=revision+1
+            WHERE installation_id=$1 AND claim_id=$2
+          `,[input.installationId,input.claimId,correctionAt])
           await client.query(`
             INSERT INTO memory_feedback (feedback_id, installation_id, claim_id, version_id, action)
             VALUES (gen_random_uuid(), $1, $2, $3, 'claim_corrected')

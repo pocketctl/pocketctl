@@ -6,6 +6,7 @@
  */
 
 import { createHash } from 'crypto'
+import { admitLifecycleSources, LIFECYCLE_SOURCE_POLICY, type SourceAdmissionReceipt } from './source-admission.js'
 import { collapseStreamEvents } from './stream-events.js'
 import {
   PACKET_POLICY_VERSION,
@@ -119,6 +120,7 @@ export const DEFAULT_PACKET_BUDGET: PacketBudget = Object.freeze({
 const MAX_ROUTINE_TOOL_TIMELINE_ENTRIES = 12
 
 export interface BuiltPacket {
+  sourceAdmission?: SourceAdmissionReceipt[]
   document: EpisodeDocumentV1
   manifest: EvidenceManifest
   sourceDigest: Buffer
@@ -220,7 +222,28 @@ export function buildEpisodePacket(input: {
   artifacts: readonly PacketSourceArtifact[]
   repository: PacketRepositoryFact | null
   budget?: PacketBudget
+  /** Explicit lifecycle entry point. Omitted preserves the legacy compiler. */
+  sourcePolicy?: 'lifecycle-v1'
 }): BuiltPacket {
+  if (input.sourcePolicy !== undefined && input.sourcePolicy !== 'lifecycle-v1') throw new Error('source_policy_unsupported')
+  if (input.sourcePolicy === 'lifecycle-v1') {
+    const admitted = admitLifecycleSources(input)
+    const allowedIds = new Set(admitted.events.map(event => event.source_event_id))
+    const packet = buildEpisodePacket({ ...input, sourcePolicy: undefined,
+      events: admitted.events,
+      artifacts: input.artifacts.filter(artifact => allowedIds.has(artifact.source_event_id)),
+      // Free-form turn reasons and repository snapshots lack event lineage.
+      // Scene routing uses verified bindings outside the model-facing packet.
+      reason: null, repository: null,
+      outcome: ['completed', 'failed', 'interrupted', 'abandoned'].includes(input.outcome) ? input.outcome : 'unknown',
+    })
+    return { ...packet, policyVersion: LIFECYCLE_SOURCE_POLICY,
+      sourceAdmission: admitted.receipts,
+      sourceDigest: createHash('sha256').update(canonicalPacketJson({
+        policy: LIFECYCLE_SOURCE_POLICY, packet: packet.sourceDigest.toString('hex'), receipts: admitted.receipts,
+      })).digest(),
+    }
+  }
   const budget = input.budget ?? DEFAULT_PACKET_BUDGET
   const manifest: EvidenceManifest = {}
   const statements: EvidenceStatement[] = []

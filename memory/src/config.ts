@@ -69,6 +69,7 @@ export interface WikiProviderBudgetSettings {
 }
 
 export interface MemoryConfig {
+  lifecycleMode?: 'off'|'shadow'|'enabled'
   /** Optional only for historical explicit fixtures. Always populated by the loader. */
   maintenanceSchedule?: typeof dailyMaintenanceSchedule
   dataRetention?: SourceRetentionSettings
@@ -587,6 +588,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     inboxRetention,
     mode,
     delegatedPublishMode:parseEnum('MEMORY_DELEGATED_PUBLISH_MODE',env.MEMORY_DELEGATED_PUBLISH_MODE,['off','enabled'] as const,'off'),
+    lifecycleMode:parseEnum('MEMORY_LIFECYCLE_MODE',env.MEMORY_LIFECYCLE_MODE,['off','shadow','enabled'] as const,'off'),
     personalAutoAcceptMode:parseEnum('MEMORY_PERSONAL_AUTO_ACCEPT_MODE',env.MEMORY_PERSONAL_AUTO_ACCEPT_MODE,['off','assist'] as const,'off'),
     reviewAutomationMode: parseEnum('MEMORY_REVIEW_AUTOMATION_MODE',env.MEMORY_REVIEW_AUTOMATION_MODE,['off','shadow','assist'] as const,'off'),
     skill,

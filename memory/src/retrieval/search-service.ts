@@ -1,3 +1,4 @@
+import {lifecycleClaimSql,type LifecycleReadFrame} from '../context/lifecycle-frame.js'
 import {recallPoolBudget} from './recall-pools.js'
 import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
 import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
@@ -23,6 +24,7 @@ import { normalizedClaimKey } from './query-normalizer.js'
 
 export interface SearchInput {
   installationId: string
+  lifecycle?:LifecycleReadFrame
   query: string
   repositoryId?: string | null
   repoSnapshotId?: string | null
@@ -164,6 +166,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         WHERE c.installation_id = $1
           AND c.state = 'active'
           AND c.consumption_hold_reason IS NULL
+          AND ${lifecycleClaimSql('$24','$25','$26')}
           AND (v.applicability IS NULL OR v.applicability->>'status'='verified')
           AND ${historicalSelection ? asOfClaimVersionSql('c','v','search_clock.as_of') : currentClaimVersionSql('c','v','search_clock.as_of')}
           AND (v.valid_from IS NULL OR v.valid_from <= search_clock.as_of)
@@ -243,7 +246,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         input.sourceRepositoryContext?.installationId??null,input.sourceRepositoryContext?.repositoryId??null,
         input.sourceRepositoryContext?.repoSnapshotId??null,input.sourceRepositoryContext?.commitSha??null,
         query,queryEmbedding,deps.embed?.provider??null,deps.embed?.model??null,deps.embed?.dimensions??null,budget,
-        [...queryTokensLower],input.taskScopeKey??null,
+        [...queryTokensLower],input.taskScopeKey??null,input.lifecycle?.spaceId??null,input.lifecycle?.destination??null,input.lifecycle?.consume??false,
       ])
       const origin=await originPolicyDecisions(deps.pool,input.installationId,prefiltered.rows.filter(r=>r.origin_policy_required).map(r=>r.version_id))
       const rows = prefiltered.rows.filter(row=>claimConsumptionDecision({
@@ -473,6 +476,7 @@ function decodeCursor(
 function cursorContextFor(input: SearchInput): string {
   return createHash('sha256').update(JSON.stringify({
     query: input.query,
+    ...(input.lifecycle?{lifecycle:input.lifecycle}:{}),
     repositoryId: input.repositoryId ?? null,
     repoSnapshotId: input.repoSnapshotId ?? null,
     branch: input.branch ?? null,

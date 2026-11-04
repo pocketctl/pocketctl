@@ -11,6 +11,7 @@ import { createSearchService, type SearchInput, type SearchService } from './sea
 
 export interface RecallInput {
   installationId: string
+  lifecycle?:SearchInput['lifecycle']
   query: string
   repositoryId?: string | null
   repoSnapshotId?: string | null
@@ -79,6 +80,7 @@ export function createRecallService(
 
       const searchInput: SearchInput = {
         installationId: input.installationId,
+        lifecycle:input.lifecycle,
         query: input.query,
         repositoryId: input.repositoryId,
         repoSnapshotId: input.repoSnapshotId,

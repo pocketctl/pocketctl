@@ -1,3 +1,4 @@
+import {invalidateLifecycleObservation} from '../claims/lifecycle-observation.js'
 import type { FastifyInstance } from 'fastify'
 import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
 import type { GrantGuard } from '../auth/grant-guard.js'
@@ -125,6 +126,10 @@ interface CompileBody {
     repo_snapshot_id?:unknown
   } | null
   task_scope_key?:unknown
+  scene_id?:unknown
+  destination?:unknown
+  fact_at?:unknown
+  known_at?:unknown
   query?: unknown
   selected_references?: unknown
 }
@@ -256,6 +261,10 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       ||(body.evidence_read_capability!==undefined&&!['bounded_excerpt_v1','on_demand_v1'].includes(String(body.evidence_read_capability)))
       || typeof body.query !== 'string'
       || references === null
+      || !optionalUuid(body.scene_id)
+      || (body.destination!==undefined&&!['personal','work','shared'].includes(String(body.destination)))
+      || (body.fact_at!=null&&(typeof body.fact_at!=='string'||!Number.isFinite(Date.parse(body.fact_at))))
+      || (body.known_at!=null&&(typeof body.known_at!=='string'||!Number.isFinite(Date.parse(body.known_at))))
       || !optionalBoundedString(body.task_scope_key,512)
       || (body.repository_hint != null
         && (typeof body.repository_hint !== 'object'
@@ -280,6 +289,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       throw new MemoryApiError('forbidden', 'shared Context requires a readable v2 scope grant')
     }
     if (deps.rateLimiter && !deps.rateLimiter.check(`context:${grant.installationId}`).allowed) {
+      await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined)
       reply.code(429)
       return { error: { code: 'rate_limited' } }
     }
@@ -300,13 +310,20 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
         ? body.repository_hint.branch : null,
       repoSnapshotId:typeof body.repository_hint?.repo_snapshot_id==='string'?body.repository_hint.repo_snapshot_id:null,
       commitSha:typeof body.repository_hint?.commit_sha==='string'?body.repository_hint.commit_sha:null,
+      sceneId:typeof body.scene_id==='string'?body.scene_id:null,
+      destination:body.destination as 'personal'|'work'|'shared'|undefined,
+      factAt:typeof body.fact_at==='string'?body.fact_at:null,knownAt:typeof body.known_at==='string'?body.known_at:null,
       taskScopeKey:typeof body.task_scope_key==='string'?body.task_scope_key:null,
       query,
       requestKey: deps.requestKey,
       selectedReferences: references,
       ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
-    })
+    }).catch(async error=>{await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined);throw error})
 
+    if(outcome.kind==='off'||outcome.kind==='unsupported_adapter'||outcome.kind==='degraded'||outcome.kind==='retrieval_failed'||outcome.kind==='shadow'||(outcome.kind==='empty'&&(outcome.degradedComponents.length>0||['snapshot_context_unavailable','missing_source'].includes(outcome.reason)))){
+      const reason=outcome.kind==='off'?'context_off':outcome.kind==='shadow'?'shadow_only':outcome.kind==='unsupported_adapter'?'unsupported_adapter':'degraded'
+      await invalidateLifecycleObservation(deps.pool,grant.installationId,reason)
+    }
     switch (outcome.kind) {
       case 'off':
         return { outcome: 'off' }
@@ -546,7 +563,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
         injectionId: typeof body.injection_id === 'string' ? body.injection_id : null,
         packId: typeof body.pack_id === 'string' ? body.pack_id : null,
         itemId: typeof body.item_id === 'string' ? body.item_id : null,
-        actor: 'user',
+        actor: grant.callerType === 'web' ? 'user' : 'agent',
         action: body.action as 'used' | 'ignored' | 'incorrect' | 'harmful',
         reasonCode: typeof body.reason_code === 'string' ? body.reason_code : null,
       })

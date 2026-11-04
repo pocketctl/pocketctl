@@ -568,6 +568,11 @@ async function purgeSessionRows(
       WHERE installation_id = $1 AND claim_id = $2 AND version_id = ANY($3::uuid[])
     `, [input.installationId, claim.claim_id, versionIds])
   }
+  // Task prose and model results belong to the deleted session. Independent
+  // accepted evidence has no Bundle FK and remains governed by knowledge delete.
+  await client.query('DELETE FROM memory_task_bundles WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
+  await client.query('DELETE FROM memory_source_processing_receipts WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
+  await client.query('DELETE FROM memory_session_scene_frames WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
   await client.query(`
     DELETE FROM memory_candidates WHERE installation_id = $1 AND episode_id IN (
       SELECT episode_id FROM work_episodes WHERE installation_id = $1 AND session_id = $2
@@ -718,6 +723,17 @@ async function purgeInstallationRows(
     SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
   `, [input.installationId])
   await rollupFeedbackBeforeInstallationPurge(client,input.installationId)
+  // Packs and loadouts have restrictive repository FKs. Remove their owned
+  // children first, while the installation fence still excludes new Context
+  // writes, before deleting repositories or the knowledge they reference.
+  for (const table of [
+    'memory_context_feedback', 'memory_context_injections',
+    'memory_context_pack_evidence', 'memory_context_pack_items',
+    'memory_context_evidence_reads', 'memory_context_packs',
+    'memory_context_loadout_items', 'memory_context_loadouts',
+  ]) {
+    await client.query(`DELETE FROM ${table} WHERE installation_id = $1`, [input.installationId])
+  }
   // Phase 4 authoritative/derived content is removed before the generic
   // repository row and before the content-free installation receipt.
   for (const table of [
@@ -736,22 +752,21 @@ async function purgeInstallationRows(
     SELECT COUNT(*)::text AS count FROM knowledge_claims WHERE installation_id = $1
   `, [input.installationId])
   for (const table of [
+    'memory_task_bundles','memory_source_processing_receipts','memory_manual_entries','memory_curation_policies','memory_session_scene_frames','memory_lifecycle_observation_windows',
     'memory_authority_records','memory_publication_delegations','memory_automation_authority_records','memory_governance_executor_principals',
     'memory_review_automation_runs','memory_review_automation_policy_heads','memory_review_automation_policies',
     'memory_session_tombstones', 'memory_dead_letters', 'memory_jobs', 'memory_usage_outbox',
     'memory_snapshot_runs', 'memory_snapshot_events', 'memory_feed_inbox', 'memory_inbox_checkpoints',
     'knowledge_tombstones', 'memory_idempotency_keys', 'memory_feedback',
     'claim_search_documents', 'knowledge_evidence', 'knowledge_evidence_capsules', 'memory_candidates',
-    'memory_extraction_runs', 'knowledge_versions', 'knowledge_claims',
+    'memory_extraction_runs', 'knowledge_versions', 'knowledge_claims','memory_logical_tombstones',
+    'memory_entity_aliases','memory_entities','memory_space_bindings','memory_spaces',
     'memory_feature_settings',
     'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
     'memory_source_retention_receipts', 'repo_snapshots', 'repositories', 'source_sessions',
-    'memory_context_feedback', 'memory_context_injections',
-    'memory_context_pack_evidence', 'memory_context_pack_items',
-    'memory_context_packs', 'memory_retrieval_candidates',
+    'memory_retrieval_candidates',
     'memory_retrieval_trajectories',
     'memory_generation_runs',
-    'memory_context_loadout_items', 'memory_context_loadouts',
     'memory_context_settings', 'memory_policy_sets',
   ]) {
     await client.query(

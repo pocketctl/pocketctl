@@ -1,3 +1,4 @@
+import type {LifecycleFrame} from './lifecycle-frame.js'
 import type pg from 'pg'
 import type { SearchService, SearchHit } from '../retrieval/search-service.js'
 import {diversifyRecall} from '../retrieval/recall-pools.js'
@@ -75,6 +76,7 @@ export function createContextRetrieval(deps: {
   return {
     async retrieve(input: {
       installationId: string
+      lifecycle?:LifecycleFrame
       query: string
       repositoryId?: string | null
       repoSnapshotId?:string|null
@@ -102,6 +104,7 @@ export function createContextRetrieval(deps: {
         const searched = await recall({
           installationId: input.installationId,
           query: input.query,
+          lifecycle:input.lifecycle,
           repositoryId: input.repositoryId ?? null,
           repoSnapshotId:input.repoSnapshotId??null,
           taskScopeKey:input.taskScopeKey??null,
@@ -326,6 +329,8 @@ export function createContextRetrieval(deps: {
         candidates: trajectoryCandidates,
       })
 
+      if(input.lifecycle?.consume&&candidates.length)await deps.pool.query(`INSERT INTO memory_claim_usage(installation_id,claim_id,signal_key,signal,occurred_at)
+        SELECT $1,c.claim_id,$2,'retrieved',clock_timestamp() FROM knowledge_claims c WHERE c.installation_id=$1 AND c.current_version_id=ANY($3::uuid[]) ON CONFLICT DO NOTHING`,[input.installationId,trajectoryId,candidates.map(c=>c.versionId)])
       return { outcome, degradedComponents, candidates, trajectoryId }
     },
   }

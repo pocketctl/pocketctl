@@ -1,5 +1,9 @@
 /** Frozen job types and claim shapes for the Memory background runtime. */
 export type JobType =
+  | 'consolidate_task'
+  | 'curate_conclusions'
+  | 'evaluate_claim_lifecycle'
+  | 'reclaim_claim_history'
   | 'execute_publication_delegation'
   | 'evaluate_review_shadow'
   | 'git_ingest'
@@ -29,6 +33,7 @@ export type JobType =
   | 'extract_skill_candidate'
 
 export const JOB_TYPES: readonly JobType[] = Object.freeze([
+  'consolidate_task', 'curate_conclusions', 'evaluate_claim_lifecycle', 'reclaim_claim_history',
   'execute_publication_delegation',
   'evaluate_review_shadow',
   'git_ingest', 'git_export', 'git_reconcile',
@@ -62,6 +67,7 @@ export const JOB_TYPES: readonly JobType[] = Object.freeze([
  * share the maintenance band (plan section 6.1).
  */
 export const JOB_PRIORITIES = Object.freeze({
+  consolidate_task: 84, curate_conclusions: 86, evaluate_claim_lifecycle: 96, reclaim_claim_history: 97,
   execute_publication_delegation: 61,
   evaluate_review_shadow: 86,
   git_ingest: 79, git_export: 79, git_reconcile: 79,

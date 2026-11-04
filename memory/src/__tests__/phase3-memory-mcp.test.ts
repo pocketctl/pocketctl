@@ -68,6 +68,11 @@ describe('Phase 3 MCP scope contract', () => {
     const tool = (name: string) => rpc.result.tools.find(entry => entry.name === name)!
     expect(tool('memory_search').inputSchema.properties).toHaveProperty('scope_installation_ids')
     expect(tool('memory_recall').inputSchema.properties).toHaveProperty('scope_installation_ids')
+    for(const name of ['memory_search','memory_recall']){
+      expect(tool(name).inputSchema.properties).toHaveProperty('scene_id')
+      expect(tool(name).inputSchema.properties).toHaveProperty('destination')
+    }
+    expect(tool('memory_list_scenes').inputSchema.properties).toHaveProperty('installation_id')
     expect(tool('memory_get_claim').inputSchema.properties).toHaveProperty('installation_id')
     expect(tool('memory_get_evidence').inputSchema.properties).toHaveProperty('installation_id')
 

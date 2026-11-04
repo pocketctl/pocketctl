@@ -2,7 +2,7 @@ import type pg from 'pg'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {expirePendingCandidates} from '../claims/candidate-expiry.js'
 import {retainInboxInstallation,type InboxRetentionSettings} from '../inbox/retention.js'
-import {previewSourceRetention,reclaimSourceTurn,type SourceRetentionSettings,type RetentionPreviewCursor} from '../retention/source.js'
+import {previewSourceRetention,previewLifecycleSourceRetention,reclaimSourceTurn,type SourceRetentionSettings,type RetentionPreviewCursor} from '../retention/source.js'
 import {retainMigrationChanges,retainMigrationHistory} from '../retention/migrations.js'
 import {retainInventoryReports} from '../retention/reports.js'
 import {dailyMaintenanceSchedule,dailyMaintenanceSlot,nextDailyMaintenanceAt} from './daily.js'
@@ -53,8 +53,9 @@ export function createDailyMaintenanceWorker(options:{
   const candidate=(await options.pool.query(`SELECT * FROM memory_maintenance_runs
    WHERE state='running' AND next_attempt_at<=NOW() ORDER BY scheduled_at,next_attempt_at,scope_key LIMIT 1`)).rows[0]
   let preview:Awaited<ReturnType<typeof previewSourceRetention>>|undefined
+  let lifecycleKey:{installation_id:string;session_id:string;turn_id:string;episode_id:null}|undefined
   if(candidate?.installation_id&&candidate.stage===2&&options.data.mode==='enabled') {
-   try{preview=await previewSourceRetention(options.pool,options.data.bodyDays,1,{...candidate.cursor,installationId:candidate.installation_id})}
+   try{preview=await previewSourceRetention(options.pool,options.data.bodyDays,1,{...candidate.cursor,installationId:candidate.installation_id});if(options.data.lifecycleMode==='enabled')lifecycleKey=(await previewLifecycleSourceRetention(options.pool,options.data,candidate.installation_id,candidate.cursor?.lifecycleTurnId))[0]}
    catch(error){await options.pool.query(`UPDATE memory_maintenance_runs SET last_error_code='source_preview_failed',revision=revision+1,next_attempt_at=NOW()+INTERVAL '1 minute' WHERE scheduled_at=$1 AND scope_key=$2 AND state='running' AND stage=2`,[candidate.scheduled_at,candidate.scope_key]);options.onError?.(error);await reportPending().catch(e=>options.onError?.(e));return false}
   }
   if(candidate){
@@ -67,7 +68,7 @@ export function createDailyMaintenanceWorker(options:{
      AND state='running' AND next_attempt_at<=NOW() FOR UPDATE SKIP LOCKED`,[candidate.scheduled_at,candidate.scope_key])).rows[0]:undefined
     if(row&&row.stage===candidate.stage&&JSON.stringify(row.cursor)===JSON.stringify(candidate.cursor)){
      const bound=createTransactionBoundPool(client),delta:Counts={},counts:Counts={...row.counts}
-     let more=false,busy=false,cursor:RetentionPreviewCursor={...row.cursor}
+     let more=false,busy=false,cursor:RetentionPreviewCursor&{lifecycleTurnId?:string}={...row.cursor}
      if(row.installation_id){
       if(row.stage===0){delta.candidates_expired=await expirePendingCandidates(bound,500,row.installation_id);more=delta.candidates_expired===500}
       else if(row.stage===1){
@@ -77,12 +78,13 @@ export function createDailyMaintenanceWorker(options:{
        if(r.skipped&&r.skipped!=='busy')delta['inbox_skipped_'+r.skipped]=1
        if(r.metadataBlocked)delta.inbox_metadata_blocked=1
       }else if(row.stage===2&&options.data.mode==='enabled'){
-       const key=preview?.reclaiming[0]??preview?.eligible[0]
+       const key=preview?.reclaiming[0]??preview?.eligible[0]??lifecycleKey
        if(key){
         const r=await reclaimSourceTurn(bound,{installationId:key.installation_id,sessionId:key.session_id,turnId:key.turn_id,episodeId:key.episode_id},options.data)
         for(const k of ['events','artifacts','snapshots','candidates','episodes'] as const)delta['source_'+k]=r[k]
         busy=r.skipped==='busy';more=true
-        if(r.skipped&&!busy){delta.source_skipped=1;cursor={eligibleEpisodeId:key.episode_id,receiptInstallationId:key.installation_id,receiptTurnId:key.turn_id}}
+        if(key===lifecycleKey&&!busy)cursor.lifecycleTurnId=key.turn_id
+        if(r.skipped&&!busy){delta.source_skipped=1;cursor={...cursor,eligibleEpisodeId:key.episode_id??cursor.eligibleEpisodeId,receiptInstallationId:key.installation_id,receiptTurnId:key.turn_id}}
        }else{
         const protectedRun=(await client.query(`SELECT EXISTS(SELECT 1 FROM memory_governance_migration_runs
          WHERE sealed_at IS NULL AND abandoned_at IS NULL AND details_reclaimed_at IS NULL

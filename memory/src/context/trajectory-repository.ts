@@ -81,19 +81,33 @@ export function createTrajectoryRepository(pool: pg.Pool) {
           `, [trajectoryId, index, stage.stage, stage.outcome,
             stage.candidateCount, stage.durationMs, stage.degradedReason ?? null])
         }
-        for (const candidate of input.candidates) {
+        // Keep the complete audit pool in the transaction without a network
+        // round trip per candidate (internal recall can return hundreds).
+        if (input.candidates.length > 0) {
           await client.query(`
             INSERT INTO memory_retrieval_candidates
               (trajectory_id, installation_id, version_id, metadata_rank, lexical_rank,
                vector_rank, fused_score, authority_score, freshness_score, scope_score,
                loadout_score, estimated_tokens, decision, reason_code, final_ordinal)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            SELECT $1, $2, candidate.*
+            FROM unnest($3::uuid[], $4::integer[], $5::integer[], $6::integer[],
+              $7::real[], $8::real[], $9::real[], $10::real[], $11::real[],
+              $12::integer[], $13::text[], $14::text[], $15::integer[]) AS candidate
           `, [
-            trajectoryId, input.installationId, candidate.versionId,
-            candidate.metadataRank, candidate.lexicalRank, candidate.vectorRank,
-            candidate.fusedScore, candidate.authorityScore, candidate.freshnessScore,
-            candidate.scopeScore, candidate.loadoutScore, candidate.estimatedTokens,
-            candidate.decision, candidate.reasonCode, candidate.finalOrdinal,
+            trajectoryId, input.installationId,
+            input.candidates.map(candidate => candidate.versionId),
+            input.candidates.map(candidate => candidate.metadataRank),
+            input.candidates.map(candidate => candidate.lexicalRank),
+            input.candidates.map(candidate => candidate.vectorRank),
+            input.candidates.map(candidate => candidate.fusedScore),
+            input.candidates.map(candidate => candidate.authorityScore),
+            input.candidates.map(candidate => candidate.freshnessScore),
+            input.candidates.map(candidate => candidate.scopeScore),
+            input.candidates.map(candidate => candidate.loadoutScore),
+            input.candidates.map(candidate => candidate.estimatedTokens),
+            input.candidates.map(candidate => candidate.decision),
+            input.candidates.map(candidate => candidate.reasonCode),
+            input.candidates.map(candidate => candidate.finalOrdinal),
           ])
         }
         await client.query('COMMIT')

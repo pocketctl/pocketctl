@@ -273,6 +273,7 @@ export interface FederatedCursorContextInput {
   taskScopeKey?: string | null
   claimTypes?: readonly string[] | null
   scopeContextFingerprint?: string
+  lifecycleContextFingerprint?:string
 }
 
 /**
@@ -342,6 +343,7 @@ function federatedCursorContext(input: FederatedCursorContextInput): string {
     branch: input.branch ?? null,
     ...(input.taskScopeKey!=null?{taskScopeKey:input.taskScopeKey}:{}),
     ...(input.scopeContextFingerprint!==undefined?{scopeContextFingerprint:input.scopeContextFingerprint}:{}),
+    ...(input.lifecycleContextFingerprint!==undefined?{lifecycleContextFingerprint:input.lifecycleContextFingerprint}:{}),
     claimTypes: input.claimTypes ? [...input.claimTypes].sort() : null,
   })).digest('base64url')
 }

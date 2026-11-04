@@ -1,6 +1,8 @@
 import {readBoundEvidence,type EvidenceReadInput,type BoundEvidenceReadInput} from './evidence-on-demand.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
+import {versionBodyPresentSql} from './version-selection.js'
+import {deliveryVersionAvailableSql} from '../episodes/delivery-withdrawal.js'
 
 /**
  * Evidence reads and sanitized excerpts. Evidence is immutable once written;
@@ -27,8 +29,12 @@ export function createEvidenceService(pool: pg.Pool) {
       const result = await pool.query(`
         SELECT evidence_id::text, evidence_kind, episode_id::text, source_event_id::text,
                artifact_id::text, excerpt, locator, occurred_at, ordinal
-        FROM knowledge_evidence
+        FROM knowledge_evidence e
         WHERE installation_id = $1 AND version_id = $2
+          AND EXISTS(SELECT 1 FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
+            WHERE v.installation_id=e.installation_id AND v.version_id=e.version_id AND ${versionBodyPresentSql()} AND ${deliveryVersionAvailableSql()}
+              AND c.state<>'revoked' AND c.consumption_hold_reason IS NULL
+              AND NOT EXISTS(SELECT 1 FROM memory_claim_lifecycle l WHERE l.installation_id=c.installation_id AND l.claim_id=c.claim_id AND(l.storage_tier='cold' OR l.body_state='reclaimed')))
         ORDER BY ordinal
       `, [input.installationId, input.versionId])
       return result.rows
@@ -54,6 +60,7 @@ export function createEvidenceService(pool: pg.Pool) {
         FROM knowledge_evidence e
         JOIN knowledge_versions v ON v.version_id = e.version_id AND v.installation_id = e.installation_id
         WHERE e.installation_id = $1 AND e.evidence_id = $2
+          AND ${versionBodyPresentSql()} AND ${deliveryVersionAvailableSql()}
       `, [input.installationId, input.evidenceId])
       return result.rows[0] ?? null
     },

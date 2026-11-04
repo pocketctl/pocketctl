@@ -28,6 +28,11 @@ type Coordinator struct {
 
 // TurnRequest describes one new-turn enrichment decision.
 type TurnRequest struct {
+	SceneID              string
+	TaskScopeKey         string
+	Destination          string
+	FactAt               string
+	KnownAt              string
 	EvidenceReadProbe    ProbeEvidence
 	ClientRequestID      string
 	SessionID            string
@@ -139,6 +144,7 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		query = ""
 	}
 	compileReq := CompileRequest{
+		SceneID: req.SceneID, TaskScopeKey: req.TaskScopeKey, Destination: req.Destination, FactAt: req.FactAt, KnownAt: req.KnownAt,
 		SchemaVersion:      1,
 		ClientRequestID:    requestID,
 		SessionID:          req.SessionID,
@@ -257,6 +263,7 @@ func (c *Coordinator) prepareShadow(req TurnRequest) {
 			query = ""
 		}
 		_, _ = c.Memory.Compile(ctx, grant.ProviderPublicOrigin, grant.Grant, CompileRequest{
+			SceneID: req.SceneID, TaskScopeKey: req.TaskScopeKey, Destination: req.Destination, FactAt: req.FactAt, KnownAt: req.KnownAt,
 			SchemaVersion:     1,
 			ClientRequestID:   requestID,
 			SessionID:         req.SessionID,

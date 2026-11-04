@@ -70,6 +70,10 @@ export async function writeManualEntry(client: pg.PoolClient, input: ManualEntry
   await client.query(`UPDATE knowledge_claims SET current_version_id=$2,normalized_key=$3,normalized_key_v2=$4,topic_key_v2=$5,duplicate_digest_v2=$6,
     revision=revision+$7,updated_at=clock_timestamp() WHERE installation_id=$1 AND claim_id=$8`,
     [input.installationId,versionId,projection.legacyKey,projection.keyV2,projection.topicKeyV2,projection.duplicateDigestV2,prior?1:0,claimId])
+  const lifecycleKind:Record<string,string>={work_method:'method',architecture_decision:'decision',repository_convention:'constraint',test_invariant:'constraint',operational_runbook:'method',reusable_skill_candidate:'method'}
+  await client.query(`INSERT INTO memory_claim_lifecycle(installation_id,claim_id,kind,assertion_mode,protection)
+    VALUES($1,$2,$3,'user_asserted',$4) ON CONFLICT(installation_id,claim_id) DO UPDATE SET assertion_mode='user_asserted',storage_tier='hot',cold_since=NULL,protection=CASE WHEN $4='user_corrected' THEN 'user_corrected' ELSE memory_claim_lifecycle.protection END`,
+    [input.installationId,claimId,lifecycleKind[claimType]??'fact',prior?'user_corrected':'none'])
   await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
     VALUES(gen_random_uuid(),$1,'index_claim_version',$2,90,$3::jsonb) ON CONFLICT DO NOTHING`,[input.installationId,`index:${versionId}`,JSON.stringify({version_id:versionId})])
   return {ok:true as const,metadata:{claim_id:claimId,version_id:versionId,version_number:versionNumber,state:'active',source_kind:'manual_entry'}}

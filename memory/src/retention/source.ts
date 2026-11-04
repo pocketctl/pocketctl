@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import { retentionTransaction,readRetentionPlan } from './transaction.js'
+import {lifecycleSourceRetentionProof,reclaimSettledTaskState,taskSourceProtectedSql} from './task-state.js'
 
 export interface SourceRetentionSettings {
   mode: 'off' | 'enabled'
@@ -8,14 +9,15 @@ export interface SourceRetentionSettings {
   /** Legacy standalone helper cadence; the production Worker uses daily maintenance. */
   intervalMs: number
   reportDirectory?: string
+  lifecycleMode?: 'off'|'shadow'|'enabled'
 }
-export interface SourceRetentionKey { installationId: string; sessionId: string; turnId: string; episodeId: string }
+export interface SourceRetentionKey { installationId: string; sessionId: string; turnId: string; episodeId: string|null }
 export interface SourceRetentionResult {
   events: number; artifacts: number; snapshots: number; candidates: number; episodes: number
   finished: boolean; skipped: string | null
 }
 export interface SourceRetentionReceipt {
-  installation_id: string; session_id: string; turn_id: string; episode_id: string
+  installation_id: string; session_id: string; turn_id: string; episode_id: string|null
   source_digest: Buffer; compiler_version: string; extraction_completed_at: Date; reclaimed_at: Date
 }
 
@@ -38,6 +40,7 @@ const eligibilityFrom = `FROM work_episodes e
     AND success.completed_at<=statement_timestamp()-($1::int*INTERVAL '24 hours')
     AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts a WHERE a.installation_id=e.installation_id AND a.turn_id=e.turn_id)
     AND NOT ${MIGRATION_PROTECTS_SCOPE_SQL}
+    AND NOT ${taskSourceProtectedSql()}
     AND NOT EXISTS(SELECT 1 FROM memory_snapshot_runs r WHERE r.installation_id=e.installation_id
       AND (r.state='running' OR(r.state='completed' AND r.relay_acked_at IS NULL)))
     AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs r WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id
@@ -113,7 +116,17 @@ export async function reclaimSourceTurn(pool: pg.Pool, key: SourceRetentionKey, 
     if (state.snapshot_required || state.snapshot_busy) return { ...result, skipped: 'snapshot' }
     let receipt = (await client.query<SourceRetentionReceipt>(`SELECT * FROM memory_source_retention_receipts
       WHERE installation_id=$1 AND turn_id=$2 FOR UPDATE`, [key.installationId, key.turnId])).rows[0]
+    if(receipt?.compiler_version==='lifecycle-v1'&&settings.lifecycleMode!=='enabled')return {...result,skipped:'lifecycle_disabled'}
     if (!receipt) {
+      if(key.episodeId===null){
+        if(settings.lifecycleMode!=='enabled')return {...result,skipped:'lifecycle_disabled'}
+        const proof=await lifecycleSourceRetentionProof(client,{...key,bodyDays:settings.bodyDays})
+        if(!proof)return {...result,skipped:'not_eligible'}
+        receipt=(await client.query<SourceRetentionReceipt>(`INSERT INTO memory_source_retention_receipts
+          (installation_id,session_id,turn_id,episode_id,source_digest,compiler_version,extraction_completed_at,state,policy_version)
+          VALUES($1,$2,$3,NULL,$4,'lifecycle-v1',$5,'reclaiming','lifecycle-source-v1') RETURNING *`,
+          [key.installationId,key.sessionId,key.turnId,proof.source_digest,proof.created_at])).rows[0]
+      }else{
       const episode = (await client.query(`SELECT e.installation_id,e.session_id,e.turn_id,e.episode_id,
           e.source_digest,e.document_compiler_version,success.completed_at ${eligibilityFrom}
         AND e.installation_id=$2 AND e.episode_id=$3 AND e.turn_id=$4`,
@@ -124,6 +137,7 @@ export async function reclaimSourceTurn(pool: pg.Pool, key: SourceRetentionKey, 
         VALUES($1,$2,$3,$4,$5,$6,$7,'reclaiming') RETURNING *`,
       [key.installationId, key.sessionId, key.turnId, key.episodeId, episode.source_digest,
         episode.document_compiler_version ?? 'unknown', episode.completed_at])).rows[0]
+      }
     }
     if (receipt.session_id !== key.sessionId || receipt.episode_id !== key.episodeId) return { ...result, skipped: 'source_discovery_changed' }
     return reclaimReceiptBatch(client, receipt, settings.batchSize)
@@ -167,6 +181,7 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     OR EXISTS(SELECT 1 FROM memory_candidates WHERE installation_id=$1 AND episode_id=$3 AND body_reclaimed_at IS NULL) pending`,
   [receipt.installation_id, receipt.turn_id, receipt.episode_id])).rows[0].pending
   if (!outstanding) {
+    await reclaimSettledTaskState(client,receipt.installation_id,receipt.turn_id)
     result.episodes = (await client.query(`UPDATE work_episodes SET
       retained_content_hash=encode(sha256(convert_to(jsonb_build_object('document',document,'manifest',evidence_manifest,'summary',summary)::text,'UTF8')),'hex'),
       document='{}',evidence_manifest='{}',summary=jsonb_strip_nulls(jsonb_build_object('references',summary->'references',
@@ -178,4 +193,16 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     result.finished = true
   }
   return result
+}
+
+/** Bounded discovery; each mutation recomputes complete coverage under locks. */
+export async function previewLifecycleSourceRetention(pool:pg.Pool,settings:SourceRetentionSettings,installationId?:string,afterTurnId?:string){
+ if(settings.mode!=='enabled'||settings.lifecycleMode!=='enabled')return []
+ return (await pool.query(`SELECT DISTINCT ON(r.installation_id,r.turn_id) r.installation_id,r.session_id,r.turn_id,NULL::uuid AS episode_id
+  FROM memory_source_processing_receipts r JOIN memory_curation_policies p USING(installation_id)
+  WHERE r.complete AND p.mode='enabled' AND p.reclaim_mode='enabled' AND r.created_at<=clock_timestamp()-($1::int*interval '24 hours') AND($2::uuid IS NULL OR r.installation_id=$2)
+   AND($3::text IS NULL OR r.turn_id>$3)
+   AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts done WHERE done.installation_id=r.installation_id AND done.turn_id=r.turn_id)
+   AND NOT ${taskSourceProtectedSql('r.installation_id','r.turn_id')}
+  ORDER BY r.installation_id,r.turn_id,r.created_at DESC LIMIT 20`,[settings.bodyDays,installationId??null,afterTurnId??null])).rows
 }

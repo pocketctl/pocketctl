@@ -16,6 +16,7 @@ const {
   discoverMemoryInstallation,
   enableMemoryServices,
   searchMemory,
+  listMemoryScenes,
   correctMemoryClaim,
   sendMemoryFeedback,
   MemoryClientError,
@@ -500,4 +501,26 @@ test('proposal deadline covers an unfinished grant and blocks a late request bod
   finish(Response.json({grant:'late-grant',expires_in:300,provider_public_origin:'https://memory.example'}));await Promise.resolve();await Promise.resolve();await Promise.resolve()
   expect(fetcher).toHaveBeenCalledTimes(1)
  }finally{vi.useRealTimers()}
+})
+
+test('lifecycle status and protection preserve personal grant, revision and caller idempotency key',async()=>{
+ const {getMemoryLifecycleStatus,protectMemoryClaim,listMemoryLifecycleClaims}=await import('../../services/memoryClient')
+ const {calls}=relayAndProviderFetch({providerHandler:()=>Response.json({})})
+ await getMemoryLifecycleStatus('inst-1');await listMemoryLifecycleClaims('cold');await protectMemoryClaim('claim-id',7,'pinned','fixed-lifecycle-key')
+ const provider=calls.filter(c=>c.origin==='https://memory.example')
+ expect(provider.map(c=>c.path)).toEqual(['/api/v1/memory/lifecycle/status','/api/v1/memory/lifecycle/claims','/api/v1/memory/claims/claim-id/protection'])
+ expect(new Headers(provider[2]?.init.headers).get('idempotency-key')).toBe('fixed-lifecycle-key')
+ expect(new Headers(provider[2]?.init.headers).get('authorization')).toBe('Bearer grant-token-1')
+ expect(JSON.parse(String(provider[2]?.init.body))).toEqual({expected_revision:7,protection:'pinned'})
+ expect(provider[0]?.init.cache).toBe('no-store')
+})
+
+test('scene metadata uses the selected readable scope and search forwards explicit scene and destination',async()=>{
+  const {calls}=relayAndProviderFetch({providerHandler:async url=>Response.json(url.includes('/scenes')?{scenes:[],has_more:false}:{hits:[],degradedComponents:[]})})
+  await listMemoryScenes('owner-scene')
+  const scenes=calls.find(c=>c.path==='/api/v1/memory/scenes')!
+  expect(scenes.search).toBe('?installation_id=owner-scene')
+  expect(new Headers(scenes.init.headers).get('authorization')).toBe('Bearer scoped-grant-token')
+  await searchMemory('timeout',{scopeInstallationIds:['owner-scene'],sceneId:'scene-work',destination:'work'})
+  expect(JSON.parse(String(calls.find(c=>c.path==='/api/v1/memory/search')!.init.body))).toMatchObject({query:'timeout',scope_installation_ids:['owner-scene'],scene_id:'scene-work',destination:'work'})
 })

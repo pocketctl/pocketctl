@@ -9,7 +9,7 @@
             <input v-model="query" type="search" :aria-label="t('memory.search_memory')" :placeholder="t('memory.search_placeholder')"
               data-testid="memory-search-input" :disabled="loading"/>
             <span class="memory-search-shortcut" aria-hidden="true">⌘ K</span>
-            <button type="submit" class="memory-button is-primary" :disabled="loading || query.trim().length === 0"
+            <button type="submit" class="memory-button is-primary" :disabled="loading || query.trim().length === 0 || sceneBlocked"
               data-testid="memory-search-submit">
               <span v-if="loading" class="memory-button-spinner" aria-hidden="true"></span>
               <span class="memory-search-submit-label" data-testid="memory-search-submit-label">{{ loading ? t('memory.searching') : t('memory.search') }}</span>
@@ -22,6 +22,19 @@
               <span>{{ scopeLabel(scope) }}</span>
             </label>
           </fieldset>
+          <div v-if="sceneOwners.length && (scenes.length || scenesLoading || scenesError)" class="memory-scene-filters" data-testid="memory-scene-filters">
+            <label>{{ t('memory.scene') }}<ActionSelect><select v-model="sceneKey" :aria-label="t('memory.scene')" :disabled="scenesLoading || !!scenesError" data-testid="memory-scene-select">
+              <option value="">{{ t('memory.scene_choose') }}</option>
+              <option v-for="scene in scenes" :key="scene.key" :value="scene.key">{{ scene.label }}</option>
+            </select></ActionSelect></label>
+            <label>{{ t('memory.scene_destination') }}<ActionSelect><select v-model="destination" :aria-label="t('memory.scene_destination')" :disabled="!selectedScene" data-testid="memory-destination-select">
+              <option value="">{{ t('memory.scene_destination_choose') }}</option>
+              <option v-for="value in selectedScene?.destinations || []" :key="value" :value="value">{{ t(`memory.destination_${value}`) }}</option>
+            </select></ActionSelect></label>
+          </div>
+          <p v-if="scenesLoading" role="status">{{ t('memory.scene_loading') }}</p>
+          <div v-else-if="scenesError" class="memory-notice is-error" role="alert" data-testid="memory-scene-error">{{ t('memory.scene_failed') }} <button type="button" class="memory-button" @click="loadScenes">{{ t('memory.scene_retry') }}</button></div>
+          <p v-else-if="scenes.length" class="memory-notice" role="status" data-testid="memory-scene-hint">{{ t('memory.scene_hint') }} <span v-if="scenesHasMore">{{ t('memory.scene_more') }}</span></p>
         </div>
 
         <div class="memory-results-head"><span>{{ searched ? `${hits.length} ${t('memory.results')} · ${t('memory.sorted_by_relevance')}` : t('memory.search_start') }}</span></div>
@@ -131,15 +144,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import ActionSelect from '../ActionSelect.vue'
 import { useLocale } from '../../composables/useLocale'
-import { getMemoryClaim, listVersionEvidence, MemoryClientError, searchMemory } from '../../services/memoryClient'
+import { getMemoryClaim, listVersionEvidence, MemoryClientError, searchMemory, listMemoryScenes } from '../../services/memoryClient'
 import type {
-  MemoryClaimDetail, MemoryEvidence, MemoryGovernanceScope, MemorySearchHit,
+  MemoryClaimDetail, MemoryEvidence, MemoryGovernanceScope, MemorySearchHit, MemoryScene, MemoryDestination,
 } from '../../types/memory'
 
 const { t } = useLocale()
-const props = withDefaults(defineProps<{ scopes?: MemoryGovernanceScope[] }>(), { scopes: () => [] })
+const props = withDefaults(defineProps<{ scopes?: MemoryGovernanceScope[]; installationId?:string }>(), { scopes: () => [] })
 const emit = defineEmits<{ (e: 'select-claim', claimId: string, hit: MemorySearchHit): void }>()
 
 const query = ref('')
@@ -179,6 +193,35 @@ watch(() => props.scopes, scopes => {
     if (personal) selectedScopeIds.value = [personal.installation_id]
   }
 }, { immediate: true, deep: true })
+
+type SceneOption=MemoryScene&{key:string;owner:string;label:string}
+const scenes=ref<SceneOption[]>([]),sceneKey=ref(''),destination=ref<MemoryDestination|''>('')
+const scenesLoading=ref(false),scenesError=ref(false),scenesHasMore=ref(false)
+let sceneRequestId=0
+const sceneOwners=computed(()=>props.scopes.length?[...selectedScopeIds.value]:props.installationId?[props.installationId]:[])
+const selectedScene=computed(()=>scenes.value.find(scene=>scene.key===sceneKey.value))
+const sceneBlocked=computed(()=>scenesLoading.value||scenesError.value||(scenes.value.length>0&&(!selectedScene.value||!selectedScene.value.destinations.includes(destination.value as MemoryDestination))))
+function clearSearch(){
+  controller?.abort();controller=undefined;loading.value=false;searched.value=false;hits.value=[];error.value='';degraded.value=false
+  previewRequestId++;selectedHit.value=null;previewDetail.value=null;previewEvidence.value=[];previewOpen.value=false;previewLoading.value=false;previewError.value=''
+}
+async function loadScenes(){
+  const requestId=++sceneRequestId,owners=[...sceneOwners.value]
+  clearSearch();scenes.value=[];sceneKey.value='';destination.value='';scenesError.value=false;scenesHasMore.value=false
+  if(!owners.length){scenesLoading.value=false;return}
+  scenesLoading.value=true
+  try{
+    const results=await Promise.all(owners.map(async owner=>({owner,list:await listMemoryScenes(owner)})))
+    if(requestId!==sceneRequestId)return
+    scenes.value=results.flatMap(({owner,list})=>list.scenes.map(scene=>({...scene,owner,key:`${owner}:${scene.id}`,label:owners.length>1?`${props.scopes.find(scope=>scope.installation_id===owner)?.name||t('memory.governance.scope.personal')} · ${scene.name}`:scene.name})))
+    scenesHasMore.value=results.some(result=>result.list.has_more)
+  }catch{if(requestId===sceneRequestId)scenesError.value=true}
+  finally{if(requestId===sceneRequestId)scenesLoading.value=false}
+}
+watch(()=>JSON.stringify(sceneOwners.value),()=>{void loadScenes()},{immediate:true})
+watch(sceneKey,()=>{destination.value='';clearSearch()})
+watch(destination,clearSearch)
+onBeforeUnmount(()=>{sceneRequestId++;controller?.abort();previewRequestId++})
 
 function humanizeType(value: string): string {
   return value.replace(/_/g, ' ')
@@ -238,7 +281,7 @@ function useSuggestion(value: string): void {
 
 async function runSearch(): Promise<void> {
   const text = query.value.trim()
-  if (!text) return
+  if (!text || sceneBlocked.value) return
   controller?.abort()
   const requestController = new AbortController()
   controller = requestController
@@ -250,9 +293,9 @@ async function runSearch(): Promise<void> {
       throw new MemoryClientError(400, 'scope_required', 'select at least one scope')
     }
     const result = await searchMemory(text, {
-      ...(props.scopes.length > 0
-        ? { scopeInstallationIds: [...selectedScopeIds.value] }
-        : {}),
+      ...(selectedScene.value
+        ? {scopeInstallationIds:[selectedScene.value.owner],sceneId:selectedScene.value.id,destination:destination.value as MemoryDestination}
+        : props.scopes.length > 0 ? { scopeInstallationIds: [...selectedScopeIds.value] } : {}),
     }, requestController.signal)
     if (controller !== requestController) return
     hits.value = result.hits
@@ -284,3 +327,9 @@ async function runSearch(): Promise<void> {
   }
 }
 </script>
+
+<style scoped>
+.memory-scene-filters{display:flex;flex-wrap:wrap;gap:12px;margin-top:14px}
+.memory-scene-filters>label{display:flex;flex-direction:column;gap:6px;min-width:160px;max-width:100%;font-size:12px;color:var(--fg-secondary)}
+@media(max-width:700px){.memory-scene-filters>label{flex:1;min-width:140px}}
+</style>

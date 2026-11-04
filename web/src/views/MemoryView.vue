@@ -35,7 +35,7 @@
     <section v-else class="memory-workspace" data-testid="memory-workspace">
       <div v-if="isMobile" class="memory-scope"><WorkspaceIcon name="memory" class="icon" /><span class="grow">{{ t('replica.personal_memory') }}</span></div>
       <div class="memory-workspace-shell memory-grid" data-testid="memory-workbench-frame">
-        <MemoryModuleNavigation v-model="active" :review-count="reviewCount" />
+        <MemoryModuleNavigation v-model="active" :review-count="lifecycleMode === 'enabled' ? null : reviewCount" />
         <div class="memory-workspace-main memory-stage">
           <div class="memory-module-picker">
             <label for="memory-module-select">{{ t('memory.module') }}
@@ -59,7 +59,7 @@
 
       <div class="memory-module-stage" data-testid="memory-module-stage">
         <div :id="`memory-panel-${active}`" class="memory-module-body" role="tabpanel" :aria-label="t(`memory.tab_${active}`)" :aria-describedby="`memory-description-${active}`">
-          <MemorySearchPanel v-if="active === 'search'" :scopes="governanceScopes" @select-claim="selectClaim"/>
+          <MemorySearchPanel v-if="active === 'search'" :installation-id="installation.installation_id" :scopes="governanceScopes" @select-claim="selectClaim"/>
           <template v-if="active === 'review'">
             <MemoryScopeSwitcher v-if="governanceScopes.length > 0" v-model="governanceTarget"
               :scopes="governanceScopes" />
@@ -90,11 +90,11 @@
               </button>
             </div>
             <p v-else-if="governanceError" class="memory-error" role="alert">{{ governanceError }}</p>
-            <section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
+            <MemoryLifecyclePanel :installation-id="installation.installation_id" @mode="lifecycleMode = $event"><section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
             <p v-if="deliveryReview" class="memory-notice">当前仅查看所选交付及验收记录的个人候选。</p>
             <CandidateReviewList ref="reviewList" :delivery="deliveryReview" @accepted="rememberAcceptedClaim"
               @changed="refreshReview" @count="reviewCount = $event"/>
-            </section>
+            </section></MemoryLifecyclePanel>
           </template>
           <ClaimDetailPanel :key="`${installation.installation_id}:${manualClaimRevision}`" v-if="active === 'claims'" :claim-id="claimId"
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
@@ -198,6 +198,7 @@ import type {
 } from '../types/memory'
 import { promotionTargetsForSource } from '../utils/memoryGovernance'
 import MemorySearchPanel from '../components/memory/MemorySearchPanel.vue'
+import MemoryLifecyclePanel from '../components/memory/MemoryLifecyclePanel.vue'
 import CandidateReviewList from '../components/memory/CandidateReviewList.vue'
 import ClaimDetailPanel from '../components/memory/ClaimDetailPanel.vue'
 import MemoryOperationalStatus from '../components/memory/MemoryOperationalStatus.vue'
@@ -258,6 +259,7 @@ watch(()=>installation.value?.installation_id,()=>{manualClaimOpen.value=false;c
 function manualClaimCreated(id:string){manualClaimOpen.value=false;claimSourceInstallationId.value=null;claimId.value=id;manualClaimRevision.value++;active.value='claims'}
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
+const lifecycleMode = ref<'off'|'shadow'|'enabled'|'unknown'>('unknown')
 const reviewCount = ref<number | null>(null)
 const reviewList = ref<InstanceType<typeof CandidateReviewList> | null>(null)
 const governanceScopes = ref<MemoryGovernanceScope[]>([])

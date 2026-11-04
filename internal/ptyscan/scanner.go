@@ -242,6 +242,10 @@ func consumeANSIEscape(s string, start, row, col int) (next int, handled bool, n
 					nextCol = c - 1
 				}
 			}
+		case 'G':
+			// Claude positions individual words with horizontal absolute moves.
+			// Discarding these moves merges the words and hides startup menus.
+			nextCol = csiCount(params) - 1
 		case 'A':
 			nextRow -= csiCount(params)
 			if nextRow < 0 {
@@ -462,10 +466,10 @@ func (s *Scanner) detectLocked() *PendingPrompt {
 	}
 }
 
-// Modern Claude uses an unnumbered menu. Require the complete workspace trust
+// Claude versions use numbered or unnumbered menus. Require the complete workspace trust
 // screen, not just prose containing "trust", before exposing owner choices.
 var claudeTrustQuestion = regexp.MustCompile(`(?i)Is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust\?`)
-var claudeTrustOption = regexp.MustCompile(`(?m)^[ \t]*([❯›]?)[ \t]*(No,\s*exit|Yes,\s*I\s*trust\s*this\s*folder)[ \t]*$`)
+var claudeTrustOption = regexp.MustCompile(`(?m)^[ \t]*([❯›]?)[ \t]*(?:[12]\.[ \t]*)?(No,\s*exit|Yes,\s*I\s*trust\s*this\s*folder)[ \t]*$`)
 
 func (s *Scanner) detectClaudeTrustLocked(clean string) *PendingPrompt {
 	question := claudeTrustQuestion.FindString(clean)
