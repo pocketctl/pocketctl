@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
@@ -3934,6 +3935,7 @@ func deliverDeferredInitialPrompt(
 	_, registrationErr := grants.RegisterSession(ctx, registrationID, sessionID)
 	return send(session.UserMessageInput{
 		SessionID: sessionID, Content: prompt, RequestID: requestID,
+		MsgID:             uuid.NewSHA1(uuid.NameSpaceOID, []byte("initial-prompt\x00"+sessionID+"\x00"+requestID)).String(),
 		SkipMemoryContext: registrationErr != nil,
 	})
 }

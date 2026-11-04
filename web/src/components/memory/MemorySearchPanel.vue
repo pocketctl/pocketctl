@@ -208,7 +208,7 @@ const scenesLoading=ref(false),scenesError=ref(false),scenesHasMore=ref(false)
 let sceneRequestId=0
 const sceneOwners=computed(()=>props.scopes.length?[...selectedScopeIds.value]:props.installationId?[props.installationId]:[])
 const selectedScene=computed(()=>scenes.value.find(scene=>scene.key===sceneKey.value))
-const sceneBlocked=computed(()=>scenesLoading.value||scenesError.value||(scenes.value.length>0&&(!selectedScene.value||!selectedScene.value.destinations.includes(destination.value as MemoryDestination))))
+const sceneBlocked=computed(()=>scenesLoading.value||scenesError.value||(scenes.value.length>0&&(!selectedScene.value ? !!sceneKey.value || !taskScopeKey.value : !selectedScene.value.destinations.includes(destination.value as MemoryDestination))))
 const taskScopeKey=ref(''),taskOptions=ref<Array<{key:string;label:string}>>([]),tasksCursor=ref<string|null>(null),tasksLoading=ref(false),tasksError=ref(false)
 const personalTaskOwner=computed(()=>props.installationId && (!props.scopes.length || (selectedScopeIds.value.length===1 && selectedScopeIds.value[0]===props.installationId)) ? props.installationId : '')
 let taskRequestId=0

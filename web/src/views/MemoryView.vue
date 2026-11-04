@@ -90,7 +90,11 @@
               </button>
             </div>
             <p v-else-if="governanceError" class="memory-error" role="alert">{{ governanceError }}</p>
-            <MemoryLifecyclePanel :installation-id="installation.installation_id" @mode="lifecycleMode = $event"><section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
+            <MemoryLifecyclePanel :installation-id="installation.installation_id" @mode="lifecycleMode = $event">
+            <details v-if="lifecycleMode === 'shadow'" class="memory-personal-review" data-testid="memory-shadow-candidates" @toggle="shadowCandidatesOpen = ($event.target as HTMLDetailsElement).open">
+              <summary>{{ t('memory.shadow_candidates') }}</summary><p class="memory-notice">{{ t('memory.shadow_candidate_readonly') }}</p>
+              <CandidateReviewList v-if="shadowCandidatesOpen" shadow />
+            </details><section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
             <p v-if="deliveryReview" class="memory-notice">当前仅查看所选交付及验收记录的个人候选。</p>
             <CandidateReviewList ref="reviewList" :delivery="deliveryReview" @accepted="rememberAcceptedClaim"
               @changed="refreshReview" @count="reviewCount = $event"/>
@@ -139,6 +143,7 @@
           <MemoryPersonaPanel v-if="active === 'persona'" data-testid="memory-panel-persona" />
           <MemoryPolicyEditor v-if="active === 'policies'" data-testid="memory-panel-policies" />
           <MemoryLoadoutEditor v-if="active === 'loadouts'" data-testid="memory-panel-loadouts" />
+          <MemoryPersonalSceneForm v-if="active === 'settings'" :key="installation.installation_id" :installation-id="installation.installation_id"/>
           <MemorySettingsCard v-if="active === 'settings'" :services="installation.enabled_services"
             :installation-status="installation.status" @changed="reload"/>
         </div>
@@ -199,6 +204,7 @@ import type {
 import { promotionTargetsForSource } from '../utils/memoryGovernance'
 import MemorySearchPanel from '../components/memory/MemorySearchPanel.vue'
 import MemoryLifecyclePanel from '../components/memory/MemoryLifecyclePanel.vue'
+import MemoryPersonalSceneForm from '../components/memory/MemoryPersonalSceneForm.vue'
 import CandidateReviewList from '../components/memory/CandidateReviewList.vue'
 import ClaimDetailPanel from '../components/memory/ClaimDetailPanel.vue'
 import MemoryOperationalStatus from '../components/memory/MemoryOperationalStatus.vue'
@@ -259,6 +265,7 @@ watch(()=>installation.value?.installation_id,()=>{manualClaimOpen.value=false;c
 function manualClaimCreated(id:string){manualClaimOpen.value=false;claimSourceInstallationId.value=null;claimId.value=id;manualClaimRevision.value++;active.value='claims'}
 const claimId = ref<string | null>(null)
 const claimSourceInstallationId = ref<string | null>(null)
+const shadowCandidatesOpen = ref(false)
 const lifecycleMode = ref<'off'|'shadow'|'enabled'|'unknown'>('unknown')
 const reviewCount = ref<number | null>(null)
 const reviewList = ref<InstanceType<typeof CandidateReviewList> | null>(null)

@@ -111,6 +111,7 @@ var (
 )
 
 type SessionManager struct {
+	memorySources           *memorySourceLedger
 	opencodeDocumentCapture func(adapter.OpencodeDocumentCandidate) bool
 
 	mu                       sync.RWMutex

@@ -480,6 +480,7 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 	event, ok := p.convertItem(method, params.ThreadID, params.TurnID, params.Item)
 	if ok {
 		stampTurnIdentity(&event, params.ThreadID, params.TurnID, "")
+		event.MemoryNative = &protocol.MemoryNativeEvent{Producer: "codex", RecordID: params.Item.ID, RootID: params.TurnID, UserRoot: params.Item.Type == "userMessage", CompleteCall: params.Item.Type == "commandExecution" || params.Item.Type == "mcpToolCall" || params.Item.Type == "dynamicToolCall", Skill: strings.EqualFold(params.Item.Tool, "skill")}
 		events = append(events, event)
 		if method == "item/completed" && params.Item.Type == "fileChange" {
 			fileChanges := p.projectManagedFileChanges(

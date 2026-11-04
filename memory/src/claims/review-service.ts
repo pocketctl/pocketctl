@@ -1,3 +1,4 @@
+import {shadowReviewQueue} from './shadow-review.js'
 import {candidateReviewHash} from './review-hash.js'
 import type pg from 'pg'
 import type { ClaimRepository } from './repository.js'
@@ -11,6 +12,7 @@ import { resolvePacketEvidence } from './evidence-resolver.js'
  */
 export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
   const service = {
+    shadowQueuePage(input:{installationId:string;limit?:number;cursor?:string}) { return shadowReviewQueue(pool,input) },
     async acceptCandidate(input: {
       installationId: string
       candidateId: string

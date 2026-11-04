@@ -482,7 +482,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		return err
 	}
 	sm.emitTurnStatus(rec, protocol.TurnStateRunning, "")
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID, RetryOfTurnID: in.RetryOfTurnID, MemorySource: memoryInputProvenance(in, rec.TurnID, agent)})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID, RetryOfTurnID: in.RetryOfTurnID, MemorySource: sm.registerMemoryInput(in, rec.TurnID, agent, "")})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
 		if !in.SuppressContextReceipt {
@@ -1064,6 +1064,7 @@ func (sm *SessionManager) EnrichOutgoingEvent(ev *protocol.DaemonEvent) {
 			}
 		}
 	}
+	sm.stampNativeMemorySource(ev)
 	stampUnknownMemorySource(ev)
 	if ev.ClassifierVersion == "" {
 		turn.Apply(ev, turn.Classify(ev, sm.turnMetrics))

@@ -89,7 +89,7 @@ func TestDeliverDeferredInitialPromptFailsOpenOnlyAfterRegistrationAttempt(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Content != "exact initial prompt" || got.SessionID != "ses-1" || got.SkipMemoryContext != tt.wantSkip {
+			if got.Content != "exact initial prompt" || got.SessionID != "ses-1" || got.SkipMemoryContext != tt.wantSkip || got.RequestID != "create-1" || got.MsgID == "" {
 				t.Fatalf("delivered input=%+v, want skip=%v", got, tt.wantSkip)
 			}
 		})

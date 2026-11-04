@@ -4,6 +4,8 @@ import {beforeAll,beforeEach,afterAll,describe,test,expect,vi} from 'vitest'
 import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {governanceFixture} from '../testing/governance-fixture.js'
+import {createReviewService} from '../claims/review-service.js'
+import {createClaimRepository} from '../claims/repository.js'
 import {createCurationWorker} from '../curation/worker.js'
 import {createSourceProjector} from '../projection/source-projector.js'
 import {stageLifecycleTurn} from '../curation/task-repository.js'
@@ -56,6 +58,26 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   expect((await pool.query('SELECT disposition,complete,allowed_count FROM memory_source_processing_receipts WHERE installation_id=$1',[f.personal])).rows).toEqual([{disposition:'no_durable_conclusion',complete:false,allowed_count:1}])
   expect((await pool.query('SELECT count(*)::int n FROM memory_candidates WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
   expect(await snapshot()).toBe(before)
+ })
+ test('nonempty shadow conclusion is visible read-only with exact evidence and scope fences',async()=>{
+  const f=await fixture(),space=randomUUID()
+  await pool.query("UPDATE memory_curation_policies SET mode='shadow' WHERE installation_id=$1",[f.personal])
+  await pool.query("INSERT INTO memory_spaces(installation_id,space_id,domain,name,destinations) VALUES($1,$2,'profile','preferences',ARRAY['personal'])",[f.personal,space])
+  const conclusion={kind:'preference',confirmed:true,subject:'self',predicate:'user.preference',value:'concise answers',conditions:{},assertion_mode:'user_asserted',fact_at:null,valid_until:null,statement:f.payload.text,evidence:{subject:[f.id],predicate:[f.id],value:[f.id]}}
+  const generate=vi.fn(async()=>success([{space_id:space,task_id:null,spans:[{event_id:f.id,quote:f.payload.text}],conclusions:[conclusion]}]))
+  const w=createCurationWorker({pool,mode:'shadow',textGenerator:{generateJson:generate} as TextGenerator,modelFingerprint:'synthetic'})
+  await w.consolidate(f.job,signal());await w.consolidate(f.job,signal())
+  const review=createReviewService(pool,createClaimRepository(pool))
+  const page=await review.shadowQueuePage({installationId:f.personal})
+  expect(page.total_count).toBe(1);expect(page.candidates[0]).toMatchObject({status:'shadow',statement:f.payload.text,evidence:[{excerpt:f.payload.text}],source_kind:'task_bundle',read_only:true})
+  expect((await review.reviewQueuePage({installationId:f.personal})).total_count).toBe(0)
+  expect((await review.shadowQueuePage({installationId:f.team})).total_count).toBe(0)
+  await expect(review.shadowQueuePage({installationId:f.team,cursor:page.candidates[0].candidate_id})).rejects.toThrow('invalid_cursor')
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query("SELECT count(*)::int n FROM memory_curation_decisions WHERE installation_id=$1",[f.personal])).rows[0].n).toBe(0)
+  expect((await pool.query("SELECT count(*)::int n FROM knowledge_claims WHERE installation_id=$1",[f.personal])).rows[0].n).toBe(1)
+  await pool.query("UPDATE memory_task_bundles SET revision=revision+1 WHERE installation_id=$1 AND bundle_id=$2",[f.personal,f.bundleId])
+  expect((await review.shadowQueuePage({installationId:f.personal})).total_count).toBe(0)
  })
  test('quoted model evidence persists numeric spans for downstream workers',async()=>{
   const f=await fixture(),space=randomUUID()

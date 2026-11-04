@@ -34,6 +34,14 @@ export function registerLifecycleManageRoutes(app: FastifyInstance, deps: Lifecy
       throw error
     } finally { client.release() }
   }
+  app.post('/api/v1/memory/scenes',{bodyLimit:2048},async(request,reply)=>{
+    const parsed=z.strictObject({expected_revision:z.literal(0),name:z.string().trim().min(1).max(200),domain:z.literal('personal_project')}).safeParse(request.body)
+    if(!parsed.success)return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid personal scene')))
+    return deps.mutation(request,reply,'create_personal_scene',async(grant,_pool,client)=>{
+      const row=(await client.query(`INSERT INTO memory_spaces(installation_id,name,domain,destinations) VALUES($1,$2,$3,ARRAY['personal']) RETURNING space_id::text,name,domain,destinations,revision`,[grant.installationId,parsed.data.name,parsed.data.domain])).rows[0]
+      return {ok:true,metadata:{...row,revision:Number(row.revision)}}
+    })
+  })
   app.get('/api/v1/memory/lifecycle/status', (request, reply) => read(request, reply, (client, id) => lifecycleStatus(client, id, deps.lifecycleMode)))
   app.get('/api/v1/memory/lifecycle/claims', async(request,reply)=>{
     const parsed=z.strictObject({view:z.enum(['cold','history']),cursor:z.uuid().optional()}).safeParse(request.query)
