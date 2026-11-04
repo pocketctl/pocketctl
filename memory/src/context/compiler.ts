@@ -1,3 +1,6 @@
+import {resolveLifecycleFrame,lifecycleFrameCurrent} from './lifecycle-frame.js'
+import type {CurationMode} from '../curation/contracts.js'
+import type {SceneDestination} from './scene-resolver.js'
 import {prepareSelectedScopeContext,selectedScopeContextCurrent} from './selected-scope-dependencies.js'
 import type {V2GrantFacts} from '../governance/authorization.js'
 import { createHash } from 'crypto'
@@ -47,6 +50,10 @@ export interface CompileRequest {
   repoSnapshotId?:string|null
   commitSha?:string|null
   taskScopeKey?:string|null
+  sceneId?:string|null
+  destination?:SceneDestination
+  factAt?:string|null
+  knownAt?:string|null
   query: string
   requestKey: { keyId: string; hmacKey: Buffer }
   selectedReferences?: readonly SelectedContextReference[]
@@ -195,6 +202,7 @@ export function createContextCompiler(deps: {
   settings: ContextSettingsRepository
   packs: PackRepository
   generation: GenerationRunRepository
+  lifecycleMode?:CurationMode
   policyResolver: PolicyResolver
 }) {
   return {
@@ -206,8 +214,11 @@ export function createContextCompiler(deps: {
         repositoryKeyHint: input.repositoryKey ?? null,
       })
       const repositoryId = resolvedScope.repositoryId
+      const lifecycle=await resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off'})
+      // Historical hints cannot silently broaden an automatic current-context request.
+      if(input.factAt||input.knownAt)return{kind:'empty',reason:'historical_context_requires_explicit_read',degradedComponents:[]}
       const generation=await consumptionGeneration(deps.pool,input.installationId)
-      const queryContext:ContextQueryFrame={repositoryId,repoSnapshotId:null,branch:repositoryId?input.branch??null:null,taskScopeKey:input.taskScopeKey??null,commitSha:repositoryId?input.commitSha?.toLowerCase()??null:null}
+      const queryContext:ContextQueryFrame={...(lifecycle?{lifecycle}:{}),repositoryId,repoSnapshotId:null,branch:repositoryId?input.branch??null:null,taskScopeKey:input.taskScopeKey??null,commitSha:repositoryId?input.commitSha?.toLowerCase()??null:null}
       if(repositoryId&&(input.repoSnapshotId||input.commitSha)){
         const snapshots=(await deps.pool.query<{repo_snapshot_id:string;commit_sha:string}>(`SELECT s.repo_snapshot_id::text,s.commit_sha FROM repo_snapshots s
           WHERE s.installation_id=$1 AND s.repository_id=$2
@@ -303,7 +314,7 @@ export function createContextCompiler(deps: {
 	  if (!run.owner) {
 		if (run.state === 'succeeded' && run.outputKind === 'context_pack' && run.outputId) {
 		  const stored = await deps.packs.get(run.outputId)
-		  if (stored?.state === 'ready' && (!queryContext.selectedScopeProof || await selectedScopeContextCurrent(deps.pool,queryContext.selectedScopeProof))) {
+		  if (stored?.state === 'ready' && await lifecycleFrameCurrent(deps.pool,input.installationId,lifecycle) && (!queryContext.selectedScopeProof || await selectedScopeContextCurrent(deps.pool,queryContext.selectedScopeProof))) {
 			return {
 			  kind: 'ready', packId: run.outputId,
 				  stableTokens: stored.stable_tokens, dynamicTokens: stored.dynamic_tokens,
@@ -332,10 +343,11 @@ export function createContextCompiler(deps: {
         ? []
         : await deps.scope.personaVersions({ installationId: input.installationId })
       // Dynamic pool: replayable retrieval over the transient query.
-      const retrieval = selectedReferences.length === 0 && resolvedScope.repositoryKnown && minimizedQuery.length > 0
+      const retrieval = selectedReferences.length === 0 && (resolvedScope.repositoryKnown||lifecycle?.spaceId) && minimizedQuery.length > 0
         ? await deps.retrieval.retrieve({
             installationId: input.installationId,
             query: minimizedQuery,
+            lifecycle,
             repositoryId,
             repoSnapshotId:queryContext.repoSnapshotId,taskScopeKey:queryContext.taskScopeKey,
             branch: input.branch ?? null,
@@ -446,13 +458,14 @@ export function createContextCompiler(deps: {
           : retrieval.candidates.filter(candidate => policyDoc.degraded_behavior === 'metadata_only'
             ? candidate.sourcePools?.includes('metadata')
             : candidate.sourcePools?.some(pool => pool === 'metadata' || pool === 'lexical'))
+      const retrievedFacts=lifecycle?.consume?await contextClaimFacts(deps.pool,input.installationId,retrievalCandidates.map(c=>c.versionId)):new Map()
       for (const candidate of retrievalCandidates) {
         if (personaVersionIds.has(candidate.versionId)) continue
         const freshnessDays = policyDoc.freshness_days[candidate.claimType]
         if (freshnessDays !== undefined && candidate.freshnessAt
           && freshnessAsOf.getTime() - candidate.freshnessAt.getTime() > freshnessDays * 86_400_000) continue
         const isL3 = candidate.claimType === 'work_method'
-        if (isL3) continue // only the reviewed persona path creates L3 items
+        if (isL3&&!retrievedFacts.get(candidate.versionId)?.lifecycle?.spaceId) continue // Scene conclusions remain L2; Persona still requires review.
         const section: 'stable' | 'dynamic' = pinnedVersions.has(candidate.versionId)
           ? 'stable'
           : 'dynamic'

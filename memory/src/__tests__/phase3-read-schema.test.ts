@@ -7,6 +7,13 @@ const PERSONAL = '11111111-1111-4111-8111-111111111111'
 const TEAM = '22222222-2222-4222-8222-222222222222'
 
 describe('phase 3 read request schema', () => {
+  test('bounded explicit lifecycle scene is accepted for both stateless reads',()=>{
+    for(const schema of [SearchRequestSchema,RecallRequestSchema]){
+      expect(schema.parse({query:'q',scene_id:PERSONAL,destination:'work'})).toMatchObject({scene_id:PERSONAL,destination:'work'})
+      expect(schema.safeParse({query:'q',scene_id:'foreign-text'}).success).toBe(false)
+      expect(schema.safeParse({query:'q',destination:'all'}).success).toBe(false)
+    }
+  })
   test('accepts a bounded explicit scope selection for search and recall', () => {
     expect(SearchRequestSchema.parse({ query: 'q', scope_installation_ids: [PERSONAL, TEAM] })
       .scope_installation_ids).toEqual([PERSONAL, TEAM])

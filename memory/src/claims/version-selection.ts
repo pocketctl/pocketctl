@@ -1,6 +1,11 @@
 import type pg from 'pg'
 import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 
+/** Additive body availability is independent of fact/revision time. */
+export function versionBodyPresentSql(version='v'):string {
+ return `COALESCE(to_jsonb(${version})->>'body_state','present')='present'`
+}
+
 /** SQL identifiers/clock expressions are internal constants, never request input.
  * JSON access preserves reads of the pre-expand schema. A NULL interval is a
  * legacy revision; only its current pointer is consumable without as-of input.
@@ -11,7 +16,7 @@ export function revisionTimeSql(version='v',at='clock_timestamp()'):string {
 }
 export function currentClaimVersionSql(claim='c',version='v',at='clock_timestamp()'):string {
  return `(${claim}.current_version_id=${version}.version_id AND ${claim}.claim_id=${version}.claim_id
-  AND ${claim}.installation_id=${version}.installation_id AND ${revisionTimeSql(version,at)} AND ${deliveryVersionAvailableSql(version)})`
+  AND ${claim}.installation_id=${version}.installation_id AND ${revisionTimeSql(version,at)} AND ${deliveryVersionAvailableSql(version)} AND ${versionBodyPresentSql(version)})`
 }
 /** Latest committed revision at a half-open boundary, before checking facts.
  * Never fall back to an older statement when the chosen revision's facts fail.

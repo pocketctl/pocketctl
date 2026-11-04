@@ -1,3 +1,6 @@
+import { readCurationPolicy } from '../curation/policy.js'
+import { stageLifecycleTurn } from '../curation/task-repository.js'
+import type { CurationMode } from '../curation/contracts.js'
 import {assertJobFence} from '../generation/fence.js'
 import type {JobFence} from '../jobs/types.js'
 import type pg from 'pg'
@@ -23,7 +26,7 @@ import { PACKET_POLICY_VERSION } from './content-policy.js'
  */
 export function createEpisodeRepository(
   pool: pg.Pool,
-  options: { stabilizationMs?: number; extractionMaxChars?: number; extractionDebounceMs?: number } = {},
+  options: { lifecycleMode?: CurationMode; stabilizationMs?: number; extractionMaxChars?: number; extractionDebounceMs?: number } = {},
 ) {
   const stabilizationMs = options.stabilizationMs ?? 30_000
   const extractionDebounceMs = options.extractionDebounceMs ?? 120_000
@@ -67,6 +70,10 @@ export function createEpisodeRepository(
             return
           }
 
+          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,row.session_id])
+          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
+          if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {await client.query('COMMIT');return}
+          const lifecyclePolicy = await readCurationPolicy(client,installationId,options.lifecycleMode??'off')
           const events = await client.query<{
             source_event_id: string
             event_type: string
@@ -82,6 +89,11 @@ export function createEpisodeRepository(
             WHERE installation_id = $1 AND turn_id = $2
             ORDER BY occurred_at, source_event_id
           `, [installationId, turnId])
+          if(lifecyclePolicy){
+            if(fence)await assertJobFence(client,fence)
+            await stageLifecycleTurn(client,{installationId,sessionId:row.session_id,turnId,events:events.rows},lifecyclePolicy)
+            if(lifecyclePolicy.mode==='enabled'){await client.query('COMMIT');return}
+          }
           const counts = summarizeEvents(events.rows.map(eventRow => ({
             event_type: eventRow.event_type,
             classification: eventRow.classification ?? {},

@@ -246,6 +246,9 @@ describe('federated RRF merge', () => {
     expect(() => resolveFederatedCursor({
       cursor, context: { ...context, query: 'different' }, key: 'cursor-key',
     })).toThrow('invalid federated cursor')
+    expect(() => resolveFederatedCursor({
+      cursor, context:{...context,lifecycleContextFingerprint:'different-scene-or-policy'},key:'cursor-key',
+    })).toThrow('invalid federated cursor')
     expect(() => encodeFederatedCursor({
       offset: 120, asOf, context, key: 'cursor-key',
     })).toThrow('invalid federated cursor offset')

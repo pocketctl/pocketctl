@@ -23,6 +23,8 @@ vi.mock('../../composables/useLocale', async () => {
   }
 })
 
+vi.mock('../../services/memoryOperationalStatus',()=>({readMemoryOperationalStatus:async()=>({state:'ready',last_error_code:null})}))
+
 const memoryRoute = { query: {} as Record<string, string> }
 vi.mock('../../components/memory/MemoryGitProjects.vue', () => ({ default: { template: '<section data-testid="git-projects-entry" />' } }))
 vi.mock('vue-router', async () => ({ ...(await vi.importActual('vue-router')), useRoute: () => memoryRoute }))
@@ -30,11 +32,14 @@ vi.mock('vue-router', async () => ({ ...(await vi.importActual('vue-router')), u
 const memoryInstallation = ref<any>(null)
 
 const memoryClient = vi.hoisted(() => ({
+  getMemoryLifecycleStatus: vi.fn(async()=>({mode:'off',personal:true,consume_mode:'off',cold_mode:'off',reclaim_mode:'off',bundles:{},runs:{},receipts:{},usage:{input_tokens:0,output_tokens:0},records:[],oldest_pending_seconds:null,has_more:false})),
+  getMemoryClaimLifecycle: vi.fn(async()=>({managed:false,source_status:'unknown'})),
   discoverMemoryInstallation: vi.fn(async () => memoryInstallation.value),
   enableMemoryServices: vi.fn(async (_id: string, _version: number, services: string[]) => ({
     ...memoryInstallation.value,
     enabled_services: services,
   })),
+  listMemoryScenes: vi.fn(async()=>({scenes:[],has_more:false})),
   searchMemory: vi.fn(async () => ({ hits: [] as any[], nextCursor: null, degradedComponents: [] as string[], poolSizes: {} })),
   listMemoryClaims: vi.fn(async () => ({
     claims: [{
@@ -254,7 +259,7 @@ describe('MemoryView', () => {
     await flushPromises()
     expect(view.get('[data-testid="memory-tab-search"]').attributes('aria-selected')).toBe('true')
 		expect(view.get('[data-testid="memory-module-group-knowledge"]').text()).toContain('技能')
-    expect(view.get('[data-testid="memory-module-group-collaboration"]').text()).toContain('候选审核')
+    expect(view.get('[data-testid="memory-module-group-collaboration"]').text()).toContain('处理与审核')
     expect(view.find('[data-testid="memory-search-initial"]').exists()).toBe(true)
     await view.get('[data-testid="memory-module-select"]').setValue('settings')
     await flushPromises()

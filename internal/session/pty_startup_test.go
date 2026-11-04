@@ -57,7 +57,11 @@ func TestPTYCreateDefersFirstTurnUntilRelayRegistration(t *testing.T) {
 
 func TestPTYInitialPromptWaitsForOwnerAndCancellation(t *testing.T) {
 	scanner := ptyscan.NewScanner("startup")
-	scanner.Feed([]byte("Do you want to proceed?\n❯ 1. Yes\n  2. No\n"))
+	raw, err := os.ReadFile("../ptyscan/testdata/claude-2.1.227-workspace-trust.ansi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.Feed(raw)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})

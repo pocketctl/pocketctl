@@ -1,3 +1,4 @@
+import { parseMemorySourceProvenance } from '../episodes/skill-provenance.js'
 import type pg from 'pg'
 import { classifyArtifact } from './artifact-classifier.js'
 import { extractCanonicalEventKey } from './event-identity.js'
@@ -349,7 +350,11 @@ async function insertSourceEvent(
     row.session_id, row.turn_id, row.event_type, row.recorded_at,
     JSON.stringify(row.classification ?? {}), JSON.stringify(row.data ?? {}),
     canonicalPayloadHash(row.data ?? {}),
-    JSON.stringify(extended.sourceProvenance ?? {}),
+    JSON.stringify(extended.sourceProvenance ?? (() => {
+      if (row.source_kind !== 'canonical_event') return {}
+      const proof = parseMemorySourceProvenance(row.classification?.memory_source)
+      return proof && proof.session_id === row.session_id && proof.turn_id === row.turn_id ? { memory: proof } : {}
+    })()),
   ])
   return { sourceEventId: result.rows[0].source_event_id, inserted: result.rows[0].inserted }
 }

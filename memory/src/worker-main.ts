@@ -1,3 +1,9 @@
+import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
+import {createLifecycleAssessmentService} from './claims/lifecycle-assessment.js'
+import {createLifecycleObservationService} from './claims/lifecycle-observation.js'
+import {createCurationExecutor} from './curation/executor.js'
+import {createCurationWorker} from './curation/worker.js'
+import {reclaimClaimHistory,reclaimColdClaimBody} from './retention/claim-history.js'
 import {createDailyMaintenanceWorker} from './maintenance/worker.js'
 import { createDeliveryWithdrawalClient } from './relay/delivery-withdrawal-client.js'
 import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-consumer.js'
@@ -344,6 +350,7 @@ async function main(): Promise<void> {
     })
     jobWorker.register('project_feed', projection.handleProjectFeed)
     const episodes = createEpisodeRepository(pool, {
+      lifecycleMode: config.lifecycleMode,
       stabilizationMs: config.episodeStabilizationMs,
       extractionMaxChars: config.extractionMaxChars,
       extractionDebounceMs: config.extractionDebounceMs,
@@ -468,7 +475,7 @@ async function main(): Promise<void> {
     const extractionTextRoute = createExtractionTextRoute(config.mimoTextModel, config.textModel)
     if (extractionTextRoute && textGenerator) {
       const extractionConsentFingerprint = extractionTextRoute.fingerprint
-      const extractionStore = createExtractionRepository(pool,result=>metrics.phase1.sourceWork.inc({result}))
+      const extractionStore = createExtractionRepository(pool,result=>metrics.phase1.sourceWork.inc({result}),{lifecycleMode:config.lifecycleMode})
       const recoverBudgetWaits=()=>extractionStore.recoverBudgetWaits({consentFingerprint:extractionConsentFingerprint,limit:50})
       await recoverBudgetWaits()
       budgetRecoveryTimer=setInterval(()=>{void recoverBudgetWaits().catch(loopError('budget_recovery'))},5*60_000)
@@ -580,7 +587,19 @@ async function main(): Promise<void> {
     }
 
     const claimRepository = createClaimRepository(pool)
-    const lifecycle = createLifecycleService(pool, claimRepository)
+    const lifecycleAssessment=createLifecycleAssessmentService({pool,mode:config.lifecycleMode??'off',modelFingerprint:extractionTextRoute?.fingerprint??'unconfigured',textGeneratorForInstallation:()=>textGenerator})
+    const observation=createLifecycleObservationService({pool,mode:config.lifecycleMode??'off'})
+    const observationScheduler=createObservationScheduler(observation,{onError:loopError('lifecycle_observation')})
+    const lifecycle = createLifecycleService(pool, claimRepository,{lifecycleMode:config.lifecycleMode})
+    const curation=createCurationWorker({pool,mode:config.lifecycleMode??'off',textGenerator,modelFingerprint:extractionTextRoute?.fingerprint??'unconfigured'})
+    const curationExecutor=createCurationExecutor({pool,mode:config.lifecycleMode??'off',tombstoneKeys:config.tombstoneHmacKeys})
+    jobWorker.register('curate_conclusions',async(job,jobSignal,ctx)=>{await curationExecutor.curate(job,jobSignal,ctx?.fence)})
+    jobWorker.register('consolidate_task',async(job,jobSignal,ctx)=>{await curation.consolidate(job,jobSignal,ctx?.fence)})
+    jobWorker.register('evaluate_claim_lifecycle',async(_job,jobSignal)=>{
+      await lifecycleAssessment.assessDueClaims({limit:1,signal:jobSignal})
+      await lifecycle.evaluateDueClaims({limit:100})
+    })
+    jobWorker.register('reclaim_claim_history',async job=>{if(!job.installation_id||typeof job.payload.claim_id!=='string')return;const target={installationId:job.installation_id,claimId:job.payload.claim_id},settings={lifecycleMode:config.lifecycleMode,readerCompatible:true};await reclaimClaimHistory(pool,target,settings);await reclaimColdClaimBody(pool,target,settings)})
 		const contextInvalidation = createInvalidationService({ pool })
 		jobWorker.register('invalidate_context_packs', async job => {
 			if (!job.installation_id) return
@@ -692,11 +711,21 @@ async function main(): Promise<void> {
       idempotencyKey: `expire:${Math.floor(Date.now() / 60_000)}`,
       priority: 95,
     })
+    const enqueueLifecycleSweep=async()=>{
+      await jobRepository.enqueueJob({jobType:'evaluate_claim_lifecycle',idempotencyKey:`lifecycle:${Math.floor(Date.now()/60000)}`,priority:96})
+      if(!config.lifecycleMode||config.lifecycleMode==='off')return
+      const rows=(await pool.query(`SELECT l.installation_id,l.claim_id FROM memory_claim_lifecycle l JOIN memory_curation_policies p USING(installation_id) WHERE p.reclaim_mode<>'off' AND l.next_evaluate_at<=clock_timestamp() ORDER BY l.next_evaluate_at,l.claim_id LIMIT 100`)).rows
+      for(const r of rows)await jobRepository.enqueueJob({installationId:r.installation_id,jobType:'reclaim_claim_history',idempotencyKey:`history:${r.claim_id}:${Math.floor(Date.now()/3600000)}`,payload:{claim_id:r.claim_id}})
+    }
+    await observationScheduler.runOnce(signal)
+    await enqueueLifecycleSweep()
     await enqueueExpirySweep()
     await enqueuePromotionExpiry()
     await enqueueReviewShadow()
     await enqueueDelegatedPublication()
     maintenanceTimer = setInterval(() => {
+      void observationScheduler.runOnce(signal).catch(loopError('lifecycle_observation'))
+      void enqueueLifecycleSweep().catch(loopError('lifecycle_schedule'))
       void enqueueExpirySweep().catch(loopError('expire_schedule'))
       void enqueuePromotionExpiry().catch(loopError('promotion_expire_schedule'))
       void enqueueReviewShadow().catch(loopError('review_shadow_schedule'))
@@ -771,7 +800,7 @@ async function main(): Promise<void> {
 
     const reportingClient = createReportingClient({ http, tokens })
     if(config.inboxRetention&&config.dataRetention){
-      dailyMaintenance=createDailyMaintenanceWorker({pool,signal,inbox:config.inboxRetention,data:config.dataRetention,
+      dailyMaintenance=createDailyMaintenanceWorker({pool,signal,inbox:config.inboxRetention,data:{...config.dataRetention,lifecycleMode:config.lifecycleMode},
         report:input=>reportingClient.reportMaintenance(input),
         onResult:result=>{
           const counts=result.counts as Record<string,number>

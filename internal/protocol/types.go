@@ -87,30 +87,40 @@ const (
 	SessionHistoryToolName = "pocketctl_read_session_history"
 )
 
+// MemoryContextHint narrows an authenticated Context request; it never grants scope access.
+type MemoryContextHint struct {
+	SceneID     string `json:"scene_id,omitempty"`
+	TaskID      string `json:"task_id,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	FactAt      string `json:"fact_at,omitempty"`
+	KnownAt     string `json:"known_at,omitempty"`
+}
+
 // Client → Daemon commands
 type ClientMessage struct {
-	QueueDispatch bool                        `json:"queue_dispatch,omitempty"`
-	RetryOfTurnID string                      `json:"retry_of_turn_id,omitempty"`
-	ForkFrom      string                      `json:"fork_from,omitempty"`
-	InvocationID  string                      `json:"invocation_id,omitempty"`
-	Path          string                      `json:"path,omitempty"`
-	Query         string                      `json:"query,omitempty"`
-	Cursor        string                      `json:"cursor,omitempty"`
-	Limit         int                         `json:"limit,omitempty"`
-	Fallback      bool                        `json:"fallback,omitempty"`
-	Type          string                      `json:"type"`
-	Status        string                      `json:"status,omitempty"`
-	SessionID     string                      `json:"session_id,omitempty"`
-	Content       string                      `json:"content,omitempty"`
-	Agent         string                      `json:"agent,omitempty"`
-	Cwd           string                      `json:"cwd,omitempty"`
-	Prompt        string                      `json:"prompt,omitempty"`
-	RequestID     string                      `json:"request_id,omitempty"`
-	MsgID         string                      `json:"msg_id,omitempty"`
-	QuotaGrant    *QuotaGrant                 `json:"quota_grant,omitempty"`
-	Collaboration *CollaborationAuthorization `json:"collaboration,omitempty"`
-	TeamContext   *CollaborationContext       `json:"team_context,omitempty"`
-	Approved      bool                        `json:"approved,omitempty"`
+	QueueDispatch     bool                        `json:"queue_dispatch,omitempty"`
+	MemoryContextHint *MemoryContextHint          `json:"memory_context_hint,omitempty"`
+	RetryOfTurnID     string                      `json:"retry_of_turn_id,omitempty"`
+	ForkFrom          string                      `json:"fork_from,omitempty"`
+	InvocationID      string                      `json:"invocation_id,omitempty"`
+	Path              string                      `json:"path,omitempty"`
+	Query             string                      `json:"query,omitempty"`
+	Cursor            string                      `json:"cursor,omitempty"`
+	Limit             int                         `json:"limit,omitempty"`
+	Fallback          bool                        `json:"fallback,omitempty"`
+	Type              string                      `json:"type"`
+	Status            string                      `json:"status,omitempty"`
+	SessionID         string                      `json:"session_id,omitempty"`
+	Content           string                      `json:"content,omitempty"`
+	Agent             string                      `json:"agent,omitempty"`
+	Cwd               string                      `json:"cwd,omitempty"`
+	Prompt            string                      `json:"prompt,omitempty"`
+	RequestID         string                      `json:"request_id,omitempty"`
+	MsgID             string                      `json:"msg_id,omitempty"`
+	QuotaGrant        *QuotaGrant                 `json:"quota_grant,omitempty"`
+	Collaboration     *CollaborationAuthorization `json:"collaboration,omitempty"`
+	TeamContext       *CollaborationContext       `json:"team_context,omitempty"`
+	Approved          bool                        `json:"approved,omitempty"`
 	// Action upgrades OpenCode permission replies to once/always/reject. Empty
 	// keeps the legacy Approved boolean contract for older clients.
 	Action string `json:"action,omitempty"`
@@ -219,6 +229,7 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
+	MemorySource   *MemorySourceProvenance     `json:"memory_source,omitempty"`
 	RetryOfTurnID  string                      `json:"retry_of_turn_id,omitempty"`
 	AppliedConfig  *TeamRuntimeConfig          `json:"applied_config,omitempty"`
 	ConfigRevision int64                       `json:"config_revision,omitempty"`

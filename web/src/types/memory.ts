@@ -131,7 +131,9 @@ export interface MemoryClaimDetail {
   versions: Array<{
     version_id: string
     version_number: string
-    statement: string
+    body_state?: 'present' | 'reclaimed'
+    body_hash?: string | null
+    statement: string | null
     structured_content?: Record<string, string | number | boolean | null | string[]>
     authority: string
     confidence: string
@@ -149,7 +151,9 @@ export interface MemoryClaimSummary {
   claim_type: MemoryClaimType
   scope_kind: string
   scope_key: string
-  state: 'active'
+  state: 'active' | 'superseded' | 'expired' | 'revoked'
+  body_state?: 'present' | 'reclaimed'
+  storage_tier?: 'hot' | 'cold'
   revision: string
   current_version_id: string
   statement: string
@@ -543,3 +547,7 @@ export interface MemoryCodeRepository {
  parser_version: string | null
 }
 export interface MemoryCodeRepositoryList {repositories:MemoryCodeRepository[];next_cursor:string|null}
+
+export type MemoryDestination = 'personal' | 'work' | 'shared'
+export interface MemoryScene { id:string; name:string; domain:'personal_project'|'work'|'life'|'profile'; destinations:MemoryDestination[] }
+export interface MemorySceneList { scenes:MemoryScene[]; has_more:boolean }

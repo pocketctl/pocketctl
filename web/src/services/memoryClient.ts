@@ -24,6 +24,8 @@ import type {
   MemoryScopeMember,
   MemoryRecallBundle,
   MemorySearchResult,
+  MemorySceneList,
+  MemoryDestination,
   MemoryActiveWiki,
   MemoryChangeImpact,
   MemoryCodeGraphPage,
@@ -227,12 +229,19 @@ export function resetMemoryClient(): void {
   v2Grant = null
 }
 
+/** Bounded authorized scene metadata; no claim bodies. */
+export function listMemoryScenes(installationId?:string):Promise<MemorySceneList>{
+  const path='/api/v1/memory/scenes'+(installationId?`?installation_id=${encodeURIComponent(installationId)}`:'')
+  return installationId?scopedMemoryJson<MemorySceneList>(installationId,'memory.search',path):memoryJson<MemorySceneList>('memory.search',path)
+}
+
 /** Search; superseded calls are aborted so only the newest response lands. */
 export async function searchMemory(
   query: string,
   options: {
     repositoryId?: string; branch?: string; claimTypes?: string[]; limit?: number
     scopeInstallationIds?: string[]
+    sceneId?: string; destination?: MemoryDestination
   } = {},
   signal?: AbortSignal,
 ): Promise<MemorySearchResult> {
@@ -241,6 +250,8 @@ export async function searchMemory(
     method: 'POST',
     body: JSON.stringify({
       query,
+      ...(options.sceneId ? {scene_id:options.sceneId} : {}),
+      ...(options.destination ? {destination:options.destination} : {}),
       ...(options.repositoryId ? { repository_id: options.repositoryId } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
       ...(options.claimTypes ? { claim_types: options.claimTypes } : {}),
@@ -1212,4 +1223,39 @@ export function reviseManualMemoryClaim(claimId:string,statement:string,expected
 /** The server selects the current retained capsule under the claim revision lock. */
 export function reviseAcceptedMemoryClaim(claimId:string,statement:string,expectedRevision:number,idempotencyKey:string):Promise<{version_id:string;version_number:number}> {
   return personalManageRequest(state.installation?.installation_id,`/api/v1/memory/claims/${encodeURIComponent(claimId)}/correct`,{method:'POST',headers:{'idempotency-key':idempotencyKey},body:JSON.stringify({statement,expected_revision:expectedRevision,inherit_current_evidence:true})})
+}
+
+export interface MemoryLifecycleStatus {
+  mode: 'off'|'shadow'|'enabled'; configured_mode: 'off'|'shadow'|'enabled'; policy_mode: 'off'|'shadow'|'enabled'
+  consume_mode: 'off'|'shadow'|'enabled'; cold_mode: 'off'|'shadow'|'enabled'; reclaim_mode: 'off'|'shadow'|'enabled'
+  personal: boolean; revision: number
+  bundles: Record<string,number>; runs: Record<string,number>; decisions: Record<string,number>; receipts: Record<string,number>
+  validation_rejections: Record<string,number>
+  assessments:Record<string,number>;assessment_usage:{input_tokens:number;output_tokens:number}
+  stage_jobs: Array<{stage:string;state:string;count:number;oldest_seconds:number|null}>
+  oldest_pending_seconds: number|null; usage: {input_tokens:number;output_tokens:number}
+  records: Array<{bundle_id:string;state:string;reason:string;updated_at:string;run_state:string|null;run_reason:string;run_mode:string|null;action:string|null;decision_state:string|null;decision_reason:string}>
+  has_more: boolean
+}
+export interface MemoryClaimLifecycle {
+  claim_id:string; revision:number; state:string; authority:string|null; managed:boolean
+  kind:string|null; assertion_mode:string|null; storage_tier:'hot'|'cold'|null; body_state:'present'|'reclaimed'|null
+  protection:'none'|'pinned'|'critical'|'user_corrected'|null; observation_state:'unknown'|'observed'|null
+  cold_since:string|null; next_evaluate_at:string|null; source_status:'withdrawn'|'unknown'
+}
+export function getMemoryLifecycleStatus(installationId:string):Promise<MemoryLifecycleStatus> {
+  return personalManageRequest(installationId,'/api/v1/memory/lifecycle/status')
+}
+export function getMemoryClaimLifecycle(claimId:string):Promise<MemoryClaimLifecycle> {
+  return personalManageRequest(state.installation?.installation_id,`/api/v1/memory/claims/${encodeURIComponent(claimId)}/lifecycle`)
+}
+export function protectMemoryClaim(claimId:string,expectedRevision:number,protection:'none'|'pinned',idempotencyKey:string):Promise<{claim_id:string;revision:number;protection:string}> {
+  return personalManageRequest(state.installation?.installation_id,`/api/v1/memory/claims/${encodeURIComponent(claimId)}/protection`,{
+    method:'POST',headers:{'idempotency-key':idempotencyKey},body:JSON.stringify({expected_revision:expectedRevision,protection}),
+  })
+}
+
+export function listMemoryLifecycleClaims(view:'cold'|'history',cursor?:string|null):Promise<MemoryClaimList> {
+ const query=new URLSearchParams({view});if(cursor)query.set('cursor',cursor)
+ return personalManageRequest(state.installation?.installation_id,`/api/v1/memory/lifecycle/claims?${query}`)
 }

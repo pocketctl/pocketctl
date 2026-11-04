@@ -36,7 +36,7 @@ describe('baseline parent and child share the configurable integration target gu
   })
   test('query-parameter target overrides cannot bypass the shared loopback policy before reset', async () => {
     const f = boundary({ database: 'fixture_test', user: 'fixture_test', superuser: false })
-    await expect(withBaselineTestTarget(f.pool, 'postgresql://fixture_test@localhost/fixture_test?host=remote.invalid', undefined, f.reset)).rejects.toThrow('baseline_test_target_mismatch')
+    await expect(withBaselineTestTarget(f.pool, 'postgresql://fixture_test@localhost/fixture_test?host=remote.invalid', undefined, f.reset)).rejects.toThrow(/connection-target overrides/)
     expect(f.events).toEqual([])
   })
   test.each([

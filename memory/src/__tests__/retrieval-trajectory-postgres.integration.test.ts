@@ -1,5 +1,5 @@
 import pg from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createSearchService } from '../retrieval/search-service.js'
@@ -110,6 +110,58 @@ describeWithDatabase('retrieval trajectory audit (PostgreSQL)', () => {
         [SECRET_QUERY],
       )
       expect(Number(leaked.rows[0].n)).toBe(0)
+    }
+  })
+
+  test('records a full recall pool with bounded database round trips and exact audit fields', async () => {
+    const seeded = await pool.query<{ version_id: string }>(`
+      INSERT INTO knowledge_versions
+        (version_id, installation_id, claim_id, version_number, statement, authority, confidence, freshness_at)
+      SELECT gen_random_uuid(), $1, claim_id, n + 1, 'audit candidate', 'user_accepted', 1, NOW()
+      FROM knowledge_claims CROSS JOIN generate_series(1, 250) n
+      WHERE installation_id = $1 RETURNING version_id::text
+    `, [INSTALLATION])
+    const candidates = seeded.rows.map((row, index) => ({
+      versionId: row.version_id, metadataRank: index + 1, lexicalRank: index % 2 ? null : index + 2,
+      vectorRank: null, fusedScore: 0.5, authorityScore: 0.25, freshnessScore: 0.75,
+      scopeScore: 0.5, loadoutScore: 0, estimatedTokens: index + 10,
+      decision: index < 24 ? 'selected' as const : 'dropped' as const,
+      reasonCode: index < 24 ? 'ranked' : 'beyond_limit', finalOrdinal: index < 24 ? index : null,
+    }))
+    const querySpy = vi.spyOn(pg.Client.prototype, 'query')
+    let id: string
+    let roundTrips: number
+    try {
+      id = await trajectory.record({ installationId: INSTALLATION, requestKey: KEY, query: SECRET_QUERY,
+        repositoryId: null, branch: null, rankingPolicyVersionId: null, backendPlan: {},
+        resultState: 'completed', degradedComponents: [],
+        stages: [{ stage: 'pools', outcome: 'ok', candidateCount: 250, durationMs: 15 }], candidates })
+      roundTrips = querySpy.mock.calls.length
+    } finally { querySpy.mockRestore() }
+    const stored = await pool.query(`SELECT version_id::text, metadata_rank, lexical_rank, vector_rank,
+      fused_score, authority_score, freshness_score, scope_score, loadout_score, estimated_tokens,
+      decision, reason_code, final_ordinal FROM memory_retrieval_candidates WHERE trajectory_id=$1 ORDER BY metadata_rank`, [id])
+    expect(stored.rows).toEqual(candidates.map(c => ({ version_id: c.versionId, metadata_rank: c.metadataRank,
+      lexical_rank: c.lexicalRank, vector_rank: c.vectorRank, fused_score: c.fusedScore,
+      authority_score: c.authorityScore, freshness_score: c.freshnessScore, scope_score: c.scopeScore,
+      loadout_score: c.loadoutScore, estimated_tokens: c.estimatedTokens, decision: c.decision,
+      reason_code: c.reasonCode, final_ordinal: c.finalOrdinal })))
+    // Audit size must not create one network round trip per candidate.
+    expect(roundTrips).toBeLessThanOrEqual(6)
+  })
+
+  test('a rejected candidate rolls back the trajectory and all candidate audit rows', async () => {
+    const versionId = (await pool.query('SELECT version_id::text FROM knowledge_versions LIMIT 1')).rows[0].version_id
+    const candidate = { versionId, metadataRank: 1, lexicalRank: null, vectorRank: null,
+      fusedScore: 0.5, authorityScore: 0, freshnessScore: 1, scopeScore: 0, loadoutScore: 0,
+      estimatedTokens: 5, decision: 'selected' as const, reasonCode: 'ranked', finalOrdinal: 0 }
+    await expect(trajectory.record({ installationId: INSTALLATION, requestKey: KEY, query: SECRET_QUERY,
+      repositoryId: null, branch: null, rankingPolicyVersionId: null, backendPlan: {},
+      resultState: 'completed', degradedComponents: [],
+      stages: [{ stage: 'pools', outcome: 'ok', candidateCount: 2, durationMs: 1 }],
+      candidates: [candidate, candidate] })).rejects.toMatchObject({ code: '23505' })
+    for (const table of ['memory_retrieval_trajectories', 'memory_retrieval_stages', 'memory_retrieval_candidates']) {
+      expect((await pool.query(`SELECT count(*)::int AS count FROM ${table}`)).rows[0].count).toBe(0)
     }
   })
 

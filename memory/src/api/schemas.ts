@@ -29,6 +29,8 @@ export const SearchRequestSchema = z.strictObject({
     { message: 'scope_installation_ids must be unique' },
   ).nullish(),
   repository_id: UUID.nullish(),
+  scene_id: UUID.nullish(),
+  destination:z.enum(['personal','work','shared']).optional(),
   repo_snapshot_id: UUID.nullish(),
   branch: z.string().min(1).max(255).nullish(),
   task_scope_key: z.string().min(1).max(512).nullish(),

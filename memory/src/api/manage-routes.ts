@@ -1,3 +1,4 @@
+import {registerLifecycleManageRoutes} from '../curation/manage-routes.js'
 import {writeManualEntry} from '../claims/manual-entry.js'
 import {ClaimIdentityWriteError} from '../claims/identity-writer.js'
 import {ManualClaimRequestSchema,ManualClaimRevisionSchema} from './schemas.js'
@@ -45,6 +46,7 @@ import { createInvalidationService } from '../context/invalidation-service.js'
  */
 
 export interface ManageRouteDeps {
+  lifecycleMode?: 'off' | 'shadow' | 'enabled'
   pool: pg.Pool
   guard: GrantGuard
   policy: CorsHostPolicy
@@ -357,7 +359,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
             "SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))",[grant.installationId,session])
           await requireCurrentInstallationAuthority(client,grant)
         }
-        if(operation==='create_manual_claim'||operation==='revise_manual_claim'){
+        if(operation==='create_manual_claim'||operation==='revise_manual_claim'||operation==='protect_claim'){
           if(grant.callerType!=='web')throw new TargetBindingError('explicit web user required')
           const personal=await client.query(`SELECT 1 FROM memory_owner_scopes WHERE installation_id=$1 AND owner_scope_kind='personal' AND state='active' FOR SHARE`,[grant.installationId])
           if(!personal.rowCount)throw new TargetBindingError('personal scope required')
@@ -450,6 +452,8 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     }
     return outcome.metadata
   }
+
+  registerLifecycleManageRoutes(app, {pool: deps.pool, guard: guardManage, mutation, lifecycleMode: deps.lifecycleMode})
 
   async function manualMutation(request: FastifyRequest, reply: FastifyReply, revision: boolean) {
     const parsed=(revision?ManualClaimRevisionSchema:ManualClaimRequestSchema).safeParse(request.body)

@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import {previewSourceRetention,reclaimSourceTurn,type SourceRetentionSettings,type RetentionPreviewCursor} from './source.js'
+import {previewSourceRetention,previewLifecycleSourceRetention,reclaimSourceTurn,type SourceRetentionSettings,type RetentionPreviewCursor} from './source.js'
 import {retainMigrationChanges,retainMigrationHistory} from './migrations.js'
 import {retainInventoryReports} from './reports.js'
 
@@ -15,7 +15,8 @@ export function createDataRetentionWorker(options:{pool:pg.Pool;settings:SourceR
   const preview=await previewSourceRetention(options.pool,options.settings.bodyDays,20,cursor)
   cursor={eligibleEpisodeId:preview.eligible.length===20?preview.eligible.at(-1)!.episode_id:undefined,
    ...(preview.reclaiming.length===20?{receiptInstallationId:preview.reclaiming.at(-1)!.installation_id,receiptTurnId:preview.reclaiming.at(-1)!.turn_id}:{})}
-  const unique=new Map([...preview.reclaiming,...preview.eligible].map(r=>[r.installation_id+':'+r.turn_id,r]))
+  const lifecycle=options.settings.lifecycleMode==='enabled'?await previewLifecycleSourceRetention(options.pool,options.settings):[]
+  const unique=new Map([...preview.reclaiming,...preview.eligible,...lifecycle].map(r=>[r.installation_id+':'+r.turn_id,r]))
   for(const r of unique.values()){
    if(stopped||options.signal.aborted)break
    try{const result=await reclaimSourceTurn(options.pool,{installationId:r.installation_id,sessionId:r.session_id,turnId:r.turn_id,episodeId:r.episode_id},options.settings)

@@ -19,6 +19,11 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('memory config', () => {
+  test('lifecycle switches default off and reject unknown modes',()=>{
+    expect(loadMemoryConfig(baseEnv()).lifecycleMode).toBe('off')
+    expect(loadMemoryConfig(baseEnv({MEMORY_LIFECYCLE_MODE:'shadow'})).lifecycleMode).toBe('shadow')
+    expect(()=>loadMemoryConfig(baseEnv({MEMORY_LIFECYCLE_MODE:'automatic'}))).toThrow('MEMORY_LIFECYCLE_MODE')
+  })
   test('data retention has a fourteen-day floor, daily default and independent switch',()=>{
     expect(loadMemoryConfig(baseEnv()).dataRetention).toEqual({mode:'enabled',bodyDays:14,batchSize:500,intervalMs:86400000,reportDirectory:undefined})
     expect(loadMemoryConfig(baseEnv({MEMORY_DATA_RETENTION_MODE:'off'})).dataRetention?.mode).toBe('off')

@@ -228,7 +228,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		// would duplicate.
 		if src != "terminal" && agent != adapter.AgentCodex && agent != adapter.AgentDSH {
 			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content,
-				RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID, RetryOfTurnID: correlation.RetryOfTurnID}
+				MemorySource: correlation.MemorySource, RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID, RetryOfTurnID: correlation.RetryOfTurnID}
 		}
 		if hidden != nil {
 			if aware, ok := ps.Backend.(interface {
@@ -297,6 +297,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 				Type:          "user_text",
 				SessionID:     ps.SessionID,
 				Text:          content,
+				MemorySource:  correlation.MemorySource,
 				RequestID:     correlation.RequestID,
 				MsgID:         correlation.MsgID,
 				RetryOfTurnID: correlation.RetryOfTurnID,
@@ -432,6 +433,7 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 		Type:          "user_text",
 		SessionID:     ps.SessionID,
 		Text:          content,
+		MemorySource:  correlation.MemorySource,
 		RequestID:     correlation.RequestID,
 		MsgID:         correlation.MsgID,
 		RetryOfTurnID: correlation.RetryOfTurnID,

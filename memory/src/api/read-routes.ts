@@ -1,4 +1,5 @@
 import {EvidenceReferenceQuerySchema,EvidenceContentQuerySchema} from './schemas.js'
+import {resolveLifecycleReadFrame,listLifecycleReadScenes} from '../context/lifecycle-frame.js'
 import {recordRecallMetrics} from '../metrics.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
@@ -51,6 +52,7 @@ export interface ReadRouteDeps {
   embeddingConsentFingerprint?: string
   phase1Metrics?: Phase1Metrics
   sharedScopesEnabled?: boolean
+  lifecycleMode?:'off'|'shadow'|'enabled'
 }
 
 interface ReplyLike {
@@ -173,6 +175,19 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     }
   }
 
+  app.get('/api/v1/memory/scenes',async(request,reply)=>{
+    const requestedInstallationId=(request.query as {installation_id?:unknown}).installation_id
+    if(requestedInstallationId!==undefined){
+      const parsed=UUIDSchema.safeParse(requestedInstallationId)
+      if(!parsed.success){reply.code(400);return errorBody(new MemoryApiError('invalid_request','invalid installation id'))}
+      return guardV2Route(request,reply,'memory.search',async grant=>{
+        const [scope]=selectFederatedScopes({grant,requestedInstallationIds:[parsed.data],sharedScopesEnabled:deps.sharedScopesEnabled===true})
+        return listLifecycleReadScenes(deps.pool,scope.installationId)
+      })
+    }
+    return guardRoute(request,reply,'memory.search',grant=>listLifecycleReadScenes(deps.pool,defaultReadInstallationId(grant)))
+  })
+
   app.post('/api/v1/memory/search', { bodyLimit: 16 * 1024 }, async (request, reply) => {
     const parsed = SearchRequestSchema.safeParse(request.body)
     if (!parsed.success) {
@@ -188,6 +203,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
         })
         const scopedContexts=await resolveFederatedScopeContexts(deps.pool,{grant,scopes,
           repositoryId:parsed.data.repository_id,repoSnapshotId:parsed.data.repo_snapshot_id,branch:parsed.data.branch,taskScopeKey:parsed.data.task_scope_key})
+        const lifecycleFrames=new Map(await Promise.all(scopes.map(async scope=>[scope.installationId,await resolveLifecycleReadFrame(deps.pool,{installationId:scope.installationId,repositoryId:scopedContexts.contexts.get(scope.installationId)?.context?.repositoryId,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'})] as const)))
         const cursorContext = {
           scopeContextFingerprint:scopedContexts.fingerprint,
           scopes,
@@ -197,6 +213,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           branch: parsed.data.branch,
           taskScopeKey: parsed.data.task_scope_key,
           claimTypes: parsed.data.claim_types,
+          lifecycleContextFingerprint:JSON.stringify([parsed.data.scene_id??null,parsed.data.destination??null,[...lifecycleFrames]]),
         }
         const cursor = resolveFederatedCursor({
           cursor: parsed.data.cursor,
@@ -215,6 +232,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
             installationId: scope.installationId,
             query: parsed.data.query,
             ...resolved.context,
+            lifecycle:lifecycleFrames.get(scope.installationId),
             claimTypes: parsed.data.claim_types ?? null,
             asOf: cursor.asOf,
             limit: pageLimit,
@@ -269,8 +287,10 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       return
     }
     const result = await guardRoute(request, reply, 'memory.search', async grant => {
+      const lifecycle=await resolveLifecycleReadFrame(deps.pool,{installationId:defaultReadInstallationId(grant),repositoryId:parsed.data.repository_id,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'})
       const searched = await search.search({
         installationId: defaultReadInstallationId(grant),
+        lifecycle,
         query: parsed.data.query,
         repositoryId: parsed.data.repository_id ?? null,
         repoSnapshotId: parsed.data.repo_snapshot_id ?? null,
@@ -307,6 +327,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           scope,
           result: await (scopedContexts.contexts.get(scope.installationId)!.context ? recall.recall({
             installationId: scope.installationId,
+            lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:scope.installationId,repositoryId:scopedContexts.contexts.get(scope.installationId)!.context!.repositoryId,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'}),
             query: parsed.data.query,
             ...scopedContexts.contexts.get(scope.installationId)!.context!,
             claimTypes: parsed.data.claim_types ?? null,
@@ -347,6 +368,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     const result = await guardRoute(request, reply, 'memory.recall', async grant => {
       return recall.recall({
         installationId: defaultReadInstallationId(grant),
+        lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:defaultReadInstallationId(grant),repositoryId:parsed.data.repository_id,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'}),
         query: parsed.data.query,
         repositoryId: parsed.data.repository_id ?? null,
         repoSnapshotId: parsed.data.repo_snapshot_id ?? null,
@@ -529,6 +551,7 @@ function readServiceFor(method: string, url: string): 'memory.search' | 'memory.
   if (method === 'POST' && path === '/api/v1/memory/search') return 'memory.search'
   if (method === 'POST' && path === '/api/v1/memory/recall') return 'memory.recall'
   if (method !== 'GET') return undefined
+  if(path==='/api/v1/memory/scenes')return 'memory.search'
   if (/^\/api\/v1\/memory\/(claims(?:\/[^/]+)?|evidence\/[^/]+|versions\/[^/]+\/evidence|episodes)$/.test(path)) {
     return 'memory.search'
   }

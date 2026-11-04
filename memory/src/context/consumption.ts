@@ -1,3 +1,4 @@
+import type {LifecycleFrame} from './lifecycle-frame.js'
 import {currentClaimVersionSql,revisionTimeSql} from '../claims/version-selection.js'
 import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 import type {SelectedScopeProof} from './selected-scope-dependencies.js'
@@ -5,7 +6,7 @@ import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions,type OriginPolicyDecisi
 import type pg from 'pg'
 import {claimConsumptionDecision,type ClaimConsumptionFacts} from '../governance/applicability.js'
 import {canonicalRepositoryRemotes} from '../governance/publication-applicability.js'
-export interface ContextQueryFrame {repositoryId:string|null;repoSnapshotId:string|null;branch:string|null;taskScopeKey:string|null;commitSha?:string|null;originPolicyStamp?:string|null;selectedScopeProof?:SelectedScopeProof}
+export interface ContextQueryFrame {lifecycle?:LifecycleFrame;repositoryId:string|null;repoSnapshotId:string|null;branch:string|null;taskScopeKey:string|null;commitSha?:string|null;originPolicyStamp?:string|null;selectedScopeProof?:SelectedScopeProof}
 export class ContextConsumptionChangedError extends Error{constructor(){super('context_consumption_changed')}}
 export async function consumptionGeneration(pool:pg.Pool|pg.PoolClient,installationId:string):Promise<string>{
  return(await pool.query<{generation:string}>(`SELECT COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=$1),1)::text AS generation`,[installationId])).rows[0]?.generation??'1'
@@ -21,11 +22,11 @@ export function contextClaimEligible(facts:ClaimConsumptionFacts,frame:ContextQu
  return claimConsumptionDecision(facts,{repositoryId:frame.repositoryId,snapshotId:frame.repoSnapshotId,branch:frame.branch,taskScopeKey:frame.taskScopeKey}).eligible
 }
 export interface ContextClaimFacts extends ClaimConsumptionFacts {
- versionId:string;claimId:string;current:boolean;timeEligible:boolean;sourceMetadataOwned:boolean;canonicalRemote:string|null;originPolicy?:OriginPolicyDecision
+ versionId:string;claimId:string;lifecycle?:{assertionMode?:string;hot:boolean;spaceId:string|null;destinations:string[];spaceActive:boolean;consume:boolean};current:boolean;timeEligible:boolean;sourceMetadataOwned:boolean;canonicalRemote:string|null;originPolicy?:OriginPolicyDecision
 }
 export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationId:string,versionIds:readonly string[],lock=false):Promise<Map<string,ContextClaimFacts>>{
  if(!versionIds.length)return new Map()
- const rows=(await pool.query(`SELECT ${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required,v.version_id::text,c.claim_id::text,c.scope_kind,c.scope_key,v.repository_id::text,v.repo_snapshot_id::text,v.branch,
+ const rows=(await pool.query(`SELECT l.storage_tier,l.body_state,l.assertion_mode,logical.space_id::text,space.destinations,space.state AS space_state,cp.consume_mode,${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required,v.version_id::text,c.claim_id::text,c.scope_kind,c.scope_key,v.repository_id::text,v.repo_snapshot_id::text,v.branch,
    to_jsonb(v)->'applicability' AS applicability,to_jsonb(c)->>'consumption_hold_reason' AS consumption_hold_reason,
    to_jsonb(c)->>'canonical_repository_key' AS canonical_repository_key,r.canonical_remote,
    (c.state='active' AND ${currentClaimVersionSql()}) AS current,
@@ -35,6 +36,10 @@ export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationI
      AND (v.repo_snapshot_id IS NULL OR (s.repo_snapshot_id IS NOT NULL AND NOT EXISTS (
        SELECT 1 FROM memory_source_snapshot_tombstones t WHERE t.installation_id=s.installation_id AND t.repository_id=s.repository_id AND t.commit_sha=s.commit_sha)))) AS source_metadata_owned
    FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
+   LEFT JOIN memory_claim_lifecycle l ON l.installation_id=c.installation_id AND l.claim_id=c.claim_id
+   LEFT JOIN memory_logical_claims logical ON logical.installation_id=c.installation_id AND logical.claim_id=c.claim_id
+   LEFT JOIN memory_spaces space ON space.installation_id=logical.installation_id AND space.space_id=logical.space_id
+   LEFT JOIN memory_curation_policies cp ON cp.installation_id=c.installation_id
    LEFT JOIN repositories r ON r.installation_id=v.installation_id AND r.repository_id=v.repository_id
    LEFT JOIN repo_snapshots s ON s.installation_id=v.installation_id AND s.repository_id=v.repository_id AND s.repo_snapshot_id=v.repo_snapshot_id
    WHERE v.installation_id=$1 AND v.version_id=ANY($2::uuid[]) ${lock?'FOR SHARE OF c,v':''}`,[installationId,versionIds])).rows
@@ -42,9 +47,11 @@ export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationI
  return new Map(rows.map(row=>[row.version_id,{versionId:row.version_id,claimId:row.claim_id,scopeKind:row.scope_kind,scopeKey:row.scope_key,
   repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,applicability:row.applicability,
   canonicalRepositoryKey:row.canonical_repository_key,consumptionHoldReason:row.consumption_hold_reason,canonicalRemote:row.canonical_remote,
+  lifecycle:{assertionMode:row.assertion_mode,hot:(!row.storage_tier||row.storage_tier==='hot')&&(!row.body_state||row.body_state==='present'),spaceId:row.space_id,destinations:row.destinations??[],spaceActive:row.space_state==='active',consume:row.consume_mode==='enabled'},
   current:row.current,timeEligible:row.time_eligible,sourceMetadataOwned:row.source_metadata_owned,...(row.origin_policy_required?{originPolicy:origin.get(row.version_id)??{eligible:false,reason:'origin_policy_requires_review' as const,stamp:null}}:{})}]))
 }
 export function eligibleContextFacts(facts:ContextClaimFacts,frame:ContextQueryFrame):boolean{
+ if(facts.lifecycle){const l=facts.lifecycle;if(!l.hot||l.assertionMode==='planned')return false;if(l.spaceId&&(!frame.lifecycle?.consume||!l.consume||!l.spaceActive||l.spaceId!==frame.lifecycle.spaceId||!l.destinations.includes(frame.lifecycle.destination)))return false}
  if(facts.originPolicy&&!facts.originPolicy.eligible)return false
  if(!facts.current||!facts.timeEligible||!contextClaimEligible(facts,frame))return false
  if(facts.applicability!=null&&(!facts.sourceMetadataOwned||(['repository','snapshot','branch'].includes(facts.scopeKind)

@@ -1,3 +1,5 @@
+import type {CurationMode} from '../curation/contracts.js'
+import {lifecycleFrameCurrent,lifecycleFrameFenceSql} from './lifecycle-frame.js'
 import {revisionTimeSql} from '../claims/version-selection.js'
 import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
@@ -42,6 +44,7 @@ export type ConsumeResult =
 
 export function createAdmissionService(deps: {
   pool: pg.Pool
+  lifecycleMode?:CurationMode
   nonceHmacKey: Buffer
   admissionTtlSeconds?: number
 }) {
@@ -269,7 +272,7 @@ export function createAdmissionService(deps: {
         }
         const dependencies=(await client.query<{version_id:string}>('SELECT DISTINCT version_id::text FROM memory_context_pack_items WHERE pack_id=$1 AND installation_id=$2',[input.packId,input.installationId])).rows
         const facts=await contextClaimFacts(client,input.installationId,dependencies.map(row=>row.version_id),true)
-        let sourceInvalid=dependencies.some(row=>{const source=facts.get(row.version_id);return !source||!eligibleContextFacts(source,queryContext)
+        let sourceInvalid=!await lifecycleFrameCurrent(client,input.installationId,queryContext.lifecycle,deps.lifecycleMode??'off')||dependencies.some(row=>{const source=facts.get(row.version_id);return !source||!eligibleContextFacts(source,queryContext)
           ||(packRow.consumption_generation===null&&source.applicability!=null)})
         const origin=await originPolicyCorpusSnapshot(client,input.installationId)
         if(origin.stamp!==(queryContext.originPolicyStamp??null))sourceInvalid=true
@@ -354,7 +357,7 @@ export function createAdmissionService(deps: {
           const selectionMatches=!proof||(!!input.selectedScopeGrant&&await selectedScopeContextCurrent(client,proof,input.selectedScopeGrant))
           const currentGrantDeadline=proof?input.selectedScopeGrant?.expiresAt??null:null
           const currentGrantClockSql="($9::double precision IS NULL OR clock_timestamp()<to_timestamp($9::double precision))"
-          const originMatches=(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
+          const originMatches=await lifecycleFrameCurrent(client,input.installationId,frozen?.query_context?.lifecycle,deps.lifecycleMode??'off')&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
           const originFences=JSON.stringify([...origin.fences,...selected.fences])
           const selectionProof=JSON.stringify(proof??null)
           const consumed = await client.query<{
@@ -373,7 +376,7 @@ export function createAdmissionService(deps: {
               AND j.admission_nonce_hmac = $5
               AND p.pack_id = j.pack_id AND p.installation_id = j.installation_id
               AND $6::boolean AND ${originPolicyFenceSql('$7')} AND ${selectedScopeFenceSql('$8')} AND ${currentGrantClockSql}
-              AND p.state = 'ready' AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
+              AND p.state = 'ready' AND ${lifecycleFrameFenceSql()} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
               AND j.consumption_generation=COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               AND NOT EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
@@ -395,7 +398,7 @@ export function createAdmissionService(deps: {
           }
           const state = await client.query<{ state: string; expired: boolean }>(`
             UPDATE memory_context_injections j
-            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7')}) OR NOT (${selectedScopeFenceSql('$8')}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
+            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${lifecycleFrameFenceSql()} OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7')}) OR NOT (${selectedScopeFenceSql('$8')}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
               OR j.consumption_generation IS NULL OR j.consumption_generation<>COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               OR EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))

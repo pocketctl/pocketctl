@@ -240,6 +240,7 @@ async function main(): Promise<void> {
       phase4Metrics: metrics.phase4,
     })
     registerReadRoutes(app, {
+      lifecycleMode:config.lifecycleMode,
       pool,
       guard,
       policy,
@@ -261,6 +262,7 @@ async function main(): Promise<void> {
       cursorSigningKey: config.hmacKey,
     })
     registerManageRoutes(app, {
+      lifecycleMode:config.lifecycleMode,
       pool,
       guard,
       policy,
@@ -283,6 +285,7 @@ async function main(): Promise<void> {
     const contextPacks = createPackRepository(pool)
 		const contextLoadouts = createLoadoutRepository(pool)
     const contextCompiler = createContextCompiler({
+      lifecycleMode:config.lifecycleMode,
       pool,
       retrieval: createContextRetrieval({
         pool,
@@ -310,7 +313,7 @@ async function main(): Promise<void> {
       rateLimiter,
       compiler: contextCompiler,
       sharedScopesEnabled:config.sharedScopesMode==='enabled',
-      admission: createAdmissionService({ pool, nonceHmacKey: Buffer.from(config.hmacKey) }),
+      admission: createAdmissionService({ pool,lifecycleMode:config.lifecycleMode, nonceHmacKey: Buffer.from(config.hmacKey) }),
       feedback: createFeedbackService({ pool }),
       packs: contextPacks,
       settings: contextSettings,
@@ -337,6 +340,7 @@ async function main(): Promise<void> {
       },
     })
     registerMcpRoute(app, {
+      lifecycleMode:config.lifecycleMode,
       onRecallMetrics:input=>recordRecallMetrics(metrics.phase1,input),
       gitReads,
       skillContext,

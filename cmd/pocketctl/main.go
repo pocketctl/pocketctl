@@ -3750,14 +3750,15 @@ func deliverUserMessage(
 	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
 	defersReceipt := agent == adapter.AgentOpencode && sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
-		QueueDispatch: cmd.QueueDispatch,
-		SessionID:     cmd.SessionID,
-		InvocationID:  cmd.InvocationID,
-		RetryOfTurnID: cmd.RetryOfTurnID,
-		Content:       cmd.Content,
-		RequestID:     cmd.RequestID,
-		MsgID:         cmd.MsgID,
-		InputMode:     protocol.InputModeAuto,
+		QueueDispatch:     cmd.QueueDispatch,
+		MemoryContextHint: cmd.MemoryContextHint,
+		SessionID:         cmd.SessionID,
+		InvocationID:      cmd.InvocationID,
+		RetryOfTurnID:     cmd.RetryOfTurnID,
+		Content:           cmd.Content,
+		RequestID:         cmd.RequestID,
+		MsgID:             cmd.MsgID,
+		InputMode:         protocol.InputModeAuto,
 	})
 	if err == nil && cmd.QueueDispatch {
 		send(protocol.DaemonEvent{Type: "queue_dispatch_started", SessionID: cmd.SessionID, RequestID: cmd.RequestID, MsgID: cmd.MsgID})

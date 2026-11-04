@@ -88,6 +88,8 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
                  to_jsonb(knowledge_versions)->'applicability' AS applicability,
                  to_jsonb(knowledge_versions)->>'effective_from' AS effective_from,
                  to_jsonb(knowledge_versions)->>'effective_until' AS effective_until,
+                 COALESCE(to_jsonb(knowledge_versions)->>'body_state','present') AS body_state,
+                 to_jsonb(knowledge_versions)->>'body_hash' AS body_hash,
                  CASE WHEN EXISTS(SELECT 1 FROM knowledge_claims selection_claim WHERE ${currentClaimVersionSql('selection_claim','knowledge_versions')}) THEN 'current' ELSE 'stale' END AS selection_status
           FROM knowledge_versions
           WHERE installation_id = $1 AND claim_id = $2
@@ -102,7 +104,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
       const oldestVersion = page[0]?.version_number
       return {
         claim: claim.rows[0],
-        versions: page.map(row => ({ ...row, version_number: String(row.version_number),authority_compatibility:versionAuthorityCompatibility(row.authority) })),
+        versions: page.map(row => ({ ...row, ...(row.body_state==='reclaimed'?{statement:null,structured_content:null,availability:'body_reclaimed'}:{availability:'available'}), version_number: String(row.version_number),authority_compatibility:versionAuthorityCompatibility(row.authority) })),
         next_version_cursor: hasMore && typeof oldestVersion === 'number'
           ? encodeVersionCursor(claimId, oldestVersion, cursorSigningKey)
           : null,
@@ -118,7 +120,8 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           AND ${input.asOf?asOfClaimVersionSql('c','v','selection_clock.at'):currentClaimVersionSql('c','v','selection_clock.at')}
           AND (v.valid_from IS NULL OR v.valid_from<=selection_clock.at)
           AND (v.valid_until IS NULL OR v.valid_until>selection_clock.at)`,[installationId,claimId,input.asOf??null])
-      return result.rows[0]??null
+      const row=result.rows[0]
+      return row?.body_state==='reclaimed'?{...row,statement:null,structured_content:null,availability:'body_reclaimed'}:row??null
     },
 
     async getEvidence(installationId: string, evidenceId: string) {

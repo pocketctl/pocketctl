@@ -1,3 +1,4 @@
+import {lifecycleFrameCurrent} from './lifecycle-frame.js'
 import {captureEvidenceReference} from '../claims/evidence-resolver.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
 import {originPolicyFenceSql} from '../governance/origin-policy.js'
@@ -153,6 +154,7 @@ export function createPackRepository(pool: pg.Pool) {
           const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2')} AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences)])
           if(!origins.matches||!valid.rows[0]?.valid)throw new ContextConsumptionChangedError()
         }
+        if(!await lifecycleFrameCurrent(client,input.installationId,input.queryContext?.lifecycle))throw new ContextConsumptionChangedError()
         const origin=await originPolicyCorpusSnapshot(client,input.installationId)
         if(origin.stamp!==(input.queryContext?.originPolicyStamp??null))throw new ContextConsumptionChangedError()
         // All source/FK dependencies precede the final generation fence.

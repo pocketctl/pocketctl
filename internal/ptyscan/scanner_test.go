@@ -2,6 +2,8 @@ package ptyscan
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -357,5 +359,47 @@ func TestPartialOptionLabelDoesNotPublishAnotherChoice(t *testing.T) {
 	}
 	if got := s.Feed([]byte("o\n")); len(got) != 1 {
 		t.Fatalf("complete menu events=%d", len(got))
+	}
+}
+
+// Captured from Claude Code 2.1.227 in an isolated 24x80 PTY. Only the
+// workspace path is anonymized; cursor positioning and numbered choices are real.
+func TestClaudeCapturedWorkspaceTrustRequiresOwnerChoice(t *testing.T) {
+	raw, err := os.ReadFile("testdata/claude-2.1.227-workspace-trust.ansi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []int{len(raw), 1, 7, 64} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			scanner := NewScanner("captured-trust")
+			count := 0
+			for start := 0; start < len(raw); start += size {
+				end := start + size
+				if end > len(raw) {
+					end = len(raw)
+				}
+				count += len(scanner.Feed(raw[start:end]))
+			}
+			prompt := scanner.ActivePrompt()
+			if count != 1 || prompt == nil {
+				t.Fatalf("events=%d prompt=%+v; screen=%q", count, prompt, TextSnapshot(raw))
+			}
+			if len(prompt.Options) != 2 || prompt.Options[0].Label != "Yes, I trust this folder" || prompt.Options[1].Label != "No, exit" {
+				t.Fatalf("options=%+v", prompt.Options)
+			}
+			if _, err := scanner.ClaimChoice(prompt.RequestID, "3"); err == nil {
+				t.Fatal("invalid owner choice accepted")
+			}
+			if scanner.ActiveRequestID() != prompt.RequestID {
+				t.Fatal("invalid choice cleared trust prompt")
+			}
+			keys, err := scanner.ClaimChoice(prompt.RequestID, "2")
+			if err != nil || keys != "\x1b[B\r" {
+				t.Fatalf("reject trust keys=%q err=%v", keys, err)
+			}
+			if _, err := scanner.ClaimChoice(prompt.RequestID, "1"); err == nil {
+				t.Fatal("replay accepted")
+			}
+		})
 	}
 }

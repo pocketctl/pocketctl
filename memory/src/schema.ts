@@ -1,3 +1,9 @@
+import { LIFECYCLE_ASSESSMENT_MIGRATION } from './retention/lifecycle-assessment-migration.js'
+import { LIFECYCLE_CONTEXT_MIGRATION } from './context/lifecycle-migration.js'
+import { LIFECYCLE_BACKFILL_MIGRATION } from './migrations/lifecycle-v3/migration.js'
+import { LIFECYCLE_RETENTION_MIGRATION } from './retention/lifecycle-v3-migration.js'
+import { CURATION_EXECUTION_MIGRATION } from './curation/execution-migration.js'
+import { LIFECYCLE_MIGRATION } from './curation/migration.js'
 import {EXTRACTION_RECOVERY_MIGRATION} from './extraction/recovery-migration.js'
 import { SCENE_MIGRATION } from './context/scene-migration.js'
 import { DAILY_MAINTENANCE_MIGRATION } from './maintenance/daily.js'
@@ -2254,6 +2260,12 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   DAILY_MAINTENANCE_MIGRATION,
   SCENE_MIGRATION,
   EXTRACTION_RECOVERY_MIGRATION,
+  LIFECYCLE_MIGRATION,
+  CURATION_EXECUTION_MIGRATION,
+  LIFECYCLE_RETENTION_MIGRATION,
+  LIFECYCLE_BACKFILL_MIGRATION,
+  LIFECYCLE_CONTEXT_MIGRATION,
+  LIFECYCLE_ASSESSMENT_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

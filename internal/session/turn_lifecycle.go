@@ -59,14 +59,15 @@ func (sm *SessionManager) turnEnabled() bool { return sm.turnMode != turnEnrichm
 // callers keep the SendMessage wrapper; the relay daemon handler populates
 // RequestID/MsgID so the daemon actually uses the relay-guaranteed ids.
 type UserMessageInput struct {
-	QueueDispatch bool
-	RetryOfTurnID string
-	InvocationID  string
-	SessionID     string
-	Content       string
-	RequestID     string
-	MsgID         string
-	InputMode     string // auto|new_turn|steer; empty = auto
+	QueueDispatch     bool
+	MemoryContextHint *protocol.MemoryContextHint
+	RetryOfTurnID     string
+	InvocationID      string
+	SessionID         string
+	Content           string
+	RequestID         string
+	MsgID             string
+	InputMode         string // auto|new_turn|steer; empty = auto
 	// HiddenContext is the Phase 2 native hidden-context payload for this
 	// new turn. Content stays the exact user input for echo, receipts,
 	// titles, Relay events and turn identity.
@@ -82,6 +83,7 @@ var ErrQueuedSessionBusy = errors.New("queued session busy")
 var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
 
 type userMessageCorrelation struct {
+	MemorySource  *protocol.MemorySourceProvenance
 	RetryOfTurnID string
 	InputMode     string
 	RequestID     string
@@ -229,7 +231,12 @@ func (sm *SessionManager) prepareMemoryContext(ctx context.Context, in UserMessa
 	if capabilityFor != nil {
 		capability = capabilityFor(ctx, in.SessionID, agent)
 	}
+	hint := in.MemoryContextHint
+	if hint == nil {
+		hint = &protocol.MemoryContextHint{}
+	}
 	pack, _ := coordinator.Prepare(ctx, memorycontext.TurnRequest{
+		SceneID: hint.SceneID, TaskScopeKey: hint.TaskID, Destination: hint.Destination, FactAt: hint.FactAt, KnownAt: hint.KnownAt,
 		ClientRequestID: requestID,
 		SessionID:       in.SessionID,
 		Agent:           agent,
@@ -475,7 +482,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		return err
 	}
 	sm.emitTurnStatus(rec, protocol.TurnStateRunning, "")
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID, RetryOfTurnID: in.RetryOfTurnID})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID, RetryOfTurnID: in.RetryOfTurnID, MemorySource: memoryInputProvenance(in, rec.TurnID, agent)})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
 		if !in.SuppressContextReceipt {
@@ -1057,6 +1064,7 @@ func (sm *SessionManager) EnrichOutgoingEvent(ev *protocol.DaemonEvent) {
 			}
 		}
 	}
+	stampUnknownMemorySource(ev)
 	if ev.ClassifierVersion == "" {
 		turn.Apply(ev, turn.Classify(ev, sm.turnMetrics))
 	}

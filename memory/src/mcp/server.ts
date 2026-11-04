@@ -38,6 +38,7 @@ export interface McpRouteDeps {
   onRecallMetrics?:SearchServiceDeps['onRecallMetrics']
   embeddingConsentFingerprint?: string
   sharedScopesEnabled?: boolean
+  lifecycleMode?:'off'|'shadow'|'enabled'
 }
 
 export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
@@ -51,6 +52,7 @@ export function createMemoryMcpHandler(deps: McpRouteDeps): McpHttpHandler {
       ...(deps.skillContext ? { skillContext: deps.skillContext } : {}),
       grant: () => requestScope.getStore()?.grant,
       sharedScopesEnabled: deps.sharedScopesEnabled === true,
+      lifecycleMode:deps.lifecycleMode,
       recallEmbeddingTimeoutMs: deps.recallEmbeddingTimeoutMs,
       cursorSigningKey: deps.cursorSigningKey,
       ...(deps.embed ? { embed: deps.embed } : {}),

@@ -8,9 +8,9 @@
             <input v-model="claimQuery" type="search" :placeholder="t('memory.filter_claims')"
               data-testid="memory-claim-filter" :disabled="operationBusy || operationUncertain"/>
           </label>
-          <button type="button" class="memory-claim-state-filter" aria-pressed="true" disabled>
-            {{ t('memory.active_claims') }}
-          </button>
+          <ActionSelect><select v-model="collection" :aria-label="t('memory.lifecycle.collection')" data-testid="memory-claim-collection" :disabled="operationBusy || operationUncertain || listLoading">
+            <option value="current">{{ t('memory.active_claims') }}</option><option value="cold">{{ t('memory.lifecycle.cold_collection') }}</option><option value="history">{{ t('memory.version_history') }}</option>
+          </select></ActionSelect>
         </div>
         <div class="memory-claim-table-head" data-testid="memory-claim-table-head">
           <span>{{ t('memory.claim_column_knowledge') }}</span><span>{{ t('memory.scope') }}</span><span>{{ t('memory.updated') }}</span>
@@ -23,7 +23,7 @@
             :aria-controls="detailPanelId" :aria-expanded="detailOpen && claim.claim_id === selectedClaimId"
             @click="selectClaim(claim.claim_id, true, $event)">
             <span class="memory-claim-row-main">
-              <strong>{{ claim.statement }}</strong>
+              <strong>{{ claim.body_state === 'reclaimed' ? t('memory.lifecycle.body_unavailable') : claim.statement }}</strong>
               <span>{{ humanizeType(claim.claim_type) }}</span>
             </span>
             <span class="memory-claim-row-scope">{{ claim.scope_key }}</span>
@@ -40,8 +40,8 @@
           </div>
           <div v-else-if="claims.length === 0" class="memory-claim-list-empty">
             <span class="memory-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></span>
-            <strong>{{ t('memory.no_active_claims') }}</strong>
-            <p>{{ t('memory.no_active_claims_copy') }}</p>
+            <strong>{{ t(collection === 'current' ? 'memory.no_active_claims' : 'memory.lifecycle.no_collection') }}</strong>
+            <p>{{ t(collection === 'current' ? 'memory.no_active_claims_copy' : 'memory.lifecycle.no_collection_copy') }}</p>
           </div>
         </div>
         <nav v-if="totalPages > 1" class="memory-pagination" :aria-label="t('memory.claim_pagination')">
@@ -76,7 +76,8 @@
             <span class="memory-chip">{{ humanizeType(detail.claim.claim_type) }}</span>
           </div>
           <p v-if="isManualEntry" class="memory-muted" data-testid="memory-manual-source">{{ t('memory.manual.source') }}</p>
-          <h3 class="memory-claim-current" data-testid="memory-claim-current">{{ currentVersion?.statement }}</h3>
+          <p v-if="!currentVersion" class="memory-notice is-error" role="alert">{{ t('memory.lifecycle.current_unavailable') }}</p>
+          <h3 class="memory-claim-current" data-testid="memory-claim-current">{{ currentVersion?.body_state === 'reclaimed' ? t('memory.lifecycle.body_unavailable') : currentVersion?.statement }}</h3>
           <dl class="memory-claim-summary-facts">
             <div><dt>{{ t('memory.claim_id') }}</dt><dd>{{ detail.claim.claim_id }}</dd></div>
             <div><dt>{{ t('memory.current_version') }}</dt><dd>v{{ currentVersion?.version_number ?? '—' }}</dd></div>
@@ -84,10 +85,26 @@
             <div><dt>{{ t('memory.freshness') }}</dt><dd>{{ claimUpdatedAt }}</dd></div>
           </dl>
 
+          <section v-if="!isSharedDetail" class="memory-claim-lifecycle" data-testid="memory-claim-lifecycle">
+            <p v-if="lifecycleLoading" role="status">{{ t('memory.loading') }}</p>
+            <p v-else-if="lifecycleError" class="memory-notice is-error" role="alert">{{ t('memory.lifecycle.unavailable') }} <button class="memory-button" :disabled="operationBusy || operationUncertain" @click="loadLifecycle(detail.claim.claim_id, detailRequest)">{{ t('common.retry') }}</button></p>
+            <template v-else-if="lifecycle">
+              <dl class="memory-claim-summary-facts">
+                <div><dt>{{ t('memory.lifecycle.authority') }}</dt><dd>{{ authorityLabel(lifecycle.authority) }}</dd></div>
+                <div><dt>{{ t('memory.lifecycle.tier') }}</dt><dd>{{ t(`memory.lifecycle.${lifecycle.storage_tier === 'cold' ? 'cold_tier' : lifecycle.storage_tier ?? 'unknown'}`) }}</dd></div>
+                <div><dt>{{ t('memory.lifecycle.protection') }}</dt><dd>{{ t(`memory.lifecycle.${lifecycle.protection ?? 'unknown'}`) }}</dd></div>
+                <div><dt>{{ t('memory.lifecycle.assertion') }}</dt><dd>{{ lifecycle.assertion_mode ? t(`memory.lifecycle.${lifecycle.assertion_mode}`) : t('memory.lifecycle.unknown') }}</dd></div>
+              </dl>
+              <p v-if="!lifecycle.managed" class="memory-muted">{{ t('memory.lifecycle.legacy_metadata') }}</p>
+              <p class="memory-muted">{{ t(lifecycle.source_status === 'withdrawn' ? 'memory.lifecycle.source_withdrawn' : 'memory.lifecycle.source_unknown') }}</p>
+              <p v-if="lifecycle.observation_state === 'unknown'" class="memory-muted">{{ t('memory.lifecycle.observation_unknown') }}</p>
+            </template>
+          </section>
+
           <div v-if="correcting" class="memory-edit-panel memory-correction-panel">
             <label for="memory-correct-statement">{{ t(isManualEntry ? 'memory.manual.revision_hint' : 'memory.correct_claim_copy') }}</label>
             <textarea id="memory-correct-statement" v-model="correctedStatement" rows="4" maxlength="4000" :disabled="operationBusy || operationUncertain" data-testid="memory-correct-statement"/>
-            <div><button type="button" class="memory-button" :disabled="operationBusy || operationUncertain" @click="correcting = false">{{ t('common.cancel') }}</button><button type="button" class="memory-button is-primary" data-testid="memory-correct-save" :disabled="operationBusy || refreshRequired || !correctedStatement.trim() || correctedStatement.trim().length > 4000 || (!operationUncertain && correctedStatement.trim() === currentVersion?.statement.trim())" @click="correct">{{ t('common.save') }}</button></div>
+            <div><button type="button" class="memory-button" :disabled="operationBusy || operationUncertain" @click="correcting = false">{{ t('common.cancel') }}</button><button type="button" class="memory-button is-primary" data-testid="memory-correct-save" :disabled="operationBusy || refreshRequired || !correctedStatement.trim() || correctedStatement.trim().length > 4000 || (!operationUncertain && correctedStatement.trim() === currentVersion?.statement?.trim())" @click="correct">{{ t('common.save') }}</button></div>
           </div>
 
           <div class="memory-section-label"><span>{{ t('memory.version_history') }}</span></div>
@@ -96,25 +113,28 @@
               <span class="memory-version-node" aria-hidden="true"></span>
               <span class="memory-version-copy">
                 <strong>v{{ version.version_number }}<template v-if="version.version_id === detail.claim.current_version_id"> · {{ t('memory.current') }}</template></strong>
-                <span>{{ version.authority }} · {{ version.freshness_at ?? version.created_at ?? '—' }}</span>
+                <span>{{ authorityLabel(version.authority) }}<template v-if="version.body_state === 'reclaimed'"> · {{ t('memory.lifecycle.body_unavailable') }}</template> · {{ version.freshness_at ?? version.created_at ?? '—' }}</span>
               </span>
               <span v-if="version.version_id === detail.claim.current_version_id" class="memory-chip is-active">{{ t('memory.current') }}</span>
             </li>
           </ol>
           <button v-if="detail.next_version_cursor" type="button" class="memory-button memory-load-older" data-testid="memory-claim-load-older" :disabled="olderLoading" @click="loadOlder">{{ t(olderLoading ? 'memory.loading' : 'memory.load_older_versions') }}</button><p v-if="olderError" class="memory-notice is-error" role="alert">{{ olderError }}</p>
 
-          <EvidencePanel v-if="detail.claim.current_version_id"
+          <EvidencePanel v-if="detail.claim.current_version_id && currentVersion?.body_state !== 'reclaimed' && lifecycle?.storage_tier !== 'cold' && lifecycle?.source_status !== 'withdrawn'"
             :version-id="detail.claim.current_version_id"
             :installation-id="props.installationId"/>
+          <p v-if="lifecycle?.storage_tier === 'cold'" class="memory-notice">{{ t('memory.lifecycle.cold_unavailable') }}</p>
           <p v-if="error" class="memory-notice is-error" role="alert" data-testid="memory-claim-error">{{ error }}</p>
 
           <p v-if="operationUncertain" class="memory-notice">{{ t('memory.claim_operation_uncertain') }}</p>
           <button v-if="refreshRequired" type="button" class="memory-button" data-testid="memory-claim-refresh" :disabled="operationBusy" @click="refreshAfterMutation">{{ t('common.retry') }}</button>
+          <p v-if="currentVersion?.body_state === 'reclaimed'" class="memory-notice">{{ t('memory.lifecycle.body_unavailable') }}</p>
           <div class="memory-claim-actions" data-testid="memory-claim-actions">
             <button type="button" class="memory-button is-primary" data-testid="memory-claim-propose"
-              :disabled="operationBusy || operationUncertain || refreshRequired || proposalLoading || detail.claim.state !== 'active'" @click="prepareProposal">{{ t('memory.governance.promotion.title') }}</button>
-            <button v-if="!isSharedDetail" type="button" class="memory-button" data-testid="memory-claim-correct" :disabled="operationBusy || operationUncertain || refreshRequired || detail.claim.state !== 'active'" @click="correcting = !correcting">{{ t('memory.correct_create_version') }}</button>
+              :disabled="operationBusy || operationUncertain || refreshRequired || proposalLoading || lifecycle?.storage_tier === 'cold' || lifecycle?.source_status === 'withdrawn' || !currentVersion || currentVersion.body_state === 'reclaimed' || detail.claim.state !== 'active'" @click="prepareProposal">{{ t('memory.governance.promotion.title') }}</button>
+            <button v-if="!isSharedDetail" type="button" class="memory-button" data-testid="memory-claim-correct" :disabled="operationBusy || operationUncertain || refreshRequired || !currentVersion || currentVersion.body_state === 'reclaimed' || detail.claim.state !== 'active'" @click="correcting = !correcting">{{ t('memory.correct_create_version') }}</button>
             <button v-if="!isSharedDetail" type="button" class="memory-button" data-testid="memory-claim-revoke" :disabled="operationBusy || refreshRequired || (operationUncertain && operationRequest?.kind !== 'revoke') || detail.claim.state !== 'active'" @click="revoke">{{ t('memory.revoke') }}</button>
+            <button v-if="!isSharedDetail && lifecycle?.managed && ['none','pinned'].includes(lifecycle.protection ?? '')" type="button" class="memory-button" data-testid="memory-claim-protect" :disabled="operationBusy || refreshRequired || (operationUncertain && operationRequest?.kind !== 'protect') || lifecycleLoading || lifecycleError || detail.claim.state !== 'active'" @click="runOperation('protect')">{{ t(lifecycle.protection === 'pinned' ? 'memory.lifecycle.unpin' : 'memory.lifecycle.pin') }}</button>
             <button v-if="!isSharedDetail" type="button" class="memory-button is-danger" data-testid="memory-claim-delete" :disabled="operationBusy || refreshRequired || (operationUncertain && operationRequest?.kind !== 'delete') || detail.claim.state !== 'active'" @click="confirmDelete = true">{{ t('memory.permanent_delete') }}</button>
           </div>
         </template>
@@ -142,9 +162,10 @@
 <script setup lang="ts">
 import { nextTick, computed, onUnmounted, ref, useId, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import { MemoryClientError, reviseAcceptedMemoryClaim, reviseManualMemoryClaim, deleteMemoryClaim, getMemoryClaim, listMemoryClaims, listVersionEvidence, revokeMemoryClaim } from '../../services/memoryClient'
+import { listMemoryLifecycleClaims, getMemoryClaimLifecycle, protectMemoryClaim, type MemoryClaimLifecycle, MemoryClientError, reviseAcceptedMemoryClaim, reviseManualMemoryClaim, deleteMemoryClaim, getMemoryClaim, listMemoryClaims, listVersionEvidence, revokeMemoryClaim } from '../../services/memoryClient'
 import type { MemoryClaimDetail, MemoryClaimSummary, MemoryEvidence } from '../../types/memory'
 import EvidencePanel from './EvidencePanel.vue'
+import ActionSelect from '../ActionSelect.vue'
 
 const { t } = useLocale()
 const props = withDefaults(defineProps<{
@@ -157,6 +178,7 @@ const emit = defineEmits<{
 }>()
 
 const detail = ref<MemoryClaimDetail | null>(null)
+const lifecycle = ref<MemoryClaimLifecycle|null>(null),lifecycleError=ref(false),lifecycleLoading=ref(false)
 const claims = ref<MemoryClaimSummary[]>([])
 const selectedClaimId = ref<string | null>(null)
 const nextCursor = ref<string | null>(null)
@@ -169,12 +191,13 @@ const correctedStatement = ref('')
 const confirmDelete = ref(false)
 const error = ref('')
 const claimQuery = ref('')
+const collection=ref<'current'|'cold'|'history'>('current')
 const detailOpen = ref(false)
 const detailLoading = ref(false)
 const detailPanel=ref<HTMLElement>()
 const olderLoading=ref(false),olderError=ref(''),proposalLoading=ref(false)
 const operationBusy=ref(false),operationUncertain=ref(false),refreshRequired=ref(false)
-type ClaimOperation={kind:'correct'|'revoke'|'delete';claimId:string;revision:number;statement:string;manual:boolean;key:string}
+type ClaimOperation={kind:'correct'|'revoke'|'delete'|'protect';protection?:'none'|'pinned';claimId:string;revision:number;statement:string;manual:boolean;key:string}
 const operationRequest=ref<ClaimOperation>()
 let operationEpoch=0,listRequest=0,refreshTarget:string|null=null,writeCommitted=false
 const detailPanelId = useId()
@@ -184,7 +207,7 @@ const currentPage = ref(1)
 const isSharedDetail = computed(() => props.installationId !== null)
 const CLAIM_PAGE_SIZE = 5
 
-const currentVersion = computed(() => detail.value?.versions.find(version => version.version_id === detail.value?.claim.current_version_id) ?? detail.value?.versions.at(-1) ?? null)
+const currentVersion = computed(() => detail.value?.versions.find(version => version.version_id === detail.value?.claim.current_version_id) ?? null)
 const orderedVersions = computed(() => [...(detail.value?.versions ?? [])].sort((a,b)=>Number(b.version_number)-Number(a.version_number)))
 const isManualEntry=computed(()=>{const source=currentVersion.value?.structured_content?.manual_entry;return !!source&&typeof source==='object'&&'source_kind' in source&&source.source_kind==='manual_entry'})
 const claimUpdatedAt = computed(() => currentVersion.value?.freshness_at ?? currentVersion.value?.created_at ?? '—')
@@ -224,6 +247,7 @@ watch([() => props.claimId, () => props.installationId], ([requestedClaimId, ins
   }
   void synchronize(requestedClaimId)
 }, { immediate: true })
+watch(collection,()=>{detailRequest++;operationEpoch++;detail.value=null;selectedClaimId.value=null;detailOpen.value=false;void refreshClaims(null)})
 watch(claimQuery, () => {
   currentPage.value = 1
   const first = pageClaims.value[0]
@@ -232,6 +256,8 @@ watch(claimQuery, () => {
   }
 })
 
+function authorityLabel(value:string|null):string {return t(`memory.lifecycle.authority_${['machine_concluded','automation_accepted','user_accepted','user_corrected','user_asserted','team_reviewed','team_published','organization_reviewed','organization_published'].includes(value??'')?value:'unknown'}`)}
+async function loadLifecycle(claimId:string,request:number){lifecycleLoading.value=true;lifecycleError.value=false;lifecycle.value=null;try{const result=await getMemoryClaimLifecycle(claimId);if(request===detailRequest)lifecycle.value=result}catch{if(request===detailRequest)lifecycleError.value=true}finally{if(request===detailRequest)lifecycleLoading.value=false}}
 function humanizeType(value: string): string { return value.replace(/_/g, ' ') }
 let detailTrigger: HTMLElement | null = null
 function closeDetail(): void {
@@ -275,7 +301,7 @@ async function loadInitialClaims(): Promise<void> {
   listLoading.value = true
   listError.value = ''
   try {
-    const page = await listMemoryClaims()
+    const page = await (collection.value==='current'?listMemoryClaims():listMemoryLifecycleClaims(collection.value))
     if(request!==listRequest)return
     claims.value = page.claims
     nextCursor.value = page.next_cursor
@@ -298,7 +324,7 @@ async function loadMoreClaims(): Promise<boolean> {
   listLoading.value = true
   listError.value = ''
   try {
-    const page = await listMemoryClaims(nextCursor.value)
+    const page = await (collection.value==='current'?listMemoryClaims(nextCursor.value):listMemoryLifecycleClaims(collection.value,nextCursor.value))
     if(request!==listRequest||installationId!==props.installationId)return false
     const known = new Set(claims.value.map(claim => claim.claim_id))
     claims.value = [...claims.value, ...page.claims.filter(claim => !known.has(claim.claim_id))]
@@ -345,6 +371,7 @@ async function loadDetail(claimId: string, openDetails: boolean): Promise<void> 
   olderLoading.value=false;olderError.value='';proposalLoading.value=false
   detailLoading.value = true
   detail.value = null
+  lifecycle.value = null; lifecycleError.value=false; lifecycleLoading.value=false
   error.value = ''
   confirmDelete.value = false
   correcting.value = false
@@ -354,6 +381,7 @@ async function loadDetail(claimId: string, openDetails: boolean): Promise<void> 
       : await getMemoryClaim(claimId)
     if (request !== detailRequest || installationId !== props.installationId) return
     detail.value = loaded
+    if (!installationId) void loadLifecycle(claimId, request)
     ensureSelectedSummary()
     correctedStatement.value = currentVersion.value?.statement ?? ''
   } catch (err) {
@@ -377,7 +405,7 @@ function ensureSelectedSummary(): void {
     state: 'active',
     revision: detail.value.claim.revision,
     current_version_id: detail.value.claim.current_version_id,
-    statement: version.statement,
+    statement: version.statement ?? '',
     authority: version.authority,
     repository_id: version.repository_id,
     repo_snapshot_id: version.repo_snapshot_id,
@@ -428,22 +456,24 @@ async function loadOlder():Promise<void>{
 async function runOperation(kind:ClaimOperation['kind']):Promise<void>{
   if(!detail.value||isSharedDetail.value||operationBusy.value||refreshRequired.value||detail.value.claim.state!=='active')return
   if(operationUncertain.value&&operationRequest.value?.kind!==kind)return
+  if(kind==='protect'&&(!lifecycle.value?.managed||!['none','pinned'].includes(lifecycle.value.protection??'')))return
   const claim=detail.value.claim,statement=correctedStatement.value.trim()
-  if(kind==='correct'&&(!statement||statement.length>4000||(!operationUncertain.value&&statement===currentVersion.value?.statement.trim())))return
+  if(kind==='correct'&&(!statement||statement.length>4000||(!operationUncertain.value&&statement===currentVersion.value?.statement?.trim())))return
   const canonical=JSON.stringify([kind,claim.claim_id,claim.revision,kind==='correct'?statement:''])
   const previous=operationRequest.value
   if(!previous||JSON.stringify([previous.kind,previous.claimId,String(previous.revision),previous.kind==='correct'?previous.statement:''])!==canonical){
-    operationRequest.value={kind,claimId:claim.claim_id,revision:Number(claim.revision),statement,manual:isManualEntry.value,key:`web-${kind}-${crypto.randomUUID()}`}
+    operationRequest.value={kind,claimId:claim.claim_id,revision:Number(claim.revision),statement,manual:isManualEntry.value,protection:lifecycle.value?.protection==='pinned'?'none':'pinned',key:`web-${kind}-${crypto.randomUUID()}`}
   }
   const input=operationRequest.value!,epoch=++operationEpoch
   operationBusy.value=true;writeCommitted=false;error.value=''
   try{
     if(kind==='correct')await(input.manual?reviseManualMemoryClaim:reviseAcceptedMemoryClaim)(input.claimId,input.statement,input.revision,input.key)
+    else if(kind==='protect')await protectMemoryClaim(input.claimId,input.revision,input.protection!,input.key)
     else if(kind==='revoke')await revokeMemoryClaim(input.claimId,input.revision,input.key)
     else await deleteMemoryClaim(input.claimId,input.revision,input.key)
     if(epoch!==operationEpoch)return
     writeCommitted=true;operationUncertain.value=false;operationRequest.value=undefined;correcting.value=false;confirmDelete.value=false
-    refreshTarget=kind==='correct'?input.claimId:null
+    refreshTarget=kind==='correct'||kind==='protect'?input.claimId:null
     await refreshAfterMutation()
     if(epoch===operationEpoch)emit('changed')
   }catch(err){

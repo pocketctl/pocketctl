@@ -11,6 +11,11 @@ import (
 
 // CompileRequest is the POST /api/v1/memory/context/compile body.
 type CompileRequest struct {
+	SceneID                string              `json:"scene_id,omitempty"`
+	TaskScopeKey           string              `json:"task_scope_key,omitempty"`
+	Destination            string              `json:"destination,omitempty"`
+	FactAt                 string              `json:"fact_at,omitempty"`
+	KnownAt                string              `json:"known_at,omitempty"`
 	EvidenceReadCapability string              `json:"evidence_read_capability,omitempty"`
 	SchemaVersion          int                 `json:"schema_version"`
 	ClientRequestID        string              `json:"client_request_id"`

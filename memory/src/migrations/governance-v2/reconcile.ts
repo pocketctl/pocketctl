@@ -58,12 +58,16 @@ export interface PrivacyWatermarks {
  principals:Record<string,any>[]
  delegations:Record<string,any>[]
  sourceRetention:Record<string,any>[]
+ logicalTombstones:Record<string,any>[]
+ reclaimedVersionBodies:Record<string,any>[]
  migrationClosures:Record<string,any>[]
  capturedAt:string
 }
 /** Keep this recovery capsule in a restricted store; it contains no plaintext
  * evidence, model prompts, credentials or HMAC keys. It is not a public report. */
 export async function capturePrivacyWatermarks(pool:pg.Pool):Promise<PrivacyWatermarks>{return migrationTransaction(pool,async c=>({
+ logicalTombstones:(await c.query('SELECT installation_id,logical_key,deleted_at FROM memory_logical_tombstones ORDER BY installation_id,logical_key')).rows,
+ reclaimedVersionBodies:(await c.query("SELECT installation_id,claim_id,version_id,body_hash,body_reclaimed_at FROM knowledge_versions WHERE body_state='reclaimed' ORDER BY installation_id,version_id")).rows,
  sourceRetention:(await c.query(`SELECT r.*,encode(source_digest,'hex') digest_hex FROM memory_source_retention_receipts r ORDER BY installation_id,turn_id`)).rows,
  migrationClosures:(await c.query(`SELECT s.*,r.sealed_at,r.abandoned_at FROM memory_governance_migration_summaries s JOIN memory_governance_migration_runs r USING(run_id) WHERE r.sealed_at IS NOT NULL OR r.abandoned_at IS NOT NULL ORDER BY run_id`)).rows,
  principals:(await c.query('SELECT installation_id,principal_id,state,permission_revision::text,valid_until FROM memory_governance_executor_principals ORDER BY installation_id,principal_id')).rows,
@@ -80,6 +84,7 @@ export async function replayPrivacyWatermarks(pool:pg.Pool,w:PrivacyWatermarks,i
  const {createPurgeRepository}=await import('../../purge/repository.js'),{randomUUID}=await import('node:crypto')
  if(!Array.isArray(w.sourceRetention)||!Array.isArray(w.migrationClosures))throw new Error('restore_retention_watermarks_required')
  if(!Array.isArray(w.principals)||!Array.isArray(w.delegations))throw new Error('restore_executor_watermarks_required')
+ if(!Array.isArray(w.logicalTombstones)||!Array.isArray(w.reclaimedVersionBodies))throw new Error('restore_lifecycle_watermarks_required')
  const purge=createPurgeRepository(pool,{hmacKey:input.purgeHmacKey})
  for(const row of w.installations.filter(i=>i.local_status==='purged'||i.relay_status==='revoked'||i.relay_status==='revoking')){
   if((await pool.query('SELECT 1 FROM memory_installations WHERE installation_id=$1',[row.installation_id])).rowCount)await purge.purgeInstallation({installationId:row.installation_id,requestId:randomUUID(),reason:'restore_privacy_replay'})
@@ -89,6 +94,8 @@ export async function replayPrivacyWatermarks(pool:pg.Pool,w:PrivacyWatermarks,i
  // writes are separate transactions; installation gates close the intervening gap.
  await migrationTransaction(pool,async c=>{
   await c.query(`UPDATE memory_installations SET local_status='integrity_error' WHERE installation_id=ANY($1::uuid[]) AND local_status<>'purged'`,[w.installations.map(i=>i.installation_id)])
+  await c.query("UPDATE memory_lifecycle_observation_windows SET state='unknown',started_at=NULL,last_heartbeat_at=NULL,capability_since_at=NULL,last_limitation_at=clock_timestamp() WHERE installation_id=ANY($1::uuid[])",[w.installations.map(i=>i.installation_id)])
+  await c.query("UPDATE memory_claim_lifecycle SET observation_state='unknown',observation_started_at=NULL WHERE installation_id=ANY($1::uuid[])",[w.installations.map(i=>i.installation_id)])
   await c.query(`UPDATE memory_governance_v2_states SET phase='hold',writer_floor='identity_v2',generation=generation+1 WHERE installation_id=ANY($1::uuid[])`,[w.installations.map(i=>i.installation_id)])
   await c.query(`UPDATE memory_jobs SET state='dead',claim_epoch=claim_epoch+1,claimed_by=NULL,claim_expires_at=NULL,last_error_code='restore_authority_revalidation' WHERE installation_id=ANY($1::uuid[]) AND state IN('pending','running')`,[w.installations.map(i=>i.installation_id)])
  })
@@ -98,12 +105,28 @@ export async function replayPrivacyWatermarks(pool:pg.Pool,w:PrivacyWatermarks,i
   for(const t of w.scopeTombstones)await c.query(`INSERT INTO memory_scope_tombstones(owner_scope_kind,owner_scope_id,authorization_epoch,reason,tombstoned_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(owner_scope_kind,owner_scope_id) DO UPDATE SET authorization_epoch=GREATEST(memory_scope_tombstones.authorization_epoch,$3::bigint),reason=CASE WHEN memory_scope_tombstones.authorization_epoch<=$3::bigint THEN $4 ELSE memory_scope_tombstones.reason END`,[t.owner_scope_kind,t.owner_scope_id,t.authorization_epoch,t.reason,t.tombstoned_at])
   for(const m of w.memberships)await c.query(`UPDATE memory_scope_memberships SET membership_revision=$3,state=$4,roles=$5,valid_from=$6,valid_until=$7 WHERE installation_id=$1 AND membership_id=$2 AND membership_revision<=$3::bigint`,[m.installation_id,m.membership_id,m.membership_revision,m.state,m.roles,m.valid_from,m.valid_until])
   for(const t of w.tombstones)if((await c.query('SELECT 1 FROM memory_installations WHERE installation_id=$1 AND local_status<>\'purged\'',[t.installation_id])).rowCount)await c.query(`INSERT INTO knowledge_tombstones(installation_id,key_id,identity_hmac,reason,deleted_at) VALUES($1,$2,decode($3,'hex'),$4,$5) ON CONFLICT DO NOTHING`,[t.installation_id,t.key_id,t.identity_hmac,t.reason,t.deleted_at])
+  for(const t of w.logicalTombstones){
+   if(!(await c.query("SELECT 1 FROM memory_installations WHERE installation_id=$1 AND local_status<>'purged'",[t.installation_id])).rowCount)continue
+   await c.query('INSERT INTO memory_logical_tombstones(installation_id,logical_key,deleted_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[t.installation_id,t.logical_key,t.deleted_at])
+   await c.query(`DELETE FROM knowledge_claims c USING memory_logical_claims m WHERE c.installation_id=m.installation_id AND c.claim_id=m.claim_id AND m.installation_id=$1 AND m.logical_key=$2`,[t.installation_id,t.logical_key])
+  }
   // Restored data is held until current Relay authority, newer purge watermarks
   // and origin mirrors have been reconciled. Never auto-resume old workers.
   await c.query(`UPDATE knowledge_claims SET consumption_hold_reason=COALESCE(consumption_hold_reason,'restore_authority_revalidation') WHERE installation_id=ANY($1::uuid[])`,[w.installations.map(i=>i.installation_id)])
   for(const p of w.principals??[])await c.query(`UPDATE memory_governance_executor_principals SET state='disabled',permission_revision=GREATEST(permission_revision,$3::bigint) WHERE installation_id=$1 AND principal_id=$2 AND ($4='disabled' OR permission_revision<$3::bigint OR valid_until>$5::timestamptz)`,[p.installation_id,p.principal_id,p.permission_revision,p.state,p.valid_until])
   for(const d of w.delegations??[])await c.query(`UPDATE memory_publication_delegations SET state='revoked' WHERE installation_id=$1 AND delegation_id=$2 AND state='active' AND ($3<>'active' OR valid_until>$4::timestamptz)`,[d.installation_id,d.delegation_id,d.state,d.valid_until])
 
+ })
+ for(const row of w.reclaimedVersionBodies)await migrationTransaction(pool,async c=>{
+  await c.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))",[row.installation_id])
+  await c.query('SELECT claim_id FROM knowledge_claims WHERE installation_id=$1 AND claim_id=$2 FOR UPDATE',[row.installation_id,row.claim_id])
+  await c.query(`UPDATE knowledge_versions SET statement='[content reclaimed]',structured_content='{}',body_state='reclaimed',body_hash=$3,body_reclaimed_at=$4
+   WHERE installation_id=$1 AND version_id=$2 AND body_state='present'`,[row.installation_id,row.version_id,row.body_hash,row.body_reclaimed_at])
+  await c.query('DELETE FROM claim_search_documents WHERE installation_id=$1 AND version_id=$2',[row.installation_id,row.version_id])
+  await c.query('DELETE FROM knowledge_evidence WHERE installation_id=$1 AND version_id=$2',[row.installation_id,row.version_id])
+  await c.query('DELETE FROM knowledge_evidence_capsules WHERE installation_id=$1 AND version_id=$2',[row.installation_id,row.version_id])
+  await c.query(`UPDATE memory_claim_lifecycle l SET body_state='reclaimed',storage_tier='cold',cold_since=COALESCE(cold_since,$3::timestamptz),revision=l.revision+1
+   FROM knowledge_claims c WHERE l.installation_id=c.installation_id AND l.claim_id=c.claim_id AND c.installation_id=$1 AND c.current_version_id=$2 AND l.body_state<>'reclaimed'`,[row.installation_id,row.version_id,row.body_reclaimed_at])
  })
  // Recovery runs while installations are held. Restore reclamation fences
  // BEFORE consumers may be restarted, then clear any body from the older backup.

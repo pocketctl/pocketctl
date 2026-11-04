@@ -7,6 +7,7 @@ vi.mock('../../composables/useLocale', () => ({
 
 const memoryClient = vi.hoisted(() => ({
   searchMemory: vi.fn(),
+  listMemoryScenes: vi.fn(),
   getMemoryClaim: vi.fn(),
   listVersionEvidence: vi.fn(),
 }))
@@ -26,6 +27,7 @@ function deferred<T>() {
 describe('MemorySearchPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    memoryClient.listMemoryScenes.mockResolvedValue({scenes:[],has_more:false})
     memoryClient.getMemoryClaim.mockImplementation(async (claimId: string) => ({
       claim: {
         claim_id: claimId, claim_type: 'work_method', scope_kind: 'branch', scope_key: 'main',
@@ -144,4 +146,61 @@ describe('MemorySearchPanel', () => {
     expect(wrapper.emitted('select-claim')?.[0]?.[0]).toBe('claim-2')
     wrapper.unmount()
   })
+  test('scene and allowed destination are required and restrict search to the chosen owner',async()=>{
+    memoryClient.listMemoryScenes.mockResolvedValue({scenes:[{id:'scene-a',name:'Work project',domain:'work',destinations:['work']}],has_more:false})
+    memoryClient.searchMemory.mockResolvedValue({hits:[],degradedComponents:[]})
+    const wrapper=mount(MemorySearchPanel,{props:{installationId:'owner-a'}});await flushPromises()
+    await wrapper.get('[data-testid="memory-search-input"]').setValue('timeout')
+    await wrapper.get('form').trigger('submit');expect(memoryClient.searchMemory).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="memory-scene-select"]').setValue('owner-a:scene-a')
+    expect(wrapper.get('[data-testid="memory-destination-select"]').findAll('option').map(o=>o.attributes('value'))).toEqual(['','work'])
+    await wrapper.get('[data-testid="memory-destination-select"]').setValue('work')
+    await wrapper.get('form').trigger('submit');await flushPromises()
+    expect(memoryClient.searchMemory).toHaveBeenCalledWith('timeout',{scopeInstallationIds:['owner-a'],sceneId:'scene-a',destination:'work'},expect.any(AbortSignal))
+    wrapper.unmount()
+  })
+  test('an owner change rejects late scenes and old search results',async()=>{
+    const late=deferred<any>(),search=deferred<any>()
+    memoryClient.listMemoryScenes.mockImplementationOnce(()=>late.promise).mockResolvedValue({scenes:[{id:'scene-b',name:'New owner scene',domain:'life',destinations:['personal']}],has_more:false})
+    const wrapper=mount(MemorySearchPanel,{props:{installationId:'owner-a'}})
+    await wrapper.setProps({installationId:'owner-b'});await flushPromises()
+    late.resolve({scenes:[{id:'scene-a',name:'Private stale scene',domain:'work',destinations:['work']}],has_more:false});await flushPromises()
+    expect(wrapper.text()).not.toContain('Private stale scene')
+    await wrapper.get('[data-testid="memory-scene-select"]').setValue('owner-b:scene-b')
+    await wrapper.get('[data-testid="memory-destination-select"]').setValue('personal')
+    await wrapper.get('[data-testid="memory-search-input"]').setValue('old query')
+    memoryClient.searchMemory.mockImplementationOnce(()=>search.promise)
+    await wrapper.get('form').trigger('submit')
+    await wrapper.setProps({installationId:'owner-c'});await flushPromises()
+    search.resolve({hits:[{claimId:'old',versionId:'old',statement:'Private stale result'}],degradedComponents:[]});await flushPromises()
+    expect(wrapper.text()).not.toContain('Private stale result')
+    expect((wrapper.get('[data-testid="memory-scene-select"]').element as HTMLSelectElement).value).toBe('')
+    wrapper.unmount()
+  })
+  test('scene metadata failure stays visible and retry does not report empty search results',async()=>{
+    memoryClient.listMemoryScenes.mockRejectedValueOnce(new Error('offline'))
+    const wrapper=mount(MemorySearchPanel,{props:{installationId:'owner'}});await flushPromises()
+    expect(wrapper.find('[data-testid="memory-scene-error"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="memory-search-empty"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="memory-search-input"]').setValue('query')
+    await wrapper.get('form').trigger('submit');expect(memoryClient.searchMemory).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="memory-scene-error"] button').trigger('click');await flushPromises()
+    expect(wrapper.find('[data-testid="memory-scene-error"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('a scene selected from multiple scopes never searches a second owner',async()=>{
+    memoryClient.listMemoryScenes.mockImplementation(async(owner:string)=>({scenes:[{id:`scene-${owner}`,name:owner,domain:'work',destinations:['work']}],has_more:false}))
+    memoryClient.searchMemory.mockResolvedValue({hits:[],degradedComponents:[]})
+    const wrapper=mount(MemorySearchPanel,{props:{installationId:'owner-a',scopes:[{installation_id:'owner-a',owner_scope_kind:'personal',owner_scope_id:'owner-a',permissions:['read'],state:'active'},{installation_id:'owner-b',name:'Other owner',owner_scope_kind:'organization',owner_scope_id:'owner-b',permissions:['read'],state:'active'}] as any}})
+    await flushPromises()
+    await wrapper.findAll('input[type="checkbox"]')[1]!.setValue(true);await flushPromises()
+    await wrapper.get('[data-testid="memory-scene-select"]').setValue('owner-b:scene-owner-b')
+    await wrapper.get('[data-testid="memory-destination-select"]').setValue('work')
+    await wrapper.get('[data-testid="memory-search-input"]').setValue('scoped')
+    await wrapper.get('form').trigger('submit');await flushPromises()
+    expect(memoryClient.searchMemory).toHaveBeenCalledWith('scoped',{scopeInstallationIds:['owner-b'],sceneId:'scene-owner-b',destination:'work'},expect.any(AbortSignal))
+    wrapper.unmount()
+  })
+
 })
