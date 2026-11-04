@@ -630,7 +630,7 @@
   "session.documents.viewer.invalid_encoding": "文档不是有效的 UTF-8 文本，未进行渲染。",
   "session.documents.viewer.integrity_failed": "文档完整性校验失败，未进行渲染。",
   "session.documents.viewer.error": "暂时无法读取文档快照。",
-  "session.model_changed": "已切换至",
+  "session.model_changed": "模型已切换",
   "session.ended_at": "结束于 {{time}}",
   "session.send_failed": "发送失败，请检查网络后重试",
   "session.session_busy": "会话仍在生成，内容已保留，请稍后重试",

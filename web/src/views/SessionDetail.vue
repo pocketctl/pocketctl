@@ -1064,6 +1064,14 @@ function handleInvocationResult(msg: any) {
     invocationCreateRequest=crypto.randomUUID()
     send({type:'session_create',request_id:invocationCreateRequest,daemon_id:host,agent:'codex',cwd:result.cwd,force:result.force===true,prompt:'',model:currentModel.value,...(result.fork_from?{fork_from:result.fork_from}:{})});return
   }
+  if(invocationName==='model' && result.kind==='text') {
+    if(result.model) currentModel.value=result.model
+    if(typeof result.effort==='string') currentEffort.value=result.effort
+    invocationDialog.value=null
+    if(messageInput.value===invocationDraft) messageInput.value=''
+    invocationSelection.value=null
+    return
+  }
   invocationDialog.value=result
   if(!['choose','input'].includes(result.kind)&&messageInput.value===invocationDraft) {messageInput.value='';invocationSelection.value=null}
 }
@@ -3386,12 +3394,17 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   if (type === 'session_model_changed') {
     const model = evt.model || evt.payload?.model || ''
     if (!model) return
-    if (evt.session_id === sessionId.value) currentModel.value = model
+    const previousModel = evt.previous_model || evt.payload?.previous_model || ''
+    const previousEffort = evt.previous_effort || evt.payload?.previous_effort || ''
+    const effort = evt.effort || evt.payload?.effort || ''
+    const transition = previousModel && previousModel !== model ? `${previousModel} → ${model}`
+      : previousEffort && effort && previousEffort !== effort ? `${model} · ${previousEffort} → ${effort}` : model
+    if (!historical && evt.session_id === sessionId.value) currentModel.value = model
     if ((evt.reason || evt.payload?.reason) === 'initial_model') return
     const eventId = evt.event_id || evt.payload?.event_id
     if (eventId && target.some((message: any) => message.type === type && message.eventId === eventId)) return
-    if (!eventId && isDuplicate(type, model, target)) return
-    target.push({ id: nextId('model'), type, role: 'agent', content: model, eventId, ...eventWithTurnMetadata(evt) })
+    if (!eventId && isDuplicate(type, transition, target)) return
+    target.push({ id: nextId('model'), type, role: 'agent', content: transition, eventId, ...eventWithTurnMetadata(evt) })
   } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
@@ -4189,6 +4202,7 @@ onMounted(() => {
   // (from the next assistant message's model field). Refresh the badge live.
   cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (typeof msg.effort === 'string') currentEffort.value = msg.effort
     if (currentSessionAgent.value === 'dsh') { currentEffort.value = msg.effort || ''; if (msg.request_id === dshSettingsPending.value) dshSettingsPending.value = '' }
     if (msg.model) currentModel.value = msg.model
     processImmediateLiveEvent(msg, { scroll: true })

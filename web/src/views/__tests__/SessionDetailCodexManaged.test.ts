@@ -352,12 +352,30 @@ describe('SessionDetail managed Codex terminal control', () => {
     await nextTick()
 
     websocketMock.handlers.get('session_model_changed')?.({
-      type: 'session_model_changed', session_id: 'thr_1', model: 'gpt-5.6', event_id: 'model-56',
+      type: 'session_model_changed', session_id: 'thr_1', previous_model: 'gpt-5.5', model: 'gpt-5.6', event_id: 'model-56',
     })
     await nextTick()
 
     expect(wrapper.get('.model-switch-notice').text()).toContain('gpt-5.6')
+    expect(wrapper.get('.model-switch-notice').text()).toContain('gpt-5.5 → gpt-5.6')
     expect(wrapper.get('.input-meta .model-pill').text()).toContain('gpt-5.6')
+  })
+
+  test('replays model notices without replacing the current model badge with an older model', async () => {
+    const wrapper = mountSession()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'], model: 'current-model', effort: 'high' })
+    await nextTick()
+    websocketMock.handlers.get('replay_batch')?.({
+      type: 'replay_batch', session_id: 'thr_1', events: [{
+        type: 'session_model_changed', session_id: 'thr_1', seq: 11,
+        event_id: 'historical-model', previous_model: 'old-model', model: 'historical-model', effort: 'low',
+      }],
+    })
+    websocketMock.handlers.get('replay_end')?.({ type: 'replay_end', session_id: 'thr_1', has_more: false })
+    await nextTick()
+    expect(wrapper.get('.model-switch-notice').text()).toContain('old-model → historical-model')
+    expect(wrapper.get('.session-toolbar-host').text()).toContain('current-model')
+    expect(wrapper.get('.input-meta .model-pill').text()).toContain('current-model')
   })
 
   test('shows the response end time beside retry after a turn finishes', async () => {

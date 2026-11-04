@@ -267,6 +267,48 @@ func TestCodexInvocationModelDefaultReplacesPreviousEffort(t *testing.T) {
 		t.Fatalf("stale effort: %v", params)
 	}
 }
+
+func TestCodexModelSwitchPublishesConfirmedTransitionOnce(t *testing.T) {
+	sm, _, rpc, _ := invocationFixture(t)
+	sm.sessions["s"].Model = "old-model"
+	sm.sessions["s"].Effort = "low"
+	rpc.results["model/list"] = json.RawMessage(`{"data":[{"model":"new-model","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}`)
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := sm.InvokeCodexCommand(context.Background(), "s", "/model new-model high", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var changes []map[string]any
+	for len(sm.outputCh) > 0 {
+		event := <-sm.outputCh
+		if event.Type != "session_model_changed" {
+			continue
+		}
+		raw, _ := json.Marshal(event)
+		var fields map[string]any
+		_ = json.Unmarshal(raw, &fields)
+		changes = append(changes, fields)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("want one confirmed transition, got %v", changes)
+	}
+	if changes[0]["previous_model"] != "old-model" || changes[0]["model"] != "new-model" || changes[0]["reason"] != protocol.TurnReasonUserRequested {
+		t.Fatalf("transition lost source or confirmation: %v", changes[0])
+	}
+}
+
+func TestCodexModelSwitchFailureKeepsPreviousSelection(t *testing.T) {
+	sm, _, rpc, _ := invocationFixture(t)
+	sm.sessions["s"].Model, sm.sessions["s"].Effort = "old-model", "low"
+	rpc.results["model/list"] = json.RawMessage(`{"data":[{"model":"new-model","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}`)
+	rpc.errs["thread/resume"] = errors.New("native model rejected")
+	if _, err := sm.InvokeCodexCommand(context.Background(), "s", "/model new-model high", ""); err == nil {
+		t.Fatal("native rejection was reported as success")
+	}
+	if sm.sessions["s"].Model != "old-model" || sm.sessions["s"].Effort != "low" || len(sm.outputCh) != 0 {
+		t.Fatal("failed selection changed state or published success")
+	}
+}
 func TestCodexProjectNestedDirectoryLinkFailsClosed(t *testing.T) {
 	_, c, _, _ := invocationFixture(t)
 	target := filepath.Join(c.projectCwd, "shared")

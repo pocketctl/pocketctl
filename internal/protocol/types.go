@@ -356,6 +356,8 @@ type DaemonEvent struct {
 	PermissionMutableModes []string                   `json:"permission_mutable_modes,omitempty"`
 	Model                  string                     `json:"model,omitempty"`  // resolved model name (session_meta event)
 	Effort                 string                     `json:"effort,omitempty"` // current thinking-effort level (session_meta event)
+	PreviousModel          string                     `json:"previous_model,omitempty"`
+	PreviousEffort         string                     `json:"previous_effort,omitempty"`
 	CreationCapabilities   *CodexCreationCapabilities `json:"creation_capabilities,omitempty"`
 	Models                 []ModelOption              `json:"models,omitempty"` // available models (model_list event)
 	CodexHomeID            string                     `json:"codex_home_id,omitempty"`

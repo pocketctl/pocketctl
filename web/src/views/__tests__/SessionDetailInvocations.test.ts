@@ -92,6 +92,18 @@ async function ready() {
  await nextTick();return wrapper
 }
 describe('new Codex invocation composer',()=>{
+ test.each([false,true])('confirmed model settings close without another dialog and preserve newer draft (%s)',async newerDraft=>{
+  const wrapper=await ready()
+  await wrapper.get('.chat-textarea').setValue('/model new-model high')
+  await wrapper.get('.send-btn').trigger('click')
+  const request=latest('invoke_command')
+  if(newerDraft) await wrapper.get('.chat-textarea').setValue('My next task')
+  websocketMock.handlers.get('invocation_result')?.({session_id:'thr_1',request_id:request.request_id,invocation:{kind:'text',text:'后续回合使用 new-model high',model:'new-model',effort:'high'}})
+  await nextTick()
+  expect((wrapper.get('.chat-textarea').element as HTMLTextAreaElement).value).toBe(newerDraft?'My next task':'')
+  expect(wrapper.text()).not.toContain('后续回合使用 new-model high')
+  expect(latest('user_message')).toBeUndefined()
+ })
  test('selection retains arguments and native identity; only Send executes',async()=>{
   const wrapper=await ready()
   await wrapper.get('.chat-textarea').setValue('/review-code check API')

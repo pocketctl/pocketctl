@@ -630,7 +630,7 @@
   "session.documents.viewer.invalid_encoding": "The document is not valid UTF-8 and was not rendered.",
   "session.documents.viewer.integrity_failed": "Document integrity verification failed. Nothing was rendered.",
   "session.documents.viewer.error": "The document snapshot cannot be loaded right now.",
-  "session.model_changed": "Switched to",
+  "session.model_changed": "Model changed",
   "session.ended_at": "Ended {{time}}",
   "session.send_failed": "Send failed — check your connection and retry",
   "session.session_busy": "The session is still generating. Your draft was kept; try again shortly",

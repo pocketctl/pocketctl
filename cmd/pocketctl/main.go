@@ -1855,6 +1855,9 @@ func cmdDaemonStart(args []string) {
 		}
 		if evt.Type == "session_model_changed" && evt.Model != "" && evt.SessionID != "" {
 			current, _ := sm.GetSessionModel(evt.SessionID)
+			if evt.PreviousModel == "" && current != evt.Model {
+				evt.PreviousModel = current
+			}
 			if evt.Model == current {
 				// Explicit remote switches update the in-memory selection before
 				// publishing the confirmation event. Keep that correlated event.
@@ -1886,9 +1889,10 @@ func cmdDaemonStart(args []string) {
 		// Older agents report only on agent_text. New Codex turn_context records
 		// are handled above and therefore reach clients before this reply.
 		return []protocol.DaemonEvent{evt, {
-			Type:      "session_model_changed",
-			SessionID: evt.SessionID,
-			Model:     evt.Model,
+			Type:          "session_model_changed",
+			SessionID:     evt.SessionID,
+			Model:         evt.Model,
+			PreviousModel: current,
 		}}
 	}
 

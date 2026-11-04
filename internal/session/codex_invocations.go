@@ -397,11 +397,20 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		sm.rememberNativeCodexConfig(id, resumed)
 		b.coord.markSubscribed(id)
 		sm.mu.Lock()
+		previousModel, previousEffort := sm.sessions[id].Model, sm.sessions[id].Effort
 		sm.sessions[id].Model = model
 		sm.sessions[id].Effort = effort
 		sm.mu.Unlock()
 		sm.outputCh <- sm.codexSessionMetadata(protocol.DaemonEvent{Type: "session_meta", SessionID: id, Model: model, Effort: effort})
-		return textResult("后续回合使用 " + args), nil
+		if previousModel != model || previousEffort != effort {
+			sm.outputCh <- protocol.DaemonEvent{
+				Type: "session_model_changed", SessionID: id, Model: model, Effort: effort,
+				PreviousModel: previousModel, PreviousEffort: previousEffort, Reason: protocol.TurnReasonUserRequested,
+			}
+		}
+		resultText := textResult("后续回合使用 " + args)
+		resultText["model"], resultText["effort"] = model, effort
+		return resultText, nil
 	case "permissions":
 		if args == "" {
 			return choices("选择会话权限", []map[string]any{choice("只读", "read-only"), choice("工作目录可写，按需审批", "workspace-write"), choice("完全访问…", "danger-full-access")}), nil
