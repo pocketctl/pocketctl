@@ -8,6 +8,7 @@ vi.mock('../../composables/useLocale', () => ({
 const memoryClient = vi.hoisted(() => ({
   searchMemory: vi.fn(),
   listMemoryScenes: vi.fn(),
+  listMemoryClaims: vi.fn(),
   getMemoryClaim: vi.fn(),
   listVersionEvidence: vi.fn(),
 }))
@@ -28,6 +29,7 @@ describe('MemorySearchPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     memoryClient.listMemoryScenes.mockResolvedValue({scenes:[],has_more:false})
+    memoryClient.listMemoryClaims.mockResolvedValue({claims:[],next_cursor:null,total_count:0})
     memoryClient.getMemoryClaim.mockImplementation(async (claimId: string) => ({
       claim: {
         claim_id: claimId, claim_type: 'work_method', scope_kind: 'branch', scope_key: 'main',
@@ -202,5 +204,29 @@ describe('MemorySearchPanel', () => {
     expect(memoryClient.searchMemory).toHaveBeenCalledWith('scoped',{scopeInstallationIds:['owner-b'],sceneId:'scene-owner-b',destination:'work'},expect.any(AbortSignal))
     wrapper.unmount()
   })
+
+ test('personal task selection sends exact task scope and clears on owner change', async () => {
+  memoryClient.listMemoryClaims.mockResolvedValue({claims:[{scope_kind:'task',scope_key:'turn:verified',statement:'Investigate log paths'}],next_cursor:null,total_count:1})
+  memoryClient.searchMemory.mockResolvedValue({hits:[],nextCursor:null,degradedComponents:[],poolSizes:{}})
+  const wrapper=mount(MemorySearchPanel,{props:{installationId:'personal',scopes:[{installation_id:'personal',owner_scope_kind:'personal',permissions:['read']} as any]}})
+  await flushPromises()
+  await wrapper.get('[data-testid="memory-task-select"]').setValue('turn:verified')
+  await wrapper.get('[data-testid="memory-search-input"]').setValue('log')
+  await wrapper.get('form').trigger('submit');await flushPromises()
+  expect(memoryClient.searchMemory).toHaveBeenLastCalledWith('log',expect.objectContaining({taskScopeKey:'turn:verified',scopeInstallationIds:['personal']}),expect.anything())
+  await wrapper.find('.memory-federated-scopes input').setValue(false);await flushPromises()
+  expect(wrapper.find('[data-testid="memory-task-select"]').exists()).toBe(false)
+ })
+ test('scope validation errors do not claim zero search results', async () => {
+  const wrapper=mount(MemorySearchPanel,{props:{installationId:'personal',scopes:[{installation_id:'personal',owner_scope_kind:'personal',permissions:['read']} as any]}})
+  await flushPromises()
+  await wrapper.find('.memory-federated-scopes input').setValue(false)
+  await wrapper.get('[data-testid="memory-search-input"]').setValue('query')
+  await wrapper.get('form').trigger('submit');await flushPromises()
+  expect(wrapper.get('[data-testid="memory-search-error"]').text()).toContain('memory.scope_required')
+  expect(wrapper.find('.memory-results-head').exists()).toBe(false)
+  expect(memoryClient.searchMemory).not.toHaveBeenCalled()
+  wrapper.unmount()
+ })
 
 })

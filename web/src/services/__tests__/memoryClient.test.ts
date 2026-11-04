@@ -524,3 +524,12 @@ test('scene metadata uses the selected readable scope and search forwards explic
   await searchMemory('timeout',{scopeInstallationIds:['owner-scene'],sceneId:'scene-work',destination:'work'})
   expect(JSON.parse(String(calls.find(c=>c.path==='/api/v1/memory/search')!.init.body))).toMatchObject({query:'timeout',scope_installation_ids:['owner-scene'],scene_id:'scene-work',destination:'work'})
 })
+
+ test('search preserves exact task scope and candidate continuation preserves delivery filters', async () => {
+  const { calls } = relayAndProviderFetch({})
+  await searchMemory('log', {taskScopeKey:'turn:verified'})
+  expect(JSON.parse(String(calls.find(c=>c.path.endsWith('/search'))!.init.body)).task_scope_key).toBe('turn:verified')
+  await listMemoryCandidates({submissionId:'submission',decisionId:'decision'}, 'cursor')
+  const params=new URLSearchParams(calls.find(c=>c.path.endsWith('/candidates'))!.search)
+  expect(Object.fromEntries(params)).toEqual({submission_id:'submission',decision_id:'decision',cursor:'cursor'})
+ })

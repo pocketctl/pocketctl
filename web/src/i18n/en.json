@@ -2556,5 +2556,14 @@
   "session.reply_waiting": "Waiting for your response",
   "session.reply_recorded": "Reply recorded",
   "session.reply_history_partial": "Earlier content is not loaded",
-  "session.reply_new_content": "New content"
+  "session.reply_new_content": "New content",
+  "memory.task_scope": "Task scope",
+  "memory.task_scope_default": "General knowledge (no task selected)",
+  "memory.task_scope_more": "Load more tasks",
+  "memory.task_scope_failed": "Could not load task scopes. Retry.",
+  "memory.task_scope_hint": "Legacy task knowledge is searched within its matching task. Select the task associated with the knowledge. This does not enable scene consumption.",
+  "memory.scope_required": "Select at least one search scope.",
+  "memory.review_loaded": "Loaded {{loaded}} of {{total}} candidates",
+  "memory.review_filter_loaded": "Filters apply to loaded candidates. Load more to extend the list.",
+  "memory.review_load_more": "Load more candidates"
 }

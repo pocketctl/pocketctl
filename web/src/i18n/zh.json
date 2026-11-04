@@ -2556,5 +2556,14 @@
   "session.reply_waiting": "等待你的处理",
   "session.reply_recorded": "回复记录",
   "session.reply_history_partial": "前文尚未加载",
-  "session.reply_new_content": "新内容"
+  "session.reply_new_content": "新内容",
+  "memory.task_scope": "任务范围",
+  "memory.task_scope_default": "通用知识（未指定任务）",
+  "memory.task_scope_more": "载入更多任务",
+  "memory.task_scope_failed": "任务范围加载失败，请重试。",
+  "memory.task_scope_hint": "旧任务知识仅在匹配的任务范围内检索。选择相关知识对应的任务后搜索；这不会开启场景消费。",
+  "memory.scope_required": "请至少选择一个检索范围。",
+  "memory.review_loaded": "已载入 {{loaded}} / {{total}} 条候选",
+  "memory.review_filter_loaded": "筛选作用于已载入候选；可继续载入更多。",
+  "memory.review_load_more": "载入更多候选"
 }

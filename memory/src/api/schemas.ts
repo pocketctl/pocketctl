@@ -105,6 +105,7 @@ export const ListQuerySchema = z.strictObject({
 })
 
 export const CandidateQuerySchema = ListQuerySchema.extend({
+  cursor: UUID.optional(),
   submission_id: UUID.optional(), decision_id: UUID.optional(),
 }).refine(value => Boolean(value.submission_id) === Boolean(value.decision_id), 'delivery identity requires both ids')
 

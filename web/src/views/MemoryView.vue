@@ -63,7 +63,7 @@
           <template v-if="active === 'review'">
             <MemoryScopeSwitcher v-if="governanceScopes.length > 0" v-model="governanceTarget"
               :scopes="governanceScopes" />
-            <MemoryGovernanceQueue v-if="governanceTarget" :entries="governanceQueue"
+            <MemoryGovernanceQueue v-if="governanceTarget && selectedGovernanceScope?.owner_scope_kind !== 'personal'" :entries="governanceQueue"
               :loading="governanceLoading" :error="governanceError"
               @decide="decideGovernance" @publish="publishGovernance" :bulk-results="bulkReviewResults" @bulk="bulkGovernance" @revise="reviseGovernance" :executors="publicationExecutors" @delegate="createDelegation" />
             <div v-if="pendingDelegations.length" class="memory-governance-actions"><p>{{ t('memory.governance.delegation.pending') }}</p><button v-for="d in pendingDelegations" :key="d.id" type="button" class="memory-button" @click="revokeDelegation(d.id)">{{ t('memory.governance.delegation.revoke') }} · {{ d.candidateId }}</button></div>

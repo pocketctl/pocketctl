@@ -32,12 +32,20 @@
               <option v-for="value in selectedScene?.destinations || []" :key="value" :value="value">{{ t(`memory.destination_${value}`) }}</option>
             </select></ActionSelect></label>
           </div>
+          <div v-if="personalTaskOwner" class="memory-scene-filters" data-testid="memory-task-filters">
+            <label>{{ t('memory.task_scope') }}<ActionSelect><select v-model="taskScopeKey" :aria-label="t('memory.task_scope')" :disabled="tasksLoading" data-testid="memory-task-select">
+              <option value="">{{ t('memory.task_scope_default') }}</option>
+              <option v-for="task in taskOptions" :key="task.key" :value="task.key">{{ task.label }}</option>
+            </select></ActionSelect></label>
+            <button v-if="tasksCursor || tasksError" type="button" class="memory-button" :disabled="tasksLoading" @click="loadTasks(!!tasksCursor)">{{ tasksError ? t('common.retry') : t('memory.task_scope_more') }}</button>
+          </div>
+          <p v-if="personalTaskOwner" class="memory-notice" :role="tasksError ? 'alert' : 'status'">{{ tasksError ? t('memory.task_scope_failed') : t('memory.task_scope_hint') }}</p>
           <p v-if="scenesLoading" role="status">{{ t('memory.scene_loading') }}</p>
           <div v-else-if="scenesError" class="memory-notice is-error" role="alert" data-testid="memory-scene-error">{{ t('memory.scene_failed') }} <button type="button" class="memory-button" @click="loadScenes">{{ t('memory.scene_retry') }}</button></div>
           <p v-else-if="scenes.length" class="memory-notice" role="status" data-testid="memory-scene-hint">{{ t('memory.scene_hint') }} <span v-if="scenesHasMore">{{ t('memory.scene_more') }}</span></p>
         </div>
 
-        <div class="memory-results-head"><span>{{ searched ? `${hits.length} ${t('memory.results')} · ${t('memory.sorted_by_relevance')}` : t('memory.search_start') }}</span></div>
+        <div v-if="!error" class="memory-results-head"><span>{{ searched ? `${hits.length} ${t('memory.results')} · ${t('memory.sorted_by_relevance')}` : t('memory.search_start') }}</span></div>
         <div v-if="!searched && !loading" class="memory-search-initial" data-testid="memory-search-initial">
           <span class="memory-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/></svg></span>
           <h3>{{ t('memory.search_empty_title') }}</h3><p>{{ t('memory.search_empty_copy') }}</p>
@@ -147,7 +155,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import ActionSelect from '../ActionSelect.vue'
 import { useLocale } from '../../composables/useLocale'
-import { getMemoryClaim, listVersionEvidence, MemoryClientError, searchMemory, listMemoryScenes } from '../../services/memoryClient'
+import { getMemoryClaim, listVersionEvidence, MemoryClientError, searchMemory, listMemoryScenes, listMemoryClaims } from '../../services/memoryClient'
 import type {
   MemoryClaimDetail, MemoryEvidence, MemoryGovernanceScope, MemorySearchHit, MemoryScene, MemoryDestination,
 } from '../../types/memory'
@@ -201,6 +209,25 @@ let sceneRequestId=0
 const sceneOwners=computed(()=>props.scopes.length?[...selectedScopeIds.value]:props.installationId?[props.installationId]:[])
 const selectedScene=computed(()=>scenes.value.find(scene=>scene.key===sceneKey.value))
 const sceneBlocked=computed(()=>scenesLoading.value||scenesError.value||(scenes.value.length>0&&(!selectedScene.value||!selectedScene.value.destinations.includes(destination.value as MemoryDestination))))
+const taskScopeKey=ref(''),taskOptions=ref<Array<{key:string;label:string}>>([]),tasksCursor=ref<string|null>(null),tasksLoading=ref(false),tasksError=ref(false)
+const personalTaskOwner=computed(()=>props.installationId && (!props.scopes.length || (selectedScopeIds.value.length===1 && selectedScopeIds.value[0]===props.installationId)) ? props.installationId : '')
+let taskRequestId=0
+async function loadTasks(more=false){
+  const generation=++taskRequestId,owner=personalTaskOwner.value
+  if(!owner)return
+  tasksLoading.value=true;tasksError.value=false
+  if(!more){taskOptions.value=[];tasksCursor.value=null;taskScopeKey.value=''}
+  try{
+    const page=await listMemoryClaims(more?tasksCursor.value:undefined)
+    if(generation!==taskRequestId||owner!==personalTaskOwner.value)return
+    const options=new Map(taskOptions.value.map(t=>[t.key,t]))
+    for(const claim of page.claims)if(claim.scope_kind==='task'&&!options.has(claim.scope_key))options.set(claim.scope_key,{key:claim.scope_key,label:claim.statement.slice(0,100)})
+    taskOptions.value=[...options.values()];tasksCursor.value=page.next_cursor??null
+  }catch{if(generation===taskRequestId)tasksError.value=true}
+  finally{if(generation===taskRequestId)tasksLoading.value=false}
+}
+watch(personalTaskOwner,()=>{taskRequestId++;taskScopeKey.value='';taskOptions.value=[];tasksCursor.value=null;tasksError.value=false;tasksLoading.value=false;clearSearch();void loadTasks()},{immediate:true})
+watch(taskScopeKey,clearSearch)
 function clearSearch(){
   controller?.abort();controller=undefined;loading.value=false;searched.value=false;hits.value=[];error.value='';degraded.value=false
   previewRequestId++;selectedHit.value=null;previewDetail.value=null;previewEvidence.value=[];previewOpen.value=false;previewLoading.value=false;previewError.value=''
@@ -221,7 +248,7 @@ async function loadScenes(){
 watch(()=>JSON.stringify(sceneOwners.value),()=>{void loadScenes()},{immediate:true})
 watch(sceneKey,()=>{destination.value='';clearSearch()})
 watch(destination,clearSearch)
-onBeforeUnmount(()=>{sceneRequestId++;controller?.abort();previewRequestId++})
+onBeforeUnmount(()=>{taskRequestId++;sceneRequestId++;controller?.abort();previewRequestId++})
 
 function humanizeType(value: string): string {
   return value.replace(/_/g, ' ')
@@ -290,9 +317,10 @@ async function runSearch(): Promise<void> {
   degraded.value = false
   try {
     if (props.scopes.length > 0 && selectedScopeIds.value.length === 0) {
-      throw new MemoryClientError(400, 'scope_required', 'select at least one scope')
+      throw new MemoryClientError(400, 'scope_required', t('memory.scope_required'))
     }
     const result = await searchMemory(text, {
+      ...(personalTaskOwner.value && taskScopeKey.value ? {taskScopeKey:taskScopeKey.value} : {}),
       ...(selectedScene.value
         ? {scopeInstallationIds:[selectedScene.value.owner],sceneId:selectedScene.value.id,destination:destination.value as MemoryDestination}
         : props.scopes.length > 0 ? { scopeInstallationIds: [...selectedScopeIds.value] } : {}),

@@ -102,6 +102,20 @@ describeWithDatabase('candidate review ledger transactions (PostgreSQL)', () => 
     candidateId = candidate.rows[0].candidate_id
   })
 
+  test('candidate keyset pages retain timestamp ties and reject foreign cursors', async()=>{
+    await pool.query(`INSERT INTO memory_candidates(candidate_id,installation_id,run_id,episode_id,ordinal,claim_type,statement,normalized_key,scope_kind,scope_key,confidence,freshness_at,evidence_handles,status,created_at)
+      SELECT gen_random_uuid(),installation_id,run_id,episode_id,n,'work_method','Page candidate '||n,'page-'||n,scope_kind,scope_key,confidence,freshness_at,evidence_handles,'validated',created_at FROM memory_candidates CROSS JOIN generate_series(1,12)n WHERE candidate_id=$1`,[candidateId])
+    const seen=new Set<string>();let cursor:string|undefined
+    do {const page=await review.reviewQueuePage({installationId:INSTALLATION,limit:5,cursor})
+      expect(page.total_count).toBe(13)
+      for(const candidate of page.candidates){expect(seen.has(candidate.candidate_id)).toBe(false);seen.add(candidate.candidate_id)}
+      cursor=page.next_cursor??undefined
+    }while(cursor)
+    expect(seen.size).toBe(13)
+    expect(await review.reviewQueuePage({installationId:INSTALLATION,limit:5,cursor:[...seen].at(-1)})).toMatchObject({candidates:[],next_cursor:null,total_count:13})
+    await expect(review.reviewQueuePage({installationId:INSTALLATION,cursor:'88888888-8888-4888-8888-888888888888'})).rejects.toThrow('invalid_cursor')
+  })
+
   test.each(['turn-1', null])('a later content gap (%s) prevents pending candidate promotion and review queue exposure', async turnId => {
     expect(await review.reviewQueue({ installationId: INSTALLATION })).toHaveLength(1)
     const gap: ExtensionFeedEnvelopeV1 = { envelope_version: 1, feed_id: '100', topic: 'session.event.v1', source: { kind: 'canonical_event', id: 'evt-100', recorded_at: '2026-10-19T00:00:00Z' }, subject: { session_id: 'ses-1', ...(turnId ? { turn_id: turnId } : {}), event_type: 'agent_text' }, classification: {}, data: {}, quarantine: { reason: 'oversized_content', original_bytes: 796067, original_sha256: 'a'.repeat(64) } }

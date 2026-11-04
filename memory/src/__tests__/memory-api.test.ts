@@ -305,7 +305,7 @@ describe('memory api manage routes', () => {
     for (const query of [`submission_id=${INSTALLATION}`, `decision_id=${INSTALLATION}`, 'submission_id=invalid&decision_id=invalid']) {
       expect((await app.inject({ method: 'GET', url: '/api/v1/memory/candidates?' + query, headers })).statusCode).toBe(400)
     }
-    expect((await app.inject({ method: 'GET', url: `/api/v1/memory/candidates?submission_id=${INSTALLATION}&decision_id=${INSTALLATION}`, headers })).json()).toEqual({ candidates: [] })
+    expect((await app.inject({ method: 'GET', url: `/api/v1/memory/candidates?submission_id=${INSTALLATION}&decision_id=${INSTALLATION}`, headers })).json()).toEqual({ candidates: [], next_cursor: null, total_count: 0 })
   })
 
   test('management preflight remains unauthenticated when read and manage routes share an app', async () => {
@@ -394,6 +394,15 @@ describe('memory api manage routes', () => {
         method: 'GET', url: `/api/v1/memory/candidates?limit=${limit}`,
         headers: { host: 'memory.example', authorization: 'Bearer t' },
       })
+      expect(response.statusCode).toBe(400)
+      expect(response.json().error.code).toBe('invalid_request')
+    }
+  })
+
+  test('candidate cursors reject malformed and unknown identities', async () => {
+    const app = makeManageApp(); apps.push(app)
+    for (const cursor of ['not-a-uuid', INSTALLATION]) {
+      const response = await app.inject({ method:'GET',url:`/api/v1/memory/candidates?cursor=${cursor}`,headers:{host:'memory.example',authorization:'Bearer t'} })
       expect(response.statusCode).toBe(400)
       expect(response.json().error.code).toBe('invalid_request')
     }
