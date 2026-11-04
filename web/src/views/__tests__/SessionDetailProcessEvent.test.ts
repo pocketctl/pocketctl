@@ -57,6 +57,22 @@ async function openToolbarOverflow(wrapper: ReturnType<typeof shallowMount>) {
 }
 
 describe('SessionDetail processEvent integration', () => {
+  test('terminal turns stop their partial stream on live delivery and replay without changing text', async () => {
+    for (const historical of [false, true]) {
+      const wrapper = shallowMount(SessionDetail)
+      const vm = wrapper.vm as any
+      vm.processEvent({type:'agent_text',turn_id:'old-turn',text:'kept **partial',streaming:true,stream_id:'old-stream',chunk_seq:0,byte_offset:0},undefined,historical)
+      vm.processEvent({type:'agent_text',turn_id:'new-turn',text:'still growing',streaming:true,stream_id:'new-stream',chunk_seq:0,byte_offset:0},undefined,historical)
+      vm.processEvent({type:'turn_status',turn_id:'old-turn',turn_status:'interrupted'},undefined,historical)
+      await wrapper.vm.$nextTick()
+      const bodies=vm.messages.filter((m:any)=>m.type==='agent_text')
+      expect(bodies[0].streaming).toBe(false)
+      expect(bodies[0].content).toBe('kept **partial')
+      expect(bodies[1].streaming).toBe(true)
+      wrapper.unmount()
+    }
+  })
+
   beforeEach(() => {
     routeMock.current = reactive({ params: { id: 'ses_1' }, query: {} as Record<string, string> })
     responsiveMock.isMobile.value = false

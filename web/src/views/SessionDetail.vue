@@ -3760,6 +3760,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const turnId = evt.turn_id || evt.payload?.turn_id
     const turnStatus = evt.turn_status || evt.payload?.turn_status
     if (!turnId || !turnStatus) return
+    if (['completed', 'failed', 'interrupted', 'abandoned'].includes(turnStatus)) {
+      for (const message of target) {
+        if (message.turn_id === turnId) message.streaming = false
+      }
+    }
     const eventId = evt.event_id || evt.payload?.event_id
     const existing = eventId && target.find((message: any) => message.type === 'turn_status' && message.eventId === eventId)
     if (existing) {
