@@ -31,6 +31,7 @@ RUN addgroup -S -g 10001 pocketctl && adduser -S -u 10001 -G pocketctl -H pocket
 COPY --from=build --chown=pocketctl:pocketctl /app/node_modules ./node_modules
 COPY --from=build --chown=pocketctl:pocketctl /app/dist ./dist
 COPY --chown=pocketctl:pocketctl package.json ./
+COPY --chown=pocketctl:pocketctl scripts/session-lifecycle-diagnose.mjs scripts/session-lifecycle-audit.mjs ./scripts/
 USER 10001:10001
 EXPOSE 8080
 CMD ["node", "dist/server.js"]

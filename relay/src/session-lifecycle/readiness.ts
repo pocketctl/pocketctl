@@ -1,3 +1,5 @@
+import { lifecycleOperationalStatus } from './operational.js'
+import { maintenanceHours } from './schedule.js'
 import type { FastifyInstance } from 'fastify'
 import type pg from 'pg'
 import type { SessionLifecycleConfig } from './types.js'
@@ -23,7 +25,7 @@ export function sessionLifecycleReadiness(config: SessionLifecycleConfig, reader
     policy_version: config.policyVersion,
     archive_days: config.archiveDays,
     purge_days: config.purgeDays,
-    schedule: { timezone: 'Asia/Shanghai', archive: '03:00', purge: '03:00', daily_notification: true },
+    schedule: { timezone: 'Asia/Shanghai', archive: `${String(maintenanceHours.archive).padStart(2,'0')}:00`, purge: `${String(maintenanceHours.purge).padStart(2,'0')}:00`, daily_notification: true },
     policy_published_at: config.release?.publishedAt ?? null,
     policy_effective_at: config.effectiveAt,
     historical_transition_deadline: config.transitionDeadline,
@@ -74,8 +76,9 @@ export function registerSessionLifecycleStatusRoutes(
       WHERE m.user_id=$1 AND m.state='published' ORDER BY m.published_at DESC,c.ordinal LIMIT 3`,[user.userId])).rows
     let readable=0,readError=false
     for(const row of chunks){try{if(!storage)throw new Error('reader unavailable');await readArchiveObject(storage,row.object_key,deps.config.maxCompressedBytes);readable++}catch{readError=true}}
-    return {...base,operational:{deletion_backlog:backlog,storage_read_sample:{checked:chunks.length,readable,failed:readError},
-      healthy:!readError&&Number(backlog?.oldest_age_seconds??0)<86400}}
+    const maintenance=await lifecycleOperationalStatus(deps.pool,deps.config,user.userId)
+    return {...base,operational:{maintenance,deletion_backlog:backlog,storage_read_sample:{checked:chunks.length,readable,failed:readError},
+      healthy:!readError&&Number(backlog?.oldest_age_seconds??0)<86400&&maintenance.alerts.length===0}}
 
   })
 }

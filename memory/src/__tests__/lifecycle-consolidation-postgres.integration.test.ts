@@ -34,6 +34,15 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
  }
  const worker=(generator:TextGenerator)=>createCurationWorker({pool,mode:'enabled',textGenerator:generator,modelFingerprint:'synthetic-v1'})
  const signal=()=>new AbortController().signal
+ test('quoted model evidence persists numeric spans for downstream workers',async()=>{
+  const f=await fixture(),space=randomUUID()
+  await pool.query("INSERT INTO memory_spaces(installation_id,space_id,domain,name,destinations) VALUES($1,$2,'profile','preferences',ARRAY['personal'])",[f.personal,space])
+  const generate=vi.fn(async()=>success([{space_id:space,task_id:null,spans:[{event_id:f.id,quote:f.payload.text}],conclusions:[]}]))
+  await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())
+  const rows=(await pool.query("SELECT spans FROM memory_task_bundles WHERE installation_id=$1 AND bundle_kind='task'",[f.personal])).rows
+  expect(rows).toEqual([{spans:[{event_id:f.id,start:0,end:f.payload.text.length}]}])
+  expect((await pool.query('SELECT count(*)::int n FROM memory_candidates')).rows[0].n).toBe(0)
+ })
  test('AC-16 zero conclusion receives complete coverage without a fabricated candidate',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>success())
   await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())
@@ -103,7 +112,7 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
  test('AC-09 valid bounded conclusion stages a task candidate and keeps coverage incomplete until decision',async()=>{
   const f=await fixture(),space=randomUUID()
   await pool.query("INSERT INTO memory_spaces(installation_id,space_id,domain,name,destinations) VALUES($1,$2,'profile','preferences',ARRAY['personal'])",[f.personal,space])
-  const generate=vi.fn(async()=>success([{space_id:space,task_id:null,spans:[{event_id:f.id,start:0,end:f.payload.text.length}],conclusions:[{
+  const generate=vi.fn(async()=>success([{space_id:space,task_id:null,spans:[{event_id:f.id,quote:f.payload.text}],conclusions:[{
    kind:'preference',assertion_mode:'user_asserted',subject:'self',predicate:'user.preference',value:'concise',conditions:{},fact_at:null,valid_until:null,statement:f.payload.text,confirmed:true,
    evidence:{subject:[f.id],predicate:[f.id],value:[f.id]},
   }]}]))

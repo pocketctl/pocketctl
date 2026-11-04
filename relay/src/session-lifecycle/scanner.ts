@@ -3,7 +3,7 @@ import { inspectLifecycleEligibility } from './eligibility.js'
 import type { LifecycleAction,LifecycleEvaluation,SessionLifecycleConfig } from './types.js'
 interface Candidate {
   rowId:number;sessionId:string;userId:number|null;activityEpoch:string;dependencyCount:number
-  eventCount:string;logicalPayloadBytes:string;countsScope:'dependency_component'
+  eventCount:string|null;logicalPayloadBytes:string|null;countsScope:'dependency_component'
   projectedAction:LifecycleAction|null;prediction:LifecycleEvaluation
 }
 export interface LifecycleObservePage {
@@ -14,7 +14,7 @@ export interface LifecycleObservePage {
  * Stable keyset pages count a dependency component at its lowest row ID. */
 export class SessionLifecycleScanner {
   constructor(private readonly db:Pick<pg.Pool,'query'>,private readonly config:SessionLifecycleConfig){}
-  async scanPage(input:{afterRowId?:number;limit:number;now?:string}):Promise<LifecycleObservePage>{
+  async scanPage(input:{afterRowId?:number;limit:number;now?:string;includeStatistics?:boolean}):Promise<LifecycleObservePage>{
     const report:LifecycleObservePage={mode:'off',policyVersion:this.config.policyVersion,evaluatedAt:null,candidates:[],nextRowId:null,eligibleCount:0,readiness:[]}
     if(this.config.mode==='off')return report
     if(this.config.mode!=='observe')throw new Error('observe scanner does not execute lifecycle actions')
@@ -23,15 +23,15 @@ export class SessionLifecycleScanner {
     const clock=(await this.db.query(`SELECT to_char(COALESCE($1::timestamptz,NOW()) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS time`,[input.now??null])).rows[0].time
     report.evaluatedAt=clock
     if(!this.config.effectiveAt)report.readiness.push('policy_unpublished')
-    if(!this.config.objectBucket||!this.config.objectRegion)report.readiness.push('object_store_unconfigured')
+    if(this.config.storageDriver==='filesystem'?!this.config.archiveDirectory:(!this.config.objectBucket||!this.config.objectRegion))report.readiness.push('object_store_unconfigured')
     const rows=(await this.db.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND (last_activity_at IS NULL
       OR last_activity_at<$2::timestamptz-($3::int*interval '1 day')) ORDER BY id LIMIT $4`,[input.afterRowId??0,clock,this.config.archiveDays,input.limit+1])).rows
     for(const row of rows.slice(0,input.limit)){
-      const inspection=await inspectLifecycleEligibility(this.db,row.session_id,this.config,{now:clock,includeStatistics:true}),root=inspection.root
+      const inspection=await inspectLifecycleEligibility(this.db,row.session_id,this.config,{now:clock,includeStatistics:input.includeStatistics===true}),root=inspection.root
       if(root&&inspection.members.every(member=>Number(member.id)>=row.id)){
         report.candidates.push({rowId:row.id,sessionId:row.session_id,userId:root.user_id,activityEpoch:root.epoch,
-          dependencyCount:inspection.members.length,eventCount:inspection.eventCount!,
-          logicalPayloadBytes:(BigInt(inspection.hotEventBytes!)+BigInt(inspection.hotDocumentBytes!)).toString(),countsScope:'dependency_component',
+          dependencyCount:inspection.members.length,eventCount:inspection.eventCount,
+          logicalPayloadBytes:inspection.hotEventBytes===null||inspection.hotDocumentBytes===null?null:(BigInt(inspection.hotEventBytes)+BigInt(inspection.hotDocumentBytes)).toString(),countsScope:'dependency_component',
           projectedAction:inspection.prediction.action,prediction:inspection.prediction})
       }
     }
