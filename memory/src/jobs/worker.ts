@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import { workerErrorCode } from './worker-diagnostics.js'
 import { JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
 import type { JobRepository } from './repository.js'
 
@@ -143,7 +144,7 @@ export function createJobWorker(options: JobWorkerOptions) {
             jobId: claim.job_id,
             claimedBy: options.workerId,
             claimEpoch: claim.claim_epoch,
-            errorCode: boundedErrorCode(error),
+            errorCode: workerErrorCode(error),
             ...(error instanceof JobTerminalError ? { terminal: true } : {}),
           }).catch(() => undefined)
         } finally {
@@ -161,15 +162,6 @@ export function createJobWorker(options: JobWorkerOptions) {
         inFlight = inFlight.filter(entry => entry !== run)
       }
     }))
-  }
-
-  function boundedErrorCode(error: unknown): string {
-    if (error instanceof JobTerminalError) {
-      return /^[a-z][a-z0-9_]{0,48}$/.test(error.errorCode)
-        ? `handler_failed_${error.errorCode}` : 'handler_failed_terminal_error'
-    }
-    const name = error instanceof Error ? error.name : 'unknown'
-    return `handler_failed_${name}`.slice(0, 64)
   }
 
   function fill():Promise<void> {

@@ -218,6 +218,7 @@
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
           <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
+          <button v-if="currentSessionAgent==='zcode' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="zcode-quota" role="menuitem" @click="openZcodeQuota"><span>{{ zcodeQuota?.title || t('zcode_quota.title') }}<small class="tool-visibility-hint">{{ zcodeQuota?.summary }}</small></span></button>
           <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
             :aria-checked="mobileShowToolCalls" data-toolbar-action="show-tool-calls" @click="toggleMobileToolCalls">
             <span><span>{{ t('session.show_tool_calls') }}</span><small class="tool-visibility-hint">{{ t('session.tool_visibility_hint') }}</small></span>
@@ -265,7 +266,7 @@
       <CodexQuota ref="codexQuota" variant="session" v-if="currentSessionAgent === 'codex' && currentSession?.control_mode === 'managed' && !focusedSubAgentId"
         :key="sessionId" :session-id="sessionId" :daemon-id="currentSession.daemon_id" :hostname="currentSession.hostname"
         :account-label="currentSession.codex_home_label" :daemon-online="currentSession.daemon_online" />
-      <ZcodeQuota v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
+      <ZcodeQuota ref="zcodeQuota" variant="session" v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
         :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div class="chat-message-viewport">
@@ -916,9 +917,14 @@ const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 
 const toolbarOverflowOpen = ref(false)
 const toolbarOverflowEl = ref<HTMLElement | null>(null)
 const codexQuota = ref<InstanceType<typeof CodexQuota>|null>(null)
+const zcodeQuota = ref<InstanceType<typeof ZcodeQuota>|null>(null)
 function openCodexQuota(){
  toolbarOverflowOpen.value=false
  nextTick(()=>{toolbarOverflowEl.value?.querySelector<HTMLButtonElement>('.toolbar-more-btn')?.focus();codexQuota.value?.show()})
+}
+function openZcodeQuota(){
+ toolbarOverflowOpen.value=false
+ nextTick(()=>{toolbarOverflowEl.value?.querySelector<HTMLButtonElement>('.toolbar-more-btn')?.focus();zcodeQuota.value?.show()})
 }
 const agentFilterOpen = ref(false)
 const agentFilterEl = ref<HTMLElement | null>(null)

@@ -232,6 +232,7 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
+	MemoryNative   *MemoryNativeEvent          `json:"-"`
 	MemorySource   *MemorySourceProvenance     `json:"memory_source,omitempty"`
 	RetryOfTurnID  string                      `json:"retry_of_turn_id,omitempty"`
 	AppliedConfig  *TeamRuntimeConfig          `json:"applied_config,omitempty"`

@@ -405,6 +405,7 @@ func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, nat
 					if ev.Type != "user_text" || s.emitUser {
 						ev.SessionID = s.sessionID
 						stampOpencodeTurn(&ev, s.sessionID, anchor, 0)
+						stampOpenCodeMemoryNative(&ev, m.Info, part)
 						out = append(out, ev)
 					}
 				}
@@ -426,6 +427,7 @@ func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, nat
 				ev.EventID = opencodePartEventID(part, ev)
 				ev.PreviousEventID = previous.eventID
 				stampOpencodeTurn(&ev, s.sessionID, anchor, 0)
+				stampOpenCodeMemoryNative(&ev, m.Info, part)
 				emittedEventID = ev.EventID
 				out = append(out, ev)
 			}

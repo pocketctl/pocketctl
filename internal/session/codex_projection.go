@@ -56,6 +56,9 @@ type codexProjection struct {
 	fileChangePath map[string]map[string]struct{}
 	turnError      map[string]adapter.CodexProjectedError
 	plans          map[string]managedPlanState
+
+	memoryUnknownTurns    map[string]bool
+	memoryUnknownOverflow bool
 }
 
 type codexProjectedPart struct {
@@ -117,6 +120,8 @@ func newCodexProjection(generation uint64) *codexProjection {
 		turnDiff:       make(map[string]string),
 		fileChangePath: make(map[string]map[string]struct{}),
 		turnError:      make(map[string]adapter.CodexProjectedError),
+
+		memoryUnknownTurns: make(map[string]bool),
 	}
 }
 
@@ -469,7 +474,25 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 		TurnID   string          `json:"turnId"`
 		Item     codexThreadItem `json:"item"`
 	}
-	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.TurnID == "" || params.Item.ID == "" || params.Item.Type == "" {
+	if json.Unmarshal(raw, &params) != nil || params.ThreadID == "" || params.TurnID == "" {
+		return nil
+	}
+	// Native delegation and future uninspected item types must taint the
+	// parent even when UI conversion has no public event for them. Never infer
+	// this from dialogue, tool arguments, or a child's returned prose.
+	memoryTurn := p.key("memory-turn", params.ThreadID, params.TurnID)
+	switch params.Item.Type {
+	case "contextCompaction", "userMessage", "agentMessage", "reasoning", "plan", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
+	default:
+		if len(p.memoryUnknownTurns) < 4096 {
+			p.memoryUnknownTurns[memoryTurn] = true
+		} else {
+			// Retain a conservative ceiling rather than forgetting old taints
+			// when this projector generation reaches its bounded graph budget.
+			p.memoryUnknownOverflow = true
+		}
+	}
+	if params.Item.ID == "" || params.Item.Type == "" {
 		return nil
 	}
 	key := p.key(method, params.ThreadID, params.TurnID, params.Item.ID, digest(raw))
@@ -480,6 +503,7 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 	event, ok := p.convertItem(method, params.ThreadID, params.TurnID, params.Item)
 	if ok {
 		stampTurnIdentity(&event, params.ThreadID, params.TurnID, "")
+		event.MemoryNative = &protocol.MemoryNativeEvent{Producer: "codex", RecordID: params.Item.ID, RootID: params.TurnID, UserRoot: params.Item.Type == "userMessage", CompleteCall: params.Item.Type == "commandExecution" || params.Item.Type == "mcpToolCall" || params.Item.Type == "dynamicToolCall", Skill: strings.EqualFold(params.Item.Tool, "skill"), UnknownChild: p.memoryUnknownOverflow || p.memoryUnknownTurns[memoryTurn]}
 		events = append(events, event)
 		if method == "item/completed" && params.Item.Type == "fileChange" {
 			fileChanges := p.projectManagedFileChanges(

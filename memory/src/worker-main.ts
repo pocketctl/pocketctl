@@ -7,13 +7,10 @@ import {reclaimClaimHistory,reclaimColdClaimBody} from './retention/claim-histor
 import {createDailyMaintenanceWorker} from './maintenance/worker.js'
 import { createDeliveryWithdrawalClient } from './relay/delivery-withdrawal-client.js'
 import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-consumer.js'
-import {updateBusinessHealthGauges} from './metrics.js'
 import {createPublicationExecutor} from './governance/publication-executor.js'
 import {createAutomationRepository} from './governance/automation-repository.js'
 import {evaluateAutomation} from './governance/automation-evaluator.js'
-import {updateRetrievalIndexGauges} from './metrics.js'
 import {createSharedClaimLifecycle} from './governance/publication-service.js'
-import {updateJobSchedulingGauges} from './metrics.js'
 import { createServer } from 'http'
 import { createHash } from 'node:crypto'
 import { loadMemoryConfig } from './config.js'
@@ -22,7 +19,6 @@ import { applyMemorySchema } from './schema.js'
 import {assertMemoryRuntimeCompatibility,MemoryRuntimeCompatibilityError} from './migrations/governance-v2/compatibility.js'
 import { createShutdownSignal } from './shutdown.js'
 import { createRelayHttpClient, type RelayHttpClient } from './relay/http-client.js'
-import { RelayRequestError } from './relay/errors.js'
 import { createProviderTokenClient } from './relay/token-client.js'
 import { createInstallationsClient } from './relay/installations.js'
 import { createFeedClient } from './relay/feed-client.js'
@@ -73,86 +69,14 @@ import { createPolicyResolver } from './policies/resolver.js'
 import type { ExtractionPolicyDocument } from './policies/schemas.js'
 import {
   createMemoryMetrics,
-  updateFeedLagGauge,
-  updatePhase4Gauges,
-  updatePhase5Gauges,
-  type MemoryMetrics,
 } from './metrics.js'
 import { createMemoryLogger } from './logging.js'
-import type pg from 'pg'
+import { createWorkerGaugeCollector } from './worker-gauges.js'
+import { createNonOverlappingPoller } from './non-overlapping-poller.js'
+import { workerErrorCode, workerErrorFields } from './jobs/worker-diagnostics.js'
+import type { JobClaim } from './jobs/types.js'
 
 const GAUGE_INTERVAL_MS = 30_000
-const LOCAL_INSTALLATION_STATES = [
-  'discovering', 'syncing', 'ready', 'degraded', 'purging', 'purged', 'integrity_error',
-] as const
-const INBOX_STATES = ['pending', 'projected', 'quarantined', 'purged'] as const
-const JOB_TYPES = [
-  'git_ingest', 'git_export', 'git_reconcile',
-  'project_feed', 'compile_episode', 'snapshot_reconcile', 'session_purge',
-  'installation_purge', 'report_status', 'report_usage',
-  'extract_candidates', 'index_claim_version', 'rebuild_claim_index', 'expire_claims',
-	'index_shared_claim',
-	'recompile_extraction_policy', 'compile_context_shadow',
-	'record_context_delivery', 'invalidate_context_packs',
-	'parse_code_snapshot', 'build_wiki',
-	'extract_skill_candidate',
-] as const
-const JOB_STATES = ['pending', 'running', 'completed', 'dead'] as const
-
-/** Bounded error code for logs: Relay codes pass through, others degrade. */
-function loopErrorCode(error: unknown): string {
-  if (error instanceof RelayRequestError) return error.code
-  const name = error instanceof Error ? error.name : 'unknown'
-  return `handler_failed_${name}`.slice(0, 64)
-}
-
-/** Update the DB-backed gauges; absent label values reset to zero. */
-async function updateGauges(pool: pg.Pool, metrics: MemoryMetrics, enabled = true): Promise<void> {
-  const installations = await pool.query<{ local_status: string; count: string }>(`
-    SELECT local_status, COUNT(*)::text AS count FROM memory_installations GROUP BY local_status
-  `)
-  const installationCounts = new Map(installations.rows.map(row => [row.local_status, Number(row.count)]))
-  for (const state of LOCAL_INSTALLATION_STATES) {
-    metrics.installations.set({ state }, installationCounts.get(state) ?? 0)
-  }
-
-  const inbox = await pool.query<{ projection_state: string; count: string }>(`
-    SELECT projection_state, COUNT(*)::text AS count FROM memory_feed_inbox GROUP BY projection_state
-  `)
-  const inboxCounts = new Map(inbox.rows.map(row => [row.projection_state, Number(row.count)]))
-  for (const state of INBOX_STATES) {
-    metrics.inboxRows.set({ state }, inboxCounts.get(state) ?? 0)
-  }
-
-  const jobs = await pool.query<{ job_type: string; state: string; count: string }>(`
-    SELECT job_type, state, COUNT(*)::text AS count FROM memory_jobs GROUP BY job_type, state
-  `)
-  const jobCounts = new Map(jobs.rows.map(row => [`${row.job_type}:${row.state}`, Number(row.count)]))
-  for (const type of JOB_TYPES) {
-    for (const state of JOB_STATES) {
-      metrics.jobs.set({ type, state }, jobCounts.get(`${type}:${state}`) ?? 0)
-    }
-  }
-
-  await updateBusinessHealthGauges(pool,metrics,enabled)
-  await updateJobSchedulingGauges(pool,metrics)
-  await updateRetrievalIndexGauges(pool,metrics.phase1)
-
-  const outbox = await pool.query<{ pending: string; reported: string; dead_letter: string }>(`
-    SELECT COUNT(*) FILTER (WHERE reported_at IS NULL AND dead_lettered_at IS NULL)::text AS pending,
-           COUNT(*) FILTER (WHERE reported_at IS NOT NULL)::text AS reported,
-           COUNT(*) FILTER (WHERE dead_lettered_at IS NOT NULL)::text AS dead_letter
-    FROM memory_usage_outbox
-  `)
-  metrics.usageOutboxRows.set({ state: 'pending' }, Number(outbox.rows[0]?.pending ?? 0))
-  metrics.usageOutboxRows.set({ state: 'reported' }, Number(outbox.rows[0]?.reported ?? 0))
-  metrics.usageOutboxRows.set({ state: 'dead_letter' }, Number(outbox.rows[0]?.dead_letter ?? 0))
-
-  await updateFeedLagGauge(pool, metrics.feedLag)
-  await updatePhase4Gauges(pool, metrics.phase4)
-  await updatePhase5Gauges(pool, metrics.phase5)
-}
-
 /**
  * memory-worker entry point. This process runs the background loops
  * (discovery, purge, feed, snapshot, projection, episodes, reporting),
@@ -174,10 +98,10 @@ async function main(): Promise<void> {
   const { signal, wait } = createShutdownSignal()
   const logger = createMemoryLogger(config.logLevel)
   const metrics = createMemoryMetrics()
-  const loopError = (loop: string) => (error: unknown) => {
+  const loopError = (loop: string) => (error: unknown, job?: JobClaim) => {
     logger.log('error', 'loop_failed', {
       loop,
-      code: loopErrorCode(error),
+      ...workerErrorFields(error, job),
     })
   }
 
@@ -201,11 +125,12 @@ async function main(): Promise<void> {
     metricsServer.once('listening', resolve)
     metricsServer.listen(config.metricsPort, config.metricsBind === 'all' ? '0.0.0.0' : '127.0.0.1')
   })
+  const gaugePoller=createNonOverlappingPoller(createWorkerGaugeCollector(pool,metrics,config.mode !== 'off',config.lifecycleMode??'off'))
   const gaugeTimer = setInterval(() => {
-    void updateGauges(pool, metrics, config.mode !== 'off').catch(loopError('metrics_gauges'))
+    void gaugePoller.runOnce().catch(loopError('metrics_gauges'))
   }, GAUGE_INTERVAL_MS)
   gaugeTimer.unref?.()
-  void updateGauges(pool, metrics, config.mode !== 'off').catch(loopError('metrics_gauges'))
+  void gaugePoller.runOnce().catch(loopError('metrics_gauges'))
 
   // Scheduled cleanup is owned by one durable daily maintenance loop.
   let dailyMaintenance: ReturnType<typeof createDailyMaintenanceWorker> | undefined
@@ -853,6 +778,7 @@ async function main(): Promise<void> {
   clearInterval(gaugeTimer)
 
   await Promise.all([
+    gaugePoller.stop().catch(loopError('metrics_gauges')),
     dailyMaintenance?.stop(),
     gitPolling?.stop(),
     purgeWorker?.stop(),
@@ -878,6 +804,6 @@ async function main(): Promise<void> {
 
 main().catch(error => {
   // Config or startup failures exit non-zero without echoing secrets.
-  console.error('memory-worker startup failed:', error instanceof MemoryRuntimeCompatibilityError?error.code:loopErrorCode(error))
+  console.error('memory-worker startup failed:', error instanceof MemoryRuntimeCompatibilityError?error.code:workerErrorCode(error))
   process.exit(1)
 })

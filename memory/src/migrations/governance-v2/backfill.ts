@@ -18,10 +18,10 @@ export const BACKFILL_FAMILIES=Object.freeze([
  'memory_governance_executor_principals','memory_automation_authority_records','memory_publication_delegations',
  'memory_review_automation_policy_heads','memory_review_automation_policies','memory_review_automation_runs','memory_review_automation_decisions',
 ])
-export async function migrationTransaction<T>(pool:pg.Pool,fn:(c:pg.PoolClient)=>Promise<T>,options:{repeatableRead?:boolean}={}):Promise<T>{
+export async function migrationTransaction<T>(pool:pg.Pool,fn:(c:pg.PoolClient)=>Promise<T>,options:{repeatableRead?:boolean;readOnly?:boolean}={}):Promise<T>{
  const c=await pool.connect();let failed=false
  const onError=()=>{failed=true};c.on?.('error',onError)
- try{await c.query(options.repeatableRead?'BEGIN ISOLATION LEVEL REPEATABLE READ':'BEGIN');await c.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'; SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");await lockRetentionLifecycle(c);await c.query('SELECT generation FROM memory_retention_control WHERE singleton FOR UPDATE');const r=await fn(c);await c.query('COMMIT');return r}
+ try{await c.query(options.readOnly?'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY':options.repeatableRead?'BEGIN ISOLATION LEVEL REPEATABLE READ':'BEGIN');await c.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'; SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");await lockRetentionLifecycle(c);await c.query(options.readOnly?'SELECT generation FROM memory_retention_control WHERE singleton':'SELECT generation FROM memory_retention_control WHERE singleton FOR UPDATE');const r=await fn(c);await c.query('COMMIT');return r}
  catch(e){failed=true;await c.query('ROLLBACK').catch(()=>undefined);throw e}
  finally{if(!failed)c.removeListener?.('error',onError);c.release(failed)}
 }
@@ -48,7 +48,11 @@ export async function migrationRows(c:Pick<pg.PoolClient,'query'>,table:string,i
  }
  if(uuidPage){
   const column=`t.${ident(pk[0])}`
-  return (await c.query(`SELECT ${key} AS id,${body} AS row FROM ${ident(table)} t WHERE ($1::text='' OR ${column}>$5::uuid) AND ${scope} AND $2::text IS NOT NULL ORDER BY ${column} LIMIT $4`,[after,table,installationIds,limit,uuidCursor])).rows as {id:string;row:Record<string,any>}[]
+  // For one owner this is exactly the same UUID cursor order. Exposing the
+  // fixed leading key lets the existing (installation,event) covering index
+  // serve metadata validation without random reads of source payload heaps.
+  const order=identitiesOnly&&table==='source_events'&&installationIds.length===1?`t.installation_id,${column}`:column
+  return (await c.query(`SELECT ${key} AS id,${body} AS row FROM ${ident(table)} t WHERE ($1::text='' OR ${column}>$5::uuid) AND ${scope} AND $2::text IS NOT NULL ORDER BY ${order} LIMIT $4`,[after,table,installationIds,limit,uuidCursor])).rows as {id:string;row:Record<string,any>}[]
  }
  const rows=(await c.query(`SELECT ${key} AS id,${body} AS row FROM ${ident(table)} t WHERE (${key} COLLATE "C")>($1 COLLATE "C") AND ${scope} AND $2::text IS NOT NULL ORDER BY ${key} COLLATE "C" LIMIT $4`,[after,table,installationIds,limit])).rows as {id:string;row:Record<string,any>}[]
  return rows

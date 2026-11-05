@@ -66,6 +66,7 @@ type ClaudeContent struct {
 }
 
 type ClaudeAdapter struct {
+	memoryRoot    string
 	tasks         claudeTaskState
 	sessionID     string
 	slashCommands []string
@@ -102,7 +103,14 @@ func extractSlashCommand(prompt string) string {
 	return rest
 }
 
-func (a *ClaudeAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, error) {
+func (a *ClaudeAdapter) SetMemoryNativeRoot(root string) { a.memoryRoot = root }
+
+func (a *ClaudeAdapter) ParseStreamLine(line string) (result []protocol.DaemonEvent, parseErr error) {
+	defer func() {
+		if parseErr == nil && a.memoryRoot != "" {
+			stampClaudeStreamMemoryNative(a.memoryRoot, line, result)
+		}
+	}()
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil, nil

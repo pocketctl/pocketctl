@@ -391,6 +391,7 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 			return err
 		}
 		input = append(input, map[string]any{"type": "skill", "name": skill.Name, "path": skill.Path})
+		ctx = context.WithValue(ctx, codexInvocationKey{}, nativeSkillID(threadID, skill.Path))
 	}
 	params := map[string]any{"threadId": threadID, "input": input}
 	if config.Effort != "" {
@@ -461,14 +462,14 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 	if response.Turn.ID != "" {
 		b.coord.setActiveTurn(threadID, response.Turn.ID)
 		b.reserveNativeTurn(threadID, response.Turn.ID)
-		// Persist retry identity as an authoritative echo. Native user items
+		// Persist accepted input identity as an authoritative echo. Native user items
 		// can arrive before the RPC reply; clients reconcile by this exact turn.
-		if correlation := userMessageCorrelationFrom(ctx); correlation.RetryOfTurnID != "" {
+		if correlation := userMessageCorrelationFrom(ctx); correlation.MsgID != "" {
 			b.sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: threadID,
-				MemorySource: correlation.MemorySource, Text: content, MsgID: correlation.MsgID, RequestID: correlation.RequestID,
+				MemorySource: b.sm.registerMemoryInput(UserMessageInput{SessionID: threadID, RequestID: correlation.RequestID, MsgID: correlation.MsgID, InvocationID: codexInvocationFrom(ctx)}, logicalCodexTurnID(threadID, response.Turn.ID), adapter.AgentCodex, response.Turn.ID), Text: content, MsgID: correlation.MsgID, RequestID: correlation.RequestID,
 				TurnID:        logicalCodexTurnID(threadID, response.Turn.ID),
 				RetryOfTurnID: correlation.RetryOfTurnID,
-				EventID:       "reply-retry:" + correlation.MsgID}
+				EventID:       "native-input:" + correlation.MsgID}
 		}
 
 	}

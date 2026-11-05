@@ -54,6 +54,14 @@ suite('migration lifecycle retention (PostgreSQL)',()=>{
   await expect(pool.query(`UPDATE memory_governance_migration_runs SET state='running' WHERE run_id=$1`,[id])).rejects.toThrow('migration_run_sealed')
   await expect(pool.query(`INSERT INTO memory_governance_migration_actions(run_id,installation_id,entity_kind,entity_id,action,reason) VALUES($1,$2,'source_events','id','unchanged','late')`,[id,a])).rejects.toThrow('migration_run_sealed')
  })
+ test('read-only seal validation does not advance an open migration or alter its revision',async()=>{
+  const id=await run()
+  const before=(await pool.query('SELECT state,xmin::text revision FROM memory_governance_migration_runs WHERE run_id=$1',[id])).rows[0]
+  const preview=await validateGovernanceMigration(pool,id,{readOnly:true})
+  expect(preview.violations).toEqual([])
+  expect((await pool.query('SELECT state,xmin::text revision FROM memory_governance_migration_runs WHERE run_id=$1',[id])).rows[0]).toEqual(before)
+  expect(preview.sealProof).toBeUndefined()
+ })
  test('bounded detail cleanup leaves summary and frozen run through interruption',async()=>{
   const id=await sealed([a],40);await sealed([a],30);await sealed([a],20)
   // Write historical details through the fixture only, before reenabling guard.

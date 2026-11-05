@@ -11,6 +11,7 @@ import (
 // JSONL entry structures — Claude Code's session history format
 type JSONLEntry struct {
 	Type           string        `json:"type"`
+	Timestamp      string        `json:"timestamp,omitempty"`
 	Subtype        string        `json:"subtype,omitempty"`
 	SessionID      string        `json:"sessionId"`
 	UUID           string        `json:"uuid,omitempty"`       // stable record identity — the preferred turn anchor (never a content hash)
@@ -375,6 +376,8 @@ type JSONLStreamParser struct {
 	compactError  string
 	turns         claudeTurnTracker
 	sawEndTurn    bool
+	memoryRoot    string
+	memoryLinks   map[string]claudeMemoryLink
 }
 
 // NewJSONLStreamParser creates a parser with empty state.
@@ -400,6 +403,7 @@ func (p *JSONLStreamParser) Parse(line string) (result []protocol.DaemonEvent, p
 			plans := p.tasks.consume(line)
 			p.stampTurns(plans, false)
 			result = append(result, plans...)
+			p.stampClaudeMemoryNative(line, result)
 		}
 	}()
 	line = strings.TrimSpace(line)

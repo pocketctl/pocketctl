@@ -1,9 +1,16 @@
 package session
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/turn"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 )
 
 func memoryProducer(agent string) string {
@@ -29,7 +36,7 @@ func memoryInputProvenance(in UserMessageInput, turnID, agent string) *protocol.
 
 // Existing native adapters lack a complete skill lineage. Preserve that gap
 // explicitly; transport sequence is canonicalized by the Relay journal.
-func stampUnknownMemorySource(ev *protocol.DaemonEvent) {
+func stampUnknownMemorySource(ev *protocol.DaemonEvent, producer string) {
 	if ev == nil || ev.MemorySource != nil || ev.SessionID == "" || ev.TurnID == "" {
 		return
 	}
@@ -42,5 +49,194 @@ func stampUnknownMemorySource(ev *protocol.DaemonEvent) {
 	case "tool_call", "tool_result":
 		role = "tool"
 	}
-	ev.MemorySource = &protocol.MemorySourceProvenance{Version: 1, Producer: memoryProducer(ev.Agent), SessionID: ev.SessionID, TurnID: ev.TurnID, EventID: ev.EventID, Sequence: "1", InvocationID: ev.TurnID, SourceRole: role, SkillState: "unknown", LineageComplete: false, DerivedFromEventIDs: []string{}}
+	eventID := ev.EventID
+	// Native record identity is useful even when there is no accepted dispatch.
+	// This identifies the observation only; it cannot establish causal lineage.
+	if n := ev.MemoryNative; eventID == "" && n != nil && n.Producer == producer && n.RecordID != "" {
+		digest := sha256.Sum256([]byte(producer + "\x00" + ev.SessionID + "\x00" + ev.TurnID + "\x00" + n.RecordID + "\x00" + ev.Type + "\x00" + ev.CallID + "\x00" + strconv.Itoa(n.Ordinal)))
+		eventID = "observed:" + hex.EncodeToString(digest[:])
+	}
+	ev.MemorySource = &protocol.MemorySourceProvenance{Version: 1, Producer: producer, SessionID: ev.SessionID, TurnID: ev.TurnID, EventID: eventID, Sequence: "1", InvocationID: ev.TurnID, SourceRole: role, SkillState: "unknown", LineageComplete: false, DerivedFromEventIDs: []string{}}
+}
+
+// Registered session metadata is authoritative. Event prose and presentation
+// fields cannot select a producer, and missing sessions never default to Claude.
+func (sm *SessionManager) memoryEventProducer(ev *protocol.DaemonEvent) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	ps := sm.sessions[ev.SessionID]
+	if ps == nil {
+		return "unknown"
+	}
+	if ps.Agent == adapter.AgentCodexDesktop && ps.Source == "observer" && ps.ControlMode == protocol.ControlLegacyReadOnly {
+		return "codex"
+	}
+	return memoryProducer(ps.Agent)
+}
+
+// All state is process-local: restart/replay cannot retroactively confer proof.
+// A command owns one native root and a bounded causal graph. Unknown branches
+// never fall back to the nearest turn or to matching text.
+type memorySourceLedger struct {
+	mu       sync.Mutex
+	bindings map[string]*memorySourceBinding
+}
+type memorySourceBinding struct {
+	root       *protocol.MemorySourceProvenance
+	started    time.Time
+	nativeRoot string
+	records    map[string]*protocol.MemorySourceProvenance
+	calls      map[string]*protocol.MemorySourceProvenance
+	skill      bool
+	unknown    bool
+}
+
+func codexInvocationFrom(ctx context.Context) string {
+	v, _ := ctx.Value(codexInvocationKey{}).(string)
+	return v
+}
+func (sm *SessionManager) memoryLedger() *memorySourceLedger {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.memorySources == nil {
+		sm.memorySources = &memorySourceLedger{bindings: map[string]*memorySourceBinding{}}
+	}
+	return sm.memorySources
+}
+func (sm *SessionManager) registerMemoryInput(in UserMessageInput, turnID, agent, nativeRoot string) *protocol.MemorySourceProvenance {
+	p := memoryInputProvenance(in, turnID, agent)
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if p == nil {
+		delete(l.bindings, in.SessionID)
+		return nil
+	}
+	// Idempotent dispatch identity; do not reset a native graph on a duplicate ACK.
+	if old := l.bindings[in.SessionID]; old != nil && old.root.EventID == p.EventID && old.root.TurnID == turnID {
+		return old.root
+	}
+	if len(l.bindings) >= 512 {
+		l.bindings = map[string]*memorySourceBinding{}
+	}
+	l.bindings[in.SessionID] = &memorySourceBinding{root: p, started: time.Now(), nativeRoot: nativeRoot, records: map[string]*protocol.MemorySourceProvenance{}, calls: map[string]*protocol.MemorySourceProvenance{}}
+	return p
+}
+
+// A failed transport write cannot remain a live source of causal authority.
+// Match the exact turn so a delayed failure never clears a successor dispatch.
+func (sm *SessionManager) discardMemoryInput(sessionID, turnID string) {
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.bindings[sessionID]; b != nil && b.root.TurnID == turnID {
+		delete(l.bindings, sessionID)
+	}
+}
+
+func (sm *SessionManager) stampNativeMemorySource(ev *protocol.DaemonEvent) {
+	if ev == nil || ev.MemorySource != nil || ev.MemoryNative == nil || ev.Resync || ev.SessionID == "" || ev.TurnID == "" {
+		return
+	}
+	n := ev.MemoryNative
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.bindings[ev.SessionID]
+	if b == nil || b.root.Producer != n.Producer || n.Sidechain || n.RecordID == "" || len(b.records) > 4096 {
+		return
+	}
+	// Claude's PTY does not accept a client message UUID. Bind only the native
+	// user root written after this command, then demand actual parent UUIDs.
+	if b.nativeRoot == "" {
+		at, err := time.Parse(time.RFC3339Nano, n.OccurredAt)
+		if n.Producer != "claude" || !n.UserRoot || n.RootID != n.RecordID || err != nil || at.Before(b.started) {
+			return
+		}
+		b.nativeRoot = n.RootID
+	}
+	if n.RootID != b.nativeRoot {
+		return
+	}
+	// Queued native content may leave after the registry terminalized its
+	// command turn. Only the exact bound Claude source root can bridge its
+	// native logical turn back to this live dispatch; no nearest-turn lookup.
+	if b.root.TurnID != ev.TurnID && !(n.Producer == "claude" && b.nativeRoot != "" && ev.SourceTurnID == b.nativeRoot && ev.TurnID == turn.LogicalTurnID(adapter.AgentClaude, ev.SessionID, "", "source_message", b.nativeRoot)) {
+		return
+	}
+	var parent *protocol.MemorySourceProvenance
+	if n.Producer == "codex" || n.DirectRoot {
+		parent = b.root
+	} else if n.UserRoot && n.RecordID == b.nativeRoot {
+		parent = b.root
+	} else {
+		parent = b.records[n.ParentRecordID]
+	}
+	if ev.Type == "tool_result" {
+		parent = b.calls[ev.CallID]
+		if parent == nil && n.CompleteCall {
+			parent = b.root
+		}
+	}
+	if parent == nil {
+		return
+	}
+	b.skill = b.skill || n.Skill
+	b.unknown = b.unknown || n.UnknownChild
+	role := "system"
+	switch ev.Type {
+	case "agent_text":
+		role = "assistant"
+	case "tool_call", "tool_result":
+		role = "tool"
+	}
+	// A native user echo is system evidence of delivery. Only the dispatch
+	// command is an independent user assertion.
+	identity := sha256.Sum256([]byte(n.Producer + "\x00" + ev.SessionID + "\x00" + b.nativeRoot + "\x00" + n.RecordID + "\x00" + ev.Type + "\x00" + ev.CallID + "\x00" + ev.EventID + "\x00" + strconv.Itoa(n.Ordinal)))
+	eventID := "native:" + hex.EncodeToString(identity[:])
+	invocation := "output:" + strings.TrimPrefix(b.root.EventID, "input:")
+	state, complete := "non_skill", true
+	if b.skill {
+		state = "skill"
+	} else if b.unknown || parent.SkillState == "unknown" || !parent.LineageComplete {
+		state = "unknown"
+		complete = false
+	}
+	p := &protocol.MemorySourceProvenance{Version: 1, Producer: n.Producer, SessionID: ev.SessionID, TurnID: b.root.TurnID, EventID: eventID, Sequence: "1", InvocationID: invocation, ParentInvocationID: b.root.InvocationID, SourceRole: role, SkillState: state, LineageComplete: complete, DerivedFromEventIDs: []string{parent.EventID}}
+	if b.skill {
+		p.SkillInvocationID = invocation
+	}
+	ev.TurnID = b.root.TurnID
+	ev.MemorySource = p
+	b.records[n.RecordID] = p
+	if ev.Type == "tool_call" && ev.CallID != "" {
+		b.calls[ev.CallID] = p
+	}
+}
+
+// A source id may be reserved only by the live owned transport. Readers and
+// recovery never call this, and a different command cannot replace the graph.
+func (sm *SessionManager) bindMemoryNativeRoot(sessionID, turnID, nativeRoot string) bool {
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.bindings[sessionID]
+	if b == nil || b.root.TurnID != turnID || nativeRoot == "" || b.nativeRoot != "" && b.nativeRoot != nativeRoot {
+		return false
+	}
+	b.nativeRoot = nativeRoot
+	return true
+}
+func (sm *SessionManager) ownedMemoryStreamRoot(sessionID string) string {
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b := l.bindings[sessionID]
+	if b == nil || b.root.Producer != "claude" {
+		return ""
+	}
+	if b.nativeRoot == "" {
+		b.nativeRoot = "spawn:" + strings.TrimPrefix(b.root.EventID, "input:")
+	}
+	return b.nativeRoot
 }

@@ -678,6 +678,9 @@ func (sm *SessionManager) newStreamAdapter(ps *ProcessState, agentType, prompt s
 		sm.mu.RLock()
 		sessionID, cwd := ps.SessionID, ps.Cwd
 		sm.mu.RUnlock()
+		if root := sm.ownedMemoryStreamRoot(sessionID); root != "" {
+			adp.SetMemoryNativeRoot(root)
+		}
 		if path, err := adapter.ResolveJSONLPathFor(agentType, sessionID, cwd); err == nil {
 			if err := adp.RestoreTaskState(path); err != nil {
 				slog.Warn("restore Claude task state", "session", sessionID, "error", err)

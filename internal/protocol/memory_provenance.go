@@ -17,3 +17,20 @@ type MemorySourceProvenance struct {
 	LineageComplete     bool     `json:"lineage_complete"`
 	DerivedFromEventIDs []string `json:"derived_from_event_ids"`
 }
+
+// MemoryNativeEvent is process-local evidence from a native decoder. It is
+// deliberately not accepted from or serialized to the transport wire.
+type MemoryNativeEvent struct {
+	DirectRoot     bool
+	CompleteCall   bool
+	Ordinal        int
+	Producer       string
+	RecordID       string
+	ParentRecordID string
+	RootID         string
+	OccurredAt     string
+	UserRoot       bool
+	Sidechain      bool
+	Skill          bool
+	UnknownChild   bool
+}

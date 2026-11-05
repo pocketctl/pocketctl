@@ -1,4 +1,5 @@
 import { LIFECYCLE_ASSESSMENT_MIGRATION } from './retention/lifecycle-assessment-migration.js'
+import { LIFECYCLE_HEALTH_INDEX_MIGRATION } from './reporting/lifecycle-health-index-migration.js'
 import { LIFECYCLE_CONTEXT_MIGRATION } from './context/lifecycle-migration.js'
 import { LIFECYCLE_BACKFILL_MIGRATION } from './migrations/lifecycle-v3/migration.js'
 import { LIFECYCLE_RETENTION_MIGRATION } from './retention/lifecycle-v3-migration.js'
@@ -2266,6 +2267,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   LIFECYCLE_BACKFILL_MIGRATION,
   LIFECYCLE_CONTEXT_MIGRATION,
   LIFECYCLE_ASSESSMENT_MIGRATION,
+  LIFECYCLE_HEALTH_INDEX_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

@@ -29,8 +29,10 @@ export async function migrationChangeStamp(c:Pick<pg.PoolClient,'query'>,install
  return (await c.query(`SELECT count(*)::text AS count,COALESCE(max(sequence),0)::text AS maximum
   FROM memory_governance_migration_changes WHERE installation_id=ANY($1::uuid[]) AND sequence>$2::bigint`,[installationIds,startWatermark])).rows[0]
 }
-export async function validateGovernanceMigration(pool:pg.Pool,runId:string,options:{prepareSeal?:boolean}={}):Promise<MigrationValidation>{return migrationTransaction(pool,async c=>{
- await assertMigrationOpen(c,runId)
+export async function validateGovernanceMigration(pool:pg.Pool,runId:string,options:{prepareSeal?:boolean;readOnly?:boolean}={}):Promise<MigrationValidation>{return migrationTransaction(pool,async c=>{
+ if(options.readOnly){
+  if(!(await c.query('SELECT 1 FROM memory_governance_migration_runs WHERE run_id=$1 AND sealed_at IS NULL AND abandoned_at IS NULL AND details_reclaimed_at IS NULL',[runId])).rowCount)throw new Error('migration_run_not_resumable')
+ }else await assertMigrationOpen(c,runId)
  const run=(await c.query('SELECT manifest FROM memory_governance_migration_runs WHERE run_id=$1',[runId])).rows[0];if(!run)throw new Error('migration_run_missing')
  const before=decodeMigrationBaseline(run.manifest),after={rows:await captureValidationRows(c,before.installationIds)}
  const purged=new Set((await c.query("SELECT installation_id FROM memory_installations WHERE local_status='purged'")).rows.map(i=>i.installation_id))
@@ -85,11 +87,11 @@ export async function validateGovernanceMigration(pool:pg.Pool,runId:string,opti
  const names=['historical_ids_retained','all_scans_classified','original_body_hashes_retained','revoked_sources_not_readmitted','current_pointer_and_intervals','unknown_inputs_held','v2_writer_unique_domain']
  const passes=[ids,covered&&unresolved===0,bodies,!revoked,!pointers&&!intervals,!unknown,!generation&&protectedIndex]
  const invariants=names.map((name,i)=>({number:i+1,name,passed:passes[i]})),violations=invariants.filter(i=>!i.passed).map(i=>i.name)
- if(!violations.length)await c.query("UPDATE memory_governance_migration_runs SET state='validated' WHERE run_id=$1",[runId])
- const sealProof=options.prepareSeal&&!violations.length?{
+ if(!violations.length&&!options.readOnly)await c.query("UPDATE memory_governance_migration_runs SET state='validated' WHERE run_id=$1",[runId])
+ const sealProof=options.prepareSeal&&!options.readOnly&&!violations.length?{
   runXmin:(await c.query('SELECT xmin::text AS revision FROM memory_governance_migration_runs WHERE run_id=$1',[runId])).rows[0].revision,
   installationIds:before.installationIds,startWatermark:before.startWatermark,
   changes:await migrationChangeStamp(c,before.installationIds,before.startWatermark),
  }:undefined
  return {invariants,counts,violations,lifecycle,...(sealProof?{sealProof}:{})}
-},{repeatableRead:options.prepareSeal})}
+},{repeatableRead:options.prepareSeal,readOnly:options.readOnly})}

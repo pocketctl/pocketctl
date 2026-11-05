@@ -1531,6 +1531,7 @@ func (b *serverBackend) send(ctx context.Context, sessionID, content string, hid
 					return fmt.Errorf("opencode source identity reservation: %w", err)
 				}
 				sourceMessageID = reserved
+				sm.bindMemoryNativeRoot(sessionID, active.TurnID, reserved)
 			}
 		}
 	}

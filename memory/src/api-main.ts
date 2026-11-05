@@ -1,4 +1,5 @@
 import {loadBudgetUncertainty,loadBusinessHealth, summarizeBusinessHealth} from './reporting/business-health.js'
+import {loadLifecycleHealth,summarizeLifecycleHealth} from './reporting/lifecycle-health.js'
 import {updateBusinessHealthGauges} from './metrics.js'
 import {recordRecallMetrics,updateRetrievalIndexGauges} from './metrics.js'
 import Fastify from 'fastify'
@@ -84,7 +85,8 @@ async function main(): Promise<void> {
     }
     try {
       await pool.query('SELECT 1')
-      return { ...summarizeBusinessHealth(await loadBusinessHealth(pool), config.mode !== 'off'), budget_uncertainty:await loadBudgetUncertainty(pool), compatibility:MEMORY_BRIDGE_COMPATIBILITY }
+      const lifecycleMode=config.mode==='off'?'off':config.lifecycleMode??'off'
+      return { ...summarizeBusinessHealth(await loadBusinessHealth(pool), config.mode !== 'off'), lifecycle:summarizeLifecycleHealth(await loadLifecycleHealth(pool,lifecycleMode),lifecycleMode), budget_uncertainty:await loadBudgetUncertainty(pool), compatibility:MEMORY_BRIDGE_COMPATIBILITY }
     } catch {
       reply.code(503)
       return { status: 'unavailable' }
@@ -94,7 +96,7 @@ async function main(): Promise<void> {
   // Bounded Prometheus metrics with the frozen label allowlists.
   const metrics = createMemoryMetrics()
   app.get('/metrics', async (_req, reply) => {
-    if(schemaReady){await updateBusinessHealthGauges(pool,metrics,config.mode !== 'off');await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
+    if(schemaReady){await updateBusinessHealthGauges(pool,metrics,config.mode !== 'off',config.lifecycleMode??'off');await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
     reply.header('content-type', metrics.registry.contentType)
     return metrics.registry.metrics()
   })
