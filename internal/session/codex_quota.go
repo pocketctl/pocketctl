@@ -16,15 +16,17 @@ import (
 
 // Account usage is private transient metadata, never conversation history.
 type CodexQuotaSnapshot struct {
-	Kind         string             `json:"kind"`
-	ScopeID      string             `json:"scope_id"`
-	ObservedAt   string             `json:"observed_at"`
-	Status       string             `json:"status"`
-	PlanType     string             `json:"plan_type"`
-	Exhausted    bool               `json:"exhausted"`
-	Buckets      []CodexQuotaBucket `json:"buckets"`
-	ResetCredits *CodexResetCredits `json:"reset_credits"`
-	UsageNotice  *CodexQuotaWindow  `json:"usage_notice"`
+	CodexHomeID    string             `json:"codex_home_id"`
+	ResetSupported bool               `json:"reset_supported"`
+	Kind           string             `json:"kind"`
+	ScopeID        string             `json:"scope_id"`
+	ObservedAt     string             `json:"observed_at"`
+	Status         string             `json:"status"`
+	PlanType       string             `json:"plan_type"`
+	Exhausted      bool               `json:"exhausted"`
+	Buckets        []CodexQuotaBucket `json:"buckets"`
+	ResetCredits   *CodexResetCredits `json:"reset_credits"`
+	UsageNotice    *CodexQuotaWindow  `json:"usage_notice"`
 }
 type CodexResetCredits struct {
 	AvailableCount int64              `json:"available_count"`
@@ -96,6 +98,9 @@ func (sm *SessionManager) ReadCodexRateLimits(ctx context.Context, id string) (*
 	if !same || !currentOK || nextGeneration != generation || revision != b.coord.quotaRevision.Load() {
 		return nil, errors.New("quota_account_changed")
 	}
+	b.coord.mu.Lock()
+	result.ResetSupported = codexResetVersionSupported(b.coord.version)
+	b.coord.mu.Unlock()
 	return result, nil
 }
 
@@ -126,7 +131,7 @@ func readCodexQuota(ctx context.Context, client codexQuotaCaller, homeID string)
 	}
 	_ = json.Unmarshal(before.Account, &account)
 	scope := sha256.Sum256(append([]byte(homeID+"\x00"), before.Account...))
-	result := &CodexQuotaSnapshot{Kind: "codex_rate_limits", ScopeID: hex.EncodeToString(scope[:16]), ObservedAt: time.Now().UTC().Format(time.RFC3339), Status: "ok", PlanType: quotaPlan(account.PlanType), Buckets: []CodexQuotaBucket{}}
+	result := &CodexQuotaSnapshot{Kind: "codex_rate_limits", CodexHomeID: homeID, ScopeID: hex.EncodeToString(scope[:16]), ObservedAt: time.Now().UTC().Format(time.RFC3339), Status: "ok", PlanType: quotaPlan(account.PlanType), Buckets: []CodexQuotaBucket{}}
 	if string(before.Account) == "null" {
 		result.Status = "unauthenticated"
 		return result, nil

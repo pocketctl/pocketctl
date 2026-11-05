@@ -161,7 +161,10 @@ type ClientMessage struct {
 	Force bool `json:"force,omitempty"`
 	// CodexHomeID selects one daemon-configured Codex account/runtime. It is an
 	// opaque allowlisted identity, never a client-supplied filesystem path.
-	CodexHomeID string `json:"codex_home_id,omitempty"`
+	CodexHomeID    string `json:"codex_home_id,omitempty"`
+	QuotaScopeID   string `json:"quota_scope_id,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	ResetType      string `json:"reset_type,omitempty"`
 	// Read-only cross-host session history response fields. Identity and
 	// authorization are resolved by Relay from the authenticated daemon.
 	SourceSessionID        string                  `json:"source_session_id,omitempty"`

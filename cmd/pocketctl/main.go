@@ -41,6 +41,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/notify"
 	"github.com/pocketctl/pocketctl/internal/platform"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/quotareset"
 	"github.com/pocketctl/pocketctl/internal/repositoryidentity"
 	"github.com/pocketctl/pocketctl/internal/session"
 	"github.com/pocketctl/pocketctl/internal/sessiondocument"
@@ -3949,6 +3950,8 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 	modelSlots := make(chan struct{}, 2)
 	quotaReadSlots := make(chan struct{}, 4)
 	zcodeQuotaReader := zcode.NewQuotaReader()
+	resetHome, _ := os.UserHomeDir()
+	resetStore := quotareset.New(filepath.Join(resetHome, ".pocketctl", "quota-resets"))
 	var directoryRequests sync.Map
 	for {
 		select {
@@ -4233,6 +4236,40 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					event.Code = codexInvocationErrorCode(invocationErr)
 				}
 				client.SendMsg(event)
+
+			case "consume_codex_reset_credit", "consume_zcode_reset_credit", "read_quota_reset_result":
+				select {
+				case quotaReadSlots <- struct{}{}:
+					go func(cmd protocol.ClientMessage) {
+						defer func() { <-quotaReadSlots }()
+						operationCtx, cancel := context.WithTimeout(ctx, 18*time.Second)
+						defer cancel()
+						var result *quotareset.Result
+						var err error
+						if cmd.SessionID != "" || len(cmd.QuotaScopeID) != 32 || !quotareset.ValidKey(cmd.IdempotencyKey) {
+							err = errors.New("invalid_request")
+						} else {
+							switch cmd.Type {
+							case "consume_codex_reset_credit":
+								result, err = sm.ConsumeCodexReset(operationCtx, cmd.CodexHomeID, cmd.QuotaScopeID, cmd.IdempotencyKey, resetStore)
+							case "consume_zcode_reset_credit":
+								result, err = zcodeQuotaReader.ConsumeReset(operationCtx, cmd.QuotaScopeID, cmd.ResetType, cmd.IdempotencyKey, resetStore)
+							case "read_quota_reset_result":
+								result, err = resetStore.Status(cmd.QuotaScopeID, cmd.IdempotencyKey)
+							}
+						}
+						event := protocol.DaemonEvent{Type: "invocation_result", RequestID: cmd.RequestID}
+						if err != nil {
+							event.Error = err.Error()
+						} else {
+							raw, _ := json.Marshal(result)
+							_ = json.Unmarshal(raw, &event.Invocation)
+						}
+						client.SendMsg(event)
+					}(cmd)
+				default:
+					client.SendMsg(protocol.DaemonEvent{Type: "invocation_result", RequestID: cmd.RequestID, Error: "busy"})
+				}
 
 			case "read_zcode_quota":
 				select {

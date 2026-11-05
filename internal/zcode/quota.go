@@ -30,12 +30,14 @@ type QuotaWindow struct {
 	ResetsAt         *int64   `json:"resets_at"` // Unix seconds, unlike the upstream milliseconds.
 }
 type QuotaSnapshot struct {
-	Kind       string        `json:"kind"`
-	ScopeID    string        `json:"scope_id"`
-	ObservedAt string        `json:"observed_at"`
-	Status     string        `json:"status"`
-	Level      string        `json:"level"`
-	Windows    []QuotaWindow `json:"windows"`
+	ResetCards     *ResetCards   `json:"reset_cards,omitempty"`
+	ResetSupported bool          `json:"reset_supported"`
+	Kind           string        `json:"kind"`
+	ScopeID        string        `json:"scope_id"`
+	ObservedAt     string        `json:"observed_at"`
+	Status         string        `json:"status"`
+	Level          string        `json:"level"`
+	Windows        []QuotaWindow `json:"windows"`
 }
 type quotaCredential struct{ key, scope, status string }
 type quotaFlight struct {
@@ -48,6 +50,8 @@ type quotaFlight struct {
 // It never reads session content, refreshes OAuth tokens, or redeems resets.
 type QuotaReader struct {
 	root, secret, endpoint string
+	resetEndpoint          string
+	resetRevision          uint64
 	client                 *http.Client
 	mu                     sync.Mutex
 	flights                map[string]*quotaFlight
@@ -203,16 +207,25 @@ func (r *QuotaReader) Read(ctx context.Context) (*QuotaSnapshot, error) {
 	if r.flights == nil {
 		r.flights = map[string]*quotaFlight{}
 	}
+	revision := r.resetRevision
 	f := &quotaFlight{done: make(chan struct{})}
 	r.flights[c.scope] = f
 	r.mu.Unlock()
 	result, readErr := r.fetch(ctx, c)
+	if readErr == nil {
+		result.ResetCards = r.readResetCards(ctx, c)
+		result.ResetSupported = result.ResetCards.Status == "ok"
+	}
 	after, afterErr := r.credential()
 	if afterErr != nil || after.status != "ok" || after.scope != c.scope {
 		result = nil
 		readErr = errors.New("quota_account_changed")
 	}
 	r.mu.Lock()
+	if revision != r.resetRevision {
+		result = nil
+		readErr = errors.New("quota_unavailable")
+	}
 	f.result = result
 	f.err = readErr
 	if readErr == nil {

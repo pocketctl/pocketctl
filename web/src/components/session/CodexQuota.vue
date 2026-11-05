@@ -26,12 +26,13 @@
           <details v-else-if="snapshot.reset_credits.credits.length" class="quota-card-details"><summary>{{ t('codex_quota.card_expiries') }}</summary><div v-for="(c,i) in snapshot.reset_credits.credits" :key="i" class="quota-credit"><strong>{{ t('codex_quota.card_name') }}</strong><small>{{ c.expires_at===null?t('codex_quota.card_no_expiry'):t('codex_quota.card_expires')+' '+formatDate(c.expires_at*1000) }}</small></div></details>
           <p v-if="cardCount!==null&&snapshot?.reset_credits?.credits&&snapshot.reset_credits.credits.length<cardCount" class="quota-card-note">{{ t('codex_quota.card_details_partial',{n:snapshot.reset_credits.credits.length,total:cardCount}) }}</p>
         </section>
-        <p class="quota-note">{{ t('codex_quota.cards_read_only') }}</p>
+
       </template>
+      <QuotaResetActions provider="codex" :daemon-id="daemonId" :scope-id="snapshot?.scope_id??''" :home-id="snapshot?.codex_home_id??homeId" :hostname="hostname" :account-label="accountLabel||selectedHomeLabel||t('codex_quota.current_account')" :supported="snapshot?.reset_supported===true" :online="online===true" :stale="stale===true||loading" :choices="resetChoices" @refresh="refresh(true)" @locked="resetLocked=$event" />
       <h3>{{ t('codex_quota.source') }}</h3><dl class="quota-group quota-source"><div><dt>{{ t('codex_quota.host') }}</dt><dd>{{ hostname||daemonId }}</dd></div><div><dt>{{ t('codex_quota.account') }}</dt><dd>{{ accountLabel||selectedHomeLabel||t('codex_quota.current_account') }}</dd></div><div><dt>{{ t('zcode_quota.source') }}</dt><dd>{{ t('codex_quota.official') }}</dd></div></dl>
-      <label v-if="!sessionId&&homes.length>1" class="quota-account-picker">{{ t('codex_quota.account') }}<select v-model="homeId"><option v-for="home in homes" :key="home.id" :value="home.id">{{ home.label }}</option></select></label>
+      <label v-if="!sessionId&&homes.length>1" class="quota-account-picker">{{ t('codex_quota.account') }}<select v-model="homeId" :disabled="resetLocked"><option v-for="home in homes" :key="home.id" :value="home.id">{{ home.label }}</option></select></label>
       <p class="quota-note">{{ t('codex_quota.shared_note') }}</p>
-      <button class="quota-refresh" :disabled="loading||!online" @click="refresh">{{ t(!online?'codex_quota.offline':loading?'codex_quota.loading':showCards?'codex_quota.refresh_with_cards':'codex_quota.refresh') }}</button>
+      <button class="quota-refresh" :disabled="loading||!online" @click="refresh()">{{ t(!online?'codex_quota.offline':loading?'codex_quota.loading':showCards?'codex_quota.refresh_with_cards':'codex_quota.refresh') }}</button>
       <p class="quota-note quota-fresh" role="status">{{ snapshot?t('codex_quota.updated')+' '+formatDate(snapshot.observed_at):t('codex_quota.no_data') }}</p>
     </div>
   </CodexQuotaDialog>
@@ -39,6 +40,7 @@
 <script setup lang="ts">
 import {computed,ref,watch,onMounted,onUnmounted} from 'vue'
 import CodexQuotaDialog from './CodexQuotaDialog.vue'
+import QuotaResetActions from './QuotaResetActions.vue'
 import {useLocale} from '../../composables/useLocale'
 import {useCodexQuota} from '../../composables/useCodexQuota'
 import {useWebSocket} from '../../composables/useWebSocket'
@@ -47,8 +49,10 @@ import {getRelayWs} from '../../composables/useEnv'
 const props=withDefaults(defineProps<{sessionId?:string;daemonId:string;hostname?:string;accountLabel?:string;daemonOnline?:boolean;variant?:'agent'|'session'}>(),{variant:'agent'})
 const {t,locale}=useLocale(),homeId=ref(''),homes=ref<{id:string;label:string}[]>([])
 const {snapshot,loading,failed,online,stale,refresh}=useCodexQuota(computed(()=>({sessionId:props.sessionId,daemonId:props.daemonId,homeId:homeId.value,online:props.daemonOnline})))
+const resetLocked=ref(false)
 const open=ref(false),opener=ref<HTMLElement|null>(null)
 const cardCount=computed(()=>snapshot.value?.reset_credits?.available_count??null)
+const resetChoices=computed(()=>cardCount.value&&cardCount.value>0?[{type:'codex',label:t('codex_quota.card_name'),count:cardCount.value}]:[])
 const showCards=computed(()=>cardCount.value!==0)
 const title=computed(()=>t(showCards.value?'codex_quota.with_cards':'codex_quota.title'))
 const planLabel=computed(()=>{const p=snapshot.value?.plan_type??'';return p==='plus'?'Plus':['pro','prolite','promax'].includes(p)?'Pro':p==='free'?'Free':['business','team'].includes(p)?'Business':['enterprise','edu','edu_plus','edu_pro'].includes(p)?p==='enterprise'?'Enterprise':'Edu':''})
