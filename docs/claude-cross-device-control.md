@@ -2,6 +2,13 @@
 
 Pocketctl integrates Claude Code through two intentionally different modes.
 
+For `bypassPermissions` in a PocketCtl-created session, follow
+[Managed session control and full-access permissions](getting-started.md#managed-session-control-and-full-access-permissions)
+to enable the daemon-local opt-in and select the permission when creating a new
+session on Web/iOS. Remote control itself does not require approval bypass, and
+the flag does not automatically elevate existing sessions or convert independent
+terminals into managed sessions.
+
 ## Capability matrix
 
 | Claude mode | Content sync | Continue from Web/iOS | Remote approval | Shared runtime |
