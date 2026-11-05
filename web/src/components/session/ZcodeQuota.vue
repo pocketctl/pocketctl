@@ -1,9 +1,9 @@
 <template>
   <div class="zcode-quota" :class="variant">
-    <button class="zcode-quota-entry" :class="{ low: !stale && hasLow, old: stale }" type="button" aria-haspopup="dialog" @click="open=true">
+    <button v-if="variant==='agent'" class="zcode-quota-entry" :class="{ low: !stale && hasLow, old: stale }" type="button" aria-haspopup="dialog" @click="show()">
       <span class="entry-copy"><strong>{{ variant==='agent' ? t('zcode_quota.remaining_title') : t('zcode_quota.plan') }}<small v-if="stale"> · {{ t('codex_quota.previous') }}</small></strong>
         <span class="entry-windows"><span v-for="w in windows" :key="w.id">{{ t(w.id==='five_hour'?'zcode_quota.five_short':'zcode_quota.week_short') }} <b :class="{warning:!stale && isLow(w)}">{{ percent(w.remaining_percent) }}</b></span></span>
-        <small v-if="notice">{{ notice }}</small>
+        <small v-if="resetChoices.length">{{ resetChoices.map(c=>c.label+' '+t('codex_quota.card_count',{n:c.count})).join(' / ') }}</small><small v-if="notice">{{ notice }}</small>
       </span><span aria-hidden="true">›</span>
     </button>
     <CodexQuotaDialog v-if="open" :title="t('zcode_quota.title')" inert-background @close="open=false">
@@ -17,9 +17,10 @@
           <small class="zq-reset">{{ resetLabel(w.resets_at) }}</small>
         </section></div>
         <p class="zq-note">{{ t('zcode_quota.shared_note') }}</p>
+        <QuotaResetActions provider="zcode" show-counts :daemon-id="daemonId" :scope-id="snapshot?.scope_id??''" :hostname="hostname" :account-label="t('zcode_quota.current_account')" :supported="snapshot?.reset_supported===true" :online="online===true" :stale="stale===true||loading" :cards-status="snapshot?.reset_cards?.status??'unavailable'" :choices="resetChoices" @refresh="refresh(true)" />
         <h3>{{ t('codex_quota.source') }}</h3><dl class="zq-group"><div><dt>{{ t('codex_quota.host') }}</dt><dd>{{ hostname || daemonId }}</dd></div><div><dt>{{ t('zcode_quota.account') }}</dt><dd>{{ t('zcode_quota.current_account') }}</dd></div><div><dt>{{ t('zcode_quota.source') }}</dt><dd>{{ t('zcode_quota.official') }}</dd></div></dl>
         <p class="zq-note">{{ t('zcode_quota.reset_note') }}</p>
-        <button class="zq-refresh" :disabled="loading||!online" @click="refresh">{{ t(!online?'codex_quota.offline':loading?'codex_quota.loading':'codex_quota.refresh') }}</button>
+        <button class="zq-refresh" :disabled="loading||!online" @click="refresh()">{{ t(!online?'codex_quota.offline':loading?'codex_quota.loading':(snapshot?.reset_cards?.status!=='ok'||resetChoices.length)?'codex_quota.refresh_with_cards':'codex_quota.refresh') }}</button>
         <p class="zq-fresh" role="status">{{ snapshot ? t('codex_quota.updated')+' '+formatDate(snapshot.observed_at) : t('codex_quota.no_data') }}</p>
       </div>
     </CodexQuotaDialog>
@@ -30,10 +31,19 @@ import { computed, ref, watch } from 'vue'
 import { useZcodeQuota, type ZcodeQuotaWindow } from '../../composables/useZcodeQuota'
 import { useLocale } from '../../composables/useLocale'
 import CodexQuotaDialog from './CodexQuotaDialog.vue'
+import QuotaResetActions from './QuotaResetActions.vue'
 const props=withDefaults(defineProps<{daemonId:string;hostname?:string;daemonOnline?:boolean;variant?:'agent'|'session'}>(),{variant:'session',daemonOnline:true})
 const {t}=useLocale(),open=ref(false)
 const {snapshot,loading,failed,online,stale,refresh}=useZcodeQuota(computed(()=>({daemonId:props.daemonId,online:props.daemonOnline})))
 const windows=computed<ZcodeQuotaWindow[]>(()=>['five_hour','week'].map(id=>snapshot.value?.windows.find(w=>w.id===id)??{id:id as ZcodeQuotaWindow['id'],remaining_percent:null,resets_at:null}))
+const resetChoices=computed(()=>(snapshot.value?.reset_cards?.cards??[]).filter(c=>c.available_count>0).map(c=>({type:c.reset_type,label:t(c.reset_type==='WEEK'?'quota_reset.week_card':'quota_reset.five_card'),count:c.available_count,expires:c.expires_at})))
+const title=computed(()=>t('zcode_quota.title'))
+const summary=computed(()=>[
+  ...(stale.value?[t('codex_quota.previous')]:[]),
+  snapshot.value?.level.toUpperCase(),
+  ...windows.value.map(w=>t(w.id==='five_hour'?'zcode_quota.five_short':'zcode_quota.week_short')+' '+percent(w.remaining_percent)),
+  ...(snapshot.value?.reset_cards?.status==='ok'?resetChoices.value.map(c=>c.label+' '+t('codex_quota.card_count',{n:c.count})):[t('codex_quota.cards')+' —']),
+].filter(Boolean).join(' · '))
 const isLow=(w:ZcodeQuotaWindow)=>w.remaining_percent!==null&&w.remaining_percent<=20
 const hasLow=computed(()=>windows.value.some(isLow))
 const notice=computed(()=>{
@@ -51,6 +61,8 @@ function percent(n:number|null){return n===null?'—':new Intl.NumberFormat(unde
 function formatDate(s:string){return new Date(s).toLocaleString()}
 function resetLabel(n:number|null){return n===null?t('codex_quota.reset_unknown'):t('codex_quota.resets')+' '+new Date(n*1000).toLocaleString()}
 watch(open,value=>{if(value)refresh()})
+function show(){open.value=true}
+defineExpose({show,title,summary})
 watch(()=>props.daemonId,()=>open.value=false)
 watch(snapshot,(next,old)=>{if(old&&!next)open.value=false})
 </script>

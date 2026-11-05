@@ -48,15 +48,24 @@ func (sm *SessionManager) ReadCodexHostRateLimits(ctx context.Context, homeID st
 	var result *CodexQuotaSnapshot
 	if client, generation, ok := coord.backendClient(); ok {
 		result, err = readCodexQuota(ctx, client, profile.ID)
+		coord.mu.Lock()
+		version := coord.version
+		coord.mu.Unlock()
+		if result != nil {
+			result.ResetSupported = codexResetVersionSupported(version)
+		}
 		_, nextGeneration, online := coord.backendClient()
 		if !online || nextGeneration != generation {
 			err = errors.New("quota_account_changed")
 		}
 	} else {
-		var binary string
-		binary, _, err = p.resolve()
+		var binary, version string
+		binary, version, err = p.resolve()
 		if err == nil {
 			result, err = readCodexQuotaProcess(ctx, binary, profile.Home, profile.ID)
+			if result != nil {
+				result.ResetSupported = codexResetVersionSupported(version)
+			}
 		}
 	}
 	if err != nil {
@@ -133,6 +142,15 @@ func (c *codexQuotaStdio) Call(ctx context.Context, method string, params any, r
 	return errors.New("quota_unavailable")
 }
 func readCodexQuotaProcess(ctx context.Context, binary, home, homeID string) (*CodexQuotaSnapshot, error) {
+	var result *CodexQuotaSnapshot
+	err := withCodexQuotaProcess(ctx, binary, home, func(client codexQuotaCaller) error {
+		var e error
+		result, e = readCodexQuota(ctx, client, homeID)
+		return e
+	})
+	return result, err
+}
+func withCodexQuotaProcess(ctx context.Context, binary, home string, action func(codexQuotaCaller) error) error {
 	cmd := exec.CommandContext(ctx, binary, "app-server")
 	cmd.Dir = home
 	cmd.Stderr = io.Discard
@@ -145,24 +163,24 @@ func readCodexQuotaProcess(ctx context.Context, binary, home, homeID string) (*C
 	cmd.Env = append(cmd.Env, "CODEX_HOME="+home)
 	input, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	output, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err = cmd.Start(); err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { input.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), 2*1024*1024)
 	client := &codexQuotaStdio{input: input, lines: scanner}
 	if err = client.Call(ctx, "initialize", codexInitializeParams(), nil); err != nil {
-		return nil, err
+		return err
 	}
 	if _, err = fmt.Fprintln(input, `{"method":"initialized","params":{}}`); err != nil {
-		return nil, err
+		return err
 	}
-	return readCodexQuota(ctx, client, homeID)
+	return action(client)
 }

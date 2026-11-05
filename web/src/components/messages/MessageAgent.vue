@@ -8,7 +8,10 @@
   <div class="agent-block">
     <div v-if="showLabel !== false" class="block-role">{{ agentReplyLabel(agentType) }}</div>
     <div :class="['agent-body', { streaming }]">
-      <div v-if="streaming" class="streaming-text">{{ content }}</div>
+      <template v-if="streaming">
+        <MarkdownRenderer v-for="(block, index) in preview.blocks" :key="index" :content="block" class="streaming-paragraph" />
+        <div class="streaming-text">{{ preview.tail }}</div>
+      </template>
       <MarkdownRenderer v-else :content="content" />
       <span v-if="streaming" class="blink-cursor"></span>
     </div>
@@ -16,10 +19,13 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { streamingParagraphs } from '../../utils/streamingParagraphs'
 import MarkdownRenderer from '../MarkdownRenderer.vue'
 import { agentReplyLabel } from '../../utils/agentDisplay'
 
-defineProps<{ content: string; streaming?: boolean; agentType?: string; showLabel?: boolean }>()
+const props = defineProps<{ content: string; streaming?: boolean; agentType?: string; showLabel?: boolean }>()
+const preview = computed(() => streamingParagraphs(props.content))
 </script>
 
 <style scoped>
@@ -45,6 +51,7 @@ defineProps<{ content: string; streaming?: boolean; agentType?: string; showLabe
   min-width: 0;
 }
 
+.streaming-paragraph { margin-bottom: 14px; }
 .streaming-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

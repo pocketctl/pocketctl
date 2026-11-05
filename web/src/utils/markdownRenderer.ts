@@ -72,6 +72,21 @@ const md = new MarkdownIt({
   },
 })
 
+// GFM task markers remain read-only presentation.
+md.core.ruler.after('inline', 'readonly_tasks', state => {
+  state.tokens.forEach((token, index) => {
+    if (token.type !== 'inline' || state.tokens[index - 2]?.type !== 'list_item_open') return
+    const first = token.children?.[0]
+    const match = first?.type === 'text' && first.content.match(/^\[([ xX])\] /)
+    if (!match || !first) return
+    first.content = first.content.slice(4)
+    const checkbox = new state.Token('html_inline', '', 0)
+    checkbox.content = '<input type="checkbox" disabled' + (match[1] !== ' ' ? ' checked' : '') + '> '
+    token.children!.unshift(checkbox)
+    state.tokens[index - 2].attrJoin('class', 'task-list-item')
+  })
+})
+
 // ---- highlight.js ----
 function resolveLanguage(lang: string | undefined): string | undefined {
   if (!lang) return undefined
@@ -80,6 +95,7 @@ function resolveLanguage(lang: string | undefined): string | undefined {
 }
 
 function highlightToHtml(code: string, lang: string | undefined): string {
+  if (code.length > 12000) return escapeHtml(code)
   const resolved = resolveLanguage(lang)
   if (resolved) {
     try {
@@ -116,8 +132,7 @@ function sanitizeCommandTags(text: string): string {
   return result.trim()
 }
 
-function renderProse(text: string): string {
-  const raw = md.render(text)
+function sanitizeHtml(raw: string): string {
   // Sanitize: allow only a safe subset of markdown-emitted tags.
   return DOMPurify.sanitize(raw, {
     ALLOWED_TAGS: [
@@ -145,58 +160,24 @@ function renderProse(text: string): string {
 // with a custom header (language label + copy button). Non-code segments are
 // rendered as normal markdown prose. ----
 export function parseMarkdownSegments(text: string): MarkdownSegment[] {
-  const sanitized = sanitizeCommandTags(text)
-  const lines = sanitized.split('\n')
+  if (text.length > 512000) return [{ type: 'prose', content: text, html: '<pre>' + escapeHtml(text) + '</pre>' }]
+  const sanitized = text.includes('```') || text.includes('~~~') ? text : sanitizeCommandTags(text)
+  const env = {}
+  const tokens = md.parse(sanitized, env)
   const segments: MarkdownSegment[] = []
-  let proseLines: string[] = []
-  let codeLines: string[] = []
-  let codeLang: string | undefined
-  let inCode = false
-
-  function flushProse() {
-    const t = proseLines.join('\n')
-    if (t.trim()) {
-      segments.push({ type: 'prose', content: t, html: renderProse(t) })
-    }
-    proseLines = []
+  let start = 0
+  function prose(end: number) {
+    if (end > start) segments.push({ type: 'prose', content: '', html: sanitizeHtml(md.renderer.render(tokens.slice(start, end), md.options, env)) })
   }
-
-  function flushCode() {
-    const code = codeLines.join('\n')
-    const lang = codeLang?.trim() || undefined
-    segments.push({
-      type: 'code',
-      content: code,
-      language: lang,
-      html: highlightToHtml(code, lang),
-    })
-    codeLines = []
-    codeLang = undefined
-  }
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-    if (trimmed.startsWith('```')) {
-      if (inCode) {
-        inCode = false
-        flushCode()
-      } else {
-        flushProse()
-        inCode = true
-        codeLang = trimmed.slice(3).trim() || undefined
-      }
-      continue
-    }
-    if (inCode) {
-      codeLines.push(line)
-    } else {
-      proseLines.push(line)
-    }
-  }
-
-  if (inCode) flushCode()
-  flushProse()
-
+  tokens.forEach((token, index) => {
+    if (token.type !== 'fence' || token.level !== 0) return
+    prose(index)
+    const code = token.content.endsWith('\n') ? token.content.slice(0, -1) : token.content
+    const language = token.info.trim().split(/\s+/)[0] || undefined
+    segments.push({ type: 'code', content: code, language, html: highlightToHtml(code, language) })
+    start = index + 1
+  })
+  prose(tokens.length)
   return segments
 }
 

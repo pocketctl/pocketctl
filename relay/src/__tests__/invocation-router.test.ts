@@ -120,3 +120,24 @@ describe('Codex host quota private reads',()=>{
   router.unregisterClient(a);router.unregisterClient(b);router.unregisterClient(foreign)
  })
 })
+
+describe('quota reset owner commands',()=>{
+ test('requires owner, binds account scope and strips upstream secrets',async()=>{
+  const {router,a,b,d}=fixture();const foreign=socket();router.registerClient(foreign,8)
+  const command={type:'consume_zcode_reset_credit',daemon_id:'d',request_id:'reset',quota_scope_id:'a'.repeat(32),idempotency_key:'operation-00000001',reset_type:'WEEK',url:'https://attacker.invalid'}
+  await router.handleClientMessage(foreign,command);expect(foreign.sent.at(-1)).toMatchObject({error:'forbidden'})
+  await router.handleClientMessage(a,command);expect(d.sent).toHaveLength(1);expect(d.sent[0]).not.toHaveProperty('url')
+  router.handleDaemonMessage('d',{type:'invocation_result',request_id:d.sent[0].request_id,invocation:{kind:'quota_reset',scope_id:'a'.repeat(32),outcome:'reset',token:'secret'}})
+  expect(a.sent.at(-1)).toMatchObject({request_id:'reset',daemon_id:'d',invocation:{kind:'quota_reset',outcome:'reset'}});expect(JSON.stringify(a.sent)).not.toContain('secret');expect(b.sent).toHaveLength(0)
+  await router.handleClientMessage(a,{...command,reset_type:'FIVE_HOUR'});expect(a.sent.at(-1)).toMatchObject({error:'request_id_conflict'})
+  router.unregisterClient(a);router.unregisterClient(b);router.unregisterClient(foreign)
+ })
+ test('rejects session references, invalid keys and arbitrary home paths',async()=>{
+  const {router,a,d}=fixture()
+  for(const extra of [{session_id:'s'},{idempotency_key:''},{quota_scope_id:'bad'},{codex_home_id:'/tmp/other'}]){
+   await router.handleClientMessage(a,{type:'consume_codex_reset_credit',daemon_id:'d',request_id:'reset',quota_scope_id:'b'.repeat(32),idempotency_key:'operation-00000001',...extra})
+   expect(a.sent.at(-1)).toMatchObject({error:'invalid_request'})
+  }
+  expect(d.sent).toHaveLength(0);router.unregisterClient(a)
+ })
+})

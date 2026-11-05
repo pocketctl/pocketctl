@@ -15,7 +15,8 @@
           </button>
         </div>
         <!-- eslint-disable-next-line vue/no-v-html -->
-        <pre class="code-pre"><code v-html="segment.html"></code></pre>
+        <pre :class="['code-pre', { 'code-collapsed': isLong(segment.content) && !expanded.has(idx) }]"><code v-html="segment.html"></code></pre>
+        <button v-if="isLong(segment.content)" class="code-expand" :aria-expanded="expanded.has(idx)" @click="toggleCode(idx)">{{ expanded.has(idx) ? '收起代码' : '展开全部代码' }}</button>
       </div>
 
       <!-- Everything else (paragraphs, headings, lists, tables, quotes, links...):
@@ -27,7 +28,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, inject } from 'vue'
+import { computed, ref, inject, watch, onUnmounted } from 'vue'
 import { parseMarkdownSegments } from '../utils/markdownRenderer'
 import { sessionDocumentLinkKey, rewriteSessionDocumentLinks } from '../utils/sessionDocumentLinks'
 
@@ -37,6 +38,16 @@ const resolveDocumentLink = inject(sessionDocumentLinkKey, undefined)
 const segments = computed(() => parseMarkdownSegments(props.content).map(segment =>
   resolveDocumentLink && segment.type !== 'code'
     ? { ...segment, html: rewriteSessionDocumentLinks(segment.html, resolveDocumentLink) } : segment))
+
+const expanded = ref(new Set<number>())
+function isLong(content: string) { return content.length > 12000 || content.split('\n').length > 50 }
+function toggleCode(index: number) {
+  const next = new Set(expanded.value)
+  if (next.has(index)) next.delete(index); else next.add(index)
+  expanded.value = next
+}
+watch(() => props.content, () => { expanded.value = new Set(); copiedIdx.value = -1 })
+onUnmounted(() => { if (copyTimer) clearTimeout(copyTimer) })
 
 // ---- copy button ----
 const copiedIdx = ref<number>(-1)
@@ -56,8 +67,8 @@ function copyCode(code: string) {
 
 <style scoped>
 .markdown-content {
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 15px;
+  line-height: 1.75;
   color: var(--fg);
   word-break: break-word;
   /* Allow this container to shrink below its content's intrinsic width so
@@ -72,8 +83,8 @@ function copyCode(code: string) {
   font-family: var(--font-mono);
   font-size: 0.9em;
   background: var(--code-bg);
-  color: var(--accent);
-  padding: 2px 6px;
+  color: var(--fg);
+  padding: 2px 5px;
   border-radius: 4px;
 }
 
@@ -90,9 +101,9 @@ function copyCode(code: string) {
   margin: 1.2em 0 0.5em;
   line-height: 1.3;
 }
-.md-prose :deep(h1) { font-size: 1.5em; }
-.md-prose :deep(h2) { font-size: 1.3em; }
-.md-prose :deep(h3) { font-size: 1.15em; }
+.md-prose :deep(h1) { font-size: 20px; }
+.md-prose :deep(h2) { font-size: 18px; }
+.md-prose :deep(h3) { font-size: 16px; }
 .md-prose :deep(h4),
 .md-prose :deep(h5),
 .md-prose :deep(h6) { font-size: 1em; }
@@ -102,7 +113,7 @@ function copyCode(code: string) {
 .md-prose :deep(h4:first-child) { margin-top: 0; }
 
 /* Paragraphs */
-.md-prose :deep(p) { margin: 0 0 0.6em; }
+.md-prose :deep(p) { margin: 0 0 14px; }
 .md-prose :deep(p:last-child) { margin-bottom: 0; }
 
 /* Strong / em / del */
@@ -113,7 +124,8 @@ function copyCode(code: string) {
 /* Links */
 .md-prose :deep(a) {
   color: var(--accent);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
   border-bottom: 1px solid transparent;
   transition: border-color 0.15s;
 }
@@ -165,7 +177,7 @@ function copyCode(code: string) {
 }
 .md-prose :deep(pre code) {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   color: var(--fg);
   line-height: 1.6;
   background: none;
@@ -174,13 +186,21 @@ function copyCode(code: string) {
 
 /* Tables (GFM) */
 .md-prose :deep(table) {
+  display: block;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  max-width: 100%;
   width: 100%;
   border-collapse: collapse;
   margin: 0.6em 0;
   font-size: 13px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  overflow: hidden;
+}
+.md-prose :deep(th),
+.md-prose :deep(td) {
+  min-width: 120px;
+  vertical-align: top;
 }
 .md-prose :deep(th) {
   background: var(--code-bg);
@@ -249,8 +269,14 @@ function copyCode(code: string) {
 }
 .code-pre :deep(code) {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.6;
   color: var(--fg);
 }
+@media (max-width: 768px) {
+  .markdown-content { line-height: 1.65; }
+  .code-copy { min-width: 44px; min-height: 44px; }
+}
+.code-pre.code-collapsed { max-height: 340px; overflow-y: hidden; }
+.code-expand { width: 100%; min-height: 44px; padding: 8px 14px; text-align: left; border: 0; border-top: 1px solid var(--border); color: var(--fg-secondary); background: var(--code-bg); cursor: pointer; }
 </style>

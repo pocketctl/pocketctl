@@ -62,6 +62,11 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
     try {
       await client.query('BEGIN')
       try {
+        // Serialize projectors before discovery so a queued pass observes the
+        // next batch, rather than rediscovering a batch another pass consumes.
+        // Purge never takes this key: lifecycle fences remain session ->
+        // installation, with no reverse dependency back to this mutex.
+        await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('projection:installation:' || $1,0))`,[installationId])
         // Inbox rows must not be owned while waiting on a lifecycle fence:
         // installation purge deletes them under that same fence. Discover all
         // natural/adapted sessions first, lock the union in stable order, then

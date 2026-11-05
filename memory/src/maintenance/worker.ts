@@ -98,10 +98,13 @@ export function createDailyMaintenanceWorker(options:{
       else if(row.stage===2&&options.data.mode==='enabled'&&options.data.reportDirectory){
        const r=await retainInventoryReports(bound,options.data.reportDirectory,options.data.batchSize);add(delta,{reports:r.reports,partials:r.partials});more=r.reports>0||r.partials>0;busy=r.busy
       }else if(row.stage===3){
+       // A later source success is not proof that earlier provider fees settled.
+       // Keep failure/uncertainty audit identities until explicit reconciliation;
+       // their age or a plain http_error/aborted code cannot authorize deletion.
+       delta.extraction_runs=0
        // Persistent expiry truth remains checked by readers/writers at use time.
        for(const [name,sql] of Object.entries({
         jobs:`DELETE FROM memory_jobs WHERE job_id IN(SELECT job_id FROM memory_jobs WHERE (state='completed' AND completed_at<NOW()-INTERVAL '24 hours') OR (state='dead' AND completed_at<NOW()-INTERVAL '7 days') LIMIT 500)`,
-        extraction_runs:`DELETE FROM memory_extraction_runs WHERE run_id IN(SELECT run_id FROM memory_extraction_runs WHERE state IN('failed','quarantined') AND completed_at<NOW()-INTERVAL '7 days' LIMIT 500)`,
         feedback:`UPDATE memory_feedback SET details='{}',reason_code=NULL WHERE ctid IN(SELECT ctid FROM memory_feedback WHERE created_at<NOW()-INTERVAL '30 days' AND (details<>'{}'::jsonb OR reason_code IS NOT NULL) LIMIT 500)`,
         maintenance_history:`DELETE FROM memory_maintenance_runs WHERE (scheduled_at,scope_key) IN(SELECT scheduled_at,scope_key FROM memory_maintenance_runs WHERE state='completed' AND scheduled_at<NOW()-INTERVAL '90 days' LIMIT 500)`,
         idempotency:`DELETE FROM memory_idempotency_keys WHERE ctid IN(SELECT ctid FROM memory_idempotency_keys WHERE expires_at<=NOW() LIMIT 500)`

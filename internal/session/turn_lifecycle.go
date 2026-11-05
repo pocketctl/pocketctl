@@ -485,6 +485,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, TurnID: rec.TurnID, RetryOfTurnID: in.RetryOfTurnID, MemorySource: sm.registerMemoryInput(in, rec.TurnID, agent, "")})
 
 	if dispatchErr := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); dispatchErr != nil {
+		sm.discardMemoryInput(in.SessionID, rec.TurnID)
 		if !in.SuppressContextReceipt {
 			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
 		}
@@ -1065,7 +1066,7 @@ func (sm *SessionManager) EnrichOutgoingEvent(ev *protocol.DaemonEvent) {
 		}
 	}
 	sm.stampNativeMemorySource(ev)
-	stampUnknownMemorySource(ev)
+	stampUnknownMemorySource(ev, sm.memoryEventProducer(ev))
 	if ev.ClassifierVersion == "" {
 		turn.Apply(ev, turn.Classify(ev, sm.turnMetrics))
 	}

@@ -66,6 +66,80 @@ local bridge plugin to export its Host launch URL; automatic Desktop attachment
 is not implemented. Remote worktree/fork creation and attachment uploads are
 not covered.
 
+## Managed session control and full-access permissions
+
+Remote session control and agent execution permissions are separate settings.
+Sending messages, answering approvals, and interrupting tasks do not require bypassing
+approvals. Full access or approval bypass requires both a daemon-local opt-in and
+the corresponding permission selection for the session.
+
+### Confirm that PocketCtl manages the session
+
+Enable the integration on the development host as the user running the daemon,
+and keep the daemon online and connected to Relay:
+
+- **Codex CLI**: run `pocketctl agent codex enable` as shown above. Open a new login
+  shell if PATH has not taken effect, then use `codex` or `codex resume <thread-id>`
+  to create or resume a session. The official TUI and Web/iOS share input,
+  approvals, questions, and interrupts. Already running native processes are not
+  automatically converted to managed sessions.
+- **Claude Code**: select Claude Code in **New session** on Web/iOS to create a
+  PocketCtl-owned PTY. Channel integration for an independent terminal provides
+  approval relay only; resume handoff is available once the session is idle or exited.
+- **Codex Desktop**: sessions are currently read-only observers. Enabling high
+  permissions does not make them remotely controllable.
+
+See [Codex shared control](codex-managed-terminal.md) and
+[Claude Code cross-device control](claude-cross-device-control.md) for capabilities
+and limitations.
+
+### Allow full access or approval bypass
+
+For a directly started daemon, add the local opt-in:
+
+```bash
+pocketctl daemon start --allow-dangerous-remote-permissions
+```
+
+For a system-supervised daemon, persist the flag in the service startup arguments:
+
+```bash
+pocketctl daemon service install --allow-dangerous-remote-permissions
+```
+
+These are minimal examples. Preserve existing `--prod` / `--relay`,
+`--allowed-cwd-root`, `--codex-home`, and other settings. If a daemon is already
+running, wait for active tasks to finish, run `pocketctl daemon stop`, then apply
+the new configuration using the same direct-start or service-managed approach.
+
+Next, select the permissions when creating a **new session** on Web/iOS:
+
+| Agent | Permission selection |
+|---|---|
+| Codex CLI | Full access: `danger-full-access`; select `never` if no approvals are wanted. |
+| Claude Code | Bypass permissions: `bypassPermissions`. |
+
+The flag is off by default. It allows clients to request high permissions; it does
+not select them automatically or modify existing sessions. It also does not expand
+the remote working-directory scope authorized by `--allowed-cwd-root`.
+High-permission modes can bypass normal approval or sandbox restrictions; use them
+only for hosts and tasks you trust.
+
+### Verify the configuration
+
+```bash
+pocketctl daemon status
+pocketctl agent codex status
+pocketctl daemon diagnose <session-id>
+```
+
+For Claude Code, use `pocketctl agent claude-code status` instead. `agent status`
+checks the integration, while `daemon diagnose` checks whether the actual session
+is controlled. Neither confirms full-access permissions for the session.
+The daemon startup output `dangerous remote permissions=true` confirms the local
+opt-in; also check the permissions selected when creating the session.
+Run `pocketctl help` for other options.
+
 ## Essential commands
 
 | Command | Purpose |

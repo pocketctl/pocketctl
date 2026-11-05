@@ -326,7 +326,7 @@ export class Router {
   }
   private clients = new Map<WebSocket, ClientConnection>();
   private sessionToDaemon = new Map<string, string>();
-  private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; hostQuotaKind?: 'zcode'|'codex'; reply?: any; timer: ReturnType<typeof setTimeout> }>();
+  private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; hostQuotaKind?: 'zcode'|'codex'|'reset'; reply?: any; timer: ReturnType<typeof setTimeout> }>();
   private documentResolveLimiter = new SessionDocumentReadLimiter(20, 10);
   private documentRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
@@ -2430,9 +2430,9 @@ export class Router {
           clearTimeout(pending.timer);
           pending.reply = pending.sessionId === ''
             ? { type: 'invocation_result', daemon_id: daemonId, request_id: pending.requestId,
-                ...(msg.error ? {error: ['quota_unavailable','quota_credentials_unavailable','quota_authentication_required','quota_account_changed','busy'].includes(msg.error) ? msg.error : 'quota_unavailable'} : {
-                  invocation: pending.hostQuotaKind === 'codex' ? sanitizeCodexQuota(msg.invocation) : { kind: msg.invocation?.kind, scope_id: msg.invocation?.scope_id,
-                    observed_at: msg.invocation?.observed_at, status: msg.invocation?.status, level: msg.invocation?.level,
+                ...(msg.error ? {error: ['quota_unavailable','quota_credentials_unavailable','quota_authentication_required','quota_account_changed','busy','invalid_request','request_id_conflict','quota_reset_unavailable','quota_reset_unknown','quota_reset_unsupported'].includes(msg.error) ? msg.error : 'quota_unavailable'} : {
+                  invocation: pending.hostQuotaKind === 'reset' ? sanitizeQuotaReset(msg.invocation) : pending.hostQuotaKind === 'codex' ? sanitizeCodexQuota(msg.invocation) : { kind: msg.invocation?.kind, scope_id: msg.invocation?.scope_id,
+                    observed_at: msg.invocation?.observed_at, status: msg.invocation?.status, level: msg.invocation?.level, reset_supported:msg.invocation?.reset_supported===true,reset_cards:sanitizeZcodeResetCards(msg.invocation?.reset_cards),
                     windows: Array.isArray(msg.invocation?.windows) ? msg.invocation.windows.slice(0,2).map((w:any)=>({id:w.id,remaining_percent:w.remaining_percent,resets_at:w.resets_at})) : [] },
                 }) }
             : { ...msg, request_id: pending.requestId };
@@ -2518,24 +2518,27 @@ export class Router {
   private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
-    if (msg.type === 'read_zcode_quota' || msg.type === 'read_codex_host_rate_limits') {
+    if (['read_zcode_quota','read_codex_host_rate_limits','consume_codex_reset_credit','consume_zcode_reset_credit','read_quota_reset_result'].includes(msg.type)) {
+ const resetCommand=['consume_codex_reset_credit','consume_zcode_reset_credit','read_quota_reset_result'].includes(msg.type);
+ const codexCommand=['read_codex_host_rate_limits','consume_codex_reset_credit'].includes(msg.type);
       const reject = (error:string) => this.send(clientWs, {type:'invocation_result',request_id:msg.request_id,daemon_id:msg.daemon_id,error});
       if (client.userId == null) { reject('forbidden'); return; }
       if (typeof msg.daemon_id !== 'string' || !msg.daemon_id || msg.daemon_id.length > 256
         || typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128
-        || msg.session_id != null || (msg.type === 'read_codex_host_rate_limits' && msg.codex_home_id != null && (typeof msg.codex_home_id !== 'string' || (msg.codex_home_id !== '' && !/^codex-home-[a-f0-9]{24}$/.test(msg.codex_home_id))))) { reject('invalid_request'); return; }
+        || msg.session_id != null || (codexCommand && msg.codex_home_id != null && (typeof msg.codex_home_id !== 'string' || (msg.codex_home_id !== '' && !/^codex-home-[a-f0-9]{24}$/.test(msg.codex_home_id))))) { reject('invalid_request'); return; }
+      if(resetCommand&&(typeof msg.quota_scope_id!=='string'||!/^[a-f0-9]{32}$/.test(msg.quota_scope_id)||typeof msg.idempotency_key!=='string'||!/^[A-Za-z0-9_-]{16,64}$/.test(msg.idempotency_key)||(msg.type==='consume_zcode_reset_credit'&&!['FIVE_HOUR','WEEK'].includes(msg.reset_type)))){reject('invalid_request');return;}
       const daemon=this.daemons.get(msg.daemon_id);
       if (!daemon) { reject('daemon_unreachable'); return; }
       if (!this.sameUser(client.userId,daemon.userId)) { reject('forbidden'); return; }
       if (daemon.ws.readyState !== 1) { reject('daemon_unreachable'); return; }
-      const fingerprint=JSON.stringify([msg.type,msg.daemon_id,msg.codex_home_id ?? '']);
+      const fingerprint=JSON.stringify([msg.type,msg.daemon_id,msg.codex_home_id ?? '',msg.quota_scope_id??'',msg.idempotency_key??'',msg.reset_type??'']);
       const existing=[...this.invocationRequests.values()].find(p=>p.client===clientWs&&p.requestId===msg.request_id);
       if (existing) { if(existing.fingerprint!==fingerprint)reject('request_id_conflict');else if(existing.reply)this.send(clientWs,existing.reply);return; }
       if(this.invocationRequests.size>=2048||[...this.invocationRequests.values()].filter(p=>p.client===clientWs&&!p.reply).length>=4){reject('busy');return;}
       const id=randomUUID();
-      const timer=setTimeout(()=>{this.invocationRequests.delete(id);reject('quota_unavailable');},20_000);timer.unref?.();
-      this.invocationRequests.set(id,{client:clientWs,daemonId:msg.daemon_id,daemonWs:daemon.ws,sessionId:'',requestId:msg.request_id,fingerprint,hostQuotaKind:msg.type === 'read_codex_host_rate_limits' ? 'codex' : 'zcode',timer});
-      this.send(daemon.ws,{type:msg.type,request_id:id,...(msg.type === 'read_codex_host_rate_limits' ? {codex_home_id:msg.codex_home_id ?? ''} : {})});
+      const timer=setTimeout(()=>{this.invocationRequests.delete(id);reject(resetCommand?'quota_reset_unknown':'quota_unavailable');},20_000);timer.unref?.();
+      this.invocationRequests.set(id,{client:clientWs,daemonId:msg.daemon_id,daemonWs:daemon.ws,sessionId:'',requestId:msg.request_id,fingerprint,hostQuotaKind:resetCommand?'reset':codexCommand?'codex':'zcode',timer});
+      this.send(daemon.ws,{type:msg.type,request_id:id,...(codexCommand ? {codex_home_id:msg.codex_home_id ?? ''} : {}),...(resetCommand?{quota_scope_id:msg.quota_scope_id,idempotency_key:msg.idempotency_key,...(msg.type==='consume_zcode_reset_credit'?{reset_type:msg.reset_type}:{})}:{})});
       return;
     }
     if (msg.type === 'message_queue') {
@@ -3966,7 +3969,16 @@ function attentionNativeCommand(command:Record<string,any>,capabilities?:string[
 // Deliberately omit credentials, account IDs, upsells and redeemable credit IDs.
 function sanitizeCodexQuota(value:any):any {
  if(value?.kind!=='codex_rate_limits')return null;
- return {kind:value.kind,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,plan_type:value.plan_type,exhausted:value.exhausted,usage_notice:value.usage_notice==null?null:{remaining_percent:value.usage_notice.remaining_percent,duration_minutes:value.usage_notice.duration_minutes,resets_at:value.usage_notice.resets_at},
+ return {kind:value.kind,codex_home_id:value.codex_home_id,reset_supported:value.reset_supported===true,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,plan_type:value.plan_type,exhausted:value.exhausted,usage_notice:value.usage_notice==null?null:{remaining_percent:value.usage_notice.remaining_percent,duration_minutes:value.usage_notice.duration_minutes,resets_at:value.usage_notice.resets_at},
  buckets:Array.isArray(value.buckets)?value.buckets.slice(0,32).map((b:any)=>({id:b.id,name:b.name,plan_type:b.plan_type,exhausted:b.exhausted,windows:Array.isArray(b.windows)?b.windows.slice(0,2).map((w:any)=>({remaining_percent:w.remaining_percent,duration_minutes:w.duration_minutes,resets_at:w.resets_at})):[]})):[],
  reset_credits:value.reset_credits==null?null:{available_count:value.reset_credits.available_count,credits:Array.isArray(value.reset_credits.credits)?value.reset_credits.credits.slice(0,64).map((c:any)=>({expires_at:c.expires_at})):null}};
+}
+
+function sanitizeQuotaReset(value:any):any{
+ if(value?.kind!=='quota_reset'||typeof value.scope_id!=='string'||!/^[a-f0-9]{32}$/.test(value.scope_id)||!['reset','alreadyRedeemed','nothingToReset','noCredit','unknown','notFound','unsupported'].includes(value.outcome))return null;
+ return {kind:'quota_reset',scope_id:value.scope_id,outcome:value.outcome};
+}
+function sanitizeZcodeResetCards(value:any):any{
+ if(!value||!['ok','unavailable','authentication_required'].includes(value.status))return null;
+ return {status:value.status,cards:value.status==='ok'&&Array.isArray(value.cards)?value.cards.slice(0,2).map((c:any)=>({reset_type:c.reset_type,available_count:c.available_count,expires_at:Array.isArray(c.expires_at)?c.expires_at.slice(0,64):[]})):null};
 }

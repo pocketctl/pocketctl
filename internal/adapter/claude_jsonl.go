@@ -376,6 +376,8 @@ type JSONLStreamParser struct {
 	compactError  string
 	turns         claudeTurnTracker
 	sawEndTurn    bool
+	memoryRoot    string
+	memoryLinks   map[string]claudeMemoryLink
 }
 
 // NewJSONLStreamParser creates a parser with empty state.
@@ -401,7 +403,7 @@ func (p *JSONLStreamParser) Parse(line string) (result []protocol.DaemonEvent, p
 			plans := p.tasks.consume(line)
 			p.stampTurns(plans, false)
 			result = append(result, plans...)
-			stampClaudeMemoryNative(line, result)
+			p.stampClaudeMemoryNative(line, result)
 		}
 	}()
 	line = strings.TrimSpace(line)

@@ -8,6 +8,11 @@ Pocketctl 可以让新启动的 Codex 终端会话与 Web/iOS 共享同一个长
 
 ## daemon 启动与启用
 
+需要 Codex 完全访问（`danger-full-access`）或无需审批（`never`）时，参见
+[托管会话控制与完全访问权限](getting-started.zh-CN.md#托管会话控制与完全访问权限)，
+按说明开启 daemon 本地高权限开关，并在 Web/iOS 新建会话时选择权限。
+共享控制本身不要求跳过审批；开启该开关不会自动提升已有会话权限。
+
 正常执行：
 
 ```bash

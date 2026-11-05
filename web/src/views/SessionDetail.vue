@@ -218,6 +218,7 @@
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
           <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
+          <button v-if="currentSessionAgent==='zcode' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="zcode-quota" role="menuitem" @click="openZcodeQuota"><span>{{ zcodeQuota?.title || t('zcode_quota.title') }}<small class="tool-visibility-hint">{{ zcodeQuota?.summary }}</small></span></button>
           <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
             :aria-checked="mobileShowToolCalls" data-toolbar-action="show-tool-calls" @click="toggleMobileToolCalls">
             <span><span>{{ t('session.show_tool_calls') }}</span><small class="tool-visibility-hint">{{ t('session.tool_visibility_hint') }}</small></span>
@@ -265,7 +266,7 @@
       <CodexQuota ref="codexQuota" variant="session" v-if="currentSessionAgent === 'codex' && currentSession?.control_mode === 'managed' && !focusedSubAgentId"
         :key="sessionId" :session-id="sessionId" :daemon-id="currentSession.daemon_id" :hostname="currentSession.hostname"
         :account-label="currentSession.codex_home_label" :daemon-online="currentSession.daemon_online" />
-      <ZcodeQuota v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
+      <ZcodeQuota ref="zcodeQuota" variant="session" v-if="currentSessionAgent === 'zcode' && !focusedSubAgentId" :key="'zcode-quota-'+sessionId"
         :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div class="chat-message-viewport">
@@ -916,9 +917,14 @@ const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 
 const toolbarOverflowOpen = ref(false)
 const toolbarOverflowEl = ref<HTMLElement | null>(null)
 const codexQuota = ref<InstanceType<typeof CodexQuota>|null>(null)
+const zcodeQuota = ref<InstanceType<typeof ZcodeQuota>|null>(null)
 function openCodexQuota(){
  toolbarOverflowOpen.value=false
  nextTick(()=>{toolbarOverflowEl.value?.querySelector<HTMLButtonElement>('.toolbar-more-btn')?.focus();codexQuota.value?.show()})
+}
+function openZcodeQuota(){
+ toolbarOverflowOpen.value=false
+ nextTick(()=>{toolbarOverflowEl.value?.querySelector<HTMLButtonElement>('.toolbar-more-btn')?.focus();zcodeQuota.value?.show()})
 }
 const agentFilterOpen = ref(false)
 const agentFilterEl = ref<HTMLElement | null>(null)
@@ -1063,6 +1069,14 @@ function handleInvocationResult(msg: any) {
     if(!host){invocationError.value='当前主机不可用';return}
     invocationCreateRequest=crypto.randomUUID()
     send({type:'session_create',request_id:invocationCreateRequest,daemon_id:host,agent:'codex',cwd:result.cwd,force:result.force===true,prompt:'',model:currentModel.value,...(result.fork_from?{fork_from:result.fork_from}:{})});return
+  }
+  if(invocationName==='model' && result.kind==='text') {
+    if(result.model) currentModel.value=result.model
+    if(typeof result.effort==='string') currentEffort.value=result.effort
+    invocationDialog.value=null
+    if(messageInput.value===invocationDraft) messageInput.value=''
+    invocationSelection.value=null
+    return
   }
   invocationDialog.value=result
   if(!['choose','input'].includes(result.kind)&&messageInput.value===invocationDraft) {messageInput.value='';invocationSelection.value=null}
@@ -3386,12 +3400,17 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   if (type === 'session_model_changed') {
     const model = evt.model || evt.payload?.model || ''
     if (!model) return
-    if (evt.session_id === sessionId.value) currentModel.value = model
+    const previousModel = evt.previous_model || evt.payload?.previous_model || ''
+    const previousEffort = evt.previous_effort || evt.payload?.previous_effort || ''
+    const effort = evt.effort || evt.payload?.effort || ''
+    const transition = previousModel && previousModel !== model ? `${previousModel} → ${model}`
+      : previousEffort && effort && previousEffort !== effort ? `${model} · ${previousEffort} → ${effort}` : model
+    if (!historical && evt.session_id === sessionId.value) currentModel.value = model
     if ((evt.reason || evt.payload?.reason) === 'initial_model') return
     const eventId = evt.event_id || evt.payload?.event_id
     if (eventId && target.some((message: any) => message.type === type && message.eventId === eventId)) return
-    if (!eventId && isDuplicate(type, model, target)) return
-    target.push({ id: nextId('model'), type, role: 'agent', content: model, eventId, ...eventWithTurnMetadata(evt) })
+    if (!eventId && isDuplicate(type, transition, target)) return
+    target.push({ id: nextId('model'), type, role: 'agent', content: transition, eventId, ...eventWithTurnMetadata(evt) })
   } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
@@ -3747,6 +3766,11 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     const turnId = evt.turn_id || evt.payload?.turn_id
     const turnStatus = evt.turn_status || evt.payload?.turn_status
     if (!turnId || !turnStatus) return
+    if (['completed', 'failed', 'interrupted', 'abandoned'].includes(turnStatus)) {
+      for (const message of target) {
+        if (message.turn_id === turnId) message.streaming = false
+      }
+    }
     const eventId = evt.event_id || evt.payload?.event_id
     const existing = eventId && target.find((message: any) => message.type === 'turn_status' && message.eventId === eventId)
     if (existing) {
@@ -4189,6 +4213,7 @@ onMounted(() => {
   // (from the next assistant message's model field). Refresh the badge live.
   cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (typeof msg.effort === 'string') currentEffort.value = msg.effort
     if (currentSessionAgent.value === 'dsh') { currentEffort.value = msg.effort || ''; if (msg.request_id === dshSettingsPending.value) dshSettingsPending.value = '' }
     if (msg.model) currentModel.value = msg.model
     processImmediateLiveEvent(msg, { scroll: true })

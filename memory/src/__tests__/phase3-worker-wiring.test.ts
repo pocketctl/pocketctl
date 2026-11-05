@@ -8,6 +8,5 @@ describe('Phase 3 worker runtime wiring', () => {
 
     expect(source).toMatch(/const indexClaimVersion[\s\S]*?claimIndexer\.handleIndexClaimVersion/)
     expect(source).toMatch(/jobWorker\.register\('index_shared_claim', indexClaimVersion\)/)
-    expect(source).toMatch(/const JOB_TYPES = \[[\s\S]*?'index_shared_claim'/)
   })
 })

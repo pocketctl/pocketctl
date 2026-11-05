@@ -5,7 +5,7 @@ import { getRelayWs } from './useEnv'
 export interface CodexQuotaWindow { remaining_percent: number; duration_minutes: number | null; resets_at: number | null }
 export interface CodexQuotaBucket { id:string; name:string; plan_type?:string; exhausted:boolean; windows:CodexQuotaWindow[] }
 export interface CodexResetCredits { available_count:number; credits:{expires_at:number|null}[]|null }
-export interface CodexQuotaSnapshot { kind:'codex_rate_limits'; scope_id:string; observed_at:string; status?:'ok'|'unauthenticated'|'unsupported'; plan_type?:string; exhausted:boolean; buckets:CodexQuotaBucket[]; reset_credits?:CodexResetCredits|null; usage_notice?:CodexQuotaWindow|null }
+export interface CodexQuotaSnapshot { kind:'codex_rate_limits'; codex_home_id?:string;reset_supported?:boolean; scope_id:string; observed_at:string; status?:'ok'|'unauthenticated'|'unsupported'; plan_type?:string; exhausted:boolean; buckets:CodexQuotaBucket[]; reset_credits?:CodexResetCredits|null; usage_notice?:CodexQuotaWindow|null }
 const stamp=(n:any)=>n===null||(Number.isSafeInteger(n)&&n>0&&n<=253402300799)
 export function parseCodexQuota(value:any):CodexQuotaSnapshot|null {
  if(value?.kind!=='codex_rate_limits'||typeof value.scope_id!=='string'||typeof value.exhausted!=='boolean'||!Number.isFinite(Date.parse(value.observed_at))||!Array.isArray(value.buckets)||value.buckets.length>32)return null
@@ -16,7 +16,7 @@ export function parseCodexQuota(value:any):CodexQuotaSnapshot|null {
  if(notice!=null&&!(typeof notice.remaining_percent==='number'&&Number.isFinite(notice.remaining_percent)&&notice.remaining_percent>=0&&notice.remaining_percent<=100&&(notice.duration_minutes===null||(Number.isSafeInteger(notice.duration_minutes)&&notice.duration_minutes>0))&&stamp(notice.resets_at)))return null
  const r=value.reset_credits
  if(r!=null&&(!Number.isSafeInteger(r.available_count)||r.available_count<0||r.available_count>1000000||(r.credits!==null&&(!Array.isArray(r.credits)||r.credits.length>64||r.credits.length>r.available_count||!r.credits.every((c:any)=>c&&stamp(c.expires_at))))))return null
- return {kind:value.kind,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status??'ok',plan_type:value.plan_type??'unknown',exhausted:value.exhausted,usage_notice:notice==null?null:{remaining_percent:notice.remaining_percent,duration_minutes:notice.duration_minutes,resets_at:notice.resets_at},buckets:value.buckets.map((b:any)=>({id:b.id,name:b.name,exhausted:b.exhausted,windows:b.windows.map((w:any)=>({remaining_percent:w.remaining_percent,duration_minutes:w.duration_minutes,resets_at:w.resets_at}))})),reset_credits:r==null?null:{available_count:r.available_count,credits:r.credits===null?null:r.credits.map((c:any)=>({expires_at:c.expires_at}))}}
+ return {kind:value.kind,codex_home_id:typeof value.codex_home_id==='string'?value.codex_home_id:undefined,reset_supported:value.reset_supported===true,scope_id:value.scope_id,observed_at:value.observed_at,status:value.status??'ok',plan_type:value.plan_type??'unknown',exhausted:value.exhausted,usage_notice:notice==null?null:{remaining_percent:notice.remaining_percent,duration_minutes:notice.duration_minutes,resets_at:notice.resets_at},buckets:value.buckets.map((b:any)=>({id:b.id,name:b.name,exhausted:b.exhausted,windows:b.windows.map((w:any)=>({remaining_percent:w.remaining_percent,duration_minutes:w.duration_minutes,resets_at:w.resets_at}))})),reset_credits:r==null?null:{available_count:r.available_count,credits:r.credits===null?null:r.credits.map((c:any)=>({expires_at:c.expires_at}))}}
 }
 export function useCodexQuota(options: Ref<{sessionId?:string;daemonId:string;homeId?:string;online?:boolean}>) {
   const { connected, daemons, send, onEvent } = useWebSocket()
@@ -31,7 +31,8 @@ export function useCodexQuota(options: Ref<{sessionId?:string;daemonId:string;ho
   const key = () => `${user?.value?.id ?? ''}:${getRelayWs()}:${options.value.daemonId}:${options.value.sessionId??''}:${options.value.homeId??''}`
   function cancel(){request='';loading.value=false;clearTimeout(timer)}
   function reset(){cancel();clearTimeout(delayed);dirty=false;snapshot.value=null;failed.value=false;identity=key();lastRead=0}
-  function refresh(){
+  function refresh(force=false){
+ if(force===true)cancel()
     if (key() !== identity) reset()
     if (!mounted || !user?.value?.id || loading.value || !online.value || document.visibilityState === 'hidden') return
     const id=crypto.randomUUID();request=id;loading.value=true;lastRead=Date.now()

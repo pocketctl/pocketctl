@@ -10,7 +10,13 @@ import (
 // Decode identity and invocation markers from the native envelope, never from
 // assistant prose. Historical parsers do not grant trust: the manager must also
 // have a new accepted command and an exact native root/parent binding.
-func stampClaudeMemoryNative(line string, events []protocol.DaemonEvent) {
+type claudeMemoryLink struct {
+	parent  string
+	emitted bool
+	unknown bool
+}
+
+func (p *JSONLStreamParser) stampClaudeMemoryNative(line string, events []protocol.DaemonEvent) {
 	var e JSONLEntry
 	if json.Unmarshal([]byte(line), &e) != nil || e.UUID == "" || e.IsMeta {
 		return
@@ -39,6 +45,67 @@ func stampClaudeMemoryNative(line string, events []protocol.DaemonEvent) {
 			}
 		}
 	}
+
+	// Preserve only native UUID edges through records with no public content.
+	// Their bodies (including thinking/system context) never become evidence.
+	root := p.turns.activeSource
+	if root == "" {
+		return
+	}
+	if p.memoryRoot != root {
+		p.memoryRoot = root
+		p.memoryLinks = map[string]claudeMemoryLink{}
+	}
+	if len(p.memoryLinks) >= 4096 {
+		p.memoryLinks = map[string]claudeMemoryLink{}
+	}
+	emitted := false
+	for _, ev := range events {
+		if ev.Type == "user_text" || ev.Type == "agent_text" || ev.Type == "tool_call" || ev.Type == "tool_result" {
+			emitted = true
+		}
+	}
+	neutral := false
+	if e.Type == "assistant" && e.Message != nil && !e.IsMeta {
+		var blocks []JSONLContentBlock
+		if json.Unmarshal(e.Message.Content, &blocks) == nil && len(blocks) > 0 {
+			neutral = true
+			for _, b := range blocks {
+				if b.Type != "thinking" && b.Type != "redacted_thinking" {
+					neutral = false
+				}
+			}
+		}
+	}
+	if e.Type == "attachment" {
+		var raw struct {
+			Attachment struct {
+				Type string `json:"type"`
+			} `json:"attachment"`
+		}
+		if json.Unmarshal([]byte(line), &raw) == nil {
+			switch raw.Attachment.Type {
+			case "environment", "model", "language", "deferred_tools_delta", "agent_listing_delta", "skill_listing", "session_context", "date", "remote_session_change", "prompt_snapshot", "hook_success", "hook_additional_context":
+				neutral = true
+			}
+		}
+	}
+	parent := e.ParentUuid
+	seen := map[string]bool{}
+	for len(seen) < 4096 {
+		link, ok := p.memoryLinks[parent]
+		if !ok || link.emitted {
+			break
+		}
+		if seen[parent] {
+			unknownChild = true
+			break
+		}
+		seen[parent] = true
+		unknownChild = unknownChild || link.unknown
+		parent = link.parent
+	}
+	p.memoryLinks[e.UUID] = claudeMemoryLink{parent: e.ParentUuid, emitted: emitted, unknown: !neutral || e.IsSidechain}
 	for i := range events {
 		ev := &events[i]
 		switch ev.Type {
@@ -46,7 +113,7 @@ func stampClaudeMemoryNative(line string, events []protocol.DaemonEvent) {
 		default:
 			continue
 		}
-		ev.MemoryNative = &protocol.MemoryNativeEvent{Ordinal: i, Producer: "claude", RecordID: e.UUID, ParentRecordID: e.ParentUuid, RootID: ev.SourceTurnID, OccurredAt: e.Timestamp, UserRoot: e.Type == "user" && ev.Type == "user_text", Sidechain: e.IsSidechain, Skill: skill, UnknownChild: unknownChild}
+		ev.MemoryNative = &protocol.MemoryNativeEvent{Ordinal: i, Producer: "claude", RecordID: e.UUID, ParentRecordID: parent, RootID: ev.SourceTurnID, OccurredAt: e.Timestamp, UserRoot: e.Type == "user" && ev.Type == "user_text", Sidechain: e.IsSidechain, Skill: skill, UnknownChild: unknownChild}
 	}
 }
 
@@ -62,6 +129,14 @@ func stampClaudeStreamMemoryNative(root, line string, events []protocol.DaemonEv
 	for _, b := range raw.Message.Content {
 		if b.Type == "tool_use" {
 			skill = skill || strings.EqualFold(b.Name, "skill")
+			if b.Name == "Read" {
+				var input struct {
+					FilePath string `json:"file_path"`
+				}
+				if json.Unmarshal(b.Input, &input) == nil && strings.EqualFold(filepath.Base(input.FilePath), "SKILL.md") {
+					skill = true
+				}
+			}
 			unknown = unknown || b.Name == "Task" || b.Name == "Agent"
 		}
 	}
