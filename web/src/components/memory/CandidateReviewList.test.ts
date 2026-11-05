@@ -169,3 +169,35 @@ test('changing delivery identity clears the old queue and ignores its late respo
   expect(wrapper.find('[data-testid="memory-candidate-row-candidate-2"]').exists()).toBe(true)
   wrapper.unmount()
 })
+
+ test('loads a server continuation without losing the first page and reports total', async()=>{
+  memoryClient.listMemoryCandidates.mockResolvedValueOnce({candidates:[candidates[0]],next_cursor:'cursor-1',total_count:52}).mockResolvedValueOnce({candidates:[candidates[1]],next_cursor:null,total_count:52})
+  const wrapper=mount(CandidateReviewList);await flushPromises()
+  expect(wrapper.emitted('count')?.at(-1)).toEqual([52])
+  await wrapper.get('[data-testid="memory-review-load-more"]').trigger('click');await flushPromises()
+  expect(memoryClient.listMemoryCandidates).toHaveBeenLastCalledWith(undefined,'cursor-1')
+  expect(wrapper.findAll('.memory-candidate-row')).toHaveLength(2)
+  expect(wrapper.find('[data-testid="memory-review-load-more"]').exists()).toBe(false)
+ })
+ test('continuation failure preserves visible candidates and offers retry',async()=>{
+  memoryClient.listMemoryCandidates.mockResolvedValueOnce({candidates:[candidates[0]],next_cursor:'cursor-1',total_count:52}).mockRejectedValueOnce(new Error('offline'))
+  const wrapper=mount(CandidateReviewList);await flushPromises()
+  await wrapper.get('[data-testid="memory-review-load-more"]').trigger('click');await flushPromises()
+  expect(wrapper.findAll('.memory-candidate-row')).toHaveLength(1)
+  expect(wrapper.get('[data-testid="memory-review-more-error"]').text()).toContain('offline')
+  expect(wrapper.find('[data-testid="memory-review-load-more"]').exists()).toBe(true)
+ })
+
+test('a delivery change discards late continuation rows', async () => {
+  let resolveMore!: (value: unknown) => void
+  memoryClient.listMemoryCandidates.mockResolvedValueOnce({candidates:[candidates[0]],next_cursor:'cursor',total_count:2})
+    .mockImplementationOnce(()=>new Promise(resolve=>{resolveMore=resolve}))
+    .mockResolvedValueOnce({candidates:[candidates[1]],next_cursor:null,total_count:1})
+  const wrapper=mount(CandidateReviewList);await flushPromises()
+  await wrapper.get('[data-testid="memory-review-load-more"]').trigger('click')
+  await wrapper.setProps({delivery:{submissionId:'new',decisionId:'new'}});await flushPromises()
+  resolveMore({candidates:[{...candidates[0],candidate_id:'late-private'}],next_cursor:null,total_count:2});await flushPromises()
+  expect(wrapper.find('[data-testid="memory-candidate-row-late-private"]').exists()).toBe(false)
+  expect(wrapper.find('[data-testid="memory-candidate-row-candidate-2"]').exists()).toBe(true)
+  wrapper.unmount()
+})

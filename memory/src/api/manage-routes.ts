@@ -181,12 +181,20 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid candidate query')))
       return
     }
-    const queue = await review.reviewQueue({
-      installationId: grant.installationId,
-      limit: parsed.data.limit,
-      submissionId: parsed.data.submission_id, decisionId: parsed.data.decision_id,
-    })
-    return { candidates: queue }
+    try {
+      return await review.reviewQueuePage({
+        installationId: grant.installationId,
+        limit: parsed.data.limit,
+        cursor: parsed.data.cursor,
+        submissionId: parsed.data.submission_id,
+        decisionId: parsed.data.decision_id,
+      })
+    } catch (error) {
+      if (error instanceof Error && error.message === 'invalid_cursor') {
+        return reply.code(400).send(errorBody(new MemoryApiError('invalid_request', 'invalid_cursor')))
+      }
+      throw error
+    }
   })
 
   app.get<{ Params: { submissionId: string; decisionId: string } }>(

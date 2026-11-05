@@ -241,7 +241,7 @@ export async function searchMemory(
   options: {
     repositoryId?: string; branch?: string; claimTypes?: string[]; limit?: number
     scopeInstallationIds?: string[]
-    sceneId?: string; destination?: MemoryDestination
+    sceneId?: string; destination?: MemoryDestination; taskScopeKey?: string
   } = {},
   signal?: AbortSignal,
 ): Promise<MemorySearchResult> {
@@ -250,6 +250,7 @@ export async function searchMemory(
     method: 'POST',
     body: JSON.stringify({
       query,
+      ...(options.taskScopeKey ? {task_scope_key:options.taskScopeKey} : {}),
       ...(options.sceneId ? {scene_id:options.sceneId} : {}),
       ...(options.destination ? {destination:options.destination} : {}),
       ...(options.repositoryId ? { repository_id: options.repositoryId } : {}),
@@ -346,9 +347,10 @@ export function getMemoryEvidence(evidenceId: string): Promise<MemoryEvidence> {
   return memoryJson<MemoryEvidence>('memory.search', `/api/v1/memory/evidence/${evidenceId}`)
 }
 
-export function listMemoryCandidates(delivery?: { submissionId: string; decisionId: string }): Promise<{ candidates: MemoryCandidate[] }> {
-  const query = delivery ? '?' + new URLSearchParams({ submission_id: delivery.submissionId, decision_id: delivery.decisionId }) : ''
-  return memoryJson<{ candidates: MemoryCandidate[] }>('memory.manage', '/api/v1/memory/candidates' + query)
+export function listMemoryCandidates(delivery?: { submissionId: string; decisionId: string }, cursor?: string | null): Promise<{ candidates: MemoryCandidate[]; next_cursor?: string | null; total_count?: number }> {
+  const params = new URLSearchParams(delivery ? { submission_id: delivery.submissionId, decision_id: delivery.decisionId } : {})
+  if(cursor)params.set('cursor',cursor)
+  return memoryJson('memory.manage', '/api/v1/memory/candidates' + (params.size ? '?' + params : ''))
 }
 
 export function getMemorySettings(): Promise<MemoryFeatureSettings> {

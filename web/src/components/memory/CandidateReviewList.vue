@@ -31,6 +31,9 @@
           </label>
         </div>
         <p class="memory-governance-muted">{{ t('memory.governance.automation.adviceOnly') }}</p>
+        <p data-testid="memory-review-loaded">{{ t('memory.review_loaded', { loaded: candidates.length, total: totalCount }) }} {{ t('memory.review_filter_loaded') }}</p>
+        <p v-if="moreError" role="alert" data-testid="memory-review-more-error">{{ moreError }}</p>
+        <button v-if="nextCursor" type="button" class="memory-button" :disabled="moreLoading" data-testid="memory-review-load-more" @click="loadMore">{{ moreLoading ? t('common.loading') : t('memory.review_load_more') }}</button>
         <label class="memory-policy-field"><input v-model="evidenceFilter" type="checkbox" @change="applyFilters"/>{{ t('memory.governance.automation.needsEvidence') }}</label>
         <div v-if="bulkSelected.length" class="memory-governance-actions"><span>{{ bulkSelected.length }}/20</span><button type="button" :disabled="bulkBusy || candidates.some(c => bulkSelected.includes(c.candidate_id) && !canAccept(c))" @click="bulkReview('accept')">{{ t('memory.governance.automation.bulkAccept') }}</button><button type="button" :disabled="bulkBusy" @click="bulkReview('reject')">{{ t('memory.governance.automation.bulkReject') }}</button></div>
         <ul v-if="bulkResults.length" aria-live="polite"><li v-for="r in bulkResults" :key="r.id">{{ r.id }} · {{ t(`memory.governance.automation.result.${r.status}`) }}</li></ul>
@@ -169,6 +172,7 @@ const emit = defineEmits<{
 const candidates = ref<MemoryCandidate[]>([])
 const selectedCandidateId = ref<string | null>(null)
 const loadError = ref('')
+const nextCursor=ref<string|null>(null),totalCount=ref(0),moreLoading=ref(false),moreError=ref('')
 const editingId = ref<string | null>(null)
 const editedStatement = ref('')
 const errors = ref<Record<string, string>>({})
@@ -222,23 +226,39 @@ const pageCandidates = computed(() => {
 let loadGeneration = 0
 async function refresh(): Promise<void> {
   const generation = ++loadGeneration
-  loadError.value = ''
+  loadError.value = '';nextCursor.value=null;moreLoading.value=false;moreError.value=''
   try {
     const result = await listMemoryCandidates(props.delivery)
     if (generation !== loadGeneration) return
     candidates.value = result.candidates
+    nextCursor.value=result.next_cursor??null;totalCount.value=result.total_count??result.candidates.length
     bulkSelected.value=[];reviewStarted.value=performance.now()
     currentPage.value = Math.min(currentPage.value, totalPages.value)
     if (!pageCandidates.value.some(candidate => candidate.candidate_id === selectedCandidateId.value)) {
       selectedCandidateId.value = pageCandidates.value[0]?.candidate_id ?? null
     }
-    emit('count', result.candidates.length)
+    emit('count', totalCount.value)
   } catch (err) {
     if (generation !== loadGeneration) return
     candidates.value = []
     selectedCandidateId.value = null
     loadError.value = err instanceof Error ? err.message : t('memory.review_load_failed')
   }
+}
+
+async function loadMore():Promise<void>{
+  if(!nextCursor.value||moreLoading.value)return
+  const generation=loadGeneration,cursor=nextCursor.value
+  moreLoading.value=true;moreError.value=''
+  try{
+    const result=await listMemoryCandidates(props.delivery,cursor)
+    if(generation!==loadGeneration)return
+    const existing=new Set(candidates.value.map(c=>c.candidate_id))
+    candidates.value.push(...result.candidates.filter(c=>!existing.has(c.candidate_id)))
+    nextCursor.value=result.next_cursor??null;totalCount.value=result.total_count??totalCount.value
+    emit('count',totalCount.value)
+  }catch(err){if(generation===loadGeneration)moreError.value=err instanceof Error?err.message:t('memory.review_load_failed')}
+  finally{if(generation===loadGeneration)moreLoading.value=false}
 }
 
 watch(() => props.delivery, () => { candidates.value = []; selectedCandidateId.value = null; bulkSelected.value = []; editingId.value = null; void refresh() }, { immediate: true })

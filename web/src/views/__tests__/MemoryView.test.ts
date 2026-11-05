@@ -139,6 +139,19 @@ describe('MemoryView', () => {
     vi.clearAllMocks()
   })
 
+  test.each(['personal', 'organization'])('review empty state belongs to the selected %s scope', async kind => {
+    memoryRoute.query = { tab: 'review' }
+    memoryInstallation.value = activeInstallation()
+    memoryClient.listGovernanceScopes.mockResolvedValueOnce({ scopes: [{
+      installation_id: 'inst-1', owner_scope_kind: kind, owner_scope_id: 'scope',
+      authorization_epoch: '1', state: 'active', name: 'Review scope', permissions: ['read'],
+    }] })
+    const view = mountView(); await flushPromises()
+    expect(view.find('.memory-governance-queue').exists()).toBe(kind === 'organization')
+    expect(view.text().includes('队列为空')).toBe(kind === 'organization')
+    view.unmount()
+  })
+
   test('delivery link opens personal review with the exact submission and decision filter', async () => {
     memoryRoute.query = { tab: 'review', submission: '11111111-1111-4111-8111-111111111111', decision: '22222222-2222-4222-8222-222222222222' }
     memoryInstallation.value = activeInstallation()

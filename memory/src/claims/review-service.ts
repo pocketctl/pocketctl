@@ -10,7 +10,7 @@ import { resolvePacketEvidence } from './evidence-resolver.js'
  * only executes ledger transactions with CAS revisions.
  */
 export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
-  return {
+  const service = {
     async acceptCandidate(input: {
       installationId: string
       candidateId: string
@@ -35,9 +35,16 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
 
     /** Review queue: validated/conflict candidates only; shadow excluded. */
     async reviewQueue(input: { installationId: string; limit?: number; submissionId?: string; decisionId?: string }) {
+      return (await service.reviewQueuePage(input)).candidates
+    },
+
+    async reviewQueuePage(input: { installationId: string; limit?: number; submissionId?: string; decisionId?: string; cursor?: string }) {
       const limit = Math.min(Math.max(1, input.limit ?? 50), 100)
+      if(input.cursor && !(await pool.query('SELECT 1 FROM memory_candidates WHERE installation_id=$1 AND candidate_id=$2::uuid',[input.installationId,input.cursor])).rowCount)throw new Error('invalid_cursor')
       const result = await pool.query(`
-        SELECT c.candidate_id::text, c.claim_type, c.statement, c.structured_content,
+        WITH eligible AS (
+        SELECT c.created_at AS page_created_at,
+               c.candidate_id::text AS page_candidate_id, c.candidate_id::text, c.claim_type, c.statement, c.structured_content,
                c.scope_kind, c.scope_key,
                c.confidence::text, c.freshness_at, c.status, c.revision::text, c.episode_id::text,
                c.repository_id::text, c.repo_snapshot_id::text, c.branch, c.evidence_handles,
@@ -58,10 +65,19 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
             WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
               AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
               AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
-        ORDER BY c.created_at DESC, c.candidate_id
-        LIMIT $2
-      `, [input.installationId, limit, input.submissionId && input.decisionId ? JSON.stringify({ source_kind: 'team_session', source_version: 2, accepted_delivery: { submission_id: input.submissionId, decision_id: input.decisionId } }) : null])
-      return result.rows.map(row => ({
+        ), page AS (SELECT * FROM eligible
+        WHERE ($4::uuid IS NULL OR page_created_at < (SELECT created_at FROM memory_candidates WHERE installation_id=$1 AND candidate_id=$4::uuid)
+          OR (page_created_at = (SELECT created_at FROM memory_candidates WHERE installation_id=$1 AND candidate_id=$4::uuid) AND page_candidate_id::uuid > $4::uuid))
+        ORDER BY page_created_at DESC, page_candidate_id::uuid
+        LIMIT $2)
+        SELECT totals.total_count,page.* FROM (SELECT count(*)::int AS total_count FROM eligible) totals
+        LEFT JOIN page ON true ORDER BY page_created_at DESC,page_candidate_id::uuid
+      `, [input.installationId, limit + 1, input.submissionId && input.decisionId ? JSON.stringify({ source_kind: 'team_session', source_version: 2, accepted_delivery: { submission_id: input.submissionId, decision_id: input.decisionId } }) : null, input.cursor??null])
+      const rows=result.rows.filter(row=>row.candidate_id)
+      const page=rows.slice(0,limit)
+      return {next_cursor:rows.length>limit?page.at(-1)!.candidate_id:null,
+        total_count:result.rows[0]?.total_count??0,
+        candidates:page.map(({total_count:_,page_created_at:__,page_candidate_id:___,...row}) => ({
         content_hash:candidateReviewHash(row),
         ...row,
         delivery_source: candidateDeliverySource(row.episode_source, row.source_available),
@@ -76,9 +92,10 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
         source_available: undefined,
         episode_document: undefined,
         evidence_manifest: undefined,
-      }))
+      }))}
     },
   }
+  return service
 }
 
 export type ReviewService = ReturnType<typeof createReviewService>

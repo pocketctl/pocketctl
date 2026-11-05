@@ -5,6 +5,7 @@ import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {governanceFixture} from '../testing/governance-fixture.js'
 import {createCurationWorker} from '../curation/worker.js'
+import {createSourceProjector} from '../projection/source-projector.js'
 import {stageLifecycleTurn} from '../curation/task-repository.js'
 import {canonicalPayloadHash} from '../inbox/canonical-json.js'
 import type {TextGenerator} from '../ports/text-generator.js'
@@ -34,6 +35,28 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
  }
  const worker=(generator:TextGenerator)=>createCurationWorker({pool,mode:'enabled',textGenerator:generator,modelFingerprint:'synthetic-v1'})
  const signal=()=>new AbortController().signal
+ test('fresh canonical feed source reaches shadow once and preserves formal content',async()=>{
+  const f=await governanceFixture(pool),session='fresh-shadow-session',turn='fresh-shadow-turn'
+  await pool.query("INSERT INTO memory_curation_policies(installation_id,mode) VALUES($1,'shadow')",[f.personal])
+  const snapshot=async()=>JSON.stringify((await pool.query(`SELECT to_jsonb(c) claim,to_jsonb(v) version,to_jsonb(e) evidence FROM knowledge_claims c JOIN knowledge_versions v USING(installation_id,claim_id) JOIN knowledge_evidence e USING(installation_id,version_id) WHERE c.installation_id=$1 ORDER BY c.claim_id,v.version_id,e.evidence_id`,[f.personal])).rows)
+  const before=await snapshot(),payload={text:'This isolated input contains no durable conclusion.'}
+  const proof={version:1,producer:'claude',session_id:session,turn_id:turn,event_id:'input:synthetic-dispatch',sequence:'1',invocation_id:'input:synthetic-dispatch',source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}
+  await pool.query(`INSERT INTO memory_feed_inbox(installation_id,feed_id,envelope_version,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,classification,data,payload_hash) VALUES($1,1,1,'session.event.v1','canonical_event','event:synthetic',$2,$3,'user_text',clock_timestamp(),$4,$5,$6)`,[f.personal,session,turn,{memory_source:proof},payload,canonicalPayloadHash(payload)])
+  const projector=createSourceProjector(pool)
+  expect(await projector.projectOnce(f.personal)).toEqual({projected:1})
+  const events=(await pool.query('SELECT * FROM source_events WHERE installation_id=$1',[f.personal])).rows
+  expect(events[0].source_provenance.memory).toEqual(proof)
+  const client=await pool.connect()
+  try{await client.query('BEGIN');await stageLifecycleTurn(client,{installationId:f.personal,sessionId:session,turnId:turn,events},{mode:'shadow',revision:1,authorizationEpoch:'1',version:'memory-lifecycle-v1'});await client.query('COMMIT')}finally{client.release()}
+  const job=(await pool.query("SELECT * FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task'",[f.personal])).rows[0]
+  const generate=vi.fn(async()=>success()),w=createCurationWorker({pool,mode:'shadow',textGenerator:{generateJson:generate} as TextGenerator,modelFingerprint:'synthetic-shadow-fixture'})
+  await w.consolidate(job,signal());await w.consolidate(job,signal())
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state,mode FROM memory_curation_runs WHERE installation_id=$1',[f.personal])).rows).toEqual([{state:'completed',mode:'shadow'}])
+  expect((await pool.query('SELECT disposition,complete,allowed_count FROM memory_source_processing_receipts WHERE installation_id=$1',[f.personal])).rows).toEqual([{disposition:'no_durable_conclusion',complete:false,allowed_count:1}])
+  expect((await pool.query('SELECT count(*)::int n FROM memory_candidates WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+  expect(await snapshot()).toBe(before)
+ })
  test('quoted model evidence persists numeric spans for downstream workers',async()=>{
   const f=await fixture(),space=randomUUID()
   await pool.query("INSERT INTO memory_spaces(installation_id,space_id,domain,name,destinations) VALUES($1,$2,'profile','preferences',ARRAY['personal'])",[f.personal,space])
