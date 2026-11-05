@@ -299,6 +299,17 @@ describe('memory api manage routes', () => {
     expect(response.headers['cache-control']).toBe('no-store')
   })
 
+  test('shadow inspection and scene creation require manage authorization',async()=>{
+    const a=makeManageApp({mode:'reject'});apps.push(a)
+    for(const [method,url]of [['GET','/api/v1/memory/shadow-candidates'],['POST','/api/v1/memory/scenes']] as const){
+      expect((await a.inject({method,url,headers:{host:'memory.example',authorization:'Bearer t'}})).statusCode).toBe(401)
+    }
+  })
+  test('shadow inspection rejects invalid cursors and delivery filters',async()=>{
+    const a=makeManageApp();apps.push(a);const headers={host:'memory.example',authorization:'Bearer t'}
+    for(const query of ['cursor=bad','limit=101',`submission_id=${INSTALLATION}&decision_id=${INSTALLATION}`])expect((await a.inject({method:'GET',url:'/api/v1/memory/shadow-candidates?'+query,headers})).statusCode).toBe(400)
+    expect((await a.inject({method:'GET',url:'/api/v1/memory/shadow-candidates',headers})).json()).toEqual({total_count:0,next_cursor:null,candidates:[]})
+  })
   test('candidate delivery filter requires a complete valid submission and decision pair', async () => {
     const app = makeManageApp(); apps.push(app)
     const headers = { host: 'memory.example', authorization: 'Bearer t' }

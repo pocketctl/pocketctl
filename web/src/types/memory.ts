@@ -95,6 +95,11 @@ export interface MemoryDeliverySource {
 }
 
 export interface MemoryCandidate {
+  read_only?:boolean
+  evidence_state?:'available'|'unavailable'
+  curation_run_id?:string
+  bundle_id?:string
+  source_kind?:string
   delivery_source?: MemoryDeliverySource | null
   content_hash?:string
   automation_mode?:'off'|'shadow'|'assist'

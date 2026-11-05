@@ -9,8 +9,8 @@
 
     <div v-else-if="candidates.length === 0" class="memory-empty-state" data-testid="memory-review-empty">
       <span class="memory-empty-icon is-success" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span>
-      <strong>{{ t('memory.review_empty') }}</strong>
-      <p>{{ t('memory.review_empty_copy') }}</p>
+      <strong>{{ t(shadow ? 'memory.shadow_candidates_empty' : 'memory.review_empty') }}</strong>
+      <p>{{ t(shadow ? 'memory.shadow_candidates_empty_copy' : 'memory.review_empty_copy') }}</p>
     </div>
 
     <div v-else class="memory-review-layout">
@@ -39,7 +39,7 @@
         <ul v-if="bulkResults.length" aria-live="polite"><li v-for="r in bulkResults" :key="r.id">{{ r.id }} · {{ t(`memory.governance.automation.result.${r.status}`) }}</li></ul>
         <ul class="memory-candidate-list" data-testid="memory-review-items">
           <li v-for="candidate in pageCandidates" :key="candidate.candidate_id">
-            <label v-if="candidate.content_hash" class="memory-policy-field"><input v-model="bulkSelected" type="checkbox" :value="candidate.candidate_id" :disabled="bulkBusy||(!bulkSelected.includes(candidate.candidate_id)&&bulkSelected.length>=20)"/>{{ t('memory.governance.automation.select') }}</label>
+            <label v-if="candidate.content_hash && !shadow" class="memory-policy-field"><input v-model="bulkSelected" type="checkbox" :value="candidate.candidate_id" :disabled="bulkBusy||(!bulkSelected.includes(candidate.candidate_id)&&bulkSelected.length>=20)"/>{{ t('memory.governance.automation.select') }}</label>
             <button type="button" class="memory-candidate-row"
               :class="{ selected: candidate.candidate_id === selectedCandidateId }"
               :aria-current="candidate.candidate_id === selectedCandidateId ? 'true' : undefined"
@@ -132,7 +132,9 @@
           :data-testid="`memory-review-action-error-${selectedCandidate.candidate_id}`">
           {{ errorFor(selectedCandidate.candidate_id) }}
         </p>
-        <div class="memory-review-actions">
+        <p v-if="shadow" class="memory-notice" data-testid="memory-shadow-readonly">{{ t('memory.shadow_candidate_readonly') }}</p>
+        <p v-if="shadow && selectedCandidate.evidence_state === 'unavailable'" class="memory-error" role="alert">{{ t('memory.shadow_evidence_unavailable') }}</p>
+        <div v-if="!shadow" class="memory-review-actions">
           <button type="button" class="memory-button memory-review-action is-danger" :data-testid="`memory-reject-${selectedCandidate.candidate_id}`" @click="reject(selectedCandidate)">
             {{ t('memory.reject') }}
           </button>
@@ -158,10 +160,10 @@
 import ActionSelect from '../ActionSelect.vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import { acceptMemoryCandidate, listMemoryCandidates, MemoryClientError, rejectMemoryCandidate } from '../../services/memoryClient'
+import { acceptMemoryCandidate, listMemoryCandidates, listMemoryShadowCandidates, MemoryClientError, rejectMemoryCandidate } from '../../services/memoryClient'
 import type { MemoryCandidate } from '../../types/memory'
 
-const props = defineProps<{ delivery?: { submissionId: string; decisionId: string } }>()
+const props = defineProps<{ shadow?:boolean; delivery?: { submissionId: string; decisionId: string } }>()
 const { t } = useLocale()
 const emit = defineEmits<{
   (e: 'changed'): void
@@ -228,7 +230,7 @@ async function refresh(): Promise<void> {
   const generation = ++loadGeneration
   loadError.value = '';nextCursor.value=null;moreLoading.value=false;moreError.value=''
   try {
-    const result = await listMemoryCandidates(props.delivery)
+    const result = await (props.shadow ? listMemoryShadowCandidates() : listMemoryCandidates(props.delivery))
     if (generation !== loadGeneration) return
     candidates.value = result.candidates
     nextCursor.value=result.next_cursor??null;totalCount.value=result.total_count??result.candidates.length
@@ -251,7 +253,7 @@ async function loadMore():Promise<void>{
   const generation=loadGeneration,cursor=nextCursor.value
   moreLoading.value=true;moreError.value=''
   try{
-    const result=await listMemoryCandidates(props.delivery,cursor)
+    const result=await (props.shadow ? listMemoryShadowCandidates(cursor) : listMemoryCandidates(props.delivery,cursor))
     if(generation!==loadGeneration)return
     const existing=new Set(candidates.value.map(c=>c.candidate_id))
     candidates.value.push(...result.candidates.filter(c=>!existing.has(c.candidate_id)))
@@ -300,7 +302,7 @@ function reviewActionError(error: unknown, fallback: string): string {
   }
   return error instanceof Error ? error.message : fallback
 }
-function canAccept(candidate: MemoryCandidate): boolean { return !candidate.delivery_source || candidate.delivery_source.state === 'available' }
+function canAccept(candidate: MemoryCandidate): boolean { return !props.shadow && !candidate.read_only && (!candidate.delivery_source || candidate.delivery_source.state === 'available') }
 function toggleEdit(candidate: MemoryCandidate): void {
   if (!canAccept(candidate)) return
   if (editingId.value === candidate.candidate_id) {
@@ -326,6 +328,7 @@ async function accept(candidate: MemoryCandidate, edited: boolean): Promise<void
 }
 
 async function reject(candidate: MemoryCandidate): Promise<void> {
+  if(props.shadow || candidate.read_only)return
   errors.value[candidate.candidate_id] = ''
   try {
     await rejectMemoryCandidate(candidate.candidate_id, Number(candidate.revision), null, `web-reject-${candidate.candidate_id}-${Date.now()}`,...(candidate.content_hash?[{expectedHash:candidate.content_hash,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value)))}]:[]))

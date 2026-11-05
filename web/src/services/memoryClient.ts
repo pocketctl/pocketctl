@@ -235,6 +235,10 @@ export function listMemoryScenes(installationId?:string):Promise<MemorySceneList
   return installationId?scopedMemoryJson<MemorySceneList>(installationId,'memory.search',path):memoryJson<MemorySceneList>('memory.search',path)
 }
 
+export function createMemoryPersonalScene(installationId:string,name:string,idempotencyKey:string):Promise<{space_id:string;name:string;domain:'personal_project';destinations:['personal']}> {
+ return scopedMemoryJson(installationId,'memory.manage','/api/v1/memory/scenes',{method:'POST',headers:{'Idempotency-Key':idempotencyKey},body:JSON.stringify({expected_revision:0,name,domain:'personal_project'})})
+}
+
 /** Search; superseded calls are aborted so only the newest response lands. */
 export async function searchMemory(
   query: string,
@@ -345,6 +349,10 @@ export function listVersionEvidence(versionId: string, installationId?: string):
 
 export function getMemoryEvidence(evidenceId: string): Promise<MemoryEvidence> {
   return memoryJson<MemoryEvidence>('memory.search', `/api/v1/memory/evidence/${evidenceId}`)
+}
+
+export function listMemoryShadowCandidates(cursor?: string | null): Promise<{candidates:MemoryCandidate[];next_cursor?:string|null;total_count?:number}> {
+ return memoryJson('memory.manage','/api/v1/memory/shadow-candidates'+(cursor?'?cursor='+encodeURIComponent(cursor):''))
 }
 
 export function listMemoryCandidates(delivery?: { submissionId: string; decisionId: string }, cursor?: string | null): Promise<{ candidates: MemoryCandidate[]; next_cursor?: string | null; total_count?: number }> {

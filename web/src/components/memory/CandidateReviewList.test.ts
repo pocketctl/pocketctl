@@ -7,6 +7,7 @@ vi.mock('../../composables/useLocale', () => ({
 
 const memoryClient = vi.hoisted(() => ({
   listMemoryCandidates: vi.fn(),
+  listMemoryShadowCandidates: vi.fn(),
   acceptMemoryCandidate: vi.fn(),
   rejectMemoryCandidate: vi.fn(),
 }))
@@ -44,6 +45,19 @@ describe('CandidateReviewList', () => {
     memoryClient.listMemoryCandidates.mockResolvedValue({ candidates })
     memoryClient.acceptMemoryCandidate.mockResolvedValue({ claim_id: 'claim-1', version_id: 'version-1' })
     memoryClient.rejectMemoryCandidate.mockResolvedValue({ candidate_id: 'candidate-1' })
+  })
+
+  test('shadow candidates show evidence and never expose review writes',async()=>{
+    memoryClient.listMemoryShadowCandidates.mockResolvedValue({candidates:[{...candidates[0],status:'shadow'}],total_count:1,next_cursor:null})
+    const wrapper=mount(CandidateReviewList,{props:{shadow:true}});await flushPromises()
+    expect(wrapper.text()).toContain('Use serial phase branches')
+    expect(wrapper.text()).toContain('Verified branch order')
+    expect(memoryClient.listMemoryCandidates).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="memory-accept-candidate-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="memory-reject-candidate-1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="memory-edit-start-candidate-1"]').exists()).toBe(false)
+    expect(memoryClient.acceptMemoryCandidate).not.toHaveBeenCalled()
+    expect(memoryClient.rejectMemoryCandidate).not.toHaveBeenCalled()
   })
 
   test('personal bulk preserves per-item conflict and sends exact hash',async()=>{

@@ -173,6 +173,14 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     return undefined
   }
 
+  app.get('/api/v1/memory/shadow-candidates',async(request,reply)=>{
+    const grant=await guardManage(request,reply);if(!grant)return
+    const parsed=CandidateQuerySchema.safeParse(request.query)
+    if(!parsed.success||parsed.data.submission_id||parsed.data.decision_id)return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid shadow candidate query')))
+    try{return await review.shadowQueuePage({installationId:grant.installationId,limit:parsed.data.limit,cursor:parsed.data.cursor})}
+    catch(error){if(error instanceof Error&&error.message==='invalid_cursor')return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid_cursor')));throw error}
+  })
+
   app.get('/api/v1/memory/candidates', async (request, reply) => {
     const grant = await guardManage(request, reply)
     if (!grant) return
@@ -367,7 +375,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
             "SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))",[grant.installationId,session])
           await requireCurrentInstallationAuthority(client,grant)
         }
-        if(operation==='create_manual_claim'||operation==='revise_manual_claim'||operation==='protect_claim'){
+        if(operation==='create_manual_claim'||operation==='revise_manual_claim'||operation==='protect_claim'||operation==='create_personal_scene'){
           if(grant.callerType!=='web')throw new TargetBindingError('explicit web user required')
           const personal=await client.query(`SELECT 1 FROM memory_owner_scopes WHERE installation_id=$1 AND owner_scope_kind='personal' AND state='active' FOR SHARE`,[grant.installationId])
           if(!personal.rowCount)throw new TargetBindingError('personal scope required')
@@ -768,9 +776,9 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
 
 function isManageRequest(method: string, rawUrl: string): boolean {
   const path = rawUrl.split('?')[0]
-  if (method === 'GET' && (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/settings')) return true
+  if (method === 'GET' && (path === '/api/v1/memory/candidates' || path === '/api/v1/memory/shadow-candidates' || path === '/api/v1/memory/settings')) return true
   if (method === 'GET' && /^\/api\/v1\/memory\/delivery-sources\/[^/]+\/decisions\/[^/]+$/.test(path)) return true
-  if (method === 'POST' && (path === '/api/v1/memory/claims' || /^\/api\/v1\/memory\/claims\/[^/]+\/manual-revisions$/.test(path))) return true
+  if (method === 'POST' && (path === '/api/v1/memory/claims' || path === '/api/v1/memory/scenes' || /^\/api\/v1\/memory\/claims\/[^/]+\/manual-revisions$/.test(path))) return true
   if (method === 'GET' && path === '/api/v1/memory/extraction-issues') return true
   if (method === 'POST' && /^\/api\/v1\/memory\/extraction-issues\/[^/]+\/retry$/.test(path)) return true
   if (method === 'POST' && path === '/api/v1/memory/feedback') return true

@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
@@ -55,7 +56,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.5.14"
+var version = "0.5.15"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -3939,6 +3940,7 @@ func deliverDeferredInitialPrompt(
 	_, registrationErr := grants.RegisterSession(ctx, registrationID, sessionID)
 	return send(session.UserMessageInput{
 		SessionID: sessionID, Content: prompt, RequestID: requestID,
+		MsgID:             uuid.NewSHA1(uuid.NameSpaceOID, []byte("initial-prompt\x00"+sessionID+"\x00"+requestID)).String(),
 		SkipMemoryContext: registrationErr != nil,
 	})
 }
