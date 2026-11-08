@@ -242,8 +242,12 @@ describeDb('two-stage inbox retention (PostgreSQL)', () => {
     expect(await sweep()).toMatchObject({ reclaimed: 1, deleted: 1 })
   })
 
-  test('a later snapshot rebuilds from Relay history without requeueing reclaimed old bodies', async () => {
+  test('a later snapshot rebuilds history while retaining an unproven original source UUID', async () => {
     await seed(1, '8 days'); await sweep()
+    const original = (await pool.query(`SELECT source_event_id,payload,payload_hash,source_provenance,mapping_state
+      FROM source_events WHERE installation_id=$1 AND origin='feed'`, [id])).rows
+    expect(original).toHaveLength(1)
+    expect(original[0].mapping_state).toBe('unproven')
     const snapshots = createSnapshotRepository(pool)
     const run = await snapshots.startRun(id)
     const payload = { ...envelope(1).data, turn_id: 'retention-turn' }
@@ -255,8 +259,10 @@ describeDb('two-stage inbox retention (PostgreSQL)', () => {
     expect((await receipt(1)).projection_state).toBe('projected')
     expect((await receipt(1)).body_reclaimed_at).toBeInstanceOf(Date)
     expect((await receipt(1)).data).toEqual({})
-    expect((await pool.query(`SELECT origin,payload FROM source_events WHERE installation_id=$1`, [id])).rows)
-      .toEqual([{ origin: 'snapshot', payload }])
+    expect((await pool.query(`SELECT source_event_id,payload,payload_hash,source_provenance,mapping_state
+      FROM source_events WHERE installation_id=$1 AND origin='feed'`, [id])).rows).toEqual(original)
+    expect((await pool.query(`SELECT origin,payload FROM source_events WHERE installation_id=$1 ORDER BY origin`, [id])).rows)
+      .toEqual([{ origin: 'feed', payload: envelope(1).data }, { origin: 'snapshot', payload }])
   })
 
   test('snapshot_required and off mode preserve data', async () => {
