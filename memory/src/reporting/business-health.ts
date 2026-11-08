@@ -1,5 +1,6 @@
 import {UNRESOLVED_EXTRACTION_SOURCE} from '../extraction/recovery.js'
 import {queryHealth,type HealthPool} from './health-query.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 
 export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap'] as const
 export type BusinessHealthReason = typeof BUSINESS_HEALTH_REASONS[number]
@@ -46,10 +47,11 @@ export function evaluateBusinessHealth(row: BusinessHealthRow, enabled = true) {
 
 /** No source text, identity labels or arbitrary exception messages escape this query. */
 export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHealthRow[]> {
+  const shared=sourcePoolContext(pool).namespace==='memory'
   const result = await queryHealth<BusinessHealthRow>(pool,`
     SELECT i.installation_id, i.local_status, i.relay_status, i.last_error_code,
       i.last_feed_id::text,
-      NOT i.snapshot_required AS feed_enabled,
+      NOT i.snapshot_required ${shared?"AND COALESCE(source_mode.mode,'legacy-feed') IN ('legacy-feed','shared-shadow')":''} AS feed_enabled,
       EXTRACT(EPOCH FROM (NOW() - COALESCE(i.last_ack_at, i.created_at))) AS feed_lag_seconds,
       COALESCE(f.extraction_mode, 'off') AS extraction_mode,
       (SELECT COUNT(*) FROM memory_jobs j WHERE j.installation_id=i.installation_id
@@ -69,6 +71,7 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='dead'
         AND j.created_at>NOW()-INTERVAL '24 hours') AS failed_jobs_24h
     FROM memory_installations i
+    ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
     LEFT JOIN memory_feature_settings f ON f.installation_id=i.installation_id
     LEFT JOIN LATERAL (SELECT MAX(completed_at) AS last_extract_at FROM memory_extraction_runs r
       WHERE r.installation_id=i.installation_id AND r.state='succeeded') runs ON TRUE

@@ -11,6 +11,7 @@ import {directLaunchFixture} from './direct-launch-fixture.js'
 import {bindOriginalPersonalReferencePage,type OriginalBindingCopyReceipt} from '../../migrations/shared-forward/original-reference-binding.js'
 import {hash} from '../../migrations/shared-forward/source-maintenance-common.js'
 import type {MappingResult} from '../../migrations/shared-source/mapping.js'
+import {prepareOriginalPayloadRetirement,applyOriginalPayloadRetirement} from '../../migrations/shared-forward/original-payload-retirement.js'
 const url=process.env.ORIGINAL_BINDING_TEST_DATABASE_URL,sourceUrl=process.env.ORIGINAL_BINDING_SOURCE_TEST_DATABASE_URL,suite=url&&sourceUrl?describe:describe.skip
 suite('finite original UUID binding with actual controlled reader and commit fence',()=>{
  let source:pg.Client,target:pg.Client,scope:SourceScope,root:{kind:'relay_event';key:string},copy:OriginalBindingCopyReceipt,mappings:MappingResult[],originalHash:string,fixtureClosed=false
@@ -172,5 +173,58 @@ suite('finite original UUID binding with actual controlled reader and commit fen
    for(const [key,value]of Object.entries({SHARED_FORWARD_SOURCE_URL:before.source,SHARED_FORWARD_TARGET_URL:before.target,MEMORY_SHARED_ARCHIVE_DIRECTORY:before.directory,MEMORY_SHARED_ARCHIVE_NAMESPACE:before.namespace}))if(value===undefined)delete process.env[key];else process.env[key]=value
    await rm(dir,{recursive:true,force:true})
   }
+ })
+ test('retirement refuses changed bytes and stale rows without removing any original body',async()=>{
+  source=new pg.Client({connectionString:sourceUrl});await source.connect()
+  const admin=new URL(url!);admin.username='postgres';admin.password='synthetic-only'
+  target=new pg.Client({connectionString:admin.href});await target.connect()
+  await target.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE WHERE singleton')
+  const input={copy,scope,root,sourceEventIds:mappings.map(m=>m.sourceEventId)}
+  await expect(prepareOriginalPayloadRetirement(source,target,{...input,sourceEventIds:[input.sourceEventIds[0],input.sourceEventIds[0]]},{archive})).rejects.toThrow('original_retirement_input_invalid')
+  await target.query("UPDATE memory.source_events SET payload='{}' WHERE source_event_id=$1",[mappings[0].sourceEventId])
+  try{await expect(prepareOriginalPayloadRetirement(source,target,input,{archive})).rejects.toThrow('original_retirement_body_not_equivalent')}finally{
+   const body=(await source.query('SELECT payload::text AS body FROM public.source_events WHERE source_event_id=$1',[mappings[0].sourceEventId])).rows[0].body
+   await target.query('UPDATE memory.source_events SET payload=$2::jsonb WHERE source_event_id=$1',[mappings[0].sourceEventId,body])
+  }
+  const page=await prepareOriginalPayloadRetirement(source,target,input,{archive})
+  await expect(applyOriginalPayloadRetirement(source,target,page,{beforeCommit:async()=>{await target.query('UPDATE memory.source_events SET created_at=created_at WHERE source_event_id=$1',[mappings[1].sourceEventId])}})).rejects.toThrow('original_retirement_row_changed')
+  expect((await target.query('SELECT count(*)::int AS n FROM memory.source_events WHERE payload IS NULL')).rows[0].n).toBe(0)
+ })
+ test('retirement requires current authority and verified cold bytes before deleting a page',async()=>{
+  const input={copy,scope,root,sourceEventIds:mappings.map(m=>m.sourceEventId)},page=await prepareOriginalPayloadRetirement(source,target,input,{archive})
+  await expect(applyOriginalPayloadRetirement(source,target,page,{beforeCommit:async()=>{await target.query("UPDATE public.extension_installations SET status='revoked' WHERE installation_id=$1",[scope.installationId])}})).rejects.toThrow('original_retirement_authority_changed')
+  await target.query("UPDATE public.extension_installations SET status='active' WHERE installation_id=$1",[scope.installationId])
+  const key=(await target.query('SELECT object_key FROM public.session_archive_chunks LIMIT 1')).rows[0].object_key,file=join(archiveDirectory!,key),bytes=await readFile(file)
+  await writeFile(file,Buffer.from('corrupt'))
+  try{await expect(prepareOriginalPayloadRetirement(source,target,input,{archive})).rejects.toThrow('archive_unavailable')}finally{await writeFile(file,bytes)}
+  expect((await target.query('SELECT count(*)::int AS n FROM memory.source_events WHERE payload IS NULL')).rows[0].n).toBe(0)
+ })
+ test('retirement rejects an unproved Session, a live writer and a changed source mode generation',async()=>{
+  const input=()=>({copy,scope,root,sourceEventIds:mappings.map(m=>m.sourceEventId)})
+  await target.query("UPDATE memory.source_events SET mapping_state='unproven' WHERE source_event_id=$1",[mappings[0].sourceEventId])
+  try{await expect(prepareOriginalPayloadRetirement(source,target,input(),{archive})).rejects.toThrow('original_retirement_session_unresolved')}finally{await target.query("UPDATE memory.source_events SET mapping_state='verified' WHERE source_event_id=$1",[mappings[0].sourceEventId])}
+  await target.query('ALTER ROLE original_binding_memory LOGIN')
+  try{await expect(prepareOriginalPayloadRetirement(source,target,input(),{archive})).rejects.toThrow('target_writers_not_fenced')}finally{await target.query('ALTER ROLE original_binding_memory NOLOGIN')}
+  const page=await prepareOriginalPayloadRetirement(source,target,input(),{archive})
+  const paused=(await target.query("SELECT shared.transition_memory_source_mode($1,$2::bigint,'paused')::text AS generation",[scope.installationId,scope.modeGeneration])).rows[0].generation
+  await expect(applyOriginalPayloadRetirement(source,target,page)).rejects.toThrow('original_retirement_authority_changed')
+  scope.modeGeneration=(await target.query("SELECT shared.transition_memory_source_mode($1,$2::bigint,'shared-shadow')::text AS generation",[scope.installationId,paused])).rows[0].generation
+  expect((await target.query('SELECT count(*)::int AS n FROM memory.source_events WHERE payload IS NULL')).rows[0].n).toBe(0)
+ })
+ test('retires only proved duplicate payloads, keeps metadata and UUIDs, and resolves through the actual Memory reader',async()=>{
+  const input={copy,scope,root,sourceEventIds:mappings.map(m=>m.sourceEventId)}
+  const metadata=async()=>(await target.query("SELECT encode(sha256(convert_to(jsonb_agg(to_jsonb(s)-'payload' ORDER BY source_event_id)::text,'UTF8')),'hex') AS hash FROM memory.source_events s")).rows[0].hash
+  const before=await metadata(),page=await prepareOriginalPayloadRetirement(source,target,input,{archive})
+  expect(await applyOriginalPayloadRetirement(source,target,page)).toMatchObject({changed:2,alreadyRetired:0,originalIdsPreserved:true,provenanceRewritten:false,bodyReclaimedAtChanged:false})
+  expect(await metadata()).toBe(before)
+  expect((await target.query('SELECT count(*)::int AS n FROM memory.source_events WHERE payload IS NULL AND body_reclaimed_at IS NULL')).rows[0].n).toBe(2)
+  const {bindSourcePool}=await import('../../sources/pool-context.js'),{prepareSourceReferences}=await import('../../sources/prepared-sources.js')
+  bindSourcePool(target,{namespace:'memory',archive});await target.query('SET search_path=pg_catalog,memory,shared')
+  const actual=await prepareSourceReferences(target as unknown as pg.Pool,scope.installationId,input.sourceEventIds)
+  expect(actual.events.map(e=>e.source_event_id).sort()).toEqual(input.sourceEventIds.sort())
+  for(const e of actual.events)expect(canonicalPayloadHash(e.payload).equals(e.payload_hash)).toBe(true)
+  await target.query('BEGIN');try{await actual.assertCurrent(target,{forCommit:true});await target.query('COMMIT')}catch(e){await target.query('ROLLBACK');throw e}
+  expect(await applyOriginalPayloadRetirement(source,target,await prepareOriginalPayloadRetirement(source,target,input,{archive}))).toMatchObject({changed:0,alreadyRetired:2})
+  expect((await source.query("SELECT encode(sha256(convert_to(jsonb_agg(to_jsonb(s) ORDER BY source_event_id)::text,'UTF8')),'hex') AS hash FROM public.source_events s")).rows[0].hash).toBe(originalHash)
  })
 })

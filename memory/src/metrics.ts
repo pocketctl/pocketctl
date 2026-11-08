@@ -4,17 +4,21 @@ import {BUSINESS_HEALTH_REASONS, loadBudgetUncertainty,loadBusinessHealth, evalu
 import {JOB_TYPES} from './jobs/types.js'
 import { Registry, Counter, Gauge, Histogram } from 'prom-client'
 import type pg from 'pg'
+import {sourcePoolContext} from './sources/pool-context.js'
 
 export async function updateFeedLagGauge(
   pool: Pick<pg.Pool, 'query'>,
   gauge: Pick<Gauge, 'set'>,
 ): Promise<void> {
+  const shared=sourcePoolContext(pool).namespace==='memory'
   const lag = await pool.query<{ lag_seconds: string | null }>(`
-    SELECT EXTRACT(EPOCH FROM (NOW() - MIN(COALESCE(last_pull_at, created_at))))::text AS lag_seconds
-    FROM memory_installations
-    WHERE relay_status IN ('pending', 'active')
-      AND local_status IN ('discovering', 'syncing', 'ready', 'degraded')
-      AND snapshot_required = FALSE
+    SELECT EXTRACT(EPOCH FROM (NOW() - MIN(COALESCE(i.last_pull_at, i.created_at))))::text AS lag_seconds
+    FROM memory_installations i
+    ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
+    WHERE i.relay_status IN ('pending', 'active')
+      AND i.local_status IN ('discovering', 'syncing', 'ready', 'degraded')
+      AND i.snapshot_required = FALSE
+      ${shared?"AND COALESCE(source_mode.mode,'legacy-feed') IN ('legacy-feed','shared-shadow')":''}
   `)
   gauge.set(Number(lag.rows[0]?.lag_seconds ?? 0))
 }

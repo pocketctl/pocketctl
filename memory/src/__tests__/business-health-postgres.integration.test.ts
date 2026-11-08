@@ -4,7 +4,8 @@ import {afterAll,beforeAll,expect,test,describe} from 'vitest'
 import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {loadBusinessHealth,evaluateBusinessHealth,summarizeBusinessHealth} from '../reporting/business-health.js'
-import {createMemoryMetrics,updateBusinessHealthGauges} from '../metrics.js'
+import {createMemoryMetrics,updateBusinessHealthGauges,updateFeedLagGauge} from '../metrics.js'
+import {bindSourcePool} from '../sources/pool-context.js'
 import {createStatusWorker} from '../reporting/status-worker.js'
 const url=process.env.MEMORY_TEST_DATABASE_URL
 const enabled=Boolean(url&&process.env.RUN_MEMORY_POSTGRES_INTEGRATION==='1')
@@ -15,6 +16,37 @@ suite('business health PostgreSQL',()=>{
  async function healthRows(){return (await loadBusinessHealth(pool)).filter(row=>row.installation_id===id)}
  beforeAll(async()=>{pool=new pg.Pool({connectionString:url});await assertMemoryTestDatabase(pool,url!);await applyMemorySchema(pool);await pool.query('TRUNCATE memory_installations CASCADE')})
  afterAll(async()=>{await pool?.end()})
+ test('shared-active personal health stops timing retired Feed while legacy organization remains monitored',async()=>{
+  const personal='dddddddd-dddd-4ddd-8ddd-dddddddddddd',organization='eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  await pool.query('CREATE SCHEMA shared;CREATE TABLE shared.memory_source_modes(installation_id uuid PRIMARY KEY,mode text NOT NULL)')
+  await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version,created_at,last_ack_at,last_pull_at)
+   SELECT id,'pocketctl-memory','active','ready',1,NOW()-interval '2 hours',NOW()-interval '301 seconds',NOW()-interval '2 hours' FROM unnest($1::uuid[]) id`,[[personal,organization]])
+  await pool.query("INSERT INTO shared.memory_source_modes VALUES($1,'shared-active'),($2,'legacy-feed')",[personal,organization])
+  bindSourcePool(pool,{namespace:'memory'})
+  const load=async()=>new Map((await loadBusinessHealth(pool)).map(row=>[row.installation_id,row]))
+  try{
+   let rows=await load()
+   expect(rows.get(personal)!.feed_enabled).toBe(false)
+   expect(evaluateBusinessHealth(rows.get(personal)!).reasons).not.toContain('feed_stalled')
+   expect(evaluateBusinessHealth(rows.get(organization)!).reasons).toContain('feed_stalled')
+   let lag=-1;await updateFeedLagGauge(pool,{set:value=>{lag=value as number}});expect(lag).toBeGreaterThan(7000)
+   await pool.query("UPDATE memory_installations SET last_pull_at=NOW() WHERE installation_id=$1",[organization])
+   await updateFeedLagGauge(pool,{set:value=>{lag=value as number}});expect(lag).toBeLessThan(5)
+   for(const mode of ['shared-shadow','legacy-feed']){
+    await pool.query('UPDATE shared.memory_source_modes SET mode=$2 WHERE installation_id=$1',[personal,mode])
+    rows=await load();expect(evaluateBusinessHealth(rows.get(personal)!).reasons).toContain('feed_stalled')
+   }
+   await pool.query('DELETE FROM shared.memory_source_modes WHERE installation_id=$1',[personal])
+   expect(evaluateBusinessHealth((await load()).get(personal)!).reasons).toContain('feed_stalled')
+   await pool.query("INSERT INTO shared.memory_source_modes VALUES($1,'paused')",[personal])
+   await pool.query("UPDATE memory_installations SET local_status='integrity_error',last_error_code='hash_mismatch' WHERE installation_id=$1",[personal])
+   expect(evaluateBusinessHealth((await load()).get(personal)!)).toMatchObject({state:'error',primaryError:'hash_mismatch'})
+  }finally{
+   bindSourcePool(pool,{namespace:'public'})
+   await pool.query('DELETE FROM memory_installations WHERE installation_id=ANY($1::uuid[])',[[personal,organization]])
+   await pool.query('DROP TABLE shared.memory_source_modes;DROP SCHEMA shared')
+  }
+ })
  test('shared empty control ACK refreshes health; failed ACK still reports stalled',async()=>{
   const shared='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
   await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version,snapshot_required,created_at,last_ack_at) VALUES($1,'pocketctl-memory','active','ready',1,FALSE,NOW()-interval '2 hours',NOW()-interval '301 seconds')`,[shared])
