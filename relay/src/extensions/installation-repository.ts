@@ -12,7 +12,7 @@ export interface ExtensionInstallation {
   enabled_services: string[]
   event_filter: Record<string, unknown>
   start_policy: 'from_now' | 'retained_history'
-  start_feed_id: number
+  start_feed_id: number | string
   config_version: number
   created_at: Date
   updated_at: Date
@@ -106,7 +106,7 @@ function toInstallation(row: InstallationRow): ExtensionInstallation {
     enabled_services: row.enabled_services ?? [],
     event_filter: row.event_filter ?? {},
     start_policy: row.start_policy,
-    start_feed_id: Number(row.start_feed_id),
+    start_feed_id: Number.isSafeInteger(Number(row.start_feed_id)) ? Number(row.start_feed_id) : String(row.start_feed_id),
     config_version: Number(row.config_version),
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -155,10 +155,10 @@ export class ExtensionInstallationRepository {
     // from_now anchors the checkpoint at the current feed head so the
     // provider never receives pre-installation history implicitly.
     const startFeedId = input.startPolicy === 'from_now'
-      ? Number((await this.pool.query<{ max: string | null }>(
+      ? (await this.pool.query<{ max: string | null }>(
         `SELECT COALESCE(MAX(feed_id), 0)::text AS max FROM extension_feed`,
-      )).rows[0]?.max ?? 0)
-      : 0
+      )).rows[0]?.max ?? '0'
+      : '0'
     const result = await this.pool.query<InstallationRow>(
       `INSERT INTO extension_installations
          (installation_id, provider_id, owner_user_id, status, granted_scopes,

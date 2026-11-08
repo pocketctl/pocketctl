@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { Router } from '../router.js'
 import {
@@ -20,7 +21,9 @@ function pool(): any {
   const value: any = {
     _calls: calls,
     query: vi.fn(async (sql: string, params: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,params);if(native)return native
       calls.push({ sql, params })
+      if(sql.includes('session_allowed'))return {rows:[{session_exists:true,session_allowed:true,session_retired:false}],rowCount:1}
       if (/SELECT 1 FROM deleted_sessions/i.test(sql)) return { rows: [], rowCount: 0 }
       if (/SELECT 1 FROM sessions/i.test(sql)) return { rows: [{ ok: 1 }], rowCount: 1 }
       if (/SELECT daemon_id FROM sessions/i.test(sql)) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }

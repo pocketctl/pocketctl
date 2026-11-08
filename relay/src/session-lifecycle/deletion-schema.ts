@@ -12,14 +12,21 @@ export async function initLifecycleDeletionSchema(db:Pick<pg.Pool,'query'>):Prom
     acked_at TIMESTAMPTZ,provider_receipt VARCHAR(512),UNIQUE(installation_id,session_id)
   );
   CREATE INDEX IF NOT EXISTS idx_extension_session_deletion_pending ON extension_session_deletions(provider_id,requested_at,request_id) WHERE status='pending';
-  CREATE OR REPLACE FUNCTION journal_session_deletion() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN
-    INSERT INTO deleted_sessions(session_id) VALUES(OLD.session_id) ON CONFLICT DO NOTHING;
+  CREATE OR REPLACE FUNCTION journal_session_deletion() RETURNS TRIGGER LANGUAGE plpgsql AS $$ DECLARE ids TEXT[];BEGIN
+    ids=public.native_session_alias_set(ARRAY[OLD.session_id]);
+    INSERT INTO deleted_sessions(session_id) SELECT unnest(ids) ON CONFLICT DO NOTHING;
+    UPDATE session_archive_object_deletions SET deletion_subject_session_id=OLD.session_id
+      WHERE user_id=OLD.user_id AND session_id=ANY(ids);
+    -- Include unreferenced/pruned and in-flight manifests under every storage name.
+    DELETE FROM session_archive_manifests WHERE user_id=OLD.user_id AND session_id=ANY(ids)
+      AND NOT EXISTS(SELECT 1 FROM events e WHERE e.body_manifest_id=session_archive_manifests.manifest_id)
+      AND NOT EXISTS(SELECT 1 FROM session_document_versions v WHERE v.body_manifest_id=session_archive_manifests.manifest_id);
     INSERT INTO session_lifecycle_deletions(session_id,user_id,daemon_id) VALUES(OLD.session_id,OLD.user_id,OLD.daemon_id) ON CONFLICT DO NOTHING;
     IF OLD.user_id IS NOT NULL THEN
       PERFORM pg_notify('pocketctl_attention',json_build_object('entity','lifecycle','user_id',OLD.user_id,'item_id',OLD.session_id,'revision',1,'operation','removed')::text);
     END IF;
     INSERT INTO extension_session_deletions(request_id,provider_id,installation_id,session_id)
-      SELECT gen_random_uuid(),provider_id,installation_id,OLD.session_id FROM extension_installations
+      SELECT gen_random_uuid(),provider_id,installation_id,sid FROM extension_installations CROSS JOIN unnest(ids) sid
       WHERE owner_user_id=OLD.user_id AND owner_scope_kind='personal' AND status IN ('pending','active','paused','revoking')
         AND 'session:deletion:read'=ANY(granted_scopes)
       ON CONFLICT(installation_id,session_id) DO NOTHING;

@@ -1,3 +1,5 @@
+import {guardRetainedEvidence} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {currentClaimVersionSql} from '../claims/version-selection.js'
 import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
 import type pg from 'pg'
@@ -131,6 +133,8 @@ async function readEvidence(client:pg.PoolClient,input:GitReaderInput,versionId:
       await currentSession(event.session_id)
     }
   }
+  try{await guardRetainedEvidence(client,installationId,evidence.map(e=>({source_event_id:e.source_event_id,artifact_id:e.artifact_id,episode_id:e.episode_id,evidence_kind:e.evidence_kind})))}
+  catch(error){if(preparedSourceUnavailable(error))stale();throw error}
   return evidence
 }
 function evidencePublic(e:Row) {return {evidenceId:e.evidence_id,versionId:e.version_id,hash:e.excerpt_hash.toString('hex'),kind:e.evidence_kind,ordinal:e.ordinal,visibility:e.visibility}}

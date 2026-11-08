@@ -1,3 +1,7 @@
+import {guardRetainedVersions} from '../sources/retained-versions.js'
+import {retainedSourceRead,type SourceReadGrant} from '../sources/retained-read.js'
+import {guardRetainedEvidence} from '../sources/retained-authority.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
 import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
 import { createHmac, timingSafeEqual } from 'crypto'
@@ -9,12 +13,13 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
   return {
     async listActiveClaims(
       installationId: string,
-      input: { limit?: number; cursor?: string | null } = {},
+      input: { limit?: number; cursor?: string | null;authorityGrant?:SourceReadGrant } = {},
     ) {
       const limit = Math.min(Math.max(1, input.limit ?? 50), 100)
       const before = decodeClaimListCursor(input.cursor, installationId, cursorSigningKey)
+      const value=await retainedSourceRead(pool,{installationId,authorityGrant:input.authorityGrant},async db=>{
       const [claims, count] = await Promise.all([
-        pool.query(`
+        db.query(`
           SELECT c.claim_id::text, c.claim_type, c.scope_kind, c.scope_key,
                  c.state, c.revision::text, c.current_version_id::text,
                  c.created_at, c.updated_at,
@@ -35,7 +40,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           ORDER BY c.updated_at DESC, c.claim_id DESC
           LIMIT $4
         `, [installationId, before?.updatedAt ?? null, before?.claimId ?? null, limit + 1]),
-        pool.query(`
+        db.query(`
           SELECT COUNT(*)::int AS count
           FROM knowledge_claims c
           JOIN knowledge_versions v
@@ -47,6 +52,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
       const hasMore = claims.rows.length > limit
       const page = hasMore ? claims.rows.slice(0, limit) : claims.rows
       const last = page.at(-1)
+      await guardRetainedVersions(db,installationId,page.map(row=>row.current_version_id),{expectedStatements:new Map(page.map(row=>[row.current_version_id,row.statement])),requireCurrent:true})
       return {
         claims: page.map(row=>({...row,authority_compatibility:versionAuthorityCompatibility(row.authority)})),
         next_cursor: hasMore && last
@@ -59,16 +65,19 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           : null,
         total_count: Number(count.rows[0]?.count ?? 0),
       }
+      })
+      return value??{claims:[],next_cursor:null,total_count:0}
     },
 
     async getClaim(
       installationId: string,
       claimId: string,
-      input: { versionLimit?: number; versionCursor?: string | null } = {},
+      input: { versionLimit?: number; versionCursor?: string | null;authorityGrant?:SourceReadGrant } = {},
     ) {
       const versionLimit = Math.min(Math.max(1, input.versionLimit ?? 20), 20)
       const beforeVersion = decodeVersionCursor(input.versionCursor, claimId, cursorSigningKey)
-      const claim = await pool.query(`
+      const value=await retainedSourceRead(pool,{installationId,authorityGrant:input.authorityGrant},async db=>{
+      const claim = await db.query(`
         SELECT c.claim_id::text, c.claim_type, c.scope_kind, c.scope_key,
                c.state, c.revision::text, c.created_at, c.updated_at,
                c.current_version_id::text,
@@ -80,7 +89,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         WHERE c.installation_id = $1 AND c.claim_id = $2
       `, [installationId, claimId])
       if (!claim.rows[0]) return null
-      const versions = await pool.query(`
+      const versions = await db.query(`
         SELECT * FROM (
           SELECT version_id::text, version_number, statement, structured_content, authority,
                  confidence::text, repository_id::text, repo_snapshot_id::text,
@@ -102,6 +111,7 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
       const hasMore = versions.rows.length > versionLimit
       const page = hasMore ? versions.rows.slice(1) : versions.rows
       const oldestVersion = page[0]?.version_number
+      await guardRetainedVersions(db,installationId,[claim.rows[0].current_version_id,...page.map(row=>row.version_id)].filter(Boolean),{expectedStatements:new Map(page.map(row=>[row.version_id,row.statement])),expectedBodyStates:new Map(page.map(row=>[row.version_id,row.body_state]))})
       return {
         claim: claim.rows[0],
         versions: page.map(row => ({ ...row, ...(row.body_state==='reclaimed'?{statement:null,structured_content:null,availability:'body_reclaimed'}:{availability:'available'}), version_number: String(row.version_number),authority_compatibility:versionAuthorityCompatibility(row.authority) })),
@@ -109,11 +119,14 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           ? encodeVersionCursor(claimId, oldestVersion, cursorSigningKey)
           : null,
       }
+      })
+      return value??null
     },
 
     /** Authorized consumers select one revision first, then its fact window. */
-    async selectClaimVersion(installationId:string,claimId:string,input:{asOf?:Date}={}) {
-      const result=await pool.query(`WITH selection_clock AS (SELECT COALESCE($3::timestamptz,clock_timestamp()) AS at)
+    async selectClaimVersion(installationId:string,claimId:string,input:{asOf?:Date;authorityGrant?:SourceReadGrant}={}) {
+      const value=await retainedSourceRead(pool,{installationId,authorityGrant:input.authorityGrant},async db=>{
+      const result=await db.query(`WITH selection_clock AS (SELECT COALESCE($3::timestamptz,clock_timestamp()) AS at)
         SELECT v.* FROM selection_clock CROSS JOIN knowledge_claims c
         JOIN knowledge_versions v USING(installation_id,claim_id)
         WHERE c.installation_id=$1 AND c.claim_id=$2 AND c.state='active'
@@ -121,11 +134,15 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
           AND (v.valid_from IS NULL OR v.valid_from<=selection_clock.at)
           AND (v.valid_until IS NULL OR v.valid_until>selection_clock.at)`,[installationId,claimId,input.asOf??null])
       const row=result.rows[0]
+      if(row)await guardRetainedVersions(db,installationId,[row.version_id],{expectedStatements:new Map([[row.version_id,row.statement]]),expectedBodyStates:new Map([[row.version_id,row.body_state]])})
       return row?.body_state==='reclaimed'?{...row,statement:null,structured_content:null,availability:'body_reclaimed'}:row??null
+      })
+      return value??null
     },
 
-    async getEvidence(installationId: string, evidenceId: string) {
-      const rows = await pool.query(`
+    async getEvidence(installationId: string, evidenceId: string,authorityGrant?:SourceReadGrant) {
+      const value=await retainedSourceRead(pool,{installationId,authorityGrant},async db=>{
+      const rows = await db.query(`
         SELECT e.evidence_id::text, e.evidence_kind, e.episode_id::text,
                e.source_event_id::text, e.artifact_id::text, e.excerpt, e.locator,
                e.occurred_at, e.ordinal, v.claim_id::text, v.version_id::text,encode(e.excerpt_hash,'hex') AS excerpt_hash,${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required
@@ -136,10 +153,12 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         WHERE c.state='active' AND c.consumption_hold_reason IS NULL AND ${currentClaimVersionSql()}
           AND (v.valid_from IS NULL OR v.valid_from<=clock_timestamp()) AND (v.valid_until IS NULL OR v.valid_until>clock_timestamp())
           AND e.installation_id = $1 AND e.evidence_id = $2
+          ${sourcePoolContext(pool).namespace==='memory'?'FOR SHARE OF e,v,c':''}
       `, [installationId, evidenceId])
       const row = rows.rows[0]
       if (!row) return null
-      if(row.origin_policy_required&&!(await originPolicyDecisions(pool,installationId,[row.version_id])).get(row.version_id)?.eligible)return null
+      if(row.origin_policy_required&&!(await originPolicyDecisions(db,installationId,[row.version_id])).get(row.version_id)?.eligible)return null
+      await guardRetainedEvidence(db,installationId,[row])
       return {
         evidence_id: row.evidence_id,
         evidence_kind: row.evidence_kind,
@@ -154,14 +173,17 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         version_id: row.version_id,
         excerpt_hash:row.excerpt_hash,
       }
+      })
+      return value??null
     },
 
     async findRelatedEpisodes(
       installationId: string,
-      input: { sessionId?: string | null; limit?: number },
+      input: { sessionId?: string | null; limit?: number;authorityGrant?:SourceReadGrant },
     ) {
       const limit = Math.min(Math.max(1, input.limit ?? 20), 100)
-      const rows = await pool.query(`
+      const value=await retainedSourceRead(pool,{installationId,authorityGrant:input.authorityGrant},async db=>{
+      const rows = await db.query(`
         SELECT episode_id::text, session_id, turn_id, state, outcome,
                started_at, terminal_at, event_count::text
         FROM work_episodes
@@ -169,12 +191,16 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         ORDER BY terminal_at DESC NULLS LAST, episode_id
         LIMIT $3
       `, [installationId, input.sessionId ?? null, limit])
+      await guardRetainedEvidence(db,installationId,rows.rows.map(row=>({source_event_id:null,artifact_id:null,episode_id:row.episode_id,evidence_kind:'episode'})))
       return { episodes: rows.rows }
+      })
+      return value??{episodes:[]}
     },
 
-    async getRepositoryContext(installationId: string, repositoryId: string) {
-      const claims = await pool.query(`
-        SELECT c.claim_id::text, c.claim_type, v.statement, v.branch,
+    async getRepositoryContext(installationId: string, repositoryId: string,authorityGrant?:SourceReadGrant) {
+      const value=await retainedSourceRead(pool,{installationId,authorityGrant},async db=>{
+      const claims = await db.query(`
+        SELECT c.claim_id::text, c.claim_type, v.version_id::text AS _version_id,v.statement, v.branch,
                v.valid_from, v.valid_until, v.authority
         FROM knowledge_claims c
         JOIN knowledge_versions v ON v.version_id = c.current_version_id
@@ -185,12 +211,16 @@ export function createMemoryReadService(pool: pg.Pool, cursorSigningKey: string)
         ORDER BY c.claim_type, c.claim_id
         LIMIT 200
       `, [installationId, repositoryId])
+      await guardRetainedVersions(db,installationId,claims.rows.map(row=>row._version_id),{expectedStatements:new Map(claims.rows.map(row=>[row._version_id,row.statement])),requireCurrent:true})
       const grouped: Record<string, unknown[]> = {}
       for (const row of claims.rows) {
         grouped[row.claim_type] = grouped[row.claim_type] ?? []
-        grouped[row.claim_type].push(row)
+        const {_version_id,...visible}=row
+        grouped[row.claim_type].push(visible)
       }
       return { repository_id: repositoryId, claims_by_type: grouped }
+      })
+      return value??{repository_id:repositoryId,claims_by_type:{} as Record<string,unknown[]>}
     },
   }
 }

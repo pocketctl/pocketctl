@@ -1,6 +1,7 @@
+import {assertNoSourceProcessingPins,SourceProcessingPurgeBlocked} from '../shared-source/processing-pins.js'
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
-import { lockSessionMaterializationFence,deleteSessionInTransaction } from '../db.js'
+import { lockSessionMaterializationFence,nativeSessionFenceSet,deleteSessionInTransaction } from '../db.js'
 import { AttentionNotificationRepository } from '../attention-inbox/notification-repository.js'
 import { archiveObjectKey,readArchiveObject,type ArchiveStorage } from '../session-archive/storage.js'
 import { encodeArchiveChunk,decodeArchiveChunk } from '../session-archive/codec.js'
@@ -35,7 +36,10 @@ export class SessionLifecycleExecutor {
     await db.query('SELECT pg_advisory_xact_lock($1)',[lease.userId])
     await db.query('SELECT id FROM users WHERE id=$1 FOR KEY SHARE',[lease.userId])
     await db.query('SELECT daemon_id FROM daemons WHERE daemon_id=ANY($1::varchar[]) ORDER BY daemon_id FOR SHARE',[preliminary.members.map(row=>row.daemon_id)])
-    for(const id of preliminary.sessionIds)await lockSessionMaterializationFence(db,id)
+    const aliasSet=[...new Set((await Promise.all(preliminary.sessionIds.map(id=>nativeSessionFenceSet(db,[id])))).flat())].sort()
+    for(const id of aliasSet)await lockSessionMaterializationFence(db,id)
+    const currentAliasSet=[...new Set((await Promise.all(preliminary.sessionIds.map(id=>nativeSessionFenceSet(db,[id])))).flat())].sort()
+    if(JSON.stringify(aliasSet)!==JSON.stringify(currentAliasSet))throw new Superseded()
     await db.query('SELECT session_id FROM sessions WHERE session_id=ANY($1::varchar[]) ORDER BY session_id FOR UPDATE',[preliminary.sessionIds])
     const valid=(await db.query(`SELECT 1 FROM session_lifecycle_jobs WHERE operation_id=$1 AND state='running'
       AND lease_token=$2 AND attempt=$3 AND lease_owner=$4 AND lease_until>NOW() FOR UPDATE`,[lease.operationId,lease.leaseToken,lease.attempt,lease.leaseOwner])).rows[0]
@@ -102,7 +106,7 @@ export class SessionLifecycleExecutor {
       })
       manifestId=randomUUID()
       await this.pool.query(`INSERT INTO session_archive_manifests(manifest_id,user_id,session_id,activity_epoch,schema_version,codec,state,event_high_water,storage_namespace,operation_id,upload_deadline)
-        SELECT $1::uuid,$2::int,$3::varchar,$4::bigint,1,'gzip','uploading',COALESCE(max(id),0),$5::text,$6::uuid,NOW()+interval '10 minutes' FROM events WHERE session_id=$3::varchar`,
+        SELECT $1::uuid,$2::int,$3::varchar,$4::bigint,1,'gzip','uploading',COALESCE(max(id),0),$5::text,$6::uuid,NOW()+interval '10 minutes' FROM events WHERE session_id=$3::varchar AND NOT owner_retired AND (user_id=$2::int OR user_id IS NULL)`,
         [manifestId,lease.userId,lease.sessionId,lease.activityEpoch,this.storage.namespace,lease.operationId])
       const limits={maxRawBytes:this.config.maxChunkBytes,maxCompressedBytes:this.config.maxCompressedBytes,maxRecords:1000},chunks:StagedChunk[]=[]
       let bytesTransferred=0,after='0',ordinal=0,budgetReached=false,publishedPartial=false
@@ -129,7 +133,7 @@ export class SessionLifecycleExecutor {
         chunks.push({manifest:m,...data})
       }
       for(;!budgetReached;){
-        const page=(await this.pool.query(`SELECT id::text,event_type,payload FROM events WHERE session_id=$1 AND body_storage='hot' AND id>$2 ORDER BY events.id LIMIT 100`,[lease.sessionId,after])).rows
+        const page=(await this.pool.query(`SELECT id::text,event_type,payload FROM events WHERE session_id=$1 AND body_storage='hot' AND NOT owner_retired AND (user_id=$3 OR user_id IS NULL) AND id>$2 ORDER BY events.id LIMIT 100`,[lease.sessionId,after,lease.userId])).rows
         if(!page.length)break
         let records:ArchiveEventBody[]=[],size=2048
         const flush=async()=>{if(records.length&&!budgetReached){await upload(await encodeArchiveChunk({userId:lease.userId,sessionId:lease.sessionId,activityEpoch:lease.activityEpoch,manifestId:manifestId!,ordinal:ordinal++},records,limits),{events:records});records=[];size=2048}}
@@ -143,7 +147,7 @@ export class SessionLifecycleExecutor {
       }
       let documentAfter=''
       for(;!budgetReached;){
-        const page=(await this.pool.query(`SELECT * FROM session_document_versions WHERE session_id=$1 AND body_storage='hot' AND version_id>$2 ORDER BY version_id LIMIT 1`,[lease.sessionId,documentAfter])).rows
+        const page=(await this.pool.query(`SELECT v.* FROM session_document_versions v JOIN session_documents d ON d.document_id=v.document_id AND d.user_id=v.user_id AND d.session_id=v.session_id WHERE v.session_id=$1 AND v.user_id=$3 AND NOT d.owner_retired AND v.body_storage='hot' AND v.version_id>$2 ORDER BY v.version_id LIMIT 1`,[lease.sessionId,documentAfter,lease.userId])).rows
         if(!page.length)break
         const d=page[0]
         await upload(await encodeDocumentArchiveChunk({userId:lease.userId,sessionId:lease.sessionId,activityEpoch:lease.activityEpoch,manifestId,ordinal:ordinal++},
@@ -160,9 +164,10 @@ export class SessionLifecycleExecutor {
             // fields before removing any payload. Oversized/unsupported header
             // shapes fail closed and leave the entire hot transaction intact.
             const rows=chunk.events.map(e=>({id:e.id,type:e.eventType,payload:e.payload}))
-            const moved=await db.query(`UPDATE events e SET body_storage='cold',payload=NULL,body_manifest_id=$1,body_chunk_ordinal=$2,body_owner_user_id=$3,body_activity_epoch=$4
+            const moved=await db.query(`UPDATE events e SET body_storage='cold',payload=NULL,body_session_id=e.session_id,body_manifest_id=$1,body_chunk_ordinal=$2,body_owner_user_id=$3,body_activity_epoch=$4
               FROM jsonb_to_recordset($5::jsonb) r(id bigint,type text,payload jsonb)
               WHERE e.id=r.id AND e.session_id=$6 AND e.event_type=r.type AND e.payload=r.payload AND e.body_storage='hot'
+                AND NOT e.owner_retired AND (e.user_id=$3 OR e.user_id IS NULL)
                 AND NOT EXISTS(SELECT 1 FROM jsonb_each(CASE WHEN jsonb_typeof(e.payload)='object' THEN e.payload ELSE '{}' END) p
                   WHERE p.key=ANY(ARRAY['agent','agent_id','event_id','message_id','part_id','revision','streaming','model','effort','turn_id','usage'])
                     AND p.value IS DISTINCT FROM session_event_body_header(e.payload)->p.key)
@@ -170,16 +175,23 @@ export class SessionLifecycleExecutor {
             if(moved.rowCount!==rows.length)throw new Error('body changed or header projection incomplete')
           }else if(chunk.document){
             const d=chunk.document
-            const moved=await db.query(`UPDATE session_document_versions SET body_storage='cold',content_bytes=NULL,body_manifest_id=$1,body_chunk_ordinal=$2,body_activity_epoch=$3
-              WHERE version_id=$4 AND user_id=$5 AND session_id=$6 AND body_storage='hot' AND content_bytes=$7 RETURNING version_id`,
+            const moved=await db.query(`UPDATE session_document_versions v SET body_storage='cold',content_bytes=NULL,body_session_id=session_id,body_manifest_id=$1,body_chunk_ordinal=$2,body_activity_epoch=$3
+              WHERE version_id=$4 AND user_id=$5 AND session_id=$6 AND body_storage='hot' AND content_bytes=$7 AND EXISTS(SELECT 1 FROM session_documents d WHERE d.document_id=v.document_id
+                AND d.user_id=$5 AND d.session_id=$6 AND NOT d.owner_retired) RETURNING version_id`,
               [manifestId,m.ordinal,lease.activityEpoch,d.version_id,lease.userId,lease.sessionId,d.content_bytes])
             if(moved.rowCount!==1)throw new Error('document version changed')
           }
         }
-        const hot=(await db.query(`SELECT EXISTS(SELECT 1 FROM events WHERE session_id=$1 AND body_storage='hot') OR EXISTS(SELECT 1 FROM session_document_versions WHERE session_id=$1 AND body_storage='hot') AS remaining`,[lease.sessionId])).rows[0].remaining
+        const remaining=(await db.query(`SELECT
+          EXISTS(SELECT 1 FROM events WHERE session_id=$1 AND body_storage='hot' AND NOT owner_retired AND (user_id=$2 OR user_id IS NULL))
+          OR EXISTS(SELECT 1 FROM session_document_versions v JOIN session_documents d ON d.document_id=v.document_id AND d.user_id=v.user_id AND d.session_id=v.session_id WHERE v.session_id=$1 AND v.user_id=$2 AND v.body_storage='hot' AND NOT d.owner_retired) AS eligible,
+          EXISTS(SELECT 1 FROM events WHERE session_id=$1 AND body_storage='hot') OR EXISTS(SELECT 1 FROM session_document_versions WHERE session_id=$1 AND body_storage='hot') AS physical`,[lease.sessionId,lease.userId])).rows[0]
+        const hot=remaining.eligible
         if(hot&&!budgetReached)throw new Superseded()
         publishedPartial=hot
-        await db.query("UPDATE sessions SET content_state=$2,cooling_operation_id=NULL,updated_at=NOW() WHERE session_id=$1",[lease.sessionId,hot?'mixed':'cold'])
+        // Retained originals keep their physical hot custody. They are not
+        // current-owner work and must not cause a permanent partial retry.
+        await db.query("UPDATE sessions SET content_state=$2,cooling_operation_id=NULL,updated_at=NOW() WHERE session_id=$1",[lease.sessionId,remaining.physical?'mixed':'cold'])
         await this.record(db,lease,current,hot?'partial':'succeeded',hot?'transfer_budget_reached':'inactivity_30_days',{archive:archived?'succeeded':'not_applicable',cool:hot?'pending':'succeeded'})
         if(!await new LifecycleJobRepository(db).finish(lease,hot?'partial':'succeeded',{reason:hot?'transfer_budget_reached':'inactivity_30_days',chunks:chunks.length,bytes:bytesTransferred}))throw new Superseded()
       })
@@ -207,6 +219,7 @@ export class SessionLifecycleExecutor {
     try{
       await this.transaction(async db=>{
         const current=await this.fenced(db,lease),notificationId=randomUUID(),operations:LifecycleJob[]=[]
+        await assertNoSourceProcessingPins(db,lease.userId,current.sessionIds)
         await this.settleStale(db,lease,current)
         // One component transaction: removing a parent cannot strand children
         // behind an unknown-ancestor guard. Adopt only unclaimed sibling jobs.
@@ -231,8 +244,10 @@ export class SessionLifecycleExecutor {
       return 'partial'
     }catch(error){
       this.onError?.(error)
+      // A temporary lease must remain claimable after its bounded delay.
+      // Genuine supersession stays terminal; pins never reopen cancelled jobs.
       const state=error instanceof Superseded?'cancelled':'partial'
-      await this.jobs.finish(lease,state,{reason:state==='cancelled'?'superseded':'database_purge_failed'})
+      await this.jobs.finish(lease,state,{reason:error instanceof SourceProcessingPurgeBlocked?'source_processing_pin_active':state==='cancelled'?'superseded':'database_purge_failed'})
       return state
     }
   }

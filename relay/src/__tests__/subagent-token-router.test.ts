@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 
 process.env.DAEMON_OFFLINE_GRACE_MS = '20'
@@ -33,7 +34,8 @@ import { BoundedExecutor } from '../ingress/bounded-executor.js'
 
 function createMockPool(): any {
   return {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       // Daemon-session ownership probe: treat every session as owned.
       if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
       return { rows: [], rowCount: 0 }
@@ -131,13 +133,14 @@ describe('router subagent_usage durable identity and ack', () => {
     const release = { resolve: undefined as (() => void) | undefined, promise: Promise.resolve() as Promise<void> }
     release.promise = new Promise<void>((resolve) => { release.resolve = resolve })
     const ingest = {
-      query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      query: vi.fn(async (sql:string,params:any[]=[]) => nativeAliasUnitResult(sql,params)??({rows:[],rowCount:0})),
       connect: vi.fn(async () => {
         active++
         peak = Math.max(peak, active)
         await release.promise
         return {
-          query: vi.fn(async (sql: string) => {
+          query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
             if (sql.includes('session_allowed')) {
               return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
             }

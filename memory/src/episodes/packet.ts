@@ -576,7 +576,7 @@ function enforceTotalDocumentBudget(
  */
 export function computeSourceDigest(input: {
   installationId: string
-  events: readonly PacketSourceEvent[]
+  events: readonly Pick<PacketSourceEvent,'source_event_id'|'payload_hash'>[]
   artifacts: readonly PacketSourceArtifact[]
 }): Buffer {
   const hash = createHash('sha256')

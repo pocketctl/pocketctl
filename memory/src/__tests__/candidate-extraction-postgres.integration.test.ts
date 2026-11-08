@@ -513,6 +513,26 @@ describeWithDatabase('candidate extraction (PostgreSQL)', () => {
       expect(usage.rows[0].n).toBe(0)
     })
 
+    test('incurred counts survive a lost job without publishing output or a partial aggregate receipt',async()=>{
+      const {runId,episodeId}=await freshRun(),{jobs,claim}=await claimedFence('extract:incurred-effect')
+      await store.recordProviderUsage({runId,inputTokens:10,outputTokens:5,costMicros:1})
+      await store.recordProviderUsage({runId,inputTokens:2,outputTokens:1,costMicros:0})
+      await staleIt(claim);await jobs.claimJobs({workerId:'w2',limit:1,leaseMs:60000})
+      await expect(store.persistCandidates({runId,installationId:INSTALLATION,episodeId,candidateStatus:'validated',candidates:[candidateRow(0)],usage:{inputTokens:10,outputTokens:5,costMicros:1},fence:{jobId:claim.job_id,claimedBy:'w1',claimEpoch:claim.claim_epoch}})).rejects.toBeInstanceOf(StaleJobFenceError)
+      expect((await pool.query('SELECT state,input_tokens::text,output_tokens::text,cost_micros::text FROM memory_extraction_runs WHERE run_id=$1',[runId])).rows).toEqual([{state:'running',input_tokens:'10',output_tokens:'5',cost_micros:'1'}])
+      expect((await pool.query('SELECT 1 FROM memory_candidates WHERE run_id=$1',[runId])).rowCount).toBe(0)
+      expect((await pool.query('SELECT 1 FROM memory_usage_outbox WHERE usage_id=$1',[`extraction:${runId}`])).rowCount).toBe(0)
+      await pool.query("UPDATE memory_extraction_runs SET started_at=clock_timestamp()-interval '1 day' WHERE run_id=$1",[runId])
+      const retried=await store.reserveRun({installationId:INSTALLATION,episodeId,sourceDigest:SOURCE_DIGEST,extractorVersion:'ext-v1',promptVersion:'prompt-v1',modelConfigHash:Buffer.alloc(32,9),mode:'enabled',provider:'openai-compatible',model:'extractor-small',staleAfterMs:60000})
+      expect(retried).toMatchObject({owner:false,runId,existingState:'failed'})
+      expect((await pool.query('SELECT error_code,input_tokens::text,output_tokens::text,cost_micros::text FROM memory_extraction_runs WHERE run_id=$1',[runId])).rows).toEqual([{error_code:'provider_result_unknown',input_tokens:'10',output_tokens:'5',cost_micros:'1'}])
+    })
+    test('a stale zero-usage attempt is held because zero does not prove HTTP was never sent',async()=>{
+      const {runId,episodeId}=await freshRun()
+      await pool.query("UPDATE memory_extraction_runs SET started_at=clock_timestamp()-interval '1 day' WHERE run_id=$1",[runId])
+      expect(await store.reserveRun({installationId:INSTALLATION,episodeId,sourceDigest:SOURCE_DIGEST,extractorVersion:'ext-v1',promptVersion:'prompt-v1',modelConfigHash:Buffer.alloc(32,9),mode:'enabled',provider:'openai-compatible',model:'extractor-small',staleAfterMs:60000})).toMatchObject({owner:false,runId,existingState:'failed'})
+      expect((await pool.query('SELECT error_code,input_tokens::text,output_tokens::text,cost_micros::text FROM memory_extraction_runs WHERE run_id=$1',[runId])).rows).toEqual([{error_code:'provider_result_unknown',input_tokens:'0',output_tokens:'0',cost_micros:'0'}])
+    })
     test('markRun rejects a stale fence and leaves run + usage untouched', async () => {
       const { runId } = await freshRun()
       const { jobs, claim } = await claimedFence('extract:turn-2:fence-stale')

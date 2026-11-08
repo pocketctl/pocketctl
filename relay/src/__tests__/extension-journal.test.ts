@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import {
@@ -12,6 +13,7 @@ import type { MaterializationInput } from '../materialization/types.js'
 
 function materializerQuery(sinkCalls: Array<Record<string, unknown>>) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
     if (/INSERT INTO extension_source_outbox/.test(sql)) {
       sinkCalls.push({ sql, params })
       return { rows: [], rowCount: 1 }
@@ -74,7 +76,7 @@ describe('extension journal eligibility policy', () => {
 
 describe('postgres extension journal sink', () => {
   test('appends one O(1) row with a stable source identity', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 })
+    const query = vi.fn().mockResolvedValue({ rows: [{}], rowCount: 1 })
     const sink = createPostgresExtensionJournalSink()
 
     await sink.appendCanonicalEvent({ query } as never, {
@@ -86,7 +88,8 @@ describe('postgres extension journal sink', () => {
       payload: { type: 'agent_text', text: 'before\u0000after' },
     })
 
-    expect(query).toHaveBeenCalledOnce()
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(String(query.mock.calls[0][0])).toContain('NOT owner_retired')
     const [sql, params] = query.mock.calls[0]
     expect(String(sql)).toContain('INSERT INTO extension_source_outbox')
     expect(String(sql)).toContain('ON CONFLICT (source_kind, source_id) DO NOTHING')
@@ -98,6 +101,7 @@ describe('postgres extension journal sink', () => {
       'agent_text',
       new Date('2026-08-23T10:00:00Z'),
       JSON.stringify({ type: 'agent_text', text: 'before\uFFFDafter' }),
+      '93821',
     ])
   })
 
@@ -163,6 +167,7 @@ describe('EventMaterializer journal integration', () => {
     const beginEnd: string[] = []
     const sinkCalls: Array<Record<string, unknown>> = []
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (/^BEGIN$/i.test(sql.trim())) { beginEnd.push('BEGIN'); return { rows: [] } }
       if (/^COMMIT$/i.test(sql.trim())) { beginEnd.push('COMMIT'); return { rows: [] } }
       if (/pg_advisory_xact_lock/i.test(sql)) return { rows: [] }

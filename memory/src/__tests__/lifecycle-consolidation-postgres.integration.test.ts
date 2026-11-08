@@ -40,7 +40,7 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
  test('fresh canonical feed source reaches shadow once and preserves formal content',async()=>{
   const f=await governanceFixture(pool),session='fresh-shadow-session',turn='fresh-shadow-turn'
   await pool.query("INSERT INTO memory_curation_policies(installation_id,mode) VALUES($1,'shadow')",[f.personal])
-  const snapshot=async()=>JSON.stringify((await pool.query(`SELECT to_jsonb(c) claim,to_jsonb(v) version,to_jsonb(e) evidence FROM knowledge_claims c JOIN knowledge_versions v USING(installation_id,claim_id) JOIN knowledge_evidence e USING(installation_id,version_id) WHERE c.installation_id=$1 ORDER BY c.claim_id,v.version_id,e.evidence_id`,[f.personal])).rows)
+  const snapshot=async()=>JSON.stringify((await pool.query(`SELECT to_jsonb(c) AS claim,to_jsonb(v) AS claim_version,to_jsonb(e) AS evidence FROM knowledge_claims c JOIN knowledge_versions v USING(installation_id,claim_id) JOIN knowledge_evidence e USING(installation_id,version_id) WHERE c.installation_id=$1 ORDER BY c.claim_id,v.version_id,e.evidence_id`,[f.personal])).rows)
   const before=await snapshot(),payload={text:'This isolated input contains no durable conclusion.'}
   const proof={version:1,producer:'claude',session_id:session,turn_id:turn,event_id:'input:synthetic-dispatch',sequence:'1',invocation_id:'input:synthetic-dispatch',source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}
   await pool.query(`INSERT INTO memory_feed_inbox(installation_id,feed_id,envelope_version,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,classification,data,payload_hash) VALUES($1,1,1,'session.event.v1','canonical_event','event:synthetic',$2,$3,'user_text',clock_timestamp(),$4,$5,$6)`,[f.personal,session,turn,{memory_source:proof},payload,canonicalPayloadHash(payload)])
@@ -111,6 +111,13 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   expect(generate).toHaveBeenCalledTimes(2)
   expect((await pool.query('SELECT state,claim_epoch FROM memory_curation_runs')).rows).toEqual([{state:'completed',claim_epoch:'2'}])
  })
+ test('a primary timeout followed by fallback budget refusal is held instead of retried as free budget waiting',async()=>{
+  const f=await fixture(),generate=vi.fn(async()=>({ok:false,code:'budget_exceeded',retryable:false,timeoutFallback:{primary:{code:'http_error',detail:'timeout',billingUncertain:true,budgetReservationId:'synthetic-reservation'}}}))
+  const w=worker({generateJson:generate} as unknown as TextGenerator)
+  await w.consolidate(f.job,signal());await w.consolidate(f.job,signal())
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows).toEqual([{state:'provider_result_unknown',error_code:'provider_result_unknown'}])
+ })
  test('AC-15 expired provider lease becomes unknown and never repeats the provider call',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{await pool.query("UPDATE memory_curation_runs SET claim_expires_at=clock_timestamp()-interval '1 second'");return success()})
   const w=worker({generateJson:generate} as TextGenerator)
@@ -124,6 +131,8 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   await expect(worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())).rejects.toThrow('curation_source_changed')
   expect((await pool.query("SELECT count(*)::int n FROM memory_curation_runs WHERE state='completed'")).rows[0].n).toBe(0)
   expect((await pool.query('SELECT state,error_code,result FROM memory_curation_runs')).rows).toEqual([{state:'failed',error_code:'curation_source_changed',result:null}])
+  expect((await pool.query('SELECT input_tokens::text,output_tokens::text FROM memory_curation_runs')).rows).toEqual([{input_tokens:'20',output_tokens:'5'}])
+  expect((await pool.query("SELECT input_tokens::text,output_tokens::text FROM memory_usage_outbox WHERE operation='curation'")).rows).toEqual([{input_tokens:'20',output_tokens:'5'}])
   await expect(worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())).rejects.toThrow('curation_source_changed')
   expect(generate).toHaveBeenCalledTimes(1)
  })

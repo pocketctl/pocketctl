@@ -173,7 +173,7 @@ suite('budget waiting and positively proven recovery',()=>{
     payload:{turn_id:e.turn,retry_failed_run_id:run.run_id}})
    await worker.tick()
    expect(outcomes[2]).toMatchObject({kind:'failed',errorCode:'provider_result_unknown',retryable:false})
-   const newRun=(await pool.query('SELECT run_id,state,error_code FROM memory_extraction_runs')).rows[0]
+   const newRun=(await pool.query('SELECT run_id,state,error_code FROM memory_extraction_runs WHERE retry_key=$1',[run.run_id])).rows[0]
    expect(newRun.run_id).not.toBe(run.run_id)
    expect(primary).toHaveBeenCalledTimes(2)
    await pool.query("UPDATE memory_provider_budget_reservations SET created_at=clock_timestamp()-interval '2 days'")
@@ -185,7 +185,7 @@ suite('budget waiting and positively proven recovery',()=>{
    expect(fallback).not.toHaveBeenCalled()
    expect((await pool.query('SELECT state FROM memory_provider_budget_reservations')).rows)
     .toEqual([{state:'reserved'},{state:'reserved'}])
-   expect((await pool.query('SELECT run_id FROM memory_extraction_runs')).rows).toEqual([{run_id:newRun.run_id}])
+   expect((await pool.query('SELECT run_id FROM memory_extraction_runs ORDER BY started_at,run_id')).rows).toEqual([{run_id:run.run_id},{run_id:newRun.run_id}])
   }finally{await worker.stop()}
  })
 

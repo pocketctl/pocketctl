@@ -1,3 +1,5 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {lookupCurrentInstallation} from '../sources/current-grant.js'
 import type pg from 'pg'
 import { createCapabilityVerifier } from '../relay/capability-verifier.js'
 import { createScopeAuthorization } from '../governance/authorization.js'
@@ -18,6 +20,7 @@ export interface GrantGuardDeps {
 }
 
 export interface VerifiedMemoryGrantV1 {
+  userId?:number
   installationId: string
   services: string[]
   configVersion: string
@@ -33,6 +36,7 @@ export type VerifiedMemoryGrant =
   | import('../governance/authorization.js').RouteV2Grant
 
 export function createGrantGuard(deps: GrantGuardDeps) {
+  const shared=sourcePoolContext(deps.pool).namespace==='memory'
   const scopeAuthorization = createScopeAuthorization(deps.pool)
   const verifier = createCapabilityVerifier({
     relayUrl: deps.relayUrl,
@@ -48,7 +52,10 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         SELECT local_status, relay_status, config_version::text AS config_version
         FROM memory_installations WHERE installation_id = $1
       `, [installationId])
-      return result.rows[0] ?? null
+      const local=result.rows[0]
+      if(!local)return null
+      const current=await lookupCurrentInstallation(deps.pool,installationId)
+      return current?{...local,relay_status:current.current?current.status:'revoked',config_version:current.configVersion,owner_user_id:current.ownerUserId}:local
     },
   })
 
@@ -74,6 +81,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       }
       return {
         installationId: verified.installationId,
+        ...(verified.userId!==undefined?{userId:verified.userId}:{}),
         services: verified.services,
         configVersion: verified.configVersion,
         expiresAt: verified.expiresAt,
@@ -99,6 +107,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       if (!verified) throw reject()
       const validated = await scopeAuthorization.validateV2Grant({
         primaryInstallationId: verified.installationId,
+        ...(shared?{userId:verified.userId}:{}),
         configVersion: verified.configVersion,
         expiresAt: verified.expiresAt,
         scopeBindings: verified.scopeBindings,
@@ -106,6 +115,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       if (!validated) throw reject()
       return {
         version: 'v2',
+        ...(validated.userId!==undefined?{userId:validated.userId}:{}),
         installationId: validated.primaryInstallationId,
         primaryInstallationId: validated.primaryInstallationId,
         services: verified.services,
@@ -129,6 +139,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       if (!verified) throw reject()
       const validated = await scopeAuthorization.validateV2Grant({
         primaryInstallationId: verified.installationId,
+        ...(shared?{userId:verified.userId}:{}),
         configVersion: verified.configVersion,
         expiresAt: verified.expiresAt,
         scopeBindings: verified.scopeBindings,
@@ -136,6 +147,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       if (!validated) throw reject()
       return {
         version: 'v2',
+        ...(validated.userId!==undefined?{userId:validated.userId}:{}),
         installationId: validated.primaryInstallationId,
         primaryInstallationId: validated.primaryInstallationId,
         services: verified.services,
@@ -160,6 +172,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       if (verifiedV2) {
         const validated = await scopeAuthorization.validateV2Grant({
           primaryInstallationId: verifiedV2.installationId,
+          ...(shared?{userId:verifiedV2.userId}:{}),
           configVersion: verifiedV2.configVersion,
           expiresAt: verifiedV2.expiresAt,
           scopeBindings: verifiedV2.scopeBindings,
@@ -167,6 +180,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         if (!validated) throw reject()
         return {
           version: 'v2',
+          ...(validated.userId!==undefined?{userId:validated.userId}:{}),
           installationId: validated.primaryInstallationId,
           primaryInstallationId: validated.primaryInstallationId,
           services: verifiedV2.services,
@@ -181,6 +195,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
       if (!verified) throw reject()
       return {
         installationId: verified.installationId,
+        ...(verified.userId!==undefined?{userId:verified.userId}:{}),
         services: verified.services,
         configVersion: verified.configVersion,
         expiresAt: verified.expiresAt,

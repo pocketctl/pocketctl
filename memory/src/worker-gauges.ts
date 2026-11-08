@@ -1,3 +1,4 @@
+import {updateSourceGauges} from './sources/metrics.js'
 import type pg from 'pg'
 import { updateFeedLagGauge, updatePhase4Gauges, updatePhase5Gauges, updateBusinessHealthGauges, updateJobSchedulingGauges, updateRetrievalIndexGauges, type MemoryMetrics } from './metrics.js'
 
@@ -33,6 +34,7 @@ export function createWorkerGaugeCollector(pool:pg.Pool,metrics:MemoryMetrics,en
     try{
       await client.query('BEGIN READ ONLY')
       await client.query(`SET LOCAL statement_timeout='3s'`)
+      await updateSourceGauges(client,metrics.source)
       // Pass a query-only adapter: nested health collectors share this timeout
       // and transaction rather than acquiring another pooled connection.
       await updateGauges({query:client.query.bind(client)},metrics,updateInbox,enabled,lifecycleMode)

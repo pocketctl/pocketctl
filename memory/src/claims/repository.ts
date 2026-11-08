@@ -1,3 +1,5 @@
+import {guardRetainedEvidence,assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import { expireCandidateIfDue } from './candidate-expiry.js'
 import {candidateReviewHash} from './review-hash.js'
 import {normalizeFeedbackReason} from './feedback-policy.js'
@@ -145,7 +147,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             return {ok:false,error:{code:'source_discovery_changed'}}
           }
           if (row.status === 'expired' || await expireCandidateIfDue(client, input.installationId, input.candidateId)) {
-            await client.query('COMMIT')
+            await assertRetainedSourceGuards(client);await client.query('COMMIT')
             return { ok: false, error: { code: 'candidate_expired' } }
           }
           if(input.expectedHash!==undefined&&candidateReviewHash(row as unknown as Record<string,unknown>)!==input.expectedHash){await client.query('ROLLBACK');return {ok:false,error:{code:'revision_conflict',currentRevision:Number(row.revision),state:row.status}}}
@@ -174,6 +176,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'candidate_evidence_stale' } }
           }
+          await guardRetainedEvidence(client,input.installationId,[{source_event_id:null,artifact_id:null,episode_id:row.episode_id,evidence_kind:'episode'}])
           if (row.valid_until && row.valid_until.getTime() <= Date.now()) {
             await client.query('ROLLBACK')
             return { ok: false, error: { code: 'invalid_input', detail: 'validity window expired' } }
@@ -258,7 +261,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             ON CONFLICT DO NOTHING
           `, [input.installationId, `index:${versionId}`, JSON.stringify({ version_id: versionId })])
 
-          await client.query('COMMIT')
+          await assertRetainedSourceGuards(client);await client.query('COMMIT')
           return {
             ok: true,
             claimId,
@@ -267,6 +270,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           }
         } catch (error) {
           await client.query('ROLLBACK')
+          if(preparedSourceUnavailable(error))return {ok:false,error:{code:'candidate_evidence_stale'}}
           if ((error as { code?: string })?.code === 'PCE01') return { ok: false, error: { code: 'candidate_expired' } }
           if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
           if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
@@ -302,7 +306,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             return { ok: false, error: { code: 'candidate_not_found' } }
           }
           if (row.status === 'expired' || await expireCandidateIfDue(client, input.installationId, input.candidateId)) {
-            await client.query('COMMIT')
+            await assertRetainedSourceGuards(client);await client.query('COMMIT')
             return { ok: false, error: { code: 'candidate_expired' } }
           }
           if(input.expectedHash!==undefined&&candidateReviewHash(row.candidate)!==input.expectedHash){await client.query('ROLLBACK');return {ok:false,error:{code:'revision_conflict',currentRevision:Number(row.revision),state:row.status}}}
@@ -322,10 +326,11 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             INSERT INTO memory_feedback (feedback_id, installation_id, candidate_id, action, reason_code,details)
             VALUES (gen_random_uuid(), $1, $2, 'candidate_rejected', $3,$4)
           `, [input.installationId, input.candidateId, normalizeFeedbackReason(input.reasonCode),JSON.stringify(input.reviewDurationMs===undefined?{}:{review_duration_ms:input.reviewDurationMs})])
-          await client.query('COMMIT')
+          await assertRetainedSourceGuards(client);await client.query('COMMIT')
           return { ok: true }
         } catch (error) {
           await client.query('ROLLBACK')
+          if(preparedSourceUnavailable(error))return {ok:false,error:{code:'candidate_evidence_stale'}}
           if ((error as { code?: string })?.code === 'PCE01') return { ok: false, error: { code: 'candidate_expired' } }
           if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
           if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
@@ -476,6 +481,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
               return { ok: false, error: { code: 'invalid_input', detail: 'evidence provenance' } }
             }
           }
+          await guardRetainedEvidence(client,input.installationId,input.evidence.map(evidence=>({source_event_id:evidence.sourceEventId??null,artifact_id:evidence.artifactId??null,episode_id:evidence.episodeId,evidence_kind:evidence.evidenceKind})))
           const finalStatement = input.statement.trim()
           const applicability=await resolveClaimApplicability(client,{installationId:input.installationId,scopeKind:row.scope_kind,scopeKey:row.scope_key,
             canonicalRepositoryKey:row.canonical_repository_key,repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,
@@ -584,10 +590,11 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             VALUES (gen_random_uuid(), $1, 'index_claim_version', $2, 90, $3::jsonb)
             ON CONFLICT DO NOTHING
           `, [input.installationId, `index:${versionId}`, JSON.stringify({ version_id: versionId })])
-          await client.query('COMMIT')
+          await assertRetainedSourceGuards(client);await client.query('COMMIT')
           return { ok: true, claimId: input.claimId, versionId, versionNumber }
         } catch (error) {
           await client.query('ROLLBACK')
+          if(preparedSourceUnavailable(error))return {ok:false,error:{code:'candidate_evidence_stale'}}
           if(error instanceof ClaimVersionIntervalError)return{ok:false,error:{code:'revision_interval_requires_review'}}
           if(error instanceof ClaimIdentityWriteError)return{ok:false,error:{code:error.code}}
           throw error
@@ -646,7 +653,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             VALUES (gen_random_uuid(), $1, $2, $3, $4)
           `, [input.installationId, input.claimId, row.current_version_id,
             input.target === 'expired' ? 'claim_expired' : 'claim_revoked'])
-          await client.query('COMMIT')
+          await assertRetainedSourceGuards(client);await client.query('COMMIT')
           return { ok: true }
         } catch (error) {
           await client.query('ROLLBACK')
@@ -696,7 +703,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
                 revision = revision + 1, updated_at = NOW()
             WHERE installation_id = $1 AND claim_id = $2
           `, [input.installationId, input.claimId, input.supersededByClaimId])
-          await client.query('COMMIT')
+          await assertRetainedSourceGuards(client);await client.query('COMMIT')
           return { ok: true }
         } catch (error) {
           await client.query('ROLLBACK')

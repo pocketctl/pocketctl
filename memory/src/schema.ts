@@ -1,3 +1,17 @@
+import {assertTeamSemanticLegacySchema} from './sources/team-semantic-migration.js'
+import {TEAM_SEMANTIC_MIGRATION} from './sources/team-semantic-migration.js'
+import {SKILL_SESSION_TOMBSTONE_IDEMPOTENCY_MIGRATION} from './skills/session-tombstone-idempotency-migration.js'
+import {TEAM_SEMANTIC_REGISTRATION_MIGRATION} from './sources/team-semantic-registration-migration.js'
+import {LEGACY_CUSTODY_RETENTION_MIGRATION} from './retention/legacy-custody-migration.js'
+import {SNAPSHOT_IDENTITY_MIGRATION} from './migrations/shared-db/snapshot-identity-migration.js'
+import {CANONICAL_REFERENCE_MIGRATION} from './migrations/shared-db/canonical-reference-migration.js'
+import {CANONICAL_WORK_MIGRATION} from './migrations/shared-db/canonical-work-migration.js'
+import {SOURCE_INPUT_MODE_MIGRATION} from './migrations/shared-db/input-mode-migration.js'
+import {LEGACY_SOURCE_ARCHIVE_MIGRATION} from './migrations/shared-db/legacy-archive-migration.js'
+import {SHARED_SOURCE_REFS_MIGRATION} from './migrations/shared-db/refs-migration.js'
+import {SHARED_SOURCE_VERSION_RANGE_MIGRATION} from './migrations/shared-db/ref-version-migration.js'
+import {assertMemoryNamespace,prepareMemorySchemaContext,namespacedStatement,pinMemoryFunctions,type MemoryNamespace} from './migrations/shared-db/schema-context.js'
+import {GIT_SCOPE_CHANGE_MIGRATION} from './git-sync/scope-change-migration.js'
 import { LIFECYCLE_ASSESSMENT_MIGRATION } from './retention/lifecycle-assessment-migration.js'
 import { LIFECYCLE_HEALTH_INDEX_MIGRATION } from './reporting/lifecycle-health-index-migration.js'
 import { LIFECYCLE_CONTEXT_MIGRATION } from './context/lifecycle-migration.js'
@@ -2268,14 +2282,32 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   LIFECYCLE_CONTEXT_MIGRATION,
   LIFECYCLE_ASSESSMENT_MIGRATION,
   LIFECYCLE_HEALTH_INDEX_MIGRATION,
+  GIT_SCOPE_CHANGE_MIGRATION,
+  SHARED_SOURCE_REFS_MIGRATION,
+  SHARED_SOURCE_VERSION_RANGE_MIGRATION,
+  LEGACY_SOURCE_ARCHIVE_MIGRATION,
+  SOURCE_INPUT_MODE_MIGRATION,
+  SNAPSHOT_IDENTITY_MIGRATION,
+  CANONICAL_REFERENCE_MIGRATION,
+  CANONICAL_WORK_MIGRATION,
+  LEGACY_CUSTODY_RETENTION_MIGRATION,
+  TEAM_SEMANTIC_REGISTRATION_MIGRATION,
+  SKILL_SESSION_TOMBSTONE_IDEMPOTENCY_MIGRATION,
+  TEAM_SEMANTIC_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
-export async function applyMemorySchema(pool: pg.Pool): Promise<void> {
+export async function applyMemorySchema(pool: pg.Pool,options:{namespace?:MemoryNamespace}={}): Promise<void> {
+  const namespace=options.namespace??'public'
+  if(!['public','memory'].includes(namespace))throw new Error('invalid_memory_namespace')
   const client = await pool.connect()
+  let previousPath:string|undefined
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY])
     try {
+      await assertTeamSemanticLegacySchema(client,namespace)
+      await assertMemoryNamespace(client as unknown as pg.Pool,namespace)
+      const context=await prepareMemorySchemaContext(client,namespace);previousPath=context.previous
       await client.query(`
         CREATE TABLE IF NOT EXISTS memory_schema_migrations (
           version       INTEGER PRIMARY KEY,
@@ -2294,8 +2326,9 @@ export async function applyMemorySchema(pool: pg.Pool): Promise<void> {
         await client.query('BEGIN')
         try {
           for (const statement of migration.statements) {
-            await client.query(statement)
+            await client.query(namespacedStatement(namespace,migration.version,statement,context.extensionSchema))
           }
+          if(namespace==='memory')await pinMemoryFunctions(client)
           await client.query(
             'INSERT INTO memory_schema_migrations (version) VALUES ($1)',
             [migration.version],
@@ -2310,6 +2343,6 @@ export async function applyMemorySchema(pool: pg.Pool): Promise<void> {
       await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY])
     }
   } finally {
-    client.release()
+    try{if(previousPath!==undefined)await client.query("SELECT set_config('search_path',$1,false)",[previousPath])}finally{client.release()}
   }
 }

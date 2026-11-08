@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { createHmac } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
 import {
@@ -11,6 +12,8 @@ function poolFor(input: {
   rows?: any[]
 }) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
+    if(sql==='SELECT user_id FROM sessions WHERE session_id=$1')return {rows:[{user_id:7}]}
     if (sql.includes('WITH authorized')) {
       return input.authorized === false
         ? { rows: [] }

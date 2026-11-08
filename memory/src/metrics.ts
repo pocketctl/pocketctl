@@ -1,3 +1,4 @@
+import {createSourceMetrics} from './sources/metrics.js'
 import {LIFECYCLE_HEALTH_REASONS,loadLifecycleHealth,evaluateLifecycleHealth,summarizeLifecycleHealth,type LifecycleMode} from './reporting/lifecycle-health.js'
 import {BUSINESS_HEALTH_REASONS, loadBudgetUncertainty,loadBusinessHealth, evaluateBusinessHealth} from './reporting/business-health.js'
 import {JOB_TYPES} from './jobs/types.js'
@@ -25,6 +26,7 @@ export async function updateFeedLagGauge(
  */
 export function createMemoryMetrics() {
   const registry = new Registry()
+  const source=createSourceMetrics(registry)
   const phase1 = createPhase1Metrics(registry)
   const phase4 = createPhase4Metrics(registry)
   const phase5 = createPhase5Metrics(registry)
@@ -139,7 +141,7 @@ export function createMemoryMetrics() {
   })
 
   return {
-    registry,
+    registry,source,
     lifecycleAlerts,lifecycleExecution,lifecycleCoverage,lifecycleModes,
     businessAlerts, evidenceGaps, extractionOutcomes, budgetUncertainty,
     installations,

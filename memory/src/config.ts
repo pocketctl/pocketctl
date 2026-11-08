@@ -1,3 +1,4 @@
+import {isAbsolute} from 'node:path'
 import {dailyMaintenanceSchedule} from './maintenance/daily.js'
 /**
  * Strict environment parsing for the pocketctl-memory service. Every value is
@@ -94,6 +95,11 @@ export interface MemoryConfig {
   apiBind: MemoryApiBind
   metricsPort: number
   metricsBind: MemoryMetricsBind
+  schemaStartup?:'auto'|'verify'|'legacy-migrate'
+  sourceArchive?:{directory:string;namespace:string}
+  databaseNamespace?: 'public'|'memory'
+  /** Finite direct-launch policy; other canonical source families stay dormant. */
+  sharedSourceProfile?: 'personal-relay-only'
   databaseUrl: string
   dbPoolMax: number
   relayUrl: string
@@ -456,6 +462,8 @@ function parseTombstoneHmacKeys(raw: string | undefined): TombstoneHmacKey[] {
 }
 
 export function loadMemoryConfig(env: Record<string, string | undefined> = process.env): MemoryConfig {
+  const archiveDirectory=env.MEMORY_SHARED_ARCHIVE_DIRECTORY?.trim(),archiveNamespace=env.MEMORY_SHARED_ARCHIVE_NAMESPACE?.trim()
+  if(Boolean(archiveDirectory)!==Boolean(archiveNamespace)||archiveDirectory&&!isAbsolute(archiveDirectory)||archiveNamespace&&archiveNamespace.length>512)throw Error('source_archive_configuration_invalid')
   const isProduction = env.NODE_ENV === 'production'
   const skill = loadSkillConfig(env)
 
@@ -466,6 +474,11 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   const wikiMode = wikiModeFromEnv(env)
 
   const databaseUrl = env.MEMORY_DATABASE_URL ?? ''
+  const databaseNamespace=parseEnum('MEMORY_DATABASE_NAMESPACE',env.MEMORY_DATABASE_NAMESPACE,['public','memory'] as const,'public')
+  const installationAllowlist=parseInstallationAllowlist(env.MEMORY_INSTALLATION_ALLOWLIST)
+  const sharedSourceProfile=env.MEMORY_SHARED_SOURCE_PROFILE
+  if(sharedSourceProfile!==undefined && (sharedSourceProfile!=='personal-relay-only'||databaseNamespace!=='memory'||installationAllowlist.length<1||installationAllowlist.length>16))
+    throw new ConfigError('MEMORY_SHARED_SOURCE_PROFILE requires personal-relay-only, memory namespace and 1..16 preserved installations')
   const relayUrl = parseHttpOrigin('MEMORY_RELAY_URL', env.MEMORY_RELAY_URL)
   const relayIssuer = parseHttpOrigin('MEMORY_RELAY_ISSUER', env.MEMORY_RELAY_ISSUER)
 
@@ -584,6 +597,10 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
 
   return {
     maintenanceSchedule: dailyMaintenanceSchedule,
+    sourceArchive:archiveDirectory&&archiveNamespace?{directory:archiveDirectory,namespace:archiveNamespace}:undefined,
+    databaseNamespace,
+    sharedSourceProfile,
+    schemaStartup:parseEnum('MEMORY_SCHEMA_STARTUP',env.MEMORY_SCHEMA_STARTUP,['auto','verify','legacy-migrate'] as const,'auto'),
     dataRetention,
     inboxRetention,
     mode,
@@ -655,7 +672,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ),
     allowedOrigins: parseAllowedOrigins(env.MEMORY_ALLOWED_ORIGINS),
     allowedHosts: parseAllowedHosts(env.MEMORY_ALLOWED_HOSTS),
-    installationAllowlist: parseInstallationAllowlist(env.MEMORY_INSTALLATION_ALLOWLIST),
+    installationAllowlist,
     tombstoneHmacKeys,
   }
 }

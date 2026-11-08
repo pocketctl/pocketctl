@@ -190,7 +190,7 @@ export async function assertSessionLifecycleSchema(
 ): Promise<void> {
   const result =
     await db.query(`SELECT count(*)=3 AS ready FROM information_schema.columns
-    WHERE table_schema=current_schema() AND table_name='sessions'
+    WHERE table_schema=(SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name)) AND table_name='sessions'
       AND column_name IN ('activity_epoch','activity_verified','last_business_activity_at')`)
   if (result.rows[0]?.ready !== true)
     throw new Error('session lifecycle activity schema not ready')

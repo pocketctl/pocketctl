@@ -1,3 +1,4 @@
+import {canonicalPayloadHash} from '../inbox/canonical-json.js'
 import {measureInventoryRecovery} from '../testing/measure-inventory-recovery.js'
 import {inventoryMemory} from '../migrations/governance-v2/inventory.js'
 import type {ExtensionFeedEnvelopeV1} from '../relay/contracts.js'
@@ -138,10 +139,18 @@ suite('source-chain body reclamation (PostgreSQL)',()=>{
   expect((await pool.query(`SELECT count(*)::int n FROM memory_jobs WHERE job_type IN('compile_episode','extract_candidates')`)).rows[0].n).toBe(0)
  })
  test('snapshot replay retains archived identities, never refills bodies or schedules compilation',async()=>{
+  const event={event_id:100,event_type:'agent_text',created_at:'2026-01-01T00:00:00Z',payload:{turn_id:'ret-turn',event_id:'event-100',text:'old snapshot body',repository_id:'git:stable-repository'}}
+  // This is a previously landed snapshot identity. Expired new transport
+  // rows are intentionally not retained merely to manufacture replay state.
+  await pool.query(`INSERT INTO memory_snapshot_events(installation_id,session_id,relay_event_id,event_type,payload,payload_hash,generation,created_at,occurred_at,content_hash)
+   VALUES($1,'ret-session',100,'agent_text',$2,$3,1,now()-interval '20 days',$4,$5)`,[installationId,event.payload,canonicalPayloadHash(event),event.created_at,canonicalPayloadHash(event.payload)])
   await reclaimSourceTurn(pool,key(),{...settings,batchSize:10})
-  const snapshot=createSnapshotRepository(pool),run=await snapshot.startRun(installationId),event={event_id:100,event_type:'agent_text',created_at:'2026-01-01T00:00:00Z',payload:{turn_id:'ret-turn',event_id:'event-100',text:'old snapshot body',repository_id:'git:stable-repository'}}
+  const snapshot=createSnapshotRepository(pool),run=await snapshot.startRun(installationId)
   await snapshot.persistSessionEvents(installationId,run.generation,'ret-session',[event])
   expect((await read('memory_snapshot_events')).payload.text).toBeUndefined()
+  await snapshot.persistSessionEvents(installationId,run.generation,'ret-session',[{...event,event_id:101}])
+  expect((await pool.query('SELECT 1 FROM memory_snapshot_events WHERE relay_event_id=101')).rowCount).toBe(0)
+
   await snapshot.finalizeRun({installationId,generation:run.generation,inventorySessionIds:['ret-session'],sessionsSeen:1,eventsSeen:1})
   expect((await pool.query('SELECT 1 FROM source_events WHERE source_event_id=$1',[eventId])).rowCount).toBe(1)
   expect((await read('work_episodes')).document).toEqual({})

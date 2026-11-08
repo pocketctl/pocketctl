@@ -51,8 +51,8 @@ suite('A3 exact human delegation and independent executor',()=>{
  })
  test('final commit beyond delegation expiry rolls back publication and receipt',async()=>{
   const {delegated,deps}=await setup(),blocker=await pool.connect(),key=8123063
-  await pool.query(`CREATE FUNCTION delegation_test_commit_block() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(8123063);RETURN NEW;END $$`)
-  await pool.query(`CREATE TRIGGER delegation_test_commit_block BEFORE INSERT ON memory_authority_records FOR EACH ROW EXECUTE FUNCTION delegation_test_commit_block()`)
+  await pool.query(`CREATE FUNCTION public.delegation_test_commit_block() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(8123063);RETURN NEW;END $$`)
+  await pool.query(`CREATE TRIGGER delegation_test_commit_block BEFORE INSERT ON memory_authority_records FOR EACH ROW EXECUTE FUNCTION public.delegation_test_commit_block()`)
   try{await blocker.query('SELECT pg_advisory_lock($1)',[key]);const pid=(await blocker.query('SELECT pg_backend_pid() pid')).rows[0].pid
    await pool.query("UPDATE memory_publication_delegations SET valid_until=clock_timestamp()+interval '500 milliseconds' WHERE delegation_id=$1",[delegated.delegationId])
    const work=createPublicationExecutor(deps).execute(delegated.delegationId)
@@ -61,7 +61,7 @@ suite('A3 exact human delegation and independent executor',()=>{
    await blocker.query('SELECT pg_advisory_unlock($1)',[key]);expect(await work).toMatchObject({published:false,reason:'publication_delegation_expired'})
    expect((await pool.query('SELECT COUNT(*)::int n FROM memory_authority_records')).rows[0].n).toBe(0)
    expect((await pool.query('SELECT state FROM memory_publication_delegations WHERE delegation_id=$1',[delegated.delegationId])).rows[0].state).toBe('active')
-  }finally{await blocker.query('SELECT pg_advisory_unlock($1)',[key]);blocker.release();await pool.query('DROP TRIGGER delegation_test_commit_block ON memory_authority_records;DROP FUNCTION delegation_test_commit_block()')}
+  }finally{await blocker.query('SELECT pg_advisory_unlock($1)',[key]);blocker.release();await pool.query('DROP TRIGGER delegation_test_commit_block ON memory_authority_records;DROP FUNCTION public.delegation_test_commit_block()')}
  })
  test.each(['authorizer','expiry','revision','policy','principal','service_grant','revoke'])('%s change invalidates execution',async changed=>{
   const {f,c,delegated,deps,principalId}=await setup()

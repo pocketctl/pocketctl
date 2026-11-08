@@ -474,12 +474,13 @@ export class EventMaterializer {
         }
         // renameOwnedDaemonSession validates old ownership and new-id
         // availability atomically; hooks run only after that success.
-        await db.renameOwnedDaemonSession(this.effectPool, {
+        const moved = await db.renameOwnedDaemonSession(this.effectPool, {
           oldSessionId,
           newSessionId: sessionId,
           daemonId: input.daemonId,
           userId: input.userId,
         })
+        if (!moved) return
         this.options.hooks?.bindSession?.(sessionId, input.daemonId)
         this.options.hooks?.renameSession?.(oldSessionId, sessionId, input.daemonId)
       })
@@ -877,6 +878,7 @@ export class EventMaterializer {
     if (!input.sessionId) return
     if (input.eventType === 'session_id_changed') {
       const oldSessionId = normalizeSessionId(input.payload.old_session_id)
+      if (oldSessionId && await db.nativeRenameReplay(this.options.pool,{oldSessionId,newSessionId:input.sessionId,userId:input.userId,daemonId:input.daemonId})) return
       if (oldSessionId) {
         await db.assertDaemonSessionAccess(this.options.pool, {
           sessionId: oldSessionId,
@@ -978,14 +980,17 @@ export class EventMaterializer {
       const nonEvent = await this.materializeNonEvent(input)
       if (nonEvent) return nonEvent
     }
+    const oldRenameId = input.eventType==='session_id_changed' ? normalizeSessionId(input.payload.old_session_id) : null
+    const replayRoute = oldRenameId && input.sessionId ? await db.nativeRenameReplay(this.options.pool,{oldSessionId:oldRenameId,newSessionId:input.sessionId,userId:input.userId,daemonId:input.daemonId}) : null
     const event = await db.persistEventWithEffect(
       this.options.pool,
-      this.ledgerSessionId(input),
+      replayRoute ?? this.ledgerSessionId(input),
       input.eventType,
       input.payload,
       5,
       input.userId,
       input.context?.admission?.sessionId ?? this.ledgerSessionId(input),
+      this.ledgerSessionId(input),
     )
     await this.appendExtensionJournal(input, event.rowID)
     const result: MaterializationResult = {
@@ -1042,10 +1047,26 @@ export class EventMaterializer {
           throw new db.DeletedDaemonSessionError()
         }
         const latest = await db.getEventEffectState(latePool, event.rowID)
+        if(latest?.ownerRetired)throw new db.UnknownDaemonSessionError()
         if (latest?.completed) return
         const nextStep = latest?.nextStep ?? event.nextStep
         // A trusted rename may commit while these effects are deferred.
-        const currentInput = input.context?.admission ? await lateMaterializer.recoverQuotaContext(input) : input
+        let currentInput = input.context?.admission ? await lateMaterializer.recoverQuotaContext(input) : input
+        if(input.sessionId && input.eventType!=='session_id_changed'){
+          const authority=(await latePool.query('SELECT public.native_session_authority($1,$2,$3) AS authority',[input.sessionId,input.userId,input.daemonId])).rows[0]?.authority
+          if(authority?.state==='current') {
+            currentInput={...currentInput,sessionId:authority.sessionId,payload:{...currentInput.payload,session_id:authority.sessionId}}
+          } else {
+            // Missing is an admission decision, never positive native authority.
+            // The creating effect must establish the real row; update-only status
+            // retains its existing suppression path. Retired names always refuse.
+            const policy:db.DaemonSessionPolicy=['session_created','session_discovered'].includes(input.eventType)
+              ? 'allow_create' : input.eventType==='session_status' ? 'allow_missing_status' : 'must_exist'
+            const access=await db.assertDaemonSessionAccess(lateEffectPool,{sessionId:input.sessionId,
+              userId:input.userId,daemonId:input.daemonId,policy})
+            if(access!=='missing')throw new db.UnknownDaemonSessionError()
+          }
+        }
         if (currentInput.sessionId !== input.sessionId) {
           result.deliveries = result.deliveries.map(delivery => ({...delivery,sessionId:currentInput.sessionId,
             payload:{...delivery.payload,session_id:currentInput.sessionId}}))
@@ -1201,6 +1222,7 @@ export class EventMaterializer {
         })
         return scoped.materializeUnlocked(recoveredInput, effect, options)
       },
+      recoveredInput.eventType==='session_id_changed' && normalizeSessionId(recoveredInput.payload.old_session_id) ? [normalizeSessionId(recoveredInput.payload.old_session_id)!] : [],
     )
   }
 }

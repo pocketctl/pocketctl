@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest';
 import { agentEventContracts, turnEnrichmentFields, turnInterruptPendingReceipt } from './fixtures/agent-event-contracts.js';
 import { buildDedupKey, classifyDaemonEvent } from '../ingress/event-policy.js';
@@ -5,7 +6,8 @@ import { Router } from '../router.js';
 
 function createRouterPool(): any {
   const pool: any = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (/INSERT INTO events/i.test(sql)) return { rows: [{ id: 1 }], rowCount: 1 };
       return { rows: [], rowCount: 1 };
     }),

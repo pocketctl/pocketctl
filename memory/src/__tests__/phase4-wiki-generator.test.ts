@@ -44,6 +44,15 @@ function mockProvider(response: ModelJsonResult<unknown>) {
 }
 
 describe('Phase 4 Wiki generator and validator', () => {
+  test('a primary timeout plus fallback budget refusal retains its uncertain reservation',async()=>{
+    const {provider}=mockProvider({ok:false,code:'budget_exceeded',retryable:false,timeoutFallback:{primary:{code:'http_error',detail:'timeout',billingUncertain:true,budgetReservationId:'primary-reservation'}}})
+    expect(await generateWikiCandidateOrFallback({generator:createWikiGenerator({provider,timeoutMs:50}),skeleton,sources,coverage:'partial',commitSha,snapshotId,signal:new AbortController().signal,requestKey:'wiki:stable'})).toMatchObject({source:'deterministic',failureCode:'provider_result_unknown',budgetReservationId:'primary-reservation'})
+  })
+  test('retains the build-run request identity through fallback dispatch', async () => {
+    const {request,provider}=mockProvider({ok:false,code:'provider_result_unknown',retryable:false})
+    await generateWikiCandidateOrFallback({generator:createWikiGenerator({provider,timeoutMs:50}),skeleton,sources,coverage:'partial',commitSha,snapshotId,signal:new AbortController().signal,requestKey:'wiki:stable-build-run'})
+    expect(request.mock.calls[0][0].requestKey).toBe('wiki:stable-build-run')
+  })
   test('keeps the deterministic skeleton inside a lowered section bound', () => {
     const bounded = buildDeterministicWikiSkeleton({
       coverage: 'partial', commitSha,

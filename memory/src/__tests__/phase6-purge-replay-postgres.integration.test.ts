@@ -1,6 +1,7 @@
 import pg from 'pg'
-import { afterAll,beforeAll,beforeEach,describe,expect,test,vi } from 'vitest'
+import { afterAll,afterEach,beforeAll,beforeEach,describe,expect,test,vi } from 'vitest'
 import * as gitCoauthors from '../skills/git-coauthors.js'
+import * as deliveryAvailability from '../episodes/delivery-withdrawal.js'
 import { applyMemorySchema,MEMORY_MIGRATIONS } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { gitImportFixture } from '../testing/phase6-import-fixture.js'
@@ -18,9 +19,15 @@ const url=process.env.MEMORY_TEST_DATABASE_URL
 const db=url&&process.env.RUN_MEMORY_POSTGRES_INTEGRATION==='1'?describe:describe.skip
 db('Phase 6 whole projection lifecycle',()=>{
   let pool:pg.Pool
+  let restoreLegacyDeliveryAvailability:(()=>void)|undefined
+  const restoreCurrentDeliveryAvailability=()=>{
+    restoreLegacyDeliveryAvailability?.();restoreLegacyDeliveryAvailability=undefined
+    expect(vi.isMockFunction(deliveryAvailability.deliveryVersionAvailableSql)).toBe(false)
+  }
   beforeAll(async()=>{pool=new pg.Pool({connectionString:url,max:12});await assertMemoryTestDatabase(pool,url!)
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await applyMemorySchema(pool)},60_000)
   beforeEach(async()=>{await pool.query('TRUNCATE memory_installations CASCADE')})
+  afterEach(restoreCurrentDeliveryAvailability)
   afterAll(async()=>{await pool?.end()})
   async function setup(kinds=['rule']) {
     const s=await gitImportFixture(pool,kinds,true)
@@ -267,6 +274,13 @@ db('Phase 6 whole projection lifecycle',()=>{
       await client.query('BEGIN');for(const statement of migration.statements)await client.query(statement)
       await client.query('INSERT INTO memory_schema_migrations(version) VALUES($1)',[migration.version]);await client.query('COMMIT')
     }}finally{client.release()}
+    expect((await pool.query('SELECT max(version) AS version FROM memory_schema_migrations')).rows[0].version).toBe(43)
+    expect((await pool.query("SELECT to_regprocedure('memory_delivery_version_available(uuid,uuid)') AS fn")).rows[0].fn).toBeNull()
+    // Seed the historical state using its pre-v68 availability semantics.
+    // Keep all current scope/evidence checks; never add a permissive runtime
+    // fallback for a missing withdrawal function. Restore before migration.
+    const availability=vi.spyOn(deliveryAvailability,'deliveryVersionAvailableSql').mockReturnValue('TRUE')
+    restoreLegacyDeliveryAvailability=()=>availability.mockRestore()
   }
   // These upgrade fixtures seed an ordinary dependency Skill using schema43's
   // live-only authorship semantics. This is not production old-schema support:
@@ -286,6 +300,7 @@ db('Phase 6 whole projection lifecycle',()=>{
     try{return await setup()}finally{authors.mockRestore();expect(vi.isMockFunction(gitCoauthors.loadGitSkillCoauthors)).toBe(false)}
   }
   async function upgradeLegacy43(s:Awaited<ReturnType<typeof setup>>){
+    restoreCurrentDeliveryAvailability()
     await applyMemorySchema(pool)
     await expect(gitCoauthors.loadGitSkillCoauthors(pool,s.f.installationId,s.f.skill.reviewed.versionId)).resolves.toEqual(new Set())
   }
@@ -330,6 +345,7 @@ db('Phase 6 whole projection lifecycle',()=>{
     await legacy43();const s=await setupLegacy43()
     await pool.query("CREATE FUNCTION fixture_upgrade_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture_upgrade_failure'; END $$")
     await pool.query('CREATE TRIGGER zz_fixture_upgrade_fail BEFORE DELETE ON memory_git_snapshots FOR EACH ROW EXECUTE FUNCTION fixture_upgrade_fail()')
+    restoreCurrentDeliveryAvailability()
     try{await expect(applyMemorySchema(pool)).rejects.toThrow('fixture_upgrade_failure')}
     finally{await pool.query('DROP TRIGGER zz_fixture_upgrade_fail ON memory_git_snapshots; DROP FUNCTION fixture_upgrade_fail()')}
     expect((await pool.query('SELECT max(version) AS n FROM memory_schema_migrations')).rows[0].n).toBe(43)

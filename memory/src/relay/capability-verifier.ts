@@ -7,6 +7,7 @@ const CLOCK_TOLERANCE_SECONDS = 30
 const CAPABILITY_GRANT_MAX_TTL_SECONDS = 300
 
 export interface VerifiedGrant {
+  userId?:number
   installationId: string
   callerType: string
   sessionId?: string
@@ -71,6 +72,7 @@ export interface CapabilityVerifierOptions {
     local_status: string
     relay_status: string
     config_version: string | number
+    owner_user_id?:string|number|null
   } | null>
   fetchImpl?: typeof fetch
   now?: () => number
@@ -180,6 +182,7 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
         || installation.local_status === 'integrity_error') return null
       if (installation.relay_status === 'revoking' || installation.relay_status === 'revoked') return null
       if (String(installation.config_version) !== payload.config_version) return null
+      if(installation.owner_user_id!==undefined&&String(installation.owner_user_id)!==subject[1])return null
 
       if (!(payload.services as unknown[]).includes(requiredService)) return null
 
@@ -190,6 +193,7 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
 
       return {
         installationId: payload.installation_id,
+        ...(installation.owner_user_id!==undefined?{userId:Number(subject[1])}:{}),
         callerType: typeof payload.caller_type === 'string' ? payload.caller_type : '',
         ...(typeof grantSession === 'string' ? { sessionId: grantSession } : {}),
         services: payload.services as string[],

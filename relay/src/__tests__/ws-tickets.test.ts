@@ -1,3 +1,4 @@
+import {freshNativeSchemaUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest';
 import { initDB } from '../db.js';
 import {
@@ -114,7 +115,7 @@ describe('shared websocket ticket capacity (M-2)', () => {
 
 describe('websocket ticket schema', () => {
   test('the main Relay bootstrap creates the shared ticket table', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }));
 
     await initDB({ query } as never);
 

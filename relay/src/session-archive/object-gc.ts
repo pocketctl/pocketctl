@@ -42,9 +42,9 @@ export class ArchiveObjectCollector {
       }
     }
     await this.pool.query(`UPDATE session_lifecycle_deletions d SET objects_completed_at=NOW() WHERE objects_completed_at IS NULL
-      AND NOT EXISTS(SELECT 1 FROM session_archive_object_deletions q WHERE q.session_id=d.session_id AND q.state<>'deleted')`)
+      AND NOT EXISTS(SELECT 1 FROM session_archive_object_deletions q WHERE q.user_id=d.user_id AND (q.deletion_subject_session_id=d.session_id OR q.session_id=ANY(public.native_session_alias_set(ARRAY[d.session_id]))) AND q.state<>'deleted')`)
     await this.pool.query(`UPDATE session_lifecycle_deletions d SET extensions_completed_at=NOW() WHERE extensions_completed_at IS NULL
-      AND NOT EXISTS(SELECT 1 FROM extension_session_deletions q WHERE q.session_id=d.session_id AND q.status='pending')`)
+      AND NOT EXISTS(SELECT 1 FROM extension_session_deletions q WHERE q.session_id=ANY(public.native_session_alias_set(ARRAY[d.session_id])) AND q.status='pending')`)
     return completed
   }
 }

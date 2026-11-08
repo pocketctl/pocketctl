@@ -4,6 +4,7 @@ import { classifyEnvelope } from '../relay/validation.js'
 import { RelayRequestError } from '../relay/errors.js'
 import { createInboxRepository, FeedIntegrityError, FeedReplayExpiredError, type QuarantinedInput } from './repository.js'
 import { createScopeControlProjector } from '../governance/membership-projector.js'
+import {readLegacySourceInputGeneration} from '../sources/input-mode.js'
 
 export interface FeedConsumerOptions {
   pool: pg.Pool
@@ -50,6 +51,8 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
   }
 
   async function consumeOne(installationId: string): Promise<boolean> {
+    const sourceModeGeneration=await readLegacySourceInputGeneration(options.pool,installationId)
+    if(sourceModeGeneration===null)return false
     if (!(await acquirePollLease(installationId))) return false
     let pulled: FeedBatch
     try {
@@ -104,6 +107,7 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
 
     await inbox.commitBatch({
       installationId,
+      sourceModeGeneration,
       envelopes: accepted,
       rawQuarantined: quarantined,
       cursor: pulled.next_cursor,

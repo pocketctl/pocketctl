@@ -119,6 +119,17 @@ const mirrorCovers = (relativePath) =>
     (entry) => relativePath === entry || relativePath.startsWith(`${entry}/`),
   )
 
+// Both service images rebuild this package from source. Keeping only their
+// committed npm tarballs would leave the filtered repository unbuildable.
+for (const service of ['memory', 'relay']) {
+  const dockerfile = fs.readFileSync(path.join(repoRoot, service, 'Dockerfile'), 'utf8')
+  if (dockerfile.includes('shared/session-source')) {
+    for (const dependency of ['shared/session-source', 'scripts/build-session-source.mjs']) {
+      assert.ok(mirrorCovers(dependency), `${service} build dependency is absent from public mirror: ${dependency}`)
+    }
+  }
+}
+
 const walkFiles = (directory) =>
   fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const absolutePath = path.join(directory, entry.name)

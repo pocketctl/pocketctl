@@ -1,3 +1,7 @@
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
+import {lookupCurrentInstallation,lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {prepareEvidenceSources} from '../sources/evidence-sources.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {createHash} from 'node:crypto'
 import type pg from 'pg'
 import {sanitizeText} from '../episodes/content-policy.js'
@@ -6,7 +10,7 @@ import {assertCurrentGrantClock,requireCurrentScopePermission,TargetBindingError
 import {selectedScopeContextCurrent} from '../context/selected-scope-dependencies.js'
 
 export interface EvidenceReadInput {
- installationId:string;evidenceId:string;scopeGrant?:V2GrantFacts;expiresAt?:number
+ installationId:string;evidenceId:string;scopeGrant?:V2GrantFacts;expiresAt?:number;configVersion?:string;userId?:number
  frame?:ContextQueryFrame;packId?:string;packInstallationId?:string
 }
 export interface BoundEvidenceReadInput extends EvidenceReadInput {
@@ -15,7 +19,7 @@ export interface BoundEvidenceReadInput extends EvidenceReadInput {
 interface EvidenceRow {
  evidence_id:string;version_id:string;claim_id:string;excerpt:string;excerpt_hash:string
  evidence_kind:string;capsule_id:string|null;source_text:string|null;source_origin:string|null
- source_event_id:string|null;artifact_id:string|null;source_text_overflow:boolean
+ source_kind:string|null;source_event_id:string|null;artifact_id:string|null;source_text_overflow:boolean
 }
 const emptyFrame:ContextQueryFrame={repositoryId:null,repoSnapshotId:null,branch:null,taskScopeKey:null}
 const digest=(text:string)=>createHash('sha256').update(text).digest('hex')
@@ -26,12 +30,17 @@ const digest=(text:string)=>createHash('sha256').update(text).digest('hex')
 export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|BoundEvidenceReadInput,bound:boolean){
  const page='page' in input?input.page??0:0,maxChars='maxChars' in input?input.maxChars??4000:4000
  if(!Number.isInteger(page)||page<0||page>3||!Number.isInteger(maxChars)||maxChars<1||maxChars>4000)throw new Error('invalid_evidence_page')
+ let prepared:Awaited<ReturnType<typeof prepareEvidenceSources>>|undefined
+ try{if(sourcePoolContext(pool).namespace==='memory')prepared=await prepareEvidenceSources(pool,input.installationId,[input.evidenceId])}catch(error){if(preparedSourceUnavailable(error))return null;throw error}
  const client=await pool.connect()
  try{
   await client.query('BEGIN')
   const deny=async()=>{await client.query('ROLLBACK');return null}
   if(input.scopeGrant)await requireCurrentScopePermission({client,grant:input.scopeGrant,targetInstallationId:input.installationId,permission:'read'})
   else{
+   if(!await lockCurrentRelayAuthority(client,[input.installationId]))return deny()
+   const current=await lookupCurrentInstallation(client,input.installationId)
+   if(current&&(!current.current||input.configVersion===undefined||current.configVersion!==input.configVersion||(input.userId!==undefined&&current.ownerUserId!==String(input.userId))))return deny()
    await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
    const installation=await client.query(`SELECT 1 FROM memory_installations i LEFT JOIN memory_owner_scopes s USING(installation_id)
      WHERE i.installation_id=$1 AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error','paused')
@@ -39,6 +48,7 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
    if(!installation.rowCount)return deny()
   }
   if(input.expiresAt!=null&&!(await client.query('SELECT clock_timestamp()<to_timestamp($1) AS live',[input.expiresAt])).rows[0].live)return deny()
+  if(prepared)await prepared.assertCurrent(client)
   const observed=(await client.query<{claim_id:string;version_id:string;excerpt_hash:string}>(`SELECT v.claim_id::text,e.version_id::text,encode(e.excerpt_hash,'hex') AS excerpt_hash
     FROM knowledge_evidence e JOIN knowledge_versions v USING(installation_id,version_id)
     WHERE e.installation_id=$1 AND e.evidence_id=$2`,[input.installationId,input.evidenceId])).rows[0]
@@ -77,17 +87,18 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
   }
   const row=(await client.query<EvidenceRow>(`SELECT e.evidence_id::text,e.version_id::text,v.claim_id::text,e.excerpt,
    encode(e.excerpt_hash,'hex') AS excerpt_hash,e.evidence_kind,e.capsule_id::text,e.source_event_id::text,e.artifact_id::text,
-   event.origin AS source_origin,
-   CASE WHEN event.origin='team' THEN NULL
+   event.origin AS source_origin,event.source_kind,
+   ${prepared?'NULL::text AS source_text,FALSE AS source_text_overflow':`CASE WHEN event.origin='team' OR event.source_kind IN('team_collaboration','team_delivery','team_semantic') THEN NULL
      WHEN e.artifact_id IS NOT NULL THEN CASE WHEN jsonb_typeof(artifact.details->'text')='string' THEN left(artifact.details->>'text',64000) ELSE NULL END
      WHEN jsonb_typeof(event.payload->'text')='string' THEN left(event.payload->>'text',64000) ELSE NULL END AS source_text,
-   (COALESCE(length(event.payload->>'text'),0)>64000 OR COALESCE(length(artifact.details->>'text'),0)>64000) AS source_text_overflow
+   (COALESCE(length(event.payload->>'text'),0)>64000 OR COALESCE(length(artifact.details->>'text'),0)>64000) AS source_text_overflow`}
    FROM knowledge_evidence e JOIN knowledge_versions v USING(installation_id,version_id)
    LEFT JOIN source_artifacts artifact ON artifact.installation_id=e.installation_id AND artifact.artifact_id=e.artifact_id
    LEFT JOIN source_events event ON event.installation_id=e.installation_id
      AND event.source_event_id=CASE WHEN e.artifact_id IS NOT NULL THEN artifact.source_event_id ELSE e.source_event_id END
    WHERE e.installation_id=$1 AND e.evidence_id=$2`,[input.installationId,input.evidenceId])).rows[0]
   if(!row||row.version_id!==observed.version_id||digest(row.excerpt)!==row.excerpt_hash)return deny()
+  if(prepared){const material=prepared.material(input.evidenceId,row.version_id,row.source_event_id,row.artifact_id);row.source_text=material.sourceText;row.source_text_overflow=material.overflow;row.source_origin=material.origin;if(material.sourceKind)row.source_kind=material.sourceKind}
   if(bound&&(!('versionId' in input)||input.versionId!==row.version_id||input.excerptHash!==row.excerpt_hash))return deny()
   const sourceVersion=row.artifact_id??row.source_event_id??row.capsule_id??row.version_id
   if('sourceVersion' in input&&input.sourceVersion!==undefined&&input.sourceVersion.toLowerCase()!==sourceVersion)return deny()
@@ -100,7 +111,7 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
   if('sourceHash' in input&&input.sourceHash!==undefined&&input.sourceHash!==sourceHash)return deny()
   const useSource=bound&&'sourceHash' in input&&Boolean(input.sourceHash)&&source!==null
   const content=useSource?source!.text:row.excerpt
-  const materialKind=useSource?'sanitized_source':row.capsule_id?'retained_capsule':row.source_origin==='team'?'retained_team_excerpt':'retained_excerpt'
+  const materialKind=useSource?'sanitized_source':row.capsule_id?'retained_capsule':row.source_origin==='team'||['team_collaboration','team_delivery','team_semantic'].includes(row.source_kind??'')?'retained_team_excerpt':'retained_excerpt'
   const available=Math.min(content.length,maxChars*4),offset=page*maxChars
   const reference={evidence_id:row.evidence_id,version_id:row.version_id,excerpt_hash:row.excerpt_hash,
     source_version:sourceVersion,source_hash:sourceHash}
@@ -130,6 +141,11 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
   }
   if(input.scopeGrant)await assertCurrentGrantClock(client,input.scopeGrant,[input.installationId])
   if(input.expiresAt!=null&&!(await client.query('SELECT clock_timestamp()<to_timestamp($1) AS live',[input.expiresAt])).rows[0].live)return deny()
+  if(prepared)await prepared.assertCurrent(client,{forCommit:true})
+  // Source fences may consume the remainder of the original grant lifetime.
+  // Recheck that same clock after every guard, immediately before COMMIT.
+  if(input.scopeGrant)await assertCurrentGrantClock(client,input.scopeGrant,[input.installationId])
+  if(input.expiresAt!=null&&!(await client.query('SELECT clock_timestamp()<to_timestamp($1) AS live',[input.expiresAt])).rows[0].live)return deny()
   await client.query('COMMIT');return result
- }catch(error){await client.query('ROLLBACK').catch(()=>undefined);if(error instanceof TargetBindingError)return null;throw error}finally{client.release()}
+ }catch(error){await client.query('ROLLBACK').catch(()=>undefined);if(error instanceof TargetBindingError||preparedSourceUnavailable(error))return null;throw error}finally{client.release()}
 }

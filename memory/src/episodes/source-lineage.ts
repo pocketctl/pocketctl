@@ -1,8 +1,10 @@
+import {parseTeamSemanticProvenance} from '@pocketctl/session-source'
 import {createHash} from 'node:crypto'
 /** Original source identity excludes the reader/installation projection. */
 export function teamOriginalRoot(provenance:unknown):string|null{
  if(!provenance||typeof provenance!=='object'||Array.isArray(provenance))return null
  const p=provenance as Record<string,unknown>
+ if(p.source_kind==='team_semantic'){const semantic=parseTeamSemanticProvenance(p);return semantic?teamOriginalRoot(semantic.native):null}
  if(p.source_kind!=='team_session'||!['team_id','team_session_id','team_call_id'].every(k=>typeof p[k]==='string'&&(p[k] as string).length>0))return null
  return 'team:'+createHash('sha256').update(JSON.stringify([p.team_id,p.team_session_id,p.team_call_id])).digest('hex')
 }
@@ -10,7 +12,7 @@ export function manifestSourceRoots(manifest:unknown,sessionId:string,episodeId:
  const entries=manifest&&typeof manifest==='object'&&!Array.isArray(manifest)?Object.values(manifest as Record<string,unknown>):[]
  const roots=new Set<string>();let team=false,unknown=false
  for(const entry of entries){if(!entry||typeof entry!=='object')continue;const p=(entry as Record<string,unknown>).source_provenance
-  if(p&&typeof p==='object'&&(p as Record<string,unknown>).source_kind==='team_session'){team=true;const root=teamOriginalRoot(p);if(root)roots.add(root);else unknown=true}}
+  if(p&&typeof p==='object'&&['team_session','team_semantic'].includes((p as Record<string,unknown>).source_kind as string)){team=true;const root=teamOriginalRoot(p);if(root)roots.add(root);else unknown=true}}
  if(unknown)return []
  return team?[...roots].sort():[`native-session:${sessionId||episodeId}`]
 }

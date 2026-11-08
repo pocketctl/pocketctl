@@ -174,7 +174,9 @@ suite('contiguous side-effect-free history batching', () => {
     expect(Number((await pool.query('SELECT count(*) FROM realtime_outbox')).rows[0].count)).toBe(64);
   });
   test('batch journals honor the same app review demo exclusion', async () => {
-    await pool.query(`UPDATE sessions SET session_id='app-review-demo-history' WHERE session_id='replay-session'`);
+    await pool.query(`WITH removed AS (DELETE FROM sessions WHERE session_id='replay-session' RETURNING daemon_id,user_id,agent_type,status,cwd)
+      INSERT INTO sessions(session_id,daemon_id,user_id,agent_type,status,cwd)
+      SELECT 'app-review-demo-history',daemon_id,user_id,agent_type,status,cwd FROM removed`);
     const repository = await seed(64, (_, payload) => { payload.session_id = 'app-review-demo-history'; });
     await worker(repository).runOnce();
     expect(Number((await pool.query('SELECT count(*) FROM events')).rows[0].count)).toBe(64);

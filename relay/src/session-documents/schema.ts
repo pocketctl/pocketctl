@@ -33,6 +33,8 @@ export async function initSessionDocumentSchema(pool: Pick<pg.Pool, 'query'>): P
       ))
     );
 
+    ALTER TABLE session_documents ADD COLUMN IF NOT EXISTS owner_retired BOOLEAN NOT NULL DEFAULT FALSE;
+
     CREATE INDEX IF NOT EXISTS idx_session_documents_session_latest
       ON session_documents (user_id, session_id, updated_at DESC, document_id);
     CREATE INDEX IF NOT EXISTS idx_session_documents_user_storage
@@ -125,6 +127,60 @@ export async function initSessionDocumentSchema(pool: Pick<pg.Pool, 'query'>): P
 
     CREATE INDEX IF NOT EXISTS idx_session_document_upload_chunks_range
       ON session_document_upload_chunks (version_id, byte_offset, byte_size);
+
+    -- A Session transfer changes current authority, never the original document
+    -- owner. Cascade only its route key; child composite keys retain that owner.
+    DO $$ DECLARE c RECORD;BEGIN
+      FOR c IN SELECT conname FROM pg_constraint WHERE contype='f'
+        AND conrelid='session_documents'::regclass AND confrelid='sessions'::regclass LOOP
+        EXECUTE format('ALTER TABLE session_documents DROP CONSTRAINT %I',c.conname);
+      END LOOP;
+      ALTER TABLE session_documents ADD CONSTRAINT session_documents_route_fkey
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON UPDATE CASCADE ON DELETE CASCADE;
+      FOR c IN SELECT conrelid::regclass AS relation,conname,pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE contype='f' AND conrelid IN('session_document_versions'::regclass,'session_document_uploads'::regclass)
+         AND confrelid='session_documents'::regclass AND confupdtype<>'c' LOOP
+        EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I',c.relation,c.conname);
+        EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I %s ON UPDATE CASCADE',c.relation,c.conname,c.definition);
+      END LOOP;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION preserve_session_document_owner() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    BEGIN
+      IF TG_OP='INSERT' THEN
+        IF TG_TABLE_NAME='session_documents' AND (to_jsonb(NEW)->>'owner_retired')::boolean THEN RAISE EXCEPTION 'document owner retirement is server-owned';END IF;
+        IF TG_TABLE_NAME<>'session_documents' AND NOT EXISTS(SELECT 1 FROM session_documents d WHERE d.document_id=NEW.document_id
+          AND d.user_id=NEW.user_id AND d.session_id=NEW.session_id AND NOT d.owner_retired)
+          THEN RAISE EXCEPTION 'document original owner retired';END IF;
+        IF NOT EXISTS(SELECT 1 FROM sessions s WHERE s.session_id=NEW.session_id AND s.user_id=NEW.user_id)
+          THEN RAISE EXCEPTION 'document current owner required';END IF;
+      ELSE
+        IF TG_TABLE_NAME='session_documents' THEN
+          IF OLD.owner_retired AND NOT NEW.owner_retired OR NEW.owner_retired IS DISTINCT FROM OLD.owner_retired AND pg_trigger_depth()<2
+            THEN RAISE EXCEPTION 'document owner retirement is server-owned and permanent';END IF;
+          IF OLD.owner_retired AND NEW.session_id=OLD.session_id AND NEW IS DISTINCT FROM OLD
+            THEN RAISE EXCEPTION 'retired document is immutable';END IF;
+        END IF;
+        IF NEW.user_id IS DISTINCT FROM OLD.user_id OR NEW.document_id IS DISTINCT FROM OLD.document_id
+          THEN RAISE EXCEPTION 'session document owner identity is immutable';END IF;
+        IF NEW.session_id IS DISTINCT FROM OLD.session_id AND ((to_jsonb(NEW)-'session_id') IS DISTINCT FROM(to_jsonb(OLD)-'session_id') OR NOT EXISTS(
+          SELECT 1 FROM session_aliases a JOIN sessions s ON s.session_id=a.next_session_id
+           WHERE a.old_session_id=OLD.session_id AND a.next_session_id=NEW.session_id
+            AND a.owner_user_id=s.user_id AND NOT a.blocked))
+          THEN RAISE EXCEPTION 'unproved document route move';END IF;
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS session_document_owner ON session_documents;
+    CREATE TRIGGER session_document_owner BEFORE INSERT OR UPDATE ON session_documents
+      FOR EACH ROW EXECUTE FUNCTION preserve_session_document_owner();
+    DROP TRIGGER IF EXISTS session_document_upload_owner ON session_document_uploads;
+    CREATE TRIGGER session_document_upload_owner BEFORE INSERT OR UPDATE ON session_document_uploads
+      FOR EACH ROW EXECUTE FUNCTION preserve_session_document_owner();
+
+    DROP TRIGGER IF EXISTS session_document_version_owner ON session_document_versions;
+    CREATE TRIGGER session_document_version_owner BEFORE INSERT ON session_document_versions
+      FOR EACH ROW EXECUTE FUNCTION preserve_session_document_owner();
 
     CREATE OR REPLACE FUNCTION prevent_session_document_version_update()
     RETURNS TRIGGER LANGUAGE plpgsql AS $$

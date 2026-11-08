@@ -1,5 +1,6 @@
 import pg from 'pg'
-import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
+import {resetDurableIngressTestDatabase} from './durable-ingress-test-db.js'
 import { initDB, deleteSession, deleteDaemon, deleteUserAccount, consolidateOfflineMachineDaemons, renameOwnedDaemonSession } from '../db.js'
 import * as admissionModule from '../session-message-admissions.js'
 import { SESSION_STATUS_SUPPRESSED_EFFECT_STEP } from '../db.js'
@@ -14,6 +15,7 @@ const suite = enabled ? describe : describe.skip
 suite('durable session message admission PostgreSQL', () => {
   let pool: pg.Pool
   let userId: number
+  const routers:Router[]=[]
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL })
     const db = await pool.query('SELECT current_database() AS name')
@@ -21,8 +23,12 @@ suite('durable session message admission PostgreSQL', () => {
     await initDB(pool)
   }, 30000)
   afterAll(async () => { await pool?.end() })
+  afterEach(async()=>{
+    for(const router of routers.splice(0)){router.beginShutdown();await router.stopDurableIngress({flushDeadlineMs:2000});router.stop()}
+    await vi.waitFor(()=>expect(pool.idleCount).toBe(pool.totalCount),{timeout:5000})
+  })
   beforeEach(async () => {
-    await pool.query('TRUNCATE deleted_sessions, users, daemons, sessions, quota_reservations, events, event_inbox, realtime_outbox RESTART IDENTITY CASCADE')
+    await resetDurableIngressTestDatabase(pool,process.env.TEST_DATABASE_URL!)
     userId = (await pool.query("INSERT INTO users(email,password_hash) VALUES('admission@test.invalid','x') RETURNING id")).rows[0].id
     await pool.query("INSERT INTO daemons(daemon_id,hostname,status,user_id) VALUES('admission-daemon','test','online',$1)", [userId])
     await pool.query("INSERT INTO sessions(session_id,daemon_id,agent_type,cwd,source,status,user_id) VALUES('admission-session','admission-daemon','codex','/repo','daemon','running',$1),('other-active','admission-daemon','codex','/repo','daemon','running',$1)", [userId])
@@ -30,6 +36,7 @@ suite('durable session message admission PostgreSQL', () => {
   function socket(): any { const sent: any[] = []; return { readyState: 1, send: vi.fn((raw: string) => sent.push(JSON.parse(raw))), close: vi.fn(), _sent: sent } }
   async function route() {
     const router = new Router(pool)
+    routers.push(router)
     const daemon = socket(), client = socket()
     await router.registerDaemon(daemon, { type: 'register', daemon_id: 'admission-daemon', hostname: 'test', agents: [], supports_quota_grant: true }, userId)
     router.registerClient(client, userId)

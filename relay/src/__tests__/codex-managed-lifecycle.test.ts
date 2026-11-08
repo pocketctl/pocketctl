@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 
 import { Router } from '../router.js'
@@ -12,6 +13,7 @@ function createRecordingPool(): any {
   let eventID = 0
   const pool: any = {
     query: vi.fn(async (sql: string, params?: any[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       queries.push({ sql, params: params || [] })
       if (sql.includes('INSERT INTO daemons') && sql.includes('RETURNING daemon_id')) {
         return { rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 }
@@ -85,7 +87,7 @@ describe('Codex managed lifecycle relay contract', () => {
       expect(queriesMatching(pool, 'INSERT INTO events')).toContainEqual(expect.objectContaining({
         params: [
           'thr_1', 'session_discovered', expect.stringContaining('"control_mode":"managed"'),
-          expect.any(String), 1,
+          expect.any(String), 1, 'thr_1',
         ],
       }))
       expect(queriesMatching(pool, "UPDATE events SET effect_status = 'completed'")).toContainEqual(expect.objectContaining({
@@ -110,7 +112,7 @@ describe('Codex managed lifecycle relay contract', () => {
       expect(queriesMatching(pool, 'INSERT INTO events')).toContainEqual(expect.objectContaining({
         params: [
           'thr_1', 'session_status', expect.stringContaining('"status":"idle"'),
-          expect.any(String), 1,
+          expect.any(String), 1, 'thr_1',
         ],
       }))
       expect(queriesMatching(pool, "UPDATE events SET effect_status = 'completed'")).toContainEqual(expect.objectContaining({

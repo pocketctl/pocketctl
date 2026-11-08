@@ -1,4 +1,5 @@
-import {rollupFeedbackBeforeInstallationPurge,minimizeSessionFeedback} from '../claims/feedback-policy.js'
+import {assertIndependentAcceptedEvidence,independentlyAcceptedVersionSupportSql} from '../claims/accepted-evidence-policy.js'
+import {rollupFeedbackBeforeInstallationPurge,minimizeSessionFeedback,minimizeEpisodeFeedback} from '../claims/feedback-policy.js'
 import {cleanupRevokedSharedClaims} from '../governance/retention-service.js'
 import { createHash, createHmac } from 'crypto'
 import type pg from 'pg'
@@ -353,115 +354,9 @@ async function deleteOrphanSourceBlobs(client:pg.PoolClient,installationIds:read
   return removed.rowCount??0
 }
 
-async function purgeSessionRows(
-  client: QueryClient,
-  input: SessionPurgeInput,
-  tombstoneHmacKeys: readonly TombstoneHmacKey[],
-): Promise<number> {
-  // Serialize against episode compilation on this session: a compile that
-  // wins the lock lands before the deletes (and is removed by them); one
-  // that loses waits for this commit and observes the tombstone fence.
-  await client.query(`
-    SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0))
-  `, [input.installationId, input.sessionId])
-  // Session invalidation writes the shared consumption generation and Git
-  // connection before deleting Claims. Serialize with all installation
-  // writers at the existing session -> installation boundary, before triggers.
-  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`, [input.installationId])
-  await client.query(`
-    INSERT INTO memory_session_tombstones
-      (installation_id, session_id, reason, source_feed_id, purged_at)
-    VALUES ($1, $2, $3, $4, NOW())
-    ON CONFLICT (installation_id, session_id) DO NOTHING
-  `, [input.installationId, input.sessionId, input.reason, input.sourceFeedId])
-
-  await minimizeSessionFeedback(client,input.installationId,input.sessionId)
-  // Phase 2 purge order: stop session-scoped context generation and remove
-  // every pack whose turn or Evidence source belongs to the purged Session
-  // before deleting the Evidence/Version joins that make that dependency
-  // discoverable. This applies to delivered history too: privacy deletion
-  // wins over audit-content retention.
-  await client.query(`
-    UPDATE memory_generation_runs
-    SET state = 'cancelled', error_code = 'source_purged', completed_at = NOW()
-    WHERE installation_id = $1 AND operation = 'compile_context'
-      AND subject_kind = 'session'
-      AND subject_key_hash = decode(md5($2), 'hex')
-      AND state IN ('queued','running')
-  `, [input.installationId, input.sessionId])
-  await client.query(`
-    DELETE FROM memory_context_packs p
-    WHERE p.installation_id = $1
-      AND (p.session_id = $2 OR EXISTS (
-        SELECT 1
-        FROM memory_context_pack_evidence pe
-        JOIN knowledge_evidence e
-          ON e.installation_id = pe.installation_id AND e.evidence_id = pe.evidence_id
-        JOIN work_episodes w
-          ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
-        WHERE pe.pack_id = p.pack_id AND w.session_id = $2))
-  `, [input.installationId, input.sessionId])
-
-  // Remove only immutable Versions whose complete evidence set belongs to
-  // this session. A Version with evidence from another session survives; the
-  // episode delete below removes only the purged evidence rows. If the
-  // current Version is deleted, retain the newest independently evidenced
-  // Version; delete the Claim only when no such Version remains.
-  const impacted = await client.query<{
-    claim_id: string
-    claim_type: string
-    scope_key: string
-  }>(`
-      SELECT DISTINCT c.claim_id::text, c.claim_type, c.scope_key
-      FROM knowledge_claims c
-      JOIN knowledge_versions v
-        ON v.installation_id = c.installation_id AND v.claim_id = c.claim_id
-      JOIN knowledge_evidence e
-        ON e.installation_id = v.installation_id AND e.version_id = v.version_id
-      JOIN work_episodes w
-        ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
-      WHERE c.installation_id = $1 AND w.session_id = $2
-      ORDER BY c.claim_id::text
-  `, [input.installationId, input.sessionId])
-  for (const claim of impacted.rows) {
-    const locked = await client.query<{ current_version_id: string | null; scope_kind: ScopeKind;
-      canonical_repository_key: string | null; normalized_key_v2: string | null }>(`
-      SELECT current_version_id::text,scope_kind,canonical_repository_key,normalized_key_v2 FROM knowledge_claims
-      WHERE installation_id = $1 AND claim_id = $2 FOR UPDATE
-    `, [input.installationId, claim.claim_id])
-    const currentVersionId = locked.rows[0]?.current_version_id ?? null
-    const dependent = await client.query<{
-      version_id: string; statement: string; valid_from: Date | null; valid_until: Date | null; branch: string | null; repo_snapshot_id: string | null;
-      repository_id:string|null;applicability:unknown
-    }>(`
-      SELECT v.version_id::text, v.statement, v.valid_from, v.valid_until,v.branch,v.repo_snapshot_id::text,v.repository_id::text,v.applicability
-      FROM knowledge_versions v
-      WHERE v.installation_id = $1 AND v.claim_id = $2
-        AND EXISTS (
-          SELECT 1 FROM knowledge_evidence e
-          JOIN work_episodes w
-            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
-          WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
-            AND w.session_id = $3
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM knowledge_evidence e
-          JOIN work_episodes w
-            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
-          WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
-            AND w.session_id <> $3
-        )
-    `, [input.installationId, claim.claim_id, input.sessionId])
-    const versionIds = dependent.rows.map(row => row.version_id)
-    if (versionIds.length === 0) {
-      await client.query(`
-        UPDATE knowledge_claims SET revision = revision + 1, updated_at = NOW()
-        WHERE installation_id = $1 AND claim_id = $2
-      `, [input.installationId, claim.claim_id])
-      continue
-    }
-    const frame = locked.rows[0]
-    const removedIdentities = dependent.rows.flatMap(version => {
+/** Pure policy descriptor shared with bounded maintenance admission. No DML. */
+export function sessionPurgeVersionIdentities(claim:{scope_key:string;claim_type:string},frame:{scope_kind:ScopeKind;canonical_repository_key:string|null;normalized_key_v2:string|null}|undefined,currentVersionId:string|null,versions:readonly {version_id:string;statement:string;repository_id:string|null;repo_snapshot_id:string|null;branch:string|null;applicability:unknown}[]){
+  const removedIdentities = versions.flatMap(version => {
       if (!frame) return []
       try {
         let historical:ClaimApplicability
@@ -482,16 +377,183 @@ async function purgeSessionRows(
     })
     const removedIdentityKeysV2=removedIdentities.map(identity=>identity.keyV2)
     // Retain the persisted current alias as well as every provable removed version's alias.
-    if(currentVersionId && versionIds.includes(currentVersionId) && frame?.normalized_key_v2
+    if(currentVersionId && versions.some(v=>v.version_id===currentVersionId) && frame?.normalized_key_v2
       && /^[a-f0-9]{64}$/.test(frame.normalized_key_v2)) removedIdentityKeysV2.push(frame.normalized_key_v2)
+  return {normalizedKeysV2:removedIdentityKeysV2,normalizedKeys:[...removedIdentities.map(identity=>identity.legacyKey),...versions.map(row=>normalizedClaimKey({claimType:claim.claim_type,scopeKey:claim.scope_key,statement:row.statement}))]}
+}
+
+async function purgeSessionRows(
+  client: QueryClient,
+  input: SessionPurgeInput,
+  tombstoneHmacKeys: readonly TombstoneHmacKey[],
+): Promise<number> {
+  // Serialize against episode compilation on this session: a compile that
+  // wins the lock lands before the deletes (and is removed by them); one
+  // that loses waits for this commit and observes the tombstone fence.
+  await client.query(`
+    SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0))
+  `, [input.installationId, input.sessionId])
+  // Session invalidation writes the shared consumption generation and Git
+  // connection before deleting Claims. Serialize with all installation
+  // writers at the existing session -> installation boundary, before triggers.
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`, [input.installationId])
+  // Prove every accepted relationship on all impacted Claim versions before
+  // any caller-owned transaction can observe a partial source mutation.
+  const ownershipVersions=await client.query<{version_id:string}>(`
+    SELECT v.version_id::text FROM knowledge_versions v
+    WHERE v.installation_id=$1 AND EXISTS(
+      SELECT 1 FROM knowledge_versions affected JOIN knowledge_evidence e USING(installation_id,version_id)
+      JOIN work_episodes w USING(installation_id,episode_id)
+      WHERE affected.installation_id=v.installation_id AND affected.claim_id=v.claim_id AND w.session_id=$2)
+    ORDER BY v.version_id`,[input.installationId,input.sessionId])
+  await assertIndependentAcceptedEvidence(client,ownershipVersions.rows.map(row=>row.version_id))
+  await client.query(`
+    INSERT INTO memory_session_tombstones
+      (installation_id, session_id, reason, source_feed_id, purged_at)
+    VALUES ($1, $2, $3, $4, NOW())
+    ON CONFLICT (installation_id, session_id) DO NOTHING
+  `, [input.installationId, input.sessionId, input.reason, input.sourceFeedId])
+
+  // Repeat the native tombstone trigger's replay policy on resumed/restored
+  // rows too: ON CONFLICT skips AFTER INSERT when the barrier already exists.
+  await client.query(`DELETE FROM memory_skill_replay_runs r WHERE r.installation_id=$1
+    AND EXISTS(SELECT 1 FROM memory_skill_replay_cases c WHERE c.installation_id=r.installation_id
+      AND c.run_id=r.run_id AND c.session_id=$2)`,[input.installationId,input.sessionId])
+
+  await minimizeSessionFeedback(client,input.installationId,input.sessionId)
+  // Phase 2 purge order: stop session-scoped context generation and remove
+  // every pack whose turn or Evidence source belongs to the purged Session
+  // before deleting the Evidence/Version joins that make that dependency
+  // discoverable. This applies to delivered history too: privacy deletion
+  // wins over audit-content retention.
+  await cancelSessionContextGenerationRows(client,input)
+  await client.query(`
+    DELETE FROM memory_context_packs p
+    WHERE p.installation_id = $1
+      AND (p.session_id = $2 OR EXISTS (
+        SELECT 1
+        FROM memory_context_pack_evidence pe
+        JOIN knowledge_evidence e
+          ON e.installation_id = pe.installation_id AND e.evidence_id = pe.evidence_id
+        JOIN work_episodes w
+          ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+        WHERE pe.pack_id = p.pack_id AND w.session_id = $2))
+  `, [input.installationId, input.sessionId])
+
+  const selectedEpisodes=await client.query<{episode_id:string}>('SELECT episode_id::text FROM work_episodes WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
+  const invalidatedClaims=await invalidateEpisodeKnowledge(client,{installationId:input.installationId,episodeIds:selectedEpisodes.rows.map(r=>r.episode_id)},tombstoneHmacKeys)
+  // Task prose and model results belong to the deleted session. Independent
+  // accepted evidence has no Bundle FK and remains governed by knowledge delete.
+  await client.query('DELETE FROM memory_task_bundles WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
+  await client.query('DELETE FROM memory_source_processing_receipts WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
+  await client.query('DELETE FROM memory_session_scene_frames WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
+  await client.query(`
+    DELETE FROM memory_candidates WHERE installation_id = $1 AND episode_id IN (
+      SELECT episode_id FROM work_episodes WHERE installation_id = $1 AND session_id = $2
+    )
+  `, [input.installationId, input.sessionId])
+  await client.query(`
+    DELETE FROM memory_extraction_runs WHERE installation_id = $1 AND episode_id IN (
+      SELECT episode_id FROM work_episodes WHERE installation_id = $1 AND session_id = $2
+    )
+  `, [input.installationId, input.sessionId])
+
+  for (const table of [
+    'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
+    'memory_snapshot_events', 'memory_source_retention_receipts',
+  ]) {
+    await client.query(
+      `DELETE FROM ${table} WHERE installation_id = $1 AND session_id = $2`,
+      [input.installationId, input.sessionId],
+    )
+  }
+  await client.query(
+    `DELETE FROM memory_feed_inbox WHERE installation_id = $1 AND session_id = $2`,
+    [input.installationId, input.sessionId],
+  )
+  await client.query(`
+    UPDATE source_sessions SET
+      agent_type = NULL, daemon_id = NULL, status = NULL, cwd_observation = NULL,
+      worktree_path = NULL, worktree_branch = NULL, deleted_at = NOW(),
+      delete_reason = $3
+    WHERE installation_id = $1 AND session_id = $2
+  `, [input.installationId, input.sessionId, input.reason])
+  await client.query(`
+    UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
+    WHERE installation_id = $1 AND feed_id = $2
+  `, [input.installationId, input.sourceFeedId ?? 0])
+  return invalidatedClaims
+}
+
+/** Mature source-loss Claim policy, shared by Session purge and exact derived
+ * episode invalidation. Callers own the native installation/session fences.
+ * Independent accepted ownership and identity/pointer semantics stay here. */
+export async function invalidateEpisodeKnowledge(client:QueryClient,input:{installationId:string;episodeIds:readonly string[]},tombstoneHmacKeys:readonly TombstoneHmacKey[]):Promise<number>{
+  // Remove only immutable Versions whose complete evidence set belongs to
+  // the selected episodes and which have no independently owned accepted support. A Version with evidence from an independent episode survives; the
+  // episode delete below removes only the purged evidence rows. If the
+  // current Version is deleted, retain the newest independently evidenced
+  // Version; delete the Claim only when no such Version remains.
+  const impacted = await client.query<{
+    claim_id: string
+    claim_type: string
+    scope_key: string
+  }>(`
+      SELECT DISTINCT c.claim_id::text, c.claim_type, c.scope_key
+      FROM knowledge_claims c
+      JOIN knowledge_versions v
+        ON v.installation_id = c.installation_id AND v.claim_id = c.claim_id
+      JOIN knowledge_evidence e
+        ON e.installation_id = v.installation_id AND e.version_id = v.version_id
+      JOIN work_episodes w
+        ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+      WHERE c.installation_id = $1 AND w.episode_id = ANY($2::uuid[])
+      ORDER BY c.claim_id::text
+  `, [input.installationId, input.episodeIds])
+  for (const claim of impacted.rows) {
+    const locked = await client.query<{ current_version_id: string | null; scope_kind: ScopeKind;
+      canonical_repository_key: string | null; normalized_key_v2: string | null }>(`
+      SELECT current_version_id::text,scope_kind,canonical_repository_key,normalized_key_v2 FROM knowledge_claims
+      WHERE installation_id = $1 AND claim_id = $2 FOR UPDATE
+    `, [input.installationId, claim.claim_id])
+    const currentVersionId = locked.rows[0]?.current_version_id ?? null
+    const dependent = await client.query<{
+      version_id: string; statement: string; valid_from: Date | null; valid_until: Date | null; branch: string | null; repo_snapshot_id: string | null;
+      repository_id:string|null;applicability:unknown
+    }>(`
+      SELECT v.version_id::text, v.statement, v.valid_from, v.valid_until,v.branch,v.repo_snapshot_id::text,v.repository_id::text,v.applicability
+      FROM knowledge_versions v
+      WHERE v.installation_id = $1 AND v.claim_id = $2
+        AND EXISTS (
+          SELECT 1 FROM knowledge_evidence e
+          JOIN work_episodes w
+            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+          WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
+            AND w.episode_id = ANY($3::uuid[])
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_evidence e
+          JOIN work_episodes w
+            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+          WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
+            AND NOT(w.episode_id = ANY($3::uuid[]))
+        )
+        AND NOT ${independentlyAcceptedVersionSupportSql()}
+    `, [input.installationId, claim.claim_id, input.episodeIds])
+    const versionIds = dependent.rows.map(row => row.version_id)
+    if (versionIds.length === 0) {
+      await client.query(`
+        UPDATE knowledge_claims SET revision = revision + 1, updated_at = NOW()
+        WHERE installation_id = $1 AND claim_id = $2
+      `, [input.installationId, claim.claim_id])
+      continue
+    }
+    const frame = locked.rows[0]
+    const removedIdentities=sessionPurgeVersionIdentities(claim,frame,currentVersionId,dependent.rows)
     await insertKnowledgeTombstones(client, {
       installationId: input.installationId,
-      normalizedKeysV2: removedIdentityKeysV2,
-      normalizedKeys: [...removedIdentities.map(identity=>identity.legacyKey),...dependent.rows.map(row => normalizedClaimKey({
-        claimType: claim.claim_type,
-        scopeKey: claim.scope_key,
-        statement: row.statement,
-      }))],
+      normalizedKeysV2: removedIdentities.normalizedKeysV2,
+      normalizedKeys: removedIdentities.normalizedKeys,
       reason: 'source_purge',
       keys: tombstoneHmacKeys,
     })
@@ -502,16 +564,16 @@ async function purgeSessionRows(
       FROM knowledge_versions v
       WHERE v.installation_id = $1 AND v.claim_id = $2
         AND NOT (v.version_id = ANY($3::uuid[]))
-        AND EXISTS (
+        AND (EXISTS (
           SELECT 1 FROM knowledge_evidence e
           JOIN work_episodes w
             ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
           WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
-            AND w.session_id <> $4
-        )
+            AND NOT(w.episode_id = ANY($4::uuid[]))
+        ) OR ${independentlyAcceptedVersionSupportSql()})
       ORDER BY v.version_number DESC
       LIMIT 1
-    `, [input.installationId, claim.claim_id, versionIds, input.sessionId])
+    `, [input.installationId, claim.claim_id, versionIds, input.episodeIds])
     if (currentVersionId && versionIds.includes(currentVersionId)) {
       if (replacement.rows[0]) {
         const removedCurrent = dependent.rows.find(row => row.version_id === currentVersionId)
@@ -568,47 +630,29 @@ async function purgeSessionRows(
       WHERE installation_id = $1 AND claim_id = $2 AND version_id = ANY($3::uuid[])
     `, [input.installationId, claim.claim_id, versionIds])
   }
-  // Task prose and model results belong to the deleted session. Independent
-  // accepted evidence has no Bundle FK and remains governed by knowledge delete.
-  await client.query('DELETE FROM memory_task_bundles WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
-  await client.query('DELETE FROM memory_source_processing_receipts WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
-  await client.query('DELETE FROM memory_session_scene_frames WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
-  await client.query(`
-    DELETE FROM memory_candidates WHERE installation_id = $1 AND episode_id IN (
-      SELECT episode_id FROM work_episodes WHERE installation_id = $1 AND session_id = $2
-    )
-  `, [input.installationId, input.sessionId])
-  await client.query(`
-    DELETE FROM memory_extraction_runs WHERE installation_id = $1 AND episode_id IN (
-      SELECT episode_id FROM work_episodes WHERE installation_id = $1 AND session_id = $2
-    )
-  `, [input.installationId, input.sessionId])
-
-  for (const table of [
-    'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
-    'memory_snapshot_events', 'memory_source_retention_receipts',
-  ]) {
-    await client.query(
-      `DELETE FROM ${table} WHERE installation_id = $1 AND session_id = $2`,
-      [input.installationId, input.sessionId],
-    )
-  }
-  await client.query(
-    `DELETE FROM memory_feed_inbox WHERE installation_id = $1 AND session_id = $2`,
-    [input.installationId, input.sessionId],
-  )
-  await client.query(`
-    UPDATE source_sessions SET
-      agent_type = NULL, daemon_id = NULL, status = NULL, cwd_observation = NULL,
-      worktree_path = NULL, worktree_branch = NULL, deleted_at = NOW(),
-      delete_reason = $3
-    WHERE installation_id = $1 AND session_id = $2
-  `, [input.installationId, input.sessionId, input.reason])
-  await client.query(`
-    UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
-    WHERE installation_id = $1 AND feed_id = $2
-  `, [input.installationId, input.sourceFeedId ?? 0])
   return impacted.rows.length
+}
+
+/** Invalidate compiled source-derived bodies without deleting another Session's
+ * raw facts or audit run/reservation links. No replacement body is invented,
+ * no source digest is retargeted, and no recompile/model job is scheduled.
+ * The caller must run inside its authorized transaction. */
+export async function invalidateDerivedEpisodes(client:QueryClient,input:{installationId:string;episodeIds:readonly string[]},tombstoneHmacKeys:readonly TombstoneHmacKey[]):Promise<number>{
+  if(!input.episodeIds.length)return 0
+  const episodes=await client.query<{session_id:string}>(`SELECT DISTINCT session_id FROM work_episodes WHERE installation_id=$1 AND episode_id=ANY($2::uuid[]) ORDER BY session_id`,[input.installationId,input.episodeIds])
+  for(const row of episodes.rows)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))`,[input.installationId,row.session_id])
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`,[input.installationId])
+  const ownership=await client.query<{version_id:string}>(`SELECT v.version_id::text FROM knowledge_versions v WHERE v.installation_id=$1 AND EXISTS(SELECT 1 FROM knowledge_versions a JOIN knowledge_evidence e USING(installation_id,version_id) WHERE a.installation_id=v.installation_id AND a.claim_id=v.claim_id AND e.episode_id=ANY($2::uuid[]))`,[input.installationId,input.episodeIds])
+  await assertIndependentAcceptedEvidence(client,ownership.rows.map(r=>r.version_id))
+  await client.query(`DELETE FROM memory_context_packs p WHERE p.installation_id=$1 AND EXISTS(SELECT 1 FROM memory_context_pack_evidence pe JOIN knowledge_evidence e USING(installation_id,evidence_id) WHERE pe.pack_id=p.pack_id AND e.episode_id=ANY($2::uuid[]))`,[input.installationId,input.episodeIds])
+  await minimizeEpisodeFeedback(client,input.installationId,input.episodeIds)
+  const invalidated=await invalidateEpisodeKnowledge(client,input,tombstoneHmacKeys)
+  await client.query(`DELETE FROM knowledge_evidence WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])`,[input.installationId,input.episodeIds])
+  await client.query(`DELETE FROM memory_candidates WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])`,[input.installationId,input.episodeIds])
+  // Native state-change triggers invalidate Skill/Git outputs, cancel their
+  // operational work, and retain original generation/unknown-budget linkage.
+  await client.query(`UPDATE work_episodes SET state='invalidated',document='{}'::jsonb,evidence_manifest='{}'::jsonb,summary='{}'::jsonb,compiled_at=NULL,updated_at=NOW() WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])`,[input.installationId,input.episodeIds])
+  return invalidated
 }
 
 async function repointClaimAfterPurge(
@@ -818,3 +862,13 @@ function buildReceipt(input: {
 }
 
 export type PurgeRepository = ReturnType<typeof createPurgeRepository>
+
+/** The existing Session purge predicate. V4 supplies exact bounded original IDs
+ * and preserves pre-existing uncertainty/errors; original callers retain the
+ * prior terminal reason behavior and whole-Session scope. */
+export async function cancelSessionContextGenerationRows(client:QueryClient,input:{installationId:string;sessionId:string},page?:{runIds:readonly string[];preserveError:true}):Promise<void>{
+  if(page&&page.runIds.length>1024)throw Error('paged_native_effect_capacity')
+  await client.query(`UPDATE memory_generation_runs SET state='cancelled',error_code=${page?"COALESCE(error_code,'source_purged')":"'source_purged'"},completed_at=NOW()
+    WHERE installation_id=$1 AND operation='compile_context' AND subject_kind='session' AND subject_key_hash=decode(md5($2),'hex')
+      AND state IN('queued','running')${page?' AND run_id=ANY($3::uuid[])':''}`,[input.installationId,input.sessionId,...(page?[page.runIds]:[])])
+}

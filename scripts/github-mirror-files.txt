@@ -4,6 +4,8 @@ cmd
 internal
 memory
 relay
+shared/session-source
+scripts/build-session-source.mjs
 web
 testdata/contracts
 testdata/turn_projection_golden.json

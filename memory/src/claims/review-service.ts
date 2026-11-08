@@ -1,4 +1,7 @@
-import {shadowReviewQueue} from './shadow-review.js'
+import {retainedSourceRead,type SourceReadGrant} from '../sources/retained-read.js'
+import {guardRetainedEvidence} from '../sources/retained-authority.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {shadowReviewQueue,type ShadowReviewInput} from './shadow-review.js'
 import {candidateReviewHash} from './review-hash.js'
 import type pg from 'pg'
 import type { ClaimRepository } from './repository.js'
@@ -12,7 +15,7 @@ import { resolvePacketEvidence } from './evidence-resolver.js'
  */
 export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
   const service = {
-    shadowQueuePage(input:{installationId:string;limit?:number;cursor?:string}) { return shadowReviewQueue(pool,input) },
+    shadowQueuePage(input:ShadowReviewInput) { return shadowReviewQueue(pool,input) },
     async acceptCandidate(input: {
       installationId: string
       candidateId: string
@@ -36,14 +39,16 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
     },
 
     /** Review queue: validated/conflict candidates only; shadow excluded. */
-    async reviewQueue(input: { installationId: string; limit?: number; submissionId?: string; decisionId?: string }) {
+    async reviewQueue(input: { installationId: string;authorityGrant?:SourceReadGrant; limit?: number; submissionId?: string; decisionId?: string }) {
       return (await service.reviewQueuePage(input)).candidates
     },
 
-    async reviewQueuePage(input: { installationId: string; limit?: number; submissionId?: string; decisionId?: string; cursor?: string }) {
+    async reviewQueuePage(input: { installationId: string;authorityGrant?:SourceReadGrant; limit?: number; submissionId?: string; decisionId?: string; cursor?: string }) {
+      const shared=sourcePoolContext(pool).namespace==='memory'
+      const value=await retainedSourceRead(pool,input,async db=>{
       const limit = Math.min(Math.max(1, input.limit ?? 50), 100)
-      if(input.cursor && !(await pool.query('SELECT 1 FROM memory_candidates WHERE installation_id=$1 AND candidate_id=$2::uuid',[input.installationId,input.cursor])).rowCount)throw new Error('invalid_cursor')
-      const result = await pool.query(`
+      if(input.cursor && !(await db.query('SELECT 1 FROM memory_candidates WHERE installation_id=$1 AND candidate_id=$2::uuid',[input.installationId,input.cursor])).rowCount)throw new Error('invalid_cursor')
+      const result = await db.query(`
         WITH eligible AS (
         SELECT c.created_at AS page_created_at,
                c.candidate_id::text AS page_candidate_id, c.candidate_id::text, c.claim_type, c.statement, c.structured_content,
@@ -52,6 +57,7 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
                c.repository_id::text, c.repo_snapshot_id::text, c.branch, c.evidence_handles,
                c.duplicate_of_claim_id::text, c.created_at, c.review_expires_at, c.validation,
                e.document AS episode_document, e.evidence_manifest,
+               ${shared?'c.xmin::text AS _candidate_stamp,e.xmin::text AS _episode_stamp,r.xmin::text AS _run_stamp,':''}
                e.summary->'references'->'source' AS episode_source,
                memory_delivery_source_available(e.summary->'references'->'source') AS source_available
         FROM memory_candidates c
@@ -77,9 +83,19 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
       `, [input.installationId, limit + 1, input.submissionId && input.decisionId ? JSON.stringify({ source_kind: 'team_session', source_version: 2, accepted_delivery: { submission_id: input.submissionId, decision_id: input.decisionId } }) : null, input.cursor??null])
       const rows=result.rows.filter(row=>row.candidate_id)
       const page=rows.slice(0,limit)
+      if(shared){
+        const locked=(await db.query(`SELECT c.candidate_id::text,c.xmin::text AS _candidate_stamp,e.xmin::text AS _episode_stamp,r.xmin::text AS _run_stamp
+          FROM memory_candidates c JOIN work_episodes e USING(installation_id,episode_id)
+          JOIN memory_extraction_runs r ON r.installation_id=c.installation_id AND r.run_id=c.run_id
+          WHERE c.installation_id=$1 AND c.candidate_id=ANY($2::uuid[]) AND c.status IN('validated','conflict')
+            AND c.review_expires_at>clock_timestamp() AND r.episode_source_digest=e.source_digest
+          ORDER BY c.candidate_id FOR SHARE OF c,e,r`,[input.installationId,page.map(row=>row.candidate_id)])).rows
+        if(locked.length!==page.length||locked.some(now=>{const old=page.find(row=>row.candidate_id===now.candidate_id);return !old||['_candidate_stamp','_episode_stamp','_run_stamp'].some(key=>old[key]!==now[key])}))throw Error('source_reference_changed')
+        await guardRetainedEvidence(db,input.installationId,page.map(row=>({source_event_id:null,artifact_id:null,episode_id:row.episode_id,evidence_kind:'episode'})))
+      }
       return {next_cursor:rows.length>limit?page.at(-1)!.candidate_id:null,
         total_count:result.rows[0]?.total_count??0,
-        candidates:page.map(({total_count:_,page_created_at:__,page_candidate_id:___,...row}) => ({
+        candidates:page.map(({total_count:_,page_created_at:__,page_candidate_id:___,_candidate_stamp:____,_episode_stamp:_____,_run_stamp:______,...row}) => ({
         content_hash:candidateReviewHash(row),
         ...row,
         delivery_source: candidateDeliverySource(row.episode_source, row.source_available),
@@ -95,6 +111,9 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
         episode_document: undefined,
         evidence_manifest: undefined,
       }))}
+      })
+      return value??{next_cursor:null,total_count:0,candidates:[]}
+
     },
   }
   return service

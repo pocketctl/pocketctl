@@ -1,3 +1,4 @@
+import {bindSourceConnectionAlias} from '../sources/pool-context.js'
 import type pg from 'pg'
 
 /**
@@ -16,12 +17,12 @@ export function createTransactionBoundPool(client: pg.PoolClient): pg.Pool {
     if(control.test(commandOf(text)))throw new Error('unsupported_transaction_control')
     return client.query(text as never,values as never)
   }) as pg.Pool['query']
-  return {
+  const pool={
     query,
     async connect() {
       const savepoint = `memory_api_${++sequence}`
       let active = false
-      return {
+      const bound={
         query: (async (text: unknown, values?: unknown[]) => {
           {
             const command = commandOf(text)
@@ -52,6 +53,10 @@ export function createTransactionBoundPool(client: pg.PoolClient): pg.Pool {
         }) as pg.PoolClient['query'],
         release() {},
       } as pg.PoolClient
+      bindSourceConnectionAlias(bound,client)
+      return bound
     },
   } as unknown as pg.Pool
+  bindSourceConnectionAlias(pool,client)
+  return pool
 }

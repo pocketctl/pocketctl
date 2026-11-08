@@ -1,3 +1,4 @@
+import {attachSourceMetrics,createSourceGaugeCollector} from './sources/metrics.js'
 import {loadBudgetUncertainty,loadBusinessHealth, summarizeBusinessHealth} from './reporting/business-health.js'
 import {loadLifecycleHealth,summarizeLifecycleHealth} from './reporting/lifecycle-health.js'
 import {updateBusinessHealthGauges} from './metrics.js'
@@ -6,8 +7,8 @@ import Fastify from 'fastify'
 import { createHash } from 'node:crypto'
 import { loadMemoryConfig } from './config.js'
 import { createMemoryPool } from './db.js'
-import { applyMemorySchema } from './schema.js'
-import {assertMemoryRuntimeCompatibility,MEMORY_BRIDGE_COMPATIBILITY} from './migrations/governance-v2/compatibility.js'
+import {prepareMemoryStartup} from './startup-schema.js'
+import {MEMORY_BRIDGE_COMPATIBILITY} from './migrations/governance-v2/compatibility.js'
 import { createCapabilityVerifier } from './relay/capability-verifier.js'
 import { createMemoryMetrics, updatePhase6Gauges } from './metrics.js'
 import { createGrantGuard } from './auth/grant-guard.js'
@@ -69,9 +70,9 @@ import {
 async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
-  await applyMemorySchema(pool)
-  await assertMemoryRuntimeCompatibility(pool)
+  await prepareMemoryStartup(pool,config)
   const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
+  const providerDrain=new ProviderDrain()
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const schemaReady = true
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 })
@@ -95,8 +96,10 @@ async function main(): Promise<void> {
 
   // Bounded Prometheus metrics with the frozen label allowlists.
   const metrics = createMemoryMetrics()
+  attachSourceMetrics(pool,metrics.source)
+  const updateSources=createSourceGaugeCollector(pool,metrics.source)
   app.get('/metrics', async (_req, reply) => {
-    if(schemaReady){await updateBusinessHealthGauges(pool,metrics,config.mode !== 'off',config.lifecycleMode??'off');await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
+    if(schemaReady){await updateSources();await updateBusinessHealthGauges(pool,metrics,config.mode !== 'off',config.lifecycleMode??'off');await updatePhase6Gauges(pool,metrics.phase6);await updateRetrievalIndexGauges(pool,metrics.phase1)}
     reply.header('content-type', metrics.registry.contentType)
     return metrics.registry.metrics()
   })
@@ -212,8 +215,9 @@ async function main(): Promise<void> {
           maxTokens: config.providerBudget.embeddingMaxTokens,
         })
       : rawEmbeddingProvider
-    const embeddingProvider = budgetedEmbeddingProvider && config.embeddingModel
-      ? Object.assign(budgetedEmbeddingProvider, {
+    const drainedEmbeddingProvider=drainEmbeddingProvider(budgetedEmbeddingProvider,providerDrain)
+    const embeddingProvider = drainedEmbeddingProvider && config.embeddingModel
+      ? Object.assign(drainedEmbeddingProvider, {
           provider: config.embeddingModel.provider,
           model: config.embeddingModel.model,
         })
@@ -363,9 +367,14 @@ async function main(): Promise<void> {
   await app.listen({ port, host: config.apiBind === 'all' ? '0.0.0.0' : '127.0.0.1' })
 
   const shutdown = async () => {
+    process.removeListener('SIGINT',shutdown)
+    process.removeListener('SIGTERM',shutdown)
+    providerDrain.close()
     await app.close()
+    const providerOutcome=await providerDrain.wait(10_000)
+    if(!providerOutcome.drained)console.error('memory-api provider_drain_deadline',providerOutcome)
     await pool.end()
-    process.exit(0)
+    process.exit(providerOutcome.drained?0:1)
   }
   process.once('SIGINT', shutdown)
   process.once('SIGTERM', shutdown)
@@ -376,3 +385,4 @@ main().catch(error => {
   console.error('memory-api startup failed:', error instanceof Error ? error.message : error)
   process.exit(1)
 })
+import {ProviderDrain,drainEmbeddingProvider} from './model/provider-drain.js'

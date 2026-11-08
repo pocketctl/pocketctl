@@ -293,7 +293,7 @@ export class SessionDocumentRepository {
              reason_code = CASE WHEN session_documents.latest_version_id IS NULL THEN NULL ELSE session_documents.reason_code END,
              captured_at = EXCLUDED.captured_at,
              updated_at = NOW()
-         WHERE session_documents.user_id = EXCLUDED.user_id
+         WHERE NOT session_documents.owner_retired AND session_documents.user_id = EXCLUDED.user_id
            AND session_documents.session_id = EXCLUDED.session_id
          RETURNING document_id`,
         [
@@ -362,7 +362,7 @@ export class SessionDocumentRepository {
              last_source_event_id = EXCLUDED.last_source_event_id,
              state = 'unavailable', reason_code = EXCLUDED.reason_code,
              captured_at = EXCLUDED.captured_at, updated_at = NOW()
-         WHERE session_documents.user_id = EXCLUDED.user_id
+         WHERE NOT session_documents.owner_retired AND session_documents.user_id = EXCLUDED.user_id
            AND session_documents.session_id = EXCLUDED.session_id
          RETURNING document_id`,
         [
@@ -382,8 +382,10 @@ export class SessionDocumentRepository {
       await this.requireLiveOwnedSession(client, input.userId, input.sessionId)
       const uploadResult = await client.query<UploadRow>(
         `SELECT user_id, session_id, document_id, total_bytes, chunk_count, state, expires_at
-         FROM session_document_uploads
-         WHERE version_id = $1
+         FROM session_document_uploads upload
+         WHERE version_id = $1 AND EXISTS(SELECT 1 FROM session_documents document
+           WHERE document.document_id=upload.document_id AND document.user_id=upload.user_id
+             AND document.session_id=upload.session_id AND NOT document.owner_retired)
          FOR UPDATE`,
         [input.versionId],
       )
@@ -446,8 +448,10 @@ export class SessionDocumentRepository {
         `SELECT version_id, user_id, session_id, document_id, display_name, document_format,
                 source_turn_id, source_event_id, total_bytes, sha256, chunk_count,
                 state, captured_at, expires_at
-         FROM session_document_uploads
-         WHERE version_id = $1
+         FROM session_document_uploads upload
+         WHERE version_id = $1 AND EXISTS(SELECT 1 FROM session_documents document
+           WHERE document.document_id=upload.document_id AND document.user_id=upload.user_id
+             AND document.session_id=upload.session_id AND NOT document.owner_retired)
          FOR UPDATE`,
         [input.versionId],
       )
@@ -596,7 +600,7 @@ export class SessionDocumentRepository {
 
   async listLatest(userId: number, sessionId: string): Promise<SessionDocumentMetadata[]> {
     const owned = await this.pool.query(
-      `SELECT 1 FROM sessions WHERE user_id = $1 AND session_id = $2`,
+      `SELECT 1 FROM sessions WHERE user_id = $1 AND session_id = $2 AND public.native_session_authority(session_id,$1,NULL)->>'state'='current'`,
       [userId, sessionId],
     )
     if (!owned.rows[0]) throw new SessionDocumentNotFoundError()
@@ -607,10 +611,16 @@ export class SessionDocumentRepository {
        FROM session_documents d
        LEFT JOIN session_document_versions v
          ON v.document_id = d.document_id AND v.version_id = d.latest_version_id
-       WHERE d.user_id = $1 AND d.session_id = $2
+       WHERE NOT d.owner_retired AND d.user_id = $1 AND d.session_id = $2
        ORDER BY d.updated_at DESC, d.document_id ASC`,
       [userId, sessionId],
     )
+    if(result.rows.length){
+      const fresh=await this.pool.query(`SELECT document_id FROM session_documents d WHERE d.user_id=$1 AND d.session_id=$2
+        AND d.document_id=ANY($3::varchar[]) AND NOT d.owner_retired
+        AND public.native_session_authority(d.session_id,$1,NULL)->>'state'='current'`,[userId,sessionId,result.rows.map(row=>row.document_id)])
+      if(fresh.rows.length!==result.rows.length)throw new SessionDocumentNotFoundError()
+    }
     return result.rows.map((row) => ({
       documentId: row.document_id,
       displayName: row.display_name,
@@ -641,11 +651,11 @@ export class SessionDocumentRepository {
   }> {
     const result = await this.pool.query<any>(
       `SELECT v.content_bytes, v.byte_size, v.sha256, d.document_format, d.display_name,
-              v.body_storage,v.body_manifest_id,v.body_chunk_ordinal,v.body_activity_epoch
+              v.body_storage,v.body_manifest_id,v.body_chunk_ordinal,v.body_activity_epoch,v.body_session_id
        FROM session_documents d
        JOIN session_document_versions v
          ON v.document_id = d.document_id AND v.version_id = $4
-       WHERE d.user_id = $1 AND d.session_id = $2 AND d.document_id = $3`,
+       WHERE NOT d.owner_retired AND d.user_id = $1 AND d.session_id = $2 AND d.document_id = $3`,
       [userId, sessionId, documentId, versionId],
     )
     const row = result.rows[0]
@@ -673,6 +683,7 @@ export class SessionDocumentRepository {
     const result = await client.query<{ session_allowed: boolean; tombstoned: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM sessions WHERE user_id = $1 AND session_id = $2
+           AND public.native_session_authority(session_id,$1,NULL)->>'state'='current'
        ) AS session_allowed,
        EXISTS (
          SELECT 1 FROM deleted_sessions WHERE session_id = $2

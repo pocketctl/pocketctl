@@ -1,3 +1,6 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {retainedSourceRead,type SourceReadGrant} from '../sources/retained-read.js'
+import {guardRetainedVersions,rememberRetainedVersionStatement} from '../sources/retained-versions.js'
 import {lifecycleClaimSql,type LifecycleReadFrame} from '../context/lifecycle-frame.js'
 import {recallPoolBudget} from './recall-pools.js'
 import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
@@ -23,6 +26,9 @@ import { normalizedClaimKey } from './query-normalizer.js'
 
 
 export interface SearchInput {
+  /** Server-only, already signature-verified grant; never copied from request JSON. */
+  authorityGrant?:SourceReadGrant
+  selectionHistorical?:boolean
   installationId: string
   lifecycle?:LifecycleReadFrame
   query: string
@@ -115,9 +121,9 @@ export function createSearchService(deps: SearchServiceDeps) {
         throw new Error('query must be 1..2000 characters')
       }
       const cursorContext = cursorContextFor(input)
-      const cursorState = decodeCursor(input.cursor, cursorContext, deps.cursorSigningKey, input.asOf)
+      const cursorState = decodeCursor(input.cursor, cursorContext, deps.cursorSigningKey, input.asOf,input.selectionHistorical)
       const requestedAsOf = cursorState?.asOf ?? input.asOf?.toISOString() ?? null
-      const historicalSelection=cursorState?.historical??Boolean(input.asOf)
+      const historicalSelection=cursorState?.historical??input.selectionHistorical??Boolean(input.asOf)
       const degraded: string[] = []
 
       const claimTypes = input.claimTypes && input.claimTypes.length > 0
@@ -373,7 +379,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       const nextOffset = offset + limit
       deps.onRecallMetrics?.({eligible:Number(prefiltered.rows[0]?.eligible_count??0),hydrated:prefiltered.rows.length,returned:page.length,
         truncated:candidatePoolTruncated,degraded:degraded.length>0,durationMs:performance.now()-started})
-      return {
+      const response:SearchResult={
         hits: page.map(({ entry, row, score }) => ({
           versionId: entry.versionId,
           claimId: row.claim_id,
@@ -403,6 +409,13 @@ export function createSearchService(deps: SearchServiceDeps) {
         ...(internal?{rankedPools:pools}:{}),
         ...(shadowComparison ? { shadowComparison } : {}),
       }
+      if(sourcePoolContext(deps.pool).namespace!=='memory')return response
+      for(const hit of response.hits)rememberRetainedVersionStatement(hit,hit.statement)
+      const accepted=await retainedSourceRead(deps.pool,{installationId:input.installationId,authorityGrant:input.authorityGrant},async client=>{
+       await guardRetainedVersions(client,input.installationId,response.hits.map(hit=>hit.versionId),{expectedStatements:new Map(response.hits.map(hit=>[hit.versionId,hit.statement])),requireCurrent:!historicalSelection,requireAvailable:true,asOf:historicalSelection?new Date(asOf):undefined})
+       return response
+      })
+      return accepted??{hits:[],nextCursor:null,degradedComponents:[...new Set([...degraded,'source_unavailable'])],poolSizes:{}}
     },
     async internalRecall(input:SearchInput&{candidateBudget?:number}):Promise<SearchResult>{
       return service.search({...input,cursor:null},recallPoolBudget(input.candidateBudget))
@@ -449,6 +462,7 @@ function decodeCursor(
   context: string,
   key: string,
   requestedAsOf?: Date | null,
+  selectionHistorical?:boolean,
 ): { offset: number; asOf: string;historical:boolean } | null {
   if (!cursor) return null
   try {
@@ -458,7 +472,7 @@ function decodeCursor(
     const supplied = Buffer.from(suppliedSignature, 'base64url')
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error('invalid_cursor')
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { o?: unknown; q?: unknown; a?: unknown;m?:unknown }
-    if (parsed.q !== context || (parsed.m!==undefined&&typeof parsed.m!=='boolean') || (requestedAsOf&&parsed.m===false)) throw new Error('invalid_cursor')
+    if (parsed.q !== context || (parsed.m!==undefined&&typeof parsed.m!=='boolean') || (requestedAsOf&&parsed.m===false&&selectionHistorical!==false)||(selectionHistorical!==undefined&&parsed.m!==undefined&&parsed.m!==selectionHistorical)) throw new Error('invalid_cursor')
     const offset = typeof parsed.o === 'number' && Number.isInteger(parsed.o) && parsed.o >= 0
       ? parsed.o
       : NaN
@@ -467,7 +481,7 @@ function decodeCursor(
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(?:\d{3}|\d{6})Z$/.test(asOf)
       || Number.isNaN(Date.parse(asOf))) throw new Error('invalid_cursor')
     if (requestedAsOf && requestedAsOf.toISOString() !== asOf) throw new Error('invalid_cursor')
-    return { offset: Math.min(offset, 100_000), asOf,historical:parsed.m===true||(parsed.m===undefined&&Boolean(requestedAsOf)) }
+    return { offset: Math.min(offset, 100_000), asOf,historical:parsed.m===true||(parsed.m===undefined&&(selectionHistorical??Boolean(requestedAsOf))) }
   } catch {
     throw new Error('invalid_cursor')
   }

@@ -9,6 +9,7 @@ import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {governanceFixture} from '../testing/governance-fixture.js'
 import {createEvidenceService} from '../claims/evidence-service.js'
 import {createMemoryReadService} from '../retrieval/read-service.js'
+import {captureEvidenceReference} from '../claims/evidence-resolver.js'
 const url=process.env.MEMORY_TEST_DATABASE_URL,suite=url&&process.env.RUN_MEMORY_POSTGRES_INTEGRATION==='1'?describe:describe.skip
 suite('bound evidence references and current secondary reads',()=>{
  let pool:pg.Pool
@@ -140,6 +141,30 @@ suite('bound evidence references and current secondary reads',()=>{
   const summary=await service().summary(input)
   expect(summary.source_available).toBe(false)
   expect(summary.reference.source_hash).toBeNull()
+ })
+
+ test.each(['team_collaboration','team_delivery'])('canonical %s retains excerpt-only evidence for events and artifacts',async kind=>{
+  for(const artifactEvidence of [false,true]){
+   const {f,input,bound}=await fixture(),event=randomUUID(),artifact=randomUUID(),text='Private canonical Team source material'
+   // Real canonical references contain metadata only. A derived artifact may
+   // retain text, but it must not grant raw Team source access through evidence.
+   await pool.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,event_type,occurred_at,payload,payload_hash,source_kind,
+    canonical_key,canonical_session_key,source_version,content_hash,hash_version,mapping_state,adapter_version)
+    VALUES($1,$2,'canonical',$1::uuid::text,'canonical-team-evidence','tool_result',clock_timestamp(),NULL,sha256('team'::bytea),$3,
+     $1::uuid::text,'canonical-team-evidence','{"content":"1","authorization":"1","storage":"1"}',sha256('team'::bytea),'canonical-json-sha256-v1','verified','canonical-ref-v1')`,[event,f.personal,kind])
+   if(artifactEvidence){
+    await pool.query(`INSERT INTO source_artifacts(artifact_id,installation_id,session_id,source_event_id,artifact_type,identity_key,details,occurred_at)
+     VALUES($1,$2,'canonical-team-evidence',$3,'tool_result',$1::uuid::text,$4::jsonb,clock_timestamp())`,[artifact,f.personal,event,JSON.stringify({text})])
+    await pool.query("UPDATE knowledge_evidence SET evidence_kind='artifact',artifact_id=$2,source_event_id=NULL WHERE evidence_id=$1",[f.evidence,artifact])
+   }else await pool.query("UPDATE knowledge_evidence SET evidence_kind='event',source_event_id=$2 WHERE evidence_id=$1",[f.evidence,event])
+   const summary=await service().summary(input)
+   expect(summary).toMatchObject({source_available:false,material_kind:'retained_team_excerpt',reference:{source_hash:null}})
+   const content=await service().readBound({...bound,sourceVersion:artifactEvidence?artifact:event})
+   expect(content).toMatchObject({content:'The fixture verifies transaction boundaries.',material_missing:true,material_kind:'retained_team_excerpt'})
+   expect(JSON.stringify(content)).not.toContain(text)
+   const proof=await captureEvidenceReference(pool,f.personal,f.evidence,f.version)
+   expect(proof?.sourceHash).toBeNull()
+  }
  })
 
  test('grant expiry after a real evidence lock wait denies content and creates no read receipt',async()=>{

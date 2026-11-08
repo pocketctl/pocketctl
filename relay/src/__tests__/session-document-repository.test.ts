@@ -133,6 +133,7 @@ describe('SessionDocumentRepository', () => {
 
   test('expires incomplete assemblies and performs complete owner-scoped reads', async () => {
     const { pool, query } = mockPool((sql, params) => {
+      if(sql.includes('SELECT 1 FROM session_document_versions v JOIN session_documents')){expect(params.slice(0,4)).toEqual([7,'s','d','v']);return {rows:[{ok:1}]}}
       if (sql.includes('DELETE FROM session_document_uploads')) return { rows: [{ version_id: 'v1' }, { version_id: 'v2' }], rowCount: 2 }
       if (sql.includes('FROM session_documents d') && sql.includes('JOIN session_document_versions')) {
         expect(params).toEqual([7, 's', 'd', 'v'])

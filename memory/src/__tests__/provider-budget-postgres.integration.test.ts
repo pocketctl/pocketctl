@@ -5,6 +5,7 @@ import { createProviderBudgetStore, withTextProviderBudget } from '../model/prov
 import { withTimeoutFallback } from '../model/text-fallback.js'
 import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
+import {ProviderDrain,drainTextProvider} from '../model/provider-drain.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const describeWithDatabase = databaseUrl && process.env.RUN_MEMORY_POSTGRES_INTEGRATION === '1'
@@ -21,6 +22,26 @@ describeWithDatabase('provider budget reservations (PostgreSQL)', () => {
   afterAll(async () => pool?.end())
   beforeEach(async () => {
     await pool.query(`TRUNCATE memory_provider_budget_reservations`)
+  })
+
+  test('shutdown deadline retains the original reservation and cannot replay a pending request',async()=>{
+    const store=createProviderBudgetStore(pool),drain=new ProviderDrain()
+    let resolveResponse!:(result:ModelJsonResult<unknown>)=>void,started!:()=>void
+    const response=new Promise<ModelJsonResult<unknown>>(r=>{resolveResponse=r}),sent=new Promise<void>(r=>{started=r})
+    const generateJson=vi.fn(()=>{started();return response})
+    const limits={key:'shutdown-pending',maxRequests:10,maxInputTokens:10000,maxOutputTokens:1000,maxOutputTokensPerRequest:100}
+    const request={operation:'review_shadow' as const,requestKey:'review:shutdown-pending',system:'s',document:{},schema:{},timeoutMs:1000,signal:new AbortController().signal}
+    const pending=drainTextProvider(withTextProviderBudget({generateJson} as TextGenerator,store,limits),drain)!.generateJson(request)
+    await sent;drain.close()
+    expect(await drain.wait(0)).toMatchObject({drained:false,activeOriginal:1})
+    expect((await pool.query("SELECT state FROM memory_provider_budget_reservations WHERE budget_key='shutdown-pending'")).rows).toEqual([{state:'reserved'}])
+    const replay=await withTextProviderBudget({generateJson} as TextGenerator,store,limits).generateJson(request)
+    expect(replay).toMatchObject({ok:false,code:'provider_result_unknown',retryable:false})
+    expect(generateJson).toHaveBeenCalledTimes(1)
+    resolveResponse({ok:true,value:{},usage:{model:'synthetic',inputTokens:7,outputTokens:3}})
+    await pending
+    expect(await drain.wait(100)).toMatchObject({drained:true})
+    expect((await pool.query("SELECT state,actual_input_tokens::text,actual_output_tokens::text FROM memory_provider_budget_reservations WHERE budget_key='shutdown-pending'")).rows).toEqual([{state:'settled',actual_input_tokens:'7',actual_output_tokens:'3'}])
   })
 
   test('concurrent reservations cannot cross a request cap', async () => {

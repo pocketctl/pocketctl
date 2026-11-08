@@ -1,7 +1,10 @@
+import {admitProviderReceipt,trackProviderReceipt,assertProviderReceiptBudgetInput} from './provider-receipt.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import type { EmbeddingProvider } from '../ports/embedding-provider.js'
 import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {assertSourceProviderExecution,startSourceProviderAttempt,finishSourceProviderAttempt,sourceProviderRequestKey,blockUnrecordedSourceEffect} from '../sources/source-execution.js'
 
 export type ProviderBudgetDimension =
   | 'text_requests'
@@ -12,9 +15,11 @@ export type ProviderBudgetDimension =
 
 export type ProviderBudgetReservation =
   | { ok: true; reservationId: string }
-  | { ok: false; dimension: ProviderBudgetDimension; retryAt?: Date | null; reason?: 'provider_result_unknown' }
+  | { ok: false; dimension: ProviderBudgetDimension; retryAt?: Date | null; reason?: 'provider_result_unknown';reservationId?:string }
 
 export interface ProviderBudgetStore {
+  /** Shared background text execution must carry its captured generation. */
+  sourceExecutionRequired?:boolean
   reserve(input: {
     key: string
     /** Stable local call identity, not a promise of provider idempotency. */
@@ -38,6 +43,7 @@ export interface ProviderBudgetStore {
  */
 export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
   return {
+    sourceExecutionRequired:sourcePoolContext(pool).namespace==='memory',
     async reserve(input) {
       const client = await pool.connect()
       try {
@@ -47,7 +53,7 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
         const reservationId = digest ? `${digest.slice(0,8)}-${digest.slice(8,12)}-${digest.slice(12,16)}-${digest.slice(16,20)}-${digest.slice(20)}` : randomUUID()
         if (digest && (await client.query('SELECT 1 FROM memory_provider_budget_reservations WHERE reservation_id=$1',[reservationId])).rowCount) {
           await client.query('COMMIT')
-          return {ok:false,dimension:input.kind==='text'?'text_requests':'embedding_requests',reason:'provider_result_unknown'}
+          return {ok:false,dimension:input.kind==='text'?'text_requests':'embedding_requests',reason:'provider_result_unknown',reservationId}
         }
         const reservationTime = (await client.query<{ reserved_at: Date }>(
           'SELECT clock_timestamp() AS reserved_at',
@@ -112,6 +118,9 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
   }
 }
 
+const receiptBudgetedProviders=new WeakSet<object>()
+export const isReceiptBudgetedTextProvider=(provider:TextGenerator)=>receiptBudgetedProviders.has(provider)
+
 export function withTextProviderBudget(
   provider: TextGenerator,
   store: ProviderBudgetStore,
@@ -124,8 +133,10 @@ export function withTextProviderBudget(
     maxOutputTokensPerRequest: number
   },
 ): TextGenerator {
-  return {
+  const wrapped:TextGenerator={
     async generateJson<T>(input: Parameters<TextGenerator['generateJson']>[0]): Promise<ModelJsonResult<T>> {
+      if(input.receipt)assertProviderReceiptBudgetInput(input.receipt,input.operation,input.requestKey)
+      await assertSourceProviderExecution(store.sourceExecutionRequired===true)
       // UTF-8 bytes are a conservative upper bound for tokenizer input units.
       const inputTokens = Buffer.byteLength(input.system, 'utf8')
         + Buffer.byteLength(JSON.stringify(input.document), 'utf8')
@@ -149,24 +160,45 @@ export function withTextProviderBudget(
         return { ok: false, code: 'budget_unavailable', retryable: true, detail: 'reservation_failed' }
       }
       if (!reservation.ok) {
-        if (reservation.reason==='provider_result_unknown')return {ok:false,code:'provider_result_unknown',retryable:false,detail:'request_already_reserved'}
+        if (reservation.reason==='provider_result_unknown')return {ok:false,code:'provider_result_unknown',retryable:false,detail:'request_already_reserved',budgetReservationId:reservation.reservationId}
         return { ok: false, code: 'budget_exceeded', retryable: false, detail: reservation.dimension,
           ...(reservation.retryAt ? {retryAt:reservation.retryAt.toISOString()}: {}) }
       }
-      const result = await provider.generateJson<T>(input)
-      const usage = result.usage
-      if (usage) {
-        await store.settle(reservation.reservationId, {
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-        })
+      const attempt=await startSourceProviderAttempt(reservation.reservationId,input.requestKey)
+      const receipt=input.receipt?await admitProviderReceipt(input.receipt,reservation.reservationId):undefined
+      const complete=async():Promise<ModelJsonResult<T>>=>{
+      let effect:'accounted'|'uncertain'='uncertain'
+      let result:ModelJsonResult<T>
+      try{
+        result = await provider.generateJson<T>(input)
+      }catch(error){
+        try{await finishSourceProviderAttempt(attempt,'uncertain')}catch{blockUnrecordedSourceEffect()}
+        throw error
       }
-      // A missing response or aborted connection does not prove zero remote
-      // spend. Keep the durable worst-case reservation and expose uncertainty.
+      let receiptFailed=false
+      if (result.usage) {
+        try{
+          await store.settle(reservation.reservationId, {
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+          })
+          effect='accounted'
+        }catch{receiptFailed=true}
+      }
+      try{await finishSourceProviderAttempt(attempt,effect)}catch{receiptFailed=true}
+      if(receiptFailed){
+        blockUnrecordedSourceEffect()
+        return {ok:false,code:'provider_result_unknown',retryable:false,billingUncertain:true,
+          ...(result.usage?{usage:result.usage}:{}),budgetReservationId:reservation.reservationId}
+      }
       return { ...result, budgetReservationId: reservation.reservationId,
-        ...(!usage ? {billingUncertain:true}: {}) }
+        ...(!result.usage ? {billingUncertain:true}: {}) }
+      }
+      return receipt?trackProviderReceipt(receipt,complete):complete()
     },
   }
+  receiptBudgetedProviders.add(wrapped)
+  return wrapped
 }
 
 export function withEmbeddingProviderBudget(
@@ -177,9 +209,12 @@ export function withEmbeddingProviderBudget(
   return {
     dimensions: provider.dimensions,
     async embed(input) {
+      await assertSourceProviderExecution(store.sourceExecutionRequired===true&&input.operation==='claim_index')
+      const requestKey=sourceProviderRequestKey(input.operation,input.texts)
       const inputTokens = input.texts.reduce((sum, text) => sum + Buffer.byteLength(text, 'utf8'), 0)
       const reservation = await store.reserve({
         key: limits.key,
+        requestKey,
         kind: 'embedding',
         inputTokens,
         outputTokens: 0,
@@ -187,10 +222,28 @@ export function withEmbeddingProviderBudget(
         maxInputTokens: limits.maxTokens,
         maxOutputTokens: 0,
       })
-      if (!reservation.ok) throw new ProviderBudgetExceededError(reservation.dimension)
-      const result = await provider.embed(input)
-      await store.settle(reservation.reservationId, { inputTokens: result.tokens, outputTokens: 0 })
-      return result
+      if (!reservation.ok) {
+        if(reservation.reason==='provider_result_unknown')throw new Error('provider_result_unknown')
+        throw new ProviderBudgetExceededError(reservation.dimension)
+      }
+      const attempt=await startSourceProviderAttempt(reservation.reservationId,requestKey)
+      let effect:'accounted'|'uncertain'='uncertain'
+      let result:Awaited<ReturnType<EmbeddingProvider['embed']>>
+      try{
+        result = await provider.embed(input)
+      }catch(error){
+        try{await finishSourceProviderAttempt(attempt,'uncertain')}catch{blockUnrecordedSourceEffect()}
+        throw error
+      }
+      let receiptFailed=false
+      try{
+        await store.settle(reservation.reservationId, { inputTokens: result.tokens, outputTokens: 0 })
+        effect='accounted'
+      }catch{receiptFailed=true;blockUnrecordedSourceEffect()}
+      try{await finishSourceProviderAttempt(attempt,effect)}catch{receiptFailed=true;blockUnrecordedSourceEffect()}
+      // Return known usage for independent accounting. The execution barrier
+      // rejects its vector publication if recording its effect failed.
+      return {...result,budgetReservationId:reservation.reservationId,...(receiptFailed?{billingUncertain:true}:{})}
     },
   }
 }

@@ -1,6 +1,7 @@
 import {delegationPolicyHash} from './publication-delegation.js'
 import type {JobFence} from '../jobs/types.js'
 import {assertJobFence} from '../generation/fence.js'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
 import type pg from 'pg'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {automationHash} from './automation-policy.js'
@@ -42,6 +43,7 @@ export function createPublicationExecutor(deps:{pool:pg.Pool;mode:'off'|'enabled
    await c.query("SELECT set_config('pocketctl.publication_delegation',$1,true)",[JSON.stringify({delegationId})])
    const result=await createPublicationService(createTransactionBoundPool(c),{tombstoneHmacKeys:deps.tombstoneHmacKeys}).publish({grant:humanGrant,targetInstallationId:d.installation_id,candidateId:d.candidate_id,expectedCandidateRevision:Number(d.candidate_revision),resolution:'new',executorPrincipalId:d.principal_id,publicationDelegationId:delegationId})
    await c.query("UPDATE memory_publication_delegations SET state='consumed',published_version_id=$2 WHERE delegation_id=$1",[delegationId,result.versionId])
+   await guardSourceExecutionCommit(c)
    await c.query('COMMIT');return {published:true,reason:'human_quorum_published',versionId:result.versionId,claimId:result.claimId}
   }catch(e){await c.query('ROLLBACK').catch(()=>undefined);const reason=e instanceof PublicationError?e.code:e instanceof Error?e.message:'';const known=['executor_not_authorized','delegation_revoked','delegation_expired','delegation_policy_changed','delegation_revision_conflict','publication_delegation_expired','automation_actor_expired','forbidden','quorum_failed','expired','state_conflict','revision_conflict','policy_head_changed'];return {published:false,reason:known.includes(reason)?reason:'delegated_publication_failed'}}finally{c.release()}
  }}

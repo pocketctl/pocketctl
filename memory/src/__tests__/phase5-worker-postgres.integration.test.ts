@@ -61,6 +61,22 @@ db('Phase 5 fenced Skill worker', () => {
       FROM memory_skill_task_runs r JOIN memory_provider_budget_reservations b ON b.reservation_id=r.budget_reservation_id WHERE r.task_id=$1`,[f.scheduled.taskId])).rows
     expect(rows).toEqual([{state:'candidate',budget_key:key,budget_state:'settled',actual_input_tokens:11,actual_output_tokens:7}])
   })
+  test('a crash after reservation recovers its budget link on restart without another provider call',async()=>{
+    const f=await fixture(),key=`skill-crash-reservation-${randomUUID()}`
+    const call=vi.fn().mockRejectedValue(Error('synthetic_process_exit'))
+    const provider=withTextProviderBudget({generateJson:call} as TextGenerator,createProviderBudgetStore(pool),
+      {key,maxRequests:10,maxInputTokens:1000000,maxOutputTokens:10000,maxOutputTokensPerRequest:100})
+    const create=()=>createSkillWorker({pool,context,generator:createSkillGenerator({provider,timeoutMs:100})}).handle
+    await expect(create()(f.claim,new AbortController().signal,{fence:f.fence})).rejects.toThrow('synthetic_process_exit')
+    expect((await pool.query('SELECT budget_reservation_id FROM memory_skill_task_runs WHERE task_id=$1',[f.scheduled.taskId])).rows[0].budget_reservation_id).toBeNull()
+    await pool.query("UPDATE memory_jobs SET state='pending',claimed_by=NULL,claim_expires_at=NULL WHERE job_id=$1",[f.claim.job_id])
+    const [next]=await f.jobs.claimJobs({workerId:'restarted-worker',limit:1,leaseMs:30000})
+    await create()(next,new AbortController().signal,{fence:{jobId:next.job_id,claimedBy:'restarted-worker',claimEpoch:next.claim_epoch}})
+    expect(call).toHaveBeenCalledTimes(1)
+    expect((await pool.query(`SELECT r.state,r.error_code,b.state AS budget_state FROM memory_skill_task_runs r
+      JOIN memory_provider_budget_reservations b ON b.reservation_id=r.budget_reservation_id WHERE r.task_id=$1`,[f.scheduled.taskId])).rows).toEqual([{state:'failed',error_code:'provider_result_unknown',budget_state:'reserved'}])
+    expect((await pool.query('SELECT 1 FROM memory_skill_archives WHERE installation_id=$1',[f.installationId])).rowCount).toBe(0)
+  })
   async function waitForBlockedSession() {
     for (let i = 0; i < 100; i++) {
       const waiting = await pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
@@ -233,6 +249,8 @@ db('Phase 5 fenced Skill worker', () => {
     await expect(w.handler(f.claim, new AbortController().signal, { fence: f.fence })).rejects.toThrow()
     expect((await pool.query(`SELECT 1 FROM memory_skill_archives`)).rowCount).toBe(0)
     expect((await pool.query(`SELECT 1 FROM memory_skill_candidates`)).rowCount).toBe(0)
+    // Rejecting an output cannot erase a provider effect that already happened.
+    expect((await pool.query('SELECT input_tokens::text,output_tokens::text FROM memory_generation_runs WHERE installation_id=$1',[f.installationId])).rows).toEqual([{input_tokens:'1',output_tokens:'1'}])
   })
   test.each(['archive_before', 'archive_after', 'candidate_apply', 'task_cas'])('crash at %s rolls back the entire output transaction and retry recovers', async (point) => {
     const f = await fixture(), w = worker()

@@ -62,6 +62,7 @@ export type WikiGeneratorResult =
 
 export interface WikiGenerator {
   generate(input: {
+    requestKey?:string
     skeleton: WikiCandidateDocumentV1
     sources: readonly WikiBuildSource[]
     coverage: WikiCoverage
@@ -99,6 +100,7 @@ export function createWikiGenerator(input: {
       })
       const response = await input.provider.generateJson<unknown>({
         operation: 'wiki_build',
+        requestKey: request.requestKey,
         system: SYSTEM_PROMPT,
         document: {
           prompt_version: WIKI_PROMPT_VERSION,
@@ -120,12 +122,14 @@ export function createWikiGenerator(input: {
         signal: request.signal,
       })
       if (!response.ok) {
+        const uncertain=response.billingUncertain||Boolean(response.timeoutFallback&&(response.code==='budget_exceeded'||response.code==='budget_unavailable'))
+        const reservation=response.budgetReservationId??response.timeoutFallback?.primary.budgetReservationId
         return {
           ok: false,
-          code: response.code,
+          code: uncertain?'provider_result_unknown':response.code,
           ...(response.usage ? { usage: response.usage } : {}),
-          ...(response.budgetReservationId
-            ? { budgetReservationId: response.budgetReservationId }
+          ...(reservation
+            ? { budgetReservationId: reservation }
             : {}),
         }
       }
@@ -185,6 +189,7 @@ function validationCode(code: WikiValidationErrorCode): string {
 }
 
 export async function generateWikiCandidateOrFallback(input: {
+  requestKey?:string
   generator?: WikiGenerator
   skeleton: WikiCandidateDocumentV1
   sources: readonly WikiBuildSource[]

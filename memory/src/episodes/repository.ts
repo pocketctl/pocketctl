@@ -1,9 +1,13 @@
+import {prepareEpisodeSources,attachPreparedSources} from '../sources/prepared-sources.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {classifyArtifact} from '../projection/artifact-classifier.js'
 import { readCurationPolicy } from '../curation/policy.js'
 import { stageLifecycleTurn } from '../curation/task-repository.js'
 import type { CurationMode } from '../curation/contracts.js'
 import {assertJobFence} from '../generation/fence.js'
 import type {JobFence} from '../jobs/types.js'
 import type pg from 'pg'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
 import type { JobClaim } from '../jobs/types.js'
 import { compileEpisode, sourceReferenceFromEvents, summarizeEvents, type TerminalOutcome } from './compiler.js'
 import {
@@ -33,9 +37,11 @@ export function createEpisodeRepository(
 
   const repository = {
     async compileTurn(installationId: string, turnId: string, fence?:JobFence): Promise<void> {
+      const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEpisodeSources(pool,installationId,turnId):undefined
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        if(prepared)attachPreparedSources(client,prepared)
         try {
           // Cheap early fence: skip work for installations already fenced by
           // a purge (or missing from the registry).
@@ -73,8 +79,9 @@ export function createEpisodeRepository(
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,row.session_id])
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
           if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {await client.query('COMMIT');return}
+          if(prepared)await prepared.assertCurrent(client)
           const lifecyclePolicy = await readCurationPolicy(client,installationId,options.lifecycleMode??'off')
-          const events = await client.query<{
+          const events = prepared?{rows:prepared.events.filter(e=>e.turn_id===turnId)}:await client.query<{
             source_event_id: string
             event_type: string
             occurred_at: Date
@@ -92,7 +99,7 @@ export function createEpisodeRepository(
           if(lifecyclePolicy){
             if(fence)await assertJobFence(client,fence)
             await stageLifecycleTurn(client,{installationId,sessionId:row.session_id,turnId,events:events.rows},lifecyclePolicy)
-            if(lifecyclePolicy.mode==='enabled'){await client.query('COMMIT');return}
+            if(lifecyclePolicy.mode==='enabled'){if(prepared)await prepared.assertCurrent(client,{forCommit:true});await guardSourceExecutionCommit(client);await client.query('COMMIT');return}
           }
           const counts = summarizeEvents(events.rows.map(eventRow => ({
             event_type: eventRow.event_type,
@@ -110,10 +117,16 @@ export function createEpisodeRepository(
             details: Record<string, unknown>
           }>(`
             SELECT artifact_id::text, source_event_id::text, artifact_type,
-                   identity_key, path, status, details
+                   identity_key, path, status${prepared?'':', details'}
             FROM source_artifacts
             WHERE installation_id = $1 AND turn_id = $2
           `, [installationId, turnId])
+          if(prepared)for(const artifact of artifacts.rows){
+            const source=prepared.events.find(e=>e.source_event_id===artifact.source_event_id)
+            const canonical=source?classifyArtifact(source.event_type,source.payload):null
+            if(!canonical||canonical.artifact_type!==artifact.artifact_type||canonical.identity_key!==artifact.identity_key||canonical.path!==artifact.path||canonical.status!==artifact.status)throw Error('source_artifact_changed')
+            artifact.details=canonical.details
+          }
           const artifactCounts: Record<string, number> = {}
           let artifactTotal = 0
           for (const artifact of artifacts.rows) {
@@ -144,7 +157,13 @@ export function createEpisodeRepository(
           // cwd or absolute-path guesses. A turn-scoped observation wins;
           // managed sessions otherwise inherit the latest trusted lifecycle
           // observation for the same session that predates the terminal turn.
-          const repositoryFact = await client.query<{
+          const observation=prepared?.events.filter(e=>typeof e.payload.repository_id==='string'&&(e.turn_id===turnId||(e.turn_id===null&&['session_created','session_discovered'].includes(e.event_type)&&new Date(e.occurred_at)<=row.terminal_at!)))
+            .sort((a,b)=>Number(b.turn_id===turnId)-Number(a.turn_id===turnId)||new Date(b.occurred_at).getTime()-new Date(a.occurred_at).getTime()||b.source_event_id.localeCompare(a.source_event_id))[0]
+          const repositoryFact = prepared?await client.query<{repository_id:string;repo_snapshot_id:string|null;commit_sha:string|null;branch:string|null;worktree_identity:string|null}>(`
+            SELECT r.repository_id::text,rs.repo_snapshot_id::text,rs.commit_sha,rs.branch,rs.worktree_identity
+            FROM repositories r LEFT JOIN LATERAL(SELECT s.repo_snapshot_id,s.commit_sha,s.branch,s.worktree_identity FROM repo_snapshots s
+              WHERE s.installation_id=r.installation_id AND s.repository_id=r.repository_id AND s.observed_at<=$3 ORDER BY s.observed_at DESC,s.repo_snapshot_id DESC LIMIT 1)rs ON TRUE
+            WHERE r.installation_id=$1 AND r.repository_key=$2 LIMIT 1`,[installationId,observation?.payload.repository_id??null,row.terminal_at]):await client.query<{
             repository_id: string
             repo_snapshot_id: string | null
             commit_sha: string | null
@@ -368,6 +387,8 @@ export function createEpisodeRepository(
             return
           }
           if(fence)await assertJobFence(client,fence)
+          if(prepared)await prepared.assertCurrent(client,{forCommit:true})
+          await guardSourceExecutionCommit(client)
           await client.query('COMMIT')
         } catch (error) {
           await client.query('ROLLBACK')

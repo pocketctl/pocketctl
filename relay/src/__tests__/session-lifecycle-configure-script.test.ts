@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, statSync } from 'node:fs'
+import { symlinkSync, chmodSync, mkdtempSync, realpathSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir, userInfo } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,7 @@ describe('atomic filesystem lifecycle configuration script', () => {
     // isolated fixture so this test cannot depend on stale repository dist.
     compiledRelay = realpathSync(mkdtempSync(join(tmpdir(), 'pocketctl-configure-lifecycle-modules-')))
     writeFileSync(join(compiledRelay, 'package.json'), '{"type":"module"}')
+    symlinkSync(join(relay,'node_modules'),join(compiledRelay,'node_modules'),'dir')
     for (const module of ['session-archive/filesystem-storage', 'session-archive/storage', 'session-lifecycle/release', 'session-lifecycle/time']) {
       const output = join(compiledRelay, 'dist', module + '.js')
       mkdirSync(dirname(output), { recursive: true })

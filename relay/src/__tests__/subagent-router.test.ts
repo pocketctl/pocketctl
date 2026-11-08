@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 
 // Short the offline grace window (read by the Router constructor).
@@ -46,7 +47,8 @@ import { Router } from '../router.js'
 // Returns rowCount: 1 for subagent_usage_seen INSERTs so the dedup gate passes through.
 function createMockPool(): any {
   return {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (/subagent_usage_seen/i.test(sql)) return { rows: [], rowCount: 1 }
       // Daemon-session ownership probe: treat every session as owned.
       if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }

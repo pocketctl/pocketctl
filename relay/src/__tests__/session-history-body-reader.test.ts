@@ -54,6 +54,8 @@ async function fixture() {
     bodyStorage: 'cold' as const,
     manifestId: binding.manifestId,
     chunkOrdinal: 0,
+    bodySessionId:binding.sessionId,
+    activityEpoch:binding.activityEpoch,
   }))
   return { reader, hot, cold, authorize, read, storage, key }
 }

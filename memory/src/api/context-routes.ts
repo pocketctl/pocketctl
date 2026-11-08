@@ -295,6 +295,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     }
 
     const outcome = await deps.compiler.compile({
+      authorityGrant:grant,
       installationId: grant.installationId,
       sessionId: body.session_id,
       clientRequestId: body.client_request_id,

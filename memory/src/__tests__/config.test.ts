@@ -90,6 +90,15 @@ describe('memory config', () => {
       .toThrow(/MEMORY_INSTALLATION_ALLOWLIST/)
   })
 
+  test('direct Session launch requires an explicit shared namespace and bounded preserved scopes', () => {
+    const personal='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', organization='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const chosen={MEMORY_DATABASE_NAMESPACE:'memory',MEMORY_SHARED_SOURCE_PROFILE:'personal-relay-only',MEMORY_INSTALLATION_ALLOWLIST:personal+','+organization}
+    expect(loadMemoryConfig(baseEnv(chosen)).sharedSourceProfile).toBe('personal-relay-only')
+    expect(loadMemoryConfig(baseEnv()).sharedSourceProfile).toBeUndefined()
+    for(const overrides of [{...chosen,MEMORY_DATABASE_NAMESPACE:'public'},{...chosen,MEMORY_INSTALLATION_ALLOWLIST:''},{...chosen,MEMORY_SHARED_SOURCE_PROFILE:'all'}])
+      expect(()=>loadMemoryConfig(baseEnv(overrides))).toThrow(/MEMORY_SHARED_SOURCE_PROFILE/)
+  })
+
   test('accepts only off, shadow and enabled modes', () => {
     expect(loadMemoryConfig(baseEnv({ MEMORY_MODE: 'off' })).mode).toBe('off')
     expect(loadMemoryConfig(baseEnv({ MEMORY_MODE: 'shadow' })).mode).toBe('shadow')

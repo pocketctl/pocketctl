@@ -6,6 +6,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY packages ./packages
 # Build needs the TypeScript compiler; runtime deps are pruned separately.
 RUN npm ci --legacy-peer-deps
 COPY tsconfig.json ./
@@ -15,6 +16,7 @@ RUN ./node_modules/.bin/tsc
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY packages ./packages
 RUN npm ci --omit=dev --legacy-peer-deps
 
 FROM node:22-alpine AS runtime

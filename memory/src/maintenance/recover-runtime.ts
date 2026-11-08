@@ -2,6 +2,9 @@ import type pg from 'pg'
 import { classifyEnvelope } from '../relay/validation.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
 import type { ExtensionFeedEnvelopeV1 } from '../relay/contracts.js'
+import {lockLegacySourceInput} from '../sources/input-mode.js'
+import {guardRetainedEvidence,assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 
 export interface RuntimeRecoveryInput {
   installationId: string
@@ -26,6 +29,7 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    if(envelopes.length)await lockLegacySourceInput(client,input.installationId)
     await client.query(`SET LOCAL lock_timeout='5s'`)
     await client.query(`SET LOCAL statement_timeout='10s'`)
     const discovered = failedRunIds.length ? (await client.query<{session_id:string}>(`
@@ -72,6 +76,13 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
       ORDER BY e.episode_id LIMIT 501 FOR SHARE OF e,s`,[input.installationId,JSON.stringify(changedScopes)])).rows : []
     if (episodes.length > 500) throw new Error('recovery_episode_limit_exceeded')
     const targets = [...episodes.map(e=>({...e,key:`recovery:discovery:${e.episode_id}:${e.digest}`})),...failed.map(e=>({...e,key:`recovery:provider:${e.run_id}`}))]
+    const currentSources=async()=>{
+      try{
+        await guardRetainedEvidence(client,input.installationId,targets.map(target=>({source_event_id:null,artifact_id:null,episode_id:target.episode_id,evidence_kind:'episode'})))
+        await assertRetainedSourceGuards(client)
+      }catch(error){if(preparedSourceUnavailable(error))throw Error('recovery_source_unavailable');throw error}
+    }
+    await currentSources()
     const scheduled: string[] = []
     for (const target of targets) {
       const result=await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
@@ -88,6 +99,7 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
         ON CONFLICT DO NOTHING RETURNING job_id`,[input.installationId,target.episode_id,target.key,target.digest,'run_id' in target ? target.run_id : null])
       if (result.rowCount) scheduled.push(target.episode_id)
     }
+    await currentSources()
     await client.query(input.apply ? 'COMMIT' : 'ROLLBACK')
     return {applied:!!input.apply,reclassified,alreadyClassified,scheduledEpisodes:scheduled,requestedFailedRuns:failedRunIds}
   } catch(error) {

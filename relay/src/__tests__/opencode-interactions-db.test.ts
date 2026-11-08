@@ -1,17 +1,20 @@
+import {freshNativeSchemaUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { initDB, listSessionsWithChildren, updateSessionActiveAgent } from '../db.js'
 
 describe('OpenCode interaction DB state', () => {
   test('initDB adds active_agent without replacing agent_type', async () => {
     const queries: string[] = []
-    const pool: any = { query: vi.fn(async (sql: string) => { queries.push(sql); return { rows: [], rowCount: 0 } }) }
+    const pool: any = { query: vi.fn(async (sql: string) => {
+        const native=freshNativeSchemaUnitResult(sql);queries.push(sql); return native??{ rows: [], rowCount: 0 } }) }
     await initDB(pool)
     expect(queries.some((sql) => /ALTER TABLE sessions ADD COLUMN IF NOT EXISTS active_agent/i.test(sql))).toBe(true)
   })
 
   test('initDB adds the durable event effect ledger columns', async () => {
     const queries: string[] = []
-    const pool: any = { query: vi.fn(async (sql: string) => { queries.push(sql); return { rows: [], rowCount: 0 } }) }
+    const pool: any = { query: vi.fn(async (sql: string) => {
+        const native=freshNativeSchemaUnitResult(sql);queries.push(sql); return native??{ rows: [], rowCount: 0 } }) }
     await initDB(pool)
     expect(queries.some((sql) => /ALTER TABLE events ADD COLUMN IF NOT EXISTS effect_status/i.test(sql))).toBe(true)
     expect(queries.some((sql) => /ALTER TABLE events ADD COLUMN IF NOT EXISTS effect_step/i.test(sql))).toBe(true)
@@ -29,6 +32,7 @@ describe('OpenCode interaction DB state', () => {
   test('session lists expose active_agent alongside agent_type', async () => {
     const pool: any = {
       query: vi.fn(async (sql: string) => {
+        const native=freshNativeSchemaUnitResult(sql);if(native)return native
         if (/FROM subagents/i.test(sql)) return { rows: [] }
         expect(sql).toMatch(/s\.active_agent/)
         return { rows: [{

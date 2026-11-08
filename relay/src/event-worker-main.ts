@@ -2,6 +2,7 @@ import { hostname } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import type pg from 'pg'
 import { createPool, parseDBUrl } from './db.js'
+import {relaySharedTarget,assertSharedRelayRuntime,assertRelaySchemaContract} from './schema-runtime.js'
 import { InboxRepository } from './ingress/inbox-repository.js'
 import { createInboxWorker } from './inbox-worker.js'
 import { InboxRetention } from './inbox-retention.js'
@@ -189,20 +190,20 @@ export async function assertDurableIngressSchema(pool: Pick<pg.Pool, 'query'>): 
       AND to_regclass('idx_event_inbox_stream_unresolved') IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'event_inbox'
           AND column_name = 'materialization_context'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'realtime_outbox'
           AND column_name = 'event_id'
           AND is_nullable = 'YES'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'realtime_outbox'
           AND column_name = 'audience'
           AND character_maximum_length >= 18
@@ -326,6 +327,7 @@ export async function main(): Promise<void> {
     : undefined
   const runtime = createWorkerRuntime({
     assertSchemaReady: async () => {
+      if(await relaySharedTarget(pool)){await assertSharedRelayRuntime(pool);await assertRelaySchemaContract(pool)}
       await assertDurableIngressSchema(pool)
       await assertSessionLifecycleSchema(pool)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)

@@ -1,3 +1,6 @@
+import {permissionsForMirrorRoles} from './role-permissions.js'
+import {loadCurrentGrantStates,currentBindingAllowed,lookupCurrentInstallation,lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {bindSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import type pg from 'pg'
 
 /**
@@ -22,6 +25,7 @@ export interface GrantScopeBinding {
 
 /** Cryptographically verified facts handed over by the grant guard. */
 export interface V2GrantFacts {
+  userId?:number
   primaryInstallationId: string
   configVersion: string
   /** Signed JWT NumericDate; production guards always retain it. */
@@ -46,22 +50,6 @@ export interface RouteV2Grant extends V2GrantFacts {
 
 export interface ValidatedV2Grant extends V2GrantFacts {}
 
-const PERMISSIONS_BY_ROLE: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  reader: Object.freeze(['read']),
-  contributor: Object.freeze(['read', 'contribute']),
-  reviewer: Object.freeze(['read', 'review']),
-  publisher: Object.freeze(['read', 'review', 'publish']),
-  policy_administrator: Object.freeze(['read', 'policy_admin']),
-  scope_administrator: Object.freeze(['read', 'contribute', 'review', 'publish', 'policy_admin', 'scope_admin']),
-})
-
-function permissionsForMirrorRoles(roles: readonly string[]): string[] {
-  const wanted = new Set<string>()
-  for (const role of roles) {
-    for (const permission of PERMISSIONS_BY_ROLE[role] ?? []) wanted.add(permission)
-  }
-  return [...wanted]
-}
 
 interface MirrorJoinRow {
   installation_id: string
@@ -98,6 +86,7 @@ export function createScopeAuthorization(pool: pg.Pool) {
       facts: V2GrantFacts,
       options: { allowedSharedStates?: readonly string[]; allowedPrimarySharedStates?: readonly string[] } = {},
     ): Promise<ValidatedV2Grant | null> {
+      if(facts.userId!==undefined&&(!Number.isSafeInteger(facts.userId)||facts.userId<=0))return null
       if (facts.scopeBindings.length === 0 || facts.scopeBindings.length > 16) return null
       try { await assertCurrentGrantClock(pool, {expiresAt:facts.expiresAt}) }
       catch(error) { if(error instanceof TargetBindingError)return null; throw error }
@@ -124,8 +113,10 @@ export function createScopeAuthorization(pool: pg.Pool) {
       ])
       const byInstallation = new Map(result.rows.map(row => [row.installation_id, row]))
 
+      const current=await loadCurrentGrantStates(pool,facts.scopeBindings)
       const validated: GrantScopeBinding[] = []
       for (const binding of facts.scopeBindings) {
+        if(current&&!currentBindingAllowed(binding,current,facts,options))continue
         const row = byInstallation.get(binding.installation_id)
         // Foreign and missing resources are indistinguishable: drop quietly.
         if (!row) continue
@@ -161,6 +152,7 @@ export function createScopeAuthorization(pool: pg.Pool) {
       }
       return {
         primaryInstallationId: facts.primaryInstallationId,
+        ...(facts.userId!==undefined?{userId:facts.userId}:{}),
         configVersion: facts.configVersion,
         scopeBindings: validated,
         ...(facts.expiresAt !== undefined ? { expiresAt: facts.expiresAt } : {}),
@@ -203,6 +195,7 @@ export async function requireCurrentScopePermission(input: {
 }): Promise<GrantScopeBinding> {
   const ids = [...new Set(input.grant.scopeBindings.map(binding => binding.installation_id))].sort()
   if (ids.length === 0 || ids.length > 16) throw new TargetBindingError('scope authority is stale')
+  if(!await lockCurrentRelayAuthority(input.client,ids,input.grant.scopeBindings.flatMap(b=>b.membership_id?[b.membership_id]:[])))throw new TargetBindingError('scope authority busy')
   for (const id of ids) {
     await input.client.query(`SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0))`, [id])
   }
@@ -214,7 +207,8 @@ export async function requireCurrentScopePermission(input: {
     ORDER BY installation_id,membership_id FOR SHARE`, [ids, memberIds])
   // Query on this exact client, never on a pool connection outside the locks.
   const queryPool = { query: input.client.query.bind(input.client) } as unknown as pg.Pool
-  await assertCurrentGrantClock(input.client, input.grant,[input.targetInstallationId])
+  bindSourcePool(queryPool,sourcePoolContext(input.client))
+  await assertCurrentGrantClock(input.client, input.grant,[input.targetInstallationId],input)
   const grant = await createScopeAuthorization(queryPool).validateV2Grant(input.grant, {allowedSharedStates:input.allowedSharedStates,allowedPrimarySharedStates:input.allowedPrimarySharedStates})
   const binding = grant?.scopeBindings.find(entry => entry.installation_id === input.targetInstallationId)
   if (!binding?.permissions.includes(input.permission)) throw new TargetBindingError('scope authority is stale')
@@ -223,8 +217,8 @@ export async function requireCurrentScopePermission(input: {
 
 /** Time is not locked: repeat immediately before commit after any blocking work. */
 export async function assertCurrentGrantClock(client: Pick<pg.PoolClient, 'query'>, grant: {
- expiresAt?: number;primaryInstallationId?:string;scopeBindings?:readonly GrantScopeBinding[]
-},selectedInstallationIds:readonly string[]=[]): Promise<void> {
+ expiresAt?: number;configVersion?:string;userId?:number;primaryInstallationId?:string;scopeBindings?:readonly GrantScopeBinding[]
+},selectedInstallationIds:readonly string[]=[],options:{allowedSharedStates?:readonly string[];allowedPrimarySharedStates?:readonly string[]}={}): Promise<void> {
  if(grant.expiresAt!==undefined){
   if(!Number.isFinite(grant.expiresAt))throw new TargetBindingError('grant expired')
   const result=await client.query<{alive:boolean}>('SELECT clock_timestamp() < to_timestamp($1::double precision) AS alive',[grant.expiresAt])
@@ -233,6 +227,9 @@ export async function assertCurrentGrantClock(client: Pick<pg.PoolClient, 'query
  // An unused secondary binding may expire without denying the primary. Only
  // the primary and the service-selected targets/sources participate here.
  const ids=new Set([grant.primaryInstallationId,...selectedInstallationIds])
+ const selected=(grant.scopeBindings??[]).filter(b=>ids.has(b.installation_id))
+ const current=await loadCurrentGrantStates(client,selected)
+ if(current&&selected.some(binding=>!currentBindingAllowed(binding,current,grant,options)))throw new TargetBindingError('scope authority is stale')
  const members=(grant.scopeBindings??[]).filter(b=>ids.has(b.installation_id)&&b.owner_scope_kind!=='personal'&&b.membership_id)
  await assertCurrentMembershipWindows(client,members.map(b=>({installationId:b.installation_id,membershipId:b.membership_id!})))
 }
@@ -251,11 +248,16 @@ export async function assertCurrentMembershipWindows(client:Pick<pg.PoolClient,'
 
 /** Serialize personal management with purge/settings writers before resource locks. */
 export async function requireCurrentInstallationAuthority(client: pg.PoolClient, grant: {
-  installationId: string; configVersion?: string; expiresAt?: number
-}): Promise<void> {
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))", [grant.installationId])
+  installationId: string; configVersion?: string; expiresAt?: number;userId?:number
+},options:{readOnly?:boolean}={}): Promise<void> {
+  if(!await lockCurrentRelayAuthority(client,[grant.installationId]))throw new TargetBindingError('installation authority busy')
+  const current=await lookupCurrentInstallation(client,grant.installationId)
+  if(current&&(!current.current||(grant.configVersion!==undefined&&current.configVersion!==grant.configVersion)||(grant.userId!==undefined&&current.ownerUserId!==String(grant.userId))))throw new TargetBindingError('installation authority is stale')
+  if(options.readOnly){
+    if(!(await client.query("SELECT pg_try_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0)) AS locked",[grant.installationId])).rows[0]?.locked)throw new TargetBindingError('installation authority busy')
+  }else await client.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))", [grant.installationId])
   const result = await client.query<{local_status:string;relay_status:string;config_version:string}>(
-    'SELECT local_status,relay_status,config_version::text FROM memory_installations WHERE installation_id=$1 FOR SHARE', [grant.installationId])
+    'SELECT local_status,relay_status,config_version::text FROM memory_installations WHERE installation_id=$1 FOR SHARE'+(options.readOnly?' NOWAIT':''), [grant.installationId])
   const row=result.rows[0]
   if (!row || ['purging','purged','integrity_error'].includes(row.local_status)
     || ['revoking','revoked'].includes(row.relay_status)

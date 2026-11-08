@@ -172,7 +172,7 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
             if(needsMetadata||(Array.isArray(added)&&added.length>0)||row.legacy)selected.push(row.source_installation_id)
           }
         }
-        await assertCurrentGrantClock(client,input.grant,selected)
+        await assertCurrentGrantClock(client,input.grant,selected,input.operation==='governance.transfer'?{allowedSharedStates:['active','dissolving']}:{})
       }
       catch (error) { if (error instanceof TargetBindingError) throw new MemoryApiError('forbidden','current authorization required'); throw error }
     }

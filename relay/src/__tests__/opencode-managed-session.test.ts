@@ -1,10 +1,12 @@
+import {freshNativeSchemaUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { initDB, listSessionsWithChildren, updateSessionControl, upsertSession } from '../db.js'
 
 describe('OpenCode managed session persistence', () => {
   test('migration adds nullable control mode and durable capabilities', async () => {
     const queries: string[] = []
-    const pool: any = { query: vi.fn(async (sql: string) => { queries.push(sql); return { rows: [], rowCount: 0 } }) }
+    const pool: any = { query: vi.fn(async (sql: string) => {
+        const native=freshNativeSchemaUnitResult(sql);queries.push(sql); return native??{ rows: [], rowCount: 0 } }) }
 
     await initDB(pool)
 
@@ -16,6 +18,7 @@ describe('OpenCode managed session persistence', () => {
   test('session list restores managed capabilities and defaults old OpenCode rows to legacy read-only', async () => {
     const pool: any = {
       query: vi.fn(async (sql: string) => {
+        const native=freshNativeSchemaUnitResult(sql);if(native)return native
         if (/FROM subagents/i.test(sql)) return { rows: [] }
         expect(sql).toMatch(/s\.control_mode/)
         expect(sql).toMatch(/s\.capabilities/)
@@ -51,7 +54,7 @@ describe('OpenCode managed session persistence', () => {
       'managed', ['shared_runtime', 'terminal_coapproval'],
     )
 
-    const [sql, params] = pool.query.mock.calls[0]
+    const [sql, params] = pool.query.mock.calls.find(([sql]:[string])=>sql.includes('INSERT INTO sessions'))
     expect(sql).toMatch(/control_mode, capabilities/)
     expect(sql).toMatch(/\$12::jsonb/)
     expect(sql).toMatch(/control_mode = COALESCE\(\$11, sessions\.control_mode\)/)

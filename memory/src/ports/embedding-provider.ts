@@ -11,6 +11,8 @@ export interface EmbeddingResult {
   model: string
   tokens: number
   costMicros?: number
+  budgetReservationId?:string
+  billingUncertain?:boolean
 }
 
 export interface EmbeddingProvider {

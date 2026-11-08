@@ -1,10 +1,12 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { deleteSession } from '../db.js'
 
 function poolWithQueries(ownerUserId?: number) {
   const statements: string[] = []
   const client = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       statements.push(sql)
       if (/SELECT user_id FROM sessions/.test(sql) && ownerUserId !== undefined) {
         return { rows: [{ user_id: ownerUserId }], rowCount: 1 }

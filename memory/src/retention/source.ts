@@ -149,6 +149,7 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
   const result = emptyResult(), args = [receipt.installation_id, receipt.turn_id, batchSize, receipt.reclaimed_at]
   result.events = (await client.query(`WITH due AS MATERIALIZED(
     SELECT source_event_id FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
+      AND source_kind IS DISTINCT FROM 'legacy_archive'
     ORDER BY source_event_id LIMIT $3 FOR UPDATE SKIP LOCKED)
     UPDATE source_events s SET payload=memory_retention_source_metadata(s.payload),body_reclaimed_at=$4
     FROM due WHERE s.source_event_id=due.source_event_id`, args)).rowCount ?? 0
@@ -174,7 +175,8 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     FROM due WHERE c.candidate_id=due.candidate_id`,
   [receipt.installation_id, receipt.episode_id, batchSize, receipt.reclaimed_at])).rowCount ?? 0
   const outstanding = (await client.query(`SELECT
-    EXISTS(SELECT 1 FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL)
+    EXISTS(SELECT 1 FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
+      AND source_kind IS DISTINCT FROM 'legacy_archive')
     OR EXISTS(SELECT 1 FROM source_artifacts WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL)
     OR EXISTS(SELECT 1 FROM memory_snapshot_events WHERE installation_id=$1 AND
       COALESCE(NULLIF(payload->>'turn_id',''),NULLIF(payload->>'source_turn_id',''))=$2 AND body_reclaimed_at IS NULL)

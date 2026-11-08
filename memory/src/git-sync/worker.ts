@@ -1,4 +1,5 @@
 import {releaseJobFence} from '../generation/fence.js'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import type pg from 'pg'
 import type { V2GrantFacts } from '../governance/authorization.js'
@@ -88,7 +89,9 @@ export function createGitSyncWorker(deps:GitWorkerDeps) {
       await gitAdmissionMode(deps,c)
       const current=await lockRun(client,r)
       await jobFence(client,current,fence)
-      return fn(client,current,c)
+      const result=await fn(client,current,c)
+      await guardSourceExecutionCommit(client)
+      return result
     })
   }
   async function durableFailures(client:pg.PoolClient,r:Run):Promise<number> {
@@ -107,6 +110,7 @@ export function createGitSyncWorker(deps:GitWorkerDeps) {
       [r.run_id,state==='observed'?'rejected':state,!!merge&&state!=='duplicate',r.installation_id,state==='observed'?'not_merged':null])
     await client.query(`UPDATE memory_git_inbox SET state=$2 WHERE installation_id=$3 AND run_id=$1`,[r.run_id,state==='duplicate'?'duplicate':'processed',r.installation_id])
     await client.query(`UPDATE memory_jobs SET state='completed',completed_at=NOW(),claim_expires_at=NULL,last_error_code=NULL WHERE job_id=$1`,[fence.jobId])
+    await guardSourceExecutionCommit(client)
   }
   async function releaseLostLease(r:Run,fence:JobFence) {
       // Generic completion checks epoch, but not wall-clock expiry. Release our

@@ -1,3 +1,6 @@
+import {assertNativeInputStartCompatible,installNativeInputStart} from './shared-source/input-start.js'
+import {initNativeSessionAliasSchema,assertNativeRetirementUpgradeInput} from './session-alias/schema.js';
+import {installRelaySchemaContract} from './schema-runtime.js';
 import { initMessageQueueSchema } from './session-message-queue/schema.js';
 import {initMaintenanceSummarySchema} from './session-lifecycle/maintenance-summary.js';
 import { initSessionShareSchema } from './session-share/store.js';
@@ -98,7 +101,10 @@ export async function initDB(pool: pg.Pool): Promise<void> {
       try {
         await client.query('BEGIN');
         await client.query(`SELECT pg_advisory_xact_lock(hashtext('pocketctl-schema-init-v1'))`);
+        await assertNativeInputStartCompatible({query:client.query.bind(client)} as pg.Pool);
+        await assertNativeRetirementUpgradeInput({query:client.query.bind(client)} as pg.Pool);
         await initDBUnlocked({ query: client.query.bind(client) } as pg.Pool);
+        await installRelaySchemaContract({query:client.query.bind(client)} as pg.Pool);
         await client.query('COMMIT');
       } catch (error) {
         try {
@@ -121,7 +127,10 @@ export async function initDB(pool: pg.Pool): Promise<void> {
     return;
   }
   // Lightweight unit-test doubles historically implement query only.
+  await assertNativeInputStartCompatible(pool);
+  await assertNativeRetirementUpgradeInput(pool);
   await initDBUnlocked(pool);
+  await installRelaySchemaContract(pool);
 }
 
 async function initDBUnlocked(pool: pg.Pool): Promise<void> {
@@ -853,6 +862,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initSessionShareSchema(pool);
   await initSessionOrganizationSchema(pool);
   await initSessionLifecycleSchema(pool);
+  await initNativeSessionAliasSchema(pool);
   await initSessionHistoryBodySchema(pool);
   await initMessageQueueSchema(pool);
   await initArchiveObjectJobSchema(pool);
@@ -871,6 +881,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // so it must run after the team schema has created that table.
   await initLifecycleDependencyFenceSchema(pool);
   await initPreferenceSchema(pool);
+  await installNativeInputStart(pool);
 }
 
 export interface EmailChallengeSendDecision {
@@ -1294,18 +1305,35 @@ async function lockMachineIdentityFence(
   );
 }
 
+export async function nativeSessionFenceSet(db:Pick<pg.Pool,'query'>,ids:string[]):Promise<string[]>{
+  return (await db.query('SELECT public.native_session_alias_set($1::text[]) AS ids',[ids])).rows[0].ids
+}
+
+/** Exact historical edge, not existence of an owned target, proves replay. */
+export async function nativeRenameReplay(db:Pick<pg.Pool,'query'>,input:{oldSessionId:string;newSessionId:string;userId:number|null;daemonId:string}):Promise<string|null>{
+  const row=(await db.query(`SELECT public.native_session_authority(a.old_session_id,$3,$4) AS authority
+    FROM public.session_aliases a WHERE a.old_session_id=$1 AND a.next_session_id=$2
+     AND a.owner_user_id IS NOT DISTINCT FROM $3::int AND a.request_daemon_id=$4 AND NOT a.blocked`,
+    [input.oldSessionId,input.newSessionId,input.userId,input.daemonId])).rows[0]?.authority
+  return row?.state==='current'?row.sessionId:null
+}
+
 /** Serialize durable materialization with explicit deletion for one session. */
 export async function withSessionMaterializationFence<T>(
   pool: pg.Pool,
   sessionId: string,
   work: (client: pg.PoolClient) => Promise<T>,
+  additionalSessionIds: string[] = [],
 ): Promise<T> {
   // Lightweight unit fakes intentionally expose query only.
   if (typeof pool.connect !== 'function') return work(pool as unknown as pg.PoolClient)
+  const prepared = await nativeSessionFenceSet(pool, [sessionId, ...additionalSessionIds])
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await lockSessionMaterializationFence(client, sessionId)
+    for (const id of prepared) await lockSessionMaterializationFence(client, id)
+    const fresh = await nativeSessionFenceSet(client, [sessionId, ...additionalSessionIds])
+    if (JSON.stringify(prepared) !== JSON.stringify(fresh)) throw Object.assign(new Error('native_alias_set_changed'), {code:'55P03'})
     const result = await work(client)
     await client.query('COMMIT')
     return result
@@ -1385,6 +1413,7 @@ export async function assertDaemonSessionAccess(
 ): Promise<DaemonSessionAccess> {
   const result = await queryable.query(
     `SELECT
+       EXISTS (SELECT 1 FROM session_aliases WHERE old_session_id=$1) OR EXISTS(SELECT 1 FROM deleted_sessions WHERE session_id=$1) AS session_retired,
        EXISTS (SELECT session_id FROM sessions WHERE session_id = $1) AS session_exists,
        EXISTS (
          SELECT session_id FROM sessions
@@ -1395,13 +1424,14 @@ export async function assertDaemonSessionAccess(
        ) AS session_allowed`,
     [input.sessionId, input.userId, input.daemonId],
   );
-  const row = result.rows[0] as { session_exists?: boolean | 't' | 'f'; session_allowed?: boolean | 't' | 'f' } | undefined;
+  const row = result.rows[0] as { session_retired?:boolean; session_exists?: boolean | 't' | 'f'; session_allowed?: boolean | 't' | 'f' } | undefined;
   const exists = row
     ? row.session_exists === true || row.session_exists === 't'
     : (result.rowCount ?? 0) > 0;
   const allowed = row
     ? row.session_allowed === true || row.session_allowed === 't'
     : true;
+  if (row?.session_retired) throw new UnknownDaemonSessionError();
   if (!exists) {
     if (input.policy === 'must_exist') throw new UnknownDaemonSessionError();
     return 'missing';
@@ -1902,7 +1932,7 @@ async function persistOwnedClientEventInTransaction(
     `INSERT INTO events (session_id, event_type, payload, event_hash, user_id)
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (session_id, event_hash) DO UPDATE
-       SET user_id = COALESCE(events.user_id, EXCLUDED.user_id)
+       SET user_id = events.user_id
      RETURNING id, (xmax = 0) AS inserted`,
     [sessionId, eventType, payloadStr, hash, userId],
   );
@@ -2059,6 +2089,7 @@ export async function persistEventWithEffect(
   attempts = 5,
   userId: number | null = null,
   hashSessionId: string = sessionId,
+  logicalSourceSessionId: string = sessionId,
 ): Promise<PersistedEventEffect> {
   const persistedPayload = sanitizeJSONBPayload(payload);
   const payloadStr = JSON.stringify(persistedPayload);
@@ -2068,16 +2099,18 @@ export async function persistEventWithEffect(
   for (let i = 0; i < attempts; i++) {
     try {
       const result = await pool.query(
-        `INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step, user_id)
-         VALUES ($1, $2, $3, $4, 'pending', 0, $5)
+        `INSERT INTO events (session_id, event_type, payload, event_hash, effect_status, effect_step, user_id, logical_source_session_id)
+         VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
          ON CONFLICT (session_id, event_hash) DO UPDATE
          SET event_hash = EXCLUDED.event_hash,
-             user_id = COALESCE(events.user_id, EXCLUDED.user_id)
-         RETURNING id, (xmax = 0) AS inserted, effect_status, effect_step`,
-        [sessionId, eventType, payloadStr, hash, userId],
+             user_id = events.user_id
+         RETURNING id, (xmax = 0) AS inserted, effect_status, effect_step, user_id, owner_retired`,
+        [sessionId, eventType, payloadStr, hash, userId, logicalSourceSessionId],
       );
       const row = result.rows[0];
       if (!row) throw new Error('event ledger row unavailable');
+      if (row.owner_retired) throw new UnknownDaemonSessionError();
+      if ('user_id' in row && row.user_id !== userId) throw new SessionOwnershipViolationError();
       const inserted = row.inserted === undefined || row.inserted === true || row.inserted === 't';
       return {
         rowID: Number(row.id),
@@ -2121,14 +2154,14 @@ export async function persistReplayContentBatch(client: Pick<pg.PoolClient, 'que
   FROM jsonb_to_recordset($1::jsonb) AS d(ordinal int,session_id text,event_type text,payload jsonb,event_hash text,user_id int)
   ORDER BY d.ordinal
   ON CONFLICT(session_id,event_hash) DO UPDATE
-  SET event_hash=EXCLUDED.event_hash,user_id=COALESCE(events.user_id,EXCLUDED.user_id)
-  RETURNING id,event_hash,user_id,(xmax=0) AS inserted,effect_status,effect_step`, [JSON.stringify(unique)]);
+  SET event_hash=EXCLUDED.event_hash,user_id=events.user_id
+  RETURNING id,event_hash,user_id,owner_retired,(xmax=0) AS inserted,effect_status,effect_step`, [JSON.stringify(unique)]);
   const indexed = new Map(result.rows.map(row => [row.event_hash, row]));
   return prepared.map(item => {
     const row = indexed.get(item.event_hash);
     // An older pending ledger can have unfinished effects even when today's
     // duplicate payload omits them. Roll back and run the original effect path.
-    if (!row || !['completed', 'none', 'abandoned'].includes(row.effect_status) || Number(row.user_id) !== item.user_id) {
+    if (!row || row.owner_retired || !['completed', 'none', 'abandoned'].includes(row.effect_status) || Number(row.user_id) !== item.user_id) {
       throw new Error('replay content batch requires ordinary materialization');
     }
     return { rowID: Number(row.id), inserted: row.inserted === true || row.inserted === 't', completed: true, nextStep: Number(row.effect_step) || 0 };
@@ -2163,15 +2196,16 @@ export async function claimRequestPushEffect(
 export async function getEventEffectState(
   pool: pg.Pool,
   eventID: number,
-): Promise<{ completed: boolean; nextStep: number } | null> {
+): Promise<{ completed: boolean; nextStep: number; ownerRetired:boolean } | null> {
   const result = await pool.query(
-    `SELECT effect_status, effect_step FROM events WHERE id = $1`,
+    `SELECT effect_status, effect_step, owner_retired FROM events WHERE id = $1`,
     [eventID],
   );
   const row = result.rows[0];
   if (!row) return null;
   return {
     completed: ['completed', 'none', 'abandoned'].includes(row.effect_status),
+    ownerRetired:row.owner_retired===true,
     nextStep: Number(row.effect_step) || 0,
   };
 }
@@ -2933,6 +2967,8 @@ export async function getSessionTokenBreakdown(pool: pg.Pool, userId: number, se
 }
 
 export async function upsertSession(pool: pg.Pool, sessionId: string, daemonId: string, agentType: string, cwd: string, status: string, title?: string, source?: string, exitReason?: string, userId?: number, model?: string, controlMode?: string, capabilities?: string[], codexHomeId?: string, codexHomeLabel?: string, terminalStartedAt?: string): Promise<void> {
+  if(userId!=null)await pool.query('SELECT public.adopt_native_session_owner($1,$2,$3)',[sessionId,userId,daemonId]);
+  await assertDaemonSessionAccess(pool,{sessionId,daemonId,userId:userId??null,policy:'allow_create'});
   const result = await pool.query(
     `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, title, source, status, exit_reason, user_id, model, control_mode, capabilities, codex_home_id, codex_home_label, new_badge_pending, created_at, updated_at)
      SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14,
@@ -3016,6 +3052,8 @@ export async function updateSessionControl(pool: pg.Pool, sessionId: string, con
 }
 
 export async function ensureDaemonSessionIdentity(pool: pg.Pool, sessionId: string, daemonId: string, userId?: number): Promise<void> {
+  if(userId!=null)await pool.query('SELECT public.adopt_native_session_owner($1,$2,$3)',[sessionId,userId,daemonId]);
+  await assertDaemonSessionAccess(pool,{sessionId,daemonId,userId:userId??null,policy:'allow_create'});
   const result = await pool.query(
     `INSERT INTO sessions (session_id, daemon_id, agent_type, cwd, source, status, user_id, created_at, updated_at)
      VALUES ($1, $2, '', '', 'daemon', 'running', $3, NOW(), NOW())
@@ -3059,6 +3097,9 @@ export async function renameOwnedDaemonSession(
     ? await (queryable as pg.Pool).connect()
     : (queryable as Pick<pg.PoolClient, 'query'>);
   const run = async (): Promise<boolean> => {
+    const ids = await nativeSessionFenceSet(client,[input.oldSessionId,input.newSessionId]);
+    for(const id of ids) await lockSessionMaterializationFence(client,id);
+    if(input.userId!=null)await client.query('SELECT public.adopt_native_session_owner($1,$2,$3)',[input.oldSessionId,input.userId,input.daemonId]);
     const [first, second] = [input.oldSessionId, input.newSessionId].sort();
     const locked = await client.query(
       `SELECT session_id, user_id, daemon_id FROM sessions
@@ -3073,11 +3114,13 @@ export async function renameOwnedDaemonSession(
     if (!oldRow) {
       // Replaying an already-applied rename is idempotent when we still own
       // the renamed row; any other missing old id is a permanent rejection.
-      if (newRow && daemonSessionAccessAllowed(newRow, input)) return true;
+      if (await nativeRenameReplay(client,input)) return false;
       throw new UnknownDaemonSessionError();
     }
     if (!daemonSessionAccessAllowed(oldRow, input)) throw new SessionOwnershipViolationError();
-    if (newRow) throw new SessionOwnershipViolationError();
+    if (newRow || (await client.query('SELECT 1 FROM session_aliases WHERE old_session_id=$1 UNION ALL SELECT 1 FROM deleted_sessions WHERE session_id=$1',[input.newSessionId])).rows.length) throw new SessionOwnershipViolationError();
+    if(ids.length>=32) throw new SessionOwnershipViolationError();
+    await client.query(`INSERT INTO session_aliases(old_session_id,next_session_id,owner_user_id,original_daemon_id,request_daemon_id) VALUES($1,$2,$3,$4,$5)`,[input.oldSessionId,input.newSessionId,oldRow.user_id,oldRow.daemon_id,input.daemonId]);
     const moved = await client.query(
       `UPDATE sessions SET
          session_id = $2,
@@ -3102,7 +3145,10 @@ export async function renameOwnedDaemonSession(
     return true;
   };
   try {
+    const prepared=await nativeSessionFenceSet(client,[input.oldSessionId,input.newSessionId]);
     if (isPool) await client.query('BEGIN');
+    for(const id of prepared)await lockSessionMaterializationFence(client,id);
+    if(JSON.stringify(prepared)!==JSON.stringify(await nativeSessionFenceSet(client,[input.oldSessionId,input.newSessionId])))throw Object.assign(new Error('native_alias_set_changed'),{code:'55P03'});
     const renamed = await run();
     if (isPool) await client.query('COMMIT');
     return renamed;
@@ -3544,6 +3590,11 @@ export async function userExists(pool: pg.Pool, userId: number): Promise<boolean
  * ON DELETE CASCADE alone. Capture the owned session/daemon ids while holding
  * the user-row lock, then remove their dependent rows in the same transaction.
  */
+export class NativeArchiveCustodyRepairRequiredError extends Error {
+  readonly code='native_archive_custody_repair_required';
+  constructor(){super('native archive custody repair required');this.name='NativeArchiveCustodyRepairRequiredError';}
+}
+
 export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<boolean> {
   const client = await pool.connect();
   try {
@@ -3557,12 +3608,6 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
       return false;
     }
 
-    await revokeTeamAccount(client, userId);
-
-    // ADR-0003: provider purge evidence must be created before the user rows
-    // disappear; it carries no user FK and survives until the provider acks.
-    await revokeExtensionDataForUser(client, userId);
-
     const sessions = await client.query(
       `SELECT session_id FROM sessions WHERE user_id = $1`,
       [userId],
@@ -3573,9 +3618,34 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     );
     const sessionIds = sessions.rows.map((row: any) => row.session_id as string);
     const daemonIds = daemons.rows.map((row: any) => row.daemon_id as string);
-    for (const sessionId of [...sessionIds].sort()) {
-      await lockSessionMaterializationFence(client, sessionId);
-    }
+    // Immutable originals can remain under another owner's current route.
+    // Discover every affected component, lock in one order, then rediscover;
+    // deletion filters below remain exact original-owner predicates.
+    const affectedNames = async ():Promise<string[]> => {
+      const rows=await client.query(`SELECT session_id FROM sessions WHERE user_id=$1
+        UNION SELECT session_id FROM events WHERE user_id=$1 OR body_owner_user_id=$1
+        UNION SELECT logical_source_session_id FROM events WHERE user_id=$1
+        UNION SELECT session_id FROM session_documents WHERE user_id=$1
+        UNION SELECT session_id FROM session_document_uploads WHERE user_id=$1
+        UNION SELECT session_id FROM session_archive_manifests WHERE user_id=$1
+        UNION SELECT old_session_id FROM session_aliases WHERE owner_user_id=$1`,[userId]);
+      return [...new Set((await Promise.all(rows.rows.map(row=>nativeSessionFenceSet(client,[row.session_id])))).flat())].sort((a,b)=>Buffer.compare(Buffer.from(a),Buffer.from(b)));
+    };
+    const accountAliasIds=await affectedNames();
+    for (const sessionId of accountAliasIds) await lockSessionMaterializationFence(client,sessionId);
+    if(JSON.stringify(accountAliasIds)!==JSON.stringify(await affectedNames()))throw Error('account_native_component_changed');
+    // Existing mixed chunks cannot be repaired by erasing one original row:
+    // the immutable object would still contain its bytes beside another
+    // owner's live fact. Refuse before every destructive business operation.
+    const mixed=await client.query(`SELECT 1 FROM events e WHERE e.body_storage='cold' AND
+      ((e.user_id=$1 AND e.body_owner_user_id IS DISTINCT FROM $1::int)
+       OR(e.body_owner_user_id=$1 AND e.user_id IS NOT NULL AND e.user_id<>$1)) LIMIT 1`,[userId]);
+    if(mixed.rows.length)throw new NativeArchiveCustodyRepairRequiredError();
+
+    await revokeTeamAccount(client,userId);
+    // Provider deletion evidence remains transactional and precedes erasure.
+    await revokeExtensionDataForUser(client,userId);
+
     const quotaFailureLedgerIds = daemonIds.map((daemonId) => {
       const namespace = createHash('sha256')
         .update(JSON.stringify([userId, daemonId]))
@@ -3601,8 +3671,12 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     await client.query(`DELETE FROM session_document_versions WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM session_documents WHERE user_id = $1`, [userId]);
     await client.query(
-      `DELETE FROM events WHERE session_id = ANY($1::varchar[])`,
-      [[...sessionIds, ...quotaFailureLedgerIds]],
+      `DELETE FROM events e WHERE user_id=$1 OR (user_id IS NULL AND
+        (session_id = ANY($2::varchar[]) OR (body_storage='cold' AND body_owner_user_id=$1
+          AND EXISTS(SELECT 1 FROM session_archive_manifests m JOIN session_archive_chunks c USING(manifest_id)
+            WHERE m.user_id=$1 AND m.manifest_id=e.body_manifest_id AND m.session_id=e.body_session_id
+              AND m.activity_epoch=e.body_activity_epoch AND c.ordinal=e.body_chunk_ordinal))))`,
+      [userId,[...sessionIds, ...quotaFailureLedgerIds]],
     );
     await client.query(`DELETE FROM subagents WHERE parent_session_id = ANY($1::varchar[])`, [sessionIds]);
     await client.query(`DELETE FROM subagent_usage_seen WHERE daemon_id = ANY($1::text[])`, [daemonIds]);
@@ -3611,6 +3685,7 @@ export async function deleteUserAccount(pool: pg.Pool, userId: number): Promise<
     await client.query(`DELETE FROM token_daily_stats WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM audit_log WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM revoked_tokens WHERE user_id = $1`, [userId]);
+    await client.query(`DELETE FROM session_archive_manifests WHERE user_id=$1`,[userId]);
     await client.query(`DELETE FROM sessions WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM daemons WHERE user_id = $1`, [userId]);
     await client.query(`DELETE FROM users WHERE id = $1`, [userId]);
@@ -3829,7 +3904,14 @@ export async function deleteSessionInTransaction(
   sessionId: string,
   options: NonNullable<Parameters<typeof deleteSession>[2]> = {},
 ): Promise<void> {
-    await lockSessionMaterializationFence(client, sessionId);
+    const aliasIds=await nativeSessionFenceSet(client,[sessionId]);
+    for(const id of aliasIds) await lockSessionMaterializationFence(client,id);
+    const historical=(await client.query('SELECT owner_user_id,original_daemon_id FROM session_aliases WHERE old_session_id=$1',[sessionId])).rows[0];
+    if(historical){
+      const authority=(await client.query('SELECT public.native_session_authority($1,$2,$3) AS authority',[sessionId,historical.owner_user_id,historical.original_daemon_id])).rows[0].authority;
+      if(authority?.state!=='current')throw new UnknownDaemonSessionError();
+      sessionId=authority.sessionId;
+    }
     if (options.writeUsageFacts) {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext('token-usage-accounting-global'))`);
     }
@@ -3914,7 +3996,9 @@ export async function deleteSessionInTransaction(
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM attention_items WHERE session_id=$1`,[sessionId]);
     await client.query(`DELETE FROM subagents WHERE parent_session_id=$1 OR agent_id=$1`,[sessionId]);
-    await client.query(`DELETE FROM session_archive_manifests WHERE session_id=$1`,[sessionId]);
+    await client.query(`UPDATE session_archive_object_deletions q SET deletion_subject_session_id=$1
+      FROM sessions s WHERE s.session_id=$1 AND q.user_id=s.user_id AND q.session_id=ANY($2::text[])`,[sessionId,aliasIds]);
+    await client.query(`DELETE FROM session_archive_manifests m USING sessions s WHERE s.session_id=$1 AND m.user_id=s.user_id AND m.session_id=ANY($2::text[])`,[sessionId,aliasIds]);
     // ADR-0003: extension content is purged in the same fenced transaction;
     // shadow/enabled additionally journal a generic provider tombstone.
     const extensionMode = options.extensionMode ?? extensionModeFromEnv();

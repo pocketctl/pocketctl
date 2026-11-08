@@ -48,6 +48,17 @@ describeWithDatabase('Phase 4 Wiki provider budget', () => {
   afterAll(async () => pool?.end())
   beforeEach(async () => pool.query(`TRUNCATE memory_provider_budget_reservations`))
 
+  test('restarting the same build retains the reservation without a second provider call',async()=>{
+    const {request,provider}=mockProvider({ok:false,code:'provider_result_unknown',retryable:false})
+    const store=createProviderBudgetStore(pool)
+    const run=()=>generateWikiCandidateOrFallback({generator:createWikiGenerator({provider:withTextProviderBudget(provider,store,{key:'wiki-stable-build',maxRequests:10,maxInputTokens:1000000,maxOutputTokens:10000,maxOutputTokensPerRequest:100}),timeoutMs:50}),skeleton,sources,coverage:'partial',commitSha,snapshotId,signal:new AbortController().signal,requestKey:'wiki:original-build-run'})
+    const first=await run()
+    expect(first).toMatchObject({source:'deterministic',failureCode:'provider_result_unknown',budgetReservationId:expect.stringMatching(/^[0-9a-f-]{36}$/)})
+    expect(await run()).toMatchObject({source:'deterministic',failureCode:'provider_result_unknown',budgetReservationId:first.budgetReservationId})
+    expect(request).toHaveBeenCalledTimes(1)
+    expect((await pool.query("SELECT state,reserved_output_tokens::text FROM memory_provider_budget_reservations WHERE budget_key='wiki-stable-build'")).rows).toEqual([{state:'reserved',reserved_output_tokens:'100'}])
+  })
+
   test('reserves worst-case usage before dispatch and rejects a second request without provider retry', async () => {
     const { request, provider } = mockProvider({
       ok: true, value: skeleton,
@@ -85,7 +96,7 @@ describeWithDatabase('Phase 4 Wiki provider budget', () => {
     const input = { generator, skeleton, sources, coverage: 'partial' as const,
       commitSha, snapshotId, signal: new AbortController().signal }
     expect(await generateWikiCandidateOrFallback(input)).toMatchObject({
-      source: 'deterministic', failureCode: 'invalid_usage',
+      source: 'deterministic', failureCode: 'provider_result_unknown',
     })
     expect(await generateWikiCandidateOrFallback(input)).toMatchObject({
       source: 'deterministic', failureCode: 'budget_exceeded',

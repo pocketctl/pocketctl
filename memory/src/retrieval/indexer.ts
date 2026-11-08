@@ -2,6 +2,8 @@ import {assertJobFence} from '../generation/fence.js'
 import type {JobFence} from '../jobs/types.js'
 import {currentClaimVersionSql} from '../claims/version-selection.js'
 import type pg from 'pg'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
+import {recordEmbeddingProviderUsage} from '../generation/provider-effect.js'
 import type { JobClaim } from '../jobs/types.js'
 import { buildSearchDocument } from './lexical.js'
 import type { EmbeddingProvider } from '../ports/embedding-provider.js'
@@ -78,6 +80,7 @@ export function createClaimIndexer(deps: IndexerDeps) {
         if(row)result=await run(client,row)
       }
       if(fence)await assertJobFence(client,fence)
+      if(head?.claim_state==='active'&&head.current_version_id===versionId&&head.consumption_hold_reason===null)await guardSourceExecutionCommit(client)
       await client.query('COMMIT')
       return result
     }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
@@ -132,13 +135,14 @@ export function createClaimIndexer(deps: IndexerDeps) {
           texts: [prepared.document],
           signal,
         })
+        await recordEmbeddingProviderUsage(deps.pool,installationId,embedded)
+        if(embedded.billingUncertain)throw Error('provider_result_unknown')
         if (embedded.vectors.length !== 1) throw new Error('embedding count mismatch')
         const vector = normalize(embedded.vectors[0])
         if (vector.length !== (deps.embed?.dimensions ?? 0)) throw new Error('embedding dimension mismatch')
         await withCurrentVersion(installationId,versionId,async client=>{
           if(!await embeddingAllowed(client,installationId,versionId))return
           await client.query(`
-          WITH updated AS (
           UPDATE claim_search_documents d SET
             embedding = $3::real[],
             embedding_provider = $4,
@@ -149,18 +153,9 @@ export function createClaimIndexer(deps: IndexerDeps) {
           FROM knowledge_claims c JOIN knowledge_versions v USING(installation_id,claim_id)
           WHERE d.installation_id=$1 AND d.version_id=$2 AND c.installation_id=d.installation_id AND v.version_id=d.version_id
             AND ${currentClaimVersionSql()} AND c.state='active' AND c.consumption_hold_reason IS NULL
-          RETURNING 1
-          )
-          INSERT INTO memory_usage_outbox
-            (installation_id, usage_id, operation, model, input_tokens, output_tokens,
-             embedding_tokens, cached_tokens, cost_micros, occurred_at)
-          SELECT $1, 'embedding:index:' || gen_random_uuid()::text, 'embedding', $8,
-                 0, 0, $9, 0, $10, NOW()
-          FROM updated
         `, [installationId, versionId, vector, deps.embed!.provider,
             deps.embed!.model, (deps.embed?.dimensions ?? 0),
-            deps.embeddingConsentFingerprint ?? null, deps.embed!.model,
-            embedded.tokens, embedded.costMicros ?? 0])
+            deps.embeddingConsentFingerprint ?? null])
         },fence)
       } catch {
         // Retry only while the target and consent still admit indexing. A
@@ -211,6 +206,7 @@ export function createClaimIndexer(deps: IndexerDeps) {
           VALUES(gen_random_uuid(),$1,'rebuild_claim_index',$2,95,$3::jsonb) ON CONFLICT DO NOTHING`,
           [job.installation_id,`rebuild:${adapterFingerprint}:after:${page.last}`,JSON.stringify({adapter_fingerprint:adapterFingerprint,after_version_id:page.last})])
         if(ctx?.fence)await assertJobFence(client,ctx.fence)
+        await guardSourceExecutionCommit(client)
         await client.query('COMMIT')
       }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
     },

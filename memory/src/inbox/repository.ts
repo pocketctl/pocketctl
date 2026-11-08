@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import {lockLegacySourceInput,readLegacySourceInputGeneration} from '../sources/input-mode.js'
 import type { ExtensionFeedEnvelopeV1 } from '../relay/contracts.js'
 import { classifyEnvelope } from '../relay/validation.js'
 import { canonicalPayloadHash } from './canonical-json.js'
@@ -37,6 +38,7 @@ export function createInboxRepository(pool: pg.Pool) {
   return {
     async commitBatch(input: {
       installationId: string
+      sourceModeGeneration?:string
       envelopes: ExtensionFeedEnvelopeV1[]
       rawQuarantined: QuarantinedInput[]
       ack: (input: { installation_id: string; cursor: string; lease_token: string }) => Promise<number>
@@ -50,6 +52,7 @@ export function createInboxRepository(pool: pg.Pool) {
         try {
           await client.query('BEGIN')
           try {
+            await lockLegacySourceInput(client,input.installationId,input.sourceModeGeneration)
             // Match purge/extraction ordering: all session locks precede the
             // installation lock, even when one batch contains multiple gaps.
             const gaps = input.rawQuarantined.filter(row => row.error_code === 'oversized_content' || row.error_code === 'oversized_discovery')
@@ -186,6 +189,7 @@ export function createInboxRepository(pool: pg.Pool) {
       // Durable commit done — now (and only now) tell Relay. An ack failure
       // throws so the loop retries the ack on the next redelivery, where the
       // rows above collapse idempotently.
+      if(input.sourceModeGeneration!==undefined&&await readLegacySourceInputGeneration(pool,input.installationId)!==input.sourceModeGeneration)throw Error('source_mode_generation_changed')
       const ackFeedId = await input.ack({
         installation_id: input.installationId,
         cursor: input.cursor,

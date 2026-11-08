@@ -1,4 +1,5 @@
 import { createHash } from 'crypto'
+import {assertSourceProviderExecution} from '../sources/source-execution.js'
 import type { TextGenerator, ModelJsonResult, TimeoutFallbackDiagnostics } from '../ports/text-generator.js'
 import { JobDeferredError, type JobFence } from '../jobs/types.js'
 import type { ExtractionRepository } from './repository.js'
@@ -101,6 +102,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         ? await deps.resolvePolicy(input.installationId, episode.repositoryId)
         : { document: SYSTEM_EXTRACTION_POLICY_V1, effectivePolicyHash: canonicalPolicyHash(SYSTEM_EXTRACTION_POLICY_V1) }
       if (policy.document.mode === 'off') return { kind: 'skipped_mode_off' }
+      await assertSourceProviderExecution(deps.store.sourceExecutionRequired===true)
       const extractionMode: 'shadow' | 'enabled' = episode.extractionMode === 'shadow'
         || policy.document.mode === 'shadow' ? 'shadow' : 'enabled'
 
@@ -161,6 +163,11 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
         if (result.timeoutFallback || result.ok || (result.code !== 'budget_exceeded' && result.code !== 'budget_unavailable')) {
           providerCallsObserved += 1
         }
+        if(result.usage){
+          usage={inputTokens:usage.inputTokens+result.usage.inputTokens,outputTokens:usage.outputTokens+result.usage.outputTokens}
+          totalCostMicros+=result.usage.costMicros??0
+          await deps.store.recordProviderUsage({runId:reserved.runId,...usage,costMicros:totalCostMicros})
+        }
         if (!result.ok) {
           // A fallback budget refusal happened AFTER a real primary timeout.
           // Deferring as a fresh budget wait would discard this attempt identity
@@ -169,13 +176,7 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
             return { ok: false, errorCode: 'provider_result_unknown', retryable: false,
               timeoutFallback: result.timeoutFallback }
           }
-          if (result.usage) {
-            usage = {
-              inputTokens: usage.inputTokens + result.usage.inputTokens,
-              outputTokens: usage.outputTokens + result.usage.outputTokens,
-            }
-            totalCostMicros += result.usage.costMicros ?? 0
-          }
+          if(result.billingUncertain)return {ok:false,errorCode:'provider_result_unknown',retryable:false}
           // Adapter-level JSON failures are still invalid model output and
           // earn exactly one bounded repair call.
           if (result.code === 'invalid_json' || result.code === 'empty_content') {
@@ -188,11 +189,6 @@ export function createCandidateExtractor(deps: CandidateExtractorDeps) {
           return { ok: false, errorCode, retryable: result.retryable,
             retryAt:result.retryAt ? new Date(result.retryAt) : null }
         }
-        usage = {
-          inputTokens: usage.inputTokens + result.usage.inputTokens,
-          outputTokens: usage.outputTokens + result.usage.outputTokens,
-        }
-        totalCostMicros += result.usage.costMicros ?? 0
         const validated = validateExtractionOutput(result.value)
         if (validated.ok && candidatesReferenceKnownHandles(validated.value.candidates, manifestHandles)) {
           return { ok: true, candidates: validated.value.candidates }
