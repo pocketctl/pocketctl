@@ -37,4 +37,15 @@ db('Phase 5 independent Provider budget', () => {
     expect(call).toHaveBeenCalledTimes(1)
     expect((await pool.query(`SELECT state,reserved_output_tokens::text FROM memory_provider_budget_reservations WHERE budget_key='phase5-skill-only'`)).rows).toEqual([{ state: 'settled', reserved_output_tokens: '100' }])
   })
+  test('a restarted task-run cannot dispatch a second paid request even with budget remaining',async()=>{
+    const call=vi.fn().mockResolvedValue({ok:false,code:'provider_result_unknown',retryable:false})
+    const store=createProviderBudgetStore(pool)
+    const create=()=>createSkillGenerator({provider:withTextProviderBudget({generateJson:call} as TextGenerator,store,{key:'phase5-stable-task-run',maxRequests:10,maxInputTokens:1000000,maxOutputTokens:10000,maxOutputTokensPerRequest:100}),timeoutMs:10})
+    const source={kind:'episode',repoSnapshotId:'snapshot',sources:[{token:'source-1',excerptHash:'a'.repeat(64),excerpt:'synthetic'}]} as ResolvedSkillInput
+    const first=await create().generate(source,new AbortController().signal,'skill:original-task-run')
+    expect(first.budgetReservationId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(await create().generate(source,new AbortController().signal,'skill:original-task-run')).toMatchObject({ok:false,code:'provider_result_unknown',retryable:false,budgetReservationId:first.budgetReservationId})
+    expect(call).toHaveBeenCalledTimes(1)
+    expect((await pool.query("SELECT state,reserved_output_tokens::text FROM memory_provider_budget_reservations WHERE budget_key='phase5-stable-task-run'")).rows).toEqual([{state:'reserved',reserved_output_tokens:'100'}])
+  })
 })

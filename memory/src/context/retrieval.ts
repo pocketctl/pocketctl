@@ -76,6 +76,7 @@ export function createContextRetrieval(deps: {
   return {
     async retrieve(input: {
       installationId: string
+      authorityGrant?:import('../sources/retained-read.js').SourceReadGrant
       lifecycle?:LifecycleFrame
       query: string
       repositoryId?: string | null
@@ -103,6 +104,7 @@ export function createContextRetrieval(deps: {
         const recall=deps.search.internalRecall?.bind(deps.search)??deps.search.search.bind(deps.search)
         const searched = await recall({
           installationId: input.installationId,
+          authorityGrant:input.authorityGrant,
           query: input.query,
           lifecycle:input.lifecycle,
           repositoryId: input.repositoryId ?? null,

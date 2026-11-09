@@ -1,3 +1,5 @@
+import {legacyTransportRetired} from '../sources/transport-state.js'
+import {JobTerminalError} from '../jobs/types.js'
 import type pg from 'pg'
 import type { JobClaim } from '../jobs/types.js'
 import { createSnapshotRepository } from './repository.js'
@@ -38,6 +40,7 @@ export function createSnapshotReconciler(options: SnapshotReconcilerOptions) {
     sessionsSeen: number
     eventsSeen: number
   }> {
+    if(await legacyTransportRetired(options.pool))throw new JobTerminalError('legacy_transport_retired')
     const pendingAck = await repository.pendingAcknowledgement(installationId)
     if (pendingAck) {
       try {

@@ -21,6 +21,8 @@ async function main():Promise<void>{
   else{console.error('invalid plan argument');process.exitCode=2;return}
  }
  if(relay&&!process.env.MEMORY_MIGRATION_RELAY_DATABASE_URL){console.error('MEMORY_MIGRATION_RELAY_DATABASE_URL is required for --relay');process.exitCode=2;return}
+ const namespace=process.env.MEMORY_MIGRATION_NAMESPACE??'public'
+ if(namespace!=='public'&&namespace!=='memory'){console.error('invalid_memory_namespace');process.exitCode=2;return}
  const connectionString=process.env.MEMORY_MIGRATION_DATABASE_URL
  if(!connectionString){console.error('MEMORY_MIGRATION_DATABASE_URL is required');process.exitCode=2;return}
  const pool=new pg.Pool({connectionString,max:1,connectionTimeoutMillis:5000})
@@ -31,7 +33,7 @@ async function main():Promise<void>{
   file=partial?await open(partial,'wx',0o600):undefined
   const sink=file?async(items:MigrationInventoryItem[])=>{for(const item of items)await file!.write(JSON.stringify(item)+'\n')}:undefined
   session=relayPool?await openRelayInventory(relayPool,sink):undefined
-  const memory=await inventoryMemory(pool,{onFindingBatch:sink,onScopeBatch:session?.scopes,onTeamSourceBatch:session?.sources})
+  const memory=await inventoryMemory(pool,{namespace,onFindingBatch:sink,onScopeBatch:session?.scopes,onTeamSourceBatch:session?.sources})
   await session?.finish()
   await file?.close();file=undefined
   if(partial&&details)await rename(partial,details)

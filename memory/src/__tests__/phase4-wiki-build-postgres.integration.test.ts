@@ -127,6 +127,20 @@ describeWithDatabase('phase4 deterministic Wiki builds', () => {
     await applyMemorySchema(pool)
   }, 120_000)
 
+  test('cancellation during the provider response retains incurred usage without publishing a candidate',async()=>{
+    const f=await insertGraphFixture(pool,'cancelled-provider-effect')
+    let runId:string
+    const service=createWikiBuildService({pool,generator:{generate:async input=>{
+      await pool.query("UPDATE memory_wiki_build_runs SET state='cancelled' WHERE run_id=$1",[runId])
+      return {ok:true,document:input.skeleton,usage:{inputTokens:17,outputTokens:13,costMicros:29,model:'synthetic'}}
+    }}})
+    runId=(await service.scheduleBuild({installationId:f.installationId,repositoryId:f.repositoryId})).runId
+    const {claim,fence}=await claimBuildJob(pool,runId)
+    await service.handleBuildWiki(claim,new AbortController().signal,{fence})
+    expect((await pool.query('SELECT 1 FROM memory_wiki_build_candidates WHERE run_id=$1',[runId])).rowCount).toBe(0)
+    expect((await pool.query('SELECT g.input_tokens::text,g.output_tokens::text,g.cost_micros::text FROM memory_generation_runs g JOIN memory_wiki_build_runs w ON w.generation_run_id=g.run_id WHERE w.run_id=$1',[runId])).rows).toEqual([{input_tokens:'17',output_tokens:'13',cost_micros:'29'}])
+  })
+
   test('serializes one active run per Wiki while allowing a different Wiki', async () => {
     const first = await insertGraphFixture(pool, 'first')
     const second = await insertGraphFixture(pool, 'second')

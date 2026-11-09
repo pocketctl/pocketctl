@@ -1,9 +1,10 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, test, expect, vi } from 'vitest'
 import { Router } from '../router.js'
 import { classifyDaemonEvent } from '../ingress/event-policy.js'
 function socket(): any { return {readyState:1,sent:[] as any[],send(raw:string){this.sent.push(JSON.parse(raw))}} }
 function fixture(){
- const query=vi.fn(async(sql:string,params:any[]=[])=>({rows:sql.includes('WITH owned_session')&&params[0]==='s'&&params[1]===7?[{daemon_id:'d',agent_type:'codex',control_mode:'managed',source:'daemon',status:'idle',capabilities:[]}]:[]}))
+ const query=vi.fn(async(sql:string,params:any[]=[])=>nativeAliasUnitResult(sql,params)??({rows:sql.includes('WITH owned_session')&&params[0]==='s'&&params[1]===7?[{daemon_id:'d',agent_type:'codex',control_mode:'managed',source:'daemon',status:'idle',capabilities:[]}]:[]}))
  const pool:any={query};pool.connect=vi.fn(async()=>({query,release:vi.fn()}))
  const router=new Router(pool),r=router as any,a=socket(),b=socket(),d=socket()
  router.registerClient(a,7);router.registerClient(b,7);r.daemons.set('d',{ws:d,userId:7});r.sessionToDaemon.set('s','d')

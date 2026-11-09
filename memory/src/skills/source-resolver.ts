@@ -1,3 +1,5 @@
+import {guardRetainedEvidence,assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {currentClaimVersionSql} from '../claims/version-selection.js'
 import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
 import { createHash } from 'node:crypto'
@@ -92,6 +94,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
   let sessionId: string | null = null, versionId: string | null = null, sourceDigest: string
   let originPolicyStamp:string|null=null
   let packets: SkillSourcePacket[]
+  let retainedEpisodes:{source_event_id:null;artifact_id:null;episode_id:string;evidence_kind:string}[]=[]
   if (source.kind === 'episode') {
     // Governance's synthetic episodes are not completed natural Sessions.
     if (binding.owner_scope_kind !== 'personal') throw new SkillWorkError('skill_shared_episode_denied')
@@ -134,6 +137,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
         kind: item.manifest.kind, eventId: item.manifest.source_event_id ?? null,
         artifactId: item.manifest.artifact_id ?? null, evidenceId: null }
     })
+    retainedEpisodes=[{source_event_id:null,artifact_id:null,episode_id:source.episodeId,evidence_kind:'episode'}]
     if (packets.length !== handles.length) throw new SkillWorkError('skill_evidence_invalid')
     // Value admission uses evidenced test success, not traffic/byte counts or a model flag.
     const tests = Array.isArray(row.document.tests) ? row.document.tests : []
@@ -183,10 +187,10 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       SELECT to_regclass('knowledge_evidence_capsules') IS NOT NULL AS available
     `)
     const evidence = await client.query<{
-      evidence_id: string; evidence_kind: 'event' | 'artifact' | 'episode' | 'accepted_excerpt'; excerpt: string
+      episode_id:string|null;evidence_id: string; evidence_kind: 'event' | 'artifact' | 'episode' | 'accepted_excerpt'; excerpt: string
       excerpt_hash: Buffer; source_event_id: string | null; artifact_id: string | null; session_id: string | null
     }>(capsuleSchema.rows[0]?.available
-      ? `SELECT k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
+      ? `SELECT k.episode_id,k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
         FROM knowledge_evidence k
         LEFT JOIN work_episodes e USING(installation_id,episode_id)
         LEFT JOIN source_sessions s USING(installation_id,session_id)
@@ -200,7 +204,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
                 AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t
                   WHERE t.installation_id=k.installation_id AND t.session_id=e.session_id)))
         ORDER BY k.ordinal FOR SHARE OF k`
-      : `SELECT k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
+      : `SELECT k.episode_id,k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
         FROM knowledge_evidence k JOIN work_episodes e USING(installation_id,episode_id)
         LEFT JOIN source_sessions s USING(installation_id,session_id)
         WHERE k.installation_id=$1 AND k.version_id=$2 AND k.visibility=$3
@@ -210,6 +214,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
         ORDER BY k.ordinal FOR SHARE OF k,e`,
     [input.installationId, versionId, binding.owner_scope_kind === 'personal' ? 'personal' : 'shared'])
     if (!evidence.rows.length || evidence.rows.length > 64) throw new SkillWorkError('skill_evidence_invalid')
+    retainedEpisodes=evidence.rows.filter(e=>!e.source_event_id&&!e.artifact_id&&e.episode_id&&e.evidence_kind!=='accepted_excerpt').map(e=>({source_event_id:null,artifact_id:null,episode_id:e.episode_id!,evidence_kind:e.evidence_kind}))
     packets = evidence.rows.map((e, index) => {
       if (e.session_id && !sessionIds.includes(e.session_id)) throw new SkillWorkError('skill_source_invalid')
       const hash = createHash('sha256').update(e.excerpt).digest('hex')
@@ -228,6 +233,8 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       AND NOT EXISTS (SELECT 1 FROM memory_source_snapshot_tombstones t WHERE t.installation_id=s.installation_id AND t.repository_id=s.repository_id AND t.commit_sha=s.commit_sha)
     FOR SHARE OF s,r`, [input.installationId, repositoryId, repoSnapshotId])
   if (!snapshot.rowCount) throw new SkillWorkError('skill_snapshot_invalid')
+  try{await guardRetainedEvidence(client,input.installationId,[...packets.map(packet=>({source_event_id:packet.eventId,artifact_id:packet.artifactId})),...retainedEpisodes])}
+  catch(error){if(preparedSourceUnavailable(error))throw new SkillWorkError('skill_source_invalid');throw error}
   await assertCurrentSkillSourceClock(client,{installationId:input.installationId,versionId,...(originPolicyStamp?{originPolicyStamp}:{})})
   const serialized = canonicalJsonString(packets)
   if (serialized.length > context.config.maxInputChars) throw new SkillWorkError('skill_input_size_exceeded')
@@ -242,6 +249,7 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
  * Time keeps moving while later task/head/outbox rows are acquired. Repeat
  * this after the last write at every native mutation/positive-read boundary. */
 export async function assertCurrentSkillSourceClock(client:Pick<pg.PoolClient,'query'>,source:{installationId:string;versionId:string|null;originPolicyStamp?:string}):Promise<void>{
+  try{await assertRetainedSourceGuards(client)}catch(error){if(preparedSourceUnavailable(error))throw new SkillWorkError('skill_source_invalid');throw error}
   if(!source.versionId)return
   const current=await client.query(`SELECT ${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
     WHERE v.installation_id=$1 AND v.version_id=$2 AND ${currentClaimVersionSql()} AND c.state='active'

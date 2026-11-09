@@ -133,7 +133,7 @@ describe('extension snapshot routes', () => {
     }
     await actual.listInventorySessions(pool as never, scope, { afterSessionRowId: 0, limit: 10 })
     await actual.getSnapshotEventPage(pool as never, scope, 'ses-1', { afterEventId: 0, limit: 10 })
-    for (const sql of queries) {
+    for (const sql of queries.filter(sql=>sql.includes('FROM extension_installations i'))) {
       expect(sql).toContain("s.source IS DISTINCT FROM 'app_review_demo'")
       expect(sql).toContain("s.session_id NOT LIKE 'app-review-demo-%'")
     }

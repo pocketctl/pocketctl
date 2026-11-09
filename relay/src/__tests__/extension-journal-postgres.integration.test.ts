@@ -211,4 +211,33 @@ describeWithDatabase('extension source journal atomicity (PostgreSQL)', () => {
     expect(second[0].id).toBe(first.id)
     expect(second[0].event_hash).toBe(first.event_hash)
   })
+  test('shared headers publish through real materialization and owned-client transactions with stable replay identity',async()=>{
+    const {applyMemorySchema}=await import(new URL('../../../memory/src/schema.ts',import.meta.url).href)
+    const {applySharedSourceContract}=await import(new URL('../../../memory/src/migrations/shared-db/contract.ts',import.meta.url).href)
+    const {applyRelaySourceCapture}=await import('../shared-source/capture.js')
+    await applyMemorySchema(pool,{namespace:'memory'})
+    await applySharedSourceContract(pool);await applyRelaySourceCapture(pool)
+    const sink=createPostgresExtensionJournalSink({sharedHeaders:true}),materializer=new EventMaterializer({pool,extensionJournalSink:sink})
+    const input=ownedInput({payload:{type:'agent_text',text:'actual materializer',turn_id:'trusted-turn',event_id:'trusted-materialized',
+      memory_source:{version:1,producer:'codex',session_id:'journal-session',turn_id:'trusted-turn',event_id:'trusted-materialized',sequence:'7',invocation_id:'trusted-invocation',source_role:'assistant',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}}})
+    await materializer.materialize(input)
+    const first=(await pool.query("SELECT id::text,source_sequence::text,source_classification,canonical_payload_hash,effect_status FROM events WHERE session_id='journal-session'")).rows[0]
+    expect(first.effect_status).toBe('completed')
+    const rootRevision=async()=>(await pool.query("SELECT revision::text FROM shared.memory_source_work WHERE source_kind='relay_event' AND root_key=$1",[userId+':journal-session'])).rows[0]?.revision
+    const publishedRevision=await rootRevision();expect(BigInt(publishedRevision)).toBeGreaterThan(0n)
+    expect(first.source_classification.memory_source.sequence).toBe(first.source_sequence)
+    expect(first.canonical_payload_hash).toMatch(/^[a-f0-9]{64}$/)
+    const {projectFeedBatch}=await import('../extensions/feed-projector.js')
+    expect((await projectFeedBatch(pool,{batchSize:50})).projected).toBe(1)
+    const feed=(await pool.query("SELECT payload FROM extension_feed WHERE source_id=$1",['event:'+first.id])).rows[0]
+    expect(feed.payload.classification).toEqual(first.source_classification)
+    await materializer.materialize(input)
+    expect((await pool.query("SELECT source_seq::text FROM extension_source_outbox WHERE source_id=$1",['event:'+first.id])).rows[0].source_seq).toBe(first.source_sequence)
+    const replayRevision=await rootRevision();expect(BigInt(replayRevision)).toBeGreaterThanOrEqual(BigInt(publishedRevision))
+    await persistOwnedClientEvent(pool,userId,'journal-session','user_text',{type:'user_text',text:'before\u0000after'},sink)
+    const owned=(await pool.query("SELECT payload,source_header_version,source_sequence::text FROM events WHERE event_type='user_text'")).rows[0]
+    expect(owned.payload.text).toBe('before\uFFFDafter');expect(owned.source_header_version).toBe(1);expect(owned.source_sequence).toBeTruthy()
+    expect(BigInt(await rootRevision())).toBeGreaterThan(BigInt(replayRevision))
+  })
+
 })

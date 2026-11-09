@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import type { ProviderInstallationItem, ProviderInstallationItemV2 } from '../relay/contracts.js'
 
 export interface DiscoveryApplyResult {
@@ -28,11 +29,17 @@ export function createInstallationRegistry(pool: pg.Pool) {
       } & Partial<Pick<ProviderInstallationItemV2,
         'owner_scope_kind' | 'owner_scope_id' | 'parent_organization_id' | 'authorization_epoch' | 'scope_snapshot'>>>
       installationCursor?: string
+      /** Native inventory pages share one current Relay control revision. */
+      sourceControlRevision?: string
     }): Promise<DiscoveryApplyResult> {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
         try {
+          if(input.sourceControlRevision!==undefined){
+            if(sourcePoolContext(pool).namespace!=='memory'||! /^[1-9][0-9]*$/.test(input.sourceControlRevision))throw Error('invalid_native_inventory_revision')
+            if((await client.query('SELECT shared.memory_source_control_snapshot() AS revision')).rows[0]?.revision!==input.sourceControlRevision)throw Error('native_inventory_changed')
+          }
           const seen: string[] = []
           for (const item of input.items) {
             seen.push(item.installation_id)
@@ -179,6 +186,22 @@ export function createInstallationRegistry(pool: pg.Pool) {
               updated_at = NOW()
           `, [input.installationCursor ?? null])
 
+          if(input.sourceControlRevision!==undefined){
+            // A complete native generation replaces only control transport.
+            // Never invent a remote feed cursor, lease or ACK timestamp.
+            await client.query(`INSERT INTO memory_native_control_observations(installation_id,control_revision)
+              SELECT installation_id,$2::bigint FROM memory_installations WHERE installation_id=ANY($1::uuid[])
+              ON CONFLICT(installation_id) DO UPDATE SET control_revision=EXCLUDED.control_revision,observed_at=clock_timestamp()`,
+              [seen,input.sourceControlRevision])
+            await client.query(`UPDATE memory_installations i SET local_status='ready',last_error_code=NULL,updated_at=NOW()
+              FROM memory_owner_scopes o WHERE i.installation_id=o.installation_id AND i.installation_id=ANY($1::uuid[])
+                AND o.owner_scope_kind IN('team','organization') AND o.state='active'
+                AND i.relay_status='active' AND NOT i.snapshot_required AND i.local_status IN('discovering','syncing')`,[seen])
+          }
+
+          // Nonblocking final fence: a concurrent native config/membership
+          // change rolls back the whole cache generation, including omissions.
+          if(input.sourceControlRevision!==undefined&&!(await client.query('SELECT shared.guard_memory_control_commit($1::bigint) AS current',[input.sourceControlRevision])).rows[0]?.current)throw Error('native_inventory_changed')
           await client.query('COMMIT')
           return { applied: input.items.length }
         } catch (error) {

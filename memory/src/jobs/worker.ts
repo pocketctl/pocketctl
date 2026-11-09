@@ -2,6 +2,13 @@ import type pg from 'pg'
 import { workerErrorCode } from './worker-diagnostics.js'
 import { JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
 import type { JobRepository } from './repository.js'
+import {withSourceJobExecution,type SourceExecutionSelection} from '../sources/source-execution.js'
+
+// Restrictive cleanup, accounting/status and control repair remain independent
+// of source-input mode. These content consumers capture at dispatch, before IO.
+const sourceJobs=new Set<JobType>(['project_shared_source','project_feed','compile_episode','snapshot_reconcile','extract_candidates','consolidate_task',
+ 'curate_conclusions','extract_skill_candidate','build_wiki','parse_code_snapshot','index_claim_version','index_shared_claim',
+ 'rebuild_claim_index','git_ingest','git_export','git_reconcile','compile_context_shadow','evaluate_review_shadow','execute_publication_delegation'])
 
 export interface JobHandlerContext {
   /** Per-job ownership fence for generation persistence and follow-on enqueue. */
@@ -53,6 +60,7 @@ interface InFlightEntry {
  */
 export function createJobWorker(options: JobWorkerOptions) {
   const handlers = new Map<JobType, JobHandler>()
+  const sourceBranches=new Map<JobType,SourceExecutionSelection>()
   const claimLimit = options.claimLimit ?? DEFAULT_CLAIM_LIMIT
   const pollIntervalMs = Math.max(50, options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS)
   const leaseMs = options.leaseMs ?? 30_000
@@ -125,7 +133,9 @@ export function createJobWorker(options: JobWorkerOptions) {
             error.name = 'AbortError'
             throw error
           }
-          await handler(claim, controller.signal, ctx)
+          const runHandler=()=>handler(claim,controller.signal,ctx)
+          if(sourceJobs.has(claim.job_type)&&claim.installation_id)await withSourceJobExecution(options.pool,ctx.fence,runHandler,{branch:sourceBranches.get(claim.job_type)??'active',signal:controller.signal})
+          else await runHandler()
           if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
           const completed=await options.jobs.completeJob({
             jobId: claim.job_id, claimedBy: options.workerId, claimEpoch: claim.claim_epoch,
@@ -233,8 +243,9 @@ export function createJobWorker(options: JobWorkerOptions) {
   }
 
   return {
-    register(jobType: JobType, handler: JobHandler): void {
+    register(jobType: JobType, handler: JobHandler,source?:{branch:SourceExecutionSelection}): void {
       handlers.set(jobType, handler)
+      sourceBranches.set(jobType,source?.branch??'active')
     },
     start(): void {
       if (stopped || options.signal.aborted) return

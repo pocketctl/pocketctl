@@ -4,6 +4,8 @@ import { classifyEnvelope } from '../relay/validation.js'
 import { RelayRequestError } from '../relay/errors.js'
 import { createInboxRepository, FeedIntegrityError, FeedReplayExpiredError, type QuarantinedInput } from './repository.js'
 import { createScopeControlProjector } from '../governance/membership-projector.js'
+import {readLegacySourceInputGeneration} from '../sources/input-mode.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 
 export interface FeedConsumerOptions {
   pool: pg.Pool
@@ -31,6 +33,7 @@ const DEFAULT_POLL_LEASE_MS = 30_000
  * reconcile, paused/revoked/integrity-error installations are not pulled.
  */
 export function createFeedConsumer(options: FeedConsumerOptions) {
+  const nativeControl=sourcePoolContext(options.pool).namespace==='memory'
   const inbox = createInboxRepository(options.pool)
   const batchLimit = options.batchLimit ?? DEFAULT_BATCH_LIMIT
   const pollLeaseMs = options.pollLeaseMs ?? DEFAULT_POLL_LEASE_MS
@@ -50,6 +53,8 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
   }
 
   async function consumeOne(installationId: string): Promise<boolean> {
+    const sourceModeGeneration=await readLegacySourceInputGeneration(options.pool,installationId)
+    if(sourceModeGeneration===null)return false
     if (!(await acquirePollLease(installationId))) return false
     let pulled: FeedBatch
     try {
@@ -104,6 +109,7 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
 
     await inbox.commitBatch({
       installationId,
+      sourceModeGeneration,
       envelopes: accepted,
       rawQuarantined: quarantined,
       cursor: pulled.next_cursor,
@@ -120,7 +126,7 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
     return true
   }
 
-  const scopeControlProjector = options.pullScopeControlFeed && options.ackScopeControlFeed
+  const scopeControlProjector = !nativeControl && options.pullScopeControlFeed && options.ackScopeControlFeed
     ? createScopeControlProjector({
         pool: options.pool,
         workerId: options.workerId,
@@ -145,11 +151,13 @@ export function createFeedConsumer(options: FeedConsumerOptions) {
           }
         }
         const rows = await options.pool.query<{ installation_id: string }>(`
-          SELECT installation_id FROM memory_installations
-          WHERE relay_status IN ('pending', 'active')
-            AND local_status IN ('discovering', 'syncing', 'ready', 'degraded')
-            AND snapshot_required = FALSE
-          ORDER BY created_at ASC
+          SELECT i.installation_id FROM memory_installations i
+          ${nativeControl?'LEFT JOIN memory_owner_scopes o USING(installation_id)':''}
+          WHERE i.relay_status IN ('pending', 'active')
+            AND i.local_status IN ('discovering', 'syncing', 'ready', 'degraded')
+            AND i.snapshot_required = FALSE
+            ${nativeControl?"AND COALESCE(o.owner_scope_kind,'personal')='personal'":''}
+          ORDER BY i.created_at ASC
         `)
         let installations = 0
         for (const row of rows.rows) {

@@ -18,6 +18,15 @@ function mock(value: unknown) {
   return { call, provider: { generateJson: call } as TextGenerator }
 }
 describe('Phase 5 bounded Skill generator', () => {
+  test('a timed-out primary followed by budget refusal retains uncertainty and the primary reservation',async()=>{
+    const call=vi.fn().mockResolvedValue({ok:false,code:'budget_exceeded',retryable:false,timeoutFallback:{primary:{code:'http_error',detail:'timeout',billingUncertain:true,budgetReservationId:'primary-reservation'}}})
+    expect(await createSkillGenerator({provider:{generateJson:call} as TextGenerator,timeoutMs:10}).generate(source,new AbortController().signal,'skill:stable')).toMatchObject({ok:false,code:'provider_result_unknown',retryable:false,budgetReservationId:'primary-reservation'})
+  })
+  test('retains the task-run request identity across provider dispatch', async () => {
+    const m=mock(document()), generator=createSkillGenerator({provider:m.provider,timeoutMs:10})
+    await generator.generate(source,new AbortController().signal,'skill:stable-task-run')
+    expect(m.call.mock.calls[0][0].requestKey).toBe('skill:stable-task-run')
+  })
   test('quotes untrusted packets and accepts only exact issued tokens', async () => {
     const m = mock(document())
     const r = await createSkillGenerator({ provider: m.provider, timeoutMs: 10 }).generate(source, new AbortController().signal)

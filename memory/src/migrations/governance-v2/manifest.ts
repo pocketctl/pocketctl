@@ -12,6 +12,7 @@ export interface MigrationInventoryItem {
 export interface ScopeObservation {installationId:string;ownerKind:string;ownerId:string;epoch:string;state:string}
 export interface TeamSourceObservation {id:string;installationId:string;bindingId:string;bindingRevision:string;teamId:string;sessionId:string;participantId:string;participantRevision:string;targetInstallationId:string;targetOwnerKind:string;targetOwnerId:string}
 export interface MigrationInventoryManifest {
+ namespace?:'public'|'memory'
   schemaVersion: number
   compatible: boolean
   blockers: string[]

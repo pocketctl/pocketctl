@@ -4,6 +4,8 @@ import {DEFAULT_EXTRACTION_RETRY_KEY} from './recovery.js'
 import type pg from 'pg'
 import type { JobFence } from '../jobs/types.js'
 import { assertJobFence } from '../generation/fence.js'
+import {sourceConnectionKey,sourcePoolContext} from '../sources/pool-context.js'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
 import { createHash } from 'crypto'
 import {claimDuplicateDigestV2,claimIdentityV2,ClaimIdentityUnavailableError} from '../claims/identity.js'
 import {resolveClaimApplicability} from '../claims/identity-writer.js'
@@ -72,6 +74,7 @@ export interface CandidateRow {
 
 export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:'owner'|'reuse'|'invalidated')=>void, options:{lifecycleMode?:CurationMode}={}) {
   return {
+    sourceExecutionRequired:sourcePoolContext(pool).namespace==='memory',
     async loadEpisodeForExtraction(
       installationId: string,
       turnId: string,
@@ -108,7 +111,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
         LEFT JOIN memory_feature_settings f ON f.installation_id = e.installation_id
         WHERE e.installation_id = $1 AND e.turn_id = $2
           AND NOT($3::text='enabled' AND EXISTS(SELECT 1 FROM memory_curation_policies p WHERE p.installation_id=e.installation_id AND p.mode='enabled')) AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -179,7 +182,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             JOIN memory_installations i ON i.installation_id=e.installation_id
             WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3
               AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -193,7 +196,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
               JOIN memory_feature_settings f ON f.installation_id=e.installation_id
               JOIN memory_installations i ON i.installation_id=e.installation_id
               WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -204,7 +207,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             observeWork?.('invalidated')
             return {runId:'',owner:false,existingState:null,...(waiting.rowCount?{sourceWaiting:true}:{sourceUnavailable:true})}
           }
-          const retryKey=input.userRetry?.jobId??DEFAULT_EXTRACTION_RETRY_KEY
+          let retryKey=input.userRetry?.jobId??DEFAULT_EXTRACTION_RETRY_KEY
           if(input.userRetry){
             const authorized=await client.query(`SELECT 1 FROM memory_jobs j JOIN memory_extraction_runs r ON r.installation_id=j.installation_id
               AND r.run_id=$4::uuid WHERE j.installation_id=$1 AND j.job_id=$5::uuid AND j.job_type='extract_candidates' AND j.state='running'
@@ -214,21 +217,36 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
               [input.installationId,input.episodeId,input.sourceDigest,input.userRetry.runId,input.userRetry.jobId])
             if(!authorized.rowCount)throw new Error('retry_not_authorized')
           }
+          // Preserve the old operator retry contract without deleting the
+          // original attempt/accounting. The exact old UUID names one new,
+          // durable retry key, so replaying authorization cannot pay again.
+          if(!input.userRetry&&input.retryFailedRunId&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.retryFailedRunId)){
+            const authorized=await client.query(`SELECT 1 FROM memory_extraction_runs WHERE installation_id=$1 AND episode_id=$2
+              AND episode_source_digest=$3 AND extractor_version=$4 AND model_config_hash=$5 AND effective_policy_hash=$6
+              AND prompt_version=$7 AND run_id=$8::uuid AND state='failed' AND error_code='provider_result_unknown'`,
+              [input.installationId,input.episodeId,input.sourceDigest,input.extractorVersion,input.modelConfigHash,effectivePolicyHashValue,input.promptVersion,input.retryFailedRunId])
+            if(authorized.rowCount)retryKey=input.retryFailedRunId
+          }
+          // A stale placeholder cannot prove that HTTP was never sent, even
+          // when every observed count is zero. Keep the original attempt/key.
+          await client.query(`UPDATE memory_extraction_runs SET state='failed',error_code='provider_result_unknown',completed_at=clock_timestamp()
+            WHERE installation_id=$1 AND episode_id=$2 AND episode_source_digest=$3 AND extractor_version=$4
+              AND model_config_hash=$5 AND effective_policy_hash=$6 AND prompt_version=$8 AND retry_key=$9::uuid
+              AND state='running' AND started_at<clock_timestamp()-($7*interval '1 millisecond')`,
+            [input.installationId,input.episodeId,input.sourceDigest,input.extractorVersion,input.modelConfigHash,effectivePolicyHashValue,
+             Math.max(60000,input.staleAfterMs),input.promptVersion,retryKey])
           await client.query(`
             DELETE FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
               AND episode_source_digest = $3
               AND extractor_version = $4 AND model_config_hash = $5
-              AND effective_policy_hash = $6 AND prompt_version=$8
-              AND retry_key='00000000-0000-0000-0000-000000000000' AND NOT $10::boolean
-              AND ((state = 'failed' AND (error_code IS DISTINCT FROM 'provider_result_unknown' OR run_id = $9::uuid))
-                OR (state = 'running'
-                  AND started_at < NOW() - ($7 * INTERVAL '1 millisecond')))
+              AND effective_policy_hash = $6 AND prompt_version=$7
+              AND retry_key='00000000-0000-0000-0000-000000000000' AND NOT $8::boolean
+              AND state='failed' AND error_code IS DISTINCT FROM 'provider_result_unknown'
+              AND input_tokens=0 AND output_tokens=0 AND cost_micros=0
           `, [input.installationId, input.episodeId, input.sourceDigest,
             input.extractorVersion, input.modelConfigHash, effectivePolicyHashValue,
-            Math.max(60_000, input.staleAfterMs),input.promptVersion,
-            input.retryFailedRunId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.retryFailedRunId)
-              ? input.retryFailedRunId : null,Boolean(input.userRetry)])
+            input.promptVersion,Boolean(input.userRetry)])
           const existing = await client.query<{ run_id: string; state: ExtractionRunState }>(`
             SELECT run_id::text, state FROM memory_extraction_runs
             WHERE installation_id = $1 AND episode_id = $2
@@ -273,6 +291,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
           ])
           if (inserted.rows[0]) {
             observeWork?.('owner')
+            await guardSourceExecutionCommit(client)
             await client.query('COMMIT')
             return { runId: inserted.rows[0].run_id, owner: true, existingState: null }
           }
@@ -331,6 +350,22 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
       UPDATE memory_extraction_runs r SET error_code='budget_recovery_queued:'||r.error_code
       FROM inserted WHERE r.run_id::text=inserted.run_id`,[input.consentFingerprint,limit])
       return result.rowCount??0
+    },
+
+    /** An already received provider effect is independent of output/job
+     * eligibility. Preserve monotonic aggregate counts without changing state
+     * or emitting a partial, prematurely reportable aggregate usage receipt. */
+    async recordProviderUsage(input:{runId:string;inputTokens:number;outputTokens:number;costMicros:number}):Promise<void>{
+      if(sourceConnectionKey(pool)!==pool)throw Error('provider_effect_requires_physical_pool')
+      if(![input.inputTokens,input.outputTokens,input.costMicros].every(n=>Number.isSafeInteger(n)&&n>=0))throw Error('invalid_provider_effect_usage')
+      const client=await pool.connect()
+      try{
+        await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
+        await client.query(`UPDATE memory_extraction_runs SET input_tokens=GREATEST(input_tokens,$2::bigint),
+          output_tokens=GREATEST(output_tokens,$3::bigint),cost_micros=GREATEST(cost_micros,$4::bigint) WHERE run_id=$1`,
+          [input.runId,input.inputTokens,input.outputTokens,input.costMicros])
+        await client.query('COMMIT')
+      }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
 
     async markRun(input: {
@@ -440,7 +475,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
           await assertLegacySourceOwner(client,input.installationId,options.lifecycleMode)
           if (input.fence) await assertJobFence(client, input.fence)
           const revision = await client.query<{ current: boolean; source_complete: boolean }>(`
-            SELECT e.source_digest = r.episode_source_digest AS current, NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+            SELECT e.source_digest = r.episode_source_digest AS current, NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id)) AS source_complete
@@ -562,6 +597,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             input.usage.inputTokens, input.usage.outputTokens,
             input.usage.costMicros, input.runId,
           ])
+          await guardSourceExecutionCommit(client)
           await client.query('COMMIT')
         } catch (error) {
           await client.query('ROLLBACK')

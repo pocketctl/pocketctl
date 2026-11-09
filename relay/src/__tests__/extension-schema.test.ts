@@ -1,3 +1,4 @@
+import {freshNativeSchemaUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 
 import { initExtensionSchema } from '../extensions/schema.js'
@@ -5,7 +6,7 @@ import { initDB } from '../db.js'
 
 describe('extension platform schema bootstrap', () => {
   test('creates all nine extension tables in one idempotent statement batch', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
 
     await initExtensionSchema({ query } as never)
 
@@ -27,7 +28,7 @@ describe('extension platform schema bootstrap', () => {
   })
 
   test('enforces the frozen unique constraints', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
     await initExtensionSchema({ query } as never)
     const sql = String(query.mock.calls[0]?.[0])
 
@@ -41,7 +42,7 @@ describe('extension platform schema bootstrap', () => {
   })
 
   test('keeps source outbox and feed free of user-cascading foreign keys', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
     await initExtensionSchema({ query } as never)
     const sql = String(query.mock.calls[0]?.[0]).replace(/\s+/g, ' ')
 
@@ -61,7 +62,7 @@ describe('extension platform schema bootstrap', () => {
   })
 
   test('uses explicit foreign keys for control tables and cascade-owned children', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
     await initExtensionSchema({ query } as never)
     const sql = String(query.mock.calls[0]?.[0])
 
@@ -83,7 +84,7 @@ describe('extension platform schema bootstrap', () => {
   })
 
   test('creates the bounded check constraints', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
     await initExtensionSchema({ query } as never)
     const sql = String(query.mock.calls[0]?.[0])
 
@@ -103,7 +104,7 @@ describe('extension platform schema bootstrap', () => {
   })
 
   test('creates the shared-feed query indexes', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
     await initExtensionSchema({ query } as never)
     const sql = String(query.mock.calls[0]?.[0])
 
@@ -115,7 +116,7 @@ describe('extension platform schema bootstrap', () => {
   })
 
   test('is included in the main Relay database bootstrap for every flag mode', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
 
     await initDB({ query } as never)
 

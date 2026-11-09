@@ -1,3 +1,5 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {sharedSessionRepository} from '../sources/session-repository.js'
 import type pg from 'pg'
 import type { ScopeResolution } from './types.js'
 
@@ -39,6 +41,8 @@ export function createScopeResolver(pool: pg.Pool) {
         repositoryId = byKey.rows[0]?.repository_id ?? null
       }
       if (!repositoryId && !input.repositoryIdHint && !input.repositoryKeyHint) {
+        if(sourcePoolContext(pool).namespace==='memory')repositoryId=await sharedSessionRepository(pool,input.installationId,input.sessionId)
+        else{
         const fromSession = await pool.query<{ repository_id: string }>(`
           SELECT r.repository_id::text
           FROM source_events e
@@ -50,6 +54,7 @@ export function createScopeResolver(pool: pg.Pool) {
           LIMIT 1
         `, [input.installationId, input.sessionId])
         repositoryId = fromSession.rows[0]?.repository_id ?? null
+        }
       }
 
       const repositoryKnown = repositoryId !== null

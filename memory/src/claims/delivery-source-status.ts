@@ -28,7 +28,7 @@ export async function deliverySourceStatus(pool: Pick<pg.Pool, 'query'>, input: 
     ),
     candidates AS (
       SELECT c.status, c.review_expires_at>clock_timestamp() AS reviewable, (r.episode_source_digest=e.source_digest AND NOT EXISTS(
-        SELECT 1 FROM memory_feed_inbox gap WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+        SELECT 1 FROM memory_source_delivery_facts gap WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
           AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
           AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))) AS fresh
       FROM memory_candidates c JOIN episodes e ON e.installation_id=c.installation_id AND e.episode_id=c.episode_id

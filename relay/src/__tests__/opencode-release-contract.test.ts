@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -19,6 +20,7 @@ function deduplicatingPool(): any {
   let nextID = 1
   const calls: Array<{ sql: string; params: any[] }> = []
   const query = vi.fn(async (sql: string, params: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,params);if(native)return native
     calls.push({ sql, params })
     if (/SELECT 1 FROM sessions/i.test(sql)) return { rows: [{ ok: 1 }], rowCount: 1 }
     if (/SELECT daemon_id FROM sessions/i.test(sql)) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }

@@ -236,8 +236,12 @@ describe('federated RRF merge', () => {
   test('signed cursors bind the query and every selected authorization epoch', () => {
     const context = { scopes: [scope(TEAM)], query: 'relay failure' }
     const asOf = new Date('2026-08-30T00:00:00.000Z')
+    const history=encodeFederatedCursor({offset:10,asOf,context,key:'cursor-key',historical:true} as any)
+    expect(resolveFederatedCursor({cursor:history,context,key:'cursor-key'})).toMatchObject({asOf,historical:true})
+    const current=encodeFederatedCursor({offset:10,asOf,context,key:'cursor-key',historical:false} as any)
+    expect(resolveFederatedCursor({cursor:current,context,key:'cursor-key'})).toMatchObject({asOf,historical:false})
     const cursor = encodeFederatedCursor({ offset: 10, asOf, context, key: 'cursor-key' })
-    expect(resolveFederatedCursor({ cursor, context, key: 'cursor-key' })).toEqual({ offset: 10, asOf })
+    expect(resolveFederatedCursor({ cursor, context, key: 'cursor-key' })).toEqual({ offset: 10, asOf,historical:true })
     expect(() => resolveFederatedCursor({
       cursor,
       context: { ...context, scopes: [{ ...context.scopes[0], authorizationEpoch: '999' }] },

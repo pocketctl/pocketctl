@@ -14,17 +14,23 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_owner_user_id INT;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_activity_epoch BIGINT;
 
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS body_session_id VARCHAR(128);
+    UPDATE events e SET body_session_id=m.session_id FROM session_archive_manifests m
+      WHERE e.body_storage='cold' AND e.body_session_id IS NULL AND m.manifest_id=e.body_manifest_id
+       AND m.user_id=e.body_owner_user_id AND m.session_id=e.session_id AND m.activity_epoch=e.body_activity_epoch;
+    ALTER TABLE events DROP CONSTRAINT IF EXISTS events_body_location;
+    ALTER TABLE events DROP CONSTRAINT IF EXISTS events_body_manifest_binding;
     DO $$ BEGIN
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='events'::regclass AND conname='events_body_location') THEN
         ALTER TABLE events ADD CONSTRAINT events_body_location CHECK (
           (body_storage='hot' AND payload IS NOT NULL AND body_manifest_id IS NULL AND body_chunk_ordinal IS NULL
-            AND body_owner_user_id IS NULL AND body_activity_epoch IS NULL)
+            AND body_owner_user_id IS NULL AND body_activity_epoch IS NULL AND body_session_id IS NULL)
           OR (body_storage='cold' AND payload IS NULL AND body_manifest_id IS NOT NULL AND body_chunk_ordinal IS NOT NULL AND body_chunk_ordinal>=0
-            AND body_owner_user_id IS NOT NULL AND body_activity_epoch IS NOT NULL AND body_activity_epoch>=0));
+            AND body_owner_user_id IS NOT NULL AND body_activity_epoch IS NOT NULL AND body_activity_epoch>=0 AND body_session_id IS NOT NULL));
       END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='events'::regclass AND conname='events_body_manifest_binding') THEN
         ALTER TABLE events ADD CONSTRAINT events_body_manifest_binding
-          FOREIGN KEY(body_manifest_id,body_owner_user_id,session_id,body_activity_epoch)
+          FOREIGN KEY(body_manifest_id,body_owner_user_id,body_session_id,body_activity_epoch)
           REFERENCES session_archive_manifests(manifest_id,user_id,session_id,activity_epoch);
       END IF;
       IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='events'::regclass AND conname='events_body_chunk_binding') THEN
@@ -46,7 +52,13 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
     $$;
     CREATE OR REPLACE FUNCTION maintain_session_event_body_header() RETURNS TRIGGER
       LANGUAGE plpgsql AS $$ BEGIN
+        IF TG_OP='UPDATE' AND OLD.body_storage='cold' AND NEW.body_storage='cold' AND
+          (NEW.body_session_id,NEW.body_manifest_id,NEW.body_chunk_ordinal,NEW.body_owner_user_id,NEW.body_activity_epoch)
+          IS DISTINCT FROM(OLD.body_session_id,OLD.body_manifest_id,OLD.body_chunk_ordinal,OLD.body_owner_user_id,OLD.body_activity_epoch)
+          THEN RAISE EXCEPTION 'immutable cold event locator';END IF;
         IF NEW.body_storage='cold' AND (TG_OP='INSERT' OR OLD.body_storage='hot') THEN
+          NEW.body_session_id=COALESCE(NEW.body_session_id,NEW.session_id);
+          IF NEW.body_session_id IS DISTINCT FROM NEW.session_id THEN RAISE EXCEPTION 'cold event route changed';END IF;
           IF NOT EXISTS(SELECT 1 FROM session_archive_manifests m JOIN session_archive_chunks c USING(manifest_id)
             WHERE m.manifest_id=NEW.body_manifest_id AND m.state='published' AND c.ordinal=NEW.body_chunk_ordinal)
             THEN RAISE EXCEPTION 'cold event manifest is not published'; END IF;
@@ -60,7 +72,7 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
         RETURN NEW;
       END $$;
     DROP TRIGGER IF EXISTS events_body_header ON events;
-    CREATE TRIGGER events_body_header BEFORE INSERT OR UPDATE OF payload,body_storage ON events
+    CREATE TRIGGER events_body_header BEFORE INSERT OR UPDATE ON events
       FOR EACH ROW EXECUTE FUNCTION maintain_session_event_body_header();
     CREATE INDEX IF NOT EXISTS idx_events_body_agent_id_desc ON events(session_id,((COALESCE(payload,body_header)->>'agent_id')),id DESC)
       WHERE COALESCE(payload,body_header)?'agent_id';

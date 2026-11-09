@@ -1,3 +1,6 @@
+import {prepareCurationSources,attachPreparedSources} from '../sources/prepared-sources.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {assertSourceProviderExecution,guardSourceExecutionCommit} from '../sources/source-execution.js'
 import pg from 'pg'
 import {createHash,randomUUID} from 'node:crypto'
 import {canonicalPacketJson} from '../episodes/packet.js'
@@ -6,6 +9,7 @@ import {parseMemorySourceProvenance} from '../episodes/skill-provenance.js'
 import type {TextGenerator} from '../ports/text-generator.js'
 import {JobDeferredError,type JobClaim,type JobFence} from '../jobs/types.js'
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
+import {recordCurationProviderUsage} from '../generation/provider-effect.js'
 import {readCurationPolicy} from './policy.js'
 import type {CurationMode} from './contracts.js'
 import {extractConclusions,CONCLUSION_PROMPT_VERSION} from './conclusion-extractor.js'
@@ -13,16 +17,20 @@ import type {ConclusionEvidence} from './conclusion-validator.js'
 import {loadCurrentLifecycleSources,refreshLifecycleProcessingReceipt} from './task-repository.js'
 import {loadTaskCatalog,taskTopicDescriptor} from './task-catalog.js'
 const hash=(v:unknown)=>createHash('sha256').update(canonicalPacketJson(v)).digest('hex')
-export async function curationTransaction<T>(pool:pg.Pool,installationId:string,bundleId:string,fn:(client:pg.PoolClient,bundle:any)=>Promise<T>):Promise<T|null>{
+export async function curationTransaction<T>(pool:pg.Pool,installationId:string,bundleId:string,fn:(client:pg.PoolClient,bundle:any)=>Promise<T>,options:{sourceCommit?:boolean}={}):Promise<T|null>{
+ const shared=sourcePoolContext(pool).namespace==='memory'
+ const prepared=shared?await prepareCurationSources(pool,installationId,bundleId):null
+ if(shared&&!prepared)return null
  const c=await pool.connect()
  try{await c.query('BEGIN');await c.query("SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");const source=(await c.query('SELECT session_id FROM memory_task_bundles WHERE installation_id=$1 AND bundle_id=$2',[installationId,bundleId])).rows[0]
   if(!source){await c.query('COMMIT');return null}
   await c.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0)),pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`,[installationId,source.session_id])
+  if(prepared){await prepared.assertCurrent(c);attachPreparedSources(c,prepared)}
   const bundle=(await c.query(`SELECT b.* FROM memory_task_bundles b JOIN memory_installations i USING(installation_id)
    WHERE b.installation_id=$1 AND b.bundle_id=$2 AND b.body_state='present' AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error')
    AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=b.installation_id AND t.session_id=b.session_id) FOR UPDATE OF b`,[installationId,bundleId])).rows[0]
   if(!bundle){await c.query('COMMIT');return null}
-  const result=await fn(c,bundle);await c.query('COMMIT');return result
+  const result=await fn(c,bundle);if(prepared)await prepared.assertCurrent(c,{forCommit:true});if(options.sourceCommit!==false)await guardSourceExecutionCommit(c);await c.query('COMMIT');return result
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }
 export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textGenerator?:TextGenerator;modelFingerprint:string}){
@@ -31,6 +39,7 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
   if(!job.installation_id||input.mode==='off')return
   const installationId=job.installation_id,bundleId=String(job.payload.bundle_id??'')
   if(!/^[0-9a-f-]{36}$/.test(bundleId))throw new Error('bundle_id_invalid')
+  await assertSourceProviderExecution(sourcePoolContext(input.pool).namespace==='memory')
   const reservation=await curationTransaction(input.pool,installationId,bundleId,async(c,bundle)=>{
    if(fence)await assertJobFence(c,fence)
    if(bundle.bundle_kind!=='intake'||Number(bundle.revision)!==Number(job.payload.bundle_revision))return null
@@ -77,6 +86,8 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
   let result:Awaited<ReturnType<typeof extractConclusions>>
   try{result=input.textGenerator?await extractConclusions(input.textGenerator,{sources:reservation.evidence,spaces:reservation.spaces,tasks:reservation.tasks,requestKey:`curation:${reservation.runId}:${reservation.claimEpoch}`,signal,now:new Date()}):{ok:false as const,code:'budget_unavailable' as const,retryable:false}}
   catch{result={ok:false,code:'provider_result_unknown',retryable:false}}
+  if('usage' in result&&result.usage)await recordCurationProviderUsage(input.pool,{installationId,runId:reservation.runId,
+   inputTokens:result.usage.inputTokens,outputTokens:result.usage.outputTokens,model:result.usage.model,costMicros:result.usage.costMicros})
   const outcome=await curationTransaction(input.pool,installationId,bundleId,async(c,bundle)=>{
    if(fence)await assertJobFence(c,fence)
    const policy=await readCurationPolicy(c,installationId,input.mode)
@@ -89,10 +100,12 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
     await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code='provider_result_unknown' WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId]);return
    }
    if(!result.ok){
-    const unknown=result.code==='provider_result_unknown'||result.code==='http_error'||result.code==='aborted'
-    await c.query('UPDATE memory_curation_runs SET state=$3,error_code=$4,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2',[installationId,reservation.runId,unknown?'provider_result_unknown':'blocked',result.code])
+    const uncertain=('billingUncertain' in result&&result.billingUncertain)||Boolean('timeoutFallback' in result&&result.timeoutFallback&&(result.code==='budget_exceeded'||result.code==='budget_unavailable'))
+    const code=uncertain?'provider_result_unknown':result.code
+    const unknown=code==='provider_result_unknown'||code==='http_error'||code==='aborted'
+    await c.query('UPDATE memory_curation_runs SET state=$3,error_code=$4,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2',[installationId,reservation.runId,unknown?'provider_result_unknown':'blocked',code])
     const retryAt='retryAt' in result&&result.retryAt&&Number.isFinite(Date.parse(result.retryAt))?new Date(result.retryAt):new Date(Date.now()+300000)
-    await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code=$3,next_evaluate_at=$4 WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId,result.code,retryAt]);return ['budget_exceeded','budget_unavailable'].includes(result.code)?retryAt:undefined
+    await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code=$3,next_evaluate_at=$4 WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId,code,retryAt]);return ['budget_exceeded','budget_unavailable'].includes(code)?retryAt:undefined
    }
    await c.query(`UPDATE memory_curation_runs SET state='completed',result=$3::jsonb,input_tokens=$4,output_tokens=$5,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2`,[installationId,reservation.runId,JSON.stringify(result.tasks),result.usage.inputTokens,result.usage.outputTokens])
    const currentTasks=result.tasks.some(task=>task.task_id)?await loadTaskCatalog(c,installationId,bundle.session_id):[]
@@ -123,7 +136,7 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
    const ended=(await c.query(`UPDATE memory_task_bundles SET state=$3,reason_code=$4,semantic_deadline=CASE WHEN $3='deferred_semantic' THEN LEAST(COALESCE(semantic_deadline,clock_timestamp()+interval '7 days'),clock_timestamp()+interval '7 days') ELSE NULL END WHERE installation_id=$1 AND bundle_id=$2 RETURNING semantic_deadline`,[installationId,bundleId,unresolved?'deferred_semantic':'completed',unresolved?(result.tasks.some(task=>!task.space_id)?'scene_unknown':'conclusion_invalid'):null])).rows[0]
    await refreshLifecycleProcessingReceipt(c,{installationId,parentBundleId:bundleId})
    return unresolved?new Date(ended.semantic_deadline):undefined
-  }).then(outcome=>{
+  },{sourceCommit:result.ok}).then(outcome=>{
    if(outcome===null)throw new Error('curation_source_unavailable')
    return outcome
   }).catch(async(error)=>{

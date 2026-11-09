@@ -1,5 +1,7 @@
 import type pg from 'pg'
 import {MemoryApiError} from '../api/errors.js'
+import {guardRetainedEvidence,assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 
 export const MAX_USER_EXTRACTION_RETRIES = 3
 const ZERO = '00000000-0000-0000-0000-000000000000'
@@ -39,7 +41,7 @@ export async function listExtractionIssues(pool:Pick<pg.Pool,'query'>,installati
  ) attempts) AS retry_count,
  (c.compiled_at IS NOT NULL AND c.body_reclaimed_at IS NULL
    AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=$1 AND retained.turn_id=c.turn_id)
-   AND NOT EXISTS(SELECT 1 FROM memory_feed_inbox gap WHERE gap.installation_id=$1 AND gap.session_id=c.session_id
+   AND NOT EXISTS(SELECT 1 FROM memory_source_delivery_facts gap WHERE gap.installation_id=$1 AND gap.session_id=c.session_id
      AND gap.projection_state='quarantined' AND gap.error_code='oversized_content' AND (gap.turn_id IS NULL OR gap.turn_id=c.turn_id))) AS source_available,
  (i.relay_status='active' AND i.local_status='ready' AND NOT i.snapshot_required
    AND f.extraction_mode IN('enabled','shadow') AND f.extraction_consent_fingerprint=$2::text) AS extraction_available
@@ -67,10 +69,17 @@ export async function scheduleExtractionRetry(client:pg.PoolClient,input:{instal
  const row=(await client.query(`SELECT r.run_id,r.episode_id,encode(r.episode_source_digest,'hex') digest,e.turn_id
  ${UNRESOLVED_EXTRACTION_SOURCE} AND r.run_id=$2::uuid FOR SHARE OF r,e,s`,[input.installationId,input.runId])).rows[0]
  if(!row)throw new MemoryApiError('not_found','extraction issue unavailable')
+ const currentSource=async()=>{
+  try{
+   await guardRetainedEvidence(client,input.installationId,[{source_event_id:null,artifact_id:null,episode_id:row.episode_id,evidence_kind:'episode'}])
+   await assertRetainedSourceGuards(client)
+  }catch(error){if(preparedSourceUnavailable(error))throw new MemoryApiError('revision_conflict','extraction source unavailable');throw error}
+ }
+ await currentSource()
  // Serialized with all other user retries for this episode under the installation authority lock.
  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('extraction-retry:'||$1||':'||$2,0))`,[input.installationId,row.episode_id])
  const existing=(await client.query(`SELECT job_id,state FROM memory_jobs WHERE installation_id=$1 AND job_type='extract_candidates' AND idempotency_key=$2`,[input.installationId,`user-extraction-retry:${input.runId}`])).rows[0]
- if(existing)return {job_id:existing.job_id as string,state:existing.state as string}
+ if(existing){await currentSource();return {job_id:existing.job_id as string,state:existing.state as string}}
  const issue=(await listExtractionIssues(client,input.installationId,input.consentFingerprint)).issues.find(r=>r.run_id===input.runId)
  if(!issue?.can_retry)throw new MemoryApiError('revision_conflict','extraction issue is not retryable; refresh current issues')
  // A different request or automatic worker must finish before another attempt starts.
@@ -81,6 +90,7 @@ export async function scheduleExtractionRetry(client:pg.PoolClient,input:{instal
  const job=(await client.query<{job_id:string}>(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
  VALUES(gen_random_uuid(),$1,'extract_candidates',$2,20,jsonb_build_object('turn_id',$3::text,'expected_source_digest',$4::text,
  'retry_extraction_run_id',$5::text,'user_retry_episode_id',$6::text)) RETURNING job_id`,[input.installationId,`user-extraction-retry:${input.runId}`,row.turn_id,row.digest,input.runId,row.episode_id])).rows[0]
+ await currentSource()
  return {job_id:job.job_id,state:'pending'}
 }
 

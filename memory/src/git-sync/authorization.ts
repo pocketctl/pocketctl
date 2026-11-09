@@ -1,3 +1,4 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
 import type pg from 'pg'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 import {assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
@@ -52,6 +53,21 @@ export async function lockGitPolicyScopes(client:pg.PoolClient,facts:V2GrantFact
 }
 
 async function currentStamp(client: pg.PoolClient, input: GitAuthorizationStamp, permission: GitPermission, code: string) {
+  if(sourcePoolContext(client).namespace==='memory'){
+    // A durable worker stamp is not a grant and may outlive mirror refresh.
+    // Current native rows, held through COMMIT, must independently authorize it.
+    const ids=[[input.installationId],[input.membershipId]]
+    if(!(await client.query('SELECT shared.lock_memory_grant_authority($1::uuid[],$2::uuid[]) AS current',ids)).rows[0]?.current)throw new Error(code)
+    const states=(await client.query('SELECT state FROM shared.memory_current_grant_states($1::uuid[],$2::uuid[])',ids)).rows
+    const native=states.length===1?states[0].state:undefined
+    if(!native||native.status!=='active'||native.provider_enabled!==true||native.owner_exists!==true||native.member_exists!==true
+      ||native.owner_scope_kind!==input.ownerScopeKind||native.owner_scope_id!==input.ownerScopeId
+      ||native.scope_state!=='active'||native.parent_state!==null&&native.parent_state!=='active'
+      ||native.authorization_epoch!==input.authorizationEpoch||native.config_version!==input.configVersion
+      ||native.membership_id!==input.membershipId||native.membership_revision!==input.membershipRevision||native.membership_state!=='active'
+      ||!Array.isArray(native.roles)||!native.roles.some((role:unknown)=>typeof role==='string'&&permissions[role]?.includes(permission)))throw new Error(code)
+  }
+
   const result = await client.query<{
     owner_scope_kind: string; owner_scope_id: string; authorization_epoch: string; config_version: string
     membership_revision: string; roles: string[]

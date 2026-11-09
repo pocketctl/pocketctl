@@ -18,6 +18,7 @@ import {
   updateLease,
 } from './feed-repository.js'
 import { boundedProviderLabel, extensionFeedAcks, extensionFeedPulls } from '../metrics.js'
+import {lockMemoryFeedInput,matchesMemoryFeedGeneration} from '../shared-source/feed-input-mode.js'
 
 export interface FeedRouteDeps {
   pool: pg.Pool
@@ -146,6 +147,7 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
         }
 
         const currentFilterHash = filterHashForInstallation(installation.event_filter ?? {})
+        const sourceModeGeneration=await lockMemoryFeedInput(client,installationId,identity.providerId)
         let afterFeedId: number
         let leaseEpoch: number
         if (cursorToken) {
@@ -153,7 +155,8 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
           if (!cursor
             || cursor.installation_id !== installationId
             || cursor.filter_hash !== currentFilterHash
-            || cursor.config_version !== String(installation.config_version)) {
+            || cursor.config_version !== String(installation.config_version)
+            || !matchesMemoryFeedGeneration(cursor.source_mode_generation,sourceModeGeneration)) {
             throw new ExtensionApiError('cursor_expired', 'cursor no longer valid for this installation')
           }
           // A cursor from an older lease epoch must never wind the stored
@@ -242,6 +245,7 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
           config_version: String(installation.config_version),
           filter_hash: currentFilterHash,
           exp: Math.floor(Date.now() / 1000) + CURSOR_TTL_SECONDS,
+          ...(sourceModeGeneration?{source_mode_generation:sourceModeGeneration}:{}),
         }, deps.cursorSecret)
         return {
           installation_id: installationId,
@@ -306,6 +310,8 @@ export function registerFeedRoutes(app: FastifyInstance, deps: FeedRouteDeps): v
           || cursor.filter_hash !== filterHashForInstallation(installation.event_filter ?? {})) {
           throw new ExtensionApiError('cursor_expired', 'cursor no longer valid for this installation')
         }
+        const sourceModeGeneration=await lockMemoryFeedInput(client,installationId,identity.providerId)
+        if(!matchesMemoryFeedGeneration(cursor.source_mode_generation,sourceModeGeneration))throw new ExtensionApiError('cursor_expired','Memory input generation no longer matches this cursor')
         const bindingHash = leaseBindingHash({
           installationId,
           leaseEpoch: Number(cursor.lease_epoch),

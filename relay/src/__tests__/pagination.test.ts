@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
 import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getLatestAgentTaskLists, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore, listSessionsPageByDaemon } from '../db.js'
@@ -15,6 +16,7 @@ function createMockPool() {
   const mockPool = {
     query: vi.fn((sql: string, params?: any[]) => {
       queries.push({ sql, params: params || [] })
+      const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
       if (sql.includes('is_subagent') && sql.includes('parent_session_id')) {
         return Promise.resolve({ rows: childSessionHit ? [{ session_id: params ? params[0] : '' }] : [], rowCount: childSessionHit ? 1 : 0 })
       }
@@ -175,7 +177,8 @@ describe('db - complete backward replay pages', () => {
   test('scans past an event window and returns a complete stream in ascending order', async () => {
     const scans = [streamRows(177, 78), streamRows(77, 0)]
     const pool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [{ exists: true }] })
         if (sql.includes('FROM events')) return Promise.resolve({ rows: scans.shift() ?? [] })
         return Promise.resolve({ rows: [] })
@@ -189,7 +192,7 @@ describe('db - complete backward replay pages', () => {
     expect(page.logicalCount).toBe(1)
     expect(page.hasMore).toBe(true)
     const scansIssued = pool.query.mock.calls.filter(([sql]: [string]) =>
-      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events')
+      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events') && !sql.startsWith('SELECT e.id::text')
     )
     expect(scansIssued).toHaveLength(2)
     expect(scansIssued[1][0]).toContain('id <')
@@ -197,7 +200,8 @@ describe('db - complete backward replay pages', () => {
 
   test('keeps the subagent filter for scans and has-more lookup', async () => {
     const pool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
         if (sql.includes('FROM events')) {
           return Promise.resolve({ rows: [{
@@ -212,7 +216,7 @@ describe('db - complete backward replay pages', () => {
     const page = await getCompleteBackwardReplayPage(pool, 'sess-1', 9, 1, 'agent-a')
 
     expect(page.events).toHaveLength(1)
-    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events'))
+    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events') && !sql.startsWith('SELECT e.id::text'))
     expect(eventQueries).toHaveLength(2)
     expect(eventQueries.every(([sql]: [string]) => sql.includes("COALESCE(payload,body_header)->>'agent_id'"))).toBe(true)
   })
@@ -238,7 +242,8 @@ describe('db - complete forward replay pages', () => {
   test('scans past an event window and returns a complete forward stream', async () => {
     const scans = [streamRows(0, 99), streamRows(100, 177)]
     const pool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
         if (sql.includes('FROM events')) return Promise.resolve({ rows: scans.shift() ?? [] })
         return Promise.resolve({ rows: [] })
@@ -253,7 +258,7 @@ describe('db - complete forward replay pages', () => {
     expect(page.logicalCount).toBe(1)
     expect(page.hasMore).toBe(false)
     const scansIssued = pool.query.mock.calls.filter(([sql]: [string]) =>
-      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events')
+      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events') && !sql.startsWith('SELECT e.id::text')
     )
     expect(scansIssued).toHaveLength(2)
     expect(scansIssued[1][0]).toContain('id >')
@@ -261,7 +266,8 @@ describe('db - complete forward replay pages', () => {
 
   test('stops at a complete logical boundary and reports buffered newer rows', async () => {
     const pool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
         if (sql.includes('FROM events')) {
           return Promise.resolve({ rows: [
@@ -284,7 +290,8 @@ describe('db - complete forward replay pages', () => {
 
   test('keeps the subagent filter for forward scans and has-more lookup', async () => {
     const pool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
         if (sql.includes('FROM events')) {
           return Promise.resolve({ rows: [{
@@ -299,7 +306,7 @@ describe('db - complete forward replay pages', () => {
     const page = await getCompleteForwardReplayPage(pool, 'sess-1', 20, 1, 'agent-a')
 
     expect(page.events).toHaveLength(1)
-    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events'))
+    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events') && !sql.startsWith('SELECT e.id::text'))
     expect(eventQueries.every(([sql]: [string]) => sql.includes("COALESCE(payload,body_header)->>'agent_id'"))).toBe(true)
   })
 })
@@ -607,7 +614,8 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
   test('replay_end carries the authoritative current session status', async () => {
     const clientWs = createMockWs()
     router.registerClient(clientWs, 1)
-    pool.query.mockImplementation((sql: string) => {
+    pool.query.mockImplementation((sql: string, params:any[]=[]) => {
+      const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
       if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
       if (sql.includes('SELECT status, turn_started_at, last_activity_at FROM sessions')) {
         return Promise.resolve({
@@ -647,7 +655,8 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
       })
     const scans = [streamRows(177, 78), streamRows(77, 0)]
     const completePagePool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
         if (sql.includes('SELECT status, turn_started_at, last_activity_at FROM sessions')) {
           return Promise.resolve({ rows: [{ status: 'completed', turn_started_at: null, last_activity_at: null }] })
@@ -695,7 +704,8 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     })
     const scans = [chunks.slice(0, 100), chunks.slice(100, 200), chunks.slice(200)]
     const completePagePool = {
-      query: vi.fn((sql: string) => {
+      query: vi.fn((sql: string, params:any[]=[]) => {
+        const native=nativeAliasUnitResult(sql,params);if(native)return Promise.resolve(native)
         if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
         if (sql.includes('SELECT status, turn_started_at, last_activity_at FROM sessions')) {
           return Promise.resolve({ rows: [{ status: 'completed', turn_started_at: null, last_activity_at: null }] })

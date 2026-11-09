@@ -7,6 +7,8 @@ import {requireCurrentScopePermission,assertCurrentGrantClock,type ValidatedV2Gr
 import type {AutomationDecision} from './automation-evaluator.js'
 import type {JobFence} from '../jobs/types.js'
 import {assertJobFence} from '../generation/fence.js'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
+import {recordReviewProviderUsage} from '../generation/provider-effect.js'
 export interface AutomationSubject {installationId:string;candidateId:string;subjectKind:'personal'|'promotion'}
 export interface PreparedAutomation extends AutomationSubject {runId:string;digest:string;policyId:string;policy:AutomationPolicy;snapshot:{revision:number;statement:string;evidence:unknown[];[key:string]:unknown};epoch:string}
 export function createAutomationRepository(pool:pg.Pool){
@@ -53,12 +55,15 @@ export function createAutomationRepository(pool:pg.Pool){
    const p=await capture(c,input);if(!p)return null
    if(fence)await assertJobFence(c,fence)
    const run=(await c.query(`INSERT INTO memory_review_automation_runs(run_id,installation_id,subject_kind,candidate_id,candidate_revision,input_digest,policy_id,model,prompt_version,evaluator_version,authorization_epoch) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(installation_id,input_digest) DO NOTHING RETURNING run_id`,[randomUUID(),input.installationId,input.subjectKind,input.candidateId,p.snapshot.revision,p.digest,p.policyId,p.policy.model,p.policy.promptVersion,p.policy.evaluatorVersion,p.epoch])).rows[0]??(await c.query('SELECT run_id FROM memory_review_automation_runs WHERE installation_id=$1 AND input_digest=$2',[input.installationId,p.digest])).rows[0]
+   await guardSourceExecutionCommit(c)
    return {...input,...p,runId:run.run_id}
   })},
-  async finish(p:PreparedAutomation,d:AutomationDecision,fence?:JobFence){return tx(async c=>{
+  async finish(p:PreparedAutomation,d:AutomationDecision,fence?:JobFence){
+   await recordReviewProviderUsage(pool,{installationId:p.installationId,runId:p.runId,usage:d.usage,budgetReservationId:d.budgetReservationId,providerReceipt:d.providerReceipt})
+   return tx(async c=>{
    const current=await capture(c,p);if(!current||current.digest!==p.digest)return false
    if(fence)await assertJobFence(c,fence)
-   await c.query(`INSERT INTO memory_review_automation_decisions(run_id,recommendation,reason_code,input_tokens,output_tokens,cost_micros,budget_reservation_id,billing_uncertain) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(run_id) DO NOTHING`,[p.runId,d.recommendation,d.reason,d.usage?.inputTokens??null,d.usage?.outputTokens??null,d.usage?.costMicros??null,d.budgetReservationId??null,d.billingUncertain??false]);return true
+   await c.query(`INSERT INTO memory_review_automation_decisions(run_id,recommendation,reason_code,input_tokens,output_tokens,cost_micros,budget_reservation_id,billing_uncertain) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(run_id) DO NOTHING`,[p.runId,d.recommendation,d.reason,d.usage?.inputTokens??null,d.usage?.outputTokens??null,d.usage?.costMicros??null,d.budgetReservationId??null,d.billingUncertain??false]);await guardSourceExecutionCommit(c);return true
   })},
   async currentAdvice(input:AutomationSubject){return tx(async c=>{const p=await capture(c,input);if(!p)return null;return (await c.query(`SELECT d.recommendation,d.reason_code AS reason,r.input_digest,d.cost_micros,d.billing_uncertain FROM memory_review_automation_runs r JOIN memory_review_automation_decisions d USING(run_id) WHERE r.installation_id=$1 AND r.input_digest=$2`,[input.installationId,p.digest])).rows[0]??null})},
  }

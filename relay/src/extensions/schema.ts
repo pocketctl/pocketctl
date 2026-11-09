@@ -317,43 +317,43 @@ export async function assertExtensionSchema(pool: Pick<pg.Pool, 'query'>): Promi
       AND to_regclass('idx_extension_source_outbox_session_id') IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_installations'
           AND column_name = 'start_feed_id'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_checkpoints'
           AND column_name = 'lease_token_hash'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_checkpoints'
           AND column_name = 'snapshot_required_at'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_installations'
           AND column_name = 'start_feed_id'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_feed'
           AND column_name = 'envelope_version'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_installations'
           AND column_name = 'owner_scope_kind'
       )
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_schema = current_schema()
+        WHERE table_schema = (SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass(table_name))
           AND table_name = 'extension_installations'
           AND column_name = 'owner_scope_id'
       ) AS ready

@@ -1,3 +1,6 @@
+import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
+import {prepareEvidenceSources,attachPreparedEvidence} from '../sources/evidence-sources.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {lifecycleFrameCurrent} from './lifecycle-frame.js'
 import {captureEvidenceReference} from '../claims/evidence-resolver.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
@@ -42,7 +45,11 @@ export interface ExternalPackItemInput {
   evidenceIds: readonly string[]
 }
 
+export type PackAuthorityGrant=V2GrantFacts|{installationId:string;configVersion:string;expiresAt?:number;userId?:number}
+
 export interface PersistPackInput {
+  /** Verified request authority, kept in memory and never persisted as a bearer. */
+  authorityGrant?:PackAuthorityGrant
   installationId: string
   generationRunId: string | null
   trajectoryId: string | null
@@ -99,9 +106,24 @@ export function createPackRepository(pool: pg.Pool) {
       const packId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
       const fullText = renderPackText({ packId, stable: stableItems, dynamic: dynamicItems })
       const { stable, dynamic } = stableDynamicSplit(fullText)
+      const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEvidenceSources(pool,input.installationId,[...new Set(input.items.flatMap(i=>[...i.evidenceIds]))]):undefined
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
+        if(prepared){
+          const grant=input.authorityGrant
+          if(!grant)throw new ContextConsumptionChangedError()
+          try{
+            if('scopeBindings' in grant)await requireCurrentScopePermission({client,grant,targetInstallationId:input.installationId,permission:'read'})
+            else{
+              if(grant.installationId!==input.installationId)throw new ContextConsumptionChangedError()
+              await requireCurrentInstallationAuthority(client,grant)
+            }
+          }catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
+          await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
+          await client.query('SELECT 1 FROM memory_installations WHERE installation_id=$1 FOR KEY SHARE',[input.installationId])
+          await prepared.assertCurrent(client);attachPreparedEvidence(client,prepared)
+        }
         const inserted=await client.query(`
           INSERT INTO memory_context_packs
             (pack_id, installation_id, generation_run_id, trajectory_id, session_id, client_request_id,
@@ -164,6 +186,10 @@ export function createPackRepository(pool: pg.Pool) {
         // against a differently-formatted literal of the same id.
         const canonical = await client.query<{ pack_id: string }>(
           `SELECT pack_id::text FROM memory_context_packs WHERE pack_id = $1`, [packId])
+        if(prepared){
+          await prepared.assertCurrent(client,{forCommit:true})
+          try{await assertCurrentGrantClock(client,input.authorityGrant!,[input.installationId])}catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
+        }
         await client.query('COMMIT')
         return canonical.rows[0]?.pack_id ?? packId
       } catch (error) {

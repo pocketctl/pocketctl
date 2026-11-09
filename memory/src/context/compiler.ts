@@ -1,3 +1,4 @@
+import type {PackAuthorityGrant} from './pack-repository.js'
 import {resolveLifecycleFrame,lifecycleFrameCurrent} from './lifecycle-frame.js'
 import type {CurationMode} from '../curation/contracts.js'
 import type {SceneDestination} from './scene-resolver.js'
@@ -38,6 +39,7 @@ export type CompileOutcome =
   | { kind: 'retrieval_failed' }
 
 export interface CompileRequest {
+  authorityGrant?:PackAuthorityGrant
   installationId: string
   sessionId: string
   clientRequestId: string
@@ -345,6 +347,7 @@ export function createContextCompiler(deps: {
       // Dynamic pool: replayable retrieval over the transient query.
       const retrieval = selectedReferences.length === 0 && (resolvedScope.repositoryKnown||lifecycle?.spaceId) && minimizedQuery.length > 0
         ? await deps.retrieval.retrieve({
+        authorityGrant:input.authorityGrant,
             installationId: input.installationId,
             query: minimizedQuery,
             lifecycle,
@@ -539,6 +542,7 @@ export function createContextCompiler(deps: {
           ? 'token_budget' : 'no_candidates'
         const packId = await deps.packs.persist({
           installationId: input.installationId,
+          authorityGrant:input.authorityGrant,
           queryContext,consumptionGeneration:generation,
           generationRunId: run.runId,
           trajectoryId: retrieval.trajectoryId || null,
@@ -569,6 +573,7 @@ export function createContextCompiler(deps: {
 
       const packId = await deps.packs.persist({
         installationId: input.installationId,
+        authorityGrant:input.authorityGrant,
         queryContext,consumptionGeneration:generation,
         generationRunId: run.runId,
         trajectoryId: retrieval.trajectoryId || null,

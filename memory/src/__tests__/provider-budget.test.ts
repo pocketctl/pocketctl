@@ -9,6 +9,12 @@ import type { EmbeddingProvider } from '../ports/embedding-provider.js'
 import type { TextGenerator } from '../ports/text-generator.js'
 
 describe('provider budget guard', () => {
+  test('a settlement error retains known usage as a terminal uncertain result',async()=>{
+    const store:ProviderBudgetStore={reserve:async()=>({ok:true,reservationId:'r1'}),settle:async()=>{throw Error('synthetic_settlement_failed')}}
+    const provider={generateJson:vi.fn().mockResolvedValue({ok:true,value:{},usage:{inputTokens:7,outputTokens:3,costMicros:11,model:'m'}})} as TextGenerator
+    const guarded=withTextProviderBudget(provider,store,{key:'pilot',maxRequests:10,maxInputTokens:10000,maxOutputTokens:100,maxOutputTokensPerRequest:10})
+    expect(await guarded.generateJson({operation:'candidate_extract',system:'s',document:{},schema:{},timeoutMs:1000,signal:new AbortController().signal})).toMatchObject({ok:false,code:'provider_result_unknown',retryable:false,billingUncertain:true,budgetReservationId:'r1',usage:{inputTokens:7,outputTokens:3,costMicros:11}})
+  })
   test('hard rejection happens before any provider request', async () => {
     const store: ProviderBudgetStore = {
       reserve: vi.fn(async () => ({ ok: false as const, dimension: 'text_output_tokens' as const })),

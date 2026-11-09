@@ -1,3 +1,4 @@
+import {preparedSourceEvents} from '../sources/prepared-sources.js'
 import type pg from 'pg'
 import {createHash} from 'node:crypto'
 import {admitLifecycleSources,LIFECYCLE_SOURCE_POLICY} from '../episodes/source-admission.js'
@@ -32,7 +33,8 @@ export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,inpu
  JSON.stringify({bundle_id:changed.bundle_id,bundle_revision:Number(changed.revision),mode:policy.mode,policy_revision:policy.revision,authorization_epoch:policy.authorizationEpoch})])
 }
 
-export function lifecycleSourceDigest(installationId:string,events:readonly PacketSourceEvent[]):Buffer{
+export type LifecycleDigestEvent=Pick<PacketSourceEvent,'source_event_id'|'payload_hash'|'event_type'|'occurred_at'|'source_provenance'>
+export function lifecycleSourceDigest(installationId:string,events:readonly LifecycleDigestEvent[]):Buffer{
  const ordered=[...events].sort((a,b)=>a.source_event_id.localeCompare(b.source_event_id))
  return createHash('sha256').update(computeSourceDigest({installationId:installationId,events:ordered,artifacts:[]}))
   .update(JSON.stringify(ordered.map(e=>({provenance:e.source_provenance??{},event_type:e.event_type,occurred_at:new Date(e.occurred_at).toISOString()})))).digest()
@@ -44,7 +46,7 @@ export function lifecycleSourceDigest(installationId:string,events:readonly Pack
 export async function loadCurrentLifecycleSources(client:Pick<pg.PoolClient,'query'>,installationId:string,bundle:{bundle_id:string;session_id:string;task_key:string;source_digest:Buffer}){
  if(!bundle.task_key.startsWith('source:'))throw new Error('curation_source_changed')
  const turnId=bundle.task_key.slice(7)
- const events=(await client.query<PacketSourceEvent & {body_reclaimed_at:Date|null}>(`SELECT source_event_id::text,event_type,occurred_at,payload_hash,payload,classification,source_provenance,body_reclaimed_at
+ const events=preparedSourceEvents(client,installationId,turnId)??(await client.query<PacketSourceEvent & {body_reclaimed_at:Date|null}>(`SELECT source_event_id::text,event_type,occurred_at,payload_hash,payload,classification,source_provenance,body_reclaimed_at
   FROM source_events WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY source_event_id FOR SHARE`,[installationId,bundle.session_id,turnId])).rows
  if(!events.length||events.some(e=>e.body_reclaimed_at||!canonicalPayloadHash(e.payload).equals(e.payload_hash))||!lifecycleSourceDigest(installationId,events).equals(bundle.source_digest))throw new Error('curation_source_changed')
  const admission=admitLifecycleSources({sessionId:bundle.session_id,turnId,events})

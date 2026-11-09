@@ -1,3 +1,4 @@
+import {freshNativeSchemaUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 
 import { initAttentionInboxSchema } from '../attention-inbox/schema.js'
@@ -5,7 +6,7 @@ import { initDB } from '../db.js'
 
 describe('Attention Inbox schema bootstrap', () => {
   test('creates product tables and an independent events projection cursor', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
 
     await initAttentionInboxSchema({ query } as never)
 
@@ -27,7 +28,7 @@ describe('Attention Inbox schema bootstrap', () => {
   })
 
   test('is included in the main Relay database bootstrap', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async (sql:string)=>freshNativeSchemaUnitResult(sql)??({ rows: [], rowCount: 0 }))
 
     await initDB({ query } as never)
 

@@ -72,7 +72,7 @@ export interface ModelDisclosure {
   }
 }
 
-interface ManageGrant { callerType?: string; installationId: string; configVersion?: string; expiresAt?: number }
+interface ManageGrant { userId?:number;callerType?: string; installationId: string; configVersion?: string; expiresAt?: number }
 
 class SourceDiscoveryChangedError extends Error {}
 
@@ -177,7 +177,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     const grant=await guardManage(request,reply);if(!grant)return
     const parsed=CandidateQuerySchema.safeParse(request.query)
     if(!parsed.success||parsed.data.submission_id||parsed.data.decision_id)return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid shadow candidate query')))
-    try{return await review.shadowQueuePage({installationId:grant.installationId,limit:parsed.data.limit,cursor:parsed.data.cursor})}
+    try{return await review.shadowQueuePage({authorityGrant:grant,installationId:grant.installationId,limit:parsed.data.limit,cursor:parsed.data.cursor})}
     catch(error){if(error instanceof Error&&error.message==='invalid_cursor')return reply.code(400).send(errorBody(new MemoryApiError('invalid_request','invalid_cursor')));throw error}
   })
 
@@ -191,6 +191,7 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
     }
     try {
       return await review.reviewQueuePage({
+        authorityGrant:grant,
         installationId: grant.installationId,
         limit: parsed.data.limit,
         cursor: parsed.data.cursor,

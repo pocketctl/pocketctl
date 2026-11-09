@@ -1,3 +1,4 @@
+import {legacyTransportRetired} from '../sources/transport-state.js'
 import type pg from 'pg'
 import { retentionTransaction,readRetentionPlan } from './transaction.js'
 import {lifecycleSourceRetentionProof,reclaimSettledTaskState,taskSourceProtectedSql} from './task-state.js'
@@ -41,7 +42,7 @@ const eligibilityFrom = `FROM work_episodes e
     AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts a WHERE a.installation_id=e.installation_id AND a.turn_id=e.turn_id)
     AND NOT ${MIGRATION_PROTECTS_SCOPE_SQL}
     AND NOT ${taskSourceProtectedSql()}
-    AND NOT EXISTS(SELECT 1 FROM memory_snapshot_runs r WHERE r.installation_id=e.installation_id
+    AND NOT EXISTS(SELECT 1 FROM memory_source_snapshot_facts r WHERE r.installation_id=e.installation_id
       AND (r.state='running' OR(r.state='completed' AND r.relay_acked_at IS NULL)))
     AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs r WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id
       AND r.episode_source_digest=e.source_digest AND (r.state='running' OR(r.state IN('failed','quarantined')
@@ -52,7 +53,7 @@ const eligibilityFrom = `FROM work_episodes e
       AND c.review_expires_at>clock_timestamp())
     AND NOT EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id
       AND s.created_at>success.completed_at)
-    AND NOT EXISTS(SELECT 1 FROM memory_feed_inbox g WHERE g.installation_id=e.installation_id AND g.session_id=e.session_id
+    AND NOT EXISTS(SELECT 1 FROM memory_source_delivery_facts g WHERE g.installation_id=e.installation_id AND g.session_id=e.session_id
       AND (g.turn_id IS NULL OR g.turn_id=e.turn_id) AND(g.projection_state='pending'
         OR(g.projection_state='quarantined' AND g.error_code='oversized_content')))
     AND NOT EXISTS(SELECT 1 FROM memory_jobs j WHERE j.installation_id=e.installation_id AND j.state IN('pending','running')
@@ -108,7 +109,7 @@ export async function reclaimSourceTurn(pool: pg.Pool, key: SourceRetentionKey, 
         EXISTS(SELECT 1 FROM memory_session_tombstones s WHERE s.installation_id=i.installation_id AND s.session_id=$2) tombstoned,
         EXISTS(SELECT 1 FROM memory_governance_migration_runs m WHERE m.sealed_at IS NULL AND m.abandoned_at IS NULL
           AND (cardinality(m.scope_ids)=0 OR i.installation_id=ANY(m.scope_ids))) migration,
-        EXISTS(SELECT 1 FROM memory_snapshot_runs r WHERE r.installation_id=i.installation_id
+        EXISTS(SELECT 1 FROM memory_source_snapshot_facts r WHERE r.installation_id=i.installation_id
           AND(r.state='running' OR(r.state='completed' AND r.relay_acked_at IS NULL))) snapshot_busy
       FROM memory_installations i WHERE i.installation_id=$1`, [key.installationId, key.sessionId])).rows[0]
     if (!state || state.local_status !== 'ready' || state.relay_status !== 'active' || state.tombstoned) return { ...result, skipped: 'inactive' }
@@ -149,6 +150,7 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
   const result = emptyResult(), args = [receipt.installation_id, receipt.turn_id, batchSize, receipt.reclaimed_at]
   result.events = (await client.query(`WITH due AS MATERIALIZED(
     SELECT source_event_id FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
+      AND source_kind IS DISTINCT FROM 'legacy_archive'
     ORDER BY source_event_id LIMIT $3 FOR UPDATE SKIP LOCKED)
     UPDATE source_events s SET payload=memory_retention_source_metadata(s.payload),body_reclaimed_at=$4
     FROM due WHERE s.source_event_id=due.source_event_id`, args)).rowCount ?? 0
@@ -156,7 +158,8 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     SELECT artifact_id FROM source_artifacts WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
     ORDER BY artifact_id LIMIT $3 FOR UPDATE SKIP LOCKED)
     UPDATE source_artifacts a SET details='{}',body_reclaimed_at=$4 FROM due WHERE a.artifact_id=due.artifact_id`, args)).rowCount ?? 0
-  result.snapshots = (await client.query(`WITH due AS MATERIALIZED(
+  const transportRetired=await legacyTransportRetired(client)
+  result.snapshots = transportRetired?0:(await client.query(`WITH due AS MATERIALIZED(
     SELECT relay_event_id,session_id FROM memory_snapshot_events WHERE installation_id=$1 AND
       COALESCE(NULLIF(payload->>'turn_id',''),NULLIF(payload->>'source_turn_id',''))=$2 AND body_reclaimed_at IS NULL
     ORDER BY relay_event_id LIMIT $3 FOR UPDATE SKIP LOCKED)
@@ -174,10 +177,11 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     FROM due WHERE c.candidate_id=due.candidate_id`,
   [receipt.installation_id, receipt.episode_id, batchSize, receipt.reclaimed_at])).rowCount ?? 0
   const outstanding = (await client.query(`SELECT
-    EXISTS(SELECT 1 FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL)
+    EXISTS(SELECT 1 FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
+      AND source_kind IS DISTINCT FROM 'legacy_archive')
     OR EXISTS(SELECT 1 FROM source_artifacts WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL)
-    OR EXISTS(SELECT 1 FROM memory_snapshot_events WHERE installation_id=$1 AND
-      COALESCE(NULLIF(payload->>'turn_id',''),NULLIF(payload->>'source_turn_id',''))=$2 AND body_reclaimed_at IS NULL)
+    ${transportRetired?'':`OR EXISTS(SELECT 1 FROM memory_snapshot_events WHERE installation_id=$1 AND
+      COALESCE(NULLIF(payload->>'turn_id',''),NULLIF(payload->>'source_turn_id',''))=$2 AND body_reclaimed_at IS NULL)`}
     OR EXISTS(SELECT 1 FROM memory_candidates WHERE installation_id=$1 AND episode_id=$3 AND body_reclaimed_at IS NULL) pending`,
   [receipt.installation_id, receipt.turn_id, receipt.episode_id])).rows[0].pending
   if (!outstanding) {

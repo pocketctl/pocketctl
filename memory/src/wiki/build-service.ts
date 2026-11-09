@@ -1,4 +1,7 @@
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
+import {recordGenerationProviderEffect} from '../generation/provider-effect.js'
+import {guardSourceExecutionCommit,assertSourceProviderExecution} from '../sources/source-execution.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import type pg from 'pg'
 
 import type { JobClaim, JobFence } from '../jobs/types.js'
@@ -143,6 +146,7 @@ export function createWikiBuildService(deps: {
         if (!fence) throw new WikiBuildFenceError('job_fence_missing')
         if (!claim.installation_id) throw new WikiBuildFenceError('installation_missing')
         if (signal.aborted) throw new WikiBuildFenceError('wiki_build_aborted')
+        await assertSourceProviderExecution(sourcePoolContext(pool).namespace==='memory')
         const runId = typeof claim.payload?.run_id === 'string' ? claim.payload.run_id : null
         if (!runId) throw new WikiBuildFenceError('payload_missing')
 
@@ -187,6 +191,7 @@ export function createWikiBuildService(deps: {
             WHERE run_id = $1 AND state = 'queued'
           `, [run.generation_run_id])
         }
+        await guardSourceExecutionCommit(start)
         await start.query('COMMIT')
         } catch (error) {
           await start.query('ROLLBACK').catch(() => undefined)
@@ -208,6 +213,7 @@ export function createWikiBuildService(deps: {
         maxSections: deps.maxSections,
       }))
       const generation = await generateWikiCandidateOrFallback({
+        requestKey:`wiki:${runId}`,
         generator: deps.generator,
         skeleton,
         sources,
@@ -217,6 +223,8 @@ export function createWikiBuildService(deps: {
         signal,
       })
       const candidate = generation.document
+      await recordGenerationProviderEffect(pool,{installationId:claim.installation_id,generationRunId:run.generation_run_id,runId,
+        operation:'build_wiki',usage:generation.usage,budgetReservationId:generation.budgetReservationId})
       const contentHash = wikiCandidateContentHash(candidate)
 
       const publishCandidate = await pool.connect()
@@ -292,6 +300,7 @@ export function createWikiBuildService(deps: {
             generation.usage?.inputTokens ?? null, generation.usage?.outputTokens ?? null,
             generation.usage?.costMicros ?? null])
         }
+        await guardSourceExecutionCommit(publishCandidate)
         await publishCandidate.query('COMMIT')
         deps.metrics?.wikiBuilds.inc({ mode, result: 'succeeded' })
       } catch (error) {

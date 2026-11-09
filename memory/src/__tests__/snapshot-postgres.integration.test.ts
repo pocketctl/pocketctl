@@ -101,7 +101,7 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
   })
 
   test('reconciles multi-page inventory and sessions, commits locally, then acks', async () => {
-    await seedLocalSession(pool, 'ses-gone')  // absent from inventory
+    await seedLocalSession(pool, 'ses-gone')  // history absent from inventory
     await seedLocalSession(pool, 'ses-1')
     const relay = makeRelay({})
     const reconciler = createSnapshotReconciler({ pool, relay })
@@ -117,9 +117,8 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
     )
     expect(snapshotRows.rows.map(row => row.session_id)).toEqual(['ses-1', 'ses-2'])
 
-    // The reconcile is authoritative for the whole installation: the
-    // departed session's feed event must be gone, not lingering with its
-    // turn id for later compiles to pick up.
+    // Snapshot rows are added without treating inventory absence as a
+    // tombstone. The helper's empty legacy source fixture adds no event.
     const events = await pool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM source_events WHERE installation_id = $1`,
       [INSTALLATION],
@@ -134,16 +133,128 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
     )
     expect(run.rows[0].state).toBe('completed')
 
-    // Sessions missing from the inventory were cleared; present ones rebuilt.
+    // Missing inventory entries retain history; present sessions are rebuilt.
     const sessions = await pool.query<{ session_id: string }>(
       `SELECT session_id FROM source_sessions ORDER BY session_id`,
     )
-    expect(sessions.rows.map(row => row.session_id)).toEqual(['ses-1', 'ses-2'])
+    expect(sessions.rows.map(row => row.session_id)).toEqual(['ses-1', 'ses-2', 'ses-gone'])
 
     const installation = await pool.query<{ snapshot_required: boolean }>(
       `SELECT snapshot_required FROM memory_installations`,
     )
     expect(installation.rows[0].snapshot_required).toBe(false)
+  })
+
+  test('repeated snapshot rebuild preserves original source UUIDs, sequence and provenance', async () => {
+    const reconciler = createSnapshotReconciler({ pool, relay: makeRelay({}) })
+    await reconciler.reconcile(INSTALLATION)
+    await pool.query(`UPDATE source_events SET source_sequence=9007199254740993,
+      source_provenance='{"state":"unknown"}',classification='{"content_class":"historical"}'
+      WHERE installation_id=$1 AND origin='snapshot' AND origin_position='1'`, [INSTALLATION])
+    const before = (await pool.query(`SELECT source_event_id::text,origin_position,source_sequence::text,
+      encode(payload_hash,'hex') AS hash,source_provenance,classification
+      FROM source_events WHERE installation_id=$1 ORDER BY origin_position`, [INSTALLATION])).rows
+    await reconciler.reconcile(INSTALLATION)
+    const after = (await pool.query(`SELECT source_event_id::text,origin_position,source_sequence::text,
+      encode(payload_hash,'hex') AS hash,source_provenance,classification
+      FROM source_events WHERE installation_id=$1 ORDER BY origin_position`, [INSTALLATION])).rows
+    expect(after).toEqual(before)
+  })
+
+  test('keeps verified Feed UUID and frozen metadata when the snapshot names the same canonical source', async () => {
+    const reconciler=createSnapshotReconciler({pool,relay:makeRelay({})})
+    await reconciler.reconcile(INSTALLATION)
+    const {canonicalPayloadHash}=await import('../inbox/canonical-json.js')
+    await pool.query(`UPDATE source_events SET origin='feed',origin_position='1001',
+      source_kind='relay_event',canonical_key='1',canonical_session_key='ses-1',
+      source_version='{"content":"1","authorization":"1","storage":"1"}',
+      source_sequence=9007199254740993,content_hash=$2,hash_version='canonical-json-sha256-v1',
+      mapping_state='verified',adapter_version='reviewed-v1',source_provenance='{"state":"unknown"}'
+      WHERE installation_id=$1 AND origin_position='1'`,[INSTALLATION,canonicalPayloadHash(relayEvent(1,'ses-1').payload)])
+    const before=(await pool.query(`SELECT * FROM source_events WHERE canonical_key='1' AND installation_id=$1`,[INSTALLATION])).rows[0]
+    await reconciler.reconcile(INSTALLATION)
+    const rows=(await pool.query(`SELECT * FROM source_events WHERE installation_id=$1 AND session_id='ses-1'`,[INSTALLATION])).rows
+    expect(rows).toHaveLength(3)
+    expect(rows.find(row=>row.source_event_id===before.source_event_id)).toEqual(before)
+  })
+
+  test('rejects a verified canonical id with conflicting content rather than replacing its UUID', async () => {
+    const reconciler=createSnapshotReconciler({pool,relay:makeRelay({})})
+    await reconciler.reconcile(INSTALLATION)
+    await pool.query(`UPDATE source_events SET source_kind='relay_event',canonical_key='1',canonical_session_key='ses-1',
+      source_version='{"content":"1","authorization":"1","storage":"1"}',content_hash=sha256('wrong'::bytea),
+      hash_version='canonical-json-sha256-v1',mapping_state='verified',adapter_version='reviewed-v1'
+      WHERE installation_id=$1 AND origin_position='1'`,[INSTALLATION])
+    const before=(await pool.query('SELECT source_event_id::text FROM source_events ORDER BY source_event_id')).rows
+    await expect(reconciler.reconcile(INSTALLATION)).rejects.toThrow('snapshot canonical source integrity conflict')
+    expect((await pool.query('SELECT source_event_id::text FROM source_events ORDER BY source_event_id')).rows).toEqual(before)
+    expect((await pool.query('SELECT state FROM memory_snapshot_runs ORDER BY generation DESC LIMIT 1')).rows[0].state).toBe('failed')
+  })
+
+  test('equal bodies at different canonical ids remain separate sources', async () => {
+    const {canonicalPayloadHash}=await import('../inbox/canonical-json.js')
+    const script={sessions:[{session_id:'ses-1',cursor:'1'}],eventsBySession:{'ses-1':[[relayEvent(1,'ses-1'),relayEvent(2,'ses-1')],[]]}}
+    const reconciler=createSnapshotReconciler({pool,relay:makeRelay(script)})
+    await reconciler.reconcile(INSTALLATION)
+    await pool.query(`UPDATE source_events SET source_kind='relay_event',canonical_key='1',canonical_session_key='ses-1',
+      source_version='{"content":"1","authorization":"1","storage":"1"}',content_hash=$2,
+      hash_version='canonical-json-sha256-v1',mapping_state='verified',adapter_version='reviewed-v1'
+      WHERE installation_id=$1 AND origin_position='1'`,[INSTALLATION,canonicalPayloadHash(relayEvent(1,'ses-1').payload)])
+    await reconciler.reconcile(INSTALLATION)
+    expect((await pool.query('SELECT count(*)::text AS n FROM source_events')).rows[0].n).toBe('2')
+  })
+
+  test('inventory absence preserves Team and unproved historical sources, turns and sessions', async () => {
+    await seedLocalSession(pool,'team_history')
+    const source=(await pool.query(`INSERT INTO source_events
+      (source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash,source_provenance)
+      VALUES(gen_random_uuid(),$1,'team','delivery:1','team_history','team-turn','agent_text',NOW(),'{"text":"owned"}',sha256('owned'::bytea),'{"team":{"id":"1"}}') RETURNING source_event_id`,[INSTALLATION])).rows[0]
+    await pool.query(`INSERT INTO source_turns(installation_id,turn_id,session_id,state,event_count,first_source_event_id,last_source_event_id)
+      VALUES($1,'team-turn','team_history','completed',1,$2,$2)`,[INSTALLATION,source.source_event_id])
+    const before=(await pool.query('SELECT * FROM source_events WHERE installation_id=$1 ORDER BY source_event_id',[INSTALLATION])).rows
+    const turns=(await pool.query('SELECT * FROM source_turns WHERE installation_id=$1',[INSTALLATION])).rows
+    await createSnapshotReconciler({pool,relay:makeRelay({sessions:[]})}).reconcile(INSTALLATION)
+    expect((await pool.query('SELECT * FROM source_events WHERE installation_id=$1 ORDER BY source_event_id',[INSTALLATION])).rows).toEqual(before)
+    expect((await pool.query('SELECT * FROM source_turns WHERE installation_id=$1',[INSTALLATION])).rows).toEqual(turns)
+    expect((await pool.query('SELECT session_id FROM source_sessions WHERE installation_id=$1',[INSTALLATION])).rows).toEqual([{session_id:'team_history'}])
+  })
+
+  test('a tombstone prevents snapshot page bodies from landing before finalize', async () => {
+    const {createSnapshotRepository}=await import('../snapshot/repository.js')
+    const repository=createSnapshotRepository(pool),run=await repository.startRun(INSTALLATION)
+    await pool.query(`INSERT INTO memory_session_tombstones(installation_id,session_id,reason,purged_at) VALUES($1,'ses-1','deleted',NOW())`,[INSTALLATION])
+    await repository.persistSessionEvents(INSTALLATION,run.generation,'ses-1',[relayEvent(1,'ses-1')])
+    expect((await pool.query('SELECT count(*)::text AS n FROM memory_snapshot_events')).rows[0].n).toBe('0')
+  })
+
+  test('duplicate Relay ids with different bodies in one page fail before durable landing', async () => {
+    const {createSnapshotRepository}=await import('../snapshot/repository.js')
+    const repository=createSnapshotRepository(pool),run=await repository.startRun(INSTALLATION)
+    await expect(repository.persistSessionEvents(INSTALLATION,run.generation,'ses-1',[
+      relayEvent(1,'ses-1'),relayEvent(1,'ses-1',{payload:{text:'different'}}),
+    ])).rejects.toThrow('snapshot integrity')
+    expect((await pool.query('SELECT count(*)::text AS n FROM memory_snapshot_events')).rows[0].n).toBe('0')
+  })
+
+  test('a Relay id cannot be rebound to a different session in another page', async () => {
+    const {createSnapshotRepository}=await import('../snapshot/repository.js')
+    const repository=createSnapshotRepository(pool),run=await repository.startRun(INSTALLATION)
+    await repository.persistSessionEvents(INSTALLATION,run.generation,'ses-1',[relayEvent(1,'ses-1')])
+    await expect(repository.persistSessionEvents(INSTALLATION,run.generation,'ses-2',[relayEvent(1,'ses-2')])).rejects.toThrow('snapshot integrity')
+    expect((await pool.query('SELECT session_id FROM memory_snapshot_events')).rows).toEqual([{session_id:'ses-1'}])
+  })
+
+  test('prepared legacy sources validate the old snapshot envelope while preserving its digest hash', async () => {
+    await createSnapshotReconciler({ pool, relay: makeRelay({}) }).reconcile(INSTALLATION)
+    const source=(await pool.query("SELECT source_event_id::text,payload_hash FROM source_events WHERE installation_id=$1 AND origin_position='1'",[INSTALLATION])).rows[0]
+    const {prepareSourceReferences}=await import('../sources/prepared-sources.js')
+    const prepared=await prepareSourceReferences(pool,INSTALLATION,[source.source_event_id])
+    expect(prepared.events[0].payload).toEqual(relayEvent(1,'ses-1').payload)
+    expect(prepared.events[0].payload_hash).toEqual(source.payload_hash)
+    const client=await pool.connect()
+    try{await client.query('BEGIN');await prepared.assertCurrent(client);await client.query('ROLLBACK')}finally{client.release()}
+    await pool.query("UPDATE source_events SET payload='{\"text\":\"changed\"}' WHERE source_event_id=$1",[source.source_event_id])
+    await expect(prepareSourceReferences(pool,INSTALLATION,[source.source_event_id])).rejects.toThrow('source_reference_hash_mismatch')
   })
 
   test('a payload hash mismatch fails the generation without touching old data', async () => {
@@ -286,7 +397,7 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
     expect(stored.rows).toEqual([{ relay_event_id: eventId }])
   })
 
-  test('revives only raced feed rows whose identity is absent from the rebuild', async () => {
+  test('preserves raced Feed rows without redundant projection work', async () => {
     // ses-1's snapshot event carries a stable identity (event_id: evt-1).
     const script: RelayScript = {
       eventsBySession: {
@@ -299,15 +410,8 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
         'ses-2': [[]],
       },
     }
-    // Five projected feed rows before the reconcile:
-    //  99 — raced: identity evt-99 not in the snapshot, projected during the
-    //       drain window → must revive.
-    //  98 — same logical event as the snapshot row (evt-1) → must stay.
-    //  97 — no stable identity (NULL key) → must stay (self-heals next run).
-    //  96 — identity absent BUT projected long before the run → outside the
-    //       race window, must stay (this pins the guard against per-reconcile
-    //       churn of retention-pruned rows).
-    // 100 — departed session → must stay (deletion is the point).
+    // Every projected Feed position survives reconciliation, including
+    // identity-less and departed-session history. None needs reprojecting.
     const seeds: Array<[number, string, Record<string, unknown>]> = [
       [99, 'ses-1', { event_id: 'evt-99' }],
       [98, 'ses-1', { event_id: 'evt-1' }],
@@ -354,7 +458,7 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
       { feed_id_str: '96', projection_state: 'projected' },
       { feed_id_str: '97', projection_state: 'projected' },
       { feed_id_str: '98', projection_state: 'projected' },
-      { feed_id_str: '99', projection_state: 'pending' },
+      { feed_id_str: '99', projection_state: 'projected' },
       { feed_id_str: '100', projection_state: 'projected' },
     ])
 
@@ -366,19 +470,19 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
     `, [INSTALLATION])
     expect(evt1.rows).toEqual([{ origin: 'snapshot' }])
 
-    // The departed session's event stayed deleted.
+    // Inventory absence keeps the historical Feed event.
     const departedEvent = await pool.query<{ count: string }>(`
       SELECT COUNT(*)::text AS count FROM source_events
       WHERE installation_id = $1 AND origin_position = '100'
     `, [INSTALLATION])
-    expect(Number(departedEvent.rows[0].count)).toBe(0)
+    expect(Number(departedEvent.rows[0].count)).toBe(1)
 
-    // Exactly one job — the revive is gated on the revived row count.
+    // No replay job: original Feed positions survived.
     const projectJobs = await pool.query<{ count: string }>(`
       SELECT COUNT(*)::text AS count FROM memory_jobs
       WHERE installation_id = $1 AND job_type = 'project_feed'
     `, [INSTALLATION])
-    expect(Number(projectJobs.rows[0].count)).toBe(1)
+    expect(Number(projectJobs.rows[0].count)).toBe(0)
   })
 
   test('a tombstoned session still listed by relay never resurrects', async () => {

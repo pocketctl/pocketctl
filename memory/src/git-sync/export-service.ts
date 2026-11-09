@@ -1,3 +1,5 @@
+import {assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {currentClaimVersionSql} from '../claims/version-selection.js'
 import {originPolicyDecisions} from '../governance/origin-policy.js'
 import type pg from 'pg'
@@ -134,7 +136,9 @@ export function createGitExportService(deps:{pool:pg.Pool;keys:GitAttestationReg
         for(const [versionId,expected] of temporal.originPolicyStamps){const decision=origin.get(versionId);if(!decision?.eligible||decision.stamp!==expected)throw new Error('git_source_stale')}
       }
       await requireCurrentGitAuthorization(client,stamp,purpose)
-      await assertGitGrantClock(client,grant,[input.installationId]);await client.query('COMMIT')
+      await assertGitGrantClock(client,grant,[input.installationId]);
+      try{await assertRetainedSourceGuards(client)}catch(error){if(preparedSourceUnavailable(error))throw new Error('git_source_stale');throw error}
+      await client.query('COMMIT')
       return result
     } catch(error) {await client.query('ROLLBACK');throw error} finally {client.release()}
   }

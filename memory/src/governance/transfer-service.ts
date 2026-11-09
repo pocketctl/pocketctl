@@ -261,7 +261,7 @@ export function createTransferService(pool: pg.Pool) {
           randomUUID(), input.targetInstallationId, targetBinding.membership_id,
           transferId, JSON.stringify({ count }),
         ])
-        await assertCurrentGrantClock(client,input.grant,[input.sourceInstallationId,input.targetInstallationId])
+        await assertCurrentGrantClock(client,input.grant,[input.sourceInstallationId,input.targetInstallationId],{allowedSharedStates:['active','dissolving']})
         await client.query('COMMIT')
         return { transferId, candidates: count }
       } catch (error) {

@@ -64,7 +64,7 @@ function signGrant(
 }
 
 function makeVerifier(keys: ReturnType<typeof makeKeys>, options: {
-  installations?: Record<string, { local_status: string; relay_status: string; config_version: string }>
+  installations?: Record<string, { local_status: string; relay_status: string; config_version: string;owner_user_id?:string }>
   fetchImpl?: typeof fetch
   now?: () => number
 } = {}) {
@@ -109,6 +109,14 @@ describe('capability grant verification', () => {
     const otherKeys = makeKeys()
     const foreign = signGrant(otherKeys, { keyid: keys.kid })
     expect(await verifier.verify(foreign, 'memory.search')).toBeNull()
+  })
+
+  test('binds the signed caller to the current owner when authoritative owner facts exist',async()=>{
+    const keys=makeKeys(),row={local_status:'ready',relay_status:'active',config_version:'3',owner_user_id:'43'}
+    const {verifier}=makeVerifier(keys,{installations:{[INSTALLATION]:row}})
+    expect(await verifier.verify(signGrant(keys),'memory.search')).toBeNull()
+    row.owner_user_id='42'
+    expect(await verifier.verify(signGrant(keys),'memory.search')).toMatchObject({userId:42})
   })
 
   test('rejects wrong issuer, audience and provider ids', async () => {

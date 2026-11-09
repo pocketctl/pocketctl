@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { Router } from '../router.js'
 
@@ -22,7 +23,8 @@ function pool(options: {
   const daemonId = options.daemonId === undefined ? 'd1' : options.daemonId
   const agentType = options.agentType ?? 'codex'
   const value: any = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('WITH owned_session')) {
         if (options.runtimePolicyError) throw new Error('runtime policy unavailable')
         return {

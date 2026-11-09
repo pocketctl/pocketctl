@@ -3,25 +3,28 @@ import type pg from 'pg'
 import {canonicalReviewPolicyHash,parseReviewPolicyDocument} from '../../governance/review-policy.js'
 import {MEMORY_MIGRATIONS} from '../../schema.js'
 import type {MigrationInventoryManifest,MigrationInventoryItem,FindingCertainty,ScopeObservation,TeamSourceObservation} from './manifest.js'
-export interface InventoryOptions {onFindingBatch?:(items:MigrationInventoryItem[])=>Promise<void>;onScopeBatch?:(items:ScopeObservation[])=>Promise<void>;onTeamSourceBatch?:(items:TeamSourceObservation[])=>Promise<void>}
+export interface InventoryOptions {namespace?:'public'|'memory';onFindingBatch?:(items:MigrationInventoryItem[])=>Promise<void>;onScopeBatch?:(items:ScopeObservation[])=>Promise<void>;onTeamSourceBatch?:(items:TeamSourceObservation[])=>Promise<void>}
 const tables={claims:'knowledge_claims',versions:'knowledge_versions',evidence:'knowledge_evidence',capsules:'knowledge_evidence_capsules',proposals:'memory_promotion_candidates',proposalRevisions:'memory_promotion_candidate_versions',decisions:'memory_review_decisions',authorityRecords:'memory_authority_records',jobs:'memory_jobs',feedback:'memory_feedback',contextPacks:'memory_context_packs',tombstones:'knowledge_tombstones',installations:'memory_installations',repositories:'repositories',snapshots:'repo_snapshots',episodes:'work_episodes',sourceEvents:'source_events',searchDocuments:'claim_search_documents',wikiVersions:'memory_wiki_versions',skillVersions:'memory_skill_versions',gitRevisionLinks:'memory_git_revision_links',featureSettings:'memory_feature_settings',sessionTombstones:'memory_session_tombstones',repositoryTombstones:'memory_repository_tombstones',snapshotTombstones:'memory_source_snapshot_tombstones'} as const
 /** Independent consistent read-only snapshot. No startup, model call, or authority write. */
 export async function inventoryMemory(pool:pg.Pool,options:InventoryOptions={}):Promise<MigrationInventoryManifest>{
+ const namespace=options.namespace??'public'
+ if(!['public','memory'].includes(namespace))throw new Error('invalid_memory_namespace')
  const started=performance.now(),client=await pool.connect()
- const manifest:MigrationInventoryManifest={schemaVersion:0,compatible:false,blockers:[],runId:randomUUID(),createdAt:new Date().toISOString(),environmentFingerprint:'',codeSchemaVersion:Math.max(...MEMORY_MIGRATIONS.map(m=>m.version)),counts:{},items:[],itemLimit:100,itemsTruncated:false,tableBytes:{},findingCounts:{recoverable:0,unknown:0,confirmed_violation:0,unproven:0},watermarks:{snapshotAt:''},queryElapsedMs:0,scopes:[],scopesTruncated:false,teamSources:[],teamSourcesTruncated:false,limitations:['Findings are per rule, not disjoint migrated-row totals; a record can have multiple reasons.','Current membership does not prove historical authorization.','Preview is bounded; full redacted details use keyset pages in this same snapshot.','Production recovery/cutover budgets need representative measured rehearsals.']}
+ const manifest:MigrationInventoryManifest={namespace,schemaVersion:0,compatible:false,blockers:[],runId:randomUUID(),createdAt:new Date().toISOString(),environmentFingerprint:'',codeSchemaVersion:Math.max(...MEMORY_MIGRATIONS.map(m=>m.version)),counts:{},items:[],itemLimit:100,itemsTruncated:false,tableBytes:{},findingCounts:{recoverable:0,unknown:0,confirmed_violation:0,unproven:0},watermarks:{snapshotAt:''},queryElapsedMs:0,scopes:[],scopesTruncated:false,teamSources:[],teamSourcesTruncated:false,limitations:['Findings are per rule, not disjoint migrated-row totals; a record can have multiple reasons.','Current membership does not prove historical authorization.','Preview is bounded; full redacted details use keyset pages in this same snapshot.','Production recovery/cutover budgets need representative measured rehearsals.']}
  try{
   await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   await client.query("SET LOCAL statement_timeout='5s'")
+  await client.query("SELECT set_config('search_path',$1,true)",['pg_catalog,'+namespace+(namespace==='memory'?',shared':'')])
   const identity=(await client.query('SELECT current_database() AS db,current_user AS role,version() AS version,inet_server_addr()::text AS server,pg_postmaster_start_time()::text AS started,CURRENT_TIMESTAMP::text AS snapshot_at')).rows[0]
   manifest.watermarks.snapshotAt=identity.snapshot_at
   const {snapshot_at,...environment}=identity
   manifest.environmentFingerprint=createHash('sha256').update(JSON.stringify(environment)).digest('hex')
-  if(!(await client.query("SELECT to_regclass('public.memory_schema_migrations') IS NOT NULL AS present")).rows[0].present){manifest.blockers.push('missing_schema');await client.query('COMMIT');return manifest}
+  if(!(await client.query("SELECT to_regclass($1) IS NOT NULL AS present",[namespace+'.memory_schema_migrations'])).rows[0].present){manifest.blockers.push('missing_schema');await client.query('COMMIT');return manifest}
   const versions=(await client.query<{version:number}>('SELECT version FROM memory_schema_migrations ORDER BY version')).rows.map(r=>Number(r.version))
   manifest.schemaVersion=Math.max(0,...versions)
   if(versions.some(v=>!MEMORY_MIGRATIONS.some(m=>m.version===v))||manifest.schemaVersion<50)manifest.blockers.push('unsupported_schema')
   if(versions.some((v,i)=>v!==i+1))manifest.blockers.push('incomplete_schema_history')
-  for(const table of Object.values(tables))if(!(await client.query('SELECT to_regclass($1) IS NOT NULL AS present',['public.'+table])).rows[0].present)manifest.blockers.push('missing_table:'+table)
+  for(const table of Object.values(tables))if(!(await client.query('SELECT to_regclass($1) IS NOT NULL AS present',[namespace+'.'+table])).rows[0].present)manifest.blockers.push('missing_table:'+table)
   if(manifest.blockers.length){await client.query('COMMIT');return manifest}
   const scalar=async(key:string,sql:string)=>{manifest.counts[key]=Number((await client.query(sql)).rows[0].n)}
   for(const [key,table] of Object.entries(tables)){

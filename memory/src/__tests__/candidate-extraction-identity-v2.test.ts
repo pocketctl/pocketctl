@@ -14,7 +14,7 @@ function fixture(output:unknown,identity=frame){
  const store={loadEpisodeForExtraction:async()=>({episodeId:'episode',turnId:'turn',sourceDigest:Buffer.from('digest'),
   document:{},manifest:{'h0-aaaaaaaa':{kind:'event'}},extractionMode:'enabled',repositoryId:null,repoSnapshotId:null,branch:null,
   sessionFirstRecordedAt:new Date(),hasPriorRunOnOldDigest:false,terminalAt:new Date(),outcome:'completed'}),
-  reserveRun:async()=>({runId:'run',owner:true,existingState:null}),markRun:async()=>undefined,discardRun:async()=>undefined,persistCandidates}
+  reserveRun:async()=>({runId:'run',owner:true,existingState:null}),markRun:async()=>undefined,recordProviderUsage:async()=>undefined,discardRun:async()=>undefined,persistCandidates}
  const deduper={identityFor:vi.fn(async()=>identity),tombstonedKeys:vi.fn(async()=>new Set<string>()),
   activeFamilyFor:vi.fn(async()=>({exactClaimId:null,family:[{claimId:'existing',statement:candidate.statement}]}))}
  const extractor=createCandidateExtractor({store:store as unknown as ExtractionRepository,deduper:deduper as never,

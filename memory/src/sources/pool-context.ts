@@ -1,0 +1,10 @@
+import type pg from 'pg'
+import type {ArchiveReadStorage,ArchiveLimits} from '@pocketctl/session-source'
+export interface SourcePoolContext {namespace:'public'|'memory';readerObserver?:(operation:string,kind:string,reason:string)=>void;archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits}}
+const contexts=new WeakMap<object,SourcePoolContext>()
+const aliases=new WeakMap<object,object>()
+export const sourceConnectionKey=(db:object):object=>aliases.get(db)??db
+export function bindSourceConnectionAlias(alias:object,client:object):void{aliases.set(alias,sourceConnectionKey(client))}
+export const sourcePoolContext=(db:object):SourcePoolContext=>contexts.get(db)??contexts.get(sourceConnectionKey(db))??{namespace:'public'}
+export function bindSourcePool(db:object,context:SourcePoolContext):void {contexts.set(db,context)}
+export function inheritSourcePool(client:pg.PoolClient,pool:pg.Pool):void{bindSourcePool(client,sourcePoolContext(pool))}

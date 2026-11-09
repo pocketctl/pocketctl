@@ -26,7 +26,7 @@ export class MemoryRuntimeCompatibilityError extends Error{
  * a global readiness failure; unsupported persisted contracts are. No backfill,
  * automatic authority, state creation, model call or writer lease is implicit.
  */
-export async function assertMemoryRuntimeCompatibility(pool:pg.Pool):Promise<void>{
+export async function assertMemoryRuntimeCompatibility(pool:pg.Pool,namespace:'public'|'memory'='public'):Promise<void>{
  const client=await pool.connect()
  try{
   await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
@@ -43,10 +43,10 @@ export async function assertMemoryRuntimeCompatibility(pool:pg.Pool):Promise<voi
    if(generations.rowCount)throw new MemoryRuntimeCompatibilityError('identity_generation')
    const declaration=(await client.query("SELECT current_setting('pocketctl.writer_capability',true) AS capability,current_setting('pocketctl.writer_identity_generation',true) AS generation")).rows[0]
    if(declaration.capability!=='identity_v2'||declaration.generation!=='adaptive')throw new MemoryRuntimeCompatibilityError('writer_declaration')
-   const indexes=(await client.query<{relname:string;indisvalid:boolean;indisunique:boolean;definition:string;predicate:string}>(`SELECT c.relname,i.indisvalid,i.indisunique,
-    pg_get_indexdef(i.indexrelid) AS definition,pg_get_expr(i.indpred,i.indrelid) AS predicate FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
+   const indexes=(await client.query<{relname:string;indisvalid:boolean;indisunique:boolean;definition:string;predicate:string;schema:string}>(`SELECT n.nspname AS schema,c.relname,i.indisvalid,i.indisunique,
+    pg_get_indexdef(i.indexrelid) AS definition,pg_get_expr(i.indpred,i.indrelid) AS predicate FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE i.indexrelid IN(to_regclass('knowledge_claims_active_identity_v1_idx'),to_regclass('knowledge_claims_active_identity_v2_idx'))`)).rows
-   if(indexes.length!==2||indexes.some(i=>!i.indisvalid||!i.indisunique||!i.definition.includes('ON public.knowledge_claims USING btree')
+   if(indexes.length!==2||indexes.some(i=>!i.indisvalid||!i.indisunique||(i.schema!==namespace || !/ON (?:[a-z_]+\.)?knowledge_claims USING btree/.test(i.definition))
      ||!i.definition.includes(i.relname.endsWith('v1_idx')?'(installation_id, claim_type, scope_key, normalized_key, conflict_variant)':'(installation_id, duplicate_digest_v2, conflict_variant)')
      ||i.predicate!==`((state = 'active'::text) AND (identity_generation = ${i.relname.endsWith('v1_idx')?1:2}))`))throw new MemoryRuntimeCompatibilityError('identity_generation')
    await client.query('COMMIT')

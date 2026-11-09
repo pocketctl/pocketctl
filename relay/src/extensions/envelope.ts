@@ -1,4 +1,4 @@
-import { parseMemorySourceProvenance, type MemorySourceProvenance } from './memory-provenance.js'
+import { canonicalSourceClassification, type MemorySourceProvenance } from '@pocketctl/session-source'
 import type { ExtensionTopic, ScopeControlTopic } from './types.js'
 import { extensionTopicForEventType, isScopeControlTopic } from './types.js'
 
@@ -87,17 +87,7 @@ export function buildStoredFeedPayload(
     : typeof payload.source_turn_id === 'string' && payload.source_turn_id
       ? payload.source_turn_id
       : undefined
-  const classification: ExtensionFeedEnvelope['classification'] = {}
-  for (const key of ['actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const) {
-    if (typeof payload[key] === 'string') classification[key] = payload[key] as string
-  }
-  if (row.source_kind === 'canonical_event') {
-    const proof = parseMemorySourceProvenance(payload.memory_source)
-    if (proof && proof.session_id === row.session_id && proof.turn_id === turnId
-      && /^[1-9][0-9]{0,19}$/.test(String(row.source_seq))) {
-      classification.memory_source = { ...proof, sequence: String(row.source_seq) }
-    }
-  }
+  const classification = canonicalSourceClassification(row)
   return {
     envelope_version: EXTENSION_ENVELOPE_VERSION,
     topic: extensionTopicForSource(row),

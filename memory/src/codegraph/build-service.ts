@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
+import {guardSourceExecutionCommit} from '../sources/source-execution.js'
 import type pg from 'pg'
 import {requireSourceAuthority,lockSourceSnapshot,SourceLifecycleFenceError} from './lifecycle.js'
 
@@ -86,6 +87,7 @@ export function createCodeGraphBuildService(deps: CodeGraphBuildDeps) {
             const result=await work(client,snapshot)
             signal.throwIfAborted()
             await recheckFence(client,fence)
+            await guardSourceExecutionCommit(client)
             await client.query('COMMIT')
             return result
           }catch(error){await client.query('ROLLBACK');if(error instanceof SourceLifecycleFenceError)throw new GraphBuildFenceError(error.code);throw error}

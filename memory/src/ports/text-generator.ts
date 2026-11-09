@@ -1,3 +1,4 @@
+import type {ProviderReceiptHandle,ReviewReceiptRequest} from '../model/provider-receipt.js'
 /**
  * Phase 1 port: bounded JSON generation from an untrusted-content-safe model
  * adapter. The model has no tools and no network access through Memory; the
@@ -28,7 +29,7 @@ export interface TimeoutFallbackDiagnostics {
 }
 
 export type ModelJsonResult<T> =
-  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean; timeoutFallback?: TimeoutFallbackDiagnostics }
+  | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean; timeoutFallback?: TimeoutFallbackDiagnostics; providerReceipt?:ProviderReceiptHandle }
   | {
       ok: false
       code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'provider_result_unknown'
@@ -42,12 +43,15 @@ export type ModelJsonResult<T> =
       retryAt?: string
       billingUncertain?: boolean
       timeoutFallback?: TimeoutFallbackDiagnostics
+      providerReceipt?:ProviderReceiptHandle
     }
 
 export interface TextGenerator {
   generateJson<T>(input: {
     operation: TextGeneratorOperation
     requestKey?: string
+    /** Internal explicit isolated enrollment, never provider wire data. */
+    receipt?: ReviewReceiptRequest
     system: string
     document: unknown
     schema: JsonSchema

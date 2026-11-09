@@ -1,3 +1,4 @@
+import {prepareRelaySchema,type RelaySchemaStrategy} from './schema-runtime.js';
 import {registerMaintenanceRoutes} from './extensions/maintenance-routes.js'
 import { finishDatabaseStartup } from './startup-readiness.js';
 import {TeamExternalStopService} from './team/external-stop.js';
@@ -71,7 +72,7 @@ import { createAuthRateLimiter, applyAuthRateLimitDecision } from './auth-rate-l
 import { ConnectionAdmission } from './connection-admission.js';
 import { sessionLifecycleConfig } from './session-lifecycle/config.js';
 import { installConfiguredHistoryReader } from './session-history/runtime.js';
-import { enableSessionColdBodies } from './session-lifecycle/cold-schema.js';
+import { enableSessionColdBodies,assertSessionColdBodiesEnabled } from './session-lifecycle/cold-schema.js';
 import { withSessionHistoryScope,invalidatePostgresHistoryBodies } from './session-history/postgres-reader.js';
 import { registerSessionLifecycleStatusRoutes } from './session-lifecycle/readiness.js';
 import { RegistrationDeadline } from './registration-deadline.js';
@@ -1239,9 +1240,9 @@ async function main() {
   const tPool = (typeof performance !== 'undefined' ? performance.now() : Date.now())
   // Listening is independent of readiness. Schema, accounting and required
   // workers must finish before business requests are admitted; failures are fatal.
-  initDB(pools.query)
-    .then(async () => {
-      if(installConfiguredHistoryReader(pools.query, lifecycleConfig))await enableSessionColdBodies(pools.query)
+  prepareRelaySchema(pools.query,()=>initDB(pools.query),(process.env.RELAY_SCHEMA_STARTUP??'auto') as RelaySchemaStrategy)
+    .then(async schemaStrategy => {
+      if(installConfiguredHistoryReader(pools.query, lifecycleConfig)){if(schemaStrategy==='verify')await assertSessionColdBodiesEnabled(pools.query);else await enableSessionColdBodies(pools.query)}
       const catalogReady = await initializeExtensionProviderCatalog(pools.query, extensionConfig.mode)
       if (!catalogReady) console.warn('[extensions] provider catalog unavailable while extensions are off')
       await assertRelayMaterializationReady(runtimeConfig.materializationMode, pools.query)

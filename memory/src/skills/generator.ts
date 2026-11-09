@@ -48,7 +48,7 @@ export function createSkillGenerator(deps: {
   onResult?: (result: 'success'|'failed'|'budget_denied', usage?: ModelUsage) => void
 }) {
   return {
-    async generate(source: ResolvedSkillInput, signal: AbortSignal): Promise<SkillGenerationResult> {
+    async generate(source: ResolvedSkillInput, signal: AbortSignal, requestKey?:string): Promise<SkillGenerationResult> {
       if (signal.aborted)
         return { ok: false, code: 'aborted', retryable: true }
       const packets = source.sources.map(item => ({
@@ -56,16 +56,18 @@ export function createSkillGenerator(deps: {
         content: `<untrusted_source token="${item.token}">\n${item.excerpt}\n</untrusted_source>`
       }))
       const result = await deps.provider.generateJson<unknown>({
-        operation: 'skill_extract', system, document: {
+        operation: 'skill_extract', requestKey, system, document: {
           prompt_version: SKILL_PROMPT_VERSION, source_kind: source.kind, repository_snapshot_id: source.repoSnapshotId,
           untrusted_source_packets: packets
         }, schema, timeoutMs: deps.timeoutMs, signal
       })
       if (!result.ok) {
-        deps.onResult?.(result.code === 'budget_exceeded' || result.code === 'budget_unavailable' ? 'budget_denied' : 'failed', result.usage)
+        const uncertain=result.billingUncertain||Boolean(result.timeoutFallback&&(result.code==='budget_exceeded'||result.code==='budget_unavailable'))
+        const reservation=result.budgetReservationId??result.timeoutFallback?.primary.budgetReservationId
+        deps.onResult?.(!uncertain&&(result.code === 'budget_exceeded' || result.code === 'budget_unavailable') ? 'budget_denied' : 'failed', result.usage)
         return {
-          ok: false, code: result.code, retryable: result.retryable, ...(result.usage ? { usage: result.usage } : {}),
-          ...(result.budgetReservationId ? { budgetReservationId: result.budgetReservationId } : {})
+          ok: false, code: uncertain?'provider_result_unknown':result.code, retryable: uncertain?false:result.retryable, ...(result.usage ? { usage: result.usage } : {}),
+          ...(reservation ? { budgetReservationId: reservation } : {})
         }
       }
       const parsed = SkillCandidateDocumentSchema.safeParse(result.value)

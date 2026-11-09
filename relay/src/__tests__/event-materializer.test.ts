@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import type { MaterializationInput } from '../materialization/types.js'
@@ -28,7 +29,8 @@ function inputFor(payload: Record<string, unknown>): MaterializationInput {
 }
 
 function pools() {
-  const query = vi.fn(async (sql: string) => {
+  const query = vi.fn(async (sql: string,params?:any[]) => {
+    if(sql.includes('public.native_session_authority'))return {rows:[{authority:{state:'current',sessionId:params![0]}}],rowCount:1}
     if (sql.includes('INSERT INTO events')) return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
     if (sql.includes('SELECT effect_status')) return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
     if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
@@ -169,6 +171,7 @@ describe('EventMaterializer', () => {
     const apply = vi.fn()
     const materializer = new EventMaterializer({
       pool: { query: vi.fn(async (sql: string) => {
+        if(sql.includes('native_session_alias_set'))return {rows:[{ids:['root']}],rowCount:1}
         if (sql.includes('INSERT INTO events')) return { rows: [{ id: 99, inserted: false, effect_status: 'completed', effect_step: 3 }], rowCount: 1 }
         return { rows: [], rowCount: 1 }
       }) } as never,
@@ -367,6 +370,7 @@ describe('EventMaterializer', () => {
   test('reuses the session-fence PoolClient for subagent usage', async () => {
     const client = {
       query: vi.fn(async (sql: string) => {
+        if(sql.includes('native_session_alias_set'))return {rows:[{ids:['root']}],rowCount:1}
         if (sql.includes('INSERT INTO subagent_usage_seen')) {
           return { rows: [{ usage_hash: 'hash' }], rowCount: 1 }
         }
@@ -378,7 +382,7 @@ describe('EventMaterializer', () => {
       connect: vi.fn().mockRejectedValue(new Error('Client has already been connected. You cannot reuse a client.')),
       release: vi.fn(),
     }
-    const pool = { connect: vi.fn().mockResolvedValue(client), query: vi.fn() }
+    const pool = { connect: vi.fn().mockResolvedValue(client), query: vi.fn(async()=>({rows:[{ids:['root']}]})) }
     const materializer = new EventMaterializer({ pool: pool as never })
 
     await expect(materializer.materialize(inputFor({
@@ -394,6 +398,7 @@ describe('EventMaterializer', () => {
     expect(client.query.mock.calls.map(([sql]) => sql)).toEqual([
       'BEGIN',
       expect.stringContaining('pg_advisory_xact_lock'),
+      expect.stringContaining('native_session_alias_set'),
       expect.stringContaining('deleted_sessions'),
       expect.stringContaining('session_allowed'),
       expect.stringContaining('INSERT INTO subagent_usage_seen'),
@@ -408,6 +413,7 @@ describe('EventMaterializer', () => {
     let ledgerCompleted = false
     const client = {
       query: vi.fn(async (sql: string) => {
+        if(sql.includes('native_session_alias_set'))return {rows:[{ids:['root']}],rowCount:1}
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 92, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
         }
@@ -421,7 +427,7 @@ describe('EventMaterializer', () => {
       connect: vi.fn().mockRejectedValue(new Error('Client has already been connected. You cannot reuse a client.')),
       release: vi.fn(),
     }
-    const pool = { connect: vi.fn().mockResolvedValue(client), query: vi.fn() }
+    const pool = { connect: vi.fn().mockResolvedValue(client), query: vi.fn(async()=>({rows:[{ids:['root']}]})) }
     const materializer = new EventMaterializer({ pool: pool as never })
 
     await expect(materializer.materialize(inputFor({
@@ -950,6 +956,7 @@ describe('EventMaterializer daemon session ownership', () => {
     const queries: { sql: string; params: any[] }[] = []
     const pool = {
       query: vi.fn(async (sql: string, params?: any[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         queries.push({ sql, params: params ?? [] })
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }

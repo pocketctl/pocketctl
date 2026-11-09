@@ -2,6 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import type { JobClaim, JobFence } from '../jobs/types.js'
 import { assertJobFence,StaleJobFenceError } from '../generation/fence.js'
+import {recordGenerationProviderEffect} from '../generation/provider-effect.js'
+import {guardSourceExecutionCommit,assertSourceProviderExecution} from '../sources/source-execution.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import type { V2GrantFacts } from '../governance/authorization.js'
 import { buildResolvedSkillArchive } from './archive.js'
 import { canonicalJsonString } from '../inbox/canonical-json.js'
@@ -36,6 +39,7 @@ export function createSkillWorker(deps: {
     try { await assertCurrentGrantClock(client,grant,[source.installationId]) }
     catch(error) { if(error instanceof TargetBindingError)throw new SkillWorkError('skill_forbidden'); throw error }
     await assertCurrentSkillSourceClock(client,source)
+    await guardSourceExecutionCommit(client)
   }
   async function assertSkillFence(client: pg.PoolClient, fence: JobFence) {
     try{await assertJobFence(client,fence)}catch(error){
@@ -118,6 +122,7 @@ export function createSkillWorker(deps: {
       await finishWithoutProvider(claim, ctx.fence, 'failed', 'skill_provider_unavailable')
       return
     }
+    await assertSourceProviderExecution(sourcePoolContext(deps.pool).namespace==='memory')
     let run: LockedRun, source: Awaited<ReturnType<typeof resolveSkillSource>>, generationRunId: string
     const start = await deps.pool.connect()
     try {
@@ -164,7 +169,11 @@ export function createSkillWorker(deps: {
     finally {
       start.release()
     }
-    const generated = await deps.generator.generate(source!, signal)
+    // The task run survives worker lease reclaims. A new generation_run UUID
+    // does not prove that the earlier provider request was never charged.
+    const generated = await deps.generator.generate(source!, signal,`skill:${run!.run_id}`)
+    await recordGenerationProviderEffect(deps.pool,{installationId:claim.installation_id,generationRunId,runId:run!.run_id,
+      operation:'extract_skill_candidate',usage:generated.usage,budgetReservationId:generated.budgetReservationId})
     if (signal.aborted)
       throw new SkillWorkError('skill_aborted', 'cancelled')
     const finish = await deps.pool.connect()

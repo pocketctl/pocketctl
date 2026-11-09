@@ -10,6 +10,7 @@ ARG RELEASE_VERSION=dev
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 COPY package.json package-lock.json ./
+COPY packages ./packages
 RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/

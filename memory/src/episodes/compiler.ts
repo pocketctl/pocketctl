@@ -1,3 +1,4 @@
+import {parseTeamSemanticProvenance,type TeamSemanticProvenance} from '@pocketctl/session-source'
 import { parseAcceptedDeliveryProvenance, type AcceptedDeliveryProvenance } from './accepted-delivery-source.js'
 
 /**
@@ -58,7 +59,8 @@ export interface EpisodeFacts {
   sourceReference?: EpisodeSourceReference | null
 }
 
-export interface EpisodeSourceReference {
+export type EpisodeSourceReference=EpisodeRawTeamSourceReference|(TeamSemanticProvenance&{accepted_delivery?:never})
+export interface EpisodeRawTeamSourceReference {
   source_kind: 'team_session'
   source_version: number
   team_id: string
@@ -111,6 +113,11 @@ export function sourceReferenceFromEvents(
 ): EpisodeSourceReference | null {
   for (const event of events) {
     const source = event.source_provenance ?? {}
+    if(source.source_kind==='team_semantic'){
+      const semantic=parseTeamSemanticProvenance(source)
+      if(semantic)return semantic
+      continue
+    }
     if (source.source_kind !== 'team_session'
       || typeof source.source_version !== 'number'
       || typeof source.team_id !== 'string'

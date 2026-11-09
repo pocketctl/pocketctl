@@ -1,3 +1,7 @@
+import {attachSourceMetrics} from './sources/metrics.js'
+import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
+import {createSharedSourceScheduler} from './sources/shared-scheduler.js'
+import {createNativeInstallationDiscovery} from './installations/native-discovery.js'
 import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
 import {createLifecycleAssessmentService} from './claims/lifecycle-assessment.js'
 import {createLifecycleObservationService} from './claims/lifecycle-observation.js'
@@ -10,14 +14,16 @@ import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-co
 import {createPublicationExecutor} from './governance/publication-executor.js'
 import {createAutomationRepository} from './governance/automation-repository.js'
 import {evaluateAutomation} from './governance/automation-evaluator.js'
+import {recordReviewProviderUsage} from './generation/provider-effect.js'
 import {createSharedClaimLifecycle} from './governance/publication-service.js'
 import { createServer } from 'http'
 import { createHash } from 'node:crypto'
 import { loadMemoryConfig } from './config.js'
 import { createMemoryPool } from './db.js'
-import { applyMemorySchema } from './schema.js'
-import {assertMemoryRuntimeCompatibility,MemoryRuntimeCompatibilityError} from './migrations/governance-v2/compatibility.js'
+import {prepareMemoryStartup} from './startup-schema.js'
+import {MemoryRuntimeCompatibilityError} from './migrations/governance-v2/compatibility.js'
 import { createShutdownSignal } from './shutdown.js'
+import {ProviderDrain,drainTextProvider,drainEmbeddingProvider} from './model/provider-drain.js'
 import { createRelayHttpClient, type RelayHttpClient } from './relay/http-client.js'
 import { createProviderTokenClient } from './relay/token-client.js'
 import { createInstallationsClient } from './relay/installations.js'
@@ -86,8 +92,7 @@ const GAUGE_INTERVAL_MS = 30_000
 async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
-  await applyMemorySchema(pool)
-  await assertMemoryRuntimeCompatibility(pool)
+  await prepareMemoryStartup(pool,config)
   if(config.delegatedPublishMode!=='enabled'){
     const c=await pool.connect();try{await c.query('BEGIN');await c.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))");await c.query("UPDATE memory_jobs SET state='dead',claim_epoch=claim_epoch+1,claimed_by=NULL,claim_expires_at=NULL,last_error_code='delegated_publish_off' WHERE job_type='execute_publication_delegation' AND state IN('pending','running')");await c.query('COMMIT')}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
   }
@@ -96,8 +101,10 @@ async function main(): Promise<void> {
     : undefined
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const { signal, wait } = createShutdownSignal()
+  const providerDrain=new ProviderDrain()
   const logger = createMemoryLogger(config.logLevel)
   const metrics = createMemoryMetrics()
+  attachSourceMetrics(pool,metrics.source)
   const loopError = (loop: string) => (error: unknown, job?: JobClaim) => {
     logger.log('error', 'loop_failed', {
       loop,
@@ -143,6 +150,7 @@ async function main(): Promise<void> {
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
+  let sharedSourceScheduler: ReturnType<typeof createSharedSourceScheduler> | undefined
   const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
     const http: RelayHttpClient = createRelayHttpClient({
@@ -165,8 +173,9 @@ async function main(): Promise<void> {
       http,
     })
     const feedClient = createFeedClient({ http, tokens })
-    const withdrawalClient = createDeliveryWithdrawalClient({ http, tokens })
-    const withdrawalConsumer = createDeliveryWithdrawalConsumer({ pool, signal, ...withdrawalClient })
+    const withdrawalConsumer = config.databaseNamespace==='memory'
+      ? createDeliveryWithdrawalConsumer({pool,signal,transport:'native'})
+      : createDeliveryWithdrawalConsumer({pool,signal,...createDeliveryWithdrawalClient({http,tokens})})
     const snapshotClient = createSnapshotClient({ http, tokens })
     const snapshotReconciler = createSnapshotReconciler({
       pool,
@@ -180,7 +189,7 @@ async function main(): Promise<void> {
         metrics.snapshot.inc({ result })
       },
     })
-    discovery = createDiscoveryWorker({
+    discovery = config.databaseNamespace==='memory'?createNativeInstallationDiscovery({pool,signal,installationAllowlist:new Set(config.installationAllowlist)}):createDiscoveryWorker({
       installations: createInstallationsClient({ http, tokens }),
       registry: createInstallationRegistry(pool),
       signal,
@@ -199,7 +208,7 @@ async function main(): Promise<void> {
       pollLeaseMs: 10_000,
       onError: loopError('feed_installation'),
       onScopeInvalidated: metrics.phase5.observeRevocationLag,
-      ...(config.sharedScopesMode !== 'off' ? {
+      ...(config.databaseNamespace!=='memory' && config.sharedScopesMode !== 'off' ? {
         pullScopeControlFeed: (installationId: string, limit: number) =>
           feedClient.pullScopeControlFeed(installationId, limit),
         ackScopeControlFeed: (input: { installation_id: string; cursor: string; lease_token: string }) =>
@@ -207,7 +216,7 @@ async function main(): Promise<void> {
       } : {}),
     })
     feedTimer = setInterval(() => {
-      const run = withdrawalConsumer.runOnce().catch(loopError('delivery_withdrawals'))
+      const run = (config.databaseNamespace==='memory'?Promise.resolve():withdrawalConsumer.runOnce()).catch(loopError('delivery_withdrawals'))
         .then(() => feedConsumer.runOnce()).then(() => undefined, loopError('feed'))
       feedInFlight.add(run)
       void run.finally(() => feedInFlight.delete(run))
@@ -274,6 +283,7 @@ async function main(): Promise<void> {
       },
     })
     jobWorker.register('project_feed', projection.handleProjectFeed)
+    if(config.databaseNamespace==='memory')jobWorker.register('project_shared_source',createCanonicalProjectionHandler(pool,{stabilizationMs:config.episodeStabilizationMs,sourceProfile:config.sharedSourceProfile,installationAllowlist:config.installationAllowlist}),{branch:'canonical'})
     const episodes = createEpisodeRepository(pool, {
       lifecycleMode: config.lifecycleMode,
       stabilizationMs: config.episodeStabilizationMs,
@@ -322,12 +332,14 @@ async function main(): Promise<void> {
         } : undefined
     // Guard each provider call independently. If MiMo times out and DeepSeek
     // runs, both attempts reserve budget instead of being miscounted as one.
-    const deepSeekTextGenerator = rawDeepSeekTextGenerator && textBudgetOptions && providerBudgetStore
+    const budgetedDeepSeekTextGenerator = rawDeepSeekTextGenerator && textBudgetOptions && providerBudgetStore
       ? withTextProviderBudget(rawDeepSeekTextGenerator, providerBudgetStore, textBudgetOptions)
       : rawDeepSeekTextGenerator
-    const mimoTextGenerator = rawMimoTextGenerator && textBudgetOptions && providerBudgetStore
+    const deepSeekTextGenerator=drainTextProvider(budgetedDeepSeekTextGenerator,providerDrain)
+    const budgetedMimoTextGenerator = rawMimoTextGenerator && textBudgetOptions && providerBudgetStore
       ? withTextProviderBudget(rawMimoTextGenerator, providerBudgetStore, textBudgetOptions)
       : rawMimoTextGenerator
+    const mimoTextGenerator=drainTextProvider(budgetedMimoTextGenerator,providerDrain)
     const textGenerator = mimoTextGenerator && deepSeekTextGenerator
       ? withTimeoutFallback(mimoTextGenerator, deepSeekTextGenerator)
       : (mimoTextGenerator ?? deepSeekTextGenerator)
@@ -346,7 +358,7 @@ async function main(): Promise<void> {
           thinking: config.textModel.thinking,
         })
       : undefined
-    const wikiTextGenerator = rawWikiTextGenerator && config.wikiProviderBudget && providerBudgetStore
+    const budgetedWikiTextGenerator = rawWikiTextGenerator && config.wikiProviderBudget && providerBudgetStore
       ? withTextProviderBudget(rawWikiTextGenerator, providerBudgetStore, {
           key: config.wikiProviderBudget.key,
           maxRequests: config.wikiProviderBudget.textRequestLimit,
@@ -355,6 +367,7 @@ async function main(): Promise<void> {
           maxOutputTokensPerRequest: config.wikiProviderBudget.textMaxOutputTokensPerRequest,
         })
       : undefined
+    const wikiTextGenerator=drainTextProvider(budgetedWikiTextGenerator,providerDrain)
     const rawSkillTextGenerator = config.textModel && config.skill.providerBudget
       ? createOpenAICompatibleTextGenerator({
           baseUrl: config.textModel.baseUrl, model: config.textModel.model, apiKey: config.textModel.apiKey,
@@ -366,7 +379,7 @@ async function main(): Promise<void> {
           maxOutputTokens: config.skill.providerBudget.textMaxOutputTokensPerRequest,
           maxAttempts: 1, thinking: config.textModel.thinking,
         }) : undefined
-    const skillTextGenerator = rawSkillTextGenerator && config.skill.providerBudget && providerBudgetStore
+    const budgetedSkillTextGenerator = rawSkillTextGenerator && config.skill.providerBudget && providerBudgetStore
       ? withTextProviderBudget(rawSkillTextGenerator, providerBudgetStore, {
           key: config.skill.providerBudget.key,
           maxRequests: config.skill.providerBudget.textRequestLimit,
@@ -374,6 +387,7 @@ async function main(): Promise<void> {
           maxOutputTokens: config.skill.providerBudget.textOutputTokenLimit,
           maxOutputTokensPerRequest: config.skill.providerBudget.textMaxOutputTokensPerRequest,
         }) : undefined
+    const skillTextGenerator=drainTextProvider(budgetedSkillTextGenerator,providerDrain)
     const skillWorker = createSkillWorker({ pool,
       context: { globalMode: config.mode, sharedMode: config.sharedScopesMode, config: config.skill },
       generator: skillTextGenerator ? createSkillGenerator({ provider: skillTextGenerator, timeoutMs: config.modelTimeoutMs, maxCandidateChars: config.skill.maxCandidateChars,
@@ -616,7 +630,8 @@ async function main(): Promise<void> {
       if(await automation.currentAdvice(input))return
       const prepared=await automation.prepare(input,ctx?.fence)
       if(!prepared)return
-      const decision=await evaluateAutomation(prepared,{provider:config.providerBudget&&config.textModel?.model===prepared.policy.model?deepSeekTextGenerator:undefined,signal,timeoutMs:config.modelTimeoutMs})
+      const decision=await evaluateAutomation(prepared,{provider:config.providerBudget&&config.textModel?.model===prepared.policy.model?deepSeekTextGenerator:undefined,drain:providerDrain,signal,timeoutMs:config.modelTimeoutMs,
+        onProviderUsage:response=>recordReviewProviderUsage(pool,{installationId:prepared.installationId,runId:prepared.runId,usage:response.usage,budgetReservationId:response.budgetReservationId})})
       await automation.finish(prepared,decision,ctx?.fence)
     })
     const enqueueReviewShadow=async()=>{
@@ -668,13 +683,14 @@ async function main(): Promise<void> {
           maxAttempts: config.providerBudget ? 1 : undefined,
         })
       : undefined
-    const workerEmbeddingProvider = rawWorkerEmbeddingProvider && config.providerBudget && providerBudgetStore
+    const budgetedWorkerEmbeddingProvider = rawWorkerEmbeddingProvider && config.providerBudget && providerBudgetStore
       ? withEmbeddingProviderBudget(rawWorkerEmbeddingProvider, providerBudgetStore, {
           key: config.providerBudget.key,
           maxRequests: config.providerBudget.embeddingMaxRequests,
           maxTokens: config.providerBudget.embeddingMaxTokens,
         })
       : rawWorkerEmbeddingProvider
+    const workerEmbeddingProvider=drainEmbeddingProvider(budgetedWorkerEmbeddingProvider,providerDrain)
     const claimIndexer = createClaimIndexer({
       pool,
       ...(config.embeddingModel && workerEmbeddingProvider ? {
@@ -720,6 +736,10 @@ async function main(): Promise<void> {
           },
         )
       }
+    }
+    if(config.databaseNamespace==='memory'){
+      sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,refreshInstallations:()=>discovery!.discoverOnce(),refreshWithdrawals:()=>withdrawalConsumer.runOnce(),onError:loopError('shared_source_scheduler')})
+      sharedSourceScheduler.start()
     }
     jobWorker.start()
 
@@ -769,6 +789,7 @@ async function main(): Promise<void> {
   // process start would self-terminate the worker; the per-loop drain steps
   // below already bound how long shutdown itself takes.
   await wait
+  providerDrain.close()
   // Stop every timer first so no new cycle can start while draining; then
   // wait for the in-flight passes so pool.end() never yanks the connection
   // out from under a relay ack or feed commit.
@@ -785,21 +806,26 @@ async function main(): Promise<void> {
     statusWorker?.stop(),
     usageWorker?.stop(),
     discovery?.stop(),
+    sharedSourceScheduler?.stop(),
   ])
   const jobOutcome = await jobWorker?.stop()
-  await Promise.race([
-    Promise.allSettled([...feedInFlight]),
-    new Promise(resolve => {
-      const timer = setTimeout(resolve, 10_000)
-      timer.unref?.()
-    }),
-  ])
+  let feedDrainTimer:ReturnType<typeof setTimeout>|undefined
+  let feedDrained:boolean
+  try{
+    feedDrained=await Promise.race([
+      Promise.allSettled([...feedInFlight]).then(()=>true),
+      new Promise<boolean>(resolve=>{feedDrainTimer=setTimeout(()=>resolve(false),10_000)}),
+    ])
+  }finally{if(feedDrainTimer)clearTimeout(feedDrainTimer)}
+  if(!feedDrained)logger.log('error','feed_drain_deadline',{active:feedInFlight.size})
+  const providerOutcome=await providerDrain.wait(10_000)
+  if(!providerOutcome.drained)logger.log('error','provider_drain_deadline',providerOutcome)
   // Idle keep-alive scrapers would otherwise hold close() open indefinitely.
   metricsServer.closeIdleConnections()
   await new Promise<void>(resolve => metricsServer.close(() => resolve()))
   await pool.end()
-  logger.log('info', 'worker_stopped', { job_outcome: jobOutcome ?? 'off' })
-  process.exit(jobOutcome === 'deadline' ? 1 : 0)
+  logger.log('info', 'worker_stopped', { job_outcome: jobOutcome ?? 'off',feed_drained:feedDrained,provider_drained:providerOutcome.drained })
+  process.exit(jobOutcome === 'deadline'||!feedDrained||!providerOutcome.drained ? 1 : 0)
 }
 
 main().catch(error => {

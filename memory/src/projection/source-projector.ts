@@ -1,3 +1,4 @@
+import {lockLegacySourceInput} from '../sources/input-mode.js'
 import { parseMemorySourceProvenance } from '../episodes/skill-provenance.js'
 import type pg from 'pg'
 import { classifyArtifact } from './artifact-classifier.js'
@@ -12,7 +13,11 @@ const TURN_STATES = new Set([
 ])
 const COMMIT_SHA_PATTERN = /^[0-9a-f]{7,64}$/i
 
-interface InboxRow {
+interface ProjectionRow {
+  session_id:string|null;turn_id:string|null;event_type:string;recorded_at:Date|string;data:Record<string,unknown>;feed_id?:string|number
+}
+
+interface InboxRow extends ProjectionRow {
   feed_id: string | number
   topic: string
   source_kind: string
@@ -62,6 +67,7 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
     try {
       await client.query('BEGIN')
       try {
+        await lockLegacySourceInput(client,installationId)
         // Serialize projectors before discovery so a queued pass observes the
         // next batch, rather than rediscovering a batch another pass consumes.
         // Purge never takes this key: lifecycle fences remain session ->
@@ -228,7 +234,24 @@ async function projectRow(
     )
     return 0
   }
-  const eventId = event.sourceEventId
+  await projectDerivedRows(client,installationId,sourceRow,event.sourceEventId,stabilizationMs)
+  await client.query(
+    `UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
+     WHERE installation_id = $1 AND feed_id = $2`,
+    [installationId, row.feed_id],
+  )
+  return 0
+}
+
+/** Reuses deterministic derived projections without manufacturing a Feed ID
+ * or persisting an event body. Caller owns the current root/output transaction. */
+export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number):Promise<void>{
+ const row:ProjectionRow={session_id:fact.sessionId,turn_id:fact.turnId,event_type:fact.eventType,recorded_at:fact.occurredAt,data:fact.payload}
+ await upsertSession(client,installationId,row)
+ await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs)
+}
+
+async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number):Promise<void>{
   const data = sourceRow.data ?? {}
 
   if (sourceRow.turn_id) {
@@ -286,18 +309,12 @@ async function projectRow(
   }
 
   await observeRepository(client, installationId, data, sourceRow.recorded_at)
-  await client.query(
-    `UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
-     WHERE installation_id = $1 AND feed_id = $2`,
-    [installationId, row.feed_id],
-  )
-  return 0
 }
 
 async function upsertSession(
   client: Pick<pg.PoolClient, 'query'>,
   installationId: string,
-  row: InboxRow,
+  row: ProjectionRow,
 ): Promise<void> {
   const data = row.data ?? {}
   const agentType = row.event_type === 'session_discovered' && typeof data.agent === 'string'
@@ -319,12 +336,12 @@ async function upsertSession(
       cwd_observation = COALESCE(EXCLUDED.cwd_observation, source_sessions.cwd_observation),
       worktree_path = COALESCE(EXCLUDED.worktree_path, source_sessions.worktree_path),
       worktree_branch = COALESCE(EXCLUDED.worktree_branch, source_sessions.worktree_branch),
-      last_recorded_at = EXCLUDED.last_recorded_at,
-      last_feed_id = GREATEST(COALESCE(source_sessions.last_feed_id, 0), EXCLUDED.last_feed_id)
+      last_recorded_at = GREATEST(source_sessions.last_recorded_at,EXCLUDED.last_recorded_at),
+      last_feed_id = CASE WHEN EXCLUDED.last_feed_id IS NULL THEN source_sessions.last_feed_id ELSE GREATEST(COALESCE(source_sessions.last_feed_id, 0), EXCLUDED.last_feed_id) END
   `, [
     installationId, row.session_id, agentType, daemonId,
     typeof data.status === 'string' ? data.status : null,
-    cwd, worktreePath, worktreeBranch, row.recorded_at, String(row.feed_id),
+    cwd, worktreePath, worktreeBranch, row.recorded_at, row.feed_id===undefined?null:String(row.feed_id),
   ])
 }
 
@@ -367,7 +384,7 @@ async function insertSourceEvent(
 async function upsertTurn(
   client: Pick<pg.PoolClient, 'query'>,
   installationId: string,
-  row: InboxRow,
+  row: ProjectionRow,
   sourceEventId: string,
 ): Promise<void> {
   const data = row.data ?? {}
@@ -382,7 +399,7 @@ async function upsertTurn(
   `, [installationId, row.turn_id])
   const current = existing.rows[0]?.state
   let nextStatus: string | null = status
-  let terminalAt: Date | null = null
+  let terminalAt: Date | string | null = null
   if (current && TERMINAL_TURN_STATES.has(current)) {
     // Terminal states never regress, even on late same-turn events.
     nextStatus = current
@@ -425,7 +442,7 @@ async function observeRepository(
   client: Pick<pg.PoolClient, 'query'>,
   installationId: string,
   data: Record<string, unknown>,
-  observedAt: Date,
+  observedAt: Date | string,
 ): Promise<void> {
   const repositoryId = typeof data.repository_id === 'string' && data.repository_id.length > 0
     ? data.repository_id

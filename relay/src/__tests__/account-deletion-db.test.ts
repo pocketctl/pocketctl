@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { deleteUserAccount, userExists } from '../db.js'
 
@@ -5,12 +6,13 @@ function transactionPool(handler?: (sql: string, params?: any[]) => any) {
   const calls: Array<{ sql: string; params?: any[] }> = []
   const client = {
     query: vi.fn(async (sql: string, params?: any[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       calls.push({ sql, params })
       if (handler) return handler(sql, params)
       if (/SELECT id FROM users WHERE id = \$1 FOR UPDATE/i.test(sql)) {
         return { rows: [{ id: 7 }], rowCount: 1 }
       }
-      if (/SELECT session_id FROM sessions WHERE user_id = \$1/i.test(sql)) {
+      if (/SELECT session_id FROM sessions WHERE user_id\s*=\s*\$1/i.test(sql)) {
         return { rows: [{ session_id: 'session-1' }], rowCount: 1 }
       }
       return { rows: [], rowCount: 1 }

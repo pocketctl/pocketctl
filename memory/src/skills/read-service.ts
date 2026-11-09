@@ -1,3 +1,5 @@
+import {assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {independentSourceCount,manifestSourceRoots} from '../episodes/source-lineage.js'
 import {rankAssistedCandidates} from '../governance/knowledge-assistance.js'
 import { createHmac, timingSafeEqual } from 'node:crypto'
@@ -43,6 +45,7 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
         try { await assertCurrentSkillSourceClock(client,{installationId:identity.installationId,versionId,...(originPolicyStamp?{originPolicyStamp}:{})}) }
         catch(error) { if(error instanceof SkillWorkError)return fail('not_found'); throw error }
       }
+      try{await assertRetainedSourceGuards(client)}catch(error){if(preparedSourceUnavailable(error))return fail('not_found');throw error}
       await client.query('COMMIT'); return result
     }
     catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }

@@ -1,19 +1,26 @@
+import {createSourceMetrics} from './sources/metrics.js'
 import {LIFECYCLE_HEALTH_REASONS,loadLifecycleHealth,evaluateLifecycleHealth,summarizeLifecycleHealth,type LifecycleMode} from './reporting/lifecycle-health.js'
 import {BUSINESS_HEALTH_REASONS, loadBudgetUncertainty,loadBusinessHealth, evaluateBusinessHealth} from './reporting/business-health.js'
 import {JOB_TYPES} from './jobs/types.js'
 import { Registry, Counter, Gauge, Histogram } from 'prom-client'
 import type pg from 'pg'
+import {sourcePoolContext} from './sources/pool-context.js'
 
 export async function updateFeedLagGauge(
   pool: Pick<pg.Pool, 'query'>,
   gauge: Pick<Gauge, 'set'>,
 ): Promise<void> {
+  const shared=sourcePoolContext(pool).namespace==='memory'
   const lag = await pool.query<{ lag_seconds: string | null }>(`
-    SELECT EXTRACT(EPOCH FROM (NOW() - MIN(COALESCE(last_pull_at, created_at))))::text AS lag_seconds
-    FROM memory_installations
-    WHERE relay_status IN ('pending', 'active')
-      AND local_status IN ('discovering', 'syncing', 'ready', 'degraded')
-      AND snapshot_required = FALSE
+    SELECT EXTRACT(EPOCH FROM (NOW() - MIN(COALESCE(i.last_pull_at, i.created_at))))::text AS lag_seconds
+    FROM memory_installations i
+    ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
+    ${shared?'LEFT JOIN memory_owner_scopes owner_scope USING(installation_id)':''}
+    WHERE i.relay_status IN ('pending', 'active')
+      AND i.local_status IN ('discovering', 'syncing', 'ready', 'degraded')
+      AND i.snapshot_required = FALSE
+      ${shared?"AND COALESCE(source_mode.mode,'legacy-feed') IN ('legacy-feed','shared-shadow')":''}
+      ${shared?"AND COALESCE(owner_scope.owner_scope_kind,'personal')='personal'":''}
   `)
   gauge.set(Number(lag.rows[0]?.lag_seconds ?? 0))
 }
@@ -25,6 +32,7 @@ export async function updateFeedLagGauge(
  */
 export function createMemoryMetrics() {
   const registry = new Registry()
+  const source=createSourceMetrics(registry)
   const phase1 = createPhase1Metrics(registry)
   const phase4 = createPhase4Metrics(registry)
   const phase5 = createPhase5Metrics(registry)
@@ -139,7 +147,7 @@ export function createMemoryMetrics() {
   })
 
   return {
-    registry,
+    registry,source,
     lifecycleAlerts,lifecycleExecution,lifecycleCoverage,lifecycleModes,
     businessAlerts, evidenceGaps, extractionOutcomes, budgetUncertainty,
     installations,

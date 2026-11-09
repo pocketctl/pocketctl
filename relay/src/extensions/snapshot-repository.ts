@@ -36,6 +36,7 @@ function sessionScopeClauses(
   const clauses: string[] = [
     "s.source IS DISTINCT FROM 'app_review_demo'",
     "s.session_id NOT LIKE 'app-review-demo-%'",
+    "public.native_session_authority(s.session_id,s.user_id,NULL)->>'state'='current'",
   ]
   if (daemonIds.length > 0) {
     params.push(daemonIds)
@@ -83,6 +84,8 @@ export interface SnapshotEventRow {
   event_type: string
   payload: Record<string, unknown>
   created_at: Date
+  source_binding?:{version:1;original_session_id:string;current_session_id:string}
+  logical_source_session_id?:string
 }
 
 export async function getSnapshotEventPage(
@@ -94,12 +97,14 @@ export async function getSnapshotEventPage(
   const params: unknown[] = [scope.installationId, scope.providerId, sessionId, options.afterEventId, options.limit]
   const scopeSql = sessionScopeClauses(scope.eventFilter ?? {}, params)
   const result = await pool.query<SnapshotEventRow>(`
-    SELECT e.id AS event_id, e.event_type, e.payload, e.created_at, ${EVENT_BODY_COLUMNS.split(', ').map(name => `e.${name}`).join(', ')}
+    SELECT e.id AS event_id, e.event_type, e.payload, e.created_at,e.logical_source_session_id, ${EVENT_BODY_COLUMNS.split(', ').map(name => `e.${name}`).join(', ')}
     FROM extension_installations i
     JOIN sessions s ON s.user_id = i.owner_user_id AND s.session_id = $3
     JOIN events e ON e.session_id = s.session_id
     WHERE i.installation_id = $1
       AND i.provider_id = $2
+      AND NOT e.owner_retired AND public.native_event_authority(e.id,i.owner_user_id)->>'state'='current' AND e.user_id=i.owner_user_id
+      AND public.native_session_authority(s.session_id,i.owner_user_id,NULL)->>'state'='current'
       AND e.id > $4
       AND ${scopeSql.join('\n      AND ')}
     ORDER BY e.id ASC
@@ -117,6 +122,7 @@ export async function getSnapshotEventPage(
     event_type: row.event_type,
     payload: row.payload,
     created_at: row.created_at,
+    ...(row.logical_source_session_id!==sessionId?{source_binding:{version:1 as const,original_session_id:row.logical_source_session_id!,current_session_id:sessionId}}:{}),
   }))
 }
 

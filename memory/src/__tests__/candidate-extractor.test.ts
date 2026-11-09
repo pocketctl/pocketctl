@@ -36,6 +36,7 @@ function fakeStore(episodeOverrides: Partial<Parameters<ExtractionRepository['lo
     })),
     reserveRun: vi.fn(async () => ({ runId: 'run-1', owner: true, existingState: null })),
     markRun: vi.fn(async () => undefined),
+    recordProviderUsage:vi.fn(async()=>undefined),
     discardRun: vi.fn(async () => undefined),
     persistCandidates: vi.fn(async () => undefined),
   }
@@ -173,6 +174,25 @@ describe('extraction prompts', () => {
 })
 
 describe('candidate extractor orchestration', () => {
+  test('shared extraction requires its dispatched execution before reserving a run',async()=>{
+    const store=fakeStore(),g=generator([])
+    Object.assign(store,{sourceExecutionRequired:true})
+    await expect(createCandidateExtractor({...DEPS_BASE,store,textGenerator:{generateJson:g.fn} as TextGenerator}).extract({installationId:INSTALLATION,turnId:'turn-1',signal:new AbortController().signal})).rejects.toThrow('source_execution_required')
+    expect(store.reserveRun).not.toHaveBeenCalled();expect(g.fn).not.toHaveBeenCalled()
+  })
+  test('a budgeted uncertain response holds the original attempt instead of permitting a fresh paid retry',async()=>{
+    const store=fakeStore(),g=generator([{ok:false,code:'http_error',retryable:true,billingUncertain:true,budgetReservationId:'original-reservation'}])
+    const extractor=createCandidateExtractor({...DEPS_BASE,store,textGenerator:{generateJson:g.fn} as TextGenerator})
+    expect(await extractor.extract({installationId:INSTALLATION,turnId:'turn-1',signal:new AbortController().signal})).toMatchObject({kind:'failed',errorCode:'provider_result_unknown',retryable:false})
+    expect(store.markRun).toHaveBeenCalledWith(expect.objectContaining({errorCode:'provider_result_unknown'}))
+  })
+  test('records incurred usage before a late output fence can fail',async()=>{
+    const store=fakeStore(),g=generator([{ok:true,value:{candidates:[]},usage:{inputTokens:7,outputTokens:3,costMicros:11,model:'synthetic'}}])
+    store.persistCandidates.mockRejectedValueOnce(Error('late_output_fence'))
+    const extractor=createCandidateExtractor({...DEPS_BASE,store,textGenerator:{generateJson:g.fn} as TextGenerator})
+    await expect(extractor.extract({installationId:INSTALLATION,turnId:'turn-1',signal:new AbortController().signal})).rejects.toThrow('late_output_fence')
+    expect(store.recordProviderUsage).toHaveBeenCalledExactlyOnceWith({runId:'run-1',inputTokens:7,outputTokens:3,costMicros:11})
+  })
   const deduper = {
     tombstonedKeys: async () => new Set<string>(),
     activeFamilyFor: async () => ({ exactClaimId: null, family: [] }),

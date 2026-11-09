@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken'
 import { signProviderExtensionToken, PROVIDER_TOKEN_AUDIENCE } from '../extensions/provider-auth.js'
 import type { FeedRouteDeps } from '../extensions/feed-routes.js'
 import { createHash } from 'node:crypto'
-import { encodeFeedCursor, filterHashForInstallation } from '../extensions/cursor.js'
+import { encodeFeedCursor, decodeFeedCursor, filterHashForInstallation } from '../extensions/cursor.js'
 
 const { registerFeedRoutes } = await import('../extensions/feed-routes.js')
 
@@ -14,6 +14,7 @@ const ISSUER = 'https://relay.example.test'
 const INSTALLATION = '11111111-1111-1111-1111-111111111111'
 
 interface Script {
+  sourceMode?: {mode:string;generation:string;allowed:boolean}
   installation?: Record<string, unknown> | null
   checkpoint?: Record<string, unknown>
   feedRows?: Array<Record<string, unknown>>
@@ -25,6 +26,8 @@ function scriptPool(script: Script) {
   const client = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       queries.push({ sql, params })
+      if(sql.includes("to_regclass('shared.memory_source_contract')"))return {rows:[{present:script.sourceMode!==undefined}]}
+      if(sql.includes('shared.lock_memory_feed_source_mode'))return {rows:[{policy:script.sourceMode}]}
       if (/^BEGIN$/i.test(sql.trim()) || /^COMMIT$/i.test(sql.trim())
         || /^ROLLBACK$/i.test(sql.trim())) return { rows: [] }
       if (/FROM extension_installations[\s\S]*FOR UPDATE/.test(sql)) {
@@ -102,6 +105,14 @@ function makeApp(script: Script, deps: Partial<FeedRouteDeps> = {}) {
 
 describe('extension feed routes', () => {
   const apps: Array<FastifyInstance> = []
+
+  test('a shared Memory pull signs the exact source generation without unsafe integer conversion',async()=>{
+    const app=makeApp({sourceMode:{mode:'shared-shadow',generation:'9007199254740993',allowed:true}})
+    apps.push(app)
+    const response=await app.inject({method:'GET',url:'/api/extensions/v1/feed?installation_id='+INSTALLATION,headers:{authorization:'Bearer '+providerToken()}})
+    expect(response.statusCode).toBe(200)
+    expect(decodeFeedCursor(response.json().next_cursor,CURSOR_SECRET)?.source_mode_generation).toBe('9007199254740993')
+  })
 
   afterEach(async () => {
     await Promise.all(apps.splice(0).map(app => app.close()))

@@ -1,3 +1,7 @@
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
+import {retainedSourceRead} from '../sources/retained-read.js'
+import {guardRetainedVersions,rememberRetainedVersionStatement} from '../sources/retained-versions.js'
+import {guardRetainedEvidence,registerRetainedReadCheck} from '../sources/retained-authority.js'
 import { randomUUID } from 'crypto'
 import type pg from 'pg'
 import { createSearchService, type SearchInput, type SearchService } from './search-service.js'
@@ -10,6 +14,7 @@ import { createSearchService, type SearchInput, type SearchService } from './sea
  */
 
 export interface RecallInput {
+  authorityGrant?:SearchInput['authorityGrant']
   installationId: string
   lifecycle?:SearchInput['lifecycle']
   query: string
@@ -80,6 +85,7 @@ export function createRecallService(
 
       const searchInput: SearchInput = {
         installationId: input.installationId,
+        authorityGrant:input.authorityGrant,
         lifecycle:input.lifecycle,
         query: input.query,
         repositoryId: input.repositoryId,
@@ -95,11 +101,13 @@ export function createRecallService(
       }
       const searched = await search.search(searchInput)
 
+      const accepted=await retainedSourceRead(pool,{installationId:input.installationId,authorityGrant:input.authorityGrant},async db=>{
+      await guardRetainedVersions(db,input.installationId,searched.hits.map(hit=>hit.versionId),{expectedStatements:new Map(searched.hits.map(hit=>[hit.versionId,hit.statement])),requireCurrent:!input.asOf,requireAvailable:true,asOf:input.asOf??undefined})
       const claims: RecallClaim[] = []
       const episodeIds = new Set<string>()
       let usedChars = 0
       for (const hit of searched.hits) {
-        const evidenceRows = await pool.query<{
+        const evidenceRows = await db.query<{
           evidence_id: string
           evidence_kind: string
           episode_id: string | null
@@ -136,7 +144,7 @@ export function createRecallService(
           })
           if (row.episode_id) episodeIds.add(row.episode_id)
         }
-        claims.push({
+        const claim:RecallClaim={
           claimId: hit.claimId,
           versionId: hit.versionId,
           claimType: hit.claimType,
@@ -146,12 +154,14 @@ export function createRecallService(
           freshnessAt: hit.freshnessAt,
           authority: hit.authority,
           evidence,
-        })
+        }
+        rememberRetainedVersionStatement(claim,hit.statement)
+        claims.push(claim)
         if (usedChars >= maxChars) break
       }
 
       const episodes = episodeIds.size > 0
-        ? await pool.query<{
+        ? await db.query<{
           episode_id: string
           session_id: string
           turn_id: string
@@ -166,16 +176,23 @@ export function createRecallService(
         `, [input.installationId, [...episodeIds]])
         : { rows: [] as Array<{ episode_id: string; session_id: string; turn_id: string; outcome: string | null; terminal_at: Date | null }> }
 
+      const visibleEpisodes:typeof episodes.rows=[]
+      for(const row of episodes.rows){
+       try{await guardRetainedEvidence(db,input.installationId,[{source_event_id:null,artifact_id:null,episode_id:row.episode_id,evidence_kind:'episode'}]);visibleEpisodes.push(row)}
+       catch(error){if(!preparedSourceUnavailable(error))throw error}
+      }
+
       // Conflicts are deterministic validator outcomes explicitly linked to a
       // recalled active claim, never arbitrary claims that merely share a type.
       const conflicts: RecallResult['conflicts'] = []
       if (claims.length > 0) {
-        const conflictRows = await pool.query<{
+        const conflictRows = await db.query<{
           claim_id: string
           claim_type: string
           statement: string
+          row_version:string
         }>(`
-          SELECT candidate_id::text AS claim_id, claim_type, statement
+          SELECT candidate_id::text AS claim_id, claim_type, statement,episode_id::text,xmin::text AS row_version
           FROM memory_candidates
           WHERE installation_id = $1
             AND status = 'conflict'
@@ -186,6 +203,14 @@ export function createRecallService(
           input.installationId,
           claims.map(claim => claim.claimId),
         ])
+        await guardRetainedEvidence(db,input.installationId,conflictRows.rows.map(row=>({source_event_id:null,artifact_id:null,episode_id:(row as unknown as {episode_id:string|null}).episode_id,evidence_kind:'episode'})))
+        if(conflictRows.rows.length){
+         const expected=JSON.stringify(conflictRows.rows.map(row=>[row.claim_id,row.row_version])),ids=conflictRows.rows.map(row=>row.claim_id)
+         await registerRetainedReadCheck(db,input.installationId,async current=>{
+          const fresh=(await current.query('SELECT candidate_id::text AS claim_id,xmin::text AS row_version FROM memory_candidates WHERE installation_id=$1 AND candidate_id=ANY($2::uuid[]) ORDER BY candidate_id FOR SHARE NOWAIT',[input.installationId,ids])).rows
+          if(JSON.stringify(fresh.map(row=>[row.claim_id,row.row_version]))!==expected)throw Error('source_reference_changed')
+         })
+        }
         for (const row of conflictRows.rows) {
           conflicts.push({
             claimId: row.claim_id,
@@ -203,7 +228,7 @@ export function createRecallService(
         degradedComponents: searched.degradedComponents,
         claims,
         conflicts,
-        relatedEpisodes: episodes.rows.map(row => ({
+        relatedEpisodes: visibleEpisodes.map(row => ({
           episodeId: row.episode_id,
           sessionId: row.session_id,
           turnId: row.turn_id,
@@ -213,6 +238,8 @@ export function createRecallService(
         coverageGaps,
         totalChars: usedChars,
       }, maxChars)
+      })
+      return accepted??boundRecallResult({requestId:randomUUID(),degradedComponents:[...new Set([...searched.degradedComponents,'source_unavailable'])],claims:[],conflicts:[],relatedEpisodes:[],coverageGaps:['source_unavailable'],totalChars:0},maxChars)
     },
   }
 }

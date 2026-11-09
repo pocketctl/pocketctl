@@ -1,3 +1,4 @@
+import {freshNativeSchemaUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, expect, test, vi } from 'vitest'
 import { getTokenUsageFactDailySeries, initDB } from '../db.js'
 
@@ -6,6 +7,7 @@ describe('token usage fact read helpers', () => {
     const queries: string[] = []
     const pool: any = {
       query: vi.fn(async (sql: string) => {
+        const native=freshNativeSchemaUnitResult(sql);if(native)return native
         queries.push(sql)
         return { rows: [], rowCount: 0 }
       }),

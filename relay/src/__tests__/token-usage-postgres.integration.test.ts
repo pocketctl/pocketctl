@@ -9,11 +9,11 @@ import {
 } from '../token-usage/dashboard-v2.js'
 import { closeEligibleTokenUsageDays, closeTokenUsageDay } from '../token-usage/day-closer.js'
 import { migrateTokenUsageAccounting } from '../token-usage/migration.js'
+import {resetDurableIngressPublicSchema} from './durable-ingress-test-db.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const integrationEnabled = Boolean(databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1')
 const describeWithDatabase = integrationEnabled ? describe.sequential : describe.skip
-const schema = `token_usage_task2_${process.pid}`
 
 describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
   let admin: pg.Pool
@@ -27,32 +27,25 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
     if (!/test/i.test(database.rows[0]?.database_name ?? '')) {
       throw new Error('Refusing token accounting integration test against a non-test database')
     }
-    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
-    await admin.query(`CREATE SCHEMA ${schema}`)
+    await resetDurableIngressPublicSchema(admin,databaseUrl!)
     pool = new pg.Pool({
       connectionString: databaseUrl,
-      options: `-c search_path=${schema}`,
     })
     await initDB(pool)
   }, 30_000)
 
   afterAll(async () => {
     await pool?.end()
-    await admin?.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
     await admin?.end()
   })
 
   test('upgrades the earlier source_event primary key before making it nullable', async () => {
-    const upgradeSchema = `${schema}_upgrade`
-    await admin.query(`DROP SCHEMA IF EXISTS ${upgradeSchema} CASCADE`)
-    await admin.query(`CREATE SCHEMA ${upgradeSchema}`)
+    await resetDurableIngressPublicSchema(admin,databaseUrl!)
     const upgradePool = new pg.Pool({
       connectionString: databaseUrl,
-      options: `-c search_path=${upgradeSchema}`,
     })
     const concurrentUpgradePool = new pg.Pool({
       connectionString: databaseUrl,
-      options: `-c search_path=${upgradeSchema}`,
     })
     try {
       await initDB(upgradePool)
@@ -156,7 +149,8 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
     } finally {
       await concurrentUpgradePool.end()
       await upgradePool.end()
-      await admin.query(`DROP SCHEMA IF EXISTS ${upgradeSchema} CASCADE`)
+      await resetDurableIngressPublicSchema(admin,databaseUrl!)
+      await initDB(pool)
     }
   }, 30_000)
 
@@ -450,7 +444,7 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
     ])
   })
 
-  test('deletes user-owned session rollups and cannot expose them after session id reuse', async () => {
+  test('deletes user-owned session rollups and rejects retired session id reuse', async () => {
     const date = new Date(Date.now() - 8 * 86_400_000).toISOString().slice(0, 10)
     const oldUser = await pool.query<{ id: number }>(`
       INSERT INTO users (email, password_hash) VALUES ('session-owner-old@example.test', '') RETURNING id
@@ -483,10 +477,10 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
     `)
     const newUserId = newUser.rows[0].id
     await pool.query(`INSERT INTO daemons (daemon_id, user_id) VALUES ('session-owner-new-daemon', $1)`, [newUserId])
-    await pool.query(`
+    await expect(pool.query(`
       INSERT INTO sessions (session_id, daemon_id, user_id, model, agent_type)
       VALUES ('reused-session-id', 'session-owner-new-daemon', $1, 'gpt-test', 'codex')
-    `, [newUserId])
+    `, [newUserId])).rejects.toThrow('retired native session')
 
     await expect(getSessionTokenTrendV2(pool, newUserId, 'reused-session-id', 30)).resolves.toEqual([])
   })

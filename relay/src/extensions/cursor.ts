@@ -13,6 +13,7 @@ export interface FeedCursorV1 {
   config_version: string
   filter_hash: string
   exp: number
+  source_mode_generation?: string
 }
 
 /** Real HMAC-SHA256; the frozen design forbids secret-prefix hashing. */
@@ -57,6 +58,7 @@ export function decodeFeedCursor(
     return null
   }
   if (cursor.exp * 1000 <= now) return null
+  if(cursor.source_mode_generation!==undefined&&(typeof cursor.source_mode_generation!=='string'||!/^[1-9][0-9]*$/.test(cursor.source_mode_generation)||BigInt(cursor.source_mode_generation)>9223372036854775807n))return null
   return cursor
 }
 

@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import pg from 'pg'
 
@@ -116,6 +117,7 @@ function sessionPool(
     queries,
     query: vi.fn(async (sql: string, params: any[] = []) => {
       queries.push({ sql, params })
+      const native=nativeAliasUnitResult(sql,params);if(native)return native
       if (sql.includes('SELECT 1 FROM daemons')) return { rows: [{ owned: true }], rowCount: 1 }
       if (sql.includes('WITH owned_session')) {
         const owned = sessionExists && !state.deleted

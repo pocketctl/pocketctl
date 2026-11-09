@@ -31,7 +31,9 @@ describe('session document schema bootstrap', () => {
   })
 
   test('is included in the serialized main database bootstrap', async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
+    const query = vi.fn(async(sql:string) => sql.includes('AS native_function')
+      ? {rows:[{native_function:false,definition:null,aliases:false,documents:false,relay_contract:false,barriers:false,event_marker:false,document_marker:false,boundary_marker:false,event_authority:false,event_guard:false,document_guard:false}],rowCount:1}
+      : {rows:[],rowCount:0})
 
     await initDB({ query } as never)
 

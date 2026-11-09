@@ -1,3 +1,4 @@
+import {assertRetainedVersionResponse} from '../sources/retained-versions.js'
 import {createEvidenceService} from '../claims/evidence-service.js'
 import {resolveLifecycleReadFrame,listLifecycleReadScenes} from '../context/lifecycle-frame.js'
 import type {SearchServiceDeps} from '../retrieval/search-service.js'
@@ -172,12 +173,14 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
               const resolved=scopedContexts.contexts.get(scope.installationId)!
               if(!resolved.context)return unavailableScopeSearchPage<SearchHit>(resolved.reason)
               return search.search({
+          authorityGrant:currentGrant(),
           installationId: scope.installationId,
           query: args.query,
           ...resolved.context,
           lifecycle:lifecycleFrames.get(scope.installationId),
           claimTypes: args.claim_types ?? null,
           asOf: cursor.asOf,
+            selectionHistorical:cursor.historical,
           limit: pageLimit,
           cursor: innerCursor,
         })
@@ -202,6 +205,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       const metadata = await decorateWithScopeMetadata(
         deps.pool, scopes.map(scope => scope.installationId), ids,
       )
+      await assertRetainedVersionResponse(deps.pool,currentGrant(),page.map(entry=>({installationId:entry.scope.installationId,versionId:entry.hit.versionId,statement:entry.hit.statement})),{requireCurrent:!cursor.historical,asOf:cursor.historical?cursor.asOf:undefined})
       return textResult({
         hits: page.map(entry => ({
           ...entry.hit,
@@ -218,6 +222,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
           ? encodeFederatedCursor({
               offset: cursor.offset + limit,
               asOf: cursor.asOf,
+                historical:cursor.historical,
               context: cursorContext,
               key: deps.cursorSigningKey,
             })
@@ -227,6 +232,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       })
     }
     const result = await search.search({
+          authorityGrant:currentGrant(),
       installationId: installationId(),
       lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:installationId(),repositoryId:args.repository_id,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'}),
       query: args.query,
@@ -272,6 +278,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       const perScope = await Promise.all(scopes.map(async scope => ({
         scope,
         result: await (scopedContexts.contexts.get(scope.installationId)!.context ? recall.recall({
+          authorityGrant:currentGrant(),
           installationId: scope.installationId,
           lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:scope.installationId,repositoryId:scopedContexts.contexts.get(scope.installationId)!.context!.repositoryId,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'}),
           query: args.query,
@@ -292,6 +299,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
           authority: claim.authority,
           freshnessAt: claim.freshnessAt,
         }))), args.max_claims ?? 5)
+      await assertRetainedVersionResponse(deps.pool,currentGrant(),perScope.flatMap(entry=>entry.result.claims.map(claim=>({installationId:entry.scope.installationId,versionId:claim.versionId,witness:claim}))),{requireCurrent:!args.as_of,asOf:args.as_of?new Date(args.as_of):undefined,retainedReads:perScope.filter(entry=>entry.result.claims.length||entry.result.conflicts.length||entry.result.relatedEpisodes.length).map(entry=>({installationId:entry.scope.installationId,result:entry.result}))})
       return textResult(buildFederatedRecallResult(
         perScope,
         merged,
@@ -299,6 +307,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       ))
     }
     const result = await recall.recall({
+          authorityGrant:currentGrant(),
       installationId: installationId(),
       lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:installationId(),repositoryId:args.repository_id,spaceId:args.scene_id,destination:args.destination,mode:deps.lifecycleMode??'off'}),
       query: args.query,
@@ -325,6 +334,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     },
   }, async args => {
     const claim = await reads.getClaim(qualifiedInstallation(args.installation_id), args.claim_id, {
+      authorityGrant:currentGrant(),
       versionLimit: args.version_limit ?? 20,
       versionCursor: args.version_cursor ?? null,
     })
@@ -335,7 +345,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     repository_id:z.uuid().optional(),repo_snapshot_id:z.uuid().optional(),branch:z.string().min(1).max(255).optional(),task_scope_key:z.string().min(1).max(512).optional()}
   const evidenceInput=(args:{evidence_id:string;installation_id?:string;pack_id?:string;pack_installation_id?:string;repository_id?:string;repo_snapshot_id?:string;branch?:string;task_scope_key?:string})=>{
     const grant=currentGrant(),v2='version' in grant&&grant.version==='v2'?grant:undefined
-    return{installationId:qualifiedInstallation(args.installation_id),evidenceId:args.evidence_id,scopeGrant:v2,expiresAt:grant.expiresAt,
+    return{installationId:qualifiedInstallation(args.installation_id),evidenceId:args.evidence_id,scopeGrant:v2,expiresAt:grant.expiresAt,configVersion:grant.configVersion,userId:grant.userId,
       packId:args.pack_id,packInstallationId:args.pack_installation_id,
       frame:{repositoryId:args.repository_id??null,repoSnapshotId:args.repo_snapshot_id??null,branch:args.branch??null,taskScopeKey:args.task_scope_key??null}}
   }
@@ -360,7 +370,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
       installation_id: z.string().uuid().optional(),
     },
   }, async args => {
-    const evidence = await reads.getEvidence(qualifiedInstallation(args.installation_id), args.evidence_id)
+    const evidence = await reads.getEvidence(qualifiedInstallation(args.installation_id), args.evidence_id,currentGrant())
     return textResult(evidence ?? { error: { code: 'not_found' } })
   })
 
@@ -372,6 +382,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     },
   }, async args => {
     return textResult(await reads.findRelatedEpisodes(installationId(), {
+      authorityGrant:currentGrant(),
       sessionId: args.session_id ?? null,
       limit: args.limit ?? 20,
     }))
@@ -381,7 +392,7 @@ export function registerMemoryTools(server: McpServer, deps: MemoryToolDeps): vo
     description: 'Active claims grouped by type for one repository (read-only).',
     inputSchema: { repository_id: z.string().uuid() },
   }, async args => {
-    return textResult(await reads.getRepositoryContext(installationId(), args.repository_id))
+    return textResult(await reads.getRepositoryContext(installationId(), args.repository_id,currentGrant()))
   })
 
   server.registerTool('memory_get_code_graph', {

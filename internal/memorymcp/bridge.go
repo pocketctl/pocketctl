@@ -165,7 +165,8 @@ func allowedMemoryTool(message jsonRpcMessage) bool {
 		return false
 	}
 	switch params.Name {
-	case "memory_search", "memory_recall", "memory_get_claim", "memory_get_evidence",
+	case "memory_search", "memory_recall", "memory_get_claim", "memory_get_evidence", "memory_list_scenes",
+		"memory_get_evidence_reference", "memory_read_evidence_content",
 		"memory_find_related_episodes", "memory_get_repository_context", "memory_get_code_graph",
 		"memory_analyze_change_impact", "memory_get_wiki_page", "memory_list_skills", "memory_get_skill", "memory_resolve_skill":
 		return true
@@ -175,7 +176,7 @@ func allowedMemoryTool(message jsonRpcMessage) bool {
 }
 
 // selectedScopesForMCPMessage extracts only the bounded selection field from
-// the two federated read tools. The bridge neither interprets permissions nor
+// federated reads and qualified claim, evidence and Skill reads. The bridge neither interprets permissions nor
 // parses the returned JWT; it forwards the requested installation IDs to the
 // authenticated daemon so Relay can make the authorization decision.
 func selectedScopesForMCPMessage(message jsonRpcMessage) ([]string, error) {
@@ -208,7 +209,27 @@ func selectedScopesForMCPMessage(message jsonRpcMessage) ([]string, error) {
 		}
 		return bounded, nil
 	}
-	if params.Name == "memory_get_claim" || params.Name == "memory_get_evidence" ||
+	if params.Name == "memory_get_evidence_reference" || params.Name == "memory_read_evidence_content" {
+		var selected []string
+		seen := make(map[string]bool)
+		for _, field := range []string{"installation_id", "pack_installation_id"} {
+			raw, present := args[field]
+			if !present {
+				continue
+			}
+			var id string
+			if json.Unmarshal(raw, &id) != nil || !scopeInstallationIDPattern.MatchString(id) {
+				return nil, errors.New("invalid_scope_selection")
+			}
+			id = strings.ToLower(id)
+			if !seen[id] {
+				seen[id] = true
+				selected = append(selected, id)
+			}
+		}
+		return selected, nil
+	}
+	if params.Name == "memory_get_claim" || params.Name == "memory_get_evidence" || params.Name == "memory_list_scenes" ||
 		params.Name == "memory_list_skills" || params.Name == "memory_get_skill" || params.Name == "memory_resolve_skill" {
 		raw, present := args["installation_id"]
 		if !present {

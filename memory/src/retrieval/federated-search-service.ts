@@ -287,8 +287,8 @@ export function resolveFederatedCursor(input: {
   key: string
   requestedAsOf?: Date | null
   now?: Date
-}): { offset: number; asOf: Date } {
-  if (!input.cursor) return { offset: 0, asOf: input.requestedAsOf ?? input.now ?? new Date() }
+}): { offset: number; asOf: Date; historical:boolean } {
+  if (!input.cursor) return { offset: 0, asOf: input.requestedAsOf ?? input.now ?? new Date(),historical:Boolean(input.requestedAsOf) }
   try {
     const [payload, suppliedSignature, extra] = input.cursor.split('.')
     if (!payload || !suppliedSignature || extra !== undefined) throw new Error('invalid_cursor')
@@ -298,7 +298,7 @@ export function resolveFederatedCursor(input: {
       throw new Error('invalid_cursor')
     }
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
-      o?: unknown; q?: unknown; a?: unknown
+      o?: unknown; q?: unknown; a?: unknown; h?:unknown
     }
     if (parsed.q !== federatedCursorContext(input.context)) throw new Error('invalid_cursor')
     if (typeof parsed.o !== 'number' || !Number.isInteger(parsed.o)
@@ -310,13 +310,19 @@ export function resolveFederatedCursor(input: {
     if (input.requestedAsOf && input.requestedAsOf.getTime() !== asOf.getTime()) {
       throw new Error('invalid_cursor')
     }
-    return { offset: parsed.o, asOf }
+    if(parsed.h!==undefined&&typeof parsed.h!=='boolean')throw Error('invalid_cursor')
+    // Previously signed cursors carried an as-of time but no mode. Preserve
+    // their historical interpretation; new current cursors sign h=false.
+    const historical=parsed.h===undefined?true:parsed.h
+    if(input.requestedAsOf&&!historical)throw Error('invalid_cursor')
+    return { offset: parsed.o, asOf,historical }
   } catch {
     throw new FederatedScopeSelectionError('invalid_cursor', 'invalid federated cursor')
   }
 }
 
 export function encodeFederatedCursor(input: {
+  historical?:boolean
   offset: number
   asOf: Date
   context: FederatedCursorContextInput
@@ -329,6 +335,7 @@ export function encodeFederatedCursor(input: {
     o: input.offset,
     q: federatedCursorContext(input.context),
     a: input.asOf.toISOString(),
+    h:input.historical??true,
   }), 'utf8').toString('base64url')
   const signature = createHmac('sha256', input.key).update(payload).digest('base64url')
   return `${payload}.${signature}`

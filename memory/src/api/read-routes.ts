@@ -1,3 +1,4 @@
+import {assertRetainedVersionResponse} from '../sources/retained-versions.js'
 import {EvidenceReferenceQuerySchema,EvidenceContentQuerySchema} from './schemas.js'
 import {resolveLifecycleReadFrame,listLifecycleReadScenes} from '../context/lifecycle-frame.js'
 import {recordRecallMetrics} from '../metrics.js'
@@ -229,12 +230,14 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
               const resolved=scopedContexts.contexts.get(scope.installationId)!
               if(!resolved.context)return unavailableScopeSearchPage<SearchHit>(resolved.reason)
               return search.search({
+            authorityGrant:grant,
             installationId: scope.installationId,
             query: parsed.data.query,
             ...resolved.context,
             lifecycle:lifecycleFrames.get(scope.installationId),
             claimTypes: parsed.data.claim_types ?? null,
             asOf: cursor.asOf,
+            selectionHistorical:cursor.historical,
             limit: pageLimit,
             cursor: innerCursor,
           })
@@ -259,6 +262,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
         const metadata = await decorateWithScopeMetadata(
           deps.pool, scopes.map(scope => scope.installationId), ids,
         )
+        await assertRetainedVersionResponse(deps.pool,grant,page.map(entry=>({installationId:entry.scope.installationId,versionId:entry.hit.versionId,statement:entry.hit.statement})),{requireCurrent:!cursor.historical,asOf:cursor.historical?cursor.asOf:undefined})
         return {
           hits: page.map(entry => ({
             ...entry.hit,
@@ -275,6 +279,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
             ? encodeFederatedCursor({
                 offset: cursor.offset + limit,
                 asOf: cursor.asOf,
+                historical:cursor.historical,
                 context: cursorContext,
                 key: deps.cursorSigningKey,
               })
@@ -289,6 +294,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     const result = await guardRoute(request, reply, 'memory.search', async grant => {
       const lifecycle=await resolveLifecycleReadFrame(deps.pool,{installationId:defaultReadInstallationId(grant),repositoryId:parsed.data.repository_id,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'})
       const searched = await search.search({
+            authorityGrant:grant,
         installationId: defaultReadInstallationId(grant),
         lifecycle,
         query: parsed.data.query,
@@ -326,6 +332,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
         const perScope = await Promise.all(scopes.map(async scope => ({
           scope,
           result: await (scopedContexts.contexts.get(scope.installationId)!.context ? recall.recall({
+            authorityGrant:grant,
             installationId: scope.installationId,
             lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:scope.installationId,repositoryId:scopedContexts.contexts.get(scope.installationId)!.context!.repositoryId,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'}),
             query: parsed.data.query,
@@ -355,6 +362,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
         const metadata = await decorateWithScopeMetadata(
           deps.pool, scopes.map(scope => scope.installationId), ids,
         )
+        await assertRetainedVersionResponse(deps.pool,grant,perScope.flatMap(entry=>entry.result.claims.map(claim=>({installationId:entry.scope.installationId,versionId:claim.versionId,witness:claim}))),{requireCurrent:!parsed.data.as_of,asOf:parsed.data.as_of?new Date(parsed.data.as_of):undefined,retainedReads:perScope.filter(entry=>entry.result.claims.length||entry.result.conflicts.length||entry.result.relatedEpisodes.length).map(entry=>({installationId:entry.scope.installationId,result:entry.result}))})
         return buildFederatedRecallResult(
           perScope,
           merged,
@@ -367,6 +375,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     }
     const result = await guardRoute(request, reply, 'memory.recall', async grant => {
       return recall.recall({
+            authorityGrant:grant,
         installationId: defaultReadInstallationId(grant),
         lifecycle:await resolveLifecycleReadFrame(deps.pool,{installationId:defaultReadInstallationId(grant),repositoryId:parsed.data.repository_id,spaceId:parsed.data.scene_id,destination:parsed.data.destination,mode:deps.lifecycleMode??'off'}),
         query: parsed.data.query,
@@ -389,6 +398,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       const parsed = ClaimsQuerySchema.safeParse(request.query)
       if (!parsed.success) throw new MemoryApiError('invalid_request', 'invalid claims query')
       return reads.listActiveClaims(defaultReadInstallationId(grant), {
+        authorityGrant:grant,
         limit: parsed.data.limit,
         cursor: parsed.data.cursor ?? null,
       })
@@ -414,6 +424,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
         const parsed = ClaimVersionsQuerySchema.safeParse(request.query)
         if (!parsed.success) throw new MemoryApiError('invalid_request', 'invalid claim query')
         const claim = await reads.getClaim(scope.installationId, claimId, {
+          authorityGrant:grant,
           versionLimit: parsed.data.version_limit,
           versionCursor: parsed.data.version_cursor ?? null,
         })
@@ -429,6 +440,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       const parsed = ClaimVersionsQuerySchema.safeParse(request.query)
       if (!parsed.success) throw new MemoryApiError('invalid_request', 'invalid claim query')
       const claim = await reads.getClaim(defaultReadInstallationId(grant), claimId, {
+        authorityGrant:grant,
         versionLimit: parsed.data.version_limit,
         versionCursor: parsed.data.version_cursor ?? null,
       })
@@ -449,7 +461,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       if(data.installation_id&&!v2)throw new MemoryApiError('forbidden','explicit scope requires v2 grant')
       const installation=data.installation_id?selectFederatedScopes({grant:v2!,requestedInstallationIds:[data.installation_id],
         sharedScopesEnabled:deps.sharedScopesEnabled===true})[0].installationId:defaultReadInstallationId(grant)
-      const input={installationId:installation,evidenceId:id,scopeGrant:v2,expiresAt:grant.expiresAt,
+      const input={installationId:installation,evidenceId:id,scopeGrant:v2,expiresAt:grant.expiresAt,configVersion:grant.configVersion,userId:grant.userId,
         packId:data.pack_id,packInstallationId:data.pack_installation_id,
         frame:{repositoryId:data.repository_id??null,repoSnapshotId:data.repo_snapshot_id??null,branch:data.branch??null,taskScopeKey:data.task_scope_key??null}}
       let row
@@ -479,7 +491,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           requestedInstallationIds: [requestedInstallationId],
           sharedScopesEnabled: deps.sharedScopesEnabled === true,
         })
-        const row = await reads.getEvidence(scope.installationId, evidenceId)
+        const row = await reads.getEvidence(scope.installationId, evidenceId,grant)
         if (!row) throw new MemoryApiError('not_found', 'evidence not found')
         return row
       })
@@ -489,7 +501,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     const result = await guardRoute(request, reply, 'memory.search', async grant => {
       const evidenceId = resourceId((request.params as { evidenceId: string }).evidenceId, reply)
       if (!evidenceId) return undefined
-      const row = await reads.getEvidence(defaultReadInstallationId(grant), evidenceId)
+      const row = await reads.getEvidence(defaultReadInstallationId(grant), evidenceId,grant)
       if (!row) throw new MemoryApiError('not_found', 'evidence not found')
       return row
     })
@@ -511,7 +523,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           requestedInstallationIds: [requestedInstallationId],
           sharedScopesEnabled: deps.sharedScopesEnabled === true,
         })
-        return evidence.evidenceForVersion({ installationId: scope.installationId, versionId })
+        return evidence.evidenceForVersion({ installationId: scope.installationId, versionId,authorityGrant:grant })
       })
       if (result !== undefined) return { evidence: result }
       return
@@ -519,7 +531,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     const result = await guardRoute(request, reply, 'memory.search', async grant => {
       const versionId = resourceId((request.params as { versionId: string }).versionId, reply)
       if (!versionId) return undefined
-      return evidence.evidenceForVersion({ installationId: defaultReadInstallationId(grant), versionId })
+      return evidence.evidenceForVersion({ installationId: defaultReadInstallationId(grant), versionId,authorityGrant:grant })
     })
     if (result !== undefined) return { evidence: result }
   })
@@ -529,6 +541,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       const parsed = EpisodesQuerySchema.safeParse(request.query)
       if (!parsed.success) throw new MemoryApiError('invalid_request', 'invalid episodes query')
       return reads.findRelatedEpisodes(defaultReadInstallationId(grant), {
+        authorityGrant:grant,
         sessionId: parsed.data.session_id ?? null,
         limit: parsed.data.limit,
       })
@@ -540,7 +553,7 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
     const result = await guardRoute(request, reply, 'memory.recall', async grant => {
       const repositoryId = resourceId((request.params as { repositoryId: string }).repositoryId, reply)
       if (!repositoryId) return undefined
-      return reads.getRepositoryContext(defaultReadInstallationId(grant), repositoryId)
+      return reads.getRepositoryContext(defaultReadInstallationId(grant), repositoryId,grant)
     })
     if (result !== undefined) return result
   })

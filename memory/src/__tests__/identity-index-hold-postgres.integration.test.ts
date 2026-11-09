@@ -51,7 +51,7 @@ suite('identity hold fences asynchronous claim indexing',()=>{
   finally{pending.completion.release()}
   await pending.indexing
   expect((await pool.query('SELECT count(*)::int AS n FROM claim_search_documents WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
-  expect((await pool.query('SELECT count(*)::int AS n FROM memory_usage_outbox WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT embedding_tokens::text,cost_micros::text FROM memory_usage_outbox WHERE installation_id=$1',[f.personal])).rows).toEqual([{embedding_tokens:'3',cost_micros:'4'}])
  })
  test('an old in-flight result cannot overwrite or delete a newly indexed head',async()=>{
   const f=await fixture(),pending=await startBlocked(f),next=randomUUID()
@@ -66,16 +66,16 @@ suite('identity hold fences asynchronous claim indexing',()=>{
   const docs=(await pool.query('SELECT version_id,document,embedding_status FROM claim_search_documents WHERE installation_id=$1',[f.personal])).rows
   expect(docs).toHaveLength(1);expect(docs[0]).toMatchObject({version_id:next,embedding_status:'disabled'})
   expect(docs[0].document).toContain('The new head stays searchable')
-  expect((await pool.query('SELECT count(*)::int AS n FROM memory_usage_outbox WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT embedding_tokens::text,cost_micros::text FROM memory_usage_outbox WHERE installation_id=$1',[f.personal])).rows).toEqual([{embedding_tokens:'3',cost_micros:'4'}])
  })
- test('consent revoked during dispatch leaves lexical data with no embedding or usage projection',async()=>{
+ test('consent revoked during dispatch blocks the embedding and retains incurred usage',async()=>{
   const f=await fixture(),pending=await startBlocked(f)
   try{await pool.query("UPDATE memory_feature_settings SET embedding_mode='off' WHERE installation_id=$1",[f.personal])}
   finally{pending.completion.release()}
   await pending.indexing
   expect((await pool.query('SELECT embedding,embedding_status FROM claim_search_documents WHERE version_id=$1',[f.version])).rows[0])
    .toEqual({embedding:null,embedding_status:'disabled'})
-  expect((await pool.query('SELECT count(*)::int AS n FROM memory_usage_outbox WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT embedding_tokens::text,cost_micros::text FROM memory_usage_outbox WHERE installation_id=$1',[f.personal])).rows).toEqual([{embedding_tokens:'3',cost_micros:'4'}])
  })
  test('provider failure after hold does not recreate projection state or schedule retries',async()=>{
   const f=await fixture(),pending=await startBlocked(f,true)

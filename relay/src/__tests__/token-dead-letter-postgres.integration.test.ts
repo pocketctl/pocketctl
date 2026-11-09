@@ -4,20 +4,18 @@ import { EventMaterializer } from '../materialization/event-materializer.js'
 import { recoverOwnedTokenDeadLetters } from '../token-usage/dead-letter-recovery.js'
 import { initDB } from '../db.js'
 import { closeTokenUsageDay } from '../token-usage/day-closer.js'
-import { assertDurableIngressTestDatabase } from './durable-ingress-test-db.js'
+import { resetDurableIngressPublicSchema } from './durable-ingress-test-db.js'
 
 const url = process.env.TEST_DATABASE_URL
 const suite = url && process.env.RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
 suite('token day dead-letter boundaries on PostgreSQL', () => {
   let admin: pg.Pool, pool: pg.Pool
   let userId: number
-  const schema = `token_dead_${process.pid}`
   const date = '2026-08-21'
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url })
-    await assertDurableIngressTestDatabase(admin, url!)
-    await admin.query(`CREATE SCHEMA ${schema}`)
-    pool = new pg.Pool({ connectionString: url, options: `-c search_path=${schema}` })
+    await resetDurableIngressPublicSchema(admin,url!)
+    pool = new pg.Pool({ connectionString: url })
     await initDB(pool)
   }, 30000)
   beforeEach(async () => {
@@ -25,7 +23,7 @@ suite('token day dead-letter boundaries on PostgreSQL', () => {
     await pool.query("INSERT INTO token_usage_accounting_state(key,completed_at) VALUES('baseline-v1','2026-08-01')")
     userId = (await pool.query("INSERT INTO users(email,password_hash) VALUES('dead@example.test','') RETURNING id")).rows[0].id
   })
-  afterAll(async () => { await pool?.end(); await admin?.query(`DROP SCHEMA ${schema} CASCADE`); await admin?.end() })
+  afterAll(async () => { await pool?.end(); await admin?.end() })
   async function dead(type: string, payload: object) {
     return (await pool.query(`INSERT INTO event_inbox(user_id,daemon_id,daemon_generation,seq,dedup_key,session_id,event_type,priority_class,received_at,payload,status,last_error)
       VALUES($1,'dead-daemon',1,(SELECT count(*)+1 FROM event_inbox),$2::text,'dead-session',$2::text,1,$3::date,$4,3,'unknown_daemon_session') RETURNING inbox_id`, [userId,type,date,payload])).rows[0].inbox_id

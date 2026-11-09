@@ -1,3 +1,4 @@
+import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 vi.mock('../quota.js', async (importOriginal) => {
@@ -49,7 +50,8 @@ function ws(): any {
 
 function pool(): any {
   const value: any = {
-    query: vi.fn(async (sql: string) => {
+    query: vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('INSERT INTO events')) {
         return { rows: [{ id: 31, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
       }
@@ -70,7 +72,8 @@ function pool(): any {
 
 function exitedSessionPool(): any {
   const value = pool()
-  value.query = vi.fn(async (sql: string) => {
+  value.query = vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
     if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
     if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
     if (sql.includes('SELECT 1 FROM sessions')) return { rows: [{ '?column?': 1 }], rowCount: 1 }
@@ -84,7 +87,8 @@ function exitedSessionPool(): any {
 
 function activeSessionPool(): any {
   const value = pool()
-  value.query = vi.fn(async (sql: string) => {
+  value.query = vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
     if (sql.includes('RETURNING daemon_id')) return { rows: [{ daemon_id: 'd1' }], rowCount: 1 }
     if (sql.includes('SELECT 1 FROM sessions')) return { rows: [{ '?column?': 1 }], rowCount: 1 }
     if (sql.includes('SELECT status FROM sessions')) return { rows: [{ status: 'running' }] }
@@ -98,6 +102,7 @@ function activeSessionPool(): any {
 function observerSessionPool(): any {
   const value = pool()
   value.query = vi.fn(async (sql: string, params?: any[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
     if (sql.includes('WITH owned_session')) {
       const owned = params?.[0] === 'observer-session' && params?.[1] === 7
       return {
@@ -209,7 +214,8 @@ describe('Router active-session quota', () => {
       release = () => resolve({ matched: true, changed: true })
     }))
     const value = pool()
-    value.query = vi.fn(async (sql: string) => {
+    value.query = vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
       if (sql.includes('INSERT INTO events')) {
         return { rows: [{ id: 11, inserted: true, effect_status: 'pending', effect_step: 0 }] }
@@ -522,7 +528,8 @@ describe('Router unresolved quota grants fail closed (M-4)', () => {
       reused: false,
     })
     const value = pool()
-    value.query = vi.fn(async (sql: string) => {
+    value.query = vi.fn(async (sql: string, nativeParams: any[] = []) => {
+      const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('SELECT plan, whitelist')) return { rows: [{ plan: 'free', whitelist: false }] }
       if (sql.includes('INSERT INTO events')) {
         return { rows: [{ id: 21, inserted: true, effect_status: 'pending', effect_step: 0 }] }
@@ -596,6 +603,7 @@ describe('Router unresolved quota grants fail closed (M-4)', () => {
     const value = pool()
     const baseQuery = value.query
     value.query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('INSERT INTO sessions') && sql.includes('RETURNING session_id')) {
         // Authorization observed the id as free, but another tenant claimed it
         // before this deferred upsert reached the ownership-guarded conflict.
@@ -636,6 +644,7 @@ describe('Router unresolved quota grants fail closed (M-4)', () => {
     const value = pool()
     const baseQuery = value.query
     value.query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('FROM quota_reservations reservation')) {
         return {
           rows: [{
@@ -682,6 +691,7 @@ describe('Router unresolved quota grants fail closed (M-4)', () => {
     const value = pool()
     const baseQuery = value.query
     value.query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('FROM quota_reservations reservation')
         && params?.[1] === 'queued-recovery-conflict') {
         return {
