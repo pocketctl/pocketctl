@@ -328,13 +328,18 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
       supersededInstallation, `snapshot:${supersededInstallation}`,
     ])
 
+    const client=await pool.connect()
     try {
-      await pool.query(`ALTER TABLE memory_snapshot_runs DROP COLUMN relay_acked_at`)
+      // Reconstruct the historical v5 shape in one owned transaction. Later
+      // metadata views did not exist at v5 and are restored by transaction end.
+      await client.query('BEGIN')
+      await client.query('DROP VIEW memory_source_snapshot_facts')
+      await client.query(`ALTER TABLE memory_snapshot_runs DROP COLUMN relay_acked_at`)
       const v6 = MEMORY_MIGRATIONS.find(migration => migration.version === 6)
       expect(v6).toBeDefined()
-      for (const statement of v6!.statements) await pool.query(statement)
+      for (const statement of v6!.statements) await client.query(statement)
 
-      const runs = await pool.query<{ installation_id: string; relay_acked_at: Date | null }>(`
+      const runs = await client.query<{ installation_id: string; relay_acked_at: Date | null }>(`
         SELECT installation_id::text, relay_acked_at
         FROM memory_snapshot_runs
         WHERE state = 'completed' AND installation_id = ANY($1::uuid[])
@@ -346,10 +351,8 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
       expect(runs.rows[2].installation_id).toBe(supersededInstallation)
       expect(runs.rows[2].relay_acked_at).not.toBeNull()
     } finally {
-      await pool.query(`
-        ALTER TABLE memory_snapshot_runs
-        ADD COLUMN IF NOT EXISTS relay_acked_at TIMESTAMPTZ
-      `)
+      await client.query('ROLLBACK')
+      client.release()
       await pool.query(`
         DELETE FROM memory_installations WHERE installation_id = ANY($1::uuid[])
       `, [[installation, ackedInstallation, supersededInstallation]])
@@ -375,22 +378,25 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
               NOW() - INTERVAL '1 hour')
     `, [installation, `snapshot:${installation}`])
 
+    const client=await pool.connect()
     try {
-      await pool.query(`ALTER TABLE memory_snapshot_runs DROP COLUMN relay_acked_at`)
+      // Reconstruct the historical v5 shape in one owned transaction. Later
+      // metadata views did not exist at v5 and are restored by transaction end.
+      await client.query('BEGIN')
+      await client.query('DROP VIEW memory_source_snapshot_facts')
+      await client.query(`ALTER TABLE memory_snapshot_runs DROP COLUMN relay_acked_at`)
       const v6 = MEMORY_MIGRATIONS.find(migration => migration.version === 6)
       expect(v6).toBeDefined()
-      for (const statement of v6!.statements) await pool.query(statement)
+      for (const statement of v6!.statements) await client.query(statement)
 
-      const run = await pool.query<{ relay_acked_at: Date | null }>(`
+      const run = await client.query<{ relay_acked_at: Date | null }>(`
         SELECT relay_acked_at FROM memory_snapshot_runs
         WHERE installation_id = $1 AND generation = 1
       `, [installation])
       expect(run.rows[0].relay_acked_at).not.toBeNull()
     } finally {
-      await pool.query(`
-        ALTER TABLE memory_snapshot_runs
-        ADD COLUMN IF NOT EXISTS relay_acked_at TIMESTAMPTZ
-      `)
+      await client.query('ROLLBACK')
+      client.release()
       await pool.query(`DELETE FROM memory_installations WHERE installation_id = $1`, [installation])
     }
   })
