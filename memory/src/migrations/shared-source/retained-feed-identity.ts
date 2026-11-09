@@ -35,9 +35,15 @@ async function frozenScopeFacts(memory:Snapshot,relay:Snapshot,installationId:st
  * identity without establishing producer lineage or a pruned Journal order.
  * Current native routing and authorization must still be revalidated at bind. */
 export async function proveRetainedFeedIdentity(memory:Snapshot,relay:Snapshot,row:Record<string,any>,source:Source,event:Record<string,any>,feed:Record<string,any>[],inbox:Record<string,any>[],ingress?:{definitionHash:string;eventHash:string;archiveVerified:boolean}){
+ // A later canonical header is an independent current order. Its verified
+ // hash/classification may corroborate the literal transport identity, but
+ // never supplies the original unknown producer lineage or source sequence.
+ const header=event.source_header_version==='1'&&typeof event.source_sequence==='string'&&/^[1-9][0-9]{0,18}$/.test(event.source_sequence)
+  &&BigInt(event.source_sequence)<=9223372036854775807n&&event.canonical_payload_hash===source.hash
+  &&hash(event.source_classification)===source.classificationHash
  if(source.provenance!=='unknown'||source.sequence!==undefined||source.bodyReclaimed||source.originalHashVersion!=='canonical-json-sha256-v1'
   ||row.origin!=='feed'||!/^personal-user:[1-9][0-9]*$/.test(source.ownerKey)||source.sessionId.startsWith('team_')||event.body_storage!=='hot'&&!(ingress?.archiveVerified&&event.body_storage==='cold')
-  ||event.source_header_version!=null||event.source_sequence!=null||!absent(row.source_provenance,'memory')||!absent(row.classification,'memory_source')
+  ||((event.source_header_version!=null||event.source_sequence!=null)&&!header)||!absent(row.source_provenance,'memory')||!absent(row.classification,'memory_source')
   ||event.user_id!==source.ownerKey.slice(14)||event.session_id!==source.sessionId||event.current_session_id!==source.sessionId
   ||event.event_type!==source.eventType||(event.payload?.turn_id??event.payload?.source_turn_id??null)!==source.turnId
   ||hash(event.payload)!==source.hash||hash(canonicalSourceClassification({source_kind:'canonical_event',session_id:event.session_id,source_seq:'',payload:event.payload}))!==source.classificationHash)return
@@ -71,6 +77,7 @@ export async function proveRetainedFeedIdentity(memory:Snapshot,relay:Snapshot,r
   ...(ingress?{ingressIndexHash:ingress.definitionHash,ingressEventHash:ingress.eventHash,sourceIngressKeyHash:hash(row.canonical_event_key),archiveVerified:ingress.archiveVerified}:{}),
   ownerUserId:owner,ownerScopeId:c.owner_scope_id,authorizationEpoch:c.authorization_epoch,configVersion:c.config_version,sessionId:source.sessionId,daemonId:sessions[0].daemon_id,turnId:source.turnId,eventType:source.eventType,
   occurredAt:new Date(at).toISOString(),originalSourceHash:source.originalSourceHash,originalHashVersion:source.originalHashVersion,contentHash:source.hash,classificationHash:source.classificationHash,provenanceHash:hash(row.source_provenance),
+  ...(header?{canonicalHeader:{version:1,sequence:event.source_sequence,contentHash:event.canonical_payload_hash,classificationHash:hash(event.source_classification)}}:{}),
   // Literal producer-looking payload bytes are part of the exact body hash,
   // never an authenticated provenance/sequence channel for this proof.
   provenanceState:'unknown',producerPayloadMetadataPresent:Object.hasOwn(row.payload,'memory_source'),sourceSequence:null,journalOrderProven:false,bodyExported:false,runtimeAuthorizationGranted:false,deletionAuthorized:false}

@@ -1,3 +1,4 @@
+import {legacyTransportRetired} from '../sources/transport-state.js'
 import type pg from 'pg'
 
 export interface InboxRetentionSettings {
@@ -13,7 +14,7 @@ export interface InboxRetentionResult {
   reclaimed: number
   deleted: number
   metadataBlocked: boolean
-  skipped: 'busy' | 'snapshot' | 'inactive' | 'unacknowledged' | null
+  skipped: 'retired' | 'busy' | 'snapshot' | 'inactive' | 'unacknowledged' | null
 }
 
 /** All lifecycle actors use this installation fence. No Session locks may
@@ -25,6 +26,7 @@ export async function retainInboxInstallation(
 ): Promise<InboxRetentionResult> {
   const result: InboxRetentionResult = { reclaimed: 0, deleted: 0, metadataBlocked: false, skipped: null }
   if (settings.mode === 'off') return result
+  if(await legacyTransportRetired(pool))return {...result,skipped:'retired'}
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -115,6 +117,7 @@ export function createInboxRetentionWorker(options: {
     if (inFlight) return inFlight
     if (stopped || options.signal.aborted || options.settings.mode === 'off') return Promise.resolve()
     inFlight = (async () => {
+      if(await legacyTransportRetired(options.pool))return
       // Fair across installations even when more than one pass is needed.
       const installations = await options.pool.query<{installation_id: string}>(`
         SELECT c.installation_id FROM memory_inbox_checkpoints c JOIN memory_installations i USING(installation_id)

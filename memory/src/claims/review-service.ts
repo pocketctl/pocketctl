@@ -69,7 +69,7 @@ export function createReviewService(pool: pg.Pool, claims: ClaimRepository) {
           AND c.review_expires_at>clock_timestamp()
           AND ($3::jsonb IS NULL OR e.summary->'references'->'source' @> $3::jsonb)
           AND r.episode_source_digest = e.source_digest
-          AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
             WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
               AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
               AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))

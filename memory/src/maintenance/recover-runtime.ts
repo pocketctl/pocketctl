@@ -94,7 +94,7 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
         WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=decode($4,'hex')
           AND s.deleted_at IS NULL AND f.extraction_mode IN('enabled','shadow')
           AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
-          AND NOT EXISTS(SELECT 1 FROM memory_feed_inbox gap WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
+          AND NOT EXISTS(SELECT 1 FROM memory_source_delivery_facts gap WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined' AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
         ON CONFLICT DO NOTHING RETURNING job_id`,[input.installationId,target.episode_id,target.key,target.digest,'run_id' in target ? target.run_id : null])
       if (result.rowCount) scheduled.push(target.episode_id)

@@ -30,7 +30,7 @@ export async function lifecycleSourceRetentionProof(client:pg.PoolClient,input:{
    AND p.mode='enabled' AND p.reclaim_mode='enabled' AND t.terminal_at IS NOT NULL AND t.state IN('completed','interrupted','failed','abandoned')
    AND t.updated_at<=r.created_at AND r.created_at<=clock_timestamp()-($6::int*interval '24 hours')
    AND NOT ${taskSourceProtectedSql('r.installation_id','r.turn_id')}
-   AND NOT EXISTS(SELECT 1 FROM memory_feed_inbox f WHERE f.installation_id=r.installation_id AND f.session_id=r.session_id
+   AND NOT EXISTS(SELECT 1 FROM memory_source_delivery_facts f WHERE f.installation_id=r.installation_id AND f.session_id=r.session_id
     AND(f.turn_id IS NULL OR f.turn_id=r.turn_id) AND(f.projection_state='pending' OR(f.projection_state='quarantined' AND f.error_code='oversized_content')))
    AND NOT EXISTS(SELECT 1 FROM memory_jobs j WHERE j.installation_id=r.installation_id AND j.state IN('pending','running') AND
     (j.job_type='snapshot_reconcile' OR j.payload->>'turn_id'=r.turn_id OR EXISTS(SELECT 1 FROM memory_task_bundles b

@@ -24,7 +24,7 @@ export interface ForwardManifest {
 }
 const hash=(value:unknown)=>createHash('sha256').update(canonicalJsonString(value)).digest('hex')
 const qualified=(schema:string,table:string)=>qi(schema)+'.'+qi(table)
-const metadataTableVersions:Readonly<Record<string,number>>={memory_canonical_projection_progress:92,memory_team_semantic_groups:94,memory_team_semantic_witnesses:94,memory_team_semantic_publications:96}
+const metadataTableVersions:Readonly<Record<string,number>>={memory_canonical_projection_progress:92,memory_team_semantic_groups:94,memory_team_semantic_witnesses:94,memory_team_semantic_publications:96,memory_native_control_observations:97,memory_source_delivery_receipts:Infinity,memory_source_snapshot_receipts:Infinity}
 /** Reviewed additive schema roster. Older sources do not acquire tables merely
  * because the destination supports preparatory semantic metadata. */
 export function memoryForwardTableRoster(version:number):string[]{

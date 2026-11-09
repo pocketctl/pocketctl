@@ -1,3 +1,4 @@
+import {bindSourcePool,bindSourceConnectionAlias} from '../../sources/pool-context.js'
 import {bindLinkedPolicyOutputs} from './forward-cleanup-linked.js'
 import {assertCleanupDependencyExclusions,discoverCleanupDependencies,cleanupState,type CleanupDependencies,type CleanupTableState} from './forward-cleanup-state.js'
 import type pg from 'pg'
@@ -123,9 +124,9 @@ async function requireScopeInvalidationPolicy(c:pg.Client){
 }
 function sessionPolicyClient(c:pg.Client,dependencies:CleanupDependencies){
  const linked=dependencies.linked
- const allowed=new Set(['memory_session_tombstones','memory_skill_replay_runs','memory_feedback','memory_generation_runs','memory_context_packs','memory_task_bundles','memory_source_processing_receipts','memory_session_scene_frames','memory_candidates','memory_extraction_runs','work_episodes','source_artifacts','source_turns','source_events','memory_snapshot_events','memory_source_retention_receipts','memory_feed_inbox','source_sessions'])
+ const allowed=new Set(['memory_session_tombstones','memory_skill_replay_runs','memory_feedback','memory_generation_runs','memory_context_packs','memory_task_bundles','memory_source_processing_receipts','memory_session_scene_frames','memory_candidates','memory_extraction_runs','work_episodes','source_artifacts','source_turns','source_events','memory_snapshot_events','memory_source_retention_receipts','memory_feed_inbox','memory_source_delivery_receipts','memory_source_delivery_facts','source_sessions'])
  if(linked)for(const table of ['knowledge_tombstones','knowledge_claims','knowledge_versions','knowledge_evidence','memory_jobs'])allowed.add(table)
- return {query:(text:string,values?:unknown[])=>{
+ const adapter={query:(text:string,values?:unknown[])=>{
   const mutation=/^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:memory\.)?([a-z_]+)/i.exec(text)
   if(mutation&&!allowed.has(mutation[1]))throw Error('cleanup_unreviewed_session_policy_mutation')
   if(linked&&mutation){
@@ -136,6 +137,7 @@ function sessionPolicyClient(c:pg.Client,dependencies:CleanupDependencies){
   }
   return c.query(text,values)
  }} as Pick<pg.PoolClient,'query'>
+ bindSourceConnectionAlias(adapter,c);bindSourcePool(adapter,{namespace:'memory'});return adapter
 }
 function protectedState(s:TableState[]){return s.filter(t=>/budget|attempt|consent|policy|settings|capsule/.test(t.table))}
 export async function planForwardCleanup(config:ForwardCleanupConfig,overlay:PrivacyOverlayManifest,options:ForwardCleanupOptions={}):Promise<ForwardCleanupManifest>{
@@ -219,7 +221,7 @@ export async function verifyForwardCleanup(config:ForwardCleanupConfig,p:Forward
    // Rows can retain a minimal source_sessions tombstone. Bodies and original
    // derived source rows must actually be gone, including canonical aliases.
    if((await c.query('SELECT 1 FROM memory.source_sessions WHERE installation_id=$1 AND session_id=$2 AND(deleted_at IS NULL OR agent_type IS NOT NULL OR daemon_id IS NOT NULL OR status IS NOT NULL OR cwd_observation IS NOT NULL OR worktree_path IS NOT NULL OR worktree_branch IS NOT NULL) LIMIT 1',[step.installationId,step.sessionId])).rowCount)remaining.push('session_metadata_cleanup_incomplete')
-   for(const table of ['source_events','source_artifacts','source_turns','work_episodes','memory_task_bundles','memory_context_packs','memory_feed_inbox']){
+   for(const table of ['source_events','source_artifacts','source_turns','work_episodes','memory_task_bundles','memory_context_packs','memory_source_delivery_facts']){
     const canonical=table==='source_events'?' OR canonical_session_key=$2':''
     if((await c.query(`SELECT 1 FROM memory.${qi(table)} WHERE installation_id=$1 AND(session_id=$2${canonical}) LIMIT 1`,[step.installationId,step.sessionId])).rowCount)remaining.push('session_physical_cleanup_incomplete')
    }

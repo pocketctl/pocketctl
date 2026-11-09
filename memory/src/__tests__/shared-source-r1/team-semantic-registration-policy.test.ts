@@ -10,6 +10,7 @@ test('semantic metadata is an explicit schema94 additive roster and never silent
  expect(memoryForwardTableRoster(95)).toContain('memory_team_semantic_groups')
  expect(memoryForwardTableRoster(96)).toContain('memory_team_semantic_publications')
  expect(memoryForwardTableRoster(95)).not.toContain('memory_team_semantic_publications')
+ for(const table of ['memory_native_control_observations','memory_source_delivery_receipts','memory_source_snapshot_receipts'])expect(memoryForwardTableRoster(96)).not.toContain(table)
  expect(()=>memoryForwardTableRoster(97)).toThrow('unreviewed_memory_schema_version')
 })
 test('semantic JSON is explicitly classified; known and unknown metadata still require exact M0 review',()=>{

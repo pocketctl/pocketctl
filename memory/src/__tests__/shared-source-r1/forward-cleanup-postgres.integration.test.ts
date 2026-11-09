@@ -46,15 +46,11 @@ suite('bounded actual forward privacy cleanup',()=>{
  }
  beforeAll(async()=>{
   if(!url||!new URL(url).pathname.endsWith('_test'))throw Error('isolated_test_required')
-  const pool=new pg.Pool({connectionString:url});await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
+  const pool=new pg.Pool({connectionString:url});await applyMemorySchema(pool,{namespace:'memory'})
   // This long synthetic suite deliberately creates/deletes >1024 rows. Keep
   // autonomous VACUUM out of its deterministic maintenance window; explicit
   // lock-contention tests below still exercise the real NOWAIT refusal.
   for(const row of (await pool.query("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='memory' AND c.relkind='r'")).rows)await pool.query('ALTER TABLE memory."'+String(row.relname).replaceAll('"','""')+'" SET(autovacuum_enabled=false)')
-  // Capture only migration-created seed DATA once, before any synthetic user
-  // fixture exists. Preserve exact JSON text/bigints; no application backup.
-  const seeded=(await pool.query(`SELECT n.nspname,c.relname,ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated='' ORDER BY a.attnum) AS columns FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN('memory','shared') AND c.relkind IN('r','p') AND c.relname NOT IN('memory_schema_migrations','memory_source_contract') ORDER BY n.nspname,c.relname`)).rows
-  for(const row of seeded){const table=quote(row.nspname)+'.'+quote(row.relname),rows=(await pool.query(`SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb)::text AS value FROM ${table} t`)).rows[0].value;if(rows!=='[]')schemaSeeds.push({table,columns:row.columns,rows})}
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY);
    CREATE TABLE public.daemons(daemon_id text PRIMARY KEY,user_id int);
    CREATE TABLE public.sessions(session_id text PRIMARY KEY,user_id int,daemon_id text,source text,content_state text,agent_type text);
@@ -68,6 +64,12 @@ suite('bounded actual forward privacy cleanup',()=>{
    CREATE TABLE public.team_delivery_memory_withdrawals(team_id text,team_session_id text,submission_id uuid,decision_id uuid);
    CREATE TABLE public.team_artifact_revocations(submission_id uuid,artifact_id text);
    CREATE TABLE public.canonical_sentinel(id bigint PRIMARY KEY,body text);`)
+  await pool.query("ALTER TABLE public.extension_installations ADD COLUMN start_policy TEXT NOT NULL DEFAULT 'retained_history'")
+  await applySharedSourceContract(pool)
+  // Capture only migration-created seed DATA once, before any synthetic user
+  // fixture exists. Preserve exact JSON text/bigints; no application backup.
+  const seeded=(await pool.query(`SELECT n.nspname,c.relname,ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped AND a.attgenerated='' ORDER BY a.attnum) AS columns FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN('memory','shared') AND c.relkind IN('r','p') AND c.relname NOT IN('memory_schema_migrations','memory_source_contract') ORDER BY n.nspname,c.relname`)).rows
+  for(const row of seeded){const table=quote(row.nspname)+'.'+quote(row.relname),rows=(await pool.query(`SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]'::jsonb)::text AS value FROM ${table} t`)).rows[0].value;if(rows!=='[]')schemaSeeds.push({table,columns:row.columns,rows})}
   await installNativeAliasFixture(pool)
   await pool.end()
  },60000)

@@ -229,14 +229,14 @@ export async function scanMapping(memory:Snapshot,relay:Snapshot,options:ScanOpt
             if(header&&(e.canonical_payload_hash!==hash(payload)||canonicalJsonString(e.source_classification)!==canonicalJsonString(classification))){forcedReason='source_header_body_or_classification_mismatch';continue}
             const canonicalProof=parseMemorySourceProvenance(header?e.source_classification?.memory_source:payload?.memory_source)
             const proofEqual=!!proof && !!canonicalProof && canonicalProof.session_id===e.session_id && canonicalProof.turn_id===(payload?.turn_id??payload?.source_turn_id) && canonicalJsonString({...proof,sequence:'0'})===canonicalJsonString({...canonicalProof,sequence:'0'})
-            const identity=sequence===undefined&&journal.length===0?await proveRetainedFeedIdentity(memory,relay,row,source,{...e,payload},retainedFeed,retainedInbox,retainedIngress?{...retainedIngress,archiveVerified}:undefined):undefined
+            const identity=(sequence===undefined&&journal.length===0||header&&!proof&&!canonicalProof)?await proveRetainedFeedIdentity(memory,relay,row,source,{...e,payload},retainedFeed,retainedInbox,retainedIngress?{...retainedIngress,archiveVerified}:undefined):undefined
             if(identity)identityManifests.set(identity.proof.manifestHash,identity.manifest)
             if(currentNative && canonicalJsonString(await relay.currentNativeSessionAuthority!(e.session_id,Number(e.user_id),String(e.id)))!==canonicalJsonString(currentNative)){
               forcedReason='native_current_authority_changed';continue
             }
             candidates.push({kind:'relay_event',id:e.id,installationId:row.installation_id,ownerKey:'personal-user:'+e.user_id,
               sessionId:e.session_id,turnId:payload?.turn_id??payload?.source_turn_id??null,eventType:e.event_type,classificationHash:hash(classification),hash:hash(payload),
-              version:sequence??'',sequence,storage:e.body_storage==='cold'?'cold':'hot',archiveVerified,
+              version:identity?'':sequence??'',sequence:identity?undefined:sequence,storage:e.body_storage==='cold'?'cold':'hot',archiveVerified,
               authorityVerified:(proofEqual||!!identity) && e.user_id===owner.owner_user_id,provenance:proofEqual?'known':'unknown',...(identity?{originalIdentityProof:identity.proof}:{})})
           }
         }

@@ -1,4 +1,6 @@
-/** Frozen source-derived table roster (2026-11-06). This is a suggested action,
+/** Reviewed Memory object dispositions, including additive runtime metadata.
+ * The private-source copy roster remains independently versioned in engine.ts.
+ * This is a suggested action,
  * never approval: every object still needs a matching reviewed definition hash. */
 export const TABLE_POLICY: Record<string,string> = {
   "memory_team_semantic_publications": "migrate-as-is",
@@ -37,6 +39,8 @@ export const TABLE_POLICY: Record<string,string> = {
   "memory_extraction_runs": "migrate-as-is",
   "memory_feature_settings": "migrate-as-is",
   "memory_feed_inbox": "retire-after-gate",
+  "memory_source_delivery_receipts": "migrate-as-is",
+  "memory_source_snapshot_receipts": "migrate-as-is",
   "memory_feedback": "migrate-as-is",
   "memory_feedback_rollups": "migrate-as-is",
   "memory_generation_run_policies": "migrate-as-is",
@@ -187,6 +191,7 @@ export const TABLE_POLICY: Record<string,string> = {
   "memory_team_semantic_groups": "migrate-as-is",
   "memory_team_semantic_witnesses": "migrate-as-is",
   "memory_canonical_projection_progress": "migrate-as-is",
+  "memory_native_control_observations": "migrate-as-is",
   "source_artifacts": "transform",
   "source_events": "transform",
   "source_sessions": "transform",

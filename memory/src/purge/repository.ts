@@ -1,3 +1,4 @@
+import {legacyTransportRetired} from '../sources/transport-state.js'
 import {assertIndependentAcceptedEvidence,independentlyAcceptedVersionSupportSql} from '../claims/accepted-evidence-policy.js'
 import {rollupFeedbackBeforeInstallationPurge,minimizeSessionFeedback,minimizeEpisodeFeedback} from '../claims/feedback-policy.js'
 import {cleanupRevokedSharedClaims} from '../governance/retention-service.js'
@@ -460,7 +461,7 @@ async function purgeSessionRows(
 
   for (const table of [
     'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
-    'memory_snapshot_events', 'memory_source_retention_receipts',
+    ...((await legacyTransportRetired(client))?[]:['memory_snapshot_events']), 'memory_source_retention_receipts',
   ]) {
     await client.query(
       `DELETE FROM ${table} WHERE installation_id = $1 AND session_id = $2`,
@@ -468,7 +469,7 @@ async function purgeSessionRows(
     )
   }
   await client.query(
-    `DELETE FROM memory_feed_inbox WHERE installation_id = $1 AND session_id = $2`,
+    `DELETE FROM memory_source_delivery_facts WHERE installation_id = $1 AND session_id = $2`,
     [input.installationId, input.sessionId],
   )
   await client.query(`
@@ -479,7 +480,7 @@ async function purgeSessionRows(
     WHERE installation_id = $1 AND session_id = $2
   `, [input.installationId, input.sessionId, input.reason])
   await client.query(`
-    UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
+    UPDATE memory_source_delivery_facts SET projection_state = 'projected', projected_at = NOW()
     WHERE installation_id = $1 AND feed_id = $2
   `, [input.installationId, input.sourceFeedId ?? 0])
   return invalidatedClaims
@@ -800,7 +801,7 @@ async function purgeInstallationRows(
     'memory_authority_records','memory_publication_delegations','memory_automation_authority_records','memory_governance_executor_principals',
     'memory_review_automation_runs','memory_review_automation_policy_heads','memory_review_automation_policies',
     'memory_session_tombstones', 'memory_dead_letters', 'memory_jobs', 'memory_usage_outbox',
-    'memory_snapshot_runs', 'memory_snapshot_events', 'memory_feed_inbox', 'memory_inbox_checkpoints',
+    ...((await legacyTransportRetired(client))?['memory_source_snapshot_facts']:['memory_snapshot_runs','memory_snapshot_events','memory_inbox_checkpoints']), 'memory_source_delivery_facts',
     'knowledge_tombstones', 'memory_idempotency_keys', 'memory_feedback',
     'claim_search_documents', 'knowledge_evidence', 'knowledge_evidence_capsules', 'memory_candidates',
     'memory_extraction_runs', 'knowledge_versions', 'knowledge_claims','memory_logical_tombstones',

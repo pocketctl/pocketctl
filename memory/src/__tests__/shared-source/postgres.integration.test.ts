@@ -107,6 +107,20 @@ suite('independent read-only maintenance snapshot',()=>{
    expect(mapped).toMatchObject({sourceEventId:id,state:'unique-hot',canonicalId:'42',provenanceState:'unknown',replacementProven:true,deletionEligible:false,originalIdentityManifest:{kind:'retained-feed-v1-original-identity',sourceSequence:null,journalOrderProven:false,runtimeAuthorizationGranted:false}})
    expect(mapped.sourceSequence).toBeUndefined();expect(mapped.sourceVersion).toBeUndefined();expect(mapped.originalIdentityManifestHash).toMatch(/^[a-f0-9]{64}$/)
    expect(JSON.stringify(mapped)).not.toContain('DO NOT EXPORT')
+   await pool.query('ALTER TABLE public.events ADD COLUMN source_header_version int,ADD COLUMN source_sequence bigint,ADD COLUMN canonical_payload_hash text,ADD COLUMN source_classification jsonb')
+   await pool.query('UPDATE public.events SET source_header_version=1,source_sequence=83,canonical_payload_hash=$1,source_classification=$2 WHERE id=42',[canonicalPayloadHash(payload).toString('hex'),classification])
+   try{
+    const currentHeader=await scan()
+    expect(currentHeader).toMatchObject({state:'unique-hot',provenanceState:'unknown',originalIdentityManifest:{sourceSequence:null,journalOrderProven:false,canonicalHeader:{version:1,sequence:'83',contentHash:canonicalPayloadHash(payload).toString('hex')}}})
+    expect(currentHeader.sourceSequence).toBeUndefined();expect(currentHeader.sourceVersion).toBeUndefined()
+    await pool.query("INSERT INTO public.extension_source_outbox VALUES(83,'canonical_event','event:42',1,'unknown-session','tool_call',$1)",[payload])
+    expect((await scan()).replacementProven).toBe(true)
+    await pool.query("UPDATE public.extension_source_outbox SET source_seq=84 WHERE source_id='event:42'")
+    expect((await scan()).replacementProven).toBe(false)
+    await pool.query("DELETE FROM public.extension_source_outbox WHERE source_id='event:42'")
+    await pool.query("UPDATE public.events SET canonical_payload_hash=repeat('f',64) WHERE id=42")
+    expect((await scan()).replacementProven).toBe(false)
+   }finally{await pool.query('ALTER TABLE public.events DROP COLUMN source_header_version,DROP COLUMN source_sequence,DROP COLUMN canonical_payload_hash,DROP COLUMN source_classification');await pool.query("DELETE FROM public.extension_source_outbox WHERE source_id='event:42'")}
    // Planning may reuse metadata only inside these same immutable RR
    // snapshots. A new snapshot must observe changed control facts; neither
    // result is a current native/runtime authorization grant.

@@ -10,7 +10,7 @@ export function createInboxGaugeUpdater(metrics:MemoryMetrics['inboxRows'], opti
   let lastHistory:number|undefined
   return async(pool:Pick<pg.Pool,'query'>):Promise<void>=>{
     const active=await pool.query<{projection_state:string;count:string}>(`
-      SELECT projection_state,COUNT(*)::text AS count FROM memory_feed_inbox
+      SELECT projection_state,COUNT(*)::text AS count FROM memory_source_delivery_facts
       WHERE projection_state IN ('pending','quarantined') GROUP BY projection_state`)
     const counts=new Map(active.rows.map(row=>[row.projection_state,Number(row.count)]))
     for(const state of ['pending','quarantined'])metrics.set({state},counts.get(state)??0)
@@ -19,7 +19,7 @@ export function createInboxGaugeUpdater(metrics:MemoryMetrics['inboxRows'], opti
     // Bound attempts too: a slow history scan must not recur every active tick.
     lastHistory=measuredAt
     const history=await pool.query<{projection_state:string;count:string}>(`
-      SELECT projection_state,COUNT(*)::text AS count FROM memory_feed_inbox
+      SELECT projection_state,COUNT(*)::text AS count FROM memory_source_delivery_facts
       WHERE projection_state IN ('projected','purged') GROUP BY projection_state`)
     const historyCounts=new Map(history.rows.map(row=>[row.projection_state,Number(row.count)]))
     for(const state of ['projected','purged'])metrics.set({state},historyCounts.get(state)??0)

@@ -30,6 +30,7 @@ const statements=[
  `CREATE TABLE IF NOT EXISTS shared.memory_source_contract(singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),version INTEGER NOT NULL,
    installed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
  `INSERT INTO shared.memory_source_contract(singleton,version) VALUES(TRUE,1) ON CONFLICT(singleton) DO NOTHING`,
+ `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS legacy_transport_retired BOOLEAN NOT NULL DEFAULT FALSE`,
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS consumer_version INT NOT NULL DEFAULT 0`,
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS commit_fence_version INT NOT NULL DEFAULT 0`,
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS execution_version INT NOT NULL DEFAULT 0`,
@@ -65,13 +66,13 @@ const statements=[
    WHERE bootstrap_state<>'ready' OR processed_revision<dispatched_revision`,
 ]
 /** Additive migrator entry only; no Relay event or application-mode mutation. */
-export async function applySharedSourceContract(pool:pg.Pool,options:{targetProfile?:SharedSourceTargetProfile;preservedInstallations?:readonly string[]}={}):Promise<void>{
+export async function applySharedSourceContract(pool:pg.Pool,options:{targetProfile?:SharedSourceTargetProfile;preservedInstallations?:readonly string[];fencedMemoryRuntimeRole?:string}={}):Promise<void>{
  if(options.targetProfile!==undefined&&!['full','personal-relay-only'].includes(options.targetProfile))throw Error('unsupported_shared_source_target_profile')
  const c=await pool.connect()
  try{
   await c.query('BEGIN');await c.query("SELECT pg_advisory_xact_lock(hashtextextended('shared-source-contract-v1',0))")
   await assertNativeInputStartCompatible(c as unknown as Pick<pg.Pool,'query'>)
-  await assertTeamSemanticLegacySchema(c);await assertTeamSemanticLegacyFunction(c)
+  await assertTeamSemanticLegacySchema(c);await assertTeamSemanticLegacyFunction(c,options.fencedMemoryRuntimeRole)
   await c.query('CREATE SCHEMA IF NOT EXISTS shared')
   await c.query(statements[0])
   const versions=(await c.query("SELECT version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'consumer_version','0') AS consumer_version,COALESCE(to_jsonb(contract)->>'commit_fence_version','0') AS commit_fence_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version,COALESCE(to_jsonb(contract)->>'delivery_source_set_capture_version','0') AS delivery_source_set_capture_version FROM shared.memory_source_contract contract")).rows

@@ -9,7 +9,7 @@ const derived=new Set(['source_kind','canonical_key','canonical_session_key','so
 const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v)
 const digest=(v:unknown)=>canonicalPayloadHash(v).toString('hex')
 type Archive=Parameters<typeof createPostgresSharedSourceReader>[1]
-interface Prepared {source:pg.Client;target:pg.Client;copy:OriginalBindingCopyReceipt;scope:SourceScope;root:SourceRoot;version:SourceVersion;rows:{id:string;xmin:string;body:string;already:boolean}[];proofHash:string}
+interface Prepared {source:pg.Client;target:pg.Client;copy:OriginalBindingCopyReceipt;scope:SourceScope;root:SourceRoot;mode:'shared-shadow'|'shared-active';version:SourceVersion;rows:{id:string;xmin:string;body:string;already:boolean}[];proofHash:string}
 const preparedPages=new WeakMap<object,Prepared>()
 export interface OriginalPayloadRetirementPage {readonly token:object;readonly kind:'proved-original-payload-retirement';readonly rows:number;readonly proofHash:string;readonly manifestHash:string}
 
@@ -19,7 +19,7 @@ export interface OriginalPayloadRetirementPage {readonly token:object;readonly k
  * complete Session to be admitted before issuing an opaque retirement token.
  * No payload is returned in the plan or receipt; original source remains frozen.
  */
-export async function prepareOriginalPayloadRetirement(source:pg.Client,target:pg.Client,input:{copy:OriginalBindingCopyReceipt;scope:SourceScope;root:SourceRoot;sourceEventIds:string[]},options:{archive?:Archive;signal?:AbortSignal}={}):Promise<OriginalPayloadRetirementPage>{
+export async function prepareOriginalPayloadRetirement(source:pg.Client,target:pg.Client,input:{copy:OriginalBindingCopyReceipt;scope:SourceScope;root:SourceRoot;sourceEventIds:string[]},options:{archive?:Archive;signal?:AbortSignal;fencedActive?:boolean}={}):Promise<OriginalPayloadRetirementPage>{
  const {copy,scope,root,sourceEventIds:ids}=structuredClone(input)
  const abort=()=>{if(options.signal?.aborted)throw Error('original_retirement_aborted')};abort()
  if(root?.kind!=='relay_event'||scope?.ownerScopeKind!=='personal'||!uuid(scope.installationId)||!/^\d*[1-9]\d*$/.test(scope.principalUserId)||!root.key.startsWith(scope.principalUserId+':')
@@ -27,7 +27,8 @@ export async function prepareOriginalPayloadRetirement(source:pg.Client,target:p
  const columns=(await assertOriginalCopiedSource(source,target,copy)).filter(c=>c!=='payload'&&!derived.has(c))
  await source.query("SET TIME ZONE 'UTC'");await target.query("SET TIME ZONE 'UTC'")
  const mode=(await target.query('SELECT mode,generation::text FROM shared.memory_source_modes JOIN shared.memory_source_contract ON singleton WHERE installation_id=$1 AND activation_ready',[scope.installationId])).rows[0]
- if(mode?.mode!=='shared-shadow'||mode.generation!==scope.modeGeneration)throw Error('original_retirement_offline_mode_required')
+ if((mode?.mode!=='shared-shadow'&&!(options.fencedActive===true&&mode?.mode==='shared-active'))||mode.generation!==scope.modeGeneration)throw Error('original_retirement_offline_mode_required')
+ if(options.fencedActive===true)await assertTargetMemoryWritersFenced(target)
  const session=root.key.slice(scope.principalUserId.length+1)
  if((await target.query("SELECT 1 FROM memory.source_events WHERE installation_id=$1 AND session_id=$2 AND(mapping_state IS DISTINCT FROM 'verified' OR source_kind IS NULL OR source_kind NOT IN('relay_event','legacy_archive')) LIMIT 1",[scope.installationId,session])).rowCount)throw Error('original_retirement_session_unresolved')
  const rowSql=(schema:string)=>`SELECT s.source_event_id::text,s.xmin::text AS row_version,s.installation_id::text,s.session_id,s.turn_id,s.origin,s.origin_position,s.event_type,s.occurred_at,s.classification,
@@ -54,8 +55,8 @@ export async function prepareOriginalPayloadRetirement(source:pg.Client,target:p
   prepared.push({id:row.source_event_id,xmin:row.row_version,body:json,already:row.already_retired})
  }
  abort();await assertFrozenMemorySource(source);await assertTargetMemoryWritersFenced(target)
- const proofHash=digest({manifestHash:copy.manifestHash,scope,root,version:heads.version,rows:rows.map(r=>({id:r.source_event_id,xmin:r.row_version,original:r.original_metadata_hash,content:r.content_hash,canonical:r.canonical_key,already:r.already_retired}))})
- const token=Object.freeze({});preparedPages.set(token,{source,target,copy,scope,root,version:heads.version,rows:prepared,proofHash})
+ const proofHash=digest({manifestHash:copy.manifestHash,scope,root,mode:mode.mode,version:heads.version,rows:rows.map(r=>({id:r.source_event_id,xmin:r.row_version,original:r.original_metadata_hash,content:r.content_hash,canonical:r.canonical_key,already:r.already_retired}))})
+ const token=Object.freeze({});preparedPages.set(token,{source,target,copy,scope,root,mode:mode.mode,version:heads.version,rows:prepared,proofHash})
  return Object.freeze({token,kind:'proved-original-payload-retirement',rows:rows.length,proofHash,manifestHash:copy.manifestHash})
 }
 
@@ -68,7 +69,7 @@ export async function applyOriginalPayloadRetirement(source:pg.Client,target:pg.
   await target.query('BEGIN');await target.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
   await assertTargetMemoryWritersFenced(target)
   const mode=(await target.query('SELECT mode,generation::text FROM shared.memory_source_modes JOIN shared.memory_source_contract ON singleton WHERE installation_id=$1 AND activation_ready',[p.scope.installationId])).rows[0]
-  if(mode?.mode!=='shared-shadow'||mode.generation!==p.scope.modeGeneration)throw Error('original_retirement_authority_changed')
+  if(mode?.mode!==p.mode||mode.generation!==p.scope.modeGeneration)throw Error('original_retirement_authority_changed')
   if(!(await target.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS locked',[JSON.stringify(p.scope),p.root.kind,p.root.key,JSON.stringify(p.version)])).rows[0]?.locked)throw Error('original_retirement_authority_changed')
   if(!(await target.query("SELECT pg_try_advisory_xact_lock(hashtextextended('canonical-projection:'||$1,0)) AS locked",[p.scope.installationId])).rows[0].locked)throw Error('original_retirement_busy')
   for(const row of p.rows){abort()

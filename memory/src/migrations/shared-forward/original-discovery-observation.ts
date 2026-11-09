@@ -3,20 +3,25 @@ import {canonicalPayloadHash,canonicalSourceClassification,createPostgresSharedS
 import {originalIngressEventHash,readIngressKeyIndex} from '../shared-source/ingress-key.js'
 import {matchRetainedInboxEnvelope} from '../shared-source/retained-inbox-envelope.js'
 const digest=(v:unknown)=>canonicalPayloadHash(v).toString('hex')
-/** A recurring discovery ID can retain several historical observations. A
+/** A recurring discovery or terminal ID can retain distinct observations. A
  * current canonical witness proves their literal relationship, never equality
  * or replacement. Original cells remain the only authority for these bytes. */
-export async function prepareOriginalDiscoveryObservation(source:pg.Client,target:pg.Client,scope:SourceScope,root:SourceRoot,row:Record<string,any>,payload:Record<string,any>,canonicalKey:string,archive?:Parameters<typeof createPostgresSharedSourceReader>[1]){
+export async function prepareOriginalDiscoveryObservation(source:pg.Client,target:pg.Client,scope:SourceScope,root:SourceRoot,row:Record<string,any>,payload:Record<string,any>,canonicalKey:string,archive?:Parameters<typeof createPostgresSharedSourceReader>[1],eventType:'session_discovered'|'turn_status'='session_discovered'){
  const fail=()=>{throw Error('necessary_original_discovery_unproven')}
+ const recurring=eventType==='turn_status',turn=row.turn_id
  const eventHash=originalIngressEventHash({...row,payload}),index=await readIngressKeyIndex(target)
- if(!eventHash||!index||row.event_type!=='session_discovered'||row.turn_id!==null||Object.hasOwn(payload,'memory_source'))fail()
+ if(!['session_discovered','turn_status'].includes(eventType)||!eventHash||!index||row.event_type!==eventType
+  ||(recurring?typeof turn!=='string'||!turn||turn.length>512:turn!==null)||(payload.turn_id??payload.source_turn_id??null)!==turn||Object.hasOwn(payload,'memory_source'))fail()
  const reader=createPostgresSharedSourceReader({query:(sql,args)=>target.query(sql,args),async connect(){throw Error('necessary_original_external_io_forbidden')}},archive)
  const page=await reader.getHeads(scope,root,[canonicalKey]),bodies=await reader.resolveBodies(scope,root,page.heads,page.version),body=bodies[0]
  if(bodies.length!==1||!body)fail()
  const h=body.head,p=body.payload as Record<string,any>,e=(await target.query('SELECT xmin::text AS row_version,user_id::text,session_id,event_hash FROM public.events WHERE id=$1',[canonicalKey])).rows[0]
- if(!e||e.user_id!==scope.principalUserId||e.session_id!==row.session_id||e.event_hash!==eventHash||h.sessionKey!==row.session_id||h.eventType!=='session_discovered'
-  ||!['hot','cold'].includes(h.storage)||h.provenance.state!=='unknown'||h.sourceSequence!==undefined||h.turnKey!==undefined
-  ||p.event_id!==payload.event_id||(p.turn_id??p.source_turn_id??null)!==null||Object.hasOwn(p,'memory_source')
+ if(!e||e.user_id!==scope.principalUserId||e.session_id!==row.session_id||e.event_hash!==eventHash||h.sessionKey!==row.session_id||h.eventType!==eventType
+  ||!['hot','cold'].includes(h.storage)||h.provenance.state!=='unknown'||h.sourceSequence!==undefined
+  // Legacy Relay heads omit turnKey; the actual hydrated body below must
+  // still match the original stored turn. Reject any conflicting head turn.
+  ||(recurring?h.turnKey!==undefined&&h.turnKey!==turn:h.turnKey!==undefined)
+  ||p.event_id!==payload.event_id||(p.turn_id??p.source_turn_id??null)!==turn||Object.hasOwn(p,'memory_source')
   ||digest(canonicalSourceClassification({source_kind:'canonical_event',session_id:row.session_id,source_seq:'',payload:p}))!==digest(row.classification)
   ||digest(p)===digest(payload)||!h.occurredAt||!Number.isFinite(new Date(row.occurred_at).getTime())||!(new Date(row.occurred_at).getTime()>new Date(h.occurredAt).getTime()))fail()
  const inbox=(await source.query(`SELECT xmin::text AS row_version,feed_id::text,envelope_version,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,
@@ -27,18 +32,18 @@ export async function prepareOriginalDiscoveryObservation(source:pg.Client,targe
  const feed=(await target.query(feedSql,[row.origin_position])).rows
  if(inbox.length>1||feed.length>1)fail()
  const i=inbox[0],f=feed[0],key='event:'+canonicalKey
- if(i&&(i.source_id!==key||i.source_kind!=='canonical_event'||i.session_id!==row.session_id||i.turn_id!==null||i.event_type!==row.event_type
+ if(i&&(i.source_id!==key||i.source_kind!=='canonical_event'||i.session_id!==row.session_id||i.turn_id!==turn||i.event_type!==row.event_type
   ||!matchRetainedInboxEnvelope(i,payload,row.classification)))fail()
  if(f){
   const env=f.payload
-  if(f.owner_user_id!==scope.principalUserId||f.source_kind!=='canonical_event'||f.source_id!==key||f.session_id!==row.session_id||f.turn_id!==null||f.envelope_version!==1
+  if(f.owner_user_id!==scope.principalUserId||f.source_kind!=='canonical_event'||f.source_id!==key||f.session_id!==row.session_id||f.turn_id!==turn||f.envelope_version!==1
    ||!env||env.envelope_version!==1||env.topic!==f.topic||env.source?.kind!=='canonical_event'||env.source?.id!==key||env.subject?.session_id!==row.session_id
-   ||(env.subject?.turn_id??null)!==null||env.subject?.event_type!==row.event_type||digest(env.data)!==digest(payload)||digest(env.classification)!==digest(row.classification))fail()
+   ||(env.subject?.turn_id??null)!==turn||env.subject?.event_type!==row.event_type||digest(env.data)!==digest(payload)||digest(env.classification)!==digest(row.classification))fail()
   // Both independent retained transport rows must agree when both survive.
   if(i&&!matchRetainedInboxEnvelope(i,env.data,env.classification))fail()
  }
  const feedFacts=feed.map(({payload,...metadata})=>({...metadata,envelopeHash:digest(payload)}))
- const manifest={schemaVersion:1,kind:'original-session-discovery-observation',canonicalKey,canonicalRowVersion:e.row_version,canonicalSourceVersion:page.version,
+ const manifest={schemaVersion:1,kind:recurring?'original-recurring-turn-status-observation':'original-session-discovery-observation',canonicalKey,canonicalRowVersion:e.row_version,canonicalSourceVersion:page.version,
   ingressIndexHash:index!.definitionHash,ingressEventHash:eventHash,sourceIngressKeyHash:digest(row.canonical_event_key),canonicalContentHash:h.contentHash,
   canonicalOccurredAt:h.occurredAt,originalOccurredAt:new Date(row.occurred_at).toISOString(),canonicalStorage:h.storage,
   inbox:inbox.map(({data,classification,...metadata})=>({...metadata,classificationHash:digest(classification)})),feed:feedFacts,

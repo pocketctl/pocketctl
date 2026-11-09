@@ -1,3 +1,4 @@
+import {legacyTransportRetired} from '../sources/transport-state.js'
 /** Opt-in maintenance stages. Existing public purgeSession semantics are not
  * changed. The maintenance caller supplies an audited complete native closure,
  * current authority and original-key guards in the same bounded transaction. */
@@ -7,7 +8,7 @@ import {invalidateDerivedEpisodes,cancelSessionContextGenerationRows} from './re
 import type {PagedCleanupPart,PagedCleanupRecord} from '../migrations/shared-forward/paged-cleanup-manifest.js'
 import {qi} from '../migrations/shared-forward/source-maintenance-common.js'
 import {minimizeFeedbackRows} from '../claims/feedback-policy.js'
-const leafTables=new Set(['source_events','source_artifacts','source_turns','work_episodes','memory_feed_inbox','memory_snapshot_events','memory_source_retention_receipts','memory_source_processing_receipts','memory_session_scene_frames','memory_task_bundle_sources','memory_task_bundles','memory_context_packs','memory_skill_replay_runs','memory_skill_executions'])
+const leafTables=new Set(['source_events','source_artifacts','source_turns','work_episodes','memory_feed_inbox','memory_source_delivery_receipts','memory_snapshot_events','memory_source_retention_receipts','memory_source_processing_receipts','memory_session_scene_frames','memory_task_bundle_sources','memory_task_bundles','memory_context_packs','memory_skill_replay_runs','memory_skill_executions'])
 type Client=Pick<pg.PoolClient,'query'>
 export async function lockStagedSessionPurge(c:Client,installationId:string,sessions:readonly string[]){
  for(const session of [...new Set(sessions)].sort())await c.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))",[installationId,session])
@@ -49,7 +50,8 @@ export async function applyStagedSessionPage(c:Client,page:PagedCleanupPart,keys
   const [installation,session]=[page.root.installationId,page.root.sessionId],reason=page.records.find(r=>r.table==='source_sessions')?.references.barrier_reason_key
   if(reason!=='user_deleted'&&reason!=='access_revoked')throw Error('paged_final_native_reason_unproved')
   // No unbounded tombstone trigger is used as a final cleanup shortcut.
-  for(const table of ['source_events','source_artifacts','source_turns','memory_feed_inbox','memory_snapshot_events','memory_context_packs','memory_task_bundles','memory_skill_executions'])if((await c.query(`SELECT 1 FROM ${qi(table)} WHERE installation_id=$1 AND session_id=$2 LIMIT 1`,[installation,session])).rowCount)throw Error('paged_final_native_residual')
+  const rawTransport=await legacyTransportRetired(c,true)?[]:['memory_snapshot_events']
+  for(const table of ['source_events','source_artifacts','source_turns','memory_source_delivery_facts',...rawTransport,'memory_context_packs','memory_task_bundles','memory_skill_executions'])if((await c.query(`SELECT 1 FROM ${qi(table)} WHERE installation_id=$1 AND session_id=$2 LIMIT 1`,[installation,session])).rowCount)throw Error('paged_final_native_residual')
   if((await c.query("SELECT 1 FROM work_episodes WHERE installation_id=$1 AND session_id=$2 AND(state<>'invalidated' OR document<>'{}'::jsonb OR evidence_manifest<>'{}'::jsonb OR summary<>'{}'::jsonb) LIMIT 1",[installation,session])).rowCount)throw Error('paged_final_episode_body_residual')
   if((await c.query(`SELECT 1 FROM memory_skill_task_runs r JOIN work_episodes e USING(installation_id,episode_id) JOIN memory_skill_tasks task USING(installation_id,task_id)
      LEFT JOIN memory_generation_runs g ON g.run_id=r.generation_run_id

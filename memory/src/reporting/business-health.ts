@@ -68,7 +68,7 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
       unresolved.unresolved_extractions,
       runs.last_extract_at,
       EXTRACT(EPOCH FROM (NOW()-runs.last_extract_at)) AS last_extract_seconds,
-      (SELECT COUNT(*) FROM memory_feed_inbox inbox WHERE inbox.installation_id=i.installation_id
+      (SELECT COUNT(*) FROM memory_source_delivery_facts inbox WHERE inbox.installation_id=i.installation_id
         AND inbox.projection_state='quarantined' AND inbox.error_code='oversized_content') AS evidence_gaps,
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='pending') AS pending_jobs,
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='dead'

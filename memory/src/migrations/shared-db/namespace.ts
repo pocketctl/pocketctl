@@ -1,3 +1,4 @@
+import {assertTransportMetadataContract} from '../../sources/transport-state.js'
 import {assertTeamSemanticLegacySchema} from '../../sources/team-semantic-migration.js'
 import {assertTeamSemanticLegacyFunction} from './team-semantic-contract.js'
 import {assertNativeInputStartCompatible} from './input-start-contract.js'
@@ -21,10 +22,10 @@ async function assertRoles(db:Pick<pg.Pool,'query'>,roles:SharedRoles){
 }
 /** Explicit admin bootstrap for an already constructed target schema, not a
  * startup side effect. Passwords/login provisioning are external to this tool. */
-export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles):Promise<void>{
+export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,options:{fencedMemoryRuntime?:boolean}={}):Promise<void>{
  const client=await pool.connect()
  try{
-  await client.query('BEGIN');await assertNativeInputStartCompatible(client as unknown as pg.Pool);await assertTeamSemanticLegacySchema(client);await assertTeamSemanticLegacyFunction(client);await assertRoles(client as unknown as pg.Pool,roles)
+  await client.query('BEGIN');await assertNativeInputStartCompatible(client as unknown as pg.Pool);await assertTeamSemanticLegacySchema(client);await assertTeamSemanticLegacyFunction(client,options.fencedMemoryRuntime?roles.memoryRole:undefined);await assertRoles(client as unknown as pg.Pool,roles)
   const database=quoteIdentifier((await client.query('SELECT current_database() AS name')).rows[0].name)
   const memory=quoteIdentifier(roles.memoryRole),relay=quoteIdentifier(roles.relayRole),migrator=quoteIdentifier(roles.migratorRole)
   const objects=(await client.query(`SELECT n.nspname,c.relname,c.relkind,EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype IN ('a','i')) AS owned_sequence FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relnamespace IN ('memory'::regnamespace,'shared'::regnamespace) AND c.relkind IN ('r','p','S','v','m') ORDER BY c.relkind,c.relname`)).rows
@@ -142,7 +143,7 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles):Pr
    await client.query(`REVOKE ALL ON FUNCTION public.read_native_team_semantic_publication(text,text) FROM PUBLIC,${memory},${relay};GRANT EXECUTE ON FUNCTION public.read_native_team_semantic_publication(text,text) TO ${migrator}`)
   }
   await assertNativeInputStartCompatible(client as unknown as pg.Pool)
-  await assertTeamSemanticLegacySchema(client);await assertTeamSemanticLegacyFunction(client)
+  await assertTeamSemanticLegacySchema(client);await assertTeamSemanticLegacyFunction(client,options.fencedMemoryRuntime?roles.memoryRole:undefined)
   await client.query('COMMIT')
  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
 }
@@ -249,6 +250,7 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
    if(modes.some(m=>!ids.includes(m.installation_id)||!facts.some(f=>f.installation_id===m.installation_id&&f.state.owner_scope_kind==='personal')))
     throw Error('shared_source_launch_scope_mismatch')
   }else if(modes.length)throw new Error('shared_source_consumers_not_ready')
+  await assertTransportMetadataContract(client)
   await client.query('COMMIT')
  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
 }

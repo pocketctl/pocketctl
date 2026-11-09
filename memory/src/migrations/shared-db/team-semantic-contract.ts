@@ -1,3 +1,5 @@
+import type pg from 'pg'
+import {assertTargetMemoryWritersFenced} from '../shared-forward/source-maintenance-capabilities.js'
 /** Explicit semantic metadata boundary. Native body and raw-reference readers
  * retain their existing kinds and independent authorization contracts. */
 export const SHARED_TEAM_SEMANTIC_FUNCTIONS=[
@@ -279,7 +281,17 @@ SELECT 1 AS rank,'source'::text AS kind,x.source_event_id::text AS id,x.mapping_
 
 /** Existing controlled audit definition/owner/ACL cannot be silently replaced
  * by a later installer. Fresh installation has no such function yet. */
-export async function assertTeamSemanticLegacyFunction(client:{query:(...args:any[])=>Promise<any>}):Promise<void>{
+export async function assertTeamSemanticLegacyFunction(client:{query:(...args:any[])=>Promise<any>},fencedRuntimeRole?:string):Promise<void>{
+ if(fencedRuntimeRole!==undefined){
+  if(!/^[a-z_][a-z0-9_]{0,62}$/.test(fencedRuntimeRole))throw Error('fenced_maintenance_runtime_required')
+  const r=(await client.query(`SELECT NOT r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole
+   AND NOT r.rolreplication AND NOT r.rolbypassrls AND r.oid<>c.relowner AND NOT pg_has_role(r.oid,c.relowner,'MEMBER')
+   AND has_table_privilege(r.oid,'memory.source_events','SELECT') AND has_table_privilege(r.oid,'memory.source_events','INSERT')
+   AND has_table_privilege(r.oid,'memory.source_events','UPDATE') AND has_table_privilege(r.oid,'memory.source_events','DELETE') AS ready
+   FROM pg_roles r CROSS JOIN pg_class c WHERE r.rolname=$1 AND c.oid='memory.memory_schema_migrations'::regclass`,[fencedRuntimeRole])).rows[0]
+  if(r?.ready!==true)throw Error('fenced_maintenance_runtime_required')
+  await assertTargetMemoryWritersFenced(client as pg.Client)
+ }
  const ddl=SHARED_TEAM_SEMANTIC_FUNCTIONS.find(s=>s.startsWith('CREATE OR REPLACE FUNCTION shared.read_memory_team_legacy_audit('))!
  const expected=ddl.split('AS $$')[1].split('$$')[0]
  const result=await client.query(`SELECT p.prosrc=$1 AND p.prosecdef AND p.provolatile='s' AND p.prokind='f' AND p.prorettype='jsonb'::regtype
@@ -292,8 +304,8 @@ export async function assertTeamSemanticLegacyFunction(client:{query:(...args:an
      JOIN pg_roles runtime ON runtime.oid=delegated.grantee
     WHERE base.oid=to_regprocedure('shared.read_memory_team_semantic_group(uuid,text,text)') AND base.proowner=p.proowner
      AND delegated.grantee=acl.grantee AND delegated.privilege_type='EXECUTE' AND NOT delegated.is_grantable
-     AND runtime.rolcanlogin AND NOT runtime.rolsuper AND NOT runtime.rolcreatedb AND NOT runtime.rolcreaterole
+     AND(runtime.rolcanlogin OR runtime.rolname=$2) AND NOT runtime.rolsuper AND NOT runtime.rolcreatedb AND NOT runtime.rolcreaterole
      AND NOT runtime.rolreplication AND NOT runtime.rolbypassrls AND NOT pg_has_role(runtime.oid,p.proowner,'MEMBER')),FALSE)) AS ready
-  FROM pg_proc p WHERE p.oid=to_regprocedure('shared.read_memory_team_legacy_audit(uuid,jsonb)')`,[expected])
+  FROM pg_proc p WHERE p.oid=to_regprocedure('shared.read_memory_team_legacy_audit(uuid,jsonb)')`,[expected,fencedRuntimeRole??null])
  if(result.rows.length&&result.rows[0]?.ready!==true)throw Error('team_semantic_legacy_function_incompatible')
 }

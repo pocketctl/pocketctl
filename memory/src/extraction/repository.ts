@@ -111,7 +111,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
         LEFT JOIN memory_feature_settings f ON f.installation_id = e.installation_id
         WHERE e.installation_id = $1 AND e.turn_id = $2
           AND NOT($3::text='enabled' AND EXISTS(SELECT 1 FROM memory_curation_policies p WHERE p.installation_id=e.installation_id AND p.mode='enabled')) AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -182,7 +182,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
             JOIN memory_installations i ON i.installation_id=e.installation_id
             WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3
               AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -196,7 +196,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
               JOIN memory_feature_settings f ON f.installation_id=e.installation_id
               JOIN memory_installations i ON i.installation_id=e.installation_id
               WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -475,7 +475,7 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
           await assertLegacySourceOwner(client,input.installationId,options.lifecycleMode)
           if (input.fence) await assertJobFence(client, input.fence)
           const revision = await client.query<{ current: boolean; source_complete: boolean }>(`
-            SELECT e.source_digest = r.episode_source_digest AS current, NOT EXISTS (SELECT 1 FROM memory_feed_inbox gap
+            SELECT e.source_digest = r.episode_source_digest AS current, NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id)) AS source_complete

@@ -125,6 +125,20 @@ suite('finite original UUID binding with actual controlled reader and commit fen
    await target.query("UPDATE memory.source_events SET source_kind=NULL,canonical_key=NULL,canonical_session_key=NULL,source_version=NULL,source_sequence=NULL,content_hash=NULL,hash_version=NULL,mapping_state='unproven',adapter_version=NULL WHERE source_event_id=$1",[m.sourceEventId])
   }
  })
+ test('a witnessed current header is fenced independently and never fills the original unknown sequence',async()=>{
+  const m=structuredClone(mappings[1]),old=(await target.query('SELECT source_header_version,source_sequence::text,canonical_payload_hash,source_classification FROM public.events WHERE id=$1',[m.canonicalId])).rows[0]
+  await target.query('UPDATE public.events SET source_header_version=1,source_sequence=777,canonical_payload_hash=$2,source_classification=(SELECT classification FROM memory.source_events WHERE source_event_id=$3) WHERE id=$1',[m.canonicalId,m.contentHash,m.sourceEventId])
+  m.originalIdentityManifest={...m.originalIdentityManifest,canonicalHeader:{version:1,sequence:'777',contentHash:m.contentHash,classificationHash:m.classificationHash}};m.originalIdentityManifestHash=digest(m.originalIdentityManifest)
+  try{
+   const bad=structuredClone(m);(bad.originalIdentityManifest!.canonicalHeader as any).sequence='778';bad.originalIdentityManifestHash=digest(bad.originalIdentityManifest)
+   await expect(call([bad])).rejects.toThrow('original_binding_current_source_conflict')
+   expect(await call([m])).toMatchObject({changed:1,sourceBodiesChanged:false,provenanceRewritten:false})
+   expect((await target.query('SELECT source_sequence,source_provenance FROM memory.source_events WHERE source_event_id=$1',[m.sourceEventId])).rows[0]).toEqual({source_sequence:null,source_provenance:{}})
+  }finally{
+   await target.query('UPDATE public.events SET source_header_version=$2,source_sequence=$3,canonical_payload_hash=$4,source_classification=$5 WHERE id=$1',[m.canonicalId,old.source_header_version,old.source_sequence,old.canonical_payload_hash,old.source_classification])
+   await target.query("UPDATE memory.source_events SET source_kind=NULL,canonical_key=NULL,canonical_session_key=NULL,source_version=NULL,source_sequence=NULL,content_hash=NULL,hash_version=NULL,mapping_state='unproven',adapter_version=NULL WHERE source_event_id=$1",[m.sourceEventId])
+  }
+ })
  test('preserves proven original order after current Journal and header order are unavailable',async()=>{
   const m=mappings[0],event=(await target.query('SELECT source_header_version,source_sequence::text,canonical_payload_hash,source_classification FROM public.events WHERE id=$1',[m.canonicalId])).rows[0]
   const journal=(await target.query("DELETE FROM public.extension_source_outbox WHERE source_kind='canonical_event' AND source_id=$1 RETURNING row_to_json(extension_source_outbox)::text AS json",['event:'+m.canonicalId])).rows
@@ -267,5 +281,19 @@ suite('finite original UUID binding with actual controlled reader and commit fen
   await target.query('BEGIN');try{await actual.assertCurrent(target,{forCommit:true});await target.query('COMMIT')}catch(e){await target.query('ROLLBACK');throw e}
   expect(await applyOriginalPayloadRetirement(source,target,await prepareOriginalPayloadRetirement(source,target,input,{archive}))).toMatchObject({changed:0,alreadyRetired:2})
   expect((await source.query("SELECT encode(sha256(convert_to(jsonb_agg(to_jsonb(s) ORDER BY source_event_id)::text,'UTF8')),'hex') AS hash FROM public.source_events s")).rows[0].hash).toBe(originalHash)
+ })
+ test('explicit forward maintenance retires active duplicates without restoring shadow authority',async()=>{
+  for(const m of mappings){const body=(await source.query('SELECT payload::text AS body FROM public.source_events WHERE source_event_id=$1',[m.sourceEventId])).rows[0].body;await target.query('UPDATE memory.source_events SET payload=$2::jsonb WHERE source_event_id=$1',[m.sourceEventId,body])}
+  scope.modeGeneration=(await target.query("SELECT shared.transition_memory_source_mode($1,$2::bigint,'shared-active')::text AS generation",[scope.installationId,scope.modeGeneration])).rows[0].generation
+  const input={copy,scope,root,sourceEventIds:mappings.map(m=>m.sourceEventId)}
+  await expect(prepareOriginalPayloadRetirement(source,target,input,{archive})).rejects.toThrow('original_retirement_offline_mode_required')
+  await target.query('ALTER ROLE original_binding_memory LOGIN')
+  try{await expect(prepareOriginalPayloadRetirement(source,target,input,{archive,fencedActive:true} as never)).rejects.toThrow('target_writers_not_fenced')}finally{await target.query('ALTER ROLE original_binding_memory NOLOGIN')}
+  const before=(await target.query('SELECT mode,generation::text FROM shared.memory_source_modes WHERE installation_id=$1',[scope.installationId])).rows[0]
+  const page=await prepareOriginalPayloadRetirement(source,target,input,{archive,fencedActive:true} as never)
+  expect(await applyOriginalPayloadRetirement(source,target,page)).toMatchObject({changed:2,alreadyRetired:0})
+  expect((await target.query('SELECT mode,generation::text FROM shared.memory_source_modes WHERE installation_id=$1',[scope.installationId])).rows[0]).toEqual(before)
+  const{prepareSourceReferences}=await import('../../sources/prepared-sources.js'),actual=await prepareSourceReferences(target as unknown as pg.Pool,scope.installationId,input.sourceEventIds)
+  expect(actual.events).toHaveLength(2);await target.query('BEGIN');try{await actual.assertCurrent(target,{forCommit:true});await target.query('COMMIT')}catch(e){await target.query('ROLLBACK');throw e}
  })
 })

@@ -59,6 +59,12 @@ export async function bindOriginalPersonalReferencePage(source:pg.Client,target:
     ||p.sessionId!==a.session_id||p.turnId!==a.turn_id||p.eventType!==a.event_type||p.occurredAt!==new Date(a.occurred_at).toISOString()
     ||p.provenanceHash!==digest(a.source_provenance)||p.classificationHash!==m.classificationHash||p.contentHash!==m.contentHash||p.originalSourceHash!==m.originalSourceHash
    ||p.sourceSequence!==null||p.journalOrderProven!==false||p.provenanceState!=='unknown'||Object.hasOwn(a.source_provenance,'memory')||Object.hasOwn(a.classification,'memory_source'))throw Error('original_binding_identity_manifest_changed')
+   if(p.canonicalHeader!==undefined){
+    const h=p.canonicalHeader as Record<string,unknown>
+    if(!h||typeof h!=='object'||Object.keys(h).sort().join(',')!=='classificationHash,contentHash,sequence,version'||h.version!==1
+     ||typeof h.sequence!=='string'||!/^[1-9][0-9]{0,18}$/.test(h.sequence)||BigInt(h.sequence)>9223372036854775807n
+     ||h.contentHash!==m.contentHash||h.classificationHash!==m.classificationHash)throw Error('original_binding_identity_manifest_changed')
+   }
    if(p.kind==='retained-inbox-v1-original-identity'){
     if(a.origin!=='feed'||!/^\d*[1-9]\d*$/.test(a.origin_position)||p.feedRowVersion!==null||!hex(p.transportEnvelopeHash)||typeof p.inboxBodyReclaimed!=='boolean')throw Error('original_binding_transport_changed')
     const inbox=(await source.query(`SELECT xmin::text AS inbox_row_version,feed_id::text,envelope_version,topic,source_kind,source_id,session_id,turn_id,event_type,recorded_at,
@@ -89,6 +95,8 @@ export async function bindOriginalPersonalReferencePage(source:pg.Client,target:
   const row=old.find(r=>r.source_event_id===m.sourceEventId)!,body=bodies.find(b=>b.head.canonicalKey===m.canonicalId)!,h=body.head,p=body.payload as Record<string,unknown>
   const classification=canonicalSourceClassification({source_kind:'canonical_event',session_id:row.session_id,source_seq:m.sourceSequence??'',payload:p})
   const transport=originalInbox.get(m.sourceEventId)
+  const observed=m.originalIdentityManifest?.canonicalHeader as {sequence:string}|undefined
+  if(observed&&(h.sourceSequence!==observed.sequence||h.provenance.state!=='unknown'))throw Error('original_binding_current_source_conflict')
   if(transport&&!matchRetainedInboxEnvelope(transport,p,classification))throw Error('original_binding_transport_changed')
   const ingress=originalIngress.get(m.sourceEventId)
   if(ingress&&p.event_id!==ingress.businessId)throw Error('original_binding_ingress_changed')

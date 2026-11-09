@@ -27,11 +27,12 @@ export const SHARED_SOURCE_MODE_FUNCTIONS=[
    IF NOT pg_try_advisory_xact_lock_shared(hashtextextended('memory-source-mode:'||p_installation::text,0)) THEN RAISE EXCEPTION 'source_mode_input_busy' USING ERRCODE='55P03';END IF;
    SELECT mode,generation INTO mode_value,generation_value FROM shared.memory_source_modes WHERE installation_id=p_installation FOR SHARE NOWAIT;
    mode_value=COALESCE(mode_value,'legacy-feed');generation_value=COALESCE(generation_value,1);
-   RETURN jsonb_build_object('mode',mode_value,'generation',generation_value::text,'allowed',provider_enabled AND mode_value IN('legacy-feed','shared-shadow'));
+   RETURN jsonb_build_object('mode',mode_value,'generation',generation_value::text,'allowed',provider_enabled AND mode_value IN('legacy-feed','shared-shadow') AND NOT (SELECT legacy_transport_retired FROM shared.memory_source_contract WHERE singleton));
   END $$`,
  `REVOKE ALL ON FUNCTION shared.fence_memory_source_mode_input(),shared.lock_memory_feed_source_mode(UUID) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.lock_memory_legacy_input(p_installation UUID,p_expected BIGINT)
   RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE m RECORD;BEGIN
+   IF (SELECT legacy_transport_retired FROM shared.memory_source_contract WHERE singleton) THEN RAISE EXCEPTION 'legacy_transport_retired';END IF;
    IF p_installation IS NULL THEN RAISE EXCEPTION 'source_mode_generation_changed';END IF;
    INSERT INTO shared.memory_source_modes(installation_id) SELECT p_installation WHERE NOT EXISTS(SELECT 1 FROM shared.memory_source_modes WHERE installation_id=p_installation) ON CONFLICT DO NOTHING;
    SELECT mode,generation INTO m FROM shared.memory_source_modes WHERE installation_id=p_installation FOR SHARE;
@@ -43,6 +44,7 @@ export const SHARED_SOURCE_MODE_FUNCTIONS=[
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS activation_ready BOOLEAN NOT NULL DEFAULT FALSE`,
  `CREATE OR REPLACE FUNCTION shared.transition_memory_source_mode(p_installation UUID,p_generation BIGINT,p_mode TEXT)
   RETURNS BIGINT LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE g BIGINT;i RECORD;BEGIN
+   IF p_mode IN('legacy-feed','shared-shadow') AND (SELECT legacy_transport_retired FROM shared.memory_source_contract WHERE singleton) THEN RAISE EXCEPTION 'legacy_transport_retired';END IF;
    IF p_mode NOT IN ('legacy-feed','shared-shadow','shared-active','paused') THEN RAISE EXCEPTION 'invalid_source_mode'; END IF;
    IF p_mode<>'paused' AND current_setting('transaction_isolation')<>'read committed'
     THEN RAISE EXCEPTION 'source_execution_requires_read_committed';END IF;

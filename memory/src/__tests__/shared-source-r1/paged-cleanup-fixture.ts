@@ -21,7 +21,7 @@ export async function createPagedFixture(url:string){
  const sql=async(text:string,values?:unknown[])=>{const c=new pg.Client({connectionString:url});await c.connect();try{return await c.query(text,values)}finally{await c.end()}}
  const pool=new pg.Pool({connectionString:url})
  try{
-  await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
+  await applyMemorySchema(pool,{namespace:'memory'})
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY);
    CREATE TABLE public.daemons(daemon_id text PRIMARY KEY,user_id int);
    CREATE TABLE public.sessions(session_id text PRIMARY KEY,user_id int,daemon_id text,source text,content_state text,agent_type text);
@@ -37,6 +37,8 @@ export async function createPagedFixture(url:string){
    CREATE TABLE public.paged_cancel_probe(id integer PRIMARY KEY);
    CREATE TABLE public.paged_canonical_sentinel(id bigint PRIMARY KEY,body text);
    INSERT INTO public.paged_canonical_sentinel VALUES(9007199254740993,'canonical must survive');`)
+  await pool.query("ALTER TABLE public.extension_installations ADD COLUMN start_policy TEXT NOT NULL DEFAULT 'retained_history'")
+  await applySharedSourceContract(pool)
   await installNativeAliasFixture(pool)
   await pool.query(`ALTER TABLE public.events ADD COLUMN created_at timestamptz,ADD COLUMN source_header_version integer,ADD COLUMN source_sequence bigint,ADD COLUMN canonical_payload_hash text,ADD COLUMN source_classification jsonb`)
   for(const [moduleName,exportName] of [['capture-contract','RELAY_SOURCE_CAPTURE_SQL'],['session-capture','RELAY_SESSION_CAPTURE_SQL']]){

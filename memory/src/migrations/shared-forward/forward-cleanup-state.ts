@@ -21,7 +21,7 @@ export async function discoverCleanupDependencies(c:pg.Client,roots:CleanupRoot[
  if(candidateIds.length>maximumRows)throw Error('cleanup_single_page_dependency_bound_exceeded')
  const dependencies={roots,installationIds,broadIds,sourceEventIds,artifactIds,episodeIds,candidateIds,packIds,injectionIds,bundleIds}
  const linked=await discoverLinkedClosure(c,dependencies)
- const narrow=new Set('source_sessions source_events source_turns source_artifacts work_episodes memory_candidates memory_extraction_runs memory_task_bundles memory_task_bundle_sources memory_source_processing_receipts memory_source_retention_receipts memory_session_scene_frames memory_feed_inbox memory_snapshot_events memory_context_packs memory_context_pack_items memory_context_pack_evidence memory_context_injections memory_context_feedback memory_context_evidence_reads memory_feedback'.split(' '))
+ const narrow=new Set('source_sessions source_events source_turns source_artifacts work_episodes memory_candidates memory_extraction_runs memory_task_bundles memory_task_bundle_sources memory_source_processing_receipts memory_source_retention_receipts memory_session_scene_frames memory_feed_inbox memory_source_delivery_receipts memory_snapshot_events memory_context_packs memory_context_pack_items memory_context_pack_evidence memory_context_injections memory_context_feedback memory_context_evidence_reads memory_feedback'.split(' '))
  if(linked.version===3||Object.keys(linked.rows).some(table=>!narrow.has(table)))return {...dependencies,linked}
  await assertCleanupDependencyExclusions(c,dependencies)
  return dependencies
@@ -47,7 +47,7 @@ export async function cleanupState(c:pg.Client,d:CleanupDependencies,locked=fals
  const catalog=(await c.query(`SELECT c.relname AS table,array_agg(a.attname ORDER BY a.attnum) AS columns FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped WHERE n.nspname='memory' AND c.relkind IN('r','p') GROUP BY c.relname ORDER BY c.relname`)).rows as {table:string;columns:string[]}[]
  if(!catalog.length||catalog.length>256||catalog.some(t=>!Object.hasOwn(TABLE_POLICY,t.table)))throw Error('cleanup_dependency_schema_unreviewed')
  const roots=`EXISTS(SELECT 1 FROM jsonb_to_recordset($1::jsonb) r("installationId" uuid,"sessionId" text) WHERE t.installation_id=r."installationId" AND t.session_id=r."sessionId")`
- const sourceTables=new Set(['source_sessions','source_events','source_turns','source_artifacts','work_episodes','memory_feed_inbox','memory_snapshot_events','memory_source_retention_receipts','memory_source_processing_receipts','memory_session_scene_frames','memory_task_bundles','memory_context_packs','memory_session_tombstones'])
+ const sourceTables=new Set(['source_sessions','source_events','source_turns','source_artifacts','work_episodes','memory_feed_inbox','memory_source_delivery_receipts','memory_snapshot_events','memory_source_retention_receipts','memory_source_processing_receipts','memory_session_scene_frames','memory_task_bundles','memory_context_packs','memory_session_tombstones'])
  const result:CleanupTableState[]=[];let rows=0,bytes=0
  for(const {table,columns} of catalog){
   let predicate='false'

@@ -8,7 +8,7 @@ import {createSourceArchiveReader} from '../../sources/archive-reader.js'
 import {safeError} from '../shared-source/database.js'
 const help=`Finite necessary original Memory custody (1..256 UUIDs, one personal Session).
   --input FILE --output NEW_DIR
-Input: {source:{database,databaseOid,role,serverAddress,serverPort},target:{...},copy,scope,root,sourceEventIds,necessity?,discoveryWitness?,sourceProcessingWitness?}.
+Input: {source:{database,databaseOid,role,serverAddress,serverPort},target:{...},copy,scope,root,sourceEventIds,necessity?,discoveryWitness?,sourceProcessingWitness?,recurringObservationWitness?,nativeHeadWitness?}.
 Requires verified copy, frozen original database, fenced target writers, current
 personal/native authority and current necessity dependencies. Default
 necessity=literal-reference requires literal packet handles. Explicit
@@ -18,6 +18,15 @@ Explicit necessity=source-processing requires an existing native projection task
 and sourceProcessingWitness:{jobId,scanId,targetCursor}. Its sealed target must
 match current personal control/mode and actual current native input. It proves
 processing necessity, not accepted knowledge or original-to-Relay identity.
+Optional source-processing nativeHeadWitness:{canonicalKey} uses the actual
+current controlled one-ID reader instead of enumerating the Session prefix.
+It proves current native input under the same root/scope/version and never an
+old-to-canonical identity. All original commit and authority fences remain.
+Source-processing may separately supply recurringObservationWitness:
+{canonicalKey,eventType:'turn_status'} for an exact recurring ingress key with
+a different, earlier current hot/cold observation. Both original and current
+turn/owner/session/type/classification, unknown provenance and current version
+must match independently. It never treats the witness as replacement bytes.
 Ordinary custody requires no stable key or retained transport. Explicit accepted-session
 discoveryWitness:{canonicalKey} separately verifies later, different original
 session_discovered observations against current controlled hot/cold bytes.

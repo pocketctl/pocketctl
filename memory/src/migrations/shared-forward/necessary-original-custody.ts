@@ -10,7 +10,7 @@ import {readSourceProcessingCustodyDependency,validSourceProcessingCustodyWitnes
 const uuid=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v)
 const digest=(v:unknown)=>canonicalPayloadHash(v).toString('hex')
 const derived=new Set(['source_kind','canonical_key','canonical_session_key','source_version','source_sequence','content_hash','hash_version','mapping_state','adapter_version','canonical_projected_at','legacy_owner_user_id','legacy_manifest_hash'])
-export interface NecessaryOriginalCustodyInput {copy:OriginalBindingCopyReceipt;scope:SourceScope;root:SourceRoot;sourceEventIds:string[];necessity?:'literal-reference'|'accepted-session'|'source-processing';discoveryWitness?:{canonicalKey:string};sourceProcessingWitness?:SourceProcessingCustodyWitness}
+export interface NecessaryOriginalCustodyInput {copy:OriginalBindingCopyReceipt;scope:SourceScope;root:SourceRoot;sourceEventIds:string[];necessity?:'literal-reference'|'accepted-session'|'source-processing';discoveryWitness?:{canonicalKey:string};sourceProcessingWitness?:SourceProcessingCustodyWitness;recurringObservationWitness?:{canonicalKey:string;eventType:'turn_status'};nativeHeadWitness?:{canonicalKey:string}}
 /** Read-only prerequisite shared by the operator and fixed live diagnostics.
  * Returns only original candidate/episode IDs and opaque metadata hashes. */
 export async function readNecessaryOriginalDependencies(db:Pick<pg.Client,'query'>,schema:'public'|'memory',installationId:string,sessionId:string,sourceEventId:string,necessity:'literal-reference'|'accepted-session'='literal-reference'){
@@ -31,9 +31,14 @@ export async function readNecessaryOriginalDependencies(db:Pick<pg.Client,'query
  * canonical absence or deduplication. No raw-source discovery by content, no
  * transport recreation, and no producer lineage is inferred. */
 export async function retainNecessaryOriginalPersonalReferencePage(source:pg.Client,target:pg.Client,input:NecessaryOriginalCustodyInput,options:{signal?:AbortSignal;beforeCommit?:()=>Promise<void>;archive?:Parameters<typeof createPostgresSharedSourceReader>[1]}={}){
- const {copy,scope,root,sourceEventIds:ids,necessity='literal-reference',discoveryWitness,sourceProcessingWitness}=structuredClone(input),abort=()=>{if(options.signal?.aborted)throw Error('necessary_original_aborted')}
+ const {copy,scope,root,sourceEventIds:ids,necessity='literal-reference',discoveryWitness,sourceProcessingWitness,recurringObservationWitness,nativeHeadWitness}=structuredClone(input),abort=()=>{if(options.signal?.aborted)throw Error('necessary_original_aborted')}
  if(discoveryWitness&&(necessity!=='accepted-session'||Object.keys(discoveryWitness).length!==1||typeof discoveryWitness.canonicalKey!=='string'||!/^[1-9][0-9]*$/.test(discoveryWitness.canonicalKey)||BigInt(discoveryWitness.canonicalKey)>9223372036854775807n))throw Error('necessary_original_input_invalid')
  if((necessity==='source-processing')!==Boolean(sourceProcessingWitness)||sourceProcessingWitness&&!validSourceProcessingCustodyWitness(sourceProcessingWitness))throw Error('necessary_original_input_invalid')
+ if(recurringObservationWitness&&(necessity!=='source-processing'||discoveryWitness||Object.keys(recurringObservationWitness).sort().join(',')!=='canonicalKey,eventType'
+  ||recurringObservationWitness.eventType!=='turn_status'||typeof recurringObservationWitness.canonicalKey!=='string'||!/^[1-9][0-9]*$/.test(recurringObservationWitness.canonicalKey)||BigInt(recurringObservationWitness.canonicalKey)>9223372036854775807n))throw Error('necessary_original_input_invalid')
+ const hasObservation=Boolean(discoveryWitness||recurringObservationWitness)
+ if(nativeHeadWitness&&(necessity!=='source-processing'||Object.keys(nativeHeadWitness).join(',')!=='canonicalKey'||typeof nativeHeadWitness.canonicalKey!=='string'
+  ||!/^[1-9][0-9]*$/.test(nativeHeadWitness.canonicalKey)||BigInt(nativeHeadWitness.canonicalKey)>9223372036854775807n))throw Error('necessary_original_input_invalid')
  if(!['literal-reference','accepted-session','source-processing'].includes(necessity)||scope?.ownerScopeKind!=='personal'||!uuid(scope.installationId)||!/^[1-9][0-9]*$/.test(scope.principalUserId)||root?.kind!=='relay_event'
   ||!root.key.startsWith(scope.principalUserId+':')||!Array.isArray(ids)||ids.length<1||ids.length>256||ids.some(id=>!uuid(id))||new Set(ids).size!==ids.length)throw Error('necessary_original_input_invalid')
  abort();const columns=await assertOriginalCopiedSource(source,target,copy),session=root.key.slice(scope.principalUserId.length+1)
@@ -46,7 +51,7 @@ export async function retainNecessaryOriginalPersonalReferencePage(source:pg.Cli
   // Actual current native input proves that the whole-Session mapping guard
   // is relevant. This is not compared with the old body or used as its ID.
   const reader=createPostgresSharedSourceReader({query:(sql,args)=>target.query(sql,args),async connect(){throw Error('necessary_original_external_io_forbidden')}},options.archive)
-  const page=await reader.listHeads(scope,root,{limit:1})
+  const page=nativeHeadWitness?await reader.getHeads(scope,root,[nativeHeadWitness.canonicalKey]):await reader.listHeads(scope,root,{limit:1})
   if(page.heads.length!==1||page.heads[0].sessionKey!==session)throw Error('necessary_original_dependency_unproven')
   processingHeadVersion=page.version;processingHeadProof={canonicalKey:page.heads[0].canonicalKey,contentHash:page.heads[0].contentHash,version:page.version}
  }
@@ -70,14 +75,15 @@ export async function retainNecessaryOriginalPersonalReferencePage(source:pg.Cli
  for(const a of originals){
   abort();const b=copied.find(r=>r.source_event_id===a.source_event_id)!
   if(a.original_row_hash!==b.original_row_hash||a.installation_id!==scope.installationId||a.session_id!==session||session.startsWith('team_')||a.origin!=='feed'
-   ||!/^\d*[1-9]\d*$/.test(a.origin_position)||(!discoveryWitness&&a.canonical_event_key!==null)||a.body_reclaimed_at||digest(a.source_provenance)!==digest({})
+   ||!/^\d*[1-9]\d*$/.test(a.origin_position)||(!hasObservation&&a.canonical_event_key!==null)||a.body_reclaimed_at||digest(a.source_provenance)!==digest({})
    ||Object.hasOwn(a.classification??{},'memory_source'))throw Error('necessary_original_copy_changed')
   const originalBody=(await source.query(`SELECT CASE WHEN octet_length(payload::text)<=33554432 THEN payload ELSE NULL END AS payload FROM public.source_events WHERE source_event_id=$1`,[a.source_event_id])).rows[0]?.payload
   const format=originalBody&&verifyOriginalSourceHash({origin:a.origin,originPosition:a.origin_position,eventType:a.event_type,occurredAt:a.occurred_at,payload:originalBody,payloadHash:a.original_hash})
-  if(format!=='canonical-json-sha256-v1'||!discoveryWitness&&typeof originalBody.event_id==='string'&&originalBody.event_id)throw Error('necessary_original_body_unproven')
+  if(format!=='canonical-json-sha256-v1'||!hasObservation&&typeof originalBody.event_id==='string'&&originalBody.event_id)throw Error('necessary_original_body_unproven')
   bytes+=Buffer.byteLength(JSON.stringify(originalBody));if(bytes>32*1024*1024)throw Error('necessary_original_body_limit')
   if(discoveryWitness)observations.set(a.source_event_id,await prepareOriginalDiscoveryObservation(source,target,scope,root,a,originalBody,discoveryWitness.canonicalKey,options.archive))
-  if(!discoveryWitness&&((await source.query('SELECT 1 FROM public.memory_feed_inbox WHERE installation_id=$1 AND feed_id=$2 LIMIT 1',[scope.installationId,a.origin_position])).rowCount
+  if(recurringObservationWitness)observations.set(a.source_event_id,await prepareOriginalDiscoveryObservation(source,target,scope,root,a,originalBody,recurringObservationWitness.canonicalKey,options.archive,'turn_status'))
+  if(!hasObservation&&((await source.query('SELECT 1 FROM public.memory_feed_inbox WHERE installation_id=$1 AND feed_id=$2 LIMIT 1',[scope.installationId,a.origin_position])).rowCount
    ||(await target.query('SELECT 1 FROM public.extension_feed WHERE feed_id=$1 LIMIT 1',[a.origin_position])).rowCount))throw Error('necessary_original_transport_still_present')
   let factsHash:string
   if(sourceProcessingWitness){
@@ -92,7 +98,7 @@ export async function retainNecessaryOriginalPersonalReferencePage(source:pg.Cli
   }
   const contentHash=digest(originalBody)
   contentHashes.set(a.source_event_id,contentHash);necessities.set(a.source_event_id,factsHash)
-  const manifest={...(observations.has(a.source_event_id)?{discoveryObservation:observations.get(a.source_event_id)!.manifest}:{}),...(sourceProcessingWitness?{sourceProcessingWitness,processingHeadProof}:{}),schemaVersion:1,kind:'necessary-original-memory-custody',necessity,sourceEventId:a.source_event_id,installationId:scope.installationId,sessionId:session,
+  const manifest={...(observations.has(a.source_event_id)?{[recurringObservationWitness?'recurringObservation':'discoveryObservation']:observations.get(a.source_event_id)!.manifest}:{}),...(sourceProcessingWitness?{sourceProcessingWitness,processingHeadProof}:{}),schemaVersion:1,kind:'necessary-original-memory-custody',necessity,sourceEventId:a.source_event_id,installationId:scope.installationId,sessionId:session,
    sourceIdentity:copy.sourceIdentity,targetIdentity:copy.targetIdentity,copyManifestHash:copy.manifestHash,sourceRowVersion:a.row_version,originalRowHash:a.original_row_hash,
    originalSourceHash:a.original_hash,contentHash,classificationHash:digest(a.classification),provenanceHash:digest(a.source_provenance),necessaryDependencyHash:factsHash,
    currentScope:scope,canonicalIdentityResolved:false,canonicalAbsenceProven:false,bodyDisposition:'retain-original-cell',provenanceState:'unknown',sourceSequence:null,deletionAuthorized:false}

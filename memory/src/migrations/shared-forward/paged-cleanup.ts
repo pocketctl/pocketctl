@@ -1,3 +1,4 @@
+import {legacyTransportRetired} from '../../sources/transport-state.js'
 import {bindPagedSkillGrants,assertPagedJobPayloads} from './paged-cleanup-native-shapes.js'
 import {pagedContextGenerationRows,assertPagedActiveExtractions} from './paged-cleanup-operational.js'
 import {pagedAffectedEpisodePredicate,assertPagedExactEpisodes} from './paged-cleanup-exact-source.js'
@@ -140,7 +141,9 @@ export async function planPagedCleanup(config:PagedCleanupConfig,inputRoots:read
    }
    // Exact feedback IDs are captured before source joins can disappear.
    cursor=null;for(;;){const rows=await discover(c=>selectPagedRows(c,tableShape(initial.catalog,'memory_feedback'),"t.installation_id=$1 AND t.details->>'session_id'=$2",[root.installationId,root.sessionId],cursor));if(!rows.length)break;await emit('feedback',root,rows.map(r=>({...r,disposition:'minimize'})));cursor=rows.at(-1)!.key}
-   for(const table of rawOrder){
+   const transportRetired=await discover(c=>legacyTransportRetired(c,true))
+   const rootTables=transportRetired?[...rawOrder.filter(t=>!['memory_feed_inbox','memory_snapshot_events'].includes(t)),'memory_source_delivery_receipts']:rawOrder
+   for(const table of rootTables){
     cursor=null
     let rawLimit=128
     for(;;){
