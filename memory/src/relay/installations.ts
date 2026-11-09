@@ -145,19 +145,7 @@ export function createInstallationsClient(options: InstallationsClientOptions) {
       }
       const installations: ProviderInstallationItemV2[] = []
       for (const entry of parsed.installations) {
-        const parsedItem = parseInstallationItem(entry)
-        if (!parsedItem) throw new Error('list_installations_v2 returned a malformed item')
-        const ownerScope = parseOwnerScopeFields(entry as Record<string, unknown>)
-        if (!ownerScope) throw new Error('list_installations_v2 returned malformed owner-scope metadata')
-        const rawSnapshot = (entry as Record<string, unknown>).scope_snapshot
-        const scopeSnapshot = rawSnapshot == null ? null : parseScopeSnapshot(rawSnapshot)
-        if ((rawSnapshot != null && !scopeSnapshot)
-          || (rawSnapshot === null && ownerScope.owner_scope_kind !== 'personal')
-          || (ownerScope.owner_scope_kind === 'personal' && scopeSnapshot)) {
-          throw new Error('list_installations_v2 returned malformed scope snapshot')
-        }
-        installations.push({ ...parsedItem, ...ownerScope,
-          ...(rawSnapshot === undefined ? {} : { scope_snapshot: scopeSnapshot }) })
+        installations.push(parseProviderInstallationV2(entry))
       }
       return {
         installations,
@@ -169,3 +157,20 @@ export function createInstallationsClient(options: InstallationsClientOptions) {
 }
 
 export type InstallationsClient = ReturnType<typeof createInstallationsClient>
+
+/** Same v2 DTO validation for HTTP and bounded native metadata. */
+export function parseProviderInstallationV2(input:unknown):ProviderInstallationItemV2{
+  const parsedItem = parseInstallationItem(input)
+  if (!parsedItem) throw new Error('list_installations_v2 returned a malformed item')
+  const ownerScope = parseOwnerScopeFields(input as Record<string, unknown>)
+  if (!ownerScope) throw new Error('list_installations_v2 returned malformed owner-scope metadata')
+  const rawSnapshot = (input as Record<string, unknown>).scope_snapshot
+  const scopeSnapshot = rawSnapshot == null ? null : parseScopeSnapshot(rawSnapshot)
+  if ((rawSnapshot != null && !scopeSnapshot)
+    || (rawSnapshot === null && ownerScope.owner_scope_kind !== 'personal')
+    || (ownerScope.owner_scope_kind === 'personal' && scopeSnapshot)) {
+    throw new Error('list_installations_v2 returned malformed scope snapshot')
+  }
+  return { ...parsedItem, ...ownerScope,
+    ...(rawSnapshot === undefined ? {} : { scope_snapshot: scopeSnapshot }) }
+}

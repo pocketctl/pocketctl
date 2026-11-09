@@ -1,6 +1,7 @@
 import {attachSourceMetrics} from './sources/metrics.js'
 import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
 import {createSharedSourceScheduler} from './sources/shared-scheduler.js'
+import {createNativeInstallationDiscovery} from './installations/native-discovery.js'
 import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
 import {createLifecycleAssessmentService} from './claims/lifecycle-assessment.js'
 import {createLifecycleObservationService} from './claims/lifecycle-observation.js'
@@ -172,8 +173,9 @@ async function main(): Promise<void> {
       http,
     })
     const feedClient = createFeedClient({ http, tokens })
-    const withdrawalClient = createDeliveryWithdrawalClient({ http, tokens })
-    const withdrawalConsumer = createDeliveryWithdrawalConsumer({ pool, signal, ...withdrawalClient })
+    const withdrawalConsumer = config.databaseNamespace==='memory'
+      ? createDeliveryWithdrawalConsumer({pool,signal,transport:'native'})
+      : createDeliveryWithdrawalConsumer({pool,signal,...createDeliveryWithdrawalClient({http,tokens})})
     const snapshotClient = createSnapshotClient({ http, tokens })
     const snapshotReconciler = createSnapshotReconciler({
       pool,
@@ -187,7 +189,7 @@ async function main(): Promise<void> {
         metrics.snapshot.inc({ result })
       },
     })
-    discovery = createDiscoveryWorker({
+    discovery = config.databaseNamespace==='memory'?createNativeInstallationDiscovery({pool,signal,installationAllowlist:new Set(config.installationAllowlist)}):createDiscoveryWorker({
       installations: createInstallationsClient({ http, tokens }),
       registry: createInstallationRegistry(pool),
       signal,
@@ -206,7 +208,7 @@ async function main(): Promise<void> {
       pollLeaseMs: 10_000,
       onError: loopError('feed_installation'),
       onScopeInvalidated: metrics.phase5.observeRevocationLag,
-      ...(config.sharedScopesMode !== 'off' ? {
+      ...(config.databaseNamespace!=='memory' && config.sharedScopesMode !== 'off' ? {
         pullScopeControlFeed: (installationId: string, limit: number) =>
           feedClient.pullScopeControlFeed(installationId, limit),
         ackScopeControlFeed: (input: { installation_id: string; cursor: string; lease_token: string }) =>
@@ -214,7 +216,7 @@ async function main(): Promise<void> {
       } : {}),
     })
     feedTimer = setInterval(() => {
-      const run = withdrawalConsumer.runOnce().catch(loopError('delivery_withdrawals'))
+      const run = (config.databaseNamespace==='memory'?Promise.resolve():withdrawalConsumer.runOnce()).catch(loopError('delivery_withdrawals'))
         .then(() => feedConsumer.runOnce()).then(() => undefined, loopError('feed'))
       feedInFlight.add(run)
       void run.finally(() => feedInFlight.delete(run))
@@ -736,7 +738,7 @@ async function main(): Promise<void> {
       }
     }
     if(config.databaseNamespace==='memory'){
-      sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,onError:loopError('shared_source_scheduler')})
+      sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,refreshInstallations:()=>discovery!.discoverOnce(),refreshWithdrawals:()=>withdrawalConsumer.runOnce(),onError:loopError('shared_source_scheduler')})
       sharedSourceScheduler.start()
     }
     jobWorker.start()

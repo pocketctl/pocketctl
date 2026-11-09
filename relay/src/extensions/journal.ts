@@ -1,5 +1,6 @@
 import type pg from 'pg'
-import {sharedSourceHeadersEnabled} from '../shared-source/headers.js'
+import {sharedSourceHeadersEnabled,sessionTransportConsumerPolicyEnabled} from '../shared-source/headers.js'
+import {readSessionTransportConsumerPolicy,recordSessionTransportBodyOmission} from '../shared-source/consumer-policy.js'
 import {canonicalPayloadHash,canonicalSourceClassification} from '@pocketctl/session-source'
 import { sanitizeJSONBPayload } from '../jsonb-payload.js'
 import { isAppReviewDemoSession } from '../config/app-review-demo.js'
@@ -82,7 +83,8 @@ export class ExtensionJournalOwnerMissingError extends Error {
  * Replays retain the original identity/sequence, and JSONB normalization matches
  * the canonical events row. A failure must propagate to the transaction owner.
  */
-export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boolean}={}): ExtensionJournalSink {
+export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boolean;consumerPolicy?:boolean}={}): ExtensionJournalSink {
+  if(options.consumerPolicy&&!options.sharedHeaders)throw Error('shared_session_transport_headers_required')
   return {
     async appendCanonicalEvent(client, input) {
       const payload=sanitizeJSONBPayload(input.payload)
@@ -131,6 +133,35 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
           originalSequence=row.source_sequence
         }else if(row.source_sequence!=null)throw Error('canonical_source_header_mismatch')
       }
+      const persistHeader=async(sequence:string)=>{
+        const hash=payloadHash
+        const classification=canonicalSourceClassification({source_kind:'canonical_event',session_id:input.sessionId,source_seq:sequence,payload})
+        if(Buffer.byteLength(JSON.stringify(classification))>65536)throw Error('canonical_source_header_limit')
+        const saved=await client.query(`UPDATE public.events SET source_header_version=1,source_sequence=$6::bigint,
+          canonical_payload_hash=$7,source_classification=$8::jsonb
+          WHERE id=$1::bigint AND NOT owner_retired AND user_id=$2 AND logical_source_session_id=$3 AND event_type=$4
+            AND(payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND source_header_version=1 AND canonical_payload_hash=$7)) AND effect_status IN ('none','pending','completed')
+            AND (source_header_version IS NULL OR (source_header_version=1 AND source_sequence=$6::bigint AND canonical_payload_hash=$7 AND source_classification=$8::jsonb))
+          RETURNING id`,[String(input.sourceEventId),input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload),sequence,hash,JSON.stringify(classification)])
+        if(saved.rowCount!==1)throw Error('canonical_source_header_mismatch')
+      }
+      if(options.consumerPolicy){
+        const policy=await readSessionTransportConsumerPolicy(client,input.ownerUserId)
+        if(!policy.bodyRequired){
+          // A pre-header legacy replay may already own a journal sequence.
+          // Never allocate a replacement or overlook a conflicting old row.
+          const old=(await client.query(`SELECT source_seq::text,
+            owner_user_id=$2 AND session_id=$3 AND event_type=$4 AND payload=$5::jsonb AS matches
+            FROM public.extension_source_outbox WHERE source_kind='canonical_event' AND source_id=$1 FOR UPDATE`,
+            [`event:${input.sourceEventId}`,input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload)])).rows
+          if(old.length>1||old.length===1&&(old[0].matches!==true||originalSequence!==undefined&&old[0].source_seq!==originalSequence))throw Error('canonical_source_header_mismatch')
+          const sequence=originalSequence??old[0]?.source_seq??(await client.query("SELECT nextval(pg_get_serial_sequence('public.extension_source_outbox','source_seq')::regclass)::text AS source_seq")).rows[0]?.source_seq
+          if(typeof sequence!=='string'||!/^[1-9][0-9]{0,18}$/.test(sequence)||BigInt(sequence)>9223372036854775807n)throw Error('canonical_source_header_mismatch')
+          if(!originalSequence&&!old.length)await recordSessionTransportBodyOmission(client,input.ownerUserId)
+          await persistHeader(sequence)
+          return
+        }
+      }
       const inserted=await client.query(
         `INSERT INTO extension_source_outbox
            (source_kind, source_id, owner_user_id, session_id, event_type, occurred_at, payload${originalSequence?', source_seq':''})
@@ -155,16 +186,7 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
           [`event:${input.sourceEventId}`,input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload)])).rows
         if(journal.length!==1 || !/^[1-9][0-9]{0,18}$/.test(journal[0].source_seq) || BigInt(journal[0].source_seq)>9223372036854775807n
           || inserted.rows.length && inserted.rows[0].source_seq!==journal[0].source_seq)throw Error('canonical_source_header_mismatch')
-        const sequence=journal[0].source_seq,hash=canonicalPayloadHash(payload).toString('hex')
-        const classification=canonicalSourceClassification({source_kind:'canonical_event',session_id:input.sessionId,source_seq:sequence,payload})
-        if(Buffer.byteLength(JSON.stringify(classification))>65536)throw Error('canonical_source_header_limit')
-        const saved=await client.query(`UPDATE public.events SET source_header_version=1,source_sequence=$6::bigint,
-          canonical_payload_hash=$7,source_classification=$8::jsonb
-          WHERE id=$1::bigint AND NOT owner_retired AND user_id=$2 AND logical_source_session_id=$3 AND event_type=$4
-            AND(payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND source_header_version=1 AND canonical_payload_hash=$7)) AND effect_status IN ('none','pending','completed')
-            AND (source_header_version IS NULL OR (source_header_version=1 AND source_sequence=$6::bigint AND canonical_payload_hash=$7 AND source_classification=$8::jsonb))
-          RETURNING id`,[String(input.sourceEventId),input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload),sequence,hash,JSON.stringify(classification)])
-        if(saved.rowCount!==1)throw Error('canonical_source_header_mismatch')
+        await persistHeader(journal[0].source_seq)
       }
     },
   }
@@ -174,8 +196,8 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
 export function createExtensionJournalSinkFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): ExtensionJournalSink | null {
-  const headers=sharedSourceHeadersEnabled(env)
+  const headers=sharedSourceHeadersEnabled(env),consumerPolicy=sessionTransportConsumerPolicyEnabled(env)
   const mode=extensionModeFromEnv(env)
   if(headers&&mode==='off')throw Error('shared_source_headers_require_journal')
-  return mode==='off'?null:createPostgresExtensionJournalSink({sharedHeaders:headers})
+  return mode==='off'?null:createPostgresExtensionJournalSink({sharedHeaders:headers,consumerPolicy})
 }

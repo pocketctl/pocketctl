@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
-import { validateDeliveryWithdrawalBatch, type DeliveryWithdrawalBatch } from '../relay/delivery-withdrawal-client.js'
+import { validateDeliveryWithdrawalBatch, validateDeliveryWithdrawalPage, type DeliveryWithdrawalBatch } from '../relay/delivery-withdrawal-client.js'
 
 const lock = 'memory-delivery-withdrawal-consumer-v1'
 export function createDeliveryWithdrawalConsumer(options: {
   pool: pg.Pool; signal: AbortSignal
+} & ({ transport: 'native' } | {
+  transport?: 'http'
   pull(consumerId: string, lastSequence: string): Promise<DeliveryWithdrawalBatch>
   ack(batch: DeliveryWithdrawalBatch): Promise<string>
-}) {
+})) {
   let current: Promise<{ applied: number; skipped: boolean }> | undefined
   return {
     runOnce(): Promise<{ applied: number; skipped: boolean }> {
@@ -21,7 +23,9 @@ export function createDeliveryWithdrawalConsumer(options: {
           if (!locked) return { applied: 0, skipped: true }
           await client.query('INSERT INTO memory_delivery_withdrawal_checkpoint(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING')
           const state = (await client.query('SELECT consumer_id::text,last_sequence::text FROM memory_delivery_withdrawal_checkpoint WHERE singleton')).rows[0]
-          const batch = validateDeliveryWithdrawalBatch(await options.pull(state.consumer_id, state.last_sequence), state.consumer_id)
+          const batch = options.transport==='native'
+            ? validateDeliveryWithdrawalPage((await client.query('SELECT shared.memory_delivery_withdrawal_page($1::uuid,$2::bigint,100) AS page',[state.consumer_id,state.last_sequence])).rows[0]?.page,state.consumer_id)
+            : validateDeliveryWithdrawalBatch(await options.pull(state.consumer_id, state.last_sequence), state.consumer_id)
           if (!batch.items.length && BigInt(batch.through_sequence) > BigInt(state.last_sequence)) throw new Error('delivery withdrawal replay gap')
           if (options.signal.aborted) return { applied: 0, skipped: true }
           let applied = 0
@@ -41,16 +45,18 @@ export function createDeliveryWithdrawalConsumer(options: {
             // Empty/nonempty retries may be behind local persistence after a
             // lost ACK; never regress the local durable watermark.
             await client.query(`UPDATE memory_delivery_withdrawal_checkpoint SET last_sequence=GREATEST(last_sequence,$1::bigint),updated_at=clock_timestamp() WHERE singleton`, [batch.through_sequence])
+            if(options.transport==='native')await client.query('UPDATE memory_delivery_withdrawal_checkpoint SET last_ack_sequence=GREATEST(last_ack_sequence,$1::bigint),updated_at=clock_timestamp() WHERE singleton',[batch.through_sequence])
             await client.query('COMMIT')
           } catch (error) { await client.query('ROLLBACK'); throw error }
-          if (!options.signal.aborted) {
-            const ack = await options.ack(batch)
+          if (options.transport!=='native' && !options.signal.aborted) {
+            const ack = await options.ack(batch as DeliveryWithdrawalBatch)
             if (!/^(0|[1-9][0-9]{0,18})$/.test(ack) || BigInt(ack) < BigInt(batch.through_sequence)) throw new Error('delivery withdrawal ACK mismatch')
             await client.query(`UPDATE memory_delivery_withdrawal_checkpoint SET last_ack_sequence=GREATEST(last_ack_sequence,$1::bigint),updated_at=clock_timestamp() WHERE singleton`, [batch.through_sequence])
           }
           return { applied, skipped: false }
         } finally {
-          // A session lock spans network I/O without holding a transaction.
+          // The same durable singleton serializes native and legacy consumers.
+          // Legacy network I/O holds no SQL transaction.
           // Connection loss releases it; another worker can replay committed data.
           try { if (locked) await client.query('SELECT pg_advisory_unlock(hashtextextended($1,0))', [lock]) }
           catch (error) { client.release(true); throw error }

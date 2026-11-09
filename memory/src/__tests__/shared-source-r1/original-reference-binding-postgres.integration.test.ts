@@ -111,6 +111,47 @@ suite('finite original UUID binding with actual controlled reader and commit fen
   await expect(call([changed])).rejects.toThrow('original_binding_transport_changed')
   expect((await target.query("SELECT count(*)::int AS n FROM memory.source_events WHERE mapping_state='verified'")).rows[0].n).toBe(0)
  })
+ test('keeps original unknown order when the current canonical Journal independently proves an order',async()=>{
+  const m=mappings[1],event=(await target.query('SELECT payload,created_at FROM public.events WHERE id=$1',[m.canonicalId])).rows[0]
+  const sequence=(await target.query(`INSERT INTO public.extension_source_outbox(source_kind,source_id,owner_user_id,session_id,event_type,occurred_at,payload)
+   VALUES('canonical_event',$1,$2,$3,'agent_text',$4,$5) RETURNING source_seq::text`,['event:'+m.canonicalId,scope.principalUserId,root.key.slice(scope.principalUserId.length+1),event.created_at,event.payload])).rows[0].source_seq
+  try{
+   expect(sequence).toMatch(/^[1-9][0-9]*$/);expect(m.sourceSequence).toBeUndefined()
+   expect(await call([m])).toMatchObject({changed:1,alreadyBound:0,sourceBodiesChanged:false,provenanceRewritten:false})
+   const row=(await target.query('SELECT source_sequence,source_provenance,payload IS NOT NULL AS body_present FROM memory.source_events WHERE source_event_id=$1',[m.sourceEventId])).rows[0]
+   expect(row).toEqual({source_sequence:null,source_provenance:{},body_present:true})
+  }finally{
+   await target.query('DELETE FROM public.extension_source_outbox WHERE source_seq=$1',[sequence])
+   await target.query("UPDATE memory.source_events SET source_kind=NULL,canonical_key=NULL,canonical_session_key=NULL,source_version=NULL,source_sequence=NULL,content_hash=NULL,hash_version=NULL,mapping_state='unproven',adapter_version=NULL WHERE source_event_id=$1",[m.sourceEventId])
+  }
+ })
+ test('preserves proven original order after current Journal and header order are unavailable',async()=>{
+  const m=mappings[0],event=(await target.query('SELECT source_header_version,source_sequence::text,canonical_payload_hash,source_classification FROM public.events WHERE id=$1',[m.canonicalId])).rows[0]
+  const journal=(await target.query("DELETE FROM public.extension_source_outbox WHERE source_kind='canonical_event' AND source_id=$1 RETURNING row_to_json(extension_source_outbox)::text AS json",['event:'+m.canonicalId])).rows
+  await target.query('UPDATE public.events SET source_header_version=NULL,source_sequence=NULL,canonical_payload_hash=NULL,source_classification=NULL WHERE id=$1',[m.canonicalId])
+  try{
+   expect(await call([m])).toMatchObject({changed:1,alreadyBound:0,provenanceRewritten:false})
+   const row=(await target.query('SELECT source_sequence::text,source_provenance,payload IS NOT NULL AS body_present FROM memory.source_events WHERE source_event_id=$1',[m.sourceEventId])).rows[0]
+   expect(row.source_sequence).toBe(m.sourceSequence);expect(row.source_provenance.memory.sequence).toBe(m.sourceSequence);expect(row.body_present).toBe(true)
+  }finally{
+   await target.query('UPDATE public.events SET source_header_version=$2,source_sequence=$3::bigint,canonical_payload_hash=$4,source_classification=$5 WHERE id=$1',[m.canonicalId,event.source_header_version,event.source_sequence,event.canonical_payload_hash,event.source_classification])
+   for(const row of journal)await target.query('INSERT INTO public.extension_source_outbox SELECT * FROM json_populate_record(NULL::public.extension_source_outbox,$1::json)',[row.json])
+   await target.query("UPDATE memory.source_events SET source_kind=NULL,canonical_key=NULL,canonical_session_key=NULL,source_version=NULL,source_sequence=NULL,content_hash=NULL,hash_version=NULL,mapping_state='unproven',adapter_version=NULL WHERE source_event_id=$1",[m.sourceEventId])
+  }
+ })
+ test('refuses a changed canonical order when the original order is positively mapped',async()=>{
+  const m=mappings[0],event=(await target.query('SELECT payload,source_sequence::text,source_classification FROM public.events WHERE id=$1',[m.canonicalId])).rows[0]
+  const changed=String(BigInt(event.source_sequence)+1000n),classification=canonicalSourceClassification({source_kind:'canonical_event',session_id:root.key.slice(scope.principalUserId.length+1),source_seq:changed,payload:event.payload})
+  await target.query('UPDATE public.extension_source_outbox SET source_seq=$2::bigint WHERE source_kind=\'canonical_event\' AND source_id=$1',['event:'+m.canonicalId,changed])
+  await target.query('UPDATE public.events SET source_sequence=$2::bigint,source_classification=$3 WHERE id=$1',[m.canonicalId,changed,classification])
+  try{
+   await expect(call([m])).rejects.toThrow('original_binding_current_source_conflict')
+   expect((await target.query('SELECT mapping_state FROM memory.source_events WHERE source_event_id=$1',[m.sourceEventId])).rows[0].mapping_state).toBe('unproven')
+  }finally{
+   await target.query('UPDATE public.events SET source_sequence=$2::bigint,source_classification=$3 WHERE id=$1',[m.canonicalId,event.source_sequence,event.source_classification])
+   await target.query('UPDATE public.extension_source_outbox SET source_seq=$2::bigint WHERE source_kind=\'canonical_event\' AND source_id=$1',['event:'+m.canonicalId,event.source_sequence])
+  }
+ })
  test('revalidates original ingress identity, index and current canonical key, including commit-time drift',async()=>{
   const m=mappings[1],index=(await target.query("SELECT pg_get_indexdef('public.idx_events_dedup'::regclass) AS definition")).rows[0].definition
   const eventHash=(await target.query('SELECT event_hash FROM public.events WHERE id=$1',[m.canonicalId])).rows[0].event_hash

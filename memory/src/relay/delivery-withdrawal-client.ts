@@ -6,8 +6,10 @@ export interface DeliveryWithdrawalItem {
   sequence: string; team_id: string; team_session_id: string
   submission_id: string; decision_id: string; recorded_at: string
 }
-export interface DeliveryWithdrawalBatch {
+export interface DeliveryWithdrawalPage {
   version: 1; consumer_id: string; items: DeliveryWithdrawalItem[]; through_sequence: string
+}
+export interface DeliveryWithdrawalBatch extends DeliveryWithdrawalPage {
   next_cursor: string; lease_token: string; lease_expires_at: string
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -19,12 +21,11 @@ const exact = (value: Record<string, unknown>, keys: string[]) => Object.keys(va
 
 /** Control records fail closed as a whole. Never quarantine-and-ACK a malformed
  * source invalidation or allow arbitrary content into the provider stream. */
-export function validateDeliveryWithdrawalBatch(value: unknown, consumerId: string): DeliveryWithdrawalBatch {
+export function validateDeliveryWithdrawalPage(value: unknown, consumerId: string): DeliveryWithdrawalPage {
   const invalid = () => new Error('invalid delivery withdrawal batch')
-  if (!object(value) || !exact(value, ['version','consumer_id','items','through_sequence','next_cursor','lease_token','lease_expires_at'])
+  if (!object(value) || !exact(value, ['version','consumer_id','items','through_sequence'])
     || value.version !== 1 || value.consumer_id !== consumerId || !uuid.test(consumerId)
-    || !Array.isArray(value.items) || value.items.length > 100 || !decimal(value.through_sequence)
-    || !text(value.next_cursor, 2048) || !text(value.lease_token, 128) || !timestamp(value.lease_expires_at)) throw invalid()
+    || !Array.isArray(value.items) || value.items.length > 100 || !decimal(value.through_sequence)) throw invalid()
   let last = 0n
   const items = value.items.map(item => {
     if (!object(item) || !exact(item, ['sequence','team_id','team_session_id','submission_id','decision_id','recorded_at'])
@@ -37,8 +38,14 @@ export function validateDeliveryWithdrawalBatch(value: unknown, consumerId: stri
       submission_id: item.submission_id, decision_id: item.decision_id, recorded_at: item.recorded_at }
   })
   if (items.length && last !== BigInt(value.through_sequence)) throw invalid()
-  return { version: 1, consumer_id: consumerId, items, through_sequence: value.through_sequence,
-    next_cursor: value.next_cursor, lease_token: value.lease_token, lease_expires_at: value.lease_expires_at }
+  return { version: 1, consumer_id: consumerId, items, through_sequence: value.through_sequence }
+}
+
+export function validateDeliveryWithdrawalBatch(value: unknown, consumerId: string): DeliveryWithdrawalBatch {
+  if (!object(value) || !exact(value, ['version','consumer_id','items','through_sequence','next_cursor','lease_token','lease_expires_at'])
+    || !text(value.next_cursor,2048) || !text(value.lease_token,128) || !timestamp(value.lease_expires_at)) throw new Error('invalid delivery withdrawal batch')
+  const page=validateDeliveryWithdrawalPage({version:value.version,consumer_id:value.consumer_id,items:value.items,through_sequence:value.through_sequence},consumerId)
+  return {...page,next_cursor:value.next_cursor,lease_token:value.lease_token,lease_expires_at:value.lease_expires_at}
 }
 
 export function createDeliveryWithdrawalClient(options: { http: RelayHttpClient; tokens: ProviderTokenClient }) {

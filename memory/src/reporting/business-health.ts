@@ -2,7 +2,7 @@ import {UNRESOLVED_EXTRACTION_SOURCE} from '../extraction/recovery.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 
-export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap'] as const
+export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap'] as const
 export type BusinessHealthReason = typeof BUSINESS_HEALTH_REASONS[number]
 export interface BusinessHealthRow {
   installation_id: string
@@ -11,6 +11,7 @@ export interface BusinessHealthRow {
   last_error_code: string | null
   feed_enabled: boolean
   feed_lag_seconds: number | string | null
+  native_control_stale?: boolean
   extraction_mode: string
   budget_deferred: number | string
   oldest_extract_seconds: number | string | null
@@ -33,6 +34,7 @@ export function evaluateBusinessHealth(row: BusinessHealthRow, enabled = true) {
   const extraction = active && ['enabled', 'shadow'].includes(row.extraction_mode)
   const reasons: BusinessHealthReason[] = []
   if (active && row.feed_enabled && Number(row.feed_lag_seconds ?? 0) > 300) reasons.push('feed_stalled')
+  if (active && row.native_control_stale) reasons.push('control_stale')
   if (extraction && Number(row.budget_deferred) > 0) reasons.push('budget_blocked')
   if (extraction && row.oldest_extract_seconds != null && Number(row.oldest_extract_seconds) > 3600
     && (row.last_extract_seconds == null || Number(row.last_extract_seconds) > 3600)) reasons.push('extraction_stalled')
@@ -51,7 +53,8 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
   const result = await queryHealth<BusinessHealthRow>(pool,`
     SELECT i.installation_id, i.local_status, i.relay_status, i.last_error_code,
       i.last_feed_id::text,
-      NOT i.snapshot_required ${shared?"AND COALESCE(source_mode.mode,'legacy-feed') IN ('legacy-feed','shared-shadow')":''} AS feed_enabled,
+      NOT i.snapshot_required ${shared?"AND COALESCE(source_mode.mode,'legacy-feed') IN ('legacy-feed','shared-shadow') AND COALESCE(owner_scope.owner_scope_kind,'personal')='personal'":''} AS feed_enabled,
+      ${shared?'native_control.control_revision IS DISTINCT FROM shared.memory_source_control_snapshot()::bigint':'FALSE'} AS native_control_stale,
       EXTRACT(EPOCH FROM (NOW() - COALESCE(i.last_ack_at, i.created_at))) AS feed_lag_seconds,
       COALESCE(f.extraction_mode, 'off') AS extraction_mode,
       (SELECT COUNT(*) FROM memory_jobs j WHERE j.installation_id=i.installation_id
@@ -72,6 +75,7 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
         AND j.created_at>NOW()-INTERVAL '24 hours') AS failed_jobs_24h
     FROM memory_installations i
     ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
+    ${shared?'LEFT JOIN memory_owner_scopes owner_scope USING(installation_id) LEFT JOIN memory_native_control_observations native_control USING(installation_id)':''}
     LEFT JOIN memory_feature_settings f ON f.installation_id=i.installation_id
     LEFT JOIN LATERAL (SELECT MAX(completed_at) AS last_extract_at FROM memory_extraction_runs r
       WHERE r.installation_id=i.installation_id AND r.state='succeeded') runs ON TRUE

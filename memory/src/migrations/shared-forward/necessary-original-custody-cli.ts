@@ -8,12 +8,16 @@ import {createSourceArchiveReader} from '../../sources/archive-reader.js'
 import {safeError} from '../shared-source/database.js'
 const help=`Finite necessary original Memory custody (1..256 UUIDs, one personal Session).
   --input FILE --output NEW_DIR
-Input: {source:{database,databaseOid,role,serverAddress,serverPort},target:{...},copy,scope,root,sourceEventIds,necessity?,discoveryWitness?}.
+Input: {source:{database,databaseOid,role,serverAddress,serverPort},target:{...},copy,scope,root,sourceEventIds,necessity?,discoveryWitness?,sourceProcessingWitness?}.
 Requires verified copy, frozen original database, fenced target writers, current
-personal/native authority and currently accepted episode dependencies. Default
+personal/native authority and current necessity dependencies. Default
 necessity=literal-reference requires literal packet handles. Explicit
 necessity=accepted-session closes original references in the same accepted
 personal Session, only under current retained_history admission.
+Explicit necessity=source-processing requires an existing native projection task
+and sourceProcessingWitness:{jobId,scanId,targetCursor}. Its sealed target must
+match current personal control/mode and actual current native input. It proves
+processing necessity, not accepted knowledge or original-to-Relay identity.
 Ordinary custody requires no stable key or retained transport. Explicit accepted-session
 discoveryWitness:{canonicalKey} separately verifies later, different original
 session_discovered observations against current controlled hot/cold bytes.

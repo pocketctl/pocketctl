@@ -2,7 +2,8 @@ import {assertNativeInputStartSchema} from './shared-source/input-start.js'
 import {assertNativeSessionAliasSchema} from './session-alias/schema.js'
 import {assertRelaySessionCaptureContract} from './shared-source/session-capture.js'
 import type pg from 'pg'
-import {sharedSourceHeadersEnabled} from './shared-source/headers.js'
+import {sharedSourceHeadersEnabled,sessionTransportConsumerPolicyEnabled} from './shared-source/headers.js'
+import {assertSessionTransportConsumerPolicy} from './shared-source/consumer-policy.js'
 import {assertRelayTeamSourceCapture} from './shared-source/team-capture.js'
 import {assertRelayControlCapture} from './shared-source/control-capture.js'
 export const RELAY_SCHEMA_CONTRACT_VERSION=1
@@ -28,6 +29,7 @@ export async function assertRelaySchemaContract(pool:pg.Pool):Promise<void>{
  try{
   await c.query('BEGIN READ ONLY');await c.query("SET LOCAL statement_timeout='5s'")
   await assertRelaySharedContract(c as unknown as pg.Pool)
+  if(sessionTransportConsumerPolicyEnabled())await assertSessionTransportConsumerPolicy(c)
   if(await relaySharedTarget(c as unknown as pg.Pool)){
    const start=(await c.query("SELECT to_jsonb(contract)->>'input_start_version' AS input_start_version FROM shared.memory_source_contract contract")).rows
    if(start.length!==1||start[0].input_start_version!=='1')throw Error('relay_shared_input_start_contract_required')
@@ -95,6 +97,7 @@ export async function assertSharedRelayRuntime(pool:pg.Pool):Promise<void>{
 export async function prepareRelaySchema(pool:pg.Pool,migrate:()=>Promise<void>,strategy:RelaySchemaStrategy='auto'):Promise<'verify'|'legacy-migrate'>{
  if(!['auto','verify','legacy-migrate'].includes(strategy))throw new Error('invalid_relay_schema_strategy')
  const headers=sharedSourceHeadersEnabled()
+ sessionTransportConsumerPolicyEnabled()
  const shared=await relaySharedTarget(pool)
  if(headers&&!shared)throw Error('relay_shared_header_contract_required')
  if(shared && strategy==='legacy-migrate')throw new Error('shared_source_requires_schema_migrator')

@@ -5,3 +5,9 @@ export function sharedSourceHeadersEnabled(env:Record<string,string|undefined>=p
  if(!['off','enabled'].includes(mode))throw Error('invalid_shared_source_headers_mode')
  return mode==='enabled'
 }
+export function sessionTransportConsumerPolicyEnabled(env:Record<string,string|undefined>=process.env):boolean{
+ const mode=env.RELAY_SHARED_SESSION_TRANSPORT??'legacy'
+ if(!['legacy','consumer-policy-v1'].includes(mode))throw Error('invalid_shared_session_transport_mode')
+ if(mode==='consumer-policy-v1'&&!sharedSourceHeadersEnabled(env))throw Error('shared_session_transport_headers_required')
+ return mode==='consumer-policy-v1'
+}

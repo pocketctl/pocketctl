@@ -1,3 +1,4 @@
+import {NATIVE_CONTROL_OBSERVATION_MIGRATION} from './installations/native-control-migration.js'
 import {assertTeamSemanticLegacySchema} from './sources/team-semantic-migration.js'
 import {TEAM_SEMANTIC_MIGRATION} from './sources/team-semantic-migration.js'
 import {SKILL_SESSION_TOMBSTONE_IDEMPOTENCY_MIGRATION} from './skills/session-tombstone-idempotency-migration.js'
@@ -2294,6 +2295,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   TEAM_SEMANTIC_REGISTRATION_MIGRATION,
   SKILL_SESSION_TOMBSTONE_IDEMPOTENCY_MIGRATION,
   TEAM_SEMANTIC_MIGRATION,
+  NATIVE_CONTROL_OBSERVATION_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */

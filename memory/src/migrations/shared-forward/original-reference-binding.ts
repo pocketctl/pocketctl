@@ -92,9 +92,11 @@ export async function bindOriginalPersonalReferencePage(source:pg.Client,target:
   if(transport&&!matchRetainedInboxEnvelope(transport,p,classification))throw Error('original_binding_transport_changed')
   const ingress=originalIngress.get(m.sourceEventId)
   if(ingress&&p.event_id!==ingress.businessId)throw Error('original_binding_ingress_changed')
+  // Neither a new canonical order nor a reclaimed Journal rewrites the
+  // independently proved original order. Reject conflicting known orders.
   if(h.storage!==(m.state==='unique-cold'?'cold':'hot')||h.sessionKey!==row.session_id||h.eventType!==row.event_type||h.contentHash!==m.contentHash||!h.occurredAt||new Date(h.occurredAt).getTime()!==new Date(row.occurred_at).getTime()
    ||(p.turn_id??p.source_turn_id??null)!==row.turn_id||digest(classification)!==m.classificationHash
-   ||h.sourceSequence!==undefined&&h.sourceSequence!==m.sourceSequence||verifyOriginalSourceHash({origin:row.origin,originPosition:row.origin_position,eventType:row.event_type,occurredAt:new Date(row.occurred_at).toISOString(),payload:p,payloadHash:row.original_hash})!==m.originalHashVersion)throw Error('original_binding_current_source_conflict')
+   ||m.sourceSequence!==undefined&&h.sourceSequence!==undefined&&h.sourceSequence!==m.sourceSequence||verifyOriginalSourceHash({origin:row.origin,originPosition:row.origin_position,eventType:row.event_type,occurredAt:new Date(row.occurred_at).toISOString(),payload:p,payloadHash:row.original_hash})!==m.originalHashVersion)throw Error('original_binding_current_source_conflict')
  }
  abort();await options.beforeCommit?.();abort()
  let changed=0,alreadyBound=0

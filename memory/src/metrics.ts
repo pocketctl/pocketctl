@@ -15,10 +15,12 @@ export async function updateFeedLagGauge(
     SELECT EXTRACT(EPOCH FROM (NOW() - MIN(COALESCE(i.last_pull_at, i.created_at))))::text AS lag_seconds
     FROM memory_installations i
     ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
+    ${shared?'LEFT JOIN memory_owner_scopes owner_scope USING(installation_id)':''}
     WHERE i.relay_status IN ('pending', 'active')
       AND i.local_status IN ('discovering', 'syncing', 'ready', 'degraded')
       AND i.snapshot_required = FALSE
       ${shared?"AND COALESCE(source_mode.mode,'legacy-feed') IN ('legacy-feed','shared-shadow')":''}
+      ${shared?"AND COALESCE(owner_scope.owner_scope_kind,'personal')='personal'":''}
   `)
   gauge.set(Number(lag.rows[0]?.lag_seconds ?? 0))
 }

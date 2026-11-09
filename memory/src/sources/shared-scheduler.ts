@@ -6,15 +6,16 @@ import {sourceConnectionKey,sourcePoolContext} from './pool-context.js'
 import {createNonOverlappingPoller} from '../non-overlapping-poller.js'
 
 interface ControlClaim {control_kind:string;control_key:string;lease_token:string;claimed_revision:string}
-/** Two bounded metadata pages per pass: one control/bootstrap page and one
+/** Bounded metadata pages per pass: native invalidations, control/bootstrap and
  * distribution page. No body, network, model or active projection runs here.
  * Durable checkpoints survive lost responses; leases span passes, not SQL
  * transactions. Renewal keeps a large valid scan from exhausting retries. */
-export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:string;signal:AbortSignal;intervalMs?:number;pageSize?:number;onError?:(error:unknown)=>void}){
+export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:string;signal:AbortSignal;intervalMs?:number;pageSize?:number;refreshInstallations?:()=>Promise<unknown>;refreshWithdrawals?:()=>Promise<unknown>;onError?:(error:unknown)=>void}){
  const {pool,workerId,signal}=options,interval=options.intervalMs??1000,pageSize=options.pageSize??64
  if(sourceConnectionKey(pool)!==pool||sourcePoolContext(pool).namespace!=='memory')throw Error('shared_scheduler_requires_physical_pool')
  if(!workerId||workerId.length>128||!Number.isInteger(interval)||interval<100||interval>60000||!Number.isInteger(pageSize)||pageSize<1||pageSize>128)throw Error('invalid_shared_scheduler_options')
  let control:ControlClaim|undefined,source:SourceWorkClaim|undefined,timer:ReturnType<typeof setTimeout>|undefined,stopped=false
+ let initialized=false,inventoryToken:string|undefined
  async function query(sql:string,args?:unknown[]){
   const c=await pool.connect()
   try{
@@ -27,6 +28,7 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
   try{
    control??=(await query('SELECT control_kind,control_key,lease_token::text,claimed_revision::text FROM shared.claim_memory_control_work($1,30,1)',[workerId])).rows[0]
    if(!control)return
+   if(inventoryToken!==control.lease_token){await options.refreshInstallations?.();inventoryToken=control.lease_token}
    if(!(await query('SELECT shared.renew_memory_control_lease($1,$2,$3,$4,$5,30) AS valid',params(control))).rows[0].valid){control=undefined;return}
    const result=(await query('SELECT shared.step_memory_control_bootstrap($1,$2,$3,$4,$5,$6) AS result',[...params(control),pageSize])).rows[0].result
    if(result.complete)control=undefined
@@ -60,6 +62,8 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
   if(stopped||signal.aborted)return
   const contract=(await query('SELECT activation_ready FROM shared.memory_source_contract WHERE singleton')).rows[0]
   if(!contract?.activation_ready)return
+  if(!initialized){await options.refreshInstallations?.();initialized=true}
+  await options.refreshWithdrawals?.()
   await controlPage()
   if(!stopped&&!signal.aborted)await sourcePage()
  })
