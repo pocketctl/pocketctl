@@ -36,14 +36,17 @@ suite('source execution context and synthetic provider dispatch',()=>{
   admin=new pg.Pool({connectionString:url,max:6})
   await admin.query('DROP SCHEMA IF EXISTS memory CASCADE;DROP SCHEMA IF EXISTS shared CASCADE;DROP SCHEMA public CASCADE;CREATE SCHEMA public')
   const inputFoundation=await beginFreshInputFixture(admin)
-  await applyMemorySchema(admin,{namespace:'memory'});await applySharedSourceContract(admin)
-  await admin.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  await applyMemorySchema(admin,{namespace:'memory'})
   await admin.query(`CREATE TABLE public.users(id int PRIMARY KEY);INSERT INTO public.users VALUES(1);
    CREATE TABLE public.extension_providers(provider_id text PRIMARY KEY,status text);INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb,start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb,start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0,subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
+   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,ack_feed_id bigint NOT NULL DEFAULT 0,snapshot_required_at timestamptz,lease_epoch bigint NOT NULL DEFAULT 0,lease_token_hash bytea,lease_expires_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    CREATE TABLE public.extension_organizations(organization_id uuid PRIMARY KEY,state text,authorization_epoch bigint);
    CREATE TABLE public.extension_teams(team_id uuid PRIMARY KEY,organization_id uuid,state text,authorization_epoch bigint);
    CREATE TABLE public.extension_scope_memberships(membership_id uuid PRIMARY KEY,scope_kind text,scope_id uuid,user_id int,roles text[],state text,membership_revision bigint)`)
+  // Current shared DDL binds native Relay relations before installing guards.
+  await applySharedSourceContract(admin)
+  await admin.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
   await installRetainedInputStartFixture(admin,'retained_history',inputFoundation)
   runtime=createMemoryPool({databaseUrl:url,databaseNamespace:'memory',dbPoolMax:6})
   await admin.query('CREATE TABLE memory.execution_test_outputs(job_id UUID PRIMARY KEY)')
@@ -57,7 +60,7 @@ suite('source execution context and synthetic provider dispatch',()=>{
   await runtime.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[installationId])
   await runtime.query("INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,claimed_by,claim_epoch,claim_expires_at) VALUES($1,$2,'extract_candidates',$1::uuid::text,85,'running','worker',1,clock_timestamp()+interval '5 minutes')",[jobId,installationId])
   if(shadow){
-   await admin.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[installationId])
+   await admin.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[installationId])
    await admin.query('SELECT shared.transition_memory_source_mode($1,1,$2)',[installationId,shadow==='active'?'shared-active':'shared-shadow'])
   }
   return {installationId,jobId,fence:{jobId,claimedBy:'worker',claimEpoch:'1'}}
@@ -311,7 +314,7 @@ suite('source execution context and synthetic provider dispatch',()=>{
   const f=await governanceFixture(runtime),organization=randomUUID(),jobId=randomUUID()
   await admin.query("INSERT INTO public.extension_organizations VALUES($1,'active',1);",[organization])
   await admin.query("INSERT INTO public.extension_teams VALUES($1,$2,'active',1)",[f.team,organization])
-  for(const[id,kind]of[[f.personal,'personal'],[f.team,'team']])await admin.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,$2,$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[id,kind])
+  for(const[id,kind]of[[f.personal,'personal'],[f.team,'team']])await admin.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,$2,$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[id,kind])
   for(const[id,roles]of[[f.proposer,['contributor']],[f.reviewer,['reviewer']],[f.publisher,['scope_administrator']]]as const)await admin.query("INSERT INTO public.extension_scope_memberships VALUES($1,'team',$2,1,$3,'active',1)",[id,f.team,roles])
   const proposed=await f.proposed(),repo=createAutomationRepository(runtime)
   await repo.setPolicy({installationId:f.team,grant:f.grant(f.publisher,['read','policy_admin']),expectedRevision:0,document:{mode:'shadow',model:'synthetic',promptVersion:'review-v1'}})
@@ -374,7 +377,7 @@ suite('source execution context and synthetic provider dispatch',()=>{
  })
  test.each([{changed:false,finishFails:false},{changed:true,finishFails:false},{changed:false,finishFails:true}])('a real Skill response keeps fees and fences output (%j)',async({changed,finishFails})=>{
   const f=await fixture(),repository=randomUUID(),snapshot=randomUUID(),claim=randomUUID(),version=randomUUID(),capsule=randomUUID()
-  await admin.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[f.installationId])
+  await admin.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[f.installationId])
   await runtime.query("INSERT INTO memory_owner_scopes(installation_id,owner_scope_kind,owner_scope_id) VALUES($1,'personal',$1)",[f.installationId])
   await runtime.query('INSERT INTO repositories(installation_id,repository_id,repository_key,first_observed_at,last_observed_at) VALUES($1,$2,$2::uuid::text,now(),now())',[f.installationId,repository])
   await runtime.query('INSERT INTO repo_snapshots(installation_id,repo_snapshot_id,repository_id,commit_sha,observed_at) VALUES($1,$2,$3,$4,now())',[f.installationId,snapshot,repository,'a'.repeat(40)])

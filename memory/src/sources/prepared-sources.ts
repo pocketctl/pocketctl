@@ -131,9 +131,17 @@ export async function prepareTurnSources(pool:pg.Pool,installationId:string,turn
  * lifecycle repository observations. New refs cannot silently disappear from
  * an in-flight compile just because its original UUID list still exists. */
 export async function prepareEpisodeSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedSources>{
- const query=`SELECT s.source_event_id::text FROM source_events s JOIN source_turns t ON t.installation_id=s.installation_id AND t.turn_id=$2
-  WHERE s.installation_id=$1 AND(s.turn_id=$2 OR(s.turn_id IS NULL AND s.session_id=t.session_id AND s.event_type IN('session_created','session_discovered') AND s.occurred_at<=t.terminal_at))
-  ORDER BY s.source_event_id LIMIT 4097`
+ // Keep the two disjoint memberships independently indexable. Same-turn refs
+ // include old aliases/other sessions and reclaimed rows; preparation must see
+ // those rows to fail closed. Both branches still require the source turn.
+ const query=`WITH turn AS(SELECT installation_id,session_id,terminal_at FROM source_turns WHERE installation_id=$1 AND turn_id=$2)
+  SELECT refs.source_event_id::text FROM(
+   SELECT s.source_event_id FROM source_events s JOIN turn t ON t.installation_id=s.installation_id
+    WHERE s.installation_id=$1 AND s.turn_id=$2
+   UNION ALL
+   SELECT s.source_event_id FROM source_events s JOIN turn t ON t.installation_id=s.installation_id AND t.session_id=s.session_id
+    WHERE s.installation_id=$1 AND s.turn_id IS NULL AND s.event_type IN('session_created','session_discovered') AND s.occurred_at<=t.terminal_at
+  )refs ORDER BY refs.source_event_id LIMIT 4097`
  const ids=(await pool.query(query,[installationId,turnId])).rows.map(r=>r.source_event_id)
  const prepared=await prepareSourceReferences(pool,installationId,ids)
  return {bodyBytes:prepared.bodyBytes,get events(){return prepared.events},async assertCurrent(client,options){
