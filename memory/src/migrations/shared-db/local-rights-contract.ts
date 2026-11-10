@@ -30,7 +30,14 @@ export const SHARED_LOCAL_RIGHTS_FUNCTIONS = [
     WHERE n.body_reclaimed_at IS DISTINCT FROM o.body_reclaimed_at`:
    ['installation','owner'].includes(filter)?semanticRows:'SELECT installation_id FROM rights_new UNION SELECT installation_id FROM rights_old'
   const scopeRows=op==='INSERT'?'SELECT owner_scope_kind,owner_scope_id FROM rights_new':op==='DELETE'?'SELECT owner_scope_kind,owner_scope_id FROM rights_old':'SELECT owner_scope_kind,owner_scope_id FROM rights_new UNION SELECT owner_scope_kind,owner_scope_id FROM rights_old'
-  const rows=filter==='scope'?`SELECT o.installation_id FROM (SELECT installation_id,owner_scope_kind,owner_scope_id FROM memory.memory_owner_scopes UNION SELECT installation_id,owner_scope_kind,owner_scope_id FROM public.extension_installations WHERE provider_id='pocketctl-memory') o JOIN (${scopeRows}) s USING(owner_scope_kind,owner_scope_id)`:ordinaryRows
+  // An organization tombstone also restricts native child teams, including
+  // those whose local ancestry is stale or whose parent has no installation.
+  const rows=filter==='scope'?`SELECT o.installation_id FROM (
+    SELECT installation_id,owner_scope_kind,owner_scope_id FROM memory.memory_owner_scopes
+    UNION SELECT installation_id,owner_scope_kind,owner_scope_id FROM public.extension_installations WHERE provider_id='pocketctl-memory'
+    UNION SELECT i.installation_id,'organization'::text,t.organization_id FROM public.extension_installations i
+      JOIN public.extension_teams t ON i.owner_scope_kind='team' AND t.team_id=i.owner_scope_id WHERE i.provider_id='pocketctl-memory'
+    ) o JOIN (${scopeRows}) s USING(owner_scope_kind,owner_scope_id)`:ordinaryRows
   return [
    `CREATE OR REPLACE FUNCTION shared.${name}() RETURNS TRIGGER
     LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE affected_installation UUID;BEGIN

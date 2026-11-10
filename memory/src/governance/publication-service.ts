@@ -1,3 +1,4 @@
+import {readCurrentReviewMemberships} from './current-review-memberships.js'
 import {classifyClaimConflict} from '../claims/conflict-classifier.js'
 import {claimIdentityV2} from '../claims/identity.js'
 import {originPolicyProofDecision,transferredOriginDecision} from './origin-policy.js'
@@ -329,7 +330,7 @@ export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKey
               'candidate evidence exceeds the active policy maximum')
           }
 
-          // Re-evaluate every counted decision against the live mirror.
+          // Re-evaluate every counted decision against current reviewer authority.
           const decisions = await client.query<{
             decision_id: string
             membership_id: string
@@ -340,17 +341,9 @@ export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKey
             FROM memory_review_decisions d
             WHERE d.candidate_revision_id = $1
           `, [latest.candidate_revision_id])
-          const stillActive = await client.query<{
-            membership_id: string
-            membership_revision: string | number
-            state: string
-            roles: string[]
-          }>(`
-            SELECT membership_id, membership_revision, state, roles
-            FROM memory_scope_memberships
-            WHERE installation_id = $1 AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())
-            ORDER BY membership_id FOR SHARE
-          `, [input.targetInstallationId])
+          let stillActive:Awaited<ReturnType<typeof readCurrentReviewMemberships>>
+          try{stillActive=await readCurrentReviewMemberships(client,input.targetInstallationId,decisions.rows.map(row=>row.membership_id),binding)}
+          catch(error){if(error instanceof TargetBindingError)throw new PublicationError('quorum_failed','current reviewer authority unavailable');throw error}
           const countedDecisions = currentReviewDecisions(
             decisions.rows.map(row => ({
               decisionId: row.decision_id,
@@ -358,7 +351,7 @@ export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKey
               membershipRevision: String(row.membership_revision),
               decision: row.decision as ReviewDecisionKind,
             })),
-            stillActive.rows.map(row => ({
+            stillActive.map(row => ({
               membershipId: row.membership_id,
               membershipRevision: String(row.membership_revision),
               state: row.state,
