@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto'
 import type pg from 'pg'
 
 import type { ReviewPolicyDocument } from './types.js'
+import {readCurrentPolicyAuthority,CurrentPolicyScopeStaleError} from './current-policy-authority.js'
 
 /**
  * ADR-0005 Review Policy V1 (§6.2). Documents are canonically hashed,
@@ -179,18 +180,20 @@ export async function loadEffectiveReviewPolicySnapshot(
   installationId: string,
   options: { ensure?: boolean } = {},
 ): Promise<EffectiveReviewPolicySnapshot> {
+  let native
+  try{native=await readCurrentPolicyAuthority(client,installationId)}catch(error){if(error instanceof CurrentPolicyScopeStaleError)throw new ReviewPolicyScopeStaleError();throw error}
   async function scopeRows(query:string,ids:unknown[]){
    return client.query<{installation_id:string;owner_scope_kind:string;parent_organization_id:string|null;alive:boolean}>(query,ids)
   }
   const alive=`s.state='active' AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error')
     AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t WHERE t.owner_scope_kind=s.owner_scope_kind AND t.owner_scope_id=s.owner_scope_id AND t.authorization_epoch>=s.authorization_epoch)`
-  const scope=await scopeRows(`SELECT s.installation_id,s.owner_scope_kind,s.parent_organization_id::text,(${alive}) AS alive
+  const scope=native?null:await scopeRows(`SELECT s.installation_id,s.owner_scope_kind,s.parent_organization_id::text,(${alive}) AS alive
     FROM memory_owner_scopes s JOIN memory_installations i USING(installation_id) WHERE s.installation_id=$1 FOR SHARE OF s,i`,[installationId])
-  const row=scope.rows[0]
+  const row=native?{owner_scope_kind:native.scopeKind,parent_organization_id:native.parentOrganizationId,alive:true}:scope?.rows[0]
   if(!row||!row.alive||!['team','organization'].includes(row.owner_scope_kind))throw new ReviewPolicyScopeStaleError()
   const scopeKind=row.owner_scope_kind as 'team'|'organization'
-  let parentInstallationId:string|null=null
-  if(scopeKind==='team'&&row.parent_organization_id){
+  let parentInstallationId:string|null=native?.parentInstallationId??null
+  if(!native&&scopeKind==='team'&&row.parent_organization_id){
    const parent=await scopeRows(`SELECT s.installation_id,s.owner_scope_kind,s.parent_organization_id::text,(${alive}) AS alive
      FROM memory_owner_scopes s JOIN memory_installations i USING(installation_id)
      WHERE s.owner_scope_kind='organization' AND s.owner_scope_id=$1 FOR SHARE OF s,i`,[row.parent_organization_id])
@@ -202,6 +205,7 @@ export async function loadEffectiveReviewPolicySnapshot(
   // remains the explicit code-floor bridge; installed inactive parents do not.
   if(parentInstallationId&&options.ensure)await ensurePolicyHead(client,parentInstallationId,DEFAULT_ORGANIZATION_REVIEW_POLICY)
   const parent=parentInstallationId?await readPolicyHead(client,parentInstallationId):null
+  if(native&&parentInstallationId&&!parent)throw new ReviewPolicyScopeStaleError()
   const targetDefault=scopeKind==='organization'?DEFAULT_ORGANIZATION_REVIEW_POLICY:DEFAULT_TEAM_REVIEW_POLICY
   if(options.ensure)await ensurePolicyHead(client,installationId,targetDefault)
   const target=await readPolicyHead(client,installationId)

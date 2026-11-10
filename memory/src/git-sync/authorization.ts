@@ -1,5 +1,6 @@
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {loadCurrentGrantStates} from '../sources/current-grant.js'
+import {readCurrentPolicyAuthority,CurrentPolicyScopeStaleError} from '../governance/current-policy-authority.js'
 import type pg from 'pg'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 import {assertCurrentMembershipWindows,assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
@@ -31,6 +32,13 @@ async function lockMirrors(client: pg.PoolClient, installationIds: string[]) {
  * identity comes only from current Ledger relationships. Lock the grant scopes
  * plus this bounded dependency set together before any policy/source locks. */
 export async function lockGitPolicyScopes(client:pg.PoolClient,facts:V2GrantFacts,installationId:string):Promise<string[]> {
+  let native
+  try{native=await readCurrentPolicyAuthority(client,installationId)}catch(error){if(error instanceof CurrentPolicyScopeStaleError)throw new Error('git_policy_scope_stale');throw error}
+  if(native){
+    const ids=[...new Set([installationId,...(native.parentInstallationId?[native.parentInstallationId]:[])])].sort()
+    await lockMirrors(client,[...facts.scopeBindings.map(b=>b.installation_id),...ids])
+    return ids
+  }
   async function discover() {
     const rows=await client.query<{installationId:string;parentOrganizationId:string|null;parentInstallationId:string|null}>(`SELECT s.installation_id AS "installationId",
       s.parent_organization_id::text AS "parentOrganizationId",p.installation_id AS "parentInstallationId" FROM memory_owner_scopes s

@@ -11,12 +11,22 @@ export const SHARED_GRANT_FUNCTIONS=[
     'owner_exists',i.owner_scope_kind<>'personal' OR EXISTS(SELECT 1 FROM public.users u WHERE u.id=i.owner_user_id),
     'scope_state',CASE i.owner_scope_kind WHEN 'team' THEN t.state WHEN 'organization' THEN org.state ELSE 'active' END,
     'parent_state',CASE WHEN i.owner_scope_kind='team' THEN parent.state ELSE NULL END,
+    'policy_contract_version',1,'parent_organization_id',t.organization_id::text,'parent_authorization_epoch',parent.authorization_epoch::text,
+    'parent_installation',CASE WHEN parent_installation.installation_id IS NULL THEN NULL ELSE jsonb_build_object(
+      'installation_id',parent_installation.installation_id::text,'status',parent_installation.status,
+      'owner_scope_kind',parent_installation.owner_scope_kind,'owner_scope_id',parent_installation.owner_scope_id::text,
+      'authorization_epoch',parent.authorization_epoch::text,'scope_state',parent.state) END,
     'authorization_epoch',CASE i.owner_scope_kind WHEN 'team' THEN t.authorization_epoch::text WHEN 'organization' THEN org.authorization_epoch::text ELSE i.authorization_epoch::text END,
     'member_user_id',member.user_id::text,'membership_id',member.membership_id::text,'membership_state',member.state,'membership_revision',member.membership_revision::text,'roles',member.roles,
     'member_exists',EXISTS(SELECT 1 FROM public.users u WHERE u.id=member.user_id))
    FROM public.extension_installations i LEFT JOIN public.extension_teams t ON i.owner_scope_kind='team' AND t.team_id=i.owner_scope_id
     LEFT JOIN public.extension_organizations parent ON parent.organization_id=t.organization_id
     LEFT JOIN public.extension_organizations org ON i.owner_scope_kind='organization' AND org.organization_id=i.owner_scope_id
+    -- Prefer the unique live installation. A historical terminal installation
+    -- still forbids silently falling back to the uninstalled organization floor.
+    LEFT JOIN LATERAL(SELECT pi.* FROM public.extension_installations pi
+      WHERE pi.provider_id='pocketctl-memory' AND pi.owner_scope_kind='organization' AND pi.owner_scope_id=t.organization_id
+      ORDER BY (pi.status IN('pending','active','paused','revoking')) DESC,pi.created_at DESC,pi.installation_id LIMIT 1) parent_installation ON TRUE
     LEFT JOIN public.extension_scope_memberships member ON member.scope_kind=i.owner_scope_kind AND member.scope_id=i.owner_scope_id AND member.membership_id=ANY(p_members)
    WHERE i.installation_id=ANY(p_installations) AND i.provider_id='pocketctl-memory' ORDER BY i.installation_id,member.membership_id;
   END $$`,
