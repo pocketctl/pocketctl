@@ -72,6 +72,9 @@ export function registerGovernanceRoutes(app: FastifyInstance, deps: GovernanceR
     typeof value === 'object' && value !== null && 'failed' in value
 
   function mapGovernanceError(error: unknown, reply: { code: (status: number) => unknown }): unknown {
+    if((error as {code?:string;message?:string})?.code==='55000'&&(error as {message?:string}).message==='reviewer_validity_expired'){
+      error=new PublicationError('quorum_failed','reviewer validity elapsed before publication commit')
+    }
     if (error instanceof MemoryApiError) return fail(reply, error)
     if (error instanceof PromotionError || error instanceof PublicationError) {
       const statusByCode: Record<string, number> = {

@@ -1,3 +1,4 @@
+import {REVIEWER_WINDOW_MIGRATION} from './governance/reviewer-window-migration.js'
 import {TRANSPORT_METADATA_MIGRATION} from './sources/transport-metadata-migration.js'
 import {NATIVE_CONTROL_OBSERVATION_MIGRATION} from './installations/native-control-migration.js'
 import {assertTeamSemanticLegacySchema} from './sources/team-semantic-migration.js'
@@ -2298,6 +2299,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   TEAM_SEMANTIC_MIGRATION,
   NATIVE_CONTROL_OBSERVATION_MIGRATION,
   TRANSPORT_METADATA_MIGRATION,
+  REVIEWER_WINDOW_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
