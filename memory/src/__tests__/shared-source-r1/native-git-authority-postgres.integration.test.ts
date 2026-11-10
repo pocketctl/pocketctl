@@ -30,6 +30,27 @@ suite('Git background stamps use current native authority before mirror refresh'
   await f.pool.query("UPDATE public.extension_organizations SET state='suspended' WHERE organization_id=$1",[stamp.ownerScopeId])
   try{await expect(authorize()).rejects.toThrow('git_authorization_stale')}finally{await f.pool.query("UPDATE public.extension_organizations SET state='active' WHERE organization_id=$1",[stamp.ownerScopeId])}
  })
+ test('a current native background stamp does not wait for stale local config and roles',async()=>{
+  const fresh={...stamp,configVersion:'2',membershipRevision:'2'},client=await f.runtime.connect()
+  await f.pool.query('UPDATE public.extension_installations SET config_version=2 WHERE installation_id=$1',[stamp.installationId])
+  await f.pool.query("UPDATE public.extension_scope_memberships SET membership_revision=2,roles=ARRAY['publisher'] WHERE membership_id=$1",[stamp.membershipId])
+  try{
+   await client.query('BEGIN');expect(await requireCurrentGitAuthorization(client,fresh,'publish')).toEqual(fresh)
+  }finally{
+   await client.query('ROLLBACK');client.release();await f.pool.query('UPDATE public.extension_installations SET config_version=1 WHERE installation_id=$1',[stamp.installationId])
+   await f.pool.query("UPDATE public.extension_scope_memberships SET membership_revision=1,roles=ARRAY['contributor'] WHERE membership_id=$1",[stamp.membershipId])
+  }
+ })
+ test('native background authorization retains local expiry and privacy tombstones',async()=>{
+  await f.runtime.query("UPDATE memory_scope_memberships SET valid_until=clock_timestamp()-interval '1 second' WHERE membership_id=$1",[stamp.membershipId])
+  try{await expect(authorize()).rejects.toThrow('git_authorization_stale')}finally{await f.runtime.query('UPDATE memory_scope_memberships SET valid_until=NULL WHERE membership_id=$1',[stamp.membershipId])}
+  await f.runtime.query("INSERT INTO memory_scope_tombstones(owner_scope_kind,owner_scope_id,authorization_epoch,reason) VALUES('organization',$1,1,'synthetic-local-privacy')",[stamp.ownerScopeId])
+  try{await expect(authorize()).rejects.toThrow('git_authorization_stale')}finally{await f.runtime.query("DELETE FROM memory_scope_tombstones WHERE owner_scope_kind='organization' AND owner_scope_id=$1",[stamp.ownerScopeId])}
+ })
+ test('native background authorization does not restore revoked native membership from local roles',async()=>{
+  await f.pool.query("UPDATE public.extension_scope_memberships SET state='revoked' WHERE membership_id=$1",[stamp.membershipId])
+  try{await expect(authorize()).rejects.toThrow('git_authorization_stale')}finally{await f.pool.query("UPDATE public.extension_scope_memberships SET state='active' WHERE membership_id=$1",[stamp.membershipId])}
+ })
  test('background authorization retains the native commit barrier through the transaction',async()=>{
   const reader=await f.runtime.connect(),writer=await f.pool.connect()
   try{

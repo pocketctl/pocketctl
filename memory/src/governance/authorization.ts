@@ -6,7 +6,7 @@ import type pg from 'pg'
 /**
  * ADR-0005 Memory-side v2 grant authorization (§8.1). The cryptographic
  * verifier establishes WHAT Relay signed; this module revalidates every
- * binding against the local scope mirror in one bounded query and returns
+ * binding against current native authority (or the public-mode mirror) and returns
  * only bindings whose installation, owner scope, lifecycle state,
  * authorization epoch, membership revision, and role-derived permissions are
  * all still current. Stale/missing/revoked bindings are silently dropped for
@@ -80,7 +80,7 @@ export function createScopeAuthorization(pool: pg.Pool) {
     /**
      * Revalidate every binding of a cryptographically verified v2 grant.
      * Returns null when the primary binding fails validation (uniform 401)
-     * or the mirror query cannot prove the grant current.
+     * or current authority and local lifecycle cannot prove the grant usable.
      */
     async validateV2Grant(
       facts: V2GrantFacts,
@@ -100,16 +100,21 @@ export function createScopeAuthorization(pool: pg.Pool) {
                t.authorization_epoch::text AS tombstone_epoch
         FROM memory_installations i
         LEFT JOIN memory_owner_scopes s ON s.installation_id = i.installation_id
+        LEFT JOIN jsonb_to_recordset($3::jsonb) AS native_binding(
+          installation_id UUID,owner_scope_kind TEXT,owner_scope_id UUID,membership_id UUID)
+          ON native_binding.installation_id = i.installation_id
         LEFT JOIN memory_scope_memberships m
           ON m.installation_id = i.installation_id
-         AND m.membership_id = ANY($2::uuid[])
+         AND (m.membership_id = native_binding.membership_id
+           OR native_binding.installation_id IS NULL AND m.membership_id = ANY($2::uuid[]))
         LEFT JOIN memory_scope_tombstones t
-          ON t.owner_scope_kind = s.owner_scope_kind
-         AND t.owner_scope_id = s.owner_scope_id
+          ON t.owner_scope_kind = COALESCE(native_binding.owner_scope_kind,s.owner_scope_kind)
+         AND t.owner_scope_id = COALESCE(native_binding.owner_scope_id,s.owner_scope_id)
         WHERE i.installation_id = ANY($1::uuid[])
       `, [
         facts.scopeBindings.map(binding => binding.installation_id),
         facts.scopeBindings.map(binding => binding.membership_id).filter((id): id is string => id !== null),
+        JSON.stringify(sourcePoolContext(pool).namespace==='memory'?facts.scopeBindings:[]),
       ])
       const byInstallation = new Map(result.rows.map(row => [row.installation_id, row]))
 
@@ -122,6 +127,16 @@ export function createScopeAuthorization(pool: pg.Pool) {
         if (!row) continue
         if (row.local_status === 'purging' || row.local_status === 'purged'
           || row.local_status === 'integrity_error') continue
+        // Native facts above own authorization. Local lifecycle, privacy and
+        // validity still deny access, but a lagging config/role mirror cannot
+        // replace a newer correctly signed native grant.
+        if (typeof row.tombstone_epoch === 'string'
+          && BigInt(row.tombstone_epoch) >= BigInt(binding.authorization_epoch)) continue
+        if (current) {
+          if (binding.owner_scope_kind !== 'personal' && row.membership_time_valid !== true) continue
+          validated.push(binding)
+          continue
+        }
         if (row.relay_status === 'revoking' || row.relay_status === 'revoked') continue
         if (!row.owner_scope_kind || row.owner_scope_kind !== binding.owner_scope_kind
           || row.owner_scope_id !== binding.owner_scope_id) continue
@@ -238,6 +253,17 @@ export async function assertCurrentGrantClock(client: Pick<pg.PoolClient, 'query
  * keeps moving while row locks are held; repeat after the last blocking work. */
 export async function assertCurrentMembershipWindows(client:Pick<pg.PoolClient,'query'>,members:readonly {installationId:string;membershipId:string}[]):Promise<void>{
  if(!members.length)return
+ // Native membership identity/state is authoritative. An absent local mirror
+ // supplies no local date override; an existing validity limit still applies.
+ if(sourcePoolContext(client).namespace==='memory'){
+  const rows=await client.query<{alive:boolean}>(`SELECT NOT EXISTS(
+   SELECT 1 FROM jsonb_to_recordset($1::jsonb) AS wanted(installation_id UUID,membership_id UUID)
+   JOIN memory_scope_memberships m ON m.installation_id=wanted.installation_id AND m.membership_id=wanted.membership_id
+   WHERE (m.valid_from IS NOT NULL AND m.valid_from>clock_timestamp()) OR (m.valid_until IS NOT NULL AND m.valid_until<=clock_timestamp())
+  ) AS alive`,[JSON.stringify(members.map(m=>({installation_id:m.installationId,membership_id:m.membershipId})))])
+  if(rows.rows[0]?.alive!==true)throw new TargetBindingError('membership validity elapsed')
+  return
+ }
  const rows=await client.query<{alive:boolean}>(`SELECT NOT EXISTS(
    SELECT 1 FROM jsonb_to_recordset($1::jsonb) AS wanted(installation_id UUID,membership_id UUID)
    WHERE NOT EXISTS(SELECT 1 FROM memory_scope_memberships m WHERE m.installation_id=wanted.installation_id AND m.membership_id=wanted.membership_id
@@ -260,8 +286,8 @@ export async function requireCurrentInstallationAuthority(client: pg.PoolClient,
     'SELECT local_status,relay_status,config_version::text FROM memory_installations WHERE installation_id=$1 FOR SHARE'+(options.readOnly?' NOWAIT':''), [grant.installationId])
   const row=result.rows[0]
   if (!row || ['purging','purged','integrity_error'].includes(row.local_status)
-    || ['revoking','revoked'].includes(row.relay_status)
-    || (grant.configVersion !== undefined && row.config_version !== grant.configVersion)) {
+    || (!current && (['revoking','revoked'].includes(row.relay_status)
+      || (grant.configVersion !== undefined && row.config_version !== grant.configVersion)))) {
     throw new TargetBindingError('installation authority is stale')
   }
   await assertCurrentGrantClock(client, grant)
