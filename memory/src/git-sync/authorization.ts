@@ -1,7 +1,8 @@
 import {sourcePoolContext} from '../sources/pool-context.js'
+import {loadCurrentGrantStates} from '../sources/current-grant.js'
 import type pg from 'pg'
 import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
-import {assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
+import {assertCurrentMembershipWindows,assertCurrentGrantClock,TargetBindingError, createScopeAuthorization, type V2GrantFacts } from '../governance/authorization.js'
 
 export type GitPermission = 'read' | 'contribute' | 'review' | 'publish' | 'scope_admin'
 export interface GitAuthorizationStamp {
@@ -66,6 +67,16 @@ async function currentStamp(client: pg.PoolClient, input: GitAuthorizationStamp,
       ||native.authorization_epoch!==input.authorizationEpoch||native.config_version!==input.configVersion
       ||native.membership_id!==input.membershipId||native.membership_revision!==input.membershipRevision||native.membership_state!=='active'
       ||!Array.isArray(native.roles)||!native.roles.some((role:unknown)=>typeof role==='string'&&permissions[role]?.includes(permission)))throw new Error(code)
+    // Native authority is complete above. Only Memory-owned lifecycle,
+    // optional member validity dates and privacy tombstones remain local.
+    const local=await client.query<{local_status:string}>(`SELECT local_status FROM memory_installations
+      WHERE installation_id=$1 AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t
+        WHERE t.owner_scope_kind=$2 AND t.owner_scope_id=$3 AND t.authorization_epoch>=$4::bigint)
+      FOR SHARE`,[input.installationId,input.ownerScopeKind,input.ownerScopeId,input.authorizationEpoch])
+    if(!local.rows[0]||['purging','purged','integrity_error'].includes(local.rows[0].local_status))throw new Error(code)
+    await client.query('SELECT membership_id FROM memory_scope_memberships WHERE installation_id=$1 AND membership_id=$2 FOR SHARE',[input.installationId,input.membershipId])
+    try{await assertCurrentMembershipWindows(client,[{installationId:input.installationId,membershipId:input.membershipId}])}catch(error){if(error instanceof TargetBindingError)throw new Error(code);throw error}
+    return input
   }
 
   const result = await client.query<{
@@ -102,12 +113,15 @@ export async function requireGitPermission(client: pg.PoolClient, facts: V2Grant
   if (!binding || binding.owner_scope_kind === 'personal' || !binding.membership_id || !binding.permissions.includes(permission)) throw new Error('git_forbidden')
   const config = await client.query<{ config_version: string }>('SELECT config_version::text FROM memory_installations WHERE installation_id=$1', [installationId])
   if (!config.rows[0]) throw new Error('git_forbidden')
+  const native=await loadCurrentGrantStates(client,[binding])
+  const configVersion=native?native.find(row=>row.installation_id===installationId&&row.state.membership_id===binding.membership_id)?.state.config_version:config.rows[0].config_version
+  if(!configVersion)throw new Error('git_forbidden')
   return currentStamp(client, { installationId, ownerScopeKind: binding.owner_scope_kind, ownerScopeId: binding.owner_scope_id,
     membershipId: binding.membership_id, membershipRevision: binding.membership_revision,
-    authorizationEpoch: binding.authorization_epoch, configVersion: config.rows[0].config_version }, permission, 'git_forbidden')
+    authorizationEpoch: binding.authorization_epoch, configVersion }, permission, 'git_forbidden')
 }
 
-/** Background workers keep this stamp, not a short-lived grant. Current mirror roles confer permission. */
+/** Background workers keep this stamp, not a short-lived grant. Current native authority (or public-mode mirror roles) confers permission. */
 export async function requireCurrentGitAuthorization(client: pg.PoolClient, stamp: GitAuthorizationStamp,
   permission: GitPermission): Promise<GitAuthorizationStamp> {
   await lockMirrors(client, [stamp.installationId])

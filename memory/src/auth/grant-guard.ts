@@ -93,7 +93,7 @@ export function createGrantGuard(deps: GrantGuardDeps) {
     /**
      * v2 guard for governance and federated routes: verifies the federated
      * scope grant cryptographically, then revalidates every binding against
-     * the local scope mirror. Stale bindings drop; a failed primary or
+     * current authority and local lifecycle state. Stale bindings drop; a failed primary or
      * service rejects the whole request with one bounded error.
      */
     async guardV2(input: {
