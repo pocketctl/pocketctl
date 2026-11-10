@@ -3,7 +3,7 @@ import pg from 'pg'
 import {detachPreparedSources} from './sources/prepared-sources.js'
 import {detachPreparedEvidence} from './sources/evidence-sources.js'
 import {createSourceArchiveReader} from './sources/archive-reader.js'
-import {bindSourcePool,inheritSourcePool} from './sources/pool-context.js'
+import {bindSourcePool,inheritSourcePool,registerPhysicalSourcePool} from './sources/pool-context.js'
 import {MEMORY_WRITER_STARTUP_OPTIONS} from './migrations/governance-v2/compatibility.js'
 import type { MemoryConfig } from './config.js'
 
@@ -21,6 +21,7 @@ export function createMemoryPool(config: Pick<MemoryConfig, 'databaseUrl' | 'dbP
     // an asynchronous pool connect listener would race the first mutation.
     options: MEMORY_WRITER_STARTUP_OPTIONS+(config.databaseNamespace==='memory'?' -c search_path=pg_catalog,memory,shared':' -c search_path=pg_catalog,public'),
   })
+  registerPhysicalSourcePool(pool)
   bindSourcePool(pool,{namespace:config.databaseNamespace??'public',...(config.sourceArchive?{archive:{storage:createSourceArchiveReader(config.sourceArchive.directory,config.sourceArchive.namespace),limits:{maxRawBytes:32*1024*1024,maxCompressedBytes:16*1024*1024,maxRecords:10000}}}:{})})
   pool.on('acquire',client=>{detachPreparedSources(client);detachPreparedEvidence(client);detachRetainedSourceGuards(client);inheritSourcePool(client,pool)})
   pool.on('release',(_error,client)=>{detachPreparedSources(client);detachPreparedEvidence(client);detachRetainedSourceGuards(client)})
