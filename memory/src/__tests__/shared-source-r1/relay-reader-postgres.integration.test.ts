@@ -20,16 +20,17 @@ suite('controlled personal Relay source reader',()=>{
   pool=new pg.Pool({connectionString:url})
   await pool.query('DROP SCHEMA IF EXISTS memory CASCADE; DROP SCHEMA IF EXISTS shared CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public')
   const inputFoundation=await beginFreshInputFixture(pool)
-  await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
+  await applyMemorySchema(pool,{namespace:'memory'})
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY); INSERT INTO public.users VALUES(1),(2);
    CREATE TABLE public.daemons(daemon_id text,user_id int); INSERT INTO public.daemons VALUES('daemon',1);
    CREATE TABLE public.sessions(session_id text,user_id int,daemon_id text,source text,content_state text,agent_type text,activity_epoch bigint NOT NULL DEFAULT 0,last_business_activity_at timestamptz DEFAULT '2026-11-06T00:00:00Z'); INSERT INTO public.sessions VALUES('session',1,'daemon','codex','cold','codex');
    CREATE TABLE public.extension_providers(provider_id text,status text); INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0,subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    CREATE TABLE public.extension_organizations(organization_id uuid PRIMARY KEY,state text,authorization_epoch bigint DEFAULT 1);
    CREATE TABLE public.extension_teams(team_id uuid PRIMARY KEY,organization_id uuid,state text,authorization_epoch bigint DEFAULT 1);
    CREATE TABLE public.extension_scope_memberships(membership_id uuid PRIMARY KEY,scope_kind text,scope_id uuid,user_id int,roles text[],state text,membership_revision bigint DEFAULT 1);
    CREATE TABLE public.events(id bigint PRIMARY KEY,session_id text,user_id int,event_type text,payload jsonb,effect_status text,body_storage text,body_manifest_id uuid,body_chunk_ordinal int,body_activity_epoch bigint,body_owner_user_id int,canonical_payload_hash text,source_sequence bigint);
+   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,ack_feed_id bigint NOT NULL DEFAULT 0,snapshot_required_at timestamptz,lease_epoch bigint NOT NULL DEFAULT 0,lease_token_hash bytea,lease_expires_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    CREATE TABLE public.extension_source_outbox(source_seq bigint,source_kind text,source_id text,owner_user_id int,session_id text,event_type text);
    CREATE TABLE public.deleted_sessions(session_id text);
    CREATE TABLE public.session_archive_manifests(manifest_id uuid,user_id int,session_id text,activity_epoch bigint,schema_version int,codec text,state text,storage_namespace text);
@@ -39,7 +40,8 @@ suite('controlled personal Relay source reader',()=>{
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_reader_relay') THEN CREATE ROLE shared_reader_relay NOLOGIN; END IF;
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_reader_migrator') THEN CREATE ROLE shared_reader_migrator NOLOGIN; END IF;
    END $$;`)
-  await pool.query(`INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')`,[inst])
+  await applySharedSourceContract(pool)
+  await pool.query(`INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')`,[inst])
   await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[inst])
   await pool.query("SELECT shared.mark_memory_source_dirty('relay_event','1:session')")
   const cold=[{id:'9007199254740994',eventType:'agent_text',payload:{text:'private cold one',turn_id:'turn-2'}},{id:'9007199254740995',eventType:'agent_text',payload:{text:'private cold two',turn_id:'turn-3'}}]
@@ -79,7 +81,7 @@ suite('controlled personal Relay source reader',()=>{
   const extra='10000000-0000-0000-0000-000000000004',foreign='10000000-0000-0000-0000-000000000005'
   await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[inst])
   for(const [id,user]of [[extra,1],[foreign,2]] as const){
-   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',$2,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[id,user])
+   await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',$2,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[id,user])
    await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[id])
    await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[id])
   }
@@ -106,7 +108,7 @@ suite('controlled personal Relay source reader',()=>{
  test('distribution resumes bounded pages after a crash, seals the complete set, and restarts on control change',async()=>{
   const extra='10000000-0000-0000-0000-000000000006'
   await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1),($2,'pocketctl-memory','active','ready',1)",[inst,extra])
-  await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[extra])
+  await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[extra])
   await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[extra])
   const claim=async()=>(await runtime.query("SELECT lease_token::text,claimed_revision::text FROM shared.claim_memory_source_work('distributor',30,128)")).rows.find(r=>r.lease_token)!
   const step=async(c:any,page:any=null)=>(await runtime.query("SELECT shared.step_memory_source_distribution('relay_event','1:session',$1,'distributor',$2,$3,$4,1) AS page",[c.lease_token,c.claimed_revision,page?.scanId??null,page?.cursor??''])).rows[0].page
@@ -510,12 +512,12 @@ suite('controlled personal Relay source reader',()=>{
   try{
    const f=await governanceFixture(seed),event='90000000-0000-0000-0000-000000000004',canonical='9007199254740993'
    const payload=(await pool.query('SELECT payload FROM public.events WHERE id=$1',[canonical])).rows[0].payload
-   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[f.personal])
+   await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[f.personal])
    await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[f.personal])
    const org=(await import('node:crypto')).randomUUID()
    await pool.query("INSERT INTO public.extension_organizations VALUES($1,'active',1)",[org])
    await pool.query("INSERT INTO public.extension_teams VALUES($1,$2,'active',1)",[f.team,org])
-   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',NULL,'team',$1,'active',1,1,ARRAY['scope:control:read'],ARRAY['memory.manage'],'{}')",[f.team])
+   await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',NULL,'team',$1,'active',1,1,ARRAY['scope:control:read'],ARRAY['memory.manage'],'{}')",[f.team])
    await pool.query("INSERT INTO public.extension_scope_memberships VALUES($1,'team',$2,1,ARRAY['scope_administrator'],'active',1)",[f.publisher,f.team])
    await seed.query("INSERT INTO source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at) VALUES($1,'session',now(),now())",[f.personal])
    await seed.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash,classification,
@@ -767,7 +769,7 @@ suite('controlled personal Relay source reader',()=>{
   const installation=randomUUID(),artifact=randomUUID(),seed=createMemoryPool({databaseUrl:url!,databaseNamespace:'memory',dbPoolMax:2})
   try{
    await pool.query("INSERT INTO public.sessions VALUES('packet-order',1,'daemon','codex','hot','codex')")
-   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[installation])
+   await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[installation])
    await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[installation])
    await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-active',2)",[installation])
    await pool.query("SELECT shared.mark_memory_source_dirty('relay_event','1:packet-order')")
@@ -900,7 +902,7 @@ suite('controlled personal Relay source reader',()=>{
   const seed=createMemoryPool({databaseUrl:url!,databaseNamespace:'memory',dbPoolMax:2}),excerpt='tests passed',body={text:excerpt,turn_id:episode},hash=createHash('sha256').update(excerpt).digest('hex').slice(0,16)
   try{
    await pool.query("INSERT INTO public.sessions VALUES($1,1,'daemon','codex','hot','codex')",[session])
-   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[installation])
+   await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services,event_filter) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[installation])
    await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status,body_storage) VALUES($1,1,$2,'tool_result',$3,'completed','hot')",[id,session,body])
    await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-active',2)",[installation])
    await pool.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",['1:'+session])

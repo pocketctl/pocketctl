@@ -1,4 +1,5 @@
 import {assertRetainedSourceGuards} from '../sources/retained-authority.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {independentSourceCount,manifestSourceRoots} from '../episodes/source-lineage.js'
 import {rankAssistedCandidates} from '../governance/knowledge-assistance.js'
@@ -54,8 +55,10 @@ export function createSkillReadService(deps: { pool: pg.Pool; context: SkillSour
     const grant = await createScopeAuthorization(createTransactionBoundPool(client)).validateV2Grant(identity.grant)
     const binding = grant?.scopeBindings.find(b => b.installation_id === identity.installationId)
     if (!binding || !binding.permissions.includes('read')) return fail('forbidden')
-    const scope = await client.query(`SELECT 1 FROM memory_owner_scopes WHERE installation_id=$1 AND state='active' AND authorization_epoch=$2`, [identity.installationId,binding.authorization_epoch])
-    if (!scope.rowCount) return fail('forbidden')
+    if (sourcePoolContext(client).namespace !== 'memory') {
+      const scope = await client.query(`SELECT 1 FROM memory_owner_scopes WHERE installation_id=$1 AND state='active' AND authorization_epoch=$2`, [identity.installationId,binding.authorization_epoch])
+      if (!scope.rowCount) return fail('forbidden')
+    }
     const mode = skillModeForScope(deps.context.globalMode,deps.context.config.mode,deps.context.sharedMode,binding.owner_scope_kind)
     if (mode === 'off') return fail('feature_disabled')
     return { binding, mode, auto_publish_mode: deps.context.config.autoPublishMode, canary_mode: deps.context.config.canaryMode }

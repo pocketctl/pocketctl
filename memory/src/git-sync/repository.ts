@@ -1,3 +1,4 @@
+import {readGitActorMemberships} from './current-authority.js'
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
@@ -260,15 +261,13 @@ export function createGitRepository(options: { pool: pg.Pool; targets: GitTarget
       const input = parse(MapActor, request)
       return transaction(grant, input.installationId, 'scope_admin', async (client, stamp) => {
         // The target membership must be locked before repository/connection.
-        const member = await client.query<{ membership_revision: string }>(`SELECT membership_revision::text FROM memory_scope_memberships
-          WHERE installation_id=$1 AND membership_id=$2 AND state='active'
-            AND (valid_from IS NULL OR valid_from<=NOW()) AND (valid_until IS NULL OR valid_until>NOW()) FOR SHARE`, [input.installationId, input.membershipId])
-        if (!member.rows[0]) throw new Error('git_forbidden')
+        const member=(await readGitActorMemberships(client,stamp,[input.membershipId])).find(row=>row.membership_id===input.membershipId&&row.state==='active')
+        if (!member) throw new Error('git_forbidden')
         await existing(client, input)
         await client.query(`INSERT INTO memory_git_actor_mappings(installation_id,connection_id,provider_actor_id,membership_id,membership_revision,authorization_epoch)
           VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(installation_id,connection_id,provider_actor_id) DO UPDATE SET membership_id=EXCLUDED.membership_id,
             membership_revision=EXCLUDED.membership_revision,authorization_epoch=EXCLUDED.authorization_epoch,updated_at=NOW()`,
-        [input.installationId, input.connectionId, input.providerActorId, input.membershipId, member.rows[0].membership_revision, stamp.authorizationEpoch])
+        [input.installationId, input.connectionId, input.providerActorId, input.membershipId, member.membership_revision, stamp.authorizationEpoch])
         const result = await client.query<GitConnection>(`UPDATE memory_git_connections SET generation=generation+1,updated_at=NOW()
           WHERE installation_id=$1 AND connection_id=$2 AND generation=$3 RETURNING ${connectionColumns}`,
         [input.installationId, input.connectionId, input.expectedGeneration])

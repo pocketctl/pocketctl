@@ -133,7 +133,7 @@ async function readEvidence(client:pg.PoolClient,input:GitReaderInput,versionId:
       await currentSession(event.session_id)
     }
   }
-  try{await guardRetainedEvidence(client,installationId,evidence.map(e=>({source_event_id:e.source_event_id,artifact_id:e.artifact_id,episode_id:e.episode_id,evidence_kind:e.evidence_kind})))}
+  try{await guardRetainedEvidence(client,installationId,evidence.map(e=>({evidence_id:e.evidence_id,version_id:e.version_id,source_event_id:e.source_event_id,artifact_id:e.artifact_id,episode_id:e.episode_id,evidence_kind:e.evidence_kind})))}
   catch(error){if(preparedSourceUnavailable(error))stale();throw error}
   return evidence
 }

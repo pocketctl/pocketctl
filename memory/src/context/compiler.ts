@@ -1,4 +1,6 @@
 import type {PackAuthorityGrant} from './pack-repository.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {readCurrentPolicyAuthority,CurrentPolicyScopeStaleError} from '../governance/current-policy-authority.js'
 import {resolveLifecycleFrame,lifecycleFrameCurrent} from './lifecycle-frame.js'
 import type {CurationMode} from '../curation/contracts.js'
 import type {SceneDestination} from './scene-resolver.js'
@@ -99,6 +101,27 @@ export async function resolveSelectedContextReferences(
   for (const reference of references) {
     if (reference.installation_id !== installationId) return null
     if (reference.source_kind === 'wiki_section') {
+      // Metadata preparation only. Caller grants and final pack/source CAS
+      // still authorize consumption; a lagging owner mirror cannot do so.
+      let nativeOwner: {scopeKind:string;ownerScopeId:string}|undefined
+      if(sourcePoolContext(pool).namespace==='memory'){
+        const state=(await pool.query<{state:{owner_scope_kind:string;owner_scope_id:string;status:string;provider_enabled:boolean;owner_exists:boolean;authorization_epoch:string}}>(
+          'SELECT state FROM shared.memory_current_grant_states($1::uuid[],$2::uuid[])',[[installationId],[]])).rows[0]?.state
+        if(!state)return null
+        if(state.owner_scope_kind==='personal'){
+          if(state.status!=='active'||!state.provider_enabled||!state.owner_exists)return null
+          const local=await pool.query(`SELECT 1 FROM memory_installations i WHERE i.installation_id=$1
+            AND i.local_status NOT IN ('purging','purged','integrity_error')
+            AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t WHERE t.owner_scope_kind='personal'
+              AND t.owner_scope_id=$2 AND t.authorization_epoch>=$3::bigint)`,[installationId,state.owner_scope_id,state.authorization_epoch])
+          if(!local.rowCount)return null
+          nativeOwner={scopeKind:'personal',ownerScopeId:state.owner_scope_id}
+        }else{
+          try{nativeOwner=await readCurrentPolicyAuthority(pool,installationId,{readOnly:true})}
+          catch(error){if(error instanceof CurrentPolicyScopeStaleError)return null;throw error}
+          if(!nativeOwner)return null
+        }
+      }
       const result = await pool.query<{
         wiki_version_id: string
         build_run_id:string|null
@@ -108,24 +131,25 @@ export async function resolveSelectedContextReferences(
         owner_scope_id: string
       }>(`
         SELECT section.wiki_version_id::text, version.build_run_id::text, section.heading, section.markdown,
-               scope.owner_scope_kind, scope.owner_scope_id::text
+               ${nativeOwner?'$8::text':'scope.owner_scope_kind'} AS owner_scope_kind,
+               ${nativeOwner?'$9::text':'scope.owner_scope_id::text'} AS owner_scope_id
         FROM memory_wiki_sections section
         JOIN memory_wiki_versions version
           ON version.installation_id = section.installation_id
          AND version.wiki_version_id = section.wiki_version_id
-        JOIN memory_owner_scopes scope ON scope.installation_id = section.installation_id
+        ${nativeOwner?'':'JOIN memory_owner_scopes scope ON scope.installation_id = section.installation_id'}
         JOIN memory_wikis wiki ON wiki.installation_id=version.installation_id AND wiki.wiki_id=version.wiki_id
         JOIN memory_wiki_heads head ON head.installation_id=wiki.installation_id AND head.repository_id=wiki.repository_id AND head.active_version_id=version.wiki_version_id
         JOIN memory_source_snapshots snapshot ON snapshot.installation_id=version.installation_id AND snapshot.snapshot_id=version.source_snapshot_id AND snapshot.repository_id=wiki.repository_id
         WHERE section.installation_id = $1 AND section.section_id = $2
           AND section.wiki_version_id = $3 AND version.state = 'active'
-          AND scope.state='active' AND snapshot.state NOT IN ('failed','purged')
+          ${nativeOwner?'':"AND scope.state='active'"} AND snapshot.state NOT IN ('failed','purged')
           AND NOT EXISTS(SELECT 1 FROM memory_repository_tombstones t WHERE t.installation_id=wiki.installation_id AND t.repository_id=wiki.repository_id)
           AND NOT EXISTS(SELECT 1 FROM memory_source_snapshot_tombstones t WHERE t.installation_id=snapshot.installation_id AND t.repository_id=snapshot.repository_id AND t.commit_sha=snapshot.commit_sha)
           AND (NOT $4::boolean OR wiki.repository_id=$5::uuid)
           AND ($7::text IS NULL OR snapshot.commit_sha=$7)
           AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM repo_snapshots requested WHERE requested.installation_id=wiki.installation_id AND requested.repository_id=wiki.repository_id AND requested.repo_snapshot_id=$6 AND requested.commit_sha=snapshot.commit_sha))
-      `, [installationId, reference.source_id, reference.source_version,frame!==undefined,frame?.repositoryId??null,frame?.repoSnapshotId??null,frame?.commitSha??null])
+      `, [installationId, reference.source_id, reference.source_version,frame!==undefined,frame?.repositoryId??null,frame?.repoSnapshotId??null,frame?.commitSha??null,...(nativeOwner?[nativeOwner.scopeKind,nativeOwner.ownerScopeId]:[])])
       const row = result.rows[0]
       if (!row || row.owner_scope_id !== reference.owner_scope_id) return null
       if(!await contextWikiBuildSourcesEligible(pool,installationId,row.build_run_id,frame??{repositoryId:null,repoSnapshotId:null,branch:null,taskScopeKey:null}))return null

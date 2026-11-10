@@ -1,3 +1,5 @@
+import {managedGitConsentCurrent,currentManagedGitConsentClocks,managedGitConsentKey,type ManagedGitConsentLocator} from './current-authority.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import { open } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { isAbsolute } from 'node:path'
@@ -44,25 +46,41 @@ export async function createGitRuntime(deps:{pool:pg.Pool;config:GitSyncConfig;g
     let files:Target[]=[]
     if(env.MEMORY_GIT_TARGET_REGISTRY_PATH)try{files=registrySchema.parse(parseStrictJson(await read(env.MEMORY_GIT_TARGET_REGISTRY_PATH))).targets}catch{throw new GitReadError('git_runtime_config_invalid')}
     if(!vault)return files
-    const rows=(await deps.pool.query(`SELECT p.installation_id,p.project_id,c.repository_id,p.target
-      FROM memory_git_project_targets p JOIN memory_git_connections c USING(installation_id,connection_id)
-      JOIN memory_scope_memberships m ON m.installation_id=p.installation_id AND m.membership_id=p.authorized_membership_id
-      JOIN memory_owner_scopes s ON s.installation_id=p.installation_id
-      WHERE p.token_cipher IS NOT NULL AND p.consent_until>clock_timestamp() AND c.state='active' AND m.state='active'
-      AND m.roles @> ARRAY['scope_administrator']::text[] AND m.membership_revision::text=p.target->>'membershipRevision'
-      AND s.state='active' AND s.authorization_epoch::text=p.target->>'authorizationEpoch'
-      AND (m.valid_from IS NULL OR m.valid_from<=clock_timestamp()) AND (m.valid_until IS NULL OR m.valid_until>clock_timestamp())`)).rows
+    const client=await deps.pool.connect()
+    let rows:Array<ManagedGitConsentLocator&{repository_id:string}> = []
+    try{
+      await client.query('BEGIN')
+      const candidates=(await client.query(`SELECT p.installation_id,p.project_id,c.repository_id,p.target,p.authorized_membership_id
+        FROM memory_git_project_targets p JOIN memory_git_connections c USING(installation_id,connection_id)
+        WHERE p.token_cipher IS NOT NULL AND p.consent_until>clock_timestamp() AND c.state='active'
+        ORDER BY p.installation_id,p.project_id`)).rows
+      for(const row of candidates)if(await managedGitConsentCurrent(client,row.installation_id,row.authorized_membership_id,row.target))rows.push(row)
+      const clockCurrent=await currentManagedGitConsentClocks(client,rows)
+      rows=rows.filter(row=>clockCurrent.has(managedGitConsentKey(row)))
+      await client.query('COMMIT')
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
     const managed:Target[]=rows.map(r=>({...registration.parse({...FixedGitTarget.strip().parse(r.target),provider:r.target.provider,
       installationId:r.installation_id,repositoryId:r.repository_id,targetId:r.target.targetId,credentialRef:r.target.credentialRef,
-      credentialFile:'managed',scopeMode:'enabled'}),managedProjectId:r.project_id,authorizationRevision:r.target.authorizationRevision}))
+      credentialFile:'managed',scopeMode:'enabled'}),managedProjectId:r.project_id,authorizationRevision:typeof r.target.authorizationRevision==='string'?r.target.authorizationRevision:undefined}))
     return [...files,...managed]
   }
   const credential=async(target:Target)=>{
     if(!target.managedProjectId)return deps.readFile?read(target.credentialFile):readRuntimeFile(target.credentialFile,true)
-    const row=(await deps.pool.query(`SELECT token_cipher FROM memory_git_project_targets WHERE installation_id=$1 AND project_id=$2
-      AND consent_until>clock_timestamp() AND target->>'authorizationRevision'=$3`,[target.installationId,target.managedProjectId,target.authorizationRevision])).rows[0]
-    if(!row?.token_cipher||!vault)throw new GitReadError('read_not_authorized')
-    return Buffer.from(vault.open(row.token_cipher,`${target.installationId}:${target.managedProjectId}`))
+    const client=await deps.pool.connect()
+    try{
+      await client.query('BEGIN')
+      const row=(await client.query(`SELECT token_cipher,target,authorized_membership_id FROM memory_git_project_targets WHERE installation_id=$1 AND project_id=$2
+        AND consent_until>clock_timestamp() AND target->>'authorizationRevision'=$3`,[target.installationId,target.managedProjectId,target.authorizationRevision])).rows[0]
+      if(!row?.token_cipher||!vault||!await managedGitConsentCurrent(client,target.installationId,row.authorized_membership_id,row.target))throw new GitReadError('read_not_authorized')
+      const locked=(await client.query(`SELECT token_cipher FROM memory_git_project_targets WHERE installation_id=$1 AND project_id=$2
+        AND token_cipher=$4 AND consent_until>clock_timestamp() AND target=$5::jsonb AND authorized_membership_id=$6
+        AND target->>'authorizationRevision'=$3 FOR SHARE`,[target.installationId,target.managedProjectId,target.authorizationRevision,row.token_cipher,row.target,row.authorized_membership_id])).rows[0]
+      if(!locked)throw new GitReadError('read_not_authorized')
+      const locator={installation_id:target.installationId,project_id:target.managedProjectId,authorized_membership_id:row.authorized_membership_id,target:row.target}
+      if(!(await currentManagedGitConsentClocks(client,[locator])).has(managedGitConsentKey(locator)))throw new GitReadError('read_not_authorized')
+      const bytes=Buffer.from(vault.open(row.token_cipher,`${target.installationId}:${target.managedProjectId}`))
+      await client.query('COMMIT');return bytes
+    }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
   }
   async function targetFor(c:GitConnection){
     const managed=vault?(await deps.pool.query(`SELECT project_id FROM memory_git_project_targets WHERE installation_id=$1 AND connection_id=$2`,[c.installationId,c.connectionId])).rows[0]:null
@@ -144,6 +162,7 @@ export function createGitPollingScheduler(deps:GitQueueDeps&{signal:AbortSignal;
     if(deps.signal.aborted||deps.config.mode==='off')return
     // This unlocked preselection is only a hint. inbox.poll still locks and
     // revalidates the selected principal's own current authorization and facts.
+    const native=sourcePoolContext(deps.pool).namespace==='memory'
     const rows=(await deps.pool.query<{installationId:string;connectionId:string;exportId:string|null;expectedGeneration:string}>(`WITH due AS MATERIALIZED (
       SELECT c.* FROM memory_git_connections c
       WHERE c.state='active' AND c.sync_mode<>'off' AND (c.next_poll_at IS NULL OR c.next_poll_at<=clock_timestamp())
@@ -156,12 +175,16 @@ export function createGitPollingScheduler(deps:GitQueueDeps&{signal:AbortSignal;
       FROM due c LEFT JOIN LATERAL (
         SELECT p.export_id FROM memory_git_sync_principals p
         JOIN memory_git_snapshots s ON s.installation_id=p.installation_id AND s.connection_id=p.connection_id AND s.export_id=p.export_id
-        JOIN memory_scope_memberships m ON m.installation_id=p.installation_id AND m.membership_id=p.membership_id
+        LEFT JOIN memory_scope_memberships m ON m.installation_id=p.installation_id AND m.membership_id=p.membership_id
         JOIN memory_installations i ON i.installation_id=p.installation_id
-        JOIN memory_owner_scopes o ON o.installation_id=p.installation_id
+        LEFT JOIN memory_owner_scopes o ON o.installation_id=p.installation_id
         WHERE p.installation_id=c.installation_id AND p.connection_id=c.connection_id AND p.generation=c.generation
           AND s.generation=c.generation AND (s.expires_at IS NULL OR s.expires_at>clock_timestamp())
-          AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error')
+          AND p.authorization_stamp->>'installationId'=p.installation_id::text
+          AND p.authorization_stamp->>'membershipId'=p.membership_id::text
+          AND p.authorization_stamp->>'ownerScopeKind'=c.owner_scope_kind
+          AND p.authorization_stamp->>'ownerScopeId'=c.owner_scope_id::text
+          ${native?'':`AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error')
           AND o.state='active' AND o.owner_scope_kind IN('team','organization') AND m.state='active'
           AND (m.valid_from IS NULL OR m.valid_from<=clock_timestamp()) AND (m.valid_until IS NULL OR m.valid_until>clock_timestamp())
           AND m.roles && ARRAY['contributor','scope_administrator']::text[]
@@ -173,7 +196,7 @@ export function createGitPollingScheduler(deps:GitQueueDeps&{signal:AbortSignal;
           AND p.authorization_stamp->>'authorizationEpoch'=o.authorization_epoch::text
           AND p.authorization_stamp->>'configVersion'=i.config_version::text
           AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t WHERE t.owner_scope_kind=o.owner_scope_kind
-            AND t.owner_scope_id=o.owner_scope_id AND t.authorization_epoch>=o.authorization_epoch)
+            AND t.owner_scope_id=o.owner_scope_id AND t.authorization_epoch>=o.authorization_epoch)`}
         ORDER BY s.created_at DESC,p.export_id LIMIT 1
       ) candidate ON true ORDER BY c.next_poll_at NULLS FIRST,c.connection_id`)).rows
     const inbox=createGitInboxService(deps)

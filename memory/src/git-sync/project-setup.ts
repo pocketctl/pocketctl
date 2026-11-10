@@ -1,3 +1,4 @@
+import {managedGitConsentCurrent,currentManagedGitConsentClocks,managedGitConsentKey} from './current-authority.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { z } from 'zod'
@@ -39,15 +40,18 @@ export function createGitProjectSetupService(deps:{pool:pg.Pool;secret:string;fe
   }
   async function read(client:pg.PoolClient,id:GitIdentity,project:string) {
     const row=(await client.query(`SELECT c.connection_id,c.repository_id,c.generation::text,c.state,c.target_branch,
-      p.consent_until,(p.token_cipher IS NOT NULL AND EXISTS(SELECT 1 FROM memory_scope_memberships m JOIN memory_owner_scopes s USING(installation_id)
-        WHERE m.installation_id=p.installation_id AND m.membership_id=p.authorized_membership_id AND m.state='active'
-        AND m.roles @> ARRAY['scope_administrator']::text[] AND m.membership_revision::text=p.target->>'membershipRevision'
-        AND s.state='active' AND s.authorization_epoch::text=p.target->>'authorizationEpoch'
-        AND (m.valid_from IS NULL OR m.valid_from<=clock_timestamp()) AND (m.valid_until IS NULL OR m.valid_until>clock_timestamp()))) AS authorized,p.target->>'repositoryUrl' AS repository_url,
+      p.consent_until,p.token_cipher IS NOT NULL AS authorized,p.authorized_membership_id,p.target,p.target->>'repositoryUrl' AS repository_url,
       clock_timestamp()<p.consent_until AS consent_active
       FROM memory_git_project_targets p JOIN memory_git_connections c USING(installation_id,connection_id)
       WHERE p.installation_id=$1 AND p.project_id=$2`,[id.installationId,project])).rows[0]
-    return row ? {...row,authorized:row.authorized&&row.consent_active&&row.state==='active'} : null
+    if(!row)return null
+    const {target,authorized_membership_id,...display}=row
+    let authorized=row.authorized&&row.consent_active&&row.state==='active'&&await managedGitConsentCurrent(client,id.installationId,authorized_membership_id,target)
+    if(authorized){
+      const locator={installation_id:id.installationId,project_id:project,authorized_membership_id,target}
+      authorized=(await currentManagedGitConsentClocks(client,[locator])).has(managedGitConsentKey(locator))
+    }
+    return {...display,authorized}
   }
   return {
     get:(id:GitIdentity,project:string)=>transaction(id,'read',client=>read(client,id,project)),

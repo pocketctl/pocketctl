@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {z} from 'zod'
 import {requireCurrentScopePermission,TargetBindingError,assertCurrentGrantClock,type ValidatedV2Grant} from '../governance/authorization.js'
 import {selectScene,type SceneDomain,type SceneDestination,type SceneSpace} from './scene-resolver.js'
@@ -11,6 +12,7 @@ export function createSceneRepository(pool:pg.Pool){
  }
  async function authorize(c:pg.PoolClient,grant:ValidatedV2Grant,installationId:string,permission:'read'|'scope_admin'){
   const binding=await requireCurrentScopePermission({client:c,grant,targetInstallationId:installationId,permission})
+  if(sourcePoolContext(c).namespace==='memory')return
   // Scene revisions become cache authority, including for personal scopes.
   const owner=(await c.query<{state:string;epoch:string}>('SELECT state,authorization_epoch::text AS epoch FROM memory_owner_scopes WHERE installation_id=$1 FOR SHARE',[installationId])).rows[0]
   if(!owner||owner.state!=='active'||owner.epoch!==binding.authorization_epoch)throw new TargetBindingError('scene authority is stale')

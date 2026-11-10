@@ -2,18 +2,19 @@ import type {SourceCommitOptions} from './prepared-sources.js'
 import type pg from 'pg'
 import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
 import {prepareSourceAuthorities} from './prepared-sources.js'
+import {governedRetainedEvidence} from './governed-retained-evidence.js'
 
-export interface RetainedEvidenceBinding {source_event_id:string|null;artifact_id:string|null;episode_id?:string|null;evidence_kind?:string}
+export interface RetainedEvidenceBinding {source_event_id:string|null;artifact_id:string|null;episode_id?:string|null;evidence_kind?:string;evidence_id?:string;version_id?:string}
 type Db=Pick<pg.PoolClient,'query'>
 interface Guard {assertCurrent(client:Db,options?:SourceCommitOptions):Promise<void>}
-interface ConsumerGuards {installationId:string;mode:string;generation:string;ids:Set<string>;guards:Guard[]}
+interface ConsumerGuards {installationId:string;mode:string;generation:string;ids:Set<string>;governedIds:Set<string>;guards:Guard[]}
 const attached=new WeakMap<object,Map<string,ConsumerGuards>>()
 export const detachRetainedSourceGuards=(client:object)=>attached.delete(sourceConnectionKey(client))
 const currentMode=async(client:Db,installationId:string):Promise<{mode:string;generation:string}>=>(await client.query(
  'SELECT mode,generation::text FROM shared.memory_source_modes WHERE installation_id=$1',[installationId],
 )).rows[0]??{mode:'legacy-feed',generation:'1'}
 
-/** Metadata-only retained-excerpt authority. No heads, raw body, archive or
+/** Retained-excerpt authority, including bounded saved reviewed snapshots. No raw body, archive or
  * model IO is permitted here, including when called within a transaction.
  * The caller repeats assertRetainedSourceGuards at its final positive boundary.
  * This supplements current grant/lifecycle checks; full root commit locking is
@@ -28,11 +29,19 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
  if(state&&(state.mode!==mode.mode||state.generation!==mode.generation))throw Error('source_reference_changed')
  if(!state){
   if(installations.size>=16)throw Error('source_reference_limit')
-  state={installationId,...mode,ids:new Set<string>(),guards:[]};installations.set(installationId,state);attached.set(sourceConnectionKey(client),installations)
+  state={installationId,...mode,ids:new Set<string>(),governedIds:new Set<string>(),guards:[]};installations.set(installationId,state);attached.set(sourceConnectionKey(client),installations)
  }
  const ids=new Set(evidence.flatMap(row=>row.source_event_id?[row.source_event_id]:[]))
  const artifactSet=new Set(evidence.flatMap(row=>row.artifact_id?[row.artifact_id]:[]))
- const episodeIds=[...new Set(evidence.flatMap(row=>!row.source_event_id&&!row.artifact_id&&row.evidence_kind!=='accepted_excerpt'&&row.episode_id?[row.episode_id]:[]))].sort()
+ const governed=await governedRetainedEvidence(client,installationId,evidence)
+ const newlyGoverned=[...governed].filter(id=>!state.governedIds.has(id))
+ if(newlyGoverned.length){
+  if(state.guards.length>=256||[...installations.values()].reduce((sum,entry)=>sum+entry.governedIds.size,0)+newlyGoverned.length>4096)throw Error('source_reference_limit')
+  const selected=new Set(newlyGoverned),bindings=evidence.filter(row=>row.evidence_id&&selected.has(row.evidence_id)).map(row=>({...row}))
+  state.guards.push({async assertCurrent(db){const fresh=await governedRetainedEvidence(db,installationId,bindings);if(fresh.size!==selected.size)throw Error('source_reference_changed')}})
+  for(const id of selected)state.governedIds.add(id)
+ }
+ const episodeIds=[...new Set(evidence.flatMap(row=>!row.source_event_id&&!row.artifact_id&&row.evidence_kind!=='accepted_excerpt'&&row.episode_id&&!(row.evidence_id&&governed.has(row.evidence_id))?[row.episode_id]:[]))].sort()
  if(episodeIds.length){
   const episodes=(await client.query(`WITH selected AS(SELECT episode_id,evidence_manifest FROM work_episodes
     WHERE installation_id=$1 AND episode_id=ANY($2::uuid[]) ORDER BY episode_id FOR SHARE),bounded AS(
@@ -87,7 +96,7 @@ const readWitnesses=new WeakMap<object,ConsumerGuards[]>()
 export function rememberRetainedSourceRead(client:object,value:unknown):void{
  if(!value||typeof value!=='object')return
  const states=attached.get(sourceConnectionKey(client))
- readWitnesses.set(value,[...(states?.values()??[])].map(state=>({...state,ids:new Set(state.ids),guards:[...state.guards]})))
+ readWitnesses.set(value,[...(states?.values()??[])].map(state=>({...state,ids:new Set(state.ids),governedIds:new Set(state.governedIds),guards:[...state.guards]})))
 }
 export function adoptRetainedSourceRead(client:object,value:object):void{
  const saved=readWitnesses.get(value)
@@ -96,9 +105,9 @@ export function adoptRetainedSourceRead(client:object,value:object):void{
  for(const state of saved){
   const existing=states.get(state.installationId)
   if(existing&&(existing.mode!==state.mode||existing.generation!==state.generation))throw Error('source_reference_changed')
-  states.set(state.installationId,{...state,ids:new Set([...(existing?.ids??[]),...state.ids]),guards:[...new Set([...(existing?.guards??[]),...state.guards])]})
+  states.set(state.installationId,{...state,ids:new Set([...(existing?.ids??[]),...state.ids]),governedIds:new Set([...(existing?.governedIds??[]),...state.governedIds]),guards:[...new Set([...(existing?.guards??[]),...state.guards])]})
  }
- if(states.size>16||[...states.values()].reduce((n,state)=>n+state.ids.size,0)>4096)throw Error('source_reference_limit')
+ if(states.size>16||[...states.values()].reduce((n,state)=>n+state.ids.size+state.governedIds.size,0)>4096)throw Error('source_reference_limit')
  attached.set(sourceConnectionKey(client),states)
 }
 
