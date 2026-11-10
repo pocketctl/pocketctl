@@ -1,3 +1,4 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {releaseJobFence} from '../generation/fence.js'
 import {guardSourceExecutionCommit} from '../sources/source-execution.js'
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
@@ -201,7 +202,17 @@ export function createGitSyncWorker(deps:GitWorkerDeps) {
       })
       watch=setInterval(()=>{
         if(checking||controller.signal.aborted)return;checking=true
-        void deps.pool.query(`SELECT 1 FROM memory_git_runs r JOIN memory_jobs j ON j.installation_id=r.installation_id AND j.job_id=r.job_id
+        const alive=sourcePoolContext(deps.pool).namespace==='memory'
+          ?gitQueueTransaction(deps.pool,async client=>{
+            // Recheck native permission in a short transaction. Provider I/O
+            // holds no row locks; the run/job/connection CAS remains separate.
+            await requireCurrentGitAuthorization(client,stamp(r),'contribute')
+            return client.query(`SELECT 1 FROM memory_git_runs r JOIN memory_jobs j ON j.installation_id=r.installation_id AND j.job_id=r.job_id
+              JOIN memory_git_connections c ON c.installation_id=r.installation_id AND c.connection_id=r.connection_id
+              WHERE r.run_id=$1 AND j.state='running' AND j.claimed_by=$2 AND j.claim_epoch=$3 AND j.claim_expires_at>clock_timestamp()
+                AND c.generation=r.generation AND c.state='active' AND c.sync_mode<>'off' AND r.expires_at>clock_timestamp()`,[r.run_id,fence.claimedBy,fence.claimEpoch])
+          })
+          :deps.pool.query(`SELECT 1 FROM memory_git_runs r JOIN memory_jobs j ON j.installation_id=r.installation_id AND j.job_id=r.job_id
           JOIN memory_git_connections c ON c.installation_id=r.installation_id AND c.connection_id=r.connection_id
           JOIN memory_scope_memberships m ON m.installation_id=r.installation_id AND m.membership_id=r.membership_id
           JOIN memory_owner_scopes s ON s.installation_id=r.installation_id JOIN memory_installations i ON i.installation_id=r.installation_id
@@ -210,7 +221,8 @@ export function createGitSyncWorker(deps:GitWorkerDeps) {
             AND (m.valid_until IS NULL OR m.valid_until>clock_timestamp()) AND (m.valid_from IS NULL OR m.valid_from<=clock_timestamp())
             AND s.state='active' AND s.authorization_epoch=r.authorization_epoch AND i.config_version=r.config_version
             AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error') AND r.expires_at>clock_timestamp()`,
-          [r.run_id,fence.claimedBy,fence.claimEpoch]).then(result=>{if(!result.rowCount)abort()}).catch(abort).finally(()=>{checking=false})
+          [r.run_id,fence.claimedBy,fence.claimEpoch])
+        void alive.then(result=>{if(!result.rowCount)abort()}).catch(abort).finally(()=>{checking=false})
       },100)
       watch.unref?.()
       if(controller.signal.aborted)throw new GitReadError('request_aborted')

@@ -1,3 +1,4 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
 import type {CurationMode} from '../curation/contracts.js'
 import {lifecycleFrameCurrent,lifecycleFrameFenceSql} from './lifecycle-frame.js'
 import {revisionTimeSql} from '../claims/version-selection.js'
@@ -12,7 +13,8 @@ import { createLoadoutRepository, resolvedLoadoutFingerprint } from './loadout-r
 import { createPolicyRepository } from '../policies/repository.js'
 import { createPolicyResolver } from '../policies/resolver.js'
 import { resolveSelectedContextReferences, type SelectedContextReference } from './compiler.js'
-import {originPolicyCorpusSnapshot,originPolicyFenceSql} from '../governance/origin-policy.js'
+import {originPolicyCorpusSnapshot,originPolicyFenceSql,lockOriginPolicyFences} from '../governance/origin-policy.js'
+import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {contextClaimFacts,eligibleContextFacts,fenceConsumptionGeneration,ContextConsumptionChangedError,type ContextQueryFrame} from './consumption.js'
 
 /**
@@ -188,7 +190,7 @@ export function createAdmissionService(deps: {
         // Resolve the same policy/settings/loadout inputs used by compilation,
         // but on this transaction's connection. Any changed head, scope row or
         // loadout makes the immutable ready pack stale.
-        const transactionPool = { query: client.query.bind(client) } as unknown as pg.Pool
+        const transactionPool = createTransactionBoundPool(client)
         const currentSettings = await createContextSettingsRepository(transactionPool).resolve({
           installationId: input.installationId,
           repositoryId: packRow.repository_id,
@@ -303,7 +305,8 @@ export function createAdmissionService(deps: {
           input.clientRequestId, input.agent, input.adapter, nonceHmac, ttl,admittedGeneration])
         if(queryContext.selectedScopeProof){
           const proof=queryContext.selectedScopeProof,origins=await selectedScopeOriginFences(client,proof)
-          const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2')} AND ($3::double precision IS NULL OR clock_timestamp()<to_timestamp($3::double precision)) AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences),input.selectedScopeGrant?.expiresAt??null])
+          if(!await lockOriginPolicyFences(client,origins.fences,sourcePoolContext(deps.pool).namespace)){await client.query('ROLLBACK');return{ok:false,error:'claim_invalid'}}
+          const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2',sourcePoolContext(deps.pool).namespace)} AND ($3::double precision IS NULL OR clock_timestamp()<to_timestamp($3::double precision)) AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences),input.selectedScopeGrant?.expiresAt??null])
           if(!origins.matches||!valid.rows[0]?.valid){await client.query('ROLLBACK');return{ok:false,error:'claim_invalid'}}
         }
         await client.query('COMMIT')
@@ -357,8 +360,9 @@ export function createAdmissionService(deps: {
           const selectionMatches=!proof||(!!input.selectedScopeGrant&&await selectedScopeContextCurrent(client,proof,input.selectedScopeGrant))
           const currentGrantDeadline=proof?input.selectedScopeGrant?.expiresAt??null:null
           const currentGrantClockSql="($9::double precision IS NULL OR clock_timestamp()<to_timestamp($9::double precision))"
-          const originMatches=await lifecycleFrameCurrent(client,input.installationId,frozen?.query_context?.lifecycle,deps.lifecycleMode??'off')&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
-          const originFences=JSON.stringify([...origin.fences,...selected.fences])
+          const originRows=[...origin.fences,...selected.fences],originLocked=await lockOriginPolicyFences(client,originRows,sourcePoolContext(deps.pool).namespace)
+          const originMatches=originLocked&&await lifecycleFrameCurrent(client,input.installationId,frozen?.query_context?.lifecycle,deps.lifecycleMode??'off')&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
+          const originFences=JSON.stringify(originRows)
           const selectionProof=JSON.stringify(proof??null)
           const consumed = await client.query<{
             pack_id: string
@@ -375,7 +379,7 @@ export function createAdmissionService(deps: {
               AND j.state = 'admitted' AND j.admission_expires_at >= clock_timestamp()
               AND j.admission_nonce_hmac = $5
               AND p.pack_id = j.pack_id AND p.installation_id = j.installation_id
-              AND $6::boolean AND ${originPolicyFenceSql('$7')} AND ${selectedScopeFenceSql('$8')} AND ${currentGrantClockSql}
+              AND $6::boolean AND ${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)} AND ${selectedScopeFenceSql('$8')} AND ${currentGrantClockSql}
               AND p.state = 'ready' AND ${lifecycleFrameFenceSql()} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
               AND j.consumption_generation=COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               AND NOT EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
@@ -398,7 +402,7 @@ export function createAdmissionService(deps: {
           }
           const state = await client.query<{ state: string; expired: boolean }>(`
             UPDATE memory_context_injections j
-            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${lifecycleFrameFenceSql()} OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7')}) OR NOT (${selectedScopeFenceSql('$8')}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
+            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${lifecycleFrameFenceSql()} OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)}) OR NOT (${selectedScopeFenceSql('$8')}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
               OR j.consumption_generation IS NULL OR j.consumption_generation<>COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               OR EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))
@@ -453,7 +457,7 @@ export function createAdmissionService(deps: {
 }
 
 function transactionPoolFromClient(client: pg.PoolClient): pg.Pool {
-  return { query: client.query.bind(client) } as unknown as pg.Pool
+  return createTransactionBoundPool(client)
 }
 
 export type AdmissionService = ReturnType<typeof createAdmissionService>

@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import {sourcePoolContext} from '../sources/pool-context.js'
 
 import {assertCurrentGrantClock,requireCurrentScopePermission,TargetBindingError,type GrantScopeBinding,type ValidatedV2Grant } from '../governance/authorization.js'
 
@@ -38,6 +39,12 @@ export async function requireCurrentWikiPermission(input: {
   } catch (error) {
     if (error instanceof TargetBindingError) throw new Error('wiki_forbidden')
     throw error
+  }
+  // The common native guard already owns config, scope, roles and revision
+  // authority, and retains local lifecycle, validity and privacy fences.
+  if (sourcePoolContext(input.client).namespace === 'memory') {
+    await assertCurrentWikiGrantClock(input.client,input.grant,[input.targetInstallationId])
+    return binding
   }
   const scope = await input.client.query<{
     relay_status: string

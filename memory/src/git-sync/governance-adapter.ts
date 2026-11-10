@@ -1,3 +1,4 @@
+import {readGitActorMemberships} from './current-authority.js'
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import { canonicalJsonString, canonicalPayloadHash } from '../inbox/canonical-json.js'
@@ -49,16 +50,15 @@ export async function lockImportProposal(context:RegisteredGitBaseContext,input:
   if(row.revision!==input.expectedRevision||row.generation!==input.expectedGeneration)throw new Error('git_revision_conflict')
   return row
 }
-/** No new participant locks here: all membership rows were held before sources
- * and connection. A newly inserted mapping to an unseen member fails closed. */
+/** Memory participant rows were held before sources and connection. Current
+ * native member authority is additionally locked through physical COMMIT. A
+ * newly inserted mapping to an unseen member still fails closed. */
 export async function requireImportActor(context:RegisteredGitBaseContext,actor:GitActor,permission:'contribute'|'review'|'publish') {
   if(!context.lockedMembershipIds.has(actor.membershipId))throw new Error('git_authorization_stale')
   const role=permission==='contribute'?['contributor','scope_administrator']:permission==='review'?['reviewer','publisher','scope_administrator']:['publisher','scope_administrator']
-  const result=await context.client.query(`SELECT 1 FROM memory_scope_memberships WHERE installation_id=$1 AND membership_id=$2
-    AND membership_revision=$3 AND state='active' AND roles && $4::text[]
-    AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())`,
-  [context.connection.installationId,actor.membershipId,actor.membershipRevision,role])
-  if(!result.rowCount||actor.authorizationEpoch!==context.stamp.authorizationEpoch)throw new Error('git_authorization_stale')
+  const member=(await readGitActorMemberships(context.client,context.stamp,[actor.membershipId])).find(row=>row.membership_id===actor.membershipId)
+  if(!member||member.state!=='active'||member.membership_revision!==actor.membershipRevision||!member.roles.some(r=>role.includes(r))
+    ||actor.authorizationEpoch!==context.stamp.authorizationEpoch)throw new Error('git_authorization_stale')
 }
 /** Shared internal provenance fence, including conflicted proposals which cannot
  * enter approval preparation yet. Caller locks run before proposal rows. */
@@ -151,9 +151,7 @@ export async function requireImportQuorum(context:RegisteredGitBaseContext,g:Gov
   const decisions=(await client.query(`SELECT decision_id,reviewer_membership_id,reviewer_membership_revision::text,decision FROM memory_git_revision_reviews
     WHERE installation_id=$1 AND revision_id=$2 AND reviewer_authorization_epoch=$3`,[c.installationId,g.revisionId,context.stamp.authorizationEpoch])).rows
   if(decisions.some(d=>!context.lockedMembershipIds.has(d.reviewer_membership_id)))throw new Error('git_authorization_stale')
-  const members=(await client.query(`SELECT membership_id,membership_revision::text,state,roles FROM memory_scope_memberships
-    WHERE installation_id=$1 AND membership_id=ANY($2::uuid[])
-      AND (valid_from IS NULL OR valid_from<=clock_timestamp()) AND (valid_until IS NULL OR valid_until>clock_timestamp())`,[c.installationId,decisions.map(d=>d.reviewer_membership_id)])).rows
+  const members=await readGitActorMemberships(client,context.stamp,decisions.map(d=>d.reviewer_membership_id))
   const authors=new Set([g.author?.membershipId,...g.coauthors.map(a=>a.membershipId)])
   const current=currentReviewDecisions(decisions.map(d=>({decisionId:d.decision_id,membershipId:d.reviewer_membership_id,membershipRevision:d.reviewer_membership_revision,decision:d.decision})),
     members.map(m=>({membershipId:m.membership_id,membershipRevision:m.membership_revision,state:m.state,roles:m.roles})))

@@ -4,7 +4,7 @@ import {sourcePoolContext} from '../sources/pool-context.js'
 import {lifecycleFrameCurrent} from './lifecycle-frame.js'
 import {captureEvidenceReference} from '../claims/evidence-resolver.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
-import {originPolicyFenceSql} from '../governance/origin-policy.js'
+import {originPolicyFenceSql,lockOriginPolicyFences} from '../governance/origin-policy.js'
 import {originPolicyCorpusSnapshot} from '../governance/origin-policy.js'
 import {ContextConsumptionChangedError} from './consumption.js'
 import { createHash } from 'crypto'
@@ -173,7 +173,8 @@ export function createPackRepository(pool: pg.Pool) {
           const proof=input.queryContext.selectedScopeProof
           if(!await selectedScopeContextCurrent(client,proof))throw new ContextConsumptionChangedError()
           const origins=await selectedScopeOriginFences(client,proof)
-          const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2')} AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences)])
+          if(!await lockOriginPolicyFences(client,origins.fences,sourcePoolContext(pool).namespace))throw new ContextConsumptionChangedError()
+          const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2',sourcePoolContext(pool).namespace)} AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences)])
           if(!origins.matches||!valid.rows[0]?.valid)throw new ContextConsumptionChangedError()
         }
         if(!await lifecycleFrameCurrent(client,input.installationId,input.queryContext?.lifecycle))throw new ContextConsumptionChangedError()

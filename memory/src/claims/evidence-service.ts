@@ -32,7 +32,7 @@ export function createEvidenceService(pool: pg.Pool) {
     }[]> {
       const value=await retainedSourceRead(pool,input,async db=>{
       const result = await db.query(`
-        SELECT evidence_id::text, evidence_kind, episode_id::text, source_event_id::text,
+        SELECT evidence_id::text,e.version_id::text, evidence_kind, episode_id::text, source_event_id::text,
                artifact_id::text, excerpt, locator, occurred_at, ordinal
         FROM knowledge_evidence e
         JOIN knowledge_versions guarded_version ON guarded_version.installation_id=e.installation_id AND guarded_version.version_id=e.version_id
@@ -46,7 +46,7 @@ export function createEvidenceService(pool: pg.Pool) {
         ${sourcePoolContext(pool).namespace==='memory'?'FOR SHARE OF e,guarded_version,guarded_claim':''}
       `, [input.installationId, input.versionId])
       await guardRetainedEvidence(db,input.installationId,result.rows)
-      return result.rows
+      return result.rows.map(({version_id:_,...row})=>row)
       })
       return value??[]
     },
