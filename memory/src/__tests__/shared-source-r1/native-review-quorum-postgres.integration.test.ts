@@ -4,6 +4,9 @@ import {directLaunchFixture,type DirectLaunchFixture} from './direct-launch-fixt
 import {governanceFixture} from '../../testing/governance-fixture.js'
 import {createTransactionBoundPool} from '../../api/transaction-bound-pool.js'
 import {createPublicationService} from '../../governance/publication-service.js'
+import Fastify from 'fastify'
+import {registerGovernanceRoutes} from '../../api/governance-routes.js'
+import {copyHistoricalAuthorityFixture} from '../../testing/publication-reviewer-window-fixture.js'
 const url=process.env.DIRECT_LAUNCH_MEMORY_TEST_DATABASE_URL,suite=url?describe:describe.skip
 suite('publication quorum uses current native reviewer authority',()=>{
  let f:DirectLaunchFixture
@@ -89,4 +92,42 @@ suite('publication quorum uses current native reviewer authority',()=>{
   }finally{await blocker.query('ROLLBACK');blocker.release();await pending?.catch(()=>undefined)}
  })
 
+ test('reviewer validity elapsed after savepoint release rejects the physical outer COMMIT',async()=>{
+  const g=await approved(),outer=await f.runtime.connect()
+  try{
+   await f.runtime.query("UPDATE memory_scope_memberships SET valid_until=clock_timestamp()+interval '500 milliseconds' WHERE membership_id=$1",[g.reviewer])
+   await outer.query('BEGIN')
+   await createPublicationService(createTransactionBoundPool(outer)).publish({grant:g.grant(g.publisher,['read','publish']),targetInstallationId:g.team,candidateId:g.proposal.candidate.candidate_id,expectedCandidateRevision:g.proposal.candidate.revision,resolution:'new'})
+   await outer.query('SELECT pg_sleep(0.6)')
+   await expect(outer.query('COMMIT')).rejects.toMatchObject({code:'55000',message:'reviewer_validity_expired'})
+   expect((await f.runtime.query('SELECT state FROM memory_promotion_candidates WHERE candidate_id=$1',[g.proposal.candidate.candidate_id])).rows[0].state).not.toBe('published')
+  }finally{await outer.query('ROLLBACK');outer.release()}
+ })
+ test('actual HTTP receipt wait expiry returns quorum_failed and rolls back publication and idempotency receipt',async()=>{
+  const g=await approved(),app=Fastify(),blocker=await f.pool.connect();let pending:Promise<Awaited<ReturnType<typeof app.inject>>>|undefined
+  registerGovernanceRoutes(app,{pool:f.runtime,guard:{guardV2:async()=>g.grant(g.publisher,['read','publish'])} as never,sharedScopesEnabled:true,cursorSigningKey:'native-review-clock-fixture'})
+  await f.pool.query(`CREATE FUNCTION memory.fixture_block_publication_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(91811261110::bigint);RETURN NEW;END $$;
+    CREATE TRIGGER fixture_block_publication_receipt BEFORE UPDATE ON memory.memory_idempotency_keys FOR EACH ROW EXECUTE FUNCTION memory.fixture_block_publication_receipt()`)
+  try{
+   await blocker.query('BEGIN');await blocker.query('SELECT pg_advisory_xact_lock(91811261110::bigint)')
+   await f.runtime.query("UPDATE memory_scope_memberships SET valid_until=clock_timestamp()+interval '1 second' WHERE membership_id=$1",[g.reviewer])
+   pending=app.inject({method:'POST',url:`/api/v1/memory/governance/proposals/${g.proposal.candidate.candidate_id}/publish`,headers:{authorization:'Bearer synthetic-guard','idempotency-key':'native-review-clock-'+g.team},payload:{target_installation_id:g.team,expected_revision:g.proposal.candidate.revision,resolution:'new'}})
+   let waiting=false
+   for(let n=0;n<100;n++){
+    if((await f.pool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%UPDATE memory_idempotency_keys%' LIMIT 1")).rowCount){waiting=true;break}
+    await new Promise(r=>setTimeout(r,10))
+   }
+   expect(waiting).toBe(true);await blocker.query('SELECT pg_sleep(1.1)');await blocker.query('COMMIT')
+   const response=await pending;expect(response.statusCode).toBe(409);expect(response.json().error.code).toBe('quorum_failed')
+   expect((await f.runtime.query('SELECT state FROM memory_promotion_candidates WHERE candidate_id=$1',[g.proposal.candidate.candidate_id])).rows[0].state).not.toBe('published')
+   expect((await f.runtime.query('SELECT 1 FROM memory_authority_records WHERE installation_id=$1',[g.team])).rowCount).toBe(0)
+   expect((await f.runtime.query("SELECT 1 FROM memory_idempotency_keys WHERE installation_id=$1 AND operation='governance.publish'",[g.team])).rowCount).toBe(0)
+  }finally{await blocker.query('ROLLBACK');blocker.release();await pending?.catch(()=>undefined);await app.close();await f.pool.query('DROP TRIGGER fixture_block_publication_receipt ON memory.memory_idempotency_keys;DROP FUNCTION memory.fixture_block_publication_receipt()')}
+ })
+ test('historical native authority copy retains expired reviewer provenance without a live mutation stamp',async()=>{
+  const g=await approved(),result=await g.publish()
+  await f.runtime.query("UPDATE memory_scope_memberships SET valid_until=clock_timestamp()-interval '1 second' WHERE membership_id=$1",[g.reviewer])
+  const copied=await copyHistoricalAuthorityFixture(f.runtime,result.versionId)
+  expect((await f.runtime.query('SELECT 1 FROM memory_authority_records WHERE version_id=$1',[copied])).rowCount).toBe(1)
+ })
 })

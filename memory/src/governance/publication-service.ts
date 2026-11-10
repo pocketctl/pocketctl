@@ -595,6 +595,7 @@ export function createPublicationService(pool: pg.Pool,options:{tombstoneHmacKey
           return { claimId, versionId, conflictGroupId, conflictVariant, resolution: input.resolution }
         } catch (error) {
           await client.query('ROLLBACK')
+          if((error as {code?:string;message?:string}).code==='55000'&&(error as {message?:string}).message==='reviewer_validity_expired')throw new PublicationError('quorum_failed','reviewer validity elapsed before publication commit')
           if((error as {message?:string}).message==='candidate_ttl_expired')throw new PublicationError('expired','candidate TTL elapsed at commit')
           throw error
         }
