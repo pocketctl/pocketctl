@@ -79,14 +79,23 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
    IF a.state<>'current' THEN RAISE EXCEPTION 'source_%',a.state;END IF;
    native=public.native_session_authority(substr(p_root,strpos(p_root,':')+1),(p_scope->>'principalUserId')::int,NULL);
    RETURN QUERY WITH selected AS (SELECT e.*,(${usageDenied('e','eligible_ref')}) AS memory_usage_denied
-      FROM public.events e LEFT JOIN memory.source_events eligible_ref ON eligible_ref.installation_id=(p_scope->>'installationId')::uuid
+      -- Keep identity enumeration ordered and narrow before evaluating the
+      -- native/input/retention guards. A bitmap+sort over wide event rows would
+      -- run those guards for the whole Session before producing one page.
+      -- OFFSET 0 preserves both subquery boundaries on generic cached plans;
+      -- eligibility still runs before the only page LIMIT below.
+      FROM(SELECT id FROM public.events WHERE session_id=native->>'sessionId'
+       AND(p_after IS NULL OR id>p_after) AND(p_ids IS NULL OR id=ANY(p_ids))
+       ORDER BY id OFFSET 0)ordered
+      CROSS JOIN LATERAL(SELECT * FROM public.events WHERE id=ordered.id OFFSET 0)e
+      LEFT JOIN memory.source_events eligible_ref ON eligible_ref.installation_id=(p_scope->>'installationId')::uuid
        AND eligible_ref.source_kind='relay_event' AND eligible_ref.canonical_key=e.id::text AND eligible_ref.mapping_state='verified'
       WHERE NOT e.owner_retired AND public.native_event_authority(e.id,(p_scope->>'principalUserId')::int)->>'state'='current'
        AND e.user_id=(p_scope->>'principalUserId')::int AND e.session_id=native->>'sessionId'
        AND shared.memory_relay_input_admitted(p_scope,e.id,p_ids IS NOT NULL)
        AND e.effect_status IN('none','completed') AND (p_after IS NULL OR e.id>p_after) AND (p_ids IS NULL OR e.id=ANY(p_ids))
        AND(p_ids IS NOT NULL OR NOT(${usageDenied('e','eligible_ref')}))
-       ORDER BY e.id LIMIT p_limit), page AS (SELECT selected.*,sum(CASE WHEN memory_usage_denied OR payload IS NULL THEN 0 ELSE octet_length(payload::text) END) OVER(ORDER BY id) AS page_bytes FROM selected)
+       ORDER BY ordered.id LIMIT p_limit), page AS (SELECT selected.*,sum(CASE WHEN memory_usage_denied OR payload IS NULL THEN 0 ELSE octet_length(payload::text) END) OVER(ORDER BY id) AS page_bytes FROM selected)
     SELECT jsonb_build_object('id',e.id::text,'session_id',e.logical_source_session_id,'current_session_id',e.session_id,'event_type',e.event_type,'user_id',e.user_id::text,'occurred_at',to_jsonb(e)->>'created_at',
       'payload',CASE WHEN NOT(${usageDenied('e','r')}) AND e.page_bytes<=33554432 THEN e.payload ELSE NULL END,'body_limit',e.page_bytes>33554432,
       'body_session_id',e.body_session_id,'body_storage',COALESCE(to_jsonb(e)->>'body_storage','hot'),'manifest_id',to_jsonb(e)->>'body_manifest_id','ordinal',to_jsonb(e)->>'body_chunk_ordinal',
