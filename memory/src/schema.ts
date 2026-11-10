@@ -2300,6 +2300,11 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   NATIVE_CONTROL_OBSERVATION_MIGRATION,
   TRANSPORT_METADATA_MIGRATION,
   REVIEWER_WINDOW_MIGRATION,
+  {version: 100, statements: [
+    // Evidence membership includes reclaimed refs, unlike the retention index.
+    `CREATE INDEX IF NOT EXISTS source_events_installation_turn_event_idx
+      ON source_events (installation_id, turn_id, source_event_id)`,
+  ]},
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
