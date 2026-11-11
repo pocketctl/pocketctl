@@ -214,6 +214,68 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    await expect(loadSourceContextSet(f.runtime,inst,root,set.scanId,'personal-projection')).rejects.toMatchObject({errorCode:'source_context_set_changed'})
   }finally{await scheduler.stop()}
  })
+ test('selected original references preserve unknown order and deny known header conflicts',async()=>{
+  const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  const turn='legacy-unknown-'+source.session,payload={text:'original reference with unknown provenance',turn_id:turn}
+  const id=(await f.publisher.query(`INSERT INTO public.events(session_id,event_type,payload,event_hash,effect_status,user_id,created_at)
+   VALUES($1,'agent_text',$2,$3,'completed',$4,'2026-11-01T01:02:03.123456Z') RETURNING id::text`,[source.session,payload,randomUUID().replaceAll('-',''),source.owner])).rows[0].id
+  const {createPostgresExtensionJournalSink}=await import(new URL('../../../../relay/dist/extensions/journal.js',import.meta.url).href)
+  await createPostgresExtensionJournalSink({sharedHeaders:true}).appendCanonicalEvent(f.publisher,{sourceEventId:id,ownerUserId:source.owner,sessionId:source.session,eventType:'agent_text',occurredAt:null,payload})
+  const originalId=randomUUID()
+  await f.pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,canonical_event_key,session_id,turn_id,event_type,occurred_at,payload,payload_hash,
+   classification,source_provenance,source_kind,canonical_key,canonical_session_key,source_version,source_sequence,content_hash,hash_version,mapping_state,adapter_version)
+   SELECT $1,$2,'feed','legacy-feed:62','legacy-original-event',logical_source_session_id,$4,event_type,date_trunc('milliseconds',created_at),NULL,decode(repeat('a',64),'hex'),
+    source_classification,'{}'::jsonb,'relay_event',id::text,logical_source_session_id,'{"content":"1","authorization":"1","storage":"0"}',NULL,decode(canonical_payload_hash,'hex'),'canonical-json-sha256-v1','verified','original-ref-v1'
+   FROM public.events WHERE id=$3`,[originalId,installation,id,turn])
+  const native=(await f.pool.query('SELECT source_sequence::text,source_classification,canonical_payload_hash FROM public.events WHERE id=$1',[id])).rows[0]
+  expect(native.source_sequence).toMatch(/^[1-9][0-9]*$/);expect(native.source_classification).toEqual({})
+  const root={kind:'relay_event' as const,key:f.root(source)},signal=new AbortController().signal,errors:unknown[]=[];let checked=false
+  const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'unknown-order-scheduler',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'unknown-order-worker',signal,claimLimit:1,onError:e=>errors.push(e)})
+  queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
+  queue.register('project_shared_source',async job=>{
+   if(job.installation_id!==installation)return
+   const scope=job.payload.scope as any,seal=await prepareMetadataScope(f.runtime,scope,root)
+   const selected=createObservedPersonalMetadataReader(f.runtime),ordinary=createPostgresSharedSourceReader(f.runtime)
+   expect((await f.runtime.query('SELECT current_user AS role')).rows[0].role).toBe('direct_launch_memory')
+   await expect(f.runtime.query('SELECT payload FROM public.events WHERE id=$1',[id])).rejects.toMatchObject({code:'42501'})
+   // Known disagreements remain denials in both paths. Restore each synthetic
+   // fault before exercising the actual legacy NULL-order case.
+   for(const mutation of [
+    {sql:'source_sequence=$2::bigint',value:String(BigInt(native.source_sequence)+1n)},
+    {sql:"content_hash=decode($2,'hex')",value:'0'.repeat(64)},
+    {sql:'classification=$2::jsonb',value:JSON.stringify({actor_scope:'user'})},
+   ]){
+    try{
+     await f.pool.query(`UPDATE memory.source_events SET ${mutation.sql} WHERE source_event_id=$1`,[originalId,mutation.value])
+     await expect(selected.selectPage(scope,root)).rejects.toMatchObject({code:'source_metadata_conflict'})
+     await expect(ordinary.getHeads(scope,root,[id])).rejects.toMatchObject({code:'source_metadata_conflict'})
+    }finally{await f.pool.query("UPDATE memory.source_events SET source_sequence=NULL,content_hash=decode($2,'hex'),classification=$3::jsonb WHERE source_event_id=$1",[originalId,native.canonical_payload_hash,JSON.stringify(native.source_classification)])}
+   }
+   const before=(await f.runtime.query('SELECT to_jsonb(s) AS original FROM source_events s WHERE source_event_id=$1',[originalId])).rows[0].original
+   expect(before).toMatchObject({origin:'feed',adapter_version:'original-ref-v1',source_sequence:null,source_provenance:{},classification:{},payload:null})
+   // This is the installed SDK default first64 API that failed on the real
+   // row, with a genuine native header and an independently unknown old order.
+   const view=await selected.selectPage(scope,root),old=await ordinary.getHeads(scope,root,[id])
+   expect(view.heads).toHaveLength(1);expect(old.heads).toHaveLength(1)
+   for(const head of [view.heads[0],old.heads[0]]){
+    expect(head).toMatchObject({canonicalKey:id,sessionKey:source.session,eventType:'agent_text',sourceSequence:native.source_sequence,classification:{},provenance:{state:'unknown'}})
+    expect(head.classification).not.toHaveProperty('memory_source')
+   }
+   expect((await selected.resolve(view))[0].payload).toEqual(payload)
+   expect((await ordinary.resolveBodies(scope,root,old.heads,old.version))[0].payload).toEqual(payload)
+   const page=await preparePersonalMetadataReferencePage(f.runtime,scope,root,seal,undefined)
+   const persisted=await persistPersonalMetadataReferencePage(f.runtime,page,0)
+   expect(persisted.references).toEqual([{sourceEventId:originalId,canonicalKey:id,sessionId:source.session,created:false}])
+   expect(persisted.contextReady).toBe(true)
+   expect((await f.runtime.query('SELECT to_jsonb(s) AS original FROM source_events s WHERE source_event_id=$1',[originalId])).rows[0].original).toEqual(before)
+   expect((await f.runtime.query('SELECT count(*)::int AS n FROM source_events WHERE installation_id=$1',[installation])).rows[0].n).toBe(1)
+   checked=true
+  },{branch:'canonical'})
+  try{for(let n=0;n<128&&!checked;n++){await scheduler.runOnce();await queue.tick();if(errors.length)throw errors[0]};expect(checked).toBe(true);expect(errors).toEqual([])}
+  finally{await scheduler.stop();await queue.stop()}
+ },30000)
  test('selected SQL keeps actual claim, privacy, original rows and transaction locks distinct from busy',async()=>{
   const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
   await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])

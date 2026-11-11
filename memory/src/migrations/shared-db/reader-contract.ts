@@ -132,7 +132,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       'provenance',COALESCE(r.source_provenance,CASE WHEN e.source_header_version=1 THEN jsonb_build_object('memory',e.source_classification->'memory_source') END),
       'classification',COALESCE(r.classification,e.source_classification),
       'header_ref_conflict',e.source_header_version=1 AND r.source_event_id IS NOT NULL AND
-       (encode(r.content_hash,'hex') IS DISTINCT FROM e.canonical_payload_hash OR r.source_sequence::text IS DISTINCT FROM e.source_sequence::text OR r.classification IS DISTINCT FROM e.source_classification),
+       (encode(r.content_hash,'hex') IS DISTINCT FROM e.canonical_payload_hash OR r.source_sequence IS NOT NULL AND r.source_sequence::text IS DISTINCT FROM e.source_sequence::text OR r.classification IS DISTINCT FROM e.source_classification),
       'journal_sequences',(SELECT jsonb_agg(j.source_seq::text ORDER BY j.source_seq) FROM public.extension_source_outbox j WHERE j.source_kind='canonical_event' AND j.source_id='event:'||e.id::text AND j.owner_user_id=e.user_id AND j.session_id=e.logical_source_session_id AND j.event_type=e.event_type),
       'retention_denied',FALSE,'input_admission',e.memory_input_admission,'metadata',${metadataRowLocator('e','r','e.memory_source_xmin')}) AS value
      FROM page e LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid
