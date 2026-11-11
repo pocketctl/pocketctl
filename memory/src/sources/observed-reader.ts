@@ -1,6 +1,6 @@
-import {protectSourceExecutionBodies} from './source-execution.js'
+import {protectSourceExecutionBodies,protectMetadataSourceBodies} from './source-execution.js'
 import type pg from 'pg'
-import {createPostgresSharedSourceReader,SourceUnavailableError,type ArchiveReadStorage,type ArchiveLimits} from '@pocketctl/session-source'
+import {createPostgresSharedSourceReader,createPostgresPersonalMetadataReader,SourceUnavailableError,type PersonalMetadataView,type SourceScope,type SourceRoot,type ArchiveReadStorage,type ArchiveLimits} from '@pocketctl/session-source'
 import {isPhysicalSourcePool,sourcePoolContext} from './pool-context.js'
 import {boundedSourceQuery} from './bounded-source-query.js'
 const observed=new Set(['listHeads','getHeads','resolveBodies','checkCurrent','checkAuthority'])
@@ -28,4 +28,24 @@ export function createObservedSourceReader(db:pg.Pool,archive?:{storage:ArchiveR
    }catch(error){observer?.(key,args[1]?.kind??'other',error instanceof SourceUnavailableError?error.code:'other');throw error}
   }
  }})
+}
+/** Only canonical personal metadata factories use this separate API. Generic
+ * model/API/evidence/shadow/Team readers above remain ordinary exact readers. */
+export function createObservedPersonalMetadataReader(db:pg.Pool){
+ if(!isPhysicalSourcePool(db))throw Error('source_metadata_requires_physical_pool')
+ const context=sourcePoolContext(db),queryDb={query:(sql:string,args?:any[])=>boundedSourceQuery(db,sql,args),connect:db.connect.bind(db)}
+ const reader=createPostgresPersonalMetadataReader(queryDb,context.archive),scopes=new WeakMap<object,{scope:SourceScope;root:SourceRoot}>()
+ const retain=(view:PersonalMetadataView,scope:SourceScope,root:SourceRoot)=>{scopes.set(view.token,{scope:structuredClone(scope),root:structuredClone(root)});return view}
+ return {
+  async selectPage(scope:SourceScope,root:SourceRoot,request:{after?:string;through?:string;limit?:number}={}){
+   await protectMetadataSourceBodies(db,scope,root);return retain(await reader.selectPage(scope,root,request),scope,root)
+  },
+  async selectKeys(scope:SourceScope,root:SourceRoot,keys:readonly string[]){
+   await protectMetadataSourceBodies(db,scope,root);return retain(await reader.selectKeys(scope,root,keys),scope,root)
+  },
+  async resolve(view:PersonalMetadataView){const state=scopes.get(view.token);if(!state)throw new SourceUnavailableError('source_selection_invalid')
+   await protectMetadataSourceBodies(db,state.scope,state.root);return reader.resolve(view)
+  },
+  assertSelection:(view:PersonalMetadataView)=>reader.assertSelection(view),proof:(view:PersonalMetadataView)=>reader.proof(view),
+ }
 }

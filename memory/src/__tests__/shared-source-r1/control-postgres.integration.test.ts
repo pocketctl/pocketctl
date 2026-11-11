@@ -9,6 +9,9 @@ suite('body-free current control revision and work',()=>{
   if(!url||!/(^|_)test$/.test(new URL(url).pathname.slice(1)))throw Error('isolated_test_required')
   pool=new pg.Pool({connectionString:url,max:4})
   await pool.query('DROP SCHEMA IF EXISTS memory CASCADE;DROP SCHEMA IF EXISTS shared CASCADE;DROP SCHEMA public CASCADE;CREATE SCHEMA public')
+  // Current contracts bind native installation identity and retirement policy.
+  const {initDB}=await import(new URL('../../../../relay/src/db.ts',import.meta.url).href)
+  await initDB(pool)
   await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
  },60000)
  afterAll(async()=>{await pool?.end()})

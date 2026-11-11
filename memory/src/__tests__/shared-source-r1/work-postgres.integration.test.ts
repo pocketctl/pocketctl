@@ -99,9 +99,9 @@ suite('durable body-free roots and revision leases',()=>{
    await reader.query('BEGIN');await reader.query('SELECT 1 FROM shared.memory_source_work WHERE source_kind=$1 AND root_key=$2 FOR SHARE',[root.kind,root.key])
    await worker.query('BEGIN');await worker.query("SET LOCAL lock_timeout='100ms'")
    const params=[claim.kind,claim.rootKey,claim.token,claim.workerId,claim.claimedRevision]
-   expect((await worker.query('SELECT shared.assert_memory_source_lease($1,$2,$3,$4,$5) AS owned',params)).rows[0].owned).toBe(false)
-   // The failed try remains a usable transaction and retains no partial root lock.
-   await worker.query('SELECT 1');await worker.query('ROLLBACK');await reader.query('COMMIT')
+   await expect(worker.query('SELECT shared.assert_memory_source_lease($1,$2,$3,$4,$5) AS owned',params)).rejects.toMatchObject({code:'55P03'})
+   // Typed contention aborts this metadata transaction; release before retry.
+   await worker.query('ROLLBACK');await reader.query('COMMIT')
    await complete(claim,async()=>{})
   }finally{await worker.query('ROLLBACK');await reader.query('ROLLBACK');worker.release();reader.release()}
  })

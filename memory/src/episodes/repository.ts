@@ -1,13 +1,14 @@
-import {prepareEpisodeSources,attachPreparedSources} from '../sources/prepared-sources.js'
+import {prepareEpisodeSources,prepareEpisodeProjectionSources,attachPreparedSources} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
+import {runSelectedSourceTransaction} from '../sources/processing-pins.js'
 import {classifyArtifact} from '../projection/artifact-classifier.js'
 import { readCurationPolicy } from '../curation/policy.js'
 import { stageLifecycleTurn } from '../curation/task-repository.js'
 import type { CurationMode } from '../curation/contracts.js'
 import {assertJobFence} from '../generation/fence.js'
-import type {JobFence} from '../jobs/types.js'
+import {JobDeferredError,type JobFence} from '../jobs/types.js'
 import type pg from 'pg'
-import {guardSourceExecutionCommit} from '../sources/source-execution.js'
+import {guardSourceExecutionCommit,sourceExecutionBranchFor} from '../sources/source-execution.js'
 import type { JobClaim } from '../jobs/types.js'
 import { compileEpisode, sourceReferenceFromEvents, summarizeEvents, type TerminalOutcome } from './compiler.js'
 import {
@@ -36,13 +37,20 @@ export function createEpisodeRepository(
   const extractionDebounceMs = options.extractionDebounceMs ?? 120_000
 
   const repository = {
-    async compileTurn(installationId: string, turnId: string, fence?:JobFence): Promise<void> {
-      const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEpisodeSources(pool,installationId,turnId):undefined
-      const client = await pool.connect()
-      try {
-        await client.query('BEGIN')
-        if(prepared)attachPreparedSources(client,prepared)
+    async compileTurn(installationId: string, turnId: string, fence?:JobFence, signal?:AbortSignal): Promise<void> {
+      const canonicalMetadata=fence&&sourceExecutionBranchFor(pool,installationId)==='canonical-active'
+      // The existing compiler produces no output for a nonterminal turn.
+      // Check that cheap metadata before choosing any body preparation: NULL
+      // selected preparation must never route an active turn through a generic
+      // whole-root body pin while its native writer is still appending.
+      if(canonicalMetadata&&!(await pool.query('SELECT terminal_at FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[installationId,turnId])).rows[0]?.terminal_at)return
+      const selected=canonicalMetadata?await prepareEpisodeProjectionSources(pool,installationId,turnId):null
+      const prepared=selected??(sourcePoolContext(pool).namespace==='memory'?await prepareEpisodeSources(pool,installationId,turnId):undefined)
+      const persist=async(client:pg.PoolClient,managed=false)=>{
+        if(!managed)await client.query('BEGIN')
+        if(prepared&&!selected)attachPreparedSources(client,prepared)
         try {
+          if(selected)await selected.fenceMembership(client)
           // Cheap early fence: skip work for installations already fenced by
           // a purge (or missing from the registry).
           const status = await client.query<{ local_status: string }>(`
@@ -51,12 +59,12 @@ export function createEpisodeRepository(
           `, [installationId])
           const localStatus = status.rows[0]?.local_status
           if (!localStatus || FENCED_STATUSES.has(localStatus)) {
-            await client.query('COMMIT')
+            if(!managed)await client.query('COMMIT')
             return
           }
 
           if ((await client.query(`SELECT 1 FROM memory_source_retention_receipts WHERE installation_id=$1 AND turn_id=$2`,
-            [installationId, turnId])).rowCount) { await client.query('COMMIT'); return }
+            [installationId, turnId])).rowCount) { if(!managed)await client.query('COMMIT'); return }
 
           const turn = await client.query<{
             session_id: string
@@ -72,13 +80,13 @@ export function createEpisodeRepository(
           `, [installationId, turnId])
           const row = turn.rows[0]
           if (!row || !row.terminal_at || !isTerminal(row.state)) {
-            await client.query('COMMIT')
+            if(!managed)await client.query('COMMIT')
             return
           }
 
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,row.session_id])
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
-          if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {await client.query('COMMIT');return}
+          if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {if(!managed)await client.query('COMMIT');return}
           if(prepared)await prepared.assertCurrent(client)
           const lifecyclePolicy = await readCurationPolicy(client,installationId,options.lifecycleMode??'off')
           const events = prepared?{rows:prepared.events.filter(e=>e.turn_id===turnId)}:await client.query<{
@@ -99,7 +107,7 @@ export function createEpisodeRepository(
           if(lifecyclePolicy){
             if(fence)await assertJobFence(client,fence)
             await stageLifecycleTurn(client,{installationId,sessionId:row.session_id,turnId,events:events.rows},lifecyclePolicy)
-            if(lifecyclePolicy.mode==='enabled'){if(prepared)await prepared.assertCurrent(client,{forCommit:true});await guardSourceExecutionCommit(client);await client.query('COMMIT');return}
+            if(lifecyclePolicy.mode==='enabled'){if(prepared)await prepared.assertCurrent(client,{forCommit:true});await guardSourceExecutionCommit(client);if(!managed)await client.query('COMMIT');return}
           }
           const counts = summarizeEvents(events.rows.map(eventRow => ({
             event_type: eventRow.event_type,
@@ -214,6 +222,18 @@ export function createEpisodeRepository(
               worktree_identity: repositoryFact.rows[0].worktree_identity,
             }
             : null
+          if(selected&&packetRepository){
+            // Parent FK lock prevents new repository/snapshot phantoms;
+            // existing packet fields remain row-locked through COMMIT.
+            try{
+             await client.query('SELECT 1 FROM repositories WHERE installation_id=$1 AND repository_id=$2 FOR SHARE NOWAIT',[installationId,packetRepository.repository_id])
+             if(packetRepository.repo_snapshot_id)await client.query('SELECT 1 FROM repo_snapshots WHERE installation_id=$1 AND repo_snapshot_id=$2 FOR SHARE NOWAIT',[installationId,packetRepository.repo_snapshot_id])
+            }catch(error){if((error as {code?:string}).code==='55P03')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000));throw error}
+            const fresh=(await client.query(`SELECT r.repository_id::text,rs.repo_snapshot_id::text,rs.commit_sha,rs.branch,rs.worktree_identity FROM repositories r
+             LEFT JOIN LATERAL(SELECT s.repo_snapshot_id,s.commit_sha,s.branch,s.worktree_identity FROM repo_snapshots s WHERE s.installation_id=r.installation_id AND s.repository_id=r.repository_id AND s.observed_at<=$3 ORDER BY s.observed_at DESC,s.repo_snapshot_id DESC LIMIT 1)rs ON TRUE
+             WHERE r.installation_id=$1 AND r.repository_key=$2 LIMIT 1`,[installationId,observation?.payload.repository_id??null,row.terminal_at])).rows[0]
+            if(JSON.stringify(fresh)!==JSON.stringify(repositoryFact.rows[0]))throw Error('source_reference_changed')
+          }
 
           const packet = buildEpisodePacket({
             installationId,
@@ -263,7 +283,7 @@ export function createEpisodeRepository(
                    pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
           `, [installationId, row.session_id])
           if ((await client.query(`SELECT 1 FROM memory_source_retention_receipts WHERE installation_id=$1 AND turn_id=$2`,
-            [installationId, turnId])).rowCount) { await client.query('COMMIT'); return }
+            [installationId, turnId])).rowCount) { if(!managed)await client.query('COMMIT'); return }
 
 
           await client.query(`
@@ -383,26 +403,28 @@ export function createEpisodeRepository(
                 WHERE installation_id = $1 AND local_status = ANY($3))::int AS fenced
           `, [installationId, row.session_id, [...FENCED_STATUSES]])
           if ((fenced.rows[0]?.tombstones ?? 0) > 0 || (fenced.rows[0]?.fenced ?? 0) > 0) {
+            if(managed)throw Error('source_reference_changed')
             await client.query('ROLLBACK')
             return
           }
           if(fence)await assertJobFence(client,fence)
           if(prepared)await prepared.assertCurrent(client,{forCommit:true})
           await guardSourceExecutionCommit(client)
-          await client.query('COMMIT')
+          if(!managed)await client.query('COMMIT')
         } catch (error) {
-          await client.query('ROLLBACK')
+          if(!managed)await client.query('ROLLBACK')
           throw error
         }
-      } finally {
-        client.release()
       }
+      if(selected)return runSelectedSourceTransaction(pool,installationId,signal,client=>persist(client,true))
+      const client=await pool.connect()
+      try{await persist(client)}finally{client.release()}
     },
 
     async handleCompileEpisode(job: JobClaim, signal: AbortSignal, ctx?:{fence:JobFence}): Promise<void> {
       if (!job.installation_id) return
       if (signal.aborted) throw new Error('compile_episode aborted')
-      await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence)
+      await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence,signal)
     },
   }
   return repository

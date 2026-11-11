@@ -3,8 +3,25 @@ import {canonicalJsonString,canonicalPayloadHash,type SourceScope,type SourceRoo
 import {JobDeferredError,JobTerminalError} from '../jobs/types.js'
 import {loadSourceContextSet,checkSourceContextSet,requireSourceContext} from './source-context-set.js'
 import {sameDerivedSourceVersion} from './derived-version.js'
+import {metadataSourceExecution} from './source-execution.js'
 export interface ProjectionObservation {scope:SourceScope;root:SourceRoot;version:SourceVersion}
 const notReady=()=>new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+export interface MetadataScopeSeal {scanId:string;targetCursor:string;controlRevision:string}
+/** Scope metadata only. This never grants whole-root/model readiness. */
+export async function prepareMetadataScope(pool:pg.Pool,scope:SourceScope,root:SourceRoot,expectedScan?:string):Promise<MetadataScopeSeal>{
+ if(root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')throw notReady()
+ const set=await loadSourceContextSet(pool,scope.installationId,root,expectedScan,'personal-projection')
+ requireSourceContext(set,scope);await checkSourceContextSet(pool,root,set,'personal-projection')
+ const context=set.contexts.find(c=>c.state==='current'&&canonicalJsonString(c.scope)===canonicalJsonString(scope))
+ if(!context)throw notReady()
+ return {scanId:set.scanId,targetCursor:context.cursorKey,controlRevision:set.controlRevision}
+}
+export function personalMetadataEnvelope(pool:pg.Pool,scope:SourceScope,root:SourceRoot,proof:unknown,seal:MetadataScopeSeal,purpose:'reference'|'episode'){
+ const execution=metadataSourceExecution(pool,scope.installationId)
+ const envelope={contract:'personal-metadata-selection-v1',purpose,executionId:execution.executionId,scanId:seal.scanId,targetCursor:seal.targetCursor,...proof as object}
+ if(Buffer.byteLength(canonicalJsonString({scope,root,envelope}))>128*1024)throw Error('source_metadata_limit')
+ return envelope
+}
 /** Identity mapping is independent of processing completeness. Every live
  * principal in the trusted seal must be caught up before positive consumers
  * can prepare model input, including references retained from old Feed rows. */

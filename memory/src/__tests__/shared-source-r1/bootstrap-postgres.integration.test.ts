@@ -129,4 +129,97 @@ suite('bounded bootstrap after control changes without new source events',()=>{
   }finally{await scheduler.stop();await pool.query('UPDATE shared.memory_source_contract SET activation_ready=FALSE')}
  })
 
+
+ // Observe real queries without changing pg.Pool's callback checkout protocol.
+ function queryBarrier(before:(sql:string,args:any[])=>Promise<void>){
+  const connect=runtime.connect.bind(runtime),queries=new Map<pg.PoolClient,any>()
+  const instrument=(c:pg.PoolClient)=>{if(queries.has(c))return c;const query=c.query.bind(c);queries.set(c,query)
+   c.query=(async(...args:any[])=>{if(typeof args[0]==='string')await before(args[0],args[1]);return (query as any)(...args)}) as any;return c}
+  runtime.connect=((callback?:any)=>callback?connect((error:any,c:any,done:any)=>callback(error,c?instrument(c):c,done)):connect().then(instrument)) as any
+  return ()=>{runtime.connect=connect as any;for(const [c,query] of queries)c.query=query}
+ }
+ test.each(['renew_memory_source_lease','ack_memory_source_work'])('real scheduler retains busy source claim at %s then acknowledges only r before its 30s expiry',async phase=>{
+  const {createSharedSourceScheduler}=await import('../../sources/shared-scheduler.js')
+  const key='task12-'+phase,locker=await pool.connect(),errors:unknown[]=[]
+  const connect=runtime.connect.bind(runtime);let barrier=false,unlock:ReturnType<typeof setTimeout>|undefined
+  await pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  await pool.query("SELECT shared.mark_memory_source_dirty('legacy_archive',$1)",[key])
+  const scheduler=createSharedSourceScheduler({pool:runtime,workerId:'task12-source',signal:new AbortController().signal,onError:e=>errors.push(e)})
+  // Barrier after the actual claim (and, for ack, successful renewal), before
+  // executing the actual SQL on another physical connection.
+  const restore=queryBarrier(async(sql,args)=>{if(!barrier&&typeof sql==='string'&&sql.includes('shared.'+phase+'(')){
+    barrier=true;await locker.query('BEGIN');await locker.query("SELECT shared.mark_memory_source_dirty('legacy_archive',$1)",[key])
+    if(phase==='ack_memory_source_work')unlock=setTimeout(()=>{void locker.query('COMMIT')},1200)
+   }})
+  try{
+   await scheduler.runOnce();expect(barrier).toBe(true)
+   const before=(await pool.query('SELECT lease_token::text,attempt,lease_until>clock_timestamp() AS live FROM shared.memory_source_work WHERE root_key=$1',[key])).rows[0]
+   expect(before.live).toBe(true);expect(before.attempt).toBe(1)
+   await locker.query('COMMIT');const started=performance.now();await scheduler.runOnce()
+   expect(performance.now()-started).toBeLessThan(5000)
+   expect((await pool.query('SELECT revision::text,processed_revision::text,lease_token,attempt,last_error_code FROM shared.memory_source_work WHERE root_key=$1',[key])).rows[0]).toEqual({revision:'2',processed_revision:'1',lease_token:null,attempt:0,last_error_code:null})
+   await scheduler.runOnce()
+   expect((await pool.query('SELECT processed_revision::text FROM shared.memory_source_work WHERE root_key=$1',[key])).rows[0].processed_revision).toBe('2');expect(errors).toEqual([])
+  }finally{clearTimeout(unlock);restore();await locker.query('ROLLBACK');locker.release();await scheduler.stop();await pool.query('UPDATE shared.memory_source_contract SET activation_ready=FALSE')}
+ })
+
+ test.each(['resume_memory_source_distribution','step_memory_source_distribution','dispatch_memory_source_distribution'])('native distribution %s retries typed contention without orphaning or exponential backoff',async phase=>{
+  const {createSharedSourceScheduler}=await import('../../sources/shared-scheduler.js')
+  const key='1:old-session-a',locker=await pool.connect(),errors:unknown[]=[];let barrier=false
+  await pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  await pool.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",[key])
+  const scheduler=createSharedSourceScheduler({pool:runtime,workerId:'task12-native',signal:new AbortController().signal,pageSize:1,onError:e=>errors.push(e)})
+  const restore=queryBarrier(async(sql)=>{if(!barrier&&sql.includes('shared.'+phase+'(')){
+   barrier=true;await locker.query('BEGIN');await locker.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",[key])
+  }})
+  try{
+   const started=performance.now()
+   for(let n=0;n<10&&!barrier;n++)await scheduler.runOnce()
+   expect(barrier).toBe(true);await locker.query('COMMIT')
+   for(let n=0;n<30;n++){
+    await scheduler.runOnce()
+    const row=(await pool.query("SELECT revision,processed_revision FROM shared.memory_source_work WHERE source_kind='relay_event' AND root_key=$1",[key])).rows[0]
+    if(row.revision===row.processed_revision)break
+   }
+   const row=(await pool.query("SELECT revision::text,processed_revision::text,lease_token,last_error_code FROM shared.memory_source_work WHERE source_kind='relay_event' AND root_key=$1",[key])).rows[0]
+   expect(row.processed_revision).toBe(row.revision);expect(row.lease_token).toBeNull();expect(row.last_error_code).toBeNull()
+   expect(performance.now()-started).toBeLessThan(5000);expect(errors).toEqual([])
+  }finally{restore();await locker.query('ROLLBACK');locker.release();await scheduler.stop();await pool.query('UPDATE shared.memory_source_contract SET activation_ready=FALSE')}
+ })
+ test.each(['expired','stolen'])('busy cached source then %s never acknowledges a stale claim',async mode=>{
+  const {createSharedSourceScheduler}=await import('../../sources/shared-scheduler.js')
+  const key='task12-invalid-'+mode,locker=await pool.connect(),connect=runtime.connect.bind(runtime);let barrier=false
+  await pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  await pool.query("SELECT shared.mark_memory_source_dirty('legacy_archive',$1)",[key])
+  const scheduler=createSharedSourceScheduler({pool:runtime,workerId:'task12-invalid',signal:new AbortController().signal})
+  const restore=queryBarrier(async(sql,args)=>{if(!barrier&&typeof sql==='string'&&sql.includes('shared.renew_memory_source_lease(')){
+    barrier=true;await locker.query('BEGIN');await locker.query('SELECT 1 FROM shared.memory_source_work WHERE root_key=$1 FOR UPDATE',[key])
+   }})
+  try{
+   await scheduler.runOnce();await locker.query('COMMIT')
+   await pool.query(mode==='expired'?"UPDATE shared.memory_source_work SET lease_until=clock_timestamp()-interval '1 second' WHERE root_key=$1":"UPDATE shared.memory_source_work SET lease_owner='replacement',lease_token=gen_random_uuid() WHERE root_key=$1",[key])
+   await scheduler.runOnce()
+   expect((await pool.query('SELECT processed_revision::text FROM shared.memory_source_work WHERE root_key=$1',[key])).rows[0].processed_revision).toBe('0')
+  }finally{restore();await locker.query('ROLLBACK');locker.release();await scheduler.stop();await pool.query('DELETE FROM shared.memory_source_work WHERE root_key=$1',[key]);await pool.query('UPDATE shared.memory_source_contract SET activation_ready=FALSE')}
+ })
+ test('native revocation control row contention preserves its cache and finishes bootstrap without a 30s orphan',async()=>{
+  const {createSharedSourceScheduler}=await import('../../sources/shared-scheduler.js')
+  const locker=await pool.connect(),connect=runtime.connect.bind(runtime),errors:unknown[]=[];let barrier=false
+  await pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  // Native source revocation capture publishes the real provider control.
+  await pool.query("INSERT INTO public.extension_providers(provider_id,manifest_version,manifest) VALUES('pocketctl-memory',1,'{}')")
+  await pool.query("UPDATE public.extension_providers SET status='disabled' WHERE provider_id='pocketctl-memory'")
+  const scheduler=createSharedSourceScheduler({pool:runtime,workerId:'task12-control',signal:new AbortController().signal,pageSize:1,onError:e=>errors.push(e)})
+  const restore=queryBarrier(async(sql,args)=>{if(!barrier&&typeof sql==='string'&&sql.includes('shared.renew_memory_control_lease(')){
+    barrier=true;await locker.query('BEGIN');await locker.query('SELECT 1 FROM shared.memory_source_control_work WHERE control_kind=$1 AND control_key=$2 FOR UPDATE',args.slice(0,2))
+   }})
+  try{
+   await scheduler.runOnce();expect(barrier).toBe(true);await locker.query('COMMIT')
+   const started=performance.now()
+   for(let n=0;n<100;n++){await scheduler.runOnce();if(!(await pool.query('SELECT 1 FROM shared.memory_source_control_work WHERE processed_revision<revision')).rowCount)break}
+   expect(performance.now()-started).toBeLessThan(5000);expect(errors).toEqual([])
+   expect((await pool.query('SELECT 1 FROM shared.memory_source_control_work WHERE processed_revision<revision')).rowCount).toBe(0)
+  }finally{restore();await locker.query('ROLLBACK');locker.release();await scheduler.stop();await pool.query('UPDATE shared.memory_source_contract SET activation_ready=FALSE')}
+ })
+
 })

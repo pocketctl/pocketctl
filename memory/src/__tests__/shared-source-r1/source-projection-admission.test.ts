@@ -3,6 +3,7 @@ import {canonicalPayloadHash} from '@pocketctl/session-source'
 const fixtures=vi.hoisted(()=>({states:new Map<string,any>()}))
 vi.mock('../../sources/observed-reader.js',()=>({createObservedSourceReader:()=>({checkCurrent:async(scope:any)=>fixtures.states.get(scope.principalUserId)})}))
 import {prepareSourceProjectionAdmission} from '../../sources/source-projection-admission.js'
+import {loadSourceContextSet,checkSourceContextSet} from '../../sources/source-context-set.js'
 // The trusted-seal combinator is tested independently of native enumeration.
 // Raw Team roots no longer admit business input through this personal port.
 const scope={installationId:'installation',principalUserId:'1',ownerScopeKind:'personal' as const,ownerScopeId:'installation',authorizationRevision:'1',configVersion:'1',modeGeneration:'2'}
@@ -12,7 +13,7 @@ function fixture(){
  const scopes=[scope,{...scope,principalUserId:'2'}]
  const targets=scopes.map((source_scope,i)=>({cursor_key:String(i+1),source_scope,source_version:version,target_mode:'shared-active',state:'current'}))
  const progress=new Map(scopes.map(s=>[canonicalPayloadHash(s).toString('hex'),{state:'ready',source_version:version}]))
- const seal={scanId:'scan',controlRevision:'1',workRevision:'1',targetCount:'2'}
+ const seal={scanId:'scan',controlRevision:'1',workRevision:'1',targetCount:'2',contentPending:false}
  fixtures.states.set('1',{state:'current',version});fixtures.states.set('2',{state:'current',version})
  const queries:string[]=[]
  const pool={query:async(sql:string,args:any[])=>{queries.push(sql)
@@ -23,6 +24,28 @@ function fixture(){
  }}
  return {pool:pool as never,targets,progress,seal,queries}
 }
+test('a scope-only seal never grants whole latest-content admission',async()=>{
+ const f=fixture();f.seal.contentPending=true
+ await expect(prepareSourceProjectionAdmission(f.pool,scope,root)).rejects.toThrow('source_not_ready')
+ expect(f.queries.some(q=>q.includes('memory_canonical_projection_progress'))).toBe(false)
+})
+test('personal metadata projection validates current authority without retargeting sealed content observations',async()=>{
+ const f=fixture();f.seal.contentPending=true
+ fixtures.states.set('1',{state:'current',version:{...version,content:'9'}})
+ const set=await loadSourceContextSet(f.pool,scope.installationId,root,'scan','personal-projection')
+ const contexts=await checkSourceContextSet(f.pool,root,set,'personal-projection')
+ expect(contexts[0].version).toEqual(version)
+ await expect(checkSourceContextSet(f.pool,root,set)).rejects.toThrow('source_not_ready')
+ for(const state of ['deleted','revoked','changed']){
+  fixtures.states.set('1',{state,version});await expect(checkSourceContextSet(f.pool,root,set,'personal-projection')).rejects.toThrow('source_not_ready')
+ }
+ fixtures.states.set('1',{state:'current',version:{...version,authorization:'99'}})
+ await expect(checkSourceContextSet(f.pool,root,set,'personal-projection')).rejects.toThrow('source_not_ready')
+})
+test('the metadata exception cannot admit Team pending content',async()=>{
+ const f=fixture();f.seal.contentPending=true
+ await expect(loadSourceContextSet(f.pool,scope.installationId,{kind:'team_collaboration',key:'call'},'scan','personal-projection')).rejects.toThrow('source_not_ready')
+})
 test('all current principals need current projection, including the principal whose UUID was not selected',async()=>{
  const f=fixture();f.progress.delete(canonicalPayloadHash({...scope,principalUserId:'2'}).toString('hex'))
  await expect(prepareSourceProjectionAdmission(f.pool,scope,root)).rejects.toThrow('source_not_ready')

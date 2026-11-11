@@ -36,21 +36,11 @@ const decimal=(v:unknown):v is string=>typeof v==='string' && /^(0|[1-9][0-9]*)$
 const validVersion=(v:SourceVersion)=>v && [v.content,v.authorization,v.storage].every(decimal)
 const sameVersion=(a:SourceVersion,b:SourceVersion)=>a.content===b.content && a.authorization===b.authorization && a.storage===b.storage
 const scopeKey=(scope:SourceScope,root:SourceRoot)=>canonicalPayloadHash({scope,root}).toString('hex')
-/** Shared first-party source algorithm. Database adapters remain responsible
- * for trusted current membership/owner joins, never for trusting caller GUCs. */
-export class SharedSourceReader {
- constructor(private readonly store:SourceStore){}
- private validate(scope:SourceScope,root:SourceRoot){
+function validateScope(scope:SourceScope,root:SourceRoot){
   if(!scope.installationId || !/^[1-9][0-9]*$/.test(scope.principalUserId) || !scope.ownerScopeId || !['personal','team','organization'].includes(scope.ownerScopeKind)
    || !decimal(scope.authorizationRevision) || !decimal(scope.configVersion) || !['relay_event','team_collaboration','team_delivery','legacy_archive'].includes(root.kind) || !root.key || root.key.length>1024)unavailable('source_scope_mismatch')
  }
- private async current(scope:SourceScope,root:SourceRoot,expected?:SourceVersion){
-  const current=await this.store.checkCurrent(scope,root,expected)
-  if(current.state!=='current')unavailable(current.state)
-  if(!validVersion(current.version) || expected && (!validVersion(expected)||!sameVersion(current.version,expected)))unavailable('changed')
-  return current.version
- }
- private heads(root:SourceRoot,heads:SourceHead[]){
+function validateHeads(root:SourceRoot,heads:SourceHead[]){
   if(heads.length>256)unavailable('page_limit')
   const seen=new Set<string>()
   for(const head of heads){
@@ -63,6 +53,32 @@ export class SharedSourceReader {
    if(seen.has(identity))unavailable('duplicate_source_identity');seen.add(identity)
   }
  }
+function validateBodies(heads:SourceHead[],bodies:ResolvedSourceBody[]):ResolvedSourceBody[]{
+ if(bodies.length!==heads.length)unavailable('body_set_mismatch')
+  let totalBytes=0
+  for(let i=0;i<heads.length;i++){
+   const body=bodies[i],head=heads[i]
+   if(!body || canonicalJsonString(body.head)!==canonicalJsonString(head))unavailable('body_set_mismatch')
+   if(body.payload===undefined || body.payload===null)unavailable('body_unavailable')
+   const serialized=canonicalJsonString(body.payload)
+   totalBytes+=Buffer.byteLength(serialized)
+   if(totalBytes>32*1024*1024)unavailable('body_byte_limit')
+   if(canonicalPayloadHash(body.payload).toString('hex')!==head.contentHash)unavailable('body_hash_mismatch')
+  }
+ return structuredClone(bodies)
+}
+/** Shared first-party source algorithm. Database adapters remain responsible
+ * for trusted current membership/owner joins, never for trusting caller GUCs. */
+export class SharedSourceReader {
+ constructor(private readonly store:SourceStore){}
+ private validate(scope:SourceScope,root:SourceRoot){validateScope(scope,root)}
+ private async current(scope:SourceScope,root:SourceRoot,expected?:SourceVersion){
+  const current=await this.store.checkCurrent(scope,root,expected)
+  if(current.state!=='current')unavailable(current.state)
+  if(!validVersion(current.version) || expected && (!validVersion(expected)||!sameVersion(current.version,expected)))unavailable('changed')
+  return current.version
+ }
+ private heads(root:SourceRoot,heads:SourceHead[]){validateHeads(root,heads)}
  async checkCurrent(scope:SourceScope,root:SourceRoot,expected?:SourceVersion){
   this.validate(scope,root)
   if(expected!==undefined&&!validVersion(expected))unavailable('source_version_invalid')
@@ -120,18 +136,51 @@ export class SharedSourceReader {
   if(!validVersion(expected))unavailable('source_version_invalid')
   await this.current(scope,root,expected)
   const bodies=await this.store.resolveBodies(scope,root,structuredClone(heads),expected)
-  if(bodies.length!==heads.length)unavailable('body_set_mismatch')
-  let totalBytes=0
-  for(let i=0;i<heads.length;i++){
-   const body=bodies[i],head=heads[i]
-   if(!body || canonicalJsonString(body.head)!==canonicalJsonString(head))unavailable('body_set_mismatch')
-   if(body.payload===undefined || body.payload===null)unavailable('body_unavailable')
-   const serialized=canonicalJsonString(body.payload)
-   totalBytes+=Buffer.byteLength(serialized)
-   if(totalBytes>32*1024*1024)unavailable('body_byte_limit')
-   if(canonicalPayloadHash(body.payload).toString('hex')!==head.contentHash)unavailable('body_hash_mismatch')
-  }
+  const verified=validateBodies(heads,bodies)
   await this.current(scope,root,expected)
-  return structuredClone(bodies)
+  return verified
  }
+}
+
+/** A separate capability for internal personal metadata work. It never changes
+ * the ordinary reader's exact whole-root vector contract. The store owns the
+ * fixed native/ref/cold observations; neither a DTO nor an old vector is a view. */
+export interface PersonalMetadataView {
+ readonly token:object;readonly heads:readonly SourceHead[];readonly observedVersion:SourceVersion
+ readonly upperId:string;readonly nextAfter?:string;readonly exhausted:boolean
+}
+export interface PersonalMetadataStore {
+ select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;limit:number}):Promise<PersonalMetadataView>
+ resolve(token:object):Promise<ResolvedSourceBody[]>
+ assert(token:object):Promise<void>
+ proof(token:object):unknown
+}
+export class PersonalMetadataSourceReader {
+ private readonly views=new WeakMap<object,{inner:object;heads:SourceHead[]}>()
+ constructor(private readonly store:PersonalMetadataStore){}
+ private async select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;limit:number}):Promise<PersonalMetadataView>{
+  validateScope(scope,root)
+  if(root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')unavailable('source_scope_mismatch')
+  if(!Number.isSafeInteger(request.limit)||request.limit<1||request.limit>256)unavailable('page_limit')
+  if(request.keys&&(!request.keys.length||request.keys.length>256||new Set(request.keys).size!==request.keys.length||request.keys.some(k=>!decimal(k)||k==='0')))unavailable('source_identity_invalid')
+  if(request.after!==undefined&&!decimal(request.after)||request.through!==undefined&&!decimal(request.through))unavailable('cursor_scope_mismatch')
+  const inner=await this.store.select(structuredClone(scope),structuredClone(root),structuredClone(request))
+  if(!validVersion(inner.observedVersion)||!decimal(inner.upperId))unavailable('source_version_invalid')
+  const heads=structuredClone([...inner.heads]);validateHeads(root,heads)
+  if(heads.length>request.limit)unavailable('page_limit')
+  if(request.keys&&(heads.length!==request.keys.length||request.keys.some(k=>!heads.some(h=>h.canonicalKey===k))))unavailable('body_set_mismatch')
+  const token=Object.freeze({});this.views.set(token,{inner:inner.token,heads})
+  return Object.freeze({token,heads:structuredClone(heads),observedVersion:{...inner.observedVersion},upperId:inner.upperId,
+   ...(inner.nextAfter?{nextAfter:inner.nextAfter}:{}),exhausted:inner.exhausted})
+ }
+ selectPage(scope:SourceScope,root:SourceRoot,request:{after?:string;through?:string;limit?:number}={}){return this.select(scope,root,{...request,limit:request.limit??64})}
+ selectKeys(scope:SourceScope,root:SourceRoot,keys:readonly string[]){return this.select(scope,root,{keys,limit:keys.length})}
+ private state(view:PersonalMetadataView){const state=this.views.get(view.token);if(!state)throw new SourceUnavailableError('source_selection_invalid');return state}
+ async resolve(view:PersonalMetadataView):Promise<ResolvedSourceBody[]>{
+  const state=this.state(view);await this.store.assert(state.inner)
+  const bodies=await this.store.resolve(state.inner)
+  const verified=validateBodies(state.heads,bodies);await this.store.assert(state.inner);return verified
+ }
+ assertSelection(view:PersonalMetadataView){return this.store.assert(this.state(view).inner)}
+ proof(view:PersonalMetadataView):unknown{return structuredClone(this.store.proof(this.state(view).inner))}
 }

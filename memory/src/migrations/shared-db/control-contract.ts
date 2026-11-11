@@ -63,7 +63,8 @@ export const SHARED_SOURCE_CONTROL_FUNCTIONS=[
   LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
    PERFORM 1 FROM shared.memory_source_control_work WHERE control_kind=p_kind AND control_key=p_key AND lease_token=p_token AND lease_owner=p_worker
     AND claimed_revision=p_revision AND lease_until>clock_timestamp() AND dead_at IS NULL FOR UPDATE NOWAIT;
-   RETURN FOUND;EXCEPTION WHEN lock_not_available THEN RETURN FALSE;
+   -- Contention is distinct from an invalid lease, including bootstrap steps.
+   RETURN FOUND;
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.ack_memory_control_work(p_kind TEXT,p_key TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT) RETURNS BOOLEAN
   LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN

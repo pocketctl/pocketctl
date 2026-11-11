@@ -12,11 +12,14 @@ async function assertRoles(db:Pick<pg.Pool,'query'>,roles:SharedRoles){
  const dbOwner=(await db.query('SELECT datdba FROM pg_database WHERE datname=current_database()')).rows[0].datdba
  if((await db.query("SELECT pg_has_role($1,$2,'MEMBER') OR pg_has_role($2,$1,'MEMBER') AS unsafe",[roles.memoryRole,roles.relayRole])).rows[0].unsafe)throw new Error('runtime_role_escalation')
  for(const name of Object.values(roles)){
-  const role=(await db.query(`SELECT oid,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1`,[name])).rows[0]
+  const role=(await db.query(`SELECT oid,rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1`,[name])).rows[0]
   if(!role)throw new Error('shared_role_missing')
-  if(name===roles.migratorRole)continue
+  if(name===roles.migratorRole){
+   if(role.rolcanlogin||role.rolsuper||role.rolcreatedb||role.rolcreaterole||role.rolreplication||role.rolbypassrls)throw Error('unsafe_shared_definer_role')
+   continue
+  }
   if(role.rolsuper||role.rolcreatedb||role.rolcreaterole||role.rolreplication||role.rolbypassrls||String(role.oid)===String(dbOwner))throw new Error('unsafe_runtime_role')
-  const inherited=(await db.query(`SELECT pg_has_role($1,$2,'MEMBER') OR pg_has_role($1,$3::oid,'MEMBER') OR EXISTS(SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_read_all_data','pg_write_all_data','pg_maintain')) AND pg_has_role($1,r.oid,'MEMBER')) AS unsafe`,[name,roles.migratorRole,dbOwner])).rows[0].unsafe
+  const inherited=(await db.query(`SELECT pg_has_role($1,$2,'MEMBER') OR pg_has_role($1,$2,'USAGE') OR pg_has_role($1,$3::oid,'MEMBER') OR EXISTS(SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls OR r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program','pg_read_all_data','pg_write_all_data','pg_maintain')) AND pg_has_role($1,r.oid,'MEMBER')) AS unsafe`,[name,roles.migratorRole,dbOwner])).rows[0].unsafe
   if(inherited)throw new Error('runtime_role_escalation')
  }
 }
@@ -25,7 +28,7 @@ async function assertRoles(db:Pick<pg.Pool,'query'>,roles:SharedRoles){
 export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,options:{fencedMemoryRuntime?:boolean}={}):Promise<void>{
  const client=await pool.connect()
  try{
-  await client.query('BEGIN');await assertNativeInputStartCompatible(client as unknown as pg.Pool);await assertTeamSemanticLegacySchema(client);await assertTeamSemanticLegacyFunction(client,options.fencedMemoryRuntime?roles.memoryRole:undefined);await assertRoles(client as unknown as pg.Pool,roles)
+  await client.query('BEGIN');await assertRoles(client as unknown as pg.Pool,roles);await assertNativeInputStartCompatible(client as unknown as pg.Pool);await assertTeamSemanticLegacySchema(client);await assertTeamSemanticLegacyFunction(client,options.fencedMemoryRuntime?roles.memoryRole:undefined)
   const database=quoteIdentifier((await client.query('SELECT current_database() AS name')).rows[0].name)
   const memory=quoteIdentifier(roles.memoryRole),relay=quoteIdentifier(roles.relayRole),migrator=quoteIdentifier(roles.migratorRole)
   const objects=(await client.query(`SELECT n.nspname,c.relname,c.relkind,EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype IN ('a','i')) AS owned_sequence FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relnamespace IN ('memory'::regnamespace,'shared'::regnamespace) AND c.relkind IN ('r','p','S','v','m') ORDER BY c.relkind,c.relname`)).rows
@@ -52,6 +55,12 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
   // PostgreSQL row locks require UPDATE on at least one column. Only the
   // non-runtime migrator/definer owns this capability; runtime receives EXECUTE.
   for(const [table,key] of [['session_aliases','old_session_id'],['extension_installations','installation_id'],['extension_teams','team_id'],['extension_organizations','organization_id'],['extension_scope_memberships','membership_id'],['users','id'],['extension_providers','provider_id'],['sessions','session_id'],['daemons','daemon_id'],['collaboration_teams','team_id'],['collaboration_team_memberships','team_id'],['collaboration_sessions','team_session_id'],['collaboration_session_participants','team_session_id'],['team_memory_bindings','binding_id'],['collaboration_calls','call_id'],['team_agent_offers','offer_id'],['team_delivery_memory_sources','source_session_id'],['team_task_submissions','submission_id'],['team_acceptance_decisions','decision_id'],['team_task_specs','task_id']]){
+   if((await client.query('SELECT to_regclass($1) IS NOT NULL AS present',['public.'+table])).rows[0].present)await client.query(`GRANT UPDATE(${quoteIdentifier(key)}) ON public.${quoteIdentifier(table)} TO ${migrator}`)
+  }
+  // These are real column UPDATE privileges held only by the non-login
+  // definer, required by PostgreSQL selected-source row locks. Neither runtime
+  // may inherit or SET ROLE to that owner; no GRANT OPTION or body DML is added.
+  for(const [table,key] of [['events','id'],['native_installation_starts','installation_id'],['native_source_publications','source_key'],['extension_source_outbox','source_seq'],['session_archive_manifests','manifest_id'],['session_archive_chunks','manifest_id']]){
    if((await client.query('SELECT to_regclass($1) IS NOT NULL AS present',['public.'+table])).rows[0].present)await client.query(`GRANT UPDATE(${quoteIdentifier(key)}) ON public.${quoteIdentifier(table)} TO ${migrator}`)
   }
   await client.query(`ALTER SCHEMA memory OWNER TO ${migrator}; ALTER SCHEMA shared OWNER TO ${migrator};

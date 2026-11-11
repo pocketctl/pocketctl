@@ -40,11 +40,15 @@ export async function directLaunchFixture(url:string,options:{originalBinding?:b
   await runtime.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[inst.installation_id])
   return {inst}
  }
- async function event(s:{owner:number;session:string},terminal=false){
+ async function event(s:{owner:number;session:string},terminal=false,options:{unknownPublication?:boolean}={}){
   const eventType=terminal?'turn_status':'agent_text'
   const turn='direct-turn-'+s.session
   const payload={...(terminal?{turn_status:'completed'}:{text:'bounded direct launch synthetic body'}),turn_id:turn,actor_scope:'assistant',memory_source:{version:1,producer:'codex',session_id:s.session,turn_id:turn,event_id:randomUUID(),sequence:terminal?'2':'1',invocation_id:'direct-launch',source_role:'assistant',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}}
-  const id=(await publisher.query("INSERT INTO public.events(session_id,event_type,payload,event_hash,effect_status,user_id) VALUES($1,$5,$2,$3,'completed',$4) RETURNING id::text",[s.session,payload,randomUUID().replaceAll('-',''),s.owner,eventType])).rows[0].id
+  // Owned negative fixture: an existing UNKNOWN sentinel must never acquire
+  // an invented publication XID/order when a later real event is observed.
+  const explicitId=options.unknownPublication?(await pool.query("SELECT nextval('public.events_id_seq')::text AS id")).rows[0].id:undefined
+  if(explicitId)await pool.query("INSERT INTO public.native_source_publications(source_kind,source_key,owner_key,source_session_id) VALUES('relay_event',$1,$2,$3)",[explicitId,String(s.owner),s.session])
+  const id=(await publisher.query(`INSERT INTO public.events(${explicitId?'id,':''}session_id,event_type,payload,event_hash,effect_status,user_id) VALUES(${explicitId?'$6::bigint,':''}$1,$5,$2,$3,'completed',$4) RETURNING id::text`,[s.session,payload,randomUUID().replaceAll('-',''),s.owner,eventType,...(explicitId?[explicitId]:[])])).rows[0].id
   await journal.createPostgresExtensionJournalSink({sharedHeaders:true}).appendCanonicalEvent(publisher,{sourceEventId:id,ownerUserId:s.owner,sessionId:s.session,eventType,occurredAt:null,payload})
   return id as string
  }

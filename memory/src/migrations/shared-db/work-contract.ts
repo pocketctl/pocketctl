@@ -5,13 +5,34 @@ export const SHARED_SOURCE_WORK_FUNCTIONS=[
  `UPDATE shared.memory_source_work SET dirty_since=updated_at WHERE dirty_since IS NULL AND processed_revision<revision`,
  `ALTER TABLE shared.memory_source_work ALTER COLUMN dirty_since SET DEFAULT clock_timestamp()`,
  `CREATE OR REPLACE FUNCTION shared.mark_memory_source_dirty(p_kind TEXT,p_root TEXT) RETURNS BIGINT
-  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE r BIGINT; BEGIN
-   -- Bootstrap holds a control lease. Never wait behind a native publisher
-   -- holding an uncommitted insertion of this same root (including a missing
-   -- row, which cannot be protected by SELECT FOR UPDATE NOWAIT).
-   IF NOT pg_try_advisory_xact_lock(hashtextextended('memory-source-dirty:'||p_kind||':'||p_root,0)) THEN
-    RAISE EXCEPTION 'source_dirty_busy' USING ERRCODE='55P03';END IF;
-   PERFORM 1 FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root FOR UPDATE NOWAIT;
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
+  DECLARE r BIGINT;lock_attempt INT=0;lock_deadline TIMESTAMPTZ;found_work BOOLEAN;advisory_locked BOOLEAN=FALSE;BEGIN
+   -- Existing publishers first serialize on the tuple with bounded NOWAIT
+   -- retries. Taking the advisory gate first would reject a healthy concurrent
+   -- writer instead of letting that short existing-row transaction finish.
+   lock_deadline=clock_timestamp()+interval '50 milliseconds';
+   LOOP
+    lock_attempt=lock_attempt+1;
+    BEGIN
+     PERFORM 1 FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root FOR UPDATE NOWAIT;
+     found_work=FOUND;
+    EXCEPTION WHEN lock_not_available THEN
+     IF lock_attempt>=32 OR clock_timestamp()>=lock_deadline THEN RAISE;END IF;
+     -- Failed subtransactions release partial row locks before this yield.
+     PERFORM pg_sleep(0.001);CONTINUE;
+    END;
+    IF advisory_locked THEN EXIT;END IF;
+    -- Retain the SAME exclusive advisory fence for EVERY write, including
+    -- existing roots: shared cleanup and exclusive custody/storage holders
+    -- must still block publication. It is never retried by the row handler.
+    IF NOT pg_try_advisory_xact_lock(hashtextextended('memory-source-dirty:'||p_kind||':'||p_root,0)) THEN
+     RAISE EXCEPTION 'source_dirty_busy' USING ERRCODE='55P03';END IF;
+    advisory_locked=TRUE;
+    IF found_work THEN EXIT;END IF;
+    -- Missing/uncommitted creators retain the original immediate TRY barrier.
+    -- Recheck under that ownership to avoid an invisible unique-index wait if
+    -- a prior creator committed between our missing observation and TRY lock.
+   END LOOP;
    INSERT INTO shared.memory_source_work(source_kind,root_key,revision) VALUES(p_kind,p_root,1)
     ON CONFLICT(source_kind,root_key) DO UPDATE SET dirty_since=CASE WHEN memory_source_work.processed_revision=memory_source_work.revision THEN clock_timestamp() ELSE COALESCE(memory_source_work.dirty_since,clock_timestamp()) END,revision=memory_source_work.revision+1,updated_at=clock_timestamp(),
       available_at=CASE WHEN memory_source_work.lease_token IS NULL THEN clock_timestamp() ELSE memory_source_work.available_at END,
@@ -37,8 +58,9 @@ export const SHARED_SOURCE_WORK_FUNCTIONS=[
   RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE found_work BOOLEAN; BEGIN
    SELECT TRUE INTO found_work FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root AND lease_token=p_token
      AND lease_owner=p_worker AND claimed_revision=p_revision AND lease_until>clock_timestamp() AND dead_at IS NULL FOR UPDATE NOWAIT;
-   RETURN COALESCE(found_work,FALSE);
-   EXCEPTION WHEN lock_not_available THEN RETURN FALSE; END $$`,
+   -- Preserve 55P03 so metadata consumers can retry a released transaction.
+   -- A missing/expired/stolen lease remains FALSE and cannot admit output.
+   RETURN COALESCE(found_work,FALSE); END $$`,
  `CREATE OR REPLACE FUNCTION shared.renew_memory_source_lease(p_kind TEXT,p_root TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT,p_seconds INT)
   RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
    IF p_seconds IS NULL OR p_seconds NOT BETWEEN 5 AND 300 THEN RAISE EXCEPTION 'invalid_source_claim';END IF;

@@ -1,12 +1,13 @@
 import {prepareTeamSemanticReferences} from './team-semantic-reader.js'
 import {deferredSourcePreparation} from './deferred-preparation.js'
-import {createObservedSourceReader} from './observed-reader.js'
+import {createObservedSourceReader,createObservedPersonalMetadataReader} from './observed-reader.js'
 import type pg from 'pg'
-import {canonicalPayloadHash,canonicalJsonString,verifyOriginalSourceHash,type SourceScope,type SourceRoot,type SourceVersion,type SourceHead} from '@pocketctl/session-source'
+import {canonicalPayloadHash,canonicalJsonString,verifyOriginalSourceHash,SourceUnavailableError,type SourceScope,type SourceRoot,type SourceVersion,type SourceHead} from '@pocketctl/session-source'
 import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
-import {sourceExecutionBranchFor} from './source-execution.js'
+import {sourceExecutionBranchFor,metadataSourceExecution,guardSourceExecutionCommit} from './source-execution.js'
 import {JobDeferredError} from '../jobs/types.js'
-import {prepareSourceProjectionAdmission} from './source-projection-admission.js'
+import {SelectedSourceLockBusy} from './processing-pins.js'
+import {prepareSourceProjectionAdmission,prepareMetadataScope,personalMetadataEnvelope} from './source-projection-admission.js'
 type Db=Pick<pg.Pool,'query'>
 export interface SourceCommitOptions {forCommit?:boolean}
 type SourceObservation={scope:SourceScope;root:SourceRoot;version:SourceVersion}
@@ -47,7 +48,10 @@ export function preparedSourceEvents(client:object,installationId:string,turnId?
  * compatibility payload. assertCurrent performs metadata/current-version SQL
  * only. Callers take authority/local advisory fences before locking refs; this
  * metadata check does not replace the authority commit barrier. */
-export async function prepareSourceReferences(pool:pg.Pool,installationId:string,ids:readonly string[]):Promise<PreparedSources>{
+export function prepareSourceReferences(pool:pg.Pool,installationId:string,ids:readonly string[]):Promise<PreparedSources>{return prepareSourceReferencesInternal(pool,installationId,ids)}
+async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:string,ids:readonly string[],selectedEpisode=false):Promise<PreparedSources>{
+ const originalExecution=selectedEpisode?metadataSourceExecution(pool,installationId).token:undefined
+ if(selectedEpisode&&sourceConnectionKey(pool)!==pool)throw Error('source_metadata_requires_physical_pool')
  if(ids.length>4096)throw Error('source_reference_limit')
  if(new Set(ids).size!==ids.length)throw Error('source_reference_duplicate')
  const deferred=deferredSourcePreparation<PreparedSources>(pool,canonicalJsonString(['references',installationId,[...ids].sort()]),physical=>prepareSourceReferences(physical,installationId,ids))
@@ -58,6 +62,7 @@ export async function prepareSourceReferences(pool:pg.Pool,installationId:string
  const shared=initialMode.mode==='shared-active'||(initialMode.mode==='shared-shadow'&&sourceExecutionBranchFor(pool,installationId)!=='legacy-active'),events:PreparedEvent[]=[],observations:{scope:SourceScope;root:SourceRoot;version:SourceVersion}[]=[]
  const semanticPreparations:Awaited<ReturnType<typeof prepareTeamSemanticReferences>>[]=[]
  const admissions=new Map<string,Awaited<ReturnType<typeof prepareSourceProjectionAdmission>>>()
+ const metadataObservations:{scope:SourceScope;root:SourceRoot;envelope:unknown}[]=[]
  let bytes=0
  for(let n=0;n<ids.length;n+=256){
   const batch=ids.slice(n,n+256)
@@ -80,8 +85,24 @@ export async function prepareSourceReferences(pool:pg.Pool,installationId:string
     const key=canonicalJsonString(binding),group=groups.get(key)??{...binding,rows:[]};group.rows.push(row);groups.set(key,group)
    }
    for(const group of groups.values()){
-    const page=await reader.getHeads(group.scope,group.root,group.rows.map(r=>r.canonical_key!))
-    if(sourceExecutionBranchFor(pool,installationId)==='canonical-active'&&group.root.kind!=='legacy_archive'){
+    let page:{heads:readonly SourceHead[];version:SourceVersion},bodies
+    const selected=selectedEpisode&&group.root.kind==='relay_event'&&group.scope.ownerScopeKind==='personal'
+    if(selected){
+     const seal=await prepareMetadataScope(pool,group.scope,group.root),metadataReader=createObservedPersonalMetadataReader(pool)
+     let view:Awaited<ReturnType<typeof metadataReader.selectKeys>>
+     try{
+      view=await metadataReader.selectKeys(group.scope,group.root,group.rows.map(r=>r.canonical_key!))
+      bodies=await metadataReader.resolve(view)
+     }catch(error){
+      // No episode output or transaction exists yet. Only the reader's typed
+      // invalidation yields to fresh job preparation; denials stay failures.
+      if(error instanceof SourceUnavailableError&&error.code==='changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+      throw error
+     }
+     page={heads:view.heads,version:view.observedVersion}
+     metadataObservations.push({scope:group.scope,root:group.root,envelope:personalMetadataEnvelope(pool,group.scope,group.root,metadataReader.proof(view),seal,'episode')})
+    }else page=await reader.getHeads(group.scope,group.root,group.rows.map(r=>r.canonical_key!))
+    if(!selected&&sourceExecutionBranchFor(pool,installationId)==='canonical-active'&&group.root.kind!=='legacy_archive'){
      const key=canonicalJsonString(group.root)
      if(!admissions.has(key)){
       const admission=await prepareSourceProjectionAdmission(pool,group.scope,group.root)
@@ -89,13 +110,13 @@ export async function prepareSourceReferences(pool:pg.Pool,installationId:string
      }
      admissions.get(key)!.requireScope(group.scope)
     }
-    const bodies=await reader.resolveBodies(group.scope,group.root,page.heads,page.version)
+    bodies??=await reader.resolveBodies(group.scope,group.root,[...page.heads],page.version)
     for(let i=0;i<group.rows.length;i++){
      const row=group.rows[i],body=bodies[i]
      if(row.event_type!==body.head.eventType||!row.content_hash?.equals(Buffer.from(body.head.contentHash,'hex'))||canonicalJsonString(row.classification)!==canonicalJsonString(body.head.classification))throw Error('source_reference_hash_mismatch')
      row.payload=body.payload as Record<string,unknown>
     }
-    observations.push({scope:group.scope,root:group.root,version:page.version})
+    if(!selected)observations.push({scope:group.scope,root:group.root,version:page.version})
    }
   }
   for(const row of rows){
@@ -107,6 +128,21 @@ export async function prepareSourceReferences(pool:pg.Pool,installationId:string
  }
  const initial=stamp(events),ordered=[...events].sort((a,b)=>new Date(a.occurred_at).getTime()-new Date(b.occurred_at).getTime()||a.source_event_id.localeCompare(b.source_event_id))
  return {bodyBytes:bytes,get events(){return ordered.map(clone)},async assertCurrent(client,options){
+  if(selectedEpisode&&metadataSourceExecution(pool,installationId).token!==originalExecution)throw Error('source_execution_scope_mismatch')
+  for(const observation of metadataObservations){
+   try{
+    const locked=(await client.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS locked',
+     [JSON.stringify(observation.scope),observation.root.kind,observation.root.key,JSON.stringify(observation.envelope)])).rows[0]?.locked
+    if(locked!==true)throw Error('source_reference_changed')
+   }catch(error){
+    const code=(error as {code?:string}).code,message=(error as Error).message
+    // A proven old-scan replacement is a distinct version wait, never a
+    // generic FALSE/busy conversion. The old proof produces no output.
+    if(code==='55P03'&&message==='source_metadata_lock_busy')throw new SelectedSourceLockBusy()
+    if(code==='P0001'&&message==='source_metadata_scan_changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+    throw error
+   }
+  }
   const current=await mode(client as Db,installationId,context.namespace==='memory')
   if(current.mode!==initialMode.mode||current.generation!==initialMode.generation)throw Error('source_reference_changed')
   for(const preparation of semanticPreparations)await preparation.assertCurrent(client,options?.forCommit===true)
@@ -130,11 +166,7 @@ export async function prepareTurnSources(pool:pg.Pool,installationId:string,turn
 /** The membership of a whole turn is part of its snapshot, including explicit
  * lifecycle repository observations. New refs cannot silently disappear from
  * an in-flight compile just because its original UUID list still exists. */
-export async function prepareEpisodeSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedSources>{
- // Keep the two disjoint memberships independently indexable. Same-turn refs
- // include old aliases/other sessions and reclaimed rows; preparation must see
- // those rows to fail closed. Both branches still require the source turn.
- const query=`WITH turn AS(SELECT installation_id,session_id,terminal_at FROM source_turns WHERE installation_id=$1 AND turn_id=$2)
+const episodeMembershipQuery=`WITH turn AS(SELECT installation_id,session_id,terminal_at FROM source_turns WHERE installation_id=$1 AND turn_id=$2)
   SELECT refs.source_event_id::text FROM(
    SELECT s.source_event_id FROM source_events s JOIN turn t ON t.installation_id=s.installation_id
     WHERE s.installation_id=$1 AND s.turn_id=$2
@@ -142,6 +174,11 @@ export async function prepareEpisodeSources(pool:pg.Pool,installationId:string,t
    SELECT s.source_event_id FROM source_events s JOIN turn t ON t.installation_id=s.installation_id AND t.session_id=s.session_id
     WHERE s.installation_id=$1 AND s.turn_id IS NULL AND s.event_type IN('session_created','session_discovered') AND s.occurred_at<=t.terminal_at
   )refs ORDER BY refs.source_event_id LIMIT 4097`
+export async function prepareEpisodeSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedSources>{
+ // Keep the two disjoint memberships independently indexable. Same-turn refs
+ // include old aliases/other sessions and reclaimed rows; preparation must see
+ // those rows to fail closed. Both branches still require the source turn.
+ const query=episodeMembershipQuery
  const ids=(await pool.query(query,[installationId,turnId])).rows.map(r=>r.source_event_id)
  const prepared=await prepareSourceReferences(pool,installationId,ids)
  return {bodyBytes:prepared.bodyBytes,get events(){return prepared.events},async assertCurrent(client,options){
@@ -209,3 +246,39 @@ export async function prepareSourceAuthorities(pool:pg.Pool,installationId:strin
 
 const unavailableCodes=new Set(['source_preparation_required','source_reference_limit','source_reference_duplicate','source_mode_paused','source_mode_invalid','source_reference_missing','source_reference_reclaimed','source_reference_unproven','source_reference_scope_unavailable','source_reference_hash_mismatch','source_reference_byte_limit','source_reference_changed','source_artifact_changed'])
 export const preparedSourceUnavailable=(error:unknown):boolean=>error instanceof Error&&(error.name==='SourceUnavailableError'||unavailableCodes.has(error.message))
+
+export interface PreparedEpisodeProjectionSources extends PreparedSources {fenceMembership(client:pg.PoolClient):Promise<void>}
+/** Internal deterministic compile entry. Public prepareEpisodeSources and all
+ * generic model/API/evidence preparations remain whole-current and strict. */
+export async function prepareEpisodeProjectionSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedEpisodeProjectionSources|null>{
+ const execution=metadataSourceExecution(pool,installationId)
+ const turnQuery=`SELECT to_jsonb(t)||jsonb_build_object('row_version',t.xmin::text) AS snapshot FROM source_turns t WHERE installation_id=$1 AND turn_id=$2`
+ const turn=(await pool.query(turnQuery,[installationId,turnId])).rows[0]?.snapshot
+ if(!turn?.terminal_at)throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+ const ids=(await pool.query(episodeMembershipQuery,[installationId,turnId])).rows.map(r=>r.source_event_id)
+ if(!ids.length)return null
+ const kinds=(await pool.query("SELECT 1 FROM source_events WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) AND source_kind IS DISTINCT FROM 'relay_event' LIMIT 1",[installationId,ids])).rowCount
+ if(kinds)return null
+ const prepared=await prepareSourceReferencesInternal(pool,installationId,ids,true)
+ const sameTurn=async(client:Pick<pg.PoolClient,'query'>)=>{
+  if(metadataSourceExecution(pool,installationId).token!==execution.token)throw Error('source_execution_scope_mismatch')
+  const current=(await client.query(turnQuery,[installationId,turnId])).rows[0]?.snapshot
+  const members=(await client.query(episodeMembershipQuery,[installationId,turnId])).rows.map(r=>r.source_event_id)
+  if(canonicalJsonString(current)!==canonicalJsonString(turn)||canonicalJsonString(members)!==canonicalJsonString(ids))throw Error('source_reference_changed')
+ }
+ return {bodyBytes:prepared.bodyBytes,get events(){return prepared.events},async fenceMembership(client){
+  await guardSourceExecutionCommit(client,installationId)
+  // Native locks precede local derived locks. Subsequent assertions always
+  // revalidate; there is no savepoint/transaction-ID selected-fence cache.
+  await prepared.assertCurrent(client)
+  try{
+   if(!(await client.query('SELECT 1 FROM memory_installations WHERE installation_id=$1 FOR UPDATE NOWAIT',[installationId])).rowCount)throw Error('source_reference_changed')
+  }catch(error){if((error as {code?:string}).code==='55P03')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000));throw error}
+  const locks=(await client.query(`SELECT pg_try_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0)) AS session,
+   pg_try_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0)) AS installation`,[installationId,turn.session_id])).rows[0]
+  if(!locks?.session||!locks.installation)throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+  try{await client.query('SELECT 1 FROM source_turns WHERE installation_id=$1 AND turn_id=$2 FOR SHARE NOWAIT',[installationId,turnId])}
+  catch(error){if((error as {code?:string}).code==='55P03')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000));throw error}
+  await sameTurn(client)
+ },async assertCurrent(client,options){await prepared.assertCurrent(client,options);await sameTurn(client)}}
+}

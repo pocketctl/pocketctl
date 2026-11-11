@@ -20,7 +20,17 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
   PRIMARY KEY(scan_id,cursor_key))`,
  `CREATE INDEX IF NOT EXISTS memory_source_distribution_installation ON shared.memory_source_distribution_targets(scan_id,installation_id,cursor_key)`,
  `CREATE OR REPLACE FUNCTION shared.resume_memory_source_distribution(p_kind TEXT,p_root TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT)
-  RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE d shared.memory_source_distributions;BEGIN
+  RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE d shared.memory_source_distributions;recovered_revision BIGINT;BEGIN
+   -- Explicit read-only recovery after a committed claim-frontier update lost
+   -- its response. The exact live token/owner is required; no lease is adopted,
+   -- renewed or advanced here. Ordinary non-NULL callers remain revision-exact.
+   IF p_revision IS NULL THEN
+    SELECT claimed_revision INTO recovered_revision FROM shared.memory_source_work
+     WHERE source_kind=p_kind AND root_key=p_root AND lease_token=p_token AND lease_owner=p_worker
+      AND claimed_revision IS NOT NULL AND lease_until>clock_timestamp() AND dead_at IS NULL FOR UPDATE NOWAIT;
+    IF NOT FOUND OR NOT shared.assert_memory_source_lease(p_kind,p_root,p_token,p_worker,recovered_revision) THEN RAISE EXCEPTION 'source_lease_lost';END IF;
+    RETURN jsonb_build_object('claimedRevision',recovered_revision::text);
+   END IF;
    IF NOT shared.assert_memory_source_lease(p_kind,p_root,p_token,p_worker,p_revision) THEN RAISE EXCEPTION 'source_lease_lost';END IF;
    SELECT * INTO d FROM shared.memory_source_distributions WHERE(source_kind,root_key)=(p_kind,p_root);
    IF NOT FOUND OR d.work_revision<>p_revision OR d.control_revision<>shared.memory_source_control_snapshot()::bigint THEN RETURN NULL;END IF;
@@ -29,12 +39,41 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.step_memory_source_distribution(p_kind TEXT,p_root TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT,p_scan UUID,p_after TEXT,p_limit INT)
   RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE d shared.memory_source_distributions;item RECORD;current_control BIGINT;page_count INT=0;BEGIN
+  DECLARE d shared.memory_source_distributions;item RECORD;current_control BIGINT;page_count INT=0;claimed_frontier BIGINT;BEGIN
    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 128 OR p_after IS NULL OR length(p_after)>2048
     OR p_kind IS NULL OR p_kind NOT IN('relay_event','team_collaboration','team_delivery') THEN RAISE EXCEPTION 'invalid_source_distribution_page';END IF;
    IF NOT shared.assert_memory_source_lease(p_kind,p_root,p_token,p_worker,p_revision) THEN RAISE EXCEPTION 'source_lease_lost';END IF;
    current_control=shared.memory_source_control_snapshot()::bigint;
    SELECT * INTO d FROM shared.memory_source_distributions WHERE source_kind=p_kind AND root_key=p_root FOR UPDATE NOWAIT;
+   -- A fully dispatched personal metadata wave owns its exact scope seal
+   -- until its original jobs finish. The live work claim can cover the latest
+   -- locked native frontier independently; no seal/targets/dispatch/ACK change.
+   IF FOUND AND p_kind='relay_event' AND d.state='sealed' AND d.dispatch_complete
+    AND d.work_revision<>p_revision AND d.control_revision=current_control
+    AND EXISTS(SELECT 1 FROM shared.memory_source_distribution_targets t WHERE t.scan_id=d.scan_id AND t.state='current')
+    AND NOT EXISTS(SELECT 1 FROM shared.memory_source_distribution_targets t
+     LEFT JOIN memory.memory_jobs j ON j.installation_id=t.installation_id AND j.job_type='project_shared_source'
+      AND j.idempotency_key='shared-source:'||d.scan_id::text||':'||encode(sha256(convert_to(t.cursor_key,'UTF8')),'hex')
+     WHERE t.scan_id=d.scan_id AND t.state='current' AND(t.target_mode<>'shared-active' OR j.job_id IS NULL
+      OR j.state='dead' OR j.payload->'scope' IS DISTINCT FROM t.source_scope
+      OR j.payload->'root' IS DISTINCT FROM jsonb_build_object('kind',p_kind,'key',p_root)
+      OR j.payload->>'distribution_scan' IS DISTINCT FROM d.scan_id::text OR j.payload->>'target_cursor' IS DISTINCT FROM t.cursor_key
+      OR NOT EXISTS(SELECT 1 FROM shared.memory_source_modes m WHERE m.installation_id=t.installation_id
+       AND m.mode='shared-active' AND m.generation::text=t.source_scope->>'modeGeneration')
+      OR NOT EXISTS(SELECT 1 FROM shared.memory_relay_source_authority(t.source_scope,p_kind,p_root) a WHERE a.state='current'
+       AND a.authorization_revision=t.source_version->>'authorization')))
+    AND EXISTS(SELECT 1 FROM shared.memory_source_distribution_targets t JOIN memory.memory_jobs j
+     ON j.installation_id=t.installation_id AND j.job_type='project_shared_source'
+      AND j.idempotency_key='shared-source:'||d.scan_id::text||':'||encode(sha256(convert_to(t.cursor_key,'UTF8')),'hex')
+     WHERE t.scan_id=d.scan_id AND t.state='current' AND j.state IN('pending','running')) THEN
+    UPDATE shared.memory_source_work SET claimed_revision=revision
+     WHERE source_kind=p_kind AND root_key=p_root AND lease_token=p_token AND lease_owner=p_worker
+      AND claimed_revision=p_revision AND lease_until>clock_timestamp() AND dead_at IS NULL
+     RETURNING claimed_revision INTO claimed_frontier;
+    IF NOT FOUND OR NOT shared.assert_memory_source_lease(p_kind,p_root,p_token,p_worker,claimed_frontier) THEN RAISE EXCEPTION 'source_lease_lost';END IF;
+    IF NOT shared.guard_memory_control_commit(current_control) THEN RAISE EXCEPTION 'source_distribution_control_changed';END IF;
+    RETURN jsonb_build_object('waiting',TRUE,'scanId',d.scan_id,'workRevision',d.work_revision::text,'claimedRevision',claimed_frontier::text);
+   END IF;
    IF FOUND AND(d.work_revision,d.control_revision) IS DISTINCT FROM(p_revision,current_control) THEN
     UPDATE shared.memory_source_distributions SET scan_id=gen_random_uuid(),work_revision=p_revision,control_revision=current_control,
      cursor_key='',state='scanning',dispatch_cursor='',dispatch_complete=FALSE,updated_at=clock_timestamp() WHERE source_kind=p_kind AND root_key=p_root RETURNING * INTO d;
@@ -131,9 +170,14 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.current_memory_source_distribution(p_kind TEXT,p_root TEXT,p_installation UUID) RETURNS JSONB
   LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
    SELECT jsonb_build_object('scanId',d.scan_id,'controlRevision',d.control_revision::text,'workRevision',d.work_revision::text,
+    'contentPending',d.work_revision<>w.revision,
     'targetCount',(SELECT count(*)::text FROM shared.memory_source_distribution_targets t WHERE t.scan_id=d.scan_id AND t.installation_id=p_installation))
    FROM shared.memory_source_distributions d JOIN shared.memory_source_work w USING(source_kind,root_key)
-   WHERE d.source_kind=p_kind AND d.root_key=p_root AND d.state='sealed' AND d.work_revision=w.revision
+   -- Scope enumeration and content completion are different proofs. Personal
+   -- metadata ingest can read a still-current scope seal while r+1 stays dirty.
+   -- Team semantic SQL consumers retain their original latest-content gate.
+   WHERE d.source_kind=p_kind AND d.root_key=p_root AND d.state='sealed' AND d.work_revision<=w.revision
+    AND(p_kind='relay_event' OR d.work_revision=w.revision)
     AND d.control_revision=shared.memory_source_control_snapshot()::bigint
   $$`,
  `REVOKE ALL ON FUNCTION shared.step_memory_source_distribution(TEXT,TEXT,UUID,TEXT,BIGINT,UUID,TEXT,INT),
