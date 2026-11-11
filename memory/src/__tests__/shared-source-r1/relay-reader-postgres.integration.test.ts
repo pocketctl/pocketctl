@@ -1192,12 +1192,29 @@ suite('controlled personal Relay source reader',()=>{
  })
 
  test('the real canonical queue resumes persisted page state across separate claims',async()=>{
+  // This late queue case enters the explicit selected API. Install the real
+  // modern marker/capture and authenticated Journal publisher prerequisites.
+  // Earlier cases intentionally retain malformed historical partial headers;
+  // NOT VALID preserves those old negative fixtures while enforcing every new
+  // row/update here. No historical body/hash/provenance backfill is performed.
+  const {RELAY_SOURCE_HEADER_SQL}=await import(new URL('../../../../relay/dist/shared-source/header-contract.js',import.meta.url).href)
+  const {RELAY_SOURCE_CAPTURE_SQL}=await import(new URL('../../../../relay/dist/shared-source/capture-contract.js',import.meta.url).href)
+  for(const sql of RELAY_SOURCE_HEADER_SQL)await pool.query(sql.replace('));\n  END IF;', ')) NOT VALID;\n  END IF;'))
+  for(const sql of RELAY_SOURCE_CAPTURE_SQL)await pool.query(sql)
+  const {createPostgresExtensionJournalSink}=await import(new URL('../../../../relay/dist/extensions/journal.js',import.meta.url).href)
+  const publishHeader=async(id:string,session:string,eventType:string,payload:Record<string,unknown>)=>createPostgresExtensionJournalSink({sharedHeaders:true}).appendCanonicalEvent(pool,{sourceEventId:id,ownerUserId:1,sessionId:session,eventType,occurredAt:null,payload})
   const {createCanonicalProjectionHandler}=await import('../../sources/canonical-projection-worker.js')
   const {createJobRepository}=await import('../../jobs/repository.js'),{createJobWorker}=await import('../../jobs/worker.js')
   const session='canonical-queue-92',turn='canonical-queue-turn-92',jobs=createJobRepository(runtime),payload:Record<string,any>={scope:{...scope,modeGeneration:'5'},root:{kind:'relay_event',key:'1:'+session}}
   await runtime.query("UPDATE memory_jobs SET state='completed',claim_expires_at=NULL WHERE state='pending'")
   await pool.query("INSERT INTO public.sessions VALUES($1,1,'daemon','codex','hot','codex')",[session])
-  for(const [i,id]of ['9007199254741260','9007199254741261'].entries())await pool.query("INSERT INTO public.events(id,session_id,user_id,event_type,payload,effect_status,body_storage,created_at) VALUES($1,$2,1,$5,$3,'completed','hot',$4)",[id,session,i===0?{text:'queue fixture 0',turn_id:turn}:{turn_status:'completed',turn_id:turn},new Date(),i===0?'agent_text':'turn_status'])
+  for(const [i,id]of ['9007199254741260','9007199254741261'].entries()){
+   const body=i===0?{text:'queue fixture 0',turn_id:turn}:{turn_status:'completed',turn_id:turn},type=i===0?'agent_text':'turn_status'
+   await pool.query("INSERT INTO public.events(id,session_id,user_id,event_type,payload,effect_status,body_storage,created_at) VALUES($1,$2,1,$5,$3,'completed','hot',$4)",[id,session,body,new Date(),type])
+   await publishHeader(id,session,type,body)
+   const header=(await pool.query('SELECT source_header_version,source_sequence::text,canonical_payload_hash,source_classification,source_body_change_revision::text FROM public.events WHERE id=$1',[id])).rows[0]
+   expect(header.source_header_version).toBe(1);expect(BigInt(header.source_sequence)).toBeGreaterThan(0n);expect(header.canonical_payload_hash).toBe(canonicalPayloadHash(body).toString('hex'));expect(header.source_classification).toEqual(expect.any(Object));expect(header.source_body_change_revision).toMatch(/^[0-9]+$/)
+  }
   await pool.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",[payload.root.key])
   const refreshSeal=async()=>{
    const claim=(await runtime.query("SELECT root_key,lease_token::text,claimed_revision::text FROM shared.claim_memory_source_work('queue-distributor',30,128)")).rows.find(r=>r.root_key===payload.root.key)!
@@ -1208,10 +1225,11 @@ suite('controlled personal Relay source reader',()=>{
    }
    const target=(await runtime.query("SELECT * FROM shared.read_memory_source_context_set('relay_event',$1,$2,$3,'',64)",[payload.root.key,page.scanId,inst])).rows[0]
    payload.distribution_scan=page.scanId;payload.target_cursor=target.cursor_key
-   await runtime.query('SELECT shared.record_memory_source_dispatch($1,$2,$3,$4,$5,$6,$7)',[inst,payload.scope.modeGeneration,payload.root.kind,payload.root.key,claim.claimed_revision,'1',payload.scope.authorizationRevision])
+   await runtime.query('SELECT shared.record_memory_source_dispatch($1,$2,$3,$4,$5,$6,$7)',[inst,payload.scope.modeGeneration,payload.root.kind,payload.root.key,claim.claimed_revision,(await pool.query('SELECT content_revision FROM shared.memory_relay_source_authority($1::jsonb,$2,$3)',[JSON.stringify(payload.scope),payload.root.kind,payload.root.key])).rows[0].content_revision,payload.scope.authorizationRevision])
    await runtime.query("SELECT shared.ack_memory_source_work('relay_event',$1,$2,'queue-distributor',$3)",[payload.root.key,claim.lease_token,claim.claimed_revision])
   }
   await refreshSeal()
+  let expectedRevision=(await pool.query('SELECT revision::text FROM shared.memory_source_work WHERE root_key=$1',[payload.root.key])).rows[0].revision
   await jobs.enqueueJob({installationId:inst,jobType:'project_shared_source',idempotencyKey:session,payload})
   const errors:string[]=[],queue=createJobWorker({pool:runtime,jobs,workerId:'canonical-page-worker',signal:new AbortController().signal,onError:e=>errors.push(String(e))})
   queue.register('project_shared_source',createCanonicalProjectionHandler(runtime,{pageSize:1,deferMs:0}),{branch:'canonical'})
@@ -1219,21 +1237,18 @@ suite('controlled personal Relay source reader',()=>{
    await queue.tick()
    expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'pending',claim_epoch:'1'}])
    expect((await runtime.query('SELECT state FROM memory_canonical_projection_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows).toEqual([{state:'scanning'}])
-   expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:'1',processed_revision:'0'})
+   expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:expectedRevision,processed_revision:'0'})
    await runtime.query('UPDATE memory_jobs SET available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])
    await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'pending',claim_epoch:'2'}])
-   await runtime.query('UPDATE memory_jobs SET available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])
-   await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'3'}])
+   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'2'}])
    expect((await runtime.query('SELECT state FROM memory_canonical_projection_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows).toEqual([{state:'ready'}])
-   expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:'1',processed_revision:'1'})
+   expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:expectedRevision,processed_revision:expectedRevision})
    expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:'2'}])
    // Simulate loss of the worker after final page COMMIT but before its job
    // completion was durable. A new claim must complete without a page restart.
    await runtime.query("UPDATE memory_jobs SET state='pending',completed_at=NULL,available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2",[inst,session])
    await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'4'}])
+   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'3'}])
    expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:'2'}])
    // Cooling changes only storage, with no new dirty revision or job. The
    // completed content projection remains usable, while real cold IO still
@@ -1252,7 +1267,7 @@ suite('controlled personal Relay source reader',()=>{
    bindSourcePool(runtime,{namespace:'memory',archive:{storage:{namespace:storage.namespace,read:async key=>{coldReads++;return storage.read(key)}},limits}})
    await runtime.query("UPDATE memory_jobs SET state='pending',completed_at=NULL,available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2",[inst,session])
    await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'5'}])
+   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'4'}])
    expect(coldReads).toBe(0)
    const {createEpisodeRepository}=await import('../../episodes/repository.js')
    queue.register('compile_episode',createEpisodeRepository(runtime,{stabilizationMs:0}).handleCompileEpisode)
@@ -1264,17 +1279,19 @@ suite('controlled personal Relay source reader',()=>{
    try{await expect(createEpisodeRepository(runtime).compileTurn(inst,turn)).rejects.toMatchObject({code:'archive_unavailable'})}
    finally{await storage.put(coldKey,cold.bytes)}
    await pool.query("INSERT INTO public.events(id,session_id,user_id,event_type,payload,effect_status,body_storage,created_at) VALUES('9007199254741262',$1,1,'agent_text',$2,'completed','hot',now())",[session,{text:'newer committed revision',turn_id:turn}])
+   await publishHeader('9007199254741262',session,'agent_text',{text:'newer committed revision',turn_id:turn})
    await pool.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",[payload.root.key])
    await refreshSeal()
+   expectedRevision=(await pool.query('SELECT revision::text FROM shared.memory_source_work WHERE root_key=$1',[payload.root.key])).rows[0].revision
    await runtime.query('UPDATE memory_jobs SET payload=$3::jsonb WHERE installation_id=$1 AND idempotency_key=$2',[inst,session,JSON.stringify(payload)])
    await runtime.query("UPDATE memory_jobs SET state='pending',completed_at=NULL,available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2",[inst,session])
    for(let n=0;n<4;n++){
     await queue.tick()
     await runtime.query('UPDATE memory_jobs SET available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])
    }
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'9'}])
+   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'7'}])
    expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:'3'}])
-   expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:'2',processed_revision:'2'})
+   expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:expectedRevision,processed_revision:expectedRevision})
    expect(errors).toEqual([])
   }finally{await queue.stop()}
  })

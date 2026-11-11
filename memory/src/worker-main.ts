@@ -1,6 +1,7 @@
 import {attachSourceMetrics} from './sources/metrics.js'
 import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
 import {createSharedSourceScheduler} from './sources/shared-scheduler.js'
+import {wakeCompletedPersonalProjection} from './sources/projection-job-handoff.js'
 import {createNativeInstallationDiscovery} from './installations/native-discovery.js'
 import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
 import {createLifecycleAssessmentService} from './claims/lifecycle-assessment.js'
@@ -238,7 +239,10 @@ async function main(): Promise<void> {
         extract_skill_candidate: config.skill.maxConcurrency,
       },
       onClaim:job=>{if(job.claim_epoch>1)metrics.jobRepeatClaims.inc({type:job.job_type})},
-      onExecution:(job,result,seconds)=>metrics.jobRuntime.observe({type:job.job_type,result},seconds),
+      onExecution:(job,result,seconds)=>{
+        metrics.jobRuntime.observe({type:job.job_type,result},seconds)
+        wakeCompletedPersonalProjection(job,result,root=>sharedSourceScheduler?.wake(root))
+      },
       onError: loopError('jobs'),
     })
     const gitConfig=config.gitSync??loadGitSyncConfig({})
@@ -738,7 +742,9 @@ async function main(): Promise<void> {
       }
     }
     if(config.databaseNamespace==='memory'){
-      sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,refreshInstallations:()=>discovery!.discoverOnce(),refreshWithdrawals:()=>withdrawalConsumer.runOnce(),onError:loopError('shared_source_scheduler')})
+      // Durable dirty rows coalesce publication bursts on the existing cadence.
+      // Per-root fenced job completion hints wake pending source work.
+      sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,onDispatch:()=>jobWorker?.wake(),refreshInstallations:()=>discovery!.discoverOnce(),refreshWithdrawals:()=>withdrawalConsumer.runOnce(),onError:loopError('shared_source_scheduler')})
       sharedSourceScheduler.start()
     }
     jobWorker.start()
@@ -806,7 +812,7 @@ async function main(): Promise<void> {
     statusWorker?.stop(),
     usageWorker?.stop(),
     discovery?.stop(),
-    sharedSourceScheduler?.stop(),
+    sharedSourceScheduler?.stop({releaseOwnedClaims:true}),
   ])
   const jobOutcome = await jobWorker?.stop()
   let feedDrainTimer:ReturnType<typeof setTimeout>|undefined

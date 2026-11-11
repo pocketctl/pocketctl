@@ -13,6 +13,13 @@ const providerAttempts=new WeakMap<object,{pool:pg.Pool;executionId:string;reser
 type ProviderEffect='accounted'|'uncertain'|'not-sent'
 const providerAccounting=new AsyncLocalStorage<Map<object,ProviderEffect>>()
 const unrecordedEffects=new WeakSet<Execution>()
+/** Scheduling a different job or background pass must not inherit the caller's
+ * execution or provider-accounting context. Only dispatch boundaries use this;
+ * actual handlers still capture and validate their own original authority. */
+export function runOutsideSourceJobExecution<T>(work:()=>T):T{
+ return executions.exit(()=>providerAccounting.exit(work))
+}
+
 /** A known response remains account-able, but no further dispatch or output
  * may follow an unrecorded effect in this execution. */
 export function blockUnrecordedSourceEffect():void{const execution=executions.getStore();if(execution)unrecordedEffects.add(execution)}
@@ -79,6 +86,21 @@ export async function protectSourceExecutionBodies(pool:pg.Pool,scope:SourceScop
  if(!execution||execution.branch==='legacy-active'||root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')return
  if(execution.pool!==pool||execution.installationId!==scope.installationId)throw new SourceExecutionError('source_execution_scope_mismatch')
  await execution.pins.protect(scope,root,typeof version==='function'?await version():version)
+}
+/** Fixed selected metadata content and current purge protection are separate.
+ * SQL still acquires/renews only an independently current ordinary vector. */
+export async function protectMetadataSourceBodies(pool:pg.Pool,scope:SourceScope,root:SourceRoot):Promise<void>{
+ const execution=executions.getStore()
+ if(!execution||execution.pool!==pool||execution.installationId!==scope.installationId||execution.branch!=='canonical-active'
+  ||root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')throw new SourceExecutionError('source_execution_scope_mismatch')
+ await execution.pins.protectCurrent(scope,root)
+}
+/** A locator only. The selected SQL fence independently validates the actual
+ * original running job/type/root/turn/claim; no GUC can confer this authority. */
+export function metadataSourceExecution(pool:pg.Pool,installationId:string):{token:object;executionId:string}{
+ const execution=executions.getStore()
+ if(!execution||execution.pool!==pool||execution.installationId!==installationId||execution.branch!=='canonical-active')throw new SourceExecutionError('source_execution_scope_mismatch')
+ return {token:execution,executionId:execution.executionId}
 }
 /** Before reserving any budget. Canonical comparison shadow cannot consume
  * even an internal budget reservation; business legacy-active shadow may. */

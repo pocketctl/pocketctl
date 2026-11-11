@@ -2,7 +2,7 @@ import type pg from 'pg'
 import { workerErrorCode } from './worker-diagnostics.js'
 import { JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
 import type { JobRepository } from './repository.js'
-import {withSourceJobExecution,type SourceExecutionSelection} from '../sources/source-execution.js'
+import {withSourceJobExecution,runOutsideSourceJobExecution,type SourceExecutionSelection} from '../sources/source-execution.js'
 
 // Restrictive cleanup, accounting/status and control repair remain independent
 // of source-input mode. These content consumers capture at dispatch, before IO.
@@ -71,6 +71,7 @@ export function createJobWorker(options: JobWorkerOptions) {
   let stopped = false
   let started=false
   let filling:Promise<void>|undefined
+  let waking:Promise<void>|undefined,wakeRequested=false
   let inFlight: Array<Promise<void>> = []
   const runningClaims = new Map<string, InFlightEntry>()
   const activeByType = new Map<JobType, number>()
@@ -185,9 +186,24 @@ export function createJobWorker(options: JobWorkerOptions) {
         typeLimits:options.concurrencyLimits})
       for(const claim of claims)options.onClaim?.(claim)
       // dispatch registers every claim synchronously before its first await.
-      void dispatch(claims).catch(error=>options.onError?.(error))
+      void runOutsideSourceJobExecution(()=>dispatch(claims)).catch(error=>options.onError?.(error))
     })().finally(()=>{filling=undefined})
     return filling
+  }
+
+  // A durable producer handoff is a hint to claim using the same SQL gates.
+  // Coalesce hints and always finish an older fill before a fresh query.
+  function wake():void{
+    if(!started||stopped||options.signal.aborted)return
+    wakeRequested=true
+    if(waking)return
+    waking=Promise.resolve().then(async()=>{
+      while(wakeRequested&&!stopped&&!options.signal.aborted){
+        wakeRequested=false
+        if(filling)await filling
+        await fill()
+      }
+    }).catch(error=>options.onError?.(error)).finally(()=>{waking=undefined})
   }
 
   async function tick():Promise<void>{
@@ -267,6 +283,7 @@ export function createJobWorker(options: JobWorkerOptions) {
       return inFlight.length === 0 ? 'drained' : 'deadline'
     },
     tick,
+    wake,
   }
 }
 

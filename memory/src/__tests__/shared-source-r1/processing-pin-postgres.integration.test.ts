@@ -1,6 +1,7 @@
 import {beginFreshInputFixture} from './input-start-fixture.js'
 import {installNativeAliasFixture} from './native-alias-fixture.js'
 import pg from 'pg'
+import {SourceProcessingPins} from '../../sources/processing-pins.js'
 import {afterAll,beforeAll,beforeEach,describe,expect,test} from 'vitest'
 import {applyMemorySchema} from '../../schema.js'
 import {applySharedSourceContract} from '../../migrations/shared-db/contract.js'
@@ -296,6 +297,50 @@ suite('bounded durable native personal processing pins',()=>{
    await pool.query('DROP TRIGGER IF EXISTS memory_execution_processing_commit ON shared.memory_source_executions;CREATE CONSTRAINT TRIGGER memory_execution_processing_commit AFTER UPDATE ON shared.memory_source_executions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION shared.check_memory_execution_processing_commit()')
   }
   await assertSharedRuntimeContract(runtime)
+ })
+
+ test.each([false,true])('real pin mutex released after 100ms admits the same immutable execution without a paid retry, renewal=%s',async renew=>{
+  const locker=await pool.connect(),pins=new SourceProcessingPins(runtime,execution)
+  const attemptsBefore=(await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_provider_attempts')).rows[0].n
+  if(renew)await pins.protect(scope,root,version)
+  const deadlineBefore=(await pool.query('SELECT hard_deadline::text FROM shared.memory_source_processing_windows')).rows[0]?.hard_deadline
+  try{
+   await locker.query('BEGIN');await locker.query("SELECT pg_advisory_xact_lock(hashtextextended('processing-pin:installation:'||$1,0))",[inst])
+   const started=performance.now(),protectedPin=(renew?pins.assertCurrent():pins.protect(scope,root,version)).then(()=>undefined,error=>error)
+   await new Promise(resolve=>setTimeout(resolve,100))
+   expect((await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename='processing_pin_memory' AND state='idle in transaction'")).rows[0].n).toBe(0)
+   await locker.query('COMMIT');expect(await protectedPin).toBeUndefined()
+   expect(performance.now()-started).toBeLessThan(2000);expect(pins.count).toBe(1)
+   if(renew)expect((await pool.query('SELECT hard_deadline::text FROM shared.memory_source_processing_windows')).rows[0].hard_deadline).toBe(deadlineBefore)
+   expect((await pool.query('SELECT source_scope,source_version FROM shared.memory_source_processing_pins WHERE execution_id=$1',[execution])).rows).toEqual([{source_scope:scope,source_version:version}])
+   expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_provider_attempts')).rows[0].n).toBe(attemptsBefore)
+  }finally{await locker.query('ROLLBACK');locker.release();await pins.close()}
+ })
+ test('real pin mutex held beyond all bounded attempts refuses admission without renewing the window',async()=>{
+  const locker=await pool.connect(),pins=new SourceProcessingPins(runtime,execution)
+  try{
+   await locker.query('BEGIN');await locker.query("SELECT pg_advisory_xact_lock(hashtextextended('processing-pin:root:1:session',0))")
+   const started=performance.now()
+   await expect(pins.protect(scope,root,version)).rejects.toThrow('processing_pin_expired_or_unavailable')
+   expect(performance.now()-started).toBeLessThan(2000)
+   expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_processing_windows')).rows[0].n).toBe(0)
+  }finally{await locker.query('ROLLBACK');locker.release();await pins.close()}
+ })
+
+ test.each(['content','authorization','storage','revoke','window','job-expiry','owner','control','mode'])('bounded class retries still reject permanent %s denial under the original immutable authority',async denial=>{
+  const pins=new SourceProcessingPins(runtime,execution),expected={...version}
+  if(['content','authorization','storage'].includes(denial))(expected as any)[denial]='9'
+  if(denial==='revoke')await pool.query("INSERT INTO public.deleted_sessions VALUES('session')")
+  if(denial==='window'){
+   expect(await pin()).toBe(true);await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[execution])
+   await pool.query("UPDATE shared.memory_source_processing_windows SET started_at=t.stamp-interval '3 minutes',hard_deadline=t.stamp-interval '1 minute' FROM(SELECT clock_timestamp() AS stamp)t")
+  }
+  if(denial==='job-expiry')await pool.query("UPDATE memory.memory_jobs SET claim_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=$1",[job])
+  if(denial==='owner')await pool.query("UPDATE memory.memory_jobs SET claimed_by='another-worker' WHERE job_id=$1",[job])
+  if(denial==='control')await pool.query('UPDATE shared.memory_source_control_clock SET revision=revision+1')
+  if(denial==='mode')await pool.query("UPDATE shared.memory_source_modes SET mode='paused' WHERE installation_id=$1",[inst])
+  try{await expect(pins.protect(scope,root,expected)).rejects.toThrow('processing_pin_expired_or_unavailable');expect(pins.count).toBe(0)}finally{await pins.close()}
+  expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_processing_pins')).rows[0].n).toBe(0)
  })
 
 })
