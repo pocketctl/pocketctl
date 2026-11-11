@@ -165,8 +165,15 @@ export async function persistCanonicalReferencePage(pool:pg.Pool,page:CanonicalR
   const sessions=[...new Set(heads.map(h=>h.sessionKey))].sort()
   // Unknown historical rows must be mapped/explicitly retained by M0 first.
   // Matching text or a hash is not authority to mint a second source UUID.
-  const unproven=await query(`SELECT source_event_id FROM source_events WHERE installation_id=$1
-   AND(session_id=ANY($2::text[]) OR canonical_session_key=ANY($2::text[])) AND mapping_state IN('unproven','conflict') LIMIT 1`,[scope.installationId,sessions])
+  // Limit each subject lookup independently so either existing partial index
+  // can reject an absent subject without scanning the installation's history.
+  const unproven=await query(`SELECT source_event_id FROM(
+   (SELECT source_event_id FROM source_events WHERE installation_id=$1
+    AND session_id=ANY($2::text[]) AND mapping_state IN('unproven','conflict') LIMIT 1)
+   UNION ALL
+   (SELECT source_event_id FROM source_events WHERE installation_id=$1
+    AND canonical_session_key=ANY($2::text[]) AND mapping_state IN('unproven','conflict') LIMIT 1)
+  ) AS unproven LIMIT 1`,[scope.installationId,sessions])
   if(unproven.rowCount)throw Error('canonical_reference_mapping_required')
   const existing=(await selectedLockQuery(`SELECT s.source_event_id::text,s.canonical_key,s.canonical_session_key,s.session_id,s.turn_id,s.event_type,s.content_hash,s.classification,s.mapping_state,s.origin,s.source_provenance,s.canonical_projected_at,p.canonical_key AS matched_key,
    (s.occurred_at=p.occurred_at::timestamptz OR(s.origin IN('feed','snapshot') AND s.mapping_state='verified' AND s.source_kind='relay_event'
