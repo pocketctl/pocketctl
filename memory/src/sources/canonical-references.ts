@@ -101,12 +101,25 @@ export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:Can
 
 /** A new latest scan may find an already current context. It must still run
  * ordinary physical installation completion, never return on a TS receipt. */
-export async function completeReadyCanonicalProjection(pool:pg.Pool,scope:SourceScope,root:SourceRoot,version:SourceVersion){
+export async function completeReadyCanonicalProjection(pool:pg.Pool,scope:SourceScope,root:SourceRoot,version:SourceVersion,options:{deferMs?:number}={}){
  requireExecution(pool,scope.installationId);const client=await pool.connect()
- try{await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='1s'")
-  await guardSourceExecutionCommit(client,scope.installationId);await completeSourceProjection(client,scope,root,version)
+ let completing=false
+ try{
+  await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='1s'")
+  await guardSourceExecutionCommit(client,scope.installationId)
+  completing=true
+  const completed=await completeSourceProjection(client,scope,root,version)
+  completing=false
   await guardSourceExecutionCommit(client,scope.installationId);await client.query('COMMIT')
- }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
+  return completed
+ }catch(error){
+  await client.query('ROLLBACK')
+  const failure=error as {code?:string;message?:string}|null
+  if(completing&&options.deferMs!==undefined&&(failure?.code==='55P03'||failure?.code==='P0001'&&failure.message==='source_reference_changed')){
+   throw new JobDeferredError('source_not_ready',new Date(Date.now()+options.deferMs))
+  }
+  throw error
+ }finally{client.release()}
 }
 
 /** Bounded metadata-only physical transaction. It neither copies a body nor

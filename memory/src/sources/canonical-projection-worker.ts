@@ -45,11 +45,18 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
   const readProgress=async()=>(await pool.query(`SELECT next_cursor,state,source_version FROM memory_canonical_projection_progress
    WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4`,[scope.installationId,root.kind,root.key,canonicalPayloadHash(scope).toString('hex')])).rows[0]
   const progress=await readProgress()
-  if(!personal&&(progress?.state==='ready'||progress?.state==='raw_ready')){
+  if(progress?.state==='ready'||(!personal&&progress?.state==='raw_ready')){
    const current=await createObservedSourceReader(pool).checkCurrent(scope,root)
    if(current.state==='current'&&sameDerivedSourceVersion(current.version,progress.source_version)){
-    if(team)await publishTeam();else{await completeReadyCanonicalProjection(pool,scope,root,current.version);if(scope.ownerScopeKind==='personal')options.onReady?.(root)}
-    return
+    if(signal.aborted)throw Error('canonical_projection_aborted')
+    if(team){await publishTeam();return}
+    // A current per-context checkpoint can skip body IO only after SQL
+    // confirms the sealed installation watermark under the current authority.
+    const completed=await completeReadyCanonicalProjection(pool,scope,root,current.version,personal?{deferMs}:undefined)
+    if(completed||!personal){
+     if(personal)options.onReady?.(root)
+     return
+    }
    }
    if(current.state!=='current'&&current.state!=='changed')throw new SourceUnavailableError(current.state)
   }
