@@ -79,6 +79,7 @@ export function createContextRetrieval(deps: {
       authorityGrant?:import('../sources/retained-read.js').SourceReadGrant
       lifecycle?:LifecycleFrame
       query: string
+      localOnly?: boolean
       repositoryId?: string | null
       repoSnapshotId?:string|null
       taskScopeKey?:string|null
@@ -106,6 +107,7 @@ export function createContextRetrieval(deps: {
           installationId: input.installationId,
           authorityGrant:input.authorityGrant,
           query: input.query,
+          localOnly: input.localOnly,
           lifecycle:input.lifecycle,
           repositoryId: input.repositoryId ?? null,
           repoSnapshotId:input.repoSnapshotId??null,
@@ -317,7 +319,7 @@ export function createContextRetrieval(deps: {
         branch: input.branch ?? null,
         rankingPolicyVersionId: input.rankingPolicyVersionId ?? null,
         backendPlan: {
-          pools: ['metadata', 'lexical', ...(degradedComponents.includes('embedding') ? [] : ['vector'])],
+          pools: ['metadata', 'lexical', ...(input.localOnly || degradedComponents.includes('embedding') ? [] : ['vector'])],
           degraded: degradedComponents,
           limit,
           internalPoolTruncated:poolTruncated,

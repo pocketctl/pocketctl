@@ -28,6 +28,8 @@ import { normalizedClaimKey } from './query-normalizer.js'
 export interface SearchInput {
   /** Server-only, already signature-verified grant; never copied from request JSON. */
   authorityGrant?:SourceReadGrant
+  /** Use database recall pools without a synchronous embedding provider call. */
+  localOnly?: boolean
   selectionHistorical?:boolean
   installationId: string
   lifecycle?:LifecycleReadFrame
@@ -136,8 +138,9 @@ export function createSearchService(deps: SearchServiceDeps) {
       const mode=embeddingMode.rows[0]?.embedding_mode
       const consentMatches=!deps.embeddingConsentFingerprint||embeddingMode.rows[0]?.embedding_consent_fingerprint===deps.embeddingConsentFingerprint
       let queryEmbedding:number[]|null=null
-      if((mode==='shadow'||mode==='enabled')&&(!deps.embed||!consentMatches))degraded.push('embedding')
-      if((mode==='shadow'||mode==='enabled')&&deps.embed&&consentMatches){
+      const embeddingEnabled = mode === 'shadow' || mode === 'enabled'
+      if (embeddingEnabled && (input.localOnly || !deps.embed || !consentMatches)) degraded.push('embedding')
+      if (embeddingEnabled && !input.localOnly && deps.embed && consentMatches) {
         try{
           const controller=new AbortController()
           const embedded=await withTimeout(deps.embed.embed({operation:'recall_query',texts:[query],signal:controller.signal}),deps.recallEmbeddingTimeoutMs,controller)
