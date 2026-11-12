@@ -31,10 +31,13 @@ function fakeDeps(overrides: {
   const deps = {
     pool: {
       query: vi.fn(async (sql: string, values?:unknown[]) => {
-        if(sql.includes('AS source_metadata_owned'))return {rows:(values?.[1] as string[]).map(versionId=>({version_id:versionId,claim_id:'fixture-claim',scope_kind:'installation',scope_key:'global',repository_id:null,repo_snapshot_id:null,branch:null,applicability:null,consumption_hold_reason:null,current:true,time_eligible:true,source_metadata_owned:true,canonical_remote:null}))}
-
-        if (sql.includes('AS evidence_ids')) {
-          return { rows: (values?.[1] as string[]).map(version_id => ({ version_id, evidence_ids: ['e-1'] })) }
+        if (sql.includes('AS source_metadata_owned')) {
+          return { rows: (values?.[1] as string[]).map(version_id => ({
+            version_id, claim_id: 'fixture-claim', scope_kind: 'installation', scope_key: 'global',
+            repository_id: null, repo_snapshot_id: null, branch: null, applicability: null,
+            consumption_hold_reason: null, current: true, time_eligible: true, source_metadata_owned: true,
+            canonical_remote: null, ...(sql.includes('AS evidence_ids') ? { evidence_ids: ['e-1'] } : {}),
+          })) }
         }
         if (sql.includes('knowledge_versions')) return { rows: [{ statement: 'version statement here' }] }
         return { rows: [] }
@@ -158,7 +161,7 @@ describe('context compiler (deterministic synchronous path)', () => {
     expect(items.find(item => item.claimType === 'work_method'))
       .toMatchObject({ layer: 'L3', section: 'stable' })
     expect(items.find(item => item.claimType === 'architecture_decision'))
-      .toMatchObject({ layer: 'L2', section: 'dynamic' })
+      .toMatchObject({ layer: 'L2', section: 'dynamic', evidenceIds: ['e-1'] })
   })
 
   test('an unknown repository hint can only compile installation Persona', async () => {

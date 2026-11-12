@@ -3,6 +3,7 @@ import type pg from 'pg'
 import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
 import {prepareSourceAuthorities} from './prepared-sources.js'
 import {governedRetainedEvidence} from './governed-retained-evidence.js'
+import {assertCurrentGrantClock,TargetBindingError} from '../governance/authorization.js'
 
 export interface RetainedEvidenceBinding {source_event_id:string|null;artifact_id:string|null;episode_id?:string|null;evidence_kind?:string;evidence_id?:string;version_id?:string}
 type Db=Pick<pg.PoolClient,'query'>
@@ -142,14 +143,35 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
  }
  for(const id of added)state.ids.add(id)
 }
-export async function assertRetainedSourceGuards(client:Db):Promise<void>{
+export async function assertRetainedSourceGuards(client:Db,finalGrant?:{
+ installationId:string
+ grant:Parameters<typeof assertCurrentGrantClock>[1]
+}):Promise<void>{
  const states=attached.get(sourceConnectionKey(client))
- if(!states)return
- for(const state of [...states.values()].sort((a,b)=>a.installationId.localeCompare(b.installationId))){
+ const state=finalGrant&&states?.size===1?states.get(finalGrant.installationId):undefined
+ const expiresAt=finalGrant?.grant.expiresAt
+ // A single retained mode with no dependent guards has no blocking work
+ // after this read. Scoped grants still recheck bindings and member clocks.
+ if(state&&!state.guards.length&&finalGrant?.grant.scopeBindings===undefined
+   &&expiresAt!==undefined&&Number.isFinite(expiresAt)){
+  const result=(await client.query<SourceMode&{alive:boolean}>(`
+   WITH retained_mode AS MATERIALIZED (
+    SELECT mode,generation::text FROM shared.memory_source_modes WHERE installation_id=$1
+   )
+   SELECT COALESCE(m.mode,'legacy-feed') AS mode,COALESCE(m.generation,'1') AS generation,
+    clock_timestamp()<to_timestamp($2::double precision) AS alive
+   FROM (VALUES (1)) singleton LEFT JOIN retained_mode m ON TRUE
+  `,[state.installationId,expiresAt])).rows[0]
+  if(result?.mode!==state.mode||result.generation!==state.generation)throw Error('source_reference_changed')
+  if(result.alive!==true)throw new TargetBindingError('grant expired')
+  return
+ }
+ for(const state of [...(states?.values()??[])].sort((a,b)=>a.installationId.localeCompare(b.installationId))){
   const mode=await currentRetainedSourceMode(client,state.installationId)
   if(mode.mode!==state.mode||mode.generation!==state.generation)throw Error('source_reference_changed')
   for(const guard of state.guards)await guard.assertCurrent(client,{forCommit:true})
  }
+ if(finalGrant)await assertCurrentGrantClock(client,finalGrant.grant,[finalGrant.installationId])
 }
 
 // In-memory only: federated DTO assembly must carry every per-scope source

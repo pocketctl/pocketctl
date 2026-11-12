@@ -1,7 +1,7 @@
 import {beginFreshInputFixture} from './input-start-fixture.js'
 import {installNativeAliasFixture} from './native-alias-fixture.js'
 import pg from 'pg'
-import {afterAll,beforeAll,describe,expect,test} from 'vitest'
+import {afterAll,beforeAll,describe,expect,test,vi} from 'vitest'
 import {applyMemorySchema} from '../../schema.js'
 import {applySharedSourceContract} from '../../migrations/shared-db/contract.js'
 import {provisionSharedDatabase} from '../../migrations/shared-db/namespace.js'
@@ -883,6 +883,24 @@ suite('controlled personal Relay source reader',()=>{
   }finally{await next.query('ROLLBACK');next.release()}
  })
 
+ test('the final personal grant check rejects expiry and a mode change after retained reads',async()=>{
+  const {guardRetainedEvidence,assertRetainedSourceGuards}=await import('../../sources/retained-authority.js')
+  const client=await runtime.connect()
+  const expired={installationId:inst,grant:{expiresAt:0}}
+  const active={installationId:inst,grant:{expiresAt:Date.now()/1000+120}}
+  try{
+   await client.query('BEGIN')
+   await guardRetainedEvidence(client,inst,[])
+   await expect(assertRetainedSourceGuards(client,active)).resolves.toBeUndefined()
+   await expect(assertRetainedSourceGuards(client,expired)).rejects.toThrow('grant expired')
+   await pool.query('UPDATE shared.memory_source_modes SET generation=generation+1 WHERE installation_id=$1',[inst])
+   try{
+    await expect(assertRetainedSourceGuards(client,active)).rejects.toThrow('source_reference_changed')
+    await expect(assertRetainedSourceGuards(client,expired)).rejects.toThrow('source_reference_changed')
+   }finally{await pool.query('UPDATE shared.memory_source_modes SET generation=generation-1 WHERE installation_id=$1',[inst])}
+  }finally{await client.query('ROLLBACK');client.release()}
+ })
+
  test('episode-only retained evidence follows explicit manifest UUIDs and cannot bypass current Relay revocation',async()=>{
   const {guardRetainedEvidence}=await import('../../sources/retained-authority.js')
   const episode=(await pool.query("SELECT episode_id::text FROM memory.work_episodes WHERE installation_id=$1 AND turn_id='turn-1'",[inst])).rows[0].episode_id
@@ -1439,6 +1457,24 @@ suite('controlled personal Relay source reader',()=>{
   }finally{await warm.end()}
  },20_000)
 
+ test('native local recall reads the embedding mode with an empty candidate set',async()=>{
+  const {randomUUID}=await import('node:crypto')
+  const {createSearchService}=await import('../../retrieval/search-service.js')
+  const {measureContextDelivery}=await import('../helpers/origin-context-fixture.js')
+  const {governanceFixture}=await import('../../testing/governance-fixture.js')
+  const {personal:installation}=await governanceFixture(runtime)
+  await runtime.query(`INSERT INTO memory_feature_settings(installation_id,embedding_mode)
+   VALUES($1,'enabled') ON CONFLICT(installation_id) DO UPDATE SET embedding_mode='enabled'`,[installation])
+  const search=createSearchService({pool:runtime,recallEmbeddingTimeoutMs:100,cursorSigningKey:'native-test-key'})
+  const measured=await measureContextDelivery(async phase=>{
+   const result=await phase('recall',()=>search.internalRecall({
+    installationId:installation,repositoryId:randomUUID(),query:'missing repository',localOnly:true,
+   }))
+   expect(result).toMatchObject({hits:[],degradedComponents:['embedding']})
+  },0)
+  expect(measured.phases[0].queries).toHaveLength(1)
+ })
+
  test('native Context delivers two accepted excerpts within the shared turn budget',async()=>{
   const {randomUUID}=await import('node:crypto')
   const {governanceFixture}=await import('../../testing/governance-fixture.js')
@@ -1487,6 +1523,7 @@ suite('controlled personal Relay source reader',()=>{
   const client=await contextDeliveryClient(runtime,context,installation)
   const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,options:{
    queryText?:string;withProvenEvidence?:boolean;configVersion?:string;verifyRetry?:boolean;expectEmpty?:boolean
+   beforeAdmit?:()=>Promise<void>
   }={})=>{
    const {queryText=statement,withProvenEvidence=true,configVersion='1',verifyRetry=false,expectEmpty=false}=options
    const signal=AbortSignal.timeout(750)
@@ -1515,6 +1552,7 @@ suite('controlled personal Relay source reader',()=>{
    expect(pack.pack.item_count).toBe(1)
    if(!withProvenEvidence)return pack.pack.pack_id as string
    const path='/packs/'+pack.pack.pack_id
+   await options.beforeAdmit?.()
    const admit=()=>http(path+'/admit',{...turn,adapter:'codex-app-server'})
    const admission=await phase('admit',()=>verifyRetry?Promise.all([admit(),admit()]):admit().then(value=>[value]))
    const ticket=admission.find(value=>value.nonce)
@@ -1535,6 +1573,51 @@ suite('controlled personal Relay source reader',()=>{
    await deliver('different-identifier',(_name,run)=>run(),{
     queryText:mixedLanguageQuery.replace('memory_jobs','memory_jobs_archive'),expectEmpty:true,
    })
+   const {setTimeout:wait}=await import('node:timers/promises')
+   let releaseFrame!:()=>void
+   const configurationStarted=new Promise<void>(resolve=>{releaseFrame=resolve})
+   let sawFrame=false,frameReleased=false,configurationOverlapped=false
+   const queryBeforeOverlap=pg.Client.prototype.query as (...args:any[])=>any
+   const overlapProbe=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:any[]){
+    const result=queryBeforeOverlap.apply(this,args)
+    if(typeof args[0]!=='string')return result
+    if(args[0].includes('WITH current_versions AS MATERIALIZED')){
+     configurationOverlapped=!frameReleased
+     releaseFrame()
+    }
+    if(!args[0].includes('AS stored_binding')||typeof args.at(-1)==='function')return result
+    sawFrame=true
+    return result.then(async(value:unknown)=>{
+     await Promise.race([configurationStarted,wait(150)])
+     frameReleased=true
+     return value
+    })
+   })
+   try{await deliver('overlapping-configuration',(_name,run)=>run())}
+   finally{overlapProbe.mockRestore()}
+   expect(sawFrame&&configurationOverlapped).toBe(true)
+
+   let releaseFailedFrame!:()=>void
+   const policyStarted=new Promise<void>(resolve=>{releaseFailedFrame=resolve})
+   let policyReadBeforeFailedFrame=false
+   const queryBeforeFailure=pg.Client.prototype.query as (...args:any[])=>any
+   const failureProbe=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:any[]){
+    const result=queryBeforeFailure.apply(this,args)
+    if(typeof args[0]!=='string')return result
+    if(args[0].includes('WITH owner_scope AS')&&args[0].includes('memory_policy_sets')){
+     policyReadBeforeFailedFrame=true
+     releaseFailedFrame()
+    }
+    if(!args[0].includes('AS stored_binding')||typeof args.at(-1)==='function')return result
+    return result.then(async()=>{
+     await Promise.race([policyStarted,wait(120)])
+     throw Error('fixture_scene_resolution_failed')
+    })
+   })
+   try{await expect(context.compile('failed-frame-before-policy')).rejects.toThrow('fixture_scene_resolution_failed')}
+   finally{failureProbe.mockRestore()}
+   expect(policyReadBeforeFailedFrame).toBe(false)
+
    const samples=Number(process.env.CONTEXT_TEST_SAMPLES??1)
    for(let n=0;n<samples;n++){
     const result=await measureContextDelivery(
@@ -1545,14 +1628,41 @@ suite('controlled personal Relay source reader',()=>{
     const [compile,admit,consume]=result.phases
     // Native scene writes acquire the authority fence before the fresh
     // snapshot. The transport still uses the original end-to-end deadline.
-    expect(compile.queries.length).toBeLessThanOrEqual(44)
-    expect(admit.queries.length).toBeLessThanOrEqual(18)
-    expect(consume.queries.length).toBeLessThanOrEqual(7)
+    const usage=await runtime.query(`SELECT u.signal,u.claim_id::text FROM memory_context_packs p
+     JOIN memory_claim_usage u ON u.installation_id=p.installation_id AND u.signal_key=p.trajectory_id::text
+     WHERE p.installation_id=$1 AND p.client_request_id=$2`,[installation,'measured-'+n])
+    expect(usage.rows).toEqual([{signal:'retrieved',claim_id:claim}])
+    expect(compile.queries.some(query=>query.statement.startsWith('SELECT wanted.version_id::text, ARRAY'))).toBe(false)
+    expect(compile.queries.some(query=>query.statement.startsWith('WITH evidence_written AS'))).toBe(false)
+    expect(compile.queries.length).toBeLessThanOrEqual(36)
+    expect(admit.queries.length).toBeLessThanOrEqual(14)
+    expect(consume.queries.length).toBeLessThanOrEqual(6)
     if(process.env.CONTEXT_TEST_DB_DELAY_MS){
      expect(compile.ms).toBeLessThan(500)
      expect(result.ms).toBeLessThan(710)
     }
    }
+   const {createHash}=await import('node:crypto')
+   const binding=Buffer.alloc(32,1)
+   const frame={repositoryId:repository,repoSnapshotId:snapshot,branch:'main',taskScopeKey:null}
+   const directPackInput={
+    installationId:installation,sessionId:context.sessionId,generationRunId:null,trajectoryId:null,agent:'codex',
+    repositoryId:repository,mode:'enabled' as const,state:'ready' as const,authorityGrant:{installationId:installation,configVersion:'1',userId:1},
+    effectivePolicyHash:binding,settingsFingerprint:binding,loadoutFingerprint:binding,
+    policyRevision:1,settingsRevision:1,loadoutRevision:1,inputDigest:createHash('sha256').update('direct-source-fence').digest(),
+    items:[{itemId:randomUUID(),claimId:claim,versionId:version,claimType:'work_method',layer:'L2' as const,
+     section:'dynamic' as const,representation:'summary' as const,statement,scopeKind:'repository',reasonCodes:[],evidenceIds:[firstEvidence]}],
+   }
+   const recordedMachineFrame={...frame,machineSourceVersionIds:[randomUUID()]}
+   await expect(context.packs.persistWithSummary({...directPackInput,clientRequestId:'missing-recorded-machine-source',
+    queryContext:recordedMachineFrame,
+   })).rejects.toThrow('context_consumption_changed')
+   await expect(context.packs.persistWithSummary({...directPackInput,clientRequestId:'stale-direct-generation',
+    queryContext:frame,consumptionGeneration:'999999',
+   })).rejects.toThrow('context_consumption_changed')
+   expect((await runtime.query(`SELECT count(*)::int AS n FROM memory_context_packs
+    WHERE installation_id=$1 AND client_request_id IN('missing-recorded-machine-source','stale-direct-generation')`,[installation])).rows[0].n).toBe(0)
+
    // The signed current Relay version must work while the local discovery row
    // still holds the previous version. The old signed grant must still fail.
    await pool.query("UPDATE public.extension_installations SET config_version=2 WHERE installation_id=$1",[installation])
@@ -1560,6 +1670,114 @@ suite('controlled personal Relay source reader',()=>{
     await expect.soft(deliver('native-current-admit',(_name,run)=>run(),{configVersion:'2',verifyRetry:true})).resolves.toBeUndefined()
     await expect.soft(deliver('native-stale-token',(_name,run)=>run())).rejects.toThrow('401')
    }finally{await pool.query("UPDATE public.extension_installations SET config_version=1 WHERE installation_id=$1",[installation])}
+
+   const busyAdmission=await context.compile('busy-authority-admit')
+   const busyHandoff=await context.compile('busy-authority-text')
+   if(busyAdmission.kind!=='ready'||busyHandoff.kind!=='ready')throw Error('fixture expected ready packs')
+   const busyTicket=await context.admit(busyHandoff.packId,'busy-authority-text')
+   if(!busyTicket.ok||!('nonce' in busyTicket))throw Error('fixture expected one fresh nonce')
+   const controlWriter=await pool.connect()
+   try{
+    await controlWriter.query('BEGIN')
+    await controlWriter.query('UPDATE public.extension_installations SET config_version=2 WHERE installation_id=$1',[installation])
+    await expect(context.admit(busyAdmission.packId,'busy-authority-admit')).resolves.toEqual({ok:false,error:'claim_invalid'})
+    await expect(context.consume(busyHandoff.packId,busyTicket.injectionId,busyTicket.nonce)).resolves.toEqual({ok:false,error:'not_found'})
+   }finally{await controlWriter.query('ROLLBACK');controlWriter.release()}
+   await expect(context.consume(busyHandoff.packId,busyTicket.injectionId,busyTicket.nonce)).resolves.toMatchObject({ok:true})
+   const lateMachine=await context.compile('machine-before-admit')
+   if(lateMachine.kind!=='ready')throw Error('fixture expected a ready pack')
+   await runtime.query(`UPDATE memory_context_packs SET query_context=query_context||
+    jsonb_build_object('machineSourceVersionIds',jsonb_build_array($3::uuid))
+    WHERE installation_id=$1 AND pack_id=$2`,[installation,lateMachine.packId,randomUUID()])
+   await expect(context.admit(lateMachine.packId,'machine-before-admit')).resolves.toEqual({ok:false,error:'claim_invalid'})
+   expect((await runtime.query(`SELECT count(*)::int AS n FROM memory_context_injections
+    WHERE installation_id=$1 AND pack_id=$2`,[installation,lateMachine.packId])).rows[0].n).toBe(0)
+
+   // A frame change without a generation change still rejects the pack.
+   let previousBinding:string|undefined
+   try{
+    await expect(deliver('new-frame-before-admit',(_name,run)=>run(),{beforeAdmit:async()=>{
+     previousBinding=(await runtime.query<{binding:string}>(`
+      SELECT binding FROM memory_session_scene_frames WHERE installation_id=$1 AND session_id=$2
+     `,[installation,context.sessionId])).rows[0]?.binding
+     expect(previousBinding).toBeDefined()
+     await runtime.query(`UPDATE memory_session_scene_frames SET binding=$3
+      WHERE installation_id=$1 AND session_id=$2`,[installation,context.sessionId,'a'.repeat(64)])
+    }})).rejects.toThrow(/\/admit: 409 .*claim_invalid/)
+    const rejected=(await runtime.query(`SELECT state FROM memory_context_packs
+     WHERE installation_id=$1 AND client_request_id='new-frame-before-admit'`,[installation])).rows[0]
+    expect(rejected?.state).toBe('invalidated')
+   }finally{
+    if(previousBinding)await runtime.query(`UPDATE memory_session_scene_frames SET binding=$3
+     WHERE installation_id=$1 AND session_id=$2`,[installation,context.sessionId,previousBinding])
+   }
+
+   const malformedFrame=await context.compile('malformed-frame-before-admit')
+   if(malformedFrame.kind!=='ready')throw Error('fixture expected a ready pack with a frame')
+   expect((await runtime.query(`UPDATE memory_context_packs
+    SET query_context=jsonb_set(query_context,'{lifecycle,consume}',to_jsonb('false'::text),false)
+    WHERE installation_id=$1 AND pack_id=$2 AND query_context->'lifecycle'->'consume'='true'::jsonb
+   `,[installation,malformedFrame.packId])).rowCount).toBe(1)
+   const {createAdmissionService}=await import('../../context/admission-service.js')
+   const shadowAdmission=createAdmissionService({pool:runtime,lifecycleMode:'shadow',nonceHmacKey:Buffer.alloc(32,7)})
+   await expect(shadowAdmission.admit({installationId:installation,sessionId:context.sessionId,
+    packId:malformedFrame.packId,clientRequestId:'malformed-frame-before-admit',agent:'codex',adapter:'codex-app-server',
+    grantConfigVersion:'1',authorityGrant:{installationId:installation,configVersion:'1',userId:1},
+   })).resolves.toEqual({ok:false,error:'claim_invalid'})
+
+   // Origin proof can change independently of the consumption generation.
+   // The direct personal path must deny the old pack at either boundary.
+   const unrelated=(await runtime.query(`UPDATE knowledge_claims
+    SET owner_scope_kind='organization' WHERE installation_id=$1 AND normalized_key='fixture-unrelated-1'
+    RETURNING claim_id,current_version_id`,[installation])).rows[0]
+   const reviewPolicy=randomUUID(),reviewVersion=randomUUID()
+   await runtime.query('INSERT INTO memory_review_policy_sets(policy_id,installation_id) VALUES($1,$2)',[reviewPolicy,installation])
+   await runtime.query(`INSERT INTO memory_review_policy_versions(policy_version_id,policy_id,version_number,document,content_hash)
+    VALUES($1,$2,1,'{}','fixture')`,[reviewVersion,reviewPolicy])
+   const generation=async()=>(await runtime.query('SELECT generation::text FROM memory_scope_consumption_generations WHERE installation_id=$1',[installation])).rows[0].generation
+   const addOrigin=async()=>{
+    const before=await generation()
+    await runtime.query(`INSERT INTO memory_authority_records(authority_id,installation_id,version_id,
+     candidate_revision_id,review_policy_version_id,counted_decision_ids,source_scope_kind,source_content_hash)
+     VALUES(gen_random_uuid(),$1,$2,gen_random_uuid(),$3,'{}','team','fixture')`,[installation,unrelated.current_version_id,reviewVersion])
+    expect(await generation()).toBe(before)
+   }
+   const clearOrigin=()=>runtime.query('DELETE FROM memory_authority_records WHERE installation_id=$1 AND version_id=$2',[installation,unrelated.current_version_id])
+   try{
+    try{
+     await expect(deliver('new-origin-before-admit',(_name,run)=>run(),{beforeAdmit:addOrigin})).rejects.toThrow('/admit: 409')
+    }finally{await clearOrigin()}
+    client.beforeNextConsume(addOrigin)
+    await expect(deliver('new-origin-before-text',(_name,run)=>run())).rejects.toThrow('/text: 410')
+    const handoff=(await runtime.query(`SELECT state FROM memory_context_injections
+     WHERE installation_id=$1 AND client_request_id='new-origin-before-text'`,[installation])).rows[0]
+    expect(handoff?.state).toBe('expired')
+    await clearOrigin()
+
+    let clearedBetweenUpdates=false
+    const originalQuery=pg.Client.prototype.query as (...args:any[])=>any
+    const probe=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:any[]){
+     const result=originalQuery.apply(this,args)
+     if(typeof args[0]!=='string'||!args[0].includes("SET state = 'prepared'")
+      ||!args[0].includes('RETURNING p.pack_id::text')||typeof args.at(-1)==='function')return result
+     return result.then(async(row:unknown)=>{
+      await clearOrigin()
+      clearedBetweenUpdates=true
+      return row
+     })
+    })
+    client.beforeNextConsume(addOrigin)
+    try{
+     await expect(deliver('origin-removed-after-denial',(_name,run)=>run())).rejects.toThrow('/text: 410')
+    }finally{probe.mockRestore()}
+    expect(clearedBetweenUpdates).toBe(true)
+    const latched=(await runtime.query(`SELECT state FROM memory_context_injections
+     WHERE installation_id=$1 AND client_request_id='origin-removed-after-denial'`,[installation])).rows[0]
+    expect(latched?.state).toBe('expired')
+   }finally{
+    await clearOrigin()
+    await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='personal' WHERE claim_id=$1",[unrelated.claim_id])
+   }
 
    const evidenceUrl=new URL('/api/v1/memory/evidence/'+firstEvidence+'/reference',client.url)
    evidenceUrl.search=new URLSearchParams({repository_id:repository,repo_snapshot_id:snapshot}).toString()

@@ -2,14 +2,14 @@ import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {guardRetainedVersions} from '../sources/retained-versions.js'
 import {assertRetainedSourceGuards,detachRetainedSourceGuards} from '../sources/retained-authority.js'
 import {retainedSourceRead} from '../sources/retained-read.js'
-import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
+import {requireCurrentScopePermission,requireCurrentInstallationAuthority,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 import {prepareEvidenceSources,attachPreparedEvidence,type PreparedEvidenceSources} from '../sources/evidence-sources.js'
 import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
-import {lifecycleFrameCurrent} from './lifecycle-frame.js'
+import {lifecycleFrameCurrent,lifecycleFrameFenceSql} from './lifecycle-frame.js'
 import {captureEvidenceReferences} from '../claims/evidence-resolver.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
 import {originPolicyFenceSql,lockOriginPolicyFences} from '../governance/origin-policy.js'
-import {originPolicyCorpusSnapshot} from '../governance/origin-policy.js'
+import {originPolicyCorpusSnapshot,originPolicyCorpusVersionsSql} from '../governance/origin-policy.js'
 import {ContextConsumptionChangedError} from './consumption.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
@@ -22,12 +22,19 @@ const machineVersionSql=`(v.authority='machine_concluded' OR EXISTS (
  SELECT 1 FROM knowledge_evidence_capsules cap WHERE cap.installation_id=v.installation_id
  AND cap.version_id=v.version_id AND cap.retention_basis='automation_conclusion'))`
 
+const machinePackItemVersionsSql=`
+ SELECT v.version_id::text FROM memory_context_pack_items i
+ JOIN knowledge_versions v USING(installation_id,version_id)
+ WHERE i.installation_id=p.installation_id AND i.pack_id=p.pack_id AND ${machineVersionSql}`
+const recordedMachinePackVersionsSql=
+ "SELECT jsonb_array_elements_text(COALESCE(p.query_context->'machineSourceVersionIds','[]'::jsonb))"
+// Only for a pack whose stored selected_references is an empty array.
+export const DIRECT_MACHINE_PACK_VERSIONS_SQL=`${machinePackItemVersionsSql} UNION ALL ${recordedMachinePackVersionsSql}`
+
 // p is the authenticated pack. Wiki text can include a cited machine Claim
 // through its build dependencies without a memory_context_pack_items row.
 export const MACHINE_PACK_VERSIONS_SQL=`
- SELECT v.version_id::text FROM memory_context_pack_items i
- JOIN knowledge_versions v USING(installation_id,version_id)
- WHERE i.installation_id=p.installation_id AND i.pack_id=p.pack_id AND ${machineVersionSql}
+ ${machinePackItemVersionsSql}
  UNION
  SELECT ref.source_version::text FROM jsonb_to_recordset(COALESCE(p.selected_references,'[]'::jsonb))
   ref(source_kind text,source_version uuid,installation_id uuid)
@@ -45,7 +52,7 @@ export const MACHINE_PACK_VERSIONS_SQL=`
   AND v.version_id=CASE WHEN bs.source_kind='claim_version' THEN bs.source_ref_id ELSE e.version_id END
  WHERE ref.source_kind='wiki_section' AND ref.installation_id=p.installation_id AND ${machineVersionSql}
  UNION
- SELECT jsonb_array_elements_text(COALESCE(p.query_context->'machineSourceVersionIds','[]'::jsonb))`
+ ${recordedMachinePackVersionsSql}`
 
 /** Recheck automated conclusions before serving saved Context in the current
  * transaction. Only the native source fence can rule out a late Relay deletion. */
@@ -153,7 +160,7 @@ export interface PersistPackInput {
 const FOREIGN_PACK_SQL="(p.query_context ? 'selectedScopeProof' OR EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(p.selected_references,'[]'::jsonb)) r WHERE r->>'installation_id' IS DISTINCT FROM p.installation_id::text))"
 
 export function createPackRepository(pool: pg.Pool) {
-  type StoredTokens = { stable_tokens: number; dynamic_tokens: number }
+  type StoredTokens = { stable_tokens: number; dynamic_tokens: number; evidence_proven?: boolean }
   const boundedTransaction = isPhysicalSourcePool(pool)
   const repository = {
     async persistWithSummary(input: PersistPackInput): Promise<{ packId: string; stableTokens: number; dynamicTokens: number; evidenceProven?: boolean }> {
@@ -184,7 +191,10 @@ export function createPackRepository(pool: pg.Pool) {
       const packId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
       const fullText = renderPackText({ packId, stable: stableItems, dynamic: dynamicItems })
       const { stable, dynamic } = stableDynamicSplit(fullText)
-      const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEvidenceSources(pool,input.installationId,[...new Set(input.items.flatMap(i=>[...i.evidenceIds]))]):undefined
+      const evidence = input.items.flatMap(item => item.evidenceIds.map(evidenceId => ({
+        itemId: item.itemId, evidenceId, versionId: item.versionId,
+      })))
+      const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEvidenceSources(pool,input.installationId,[...new Set(evidence.map(ref=>ref.evidenceId))]):undefined
       const client = await pool.connect()
       let lockedEvidence:Awaited<ReturnType<PreparedEvidenceSources['lockForPack']>>|undefined
       let commitDispatched = false
@@ -202,7 +212,17 @@ export function createPackRepository(pool: pg.Pool) {
           }catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
           lockedEvidence=await prepared.lockForPack(client);attachPreparedEvidence(client,prepared)
         }
-        // Foreign keys see the newly inserted pack in this statement.
+        const humanCapsules=lockedEvidence?.humanCapsules
+        const lockedReferences=humanCapsules&&evidence.length ? evidence.map(ref=>{
+          const proof=humanCapsules.get(ref.evidenceId.toLowerCase())
+          const bound=proof?.versionId===ref.versionId.toLowerCase()?proof:null
+          return {
+            item_id:ref.itemId,evidence_id:ref.evidenceId,version_id:bound?.versionId??null,
+            excerpt_hash:bound?.excerptHash.toString('hex')??null,source_version:bound?.sourceVersion??null,
+          }
+        }) : undefined
+        // Exact reviewed capsule bindings are already locked. Chain evidence
+        // and generation writes through the pack items in the same statement.
         const inserted=await client.query<StoredTokens>(`
           WITH stored AS (
             INSERT INTO memory_context_packs
@@ -223,13 +243,27 @@ export function createPackRepository(pool: pg.Pool) {
             FROM jsonb_to_recordset($27::jsonb) AS i(item_id uuid, claim_id uuid, version_id uuid, claim_type text,
               layer text, section text, representation text, rendered_text text, reason_codes text[], token_count integer, ordinal integer)
             ORDER BY i.ordinal
+            ON CONFLICT DO NOTHING RETURNING item_id
+          )${lockedReferences ? `, evidence_written AS (
+            INSERT INTO memory_context_pack_evidence
+              (pack_id,item_id,installation_id,evidence_id,evidence_version_id,excerpt_hash,source_version)
+            SELECT $1,e.item_id,$2,e.evidence_id,e.version_id,decode(e.excerpt_hash,'hex'),e.source_version
+            FROM jsonb_to_recordset($28::jsonb) e(item_id uuid,evidence_id uuid,version_id uuid,excerpt_hash text,source_version uuid)
+            WHERE (SELECT count(*) FROM items)>=0
             ON CONFLICT DO NOTHING
-          ), completed_empty AS (
+            RETURNING (evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
+          ), completed AS (
+            UPDATE memory_generation_runs
+            SET state='succeeded',output_kind='context_pack',output_id=$1,completed_at=NOW()
+            WHERE run_id=$3 AND (SELECT count(*) FROM evidence_written)>=0
+          )` : `, completed_empty AS (
             UPDATE memory_generation_runs
             SET state='succeeded',output_kind='context_pack',output_id=stored.pack_id,completed_at=NOW()
             FROM stored WHERE run_id=$3 AND $23='empty'
-          )
-          SELECT stable_tokens,dynamic_tokens FROM stored
+          )`}
+          SELECT stable_tokens,dynamic_tokens
+            ${lockedReferences ? ',(SELECT count(*)>0 AND bool_and(proven) FROM evidence_written) AS evidence_proven' : ''}
+          FROM stored
         `, [packId, input.installationId, input.generationRunId, input.trajectoryId, input.sessionId,
           input.clientRequestId, input.agent, input.repositoryId, input.mode, input.effectivePolicyHash,
           input.settingsFingerprint, input.loadoutFingerprint, input.inputDigest, input.policyRevision, input.settingsRevision,
@@ -241,43 +275,33 @@ export function createPackRepository(pool: pg.Pool) {
             item_id:item.itemId, claim_id:item.claimId, version_id:item.versionId, claim_type:item.claimType,
             layer:item.layer, section:item.section, representation:item.representation, rendered_text:item.statement,
             reason_codes:item.reasonCodes, token_count:estimateTokens(item.statement), ordinal,
-          })))])
-        let evidenceProven = inserted.rowCount ? false : undefined
-        let generationRecorded=input.state==='empty' && Boolean(inserted.rowCount)
-        if (input.items.length) {
-          const evidence = input.items.flatMap(item => item.evidenceIds.map(evidenceId => ({
-            itemId: item.itemId, evidenceId, versionId: item.versionId,
-          })))
-          if (evidence.length) {
-            const humanCapsules=lockedEvidence?.humanCapsules
-            const references = humanCapsules
-              ? evidence.map(ref=>{
-                const proof=humanCapsules.get(ref.evidenceId.toLowerCase())
-                return proof?.versionId===ref.versionId.toLowerCase()?proof:null
-              })
-              : await captureEvidenceReferences(client, input.installationId, evidence)
-            const written = await client.query<{ proven: boolean }>(`
-              WITH evidence_written AS (
-                INSERT INTO memory_context_pack_evidence
-                  (pack_id, item_id, installation_id, evidence_id,evidence_version_id,excerpt_hash,source_hash,source_version)
-                SELECT $1, e.item_id, $2, e.evidence_id, e.version_id, e.excerpt_hash, e.source_hash, e.source_version
-                FROM unnest($3::uuid[], $4::uuid[], $5::uuid[], $6::bytea[], $7::text[], $8::uuid[])
-                  AS e(item_id, evidence_id, version_id, excerpt_hash, source_hash, source_version)
-                ON CONFLICT DO NOTHING
-                RETURNING (evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
-              ), generation_written AS (
-                UPDATE memory_generation_runs
-                SET state='succeeded',output_kind='context_pack',output_id=$1::uuid,completed_at=NOW()
-                FROM (SELECT count(*) AS written FROM evidence_written) proof
-                WHERE run_id=$9::uuid AND proof.written>=0
-              )
-              SELECT proven FROM evidence_written
-            `, [packId, input.installationId, evidence.map(ref => ref.itemId), evidence.map(ref => ref.evidenceId),
-              references.map(ref => ref?.versionId ?? null), references.map(ref => ref?.excerptHash ?? null),
-              references.map(ref => ref?.sourceHash ?? null), references.map(ref => ref?.sourceVersion ?? null), input.generationRunId])
-            generationRecorded=true
-            if (inserted.rowCount) evidenceProven = written.rows.length > 0 && written.rows.every(row => row.proven)
-          }
+          }))),
+          ...(lockedReferences ? [JSON.stringify(lockedReferences)] : [])])
+        let evidenceProven = inserted.rowCount ? inserted.rows[0].evidence_proven ?? false : undefined
+        let generationRecorded=Boolean(lockedReferences)||(input.state==='empty'&&Boolean(inserted.rowCount))
+        if (evidence.length && !lockedReferences) {
+          const references = await captureEvidenceReferences(client, input.installationId, evidence)
+          const written = await client.query<{ proven: boolean }>(`
+            WITH evidence_written AS (
+              INSERT INTO memory_context_pack_evidence
+                (pack_id, item_id, installation_id, evidence_id,evidence_version_id,excerpt_hash,source_hash,source_version)
+              SELECT $1, e.item_id, $2, e.evidence_id, e.version_id, e.excerpt_hash, e.source_hash, e.source_version
+              FROM unnest($3::uuid[], $4::uuid[], $5::uuid[], $6::bytea[], $7::text[], $8::uuid[])
+                AS e(item_id, evidence_id, version_id, excerpt_hash, source_hash, source_version)
+              ON CONFLICT DO NOTHING
+              RETURNING (evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
+            ), generation_written AS (
+              UPDATE memory_generation_runs
+              SET state='succeeded',output_kind='context_pack',output_id=$1::uuid,completed_at=NOW()
+              FROM (SELECT count(*) AS written FROM evidence_written) proof
+              WHERE run_id=$9::uuid AND proof.written>=0
+            )
+            SELECT proven FROM evidence_written
+          `, [packId, input.installationId, evidence.map(ref => ref.itemId), evidence.map(ref => ref.evidenceId),
+            references.map(ref => ref?.versionId ?? null), references.map(ref => ref?.excerptHash ?? null),
+            references.map(ref => ref?.sourceHash ?? null), references.map(ref => ref?.sourceVersion ?? null), input.generationRunId])
+          generationRecorded=true
+          if (inserted.rowCount) evidenceProven = written.rows.length > 0 && written.rows.every(row => row.proven)
         }
         if (input.generationRunId&&!generationRecorded) {
           await client.query(`
@@ -295,10 +319,45 @@ export function createPackRepository(pool: pg.Pool) {
           const valid=await client.query<{valid:boolean}>(`SELECT ${selectedScopeFenceSql('$1')} AND ${originPolicyFenceSql('$2',sourcePoolContext(pool).namespace)} AS valid`,[JSON.stringify(proof),JSON.stringify(origins.fences)])
           if(!origins.matches||!valid.rows[0]?.valid)throw new ContextConsumptionChangedError()
         }
-        if(!await lifecycleFrameCurrent(client,input.installationId,input.queryContext?.lifecycle))throw new ContextConsumptionChangedError()
-        const origin=await originPolicyCorpusSnapshot(client,input.installationId)
-        if(origin.stamp!==(input.queryContext?.originPolicyStamp??null))throw new ContextConsumptionChangedError()
-        if(inserted.rowCount&&prepared){
+        const originStamp=input.queryContext?.originPolicyStamp??null
+        const checkDirectPack=Boolean(boundedTransaction&&inserted.rowCount&&lockedReferences
+          && !(input.selectedReferences?.length)&&!input.queryContext?.selectedScopeProof&&originStamp===null)
+        const stampGeneration=async (checkPack:boolean) => (await client.query<{
+          generation:string|null;stamped:boolean;frame_current?:boolean;origin_absent?:boolean;machine_sources?:boolean
+        }>(`
+          WITH ${checkPack?`pack_checks AS MATERIALIZED (
+            SELECT ${lifecycleFrameFenceSql('p','enabled','memory')} AS frame_current,
+              NOT EXISTS (${originPolicyCorpusVersionsSql('p.installation_id')}) AS origin_absent,
+              EXISTS (${DIRECT_MACHINE_PACK_VERSIONS_SQL}) AS machine_sources
+            FROM memory_context_packs p
+            WHERE p.installation_id=$1 AND p.pack_id=$2 AND p.selected_references='[]'::jsonb
+          ), `:''}current_generation AS MATERIALIZED (
+            SELECT g.generation FROM memory_scope_consumption_generations g
+            ${checkPack?'JOIN pack_checks pc ON pc.frame_current AND pc.origin_absent AND NOT pc.machine_sources':''}
+            WHERE g.installation_id=$1 FOR SHARE OF g
+          ), stamped AS (
+            UPDATE memory_context_packs p SET consumption_generation=g.generation
+            FROM current_generation g
+            WHERE p.pack_id=$2 AND ($3::text IS NULL OR g.generation::text=$3) RETURNING p.pack_id
+          )
+          SELECT g.generation::text,EXISTS(SELECT 1 FROM stamped) AS stamped${checkPack?',pc.*':''}
+          FROM ${checkPack?'pack_checks pc LEFT JOIN current_generation g ON TRUE':'current_generation g'}
+        `,[input.installationId,packId,input.consumptionGeneration??null])).rows[0]
+        let needsMachineFence=true
+        let directStamp:Awaited<ReturnType<typeof stampGeneration>>|undefined
+        if(checkDirectPack){
+          // Only packs without machine dependencies can lock the generation
+          // here. Machine sources still acquire their native locks first.
+          const current=await stampGeneration(true)
+          if(!current?.frame_current||!current.origin_absent)throw new ContextConsumptionChangedError()
+          needsMachineFence=current.machine_sources===true
+          if(!needsMachineFence)directStamp=current
+        }else{
+          if(!await lifecycleFrameCurrent(client,input.installationId,input.queryContext?.lifecycle))throw new ContextConsumptionChangedError()
+          const origin=await originPolicyCorpusSnapshot(client,input.installationId)
+          if(origin.stamp!==originStamp)throw new ContextConsumptionChangedError()
+        }
+        if(inserted.rowCount&&prepared&&needsMachineFence){
           try{
             const machineVersions=await fenceMachinePackSources(client,input.installationId,packId,undefined,boundedTransaction)
             if(machineVersions.length)await client.query(`
@@ -311,18 +370,9 @@ export function createPackRepository(pool: pg.Pool) {
         }
         // All source/FK dependencies precede the final generation fence.
         if(inserted.rowCount){
-          const existing=(await client.query<{generation:string;stamped:boolean}>(`
-            WITH current_generation AS MATERIALIZED (
-              SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=$1 FOR SHARE
-            ), stamped AS (
-              UPDATE memory_context_packs p SET consumption_generation=g.generation
-              FROM current_generation g
-              WHERE p.pack_id=$2 AND ($3::text IS NULL OR g.generation::text=$3) RETURNING p.pack_id
-            )
-            SELECT generation::text,EXISTS(SELECT 1 FROM stamped) AS stamped FROM current_generation
-          `,[input.installationId,packId,input.consumptionGeneration??null])).rows[0]
-          if(existing&&!existing.stamped)throw new ContextConsumptionChangedError()
-          if(!existing){
+          const existing=directStamp??await stampGeneration(false)
+          if(existing?.generation!=null&&!existing.stamped)throw new ContextConsumptionChangedError()
+          if(existing?.generation==null){
             const generation=await fenceConsumptionGeneration(client,input.installationId,input.consumptionGeneration)
             await client.query('UPDATE memory_context_packs SET consumption_generation=$2 WHERE pack_id=$1',[packId,generation])
           }
@@ -331,8 +381,7 @@ export function createPackRepository(pool: pg.Pool) {
           'SELECT stable_tokens, dynamic_tokens FROM memory_context_packs WHERE pack_id=$1', [packId],
         )).rows[0]
         if(lockedEvidence){
-          await lockedEvidence.assertForCommit()
-          try{await assertCurrentGrantClock(client,input.authorityGrant!,[input.installationId])}catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
+          try{await lockedEvidence.assertForCommit(input.authorityGrant!)}catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
         }
         commitDispatched = true
         await client.query('COMMIT')

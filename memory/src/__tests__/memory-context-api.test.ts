@@ -136,7 +136,11 @@ describe('context route contracts (unit)', () => {
     expect(response.json()).toEqual({outcome:'degraded',reason:'context_consumption_changed'})
   })
 
-  test('slow native compilation logs bounded phase timings without request data', async () => {
+  test.each([
+    { timestamp: 'daemon-start', expectedAge: expect.any(Number) },
+    { timestamp: 'private-invalid-clock', expectedAge: null },
+  ])('slow native compilation logs bounded phase timings without request data ($timestamp)', async ({ timestamp, expectedAge }) => {
+    const started = timestamp === 'daemon-start' ? new Date(Date.now() - 300).toISOString().replace('Z', '123456Z') : timestamp
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const app = appWith({ compiler: { compile: async (_input: unknown, observe: (phase: string, ms: number) => void) => {
       await new Promise(resolve => setTimeout(resolve, 425))
@@ -148,12 +152,18 @@ describe('context route contracts (unit)', () => {
         method: 'POST', url: '/api/v1/memory/context/compile',
         headers: { host: 'memory.test', authorization: 'Bearer private-grant' },
         payload: { schema_version: 1, client_request_id: 'private-request', session_id: 'private-session',
-          agent: 'codex', adapter_capability: 'native_hidden_v1', query: 'private-query' },
+          agent: 'codex', adapter_capability: 'native_hidden_v1', query: 'private-query', requested_at: started },
       })
       expect(response.statusCode).toBe(200)
       const line = log.mock.calls.map(call => String(call[0])).find(value => value.includes('context_compile_latency'))
       expect(line).toBeDefined()
-      expect(JSON.parse(line!)).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number), retrieve_ms: 400 })
+      const timing = JSON.parse(line!)
+      expect(timing).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number), retrieve_ms: 400, daemon_request_age_ms: expectedAge })
+      if (timestamp === 'daemon-start') {
+        expect(timing.daemon_request_age_ms).toBeGreaterThanOrEqual(300)
+        expect(timing.daemon_request_age_ms).toBeLessThan(700)
+      }
+      expect(line).not.toContain(started)
       expect(line).not.toContain('private-')
     } finally {
       log.mockRestore()

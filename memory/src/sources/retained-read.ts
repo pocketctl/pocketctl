@@ -3,7 +3,7 @@ import {isPhysicalSourcePool,sourcePoolContext} from './pool-context.js'
 import {lockCurrentRelayAuthority} from './current-grant.js'
 import {assertRetainedSourceGuards,rememberRetainedSourceRead} from './retained-authority.js'
 import {preparedSourceUnavailable} from './prepared-sources.js'
-import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
+import {requireCurrentScopePermission,requireCurrentInstallationAuthority,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 export type SourceReadGrant=V2GrantFacts|{installationId:string;configVersion?:string;expiresAt?:number;userId?:number}
 type Db=Pick<pg.PoolClient,'query'>
 /** Retained metadata/excerpt reads only. Callbacks register exact source UUIDs,
@@ -30,8 +30,7 @@ export async function retainedSourceRead<T>(pool:pg.Pool,input:{installationId:s
    await requireCurrentInstallationAuthority(client,grant,{readOnly:'wait-for-purge'})
   }
   const value=await read(client)
-  await assertRetainedSourceGuards(client)
-  await assertCurrentGrantClock(client,grant,[input.installationId])
+  await assertRetainedSourceGuards(client,{installationId:input.installationId,grant})
   rememberRetainedSourceRead(client,value)
   await client.query('COMMIT');return value
  }catch(error){

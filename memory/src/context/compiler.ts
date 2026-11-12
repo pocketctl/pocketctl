@@ -1,5 +1,5 @@
 import type {PackAuthorityGrant} from './pack-repository.js'
-import {sourcePoolContext} from '../sources/pool-context.js'
+import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import {readCurrentPolicyAuthority,CurrentPolicyScopeStaleError} from '../governance/current-policy-authority.js'
 import {resolveLifecycleFrame,lifecycleFrameCurrent} from './lifecycle-frame.js'
 import type {CurationMode} from '../curation/contracts.js'
@@ -278,9 +278,10 @@ export function createContextCompiler(deps: {
       const generation = resolvedScope.consumptionGeneration
       mark('scope')
       const repositoryId = resolvedScope.repositoryId
-      const [lifecycle, snapshots, effectiveSettings] = await Promise.all([
-        resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off',authorityGrant:input.authorityGrant}),
-        !input.factAt && !input.knownAt && repositoryId && (input.repoSnapshotId || input.commitSha)
+      const historical = Boolean(input.factAt || input.knownAt)
+      const lifecyclePending = resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off',authorityGrant:input.authorityGrant})
+      const inputsPending = Promise.all([
+        !historical && repositoryId && (input.repoSnapshotId || input.commitSha)
           ? deps.pool.query<{repo_snapshot_id:string;commit_sha:string}>(`SELECT s.repo_snapshot_id::text,s.commit_sha FROM repo_snapshots s
             WHERE s.installation_id=$1 AND s.repository_id=$2
              AND ($3::uuid IS NULL OR s.repo_snapshot_id=$3) AND ($4::text IS NULL OR s.commit_sha=$4)
@@ -289,8 +290,27 @@ export function createContextCompiler(deps: {
           : null,
         deps.settings.resolve({ installationId: input.installationId, repositoryId, sessionId: input.sessionId, agent: input.agent }),
       ])
+      const readConfigurationMetadata = () => Promise.all([
+        deps.loadouts.resolve({ installationId: input.installationId, repositoryId, agent: input.agent }),
+        readContextCorpusFingerprint(deps.pool,input.installationId),
+        originPolicyCorpusSnapshot(deps.pool, input.installationId),
+      ])
+      // Direct personal compilation can read its configuration once settings
+      // and snapshot checks pass, while the separate scene transaction runs.
+      // Persistence and handoff still fence the scene and source authority.
+      const overlapConfiguration = !historical && input.adapterCapability==='native_hidden_v1'
+        && !input.selectedReferences?.length && input.authorityGrant && !('scopeBindings' in input.authorityGrant)
+        && isPhysicalSourcePool(deps.pool) && sourcePoolContext(deps.pool).namespace==='memory'
+      const earlyConfiguration = overlapConfiguration ? inputsPending.then(([snapshots, settings]) =>
+        settings.mode==='enabled' && !(input.repoSnapshotId&&snapshots&&snapshots.rows.length!==1)
+          ? readConfigurationMetadata()
+          : null,
+      ) : null
+      // Input errors retain precedence even if the concurrent read fails.
+      if (earlyConfiguration) void earlyConfiguration.catch(()=>undefined)
+      const [lifecycle,[snapshots,effectiveSettings]] = await Promise.all([lifecyclePending,inputsPending])
       // Historical hints cannot silently broaden an automatic current-context request.
-      if(input.factAt||input.knownAt)return{kind:'empty',reason:'historical_context_requires_explicit_read',degradedComponents:[]}
+      if(historical)return{kind:'empty',reason:'historical_context_requires_explicit_read',degradedComponents:[]}
       const queryContext:ContextQueryFrame={...(lifecycle?{lifecycle}:{}),repositoryId,repoSnapshotId:null,branch:repositoryId?input.branch??null:null,taskScopeKey:input.taskScopeKey??null,commitSha:repositoryId?input.commitSha?.toLowerCase()??null:null}
       if(snapshots){
         if(snapshots.rows.length===1){queryContext.repoSnapshotId=snapshots.rows[0].repo_snapshot_id;queryContext.commitSha=snapshots.rows[0].commit_sha}
@@ -303,11 +323,11 @@ export function createContextCompiler(deps: {
           ? 'enabled'
           : 'shadow'
 
-      const [[policy, rankingPolicy], loadout, corpus, originSnapshot] = await Promise.all([
+      // Policy resolution can initialize code-owned heads. Start it only
+      // after the input phase succeeds, including the scene transaction.
+      const [[policy, rankingPolicy], [loadout, corpus, originSnapshot]] = await Promise.all([
         deps.policyResolver.resolveContext({ installationId: input.installationId, repositoryId }),
-        deps.loadouts.resolve({ installationId: input.installationId, repositoryId, agent: input.agent }),
-        readContextCorpusFingerprint(deps.pool,input.installationId),
-        originPolicyCorpusSnapshot(deps.pool, input.installationId),
+        earlyConfiguration ? earlyConfiguration.then(metadata=>metadata??readConfigurationMetadata()) : readConfigurationMetadata(),
       ])
       mark('configuration')
       const policyDoc = policy.document as ContextPolicyDocument
@@ -518,26 +538,19 @@ export function createContextCompiler(deps: {
 
       // Deduplicate by identity and near-identical text before budgeting.
       const versionIds = [...new Set(drafts.map(draft => draft.versionId))]
-      const [facts, evidence] = await Promise.all([
-        contextClaimFacts(deps.pool, input.installationId, versionIds),
-        selectedReferences.length || !versionIds.length ? null : deps.pool.query<{ version_id: string; evidence_ids: string[] }>(`
-          SELECT wanted.version_id::text, ARRAY(
-            SELECT e.evidence_id::text FROM knowledge_evidence e
-            WHERE e.installation_id=$1 AND e.version_id=wanted.version_id
-            ORDER BY e.ordinal ASC LIMIT 4
-          ) AS evidence_ids
-          FROM unnest($2::uuid[]) AS wanted(version_id)
-        `, [input.installationId, versionIds]),
-      ])
-      const evidenceByVersion = new Map(evidence?.rows.map(row => [row.version_id, row.evidence_ids]))
-      const eligibleDrafts = drafts.filter(draft => {
+      const facts = await contextClaimFacts(deps.pool, input.installationId, versionIds, {
+        includeEvidenceIds: selectedReferences.length === 0,
+      })
+      const eligibleDrafts = drafts.flatMap(draft => {
         const source = facts.get(draft.versionId)
         // Recalled work methods require a Scene. Persona and explicit references
         // have their own selection rules.
         const needsScene = draft.claimType === 'work_method' && draft.layer === 'L2' && !selectedItemReferences.has(draft.itemId)
         return source && (!needsScene || (lifecycle?.consume && source.lifecycle?.spaceId))
           && eligibleContextFacts(source,queryContext)
-      }).map(draft => ({ ...draft, evidenceIds: evidenceByVersion.get(draft.versionId) ?? draft.evidenceIds }))
+          ? [{ ...draft, evidenceIds: source.evidenceIds ?? draft.evidenceIds }]
+          : []
+      })
       const deduped = dedupeItems(eligibleDrafts.map(draft => ({
         ...draft,
         renderedText: draft.statement,

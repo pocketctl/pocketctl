@@ -1,4 +1,4 @@
-import {MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
+import {DIRECT_MACHINE_PACK_VERSIONS_SQL,MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import {currentPersonalInstallation,lockCurrentRelayAuthority,personalLifecycleAuthorityStampSql,personalLifecycleAuthorityStateSql,personalLifecycleDeliveryStampSql} from '../sources/current-grant.js'
@@ -16,7 +16,7 @@ import { createLoadoutRepository, resolvedLoadoutFingerprint } from './loadout-r
 import { createPolicyRepository } from '../policies/repository.js'
 import { createPolicyResolver } from '../policies/resolver.js'
 import { resolveSelectedContextReferences, type SelectedContextReference } from './compiler.js'
-import {originPolicyCorpusSnapshot,originPolicyFenceSql,lockOriginPolicyFences} from '../governance/origin-policy.js'
+import {originPolicyCorpusSnapshot,originPolicyCorpusVersionsSql,originPolicyFenceSql,lockOriginPolicyFences} from '../governance/origin-policy.js'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {contextClaimFacts,eligibleContextFacts,fenceConsumptionGeneration,ContextConsumptionChangedError,type ContextQueryFrame} from './consumption.js'
 
@@ -307,13 +307,20 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'claim_invalid' }
         }
         const dependencies=validity.versions
-        const facts=await contextClaimFacts(client,input.installationId,dependencies,true)
-        let sourceInvalid=!await lifecycleFrameCurrent(client,input.installationId,queryContext.lifecycle,deps.lifecycleMode??'off')||dependencies.some(versionId=>{const source=facts.get(versionId);return !source||!eligibleContextFacts(source,queryContext)
+        const facts=await contextClaimFacts(client,input.installationId,dependencies,{lock:true})
+        let sourceInvalid=dependencies.some(versionId=>{const source=facts.get(versionId);return !source||!eligibleContextFacts(source,queryContext)
           ||(packRow.consumption_generation===null&&source.applicability!=null)})
-        const origin=await originPolicyCorpusSnapshot(client,input.installationId)
-        if(origin.stamp!==(queryContext.originPolicyStamp??null))sourceInvalid=true
+        const originStamp=queryContext.originPolicyStamp??null
+        const lifecycleMode=deps.lifecycleMode??'off'
+        const directPack=physical&&nativeGrant&&!selectedReferences.length
+          && !queryContext.selectedScopeProof&&originStamp===null?{packId:input.packId,lifecycleMode}:undefined
+        if(!directPack){
+          if(!await lifecycleFrameCurrent(client,input.installationId,queryContext.lifecycle,lifecycleMode))sourceInvalid=true
+          const origin=await originPolicyCorpusSnapshot(client,input.installationId)
+          if(origin.stamp!==originStamp)sourceInvalid=true
+        }
         let admittedGeneration:string|undefined
-        try{admittedGeneration=await fenceConsumptionGeneration(client,input.installationId,packRow.consumption_generation??undefined)}
+        try{admittedGeneration=await fenceConsumptionGeneration(client,input.installationId,packRow.consumption_generation??undefined,{directPack})}
         catch(error){if(!(error instanceof ContextConsumptionChangedError))throw error;sourceInvalid=true}
         if(sourceInvalid){
           await client.query("UPDATE memory_context_packs SET state='invalidated',invalidated_at=NOW(),error_code='consumption_context_changed' WHERE pack_id=$1",[input.packId])
@@ -325,20 +332,31 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'expired' }
         }
 
-        await fenceMachinePackSources(client,input.installationId,input.packId,input.authorityGrant,Boolean(nativeGrant))
         const nonce = randomBytes(24).toString('hex')
         const nonceHmac = createHmac('sha256', deps.nonceHmacKey).update(nonce).digest()
         const injectionId = randomUUID()
-        const inserted = await client.query<{ admission_expires_at: Date }>(`
+        const insertAdmission = (direct: boolean) => client.query<{ admission_expires_at: Date }>(`
           INSERT INTO memory_context_injections
             (injection_id, installation_id, pack_id, session_id, client_request_id,
              agent, adapter, admission_nonce_hmac, state, admitted_at, admission_expires_at,consumption_generation)
           SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'admitted', clock_timestamp(),
                  clock_timestamp() + ($9 * INTERVAL '1 second'),$10
-          WHERE $11::double precision IS NULL OR clock_timestamp()<to_timestamp($11::double precision)
+          WHERE ($11::double precision IS NULL OR clock_timestamp()<to_timestamp($11::double precision))
+          ${direct?`AND EXISTS (
+            SELECT 1 FROM memory_context_packs p
+            WHERE p.installation_id=$2 AND p.pack_id=$3 AND p.selected_references='[]'::jsonb
+              AND NOT EXISTS (${DIRECT_MACHINE_PACK_VERSIONS_SQL})
+          )`:''}
           RETURNING admission_expires_at
         `, [injectionId, input.installationId, input.packId, input.sessionId,
           input.clientRequestId, input.agent, input.adapter, nonceHmac, ttl,admittedGeneration,nativeGrant?.expiresAt??null])
+        // A direct pack can prove the absence of machine sources in the
+        // nonce INSERT itself. All other packs keep the full source fence.
+        let inserted = directPack ? await insertAdmission(true) : undefined
+        if (!inserted?.rowCount) {
+          await fenceMachinePackSources(client,input.installationId,input.packId,input.authorityGrant,Boolean(nativeGrant))
+          inserted = await insertAdmission(false)
+        }
         if (!inserted.rowCount) {
           await client.query('ROLLBACK')
           return { ok: false, error: 'claim_invalid' }
@@ -439,8 +457,32 @@ export function createAdmissionService(deps: {
             && (!selectedPrimary || (observed?.native_authority?.authorization_epoch===selectedPrimary.authorization_epoch
               && observed.native_authority.owner_scope_id===selectedPrimary.owner_scope_id))
           const frozen = nativeCurrent && observed?.injection_id ? observed : undefined
-          const origin=frozen?await originPolicyCorpusSnapshot(client,input.installationId):{stamp:null,fences:[]}
           const proof=frozen?.query_context?.selectedScopeProof
+          const verifyEmptyOriginAtHandoff=Boolean(physical&&nativeGrant&&frozen&&!proof
+            && frozen.query_context?.originPolicyStamp==null)
+          const origin=frozen&&!verifyEmptyOriginAtHandoff
+            ? await originPolicyCorpusSnapshot(client,input.installationId) : {stamp:null,fences:[]}
+          // A pack without an origin stamp was compiled against an empty
+          // origin-policy corpus. Keep the observation from the nonce
+          // transition for the expiration path if a concurrent writer changes it.
+          const emptyOriginFence=verifyEmptyOriginAtHandoff
+            ? '(SELECT absent FROM origin_observation)'
+            : 'TRUE'
+          // The direct branch has neither origin fences nor a selected-scope
+          // proof. Avoid planning their joins while still checking the corpus
+          // in the same snapshot as the nonce transition.
+          const dependencyFence=verifyEmptyOriginAtHandoff
+            ? "$7::jsonb='[]'::jsonb AND $8::jsonb='null'::jsonb"
+            : `${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)} AND ${selectedScopeFenceSql('$8')}`
+          const observeOrigin=verifyEmptyOriginAtHandoff ? `
+            WITH origin_observation AS MATERIALIZED (
+              SELECT COALESCE((
+                SELECT p.query_context->>'originPolicyStamp' IS NULL
+                  AND NOT EXISTS (${originPolicyCorpusVersionsSql('p.installation_id')})
+                FROM memory_context_packs p WHERE p.installation_id=$2 AND p.pack_id=$4
+              ),FALSE) AS absent
+            ), handoff AS (
+          ` : ''
           const selected=proof?await selectedScopeOriginFences(client,proof):{matches:true,fences:[]}
           const selectionMatches=!proof||(!!input.selectedScopeGrant&&await selectedScopeContextCurrent(client,proof,input.selectedScopeGrant))
           const currentGrantDeadline=input.authorityGrant?.expiresAt??(proof?input.selectedScopeGrant?.expiresAt??null:null)
@@ -460,12 +502,14 @@ export function createAdmissionService(deps: {
           const consumeParameters=[input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac,
             originMatches,originFences,selectionProof,currentGrantDeadline,machineSources]
           const consumed = await client.query<{
-            pack_id: string
+            pack_id: string | null
             stable_text: string
             dynamic_text: string
             stable_hash: Buffer | null
             dynamic_hash: Buffer | null
+            origin_absent?: boolean
           }>(`
+            ${observeOrigin}
             UPDATE memory_context_injections j
             SET state = 'prepared'${shared?`, native_delivery_authority_sha256=$11,
               native_delivery_prepared_at=CASE WHEN $11::text IS NOT NULL THEN clock_timestamp() END`:''}
@@ -475,16 +519,18 @@ export function createAdmissionService(deps: {
               AND j.state = 'admitted' AND j.admission_expires_at >= clock_timestamp()
               AND j.admission_nonce_hmac = $5
               AND p.pack_id = j.pack_id AND p.installation_id = j.installation_id
-              AND $6::boolean AND ${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)} AND ${selectedScopeFenceSql('$8')} AND ${currentGrantClockSql}
+              AND $6::boolean AND ${emptyOriginFence} AND ${dependencyFence} AND ${currentGrantClockSql}
               AND p.state = 'ready' AND ${frameFence} AND ${currentMachineSourcesSql} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
               AND j.consumption_generation=COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               AND NOT EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
             RETURNING p.pack_id::text, p.stable_text, p.dynamic_text,
                       p.stable_hash, p.dynamic_hash
+            ${verifyEmptyOriginAtHandoff ? `) SELECT handoff.*,origin_observation.absent AS origin_absent
+              FROM origin_observation LEFT JOIN handoff ON TRUE` : ''}
           `, shared?[...consumeParameters,frozen?.delivery_authority_sha256??null]:consumeParameters)
           const row = consumed.rows[0]
-          if (row) {
+          if (row?.pack_id) {
             return {
               ok: true,
               pack: {
@@ -496,9 +542,10 @@ export function createAdmissionService(deps: {
               },
             }
           }
+          const originWasCurrent=originMatches&&(!verifyEmptyOriginAtHandoff||row?.origin_absent===true)
           const state = await client.query<{ state: string; expired: boolean }>(`
             UPDATE memory_context_injections j
-            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${frameFence} OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)}) OR NOT (${selectedScopeFenceSql('$8')}) OR NOT (${currentMachineSourcesSql}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
+            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${frameFence} OR NOT (${currentGrantClockSql}) OR NOT (${dependencyFence}) OR NOT (${currentMachineSourcesSql}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
               OR j.consumption_generation IS NULL OR j.consumption_generation<>COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               OR EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))
@@ -508,7 +555,7 @@ export function createAdmissionService(deps: {
             WHERE j.injection_id = $1 AND j.installation_id = $2 AND j.session_id = $3 AND j.pack_id = $4
               AND j.admission_nonce_hmac=$5 AND p.pack_id=j.pack_id AND p.installation_id=j.installation_id
             RETURNING j.state, j.admission_expires_at < clock_timestamp() AS expired
-          `, [input.injectionId, input.installationId, input.sessionId, input.packId,nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline,machineSources])
+          `, [input.injectionId, input.installationId, input.sessionId, input.packId,nonceHmac,originWasCurrent,originFences,selectionProof,currentGrantDeadline,machineSources])
           if (!state.rows[0]) return { ok: false, error: 'not_found' }
           if (state.rows[0].expired || state.rows[0].state === 'expired') {
             return { ok: false, error: 'expired' }
