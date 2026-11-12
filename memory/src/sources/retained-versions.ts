@@ -41,7 +41,7 @@ export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,i
  let capsuleStamps:unknown[]=[]
  const capsules=evidence.filter(row=>row.evidence_kind==='accepted_excerpt').map(row=>row.capsule_id)
  if(capsules.length){
-  const retained=(await client.query("SELECT capsule_id::text,version_id::text,xmin::text AS capsule_stamp FROM knowledge_evidence_capsules WHERE installation_id=$1 AND capsule_id=ANY($2::uuid[]) AND retention_basis='user_accepted' ORDER BY capsule_id FOR SHARE NOWAIT",[installationId,capsules])).rows
+  const retained=(await client.query("SELECT capsule_id::text,version_id::text,xmin::text AS capsule_stamp FROM knowledge_evidence_capsules WHERE installation_id=$1 AND capsule_id=ANY($2::uuid[]) ORDER BY capsule_id FOR SHARE NOWAIT",[installationId,capsules])).rows
   capsuleStamps=retained.map(row=>[row.capsule_id,row.capsule_stamp])
   if(evidence.some(row=>row.evidence_kind==='accepted_excerpt'&&!retained.some(c=>c.capsule_id===row.capsule_id&&c.version_id===row.version_id)))throw Error('source_reference_changed')
  }

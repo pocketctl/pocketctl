@@ -445,7 +445,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
           const inherited = input.inheritCurrentEvidence ? (await client.query<{
             excerpt:string; occurred_at:Date; evidence_kind:string; capsule_id:string|null; retained:boolean
           }>(`SELECT e.excerpt,e.occurred_at,e.evidence_kind,e.capsule_id::text,
-              (k.capsule_id IS NOT NULL AND memory_delivery_source_available(COALESCE(e.locator->'source_provenance','{}'::jsonb))) AS retained
+              (k.retention_basis='user_accepted' AND memory_delivery_source_available(COALESCE(e.locator->'source_provenance','{}'::jsonb))) AS retained
             FROM knowledge_evidence e LEFT JOIN knowledge_evidence_capsules k
               ON k.installation_id=e.installation_id AND k.version_id=e.version_id AND k.capsule_id=e.capsule_id
             WHERE e.installation_id=$1 AND e.version_id=$2 ORDER BY e.ordinal FOR SHARE OF e`,
