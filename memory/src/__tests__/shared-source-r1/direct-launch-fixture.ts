@@ -7,7 +7,7 @@ import {applySharedSourceContract} from '../../migrations/shared-db/contract.js'
 import {provisionSharedDatabase} from '../../migrations/shared-db/namespace.js'
 import {createMemoryPool} from '../../db.js'
 /** Fresh, explicitly named database only. Never connects to old private fixtures. */
-export async function directLaunchFixture(url:string,options:{originalBinding?:boolean;necessaryOriginal?:boolean;personalClosure?:boolean}={}){
+export async function directLaunchFixture(url:string,options:{originalBinding?:boolean;necessaryOriginal?:boolean;personalClosure?:boolean;captureRelayControls?:boolean}={}){
  const u=new URL(url),adminUrl=process.env.DIRECT_LAUNCH_FIXTURE_ADMIN_DATABASE_URL,database=options.personalClosure?'shared_personal_closure_test':options.necessaryOriginal?'shared_necessary_original_test':options.originalBinding?'shared_original_binding_test':'shared_direct_launch_memory_test'
  if(!adminUrl||u.search||u.hash||u.pathname!=='/'+database||u.username!==database||!['127.0.0.1','localhost'].includes(u.hostname))throw Error('dedicated_direct_launch_fixture_required')
  const au=new URL(adminUrl)
@@ -21,6 +21,7 @@ export async function directLaunchFixture(url:string,options:{originalBinding?:b
  const relay=await load('db'),capture=await load('shared-source/capture'),team=await load('shared-source/team-capture'),repository=await load('extensions/installation-repository'),journal=await load('extensions/journal')
  await relay.initDB(pool);await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool);await capture.applyRelaySourceCapture(pool);await team.applyRelayTeamSourceCapture(pool)
  await pool.query("INSERT INTO public.extension_providers(provider_id,manifest_version,manifest,status) VALUES('pocketctl-memory',1,'{}','enabled') ON CONFLICT(provider_id) DO UPDATE SET status='enabled'")
+ if(options.captureRelayControls)await (await load('shared-source/control-capture')).applyRelayControlCapture(pool)
  await provisionSharedDatabase(pool,{memoryRole,relayRole,migratorRole})
  const ru=new URL(url);ru.username=memoryRole;ru.password='synthetic-only'
  const runtime=createMemoryPool({databaseUrl:ru.href,databaseNamespace:'memory',dbPoolMax:5})
