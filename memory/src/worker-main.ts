@@ -5,7 +5,8 @@ import {wakeCompletedPersonalProjection} from './sources/projection-job-handoff.
 import {createNativeInstallationDiscovery} from './installations/native-discovery.js'
 import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
 import {createLifecycleAssessmentService} from './claims/lifecycle-assessment.js'
-import {createLifecycleObservationService} from './claims/lifecycle-observation.js'
+import {createLifecycleJobHandler} from './claims/lifecycle-job.js'
+import {createLifecycleObservationService,lifecycleOwnerJoin} from './claims/lifecycle-observation.js'
 import {createCurationExecutor} from './curation/executor.js'
 import {createCurationWorker} from './curation/worker.js'
 import {reclaimClaimHistory,reclaimColdClaimBody} from './retention/claim-history.js'
@@ -530,7 +531,7 @@ async function main(): Promise<void> {
     }
 
     const claimRepository = createClaimRepository(pool)
-    const lifecycleAssessment=createLifecycleAssessmentService({pool,mode:config.lifecycleMode??'off',modelFingerprint:extractionTextRoute?.fingerprint??'unconfigured',textGeneratorForInstallation:()=>textGenerator})
+    const lifecycleAssessment=createLifecycleAssessmentService({pool,mode:config.lifecycleMode??'off',modelFingerprint:extractionTextRoute?.fingerprint??'unconfigured',consentFingerprint:extractionTextRoute?.fingerprint,textGeneratorForInstallation:()=>config.databaseNamespace==='memory'&&!textBudgetOptions?undefined:textGenerator})
     const observation=createLifecycleObservationService({pool,mode:config.lifecycleMode??'off'})
     const observationScheduler=createObservationScheduler(observation,{onError:loopError('lifecycle_observation')})
     const lifecycle = createLifecycleService(pool, claimRepository,{lifecycleMode:config.lifecycleMode})
@@ -538,10 +539,9 @@ async function main(): Promise<void> {
     const curationExecutor=createCurationExecutor({pool,mode:config.lifecycleMode??'off',tombstoneKeys:config.tombstoneHmacKeys})
     jobWorker.register('curate_conclusions',async(job,jobSignal,ctx)=>{await curationExecutor.curate(job,jobSignal,ctx?.fence)})
     jobWorker.register('consolidate_task',async(job,jobSignal,ctx)=>{await curation.consolidate(job,jobSignal,ctx?.fence)})
-    jobWorker.register('evaluate_claim_lifecycle',async(_job,jobSignal)=>{
-      await lifecycleAssessment.assessDueClaims({limit:1,signal:jobSignal})
-      await lifecycle.evaluateDueClaims({limit:100})
-    })
+    jobWorker.register('evaluate_claim_lifecycle',createLifecycleJobHandler({
+      shared:config.databaseNamespace==='memory',jobs:jobRepository,lifecycle,assessment:lifecycleAssessment,
+    }))
     jobWorker.register('reclaim_claim_history',async job=>{if(!job.installation_id||typeof job.payload.claim_id!=='string')return;const target={installationId:job.installation_id,claimId:job.payload.claim_id},settings={lifecycleMode:config.lifecycleMode,readerCompatible:true};await reclaimClaimHistory(pool,target,settings);await reclaimColdClaimBody(pool,target,settings)})
 		const contextInvalidation = createInvalidationService({ pool })
 		jobWorker.register('invalidate_context_packs', async job => {
@@ -658,7 +658,13 @@ async function main(): Promise<void> {
     const enqueueLifecycleSweep=async()=>{
       await jobRepository.enqueueJob({jobType:'evaluate_claim_lifecycle',idempotencyKey:`lifecycle:${Math.floor(Date.now()/60000)}`,priority:96})
       if(!config.lifecycleMode||config.lifecycleMode==='off')return
-      const rows=(await pool.query(`SELECT l.installation_id,l.claim_id FROM memory_claim_lifecycle l JOIN memory_curation_policies p USING(installation_id) WHERE p.reclaim_mode<>'off' AND l.next_evaluate_at<=clock_timestamp() ORDER BY l.next_evaluate_at,l.claim_id LIMIT 100`)).rows
+      const authority=lifecycleOwnerJoin(pool,'i.installation_id')
+      const rows=(await pool.query(`SELECT l.installation_id,l.claim_id FROM memory_claim_lifecycle l
+        JOIN memory_curation_policies p USING(installation_id) JOIN memory_installations i USING(installation_id)
+        ${authority.shared?authority.join:''}
+        WHERE p.reclaim_mode<>'off' AND l.next_evaluate_at<=clock_timestamp()
+         ${authority.shared?`AND ${authority.ready}`:''}
+        ORDER BY l.next_evaluate_at,l.claim_id LIMIT 100`)).rows
       for(const r of rows)await jobRepository.enqueueJob({installationId:r.installation_id,jobType:'reclaim_claim_history',idempotencyKey:`history:${r.claim_id}:${Math.floor(Date.now()/3600000)}`,payload:{claim_id:r.claim_id}})
     }
     await observationScheduler.runOnce(signal)

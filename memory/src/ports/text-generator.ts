@@ -32,7 +32,7 @@ export type ModelJsonResult<T> =
   | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean; timeoutFallback?: TimeoutFallbackDiagnostics; providerReceipt?:ProviderReceiptHandle }
   | {
       ok: false
-      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'provider_result_unknown'
+      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'source_not_sent' | 'provider_result_unknown'
       retryable: boolean
       /** Bounded machine code only — never raw provider text. */
       detail?: string
@@ -52,6 +52,8 @@ export interface TextGenerator {
     requestKey?: string
     /** Internal explicit isolated enrollment, never provider wire data. */
     receipt?: ReviewReceiptRequest
+    /** Optional final authority check after budget waits, before provider IO. */
+    authorizeDispatch?: () => Promise<boolean>
     system: string
     document: unknown
     schema: JsonSchema

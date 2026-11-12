@@ -5,7 +5,9 @@ import {evaluateClaimLifecycle} from './lifecycle-evaluator.js'
 import type {LifecycleMode,LifecycleFacts} from './lifecycle-policy.js'
 import {requireCurrentScopePermission,assertCurrentGrantClock,type V2GrantFacts} from '../governance/authorization.js'
 import {contextClaimFacts,eligibleContextFacts,type ContextQueryFrame} from '../context/consumption.js'
-import {lifecycleObservationAvailableSql} from './lifecycle-observation.js'
+import {lifecycleObservationAvailableSql,lifecycleOwnerJoin} from './lifecycle-observation.js'
+import {lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {deferLifecycleEvaluation,guardLifecycleVersion} from './lifecycle-source.js'
 
 /**
  * Claim lifecycle: correct (immutable Version N+1), expire, revoke, supersede
@@ -21,33 +23,56 @@ export function createLifecycleService(pool: pg.Pool, claims: ClaimRepository, o
       claims.transitionClaim({ ...input, target: 'revoked' }),
     supersedeClaim: claims.supersedeClaim.bind(claims) as typeof claims.supersedeClaim,
 
-    async evaluateDueClaims(input:{limit?:number}={}):Promise<{evaluated:number;cooled:number;reclaimEligible:number}> {
+    async listDueInstallations():Promise<string[]>{
+      if(!options.lifecycleMode||options.lifecycleMode==='off')return []
+      const authority=lifecycleOwnerJoin(pool,'i.installation_id')
+      const rows=(await pool.query<{installation_id:string}>(`SELECT i.installation_id
+        FROM memory_claim_lifecycle l JOIN memory_curation_policies p USING(installation_id)
+        JOIN memory_installations i USING(installation_id) ${authority.join}
+        WHERE l.next_evaluate_at<=clock_timestamp() AND p.cold_mode<>'off' AND ${authority.ready}
+         AND NOT EXISTS(SELECT 1 FROM memory_jobs j WHERE j.installation_id=i.installation_id
+          AND j.job_type='evaluate_claim_lifecycle' AND j.state IN('pending','running'))
+        GROUP BY i.installation_id ORDER BY min(l.next_evaluate_at),i.installation_id LIMIT 100`)).rows
+      return rows.map(row=>row.installation_id)
+    },
+
+    async evaluateDueClaims(input:{limit?:number;installationId?:string}={}):Promise<{evaluated:number;cooled:number;reclaimEligible:number}> {
       const counts={evaluated:0,cooled:0,reclaimEligible:0}
       if(!options.lifecycleMode||options.lifecycleMode==='off')return counts
       const limit=input.limit??100
       if(!Number.isInteger(limit)||limit<1||limit>500)throw new Error('invalid_lifecycle_batch')
+      const authority=lifecycleOwnerJoin(pool,'i.installation_id')
       const ids=(await pool.query(`SELECT l.installation_id,l.claim_id FROM memory_claim_lifecycle l
         JOIN memory_curation_policies p ON p.installation_id=l.installation_id
-        WHERE l.next_evaluate_at<=clock_timestamp() AND p.cold_mode<>'off'
-        ORDER BY l.next_evaluate_at,l.installation_id,l.claim_id LIMIT $1`,[limit])).rows
+        JOIN memory_installations i ON i.installation_id=l.installation_id ${authority.join}
+        WHERE l.next_evaluate_at<=clock_timestamp() AND p.cold_mode<>'off' AND ${authority.ready}
+         AND ($2::uuid IS NULL OR l.installation_id=$2)
+        ORDER BY l.next_evaluate_at,l.installation_id,l.claim_id LIMIT $1`,[limit,input.installationId??null])).rows
       for(const id of ids){
         const client=await pool.connect()
         try{
           await client.query('BEGIN')
+          await client.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'")
+          if(!await lockCurrentRelayAuthority(client,[id.installation_id])){await client.query('ROLLBACK');continue}
           if(options.lifecycleMode==='enabled')await lockLifecycleScope(client,id.installation_id)
           else await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[id.installation_id])
-          const row=(await client.query(`SELECT l.*,CASE WHEN ${lifecycleObservationAvailableSql()} THEN l.observation_state ELSE 'unknown' END AS observation_state,c.state,c.created_at,c.consumption_hold_reason,v.authority,v.valid_until,
+          const row=(await client.query(`SELECT l.*,CASE WHEN ${lifecycleObservationAvailableSql(authority.stamp)} THEN l.observation_state ELSE 'unknown' END AS observation_state,c.state,c.created_at,c.consumption_hold_reason,v.authority,v.valid_until,
             p.cold_mode,p.reclaim_mode,clock_timestamp() AS now,
             memory_delivery_version_available(v.installation_id,v.version_id) AS source_available,
             v.version_id FROM memory_claim_lifecycle l JOIN knowledge_claims c USING(installation_id,claim_id)
             JOIN knowledge_versions v ON v.installation_id=c.installation_id AND v.version_id=c.current_version_id
             JOIN memory_curation_policies p ON p.installation_id=c.installation_id
-            JOIN memory_installations i ON i.installation_id=c.installation_id JOIN memory_owner_scopes s ON s.installation_id=c.installation_id
-            WHERE l.installation_id=$1 AND l.claim_id=$2 AND l.next_evaluate_at<=clock_timestamp()
-             AND i.local_status='ready' AND i.relay_status='active' AND s.state='active' AND s.owner_scope_kind='personal'
-            FOR UPDATE OF c,l FOR SHARE OF p,s,i`,[id.installation_id,id.claim_id])).rows[0]
+            JOIN memory_installations i ON i.installation_id=c.installation_id ${authority.join}
+            WHERE l.installation_id=$1 AND l.claim_id=$2 AND l.next_evaluate_at<=clock_timestamp() AND ${authority.ready}
+            FOR UPDATE OF c,l FOR SHARE OF p,i${authority.localOwnerLock}`,[id.installation_id,id.claim_id])).rows[0]
           if(!row){await client.query('COMMIT');continue}
           const decision=evaluateClaimLifecycle(lifecycleFacts(row,options.lifecycleMode))
+          if((decision.action==='cool'||decision.action==='reclaim_eligible')
+           &&!await guardLifecycleVersion(client,id.installation_id,row.version_id)){
+            if(options.lifecycleMode==='enabled')await deferLifecycleEvaluation(client,id.installation_id,id.claim_id)
+            await client.query('COMMIT')
+            continue
+          }
           counts.evaluated++
           if(options.lifecycleMode==='enabled'){
             if(decision.action==='cool'&&!row.consumption_hold_reason){

@@ -165,6 +165,14 @@ export function withTextProviderBudget(
           ...(reservation.retryAt ? {retryAt:reservation.retryAt.toISOString()}: {}) }
       }
       const attempt=await startSourceProviderAttempt(reservation.reservationId,input.requestKey)
+      if(input.authorizeDispatch&&!await input.authorizeDispatch().catch(()=>false)){
+        try{await finishSourceProviderAttempt(attempt,'not-sent')}
+        catch{
+          blockUnrecordedSourceEffect()
+          return {ok:false,code:'provider_result_unknown',retryable:false,billingUncertain:true,budgetReservationId:reservation.reservationId}
+        }
+        return {ok:false,code:'source_not_sent',retryable:true,budgetReservationId:reservation.reservationId}
+      }
       const receipt=input.receipt?await admitProviderReceipt(input.receipt,reservation.reservationId):undefined
       const complete=async():Promise<ModelJsonResult<T>>=>{
       let effect:'accounted'|'uncertain'='uncertain'
