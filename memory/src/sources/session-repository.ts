@@ -1,7 +1,15 @@
 import type pg from 'pg'
 import {canonicalJsonString} from '@pocketctl/session-source'
 import {prepareSourceReferences,preparedSourceUnavailable} from './prepared-sources.js'
-const references=`SELECT source_event_id::text FROM source_events WHERE installation_id=$1 AND session_id=$2 ORDER BY occurred_at DESC,source_event_id DESC LIMIT 4097`
+// Managed Relay producers attach Git identity to lifecycle observations.
+// Retained archive rows and older copied observations keep their existing
+// lookup contract. A compatibility payload can only nominate a UUID: the
+// verified source reader still supplies and validates the actual fact.
+const references = `SELECT source_event_id::text FROM source_events
+ WHERE installation_id=$1 AND session_id=$2
+  AND (event_type IN ('session_created','session_discovered') OR source_kind='legacy_archive'
+    OR (origin IN ('feed','snapshot','team') AND payload ? 'repository_id'))
+ ORDER BY occurred_at DESC,source_event_id DESC LIMIT 4097`
 /** Applicability discovery, never a grant. Resolve exact stored source UUIDs
  * before BEGIN and fail closed when a bounded current observation is unprovable. */
 export async function sharedSessionRepository(pool:pg.Pool,installationId:string,sessionId:string):Promise<string|null>{

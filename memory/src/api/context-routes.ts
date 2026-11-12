@@ -332,6 +332,8 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
         grant_ms: Math.round(verifiedAt - startedAt),
         compile_ms: Math.round(finishedAt - verifiedAt),
         client_closed: reply.raw.destroyed,
+        repository_hint_present: Boolean(body.repository_hint?.repository_id),
+        commit_hint_present: Boolean(body.repository_hint?.commit_sha),
       })
     }
 

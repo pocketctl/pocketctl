@@ -14,6 +14,8 @@ import { createContextCompiler } from '../context/compiler.js'
 import { createPolicyRepository } from '../policies/repository.js'
 import { createPolicyResolver } from '../policies/resolver.js'
 import {createAdmissionService} from '../context/admission-service.js'
+import { sharedSessionRepository } from '../sources/session-repository.js'
+import { canonicalPayloadHash } from '@pocketctl/session-source'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -128,6 +130,20 @@ describeWithDatabase('context pack compilation (PostgreSQL)', () => {
       VALUES ($1, $2, $3)
     `, [INSTALLATION, version.rows[0].version_id, input.statement])
   }
+
+  test.each(['session_created', 'session_discovered', 'user_text'])(
+    'repository fallback uses the %s observation without reading unrelated source bodies', async eventType => {
+      const observation = { repository_id: 'compiler-fixture' }
+      await pool.query(`
+        INSERT INTO source_events
+          (source_event_id, installation_id, origin, origin_position, session_id, event_type, occurred_at, payload, payload_hash)
+        VALUES (gen_random_uuid(), $1, 'feed', 'repository-observation', 'ses-c', $2, NOW(), $3, $4),
+               (gen_random_uuid(), $1, 'feed', 'unrelated-body', 'ses-c', 'agent_text', NOW(), '{}', sha256('invalid fixture hash'))
+      `, [INSTALLATION, eventType, JSON.stringify(observation), canonicalPayloadHash(observation)])
+
+      expect(await sharedSessionRepository(pool, INSTALLATION, 'ses-c')).toBe(REPOSITORY)
+    },
+  )
 
   test('enabled mode with a probed adapter persists a ready pack atomically', async () => {
     await seedClaim({ key: 'auth-path', statement: 'Web obtains capability grant before memory access grant compile' })

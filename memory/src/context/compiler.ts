@@ -266,26 +266,11 @@ export function createContextCompiler(deps: {
           ? 'enabled'
           : 'shadow'
 
-      const policy = await deps.policyResolver.resolve({
-        installationId: input.installationId,
-        kind: 'context',
-        repositoryId,
-      })
-      const rankingPolicy = await deps.policyResolver.resolve({
-        installationId: input.installationId,
-        kind: 'ranking',
-        repositoryId,
-      })
-      const policyDoc = policy.document as ContextPolicyDocument
-      const loadout = await deps.loadouts.resolve({
-        installationId: input.installationId,
-        repositoryId,
-        agent: input.agent,
-      })
-
-      const settingsFingerprint = effectiveContextSettingsFingerprint(effectiveSettings)
-      const loadoutFingerprint = resolvedLoadoutFingerprint(loadout)
-      const corpus = await deps.pool.query<{ fingerprint: string }>(`
+      const [policy, rankingPolicy, loadout, corpus, originSnapshot] = await Promise.all([
+        deps.policyResolver.resolve({ installationId: input.installationId, kind: 'context', repositoryId }),
+        deps.policyResolver.resolve({ installationId: input.installationId, kind: 'ranking', repositoryId }),
+        deps.loadouts.resolve({ installationId: input.installationId, repositoryId, agent: input.agent }),
+        deps.pool.query<{ fingerprint: string }>(`
         SELECT md5(COALESCE(string_agg(
           c.claim_id::text || ':' || c.state || ':' || COALESCE(c.current_version_id::text, '')
           || ':' || memory_delivery_version_available(c.installation_id, c.current_version_id)::text
@@ -297,8 +282,12 @@ export function createContextCompiler(deps: {
           ), ''), ',' ORDER BY c.claim_id), '')) AS fingerprint
         FROM knowledge_claims c
         WHERE c.installation_id = $1
-      `, [input.installationId])
-      const originSnapshot=await originPolicyCorpusSnapshot(deps.pool,input.installationId)
+        `, [input.installationId]),
+        originPolicyCorpusSnapshot(deps.pool, input.installationId),
+      ])
+      const policyDoc = policy.document as ContextPolicyDocument
+      const settingsFingerprint = effectiveContextSettingsFingerprint(effectiveSettings)
+      const loadoutFingerprint = resolvedLoadoutFingerprint(loadout)
       if(originSnapshot.stamp!==null)queryContext.originPolicyStamp=originSnapshot.stamp
       const corpusFingerprint = corpus.rows[0]?.fingerprint ?? ''
       const effectivePolicyHash = createHash('sha256')
