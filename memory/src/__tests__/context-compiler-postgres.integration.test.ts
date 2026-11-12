@@ -132,18 +132,41 @@ describeWithDatabase('context pack compilation (PostgreSQL)', () => {
   }
 
   test.each(['session_created', 'session_discovered', 'user_text'])(
-    'repository fallback uses the %s observation without reading unrelated source bodies', async eventType => {
+    'repository fallback uses the latest %s observation without reading older bodies', async eventType => {
       const observation = { repository_id: 'compiler-fixture' }
       await pool.query(`
         INSERT INTO source_events
           (source_event_id, installation_id, origin, origin_position, session_id, event_type, occurred_at, payload, payload_hash)
-        VALUES (gen_random_uuid(), $1, 'feed', 'repository-observation', 'ses-c', $2, NOW(), $3, $4),
-               (gen_random_uuid(), $1, 'feed', 'unrelated-body', 'ses-c', 'agent_text', NOW(), '{}', sha256('invalid fixture hash'))
+        VALUES (gen_random_uuid(), $1, 'feed', 'repository-observation', 'ses-c', $2, NOW(), $3, $4)
       `, [INSTALLATION, eventType, JSON.stringify(observation), canonicalPayloadHash(observation)])
+      await pool.query(`
+        INSERT INTO source_events
+          (source_event_id, installation_id, origin, origin_position, session_id, event_type, occurred_at, payload, payload_hash)
+        SELECT gen_random_uuid(), $1, 'feed', 'older-body-'||n, 'ses-c', 'agent_text', NOW()-n*interval '1 second', '{}',
+          CASE WHEN n=50 THEN sha256('invalid fixture hash') ELSE $2 END
+        FROM generate_series(1,50) n
+      `, [INSTALLATION, canonicalPayloadHash({})])
 
       expect(await sharedSessionRepository(pool, INSTALLATION, 'ses-c')).toBe(REPOSITORY)
     },
   )
+
+  test('repository fallback still reads older facts when the prefix has no registered match', async () => {
+    const observation = { repository_id: 'compiler-fixture' }
+    await pool.query(`
+      INSERT INTO source_events
+        (source_event_id, installation_id, origin, origin_position, session_id, event_type, occurred_at, payload, payload_hash)
+      VALUES (gen_random_uuid(), $1, 'feed', 'older-repository', 'ses-c', 'user_text', NOW()-interval '1 minute', $2, $3)
+    `, [INSTALLATION, JSON.stringify(observation), canonicalPayloadHash(observation)])
+    await pool.query(`
+      INSERT INTO source_events
+        (source_event_id, installation_id, origin, origin_position, session_id, event_type, occurred_at, payload, payload_hash)
+      SELECT gen_random_uuid(), $1, 'feed', 'newer-body-'||n, 'ses-c', 'agent_text', NOW()-n*interval '1 second', '{}', $2
+      FROM generate_series(1,50) n
+    `, [INSTALLATION, canonicalPayloadHash({})])
+
+    expect(await sharedSessionRepository(pool, INSTALLATION, 'ses-c')).toBe(REPOSITORY)
+  })
 
   test('enabled mode with a probed adapter persists a ready pack atomically', async () => {
     await seedClaim({ key: 'auth-path', statement: 'Web obtains capability grant before memory access grant compile' })
