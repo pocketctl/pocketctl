@@ -10,7 +10,7 @@ import {createSharedSourceScheduler} from '../../sources/shared-scheduler.js'
 import {createJobRepository} from '../../jobs/repository.js'
 import {createJobWorker} from '../../jobs/worker.js'
 import {createCanonicalProjectionHandler} from '../../sources/canonical-projection-worker.js'
-import {preparePersonalMetadataReferencePage,persistPersonalMetadataReferencePage} from '../../sources/canonical-references.js'
+import {prepareCanonicalReferencePage,persistCanonicalReferencePage,preparePersonalMetadataReferencePage,persistPersonalMetadataReferencePage} from '../../sources/canonical-references.js'
 import {loadSourceContextSet,checkSourceContextSet} from '../../sources/source-context-set.js'
 import {createEpisodeRepository} from '../../episodes/repository.js'
 import {provisionSharedDatabase} from '../../migrations/shared-db/namespace.js'
@@ -888,7 +888,7 @@ suite('continuous personal canonical content uses current scope seal',()=>{
   },{branch:'canonical'})
   try{for(let n=0;n<128&&!checked;n++){await scheduler.runOnce();await queue.tick();if(errors.length)throw errors[0]};expect(checked).toBe(true);expect(errors).toEqual([])}finally{await scheduler.stop();await queue.stop()}
  },30000)
- test('projects eligible headerless turns alongside an unrelated reclaimed turn',async()=>{
+ test.each([false,true])('projects eligible headerless turns alongside an unrelated reclaimed turn (originals=%s)',async reuseOriginals=>{
   const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
   await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
   const reclaimed=await f.event(source),eligible=[await f.event(source),await f.event(source)],reclaimedTurn='direct-turn-'+source.session
@@ -898,6 +898,12 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    WHERE id=ANY($1::bigint[])`,[[reclaimed,...eligible],eligible])
   await f.pool.query(`INSERT INTO memory.memory_source_retention_receipts(installation_id,session_id,turn_id,source_digest,compiler_version,extraction_completed_at,state)
    VALUES($1,$2,$3,$4,'fixture',now(),'reclaiming')`,[installation,source.session,reclaimedTurn,Buffer.alloc(32)])
+  const originalIds=eligible.map(()=>randomUUID()),reclaimedOriginal=randomUUID()
+  if(reuseOriginals)await f.pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash,body_reclaimed_at)
+   SELECT $1,$2,'feed','retired-original',session_id,$4,event_type,created_at,'{}'::jsonb,decode(repeat('b',64),'hex'),now()
+   FROM public.events WHERE id=$3`,[reclaimedOriginal,installation,reclaimed,reclaimedTurn])
+  const readOriginals=async()=>(await f.runtime.query('SELECT to_jsonb(s) AS original FROM source_events s WHERE source_event_id=ANY($1::uuid[]) ORDER BY source_event_id',[[...originalIds,reclaimedOriginal]])).rows
+  let originals:Awaited<ReturnType<typeof readOriginals>>|undefined
   const root={kind:'relay_event' as const,key:f.root(source)},signal=new AbortController().signal,errors:unknown[]=[]
   const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'headerless-retention-scheduler',signal,onError:e=>errors.push(e)})
   const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'headerless-retention-worker',signal,
@@ -908,28 +914,96 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    if(job.installation_id!==installation)return
    const scope=job.payload.scope as Parameters<ReturnType<typeof createPostgresSharedSourceReader>['listHeads']>[0]
    const ordinary=createPostgresSharedSourceReader(f.runtime)
-   expect((await ordinary.listHeads(scope,root)).heads.map(h=>h.canonicalKey)).toEqual(eligible)
+   const current=await ordinary.listHeads(scope,root)
+   expect(current.heads.map(h=>h.canonicalKey)).toEqual(eligible)
    await expect(ordinary.getHeads(scope,root,[reclaimed])).rejects.toMatchObject({code:'source_body_reclaimed'})
+   if(reuseOriginals&&!originals){
+    const bind=async(index:number)=>{
+     const head=current.heads[index]
+     await f.pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,
+      payload,payload_hash,classification,source_kind,canonical_key,canonical_session_key,source_version,content_hash,hash_version,mapping_state,adapter_version)
+      SELECT $1,$2,'feed',$1::uuid::text,session_id,payload->>'turn_id',event_type,date_trunc('milliseconds',created_at),
+       payload,decode($4,'hex'),$5,'relay_event',id::text,session_id,$6,decode($4,'hex'),'canonical-json-sha256-v1','verified','original-ref-v1'
+      FROM public.events WHERE id=$3`,[originalIds[index],installation,head.canonicalKey,head.contentHash,head.classification,current.version])
+    }
+    await bind(0)
+    const partial=await readOriginals(),unmapped=await prepareCanonicalReferencePage(f.runtime,scope,root)
+    await expect(persistCanonicalReferencePage(f.runtime,unmapped,{project:true,checkpoint:true})).rejects.toThrow('canonical_reference_mapping_required')
+    expect(await readOriginals()).toEqual(partial)
+    expect((await f.runtime.query("SELECT count(*)::int AS n FROM source_events WHERE installation_id=$1 AND origin='canonical'",[installation])).rows[0].n).toBe(0)
+    expect((await f.runtime.query('SELECT count(*)::int AS n FROM memory_canonical_projection_progress WHERE installation_id=$1',[installation])).rows[0].n).toBe(0)
+    await bind(1)
+    originals=await readOriginals()
+    expect(originals).toHaveLength(3)
+    const fence=await f.runtime.connect()
+    try{
+     await fence.query('BEGIN')
+     const expected={contract:'personal-reference-projection-v1',observedVersion:current.version,canonicalIds:eligible}
+     const result=await fence.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS locked',[scope,root.kind,root.key,expected])
+     expect(result.rows[0].locked).toBe(true)
+     await expect(f.pool.query('SELECT 1 FROM memory.source_events WHERE source_event_id=$1 FOR UPDATE NOWAIT',[originalIds[0]])).rejects.toMatchObject({code:'55P03'})
+    }finally{await fence.query('ROLLBACK');fence.release()}
+   }
    await normal(job,abort,context)
   },{branch:'canonical'})
   let continued=false
+  const closeObserver=observeProjectionCommits(f.runtime,async event=>{
+   if(event.installationId!==installation||event.rootKey!==root.key||event.after.state!=='scanning'||!event.after.next_cursor)return
+   const version=event.after.source_version
+   if(reuseOriginals?version.metadataWave?.phase==='scanning':typeof version.content==='string')continued=true
+  },errors)
   try{
    for(let n=0;n<96;n++){
     await scheduler.runOnce();await queue.tick();if(errors.length)throw errors[0]
     const progress=(await f.runtime.query('SELECT state,next_cursor,source_version FROM memory_canonical_projection_progress WHERE installation_id=$1 AND root_key=$2',[installation,root.key])).rows[0]
-    if(progress?.state==='scanning'&&progress.next_cursor&&typeof progress.source_version.content==='string')continued=true
     if(progress?.state==='ready')break
     if(n===95)throw Error('fixture_projection_checkpoint_missing');await delay(30)
    }
    expect(continued).toBe(true)
-   const refs=(await f.runtime.query('SELECT canonical_key,payload FROM source_events WHERE installation_id=$1 ORDER BY canonical_key',[installation])).rows
-   expect(refs).toEqual(eligible.map(key=>({canonical_key:key,payload:null})))
+   const refs=(await f.runtime.query('SELECT source_event_id::text,canonical_key,origin,payload FROM source_events WHERE installation_id=$1 AND canonical_key IS NOT NULL ORDER BY canonical_key',[installation])).rows
+   if(reuseOriginals){
+    expect(refs.map(r=>[r.source_event_id,r.canonical_key,r.origin])).toEqual(eligible.map((key,i)=>[originalIds[i],key,'feed']))
+    expect(await readOriginals()).toEqual(originals)
+    expect(originals?.find(r=>r.original.source_event_id===reclaimedOriginal)?.original).toMatchObject({mapping_state:'unproven',payload:{},source_kind:null})
+   }else expect(refs.map(r=>[r.canonical_key,r.origin,r.payload])).toEqual(eligible.map(key=>[key,'canonical',null]))
    const watermark=(await f.pool.query(`SELECT w.revision::text,p.processed_revision::text FROM shared.memory_source_work w
     JOIN shared.memory_source_progress p USING(source_kind,root_key)
     WHERE w.source_kind='relay_event' AND w.root_key=$1 AND p.installation_id=$2`,[root.key,installation])).rows[0]
    expect(watermark?.processed_revision).toBe(watermark?.revision)
    expect(BigInt(watermark.revision)).toBeGreaterThan(0n)
    expect((await f.runtime.query("SELECT state FROM memory_jobs WHERE installation_id=$1 AND job_type='project_shared_source'",[installation])).rows).toEqual([{state:'completed'}])
+  }finally{await scheduler.stop();await queue.stop();await closeObserver()}
+ },15000)
+ test('blocks allocation on a new logical page with an unresolved original in a fenced alias',async()=>{
+  const original=await f.source(),installation=(await f.install(original,'retained_history')).inst.installation_id
+  const source={...original,session:original.session+'-new'}
+  const {renameOwnedDaemonSession}=await import(new URL('../../../../relay/dist/db.js',import.meta.url).href)
+  expect(await renameOwnedDaemonSession(f.publisher,{oldSessionId:original.session,newSessionId:source.session,daemonId:source.daemon,userId:source.owner})).toBe(true)
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  const id=await f.event(source),unresolved=randomUUID()
+  await f.pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,event_type,occurred_at,payload,payload_hash)
+   VALUES($1,$2,'feed','alias-original',$3,'agent_text',now(),'{}'::jsonb,decode(repeat('b',64),'hex'))`,[unresolved,installation,original.session])
+  const root={kind:'relay_event' as const,key:f.root(source)},signal=new AbortController().signal,errors:unknown[]=[]
+  const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'alias-original-scheduler',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'alias-original-worker',signal,onError:e=>errors.push(e)})
+  const normal=createCanonicalProjectionHandler(f.runtime,{pageSize:1,stabilizationMs:0});let observed=false
+  queue.register('project_shared_source',async(job,abort,context)=>{
+   const jobRoot=job.payload.root as {key?:string}|undefined
+   if(job.installation_id!==installation||jobRoot?.key!==root.key)return
+   const scope=job.payload.scope as Parameters<ReturnType<typeof createPostgresSharedSourceReader>['listHeads']>[0]
+   const ordinary=createPostgresSharedSourceReader(f.runtime)
+   expect((await ordinary.listHeads(scope,root)).heads.map(h=>[h.canonicalKey,h.sessionKey])).toEqual([[id,source.session]])
+   const page=await prepareCanonicalReferencePage(f.runtime,scope,root,{limit:1})
+   await expect(persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true})).rejects.toThrow('canonical_reference_mapping_required')
+   await expect(normal(job,abort,context)).rejects.toThrow('canonical_reference_mapping_required')
+   const refs=(await f.runtime.query('SELECT source_event_id::text,canonical_key,mapping_state FROM source_events WHERE installation_id=$1',[installation])).rows
+   expect(refs).toEqual([{source_event_id:unresolved,canonical_key:null,mapping_state:'unproven'}])
+   expect((await f.runtime.query('SELECT count(*)::int AS n FROM memory_canonical_projection_progress WHERE installation_id=$1',[installation])).rows[0].n).toBe(0)
+   observed=true
+  },{branch:'canonical'})
+  try{
+   for(let n=0;n<96&&!observed;n++){await scheduler.runOnce();await queue.tick();if(errors.length)throw errors[0]}
+   expect(observed).toBe(true)
   }finally{await scheduler.stop();await queue.stop()}
  },15000)
 })
