@@ -4,11 +4,12 @@ import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadata
 export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.lock_memory_personal_source_commit(p_scope JSONB,p_kind TEXT,p_root TEXT,p_expected JSONB,p_retained BOOLEAN)
   RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE a RECORD;owner_id INT;installation UUID;session_key TEXT;native JSONB;fresh_native JSONB;session_ids TEXT[];sid TEXT;selected_mode BOOLEAN;expected JSONB;execution RECORD;distribution RECORD;item RECORD;fresh_row JSONB;input_fingerprint TEXT;selected_ids BIGINT[];turn_key TEXT;input_admission TEXT;lock_phase BOOLEAN:=FALSE;stale_scan BOOLEAN:=FALSE;BEGIN
+  DECLARE a RECORD;owner_id INT;installation UUID;session_key TEXT;native JSONB;fresh_native JSONB;session_ids TEXT[];sid TEXT;selected_mode BOOLEAN;ordinary_projection BOOLEAN;expected JSONB;execution RECORD;distribution RECORD;item RECORD;fresh_row JSONB;input_fingerprint TEXT;selected_ids BIGINT[];projection_keys TEXT[];turn_key TEXT;input_admission TEXT;lock_phase BOOLEAN:=FALSE;stale_scan BOOLEAN:=FALSE;BEGIN
    selected_mode=COALESCE(p_expected->>'contract'='personal-metadata-selection-v1',FALSE);
-   expected=CASE WHEN selected_mode THEN p_expected->'observedVersion' ELSE p_expected END;
+   ordinary_projection=COALESCE(p_expected->>'contract'='personal-reference-projection-v1',FALSE);
+   expected=CASE WHEN selected_mode OR ordinary_projection THEN p_expected->'observedVersion' ELSE p_expected END;
    IF p_scope IS NULL OR p_expected IS NULL OR p_retained IS NULL OR p_kind IS NULL OR p_kind NOT IN('relay_event','legacy_archive')
-    OR jsonb_typeof(p_scope)<>'object' OR jsonb_typeof(p_expected)<>'object' OR octet_length(p_scope::text)>32768 OR octet_length(p_expected::text)>(CASE WHEN selected_mode THEN 131072 ELSE 1024 END)
+    OR jsonb_typeof(p_scope)<>'object' OR jsonb_typeof(p_expected)<>'object' OR octet_length(p_scope::text)>32768 OR octet_length(p_expected::text)>(CASE WHEN selected_mode THEN 131072 WHEN ordinary_projection THEN 8192 ELSE 1024 END)
     OR p_root IS NULL OR length(p_root) NOT BETWEEN 1 AND 1024 THEN RETURN FALSE;END IF;
    IF selected_mode THEN
     IF octet_length(p_expected::text)+octet_length(p_scope::text)+octet_length(p_root)>131072 OR p_retained OR p_kind<>'relay_event' OR p_scope->>'ownerScopeKind'<>'personal'
@@ -18,6 +19,16 @@ export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
      OR jsonb_array_length(p_expected->'rows') NOT BETWEEN 1 AND 256 OR jsonb_typeof(p_expected->'cold')<>'array' OR jsonb_array_length(p_expected->'cold')>32
      OR COALESCE(p_expected->>'inputFingerprint','')!~'^[a-f0-9]{64}$' OR COALESCE(p_expected->>'nativeSessionFingerprint','')!~'^[a-f0-9]{64}$'
      OR COALESCE(p_expected->>'targetCursor','')='' OR length(p_expected->>'targetCursor')>2048 THEN RETURN FALSE;END IF;
+   ELSIF ordinary_projection THEN
+    IF p_retained OR p_kind<>'relay_event' OR p_scope->>'ownerScopeKind' IS DISTINCT FROM 'personal'
+     OR p_expected-ARRAY['contract','observedVersion','canonicalIds']<>'{}'::jsonb
+     OR NOT(p_expected?&ARRAY['contract','observedVersion','canonicalIds'])
+     OR jsonb_typeof(p_expected->'canonicalIds') IS DISTINCT FROM 'array' THEN RETURN FALSE;END IF;
+    IF jsonb_array_length(p_expected->'canonicalIds') NOT BETWEEN 1 AND 256 OR EXISTS(
+     SELECT 1 FROM jsonb_array_elements(p_expected->'canonicalIds') k(value)
+     WHERE jsonb_typeof(k.value)<>'string' OR k.value#>>'{}' !~ '^[1-9][0-9]{0,18}$') THEN RETURN FALSE;END IF;
+    projection_keys=ARRAY(SELECT DISTINCT k.value FROM jsonb_array_elements_text(p_expected->'canonicalIds') k(value));
+    IF cardinality(projection_keys)<>jsonb_array_length(p_expected->'canonicalIds') THEN RETURN FALSE;END IF;
    ELSIF p_expected-ARRAY['content','authorization','storage']<>'{}'::jsonb THEN RETURN FALSE;
    END IF;
    IF jsonb_typeof(expected)<>'object' OR expected-ARRAY['content','authorization','storage']<>'{}'::jsonb
@@ -184,6 +195,28 @@ export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
     -- native/ref facts remain exact. Fresh job preparation must run all later
     -- positive turn/FK/commit guards again; this transaction is rolled back.
     IF stale_scan THEN RAISE EXCEPTION 'source_metadata_scan_changed' USING ERRCODE='P0001';END IF;
+    IF selected_mode AND p_expected->>'purpose'='reference' THEN
+     projection_keys=ARRAY(SELECT id::text FROM unnest(selected_ids) id);
+    END IF;
+    IF cardinality(projection_keys)>0 THEN
+     IF ordinary_projection AND NOT pg_try_advisory_xact_lock(hashtextextended('canonical-projection:'||installation::text,0)) THEN RAISE lock_not_available;END IF;
+     -- The native Session and its entire alias component are already locked.
+     -- An unresolved original permits reuse only, even on a different alias page.
+     IF EXISTS(SELECT 1 FROM memory.source_events WHERE installation_id=installation AND session_id=ANY(session_ids) AND mapping_state IN('unproven','conflict'))
+      OR EXISTS(SELECT 1 FROM memory.source_events WHERE installation_id=installation AND canonical_session_key=ANY(session_ids) AND mapping_state IN('unproven','conflict')) THEN
+      IF ordinary_projection THEN
+       PERFORM s.source_event_id FROM memory.source_events s
+        WHERE s.installation_id=installation AND s.source_kind='relay_event' AND s.canonical_key=ANY(projection_keys)
+        ORDER BY s.source_event_id FOR SHARE NOWAIT;
+      END IF;
+      IF EXISTS(SELECT 1 FROM unnest(projection_keys) k(value) WHERE NOT EXISTS(
+        SELECT 1 FROM memory.source_events s WHERE s.installation_id=installation AND s.source_kind='relay_event' AND s.canonical_key=k.value
+         AND s.session_id=s.canonical_session_key AND s.session_id=ANY(session_ids) AND s.mapping_state='verified' AND s.body_reclaimed_at IS NULL
+         AND s.origin IN('feed','snapshot') AND s.adapter_version='original-ref-v1')) THEN
+       RAISE EXCEPTION 'canonical_reference_mapping_required' USING ERRCODE='P0001';
+      END IF;
+     END IF;
+    END IF;
     RETURN TRUE;
    EXCEPTION WHEN lock_not_available THEN
     -- Only real lock acquisition contention is retryable. Predicate denials
