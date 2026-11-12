@@ -25,7 +25,7 @@ import { LIFECYCLE_MIGRATION } from './curation/migration.js'
 import {EXTRACTION_RECOVERY_MIGRATION} from './extraction/recovery-migration.js'
 import { SCENE_MIGRATION } from './context/scene-migration.js'
 import { DAILY_MAINTENANCE_MIGRATION } from './maintenance/daily.js'
-import { DATA_RETENTION_MIGRATION } from './retention/migration.js'
+import { DATA_RETENTION_MIGRATION, RETENTION_REFERENCE_UUID_MIGRATION } from './retention/migration.js'
 import { GIT_MANAGED_SETUP_MIGRATION } from './git-sync/managed-migration.js'
 import { CANDIDATE_REVIEW_EXPIRY_MIGRATION } from './claims/candidate-expiry-migration.js'
 import { INBOX_RETENTION_MIGRATION } from './inbox/retention-migration.js'
@@ -2305,6 +2305,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
     `CREATE INDEX IF NOT EXISTS source_events_installation_turn_event_idx
       ON source_events (installation_id, turn_id, source_event_id)`,
   ]},
+  RETENTION_REFERENCE_UUID_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
