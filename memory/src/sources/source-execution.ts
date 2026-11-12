@@ -133,10 +133,11 @@ export async function guardSourceExecutionCommit(client:Pick<pg.PoolClient,'quer
 /** Advance the installation watermark only after its complete sealed set is
  * projected. SQL independently rechecks original execution and current source;
  * a partial set legitimately returns false. */
-export async function completeSourceProjection(client:Pick<pg.PoolClient,'query'>,scope:{installationId:string},root:{kind:string;key:string},version:unknown):Promise<void>{
+export async function completeSourceProjection(client:Pick<pg.PoolClient,'query'>,scope:{installationId:string},root:{kind:string;key:string},version:unknown):Promise<boolean>{
  const execution=executions.getStore()
  if(!execution||execution.branch!=='canonical-active'||execution.installationId!==scope.installationId||sourceConnectionKey(client)!==client)throw new SourceExecutionError('source_execution_scope_mismatch')
- await client.query('SELECT shared.complete_memory_source_projection($1,$2::jsonb,$3,$4,$5::jsonb)',[execution.executionId,JSON.stringify(scope),root.kind,root.key,JSON.stringify(version)])
+ const result=await client.query('SELECT shared.complete_memory_source_projection($1,$2::jsonb,$3,$4,$5::jsonb) AS completed',[execution.executionId,JSON.stringify(scope),root.kind,root.key,JSON.stringify(version)])
+ return result.rows[0]?.completed===true
 }
 /** Comparison receipts have their own physical commit admission. This never
  * grants the positive publish/provider capability to a shadow execution. */

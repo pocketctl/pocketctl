@@ -64,9 +64,38 @@ test('only positive personal context-ready completion hints the source producer'
  const g=fixture();io.persist.mockRejectedValueOnce(Error('unknown_commit'));await expect(createCanonicalProjectionHandler(g.pool,{onReady:ready}as any)(g.job,g.controller.signal,{}as any)).rejects.toThrow('unknown_commit');expect(ready).toHaveBeenCalledOnce()
 })
 
-test('ready personal checkpoint still prepares fresh selected page before physical completion',async()=>{
- const version={content:'1',authorization:'1',storage:'1'},f=fixture([{state:'ready',next_cursor:null,source_version:version}]);io.current.mockResolvedValue({state:'current',version});io.persist.mockResolvedValueOnce({contextReady:true})
- await f.run();expect(io.prepare).toHaveBeenCalledOnce();expect(io.persist).toHaveBeenCalledOnce();expect(io.completeReady).not.toHaveBeenCalled();expect(io.current).not.toHaveBeenCalled()
+test('current ready personal progress survives storage-only change without opening source bodies',async()=>{
+ const version={content:'1',authorization:'1',storage:'1'},current={...version,storage:'2'}
+ const f=fixture([{state:'ready',next_cursor:null,source_version:version}])
+ io.current.mockResolvedValue({state:'current',version:current});io.completeReady.mockResolvedValue(true)
+ await f.run()
+ expect(io.completeReady).toHaveBeenCalledWith(f.pool,scope,root,current,{deferMs:1000})
+ expect(io.prepare).not.toHaveBeenCalled()
+ expect(io.persist).not.toHaveBeenCalled()
+})
+test('ready personal progress whose installation watermark cannot be confirmed uses a fresh page',async()=>{
+ const version={content:'1',authorization:'1',storage:'1'},f=fixture([{state:'ready',next_cursor:null,source_version:version}])
+ io.current.mockResolvedValue({state:'current',version});io.completeReady.mockResolvedValue(false)
+ io.persist.mockResolvedValueOnce({contextReady:true})
+ await f.run()
+ expect(io.completeReady).toHaveBeenCalledOnce()
+ expect(io.prepare).toHaveBeenCalledOnce()
+ expect(io.persist).toHaveBeenCalledOnce()
+})
+test('a newer content revision cannot complete an old ready checkpoint',async()=>{
+ const version={content:'1',authorization:'1',storage:'1'},f=fixture([{state:'ready',next_cursor:null,source_version:version}])
+ io.current.mockResolvedValue({state:'current',version:{...version,content:'2'}})
+ io.persist.mockResolvedValueOnce({contextReady:true})
+ await f.run()
+ expect(io.completeReady).not.toHaveBeenCalled()
+ expect(io.prepare).toHaveBeenCalledOnce()
+})
+test('an authority denial before ready recovery prevents watermark completion and body reads',async()=>{
+ const version={content:'1',authorization:'1',storage:'1'},f=fixture([{state:'ready',next_cursor:null,source_version:version}])
+ io.current.mockResolvedValue({state:'revoked'})
+ await expect(f.run()).rejects.toMatchObject({code:'revoked'})
+ expect(io.completeReady).not.toHaveBeenCalled()
+ expect(io.prepare).not.toHaveBeenCalled()
 })
 test('explicit changed metadata input waits with original delay and no inline proof retry',async()=>{
  const f=fixture(),changed=new SourceUnavailableError('changed');io.prepare.mockRejectedValueOnce(changed)

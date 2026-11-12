@@ -1208,8 +1208,12 @@ suite('controlled personal Relay source reader',()=>{
   const session='canonical-queue-92',turn='canonical-queue-turn-92',jobs=createJobRepository(runtime),payload:Record<string,any>={scope:{...scope,modeGeneration:'5'},root:{kind:'relay_event',key:'1:'+session}}
   await runtime.query("UPDATE memory_jobs SET state='completed',claim_expires_at=NULL WHERE state='pending'")
   await pool.query("INSERT INTO public.sessions VALUES($1,1,'daemon','codex','hot','codex')",[session])
-  for(const [i,id]of ['9007199254741260','9007199254741261'].entries()){
-   const body=i===0?{text:'queue fixture 0',turn_id:turn}:{turn_status:'completed',turn_id:turn},type=i===0?'agent_text':'turn_status'
+  // A personal claim can commit four one-event pages before deferring.
+  const initialEvents=['9007199254741260','9007199254741261','9007199254741263','9007199254741264','9007199254741265']
+  for(const [i,id] of initialEvents.entries()){
+   const terminal=i===initialEvents.length-1
+   const type=terminal?'turn_status':'agent_text'
+   const body=terminal?{turn_status:'completed',turn_id:turn}:{text:`queue fixture ${i}`,turn_id:turn}
    await pool.query("INSERT INTO public.events(id,session_id,user_id,event_type,payload,effect_status,body_storage,created_at) VALUES($1,$2,1,$5,$3,'completed','hot',$4)",[id,session,body,new Date(),type])
    await publishHeader(id,session,type,body)
    const header=(await pool.query('SELECT source_header_version,source_sequence::text,canonical_payload_hash,source_classification,source_body_change_revision::text FROM public.events WHERE id=$1',[id])).rows[0]
@@ -1233,23 +1237,47 @@ suite('controlled personal Relay source reader',()=>{
   await jobs.enqueueJob({installationId:inst,jobType:'project_shared_source',idempotencyKey:session,payload})
   const errors:string[]=[],queue=createJobWorker({pool:runtime,jobs,workerId:'canonical-page-worker',signal:new AbortController().signal,onError:e=>errors.push(String(e))})
   queue.register('project_shared_source',createCanonicalProjectionHandler(runtime,{pageSize:1,deferMs:0}),{branch:'canonical'})
+  const readJob=async()=> (await runtime.query(
+   'SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session]
+  )).rows[0]
+  const tickPending=async()=>{
+   await runtime.query("UPDATE memory_jobs SET available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2 AND state='pending'",[inst,session])
+   await queue.tick()
+   return readJob()
+  }
+  const finishPending=async(maxClaims:number)=>{
+   let job=await readJob()
+   for(let i=0;i<maxClaims&&job.state==='pending';i++)job=await tickPending()
+   expect(job.state).toBe('completed')
+   return Number(job.claim_epoch)
+  }
   try{
    await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'pending',claim_epoch:'1'}])
+   expect(await readJob()).toEqual({state:'pending',claim_epoch:'1'})
    expect((await runtime.query('SELECT state FROM memory_canonical_projection_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows).toEqual([{state:'scanning'}])
    expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:expectedRevision,processed_revision:'0'})
-   await runtime.query('UPDATE memory_jobs SET available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])
-   await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'2'}])
+   const firstCompletionEpoch=await finishPending(initialEvents.length-1)
+   expect(firstCompletionEpoch).toBeGreaterThan(1)
    expect((await runtime.query('SELECT state FROM memory_canonical_projection_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows).toEqual([{state:'ready'}])
    expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:expectedRevision,processed_revision:expectedRevision})
-   expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:'2'}])
+   expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:String(initialEvents.length)}])
    // Simulate loss of the worker after final page COMMIT but before its job
    // completion was durable. A new claim must complete without a page restart.
    await runtime.query("UPDATE memory_jobs SET state='pending',completed_at=NULL,available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2",[inst,session])
-   await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'3'}])
-   expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:'2'}])
+   const readRetryBudget=async()=> (await runtime.query(
+    "SELECT attempts,COALESCE((payload->>'source_wait_count')::int,0) AS source_wait_count FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2",[inst,session]
+   )).rows[0]
+   const beforeContention=await readRetryBudget()
+   const blocker=await pool.connect()
+   try{
+    await blocker.query('BEGIN')
+    await blocker.query("SELECT 1 FROM shared.memory_source_work WHERE source_kind='relay_event' AND root_key=$1 FOR UPDATE",[payload.root.key])
+    await queue.tick()
+    expect(await readJob()).toEqual({state:'pending',claim_epoch:String(firstCompletionEpoch+1)})
+    expect(await readRetryBudget()).toEqual({attempts:beforeContention.attempts,source_wait_count:beforeContention.source_wait_count+1})
+   }finally{await blocker.query('ROLLBACK');blocker.release()}
+   expect(await tickPending()).toEqual({state:'completed',claim_epoch:String(firstCompletionEpoch+2)})
+   expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:String(initialEvents.length)}])
    // Cooling changes only storage, with no new dirty revision or job. The
    // completed content projection remains usable, while real cold IO still
    // validates the new full storage proof rather than old compatibility text.
@@ -1267,7 +1295,7 @@ suite('controlled personal Relay source reader',()=>{
    bindSourcePool(runtime,{namespace:'memory',archive:{storage:{namespace:storage.namespace,read:async key=>{coldReads++;return storage.read(key)}},limits}})
    await runtime.query("UPDATE memory_jobs SET state='pending',completed_at=NULL,available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2",[inst,session])
    await queue.tick()
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'4'}])
+   expect(await readJob()).toEqual({state:'completed',claim_epoch:String(firstCompletionEpoch+3)})
    expect(coldReads).toBe(0)
    const {createEpisodeRepository}=await import('../../episodes/repository.js')
    queue.register('compile_episode',createEpisodeRepository(runtime,{stabilizationMs:0}).handleCompileEpisode)
@@ -1285,12 +1313,9 @@ suite('controlled personal Relay source reader',()=>{
    expectedRevision=(await pool.query('SELECT revision::text FROM shared.memory_source_work WHERE root_key=$1',[payload.root.key])).rows[0].revision
    await runtime.query('UPDATE memory_jobs SET payload=$3::jsonb WHERE installation_id=$1 AND idempotency_key=$2',[inst,session,JSON.stringify(payload)])
    await runtime.query("UPDATE memory_jobs SET state='pending',completed_at=NULL,available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2",[inst,session])
-   for(let n=0;n<4;n++){
-    await queue.tick()
-    await runtime.query('UPDATE memory_jobs SET available_at=clock_timestamp() WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])
-   }
-   expect((await runtime.query('SELECT state,claim_epoch::text FROM memory_jobs WHERE installation_id=$1 AND idempotency_key=$2',[inst,session])).rows).toEqual([{state:'completed',claim_epoch:'7'}])
-   expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:'3'}])
+   const newRevisionEpoch=await finishPending(initialEvents.length+1)
+   expect(newRevisionEpoch).toBeGreaterThan(firstCompletionEpoch+3)
+   expect((await runtime.query('SELECT event_count::text FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{event_count:String(initialEvents.length+1)}])
    expect((await pool.query('SELECT dispatched_revision::text,processed_revision::text FROM shared.memory_source_progress WHERE installation_id=$1 AND root_key=$2',[inst,payload.root.key])).rows[0]).toEqual({dispatched_revision:expectedRevision,processed_revision:expectedRevision})
    expect(errors).toEqual([])
   }finally{await queue.stop()}
