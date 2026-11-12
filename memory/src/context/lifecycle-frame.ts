@@ -83,8 +83,18 @@ export function lifecycleClaimSql(spaceParam:string,destinationParam:string,cons
 
 /** A session switch invalidates only that session. Evaluated in the final
  * consume UPDATE snapshot rather than relying on an earlier async check. */
-export function lifecycleFrameFenceSql(pack='p'):string{return `(
- ${pack}.query_context->'lifecycle' IS NULL OR ${pack}.query_context->'lifecycle'='null'::jsonb OR
- EXISTS(SELECT 1 FROM memory_session_scene_frames lifecycle_frame
- WHERE lifecycle_frame.installation_id=${pack}.installation_id AND lifecycle_frame.session_id=${pack}.session_id
- AND lifecycle_frame.binding=${pack}.query_context->'lifecycle'->>'binding'))`}
+export function lifecycleFrameFenceSql(pack='p',mode:CurationMode='enabled'):string{
+ const frame=`(${pack}.query_context->'lifecycle')`
+ return `(${frame} IS NULL OR ${frame}='null'::jsonb OR (
+  (${mode==='enabled'?'TRUE':`${frame}->>'consume' IS DISTINCT FROM 'true'`})
+  AND EXISTS(SELECT 1 FROM memory_session_scene_frames f
+   JOIN memory_curation_policies cp USING(installation_id)
+   JOIN memory_owner_scopes o USING(installation_id)
+   WHERE f.installation_id=${pack}.installation_id AND f.session_id=${pack}.session_id
+    AND f.session_id=${frame}->>'sessionId' AND f.binding=${frame}->>'binding' AND cp.revision::text=${frame}->>'policyRevision'
+    AND o.state='active' AND o.authorization_epoch::text=${frame}->>'authorizationEpoch'
+    AND (${frame}->>'spaceId' IS NULL OR EXISTS(
+     SELECT 1 FROM memory_spaces s WHERE s.installation_id=f.installation_id
+      AND s.space_id::text=${frame}->>'spaceId' AND s.revision::text=${frame}->>'spaceRevision'
+      AND s.state='active' AND (${frame}->>'destination')=ANY(s.destinations))))))`
+}

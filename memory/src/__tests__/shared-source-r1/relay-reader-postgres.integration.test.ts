@@ -1393,9 +1393,11 @@ suite('controlled personal Relay source reader',()=>{
    AND v.installation_id=c.installation_id AND v.claim_id=c.claim_id`,[installation])
   const context=await originContextFixture(runtime,installation,{authorityGrant:{installationId:installation,configVersion:'1',userId:1},sceneId:space,query:statement,repositoryId:repository,commitSha:commit})
   const client=await contextDeliveryClient(runtime,context,installation)
-  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,queryText=statement)=>{
+  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,queryText=statement,withProvenEvidence=true)=>{
    const signal=AbortSignal.timeout(750)
    const grant=client.issueGrant()
+   const transportDelay=Number(process.env.CONTEXT_TEST_TRANSPORT_DELAY_MS??0)
+   if(transportDelay>0)await new Promise(resolve=>setTimeout(resolve,transportDelay))
    const http=async(path:string,body?:Record<string,unknown>)=>{
     const headers:Record<string,string>={authorization:'Bearer '+grant}
     if(body)headers['content-type']='application/json'
@@ -1410,8 +1412,9 @@ suite('controlled personal Relay source reader',()=>{
     repository_hint:{repository_id:repository,commit_sha:commit},evidence_read_capability:'on_demand_v1',
    }))
    expect(pack.outcome).toBe('ready')
-   expect(pack.evidence_read_capability).toBe('on_demand_v1')
+   expect(pack.evidence_read_capability).toBe(withProvenEvidence?'on_demand_v1':'bounded_excerpt_v1')
    expect(pack.pack.item_count).toBe(1)
+   if(!withProvenEvidence)return pack.pack.pack_id as string
    const path='/packs/'+pack.pack.pack_id
    const ticket=await phase('admit',()=>http(path+'/admit',{...turn,adapter:'codex-app-server'}))
    const query=new URLSearchParams({session_id:context.sessionId,injection_id:ticket.injection_id,nonce:ticket.nonce})
@@ -1425,19 +1428,24 @@ suite('controlled personal Relay source reader',()=>{
    const samples=Number(process.env.CONTEXT_TEST_SAMPLES??1)
    for(let n=0;n<samples;n++){
     const result=await measureContextDelivery(
-     phase=>deliver('measured-'+n,phase,n%2===0?statement:'installation watermark？引用证据号。'),
+     async phase=>{await deliver('measured-'+n,phase,n%2===0?statement:'installation watermark？引用证据号。')},
      Number(process.env.CONTEXT_TEST_DB_DELAY_MS??0),
     )
     if(process.env.CONTEXT_TEST_TIMING)console.info(JSON.stringify(result))
     const [compile,admit,consume]=result.phases
-    expect(compile.queries.length).toBeLessThanOrEqual(49)
+    expect(compile.queries.length).toBeLessThanOrEqual(43)
     expect(admit.queries.length).toBeLessThanOrEqual(18)
-    expect(consume.queries.length).toBeLessThanOrEqual(8)
+    expect(consume.queries.length).toBeLessThanOrEqual(6)
     if(process.env.CONTEXT_TEST_DB_DELAY_MS){
      expect(compile.ms).toBeLessThan(500)
      expect(result.ms).toBeLessThan(710)
     }
    }
+   await runtime.query("UPDATE knowledge_evidence SET excerpt_hash=decode(repeat('00',32),'hex') WHERE installation_id=$1 AND evidence_id=$2",[installation,secondEvidence])
+   const unproven=await deliver('corrupt-hash',(_name,run)=>run(),statement,false)
+   const proof=(await runtime.query(`SELECT evidence_version_id,excerpt_hash,source_version
+     FROM memory_context_pack_evidence WHERE pack_id=$1 AND evidence_id=$2`,[unproven,secondEvidence])).rows[0]
+   expect(proof).toEqual({evidence_version_id:null,excerpt_hash:null,source_version:null})
   }finally{await client.close()}
   const legacyFingerprint=async()=>(await runtime.query<{fingerprint:string}>(`
    SELECT md5(COALESCE(string_agg(

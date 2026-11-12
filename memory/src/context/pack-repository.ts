@@ -3,7 +3,7 @@ import {guardRetainedVersions} from '../sources/retained-versions.js'
 import {assertRetainedSourceGuards,detachRetainedSourceGuards} from '../sources/retained-authority.js'
 import {retainedSourceRead} from '../sources/retained-read.js'
 import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
-import {prepareEvidenceSources,attachPreparedEvidence} from '../sources/evidence-sources.js'
+import {prepareEvidenceSources,attachPreparedEvidence,type PreparedEvidenceSources} from '../sources/evidence-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {lifecycleFrameCurrent} from './lifecycle-frame.js'
 import {captureEvidenceReferences} from '../claims/evidence-resolver.js'
@@ -185,6 +185,7 @@ export function createPackRepository(pool: pg.Pool) {
       const { stable, dynamic } = stableDynamicSplit(fullText)
       const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEvidenceSources(pool,input.installationId,[...new Set(input.items.flatMap(i=>[...i.evidenceIds]))]):undefined
       const client = await pool.connect()
+      let lockedEvidence:Awaited<ReturnType<PreparedEvidenceSources['lockForPack']>>|undefined
       try {
         await client.query('BEGIN')
         if(prepared){
@@ -197,7 +198,7 @@ export function createPackRepository(pool: pg.Pool) {
               await requireCurrentInstallationAuthority(client,grant)
             }
           }catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
-          await prepared.assertCurrent(client);attachPreparedEvidence(client,prepared)
+          lockedEvidence=await prepared.lockForPack(client);attachPreparedEvidence(client,prepared)
         }
         // Foreign keys see the newly inserted pack in this statement.
         const inserted=await client.query<StoredTokens>(`
@@ -236,27 +237,43 @@ export function createPackRepository(pool: pg.Pool) {
             reason_codes:item.reasonCodes, token_count:estimateTokens(item.statement), ordinal,
           })))])
         let evidenceProven = inserted.rowCount ? false : undefined
+        let generationRecorded=false
         if (input.items.length) {
           const evidence = input.items.flatMap(item => item.evidenceIds.map(evidenceId => ({
             itemId: item.itemId, evidenceId, versionId: item.versionId,
           })))
           if (evidence.length) {
-            const references = await captureEvidenceReferences(client, input.installationId, evidence)
+            const humanCapsules=lockedEvidence?.humanCapsules
+            const references = humanCapsules
+              ? evidence.map(ref=>{
+                const proof=humanCapsules.get(ref.evidenceId.toLowerCase())
+                return proof?.versionId===ref.versionId.toLowerCase()?proof:null
+              })
+              : await captureEvidenceReferences(client, input.installationId, evidence)
             const written = await client.query<{ proven: boolean }>(`
-              INSERT INTO memory_context_pack_evidence
-                (pack_id, item_id, installation_id, evidence_id,evidence_version_id,excerpt_hash,source_hash,source_version)
-              SELECT $1, e.item_id, $2, e.evidence_id, e.version_id, e.excerpt_hash, e.source_hash, e.source_version
-              FROM unnest($3::uuid[], $4::uuid[], $5::uuid[], $6::bytea[], $7::text[], $8::uuid[])
-                AS e(item_id, evidence_id, version_id, excerpt_hash, source_hash, source_version)
-              ON CONFLICT DO NOTHING
-              RETURNING (evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
+              WITH evidence_written AS (
+                INSERT INTO memory_context_pack_evidence
+                  (pack_id, item_id, installation_id, evidence_id,evidence_version_id,excerpt_hash,source_hash,source_version)
+                SELECT $1, e.item_id, $2, e.evidence_id, e.version_id, e.excerpt_hash, e.source_hash, e.source_version
+                FROM unnest($3::uuid[], $4::uuid[], $5::uuid[], $6::bytea[], $7::text[], $8::uuid[])
+                  AS e(item_id, evidence_id, version_id, excerpt_hash, source_hash, source_version)
+                ON CONFLICT DO NOTHING
+                RETURNING (evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
+              ), generation_written AS (
+                UPDATE memory_generation_runs
+                SET state='succeeded',output_kind='context_pack',output_id=$1::uuid,completed_at=NOW()
+                FROM (SELECT count(*) AS written FROM evidence_written) proof
+                WHERE run_id=$9::uuid AND proof.written>=0
+              )
+              SELECT proven FROM evidence_written
             `, [packId, input.installationId, evidence.map(ref => ref.itemId), evidence.map(ref => ref.evidenceId),
               references.map(ref => ref?.versionId ?? null), references.map(ref => ref?.excerptHash ?? null),
-              references.map(ref => ref?.sourceHash ?? null), references.map(ref => ref?.sourceVersion ?? null)])
+              references.map(ref => ref?.sourceHash ?? null), references.map(ref => ref?.sourceVersion ?? null), input.generationRunId])
+            generationRecorded=true
             if (inserted.rowCount) evidenceProven = written.rows.length > 0 && written.rows.every(row => row.proven)
           }
         }
-        if (input.generationRunId) {
+        if (input.generationRunId&&!generationRecorded) {
           await client.query(`
             UPDATE memory_generation_runs
             SET state = 'succeeded', output_kind = 'context_pack', output_id = $2::uuid,
@@ -287,13 +304,28 @@ export function createPackRepository(pool: pg.Pool) {
           }
         }
         // All source/FK dependencies precede the final generation fence.
-        const generation=await fenceConsumptionGeneration(client,input.installationId,input.consumptionGeneration)
-        if(inserted.rowCount)await client.query('UPDATE memory_context_packs SET consumption_generation=$2 WHERE pack_id=$1',[packId,generation])
+        if(inserted.rowCount){
+          const existing=(await client.query<{generation:string;stamped:boolean}>(`
+            WITH current_generation AS MATERIALIZED (
+              SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=$1 FOR SHARE
+            ), stamped AS (
+              UPDATE memory_context_packs p SET consumption_generation=g.generation
+              FROM current_generation g
+              WHERE p.pack_id=$2 AND ($3::text IS NULL OR g.generation::text=$3) RETURNING p.pack_id
+            )
+            SELECT generation::text,EXISTS(SELECT 1 FROM stamped) AS stamped FROM current_generation
+          `,[input.installationId,packId,input.consumptionGeneration??null])).rows[0]
+          if(existing&&!existing.stamped)throw new ContextConsumptionChangedError()
+          if(!existing){
+            const generation=await fenceConsumptionGeneration(client,input.installationId,input.consumptionGeneration)
+            await client.query('UPDATE memory_context_packs SET consumption_generation=$2 WHERE pack_id=$1',[packId,generation])
+          }
+        }else await fenceConsumptionGeneration(client,input.installationId,input.consumptionGeneration)
         const tokens = inserted.rows[0] ?? (await client.query<StoredTokens>(
           'SELECT stable_tokens, dynamic_tokens FROM memory_context_packs WHERE pack_id=$1', [packId],
         )).rows[0]
-        if(prepared){
-          await prepared.assertCurrent(client,{forCommit:true})
+        if(lockedEvidence){
+          await lockedEvidence.assertForCommit()
           try{await assertCurrentGrantClock(client,input.authorityGrant!,[input.installationId])}catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
         }
         await client.query('COMMIT')

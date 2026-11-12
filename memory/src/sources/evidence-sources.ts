@@ -11,22 +11,34 @@ type TeamEvidenceKind='team_collaboration'|'team_delivery'|'team_semantic'
 const teamKind=(kind:string|null):kind is TeamEvidenceKind=>kind==='team_collaboration'||kind==='team_delivery'||kind==='team_semantic'
 const retainedTeam=(row:Pick<Binding,'origin'|'source_kind'>)=>row.origin==='team'||teamKind(row.source_kind)
 export interface EvidenceMaterial {sourceKind?:TeamEvidenceKind;sourceText:string|null;overflow:boolean;origin:string|null;sourceEventId:string|null;artifactId:string|null}
-export interface PreparedEvidenceSources {readonly bodyBytes?:number;material(evidenceId:string,versionId:string,sourceEventId:string|null,artifactId:string|null):EvidenceMaterial;assertCurrent(client:Pick<pg.PoolClient,'query'>,options?:SourceCommitOptions):Promise<void>}
-const boundQuery=`SELECT e.episode_id::text,e.evidence_kind,e.evidence_id::text,e.version_id::text,e.capsule_id::text,e.source_event_id::text,e.artifact_id::text,a.source_event_id::text AS artifact_event_id,
- COALESCE(a.source_event_id,e.source_event_id)::text AS resolved_event_id,s.origin,s.source_kind,s.body_reclaimed_at,EXISTS(SELECT 1 FROM memory_source_retention_receipts receipt WHERE receipt.installation_id=s.installation_id AND(receipt.turn_id=s.turn_id OR(s.turn_id IS NULL AND receipt.session_id=s.session_id))) AS retention_denied,a.artifact_type,a.identity_key,a.path,a.status
+type EvidenceClient=Pick<pg.PoolClient,'query'>
+interface HumanCapsuleReference {versionId:string;sourceVersion:string;excerptHash:Buffer;sourceHash:null}
+interface LockedPackEvidence {
+ humanCapsules?:ReadonlyMap<string,HumanCapsuleReference>
+ assertForCommit():Promise<void>
+}
+export interface PreparedEvidenceSources {
+ readonly bodyBytes?:number
+ material(evidenceId:string,versionId:string,sourceEventId:string|null,artifactId:string|null):EvidenceMaterial
+ assertCurrent(client:EvidenceClient,options?:SourceCommitOptions):Promise<void>
+ lockForPack(client:EvidenceClient):Promise<LockedPackEvidence>
+}
+const boundQuery=(proof='')=>`SELECT e.episode_id::text,e.evidence_kind,e.evidence_id::text,e.version_id::text,e.capsule_id::text,e.source_event_id::text,e.artifact_id::text,a.source_event_id::text AS artifact_event_id,
+ COALESCE(a.source_event_id,e.source_event_id)::text AS resolved_event_id,s.origin,s.source_kind,s.body_reclaimed_at,EXISTS(SELECT 1 FROM memory_source_retention_receipts receipt WHERE receipt.installation_id=s.installation_id AND(receipt.turn_id=s.turn_id OR(s.turn_id IS NULL AND receipt.session_id=s.session_id))) AS retention_denied,a.artifact_type,a.identity_key,a.path,a.status${proof}
  FROM knowledge_evidence e LEFT JOIN source_artifacts a ON a.installation_id=e.installation_id AND a.artifact_id=e.artifact_id
  LEFT JOIN source_events s ON s.installation_id=e.installation_id AND s.source_event_id=COALESCE(a.source_event_id,e.source_event_id)
  WHERE e.installation_id=$1 AND e.evidence_id=ANY($2::uuid[]) ORDER BY e.evidence_id`
 async function evidenceBindings(db:Pick<pg.PoolClient,'query'>,installationId:string,ids:readonly string[]):Promise<Binding[]>{
  const rows:Binding[]=[]
- for(let n=0;n<ids.length;n+=256)rows.push(...(await db.query<Binding>(boundQuery,[installationId,ids.slice(n,n+256)])).rows)
+ for(let n=0;n<ids.length;n+=256)rows.push(...(await db.query<Binding>(boundQuery(),[installationId,ids.slice(n,n+256)])).rows)
  return rows.sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
 }
 // Capsule-only packs can lock their exact bindings and read their mode in
 // one snapshot. Automation capsules still go through the native root guard.
-async function lockCapsuleEvidence(db:Pick<pg.PoolClient,'query'>,installationId:string,ids:readonly string[]){
+async function lockCapsuleEvidence(db:EvidenceClient,installationId:string,ids:readonly string[],forPack:boolean){
+ const proof=forPack?",CASE WHEN e.excerpt_hash=sha256(convert_to(e.excerpt,'UTF8')) THEN encode(e.excerpt_hash,'hex') END AS verified_excerpt_hash":''
  const {rows}=await db.query(`
-  WITH bindings AS MATERIALIZED (${boundQuery} FOR SHARE OF e NOWAIT),
+  WITH bindings AS MATERIALIZED (${boundQuery(proof)} FOR SHARE OF e NOWAIT),
   capsules AS MATERIALIZED (
    SELECT c.capsule_id::text,c.version_id::text,c.retention_basis
    FROM knowledge_evidence_capsules c WHERE c.installation_id=$1
@@ -38,8 +50,14 @@ async function lockCapsuleEvidence(db:Pick<pg.PoolClient,'query'>,installationId
   UNION ALL SELECT 'mode',jsonb_build_object('mode',mode,'generation',generation::text)
    FROM shared.memory_source_modes WHERE installation_id=$1
  `,[installationId,ids])
- const bindings:Binding[]=rows.filter(row=>row.kind==='binding').map(row=>row.value)
-  .sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
+ const humanCapsules=new Map<string,HumanCapsuleReference>()
+ const bindings:Binding[]=rows.filter(row=>row.kind==='binding').map(row=>{
+  const {verified_excerpt_hash:hash,...binding}=row.value
+  if(typeof hash==='string'&&hash.length===64)humanCapsules.set(binding.evidence_id,{
+   versionId:binding.version_id,sourceVersion:binding.capsule_id,excerptHash:Buffer.from(hash,'hex'),sourceHash:null,
+  })
+  return binding
+ }).sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
  const capsules=new Map(rows.filter(row=>row.kind==='capsule').map(row=>[row.value.capsule_id,row.value]))
  const lockedCapsules=bindings.map(binding=>{
   const cap=capsules.get(binding.capsule_id)
@@ -47,7 +65,7 @@ async function lockCapsuleEvidence(db:Pick<pg.PoolClient,'query'>,installationId
   return {evidence_id:binding.evidence_id,version_id:binding.version_id,retention_basis:cap.retention_basis}
  })
  const mode=rows.find(row=>row.kind==='mode')?.value??{mode:'legacy-feed',generation:'1'}
- return {bindings,locked:{mode,capsules:lockedCapsules}}
+ return {bindings,locked:{mode,capsules:lockedCapsules},humanCapsules}
 }
 const bindingStamp=(rows:Binding[])=>canonicalJsonString(rows.map(r=>({...r,body_reclaimed_at:r.body_reclaimed_at?String(r.body_reclaimed_at):null})))
 function textPrefix(value:unknown):{sourceText:string|null;overflow:boolean}{
@@ -95,15 +113,12 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
  const initial=bindingStamp(rows)
  const capsuleOnly=!!mode&&ids.length>0&&ids.length<=256&&rows.length===ids.length
   &&rows.every(row=>row.evidence_kind==='accepted_excerpt'&&row.capsule_id&&!row.source_event_id&&!row.artifact_id)
- return {bodyBytes,material(evidenceId,versionId,sourceEventId,artifactId){
-  const binding=rows.find(r=>r.evidence_id===evidenceId)
-  if(!binding||binding.version_id!==versionId||binding.source_event_id!==sourceEventId||binding.artifact_id!==artifactId)throw Error('source_reference_changed')
-  return materials.get(evidenceId)!
- },async assertCurrent(client,options){
+ const check=async(client:EvidenceClient,options?:SourceCommitOptions,forPack=false)=>{
   if(capsuleOnly){
-   const {bindings,locked}=await lockCapsuleEvidence(client,installationId,ids)
+   const {bindings,locked,humanCapsules}=await lockCapsuleEvidence(client,installationId,ids,forPack)
    if(bindingStamp(bindings)!==initial)throw Error('source_reference_changed')
    await guardRetainedEvidence(client,installationId,bindings,{expectedMode:mode,locked})
+   if(forPack&&locked.capsules.every(row=>row.retention_basis==='user_accepted'))return humanCapsules
   }else{
    await guardRetainedEvidence(client,installationId,rows,{expectedMode:mode})
    if(authority)await authority.assertCurrent(client,options)
@@ -111,7 +126,22 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
    const fresh=await evidenceBindings(client,installationId,ids)
    if(bindingStamp(fresh)!==initial)throw Error('source_reference_changed')
   }
+ }
+ return {bodyBytes,material(evidenceId,versionId,sourceEventId,artifactId){
+  const binding=rows.find(r=>r.evidence_id===evidenceId)
+  if(!binding||binding.version_id!==versionId||binding.source_event_id!==sourceEventId||binding.artifact_id!==artifactId)throw Error('source_reference_changed')
+  return materials.get(evidenceId)!
+ },async assertCurrent(client,options){
+  await check(client,options)
   if(options?.forCommit)await assertRetainedSourceGuards(client)
+ },async lockForPack(client){
+  const humanCapsules=await check(client,undefined,true)
+  return {humanCapsules,async assertForCommit(){
+   // The same transaction still holds the exact evidence and capsule rows
+   // FOR SHARE. Recheck the current mode and registered guards at commit.
+   if(!humanCapsules)await check(client,{forCommit:true})
+   await assertRetainedSourceGuards(client)
+  }}
  }}
 }
 const attached=new WeakMap<object,PreparedEvidenceSources>()
