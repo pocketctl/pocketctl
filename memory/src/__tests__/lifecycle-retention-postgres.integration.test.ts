@@ -124,6 +124,33 @@ suite('lifecycle retention',()=>{
   expect(await reclaimSourceTurn(pool,f.key,sourceSettings)).toMatchObject({events:0,finished:true})
   await expect(pool.query(`INSERT INTO memory_task_bundle_sources(installation_id,bundle_id,source_event_id,source_digest,source_sequence) VALUES($1,$2,$3,$4,1)`,[f.personal,randomUUID(),f.eventId,f.digest])).rejects.toThrow('source_body_reclaimed')
  })
+ test('fresh bundle membership reads the source by UUID even when a retained turn has many sources',async()=>{
+  const f=await taskSource(),bundle=randomUUID(),freshEvent=randomUUID()
+  await pool.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash)
+   SELECT gen_random_uuid(),$1,'feed','retained-fixture-'||n,'task-source','task-turn','message',now(),'{"text":"retention fixture source"}'::jsonb,$2
+   FROM generate_series(1,4096) AS n`,[f.personal,f.digest])
+  await pool.query(`INSERT INTO memory_source_retention_receipts(installation_id,turn_id,session_id,source_digest,compiler_version,extraction_completed_at,state,finished_at)
+   VALUES($1,'task-turn','task-source',$2,'fixture',now(),'reclaimed',now())`,[f.personal,f.digest])
+  await pool.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash)
+   VALUES($1,$2,'feed','fresh-fixture','task-source','fresh-turn','message',now(),'{"text":"retention fixture source"}',$3)`,[freshEvent,f.personal,f.digest])
+  await pool.query(`INSERT INTO memory_task_bundles(installation_id,bundle_id,session_id,task_key,source_digest,watermark)
+   VALUES($1,$2,'task-source','fresh-bundle',$3,1)`,[f.personal,bundle,f.digest])
+  await pool.query('ANALYZE source_events')
+  await pool.query('ANALYZE memory_source_retention_receipts')
+  const client=await pool.connect()
+  try{
+   await client.query('BEGIN')
+   await client.query('SET LOCAL plan_cache_mode=force_generic_plan; SET LOCAL max_parallel_workers_per_gather=0')
+   await client.query(`INSERT INTO memory_task_bundle_sources(installation_id,bundle_id,source_event_id,source_digest,source_sequence)
+    VALUES($1,$2,$3,$4,1)`,[f.personal,bundle,freshEvent,f.digest])
+   const {reads}=(await client.query<{reads:number}>(`SELECT (seq_tup_read+idx_tup_fetch)::int AS reads
+    FROM pg_stat_xact_user_tables WHERE relid='source_events'::regclass`)).rows[0]
+   expect(reads).toBeLessThan(64)
+  }finally{
+   await client.query('ROLLBACK')
+   client.release()
+  }
+ })
  test('AC-38 digest changes and unknown/failed/incomplete coverage do not reclaim',async()=>{
   const f=await taskSource()
   await pool.query("UPDATE memory_source_processing_receipts SET complete=false")

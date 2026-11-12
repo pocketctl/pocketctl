@@ -1,5 +1,27 @@
 import {GOVERNANCE_INCREMENTAL_MIGRATION} from '../migrations/governance-v2/incremental-migration.js'
 
+export const RETENTION_REFERENCE_UUID_MIGRATION = {
+  version: 101,
+  statements: [
+    `CREATE OR REPLACE FUNCTION memory_retention_reference_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+      DECLARE
+        value JSONB:=to_jsonb(NEW);
+        owner UUID:=(value->>'installation_id')::uuid;
+        episode_key UUID:=(value->>'episode_id')::uuid;
+        source_key UUID:=(value->>'source_event_id')::uuid;
+        artifact_key UUID:=(value->>'artifact_id')::uuid;
+      BEGIN
+        PERFORM pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||owner,0));
+        IF EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=owner AND (
+          r.episode_id=episode_key OR EXISTS(SELECT 1 FROM source_events s
+            WHERE s.installation_id=owner AND s.source_event_id=source_key AND s.turn_id=r.turn_id)
+          OR EXISTS(SELECT 1 FROM source_artifacts a WHERE a.installation_id=owner AND a.artifact_id=artifact_key
+            AND a.turn_id=r.turn_id))) THEN RAISE EXCEPTION 'source_body_reclaimed'; END IF;
+        RETURN NEW;
+      END $$`,
+  ],
+}
+
 /** Additive retention fences. Historical content is not reclaimed by schema startup. */
 export const DATA_RETENTION_MIGRATION = {
   version: 72,
