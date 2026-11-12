@@ -2,7 +2,7 @@ import {prepareEpisodeSources,prepareEpisodeProjectionSources,attachPreparedSour
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {runSelectedSourceTransaction} from '../sources/processing-pins.js'
 import {classifyArtifact} from '../projection/artifact-classifier.js'
-import { readCurationPolicy } from '../curation/policy.js'
+import { lockCurationAuthority, readCurationPolicy } from '../curation/policy.js'
 import { stageLifecycleTurn } from '../curation/task-repository.js'
 import type { CurationMode } from '../curation/contracts.js'
 import {assertJobFence} from '../generation/fence.js'
@@ -51,6 +51,7 @@ export function createEpisodeRepository(
         if(prepared&&!selected)attachPreparedSources(client,prepared)
         try {
           if(selected)await selected.fenceMembership(client)
+          else if(options.lifecycleMode&&options.lifecycleMode!=='off')await lockCurationAuthority(client,installationId)
           // Cheap early fence: skip work for installations already fenced by
           // a purge (or missing from the registry).
           const status = await client.query<{ local_status: string }>(`
@@ -89,6 +90,7 @@ export function createEpisodeRepository(
           if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {if(!managed)await client.query('COMMIT');return}
           if(prepared)await prepared.assertCurrent(client)
           const lifecyclePolicy = await readCurationPolicy(client,installationId,options.lifecycleMode??'off')
+          if(lifecyclePolicy==='source_denied') { if(!managed)await client.query('COMMIT'); return }
           const events = prepared?{rows:prepared.events.filter(e=>e.turn_id===turnId)}:await client.query<{
             source_event_id: string
             event_type: string

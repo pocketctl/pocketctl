@@ -7,6 +7,7 @@ export const SHARED_GRANT_FUNCTIONS=[
    IF p_installations IS NULL OR cardinality(p_installations) NOT BETWEEN 1 AND 16 OR cardinality(p_members)>16 THEN RAISE EXCEPTION 'grant_scope_limit';END IF;
    RETURN QUERY SELECT i.installation_id,jsonb_build_object('status',i.status,'config_version',i.config_version::text,
     'provider_enabled',EXISTS(SELECT 1 FROM public.extension_providers provider WHERE provider.provider_id=i.provider_id AND provider.status='enabled'),
+    'curation_input_allowed',i.granted_scopes @> ARRAY['session:events:read']::text[] AND i.enabled_services @> ARRAY['memory.manage']::text[],
     'owner_user_id',i.owner_user_id::text,'owner_scope_kind',i.owner_scope_kind,'owner_scope_id',i.owner_scope_id::text,
     'owner_exists',i.owner_scope_kind<>'personal' OR EXISTS(SELECT 1 FROM public.users u WHERE u.id=i.owner_user_id),
     'scope_state',CASE i.owner_scope_kind WHEN 'team' THEN t.state WHEN 'organization' THEN org.state ELSE 'active' END,

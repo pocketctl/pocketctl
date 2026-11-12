@@ -439,12 +439,22 @@ suite('controlled personal Relay source reader',()=>{
   const current=await curationTransaction(observed,inst,bundleId,async(c,bundle)=>loadCurrentLifecycleSources(c,inst,bundle))
   expect(current!.events.map(e=>e.payload.text)).toEqual(['private hot'])
   expect(current!.unknown).toBe(true)
-  await expect(curationTransaction(observed,inst,bundleId,async(c)=>{
-   await c.query("UPDATE memory_task_bundles SET state='completed' WHERE installation_id=$1 AND bundle_id=$2",[inst,bundleId])
-   await pool.query('UPDATE public.extension_installations SET authorization_epoch=2 WHERE installation_id=$1',[inst])
-  })).rejects.toThrow('source_reference_changed')
+  const control=await pool.connect()
+  const changeEpoch=()=>control.query('UPDATE public.extension_installations SET authorization_epoch=2 WHERE installation_id=$1',[inst])
+  try{
+   await control.query('BEGIN')
+   await changeEpoch()
+   await expect(curationTransaction(observed,inst,bundleId,async(c)=>{
+    await c.query("UPDATE memory_task_bundles SET state='completed' WHERE installation_id=$1 AND bundle_id=$2",[inst,bundleId])
+   })).rejects.toMatchObject({reason:'source_not_ready'})
+   await control.query('ROLLBACK')
+   await curationTransaction(observed,inst,bundleId,async()=>{
+    await control.query("BEGIN; SET LOCAL lock_timeout='100ms'")
+    await expect(changeEpoch()).rejects.toMatchObject({code:'55P03'})
+    await control.query('ROLLBACK')
+   })
+  }finally{await control.query('ROLLBACK');control.release()}
   expect((await pool.query('SELECT state FROM memory.memory_task_bundles WHERE bundle_id=$1',[bundleId])).rows[0].state).toBe('pending')
-  await pool.query('UPDATE public.extension_installations SET authorization_epoch=1 WHERE installation_id=$1',[inst])
   const {lifecycleSourceRetentionProof}=await import('../../retention/task-state.js'),retentionClient=await observed.connect()
   try{await retentionClient.query('BEGIN');expect(await lifecycleSourceRetentionProof(retentionClient,{installationId:inst,sessionId:'session',turnId:'turn-1',bodyDays:14})).toBeNull();await retentionClient.query('COMMIT')}finally{await retentionClient.query('ROLLBACK');retentionClient.release()}
 
@@ -462,6 +472,32 @@ suite('controlled personal Relay source reader',()=>{
    expect(JSON.stringify(health)).not.toMatch(/private hot|session|10000000-0000/)
    await c.query('COMMIT')
   }finally{await c.query('ROLLBACK');c.release()}
+ })
+
+ test('denied personal curation input cannot fall back to a legacy episode write',async()=>{
+  const {createEpisodeRepository}=await import('../../episodes/repository.js')
+  const {randomUUID}=await import('node:crypto')
+  const id=randomUUID(),session='legacy-curation-'+id,turn='legacy-curation-turn',payload={text:'synthetic compatibility body',turn_id:turn}
+  const {rows:[scopeBefore]}=await pool.query('SELECT enabled_services,config_version FROM public.extension_installations WHERE installation_id=$1',[inst])
+  await pool.query("INSERT INTO memory.source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at) VALUES($1,$2,now(),now())",[inst,session])
+  await pool.query("INSERT INTO memory.source_turns(installation_id,turn_id,session_id,state,started_at,terminal_at,event_count) VALUES($1,$2,$3,'completed',now(),now(),1)",[inst,turn,session])
+  await pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash)
+   VALUES($1::uuid,$2,'feed',($1::uuid)::text,$3,$4,'agent_text',now(),$5,$6)`,[id,inst,session,turn,payload,canonicalPayloadHash(payload)])
+  const repository=createEpisodeRepository(runtime,{lifecycleMode:'enabled',stabilizationMs:0})
+  const episodes=()=>runtime.query('SELECT 1 FROM work_episodes WHERE installation_id=$1 AND turn_id=$2',[inst,turn])
+  const restoreScope=()=>pool.query('UPDATE public.extension_installations SET enabled_services=$2,config_version=$3 WHERE installation_id=$1',[inst,scopeBefore.enabled_services,scopeBefore.config_version])
+  try{
+   await pool.query("UPDATE shared.memory_source_modes SET mode='legacy-feed' WHERE installation_id=$1",[inst])
+   await pool.query("UPDATE public.extension_installations SET enabled_services='{}',config_version=config_version+1 WHERE installation_id=$1",[inst])
+   await repository.compileTurn(inst,turn)
+   expect((await episodes()).rowCount).toBe(0)
+   await restoreScope()
+   await repository.compileTurn(inst,turn)
+   expect((await episodes()).rowCount).toBe(1)
+  }finally{
+   await restoreScope()
+   await pool.query("UPDATE shared.memory_source_modes SET mode='shared-shadow' WHERE installation_id=$1",[inst])
+  }
  })
 
  test('contended source health cancels and preserves the last observed values',async()=>{
@@ -1643,6 +1679,7 @@ suite('controlled personal Relay source reader',()=>{
  test('machine-concluded claims and excerpts retain current source authority after automatic publication',async()=>{
   const {randomUUID}=await import('node:crypto')
   const {writeLifecycleConclusion}=await import('../../curation/writer.js')
+  const {lockCurationAuthority,readCurationPolicy}=await import('../../curation/policy.js')
   const {createMemoryReadService}=await import('../../retrieval/read-service.js')
   const {createEvidenceService}=await import('../../claims/evidence-service.js')
   const {createSearchService}=await import('../../retrieval/search-service.js')
@@ -1653,7 +1690,7 @@ suite('controlled personal Relay source reader',()=>{
   await pool.query("INSERT INTO public.sessions VALUES($1,1,'daemon','codex','hot','codex')",[session])
   await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status,body_storage) VALUES($1,1,$2,'agent_text',$3,'completed','hot')",[canonical,session,payload])
   await pool.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",['1:'+session])
-  await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage','memory.search'])",[installation])
+  await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',2,1,ARRAY['session:events:read'],ARRAY['memory.manage','memory.search'])",[installation])
   await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[installation])
   await runtime.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[installation])
   await runtime.query("INSERT INTO memory_owner_scopes(installation_id,owner_scope_kind,owner_scope_id) VALUES($1,'personal',$1)",[installation])
@@ -1667,20 +1704,46 @@ suite('controlled personal Relay source reader',()=>{
   [source,installation,canonical,session,at,digest])
   await runtime.query("INSERT INTO memory_task_bundles(installation_id,bundle_id,task_key,session_id,space_id,source_digest,watermark,bundle_kind) VALUES($1,$2,'machine-task',$3,$4,$5,1,'task')",[installation,bundle,session,space,digest])
   await runtime.query('INSERT INTO memory_task_bundle_sources(installation_id,bundle_id,source_event_id,source_digest,source_sequence) VALUES($1,$2,$3,$4,1)',[installation,bundle,source,digest])
-  await runtime.query("INSERT INTO memory_curation_runs(installation_id,run_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state) VALUES($1,$2,$3,1,$4,1,repeat('a',64),repeat('b',64),'enabled','completed')",[installation,run,bundle,digest])
+  await runtime.query("INSERT INTO memory_curation_runs(installation_id,run_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,authorization_epoch) VALUES($1,$2,$3,1,$4,1,repeat('a',64),repeat('b',64),'enabled','completed',2)",[installation,run,bundle,digest])
   await runtime.query(`INSERT INTO memory_candidates(candidate_id,installation_id,ordinal,claim_type,statement,normalized_key,scope_kind,scope_key,confidence,freshness_at,evidence_handles,status,source_kind,bundle_id,curation_run_id,bundle_revision)
    VALUES($1,$2,0,'work_method',$3,'machine-fixture','task','machine-task',1,$4,'[]','validated','task_bundle',$5,$6,1)`,[candidate,installation,statement,at,bundle,run])
-  const client=await runtime.connect()
-  let result:Awaited<ReturnType<typeof writeLifecycleConclusion>>
-  try{
-   await client.query('BEGIN')
-   result=await writeLifecycleConclusion(client,{installationId:installation,candidateId:candidate,runId:run,bundleId:bundle,candidateRevision:1,
+  const checkPolicy=async()=>{
+   const client=await runtime.connect()
+   try{
+    await client.query('BEGIN')
+    await lockCurationAuthority(client,installation)
+    return await readCurationPolicy(client,installation,'enabled')
+   }finally{await client.query('ROLLBACK');client.release()}
+  }
+  expect(await checkPolicy()).toMatchObject({mode:'enabled',authorizationEpoch:'2'})
+  await runtime.query("UPDATE memory_installations SET local_status='purging' WHERE installation_id=$1",[installation])
+  expect(await checkPolicy()).toBeNull()
+  await runtime.query("UPDATE memory_installations SET local_status='ready' WHERE installation_id=$1",[installation])
+  const publish=async()=>{
+   const client=await runtime.connect()
+   try{
+    await client.query('BEGIN')
+    const result=await writeLifecycleConclusion(client,{installationId:installation,candidateId:candidate,runId:run,bundleId:bundle,candidateRevision:1,
     conclusion:{kind:'constraint',assertion_mode:'user_asserted',subject:'Migration',predicate:'workflow.constraint',value:'retain original source UUIDs',conditions:{},fact_at:null,valid_until:null,statement,confirmed:true,evidence:{subject:[source],predicate:[source],value:[source]}},
     identity:{installationId:installation,spaceId:space,subjectEntityId:subject,predicateId:'workflow.constraint',cardinality:'single'},logicalKey:'a'.repeat(64),
     relation:{action:'create',reason:'new_logical_identity',differences:[]},target:null,
     evidence:[{id:source,text:statement,role:'user',occurredAt:at,digest}],tombstoneKeys:[]})
-   await client.query('COMMIT')
-  }finally{await client.query('ROLLBACK');client.release()}
+    await client.query('COMMIT')
+    return result
+   }finally{await client.query('ROLLBACK');client.release()}
+  }
+  for(const [change,restore] of [
+   ["status='revoked'","status='active'"],
+   ["enabled_services=ARRAY['memory.search'],config_version=2","enabled_services=ARRAY['memory.manage','memory.search'],config_version=1"],
+   ["granted_scopes='{}',config_version=2","granted_scopes=ARRAY['session:events:read'],config_version=1"],
+  ]){
+   await pool.query('UPDATE public.extension_installations SET '+change+' WHERE installation_id=$1',[installation])
+   expect(await checkPolicy()).toBe('source_denied')
+   await expect(publish()).rejects.toMatchObject({code:'55000',message:'curation_authority_required'})
+   expect((await runtime.query('SELECT 1 FROM memory_curation_decisions WHERE installation_id=$1',[installation])).rowCount).toBe(0)
+   await pool.query('UPDATE public.extension_installations SET '+restore+' WHERE installation_id=$1',[installation])
+  }
+  const result=await publish()
   const claimId=result.claimId!,versionId=result.versionId!
   const row=(await runtime.query("SELECT e.evidence_id,cap.retention_basis FROM knowledge_evidence e JOIN knowledge_evidence_capsules cap USING(installation_id,capsule_id) WHERE e.installation_id=$1 AND e.version_id=$2",[installation,versionId])).rows[0]
   expect(row.retention_basis).toBe('automation_conclusion')
@@ -1689,7 +1752,7 @@ suite('controlled personal Relay source reader',()=>{
   const evidence=createEvidenceService(runtime)
   const search=createSearchService({pool:runtime,cursorSigningKey:'fixture',recallEmbeddingTimeoutMs:100})
   const select=()=>assertRetainedVersionResponse(runtime,authorityGrant,[{installationId:installation,versionId,statement}])
-  const query=()=>search.search({installationId:installation,query:'retain original source UUIDs',authorityGrant,lifecycle:{spaceId:space,spaceRevision:'1',destination:'personal',policyRevision:'1',authorizationEpoch:'1',consume:true}})
+  const query=()=>search.search({installationId:installation,query:'retain original source UUIDs',authorityGrant,lifecycle:{spaceId:space,spaceRevision:'1',destination:'personal',policyRevision:'1',authorizationEpoch:'2',consume:true}})
   expect((await reads.listActiveClaims(installation,{authorityGrant})).claims).toMatchObject([{claim_id:claimId,authority:'machine_concluded'}])
   expect(await reads.getClaim(installation,claimId,{authorityGrant})).toMatchObject({claim:{current_version_id:versionId}})
   expect(await evidence.evidenceForVersion({installationId:installation,versionId,authorityGrant})).toMatchObject([{excerpt:statement,locator:{source_event_id:source}}])
