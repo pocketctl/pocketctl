@@ -1,10 +1,34 @@
 import {createHash} from 'node:crypto'
 import type pg from 'pg'
 import type {LifecycleMode} from './lifecycle-policy.js'
+import {lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 
-export function lifecycleObservationAvailableSql(l='l'):string{
+/** Scope authority and local readiness are independent in shared mode. */
+export function lifecycleOwnerJoin(db:Pick<pg.Pool,'query'>,installation:string){
+ const shared=sourcePoolContext(db).namespace==='memory'
+ return {
+  shared,
+  join:shared?`JOIN LATERAL (
+   SELECT encode(sha256(convert_to(jsonb_build_array(current.state->>'authorization_epoch',current.state->>'config_version',
+    current.state->>'owner_user_id',current.state->>'owner_scope_id')::text,'UTF8')),'hex') AS authority_stamp
+   FROM shared.memory_current_grant_states(ARRAY[${installation}::uuid],ARRAY[]::uuid[]) current
+   WHERE current.state @> '{"owner_scope_kind":"personal","status":"active","owner_exists":true,"provider_enabled":true,"curation_input_allowed":true}'::jsonb
+    AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t
+     WHERE t.owner_scope_kind='personal' AND t.owner_scope_id=(current.state->>'owner_scope_id')::uuid
+      AND t.authorization_epoch>=(current.state->>'authorization_epoch')::bigint)
+  ) owner ON TRUE`:`JOIN memory_owner_scopes owner ON owner.installation_id=${installation}
+   AND owner.owner_scope_kind='personal' AND owner.state='active'`,
+  ready:shared?"i.local_status='ready'":"i.local_status='ready' AND i.relay_status='active'",
+  stamp:shared?'owner.authority_stamp':'NULL::text',
+  localOwnerLock:shared?'':',owner',
+ }
+}
+
+export function lifecycleObservationAvailableSql(authorityStamp:string,l='l'):string{
  return `EXISTS(SELECT 1 FROM memory_lifecycle_observation_windows observation
   WHERE observation.installation_id=${l}.installation_id AND observation.state='observed'
+   AND (${authorityStamp} IS NULL OR starts_with(observation.settings_hash,${authorityStamp}||':'))
    AND observation.capability_since_at IS NOT NULL AND observation.capability_since_at<=observation.started_at
    AND observation.started_at<=clock_timestamp()-interval '90 days'
    AND observation.last_native_delivery_at>=clock_timestamp()-interval '24 hours'
@@ -15,9 +39,9 @@ export function createLifecycleObservationService(input:{pool:pg.Pool;mode:Lifec
  return {
   async listActivePersonalOwners(limit=100,afterInstallationId?:string):Promise<string[]>{
    if(!Number.isInteger(limit)||limit<1||limit>500)throw new Error('invalid_observation_batch')
-   return (await input.pool.query(`SELECT i.installation_id FROM memory_installations i JOIN memory_owner_scopes s USING(installation_id)
-    WHERE i.local_status='ready' AND i.relay_status='active' AND s.owner_scope_kind='personal' AND s.state='active'
-     AND($2::uuid IS NULL OR i.installation_id>$2) ORDER BY i.installation_id LIMIT $1`,[limit,afterInstallationId??null])).rows.map(r=>r.installation_id)
+   const authority=lifecycleOwnerJoin(input.pool,'i.installation_id')
+   return (await input.pool.query(`SELECT i.installation_id FROM memory_installations i ${authority.join}
+    WHERE ${authority.ready} AND($2::uuid IS NULL OR i.installation_id>$2) ORDER BY i.installation_id LIMIT $1`,[limit,afterInstallationId??null])).rows.map(r=>r.installation_id)
   },
   async recordObservationHeartbeat(options:{installationId:string;maxGapMs?:number}):Promise<'unknown'|'observed'>{
    const maxGap=options.maxGapMs??300000
@@ -25,17 +49,29 @@ export function createLifecycleObservationService(input:{pool:pg.Pool;mode:Lifec
    const c=await input.pool.connect()
    try{
     await c.query('BEGIN')
+    await c.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'")
+    if(!await lockCurrentRelayAuthority(c,[options.installationId])){await c.query('ROLLBACK');return 'unknown'}
     await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0)),pg_advisory_xact_lock(hashtextextended('lifecycle-observation:'||$1,0))",[options.installationId])
-    const owner=(await c.query(`SELECT 1 FROM memory_installations i JOIN memory_owner_scopes s USING(installation_id)
-     JOIN memory_curation_policies p USING(installation_id) WHERE i.installation_id=$1 AND i.local_status='ready' AND i.relay_status='active'
-     AND s.owner_scope_kind='personal' AND s.state='active' AND p.consume_mode='enabled' FOR SHARE OF i,s,p`,[options.installationId])).rowCount
+    const authority=lifecycleOwnerJoin(c,'i.installation_id')
+    const owner=(await c.query<{authority_stamp:string|null}>(`SELECT ${authority.stamp} AS authority_stamp FROM memory_installations i
+     JOIN memory_curation_policies p USING(installation_id) ${authority.join}
+     WHERE i.installation_id=$1 AND ${authority.ready} AND p.consume_mode='enabled'
+     FOR SHARE OF i,p${authority.localOwnerLock}`,[options.installationId])).rows[0]
     const settings=(await c.query(`SELECT scope_kind,scope_key,agent,mode,revision::text FROM memory_context_settings
      WHERE installation_id=$1 ORDER BY scope_kind,scope_key,agent NULLS FIRST FOR SHARE`,[options.installationId])).rows
     const settingsEnabled=input.mode==='enabled'&&!!owner&&settings.some(s=>s.scope_kind==='installation'&&s.scope_key==='global'&&s.agent===null&&s.mode==='enabled')&&settings.every(s=>s.mode==='enabled')
-    const fingerprint=createHash('sha256').update(JSON.stringify(settings)).digest('hex')
-    const prior=(await c.query('SELECT *,clock_timestamp() AS now FROM memory_lifecycle_observation_windows WHERE installation_id=$1 FOR UPDATE',[options.installationId])).rows[0]
+    const prefix=owner?.authority_stamp ? owner.authority_stamp+':' : ''
+    const fingerprint=prefix+createHash('sha256').update(JSON.stringify(settings)).digest('hex')
+    const prior=(await c.query('SELECT * FROM memory_lifecycle_observation_windows WHERE installation_id=$1 FOR UPDATE',[options.installationId])).rows[0]
+    // A different Relay authority cannot inherit the old continuous interval.
+    if(prefix&&prior&&!prior.settings_hash.startsWith(prefix)){
+     await c.query('SELECT memory_invalidate_lifecycle_observation($1::uuid)',[options.installationId])
+     await c.query('UPDATE memory_lifecycle_observation_windows SET settings_hash=$2 WHERE installation_id=$1',[options.installationId,fingerprint])
+     await c.query('COMMIT')
+     return 'unknown'
+    }
     const enabled=settingsEnabled&&!!prior?.capability_since_at&&(!prior.last_limitation_at||prior.capability_since_at>=prior.last_limitation_at)
-    if(!enabled&&!prior){await c.query('COMMIT');return 'unknown'}
+    if(!enabled&&!prior&&!(prefix&&settingsEnabled)){await c.query('COMMIT');return 'unknown'}
     const now=(await c.query('SELECT clock_timestamp() AS now')).rows[0].now as Date
     if(prior?.capability_since_at&&(!prior.last_native_delivery_at||now.getTime()-prior.last_native_delivery_at.getTime()>86400000)||prior?.last_heartbeat_at&&now.getTime()-prior.last_heartbeat_at.getTime()>Math.min(maxGap,prior.max_gap_ms)){
      await c.query('SELECT memory_invalidate_lifecycle_observation($1::uuid)',[options.installationId]);await c.query('COMMIT');return 'unknown'

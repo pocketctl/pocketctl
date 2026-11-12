@@ -7,7 +7,7 @@ import {withSourceJobExecution,runOutsideSourceJobExecution,type SourceExecution
 // Restrictive cleanup, accounting/status and control repair remain independent
 // of source-input mode. These content consumers capture at dispatch, before IO.
 const sourceJobs=new Set<JobType>(['project_shared_source','project_feed','compile_episode','snapshot_reconcile','extract_candidates','consolidate_task',
- 'curate_conclusions','extract_skill_candidate','build_wiki','parse_code_snapshot','index_claim_version','index_shared_claim',
+ 'curate_conclusions','evaluate_claim_lifecycle','extract_skill_candidate','build_wiki','parse_code_snapshot','index_claim_version','index_shared_claim',
  'rebuild_claim_index','git_ingest','git_export','git_reconcile','compile_context_shadow','evaluate_review_shadow','execute_publication_delegation'])
 
 export interface JobHandlerContext {
