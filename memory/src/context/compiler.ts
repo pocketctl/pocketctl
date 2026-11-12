@@ -459,15 +459,6 @@ export function createContextCompiler(deps: {
         }
       }
 
-      const evidenceFor = async (versionId: string): Promise<string[]> => {
-        const rows = await deps.pool.query<{ evidence_id: string }>(`
-          SELECT evidence_id::text FROM knowledge_evidence
-          WHERE installation_id = $1 AND version_id = $2
-          ORDER BY ordinal ASC LIMIT 4
-        `, [input.installationId, versionId])
-        return rows.rows.map(row => row.evidence_id)
-      }
-
       for (const entry of persona) {
         const statement = redactSensitive(await statementFor(deps.pool, input.installationId, entry.versionId))
         drafts.push({
@@ -484,7 +475,7 @@ export function createContextCompiler(deps: {
           statement,
           scopeKind: 'installation',
           reasonCodes: ['persona', 'l3_stable'],
-          evidenceIds: await evidenceFor(entry.versionId),
+          evidenceIds: [],
           normalizedKey: `persona:${entry.claimId}`,
           rank: 100,
         })
@@ -519,14 +510,26 @@ export function createContextCompiler(deps: {
           statement: redactSensitive(candidate.statement),
           scopeKind: candidate.scopeKind,
           reasonCodes: candidate.reasonCodes,
-          evidenceIds: await evidenceFor(candidate.versionId),
+          evidenceIds: [],
           normalizedKey: `${candidate.claimType}:${candidate.claimId}`,
           rank: candidate.fusedScore,
         })
       }
 
       // Deduplicate by identity and near-identical text before budgeting.
-      const facts=await contextClaimFacts(deps.pool,input.installationId,drafts.map(d=>d.versionId))
+      const versionIds = [...new Set(drafts.map(draft => draft.versionId))]
+      const [facts, evidence] = await Promise.all([
+        contextClaimFacts(deps.pool, input.installationId, versionIds),
+        selectedReferences.length || !versionIds.length ? null : deps.pool.query<{ version_id: string; evidence_ids: string[] }>(`
+          SELECT wanted.version_id::text, ARRAY(
+            SELECT e.evidence_id::text FROM knowledge_evidence e
+            WHERE e.installation_id=$1 AND e.version_id=wanted.version_id
+            ORDER BY e.ordinal ASC LIMIT 4
+          ) AS evidence_ids
+          FROM unnest($2::uuid[]) AS wanted(version_id)
+        `, [input.installationId, versionIds]),
+      ])
+      const evidenceByVersion = new Map(evidence?.rows.map(row => [row.version_id, row.evidence_ids]))
       const eligibleDrafts = drafts.filter(draft => {
         const source = facts.get(draft.versionId)
         // Recalled work methods require a Scene. Persona and explicit references
@@ -534,7 +537,7 @@ export function createContextCompiler(deps: {
         const needsScene = draft.claimType === 'work_method' && draft.layer === 'L2' && !selectedItemReferences.has(draft.itemId)
         return source && (!needsScene || (lifecycle?.consume && source.lifecycle?.spaceId))
           && eligibleContextFacts(source,queryContext)
-      })
+      }).map(draft => ({ ...draft, evidenceIds: evidenceByVersion.get(draft.versionId) ?? draft.evidenceIds }))
       const deduped = dedupeItems(eligibleDrafts.map(draft => ({
         ...draft,
         renderedText: draft.statement,

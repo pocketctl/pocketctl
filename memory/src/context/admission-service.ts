@@ -70,9 +70,9 @@ export function createAdmissionService(deps: {
   const ttl = deps.admissionTtlSeconds ?? 5
   const physical = isPhysicalSourcePool(deps.pool)
   const timeouts = "SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'"
-  const begin = async (client: pg.PoolClient, bounded: boolean) => {
+  const begin = async (client: pg.PoolClient, bounded: boolean, withoutJit = false) => {
     if (bounded && physical) {
-      await client.query(`BEGIN; ${timeouts}`)
+      await client.query(`BEGIN; ${timeouts}${withoutJit ? '; SET LOCAL jit=off' : ''}`)
     } else {
       await client.query('BEGIN')
       if (bounded) await client.query(timeouts)
@@ -325,7 +325,7 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'expired' }
         }
 
-        await fenceMachinePackSources(client,input.installationId,input.packId,input.authorityGrant)
+        await fenceMachinePackSources(client,input.installationId,input.packId,input.authorityGrant,Boolean(nativeGrant))
         const nonce = randomBytes(24).toString('hex')
         const nonceHmac = createHmac('sha256', deps.nonceHmacKey).update(nonce).digest()
         const injectionId = randomUUID()
@@ -402,7 +402,9 @@ export function createAdmissionService(deps: {
       const currentMachineSourcesSql=`($10::boolean OR NOT (${machineSourcesSql}))`
       const client=await deps.pool.connect()
       try {
-        await begin(client, physical || Boolean(nativeGrant))
+        // The bounded personal handoff touches one installation and injection.
+        // PG13 can spend more time compiling its guard plan than executing it.
+        await begin(client, physical || Boolean(nativeGrant), Boolean(nativeGrant))
         // Secure native V1 authority before locking the authenticated
         // installation and injection. Read current facts after the fence.
         const result:ConsumeResult=await (async()=>{

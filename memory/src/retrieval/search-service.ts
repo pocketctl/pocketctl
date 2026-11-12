@@ -115,6 +115,19 @@ export interface SearchServiceDeps {
   onRecallMetrics?(input:{eligible:number;hydrated:number;returned:number;truncated:boolean;degraded:boolean;durationMs:number}):void
 }
 
+// The rest of a native prompt can specify output format without describing the
+// subject. Try its leading question only when the same code identifier also
+// appears as a whole token in the document.
+function leadingCodeQuestion(query: string) {
+  const end = query.search(/[?？]/u)
+  if (end < 0 || !query.slice(end + 1).trim()) return null
+  const question = query.slice(0, end).trim()
+  const codeIdentifier = /(?<![\p{L}\p{N}_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\p{L}\p{N}_])/gu
+  const identifiers = [...new Set(question.toLowerCase().match(codeIdentifier) ?? [])].slice(0, 8)
+  if (!identifiers.length) return null
+  return { question, pattern: String.raw`\m(${identifiers.join('|')})\M` }
+}
+
 export function createSearchService(deps: SearchServiceDeps) {
   const service={
     async search(input: SearchInput,internalBudget?:number): Promise<SearchResult> {
@@ -160,6 +173,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       }
       const shared = sourcePoolContext(deps.pool).namespace === 'memory'
       const nativeLexical = input.localOnly === true && !historicalSelection && shared
+      const codeQuestion = nativeLexical ? leadingCodeQuestion(query) : null
       const currentVersion = nativeLexical ? `(c.current_version_id=v.version_id AND COALESCE(v.body_state,'present')='present'
         AND COALESCE(v.effective_from,v.created_at)<=search_clock.as_of
         AND (v.effective_until IS NULL OR v.effective_until>search_clock.as_of)
@@ -169,6 +183,8 @@ export function createSearchService(deps: SearchServiceDeps) {
           WHERE de.installation_id=v.installation_id AND de.version_id=v.version_id
         ))` : currentClaimVersionSql('c','v','search_clock.as_of')
       // SQL ranks the entire eligible corpus before bounded hydration. No UUID prefix scan.
+      // Full-text matches sort above full-query trigram matches. The leading
+      // question only breaks through when no full-query match uses that slot.
       const [prefiltered,localEmbeddingMode] = await Promise.all([deps.pool.query<PrefilteredRow>(`
         WITH search_clock AS (
           SELECT COALESCE($2::timestamptz, statement_timestamp()) AS as_of
@@ -232,7 +248,9 @@ export function createSearchService(deps: SearchServiceDeps) {
         ${nativeLexical?`), document_scores AS MATERIALIZED (
           SELECT version_id,authority,freshness_at,
             CASE WHEN search_vector@@q.terms THEN ts_rank(search_vector,q.terms) END AS fts_score,
-            word_similarity($16,search_document) AS trigram_score
+            word_similarity($16,search_document) AS trigram_score,
+            CASE WHEN $28::text IS NOT NULL AND search_document ~* $29::text
+              THEN word_similarity($28,search_document) END AS question_score
           FROM eligible CROSS JOIN (SELECT websearch_to_tsquery('simple'::regconfig,$16) terms) q
         `:''}
         ), metadata_candidates AS(
@@ -240,8 +258,10 @@ export function createSearchService(deps: SearchServiceDeps) {
             WHERE strpos(lower(claim_type||'|'||scope_key||'|'||statement),token)>0)
           ORDER BY authority ASC,freshness_at DESC,version_id LIMIT $21
         ), lexical_candidates AS(
-          ${nativeLexical?`SELECT version_id FROM document_scores WHERE fts_score IS NOT NULL OR trigram_score>.3
-          ORDER BY COALESCE(1+fts_score,trigram_score) DESC,authority DESC,freshness_at DESC,version_id LIMIT $21`:`
+          ${nativeLexical?`SELECT version_id FROM document_scores
+          WHERE fts_score IS NOT NULL OR trigram_score>.3 OR question_score>.3
+          ORDER BY COALESCE(1+fts_score, CASE WHEN trigram_score>.3 THEN trigram_score END, question_score-1) DESC,
+            authority DESC,freshness_at DESC,version_id LIMIT $21`:`
           SELECT version_id FROM eligible
           WHERE search_vector@@websearch_to_tsquery('simple'::regconfig,$16)
             OR word_similarity($16,search_document)>.3
@@ -266,8 +286,9 @@ export function createSearchService(deps: SearchServiceDeps) {
           ${nativeLexical ? `,
             CASE WHEN score.fts_score IS NOT NULL THEN (row_number() OVER(
               ORDER BY score.fts_score DESC NULLS LAST,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_fts_rank,
-            CASE WHEN score.trigram_score>.3 THEN (row_number() OVER(
-              ORDER BY score.trigram_score DESC,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank` : ''}
+            CASE WHEN score.trigram_score>.3 OR score.question_score>.3 THEN (row_number() OVER(
+              ORDER BY COALESCE(CASE WHEN score.trigram_score>.3 THEN score.trigram_score END, score.question_score-1) DESC NULLS LAST,
+                e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank` : ''}
         FROM eligible e JOIN picked USING(version_id) ${nativeLexical?'JOIN document_scores score USING(version_id) ':''}LEFT JOIN vector_candidates vc USING(version_id)
         ORDER BY e.version_id
       `, [
@@ -284,6 +305,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         query,queryEmbedding,deps.embed?.provider??null,deps.embed?.model??null,deps.embed?.dimensions??null,budget,
         [...queryTokensLower],input.taskScopeKey??null,input.lifecycle?.spaceId??null,input.lifecycle?.destination??null,input.lifecycle?.consume??false,
         ...(shared?[input.lifecycle?.authorizationEpoch??null]:[]),
+        ...(nativeLexical ? [codeQuestion?.question ?? null, codeQuestion?.pattern ?? null] : []),
       ]),input.localOnly?readEmbeddingMode():undefined])
       const localMode=localEmbeddingMode?.rows[0]?.embedding_mode
       if(localMode==='shadow'||localMode==='enabled')degraded.push('embedding')
