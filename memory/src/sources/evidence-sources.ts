@@ -6,6 +6,7 @@ import {canonicalJsonString,SourceUnavailableError} from '@pocketctl/session-sou
 import {prepareSourceReferences,prepareSourceAuthorities,type PreparedSources} from './prepared-sources.js'
 import {classifyArtifact} from '../projection/artifact-classifier.js'
 import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
+import type {SourceReadGrant} from './retained-read.js'
 interface Binding {episode_id:string|null;evidence_kind:string;evidence_id:string;version_id:string;capsule_id:string|null;source_event_id:string|null;artifact_id:string|null;resolved_event_id:string|null;origin:string|null;source_kind:string|null;body_reclaimed_at:Date|null;retention_denied:boolean;artifact_type:string|null;identity_key:string|null;path:string|null;status:string|null}
 type TeamEvidenceKind='team_collaboration'|'team_delivery'|'team_semantic'
 const teamKind=(kind:string|null):kind is TeamEvidenceKind=>kind==='team_collaboration'||kind==='team_delivery'||kind==='team_semantic'
@@ -15,7 +16,7 @@ type EvidenceClient=Pick<pg.PoolClient,'query'>
 interface HumanCapsuleReference {versionId:string;sourceVersion:string;excerptHash:Buffer;sourceHash:null}
 interface LockedPackEvidence {
  humanCapsules?:ReadonlyMap<string,HumanCapsuleReference>
- assertForCommit():Promise<void>
+ assertForCommit(grant:SourceReadGrant):Promise<void>
 }
 export interface PreparedEvidenceSources {
  readonly bodyBytes?:number
@@ -136,11 +137,11 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
   if(options?.forCommit)await assertRetainedSourceGuards(client)
  },async lockForPack(client){
   const humanCapsules=await check(client,undefined,true)
-  return {humanCapsules,async assertForCommit(){
+  return {humanCapsules,async assertForCommit(grant){
    // The same transaction still holds the exact evidence and capsule rows
    // FOR SHARE. Recheck the current mode and registered guards at commit.
    if(!humanCapsules)await check(client,{forCommit:true})
-   await assertRetainedSourceGuards(client)
+   await assertRetainedSourceGuards(client,{installationId,grant})
   }}
  }}
 }

@@ -133,6 +133,7 @@ interface CompileBody {
   fact_at?:unknown
   known_at?:unknown
   query?: unknown
+  requested_at?: unknown
   selected_references?: unknown
 }
 
@@ -287,6 +288,14 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
 
     // Session binding: the body session MUST equal the grant session.
     const startedAt = performance.now()
+    // The daemon records its wall time before requesting the Relay grant.
+    // Compare clocks for diagnostics only. Never use this input as authority.
+    const arrivedAt = Date.now()
+    const requestedAt = typeof body.requested_at === 'string'
+      && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(body.requested_at)
+      ? Date.parse(body.requested_at)
+      : NaN
+    const daemonRequestAgeMs = arrivedAt - requestedAt
     const grant = await daemonGuard(req.headers.authorization, body.session_id)
     const verifiedAt = performance.now()
     if (references.length > 0 && (!sharedAuthorized(grant, grant.installationId)
@@ -333,6 +342,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       if (body.adapter_capability !== 'native_hidden_v1' || (!reply.raw.destroyed && responseAt - startedAt < 400)) return
       logger.log('warn', 'context_compile_latency', {
         outcome: outcome.kind,
+        daemon_request_age_ms: daemonRequestAgeMs >= -5000 && daemonRequestAgeMs <= 60000 ? daemonRequestAgeMs : null,
         grant_ms: Math.round(verifiedAt - startedAt),
         compile_ms: Math.round(finishedAt - verifiedAt),
         post_compile_ms: Math.round(responseAt - finishedAt),

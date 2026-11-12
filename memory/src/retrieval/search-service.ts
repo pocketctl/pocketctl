@@ -103,7 +103,10 @@ interface PrefilteredRow {
   selected_cap?:boolean
   native_fts_rank?:number|null
   native_trigram_rank?:number|null
+  local_embedding_mode?:string|null
 }
+
+type PrefilterQueryRow = PrefilteredRow | { version_id: null; local_embedding_mode: string | null }
 
 export interface SearchServiceDeps {
   pool: pg.Pool
@@ -185,7 +188,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       // SQL ranks the entire eligible corpus before bounded hydration. No UUID prefix scan.
       // Full-text matches sort above full-query trigram matches. The leading
       // question only breaks through when no full-query match uses that slot.
-      const [prefiltered,localEmbeddingMode] = await Promise.all([deps.pool.query<PrefilteredRow>(`
+      const [prefiltered,localEmbeddingMode] = await Promise.all([deps.pool.query<PrefilterQueryRow>(`
         WITH search_clock AS (
           SELECT COALESCE($2::timestamptz, statement_timestamp()) AS as_of
         ), eligible AS MATERIALIZED (
@@ -288,8 +291,12 @@ export function createSearchService(deps: SearchServiceDeps) {
               ORDER BY score.fts_score DESC NULLS LAST,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_fts_rank,
             CASE WHEN score.trigram_score>.3 OR score.question_score>.3 THEN (row_number() OVER(
               ORDER BY COALESCE(CASE WHEN score.trigram_score>.3 THEN score.trigram_score END, score.question_score-1) DESC NULLS LAST,
-                e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank` : ''}
+                e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank,
+            local_settings.embedding_mode AS local_embedding_mode` : ''}
         FROM eligible e JOIN picked USING(version_id) ${nativeLexical?'JOIN document_scores score USING(version_id) ':''}LEFT JOIN vector_candidates vc USING(version_id)
+        ${nativeLexical?`RIGHT JOIN (
+          SELECT (SELECT embedding_mode FROM memory_feature_settings WHERE installation_id=$1) AS embedding_mode
+        ) local_settings ON TRUE`:''}
         ORDER BY e.version_id
       `, [
         input.installationId, requestedAsOf,
@@ -306,19 +313,22 @@ export function createSearchService(deps: SearchServiceDeps) {
         [...queryTokensLower],input.taskScopeKey??null,input.lifecycle?.spaceId??null,input.lifecycle?.destination??null,input.lifecycle?.consume??false,
         ...(shared?[input.lifecycle?.authorizationEpoch??null]:[]),
         ...(nativeLexical ? [codeQuestion?.question ?? null, codeQuestion?.pattern ?? null] : []),
-      ]),input.localOnly?readEmbeddingMode():undefined])
-      const localMode=localEmbeddingMode?.rows[0]?.embedding_mode
+      ]),input.localOnly&&!nativeLexical?readEmbeddingMode():undefined])
+      const localMode=nativeLexical?prefiltered.rows[0]?.local_embedding_mode:localEmbeddingMode?.rows[0]?.embedding_mode
       if(localMode==='shadow'||localMode==='enabled')degraded.push('embedding')
-      const origin=await originPolicyDecisions(deps.pool,input.installationId,prefiltered.rows.filter(r=>r.origin_policy_required).map(r=>r.version_id))
-      const rows = prefiltered.rows.filter(row=>claimConsumptionDecision({
+      // The local settings row survives an empty candidate set so the caller
+      // still sees the configured vector degradation for that search.
+      const rankedRows=prefiltered.rows.filter((row):row is PrefilteredRow=>row.version_id!==null)
+      const origin=await originPolicyDecisions(deps.pool,input.installationId,rankedRows.filter(r=>r.origin_policy_required).map(r=>r.version_id))
+      const rows = rankedRows.filter(row=>claimConsumptionDecision({
         scopeKind:row.scope_kind,scopeKey:row.scope_key,repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,
         consumptionHoldReason:row.consumption_hold_reason,canonicalRepositoryKey:row.canonical_repository_key,applicability:row.applicability,
       },{repositoryId:input.repositoryId,snapshotId:input.repoSnapshotId,branch:input.branch,taskScopeKey:input.taskScopeKey}).eligible).filter(row=>{if(!row.origin_policy_required)return true;const decision=origin.get(row.version_id);if(decision?.eligible)return true;
         const reason=decision?.reason??'origin_policy_requires_review';if(!degraded.includes(reason))degraded.push(reason);return false})
-      const candidatePoolTruncated=prefiltered.rows[0]?.selected_cap===true
-      if(rows.length<prefiltered.rows.length&&candidatePoolTruncated)degraded.push('post_filter_pool_truncated')
+      const candidatePoolTruncated=rankedRows[0]?.selected_cap===true
+      if(rows.length<rankedRows.length&&candidatePoolTruncated)degraded.push('post_filter_pool_truncated')
       if (rows.length === 0) {
-        deps.onRecallMetrics?.({eligible:Number(prefiltered.rows[0]?.eligible_count??0),hydrated:prefiltered.rows.length,returned:0,truncated:candidatePoolTruncated,degraded:degraded.length>0,durationMs:performance.now()-started})
+        deps.onRecallMetrics?.({eligible:Number(rankedRows[0]?.eligible_count??0),hydrated:rankedRows.length,returned:0,truncated:candidatePoolTruncated,degraded:degraded.length>0,durationMs:performance.now()-started})
         return { hits: [], nextCursor: null, degradedComponents: degraded, poolSizes: {} }
       }
       const byVersion = new Map(rows.map(row => [row.version_id, row]))
@@ -441,7 +451,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       const offset = cursorState?.offset ?? 0
       const page = adjusted.slice(offset, offset + limit)
       const nextOffset = offset + limit
-      deps.onRecallMetrics?.({eligible:Number(prefiltered.rows[0]?.eligible_count??0),hydrated:prefiltered.rows.length,returned:page.length,
+      deps.onRecallMetrics?.({eligible:Number(rankedRows[0]?.eligible_count??0),hydrated:rankedRows.length,returned:page.length,
         truncated:candidatePoolTruncated,degraded:degraded.length>0,durationMs:performance.now()-started})
       const response:SearchResult={
         hits: page.map(({ entry, row, score }) => ({

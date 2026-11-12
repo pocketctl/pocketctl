@@ -134,13 +134,15 @@ export async function originPolicyDecisions(client:Queryable,installationId:stri
  return result
 }
 
+export const originPolicyCorpusVersionsSql=(installation:string)=>`SELECT v.version_id::text
+  FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
+  WHERE v.installation_id=${installation} AND c.current_version_id=v.version_id AND c.state='active'
+   AND ${ORIGIN_POLICY_REQUIRED_SQL}`
+
 /** A coarse policy-only corpus stamp prevents pre-lookup cache reuse and binds
  * immutable packs without changing the installation's data generation. */
 export async function originPolicyCorpusSnapshot(client:Queryable,installationId:string):Promise<{stamp:string|null;fences:OriginPolicyFence[]}>{
- const rows=(await client.query<{version_id:string}>(`SELECT v.version_id::text
-  FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
-  WHERE v.installation_id=$1 AND c.current_version_id=v.version_id AND c.state='active'
-   AND ${ORIGIN_POLICY_REQUIRED_SQL} ORDER BY v.version_id`,[installationId])).rows
+ const rows=(await client.query<{version_id:string}>(`${originPolicyCorpusVersionsSql('$1')} ORDER BY v.version_id`,[installationId])).rows
  const ids=rows.map(r=>r.version_id)
  if(!ids.length)return{stamp:null,fences:[]}
  const decisions=await originPolicyDecisions(client,installationId,ids),fences=new Map<string,OriginPolicyFence>()
