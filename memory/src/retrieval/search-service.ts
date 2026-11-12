@@ -136,13 +136,14 @@ export function createSearchService(deps: SearchServiceDeps) {
         : null
 
       const queryTokensLower=new Set(query.toLowerCase().split(/[^a-z0-9_\u3040-\u30ff\u3400-\u9fff]+/i).filter(token=>token.length>1))
-      const embeddingMode=await deps.pool.query<{embedding_mode:string|null;embedding_consent_fingerprint:string|null}>(`
+      const readEmbeddingMode=()=>deps.pool.query<{embedding_mode:string|null;embedding_consent_fingerprint:string|null}>(`
         SELECT embedding_mode,embedding_consent_fingerprint FROM memory_feature_settings WHERE installation_id=$1`,[input.installationId])
-      const mode=embeddingMode.rows[0]?.embedding_mode
-      const consentMatches=!deps.embeddingConsentFingerprint||embeddingMode.rows[0]?.embedding_consent_fingerprint===deps.embeddingConsentFingerprint
+      const embeddingMode=input.localOnly?undefined:await readEmbeddingMode()
+      const mode=embeddingMode?.rows[0]?.embedding_mode
+      const consentMatches=!deps.embeddingConsentFingerprint||embeddingMode?.rows[0]?.embedding_consent_fingerprint===deps.embeddingConsentFingerprint
       let queryEmbedding:number[]|null=null
       const embeddingEnabled = mode === 'shadow' || mode === 'enabled'
-      if (embeddingEnabled && (input.localOnly || !deps.embed || !consentMatches)) degraded.push('embedding')
+      if (embeddingEnabled && (!deps.embed || !consentMatches)) degraded.push('embedding')
       if (embeddingEnabled && !input.localOnly && deps.embed && consentMatches) {
         try{
           const controller=new AbortController()
@@ -166,11 +167,8 @@ export function createSearchService(deps: SearchServiceDeps) {
           JOIN memory_team_delivery_withdrawals dw ON ${withdrawnDeliveryJoinSql('de','dw')}
           WHERE de.installation_id=v.installation_id AND de.version_id=v.version_id
         ))` : currentClaimVersionSql('c','v','search_clock.as_of')
-      const ftsMatch = "e.search_vector@@websearch_to_tsquery('simple'::regconfig,$16)"
-      const ftsScore = `CASE WHEN ${ftsMatch} THEN ts_rank(e.search_vector,websearch_to_tsquery('simple'::regconfig,$16)) END`
-      const trigramScore = 'word_similarity($16,e.search_document)'
       // SQL ranks the entire eligible corpus before bounded hydration. No UUID prefix scan.
-      const prefiltered = await deps.pool.query<PrefilteredRow>(`
+      const [prefiltered,localEmbeddingMode] = await Promise.all([deps.pool.query<PrefilteredRow>(`
         WITH search_clock AS (
           SELECT COALESCE($2::timestamptz, statement_timestamp()) AS as_of
         ), eligible AS MATERIALIZED (
@@ -230,17 +228,25 @@ export function createSearchService(deps: SearchServiceDeps) {
             AND (c.scope_kind<>'snapshot' OR ($4::uuid IS NOT NULL AND v.repo_snapshot_id=$4))
             AND (c.scope_kind<>'branch' OR ($5::text IS NOT NULL AND v.branch=$5))
             AND (c.scope_kind<>'task' OR ($23::text IS NOT NULL AND c.scope_key=$23))))
+        ${nativeLexical?`), document_scores AS MATERIALIZED (
+          SELECT version_id,authority,freshness_at,
+            CASE WHEN search_vector@@q.terms THEN ts_rank(search_vector,q.terms) END AS fts_score,
+            word_similarity($16,search_document) AS trigram_score
+          FROM eligible CROSS JOIN (SELECT websearch_to_tsquery('simple'::regconfig,$16) terms) q
+        `:''}
         ), metadata_candidates AS(
           SELECT version_id FROM eligible WHERE EXISTS(SELECT 1 FROM unnest($22::text[]) token
             WHERE strpos(lower(claim_type||'|'||scope_key||'|'||statement),token)>0)
           ORDER BY authority ASC,freshness_at DESC,version_id LIMIT $21
         ), lexical_candidates AS(
+          ${nativeLexical?`SELECT version_id FROM document_scores WHERE fts_score IS NOT NULL OR trigram_score>.3
+          ORDER BY COALESCE(1+fts_score,trigram_score) DESC,authority DESC,freshness_at DESC,version_id LIMIT $21`:`
           SELECT version_id FROM eligible
           WHERE search_vector@@websearch_to_tsquery('simple'::regconfig,$16)
             OR word_similarity($16,search_document)>.3
           ORDER BY CASE WHEN search_vector@@websearch_to_tsquery('simple'::regconfig,$16)
             THEN 1+ts_rank(search_vector,websearch_to_tsquery('simple'::regconfig,$16))
-            ELSE word_similarity($16,search_document) END DESC,authority DESC,freshness_at DESC,version_id LIMIT $21
+            ELSE word_similarity($16,search_document) END DESC,authority DESC,freshness_at DESC,version_id LIMIT $21`}
         ), vector_candidates AS(
           SELECT eligible.version_id,sc.score FROM eligible
           JOIN claim_search_documents vd ON vd.installation_id=$1 AND vd.version_id=eligible.version_id::uuid
@@ -257,11 +263,11 @@ export function createSearchService(deps: SearchServiceDeps) {
           ((SELECT count(*) FROM metadata_candidates)>=$21 OR (SELECT count(*) FROM lexical_candidates)>=$21
             OR (SELECT count(*) FROM vector_candidates)>=$21) AS selected_cap
           ${nativeLexical ? `,
-            CASE WHEN ${ftsMatch} THEN (row_number() OVER(
-              ORDER BY (${ftsScore}) DESC NULLS LAST,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_fts_rank,
-            CASE WHEN ${trigramScore}>.3 THEN (row_number() OVER(
-              ORDER BY ${trigramScore} DESC,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank` : ''}
-        FROM eligible e JOIN picked USING(version_id) LEFT JOIN vector_candidates vc USING(version_id)
+            CASE WHEN score.fts_score IS NOT NULL THEN (row_number() OVER(
+              ORDER BY score.fts_score DESC NULLS LAST,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_fts_rank,
+            CASE WHEN score.trigram_score>.3 THEN (row_number() OVER(
+              ORDER BY score.trigram_score DESC,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank` : ''}
+        FROM eligible e JOIN picked USING(version_id) ${nativeLexical?'JOIN document_scores score USING(version_id) ':''}LEFT JOIN vector_candidates vc USING(version_id)
         ORDER BY e.version_id
       `, [
         input.installationId, requestedAsOf,
@@ -276,7 +282,9 @@ export function createSearchService(deps: SearchServiceDeps) {
         input.sourceRepositoryContext?.repoSnapshotId??null,input.sourceRepositoryContext?.commitSha??null,
         query,queryEmbedding,deps.embed?.provider??null,deps.embed?.model??null,deps.embed?.dimensions??null,budget,
         [...queryTokensLower],input.taskScopeKey??null,input.lifecycle?.spaceId??null,input.lifecycle?.destination??null,input.lifecycle?.consume??false,
-      ])
+      ]),input.localOnly?readEmbeddingMode():undefined])
+      const localMode=localEmbeddingMode?.rows[0]?.embedding_mode
+      if(localMode==='shadow'||localMode==='enabled')degraded.push('embedding')
       const origin=await originPolicyDecisions(deps.pool,input.installationId,prefiltered.rows.filter(r=>r.origin_policy_required).map(r=>r.version_id))
       const rows = prefiltered.rows.filter(row=>claimConsumptionDecision({
         scopeKind:row.scope_kind,scopeKey:row.scope_key,repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,

@@ -1,5 +1,5 @@
-import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
-import {deliveryVersionAvailableSql} from '../episodes/delivery-withdrawal.js'
+import {asOfClaimVersionSql} from '../claims/version-selection.js'
+import {withdrawnDeliveryJoinSql} from '../episodes/delivery-withdrawal.js'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {retainedSourceRead,type SourceReadGrant} from './retained-read.js'
 import {assertRetainedSourceGuards,adoptRetainedSourceRead} from './retained-authority.js'
@@ -21,8 +21,12 @@ export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,i
  // repeat the complete snapshot at the final read boundary.
  const {rows}=await client.query(`WITH versions AS MATERIALIZED(
   SELECT v.version_id::text,v.xmin::text AS version_stamp,c.xmin::text AS claim_stamp,v.statement,v.body_state,c.state,c.current_version_id::text,c.consumption_hold_reason,
-  ${deliveryVersionAvailableSql()} AS delivery_available,
-  (CASE WHEN $3::timestamptz IS NULL THEN ${currentClaimVersionSql()} ELSE ${asOfClaimVersionSql('c','v','$3::timestamptz')} END
+  NOT EXISTS(SELECT 1 FROM knowledge_evidence de
+    JOIN memory_team_delivery_withdrawals dw ON ${withdrawnDeliveryJoinSql('de','dw')}
+    WHERE de.installation_id=v.installation_id AND de.version_id=v.version_id) AS delivery_available,
+  (CASE WHEN $3::timestamptz IS NULL THEN (c.current_version_id=v.version_id AND COALESCE(v.body_state,'present')='present'
+    AND COALESCE(v.effective_from,v.created_at)<=clock_timestamp()
+    AND (v.effective_until IS NULL OR v.effective_until>clock_timestamp())) ELSE ${asOfClaimVersionSql('c','v','$3::timestamptz')} END
    AND(v.valid_from IS NULL OR v.valid_from<=COALESCE($3::timestamptz,clock_timestamp()))
    AND(v.valid_until IS NULL OR v.valid_until>COALESCE($3::timestamptz,clock_timestamp()))) AS selection_available
   FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)

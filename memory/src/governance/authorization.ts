@@ -277,15 +277,25 @@ export async function requireCurrentInstallationAuthority(client: pg.PoolClient,
   installationId: string; configVersion?: string; expiresAt?: number;userId?:number
 },options:{readOnly?:boolean|'wait-for-purge'}={}): Promise<void> {
   if(grant.expiresAt!==undefined&&!Number.isFinite(grant.expiresAt))throw new TargetBindingError('grant expired')
-  if(!await lockCurrentRelayAuthority(client,[grant.installationId]))throw new TargetBindingError('installation authority busy')
   const shared=sourcePoolContext(client).namespace==='memory'
-  if(options.readOnly){
-    if(options.readOnly==='wait-for-purge'){
-      await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[grant.installationId])
-    }else if(!(await client.query("SELECT pg_try_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0)) AS locked",[grant.installationId])).rows[0]?.locked){
-      throw new TargetBindingError('installation authority busy')
-    }
-  }else await client.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))", [grant.installationId])
+  const purgeLock=options.readOnly==='wait-for-purge'?'pg_advisory_xact_lock_shared'
+    :options.readOnly?'pg_try_advisory_xact_lock_shared':'pg_advisory_xact_lock'
+  const lockExpression=`${purgeLock}(hashtextextended('purge:installation:'||$1::text,0))`
+  if(shared){
+    // Acquire native authority before the local purge lock. The separate
+    // validation statement below takes a fresh snapshot after either wait.
+    const locks=(await client.query<{authority_locked:boolean;purge_locked:boolean}>(`
+      WITH authority AS MATERIALIZED (
+        SELECT shared.lock_memory_grant_authority(ARRAY[$1::text::uuid],ARRAY[]::uuid[]) AS locked
+      )
+      SELECT locked AS authority_locked,
+        CASE WHEN locked THEN ${options.readOnly===true?lockExpression:`${lockExpression} IS NOT NULL`} ELSE FALSE END AS purge_locked
+      FROM authority`,[grant.installationId])).rows[0]
+    if(!locks?.authority_locked||!locks.purge_locked)throw new TargetBindingError('installation authority busy')
+  }else{
+    const lock=(await client.query<{locked:boolean}>(`SELECT ${lockExpression} AS locked`,[grant.installationId])).rows[0]
+    if(options.readOnly===true&&lock?.locked!==true)throw new TargetBindingError('installation authority busy')
+  }
   // Read native authority after its lock and sample expiry after the local
   // row lock, which can block on the write path.
   const result = await client.query<{
