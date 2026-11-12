@@ -1,7 +1,7 @@
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {retainedSourceRead,type SourceReadGrant} from '../sources/retained-read.js'
 import {guardRetainedVersions,rememberRetainedVersionStatement} from '../sources/retained-versions.js'
-import {lifecycleClaimSql,type LifecycleReadFrame} from '../context/lifecycle-frame.js'
+import {lifecycleClaimSql,lifecycleReadFrameCurrent,type LifecycleReadFrame} from '../context/lifecycle-frame.js'
 import {recallPoolBudget} from './recall-pools.js'
 import {withdrawnDeliveryJoinSql} from '../episodes/delivery-withdrawal.js'
 import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
@@ -158,7 +158,8 @@ export function createSearchService(deps: SearchServiceDeps) {
           else queryEmbedding=normalize(vector)
         }catch{degraded.push('embedding')}
       }
-      const nativeLexical = input.localOnly === true && !historicalSelection && sourcePoolContext(deps.pool).namespace === 'memory'
+      const shared = sourcePoolContext(deps.pool).namespace === 'memory'
+      const nativeLexical = input.localOnly === true && !historicalSelection && shared
       const currentVersion = nativeLexical ? `(c.current_version_id=v.version_id AND COALESCE(v.body_state,'present')='present'
         AND COALESCE(v.effective_from,v.created_at)<=search_clock.as_of
         AND (v.effective_until IS NULL OR v.effective_until>search_clock.as_of)
@@ -188,7 +189,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         WHERE c.installation_id = $1
           AND c.state = 'active'
           AND c.consumption_hold_reason IS NULL
-          AND ${lifecycleClaimSql('$24','$25','$26')}
+          AND ${lifecycleClaimSql('$24','$25','$26','c','v',shared?{installation:'$1',epoch:'$27'}:undefined)}
           AND (v.applicability IS NULL OR v.applicability->>'status'='verified')
           AND ${historicalSelection ? asOfClaimVersionSql('c','v','search_clock.as_of') : currentVersion}
           AND (v.valid_from IS NULL OR v.valid_from <= search_clock.as_of)
@@ -282,6 +283,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         input.sourceRepositoryContext?.repoSnapshotId??null,input.sourceRepositoryContext?.commitSha??null,
         query,queryEmbedding,deps.embed?.provider??null,deps.embed?.model??null,deps.embed?.dimensions??null,budget,
         [...queryTokensLower],input.taskScopeKey??null,input.lifecycle?.spaceId??null,input.lifecycle?.destination??null,input.lifecycle?.consume??false,
+        ...(shared?[input.lifecycle?.authorizationEpoch??null]:[]),
       ]),input.localOnly?readEmbeddingMode():undefined])
       const localMode=localEmbeddingMode?.rows[0]?.embedding_mode
       if(localMode==='shadow'||localMode==='enabled')degraded.push('embedding')
@@ -449,9 +451,13 @@ export function createSearchService(deps: SearchServiceDeps) {
         ...(internal?{rankedPools:pools}:{}),
         ...(shadowComparison ? { shadowComparison } : {}),
       }
-      if(sourcePoolContext(deps.pool).namespace!=='memory')return response
+      if(!shared)return response
       for(const hit of response.hits)rememberRetainedVersionStatement(hit,hit.statement)
       const accepted=await retainedSourceRead(deps.pool,{installationId:input.installationId,authorityGrant:input.authorityGrant},async client=>{
+       // Internal Context candidates get their frame fenced at pack
+       // persistence and again at admission and consumption.
+       const contextCompile=internal&&input.lifecycle&&'binding' in input.lifecycle
+       if(!contextCompile&&!await lifecycleReadFrameCurrent(client,input))return undefined
        await guardRetainedVersions(client,input.installationId,response.hits.map(hit=>hit.versionId),{expectedStatements:new Map(response.hits.map(hit=>[hit.versionId,hit.statement])),requireCurrent:!historicalSelection,requireAvailable:true,asOf:historicalSelection?new Date(asOf):undefined})
        return response
       })

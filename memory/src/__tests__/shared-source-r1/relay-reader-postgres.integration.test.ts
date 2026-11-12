@@ -1393,9 +1393,12 @@ suite('controlled personal Relay source reader',()=>{
    AND v.installation_id=c.installation_id AND v.claim_id=c.claim_id`,[installation])
   const context=await originContextFixture(runtime,installation,{authorityGrant:{installationId:installation,configVersion:'1',userId:1},sceneId:space,query:statement,repositoryId:repository,commitSha:commit})
   const client=await contextDeliveryClient(runtime,context,installation)
-  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,queryText=statement,withProvenEvidence=true)=>{
+  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,options:{
+   queryText?:string;withProvenEvidence?:boolean;configVersion?:string;verifyRetry?:boolean
+  }={})=>{
+   const {queryText=statement,withProvenEvidence=true,configVersion='1',verifyRetry=false}=options
    const signal=AbortSignal.timeout(750)
-   const grant=client.issueGrant()
+   const grant=client.issueGrant(configVersion)
    const transportDelay=Number(process.env.CONTEXT_TEST_TRANSPORT_DELAY_MS??0)
    if(transportDelay>0)await new Promise(resolve=>setTimeout(resolve,transportDelay))
    const http=async(path:string,body?:Record<string,unknown>)=>{
@@ -1403,7 +1406,7 @@ suite('controlled personal Relay source reader',()=>{
     if(body)headers['content-type']='application/json'
     const response=await fetch(client.url+path,{headers,method:body?'POST':'GET',body:body?JSON.stringify(body):undefined,signal})
     const data=await response.json()
-    if(!response.ok)throw Error(path.split('?')[0]+': '+JSON.stringify(data))
+    if(!response.ok)throw Error(path.split('?')[0]+': '+response.status+' '+JSON.stringify(data))
     return data
    }
    const turn={session_id:context.sessionId,client_request_id:request,agent:'codex'}
@@ -1416,33 +1419,174 @@ suite('controlled personal Relay source reader',()=>{
    expect(pack.pack.item_count).toBe(1)
    if(!withProvenEvidence)return pack.pack.pack_id as string
    const path='/packs/'+pack.pack.pack_id
-   const ticket=await phase('admit',()=>http(path+'/admit',{...turn,adapter:'codex-app-server'}))
+   const admit=()=>http(path+'/admit',{...turn,adapter:'codex-app-server'})
+   const admission=await phase('admit',()=>verifyRetry?Promise.all([admit(),admit()]):admit().then(value=>[value]))
+   const ticket=admission.find(value=>value.nonce)
+   if(verifyRetry){
+    expect(admission.filter(value=>value.nonce)).toHaveLength(1)
+    expect(admission.find(value=>value.existing)).toMatchObject({injection_id:ticket.injection_id,state:'admitted'})
+   }
    const query=new URLSearchParams({session_id:context.sessionId,injection_id:ticket.injection_id,nonce:ticket.nonce})
    const consumed=await phase('consume',()=>http(path+'/text?'+query.toString()))
    expect(consumed.dynamic_text).toContain(statement)
    for(const id of [firstEvidence,secondEvidence])expect(consumed.dynamic_text).toContain(id)
    expect(consumed.pack_id).toBe(pack.pack.pack_id)
+   if(verifyRetry)await expect(http(path+'/text?'+query.toString())).rejects.toThrow('409')
   }
   try{
    await deliver('warmup',(_name,run)=>run())
    const samples=Number(process.env.CONTEXT_TEST_SAMPLES??1)
    for(let n=0;n<samples;n++){
     const result=await measureContextDelivery(
-     async phase=>{await deliver('measured-'+n,phase,n%2===0?statement:'installation watermark？引用证据号。')},
+     async phase=>{await deliver('measured-'+n,phase,{queryText:n%2===0?statement:'installation watermark？引用证据号。'})},
      Number(process.env.CONTEXT_TEST_DB_DELAY_MS??0),
     )
     if(process.env.CONTEXT_TEST_TIMING)console.info(JSON.stringify(result))
     const [compile,admit,consume]=result.phases
-    expect(compile.queries.length).toBeLessThanOrEqual(43)
+    // Native scene writes acquire the authority fence before the fresh
+    // snapshot. The transport still uses the original end-to-end deadline.
+    expect(compile.queries.length).toBeLessThanOrEqual(44)
     expect(admit.queries.length).toBeLessThanOrEqual(18)
-    expect(consume.queries.length).toBeLessThanOrEqual(6)
+    expect(consume.queries.length).toBeLessThanOrEqual(7)
     if(process.env.CONTEXT_TEST_DB_DELAY_MS){
      expect(compile.ms).toBeLessThan(500)
      expect(result.ms).toBeLessThan(710)
     }
    }
+   // The signed current Relay version must work while the local discovery row
+   // still holds the previous version. The old signed grant must still fail.
+   await pool.query("UPDATE public.extension_installations SET config_version=2 WHERE installation_id=$1",[installation])
+   try{
+    await expect.soft(deliver('native-current-admit',(_name,run)=>run(),{configVersion:'2',verifyRetry:true})).resolves.toBeUndefined()
+    await expect.soft(deliver('native-stale-token',(_name,run)=>run())).rejects.toThrow('401')
+   }finally{await pool.query("UPDATE public.extension_installations SET config_version=1 WHERE installation_id=$1",[installation])}
+
+   const evidenceUrl=new URL('/api/v1/memory/evidence/'+firstEvidence+'/reference',client.url)
+   evidenceUrl.search=new URLSearchParams({repository_id:repository,repo_snapshot_id:snapshot}).toString()
+   const readReference=()=>fetch(evidenceUrl,{headers:{authorization:'Bearer '+client.issueGrant('1','memory.search')},signal:AbortSignal.timeout(2500)})
+   const original=await readReference()
+   expect(original.status).toBe(200)
+   const originalBody=await original.json()
+   expect(originalBody.reference.evidence_id).toBe(firstEvidence)
+   await runtime.query("UPDATE memory_installations SET relay_status='revoked' WHERE installation_id=$1",[installation])
+   try{
+    const stillAuthorized=await readReference()
+    expect.soft(stillAuthorized.status).toBe(200)
+    expect.soft(await stillAuthorized.json()).toEqual(originalBody)
+   }finally{await runtime.query("UPDATE memory_installations SET relay_status='active' WHERE installation_id=$1",[installation])}
+   await runtime.query("UPDATE memory_installations SET local_status='integrity_error' WHERE installation_id=$1",[installation])
+   try{expect((await readReference()).status).toBe(401)}
+   finally{await runtime.query("UPDATE memory_installations SET local_status='ready' WHERE installation_id=$1",[installation])}
+   // The guard has already accepted the signed grant when this second
+   // connection disables the provider. No discovery Worker runs in the fixture.
+   let disabledBeforeConsume=false
+   client.beforeNextConsume(async()=>{
+    await pool.query("UPDATE public.extension_providers SET status='disabled' WHERE provider_id='pocketctl-memory'")
+    disabledBeforeConsume=true
+   })
+   try{
+    await expect.soft(deliver('native-revoked-before-text',(_name,run)=>run())).rejects.toThrow(/text: (404|410)/)
+    expect.soft(disabledBeforeConsume).toBe(true)
+    const injection=(await runtime.query("SELECT state FROM memory_context_injections WHERE installation_id=$1 AND client_request_id='native-revoked-before-text'",[installation])).rows[0]
+    expect.soft(injection?.state).not.toBe('prepared')
+   }finally{await pool.query("UPDATE public.extension_providers SET status='enabled' WHERE provider_id='pocketctl-memory'")}
+   const {resolveLifecycleReadFrame,resolveLifecycleFrame}=await import('../../context/lifecycle-frame.js')
+   const scenesUrl=new URL('/api/v1/memory/scenes',client.url)
+   const readScenes=()=>fetch(scenesUrl,{headers:{authorization:'Bearer '+client.issueGrant('1','memory.search')},signal:AbortSignal.timeout(2500)})
+   await pool.query('UPDATE public.extension_installations SET authorization_epoch=2 WHERE installation_id=$1',[installation])
+   try{
+    await runtime.query("UPDATE memory_owner_scopes SET state='suspended' WHERE installation_id=$1",[installation])
+    try{
+     const response=await readScenes()
+     expect(response.status).toBe(200)
+     expect.soft(await response.json()).toMatchObject({scenes:[{id:space}],has_more:false})
+     expect.soft(await resolveLifecycleReadFrame(runtime,{installationId:installation,spaceId:space,repositoryId:repository,mode:'enabled'}))
+      .toMatchObject({spaceId:space,authorizationEpoch:'2'})
+    }finally{await runtime.query("UPDATE memory_owner_scopes SET state='active' WHERE installation_id=$1",[installation])}
+
+    await runtime.query("UPDATE memory_installations SET local_status='integrity_error' WHERE installation_id=$1",[installation])
+    try{
+     expect((await readScenes()).status).toBe(401)
+     expect(await resolveLifecycleReadFrame(runtime,{installationId:installation,spaceId:space,repositoryId:repository,mode:'enabled'})).toBeUndefined()
+    }finally{await runtime.query("UPDATE memory_installations SET local_status='ready' WHERE installation_id=$1",[installation])}
+
+    const staleGrant={installationId:installation,configVersion:'1',userId:1}
+    await pool.query('UPDATE public.extension_installations SET config_version=2 WHERE installation_id=$1',[installation])
+    try{
+     const frame=await resolveLifecycleFrame(runtime,{installationId:installation,sessionId:context.sessionId,repositoryId:repository,spaceId:space,mode:'enabled',authorityGrant:staleGrant})
+     expect.soft(frame).toBeUndefined()
+    }finally{await pool.query('UPDATE public.extension_installations SET config_version=1 WHERE installation_id=$1',[installation])}
+
+    expect(await resolveLifecycleFrame(runtime,{
+     installationId:installation,sessionId:context.sessionId,repositoryId:repository,spaceId:space,mode:'enabled',
+     authorityGrant:{...staleGrant,expiresAt:Math.floor(Date.now()/1000)-1},
+    })).toBeUndefined()
+
+    const collisionSession='native-scene-frame-clock-race'
+    const holder=await runtime.connect()
+    try{
+     await holder.query('BEGIN')
+     await holder.query('INSERT INTO memory_session_scene_frames(installation_id,session_id,binding) VALUES($1,$2,$3)',[installation,collisionSession,'b'.repeat(64)])
+     const expiresAt=Date.now()/1000+0.45
+     const attempted=resolveLifecycleFrame(runtime,{
+      installationId:installation,sessionId:collisionSession,repositoryId:repository,spaceId:space,mode:'enabled',
+      authorityGrant:{...staleGrant,expiresAt},
+     })
+     const {setTimeout:delay}=await import('node:timers/promises')
+     let waiting=false
+     for(let n=0;n<40&&!waiting;n++){
+      const observed=await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+       WHERE pid<>pg_backend_pid() AND query LIKE 'INSERT INTO memory_session_scene_frames(%' AND wait_event_type='Lock') AS waiting`)
+      waiting=observed.rows[0].waiting
+      if(!waiting)await delay(5)
+     }
+     expect.soft(waiting).toBe(true)
+     await delay(Math.max(0,expiresAt*1000-Date.now()+15))
+     await holder.query('ROLLBACK')
+     expect.soft(await attempted).toBeUndefined()
+     const inserted=await runtime.query('SELECT 1 FROM memory_session_scene_frames WHERE installation_id=$1 AND session_id=$2',[installation,collisionSession])
+     expect.soft(inserted.rowCount).toBe(0)
+    }finally{
+     await holder.query('ROLLBACK')
+     holder.release()
+    }
+
+    const {createSearchService}=await import('../../retrieval/search-service.js')
+    const {createRecallService}=await import('../../retrieval/recall-service.js')
+    const entity=randomUUID()
+    await runtime.query("INSERT INTO memory_entities(installation_id,space_id,entity_id,kind,name) VALUES($1,$2,$3,'service','fixture')",[installation,space,entity])
+    await runtime.query(`INSERT INTO memory_logical_claims(installation_id,space_id,subject_entity_id,logical_key,predicate_id,cardinality,claim_id)
+     VALUES($1,$2,$3,repeat('a',64),'service.timeout','single',$4)`,[installation,space,entity,claim])
+    try{
+     const lifecycle=await resolveLifecycleReadFrame(runtime,{installationId:installation,spaceId:space,repositoryId:repository,mode:'enabled'})
+     const search=createSearchService({pool:runtime,recallEmbeddingTimeoutMs:100,cursorSigningKey:'native-scene-fixture'})
+     const input={installationId:installation,authorityGrant:staleGrant,query:statement,repositoryId:repository,repoSnapshotId:snapshot,lifecycle}
+     const valid=await search.search(input)
+     expect(valid.hits.map(hit=>hit.versionId)).toContain(version)
+     await pool.query('UPDATE public.extension_installations SET authorization_epoch=3 WHERE installation_id=$1',[installation])
+     expect.soft((await search.search(input)).hits).toEqual([])
+     const recall=createRecallService(runtime,{...search,search:async()=>valid})
+     expect.soft((await recall.recall(input)).claims).toEqual([])
+    }finally{
+     await pool.query('UPDATE public.extension_installations SET authorization_epoch=2 WHERE installation_id=$1',[installation])
+     await runtime.query('DELETE FROM memory_logical_claims WHERE installation_id=$1 AND claim_id=$2',[installation,claim])
+    }
+
+    let advancedBeforeConsume=false
+    client.beforeNextConsume(async()=>{
+     await pool.query('UPDATE public.extension_installations SET authorization_epoch=3 WHERE installation_id=$1',[installation])
+     advancedBeforeConsume=true
+    })
+    await expect.soft(deliver('native-scene-epoch-before-text',(_name,run)=>run())).rejects.toThrow(/text: (404|410)/)
+    expect.soft(advancedBeforeConsume).toBe(true)
+    const frozen=(await runtime.query(`SELECT p.query_context->'lifecycle'->>'authorizationEpoch' AS epoch,j.state
+     FROM memory_context_packs p JOIN memory_context_injections j USING(installation_id,pack_id)
+     WHERE p.installation_id=$1 AND p.client_request_id='native-scene-epoch-before-text'`,[installation])).rows[0]
+    expect.soft(frozen?.epoch).toBe('2')
+    expect.soft(frozen?.state).not.toBe('prepared')
+   }finally{await pool.query('UPDATE public.extension_installations SET authorization_epoch=1 WHERE installation_id=$1',[installation])}
    await runtime.query("UPDATE knowledge_evidence SET excerpt_hash=decode(repeat('00',32),'hex') WHERE installation_id=$1 AND evidence_id=$2",[installation,secondEvidence])
-   const unproven=await deliver('corrupt-hash',(_name,run)=>run(),statement,false)
+   const unproven=await deliver('corrupt-hash',(_name,run)=>run(),{withProvenEvidence:false})
    const proof=(await runtime.query(`SELECT evidence_version_id,excerpt_hash,source_version
      FROM memory_context_pack_evidence WHERE pack_id=$1 AND evidence_id=$2`,[unproven,secondEvidence])).rows[0]
    expect(proof).toEqual({evidence_version_id:null,excerpt_hash:null,source_version:null})

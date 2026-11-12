@@ -43,8 +43,10 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
    if(current&&(!current.current||input.configVersion===undefined||current.configVersion!==input.configVersion||(input.userId!==undefined&&current.ownerUserId!==String(input.userId))))return deny()
    await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
    const installation=await client.query(`SELECT 1 FROM memory_installations i LEFT JOIN memory_owner_scopes s USING(installation_id)
-     WHERE i.installation_id=$1 AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error','paused')
-       AND (s.owner_scope_kind IS NULL OR(s.owner_scope_kind='personal' AND s.state='active')) FOR SHARE OF i`,[input.installationId])
+     WHERE i.installation_id=$1 AND i.local_status NOT IN('purging','purged','integrity_error','paused')
+       AND ($2::boolean OR (i.relay_status='active'
+         AND (s.owner_scope_kind IS NULL OR(s.owner_scope_kind='personal' AND s.state='active'))))
+       FOR SHARE OF i`,[input.installationId,current!==undefined])
    if(!installation.rowCount)return deny()
   }
   if(input.expiresAt!=null&&!(await client.query('SELECT clock_timestamp()<to_timestamp($1) AS live',[input.expiresAt])).rows[0].live)return deny()
