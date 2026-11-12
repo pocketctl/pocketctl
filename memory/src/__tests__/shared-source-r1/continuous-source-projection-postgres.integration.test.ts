@@ -707,12 +707,24 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    const commitBody=bodies.find(r=>r.proname==='lock_memory_personal_source_commit').prosrc
    expect(commitBody).not.toMatch(/memory_relay_input_admitted|\be\.payload\b|to_jsonb\(e\)/)
    expect(commitBody.match(/memory_input_start_admission\(/g)).toHaveLength(1)
+   // The physical selected fence observes native authority once per requested ID.
+   expect(commitBody.match(/public\.native_event_authority\(/g)).toHaveLength(1)
    for(const name of ['memory_input_start_admission','native_event_authority'])expect(bodies.find(r=>r.proname===name).prosrc).not.toMatch(/payload|to_jsonb\(e\)/)
    const envelope=personalMetadataEnvelope(f.runtime,scope,root,reader.proof(view),seal,'reference')
    const lock=async(c:any,proof:unknown=envelope)=>(await c.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS valid',[JSON.stringify(scope),root.kind,root.key,JSON.stringify(proof)])).rows[0].valid
    const c=await f.pool.connect()
    try{
     await c.query('BEGIN');expect(await lock(c)).toBe(true);await c.query('COMMIT')
+    const pair=await reader.selectKeys(scope,root,[id,unknown!])
+    const pairEnvelope=personalMetadataEnvelope(f.runtime,scope,root,reader.proof(pair),seal,'reference') as any
+    expect(pairEnvelope.rows.map((row:{id:string})=>row.id)).toEqual([id,unknown])
+    await c.query('BEGIN');expect(await lock(c,pairEnvelope)).toBe(true);await c.query('COMMIT')
+    await c.query('BEGIN')
+    await c.query('UPDATE public.events SET source_header_version=NULL,source_sequence=NULL,canonical_payload_hash=NULL,source_classification=NULL WHERE id=$1',[unknown])
+    const invalidFirst={...pairEnvelope,rows:[{...pairEnvelope.rows[0],contentHash:'0'.repeat(64)},pairEnvelope.rows[1]]}
+    expect(await lock(c,invalidFirst)).toBe(false)
+    await expect(lock(c,pairEnvelope)).rejects.toThrow('source_metadata_proof_unavailable')
+    await c.query('ROLLBACK')
     for(const mutation of ["source_provenance='{}'::jsonb","content_hash=decode(repeat('0',64),'hex')","classification='{}'::jsonb"]){
      await c.query('BEGIN');await c.query(`UPDATE memory.source_events SET ${mutation} WHERE installation_id=$1 AND canonical_key=$2`,[installation,id])
      expect((await metadata(c)).rows).toEqual([]);expect(await lock(c)).toBe(false);await c.query('ROLLBACK')
