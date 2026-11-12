@@ -14,6 +14,9 @@ import {assertTransportMetadataContract} from '../../sources/transport-state.js'
 const url=process.env.DIRECT_LAUNCH_MEMORY_TEST_DATABASE_URL,suite=url?describe:describe.skip
 suite('explicit physical legacy transport retirement',()=>{
  let db:pg.Client,input:any,installation:string,sourceBefore:any,organization:string,organizationBefore:any,orgLocalBefore:any,orgObservationBefore:any
+ const shadowHeaders=async(owner:string,keys:string[])=>(await db.query(
+  "SELECT source_event_id,canonical_key,link_via,row_version FROM shared.memory_shadow_candidate_headers($1,'relay_event',$2,ARRAY['kept'])",
+  [owner,keys])).rows
  const present=async()=>(await db.query("SELECT to_regclass('memory.memory_feed_inbox') IS NOT NULL AS raw,to_regclass('memory.memory_source_delivery_receipts') IS NOT NULL AS receipts,(SELECT legacy_transport_retired FROM shared.memory_source_contract) AS retired")).rows[0]
  beforeAll(async()=>{
   const f=await directLaunchFixture(url!)
@@ -30,10 +33,10 @@ suite('explicit physical legacy transport retirement',()=>{
   orgLocalBefore=(await f.pool.query('SELECT to_jsonb(i) AS row FROM memory.memory_installations i WHERE installation_id=$1',[organization])).rows[0].row
   orgObservationBefore=(await f.pool.query('SELECT to_jsonb(i) AS row FROM memory.memory_native_control_observations i WHERE installation_id=$1',[organization])).rows[0].row
   await f.pool.query(`INSERT INTO memory.source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at) VALUES($1,'kept',NOW(),NOW());`,[installation])
-  await f.pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,event_type,occurred_at,payload_hash,payload,classification) VALUES(gen_random_uuid(),$1,'feed','1001','kept','agent_text',NOW(),decode(repeat('ab',32),'hex'),' {"necessary":"original"}','{}')`,[installation])
+  await f.pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,event_type,occurred_at,payload_hash,payload,classification) VALUES(gen_random_uuid(),$1,'feed','1001','kept','agent_text','2026-11-06T00:00:00Z',decode(repeat('ab',32),'hex'),' {"necessary":"original"}','{}')`,[installation])
   sourceBefore=(await f.pool.query('SELECT to_jsonb(s) AS row FROM memory.source_events s')).rows
   await f.pool.query(`INSERT INTO memory.memory_feed_inbox(installation_id,feed_id,envelope_version,topic,source_kind,source_id,session_id,event_type,recorded_at,data,classification,payload_hash,projection_state,projected_at,body_reclaimed_at)
-   SELECT $1,x,1,'session.event.v1','canonical_event','event:'||x,'kept','agent_text',NOW(),'{}','{}',decode(repeat('ab',32),'hex'),'projected',NOW(),NOW() FROM generate_series(1001,1002) x`,[installation])
+   SELECT $1,x,1,'session.event.v1','canonical_event','event:'||x,'kept','agent_text','2026-11-06T00:00:00Z','{}','{}',decode(repeat('ab',32),'hex'),'projected',NOW(),NOW() FROM generate_series(1001,1002) x`,[installation])
   await f.pool.query('INSERT INTO memory.memory_inbox_checkpoints(installation_id,last_ack_feed_id) VALUES($1,1002)',[installation])
   const identity=(await f.pool.query('SELECT current_database() AS name,d.oid::text AS oid,(SELECT system_identifier::text FROM pg_control_system()) AS "systemIdentifier" FROM pg_database d WHERE datname=current_database()')).rows[0]
   await f.pool.query('ALTER ROLE direct_launch_memory NOLOGIN');await f.close()
@@ -64,9 +67,18 @@ suite('explicit physical legacy transport retirement',()=>{
   finally{await db.query('UPDATE memory_inbox_checkpoints SET last_ack_feed_id=1002')}
  })
  test('never discards a unique old Snapshot body',async()=>{
-  await db.query("INSERT INTO memory_snapshot_events(installation_id,session_id,relay_event_id,event_type,payload,payload_hash,created_at,generation) VALUES($1,'unique-snapshot',999,'agent_text','{\"unique\":true}',decode(repeat('ab',32),'hex'),NOW(),1)",[installation])
-  try{await expect(retireLegacyTransport(db,input)).rejects.toThrow('legacy_transport_snapshot_storage_remaining');expect(await present()).toEqual({raw:true,receipts:false,retired:false})}
-  finally{await db.query('DELETE FROM memory_snapshot_events WHERE relay_event_id=999')}
+  await db.query("INSERT INTO memory_snapshot_events(installation_id,session_id,relay_event_id,event_type,payload,payload_hash,created_at,generation) VALUES($1,'kept',999,'agent_text','{\"unique\":true}',decode(repeat('ab',32),'hex'),NOW(),1)",[installation])
+  const source_event_id=randomUUID()
+  try{
+   await db.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,event_type,occurred_at,payload_hash,payload,classification)
+    VALUES($2,$1,'snapshot','999','kept','agent_text',NOW(),decode(repeat('ab',32),'hex'),'{"unique":true}','{}')`,[installation,source_event_id])
+   expect(await shadowHeaders(installation,['999'])).toEqual([{source_event_id,canonical_key:'999',link_via:'snapshot',row_version:expect.stringMatching(/^[0-9]+$/)}])
+   await expect(retireLegacyTransport(db,input)).rejects.toThrow('legacy_transport_snapshot_storage_remaining')
+   expect(await present()).toEqual({raw:true,receipts:false,retired:false})
+  }finally{
+   await db.query('DELETE FROM memory.source_events WHERE installation_id=$1 AND source_event_id=$2',[installation,source_event_id])
+   await db.query('DELETE FROM memory_snapshot_events WHERE relay_event_id=999')
+  }
  })
  test('rejects caller transactions and live writer capability',async()=>{
   await db.query('BEGIN');try{await expect(retireLegacyTransport(db,input)).rejects.toThrow('inbox_retirement_idle_connection_required');expect(db.getTransactionStatus()).toBe('T')}finally{await db.query('ROLLBACK')}
@@ -87,6 +99,8 @@ suite('explicit physical legacy transport retirement',()=>{
  })
  test('physically drops only transport, retaining exact content-free identity and least-role purge/read access',async()=>{
   const before=(await db.query('SELECT to_jsonb(f) AS row FROM memory_source_delivery_facts f ORDER BY feed_id')).rows
+  const preRetirementHeaders=await shadowHeaders(installation,['1001','1002'])
+  expect(preRetirementHeaders).toEqual([{source_event_id:sourceBefore[0].row.source_event_id,canonical_key:'1001',link_via:'inbox',row_version:expect.stringMatching(/^[0-9]+:[a-f0-9]{64}$/)}])
   await db.query('CREATE ROLE unexpected_transport_reader NOLOGIN;ALTER DEFAULT PRIVILEGES IN SCHEMA memory GRANT SELECT ON TABLES TO unexpected_transport_reader;GRANT SELECT(source_id) ON memory.memory_source_delivery_facts TO unexpected_transport_reader')
   const result=await retireLegacyTransport(db,input)
   const leaks=(await db.query("SELECT has_table_privilege('unexpected_transport_reader',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege('unexpected_transport_reader',c.oid,'SELECT,INSERT,UPDATE,REFERENCES') AS unsafe FROM pg_class c WHERE c.oid=ANY(ARRAY['memory.memory_source_delivery_receipts'::regclass,'memory.memory_source_snapshot_receipts'::regclass,'memory.memory_source_delivery_facts'::regclass,'memory.memory_source_snapshot_facts'::regclass])")).rows
@@ -106,6 +120,9 @@ suite('explicit physical legacy transport retirement',()=>{
   try{
    const page=(await db.query('SELECT shared.memory_installation_inventory_page(NULL,128,NULL) AS page')).rows[0].page
    expect(page.installations.find((i:any)=>i.installation_id===organization)).toMatchObject({config_version:'2',subscriptions:organizationBefore.subscriptions})
+   expect(await shadowHeaders(installation,['1001','1002'])).toEqual(preRetirementHeaders)
+   expect(await shadowHeaders(organization,['1001','1002'])).toEqual([])
+   expect(await shadowHeaders(installation,[])).toEqual([])
    expect(await readLegacySourceInputGeneration(db as unknown as pg.Pool,organization)).toBeNull()
   }finally{await db.query('ROLLBACK')}
   expect((await db.query("SELECT attname FROM pg_attribute WHERE attrelid='memory.memory_source_delivery_receipts'::regclass AND attnum>0 AND NOT attisdropped")).rows.some(r=>['data','classification','payload'].includes(r.attname))).toBe(false)

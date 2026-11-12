@@ -1,5 +1,7 @@
 /** Comparison-only metadata. No source body, active progress or knowledge is
  * written by these functions, and a body match is not full rollout acceptance. */
+// Alias i is the same body-free delivery view row in the header and Worker reads.
+export const shadowDeliveryFactRevisionSql="encode(sha256(convert_to(to_jsonb(i)::text,'UTF8')),'hex')"
 export const SHARED_SOURCE_SHADOW_FUNCTIONS=[
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS shadow_version INT NOT NULL DEFAULT 0`,
  `CREATE TABLE IF NOT EXISTS shared.memory_source_shadow_progress(
@@ -19,34 +21,51 @@ export const SHARED_SOURCE_SHADOW_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.memory_shadow_candidate_headers(p_installation UUID,p_kind TEXT,p_keys TEXT[],p_sessions TEXT[])
   RETURNS TABLE(source_event_id TEXT,canonical_key TEXT,link_via TEXT,row_version TEXT,origin TEXT,origin_position TEXT,session_id TEXT,
    turn_id TEXT,event_type TEXT,occurred_at TEXT,payload_hash TEXT,classification JSONB,source_provenance JSONB,body_reclaimed BOOLEAN,metadata_limited BOOLEAN)
-  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
+  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
+  DECLARE snapshot_sources UUID[]:=ARRAY[]::uuid[];
+  BEGIN
    IF p_installation IS NULL OR p_kind IS NULL OR p_kind NOT IN('relay_event','team_collaboration','team_delivery')
     OR cardinality(p_keys) NOT BETWEEN 0 AND 128 OR cardinality(p_sessions) NOT BETWEEN 0 AND 128 THEN RAISE EXCEPTION 'invalid_shadow_page';END IF;
+   -- Snapshot event rows have no receipt projection. This statement is planned
+   -- only before retirement, when the original per-event proof still exists.
+   IF p_kind='relay_event' AND NOT COALESCE((SELECT legacy_transport_retired FROM shared.memory_source_contract WHERE singleton),FALSE) THEN
+    SELECT ARRAY(
+     SELECT s.source_event_id FROM memory.source_events s
+     WHERE s.installation_id=p_installation AND s.origin='snapshot' AND s.origin_position=ANY(p_keys)
+      AND EXISTS(SELECT 1 FROM memory.memory_snapshot_events snapshot
+       WHERE snapshot.installation_id=s.installation_id AND snapshot.session_id=s.session_id AND snapshot.relay_event_id::text=s.origin_position
+        AND snapshot.event_type=s.event_type AND snapshot.payload_hash=s.payload_hash)
+     ORDER BY s.source_event_id LIMIT 257
+    ) INTO snapshot_sources;
+   END IF;
    RETURN QUERY WITH relations AS(
-    SELECT s.source_event_id,s.canonical_key AS key,'typed-ref'::text AS via FROM memory.source_events s
+    SELECT s.source_event_id,s.canonical_key AS key,'typed-ref'::text AS via,NULL::text AS delivery_revision FROM memory.source_events s
      WHERE s.installation_id=p_installation AND s.source_kind=p_kind AND s.mapping_state='verified' AND s.canonical_key=ANY(p_keys)
     UNION
-    SELECT s.source_event_id,substr(i.source_id,7),'inbox' FROM memory.memory_feed_inbox i JOIN memory.source_events s
+    SELECT s.source_event_id,substr(i.source_id,7),'inbox',${shadowDeliveryFactRevisionSql}
+     FROM memory.memory_source_delivery_facts i JOIN memory.source_events s
      ON s.installation_id=i.installation_id AND s.origin='feed' AND s.origin_position=i.feed_id::text
+      AND s.session_id=i.session_id AND s.turn_id IS NOT DISTINCT FROM i.turn_id
+      AND s.event_type=i.event_type AND s.occurred_at=i.recorded_at
      WHERE p_kind='relay_event' AND i.installation_id=p_installation AND i.session_id=ANY(p_sessions) AND i.source_kind='canonical_event'
-      AND i.source_id IN(SELECT 'event:'||key FROM unnest(p_keys) keys(key)) AND i.payload_hash=s.payload_hash
+      AND i.projection_state='projected' AND i.error_code IS NULL
+      AND i.source_id IN(SELECT 'event:'||key FROM unnest(p_keys) keys(key))
     UNION
-    SELECT s.source_event_id,s.origin_position,'snapshot' FROM memory.source_events s JOIN memory.memory_snapshot_events snapshot
-     ON snapshot.installation_id=s.installation_id AND snapshot.session_id=s.session_id AND snapshot.relay_event_id::text=s.origin_position
-      AND snapshot.event_type=s.event_type AND snapshot.payload_hash=s.payload_hash
-     WHERE p_kind='relay_event' AND s.installation_id=p_installation AND s.origin='snapshot' AND s.origin_position=ANY(p_keys)
+    SELECT s.source_event_id,s.origin_position,'snapshot',NULL::text FROM memory.source_events s
+     WHERE s.installation_id=p_installation AND s.source_event_id=ANY(snapshot_sources)
     UNION
-    SELECT s.source_event_id,s.origin_position,'team-adapter' FROM memory.source_events s
+    SELECT s.source_event_id,s.origin_position,'team-adapter',NULL::text FROM memory.source_events s
      WHERE s.installation_id=p_installation AND s.origin='team' AND s.origin_position=ANY(p_keys)
       AND s.source_provenance->>'source_kind'='team_session'
       AND s.source_provenance->>'source_version'=CASE WHEN p_kind='team_collaboration' THEN '1' WHEN p_kind='team_delivery' THEN '2' ELSE '' END
-   ) SELECT s.source_event_id::text,r.key,r.via,s.xmin::text,s.origin,s.origin_position,s.session_id,s.turn_id,s.event_type,
+   ) SELECT s.source_event_id::text,r.key,r.via,s.xmin::text||COALESCE(':'||r.delivery_revision,''),
+     s.origin,s.origin_position,s.session_id,s.turn_id,s.event_type,
      to_jsonb(s)->>'occurred_at',encode(s.payload_hash,'hex'),
      CASE WHEN octet_length(s.classification::text)<=1048576 THEN s.classification END,
      CASE WHEN octet_length(s.source_provenance::text)<=1048576 THEN s.source_provenance END,
      s.body_reclaimed_at IS NOT NULL,octet_length(s.classification::text)>1048576 OR octet_length(s.source_provenance::text)>1048576
     FROM relations r JOIN memory.source_events s USING(source_event_id)
-    WHERE s.origin IN('feed','snapshot','team') ORDER BY s.source_event_id,r.key,r.via LIMIT 257;
+    WHERE s.installation_id=p_installation AND s.origin IN('feed','snapshot','team') ORDER BY s.source_event_id,r.key,r.via LIMIT 257;
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.read_memory_source_shadow_progress(p_installation UUID,p_kind TEXT,p_root TEXT,p_scan UUID,p_context TEXT)
   RETURNS JSONB LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
@@ -76,6 +95,9 @@ export const SHARED_SOURCE_SHADOW_FUNCTIONS=[
     OR NOT EXISTS(SELECT 1 FROM shared.memory_source_distribution_targets t JOIN shared.memory_source_distributions d ON d.scan_id=t.scan_id
       WHERE t.scan_id=p_scan AND t.source_scope=p_scope AND t.state='current' AND d.source_kind=p_kind AND d.root_key=p_root
        AND d.state='sealed' AND d.control_revision=execution.control_revision) THEN RAISE EXCEPTION 'source_shadow_changed';END IF;
+   IF p_kind='relay_event' AND p_context IS DISTINCT FROM
+    encode(sha256(convert_to('["'||shared.memory_source_scope_key(p_scope)||'","feed-envelope-v1"]','UTF8')),'hex')
+   THEN RAISE EXCEPTION 'source_shadow_proof_context_changed';END IF;
    comparison=p_meta->'comparison';
    IF jsonb_typeof(comparison)<>'object' OR comparison-ARRAY['schemaVersion','matched','unproven','different','unknownProvenance','canonicalDigest','legacyDigest','fullAcceptanceReady','findings']<>'{}'::jsonb
     OR comparison->>'schemaVersion'<>'1' OR comparison->>'fullAcceptanceReady'<>'false'
@@ -103,6 +125,11 @@ export const SHARED_SOURCE_SHADOW_FUNCTIONS=[
    IF NOT pg_try_advisory_xact_lock_shared(hashtextextended('purge:installation:'||installation::text,0)) THEN RAISE EXCEPTION 'source_shadow_busy' USING ERRCODE='55P03';END IF;
    PERFORM 1 FROM memory.source_events s WHERE s.installation_id=installation AND s.source_event_id IN
     (SELECT (item->>0)::uuid FROM jsonb_array_elements(p_meta->'observations') items(item)) ORDER BY s.source_event_id FOR SHARE NOWAIT;
+   PERFORM 1 FROM memory.memory_source_delivery_facts i JOIN memory.source_events s
+    ON s.installation_id=i.installation_id AND s.origin='feed' AND s.origin_position=i.feed_id::text
+    WHERE i.installation_id=installation AND i.session_id=ANY(session_keys) AND s.source_event_id IN
+     (SELECT (item->>0)::uuid FROM jsonb_array_elements(p_meta->'observations') items(item) WHERE item->>3='inbox')
+    ORDER BY i.feed_id FOR SHARE OF i NOWAIT;
    SELECT COALESCE(jsonb_agg(jsonb_build_array(h.source_event_id,h.row_version,h.canonical_key,h.link_via)
     ORDER BY h.source_event_id COLLATE "C",h.canonical_key COLLATE "C",h.link_via COLLATE "C"),'[]') INTO current_rows
     FROM shared.memory_shadow_candidate_headers(installation,p_kind,source_keys,session_keys) h;

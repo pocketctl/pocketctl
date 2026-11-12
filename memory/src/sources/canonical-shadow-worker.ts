@@ -7,11 +7,19 @@ import {loadSourceContextSet,checkSourceContextSet,requireSourceContext} from '.
 import {sourceConnectionKey,sourcePoolContext} from './pool-context.js'
 import {sourceExecutionBranchFor,writeSourceComparisonProgress} from './source-execution.js'
 import {compareSourcePage,type LegacyComparisonSource} from './shadow-comparison.js'
+import {matchRetainedInboxEnvelopeHeader} from '../migrations/shared-source/retained-inbox-envelope.js'
+import {shadowDeliveryFactRevisionSql} from '../migrations/shared-db/shadow-contract.js'
 
 interface PreparedComparison {pool:pg.Pool;scope:SourceScope;root:SourceRoot;scan:string;context:string;meta:Record<string,unknown>}
 const preparedPages=new WeakMap<object,PreparedComparison>()
 const compareBytes=(a:string,b:string)=>Buffer.compare(Buffer.from(a),Buffer.from(b))
 const pending=(deferMs:number)=>new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+
+export function shadowComparisonContextKey(scope:SourceScope,kind:SourceRoot['kind']):string{
+ const scopeKey=canonicalPayloadHash(scope).toString('hex')
+ // A relay-event scan proved by the old hash rule cannot supply a prefix.
+ return kind==='relay_event'?canonicalPayloadHash([scopeKey,'feed-envelope-v1']).toString('hex'):scopeKey
+}
 
 /** Candidate relations are metadata only. Bodies are fetched one at a time
  * against their observed xmin, with one combined 32 MiB page budget. */
@@ -30,8 +38,17 @@ async function preparePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,scan:s
  if(headers.length>256)throw Error('shadow_comparison_limit')
  const observations=headers.map(h=>[h.source_event_id,h.row_version,h.canonical_key,h.link_via])
   .sort((a,b)=>compareBytes(a[0],b[0])||compareBytes(a[2],b[2])||compareBytes(a[3],b[3]))
+ const feedPositions=[...new Set(headers.filter(h=>h.link_via==='inbox').map(h=>h.origin_position))]
+ const deliveryFacts=feedPositions.length?(await pool.query(`SELECT i.feed_id::text,i.envelope_version,i.topic,i.source_kind,i.source_id,
+  i.session_id,i.turn_id,i.event_type,i.recorded_at,encode(i.payload_hash,'hex') AS envelope_hash,
+  ${shadowDeliveryFactRevisionSql} AS receipt_revision
+  FROM memory_source_delivery_facts i WHERE i.installation_id=$1 AND i.feed_id=ANY($2::bigint[])`,[scope.installationId,feedPositions])).rows:[]
+ const byFeed=new Map(deliveryFacts.map(fact=>[fact.feed_id,fact]))
  const grouped=new Map<string,LegacyComparisonSource>()
  for(const h of headers){
+  const [sourceRevision,deliveryRevision]=h.row_version.split(':')
+  const fact=h.link_via==='inbox'?byFeed.get(h.origin_position):undefined
+  if(h.link_via==='inbox'&&(!fact||!deliveryRevision||fact.receipt_revision!==deliveryRevision))throw new SourceUnavailableError('changed')
   let row=grouped.get(h.source_event_id)
   if(!row){
    row={sourceEventId:h.source_event_id,installationId:scope.installationId,origin:h.origin,originPosition:h.origin_position,
@@ -40,13 +57,14 @@ async function preparePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,scan:s
    if(!row.unavailable&&bytes<32*1024*1024){
     const body=(await pool.query(`SELECT xmin::text AS row_version,CASE WHEN octet_length(payload::text)<=$3 THEN payload END AS payload
      FROM source_events WHERE installation_id=$1 AND source_event_id=$2 AND body_reclaimed_at IS NULL`,[scope.installationId,h.source_event_id,32*1024*1024-bytes])).rows[0]
-    if(!body||body.row_version!==h.row_version)throw new SourceUnavailableError('changed')
+    if(!body||body.row_version!==sourceRevision)throw new SourceUnavailableError('changed')
     row.payload=body.payload;row.unavailable=body.payload===null
     if(body.payload!==null)bytes+=Buffer.byteLength(canonicalJsonString(body.payload))
    }else row.unavailable=true
    grouped.set(h.source_event_id,row)
   }
-  row.links.push({kind:root.kind,key:h.canonical_key,via:h.link_via})
+  const envelopeVerified=fact&&!row.unavailable?matchRetainedInboxEnvelopeHeader(fact,row.payload,row.classification):undefined
+  row.links.push({kind:root.kind,key:h.canonical_key,via:h.link_via,envelopeVerified})
  }
  const comparison=compareSourcePage(scope.installationId,bodies,[...grouped.values()])
  if((await reader.checkCurrent(scope,root,page.version)).state!=='current')throw new SourceUnavailableError('changed')
@@ -84,7 +102,7 @@ export function createCanonicalShadowHandler(pool:pg.Pool,options:{pageSize?:num
   if(signal.aborted)throw Error('source_shadow_aborted')
   const contexts=await loadSourceContextSet(pool,scope.installationId,root,scan)
   requireSourceContext(contexts,scope,cursor);await checkSourceContextSet(pool,root,contexts)
-  const context=canonicalPayloadHash(scope).toString('hex')
+  const context=shadowComparisonContextKey(scope,root.kind)
   const progress=(await pool.query('SELECT shared.read_memory_source_shadow_progress($1,$2,$3,$4,$5) AS progress',[scope.installationId,root.kind,root.key,scan,context])).rows[0].progress
   let from=progress?.nextCursor??undefined
   if(progress&&['body_identity_ready','different'].includes(progress.state)){

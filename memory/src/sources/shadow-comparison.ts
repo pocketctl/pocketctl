@@ -6,12 +6,15 @@ export interface LegacyComparisonSource {
  sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:unknown;payloadHash:string
  classification:Record<string,unknown>;provenance:Record<string,unknown>
  unavailable?:boolean
- links:{kind:SourceKind;key:string;via:'typed-ref'|'inbox'|'snapshot'|'team-adapter'}[]
+ links:{kind:SourceKind;key:string;via:'typed-ref'|'inbox'|'snapshot'|'team-adapter';envelopeVerified?:boolean}[]
 }
 export interface SourcePageComparison {
  schemaVersion:1;matched:string;unproven:string;different:string;unknownProvenance:string
  canonicalDigest:string;legacyDigest:string;fullAcceptanceReady:false
  findings:{canonicalKey:string;reason:'missing_identity_relation'|'duplicate_legacy_identity'|'installation_mismatch'|'source_metadata_mismatch'|'original_hash_mismatch'|'body_hash_mismatch'|'provenance_mismatch'|'canonical_hash_mismatch'|'source_unavailable'}[]
+}
+function provesIdentity(link:LegacyComparisonSource['links'][number]):boolean{
+ return link.via!=='inbox'||link.envelopeVerified===true
 }
 function legacyProvenance(row:LegacyComparisonSource):Record<string,unknown>{
  if(row.origin==='team')return row.provenance.source_kind==='team_session'?{state:'known',team:row.provenance}:{state:'unknown'}
@@ -33,7 +36,7 @@ export function compareSourcePage(installationId:string,bodies:readonly Resolved
  const canonical=createHash('sha256'),old=createHash('sha256'),findings:SourcePageComparison['findings']=[],seen=new Set<string>()
  const identities=new Set(bodies.map(b=>b.head.kind+':'+b.head.canonicalKey)),ambiguous=new Set<string>()
  for(const row of legacy){
-  const linked=new Set(row.links.map(l=>l.kind+':'+l.key).filter(key=>identities.has(key)))
+  const linked=new Set(row.links.filter(provesIdentity).map(l=>l.kind+':'+l.key).filter(key=>identities.has(key)))
   if(linked.size>1)ambiguous.add(row.sourceEventId)
  }
  const observe=(value:unknown)=>{const json=canonicalJsonString(value);bytes+=Buffer.byteLength(json);if(bytes>maxBytes)throw Error('shadow_comparison_limit');return json}
@@ -44,9 +47,10 @@ export function compareSourcePage(installationId:string,bodies:readonly Resolved
   const fail=(reason:SourcePageComparison['findings'][number]['reason'],missing=false)=>{findings.push({canonicalKey:head.canonicalKey,reason});if(missing)unproven++;else different++}
   if(createHash('sha256').update(payload).digest('hex')!==head.contentHash){fail('canonical_hash_mismatch');continue}
   const rows=legacy.filter(r=>r.links.some(link=>link.kind===head.kind&&link.key===head.canonicalKey))
-  if(!rows.length){fail('missing_identity_relation',true);continue}
-  if(rows.length!==1||ambiguous.has(rows[0].sourceEventId)){fail('duplicate_legacy_identity',true);continue}
-  const row=rows[0]
+  const provenRows=rows.filter(row=>row.links.some(link=>link.kind===head.kind&&link.key===head.canonicalKey&&provesIdentity(link)))
+  if(provenRows.length>1||provenRows.some(row=>ambiguous.has(row.sourceEventId))){fail('duplicate_legacy_identity',true);continue}
+  const row=provenRows[0]??(rows.length===1?rows[0]:undefined)
+  if(!row){fail('missing_identity_relation',true);continue}
   if(row.installationId!==installationId){fail('installation_mismatch');continue}
   if(row.unavailable){fail('source_unavailable',true);continue}
   const canonicalTime=micros(head.occurredAt??''),originalTime=micros(row.occurredAt)
@@ -56,6 +60,7 @@ export function compareSourcePage(installationId:string,bodies:readonly Resolved
    ||canonicalJsonString(row.classification)!==canonicalJsonString(head.classification)){fail('source_metadata_mismatch');continue}
   const legacyPayload=observe(row.payload)
   if(!verifyOriginalSourceHash({origin:row.origin,originPosition:row.originPosition,eventType:row.eventType,occurredAt:row.occurredAt,payload:row.payload,payloadHash:row.payloadHash})){fail('original_hash_mismatch');continue}
+  if(!provenRows.length){fail('missing_identity_relation',true);continue}
   if(createHash('sha256').update(legacyPayload).digest('hex')!==head.contentHash){fail('body_hash_mismatch');continue}
   const proof=legacyProvenance(row)
   if(canonicalJsonString(proof)!==canonicalJsonString(head.provenance)){fail('provenance_mismatch');continue}
