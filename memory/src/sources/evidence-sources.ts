@@ -1,5 +1,5 @@
 import type {SourceCommitOptions} from './prepared-sources.js'
-import {guardRetainedEvidence} from './retained-authority.js'
+import {assertRetainedSourceGuards,guardRetainedEvidence} from './retained-authority.js'
 import {deferredSourcePreparation} from './deferred-preparation.js'
 import type pg from 'pg'
 import {canonicalJsonString,SourceUnavailableError} from '@pocketctl/session-source'
@@ -72,6 +72,7 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
   for(let n=0;n<ids.length;n+=256)fresh.push(...(await client.query<Binding>(boundQuery,[installationId,ids.slice(n,n+256)])).rows)
   fresh.sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
   if(bindingStamp(fresh)!==initial)throw Error('source_reference_changed')
+  if(options?.forCommit)await assertRetainedSourceGuards(client)
  }}
 }
 const attached=new WeakMap<object,PreparedEvidenceSources>()

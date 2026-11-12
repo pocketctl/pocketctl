@@ -1,3 +1,7 @@
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
+import {guardRetainedVersions} from '../sources/retained-versions.js'
+import {assertRetainedSourceGuards,detachRetainedSourceGuards} from '../sources/retained-authority.js'
+import {retainedSourceRead} from '../sources/retained-read.js'
 import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 import {prepareEvidenceSources,attachPreparedEvidence} from '../sources/evidence-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
@@ -13,6 +17,78 @@ import type pgPool from 'pg'
 import { renderPackText, hashPackText, stableDynamicSplit, type RenderItem } from './renderer.js'
 import { estimateTokens } from './token-budget.js'
 import {fenceConsumptionGeneration,type ContextQueryFrame} from './consumption.js'
+
+const machineVersionSql=`(v.authority='machine_concluded' OR EXISTS (
+ SELECT 1 FROM knowledge_evidence_capsules cap WHERE cap.installation_id=v.installation_id
+ AND cap.version_id=v.version_id AND cap.retention_basis='automation_conclusion'))`
+
+// p is the authenticated pack. Wiki text can include a cited machine Claim
+// through its build dependencies without a memory_context_pack_items row.
+const machinePackVersionsSql=`
+ SELECT v.version_id::text FROM memory_context_pack_items i
+ JOIN knowledge_versions v USING(installation_id,version_id)
+ WHERE i.installation_id=p.installation_id AND i.pack_id=p.pack_id AND ${machineVersionSql}
+ UNION
+ SELECT ref.source_version::text FROM jsonb_to_recordset(COALESCE(p.selected_references,'[]'::jsonb))
+  ref(source_kind text,source_version uuid,installation_id uuid)
+ LEFT JOIN knowledge_versions v ON v.installation_id=ref.installation_id AND v.version_id=ref.source_version
+ WHERE ref.source_kind IN('memory_claim','memory_evidence') AND ref.installation_id=p.installation_id
+  AND (v.version_id IS NULL OR ${machineVersionSql})
+ UNION
+ SELECT v.version_id::text FROM jsonb_to_recordset(COALESCE(p.selected_references,'[]'::jsonb))
+  ref(source_kind text,source_version uuid,installation_id uuid)
+ JOIN memory_wiki_versions w ON w.installation_id=ref.installation_id AND w.wiki_version_id=ref.source_version
+ JOIN memory_wiki_build_sources bs ON bs.installation_id=w.installation_id AND bs.run_id=w.build_run_id
+  AND bs.source_kind IN('claim_version','evidence')
+ LEFT JOIN knowledge_evidence e ON e.installation_id=bs.installation_id AND e.evidence_id=bs.source_ref_id AND bs.source_kind='evidence'
+ JOIN knowledge_versions v ON v.installation_id=bs.installation_id
+  AND v.version_id=CASE WHEN bs.source_kind='claim_version' THEN bs.source_ref_id ELSE e.version_id END
+ WHERE ref.source_kind='wiki_section' AND ref.installation_id=p.installation_id AND ${machineVersionSql}
+ UNION
+ SELECT jsonb_array_elements_text(COALESCE(p.query_context->'machineSourceVersionIds','[]'::jsonb))`
+
+/** Recheck automated conclusions before serving saved Context in the current
+ * transaction. Only the native source fence can rule out a late Relay deletion. */
+export async function fenceMachinePackSources(client:Pick<pg.PoolClient,'query'>,installationId:string,packId:string,authorityGrant?:PackAuthorityGrant):Promise<string[]>{
+ if(sourcePoolContext(client).namespace!=='memory')return []
+ await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
+ const versions=(await client.query<{version_id:string}>(`
+  SELECT source.version_id FROM memory_context_packs p
+  CROSS JOIN LATERAL (${machinePackVersionsSql} ORDER BY 1 LIMIT 513) source
+  WHERE p.installation_id=$1 AND p.pack_id=$2`,[installationId,packId])).rows
+ const versionIds=versions.map(row=>row.version_id)
+ if(!versionIds.length)return []
+ if(authorityGrant){
+  if('scopeBindings' in authorityGrant)await requireCurrentScopePermission({client:client as pg.PoolClient,grant:authorityGrant,targetInstallationId:installationId,permission:'read'})
+  else{
+   if(authorityGrant.installationId!==installationId)throw new TargetBindingError('installation authority mismatch')
+   await requireCurrentInstallationAuthority(client as pg.PoolClient,authorityGrant,{readOnly:true})
+  }
+ }
+ await guardRetainedVersions(client,installationId,versionIds,{requireCurrent:true,requireAvailable:true})
+ await assertRetainedSourceGuards(client)
+ return versionIds
+}
+
+/** A denied pack can retain its history without exposing the stored text or
+ * leaving the surrounding read/consume transaction aborted. */
+export async function machinePackSourcesAvailable(client:Pick<pg.PoolClient,'query'>,installationId:string,packId:string,authorityGrant?:PackAuthorityGrant):Promise<boolean>{
+ if(sourcePoolContext(client).namespace!=='memory')return true
+ await client.query('SAVEPOINT machine_pack_source')
+ try{
+  await fenceMachinePackSources(client,installationId,packId,authorityGrant)
+  await client.query('RELEASE SAVEPOINT machine_pack_source')
+  // The successful check holds its native and row locks until outer COMMIT.
+  detachRetainedSourceGuards(client)
+  return true
+ }catch(error){
+  await client.query('ROLLBACK TO SAVEPOINT machine_pack_source')
+  await client.query('RELEASE SAVEPOINT machine_pack_source')
+  detachRetainedSourceGuards(client)
+  if(error instanceof TargetBindingError||preparedSourceUnavailable(error)||['55P03','57014'].includes((error as {code?:string}).code??''))return false
+  throw error
+ }
+}
 
 /**
  * Immutable Context Pack persistence (plan 8.2/9.4). Packs are write-once:
@@ -180,6 +256,17 @@ export function createPackRepository(pool: pg.Pool) {
         if(!await lifecycleFrameCurrent(client,input.installationId,input.queryContext?.lifecycle))throw new ContextConsumptionChangedError()
         const origin=await originPolicyCorpusSnapshot(client,input.installationId)
         if(origin.stamp!==(input.queryContext?.originPolicyStamp??null))throw new ContextConsumptionChangedError()
+        if(inserted.rowCount&&prepared){
+          try{
+            const machineVersions=await fenceMachinePackSources(client,input.installationId,packId)
+            if(machineVersions.length)await client.query(`
+              UPDATE memory_context_packs SET query_context=query_context||jsonb_build_object('machineSourceVersionIds',$2::jsonb)
+              WHERE pack_id=$1`,[packId,JSON.stringify(machineVersions)])
+          }catch(error){
+            if(preparedSourceUnavailable(error)||['55P03','57014'].includes((error as {code?:string}).code??''))throw new ContextConsumptionChangedError()
+            throw error
+          }
+        }
         // All source/FK dependencies precede the final generation fence.
         const generation=await fenceConsumptionGeneration(client,input.installationId,input.consumptionGeneration)
         if(inserted.rowCount)await client.query('UPDATE memory_context_packs SET consumption_generation=$2 WHERE pack_id=$1',[packId,generation])
@@ -229,6 +316,7 @@ export function createPackRepository(pool: pg.Pool) {
 
     async listForSession(input: {
       installationId: string
+      authorityGrant?: PackAuthorityGrant
       sessionId: string
       limit?: number
       beforeCreatedAt?: Date | string | null
@@ -273,12 +361,13 @@ export function createPackRepository(pool: pg.Pool) {
         }>
       }
     }>> {
-      const result = await pool.query<{
+      const listed=await retainedSourceRead(pool,input,async db=>{
+      const result = await db.query<{
         pack_id: string; state: string; client_request_id: string; created_at: Date; created_at_cursor: string
         mode: string; agent: string; stable_text: string; dynamic_text: string
         stable_tokens: number; dynamic_tokens: number; error_code: string | null
         policy_revision: string; settings_revision: string; loadout_revision: string
-        trajectory_id: string | null; result_state: string | null; degraded_components: string[] | null
+        trajectory_id: string | null; result_state: string | null; degraded_components: string[] | null; machine_source:boolean
       }>(`
         SELECT p.pack_id::text, p.state, p.client_request_id, p.created_at,
                to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor,
@@ -287,7 +376,8 @@ export function createPackRepository(pool: pg.Pool) {
                CASE WHEN ${FOREIGN_PACK_SQL} THEN '' ELSE p.dynamic_text END AS dynamic_text,
                p.stable_tokens, p.dynamic_tokens, p.error_code,
                p.policy_revision::text, p.settings_revision::text, p.loadout_revision::text,
-               p.trajectory_id::text, t.result_state, t.degraded_components
+               p.trajectory_id::text, t.result_state, t.degraded_components,
+               EXISTS(${machinePackVersionsSql}) AS machine_source
         FROM memory_context_packs p
         LEFT JOIN memory_retrieval_trajectories t ON t.trajectory_id = p.trajectory_id
         WHERE p.installation_id = $1 AND p.session_id = $2
@@ -298,11 +388,15 @@ export function createPackRepository(pool: pg.Pool) {
         input.beforeCreatedAt ?? null, input.beforePackId ?? null,
         Math.min(Math.max(input.limit ?? 50, 1), 51)])
       const packIds = result.rows.map(row => row.pack_id)
+      const withheld=new Set<string>()
+      for(const pack of result.rows){
+        if(pack.machine_source&&!await machinePackSourcesAvailable(db,input.installationId,pack.pack_id))withheld.add(pack.pack_id)
+      }
       const items = packIds.length === 0 ? { rows: [] as Array<{
         pack_id: string; item_id: string; claim_id: string; version_id: string
         claim_type: string; layer: string; section: string; representation: string
         reason_codes: string[]; token_count: number; ordinal: number; evidence_ids: string[]
-      }> } : await pool.query<{
+      }> } : await db.query<{
         pack_id: string; item_id: string; claim_id: string; version_id: string
         claim_type: string; layer: string; section: string; representation: string
         reason_codes: string[]; token_count: number; ordinal: number; evidence_ids: string[]
@@ -323,7 +417,7 @@ export function createPackRepository(pool: pg.Pool) {
       const candidates = trajectoryIds.length === 0 ? { rows: [] as Array<{
         trajectory_id: string; version_id: string; decision: string
         reason_code: string; final_ordinal: number | null
-      }> } : await pool.query<{
+      }> } : await db.query<{
         trajectory_id: string; version_id: string; decision: string
         reason_code: string; final_ordinal: number | null
       }>(`
@@ -346,28 +440,30 @@ export function createPackRepository(pool: pg.Pool) {
       }
       return result.rows.map(row => ({
         pack_id: row.pack_id,
-        state: row.state,
+        state: withheld.has(row.pack_id)?'invalidated':row.state,
         client_request_id: row.client_request_id,
         created_at: row.created_at,
         created_at_cursor: row.created_at_cursor,
         mode: row.mode,
         agent: row.agent,
-        stable_text: row.stable_text,
-        dynamic_text: row.dynamic_text,
+        stable_text: withheld.has(row.pack_id)?'':row.stable_text,
+        dynamic_text: withheld.has(row.pack_id)?'':row.dynamic_text,
         stable_tokens: Number(row.stable_tokens),
         dynamic_tokens: Number(row.dynamic_tokens),
-        error_code: row.error_code,
+        error_code: withheld.has(row.pack_id)?'source_invalidated':row.error_code,
         policy_revision: Number(row.policy_revision),
         settings_revision: Number(row.settings_revision),
         loadout_revision: Number(row.loadout_revision),
-        items: (itemsByPack.get(row.pack_id) ?? []).map(({ pack_id: _packId, ...item }) => item),
-        trajectory: row.trajectory_id && row.result_state ? {
+        items: (withheld.has(row.pack_id)?[]:itemsByPack.get(row.pack_id)??[]).map(({ pack_id: _packId, ...item }) => item),
+        trajectory: !withheld.has(row.pack_id) && row.trajectory_id && row.result_state ? {
           result_state: row.result_state,
           degraded_components: row.degraded_components ?? [],
           candidates: (candidatesByTrajectory.get(row.trajectory_id) ?? [])
             .map(({ trajectory_id: _trajectoryId, ...candidate }) => candidate),
         } : null,
       }))
+      })
+      return listed??[]
     },
 
     /** Invalidate every not-yet-admitted dependent pack of a claim version. */

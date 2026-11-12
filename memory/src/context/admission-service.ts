@@ -1,10 +1,12 @@
+import {fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import type {CurationMode} from '../curation/contracts.js'
 import {lifecycleFrameCurrent,lifecycleFrameFenceSql} from './lifecycle-frame.js'
 import {revisionTimeSql} from '../claims/version-selection.js'
 import { deliveryVersionAvailableSql } from '../episodes/delivery-withdrawal.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
-import type {V2GrantFacts} from '../governance/authorization.js'
+import {TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 import {WIKI_SOURCE_TIME_INVALID_SQL} from './consumption.js'
 import { createHash, createHmac, randomBytes, randomUUID } from 'crypto'
 import type pg from 'pg'
@@ -63,6 +65,7 @@ export function createAdmissionService(deps: {
       grantConfigVersion: string
       sharedGrantAuthorized?: boolean
       selectedScopeGrant?:V2GrantFacts
+      authorityGrant?:PackAuthorityGrant
     }): Promise<AdmissionResult> {
       const client = await deps.pool.connect()
       try {
@@ -291,6 +294,7 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'expired' }
         }
 
+        await fenceMachinePackSources(client,input.installationId,input.packId,input.authorityGrant)
         const nonce = randomBytes(24).toString('hex')
         const nonceHmac = createHmac('sha256', deps.nonceHmacKey).update(nonce).digest()
         const injectionId = randomUUID()
@@ -313,6 +317,7 @@ export function createAdmissionService(deps: {
         return { ok: true, injectionId, nonce, expiresAt: inserted.rows[0].admission_expires_at }
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined)
+        if(error instanceof TargetBindingError||preparedSourceUnavailable(error)||['55P03','57014'].includes((error as {code?:string}).code??''))return{ok:false,error:'claim_invalid'}
         throw error
       } finally {
         client.release()
@@ -342,6 +347,7 @@ export function createAdmissionService(deps: {
       injectionId: string
       nonce: string
       selectedScopeGrant?:V2GrantFacts
+      authorityGrant?:PackAuthorityGrant
     }): Promise<ConsumeResult> {
       const client=await deps.pool.connect()
       try {
@@ -358,10 +364,11 @@ export function createAdmissionService(deps: {
           const proof=frozen?.query_context?.selectedScopeProof
           const selected=proof?await selectedScopeOriginFences(client,proof):{matches:true,fences:[]}
           const selectionMatches=!proof||(!!input.selectedScopeGrant&&await selectedScopeContextCurrent(client,proof,input.selectedScopeGrant))
-          const currentGrantDeadline=proof?input.selectedScopeGrant?.expiresAt??null:null
+          const currentGrantDeadline=input.authorityGrant?.expiresAt??(proof?input.selectedScopeGrant?.expiresAt??null:null)
           const currentGrantClockSql="($9::double precision IS NULL OR clock_timestamp()<to_timestamp($9::double precision))"
           const originRows=[...origin.fences,...selected.fences],originLocked=await lockOriginPolicyFences(client,originRows,sourcePoolContext(deps.pool).namespace)
-          const originMatches=originLocked&&await lifecycleFrameCurrent(client,input.installationId,frozen?.query_context?.lifecycle,deps.lifecycleMode??'off')&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
+          const sourcesCurrent=!frozen||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant)
+          const originMatches=sourcesCurrent&&originLocked&&await lifecycleFrameCurrent(client,input.installationId,frozen?.query_context?.lifecycle,deps.lifecycleMode??'off')&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
           const originFences=JSON.stringify(originRows)
           const selectionProof=JSON.stringify(proof??null)
           const consumed = await client.query<{

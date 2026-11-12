@@ -147,5 +147,5 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
   if(input.scopeGrant)await assertCurrentGrantClock(client,input.scopeGrant,[input.installationId])
   if(input.expiresAt!=null&&!(await client.query('SELECT clock_timestamp()<to_timestamp($1) AS live',[input.expiresAt])).rows[0].live)return deny()
   await client.query('COMMIT');return result
- }catch(error){await client.query('ROLLBACK').catch(()=>undefined);if(error instanceof TargetBindingError||preparedSourceUnavailable(error))return null;throw error}finally{client.release()}
+ }catch(error){await client.query('ROLLBACK').catch(()=>undefined);if(error instanceof TargetBindingError||preparedSourceUnavailable(error)||(error as {code?:string}).code==='55P03')return null;throw error}finally{client.release()}
 }

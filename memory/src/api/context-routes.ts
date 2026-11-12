@@ -390,6 +390,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       agent: body.agent,
       adapter: body.adapter,
       grantConfigVersion: grant.configVersion,
+      authorityGrant: grant,
       sharedGrantAuthorized: sharedAuthorized(grant, grant.installationId),
       ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     })
@@ -428,6 +429,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       packId,
       injectionId: query.injection_id,
       nonce: query.nonce,
+      authorityGrant: grant,
       ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     })
     if (!result.ok) {
@@ -517,6 +519,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     }
     const rows = await deps.packs.listForSession({
       installationId: grant.installationId,
+      authorityGrant: grant,
       sessionId,
       limit: pageSize + 1,
       beforeCreatedAt: cursor?.createdAt ?? null,
