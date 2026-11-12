@@ -3,6 +3,12 @@ import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadata
 // must skip expired use before LIMIT; explicit keys remain denied references.
 const sourceTurn=(e:string,r:string)=>`COALESCE(${r}.turn_id,${e}.payload->>'turn_id',${e}.payload->>'source_turn_id',CASE WHEN to_jsonb(${e})->>'source_header_version'='1' THEN to_jsonb(${e})->'source_classification'->'memory_source'->>'turn_id' END)`
 const usageDenied=(e:string,r:string)=>`${r}.body_reclaimed_at IS NOT NULL OR EXISTS(SELECT 1 FROM memory.memory_source_retention_receipts receipt WHERE receipt.installation_id=(p_scope->>'installationId')::uuid AND receipt.session_id=COALESCE(to_jsonb(${e})->>'logical_source_session_id',${e}.session_id) AND(receipt.turn_id=${sourceTurn(e,r)} OR ${sourceTurn(e,r)} IS NULL))`
+// Headerless hot history can need the ordinary version-locked reader.
+// Detect that case only during body-capable enumeration. The keyed metadata
+// observation and the final selected fence never access historical payload.
+const legacySelectionFallback=(e:string,r:string)=>`CASE WHEN ${e}.source_header_version IS NULL AND ${e}.body_storage='hot' AND ${e}.payload IS NOT NULL THEN
+ CASE WHEN (${e}.canonical_payload_hash IS NULL AND ${r}.content_hash IS NULL) OR ${metadataUsageDenied(e,r)} THEN NOT(${usageDenied(e,r)}) ELSE FALSE END
+ ELSE FALSE END`
 const personalAuthority=(retained:boolean)=>`CREATE OR REPLACE FUNCTION shared.${retained?'memory_retained_relay_authority':'memory_relay_source_authority'}(p_scope JSONB,p_kind TEXT,p_root TEXT)
   RETURNS TABLE(state TEXT,content_revision TEXT,authorization_revision TEXT,storage_revision TEXT)
   LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE i RECORD;s RECORD;w RECORD;m RECORD;owner_id INT;session_key TEXT;session_found BOOLEAN;native JSONB;session_ids TEXT[];BEGIN
@@ -108,19 +114,23 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
      RETURN NEXT observation-'admissions';RETURN;
     END IF;
     WITH selected AS MATERIALIZED(
-     SELECT event_row.*,event_row.xmin::text AS memory_source_xmin,input_admission.value AS memory_input_admission FROM(
+     SELECT event_row.*,event_row.xmin::text AS memory_source_xmin,input_admission.value AS memory_input_admission,legacy_fallback.required AS memory_legacy_fallback FROM(
       SELECT id FROM public.events WHERE session_id=native->>'sessionId' AND(p_after IS NULL OR id>p_after)
        AND(NOT keyed_mode OR id=ANY(p_ids[2:])) ORDER BY id OFFSET 0)ordered
      CROSS JOIN LATERAL(SELECT event_body.*,event_body.xmin AS xmin FROM public.events event_body WHERE id=ordered.id OFFSET 0)event_row
      LEFT JOIN memory.source_events eligible_ref ON eligible_ref.installation_id=(p_scope->>'installationId')::uuid
       AND eligible_ref.source_kind='relay_event' AND eligible_ref.canonical_key=event_row.id::text AND eligible_ref.mapping_state='verified'
      CROSS JOIN LATERAL(SELECT ${metadataInputAdmission('event_row','eligible_ref','keyed_mode')} AS value OFFSET 0)input_admission
+     CROSS JOIN LATERAL(SELECT CASE WHEN NOT keyed_mode THEN ${legacySelectionFallback('event_row','eligible_ref')} ELSE FALSE END AS required OFFSET 0)legacy_fallback
      WHERE NOT event_row.owner_retired AND event_row.user_id=(p_scope->>'principalUserId')::int
       AND public.native_event_authority(event_row.id,event_row.user_id)->>'state'='current'
       AND event_row.effect_status IN('none','completed')
-      AND NOT(${metadataUsageDenied('event_row','eligible_ref')}) AND input_admission.value<>'denied'
-     ORDER BY ordered.id LIMIT p_limit),page AS(
-      SELECT selected.*,sum(CASE WHEN payload IS NULL THEN 0 ELSE octet_length(payload::text) END) OVER(ORDER BY id) AS page_bytes FROM selected
+      AND (legacy_fallback.required OR NOT(${metadataUsageDenied('event_row','eligible_ref')})) AND input_admission.value<>'denied'
+     ORDER BY ordered.id LIMIT p_limit),legacy_required AS MATERIALIZED(
+      SELECT 1 FROM selected WHERE memory_legacy_fallback LIMIT 1
+     ),page AS(
+      SELECT selected.*,sum(CASE WHEN payload IS NULL THEN 0 ELSE octet_length(payload::text) END) OVER(ORDER BY id) AS page_bytes
+      FROM selected WHERE NOT EXISTS(SELECT 1 FROM legacy_required)
      ),observed AS(
      SELECT e.id,jsonb_build_object('id',e.id::text,'session_id',e.logical_source_session_id,'current_session_id',e.session_id,
       'event_type',e.event_type,'user_id',e.user_id::text,'occurred_at',e.created_at::text,
@@ -140,10 +150,12 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
     SELECT jsonb_build_object('contract','personal-metadata-observation-v1','version',jsonb_build_object('content',a.content_revision,'authorization',a.authorization_revision,'storage',a.storage_revision),
      'inputFingerprint',input_fingerprint,'nativeSessionFingerprint',encode(sha256(convert_to(native::text,'UTF8')),'hex'),
      'upperId',COALESCE((SELECT boundary.id::text FROM public.events boundary WHERE boundary.session_id=native->>'sessionId' ORDER BY boundary.id DESC LIMIT 1),'0'),
-     'rows',COALESCE((SELECT jsonb_agg(value ORDER BY id) FROM observed),'[]'::jsonb)) INTO observation;
+     'rows',COALESCE((SELECT jsonb_agg(value ORDER BY id) FROM observed),'[]'::jsonb),
+      'legacyFallback',EXISTS(SELECT 1 FROM legacy_required)) INTO observation;
+    IF (observation->>'legacyFallback')::boolean THEN RAISE EXCEPTION 'source_metadata_proof_unavailable';END IF;
     IF EXISTS(SELECT 1 FROM jsonb_array_elements(observation->'rows') row WHERE row->>'input_admission'='unsupported') THEN RAISE EXCEPTION 'source_metadata_proof_unavailable';END IF;
     IF EXISTS(SELECT 1 FROM jsonb_array_elements(observation->'rows') row WHERE row->>'input_admission'='unproven') THEN RAISE EXCEPTION 'source_input_start_unproven';END IF;
-    RETURN NEXT observation;RETURN;
+    RETURN NEXT observation-'legacyFallback';RETURN;
    END IF;
    RETURN QUERY WITH selected AS (SELECT e.*,(${usageDenied('e','eligible_ref')}) AS memory_usage_denied
       -- Keep identity enumeration ordered and narrow before evaluating the

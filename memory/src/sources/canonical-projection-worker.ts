@@ -60,7 +60,11 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
    }
    if(current.state!=='current'&&current.state!=='changed')throw new SourceUnavailableError(current.state)
   }
-  if(personal){
+  // A scanning checkpoint with a plain version and cursor belongs to the
+  // strict ordinary reader. It must finish that sweep without changing cursors.
+  const ordinaryContinuation=personal&&progress?.state==='scanning'&&typeof progress.source_version?.content==='string'
+  if(personal&&!ordinaryContinuation){
+   let useOrdinary=false
    // Spend at most the existing one-second deferred interval on successful
    // fresh pages; this does not alter either periodic poll or error backoff.
    const burstStarted=performance.now(),burstBudgetMs=1000
@@ -74,6 +78,10 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
      // A typed invalidated read has produced no output. Yield this claim;
      // never retry the old body proof or replace its original scope/seal.
      if(error instanceof SourceUnavailableError&&error.code==='changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+     if(error instanceof SourceUnavailableError&&error.code==='source_metadata_proof_unavailable'){
+      useOrdinary=true
+      break
+     }
      throw error
     }
     if(signal.aborted)throw Error('canonical_projection_aborted')
@@ -89,14 +97,18 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
     if(performance.now()-burstStarted>=burstBudgetMs||canonicalJsonString(nextProgress??null)===canonicalJsonString(currentProgress??null))break
     currentProgress=nextProgress
    }
-   throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+   if(!useOrdinary)throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
   }
+  // The ordinary reader repeats input and retention authority and commits
+  // under an exact full-root version. Start it from the beginning when the
+  // selected reader could not prove its page.
+  const cursorForOrdinary=!personal||ordinaryContinuation?progress?.next_cursor??undefined:undefined
   let page
-  try{page=await prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor:progress?.next_cursor??undefined})}
+  try{page=await prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor:cursorForOrdinary})}
   catch(error){
    // A newer source revision invalidates the old cursor. Restart enumeration
    // under the new authority snapshot; existing source UUIDs are reused.
-   if(!progress?.next_cursor||!(error instanceof SourceUnavailableError)||error.code!=='changed')throw error
+   if(!cursorForOrdinary||!(error instanceof SourceUnavailableError)||error.code!=='changed')throw error
    page=await prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize})
   }
   if(signal.aborted)throw Error('canonical_projection_aborted')
@@ -106,5 +118,6 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
   await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs:options.stabilizationMs})
   if(team&&!page.hasMore)await publishTeam()
   if(page.hasMore)throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+  if(personal)options.onReady?.(root)
  }
 }
