@@ -31,6 +31,31 @@ export function currentPersonalInstallation(state:CurrentState['state']|null|und
  return {current:!!state&&state.owner_scope_kind==='personal'&&state.owner_exists&&state.provider_enabled&&state.status==='active',configVersion:state?.config_version??'0',status:state?.status??'revoked',ownerUserId:state?.owner_user_id??null}
 }
 
+/** Used only with SQL expressions defined by the owning query. */
+export function personalLifecycleAuthorityStampSql(state:string):string{
+ return `encode(sha256(convert_to(jsonb_build_array(${state}->>'authorization_epoch',${state}->>'config_version',
+  ${state}->>'owner_user_id',${state}->>'owner_scope_id',${state}->>'provider_control_revision',
+  ${state}->>'installation_control_revision')::text,'UTF8')),'hex')`
+}
+// A missing capture trigger can lose a disable/re-enable transition even
+// when the current native rows look active again. A zero revision is valid
+// before the first change only while this existing Relay contract is present.
+const lifecycleControlCapture = [
+  ['extension_providers','providers'], ['extension_installations','installations'],
+].flatMap(([table,control])=>[['insert',4],['update',16],['delete',8]].map(([operation,type])=>
+  `(to_regclass('public.${table}'),'memory_control_${control}_${operation}',
+    to_regprocedure('shared.capture_memory_control_${control}()'),${type})`,
+)).join(',')
+export const personalLifecycleAuthorityStateSql=(state:string)=>
+ `${state} @> '{"owner_scope_kind":"personal","status":"active","owner_exists":true,"provider_enabled":true,"curation_input_allowed":true}'::jsonb
+ AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t
+  WHERE t.owner_scope_kind='personal' AND t.owner_scope_id=(${state}->>'owner_scope_id')::uuid
+   AND t.authorization_epoch>=(${state}->>'authorization_epoch')::bigint)
+ AND EXISTS(SELECT 1 FROM shared.memory_source_contract c WHERE c.singleton AND to_jsonb(c)->>'control_capture_version'='1')
+ AND NOT EXISTS(SELECT 1 FROM (VALUES ${lifecycleControlCapture}) required(rel,trigger_name,fn,type)
+  WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=required.rel AND t.tgname=required.trigger_name
+   AND t.tgfoid=required.fn AND t.tgtype=required.type AND t.tgenabled IN('O','A')))`
+
 /** Nonblocking public authority barrier. Caller must be inside BEGIN and call
  * before local Memory/resource locks. No raw table capability is exposed. */
 export async function lockCurrentRelayAuthority(db:Db,installationIds:readonly string[],memberIds:readonly string[]=[]):Promise<boolean>{
@@ -38,4 +63,12 @@ export async function lockCurrentRelayAuthority(db:Db,installationIds:readonly s
  const ids=[...new Set(installationIds)].sort(),members=[...new Set(memberIds)].sort()
  if(!ids.length||ids.length>16||members.length>16)throw Error('grant_scope_limit')
  return (await db.query<{locked:boolean}>('SELECT shared.lock_memory_grant_authority($1::uuid[],$2::uuid[]) AS locked',[ids,members])).rows[0]?.locked===true
+}
+
+/** The handoff is specific to both Relay authority and local Context settings. */
+export function personalLifecycleDeliveryStampSql(installation:string,authorityStamp:string):string{
+ return `encode(sha256(convert_to(jsonb_build_array(${authorityStamp},
+  (SELECT jsonb_build_array(p.revision,p.consume_mode) FROM memory_curation_policies p WHERE p.installation_id=${installation}),
+  (SELECT jsonb_agg(jsonb_build_array(s.setting_id,s.revision,s.mode) ORDER BY s.setting_id)
+   FROM memory_context_settings s WHERE s.installation_id=${installation}))::text,'UTF8')),'hex')`
 }

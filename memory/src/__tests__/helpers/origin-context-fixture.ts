@@ -67,16 +67,23 @@ export async function contextDeliveryClient(
     requestKey: { keyId: 'fixture', hmacKey: Buffer.alloc(32, 3) },
   })
   const url = await app.listen({ host: '127.0.0.1', port: 0 })
-  const issueGrant = (configVersion = '1', service = 'memory.context') => jwt.sign({
+  const sign = (claims: object, expiresIn = 120) => jwt.sign(claims, keys.privateKey, {
+    algorithm: 'RS256', keyid: jwk.kid, issuer: relay, audience: 'pocketctl-memory',
+    subject: 'user:1', expiresIn, jwtid: randomUUID(),
+  })
+  const issueGrant = (configVersion = '1', service = 'memory.context') => sign({
     token_type: 'extension_capability', installation_id: installationId, provider_id: 'pocketctl-memory',
     services: [service], config_version: configVersion,
     ...(service === 'memory.context' ? { caller_type: 'daemon', session_id: context.sessionId } : { caller_type: 'web' }),
-  }, keys.privateKey, {
-    algorithm: 'RS256', keyid: jwk.kid, issuer: relay, audience: 'pocketctl-memory',
-    subject: 'user:1', expiresIn: 120, jwtid: randomUUID(),
   })
+  const issuePersonalV2Grant = (configVersion: string, authorizationEpoch: string) => sign({
+    token_type: 'extension_capability_v2', provider_id: 'pocketctl-memory', primary_installation_id: installationId,
+    services: ['memory.context'], config_version: configVersion, caller_type: 'daemon', session_id: context.sessionId,
+    scope_bindings: [{ installation_id: installationId, owner_scope_id: installationId, owner_scope_kind: 'personal',
+      membership_id: null, membership_revision: '0', authorization_epoch: authorizationEpoch, permissions: ['read'] }],
+  }, 60)
   return {
-    url: url + '/api/v1/memory/context', issueGrant, close: () => app.close(),
+    url: url + '/api/v1/memory/context', issueGrant, issuePersonalV2Grant, close: () => app.close(),
     beforeNextConsume: (action: () => Promise<void>) => { beforeConsume = action },
   }
 }

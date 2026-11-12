@@ -1,5 +1,7 @@
 import {createHash,randomUUID} from 'node:crypto'
 import type pg from 'pg'
+import {createAdmissionService} from '../../context/admission-service.js'
+import {personalLifecycleAuthorityStampSql,personalLifecycleDeliveryStampSql} from '../../sources/current-grant.js'
 import {canonicalPayloadHash} from '@pocketctl/session-source'
 import {afterAll,beforeAll,beforeEach,describe,expect,test,vi} from 'vitest'
 import {directLaunchFixture,type DirectLaunchFixture} from './direct-launch-fixture.js'
@@ -22,7 +24,7 @@ suite('personal lifecycle uses current Relay authority',()=>{
  let fixture:DirectLaunchFixture, installationId:string, source:Awaited<ReturnType<DirectLaunchFixture['source']>>
  const scheduler=()=>createLifecycleObservationService({pool:fixture.runtime,mode:'enabled'})
  beforeAll(async()=>{
-  fixture=await directLaunchFixture(url!)
+  fixture=await directLaunchFixture(url!,{captureRelayControls:true})
   source=await fixture.source()
   installationId=(await fixture.install(source,'retained_history')).inst.installation_id
   await fixture.runtime.query("INSERT INTO memory_owner_scopes(installation_id,owner_scope_kind,owner_scope_id,state,authorization_epoch) VALUES($1,'personal',$1,'active',1) ON CONFLICT (installation_id) DO UPDATE SET state='active',authorization_epoch=1",[installationId])
@@ -42,12 +44,16 @@ suite('personal lifecycle uses current Relay authority',()=>{
   await fixture.pool.query("UPDATE public.extension_installations SET status='revoked',authorization_epoch=authorization_epoch+1 WHERE installation_id=$1",[installationId])
   expect(await scheduler().listActivePersonalOwners()).toEqual([])
  })
- async function nativeDelivery(){
-  const pack=randomUUID(),request=randomUUID(),digest=createHash('sha256').update(request).digest()
+ async function nativeDelivery(bound=true){
+  const pack=randomUUID(),request=randomUUID(),digest=createHash('sha256').update(request).digest(),injectionId=randomUUID()
   await fixture.runtime.query(`INSERT INTO memory_context_packs(pack_id,installation_id,session_id,client_request_id,agent,mode,effective_policy_hash,input_digest,state)
    VALUES($1,$2,$3,$3,'codex','enabled',$4,$4,'ready')`,[pack,installationId,request,digest])
-  await fixture.runtime.query(`INSERT INTO memory_context_injections(injection_id,installation_id,pack_id,session_id,client_request_id,agent,adapter,admission_nonce_hmac,state,delivered_at)
-   VALUES(gen_random_uuid(),$1,$2,$3,$3,'codex','codex-app-server',$4,'delivered',clock_timestamp())`,[installationId,pack,request,digest])
+  await fixture.runtime.query(`INSERT INTO memory_context_injections(injection_id,installation_id,pack_id,session_id,client_request_id,agent,adapter,admission_nonce_hmac,state,native_delivery_authority_sha256,native_delivery_prepared_at)
+   SELECT $1,$2,$3,$4,$4,'codex','codex-app-server',$5,'prepared',CASE WHEN $6 THEN ${personalLifecycleDeliveryStampSql('$2',personalLifecycleAuthorityStampSql('current.state'))} END,CASE WHEN $6 THEN clock_timestamp() END
+   FROM shared.memory_current_grant_states(ARRAY[$2::uuid],ARRAY[]::uuid[]) current`,[injectionId,installationId,pack,request,digest,bound])
+  expect(await createAdmissionService({pool:fixture.runtime,nonceHmacKey:Buffer.alloc(32)}).receipt({
+   injectionId,installationId,sessionId:request,delivered:true,
+  })).toEqual({ok:true,state:'delivered'})
  }
  async function observedWindow(){
   // Advance only the clock-derived fixture fields to model a mature interval.
@@ -61,7 +67,7 @@ suite('personal lifecycle uses current Relay authority',()=>{
  }
  test('an old unbound delivery cannot start coverage under a new authority',async()=>{
   await fixture.runtime.query('DELETE FROM memory_lifecycle_observation_windows WHERE installation_id=$1',[installationId])
-  await nativeDelivery()
+  await nativeDelivery(false)
   await fixture.pool.query("UPDATE public.extension_installations SET authorization_epoch=authorization_epoch+1 WHERE installation_id=$1",[installationId])
   expect(await scheduler().recordObservationHeartbeat({installationId})).toBe('unknown')
   const observation=async()=>(await fixture.runtime.query('SELECT capability_since_at,started_at FROM memory_lifecycle_observation_windows WHERE installation_id=$1',[installationId])).rows[0]

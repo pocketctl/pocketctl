@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto'
 import type pg from 'pg'
 import type {LifecycleMode} from './lifecycle-policy.js'
-import {lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {lockCurrentRelayAuthority,personalLifecycleAuthorityStampSql,personalLifecycleAuthorityStateSql} from '../sources/current-grant.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 
 /** Scope authority and local readiness are independent in shared mode. */
@@ -10,13 +10,9 @@ export function lifecycleOwnerJoin(db:Pick<pg.Pool,'query'>,installation:string)
  return {
   shared,
   join:shared?`JOIN LATERAL (
-   SELECT encode(sha256(convert_to(jsonb_build_array(current.state->>'authorization_epoch',current.state->>'config_version',
-    current.state->>'owner_user_id',current.state->>'owner_scope_id')::text,'UTF8')),'hex') AS authority_stamp
+   SELECT ${personalLifecycleAuthorityStampSql('current.state')} AS authority_stamp
    FROM shared.memory_current_grant_states(ARRAY[${installation}::uuid],ARRAY[]::uuid[]) current
-   WHERE current.state @> '{"owner_scope_kind":"personal","status":"active","owner_exists":true,"provider_enabled":true,"curation_input_allowed":true}'::jsonb
-    AND NOT EXISTS(SELECT 1 FROM memory_scope_tombstones t
-     WHERE t.owner_scope_kind='personal' AND t.owner_scope_id=(current.state->>'owner_scope_id')::uuid
-      AND t.authorization_epoch>=(current.state->>'authorization_epoch')::bigint)
+   WHERE ${personalLifecycleAuthorityStateSql('current.state')}
   ) owner ON TRUE`:`JOIN memory_owner_scopes owner ON owner.installation_id=${installation}
    AND owner.owner_scope_kind='personal' AND owner.state='active'`,
   ready:shared?"i.local_status='ready'":"i.local_status='ready' AND i.relay_status='active'",

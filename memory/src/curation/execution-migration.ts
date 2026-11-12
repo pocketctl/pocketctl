@@ -1,4 +1,4 @@
-import {SHARED_GRANT_FUNCTIONS} from '../migrations/shared-db/grant-contract.js'
+import {SHARED_GRANT_STATES_V102} from '../migrations/shared-db/grant-contract.js'
 
 export const CURATION_EXECUTION_MIGRATION={version:79,statements:[
  `ALTER TABLE memory_task_bundles ADD COLUMN bundle_kind TEXT NOT NULL DEFAULT 'intake' CHECK(bundle_kind IN('intake','task')),
@@ -38,7 +38,7 @@ export const CURATION_NATIVE_AUTHORITY_MIGRATION={version:102,statements:[
  `DO $curation_grant_migration$ BEGIN
  IF current_schema()<>'memory' THEN RETURN;END IF;
  IF to_regprocedure('shared.memory_current_grant_states(uuid[],uuid[])') IS NOT NULL THEN
-  EXECUTE $grant_definition$${SHARED_GRANT_FUNCTIONS[0]}$grant_definition$;
+  EXECUTE $grant_definition$${SHARED_GRANT_STATES_V102}$grant_definition$;
  END IF;
  EXECUTE $trigger_definition$
  CREATE OR REPLACE FUNCTION memory.memory_require_curation_authority() RETURNS trigger

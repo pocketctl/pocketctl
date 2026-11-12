@@ -1,7 +1,6 @@
 /** Current Relay facts for already signature-verified grants. No bearer/JWT,
  * credentials or text enter the database function; local Memory state stays local. */
-export const SHARED_GRANT_FUNCTIONS=[
- `CREATE OR REPLACE FUNCTION shared.memory_current_grant_states(p_installations UUID[],p_members UUID[])
+export const SHARED_GRANT_STATES_V102=`CREATE OR REPLACE FUNCTION shared.memory_current_grant_states(p_installations UUID[],p_members UUID[])
   RETURNS TABLE(installation_id UUID,state JSONB)
   LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
    IF p_installations IS NULL OR cardinality(p_installations) NOT BETWEEN 1 AND 16 OR cardinality(p_members)>16 THEN RAISE EXCEPTION 'grant_scope_limit';END IF;
@@ -30,7 +29,12 @@ export const SHARED_GRANT_FUNCTIONS=[
       ORDER BY (pi.status IN('pending','active','paused','revoking')) DESC,pi.created_at DESC,pi.installation_id LIMIT 1) parent_installation ON TRUE
     LEFT JOIN public.extension_scope_memberships member ON member.scope_kind=i.owner_scope_kind AND member.scope_id=i.owner_scope_id AND member.membership_id=ANY(p_members)
    WHERE i.installation_id=ANY(p_installations) AND i.provider_id='pocketctl-memory' ORDER BY i.installation_id,member.membership_id;
-  END $$`,
+  END $$`
+const controlRevisions=`'provider_control_revision',COALESCE((SELECT w.revision::text FROM shared.memory_source_control_work w WHERE w.control_kind='provider' AND w.control_key=i.provider_id),'0'),
+    'installation_control_revision',COALESCE((SELECT w.revision::text FROM shared.memory_source_control_work w WHERE w.control_kind='installation' AND w.control_key=i.installation_id::text),'0'),
+    `
+export const SHARED_GRANT_FUNCTIONS=[
+ SHARED_GRANT_STATES_V102.replace("'curation_input_allowed',",controlRevisions+"'curation_input_allowed',"),
  `REVOKE ALL ON FUNCTION shared.memory_current_grant_states(UUID[],UUID[]) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.lock_memory_grant_authority(p_installations UUID[],p_members UUID[])
   RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$

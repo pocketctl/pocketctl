@@ -20,6 +20,7 @@ import { LIFECYCLE_HEALTH_INDEX_MIGRATION } from './reporting/lifecycle-health-i
 import { LIFECYCLE_CONTEXT_MIGRATION } from './context/lifecycle-migration.js'
 import { LIFECYCLE_BACKFILL_MIGRATION } from './migrations/lifecycle-v3/migration.js'
 import { LIFECYCLE_RETENTION_MIGRATION } from './retention/lifecycle-v3-migration.js'
+import { CONTEXT_NATIVE_RECEIPT_MIGRATION } from './context/native-receipt-migration.js'
 import { CURATION_EXECUTION_MIGRATION, CURATION_NATIVE_AUTHORITY_MIGRATION } from './curation/execution-migration.js'
 import { LIFECYCLE_MIGRATION } from './curation/migration.js'
 import {EXTRACTION_RECOVERY_MIGRATION} from './extraction/recovery-migration.js'
@@ -2307,6 +2308,7 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   ]},
   RETENTION_REFERENCE_UUID_MIGRATION,
   CURATION_NATIVE_AUTHORITY_MIGRATION,
+  CONTEXT_NATIVE_RECEIPT_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
@@ -2343,7 +2345,7 @@ export async function applyMemorySchema(pool: pg.Pool,options:{namespace?:Memory
           }
           // This replacement pins its own search path. Leave unrelated
           // shared-contract functions at their existing narrower settings.
-          if(namespace==='memory'&&migration.version!==CURATION_NATIVE_AUTHORITY_MIGRATION.version)await pinMemoryFunctions(client)
+          if(namespace==='memory'&&migration.version!==CURATION_NATIVE_AUTHORITY_MIGRATION.version&&migration.version!==CONTEXT_NATIVE_RECEIPT_MIGRATION.version)await pinMemoryFunctions(client)
           await client.query(
             'INSERT INTO memory_schema_migrations (version) VALUES ($1)',
             [migration.version],

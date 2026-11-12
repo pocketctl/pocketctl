@@ -1,7 +1,7 @@
 import {MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
-import {currentPersonalInstallation,lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {currentPersonalInstallation,lockCurrentRelayAuthority,personalLifecycleAuthorityStampSql,personalLifecycleAuthorityStateSql,personalLifecycleDeliveryStampSql} from '../sources/current-grant.js'
 import type {CurationMode} from '../curation/contracts.js'
 import {lifecycleFrameCurrent,lifecycleFrameFenceSql} from './lifecycle-frame.js'
 import {revisionTimeSql} from '../claims/version-selection.js'
@@ -48,11 +48,14 @@ export type ConsumeResult =
   | { ok: false; error: 'not_found' | 'expired' | 'already_consumed' }
 
 type PersonalGrant = Exclude<PackAuthorityGrant, V2GrantFacts>
-type NativeInstallationState = Parameters<typeof currentPersonalInstallation>[0]
+type NativeInstallationState = NonNullable<Parameters<typeof currentPersonalInstallation>[0]> & {
+  authorization_epoch: string
+  owner_scope_id: string
+}
 const nativeInstallationStateSql = (id: string) =>
   `(SELECT state FROM shared.memory_current_grant_states(ARRAY[${id}::uuid],ARRAY[]::uuid[]) LIMIT 1)`
 
-function matchesPersonalGrant(state: NativeInstallationState, grant: PersonalGrant): boolean {
+function matchesPersonalGrant(state: NativeInstallationState | null | undefined, grant: PersonalGrant): boolean {
   const current = currentPersonalInstallation(state)
   return current.current && current.configVersion === grant.configVersion
     && (grant.userId === undefined || current.ownerUserId === String(grant.userId))
@@ -384,7 +387,13 @@ export function createAdmissionService(deps: {
     }): Promise<ConsumeResult> {
       const shared=sourcePoolContext(deps.pool).namespace==='memory'
       const grant = input.authorityGrant
-      const nativeGrant = shared && grant && !('scopeBindings' in grant) ? grant : undefined
+      const selectedPrimary = shared && grant && 'scopeBindings' in grant
+        && grant.primaryInstallationId === input.installationId
+        ? grant.scopeBindings.find(binding=>binding.installation_id===input.installationId
+          && binding.owner_scope_kind==='personal' && binding.membership_id===null
+          && binding.permissions.includes('read')) : undefined
+      const nativeGrant = shared && grant && !('scopeBindings' in grant) ? grant
+        : selectedPrimary && grant && { installationId:input.installationId,configVersion:grant.configVersion,userId:grant.userId }
       if (nativeGrant && nativeGrant.installationId !== input.installationId) {
         return { ok: false, error: 'not_found' }
       }
@@ -410,15 +419,23 @@ export function createAdmissionService(deps: {
           const observed=(await client.query<{
             injection_id:string|null;query_context:ContextQueryFrame|null;machine_sources:boolean|null
             native_authority?:NativeInstallationState
+            delivery_authority_sha256?:string|null
           }>(nativeGrant?`
             WITH installation AS MATERIALIZED (
               SELECT installation_id FROM memory_installations
               WHERE installation_id=$2 AND local_status='ready' FOR SHARE
             )
-            SELECT ${nativeInstallationStateSql('i.installation_id')} AS native_authority,pack.*
-            FROM installation i LEFT JOIN LATERAL (${packSql}) pack ON TRUE
+            SELECT authority.state AS native_authority,pack.*,
+              CASE WHEN ${personalLifecycleAuthorityStateSql('authority.state')}
+                THEN ${personalLifecycleDeliveryStampSql('i.installation_id',personalLifecycleAuthorityStampSql('authority.state'))}
+              END AS delivery_authority_sha256
+            FROM installation i
+            LEFT JOIN LATERAL shared.memory_current_grant_states(ARRAY[i.installation_id],ARRAY[]::uuid[]) authority ON TRUE
+            LEFT JOIN LATERAL (${packSql}) pack ON TRUE
           `:packSql,[input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac])).rows[0]
           const nativeCurrent = !nativeGrant || matchesPersonalGrant(observed?.native_authority, nativeGrant)
+            && (!selectedPrimary || (observed?.native_authority?.authorization_epoch===selectedPrimary.authorization_epoch
+              && observed.native_authority.owner_scope_id===selectedPrimary.owner_scope_id))
           const frozen = nativeCurrent && observed?.injection_id ? observed : undefined
           const origin=frozen?await originPolicyCorpusSnapshot(client,input.installationId):{stamp:null,fences:[]}
           const proof=frozen?.query_context?.selectedScopeProof
@@ -438,6 +455,8 @@ export function createAdmissionService(deps: {
           const originMatches=sourcesCurrent&&originLocked&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
           const originFences=JSON.stringify(originRows)
           const selectionProof=JSON.stringify(proof??null)
+          const consumeParameters=[input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac,
+            originMatches,originFences,selectionProof,currentGrantDeadline,machineSources]
           const consumed = await client.query<{
             pack_id: string
             stable_text: string
@@ -446,7 +465,8 @@ export function createAdmissionService(deps: {
             dynamic_hash: Buffer | null
           }>(`
             UPDATE memory_context_injections j
-            SET state = 'prepared'
+            SET state = 'prepared'${shared?`, native_delivery_authority_sha256=$11,
+              native_delivery_prepared_at=CASE WHEN $11::text IS NOT NULL THEN clock_timestamp() END`:''}
             FROM memory_context_packs p
             WHERE j.injection_id = $1 AND j.installation_id = $2
               AND j.session_id = $3 AND j.pack_id = $4
@@ -460,7 +480,7 @@ export function createAdmissionService(deps: {
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
             RETURNING p.pack_id::text, p.stable_text, p.dynamic_text,
                       p.stable_hash, p.dynamic_hash
-          `, [input.injectionId, input.installationId, input.sessionId, input.packId, nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline,machineSources])
+          `, shared?[...consumeParameters,frozen?.delivery_authority_sha256??null]:consumeParameters)
           const row = consumed.rows[0]
           if (row) {
             return {
@@ -511,22 +531,37 @@ export function createAdmissionService(deps: {
       delivered: boolean
       outcomeCode?: string
     }): Promise<ReceiptResult> {
-      const result = await deps.pool.query<{ state: string }>(`
-        UPDATE memory_context_injections
-		SET state = CASE WHEN state IN ('delivered', 'delivery_failed') THEN state
-                         WHEN $3 THEN 'delivered' ELSE 'delivery_failed' END,
-            delivered_at = CASE WHEN $3 AND delivered_at IS NULL THEN NOW() ELSE delivered_at END,
-			outcome_code = CASE WHEN state = 'prepared' THEN COALESCE($4, outcome_code)
-			                    ELSE outcome_code END
-        WHERE injection_id = $1 AND installation_id = $2 AND session_id = $5
-		  AND state IN ('prepared', 'delivered', 'delivery_failed')
-        RETURNING state
-      `, [input.injectionId, input.installationId, input.delivered, input.outcomeCode ?? null, input.sessionId])
-      const row = result.rows[0] as { state: 'delivered' | 'delivery_failed' } | undefined
-      if (!row) {
-		return { ok: false, error: 'not_found' }
+      const writeReceipt = async (db: Pick<pg.Pool,'query'>): Promise<ReceiptResult> => {
+        const result = await db.query<{ state: 'delivered' | 'delivery_failed' }>(`
+          UPDATE memory_context_injections
+          SET state = CASE WHEN $3 THEN 'delivered' ELSE 'delivery_failed' END,
+              delivered_at = CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,
+              outcome_code = COALESCE($4, outcome_code)
+          WHERE injection_id = $1 AND installation_id = $2 AND session_id = $5 AND state = 'prepared'
+          RETURNING state
+        `, [input.injectionId, input.installationId, input.delivered, input.outcomeCode ?? null, input.sessionId])
+        // A separate statement sees a concurrent winner after UPDATE waited for
+        // it. A terminal acknowledgement never fires another state trigger.
+        const row = result.rows[0] ?? (await db.query<{state:'delivered'|'delivery_failed'}>(`
+          SELECT state FROM memory_context_injections
+          WHERE injection_id=$1 AND installation_id=$2 AND session_id=$3 AND state IN('delivered','delivery_failed')
+        `,[input.injectionId,input.installationId,input.sessionId])).rows[0]
+        if (!row) {
+            return { ok: false, error: 'not_found' }
+        }
+        return { ok: true, state: row.state }
       }
-      return { ok: true, state: row.state }
+      if (sourcePoolContext(deps.pool).namespace!=='memory') return writeReceipt(deps.pool)
+      const client = await deps.pool.connect()
+      try {
+        await client.query("BEGIN;SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='250ms'")
+        const result = await writeReceipt(client)
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        await client.query('ROLLBACK').catch(()=>undefined)
+        throw error
+      } finally { client.release() }
     },
   }
 }
