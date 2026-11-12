@@ -37,3 +37,15 @@ export function deliveryWithdrawal(input: {
 export function deliveryVersionAvailableSql(version = 'v'): string {
   return `memory_delivery_version_available(${version}.installation_id,${version}.version_id)`
 }
+
+
+/** Set-oriented equivalent of memory_delivery_source_available for evidence
+ * joins. The aliases are code-owned SQL identifiers. */
+export function withdrawnDeliveryJoinSql(evidence: string, withdrawal: string): string {
+  return `${evidence}.locator#>>'{source_provenance,source_kind}'='team_session'
+   AND ${evidence}.locator#>>'{source_provenance,source_version}'='2'
+   AND ${withdrawal}.team_id=${evidence}.locator#>>'{source_provenance,team_id}'
+   AND ${withdrawal}.team_session_id=${evidence}.locator#>>'{source_provenance,team_session_id}'
+   AND ${withdrawal}.submission_id::text=${evidence}.locator#>>'{source_provenance,accepted_delivery,submission_id}'
+   AND ${withdrawal}.decision_id::text=${evidence}.locator#>>'{source_provenance,accepted_delivery,decision_id}'`
+}

@@ -33,16 +33,33 @@ export async function resolveLifecycleFrame(pool:pg.Pool,input:{installationId:s
  if(input.mode==='off')return undefined
  const c=await pool.connect()
  try{await c.query('BEGIN')
-  const p=(await c.query(`SELECT p.revision::text,p.consume_mode,o.authorization_epoch::text FROM memory_curation_policies p JOIN memory_owner_scopes o USING(installation_id)
-   WHERE p.installation_id=$1 AND o.owner_scope_kind='personal' AND o.state='active' FOR SHARE OF p,o`,[input.installationId])).rows[0]
-  if(!p){await c.query('COMMIT');return undefined}
   const destination=input.destination??'personal'
-  const rows=(await c.query(`SELECT s.space_id::text,s.revision::text FROM memory_spaces s WHERE s.installation_id=$1 AND s.state='active' AND $4=ANY(s.destinations)
-   AND (($2::uuid IS NOT NULL AND s.space_id=$2) OR ($2::uuid IS NULL AND EXISTS(SELECT 1 FROM memory_space_bindings b WHERE b.installation_id=s.installation_id AND b.space_id=s.space_id AND b.repository_id=$3))) ORDER BY s.space_id LIMIT 2 FOR SHARE OF s`,[input.installationId,input.spaceId??null,input.repositoryId,destination])).rows
-  const scene=rows.length===1?rows[0]:null
+  const p=(await c.query<{
+   revision:string;consume_mode:string;authorization_epoch:string;stored_binding:string|null;scenes:Array<{space_id:string;revision:string}>
+  }>(`WITH policy AS MATERIALIZED (
+   SELECT p.installation_id,p.revision::text,p.consume_mode,o.authorization_epoch::text
+   FROM memory_curation_policies p JOIN memory_owner_scopes o USING(installation_id)
+   WHERE p.installation_id=$1 AND o.owner_scope_kind='personal' AND o.state='active' FOR SHARE OF p,o
+  ), resolved AS MATERIALIZED (
+  SELECT policy.*,COALESCE((
+   SELECT jsonb_agg(scene ORDER BY scene.space_id) FROM (
+    SELECT s.space_id::text,s.revision::text FROM memory_spaces s
+    WHERE s.installation_id=policy.installation_id AND s.state='active' AND $4=ANY(s.destinations)
+     AND (($2::uuid IS NOT NULL AND s.space_id=$2) OR ($2::uuid IS NULL AND EXISTS(
+      SELECT 1 FROM memory_space_bindings b WHERE b.installation_id=s.installation_id
+       AND b.space_id=s.space_id AND b.repository_id=$3)))
+    ORDER BY s.space_id LIMIT 2 FOR SHARE OF s
+   ) scene
+  ),'[]'::jsonb) AS scenes FROM policy
+  )
+  SELECT resolved.*,(SELECT f.binding FROM memory_session_scene_frames f
+   WHERE f.installation_id=resolved.installation_id AND f.session_id=$5 FOR NO KEY UPDATE) AS stored_binding
+  FROM resolved`,[input.installationId,input.spaceId??null,input.repositoryId,destination,input.sessionId])).rows[0]
+  if(!p){await c.query('COMMIT');return undefined}
+  const scene=p.scenes.length===1?p.scenes[0]:null
   const value={spaceId:scene?.space_id??null,spaceRevision:scene?.revision??null,destination,policyRevision:p.revision,authorizationEpoch:p.authorization_epoch,sessionId:input.sessionId,consume:input.mode==='enabled'&&p.consume_mode==='enabled'}
   const binding=createHash('sha256').update(JSON.stringify(value)).digest('hex')
-  await c.query(`INSERT INTO memory_session_scene_frames(installation_id,session_id,binding) VALUES($1,$2,$3) ON CONFLICT(installation_id,session_id) DO UPDATE SET binding=EXCLUDED.binding WHERE memory_session_scene_frames.binding<>EXCLUDED.binding`,[input.installationId,input.sessionId,binding])
+  if(p.stored_binding!==binding)await c.query(`INSERT INTO memory_session_scene_frames(installation_id,session_id,binding) VALUES($1,$2,$3) ON CONFLICT(installation_id,session_id) DO UPDATE SET binding=EXCLUDED.binding WHERE memory_session_scene_frames.binding<>EXCLUDED.binding`,[input.installationId,input.sessionId,binding])
   await c.query('COMMIT');return {...value,binding}
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }

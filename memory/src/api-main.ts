@@ -5,6 +5,8 @@ import {updateBusinessHealthGauges} from './metrics.js'
 import {recordRecallMetrics,updateRetrievalIndexGauges} from './metrics.js'
 import Fastify from 'fastify'
 import { createHash } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
+import { createMemoryLogger } from './logging.js'
 import { loadMemoryConfig } from './config.js'
 import { createMemoryPool } from './db.js'
 import {prepareMemoryStartup} from './startup-schema.js'
@@ -69,8 +71,20 @@ import {
  */
 async function main(): Promise<void> {
   const config = loadMemoryConfig()
-  const pool = createMemoryPool(config)
+  // The native turn has one deadline for all three Context requests.
+  // Keep a small number of already-authorized connections below the existing
+  // pool ceiling so the foreground path does not pay connection setup.
+  const retainedConnections = config.mode === 'enabled' && config.databaseNamespace === 'memory'
+    ? Math.min(3, config.dbPoolMax) : 0
+  const pool = createMemoryPool(config, { retainIdleConnections: retainedConnections })
+  if (retainedConnections) {
+    const logger = createMemoryLogger('warn')
+    pool.on('error', () => logger.log('warn', 'memory_idle_database_connection_lost'))
+  }
   await prepareMemoryStartup(pool,config)
+  const warmConnections = retainedConnections
+    ? Promise.allSettled(Array.from({ length: retainedConnections }, () => pool.query('SELECT 1')))
+    : undefined
   const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
   const providerDrain=new ProviderDrain()
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
@@ -365,6 +379,7 @@ async function main(): Promise<void> {
   }
 
   const port = config.port
+  if (warmConnections) await Promise.race([warmConnections, delay(1_000, undefined, { ref: false })])
   await app.listen({ port, host: config.apiBind === 'all' ? '0.0.0.0' : '127.0.0.1' })
 
   const shutdown = async () => {

@@ -64,4 +64,5 @@ export interface ScopeResolution {
   repositoryKnown: boolean
   personaOnly: boolean
   sessionKnown: boolean
+  consumptionGeneration: string
 }

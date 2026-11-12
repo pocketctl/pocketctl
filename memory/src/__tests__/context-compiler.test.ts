@@ -53,6 +53,7 @@ function fakeDeps(overrides: {
         repositoryKnown: overrides.repositoryKnown !== false,
         personaOnly: overrides.repositoryKnown === false,
         sessionKnown: true,
+        consumptionGeneration: '1',
       })),
       personaVersions: vi.fn(async () => overrides.persona ?? []),
     } as unknown as ScopeResolver,

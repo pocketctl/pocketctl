@@ -20,7 +20,7 @@ export function createScopeResolver(pool: pg.Pool) {
       repositoryKeyHint?: string | null
       unknownRepositoryBehavior?: 'persona_only' | 'empty'
     }): Promise<ScopeResolution> {
-      const scope = (await pool.query<{ session_known: boolean; repository_id: string | null }>(`
+      const scope = (await pool.query<{ session_known: boolean; repository_id: string | null; generation: string }>(`
         SELECT EXISTS (
           SELECT 1 FROM source_sessions
           WHERE installation_id = $1 AND session_id = $2 AND deleted_at IS NULL
@@ -29,7 +29,8 @@ export function createScopeResolver(pool: pg.Pool) {
           WHERE installation_id = $1 AND (repository_id = $3::uuid OR repository_key = $4)
           ORDER BY (repository_id = $3::uuid) DESC NULLS LAST
           LIMIT 1
-        ) AS repository_id
+        ) AS repository_id,
+          COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=$1),1)::text AS generation
       `, [input.installationId, input.sessionId, input.repositoryIdHint || null, input.repositoryKeyHint || null])).rows[0]
       let repositoryId = scope?.repository_id ?? null
       if (!repositoryId && !input.repositoryIdHint && !input.repositoryKeyHint) {
@@ -58,6 +59,7 @@ export function createScopeResolver(pool: pg.Pool) {
         // An unknown hint narrows to Persona (or empty); never widens scope.
         personaOnly: !repositoryKnown && personaOnlyBehavior === 'persona_only',
         sessionKnown: scope?.session_known === true,
+        consumptionGeneration: scope?.generation ?? '1',
       }
     },
 

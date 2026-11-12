@@ -3,6 +3,7 @@ import {retainedSourceRead,type SourceReadGrant} from '../sources/retained-read.
 import {guardRetainedVersions,rememberRetainedVersionStatement} from '../sources/retained-versions.js'
 import {lifecycleClaimSql,type LifecycleReadFrame} from '../context/lifecycle-frame.js'
 import {recallPoolBudget} from './recall-pools.js'
+import {withdrawnDeliveryJoinSql} from '../episodes/delivery-withdrawal.js'
 import {currentClaimVersionSql,asOfClaimVersionSql} from '../claims/version-selection.js'
 import {ORIGIN_POLICY_REQUIRED_SQL,originPolicyDecisions} from '../governance/origin-policy.js'
 import { createHash, createHmac, timingSafeEqual } from 'crypto'
@@ -100,6 +101,8 @@ interface PrefilteredRow {
   vector_score?:number|string|null
   eligible_count?:string
   selected_cap?:boolean
+  native_fts_rank?:number|null
+  native_trigram_rank?:number|null
 }
 
 export interface SearchServiceDeps {
@@ -154,6 +157,18 @@ export function createSearchService(deps: SearchServiceDeps) {
           else queryEmbedding=normalize(vector)
         }catch{degraded.push('embedding')}
       }
+      const nativeLexical = input.localOnly === true && !historicalSelection && sourcePoolContext(deps.pool).namespace === 'memory'
+      const currentVersion = nativeLexical ? `(c.current_version_id=v.version_id AND COALESCE(v.body_state,'present')='present'
+        AND COALESCE(v.effective_from,v.created_at)<=search_clock.as_of
+        AND (v.effective_until IS NULL OR v.effective_until>search_clock.as_of)
+        AND NOT EXISTS(
+          SELECT 1 FROM knowledge_evidence de
+          JOIN memory_team_delivery_withdrawals dw ON ${withdrawnDeliveryJoinSql('de','dw')}
+          WHERE de.installation_id=v.installation_id AND de.version_id=v.version_id
+        ))` : currentClaimVersionSql('c','v','search_clock.as_of')
+      const ftsMatch = "e.search_vector@@websearch_to_tsquery('simple'::regconfig,$16)"
+      const ftsScore = `CASE WHEN ${ftsMatch} THEN ts_rank(e.search_vector,websearch_to_tsquery('simple'::regconfig,$16)) END`
+      const trigramScore = 'word_similarity($16,e.search_document)'
       // SQL ranks the entire eligible corpus before bounded hydration. No UUID prefix scan.
       const prefiltered = await deps.pool.query<PrefilteredRow>(`
         WITH search_clock AS (
@@ -177,7 +192,7 @@ export function createSearchService(deps: SearchServiceDeps) {
           AND c.consumption_hold_reason IS NULL
           AND ${lifecycleClaimSql('$24','$25','$26')}
           AND (v.applicability IS NULL OR v.applicability->>'status'='verified')
-          AND ${historicalSelection ? asOfClaimVersionSql('c','v','search_clock.as_of') : currentClaimVersionSql('c','v','search_clock.as_of')}
+          AND ${historicalSelection ? asOfClaimVersionSql('c','v','search_clock.as_of') : currentVersion}
           AND (v.valid_from IS NULL OR v.valid_from <= search_clock.as_of)
           AND (v.valid_until IS NULL OR v.valid_until > search_clock.as_of)
           AND EXISTS (
@@ -241,6 +256,11 @@ export function createSearchService(deps: SearchServiceDeps) {
           (SELECT count(*)::text FROM eligible) AS eligible_count,
           ((SELECT count(*) FROM metadata_candidates)>=$21 OR (SELECT count(*) FROM lexical_candidates)>=$21
             OR (SELECT count(*) FROM vector_candidates)>=$21) AS selected_cap
+          ${nativeLexical ? `,
+            CASE WHEN ${ftsMatch} THEN (row_number() OVER(
+              ORDER BY (${ftsScore}) DESC NULLS LAST,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_fts_rank,
+            CASE WHEN ${trigramScore}>.3 THEN (row_number() OVER(
+              ORDER BY ${trigramScore} DESC,e.authority DESC,e.freshness_at DESC,e.version_id))::integer END AS native_trigram_rank` : ''}
         FROM eligible e JOIN picked USING(version_id) LEFT JOIN vector_candidates vc USING(version_id)
         ORDER BY e.version_id
       `, [
@@ -297,49 +317,58 @@ export function createSearchService(deps: SearchServiceDeps) {
       // 3. Lexical pool: FTS over the projection, trigram fallback on parse
       //    failure or empty recall (covers CJK and code tokens).
       let lexicalPool: string[] = []
-      try {
-        const fts = await deps.pool.query<{ version_id: string }>(`
-          WITH candidate_documents AS (
-            SELECT v.version_id, v.authority, v.freshness_at,
-                   COALESCE(d.search_vector, to_tsvector('simple'::regconfig, v.statement)) AS search_vector
-            FROM knowledge_versions v
-            LEFT JOIN claim_search_documents d
-              ON d.installation_id = v.installation_id AND d.version_id = v.version_id
-            WHERE v.installation_id = $1 AND v.version_id = ANY($2::uuid[])
-          )
-          SELECT version_id::text
-          FROM candidate_documents
-          WHERE search_vector @@ websearch_to_tsquery('simple'::regconfig, $3)
-          ORDER BY ts_rank(search_vector, websearch_to_tsquery('simple'::regconfig, $3)) DESC,
-                   authority DESC, freshness_at DESC,
-                   version_id
-          LIMIT 200
-        `, [input.installationId, versionIds, query])
-        lexicalPool = fts.rows.map(row => row.version_id)
-      } catch {
-        lexicalPool = []
-      }
-      if (lexicalPool.length === 0) {
-        // word_similarity ranks the best matching span of the document —
-        // substring semantics that cover CJK text and code identifiers the
-        // 'simple' tokenizer cannot split.
-        const trgm = await deps.pool.query<{ version_id: string }>(`
-          WITH candidate_documents AS (
-            SELECT v.version_id, v.authority, v.freshness_at,
-                   COALESCE(d.document, v.statement) AS document
-            FROM knowledge_versions v
-            LEFT JOIN claim_search_documents d
-              ON d.installation_id = v.installation_id AND d.version_id = v.version_id
-            WHERE v.installation_id = $1 AND v.version_id = ANY($2::uuid[])
-          )
-          SELECT version_id::text
-          FROM candidate_documents
-          WHERE word_similarity($3, document) > 0.3
-          ORDER BY word_similarity($3, document) DESC,
-                   authority DESC, freshness_at DESC, version_id
-          LIMIT 200
-        `, [input.installationId, versionIds, query])
-        lexicalPool = trgm.rows.map(row => row.version_id)
+      if (nativeLexical) {
+        const ranked = (field: 'native_fts_rank' | 'native_trigram_rank') => rows
+          .filter(row => row[field] != null)
+          .sort((a,b) => a[field]! - b[field]!)
+          .map(row => row.version_id)
+        lexicalPool = ranked('native_fts_rank')
+        if (!lexicalPool.length) lexicalPool = ranked('native_trigram_rank')
+      } else {
+        try {
+          const fts = await deps.pool.query<{ version_id: string }>(`
+            WITH candidate_documents AS (
+              SELECT v.version_id, v.authority, v.freshness_at,
+                     COALESCE(d.search_vector, to_tsvector('simple'::regconfig, v.statement)) AS search_vector
+              FROM knowledge_versions v
+              LEFT JOIN claim_search_documents d
+                ON d.installation_id = v.installation_id AND d.version_id = v.version_id
+              WHERE v.installation_id = $1 AND v.version_id = ANY($2::uuid[])
+            )
+            SELECT version_id::text
+            FROM candidate_documents
+            WHERE search_vector @@ websearch_to_tsquery('simple'::regconfig, $3)
+            ORDER BY ts_rank(search_vector, websearch_to_tsquery('simple'::regconfig, $3)) DESC,
+                     authority DESC, freshness_at DESC,
+                     version_id
+            LIMIT 200
+          `, [input.installationId, versionIds, query])
+          lexicalPool = fts.rows.map(row => row.version_id)
+        } catch {
+          lexicalPool = []
+        }
+        if (lexicalPool.length === 0) {
+          // word_similarity ranks the best matching span of the document —
+          // substring semantics that cover CJK text and code identifiers the
+          // 'simple' tokenizer cannot split.
+          const trgm = await deps.pool.query<{ version_id: string }>(`
+            WITH candidate_documents AS (
+              SELECT v.version_id, v.authority, v.freshness_at,
+                     COALESCE(d.document, v.statement) AS document
+              FROM knowledge_versions v
+              LEFT JOIN claim_search_documents d
+                ON d.installation_id = v.installation_id AND d.version_id = v.version_id
+              WHERE v.installation_id = $1 AND v.version_id = ANY($2::uuid[])
+            )
+            SELECT version_id::text
+            FROM candidate_documents
+            WHERE word_similarity($3, document) > 0.3
+            ORDER BY word_similarity($3, document) DESC,
+                     authority DESC, freshness_at DESC, version_id
+            LIMIT 200
+          `, [input.installationId, versionIds, query])
+          lexicalPool = trgm.rows.map(row => row.version_id)
+        }
       }
       lexicalPool=lexicalPool.slice(0,internal?budget:200)
       pools.push({ name: 'lexical', ranked: lexicalPool })
