@@ -18,6 +18,7 @@ import type { ContextMode } from '../context/types.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
 import { registerApiErrorDiagnostics } from './error-diagnostics.js'
+import { createMemoryLogger } from '../logging.js'
 
 /**
  * Phase 2 context routes (plan section 10). Agent routes require a
@@ -136,6 +137,7 @@ interface CompileBody {
 
 export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDeps) {
   registerApiErrorDiagnostics(app, deps.unexpectedErrorSink)
+  const logger = createMemoryLogger('warn')
   const idempotency = createIdempotencyStore(deps.pool)
   const mutation = async (
     req: Pick<import('fastify').FastifyRequest, 'headers' | 'body' | 'params'>,
@@ -283,7 +285,9 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     const query = truncateUtf8(body.query, MAX_QUERY_BYTES)
 
     // Session binding: the body session MUST equal the grant session.
+    const startedAt = performance.now()
     const grant = await daemonGuard(req.headers.authorization, body.session_id)
+    const verifiedAt = performance.now()
     if (references.length > 0 && (!sharedAuthorized(grant, grant.installationId)
       || references.some(reference=>!sharedAuthorized(grant,reference.installation_id)))) {
       throw new MemoryApiError('forbidden', 'shared Context requires a readable v2 scope grant')
@@ -320,6 +324,16 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       selectedReferences: references,
       ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     }).catch(async error=>{await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined);throw error})
+
+    const finishedAt = performance.now()
+    if (body.adapter_capability === 'native_hidden_v1' && (reply.raw.destroyed || finishedAt - startedAt >= 400)) {
+      logger.log('warn', 'context_compile_latency', {
+        outcome: outcome.kind,
+        grant_ms: Math.round(verifiedAt - startedAt),
+        compile_ms: Math.round(finishedAt - verifiedAt),
+        client_closed: reply.raw.destroyed,
+      })
+    }
 
     if(outcome.kind==='off'||outcome.kind==='unsupported_adapter'||outcome.kind==='degraded'||outcome.kind==='retrieval_failed'||outcome.kind==='shadow'||(outcome.kind==='empty'&&(outcome.degradedComponents.length>0||['snapshot_context_unavailable','missing_source'].includes(outcome.reason)))){
       const reason=outcome.kind==='off'?'context_off':outcome.kind==='shadow'?'shadow_only':outcome.kind==='unsupported_adapter'?'unsupported_adapter':'degraded'

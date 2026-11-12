@@ -227,6 +227,7 @@ async function main(): Promise<void> {
       relayUrl: config.relayUrl,
       relayIssuer: config.relayIssuer,
     })
+    await guard.warmSigningKeys()
     const rateLimiter = createRateLimiter(120, 60_000)
     registerCodegraphRoutes(app, {
       pool,

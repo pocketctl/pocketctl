@@ -236,6 +236,20 @@ describe('capability grant verification', () => {
     expect(await verifier.verify(grant, 'memory.search')).toBeNull()
   })
 
+  test('startup can warm Relay keys without caching grant authorization', async () => {
+    const keys = makeKeys()
+    const installations = {
+      [INSTALLATION]: { local_status: 'ready', relay_status: 'active', config_version: '3' },
+    }
+    const { verifier, fetchMock } = makeVerifier(keys, { installations })
+    await verifier.warmSigningKeys()
+    const token = signGrant(keys)
+    expect(await verifier.verify(token, 'memory.search')).not.toBeNull()
+    installations[INSTALLATION].config_version = '4'
+    expect(await verifier.verify(token, 'memory.search')).toBeNull()
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
   test('an unknown kid forces exactly one JWKS refresh', async () => {
     const oldKeys = makeKeys()
     const newKeys = makeKeys()

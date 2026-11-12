@@ -60,6 +60,8 @@ export function createGrantGuard(deps: GrantGuardDeps) {
   })
 
   return {
+    warmSigningKeys: verifier.warmSigningKeys,
+
     async guard(input: {
       authorization: string | undefined
       requiredService: string
@@ -206,4 +208,4 @@ export function createGrantGuard(deps: GrantGuardDeps) {
   }
 }
 
-export type GrantGuard = ReturnType<typeof createGrantGuard>
+export type GrantGuard = Omit<ReturnType<typeof createGrantGuard>, 'warmSigningKeys'>
