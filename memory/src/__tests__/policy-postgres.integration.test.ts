@@ -12,6 +12,7 @@ import {
   SYSTEM_RANKING_POLICY_V1,
 } from '../policies/schemas.js'
 import { createExtractionRepository } from '../extraction/repository.js'
+import { createTransactionBoundPool } from '../api/transaction-bound-pool.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -92,6 +93,32 @@ describeWithDatabase('versioned policies (PostgreSQL)', () => {
       WHERE s.installation_id IS NULL
     `)
     expect(Number(versions.rows[0].n)).toBe(3)
+  })
+
+  test('resolving installed system policies does not wait for a concurrent head row lock', async () => {
+    await repository.ensureSystemPolicies()
+    const locker = await pool.connect()
+    const reader = await pool.connect()
+    try {
+      await locker.query('BEGIN')
+      await locker.query(`
+        SELECT h.policy_id FROM memory_policy_heads h JOIN memory_policy_sets s USING (policy_id)
+        WHERE s.installation_id IS NULL AND s.layer = 'system' FOR UPDATE OF h
+      `)
+      await reader.query('BEGIN')
+      await reader.query("SET LOCAL lock_timeout='150ms'")
+      const transactionPool = createTransactionBoundPool(reader)
+      const policy = await createPolicyResolver({
+        pool: transactionPool, repository: createPolicyRepository(transactionPool),
+      }).resolve({ installationId: INSTALLATION, kind: 'context' })
+      expect(policy.document).toEqual(SYSTEM_CONTEXT_POLICY_V1)
+      expect(policy.policyVersionIds).toHaveLength(1)
+    } finally {
+      await reader.query('ROLLBACK')
+      reader.release()
+      await locker.query('ROLLBACK')
+      locker.release()
+    }
   })
 
   test('system ranking policy advances immutably when its code-owned contract changes', async () => {

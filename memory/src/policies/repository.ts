@@ -25,6 +25,11 @@ export interface PolicyHeadRow {
   revision: number
 }
 
+const systemPolicies = (['extraction', 'context', 'ranking'] as const).map(kind => {
+  const document = systemPolicyFor(kind)
+  return { kind, document, hash: canonicalPolicyHash(document) }
+})
+
 /**
  * Policy persistence over the v13 schema. System rows carry a NULL
  * installation and are installed idempotently; repository/user rows are
@@ -35,7 +40,18 @@ export function createPolicyRepository(pool: pg.Pool) {
   return {
     /** Idempotently install and activate the latest code-owned system document. */
     async ensureSystemPolicies(): Promise<void> {
-      for (const kind of ['extraction', 'context', 'ranking'] as const) {
+      // ON CONFLICT DO UPDATE locks the head even when its WHERE clause is
+      // false. Initialized readers use committed heads without a write lock.
+      const installed = await pool.query<{ policy_kind: PolicyKind; content_hash: Buffer }>(`
+        SELECT s.policy_kind, v.content_hash
+        FROM memory_policy_sets s
+        JOIN memory_policy_heads h ON h.policy_id = s.policy_id
+        JOIN memory_policy_versions v ON v.policy_id = s.policy_id AND v.policy_version_id = h.active_version_id
+        WHERE s.installation_id IS NULL AND s.layer = 'system' AND s.scope_key = 'global'
+      `)
+      const hashes = new Map(installed.rows.map(row => [row.policy_kind, row.content_hash]))
+      for (const { kind, document, hash } of systemPolicies) {
+        if (hashes.get(kind)?.equals(hash)) continue
         const set = await pool.query<{ policy_id: string }>(`
           INSERT INTO memory_policy_sets
             (policy_id, installation_id, policy_kind, layer, scope_key)
@@ -47,12 +63,10 @@ export function createPolicyRepository(pool: pg.Pool) {
         if (!policyId) {
           const existing = await pool.query<{ policy_id: string }>(`
             SELECT policy_id::text FROM memory_policy_sets
-            WHERE installation_id IS NULL AND policy_kind = $1 AND layer = 'system'
+            WHERE installation_id IS NULL AND policy_kind = $1 AND layer = 'system' AND scope_key = 'global'
           `, [kind])
           policyId = existing.rows[0].policy_id
         }
-        const document = systemPolicyFor(kind)
-        const hash = canonicalPolicyHash(document)
         const version = await pool.query<{ policy_version_id: string }>(`
           INSERT INTO memory_policy_versions
             (policy_version_id, policy_id, version_number, schema_version,

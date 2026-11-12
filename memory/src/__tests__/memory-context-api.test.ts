@@ -136,6 +136,30 @@ describe('context route contracts (unit)', () => {
     expect(response.json()).toEqual({outcome:'degraded',reason:'context_consumption_changed'})
   })
 
+  test('slow native compilation logs bounded phase timings without request data', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const app = appWith({ compiler: { compile: async () => {
+      await new Promise(resolve => setTimeout(resolve, 425))
+      return { kind: 'ready', packId: 'private-pack', stableTokens: 0, dynamicTokens: 2, itemCount: 1 }
+    } } as never })
+    try {
+      const response = await app.inject({
+        method: 'POST', url: '/api/v1/memory/context/compile',
+        headers: { host: 'memory.test', authorization: 'Bearer private-grant' },
+        payload: { schema_version: 1, client_request_id: 'private-request', session_id: 'private-session',
+          agent: 'codex', adapter_capability: 'native_hidden_v1', query: 'private-query' },
+      })
+      expect(response.statusCode).toBe(200)
+      const line = log.mock.calls.map(call => String(call[0])).find(value => value.includes('context_compile_latency'))
+      expect(line).toBeDefined()
+      expect(JSON.parse(line!)).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number) })
+      expect(line).not.toContain('private-')
+    } finally {
+      log.mockRestore()
+      await app.close()
+    }
+  })
+
   test('an off compile outcome maps to the frozen wire shape', async () => {
     const app = appWith({
       compiler: { compile: vi.fn(async () => ({ kind: 'off' })) } as never,

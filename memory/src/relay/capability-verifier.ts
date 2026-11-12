@@ -96,9 +96,9 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
   const now = options.now ?? (() => Date.now())
   const cache = new Map<string, CachedJwk>()
 
-  async function fetchJwks(): Promise<void> {
+  async function fetchJwks(timeoutMs = 10_000): Promise<void> {
     const response = await doFetch(`${options.relayUrl}${JWKS_PATH}`, {
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
     if (!response.ok) throw new Error('jwks endpoint unavailable')
     const document = await response.json() as { keys?: unknown }
@@ -135,6 +135,11 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
   }
 
   return {
+    /** Warm only public signing keys. Verification still rechecks each grant. */
+    async warmSigningKeys(): Promise<void> {
+      await fetchJwks(1_000).catch(() => undefined)
+    },
+
     async verify(
       token: string,
       requiredService: string,
