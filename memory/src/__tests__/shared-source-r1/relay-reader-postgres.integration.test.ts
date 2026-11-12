@@ -1024,11 +1024,17 @@ suite('controlled personal Relay source reader',()=>{
   const {createCanonicalProjectionHandler}=await import('../../sources/canonical-projection-worker.js')
   const {withSourceJobExecution}=await import('../../sources/source-execution.js')
   const {createSourceProjector}=await import('../../projection/source-projector.js')
+  const {shadowComparisonContextKey}=await import('../../sources/canonical-shadow-worker.js')
   const session='metadata-time',target={kind:'relay_event' as const,key:'1:'+session},body={text:'new canonical source'},feed='991',legacyJob='70000000-0000-0000-0000-000000000098',shadowJob='70000000-0000-0000-0000-000000000099'
+  const feedEnvelopeHash=(feedId:string,eventId:string,recordedAt:string,payload:Record<string,unknown>)=>canonicalPayloadHash({
+   envelope_version:1,feed_id:feedId,topic:'session.event.v1',
+   source:{kind:'canonical_event',id:'event:'+eventId,recorded_at:recordedAt},
+   subject:{session_id:session,event_type:'agent_text'},classification:{},data:payload,
+  })
   await runtime.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1) ON CONFLICT(installation_id) DO UPDATE SET relay_status='active',local_status='ready'",[inst])
   await runtime.query("INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,claimed_by,claim_epoch,claim_expires_at) VALUES($1,$3,'project_feed','shadow-legacy-test',50,'running','shadow-test',1,clock_timestamp()+interval '5 minutes'),($2,$3,'project_shared_source','shadow-canonical-test',52,'running','shadow-test',1,clock_timestamp()+interval '5 minutes')",[legacyJob,shadowJob,inst])
   await runtime.query(`INSERT INTO memory_feed_inbox(installation_id,feed_id,envelope_version,topic,source_kind,source_id,session_id,event_type,recorded_at,data,payload_hash)
-   VALUES($1,$2,1,'session.event.v1','canonical_event','event:9007199254741244',$3,'agent_text','2026-11-06T12:34:56.123Z',$4,$5)`,[inst,feed,session,body,canonicalPayloadHash(body)])
+   VALUES($1,$2,1,'session.event.v1','canonical_event','event:9007199254741244',$3,'agent_text','2026-11-06T12:34:56.123Z',$4,$5)`,[inst,feed,session,body,feedEnvelopeHash(feed,'9007199254741244','2026-11-06T12:34:56.123Z',body)])
   const claim=(await runtime.query("SELECT source_kind,root_key,lease_token::text,claimed_revision::text FROM shared.claim_memory_source_work('shadow-distributor',30,128)")).rows.find(r=>r.source_kind===target.kind&&r.root_key===target.key)!
   let page:any=null
   for(let n=0;n<5;n++){page=(await runtime.query('SELECT shared.step_memory_source_distribution($1,$2,$3,$4,$5,$6,$7,64) AS page',[target.kind,target.key,claim.lease_token,'shadow-distributor',claim.claimed_revision,page?.scanId??null,page?.cursor??''])).rows[0].page;if(page.state==='sealed')break}
@@ -1036,18 +1042,42 @@ suite('controlled personal Relay source reader',()=>{
   const handler=createCanonicalProjectionHandler(runtime,{pageSize:64,deferMs:0})
   let epoch=1
   const run=async()=>withSourceJobExecution(runtime,{jobId:shadowJob,claimedBy:'shadow-test',claimEpoch:epoch},()=>handler({job_id:shadowJob,installation_id:inst,job_type:'project_shared_source',payload} as any,new AbortController().signal),{branch:'canonical-shadow'})
-  const progress=async()=>(await runtime.query('SELECT shared.read_memory_source_shadow_progress($1,$2,$3,$4,$5) AS progress',[inst,target.kind,target.key,page.scanId,canonicalPayloadHash(scope).toString('hex')])).rows[0].progress
+  const previousContext=canonicalPayloadHash(scope).toString('hex'),previousScan=page.scanId
+  const previousVersion=(await createPostgresSharedSourceReader(runtime,{storage,limits}).listHeads(scope,target,{limit:1})).version
+  await pool.query(`INSERT INTO shared.memory_source_shadow_progress
+   (installation_id,source_kind,root_key,scan_id,context_key,source_version,next_cursor,last_page_hash,matched,unproven,different,unknown_provenance,canonical_digest,legacy_digest,state)
+   VALUES($1,$2,$3,$4,$5,$6,'historical-prefix',repeat('0',64),1,0,0,0,repeat('1',64),repeat('1',64),'scanning')`,
+   [inst,target.kind,target.key,previousScan,previousContext,previousVersion])
+  const previousProgress=async()=>(await runtime.query('SELECT shared.read_memory_source_shadow_progress($1,$2,$3,$4,$5) AS progress',[inst,target.kind,target.key,previousScan,previousContext])).rows[0].progress
+  const progress=async()=>(await runtime.query('SELECT shared.read_memory_source_shadow_progress($1,$2,$3,$4,$5) AS progress',[inst,target.kind,target.key,page.scanId,shadowComparisonContextKey(scope,target.kind)])).rows[0].progress
   const budgetBefore=(await runtime.query('SELECT count(*)::text n FROM memory_provider_budget_reservations')).rows[0].n
   try{
    await expect(run()).rejects.toMatchObject({name:'JobDeferredError'})
    expect(await progress()).toMatchObject({state:'waiting',matched:'0',fullAcceptanceReady:false})
    await withSourceJobExecution(runtime,{jobId:legacyJob,claimedBy:'shadow-test',claimEpoch:1},()=>createSourceProjector(runtime).projectOnce(inst))
    const original=(await runtime.query("SELECT source_event_id::text,payload_hash,origin,payload FROM source_events WHERE installation_id=$1 AND origin='feed' AND origin_position=$2",[inst,feed])).rows[0]
+   const deliveryWriter=await pool.connect()
+   try{
+    await deliveryWriter.query('BEGIN')
+    await deliveryWriter.query('SELECT 1 FROM memory.memory_feed_inbox WHERE installation_id=$1 AND feed_id=$2 FOR UPDATE',[inst,feed])
+    await expect(run()).rejects.toMatchObject({code:'55P03'})
+    expect(await progress()).toMatchObject({state:'waiting',matched:'0',fullAcceptanceReady:false})
+   }finally{
+    await deliveryWriter.query('ROLLBACK')
+    deliveryWriter.release()
+   }
    await run()
    expect(await progress()).toMatchObject({state:'body_identity_ready',matched:'1',different:'0',unproven:'0',unknownProvenance:'1',fullAcceptanceReady:false})
+   expect(await previousProgress()).toMatchObject({state:'scanning',matched:'1',nextCursor:'historical-prefix',version:previousVersion})
    expect((await runtime.query('SELECT source_event_id::text,payload_hash,origin,payload FROM source_events WHERE source_event_id=$1',[original.source_event_id])).rows[0]).toEqual(original)
    expect((await pool.query('SELECT 1 FROM shared.memory_source_progress WHERE installation_id=$1',[inst])).rowCount).toBe(0)
    expect((await runtime.query('SELECT count(*)::text n FROM memory_provider_budget_reservations')).rows[0].n).toBe(budgetBefore)
+   await runtime.query("UPDATE memory_feed_inbox SET payload_hash=decode(repeat('ab',32),'hex') WHERE installation_id=$1 AND feed_id=$2",[inst,feed])
+   await expect(run()).rejects.toMatchObject({name:'JobDeferredError'})
+   expect(await progress()).toMatchObject({state:'waiting',unproven:'1',fullAcceptanceReady:false})
+   await runtime.query('UPDATE memory_feed_inbox SET payload_hash=$3 WHERE installation_id=$1 AND feed_id=$2',[
+    inst,feed,feedEnvelopeHash(feed,'9007199254741244','2026-11-06T12:34:56.123Z',body),
+   ])
    await runtime.query("UPDATE source_events SET payload='{}' WHERE source_event_id=$1",[original.source_event_id])
    await runtime.query('UPDATE memory_jobs SET claim_epoch=2 WHERE job_id=$1',[shadowJob]);epoch=2
    await run()
@@ -1066,7 +1096,7 @@ suite('controlled personal Relay source reader',()=>{
    await expect(run()).rejects.toMatchObject({name:'JobDeferredError'})
    expect(await progress()).toMatchObject({state:'waiting',observedDifferent:'1',firstFindings})
    await runtime.query(`INSERT INTO memory_feed_inbox(installation_id,feed_id,envelope_version,topic,source_kind,source_id,session_id,event_type,recorded_at,data,payload_hash)
-    VALUES($1,992,1,'session.event.v1','canonical_event','event:9007199254741257',$2,'agent_text','2026-11-06T12:34:57.456Z',$3,$4)`,[inst,session,{text:'second shadow source'},canonicalPayloadHash({text:'second shadow source'})])
+    VALUES($1,992,1,'session.event.v1','canonical_event','event:9007199254741257',$2,'agent_text','2026-11-06T12:34:57.456Z',$3,$4)`,[inst,session,{text:'second shadow source'},feedEnvelopeHash('992','9007199254741257','2026-11-06T12:34:57.456Z',{text:'second shadow source'})])
    await withSourceJobExecution(runtime,{jobId:legacyJob,claimedBy:'shadow-test',claimEpoch:1},()=>createSourceProjector(runtime).projectOnce(inst))
    await run()
    expect(await progress()).toMatchObject({state:'body_identity_ready',matched:'2',different:'0',unproven:'0',observedDifferent:'1',firstFindings})

@@ -4,7 +4,7 @@ import {compareSourcePage,type LegacyComparisonSource} from '../../sources/shado
 const payload={text:'private synthetic body',turn_id:'turn'}
 const hash=canonicalPayloadHash(payload).toString('hex')
 const body:ResolvedSourceBody={head:{kind:'relay_event',canonicalKey:'9007199254740993',rootKey:'1:session',sessionKey:'session',turnKey:'turn',eventType:'agent_text',occurredAt:'2026-11-07T00:00:00.123456Z',contentHash:hash,hashVersion:'canonical-json-sha256-v1',classification:{},provenance:{state:'unknown'},storage:'hot'},payload}
-const source:LegacyComparisonSource={sourceEventId:'10000000-0000-0000-0000-000000000099',installationId:'installation',origin:'feed',originPosition:'42',sessionId:'session',turnId:'turn',eventType:'agent_text',occurredAt:'2026-11-07T00:00:00.123Z',payload,payloadHash:hash,classification:{},provenance:{},links:[{kind:'relay_event',key:body.head.canonicalKey,via:'inbox'}]}
+const source:LegacyComparisonSource={sourceEventId:'10000000-0000-0000-0000-000000000099',installationId:'installation',origin:'feed',originPosition:'42',sessionId:'session',turnId:'turn',eventType:'agent_text',occurredAt:'2026-11-07T00:00:00.123Z',payload,payloadHash:hash,classification:{},provenance:{},links:[{kind:'relay_event',key:body.head.canonicalKey,via:'inbox',envelopeVerified:true}]}
 test('explicit scoped identity permits shadow equality without promoting unknown provenance or exporting bodies',()=>{
  const result=compareSourcePage('installation',[body],[source])
  expect(result).toMatchObject({schemaVersion:1,matched:'1',unproven:'0',different:'0',unknownProvenance:'1',fullAcceptanceReady:false})
@@ -38,4 +38,11 @@ test('one old UUID cannot establish two different canonical identities',()=>{
  const other={...body,head:{...body.head,canonicalKey:'9007199254740994'}}
  const candidate={...source,links:[...source.links,{...source.links[0],key:other.head.canonicalKey}]}
  expect(compareSourcePage('installation',[body,other],[candidate])).toMatchObject({matched:'0',unproven:'2'})
+})
+
+test('unverified Inbox metadata cannot prove a link or hide independent typed proof',()=>{
+ const unverified={...source,links:[{...source.links[0],envelopeVerified:undefined}]}
+ expect(compareSourcePage('installation',[body],[unverified])).toMatchObject({matched:'0',unproven:'1',different:'0'})
+ const typed:LegacyComparisonSource={...source,sourceEventId:'20000000-0000-0000-0000-000000000099',links:[{...source.links[0],via:'typed-ref'}]}
+ expect(compareSourcePage('installation',[body],[unverified,typed])).toMatchObject({matched:'1',unproven:'0',different:'0'})
 })
