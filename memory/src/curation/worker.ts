@@ -7,10 +7,10 @@ import {canonicalPacketJson} from '../episodes/packet.js'
 import {sanitizeText} from '../episodes/content-policy.js'
 import {parseMemorySourceProvenance} from '../episodes/skill-provenance.js'
 import type {TextGenerator} from '../ports/text-generator.js'
-import {JobDeferredError,type JobClaim,type JobFence} from '../jobs/types.js'
+import {JobDeferredError,JobTerminalError,type JobClaim,type JobFence} from '../jobs/types.js'
 import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import {recordCurationProviderUsage} from '../generation/provider-effect.js'
-import {readCurationPolicy} from './policy.js'
+import {lockCurationAuthority,readCurationPolicy} from './policy.js'
 import type {CurationMode} from './contracts.js'
 import {extractConclusions,CONCLUSION_PROMPT_VERSION} from './conclusion-extractor.js'
 import type {ConclusionEvidence} from './conclusion-validator.js'
@@ -24,11 +24,12 @@ export async function curationTransaction<T>(pool:pg.Pool,installationId:string,
  const c=await pool.connect()
  try{await c.query('BEGIN');await c.query("SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");const source=(await c.query('SELECT session_id FROM memory_task_bundles WHERE installation_id=$1 AND bundle_id=$2',[installationId,bundleId])).rows[0]
   if(!source){await c.query('COMMIT');return null}
+  if(shared)await lockCurationAuthority(c,installationId)
   await c.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0)),pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`,[installationId,source.session_id])
   if(prepared){await prepared.assertCurrent(c);attachPreparedSources(c,prepared)}
   const bundle=(await c.query(`SELECT b.* FROM memory_task_bundles b JOIN memory_installations i USING(installation_id)
-   WHERE b.installation_id=$1 AND b.bundle_id=$2 AND b.body_state='present' AND i.relay_status='active' AND i.local_status NOT IN('purging','purged','integrity_error')
-   AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=b.installation_id AND t.session_id=b.session_id) FOR UPDATE OF b`,[installationId,bundleId])).rows[0]
+   WHERE b.installation_id=$1 AND b.bundle_id=$2 AND b.body_state='present' AND ($3::boolean OR i.relay_status='active') AND i.local_status NOT IN('purging','purged','integrity_error')
+   AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=b.installation_id AND t.session_id=b.session_id) FOR UPDATE OF b`,[installationId,bundleId,shared])).rows[0]
   if(!bundle){await c.query('COMMIT');return null}
   const result=await fn(c,bundle);if(prepared)await prepared.assertCurrent(c,{forCommit:true});if(options.sourceCommit!==false)await guardSourceExecutionCommit(c);await c.query('COMMIT');return result
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
@@ -44,7 +45,7 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
    if(fence)await assertJobFence(c,fence)
    if(bundle.bundle_kind!=='intake'||Number(bundle.revision)!==Number(job.payload.bundle_revision))return null
    const policy=await readCurationPolicy(c,installationId,input.mode)
-   if(!policy)return null
+   if(!policy||policy==='source_denied')return null
    const source=await loadCurrentLifecycleSources(c,installationId,bundle)
    if(bundle.state==='deferred_semantic'&&bundle.semantic_deadline&&new Date(bundle.semantic_deadline).getTime()<=Date.now()){
     await c.query("UPDATE memory_task_bundles SET state='skipped_unresolved',reason_code='semantic_deadline_elapsed' WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId])
@@ -73,7 +74,15 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
     }
     if(old?.state==='blocked'&&['budget_exceeded','budget_unavailable'].includes(old.error_code)){
      if(new Date(bundle.next_evaluate_at).getTime()>Date.now())throw new JobDeferredError('source_not_ready',new Date(bundle.next_evaluate_at))
-     inserted=(await c.query(`UPDATE memory_curation_runs SET state='running',error_code=NULL,completed_at=NULL,claimed_by=$3,claim_epoch=claim_epoch+1,claim_expires_at=clock_timestamp()+interval '5 minutes' WHERE installation_id=$1 AND run_id=$2 RETURNING run_id::text,claim_epoch`,[installationId,old.run_id,job.job_id])).rows[0]
+     // A definite budget refusal can take a new claim under current authority.
+     // Prior usage and uncertain or running attempts cannot enter this retry.
+     inserted=(await c.query(`UPDATE memory_curation_runs r
+      SET state='running',error_code=NULL,completed_at=NULL,claimed_by=$3,claim_epoch=claim_epoch+1,
+          claim_expires_at=clock_timestamp()+interval '5 minutes',authorization_epoch=$4
+      WHERE r.installation_id=$1 AND r.run_id=$2 AND r.input_tokens=0 AND r.output_tokens=0
+       AND NOT EXISTS(SELECT 1 FROM memory_usage_outbox u WHERE u.installation_id=r.installation_id AND u.usage_id='curation:'||r.run_id::text)
+      RETURNING run_id::text,claim_epoch`,[installationId,old.run_id,job.job_id,policy.authorizationEpoch])).rows[0]
+     if(!inserted)throw new JobTerminalError('curation_budget_usage_already_recorded')
     }else{
      if(bundle.state==='deferred_semantic')throw new JobDeferredError('source_not_ready',new Date(bundle.semantic_deadline))
      return null
@@ -91,7 +100,7 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
   const outcome=await curationTransaction(input.pool,installationId,bundleId,async(c,bundle)=>{
    if(fence)await assertJobFence(c,fence)
    const policy=await readCurationPolicy(c,installationId,input.mode)
-   if(!policy||policy.mode!==reservation.policy.mode||policy.revision!==reservation.policy.revision||policy.authorizationEpoch!==reservation.policy.authorizationEpoch||Number(bundle.revision)!==reservation.revision||!bundle.source_digest.equals(reservation.digest))throw new Error('curation_source_changed')
+   if(!policy||policy==='source_denied'||policy.mode!==reservation.policy.mode||policy.revision!==reservation.policy.revision||policy.authorizationEpoch!==reservation.policy.authorizationEpoch||Number(bundle.revision)!==reservation.revision||!bundle.source_digest.equals(reservation.digest))throw new Error('curation_source_changed')
    await loadCurrentLifecycleSources(c,installationId,bundle)
    const lease=(await c.query(`SELECT claim_expires_at>clock_timestamp() AS live FROM memory_curation_runs WHERE installation_id=$1 AND run_id=$2 AND claimed_by=$3 AND state='running' AND claim_epoch=$4 FOR UPDATE`,[installationId,reservation.runId,job.job_id,reservation.claimEpoch])).rows[0]
    if(!lease)throw new Error('curation_lease_lost')

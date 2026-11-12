@@ -102,14 +102,27 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   expect(JSON.stringify(generate.mock.calls)).not.toContain('UNKNOWN_EXCLUDED_CANARY')
   expect((await pool.query('SELECT disposition,complete FROM memory_source_processing_receipts')).rows).toEqual([{disposition:'provenance_unknown',complete:false}])
  })
- test('AC-15 known budget block safely retries the same run after its retry time',async()=>{
+ test('AC-15 known budget block retries the same run under current authority',async()=>{
   const f=await fixture(),generate=vi.fn().mockResolvedValueOnce({ok:false,code:'budget_exceeded',retryable:true}).mockResolvedValueOnce(success())
   const w=worker({generateJson:generate} as TextGenerator)
   await expect(w.consolidate(f.job,signal())).rejects.toThrow('source_not_ready')
+  const {run_id:runId}=(await pool.query('SELECT run_id FROM memory_curation_runs')).rows[0]
+  await pool.query('UPDATE memory_owner_scopes SET authorization_epoch=2 WHERE installation_id=$1',[f.personal])
   await pool.query("UPDATE memory_task_bundles SET next_evaluate_at=clock_timestamp()-interval '1 second'")
   await w.consolidate(f.job,signal())
   expect(generate).toHaveBeenCalledTimes(2)
-  expect((await pool.query('SELECT state,claim_epoch FROM memory_curation_runs')).rows).toEqual([{state:'completed',claim_epoch:'2'}])
+  expect((await pool.query('SELECT run_id,state,claim_epoch,authorization_epoch FROM memory_curation_runs')).rows).toEqual([{run_id:runId,state:'completed',claim_epoch:'2',authorization_epoch:'2'}])
+ })
+ test('an existing usage receipt forbids reopening a budget-blocked curation run',async()=>{
+  const f=await fixture(),generate=vi.fn().mockResolvedValueOnce({ok:false,code:'budget_exceeded',retryable:true})
+  const w=worker({generateJson:generate} as TextGenerator)
+  await expect(w.consolidate(f.job,signal())).rejects.toThrow('source_not_ready')
+  await pool.query(`INSERT INTO memory_usage_outbox(installation_id,usage_id,operation,model,occurred_at)
+   SELECT installation_id,'curation:'||run_id::text,'curation','synthetic',clock_timestamp() FROM memory_curation_runs`)
+  await pool.query("UPDATE memory_task_bundles SET next_evaluate_at=clock_timestamp()-interval '1 second'")
+  await expect(w.consolidate(f.job,signal())).rejects.toThrow('curation_budget_usage_already_recorded')
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state,claim_epoch FROM memory_curation_runs')).rows).toEqual([{state:'blocked',claim_epoch:'1'}])
  })
  test('a primary timeout followed by fallback budget refusal is held instead of retried as free budget waiting',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>({ok:false,code:'budget_exceeded',retryable:false,timeoutFallback:{primary:{code:'http_error',detail:'timeout',billingUncertain:true,budgetReservationId:'synthetic-reservation'}}}))

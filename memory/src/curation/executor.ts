@@ -27,7 +27,7 @@ export function createCurationExecutor(input:{pool:pg.Pool;mode:CurationMode;tom
    await c.query("SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'")
    if(fence)await assertJobFence(c,fence)
    const policy=await readCurationPolicy(c,installationId,input.mode)
-   if(!policy||policy.mode!=='enabled')return null
+   if(!policy||policy==='source_denied'||policy.mode!=='enabled')return null
    const candidate=(await c.query(`SELECT * FROM memory_candidates WHERE installation_id=$1 AND candidate_id=$2 AND source_kind='task_bundle' AND bundle_id=$3 AND curation_run_id=$4 FOR UPDATE`,[installationId,candidateId,bundleId,runId])).rows[0]
    if(!candidate)return null
    const previous=(await c.query('SELECT action,reason_code,claim_id,version_id,decision_id FROM memory_curation_decisions WHERE installation_id=$1 AND candidate_id=$2 ORDER BY created_at DESC LIMIT 1',[installationId,candidateId])).rows[0]

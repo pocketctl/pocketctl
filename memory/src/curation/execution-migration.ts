@@ -1,3 +1,5 @@
+import {SHARED_GRANT_FUNCTIONS} from '../migrations/shared-db/grant-contract.js'
+
 export const CURATION_EXECUTION_MIGRATION={version:79,statements:[
  `ALTER TABLE memory_task_bundles ADD COLUMN bundle_kind TEXT NOT NULL DEFAULT 'intake' CHECK(bundle_kind IN('intake','task')),
  ADD COLUMN parent_bundle_id UUID,ADD COLUMN parent_revision BIGINT,ADD COLUMN spans JSONB NOT NULL DEFAULT '[]' CHECK(jsonb_typeof(spans)='array'),
@@ -29,4 +31,41 @@ export const CURATION_EXECUTION_MIGRATION={version:79,statements:[
  signal TEXT NOT NULL CHECK(signal IN('retrieved','delivered','agent_reported_used','user_confirmed','outcome_verified')),
  occurred_at TIMESTAMPTZ NOT NULL,PRIMARY KEY(installation_id,claim_id,signal,signal_key),
  FOREIGN KEY(installation_id,claim_id) REFERENCES knowledge_claims(installation_id,claim_id) ON DELETE CASCADE)`,
+]}
+
+export const CURATION_NATIVE_AUTHORITY_MIGRATION={version:102,statements:[
+ // Fresh shared installs receive this same definition from the shared contract.
+ `DO $curation_grant_migration$ BEGIN
+ IF current_schema()<>'memory' THEN RETURN;END IF;
+ IF to_regprocedure('shared.memory_current_grant_states(uuid[],uuid[])') IS NOT NULL THEN
+  EXECUTE $grant_definition$${SHARED_GRANT_FUNCTIONS[0]}$grant_definition$;
+ END IF;
+ EXECUTE $trigger_definition$
+ CREATE OR REPLACE FUNCTION memory.memory_require_curation_authority() RETURNS trigger
+ LANGUAGE plpgsql SET search_path=pg_catalog,memory,shared AS $curation_authority$
+ DECLARE epoch BIGINT;
+ BEGIN
+ IF NEW.authority<>'machine_concluded' THEN RETURN NULL;END IF;
+ IF NOT shared.lock_memory_grant_authority(ARRAY[NEW.installation_id],ARRAY[]::uuid[]) THEN
+  RAISE EXCEPTION 'curation_authority_required' USING ERRCODE='55000';
+ END IF;
+ SELECT (current.state->>'authorization_epoch')::bigint INTO epoch
+ FROM shared.memory_current_grant_states(ARRAY[NEW.installation_id],ARRAY[]::uuid[]) current
+ JOIN memory_installations i ON i.installation_id=current.installation_id
+ JOIN memory_curation_policies p ON p.installation_id=i.installation_id
+ WHERE i.local_status NOT IN('purging','purged','integrity_error')
+  AND current.state @> '{"owner_scope_kind":"personal","status":"active","owner_exists":true,"provider_enabled":true,"curation_input_allowed":true}'::jsonb
+ FOR SHARE OF i,p NOWAIT;
+ IF NOT EXISTS(
+  SELECT 1 FROM memory_curation_decisions d JOIN memory_curation_runs r USING(installation_id,run_id)
+  JOIN memory_task_bundles b ON b.installation_id=r.installation_id AND b.bundle_id=r.bundle_id
+  JOIN memory_curation_policies p ON p.installation_id=r.installation_id
+  WHERE d.installation_id=NEW.installation_id AND d.version_id=NEW.version_id AND d.state='committed'
+   AND r.mode='enabled' AND p.mode='enabled' AND r.policy_revision=p.revision AND r.authorization_epoch=epoch
+   AND r.bundle_revision=b.revision AND r.source_digest=b.source_digest AND b.body_state='present')
+ THEN RAISE EXCEPTION 'curation_authority_required' USING ERRCODE='55000';END IF;
+ RETURN NULL;
+ END $curation_authority$
+ $trigger_definition$;
+ END $curation_grant_migration$`,
 ]}
