@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken'
 import pg from 'pg'
 import { vi } from 'vitest'
 import { registerContextRoutes } from '../../api/context-routes.js'
+import { registerReadRoutes } from '../../api/read-routes.js'
 import { createCorsHostPolicy } from '../../auth/cors-host-policy.js'
 import { createGrantGuard } from '../../auth/grant-guard.js'
 import { createFeedbackService } from '../../context/feedback-service.js'
@@ -52,20 +53,32 @@ export async function contextDeliveryClient(
   })
   await guard.warmSigningKeys()
   const app = Fastify()
+  const policy = createCorsHostPolicy({ allowedOrigins: [], allowedHosts: ['127.0.0.1'], isProduction: true })
+  registerReadRoutes(app, { pool, guard, policy, recallEmbeddingTimeoutMs: 100, cursorSigningKey: 'origin-context' })
+  let beforeConsume: (() => Promise<void>) | undefined
   registerContextRoutes(app, {
-    ...context, pool, guard, feedback: createFeedbackService({ pool }),
-    policy: createCorsHostPolicy({ allowedOrigins: [], allowedHosts: ['127.0.0.1'], isProduction: true }),
+    ...context, pool, guard, feedback: createFeedbackService({ pool }), policy,
+    admission: { ...context.admission, consume: async input => {
+      const before = beforeConsume
+      beforeConsume = undefined
+      await before?.()
+      return context.admission.consume(input)
+    } },
     requestKey: { keyId: 'fixture', hmacKey: Buffer.alloc(32, 3) },
   })
   const url = await app.listen({ host: '127.0.0.1', port: 0 })
-  const issueGrant = () => jwt.sign({
+  const issueGrant = (configVersion = '1', service = 'memory.context') => jwt.sign({
     token_type: 'extension_capability', installation_id: installationId, provider_id: 'pocketctl-memory',
-    caller_type: 'daemon', services: ['memory.context'], config_version: '1', session_id: context.sessionId,
+    services: [service], config_version: configVersion,
+    ...(service === 'memory.context' ? { caller_type: 'daemon', session_id: context.sessionId } : { caller_type: 'web' }),
   }, keys.privateKey, {
     algorithm: 'RS256', keyid: jwk.kid, issuer: relay, audience: 'pocketctl-memory',
     subject: 'user:1', expiresIn: 120, jwtid: randomUUID(),
   })
-  return { url: url + '/api/v1/memory/context', issueGrant, close: () => app.close() }
+  return {
+    url: url + '/api/v1/memory/context', issueGrant, close: () => app.close(),
+    beforeNextConsume: (action: () => Promise<void>) => { beforeConsume = action },
+  }
 }
 
 type QueryTiming={statement:string;ms:number}

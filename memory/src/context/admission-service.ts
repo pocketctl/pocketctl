@@ -1,6 +1,7 @@
 import {MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
+import {currentPersonalInstallation,lockCurrentRelayAuthority} from '../sources/current-grant.js'
 import type {CurationMode} from '../curation/contracts.js'
 import {lifecycleFrameCurrent,lifecycleFrameFenceSql} from './lifecycle-frame.js'
 import {revisionTimeSql} from '../claims/version-selection.js'
@@ -46,6 +47,17 @@ export type ConsumeResult =
     } }
   | { ok: false; error: 'not_found' | 'expired' | 'already_consumed' }
 
+type PersonalGrant = Exclude<PackAuthorityGrant, V2GrantFacts>
+type NativeInstallationState = Parameters<typeof currentPersonalInstallation>[0]
+const nativeInstallationStateSql = (id: string) =>
+  `(SELECT state FROM shared.memory_current_grant_states(ARRAY[${id}::uuid],ARRAY[]::uuid[]) LIMIT 1)`
+
+function matchesPersonalGrant(state: NativeInstallationState, grant: PersonalGrant): boolean {
+  const current = currentPersonalInstallation(state)
+  return current.current && current.configVersion === grant.configVersion
+    && (grant.userId === undefined || current.ownerUserId === String(grant.userId))
+}
+
 export function createAdmissionService(deps: {
   pool: pg.Pool
   lifecycleMode?:CurationMode
@@ -53,6 +65,16 @@ export function createAdmissionService(deps: {
   admissionTtlSeconds?: number
 }) {
   const ttl = deps.admissionTtlSeconds ?? 5
+  const physical = isPhysicalSourcePool(deps.pool)
+  const timeouts = "SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'"
+  const begin = async (client: pg.PoolClient, bounded: boolean) => {
+    if (bounded && physical) {
+      await client.query(`BEGIN; ${timeouts}`)
+    } else {
+      await client.query('BEGIN')
+      if (bounded) await client.query(timeouts)
+    }
+  }
 
   return {
     async admit(input: {
@@ -67,23 +89,41 @@ export function createAdmissionService(deps: {
       selectedScopeGrant?:V2GrantFacts
       authorityGrant?:PackAuthorityGrant
     }): Promise<AdmissionResult> {
+      const grant = input.authorityGrant
+      const nativeGrant = sourcePoolContext(deps.pool).namespace === 'memory'
+        && grant && !('scopeBindings' in grant) ? grant : undefined
+      if (nativeGrant && (nativeGrant.installationId !== input.installationId
+        || nativeGrant.configVersion !== input.grantConfigVersion)) {
+        return { ok: false, error: 'mode_off' }
+      }
       const client = await deps.pool.connect()
       try {
-        await client.query('BEGIN')
+        await begin(client,Boolean(nativeGrant))
         // Join compiler/Skill/cleanup's source-first order. Installation-first
         // admission can deadlock a Session purge that already owns its source.
-        await client.query(`
-          WITH session_lock AS MATERIALIZED (
+        const locks = await client.query<{ locked: boolean }>(`
+          WITH authority AS MATERIALIZED (
+            SELECT ${nativeGrant?"shared.lock_memory_grant_authority(ARRAY[$1::text::uuid],ARRAY[]::uuid[])":'TRUE'} AS locked
+          ), session_lock AS MATERIALIZED (
             SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0))
+            FROM authority WHERE locked
           )
-          SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
+          SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0)) IS NOT NULL AS locked
           FROM session_lock
         `, [input.installationId, input.sessionId])
+        if (!locks.rows[0]?.locked) {
+          await client.query('ROLLBACK')
+          return { ok: false, error: 'claim_invalid' }
+        }
 
+        // Read Relay facts in the fresh snapshot after the authority fence.
+        // The Memory row contributes its local readiness independently.
         const installation = await client.query<{
           relay_status: string
           local_status: string
           config_version: string
+          native_authority: NativeInstallationState
+          grant_alive: boolean
           prior: { injection_id: string; state: string; expired: boolean } | null
         }>(`
           WITH installation AS MATERIALIZED (
@@ -92,17 +132,19 @@ export function createAdmissionService(deps: {
           ), prior AS (
             SELECT j.injection_id::text,j.state,COALESCE(j.admission_expires_at<NOW(),FALSE) AS expired
             FROM installation i JOIN memory_context_injections j USING(installation_id)
-            WHERE i.relay_status='active' AND i.local_status='ready' AND i.config_version=$4
+            WHERE i.local_status='ready' AND ($5::boolean OR (i.relay_status='active' AND i.config_version=$4))
               AND j.session_id=$2 AND j.client_request_id=$3
             ORDER BY j.created_at DESC LIMIT 1 FOR UPDATE OF j
           )
-          SELECT installation.*,(SELECT to_jsonb(prior) FROM prior) AS prior FROM installation
-        `, [input.installationId,input.sessionId,input.clientRequestId,input.grantConfigVersion])
+          SELECT installation.*,(SELECT to_jsonb(prior) FROM prior) AS prior,
+            ${nativeGrant?nativeInstallationStateSql('$1'):'NULL'} AS native_authority,
+            ($6::double precision IS NULL OR clock_timestamp()<to_timestamp($6::double precision)) AS grant_alive
+          FROM installation
+        `, [input.installationId,input.sessionId,input.clientRequestId,input.grantConfigVersion,Boolean(nativeGrant),nativeGrant?.expiresAt??null])
         const installationRow = installation.rows[0]
-        if (!installationRow
-          || installationRow.relay_status !== 'active'
-          || installationRow.local_status !== 'ready'
-          || installationRow.config_version !== input.grantConfigVersion) {
+        if (!installationRow || installationRow.local_status !== 'ready' || !installationRow.grant_alive
+          || (nativeGrant ? !matchesPersonalGrant(installationRow.native_authority,nativeGrant)
+            : installationRow.relay_status !== 'active' || installationRow.config_version !== input.grantConfigVersion)) {
           await client.query('COMMIT')
           return { ok: false, error: 'mode_off' }
         }
@@ -288,11 +330,16 @@ export function createAdmissionService(deps: {
           INSERT INTO memory_context_injections
             (injection_id, installation_id, pack_id, session_id, client_request_id,
              agent, adapter, admission_nonce_hmac, state, admitted_at, admission_expires_at,consumption_generation)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'admitted', clock_timestamp(),
-                  clock_timestamp() + ($9 * INTERVAL '1 second'),$10)
+          SELECT $1, $2, $3, $4, $5, $6, $7, $8, 'admitted', clock_timestamp(),
+                 clock_timestamp() + ($9 * INTERVAL '1 second'),$10
+          WHERE $11::double precision IS NULL OR clock_timestamp()<to_timestamp($11::double precision)
           RETURNING admission_expires_at
         `, [injectionId, input.installationId, input.packId, input.sessionId,
-          input.clientRequestId, input.agent, input.adapter, nonceHmac, ttl,admittedGeneration])
+          input.clientRequestId, input.agent, input.adapter, nonceHmac, ttl,admittedGeneration,nativeGrant?.expiresAt??null])
+        if (!inserted.rowCount) {
+          await client.query('ROLLBACK')
+          return { ok: false, error: 'claim_invalid' }
+        }
         if(queryContext.selectedScopeProof){
           const proof=queryContext.selectedScopeProof,origins=await selectedScopeOriginFences(client,proof)
           if(!await lockOriginPolicyFences(client,origins.fences,sourcePoolContext(deps.pool).namespace)){await client.query('ROLLBACK');return{ok:false,error:'claim_invalid'}}
@@ -336,22 +383,43 @@ export function createAdmissionService(deps: {
       authorityGrant?:PackAuthorityGrant
     }): Promise<ConsumeResult> {
       const shared=sourcePoolContext(deps.pool).namespace==='memory'
-      const physical=isPhysicalSourcePool(deps.pool)
-      const frameFence=lifecycleFrameFenceSql('p',deps.lifecycleMode??'off')
+      const grant = input.authorityGrant
+      const nativeGrant = shared && grant && !('scopeBindings' in grant) ? grant : undefined
+      if (nativeGrant && nativeGrant.installationId !== input.installationId) {
+        return { ok: false, error: 'not_found' }
+      }
+      const frameFence=lifecycleFrameFenceSql('p',deps.lifecycleMode??'off',shared?'memory':'public')
       const machineSourcesSql=shared?`EXISTS (${MACHINE_PACK_VERSIONS_SQL})`:'FALSE'
       const currentMachineSourcesSql=`($10::boolean OR NOT (${machineSourcesSql}))`
       const client=await deps.pool.connect()
       try {
-        await client.query(physical?"BEGIN; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'":'BEGIN')
-        // Lock only the authenticated owned injection. Source reads and their
-        // SQL fences use fresh READ COMMITTED snapshots after any lock wait.
+        await begin(client, physical || Boolean(nativeGrant))
+        // Secure native V1 authority before locking the authenticated
+        // installation and injection. Read current facts after the fence.
         const result:ConsumeResult=await (async()=>{
+          if (nativeGrant && !await lockCurrentRelayAuthority(client, [input.installationId])) {
+            return { ok: false, error: 'not_found' }
+          }
           const nonceHmac = createHmac('sha256', deps.nonceHmacKey).update(input.nonce).digest()
-          const frozen=(await client.query<{query_context:ContextQueryFrame|null;machine_sources:boolean}>(`
-            SELECT p.query_context,${machineSourcesSql} AS machine_sources FROM memory_context_injections j
+          const packSql=`SELECT j.injection_id,p.query_context,${machineSourcesSql} AS machine_sources
+            FROM memory_context_injections j
             JOIN memory_context_packs p ON p.pack_id=j.pack_id AND p.installation_id=j.installation_id
-            WHERE j.injection_id=$1 AND j.installation_id=$2 AND j.session_id=$3 AND j.pack_id=$4 AND j.admission_nonce_hmac=$5 AND j.state='admitted' FOR UPDATE OF j`,
-            [input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac])).rows[0]
+            WHERE j.injection_id=$1 AND j.installation_id=${nativeGrant?'i.installation_id':'$2'}
+              AND j.session_id=$3 AND j.pack_id=$4 AND j.admission_nonce_hmac=$5 AND j.state='admitted'
+            FOR UPDATE OF j`
+          const observed=(await client.query<{
+            injection_id:string|null;query_context:ContextQueryFrame|null;machine_sources:boolean|null
+            native_authority?:NativeInstallationState
+          }>(nativeGrant?`
+            WITH installation AS MATERIALIZED (
+              SELECT installation_id FROM memory_installations
+              WHERE installation_id=$2 AND local_status='ready' FOR SHARE
+            )
+            SELECT ${nativeInstallationStateSql('i.installation_id')} AS native_authority,pack.*
+            FROM installation i LEFT JOIN LATERAL (${packSql}) pack ON TRUE
+          `:packSql,[input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac])).rows[0]
+          const nativeCurrent = !nativeGrant || matchesPersonalGrant(observed?.native_authority, nativeGrant)
+          const frozen = nativeCurrent && observed?.injection_id ? observed : undefined
           const origin=frozen?await originPolicyCorpusSnapshot(client,input.installationId):{stamp:null,fences:[]}
           const proof=frozen?.query_context?.selectedScopeProof
           const selected=proof?await selectedScopeOriginFences(client,proof):{matches:true,fences:[]}
@@ -360,11 +428,11 @@ export function createAdmissionService(deps: {
           const currentGrantClockSql="($9::double precision IS NULL OR clock_timestamp()<to_timestamp($9::double precision))"
           const originRows=[...origin.fences,...selected.fences],originLocked=await lockOriginPolicyFences(client,originRows,sourcePoolContext(deps.pool).namespace)
           const machineSources=frozen?.machine_sources===true
-          const sourcesCurrent=!machineSources||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant)
-          if(shared&&!physical&&frozen&&!machineSources){
+          const sourcesCurrent=nativeCurrent&&(!machineSources||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant))
+          if(shared&&!physical&&!nativeGrant&&frozen&&!machineSources){
             await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
           }
-          // The no-machine path avoids a savepoint and native lookup. The
+          // The no-machine path avoids the machine source savepoint. The
           // atomic UPDATE still rejects a machine dependency added since the
           // earlier injection lock read, before it can return any pack text.
           const originMatches=sourcesCurrent&&originLocked&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
@@ -429,6 +497,7 @@ export function createAdmissionService(deps: {
         return result
       }catch(error){
         await client.query('ROLLBACK').catch(()=>undefined)
+        if(nativeGrant&&['55P03','57014'].includes((error as {code?:string}).code??''))return{ok:false,error:'not_found'}
         throw error
       }finally{client.release()}
 

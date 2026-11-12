@@ -1,4 +1,5 @@
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
+import {lifecycleReadFrameCurrent} from '../context/lifecycle-frame.js'
 import {retainedSourceRead} from '../sources/retained-read.js'
 import {guardRetainedVersions,rememberRetainedVersionStatement} from '../sources/retained-versions.js'
 import {guardRetainedEvidence,registerRetainedReadCheck} from '../sources/retained-authority.js'
@@ -102,6 +103,7 @@ export function createRecallService(
       const searched = await search.search(searchInput)
 
       const accepted=await retainedSourceRead(pool,{installationId:input.installationId,authorityGrant:input.authorityGrant},async db=>{
+      if(!await lifecycleReadFrameCurrent(db,input))return undefined
       await guardRetainedVersions(db,input.installationId,searched.hits.map(hit=>hit.versionId),{expectedStatements:new Map(searched.hits.map(hit=>[hit.versionId,hit.statement])),requireCurrent:!input.asOf,requireAvailable:true,asOf:input.asOf??undefined})
       const claims: RecallClaim[] = []
       const episodeIds = new Set<string>()

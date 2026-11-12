@@ -279,7 +279,7 @@ export function createContextCompiler(deps: {
       mark('scope')
       const repositoryId = resolvedScope.repositoryId
       const [lifecycle, snapshots, effectiveSettings] = await Promise.all([
-        resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off'}),
+        resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off',authorityGrant:input.authorityGrant}),
         !input.factAt && !input.knownAt && repositoryId && (input.repoSnapshotId || input.commitSha)
           ? deps.pool.query<{repo_snapshot_id:string;commit_sha:string}>(`SELECT s.repo_snapshot_id::text,s.commit_sha FROM repo_snapshots s
             WHERE s.installation_id=$1 AND s.repository_id=$2
