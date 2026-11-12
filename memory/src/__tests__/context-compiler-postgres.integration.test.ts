@@ -29,12 +29,16 @@ describeWithDatabase('context pack compilation (PostgreSQL)', () => {
   let pool: pg.Pool
   let compiler: ReturnType<typeof createContextCompiler>
   let packs: ReturnType<typeof createPackRepository>
+  const embed = vi.fn(async () => ({ vectors: [[1, 0]], model: 'test', tokens: 1 }))
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 4 })
     await assertMemoryTestDatabase(pool, databaseUrl!)
     await applyMemorySchema(pool)
-    const search = createSearchService({ pool, recallEmbeddingTimeoutMs: 100, cursorSigningKey: 'k' })
+    const search = createSearchService({
+      pool, recallEmbeddingTimeoutMs: 850, cursorSigningKey: 'k',
+      embed: { provider: 'test', model: 'test', dimensions: 2, embed },
+    })
     const trajectory = createTrajectoryRepository(pool)
     const policyRepository = createPolicyRepository(pool)
     const policyResolver = createPolicyResolver({ pool, repository: policyRepository })
@@ -170,6 +174,42 @@ describeWithDatabase('context pack compilation (PostgreSQL)', () => {
       WHERE session_id = 'ses-c' AND client_request_id = 'cr-det' AND state <> 'invalidated'
     `)
     expect(rows.rows[0].n).toBe(1)
+  })
+
+  test('native delivery admits lexical evidence without waiting for remote embedding', async () => {
+    await seedClaim({ key: 'lease-epoch', statement: 'Projection watermark recovery checks the durable lease epoch' })
+    await pool.query("INSERT INTO memory_feature_settings(installation_id, embedding_mode) VALUES ($1, 'enabled')", [INSTALLATION])
+    embed.mockClear()
+    embed.mockImplementationOnce(() => new Promise(() => {}))
+
+    const request = {
+      installationId: INSTALLATION, sessionId: 'ses-c', clientRequestId: 'native-lexical',
+      agent: 'codex', adapterCapability: 'native_hidden_v1' as const,
+      repositoryId: REPOSITORY, query: 'projection watermark recovery', requestKey: KEY,
+    }
+    const outcome = await compiler.compile(request)
+    expect(embed).not.toHaveBeenCalled()
+    if (outcome.kind !== 'ready') throw new Error(`expected ready, got ${outcome.kind}`)
+
+    const admission = createAdmissionService({ pool, nonceHmacKey: KEY.hmacKey })
+    const admitted = await admission.admit({
+      ...request, packId: outcome.packId, adapter: 'codex-app-server', grantConfigVersion: '1',
+    })
+    if (!admitted.ok || !('nonce' in admitted)) throw new Error('expected a new admission')
+    const delivery = { ...request, packId: outcome.packId, injectionId: admitted.injectionId, nonce: admitted.nonce }
+    const consumed = await admission.consume(delivery)
+    expect(consumed).toMatchObject({ ok: true, pack: { dynamicText: expect.stringContaining('durable lease epoch') } })
+    expect(await admission.consume(delivery)).toEqual({ ok: false, error: 'already_consumed' })
+    const trace = await pool.query(`
+      SELECT backend_plan FROM memory_retrieval_trajectories t
+      JOIN memory_context_packs p USING (trajectory_id) WHERE p.pack_id = $1
+    `, [outcome.packId])
+    expect(trace.rows[0].backend_plan).toMatchObject({ pools: ['metadata', 'lexical'], degraded: ['embedding'] })
+
+    embed.mockReset().mockResolvedValue({ vectors: [[1, 0]], model: 'test', tokens: 1 })
+    const shadow = await compiler.compile({ ...request, clientRequestId: 'shadow-hybrid', adapterCapability: 'shadow_only' })
+    expect(shadow.kind).toBe('shadow')
+    expect(embed).toHaveBeenCalledOnce()
   })
 
   test('mode off persists nothing', async () => {

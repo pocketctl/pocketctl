@@ -368,12 +368,15 @@ export function createContextCompiler(deps: {
         && policyDoc.unknown_repository_behavior === 'empty'
         ? []
         : await deps.scope.personaVersions({ installationId: input.installationId })
-      // Dynamic pool: replayable retrieval over the transient query.
+      // A native turn shares the daemon deadline with grant, admission and
+      // consumption. Keep remote embedding off that synchronous path and
+      // apply the configured degradation policy to the local retrieval pools.
       const retrieval = selectedReferences.length === 0 && (resolvedScope.repositoryKnown||lifecycle?.spaceId) && minimizedQuery.length > 0
         ? await deps.retrieval.retrieve({
         authorityGrant:input.authorityGrant,
             installationId: input.installationId,
             query: minimizedQuery,
+            localOnly: mode === 'enabled',
             lifecycle,
             repositoryId,
             repoSnapshotId:queryContext.repoSnapshotId,taskScopeKey:queryContext.taskScopeKey,
