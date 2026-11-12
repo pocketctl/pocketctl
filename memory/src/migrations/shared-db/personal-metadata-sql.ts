@@ -32,11 +32,11 @@ export const metadataInputAdmission=(e='e',r='r',explicit='TRUE',scope='p_scope'
     ELSE CASE WHEN boundary.state='unproven' THEN 'unproven' ELSE 'denied' END END
  ELSE CASE WHEN boundary.state='unproven' THEN 'unproven' ELSE 'denied' END END
  FROM(WITH original AS MATERIALIZED(SELECT shared.memory_input_start_admission((${scope}->>'installationId')::uuid,'relay_event',${e}.id::text,${e}.user_id::text,${e}.logical_source_session_id) AS state)SELECT state FROM original)boundary)`
-export const metadataNativeFingerprint=(e='e',rowVersion=`${e}.xmin::text`,native='native',input='input_fingerprint')=>`encode(sha256(convert_to(jsonb_build_array('personal-native-v2',
+export const metadataNativeFingerprint=(e='e',rowVersion=`${e}.xmin::text`,native='native',input='input_fingerprint',eventAuthority=`public.native_event_authority(${e}.id,${e}.user_id)`)=>`encode(sha256(convert_to(jsonb_build_array('personal-native-v2',
  ${e}.id::text,${rowVersion},${e}.source_body_change_revision::text,${e}.user_id::text,${e}.session_id,${e}.logical_source_session_id,
  ${e}.owner_retired,${e}.event_type,${e}.created_at::text,${e}.effect_status,${e}.source_header_version,${e}.source_sequence::text,
  ${e}.canonical_payload_hash,${e}.source_classification,${e}.body_storage,${e}.body_session_id,${e}.body_manifest_id,${e}.body_chunk_ordinal,
- ${e}.body_activity_epoch::text,${e}.body_owner_user_id::text,${native},public.native_event_authority(${e}.id,${e}.user_id),${input},
+ ${e}.body_activity_epoch::text,${e}.body_owner_user_id::text,${native},${eventAuthority},${input},
  (SELECT to_jsonb(publication) FROM public.native_source_publications publication WHERE publication.source_kind='relay_event' AND publication.source_key=${e}.id::text),
  -- A complete immutable publication is the native input boundary. Delivery
  -- journal GC cannot change that boundary. Historical/incomplete publications
@@ -55,7 +55,7 @@ export const metadataRefObservation=(r='r')=>`CASE WHEN ${r}.source_event_id IS 
  ${r}.occurred_at::text,${r}.classification,${r}.source_provenance,${r}.body_reclaimed_at::text,${r}.source_kind,${r}.canonical_key,
  ${r}.canonical_session_key,${r}.source_version,${r}.source_sequence::text,encode(${r}.content_hash,'hex'),encode(${r}.payload_hash,'hex'),
  ${r}.mapping_state,${r}.hash_version,${r}.adapter_version,${r}.canonical_projected_at::text)::text,'UTF8')),'hex')) END`
-export const metadataRowLocator=(e='e',r='r',rowVersion=`${e}.xmin::text`,native='native',input='input_fingerprint')=>`jsonb_build_object(
+export const metadataRowLocator=(e='e',r='r',rowVersion=`${e}.xmin::text`,native='native',input='input_fingerprint',eventAuthority?:string)=>`jsonb_build_object(
  'id',${e}.id::text,'rowVersion',${rowVersion},'bodyChangeRevision',${e}.source_body_change_revision::text,
  'contentHash',COALESCE(${e}.canonical_payload_hash,encode(${r}.content_hash,'hex')),
- 'nativeFingerprint',${metadataNativeFingerprint(e,rowVersion,native,input)},'ref',${metadataRefObservation(r)})`
+ 'nativeFingerprint',${metadataNativeFingerprint(e,rowVersion,native,input,eventAuthority)},'ref',${metadataRefObservation(r)})`

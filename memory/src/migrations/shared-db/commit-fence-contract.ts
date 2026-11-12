@@ -150,10 +150,13 @@ export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
      input_fingerprint=${metadataInputFingerprint()};
      IF input_fingerprint IS DISTINCT FROM p_expected->>'inputFingerprint' THEN RAISE lock_not_available;END IF;
      FOR item IN SELECT value FROM jsonb_array_elements(p_expected->'rows') LOOP
-      SELECT ${metadataRowLocator()},${metadataInputAdmission()} INTO fresh_row,input_admission FROM public.events e LEFT JOIN memory.source_events r
+      -- Reuse the native authority for the row fingerprint and the current-state check.
+      SELECT ${metadataRowLocator('e','r','e.xmin::text','native','input_fingerprint','event_authority.value')},${metadataInputAdmission()}
+       INTO fresh_row,input_admission FROM public.events e LEFT JOIN memory.source_events r
        ON r.installation_id=installation AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified'
+       CROSS JOIN LATERAL(SELECT public.native_event_authority(e.id,owner_id) AS value OFFSET 0) event_authority
        WHERE e.id=(item.value->>'id')::bigint AND e.user_id=owner_id AND NOT e.owner_retired AND e.session_id=native->>'sessionId'
-        AND e.effect_status IN('none','completed') AND public.native_event_authority(e.id,owner_id)->>'state'='current'
+        AND e.effect_status IN('none','completed') AND event_authority.value->>'state'='current'
         AND NOT(${metadataUsageDenied()});
       IF input_admission='unsupported' THEN RAISE EXCEPTION 'source_metadata_proof_unavailable';END IF;
       IF input_admission='unproven' THEN RAISE EXCEPTION 'source_input_start_unproven';END IF;
