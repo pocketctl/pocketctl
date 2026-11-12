@@ -6,6 +6,7 @@ import { MemoryApiError, errorBody } from './errors.js'
 import {
   resolveSelectedContextReferences,
   type ContextCompiler,
+  type ContextCompilePhase,
   type SelectedContextReference,
 } from '../context/compiler.js'
 import type { AdmissionService } from '../context/admission-service.js'
@@ -298,6 +299,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       return { error: { code: 'rate_limited' } }
     }
 
+    const phases: Partial<Record<ContextCompilePhase, number>> = {}
     const outcome = await deps.compiler.compile({
       authorityGrant:grant,
       installationId: grant.installationId,
@@ -323,14 +325,24 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       requestKey: deps.requestKey,
       selectedReferences: references,
       ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
-    }).catch(async error=>{await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined);throw error})
+    }, (phase, ms) => { phases[phase] = ms }).catch(async error=>{await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined);throw error})
 
     const finishedAt = performance.now()
-    if (body.adapter_capability === 'native_hidden_v1' && (reply.raw.destroyed || finishedAt - startedAt >= 400)) {
+    const logLatency = () => {
+      const responseAt = performance.now()
+      if (body.adapter_capability !== 'native_hidden_v1' || (!reply.raw.destroyed && responseAt - startedAt < 400)) return
       logger.log('warn', 'context_compile_latency', {
         outcome: outcome.kind,
         grant_ms: Math.round(verifiedAt - startedAt),
         compile_ms: Math.round(finishedAt - verifiedAt),
+        post_compile_ms: Math.round(responseAt - finishedAt),
+        scope_ms: phases.scope ?? null,
+        inputs_ms: phases.inputs ?? null,
+        configuration_ms: phases.configuration ?? null,
+        reserve_ms: phases.reserve ?? null,
+        retrieve_ms: phases.retrieve ?? null,
+        assemble_ms: phases.assemble ?? null,
+        persist_ms: phases.persist ?? null,
         client_closed: reply.raw.destroyed,
         repository_hint_present: Boolean(body.repository_hint?.repository_id),
         commit_hint_present: Boolean(body.repository_hint?.commit_sha),
@@ -341,6 +353,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       const reason=outcome.kind==='off'?'context_off':outcome.kind==='shadow'?'shadow_only':outcome.kind==='unsupported_adapter'?'unsupported_adapter':'degraded'
       await invalidateLifecycleObservation(deps.pool,grant.installationId,reason)
     }
+    if (outcome.kind !== 'ready') logLatency()
     switch (outcome.kind) {
       case 'off':
         return { outcome: 'off' }
@@ -355,10 +368,16 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       case 'ready':{
         let evidenceCapability='bounded_excerpt_v1'
         if(body.evidence_read_capability==='on_demand_v1'&&body.adapter_capability==='native_hidden_v1'){
-          const proof=(await deps.pool.query(`SELECT count(*)::int AS n,bool_and(evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
-            FROM memory_context_pack_evidence WHERE pack_id=$1`,[outcome.packId])).rows[0]
-          if(proof?.n>0&&proof.proven)evidenceCapability='on_demand_v1'
+          let proven = outcome.evidenceProven
+          if (proven === undefined) {
+            // Reused packs predate this write, so read their persisted proof.
+            const proof=(await deps.pool.query(`SELECT count(*)::int AS n,bool_and(evidence_version_id IS NOT NULL AND excerpt_hash IS NOT NULL AND source_version IS NOT NULL) AS proven
+              FROM memory_context_pack_evidence WHERE pack_id=$1`,[outcome.packId])).rows[0]
+            proven = Boolean(proof?.n > 0 && proof.proven)
+          }
+          if (proven) evidenceCapability='on_demand_v1'
         }
+        logLatency()
         return {
           outcome: 'ready',
           ...(body.evidence_read_capability?{evidence_read_capability:evidenceCapability}:{}),

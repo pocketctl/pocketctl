@@ -71,6 +71,10 @@ function fakeDeps(overrides: {
         persisted.push(input)
         return `pack-${persisted.length}`
       }),
+      persistWithSummary: vi.fn(async (input: Record<string, unknown>) => {
+        persisted.push(input)
+        return { packId: `pack-${persisted.length}`, stableTokens: 10, dynamicTokens: 20 }
+      }),
       get: vi.fn(async () => ({
         state: 'ready', mode: 'enabled', stable_text: '', dynamic_text: '',
         stable_tokens: 10, dynamic_tokens: 20, item_count: 2,
@@ -85,17 +89,13 @@ function fakeDeps(overrides: {
       attachPolicies: vi.fn(async () => undefined),
     } as unknown as GenerationRunRepository,
     policyResolver: {
-      resolve: vi.fn(async (input: { kind: string }): Promise<EffectivePolicy> => {
-        const document = input.kind === 'ranking'
-          ? SYSTEM_RANKING_POLICY_V1
-          : overrides.contextPolicy ?? SYSTEM_CONTEXT_POLICY_V1
-        return {
+      resolveContext: vi.fn(async (): Promise<[EffectivePolicy, EffectivePolicy]> =>
+        [overrides.contextPolicy ?? SYSTEM_CONTEXT_POLICY_V1, SYSTEM_RANKING_POLICY_V1].map((document, index) => ({
           document,
-          policyVersionIds: [input.kind === 'ranking' ? 'pv-ranking-1' : 'pv-context-1'],
+          policyVersionIds: [index ? 'pv-ranking-1' : 'pv-context-1'],
           effectivePolicyHash: canonicalPolicyHash(document),
-          policyRevision: input.kind === 'ranking' ? 3 : 7,
-        }
-      }),
+          policyRevision: index ? 3 : 7,
+        })) as [EffectivePolicy, EffectivePolicy]),
     } as unknown as PolicyResolver,
   }
   return { deps, persisted, completed }

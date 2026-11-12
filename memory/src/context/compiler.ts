@@ -34,7 +34,7 @@ import { applyTokenBudget, dedupeItems, estimateTokens } from './token-budget.js
 export type CompileOutcome =
   | { kind: 'off' }
   | { kind: 'empty'; reason: string; degradedComponents: string[] }
-  | { kind: 'ready'; packId: string; stableTokens: number; dynamicTokens: number; itemCount: number }
+  | { kind: 'ready'; packId: string; stableTokens: number; dynamicTokens: number; itemCount: number; evidenceProven?: boolean }
   | { kind: 'shadow'; packId: string }
   | { kind: 'unsupported_adapter' }
   | { kind: 'degraded'; reason: string }
@@ -220,6 +220,8 @@ function deterministicItemId(parts: readonly string[]): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
+export type ContextCompilePhase = 'scope' | 'inputs' | 'configuration' | 'reserve' | 'retrieve' | 'assemble' | 'persist'
+
 export function createContextCompiler(deps: {
   pool: pg.Pool
   retrieval: ContextRetrieval
@@ -232,43 +234,53 @@ export function createContextCompiler(deps: {
   policyResolver: PolicyResolver
 }) {
   return {
-    async compile(input: CompileRequest): Promise<CompileOutcome> {
-      const resolvedScope = await deps.scope.resolve({
-        installationId: input.installationId,
-        sessionId: input.sessionId,
-        repositoryIdHint: input.repositoryId ?? null,
-        repositoryKeyHint: input.repositoryKey ?? null,
-      })
+    async compile(input: CompileRequest, observe?: (phase: ContextCompilePhase, ms: number) => void): Promise<CompileOutcome> {
+      let checkpoint = performance.now()
+      const mark = (phase: ContextCompilePhase) => {
+        if (!observe) return
+        const now = performance.now()
+        observe(phase, Math.round(now - checkpoint))
+        checkpoint = now
+      }
+      // Read the fence generation before preparing snapshot-dependent inputs.
+      const [resolvedScope, generation] = await Promise.all([
+        deps.scope.resolve({
+          installationId: input.installationId,
+          sessionId: input.sessionId,
+          repositoryIdHint: input.repositoryId ?? null,
+          repositoryKeyHint: input.repositoryKey ?? null,
+        }),
+        consumptionGeneration(deps.pool,input.installationId),
+      ])
+      mark('scope')
       const repositoryId = resolvedScope.repositoryId
-      const lifecycle=await resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off'})
+      const [lifecycle, snapshots, effectiveSettings] = await Promise.all([
+        resolveLifecycleFrame(deps.pool,{installationId:input.installationId,sessionId:input.sessionId,repositoryId,spaceId:input.sceneId,destination:input.destination,mode:deps.lifecycleMode??'off'}),
+        !input.factAt && !input.knownAt && repositoryId && (input.repoSnapshotId || input.commitSha)
+          ? deps.pool.query<{repo_snapshot_id:string;commit_sha:string}>(`SELECT s.repo_snapshot_id::text,s.commit_sha FROM repo_snapshots s
+            WHERE s.installation_id=$1 AND s.repository_id=$2
+             AND ($3::uuid IS NULL OR s.repo_snapshot_id=$3) AND ($4::text IS NULL OR s.commit_sha=$4)
+             AND NOT EXISTS(SELECT 1 FROM memory_source_snapshot_tombstones t WHERE t.installation_id=s.installation_id AND t.repository_id=s.repository_id AND t.commit_sha=s.commit_sha)
+            ORDER BY s.repo_snapshot_id LIMIT 2`,[input.installationId,repositoryId,input.repoSnapshotId??null,input.commitSha?.toLowerCase()??null])
+          : null,
+        deps.settings.resolve({ installationId: input.installationId, repositoryId, sessionId: input.sessionId, agent: input.agent }),
+      ])
       // Historical hints cannot silently broaden an automatic current-context request.
       if(input.factAt||input.knownAt)return{kind:'empty',reason:'historical_context_requires_explicit_read',degradedComponents:[]}
-      const generation=await consumptionGeneration(deps.pool,input.installationId)
       const queryContext:ContextQueryFrame={...(lifecycle?{lifecycle}:{}),repositoryId,repoSnapshotId:null,branch:repositoryId?input.branch??null:null,taskScopeKey:input.taskScopeKey??null,commitSha:repositoryId?input.commitSha?.toLowerCase()??null:null}
-      if(repositoryId&&(input.repoSnapshotId||input.commitSha)){
-        const snapshots=(await deps.pool.query<{repo_snapshot_id:string;commit_sha:string}>(`SELECT s.repo_snapshot_id::text,s.commit_sha FROM repo_snapshots s
-          WHERE s.installation_id=$1 AND s.repository_id=$2
-           AND ($3::uuid IS NULL OR s.repo_snapshot_id=$3) AND ($4::text IS NULL OR s.commit_sha=$4)
-           AND NOT EXISTS(SELECT 1 FROM memory_source_snapshot_tombstones t WHERE t.installation_id=s.installation_id AND t.repository_id=s.repository_id AND t.commit_sha=s.commit_sha)
-          ORDER BY s.repo_snapshot_id LIMIT 2`,[input.installationId,repositoryId,input.repoSnapshotId??null,queryContext.commitSha??null])).rows
-        if(snapshots.length===1){queryContext.repoSnapshotId=snapshots[0].repo_snapshot_id;queryContext.commitSha=snapshots[0].commit_sha}
+      if(snapshots){
+        if(snapshots.rows.length===1){queryContext.repoSnapshotId=snapshots.rows[0].repo_snapshot_id;queryContext.commitSha=snapshots.rows[0].commit_sha}
         else if(input.repoSnapshotId)return{kind:'empty',reason:'snapshot_context_unavailable',degradedComponents:[]}
       }
-      const effectiveSettings = await deps.settings.resolve({
-        installationId: input.installationId,
-        repositoryId,
-        sessionId: input.sessionId,
-        agent: input.agent,
-      })
+      mark('inputs')
       if (effectiveSettings.mode === 'off') return { kind: 'off' }
       const mode: 'shadow' | 'enabled' =
         effectiveSettings.mode === 'enabled' && input.adapterCapability === 'native_hidden_v1'
           ? 'enabled'
           : 'shadow'
 
-      const [policy, rankingPolicy, loadout, corpus, originSnapshot] = await Promise.all([
-        deps.policyResolver.resolve({ installationId: input.installationId, kind: 'context', repositoryId }),
-        deps.policyResolver.resolve({ installationId: input.installationId, kind: 'ranking', repositoryId }),
+      const [[policy, rankingPolicy], loadout, corpus, originSnapshot] = await Promise.all([
+        deps.policyResolver.resolveContext({ installationId: input.installationId, repositoryId }),
         deps.loadouts.resolve({ installationId: input.installationId, repositoryId, agent: input.agent }),
         deps.pool.query<{ fingerprint: string }>(`
         SELECT md5(COALESCE(string_agg(
@@ -285,6 +297,7 @@ export function createContextCompiler(deps: {
         `, [input.installationId]),
         originPolicyCorpusSnapshot(deps.pool, input.installationId),
       ])
+      mark('configuration')
       const policyDoc = policy.document as ContextPolicyDocument
       const settingsFingerprint = effectiveContextSettingsFingerprint(effectiveSettings)
       const loadoutFingerprint = resolvedLoadoutFingerprint(loadout)
@@ -347,16 +360,16 @@ export function createContextCompiler(deps: {
 		}
 		return { kind: 'degraded', reason: 'compile_in_progress' }
 	  }
-      await deps.generation.attachPolicies({
-        runId: run.runId,
-        policyVersionIds: [...policy.policyVersionIds, ...rankingPolicy.policyVersionIds],
-      })
+      const [, persona] = await Promise.all([
+        deps.generation.attachPolicies({
+          runId: run.runId,
+          policyVersionIds: [...policy.policyVersionIds, ...rankingPolicy.policyVersionIds],
+        }),
+        selectedReferences.length || (!resolvedScope.repositoryKnown && policyDoc.unknown_repository_behavior === 'empty')
+          ? [] : deps.scope.personaVersions({ installationId: input.installationId }),
+      ])
 
-      // L3 Persona stable pool: active user-reviewed work_method only.
-      const persona = selectedReferences.length > 0 ? [] : !resolvedScope.repositoryKnown
-        && policyDoc.unknown_repository_behavior === 'empty'
-        ? []
-        : await deps.scope.personaVersions({ installationId: input.installationId })
+      mark('reserve')
       // A native turn shares the daemon deadline with grant, admission and
       // consumption. Keep remote embedding off that synchronous path and
       // apply the configured degradation policy to the local retrieval pools.
@@ -380,6 +393,7 @@ export function createContextCompiler(deps: {
             rankingPolicy: rankingPolicy.document as RankingPolicyDocument,
           })
         : { outcome: 'empty' as const, degradedComponents: [], candidates: [], trajectoryId: '' }
+      mark('retrieve')
       if (retrieval.outcome === 'retrieval_failed') {
         await deps.generation.complete({
           runId: run.runId, state: 'failed', errorCode: 'retrieval_failed',
@@ -477,14 +491,11 @@ export function createContextCompiler(deps: {
           : retrieval.candidates.filter(candidate => policyDoc.degraded_behavior === 'metadata_only'
             ? candidate.sourcePools?.includes('metadata')
             : candidate.sourcePools?.some(pool => pool === 'metadata' || pool === 'lexical'))
-      const retrievedFacts=lifecycle?.consume?await contextClaimFacts(deps.pool,input.installationId,retrievalCandidates.map(c=>c.versionId)):new Map()
       for (const candidate of retrievalCandidates) {
         if (personaVersionIds.has(candidate.versionId)) continue
         const freshnessDays = policyDoc.freshness_days[candidate.claimType]
         if (freshnessDays !== undefined && candidate.freshnessAt
           && freshnessAsOf.getTime() - candidate.freshnessAt.getTime() > freshnessDays * 86_400_000) continue
-        const isL3 = candidate.claimType === 'work_method'
-        if (isL3&&!retrievedFacts.get(candidate.versionId)?.lifecycle?.spaceId) continue // Scene conclusions remain L2; Persona still requires review.
         const section: 'stable' | 'dynamic' = pinnedVersions.has(candidate.versionId)
           ? 'stable'
           : 'dynamic'
@@ -510,7 +521,14 @@ export function createContextCompiler(deps: {
 
       // Deduplicate by identity and near-identical text before budgeting.
       const facts=await contextClaimFacts(deps.pool,input.installationId,drafts.map(d=>d.versionId))
-      const eligibleDrafts=drafts.filter(draft=>{const source=facts.get(draft.versionId);return source&&eligibleContextFacts(source,queryContext)})
+      const eligibleDrafts = drafts.filter(draft => {
+        const source = facts.get(draft.versionId)
+        // Recalled work methods require a Scene. Persona and explicit references
+        // have their own selection rules.
+        const needsScene = draft.claimType === 'work_method' && draft.layer === 'L2' && !selectedItemReferences.has(draft.itemId)
+        return source && (!needsScene || (lifecycle?.consume && source.lifecycle?.spaceId))
+          && eligibleContextFacts(source,queryContext)
+      })
       const deduped = dedupeItems(eligibleDrafts.map(draft => ({
         ...draft,
         renderedText: draft.statement,
@@ -551,6 +569,7 @@ export function createContextCompiler(deps: {
       const keptExternal=boundedExternal.filter(item=>budget.kept.includes(item.itemId))
       const keptReferences=new Set(budget.kept.map(id=>selectedItemReferences.get(id)).filter((r):r is SelectedContextReference=>!!r))
       const renderedReferences=selectedReferences.filter(reference=>keptReferences.has(reference))
+      mark('assemble')
 
       try {
       if (keptItems.length === 0 && keptExternal.length === 0) {
@@ -579,6 +598,7 @@ export function createContextCompiler(deps: {
           state: 'empty',
           errorCode: emptyReason,
         })
+        mark('persist')
         void packId
         return {
           kind: 'empty',
@@ -587,7 +607,7 @@ export function createContextCompiler(deps: {
         }
       }
 
-      const packId = await deps.packs.persist({
+      const { packId, stableTokens: storedStableTokens, dynamicTokens, evidenceProven } = await deps.packs.persistWithSummary({
         installationId: input.installationId,
         authorityGrant:input.authorityGrant,
         queryContext,consumptionGeneration:generation,
@@ -611,13 +631,14 @@ export function createContextCompiler(deps: {
         state: mode === 'enabled' ? 'ready' : 'shadow',
       })
 
+      mark('persist')
       if (mode === 'shadow') return { kind: 'shadow', packId }
-      const stored = await deps.packs.get(packId)
       return {
         kind: 'ready',
         packId,
-        stableTokens: stored?.stable_tokens ?? 0,
-        dynamicTokens: stored?.dynamic_tokens ?? 0,
+        stableTokens: storedStableTokens,
+        dynamicTokens,
+        evidenceProven,
         itemCount: keptItems.length + keptExternal.length,
       }
       }catch(error){

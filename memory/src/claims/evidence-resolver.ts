@@ -70,9 +70,19 @@ export function resolvePacketEvidence(
 /** Known proof is captured when a new pack is written. Bad legacy hashes stay
  * unproven; no current bytes are retroactively asserted as historical proof. */
 export async function captureEvidenceReference(client:Pick<pg.PoolClient,'query'>,installationId:string,evidenceId:string,versionId:string){
+ const [reference]=await captureEvidenceReferences(client,installationId,[{evidenceId,versionId}])
+ return reference
+}
+
+export async function captureEvidenceReferences(
+ client:Pick<pg.PoolClient,'query'>,
+ installationId:string,
+ evidence:readonly {evidenceId:string;versionId:string}[],
+){
+ if(!evidence.length)return []
  const prepared=preparedEvidenceSources(client)
  if(sourcePoolContext(client).namespace==='memory'&&!prepared)throw Error('source_preparation_required')
- const row=(await client.query<{source_event_id:string|null;artifact_id:string|null;version_id:string;source_version:string;excerpt:string;excerpt_hash:Buffer;source_text:string|null}>(`SELECT e.source_event_id::text,e.artifact_id::text,e.version_id::text,COALESCE(e.artifact_id,e.source_event_id,e.capsule_id,e.version_id)::text AS source_version,e.excerpt,e.excerpt_hash,
+ const rows=(await client.query<{evidence_id:string;source_event_id:string|null;artifact_id:string|null;version_id:string;source_version:string;excerpt:string;excerpt_hash:Buffer;source_text:string|null}>(`SELECT e.evidence_id::text,e.source_event_id::text,e.artifact_id::text,e.version_id::text,COALESCE(e.artifact_id,e.source_event_id,e.capsule_id,e.version_id)::text AS source_version,e.excerpt,e.excerpt_hash,
    ${prepared?'NULL::text AS source_text':`CASE WHEN event.origin='team' OR event.source_kind IN('team_collaboration','team_delivery','team_semantic') THEN NULL
      WHEN e.artifact_id IS NOT NULL THEN CASE WHEN jsonb_typeof(artifact.details->'text')='string' THEN left(artifact.details->>'text',64000) ELSE NULL END
      WHEN jsonb_typeof(event.payload->'text')='string' THEN left(event.payload->>'text',64000) ELSE NULL END AS source_text`}
@@ -80,9 +90,15 @@ export async function captureEvidenceReference(client:Pick<pg.PoolClient,'query'
    LEFT JOIN source_artifacts artifact ON artifact.installation_id=e.installation_id AND artifact.artifact_id=e.artifact_id
    LEFT JOIN source_events event ON event.installation_id=e.installation_id
      AND event.source_event_id=CASE WHEN e.artifact_id IS NOT NULL THEN artifact.source_event_id ELSE e.source_event_id END
-   WHERE e.installation_id=$1 AND e.evidence_id=$2 AND e.version_id=$3 FOR SHARE OF e`,[installationId,evidenceId,versionId])).rows[0]
- if(!row||row.excerpt_hash.length!==32||!createHash('sha256').update(row.excerpt).digest().equals(row.excerpt_hash))return null
- if(prepared)row.source_text=prepared.material(evidenceId,row.version_id,row.source_event_id,row.artifact_id).sourceText
- return{versionId:row.version_id,sourceVersion:row.source_version,excerptHash:row.excerpt_hash,
-   sourceHash:row.source_text?createHash('sha256').update(sanitizeText(row.source_text,64000).text).digest('hex'):null}
+   WHERE e.installation_id=$1 AND e.evidence_id=ANY($2::uuid[])
+   ORDER BY e.evidence_id FOR SHARE OF e`,[installationId,evidence.map(ref=>ref.evidenceId)])).rows
+ const byId=new Map(rows.map(row=>[row.evidence_id,row]))
+ return evidence.map(({evidenceId,versionId})=>{
+  const row=byId.get(evidenceId.toLowerCase())
+  if(!row||row.version_id!==versionId.toLowerCase()||row.excerpt_hash.length!==32
+   ||!createHash('sha256').update(row.excerpt).digest().equals(row.excerpt_hash))return null
+  const sourceText=prepared?prepared.material(row.evidence_id,row.version_id,row.source_event_id,row.artifact_id).sourceText:row.source_text
+  return {versionId:row.version_id,sourceVersion:row.source_version,excerptHash:row.excerpt_hash,
+   sourceHash:sourceText?createHash('sha256').update(sanitizeText(sourceText,64000).text).digest('hex'):null}
+ })
 }

@@ -1330,6 +1330,96 @@ suite('controlled personal Relay source reader',()=>{
   expect((await runtime.query('SELECT document_compiler_version FROM work_episodes WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{document_compiler_version:'memory-episode-packet-v6'}])
   expect((await runtime.query('SELECT count(*)::text AS n FROM memory_provider_budget_reservations')).rows[0].n).toBe('0')
  })
+ test('native Context delivers two accepted excerpts within the shared turn budget',async()=>{
+  const {randomUUID}=await import('node:crypto')
+  const {governanceFixture}=await import('../../testing/governance-fixture.js')
+  const {originContextFixture,contextDeliveryClient,measureContextDelivery}=await import('../helpers/origin-context-fixture.js')
+  const {personal:installation,claim,version,evidence:firstEvidence}=await governanceFixture(runtime)
+  const repository=randomUUID(),snapshot=randomUUID(),space=randomUUID(),secondEvidence=randomUUID(),commit='f'.repeat(40)
+  const statement='Memory job migration requires an exact installation watermark.'
+  await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage','memory.search'])",[installation])
+  await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[installation])
+  await runtime.query("INSERT INTO memory_curation_policies(installation_id,mode,consume_mode) VALUES($1,'enabled','enabled')",[installation])
+  await runtime.query("INSERT INTO repositories(repository_id,installation_id,repository_key,first_observed_at,last_observed_at) VALUES($1,$2,'context-budget',now(),now())",[repository,installation])
+  await runtime.query("INSERT INTO repo_snapshots(installation_id,repository_id,repo_snapshot_id,commit_sha,branch,observed_at) VALUES($1,$2,$3,$4,'main',now())",[installation,repository,snapshot,commit])
+  await runtime.query("INSERT INTO memory_spaces(installation_id,space_id,domain,name,destinations) VALUES($1,$2,'work','Migration',ARRAY['personal'])",[installation,space])
+  await runtime.query("UPDATE knowledge_claims SET scope_kind='repository',scope_key=$2 WHERE claim_id=$1",[claim,repository])
+  await runtime.query("UPDATE knowledge_versions SET statement=$2,repository_id=$3,repo_snapshot_id=$4 WHERE version_id=$1",[version,statement,repository,snapshot])
+  await runtime.query('DELETE FROM knowledge_evidence WHERE evidence_id=$1',[firstEvidence])
+  await runtime.query(`WITH capsule AS(
+    INSERT INTO knowledge_evidence_capsules(capsule_id,installation_id,version_id,retention_basis,source_content_hash)
+    VALUES(gen_random_uuid(),$1,$2,'user_accepted',sha256(convert_to($3,'UTF8'))) RETURNING capsule_id)
+   INSERT INTO knowledge_evidence(evidence_id,installation_id,version_id,capsule_id,ordinal,evidence_kind,excerpt,excerpt_hash,occurred_at)
+   SELECT id,$1,$2,capsule_id,ordinal,'accepted_excerpt',$3,sha256(convert_to($3,'UTF8')),now()
+   FROM capsule CROSS JOIN unnest($4::uuid[]) WITH ORDINALITY AS e(id,ordinal)`,[installation,version,statement,[firstEvidence,secondEvidence]])
+  // Match the observed corpus size while keeping a single relevant version.
+  await runtime.query(`WITH distractors AS MATERIALIZED(
+    SELECT gen_random_uuid() AS claim_id,gen_random_uuid() AS version_id,n FROM generate_series(1,31) n
+   ), claims AS (
+    INSERT INTO knowledge_claims(claim_id,installation_id,claim_type,scope_kind,scope_key,normalized_key,state)
+    SELECT claim_id,$1,'test_invariant','repository',$2::uuid::text,'fixture-unrelated-'||n,'active' FROM distractors
+   ), versions AS (
+    INSERT INTO knowledge_versions(version_id,installation_id,claim_id,version_number,statement,authority,confidence,repository_id,repo_snapshot_id)
+    SELECT version_id,$1,claim_id,1,'Recipe: roast zucchini with olive oil.','user_accepted',1,$2,$3 FROM distractors
+    RETURNING version_id
+   ), capsules AS (
+    INSERT INTO knowledge_evidence_capsules(capsule_id,installation_id,version_id,retention_basis,source_content_hash)
+    SELECT gen_random_uuid(),$1,version_id,'user_accepted',sha256(convert_to('fixture','UTF8')) FROM versions
+    RETURNING version_id,capsule_id
+   )
+   INSERT INTO knowledge_evidence(evidence_id,installation_id,version_id,capsule_id,ordinal,evidence_kind,excerpt,excerpt_hash,occurred_at)
+   SELECT gen_random_uuid(),$1,version_id,capsule_id,1,'accepted_excerpt','fixture',sha256(convert_to('fixture','UTF8')),now() FROM capsules`,[installation,repository,snapshot])
+  await runtime.query(`UPDATE knowledge_claims c SET current_version_id=v.version_id
+   FROM knowledge_versions v WHERE c.installation_id=$1 AND c.current_version_id IS NULL
+   AND v.installation_id=c.installation_id AND v.claim_id=c.claim_id`,[installation])
+  const context=await originContextFixture(runtime,installation,{authorityGrant:{installationId:installation,configVersion:'1',userId:1},sceneId:space,query:statement,repositoryId:repository,commitSha:commit})
+  const client=await contextDeliveryClient(runtime,context,installation)
+  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>)=>{
+   const signal=AbortSignal.timeout(750)
+   const grant=client.issueGrant()
+   const http=async(path:string,body?:Record<string,unknown>)=>{
+    const headers:Record<string,string>={authorization:'Bearer '+grant}
+    if(body)headers['content-type']='application/json'
+    const response=await fetch(client.url+path,{headers,method:body?'POST':'GET',body:body?JSON.stringify(body):undefined,signal})
+    const data=await response.json()
+    if(!response.ok)throw Error(path.split('?')[0]+': '+JSON.stringify(data))
+    return data
+   }
+   const turn={session_id:context.sessionId,client_request_id:request,agent:'codex'}
+   const pack=await phase('compile',()=>http('/compile',{
+    ...turn,schema_version:1,adapter_capability:'native_hidden_v1',query:statement,
+    repository_hint:{repository_id:repository,commit_sha:commit},evidence_read_capability:'on_demand_v1',
+   }))
+   expect(pack.outcome).toBe('ready')
+   expect(pack.evidence_read_capability).toBe('on_demand_v1')
+   expect(pack.pack.item_count).toBe(1)
+   const path='/packs/'+pack.pack.pack_id
+   const ticket=await phase('admit',()=>http(path+'/admit',{...turn,adapter:'codex-app-server'}))
+   const query=new URLSearchParams({session_id:context.sessionId,injection_id:ticket.injection_id,nonce:ticket.nonce})
+   const consumed=await phase('consume',()=>http(path+'/text?'+query.toString()))
+   expect(consumed.dynamic_text).toContain(statement)
+   for(const id of [firstEvidence,secondEvidence])expect(consumed.dynamic_text).toContain(id)
+   expect(consumed.pack_id).toBe(pack.pack.pack_id)
+  }
+  try{
+   await deliver('warmup',(_name,run)=>run())
+   const samples=Number(process.env.CONTEXT_TEST_SAMPLES??1)
+   for(let n=0;n<samples;n++){
+    const result=await measureContextDelivery(
+     phase=>deliver('measured-'+n,phase),
+     Number(process.env.CONTEXT_TEST_DB_DELAY_MS??0),
+    )
+    if(process.env.CONTEXT_TEST_TIMING)console.info(JSON.stringify(result))
+    const compile=result.phases.find(phase=>phase.name==='compile')!
+    expect(compile.queries.length).toBeLessThanOrEqual(70)
+    if(process.env.CONTEXT_TEST_DB_DELAY_MS){
+     expect(compile.ms).toBeLessThan(500)
+     expect(result.ms).toBeLessThan(710)
+    }
+   }
+  }finally{await client.close()}
+ },30000)
+
  test('machine-concluded claims and excerpts retain current source authority after automatic publication',async()=>{
   const {randomUUID}=await import('node:crypto')
   const {writeLifecycleConclusion}=await import('../../curation/writer.js')

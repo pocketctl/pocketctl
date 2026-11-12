@@ -1,5 +1,5 @@
 import {sourcePoolContext} from '../sources/pool-context.js'
-import {lookupCurrentInstallation} from '../sources/current-grant.js'
+import {currentPersonalInstallation} from '../sources/current-grant.js'
 import type pg from 'pg'
 import { createCapabilityVerifier } from '../relay/capability-verifier.js'
 import { createScopeAuthorization } from '../governance/authorization.js'
@@ -48,14 +48,17 @@ export function createGrantGuard(deps: GrantGuardDeps) {
         local_status: string
         relay_status: string
         config_version: string | number
+        authority: Parameters<typeof currentPersonalInstallation>[0]
       }>(`
-        SELECT local_status, relay_status, config_version::text AS config_version
+        SELECT local_status, relay_status, config_version::text AS config_version,
+          ${shared ? "(SELECT state FROM shared.memory_current_grant_states(ARRAY[$1::uuid],ARRAY[]::uuid[]) LIMIT 1)" : 'NULL'} AS authority
         FROM memory_installations WHERE installation_id = $1
       `, [installationId])
       const local=result.rows[0]
       if(!local)return null
-      const current=await lookupCurrentInstallation(deps.pool,installationId)
-      return current?{...local,relay_status:current.current?current.status:'revoked',config_version:current.configVersion,owner_user_id:current.ownerUserId}:local
+      if(!shared)return local
+      const current=currentPersonalInstallation(local.authority)
+      return {...local,relay_status:current.current?current.status:'revoked',config_version:current.configVersion,owner_user_id:current.ownerUserId}
     },
   })
 

@@ -138,8 +138,9 @@ describe('context route contracts (unit)', () => {
 
   test('slow native compilation logs bounded phase timings without request data', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-    const app = appWith({ compiler: { compile: async () => {
+    const app = appWith({ compiler: { compile: async (_input: unknown, observe: (phase: string, ms: number) => void) => {
       await new Promise(resolve => setTimeout(resolve, 425))
+      observe('retrieve', 400)
       return { kind: 'ready', packId: 'private-pack', stableTokens: 0, dynamicTokens: 2, itemCount: 1 }
     } } as never })
     try {
@@ -152,7 +153,7 @@ describe('context route contracts (unit)', () => {
       expect(response.statusCode).toBe(200)
       const line = log.mock.calls.map(call => String(call[0])).find(value => value.includes('context_compile_latency'))
       expect(line).toBeDefined()
-      expect(JSON.parse(line!)).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number) })
+      expect(JSON.parse(line!)).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number), retrieve_ms: 400 })
       expect(line).not.toContain('private-')
     } finally {
       log.mockRestore()
@@ -232,7 +233,7 @@ describe('context route contracts (unit)', () => {
       repositoryId: null,
       repositoryKey: 'gitee.com/muwb123/pocketctl',
       branch: 'develop',
-    }))
+    }), expect.any(Function))
   })
 
   test('pack text is consumed once through a session-bound admitted injection', async () => {

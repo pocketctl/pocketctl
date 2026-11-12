@@ -30,6 +30,67 @@ const systemPolicies = (['extraction', 'context', 'ranking'] as const).map(kind 
   return { kind, document, hash: canonicalPolicyHash(document) }
 })
 
+interface PolicyHeadScope {
+  installationId: string
+  repositoryId?: string | null
+  userScopeKey?: string | null
+  organizationInstallationId?: string | null
+  includeTeamLayer?: boolean
+}
+
+interface PolicyHeadDocument {
+  layer: PolicyLayer
+  scopeKey: string
+  document: AnyPolicyDocument
+  policyVersionId: string
+  headRevision: number
+}
+
+async function listHeadDocuments(
+  pool: pg.Pool, input: PolicyHeadScope, kinds: readonly PolicyKind[], resolveOwner = false,
+) {
+  const { rows } = await pool.query<{
+    policy_kind: PolicyKind
+    layer: PolicyLayer
+    scope_key: string
+    document: AnyPolicyDocument
+    policy_version_id: string
+    revision: string
+    content_hash: Buffer
+  }>(`
+    WITH owner_scope AS (
+      SELECT owner.owner_scope_kind, parent.installation_id AS organization_installation_id
+      FROM memory_owner_scopes owner
+      LEFT JOIN memory_owner_scopes parent ON parent.owner_scope_kind='organization'
+        AND parent.owner_scope_id=owner.parent_organization_id
+      WHERE $7::boolean AND owner.installation_id=$1 AND owner.owner_scope_kind='team'
+    )
+    SELECT s.policy_kind, s.layer, s.scope_key, v.document, v.policy_version_id::text, h.revision::text, v.content_hash
+    FROM memory_policy_sets s
+    JOIN memory_policy_heads h ON h.policy_id = s.policy_id
+    JOIN memory_policy_versions v ON v.policy_version_id = h.active_version_id
+    WHERE (s.policy_kind = ANY($2::text[]) OR ($7::boolean AND s.installation_id IS NULL AND s.layer='system' AND s.scope_key='global'))
+      AND (s.installation_id IS NULL AND s.layer = 'system'
+           OR s.installation_id = $1 AND s.layer = 'repository' AND s.scope_key = $3
+           OR s.installation_id = $1 AND s.layer = 'user' AND s.scope_key = $4
+           OR (s.installation_id = COALESCE($5::uuid,(SELECT organization_installation_id FROM owner_scope)) AND s.layer = 'organization')
+           OR (($6::boolean OR EXISTS(SELECT 1 FROM owner_scope)) AND s.installation_id = $1 AND s.layer = 'team'))
+    ORDER BY s.policy_kind, (s.layer = 'system') DESC, (s.layer = 'organization') DESC,
+             (s.layer = 'team') DESC, s.created_at ASC
+  `, [input.installationId, kinds, input.repositoryId ?? '', input.userScopeKey ?? 'global',
+    input.organizationInstallationId ?? null, Boolean(input.includeTeamLayer), resolveOwner])
+  const result = new Map<PolicyKind, PolicyHeadDocument[]>()
+  for (const row of rows) {
+    const documents = result.get(row.policy_kind) ?? []
+    documents.push({ layer: row.layer, scopeKey: row.scope_key, document: row.document,
+      policyVersionId: row.policy_version_id, headRevision: Number(row.revision) })
+    result.set(row.policy_kind, documents)
+  }
+  const systemHashes = new Map(rows.filter(row=>row.layer==='system'&&row.scope_key==='global')
+    .map(row=>[row.policy_kind,row.content_hash]))
+  return {documents:result,systemCurrent:systemPolicies.every(policy=>systemHashes.get(policy.kind)?.equals(policy.hash))}
+}
+
 /**
  * Policy persistence over the v13 schema. System rows carry a NULL
  * installation and are installed idempotently; repository/user rows are
@@ -96,46 +157,15 @@ export function createPolicyRepository(pool: pg.Pool) {
       }
     },
 
-    async listHeadDocuments(input: {
-      installationId: string
-      kind: PolicyKind
-      repositoryId?: string | null
-      userScopeKey?: string | null
-      /** Phase 3: parent Organization installation for the org layer. */
-      organizationInstallationId?: string | null
-      /** Phase 3: include this installation's team layer. */
-      includeTeamLayer?: boolean
-    }): Promise<Array<{ layer: PolicyLayer; scopeKey: string; document: AnyPolicyDocument; policyVersionId: string; headRevision: number }>> {
-      const result = await pool.query<{
-        layer: PolicyLayer
-        scope_key: string
-        document: AnyPolicyDocument
-        policy_version_id: string
-        revision: string
-      }>(`
-        SELECT s.layer, s.scope_key, v.document, v.policy_version_id::text, h.revision::text
-        FROM memory_policy_sets s
-        JOIN memory_policy_heads h ON h.policy_id = s.policy_id
-        JOIN memory_policy_versions v ON v.policy_version_id = h.active_version_id
-        WHERE s.policy_kind = $2
-          AND (s.installation_id IS NULL AND s.layer = 'system'
-               OR s.installation_id = $1 AND s.layer = 'repository' AND s.scope_key = $3
-               OR s.installation_id = $1 AND s.layer = 'user' AND s.scope_key = $4
-               OR ($5::uuid IS NOT NULL AND s.installation_id = $5::uuid AND s.layer = 'organization')
-               OR ($6::boolean AND s.installation_id = $1 AND s.layer = 'team'))
-        ORDER BY (s.layer = 'system') DESC,
-                 (s.layer = 'organization') DESC,
-                 (s.layer = 'team') DESC,
-                 s.created_at ASC
-      `, [input.installationId, input.kind, input.repositoryId ?? '', input.userScopeKey ?? 'global',
-        input.organizationInstallationId ?? null, Boolean(input.includeTeamLayer)])
-      return result.rows.map(row => ({
-        layer: row.layer,
-        scopeKey: row.scope_key,
-        document: row.document,
-        policyVersionId: row.policy_version_id,
-        headRevision: Number(row.revision),
-      }))
+    async listHeadDocuments(input: PolicyHeadScope & { kind: PolicyKind }) {
+      return (await listHeadDocuments(pool, input, [input.kind])).documents.get(input.kind) ?? []
+    },
+
+    async resolveHeadDocuments(input: PolicyHeadScope, kinds: readonly PolicyKind[]) {
+      const heads = await listHeadDocuments(pool, input, kinds, true)
+      if (heads.systemCurrent) return heads.documents
+      await this.ensureSystemPolicies()
+      return (await listHeadDocuments(pool, input, kinds, true)).documents
     },
 
     /**

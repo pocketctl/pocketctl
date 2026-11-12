@@ -1,5 +1,5 @@
 import {permissionsForMirrorRoles} from './role-permissions.js'
-import {loadCurrentGrantStates,currentBindingAllowed,lookupCurrentInstallation,lockCurrentRelayAuthority} from '../sources/current-grant.js'
+import {loadCurrentGrantStates,currentBindingAllowed,currentPersonalInstallation,lockCurrentRelayAuthority} from '../sources/current-grant.js'
 import {bindSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import type pg from 'pg'
 
@@ -275,20 +275,37 @@ export async function assertCurrentMembershipWindows(client:Pick<pg.PoolClient,'
 /** Serialize personal management with purge/settings writers before resource locks. */
 export async function requireCurrentInstallationAuthority(client: pg.PoolClient, grant: {
   installationId: string; configVersion?: string; expiresAt?: number;userId?:number
-},options:{readOnly?:boolean}={}): Promise<void> {
+},options:{readOnly?:boolean|'wait-for-purge'}={}): Promise<void> {
+  if(grant.expiresAt!==undefined&&!Number.isFinite(grant.expiresAt))throw new TargetBindingError('grant expired')
   if(!await lockCurrentRelayAuthority(client,[grant.installationId]))throw new TargetBindingError('installation authority busy')
-  const current=await lookupCurrentInstallation(client,grant.installationId)
-  if(current&&(!current.current||(grant.configVersion!==undefined&&current.configVersion!==grant.configVersion)||(grant.userId!==undefined&&current.ownerUserId!==String(grant.userId))))throw new TargetBindingError('installation authority is stale')
+  const shared=sourcePoolContext(client).namespace==='memory'
   if(options.readOnly){
-    if(!(await client.query("SELECT pg_try_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0)) AS locked",[grant.installationId])).rows[0]?.locked)throw new TargetBindingError('installation authority busy')
+    if(options.readOnly==='wait-for-purge'){
+      await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[grant.installationId])
+    }else if(!(await client.query("SELECT pg_try_advisory_xact_lock_shared(hashtextextended('purge:installation:' || $1,0)) AS locked",[grant.installationId])).rows[0]?.locked){
+      throw new TargetBindingError('installation authority busy')
+    }
   }else await client.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))", [grant.installationId])
-  const result = await client.query<{local_status:string;relay_status:string;config_version:string}>(
-    'SELECT local_status,relay_status,config_version::text FROM memory_installations WHERE installation_id=$1 FOR SHARE'+(options.readOnly?' NOWAIT':''), [grant.installationId])
+  // Read native authority after its lock and sample expiry after the local
+  // row lock, which can block on the write path.
+  const result = await client.query<{
+    local_status:string;relay_status:string;config_version:string
+    alive:boolean;authority:Parameters<typeof currentPersonalInstallation>[0]
+  }>(`WITH installation AS MATERIALIZED (
+    SELECT local_status,relay_status,config_version::text FROM memory_installations
+    WHERE installation_id=$1 FOR SHARE ${options.readOnly?'NOWAIT':''}
+  )
+  SELECT installation.*, ($2::double precision IS NULL OR clock_timestamp()<to_timestamp($2::double precision)) AS alive,
+    ${shared?"(SELECT state FROM shared.memory_current_grant_states(ARRAY[$1::uuid],ARRAY[]::uuid[]) LIMIT 1)":'NULL'} AS authority
+  FROM installation`,[grant.installationId,grant.expiresAt??null])
   const row=result.rows[0]
-  if (!row || ['purging','purged','integrity_error'].includes(row.local_status)
+  if(!row)throw new TargetBindingError('installation authority is stale')
+  const current=shared?currentPersonalInstallation(row.authority):undefined
+  if (['purging','purged','integrity_error'].includes(row.local_status)
+    || (current&&(!current.current||(grant.configVersion!==undefined&&current.configVersion!==grant.configVersion)||(grant.userId!==undefined&&current.ownerUserId!==String(grant.userId))))
     || (!current && (['revoking','revoked'].includes(row.relay_status)
       || (grant.configVersion !== undefined && row.config_version !== grant.configVersion)))) {
     throw new TargetBindingError('installation authority is stale')
   }
-  await assertCurrentGrantClock(client, grant)
+  if(!row.alive)throw new TargetBindingError('grant expired')
 }

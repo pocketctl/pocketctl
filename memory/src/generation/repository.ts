@@ -80,13 +80,13 @@ export function createGenerationRunRepository(pool: pg.Pool) {
       runId: string
       policyVersionIds: readonly string[]
     }): Promise<void> {
-      for (const [index, policyVersionId] of input.policyVersionIds.entries()) {
-        await pool.query(`
-          INSERT INTO memory_generation_run_policies (run_id, ordinal, policy_version_id)
-          VALUES ($1, $2, $3)
-          ON CONFLICT DO NOTHING
-        `, [input.runId, index, policyVersionId])
-      }
+      if (!input.policyVersionIds.length) return
+      await pool.query(`
+        INSERT INTO memory_generation_run_policies (run_id, ordinal, policy_version_id)
+        SELECT $1, ordinal - 1, version_id
+        FROM unnest($2::uuid[]) WITH ORDINALITY AS versions(version_id, ordinal)
+        ON CONFLICT DO NOTHING
+      `, [input.runId, input.policyVersionIds])
     },
   }
 }

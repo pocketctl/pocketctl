@@ -17,34 +17,56 @@ export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,i
  const versions=[...new Set(ids)].sort()
  if(versions.length>512)throw Error('source_reference_limit')
  if(!versions.length)return
- const current=(await client.query(`SELECT v.version_id::text,v.xmin::text AS version_stamp,c.xmin::text AS claim_stamp,v.statement,v.body_state,c.state,c.current_version_id::text,c.consumption_hold_reason,
+ // Keep the same NOWAIT locks, acquire them in dependency order, and
+ // repeat the complete snapshot at the final read boundary.
+ const {rows}=await client.query(`WITH versions AS MATERIALIZED(
+  SELECT v.version_id::text,v.xmin::text AS version_stamp,c.xmin::text AS claim_stamp,v.statement,v.body_state,c.state,c.current_version_id::text,c.consumption_hold_reason,
   ${deliveryVersionAvailableSql()} AS delivery_available,
   (CASE WHEN $3::timestamptz IS NULL THEN ${currentClaimVersionSql()} ELSE ${asOfClaimVersionSql('c','v','$3::timestamptz')} END
    AND(v.valid_from IS NULL OR v.valid_from<=COALESCE($3::timestamptz,clock_timestamp()))
    AND(v.valid_until IS NULL OR v.valid_until>COALESCE($3::timestamptz,clock_timestamp()))) AS selection_available
   FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
-  WHERE v.installation_id=$1 AND v.version_id=ANY($2::uuid[]) ORDER BY v.version_id FOR SHARE OF v,c NOWAIT`,[installationId,versions,options.asOf??null])).rows
- if(current.length!==versions.length||current.some(row=>options.expectedStatements?.has(row.version_id)&&options.expectedStatements.get(row.version_id)!==row.statement
-  ||options.expectedBodyStates?.has(row.version_id)&&options.expectedBodyStates.get(row.version_id)!==row.body_state
-  ||options.requireAvailable&&(row.body_state!=='present'||row.state!=='active'||row.consumption_hold_reason!==null||row.delivery_available!==true||row.selection_available!==true)
-  ||options.requireCurrent&&(row.body_state!=='present'||row.state!=='active'||row.current_version_id!==row.version_id||row.consumption_hold_reason!==null)))throw Error('source_reference_changed')
- const evidence=(await client.query(`SELECT e.evidence_id::text,e.xmin::text AS evidence_stamp,e.version_id::text,e.source_event_id::text,e.artifact_id::text,e.episode_id::text,e.evidence_kind,e.capsule_id::text,
+  WHERE v.installation_id=$1 AND v.version_id=ANY($2::uuid[]) ORDER BY v.version_id FOR SHARE OF v,c NOWAIT
+ ), evidence AS MATERIALIZED(
+  SELECT e.evidence_id::text,e.xmin::text AS evidence_stamp,e.version_id::text,e.source_event_id::text,e.artifact_id::text,e.episode_id::text,e.evidence_kind,e.capsule_id::text,
   e.locator#>>'{source_provenance,source_kind}' AS provenance_kind,e.locator#>>'{source_provenance,source_version}' AS provenance_version,
   CASE WHEN e.locator#>>'{source_provenance,source_kind}'='team_session' AND e.locator#>>'{source_provenance,source_version}'='2'
    THEN jsonb_build_object('team_id',e.locator#>>'{source_provenance,team_id}','team_session_id',e.locator#>>'{source_provenance,team_session_id}',
     'submission_id',e.locator#>>'{source_provenance,accepted_delivery,submission_id}','decision_id',e.locator#>>'{source_provenance,accepted_delivery,decision_id}') END AS delivery_proof
-  FROM knowledge_evidence e WHERE e.installation_id=$1 AND e.version_id=ANY($2::uuid[])
-  ORDER BY e.version_id,e.evidence_id LIMIT 4097 FOR SHARE OF e NOWAIT`,[installationId,versions])).rows
+  FROM knowledge_evidence e WHERE e.installation_id=$1 AND e.version_id IN(SELECT version_id::uuid FROM versions)
+  ORDER BY e.version_id,e.evidence_id LIMIT 4097 FOR SHARE OF e NOWAIT
+ ), capsules AS MATERIALIZED(
+  SELECT capsule_id::text,version_id::text,xmin::text AS capsule_stamp,retention_basis
+  FROM knowledge_evidence_capsules
+  WHERE installation_id=$1 AND capsule_id IN(SELECT capsule_id::uuid FROM evidence WHERE evidence_kind='accepted_excerpt')
+  ORDER BY capsule_id FOR SHARE NOWAIT
+ )
+ SELECT 'version' AS kind,to_jsonb(v) AS value FROM versions v
+ UNION ALL SELECT 'evidence',to_jsonb(e) FROM evidence e
+ UNION ALL SELECT 'capsule',to_jsonb(c) FROM capsules c
+ UNION ALL SELECT 'mode',jsonb_build_object('mode',mode,'generation',generation::text)
+  FROM shared.memory_source_modes WHERE installation_id=$1`,[installationId,versions,options.asOf??null])
+ const current=rows.filter(row=>row.kind==='version').map(row=>row.value)
+  .sort((a,b)=>a.version_id.localeCompare(b.version_id))
+ const evidence=rows.filter(row=>row.kind==='evidence').map(row=>row.value)
+  .sort((a,b)=>a.version_id.localeCompare(b.version_id)||a.evidence_id.localeCompare(b.evidence_id))
+ const capsules=rows.filter(row=>row.kind==='capsule').map(row=>row.value)
+  .sort((a,b)=>a.capsule_id.localeCompare(b.capsule_id))
+ if(current.length!==versions.length||current.some(row=>options.expectedStatements?.has(row.version_id)&&options.expectedStatements.get(row.version_id)!==row.statement
+  ||options.expectedBodyStates?.has(row.version_id)&&options.expectedBodyStates.get(row.version_id)!==row.body_state
+  ||options.requireAvailable&&(row.body_state!=='present'||row.state!=='active'||row.consumption_hold_reason!==null||row.delivery_available!==true||row.selection_available!==true)
+  ||options.requireCurrent&&(row.body_state!=='present'||row.state!=='active'||row.current_version_id!==row.version_id||row.consumption_hold_reason!==null)))throw Error('source_reference_changed')
  if(evidence.length>4096)throw Error('source_reference_limit')
  const withEvidence=new Set(evidence.map(row=>row.version_id))
  if(current.some(row=>row.body_state==='present'&&!withEvidence.has(row.version_id)))throw Error('source_reference_changed')
- let capsuleStamps:unknown[]=[]
- const capsules=evidence.filter(row=>row.evidence_kind==='accepted_excerpt').map(row=>row.capsule_id)
- if(capsules.length){
-  const retained=(await client.query("SELECT capsule_id::text,version_id::text,xmin::text AS capsule_stamp FROM knowledge_evidence_capsules WHERE installation_id=$1 AND capsule_id=ANY($2::uuid[]) ORDER BY capsule_id FOR SHARE NOWAIT",[installationId,capsules])).rows
-  capsuleStamps=retained.map(row=>[row.capsule_id,row.capsule_stamp])
-  if(evidence.some(row=>row.evidence_kind==='accepted_excerpt'&&!retained.some(c=>c.capsule_id===row.capsule_id&&c.version_id===row.version_id)))throw Error('source_reference_changed')
- }
+ const capsulesById=new Map(capsules.map(row=>[row.capsule_id,row]))
+ const lockedCapsules=evidence.filter(row=>row.evidence_kind==='accepted_excerpt').map(row=>{
+  const cap=capsulesById.get(row.capsule_id)
+  if(!cap||cap.version_id!==row.version_id)throw Error('source_reference_changed')
+  return {evidence_id:row.evidence_id,version_id:row.version_id,retention_basis:cap.retention_basis}
+ })
+ const mode=rows.find(row=>row.kind==='mode')?.value??{mode:'legacy-feed',generation:'1'}
+ const capsuleStamps=capsules.map(row=>[row.capsule_id,row.capsule_stamp])
 
  const snapshot=JSON.stringify([current.map(row=>[row.version_id,row.version_stamp,row.claim_stamp]),evidence.map(row=>[row.evidence_id,row.evidence_stamp]),capsuleStamps])
  if(options.expectedSnapshot!==undefined&&snapshot!==options.expectedSnapshot)throw Error('source_reference_changed')
@@ -55,7 +77,7 @@ export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,i
   if(unique.length>512)throw Error('source_reference_limit')
   if((await client.query('SELECT shared.lock_memory_delivery_commit($1::jsonb) AS locked',[JSON.stringify(unique)])).rows[0]?.locked!==true)throw Error('source_reference_changed')
  }
- await guardRetainedEvidence(client,installationId,evidence)
+ await guardRetainedEvidence(client,installationId,evidence,{locked:{mode,capsules:lockedCapsules}})
  if(options.recordCheck!==false){
   const repeated={...options,asOf:options.asOf?new Date(options.asOf):undefined,expectedSnapshot:snapshot,recordCheck:false}
   await registerRetainedReadCheck(client,installationId,db=>guardRetainedVersions(db,installationId,versions,repeated))
