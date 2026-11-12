@@ -888,4 +888,48 @@ suite('continuous personal canonical content uses current scope seal',()=>{
   },{branch:'canonical'})
   try{for(let n=0;n<128&&!checked;n++){await scheduler.runOnce();await queue.tick();if(errors.length)throw errors[0]};expect(checked).toBe(true);expect(errors).toEqual([])}finally{await scheduler.stop();await queue.stop()}
  },30000)
+ test('projects eligible headerless turns alongside an unrelated reclaimed turn',async()=>{
+  const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  const reclaimed=await f.event(source),eligible=[await f.event(source),await f.event(source)],reclaimedTurn='direct-turn-'+source.session
+  // Recreate the old format where the turn exists only in the authoritative hot payload.
+  await f.pool.query(`UPDATE public.events SET source_header_version=NULL,source_sequence=NULL,canonical_payload_hash=NULL,source_classification=NULL,
+   payload=CASE WHEN id=ANY($2::bigint[]) THEN jsonb_set(payload,'{turn_id}',to_jsonb('separate-retained-turn'::text)) ELSE payload END
+   WHERE id=ANY($1::bigint[])`,[[reclaimed,...eligible],eligible])
+  await f.pool.query(`INSERT INTO memory.memory_source_retention_receipts(installation_id,session_id,turn_id,source_digest,compiler_version,extraction_completed_at,state)
+   VALUES($1,$2,$3,$4,'fixture',now(),'reclaiming')`,[installation,source.session,reclaimedTurn,Buffer.alloc(32)])
+  const root={kind:'relay_event' as const,key:f.root(source)},signal=new AbortController().signal,errors:unknown[]=[]
+  const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'headerless-retention-scheduler',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'headerless-retention-worker',signal,
+   onError:(error,job)=>{if(!job||job.installation_id===installation)errors.push(error)}})
+  const normal=createCanonicalProjectionHandler(f.runtime,{pageSize:1,stabilizationMs:0})
+  queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
+  queue.register('project_shared_source',async(job,abort,context)=>{
+   if(job.installation_id!==installation)return
+   const scope=job.payload.scope as Parameters<ReturnType<typeof createPostgresSharedSourceReader>['listHeads']>[0]
+   const ordinary=createPostgresSharedSourceReader(f.runtime)
+   expect((await ordinary.listHeads(scope,root)).heads.map(h=>h.canonicalKey)).toEqual(eligible)
+   await expect(ordinary.getHeads(scope,root,[reclaimed])).rejects.toMatchObject({code:'source_body_reclaimed'})
+   await normal(job,abort,context)
+  },{branch:'canonical'})
+  let continued=false
+  try{
+   for(let n=0;n<96;n++){
+    await scheduler.runOnce();await queue.tick();if(errors.length)throw errors[0]
+    const progress=(await f.runtime.query('SELECT state,next_cursor,source_version FROM memory_canonical_projection_progress WHERE installation_id=$1 AND root_key=$2',[installation,root.key])).rows[0]
+    if(progress?.state==='scanning'&&progress.next_cursor&&typeof progress.source_version.content==='string')continued=true
+    if(progress?.state==='ready')break
+    if(n===95)throw Error('fixture_projection_checkpoint_missing');await delay(30)
+   }
+   expect(continued).toBe(true)
+   const refs=(await f.runtime.query('SELECT canonical_key,payload FROM source_events WHERE installation_id=$1 ORDER BY canonical_key',[installation])).rows
+   expect(refs).toEqual(eligible.map(key=>({canonical_key:key,payload:null})))
+   const watermark=(await f.pool.query(`SELECT w.revision::text,p.processed_revision::text FROM shared.memory_source_work w
+    JOIN shared.memory_source_progress p USING(source_kind,root_key)
+    WHERE w.source_kind='relay_event' AND w.root_key=$1 AND p.installation_id=$2`,[root.key,installation])).rows[0]
+   expect(watermark?.processed_revision).toBe(watermark?.revision)
+   expect(BigInt(watermark.revision)).toBeGreaterThan(0n)
+   expect((await f.runtime.query("SELECT state FROM memory_jobs WHERE installation_id=$1 AND job_type='project_shared_source'",[installation])).rows).toEqual([{state:'completed'}])
+  }finally{await scheduler.stop();await queue.stop()}
+ },15000)
 })
