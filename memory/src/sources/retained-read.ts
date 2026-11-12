@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import {sourcePoolContext} from './pool-context.js'
+import {isPhysicalSourcePool,sourcePoolContext} from './pool-context.js'
 import {lockCurrentRelayAuthority} from './current-grant.js'
 import {assertRetainedSourceGuards,rememberRetainedSourceRead} from './retained-authority.js'
 import {preparedSourceUnavailable} from './prepared-sources.js'
@@ -14,13 +14,21 @@ export async function retainedSourceRead<T>(pool:pg.Pool,input:{installationId:s
  if(!grant||(!('scopeBindings' in grant)&&typeof grant.configVersion!=='string'))return undefined
  const client=await pool.connect()
  try{
-  await client.query('BEGIN')
-  await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
-  const bindings='scopeBindings' in grant?grant.scopeBindings:[]
-  if(!await lockCurrentRelayAuthority(client,bindings.length?bindings.map(b=>b.installation_id):[input.installationId],bindings.flatMap(b=>b.membership_id?[b.membership_id]:[])))throw new TargetBindingError('scope authority busy')
-  await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
-  if('scopeBindings' in grant)await requireCurrentScopePermission({client,grant,targetInstallationId:input.installationId,permission:'read'})
-  else{if(grant.installationId!==input.installationId)throw new TargetBindingError('installation authority mismatch');await requireCurrentInstallationAuthority(client,grant,{readOnly:true})}
+  const timeouts="SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'"
+  if(isPhysicalSourcePool(pool))await client.query('BEGIN; '+timeouts)
+  else{
+   await client.query('BEGIN')
+   await client.query(timeouts)
+  }
+  if('scopeBindings' in grant){
+   const bindings=grant.scopeBindings
+   if(!await lockCurrentRelayAuthority(client,bindings.length?bindings.map(b=>b.installation_id):[input.installationId],bindings.flatMap(b=>b.membership_id?[b.membership_id]:[])))throw new TargetBindingError('scope authority busy')
+   await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
+   await requireCurrentScopePermission({client,grant,targetInstallationId:input.installationId,permission:'read'})
+  }else{
+   if(grant.installationId!==input.installationId)throw new TargetBindingError('installation authority mismatch')
+   await requireCurrentInstallationAuthority(client,grant,{readOnly:'wait-for-purge'})
+  }
   const value=await read(client)
   await assertRetainedSourceGuards(client)
   await assertCurrentGrantClock(client,grant,[input.installationId])

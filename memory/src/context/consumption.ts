@@ -13,8 +13,13 @@ export async function consumptionGeneration(pool:pg.Pool|pg.PoolClient,installat
 }
 /** Caller acquires source/FK dependencies first. Never acquire source locks after this fence. */
 export async function fenceConsumptionGeneration(client:pg.PoolClient,installationId:string,expected?:string):Promise<string>{
- await client.query('INSERT INTO memory_scope_consumption_generations(installation_id) VALUES($1) ON CONFLICT DO NOTHING',[installationId])
- const generation=(await client.query<{generation:string}>('SELECT generation::text FROM memory_scope_consumption_generations WHERE installation_id=$1 FOR SHARE',[installationId])).rows[0].generation
+ const select = () => client.query<{generation:string}>('SELECT generation::text FROM memory_scope_consumption_generations WHERE installation_id=$1 FOR SHARE',[installationId])
+ let row=(await select()).rows[0]
+ if(!row){
+  await client.query('INSERT INTO memory_scope_consumption_generations(installation_id) VALUES($1) ON CONFLICT DO NOTHING',[installationId])
+  row=(await select()).rows[0]
+ }
+ const generation=row.generation
  if(expected!==undefined&&generation!==expected)throw new ContextConsumptionChangedError()
  return generation
 }

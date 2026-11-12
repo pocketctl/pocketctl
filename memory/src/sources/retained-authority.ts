@@ -6,11 +6,18 @@ import {governedRetainedEvidence} from './governed-retained-evidence.js'
 
 export interface RetainedEvidenceBinding {source_event_id:string|null;artifact_id:string|null;episode_id?:string|null;evidence_kind?:string;evidence_id?:string;version_id?:string}
 type Db=Pick<pg.PoolClient,'query'>
+type SourceMode={mode:string;generation:string}
+type LockedCapsule={evidence_id:string;version_id:string;retention_basis:string}
+interface RetainedEvidenceOptions {
+ expectedMode?:SourceMode
+ /** Already read in the caller's locking snapshot on this transaction. */
+ locked?:{mode:SourceMode;capsules:readonly LockedCapsule[]}
+}
 interface Guard {assertCurrent(client:Db,options?:SourceCommitOptions):Promise<void>}
 interface ConsumerGuards {installationId:string;mode:string;generation:string;ids:Set<string>;governedIds:Set<string>;guards:Guard[]}
 const attached=new WeakMap<object,Map<string,ConsumerGuards>>()
 export const detachRetainedSourceGuards=(client:object)=>attached.delete(sourceConnectionKey(client))
-const currentMode=async(client:Db,installationId:string):Promise<{mode:string;generation:string}>=>(await client.query(
+export const currentRetainedSourceMode=async(client:Db,installationId:string):Promise<SourceMode>=>(await client.query(
  'SELECT mode,generation::text FROM shared.memory_source_modes WHERE installation_id=$1',[installationId],
 )).rows[0]??{mode:'legacy-feed',generation:'1'}
 
@@ -19,12 +26,12 @@ const uuidPattern='^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}
 /** Human capsules carry independent retention authority. Machine capsules
  * instead cite the exact original member of a committed curation decision.
  * The returned UUIDs still need the current native source commit fence. */
-async function machineExcerptSources(client:Db,installationId:string,evidence:readonly RetainedEvidenceBinding[]):Promise<string[]>{
+async function machineExcerptSources(client:Db,installationId:string,evidence:readonly RetainedEvidenceBinding[],locked?:readonly LockedCapsule[]):Promise<string[]>{
  const excerpts=evidence.filter(row=>row.evidence_kind==='accepted_excerpt')
  if(!excerpts.length)return []
  if(excerpts.some(row=>!row.evidence_id||!row.version_id))throw Error('source_reference_unproven')
  const expected=new Map(excerpts.map(row=>[row.evidence_id,row.version_id]))
- const capsules=(await client.query(`
+ const capsules=locked??(await client.query<LockedCapsule>(`
   SELECT e.evidence_id::text,e.version_id::text,cap.retention_basis
   FROM knowledge_evidence e JOIN knowledge_evidence_capsules cap USING(installation_id,capsule_id,version_id)
   WHERE e.installation_id=$1 AND e.evidence_id=ANY($2::uuid[]) AND e.evidence_kind='accepted_excerpt'
@@ -69,20 +76,22 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
  * The caller repeats assertRetainedSourceGuards at its final positive boundary.
  * This supplements current grant/lifecycle checks; full root commit locking is
  * a separate contract. Observations are private to the acquired connection. */
-export async function guardRetainedEvidence(client:Db,installationId:string,evidence:readonly RetainedEvidenceBinding[]):Promise<void>{
+export async function guardRetainedEvidence(client:Db,installationId:string,evidence:readonly RetainedEvidenceBinding[],options:RetainedEvidenceOptions={}):Promise<void>{
  if(sourcePoolContext(client).namespace!=='memory')return
  if(evidence.length>4096)throw Error('source_reference_limit')
  const installations=attached.get(sourceConnectionKey(client))??new Map<string,ConsumerGuards>()
  let state=installations.get(installationId)
- const mode=await currentMode(client,installationId)
- if(!['legacy-feed','shared-shadow','shared-active'].includes(mode.mode))throw Error('source_reference_changed')
+ const {expectedMode,locked}=options
+ const mode=locked?.mode??await currentRetainedSourceMode(client,installationId)
+ if(!['legacy-feed','shared-shadow','shared-active'].includes(mode.mode)
+  ||expectedMode&&(mode.mode!==expectedMode.mode||mode.generation!==expectedMode.generation))throw Error('source_reference_changed')
  if(state&&(state.mode!==mode.mode||state.generation!==mode.generation))throw Error('source_reference_changed')
  if(!state){
   if(installations.size>=16)throw Error('source_reference_limit')
   state={installationId,...mode,ids:new Set<string>(),governedIds:new Set<string>(),guards:[]};installations.set(installationId,state);attached.set(sourceConnectionKey(client),installations)
  }
  const ids=new Set(evidence.flatMap(row=>row.source_event_id?[row.source_event_id]:[]))
- const machineSources=await machineExcerptSources(client,installationId,evidence)
+ const machineSources=await machineExcerptSources(client,installationId,evidence,locked?.capsules)
  if(machineSources.length&&mode.mode==='legacy-feed')throw Error('source_reference_unproven')
  for(const id of machineSources)ids.add(id)
  const artifactSet=new Set(evidence.flatMap(row=>row.artifact_id?[row.artifact_id]:[]))
@@ -137,7 +146,7 @@ export async function assertRetainedSourceGuards(client:Db):Promise<void>{
  const states=attached.get(sourceConnectionKey(client))
  if(!states)return
  for(const state of [...states.values()].sort((a,b)=>a.installationId.localeCompare(b.installationId))){
-  const mode=await currentMode(client,state.installationId)
+  const mode=await currentRetainedSourceMode(client,state.installationId)
   if(mode.mode!==state.mode||mode.generation!==state.generation)throw Error('source_reference_changed')
   for(const guard of state.guards)await guard.assertCurrent(client,{forCommit:true})
  }
@@ -168,7 +177,7 @@ export function adoptRetainedSourceRead(client:object,value:object):void{
  * The check must use metadata SQL/NOWAIT only, with no writes or network IO. */
 export async function registerRetainedReadCheck(client:Db,installationId:string,check:(db:Db)=>Promise<void>):Promise<void>{
  if(sourcePoolContext(client).namespace!=='memory')return
- await guardRetainedEvidence(client,installationId,[])
+ if(!attached.get(sourceConnectionKey(client))?.has(installationId))await guardRetainedEvidence(client,installationId,[])
  const state=attached.get(sourceConnectionKey(client))!.get(installationId)!
  if(state.guards.length>=256)throw Error('source_reference_limit')
  state.guards.push({assertCurrent:check})

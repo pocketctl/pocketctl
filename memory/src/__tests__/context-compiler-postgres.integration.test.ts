@@ -281,8 +281,8 @@ describeWithDatabase('context pack compilation (PostgreSQL)', () => {
   })
   test('a source mutation between retrieval and persistence returns retryable degradation and no ready pack',async()=>{
     await seedClaim({key:'concurrent-source',statement:'concurrent source marker'})
-    const persist=packs.persist.bind(packs)
-    const boundary=vi.spyOn(packs,'persist').mockImplementationOnce(async input=>{
+    const persist=packs.persistWithSummary.bind(packs)
+    const boundary=vi.spyOn(packs,'persistWithSummary').mockImplementationOnce(async input=>{
       await pool.query("UPDATE knowledge_claims SET consumption_hold_reason='fixture_hold' WHERE installation_id=$1",[INSTALLATION])
       return persist(input)
     })

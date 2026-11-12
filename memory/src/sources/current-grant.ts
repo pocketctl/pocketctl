@@ -23,6 +23,11 @@ export async function lookupCurrentInstallation(db:Db,installationId:string):Pro
  if(sourcePoolContext(db).namespace!=='memory')return undefined
  const rows=(await db.query<CurrentState>('SELECT * FROM shared.memory_current_grant_states($1::uuid[],$2::uuid[])',[[installationId],[]])).rows
  const state=rows[0]?.state
+ return currentPersonalInstallation(state)
+}
+
+/** Interpret the controlled Relay state for a personal capability. */
+export function currentPersonalInstallation(state:CurrentState['state']|null|undefined){
  return {current:!!state&&state.owner_scope_kind==='personal'&&state.owner_exists&&state.provider_enabled&&state.status==='active',configVersion:state?.config_version??'0',status:state?.status??'revoked',ownerUserId:state?.owner_user_id??null}
 }
 

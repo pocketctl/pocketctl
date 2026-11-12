@@ -20,26 +20,18 @@ export function createScopeResolver(pool: pg.Pool) {
       repositoryKeyHint?: string | null
       unknownRepositoryBehavior?: 'persona_only' | 'empty'
     }): Promise<ScopeResolution> {
-      const session = await pool.query<{ n: number }>(`
-        SELECT COUNT(*)::int AS n FROM source_sessions
-        WHERE installation_id = $1 AND session_id = $2 AND deleted_at IS NULL
-      `, [input.installationId, input.sessionId])
-
-      let repositoryId: string | null = null
-      if (input.repositoryIdHint) {
-        const byId = await pool.query<{ repository_id: string }>(`
+      const scope = (await pool.query<{ session_known: boolean; repository_id: string | null }>(`
+        SELECT EXISTS (
+          SELECT 1 FROM source_sessions
+          WHERE installation_id = $1 AND session_id = $2 AND deleted_at IS NULL
+        ) AS session_known, (
           SELECT repository_id::text FROM repositories
-          WHERE installation_id = $1 AND repository_id = $2
-        `, [input.installationId, input.repositoryIdHint])
-        repositoryId = byId.rows[0]?.repository_id ?? null
-      }
-      if (!repositoryId && input.repositoryKeyHint) {
-        const byKey = await pool.query<{ repository_id: string }>(`
-          SELECT repository_id::text FROM repositories
-          WHERE installation_id = $1 AND repository_key = $2
-        `, [input.installationId, input.repositoryKeyHint])
-        repositoryId = byKey.rows[0]?.repository_id ?? null
-      }
+          WHERE installation_id = $1 AND (repository_id = $3::uuid OR repository_key = $4)
+          ORDER BY (repository_id = $3::uuid) DESC NULLS LAST
+          LIMIT 1
+        ) AS repository_id
+      `, [input.installationId, input.sessionId, input.repositoryIdHint || null, input.repositoryKeyHint || null])).rows[0]
+      let repositoryId = scope?.repository_id ?? null
       if (!repositoryId && !input.repositoryIdHint && !input.repositoryKeyHint) {
         if(sourcePoolContext(pool).namespace==='memory')repositoryId=await sharedSessionRepository(pool,input.installationId,input.sessionId)
         else{
@@ -65,7 +57,7 @@ export function createScopeResolver(pool: pg.Pool) {
         repositoryKnown,
         // An unknown hint narrows to Persona (or empty); never widens scope.
         personaOnly: !repositoryKnown && personaOnlyBehavior === 'persona_only',
-        sessionKnown: (session.rows[0]?.n ?? 0) > 0,
+        sessionKnown: scope?.session_known === true,
       }
     },
 

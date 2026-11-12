@@ -214,11 +214,8 @@ export function createAdmissionService(deps: {
           pool: transactionPool,
           repository: policyRepository,
         })
-        const currentPolicy = await policyResolver.resolve({
-          installationId: input.installationId, kind: 'context', repositoryId: packRow.repository_id,
-        })
-        const currentRankingPolicy = await policyResolver.resolve({
-          installationId: input.installationId, kind: 'ranking', repositoryId: packRow.repository_id,
+        const [currentPolicy, currentRankingPolicy] = await policyResolver.resolveContext({
+          installationId: input.installationId, repositoryId: packRow.repository_id,
         })
         const currentPolicyHash = createHash('sha256')
           .update(currentPolicy.effectivePolicyHash)
@@ -240,44 +237,33 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'pack_mismatch' }
         }
 
-        // Claim/evidence liveness recheck over the pack's dependency join.
-        const invalid = await client.query<{ n: number }>(`
-          SELECT COUNT(*)::int AS n FROM memory_context_pack_items i
-          JOIN knowledge_claims c ON c.claim_id = i.claim_id AND c.installation_id = i.installation_id
-          WHERE i.pack_id = $1 AND i.installation_id = $2
-            AND (c.state <> 'active' OR c.current_version_id IS NULL
-                 OR c.current_version_id <> i.version_id
-                 OR NOT EXISTS (
-                   SELECT 1 FROM knowledge_evidence e
-                   WHERE e.installation_id = i.installation_id
-                     AND e.version_id = i.version_id))
-        `, [input.packId, input.installationId])
-        if ((invalid.rows[0]?.n ?? 0) > 0) {
+        // Observe liveness, Session tombstones and dependency membership in
+        // one snapshot. The exact claim rows are still locked and rechecked below.
+        const validity = (await client.query<{invalid:boolean; tombstoned:boolean; versions:string[]}>(`
+          WITH items AS MATERIALIZED (
+            SELECT claim_id, version_id
+            FROM memory_context_pack_items WHERE pack_id=$1 AND installation_id=$2
+          )
+          SELECT EXISTS(
+            SELECT 1 FROM items i JOIN knowledge_claims c ON c.installation_id=$2 AND c.claim_id=i.claim_id
+            WHERE c.state<>'active' OR c.current_version_id IS DISTINCT FROM i.version_id
+              OR NOT EXISTS(SELECT 1 FROM knowledge_evidence e WHERE e.installation_id=$2 AND e.version_id=i.version_id)
+          ) AS invalid, EXISTS(
+            SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=$2
+            AND (t.session_id=$3 OR EXISTS(
+              SELECT 1 FROM memory_context_pack_evidence pe
+              JOIN knowledge_evidence e USING(installation_id,evidence_id)
+              JOIN work_episodes w ON w.installation_id=e.installation_id AND w.episode_id=e.episode_id
+              WHERE pe.pack_id=$1 AND w.session_id=t.session_id))
+          ) AS tombstoned, ARRAY(SELECT DISTINCT version_id::text FROM items) AS versions
+        `,[input.packId,input.installationId,input.sessionId])).rows[0]
+        if(validity.invalid||validity.tombstoned){
           await client.query('COMMIT')
           return { ok: false, error: 'claim_invalid' }
         }
-
-        // Tombstone recheck for the target and every Evidence source Session.
-        const tombstoned = await client.query<{ n: number }>(`
-          SELECT COUNT(*)::int AS n
-          FROM memory_session_tombstones t
-          WHERE t.installation_id = $1
-            AND (t.session_id = $2 OR EXISTS (
-              SELECT 1
-              FROM memory_context_pack_evidence pe
-              JOIN knowledge_evidence e
-                ON e.installation_id = pe.installation_id AND e.evidence_id = pe.evidence_id
-              JOIN work_episodes w
-                ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
-              WHERE pe.pack_id = $3 AND w.session_id = t.session_id))
-        `, [input.installationId, input.sessionId, input.packId])
-        if ((tombstoned.rows[0]?.n ?? 0) > 0) {
-          await client.query('COMMIT')
-          return { ok: false, error: 'claim_invalid' }
-        }
-        const dependencies=(await client.query<{version_id:string}>('SELECT DISTINCT version_id::text FROM memory_context_pack_items WHERE pack_id=$1 AND installation_id=$2',[input.packId,input.installationId])).rows
-        const facts=await contextClaimFacts(client,input.installationId,dependencies.map(row=>row.version_id),true)
-        let sourceInvalid=!await lifecycleFrameCurrent(client,input.installationId,queryContext.lifecycle,deps.lifecycleMode??'off')||dependencies.some(row=>{const source=facts.get(row.version_id);return !source||!eligibleContextFacts(source,queryContext)
+        const dependencies=validity.versions
+        const facts=await contextClaimFacts(client,input.installationId,dependencies,true)
+        let sourceInvalid=!await lifecycleFrameCurrent(client,input.installationId,queryContext.lifecycle,deps.lifecycleMode??'off')||dependencies.some(versionId=>{const source=facts.get(versionId);return !source||!eligibleContextFacts(source,queryContext)
           ||(packRow.consumption_generation===null&&source.applicability!=null)})
         const origin=await originPolicyCorpusSnapshot(client,input.installationId)
         if(origin.stamp!==(queryContext.originPolicyStamp??null))sourceInvalid=true
