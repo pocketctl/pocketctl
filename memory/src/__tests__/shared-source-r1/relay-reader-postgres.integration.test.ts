@@ -1416,7 +1416,8 @@ suite('controlled personal Relay source reader',()=>{
   const {originContextFixture,contextDeliveryClient,measureContextDelivery}=await import('../helpers/origin-context-fixture.js')
   const {personal:installation,claim,version,evidence:firstEvidence}=await governanceFixture(runtime)
   const repository=randomUUID(),snapshot=randomUUID(),space=randomUUID(),secondEvidence=randomUUID(),commit='f'.repeat(40)
-  const statement='Memory job migration requires an exact installation watermark.'
+  const statement='For missing memory_jobs records, confirm the exact installation watermark.'
+  const mixedLanguageQuery='memory_jobs 缺失记录先核对哪几项？仅依据本轮自动附加的 Context，给出核验顺序和证据 ID。无自动 Context 就只答‘未收到 Context’。请勿调用工具。'
   await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage','memory.search'])",[installation])
   await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-shadow',2)",[installation])
   await runtime.query("INSERT INTO memory_curation_policies(installation_id,mode,consume_mode) VALUES($1,'enabled','enabled')",[installation])
@@ -1455,9 +1456,9 @@ suite('controlled personal Relay source reader',()=>{
   const context=await originContextFixture(runtime,installation,{authorityGrant:{installationId:installation,configVersion:'1',userId:1},sceneId:space,query:statement,repositoryId:repository,commitSha:commit})
   const client=await contextDeliveryClient(runtime,context,installation)
   const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,options:{
-   queryText?:string;withProvenEvidence?:boolean;configVersion?:string;verifyRetry?:boolean
+   queryText?:string;withProvenEvidence?:boolean;configVersion?:string;verifyRetry?:boolean;expectEmpty?:boolean
   }={})=>{
-   const {queryText=statement,withProvenEvidence=true,configVersion='1',verifyRetry=false}=options
+   const {queryText=statement,withProvenEvidence=true,configVersion='1',verifyRetry=false,expectEmpty=false}=options
    const signal=AbortSignal.timeout(750)
    const grant=client.issueGrant(configVersion)
    const transportDelay=Number(process.env.CONTEXT_TEST_TRANSPORT_DELAY_MS??0)
@@ -1475,6 +1476,10 @@ suite('controlled personal Relay source reader',()=>{
     ...turn,schema_version:1,adapter_capability:'native_hidden_v1',query:queryText,
     repository_hint:{repository_id:repository,commit_sha:commit},evidence_read_capability:'on_demand_v1',
    }))
+   if(expectEmpty){
+    expect(pack).toMatchObject({outcome:'empty',reason:'no_candidates'})
+    return
+   }
    expect(pack.outcome).toBe('ready')
    expect(pack.evidence_read_capability).toBe(withProvenEvidence?'on_demand_v1':'bounded_excerpt_v1')
    expect(pack.pack.item_count).toBe(1)
@@ -1496,6 +1501,10 @@ suite('controlled personal Relay source reader',()=>{
   }
   try{
    await deliver('warmup',(_name,run)=>run())
+   await deliver('mixed-language-identifier',(_name,run)=>run(),{queryText:mixedLanguageQuery})
+   await deliver('different-identifier',(_name,run)=>run(),{
+    queryText:mixedLanguageQuery.replace('memory_jobs','memory_jobs_archive'),expectEmpty:true,
+   })
    const samples=Number(process.env.CONTEXT_TEST_SAMPLES??1)
    for(let n=0;n<samples;n++){
     const result=await measureContextDelivery(

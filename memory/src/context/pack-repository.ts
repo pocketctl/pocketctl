@@ -4,7 +4,7 @@ import {assertRetainedSourceGuards,detachRetainedSourceGuards} from '../sources/
 import {retainedSourceRead} from '../sources/retained-read.js'
 import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 import {prepareEvidenceSources,attachPreparedEvidence,type PreparedEvidenceSources} from '../sources/evidence-sources.js'
-import {sourcePoolContext} from '../sources/pool-context.js'
+import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import {lifecycleFrameCurrent} from './lifecycle-frame.js'
 import {captureEvidenceReferences} from '../claims/evidence-resolver.js'
 import {selectedScopeContextCurrent,selectedScopeFenceSql,selectedScopeOriginFences} from './selected-scope-dependencies.js'
@@ -49,9 +49,9 @@ export const MACHINE_PACK_VERSIONS_SQL=`
 
 /** Recheck automated conclusions before serving saved Context in the current
  * transaction. Only the native source fence can rule out a late Relay deletion. */
-export async function fenceMachinePackSources(client:Pick<pg.PoolClient,'query'>,installationId:string,packId:string,authorityGrant?:PackAuthorityGrant):Promise<string[]>{
+export async function fenceMachinePackSources(client:Pick<pg.PoolClient,'query'>,installationId:string,packId:string,authorityGrant?:PackAuthorityGrant,boundedTransaction=false):Promise<string[]>{
  if(sourcePoolContext(client).namespace!=='memory')return []
- await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
+ if(!boundedTransaction)await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
  const versions=(await client.query<{version_id:string}>(`
   SELECT source.version_id FROM memory_context_packs p
   CROSS JOIN LATERAL (${MACHINE_PACK_VERSIONS_SQL} ORDER BY 1 LIMIT 513) source
@@ -154,6 +154,7 @@ const FOREIGN_PACK_SQL="(p.query_context ? 'selectedScopeProof' OR EXISTS(SELECT
 
 export function createPackRepository(pool: pg.Pool) {
   type StoredTokens = { stable_tokens: number; dynamic_tokens: number }
+  const boundedTransaction = isPhysicalSourcePool(pool)
   const repository = {
     async persistWithSummary(input: PersistPackInput): Promise<{ packId: string; stableTokens: number; dynamicTokens: number; evidenceProven?: boolean }> {
       const stableItems: RenderItem[] = input.items
@@ -186,8 +187,9 @@ export function createPackRepository(pool: pg.Pool) {
       const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEvidenceSources(pool,input.installationId,[...new Set(input.items.flatMap(i=>[...i.evidenceIds]))]):undefined
       const client = await pool.connect()
       let lockedEvidence:Awaited<ReturnType<PreparedEvidenceSources['lockForPack']>>|undefined
+      let commitDispatched = false
       try {
-        await client.query('BEGIN')
+        await client.query(boundedTransaction ? "BEGIN; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'" : 'BEGIN')
         if(prepared){
           const grant=input.authorityGrant
           if(!grant)throw new ContextConsumptionChangedError()
@@ -222,6 +224,10 @@ export function createPackRepository(pool: pg.Pool) {
               layer text, section text, representation text, rendered_text text, reason_codes text[], token_count integer, ordinal integer)
             ORDER BY i.ordinal
             ON CONFLICT DO NOTHING
+          ), completed_empty AS (
+            UPDATE memory_generation_runs
+            SET state='succeeded',output_kind='context_pack',output_id=stored.pack_id,completed_at=NOW()
+            FROM stored WHERE run_id=$3 AND $23='empty'
           )
           SELECT stable_tokens,dynamic_tokens FROM stored
         `, [packId, input.installationId, input.generationRunId, input.trajectoryId, input.sessionId,
@@ -237,7 +243,7 @@ export function createPackRepository(pool: pg.Pool) {
             reason_codes:item.reasonCodes, token_count:estimateTokens(item.statement), ordinal,
           })))])
         let evidenceProven = inserted.rowCount ? false : undefined
-        let generationRecorded=false
+        let generationRecorded=input.state==='empty' && Boolean(inserted.rowCount)
         if (input.items.length) {
           const evidence = input.items.flatMap(item => item.evidenceIds.map(evidenceId => ({
             itemId: item.itemId, evidenceId, versionId: item.versionId,
@@ -294,7 +300,7 @@ export function createPackRepository(pool: pg.Pool) {
         if(origin.stamp!==(input.queryContext?.originPolicyStamp??null))throw new ContextConsumptionChangedError()
         if(inserted.rowCount&&prepared){
           try{
-            const machineVersions=await fenceMachinePackSources(client,input.installationId,packId)
+            const machineVersions=await fenceMachinePackSources(client,input.installationId,packId,undefined,boundedTransaction)
             if(machineVersions.length)await client.query(`
               UPDATE memory_context_packs SET query_context=query_context||jsonb_build_object('machineSourceVersionIds',$2::jsonb)
               WHERE pack_id=$1`,[packId,JSON.stringify(machineVersions)])
@@ -328,10 +334,14 @@ export function createPackRepository(pool: pg.Pool) {
           await lockedEvidence.assertForCommit()
           try{await assertCurrentGrantClock(client,input.authorityGrant!,[input.installationId])}catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
         }
+        commitDispatched = true
         await client.query('COMMIT')
         return { packId, stableTokens: tokens?.stable_tokens ?? 0, dynamicTokens: tokens?.dynamic_tokens ?? 0, evidenceProven }
       } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined)
+        const rolledBack = await client.query('ROLLBACK').then(() => true, () => false)
+        if (!commitDispatched && rolledBack && boundedTransaction && ['55P03', '57014'].includes((error as {code?:string}).code ?? '')) {
+          throw new ContextConsumptionChangedError()
+        }
         throw error
       } finally {
         client.release()
