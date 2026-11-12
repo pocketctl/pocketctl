@@ -21,6 +21,7 @@ import {createSourceArchiveReader} from '../../sources/archive-reader.js'
 import {assertSourceProviderExecution,guardSourceExecutionCommit,protectMetadataSourceBodies} from '../../sources/source-execution.js'
 import {boundedSourceQuery} from '../../sources/bounded-source-query.js'
 import {prepareEpisodeProjectionSources} from '../../sources/prepared-sources.js'
+import {sharedSessionRepository} from '../../sources/session-repository.js'
 import {JobDeferredError} from '../../jobs/types.js'
 import {SourceProcessingPins,runSelectedSourceTransaction} from '../../sources/processing-pins.js'
 import {observeProjectionCommits} from './helpers/projection-commit-observer.js'
@@ -460,7 +461,9 @@ suite('continuous personal canonical content uses current scope seal',()=>{
   const tickUntil=async(work:()=>Promise<boolean>)=>{for(let n=0;n<160;n++){await scheduler.runOnce();if(await work())return;await queue.tick();if(errors.length)throw errors[0];await delay(10)}throw Error('local_lock_fixture_missing')}
   try{
    await tickUntil(async()=>!!await jobFor('compile_episode'))
-   expect((await f.runtime.query('SELECT 1 FROM repositories WHERE installation_id=$1',[installation])).rowCount).toBe(1)
+   const repository=(await f.runtime.query('SELECT repository_id::text FROM repositories WHERE installation_id=$1',[installation])).rows
+   expect(repository).toHaveLength(1)
+   expect(await sharedSessionRepository(f.runtime,installation,source.session)).toBe(repository[0].repository_id)
    expect((await f.runtime.query('SELECT 1 FROM repo_snapshots WHERE installation_id=$1',[installation])).rowCount).toBe(1)
    const episodeJob=(await jobFor('compile_episode')).job_id
    for(const site of ['turn','repository','snapshot'] as const){
