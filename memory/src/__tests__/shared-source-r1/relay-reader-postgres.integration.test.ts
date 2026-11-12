@@ -1330,9 +1330,28 @@ suite('controlled personal Relay source reader',()=>{
   expect((await runtime.query('SELECT document_compiler_version FROM work_episodes WHERE installation_id=$1 AND turn_id=$2',[inst,turn])).rows).toEqual([{document_compiler_version:'memory-episode-packet-v6'}])
   expect((await runtime.query('SELECT count(*)::text AS n FROM memory_provider_budget_reservations')).rows[0].n).toBe('0')
  })
+ test('the native API pool retains its bounded warm connections across idle expiry',async()=>{
+  const {setTimeout:wait}=await import('node:timers/promises')
+  const nativeUrl=new URL(url!)
+  nativeUrl.username='shared_reader_memory'
+  nativeUrl.password='only-test'
+  const warm=createMemoryPool({databaseUrl:nativeUrl.href,databaseNamespace:'memory',dbPoolMax:3},{retainIdleConnections:3})
+  const identities=async()=>(await Promise.all(Array.from({length:3},async()=>(
+   await warm.query<{pid:number}>('SELECT pg_backend_pid() AS pid')
+  ).rows[0].pid))).sort((a,b)=>a-b)
+  try{
+   const first=await identities()
+   expect(new Set(first).size).toBe(3)
+   await wait(10_500)
+   expect(warm.idleCount).toBe(3)
+   expect(await identities()).toEqual(first)
+  }finally{await warm.end()}
+ },20_000)
+
  test('native Context delivers two accepted excerpts within the shared turn budget',async()=>{
   const {randomUUID}=await import('node:crypto')
   const {governanceFixture}=await import('../../testing/governance-fixture.js')
+  const {readContextCorpusFingerprint}=await import('../../context/compiler.js')
   const {originContextFixture,contextDeliveryClient,measureContextDelivery}=await import('../helpers/origin-context-fixture.js')
   const {personal:installation,claim,version,evidence:firstEvidence}=await governanceFixture(runtime)
   const repository=randomUUID(),snapshot=randomUUID(),space=randomUUID(),secondEvidence=randomUUID(),commit='f'.repeat(40)
@@ -1374,7 +1393,7 @@ suite('controlled personal Relay source reader',()=>{
    AND v.installation_id=c.installation_id AND v.claim_id=c.claim_id`,[installation])
   const context=await originContextFixture(runtime,installation,{authorityGrant:{installationId:installation,configVersion:'1',userId:1},sceneId:space,query:statement,repositoryId:repository,commitSha:commit})
   const client=await contextDeliveryClient(runtime,context,installation)
-  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>)=>{
+  const deliver=async(request:string,phase:<T>(name:string,run:()=>Promise<T>)=>Promise<T>,queryText=statement)=>{
    const signal=AbortSignal.timeout(750)
    const grant=client.issueGrant()
    const http=async(path:string,body?:Record<string,unknown>)=>{
@@ -1387,7 +1406,7 @@ suite('controlled personal Relay source reader',()=>{
    }
    const turn={session_id:context.sessionId,client_request_id:request,agent:'codex'}
    const pack=await phase('compile',()=>http('/compile',{
-    ...turn,schema_version:1,adapter_capability:'native_hidden_v1',query:statement,
+    ...turn,schema_version:1,adapter_capability:'native_hidden_v1',query:queryText,
     repository_hint:{repository_id:repository,commit_sha:commit},evidence_read_capability:'on_demand_v1',
    }))
    expect(pack.outcome).toBe('ready')
@@ -1406,18 +1425,42 @@ suite('controlled personal Relay source reader',()=>{
    const samples=Number(process.env.CONTEXT_TEST_SAMPLES??1)
    for(let n=0;n<samples;n++){
     const result=await measureContextDelivery(
-     phase=>deliver('measured-'+n,phase),
+     phase=>deliver('measured-'+n,phase,n%2===0?statement:'installation watermark？引用证据号。'),
      Number(process.env.CONTEXT_TEST_DB_DELAY_MS??0),
     )
     if(process.env.CONTEXT_TEST_TIMING)console.info(JSON.stringify(result))
-    const compile=result.phases.find(phase=>phase.name==='compile')!
-    expect(compile.queries.length).toBeLessThanOrEqual(70)
+    const [compile,admit,consume]=result.phases
+    expect(compile.queries.length).toBeLessThanOrEqual(49)
+    expect(admit.queries.length).toBeLessThanOrEqual(18)
+    expect(consume.queries.length).toBeLessThanOrEqual(8)
     if(process.env.CONTEXT_TEST_DB_DELAY_MS){
      expect(compile.ms).toBeLessThan(500)
      expect(result.ms).toBeLessThan(710)
     }
    }
   }finally{await client.close()}
+  const legacyFingerprint=async()=>(await runtime.query<{fingerprint:string}>(`
+   SELECT md5(COALESCE(string_agg(
+    c.claim_id::text||':'||c.state||':'||COALESCE(c.current_version_id::text,'')
+     ||':'||memory_delivery_version_available(c.installation_id,c.current_version_id)::text
+     ||':'||COALESCE((SELECT md5(string_agg(e.evidence_id::text,',' ORDER BY e.evidence_id))
+      FROM knowledge_evidence e WHERE e.installation_id=c.installation_id AND e.version_id=c.current_version_id),''),
+    ',' ORDER BY c.claim_id),'')) AS fingerprint
+   FROM knowledge_claims c WHERE c.installation_id=$1
+  `,[installation])).rows[0].fingerprint
+  const before=await legacyFingerprint()
+  expect(await readContextCorpusFingerprint(runtime,installation)).toBe(before)
+  const teamId=randomUUID(),teamSessionId=randomUUID(),submissionId=randomUUID(),decisionId=randomUUID()
+  await runtime.query("UPDATE knowledge_evidence SET locator=$3 WHERE installation_id=$1 AND evidence_id=$2",[
+   installation,firstEvidence,{source_provenance:{source_kind:'team_session',source_version:'2',team_id:teamId,team_session_id:teamSessionId,
+    accepted_delivery:{submission_id:submissionId,decision_id:decisionId}}},
+  ])
+  await runtime.query("INSERT INTO memory_team_delivery_withdrawals(team_id,team_session_id,submission_id,decision_id) VALUES($1,$2,$3,$4)",[
+   teamId,teamSessionId,submissionId,decisionId,
+  ])
+  const withdrawn=await legacyFingerprint()
+  expect(withdrawn).not.toBe(before)
+  expect(await readContextCorpusFingerprint(runtime,installation)).toBe(withdrawn)
  },30000)
 
  test('machine-concluded claims and excerpts retain current source authority after automatic publication',async()=>{

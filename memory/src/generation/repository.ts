@@ -18,6 +18,7 @@ export function createGenerationRunRepository(pool: pg.Pool) {
       inputDigest: Buffer
       effectivePolicyHash: Buffer
       state?: 'queued' | 'running'
+      policyVersionIds?: readonly string[]
     }): Promise<{
 		runId: string
 		owner: boolean
@@ -27,15 +28,23 @@ export function createGenerationRunRepository(pool: pg.Pool) {
 	}> {
       const runId = randomUUID()
       const inserted = await pool.query<{ run_id: string }>(`
-        INSERT INTO memory_generation_runs
-          (run_id, installation_id, operation, subject_kind, subject_key_hash,
-           input_digest, effective_policy_hash, state)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT DO NOTHING
-        RETURNING run_id::text
+        WITH run AS (
+          INSERT INTO memory_generation_runs
+            (run_id, installation_id, operation, subject_kind, subject_key_hash,
+             input_digest, effective_policy_hash, state)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          ON CONFLICT DO NOTHING
+          RETURNING run_id
+        ), policies AS (
+          INSERT INTO memory_generation_run_policies (run_id, ordinal, policy_version_id)
+          SELECT run.run_id, versions.ordinal - 1, versions.version_id
+          FROM run CROSS JOIN unnest($9::uuid[]) WITH ORDINALITY AS versions(version_id, ordinal)
+          ON CONFLICT DO NOTHING
+        )
+        SELECT run_id::text FROM run
       `, [runId, input.installationId, input.operation, input.subjectKind,
         input.subjectKeyHash, input.inputDigest, input.effectivePolicyHash,
-        input.state ?? 'running'])
+        input.state ?? 'running', input.policyVersionIds ?? []])
       if (inserted.rows[0]) return {
 		runId: inserted.rows[0].run_id, owner: true,
 		state: input.state ?? 'running', outputKind: null, outputId: null,

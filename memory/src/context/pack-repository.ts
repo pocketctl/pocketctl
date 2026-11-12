@@ -24,7 +24,7 @@ const machineVersionSql=`(v.authority='machine_concluded' OR EXISTS (
 
 // p is the authenticated pack. Wiki text can include a cited machine Claim
 // through its build dependencies without a memory_context_pack_items row.
-const machinePackVersionsSql=`
+export const MACHINE_PACK_VERSIONS_SQL=`
  SELECT v.version_id::text FROM memory_context_pack_items i
  JOIN knowledge_versions v USING(installation_id,version_id)
  WHERE i.installation_id=p.installation_id AND i.pack_id=p.pack_id AND ${machineVersionSql}
@@ -54,7 +54,7 @@ export async function fenceMachinePackSources(client:Pick<pg.PoolClient,'query'>
  await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
  const versions=(await client.query<{version_id:string}>(`
   SELECT source.version_id FROM memory_context_packs p
-  CROSS JOIN LATERAL (${machinePackVersionsSql} ORDER BY 1 LIMIT 513) source
+  CROSS JOIN LATERAL (${MACHINE_PACK_VERSIONS_SQL} ORDER BY 1 LIMIT 513) source
   WHERE p.installation_id=$1 AND p.pack_id=$2`,[installationId,packId])).rows
  const versionIds=versions.map(row=>row.version_id)
  if(!versionIds.length)return []
@@ -199,40 +199,44 @@ export function createPackRepository(pool: pg.Pool) {
           }catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
           await prepared.assertCurrent(client);attachPreparedEvidence(client,prepared)
         }
+        // Foreign keys see the newly inserted pack in this statement.
         const inserted=await client.query<StoredTokens>(`
-          INSERT INTO memory_context_packs
-            (pack_id, installation_id, generation_run_id, trajectory_id, session_id, client_request_id,
-             agent, repository_id, mode, effective_policy_hash, settings_fingerprint,
-             loadout_fingerprint, input_digest, policy_revision, settings_revision, loadout_revision, stable_text, dynamic_text,
-             stable_hash, dynamic_hash, stable_tokens, dynamic_tokens,
-             stable_cache_hit, state, error_code, selected_references,query_context, generated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                  $16, $17, $18, $19, $20, $21, $22, FALSE, $23, $24, $25::jsonb,$26::jsonb, NOW())
-          ON CONFLICT DO NOTHING RETURNING stable_tokens, dynamic_tokens
+          WITH stored AS (
+            INSERT INTO memory_context_packs
+              (pack_id, installation_id, generation_run_id, trajectory_id, session_id, client_request_id,
+               agent, repository_id, mode, effective_policy_hash, settings_fingerprint,
+               loadout_fingerprint, input_digest, policy_revision, settings_revision, loadout_revision, stable_text, dynamic_text,
+               stable_hash, dynamic_hash, stable_tokens, dynamic_tokens,
+               stable_cache_hit, state, error_code, selected_references,query_context, generated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19, $20, $21, $22, FALSE, $23, $24, $25::jsonb,$26::jsonb, NOW())
+            ON CONFLICT DO NOTHING RETURNING pack_id, stable_tokens, dynamic_tokens
+          ), items AS (
+            INSERT INTO memory_context_pack_items
+              (pack_id, item_id, installation_id, claim_id, version_id, claim_type,
+               layer, section, representation, rendered_text, reason_codes, token_count, ordinal)
+            SELECT COALESCE((SELECT pack_id FROM stored),$1::uuid), i.item_id, $2, i.claim_id, i.version_id, i.claim_type,
+              i.layer, i.section, i.representation, i.rendered_text, i.reason_codes, i.token_count, i.ordinal
+            FROM jsonb_to_recordset($27::jsonb) AS i(item_id uuid, claim_id uuid, version_id uuid, claim_type text,
+              layer text, section text, representation text, rendered_text text, reason_codes text[], token_count integer, ordinal integer)
+            ORDER BY i.ordinal
+            ON CONFLICT DO NOTHING
+          )
+          SELECT stable_tokens,dynamic_tokens FROM stored
         `, [packId, input.installationId, input.generationRunId, input.trajectoryId, input.sessionId,
           input.clientRequestId, input.agent, input.repositoryId, input.mode, input.effectivePolicyHash,
           input.settingsFingerprint, input.loadoutFingerprint, input.inputDigest, input.policyRevision, input.settingsRevision,
           input.loadoutRevision, stable, dynamic, hashPackText(stable),
           hashPackText(dynamic), estimateTokens(stable), estimateTokens(dynamic),
           input.state, input.errorCode ?? null, JSON.stringify(input.selectedReferences ?? []),
-          JSON.stringify(input.queryContext??{repositoryId:input.repositoryId,repoSnapshotId:null,branch:null,taskScopeKey:null})])
-        let evidenceProven = inserted.rowCount ? false : undefined
-        if (input.items.length) {
-          await client.query(`
-            INSERT INTO memory_context_pack_items
-              (pack_id, item_id, installation_id, claim_id, version_id, claim_type,
-               layer, section, representation, rendered_text, reason_codes, token_count, ordinal)
-            SELECT $1, i.item_id, $2, i.claim_id, i.version_id, i.claim_type,
-              i.layer, i.section, i.representation, i.rendered_text, i.reason_codes, i.token_count, i.ordinal
-            FROM jsonb_to_recordset($3::jsonb) AS i(item_id uuid, claim_id uuid, version_id uuid, claim_type text,
-              layer text, section text, representation text, rendered_text text, reason_codes text[], token_count integer, ordinal integer)
-            ORDER BY i.ordinal
-            ON CONFLICT DO NOTHING
-          `, [packId, input.installationId, JSON.stringify(input.items.map((item, ordinal) => ({
+          JSON.stringify(input.queryContext??{repositoryId:input.repositoryId,repoSnapshotId:null,branch:null,taskScopeKey:null}),
+          JSON.stringify(input.items.map((item, ordinal) => ({
             item_id:item.itemId, claim_id:item.claimId, version_id:item.versionId, claim_type:item.claimType,
             layer:item.layer, section:item.section, representation:item.representation, rendered_text:item.statement,
             reason_codes:item.reasonCodes, token_count:estimateTokens(item.statement), ordinal,
           })))])
+        let evidenceProven = inserted.rowCount ? false : undefined
+        if (input.items.length) {
           const evidence = input.items.flatMap(item => item.evidenceIds.map(evidenceId => ({
             itemId: item.itemId, evidenceId, versionId: item.versionId,
           })))
@@ -391,7 +395,7 @@ export function createPackRepository(pool: pg.Pool) {
                p.stable_tokens, p.dynamic_tokens, p.error_code,
                p.policy_revision::text, p.settings_revision::text, p.loadout_revision::text,
                p.trajectory_id::text, t.result_state, t.degraded_components,
-               EXISTS(${machinePackVersionsSql}) AS machine_source
+               EXISTS(${MACHINE_PACK_VERSIONS_SQL}) AS machine_source
         FROM memory_context_packs p
         LEFT JOIN memory_retrieval_trajectories t ON t.trajectory_id = p.trajectory_id
         WHERE p.installation_id = $1 AND p.session_id = $2

@@ -9,7 +9,8 @@ import type {V2GrantFacts} from '../governance/authorization.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
 import {originPolicyCorpusSnapshot} from '../governance/origin-policy.js'
-import {consumptionGeneration,contextWikiBuildSourcesEligible,contextClaimFacts,eligibleContextFacts,ContextConsumptionChangedError,type ContextQueryFrame} from './consumption.js'
+import {contextWikiBuildSourcesEligible,contextClaimFacts,eligibleContextFacts,ContextConsumptionChangedError,type ContextQueryFrame} from './consumption.js'
+import {withdrawnDeliveryJoinSql} from '../episodes/delivery-withdrawal.js'
 import { redactSensitive } from '../logging.js'
 import type { ContextRetrieval } from './retrieval.js'
 import type { ScopeResolver } from './scope-resolver.js'
@@ -220,6 +221,31 @@ function deterministicItemId(parts: readonly string[]): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
+export async function readContextCorpusFingerprint(pool:Pick<pg.Pool,'query'>,installationId:string):Promise<string>{
+  // Freeze the existing digest format while aggregating all evidence for a
+  // current Version once, including withdrawal status.
+  const result=await pool.query<{fingerprint:string}>(`
+    WITH current_versions AS MATERIALIZED (
+      SELECT DISTINCT current_version_id AS version_id
+      FROM knowledge_claims WHERE installation_id=$1 AND current_version_id IS NOT NULL
+    ), evidence AS MATERIALIZED (
+      SELECT e.version_id, md5(string_agg(e.evidence_id::text, ',' ORDER BY e.evidence_id)) AS fingerprint,
+             bool_or(w.team_id IS NOT NULL) AS withdrawn
+      FROM current_versions c JOIN knowledge_evidence e ON e.installation_id=$1 AND e.version_id=c.version_id
+      LEFT JOIN memory_team_delivery_withdrawals w
+        ON ${withdrawnDeliveryJoinSql('e','w')}
+      GROUP BY e.version_id
+    )
+    SELECT md5(COALESCE(string_agg(
+      c.claim_id::text || ':' || c.state || ':' || COALESCE(c.current_version_id::text, '')
+      || ':' || (NOT COALESCE(e.withdrawn, false))::text
+      || ':' || COALESCE(e.fingerprint, ''), ',' ORDER BY c.claim_id), '')) AS fingerprint
+    FROM knowledge_claims c LEFT JOIN evidence e ON e.version_id=c.current_version_id
+    WHERE c.installation_id=$1
+  `,[installationId])
+  return result.rows[0]?.fingerprint??''
+}
+
 export type ContextCompilePhase = 'scope' | 'inputs' | 'configuration' | 'reserve' | 'retrieve' | 'assemble' | 'persist'
 
 export function createContextCompiler(deps: {
@@ -242,16 +268,14 @@ export function createContextCompiler(deps: {
         observe(phase, Math.round(now - checkpoint))
         checkpoint = now
       }
-      // Read the fence generation before preparing snapshot-dependent inputs.
-      const [resolvedScope, generation] = await Promise.all([
-        deps.scope.resolve({
-          installationId: input.installationId,
-          sessionId: input.sessionId,
-          repositoryIdHint: input.repositoryId ?? null,
-          repositoryKeyHint: input.repositoryKey ?? null,
-        }),
-        consumptionGeneration(deps.pool,input.installationId),
-      ])
+      // Scope resolution samples the fence before snapshot-dependent inputs.
+      const resolvedScope = await deps.scope.resolve({
+        installationId: input.installationId,
+        sessionId: input.sessionId,
+        repositoryIdHint: input.repositoryId ?? null,
+        repositoryKeyHint: input.repositoryKey ?? null,
+      })
+      const generation = resolvedScope.consumptionGeneration
       mark('scope')
       const repositoryId = resolvedScope.repositoryId
       const [lifecycle, snapshots, effectiveSettings] = await Promise.all([
@@ -282,19 +306,7 @@ export function createContextCompiler(deps: {
       const [[policy, rankingPolicy], loadout, corpus, originSnapshot] = await Promise.all([
         deps.policyResolver.resolveContext({ installationId: input.installationId, repositoryId }),
         deps.loadouts.resolve({ installationId: input.installationId, repositoryId, agent: input.agent }),
-        deps.pool.query<{ fingerprint: string }>(`
-        SELECT md5(COALESCE(string_agg(
-          c.claim_id::text || ':' || c.state || ':' || COALESCE(c.current_version_id::text, '')
-          || ':' || memory_delivery_version_available(c.installation_id, c.current_version_id)::text
-          || ':' || COALESCE((
-            SELECT md5(string_agg(e.evidence_id::text, ',' ORDER BY e.evidence_id))
-            FROM knowledge_evidence e
-            WHERE e.installation_id = c.installation_id
-              AND e.version_id = c.current_version_id
-          ), ''), ',' ORDER BY c.claim_id), '')) AS fingerprint
-        FROM knowledge_claims c
-        WHERE c.installation_id = $1
-        `, [input.installationId]),
+        readContextCorpusFingerprint(deps.pool,input.installationId),
         originPolicyCorpusSnapshot(deps.pool, input.installationId),
       ])
       mark('configuration')
@@ -302,7 +314,7 @@ export function createContextCompiler(deps: {
       const settingsFingerprint = effectiveContextSettingsFingerprint(effectiveSettings)
       const loadoutFingerprint = resolvedLoadoutFingerprint(loadout)
       if(originSnapshot.stamp!==null)queryContext.originPolicyStamp=originSnapshot.stamp
-      const corpusFingerprint = corpus.rows[0]?.fingerprint ?? ''
+      const corpusFingerprint = corpus
       const effectivePolicyHash = createHash('sha256')
         .update(policy.effectivePolicyHash)
         .update(rankingPolicy.effectivePolicyHash)
@@ -338,6 +350,7 @@ export function createContextCompiler(deps: {
         subjectKeyHash: createHash('md5').update(input.sessionId).digest(),
         inputDigest,
         effectivePolicyHash,
+        policyVersionIds: [...policy.policyVersionIds, ...rankingPolicy.policyVersionIds],
       })
 	  if (!run.owner) {
 		if (run.state === 'succeeded' && run.outputKind === 'context_pack' && run.outputId) {
@@ -360,15 +373,8 @@ export function createContextCompiler(deps: {
 		}
 		return { kind: 'degraded', reason: 'compile_in_progress' }
 	  }
-      const [, persona] = await Promise.all([
-        deps.generation.attachPolicies({
-          runId: run.runId,
-          policyVersionIds: [...policy.policyVersionIds, ...rankingPolicy.policyVersionIds],
-        }),
-        selectedReferences.length || (!resolvedScope.repositoryKnown && policyDoc.unknown_repository_behavior === 'empty')
-          ? [] : deps.scope.personaVersions({ installationId: input.installationId }),
-      ])
-
+      const persona = selectedReferences.length || (!resolvedScope.repositoryKnown && policyDoc.unknown_repository_behavior === 'empty')
+        ? [] : await deps.scope.personaVersions({ installationId: input.installationId })
       mark('reserve')
       // A native turn shares the daemon deadline with grant, admission and
       // consumption. Keep remote embedding off that synchronous path and

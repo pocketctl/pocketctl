@@ -12,11 +12,15 @@ import type { MemoryConfig } from './config.js'
  * is config-owned so tests and production cannot accidentally oversubscribe
  * connections.
  */
-export function createMemoryPool(config: Pick<MemoryConfig, 'databaseUrl' | 'dbPoolMax' | 'databaseNamespace' | 'sourceArchive'>): pg.Pool {
+export function createMemoryPool(
+  config: Pick<MemoryConfig, 'databaseUrl' | 'dbPoolMax' | 'databaseNamespace' | 'sourceArchive'>,
+  options: { retainIdleConnections?: number } = {},
+): pg.Pool {
   const pool=new pg.Pool({
     connectionString: config.databaseUrl,
     application_name:'pocketctl-memory',
     max: config.dbPoolMax,
+    min: Math.min(config.dbPoolMax, options.retainIdleConnections ?? 0),
     // Startup packet applies to every connection before its first query;
     // an asynchronous pool connect listener would race the first mutation.
     options: MEMORY_WRITER_STARTUP_OPTIONS+(config.databaseNamespace==='memory'?' -c search_path=pg_catalog,memory,shared':' -c search_path=pg_catalog,public'),

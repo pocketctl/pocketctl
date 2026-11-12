@@ -1,4 +1,4 @@
-import {fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
+import {MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import type {CurationMode} from '../curation/contracts.js'
@@ -73,22 +73,31 @@ export function createAdmissionService(deps: {
         // Join compiler/Skill/cleanup's source-first order. Installation-first
         // admission can deadlock a Session purge that already owns its source.
         await client.query(`
-          SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0))
-        `, [input.installationId, input.sessionId])
-        await client.query(`
+          WITH session_lock AS MATERIALIZED (
+            SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2, 0))
+          )
           SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
-        `, [input.installationId])
+          FROM session_lock
+        `, [input.installationId, input.sessionId])
 
         const installation = await client.query<{
           relay_status: string
           local_status: string
           config_version: string
+          prior: { injection_id: string; state: string; expired: boolean } | null
         }>(`
-          SELECT relay_status, local_status, config_version::text
-          FROM memory_installations
-          WHERE installation_id = $1
-          FOR SHARE
-        `, [input.installationId])
+          WITH installation AS MATERIALIZED (
+            SELECT installation_id,relay_status,local_status,config_version::text
+            FROM memory_installations WHERE installation_id=$1 FOR SHARE
+          ), prior AS (
+            SELECT j.injection_id::text,j.state,COALESCE(j.admission_expires_at<NOW(),FALSE) AS expired
+            FROM installation i JOIN memory_context_injections j USING(installation_id)
+            WHERE i.relay_status='active' AND i.local_status='ready' AND i.config_version=$4
+              AND j.session_id=$2 AND j.client_request_id=$3
+            ORDER BY j.created_at DESC LIMIT 1 FOR UPDATE OF j
+          )
+          SELECT installation.*,(SELECT to_jsonb(prior) FROM prior) AS prior FROM installation
+        `, [input.installationId,input.sessionId,input.clientRequestId,input.grantConfigVersion])
         const installationRow = installation.rows[0]
         if (!installationRow
           || installationRow.relay_status !== 'active'
@@ -98,17 +107,8 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'mode_off' }
         }
 
-        // Idempotency: an existing admission for this client request returns
-        // its state without compiling or admitting twice.
-        const existing = await client.query<{ injection_id: string; state: string; expired: boolean }>(`
-          SELECT injection_id::text, state,
-                 COALESCE(admission_expires_at < NOW(), FALSE) AS expired
-          FROM memory_context_injections
-          WHERE installation_id = $1 AND session_id = $2 AND client_request_id = $3
-          ORDER BY created_at DESC LIMIT 1
-          FOR UPDATE
-        `, [input.installationId, input.sessionId, input.clientRequestId])
-        const prior = existing.rows[0]
+        // A previously admitted request keeps the original nonce history.
+        const prior = installationRow.prior
         if (prior?.state === 'admitted' && prior.expired) {
           await client.query(`
             UPDATE memory_context_injections SET state = 'expired'
@@ -335,6 +335,9 @@ export function createAdmissionService(deps: {
       selectedScopeGrant?:V2GrantFacts
       authorityGrant?:PackAuthorityGrant
     }): Promise<ConsumeResult> {
+      const shared=sourcePoolContext(deps.pool).namespace==='memory'
+      const machineSourcesSql=shared?`EXISTS (${MACHINE_PACK_VERSIONS_SQL})`:'FALSE'
+      const currentMachineSourcesSql=`($10::boolean OR NOT (${machineSourcesSql}))`
       const client=await deps.pool.connect()
       try {
         await client.query('BEGIN')
@@ -342,7 +345,8 @@ export function createAdmissionService(deps: {
         // SQL fences use fresh READ COMMITTED snapshots after any lock wait.
         const result:ConsumeResult=await (async()=>{
           const nonceHmac = createHmac('sha256', deps.nonceHmacKey).update(input.nonce).digest()
-          const frozen=(await client.query<{query_context:ContextQueryFrame|null}>(`SELECT p.query_context FROM memory_context_injections j
+          const frozen=(await client.query<{query_context:ContextQueryFrame|null;machine_sources:boolean}>(`
+            SELECT p.query_context,${machineSourcesSql} AS machine_sources FROM memory_context_injections j
             JOIN memory_context_packs p ON p.pack_id=j.pack_id AND p.installation_id=j.installation_id
             WHERE j.injection_id=$1 AND j.installation_id=$2 AND j.session_id=$3 AND j.pack_id=$4 AND j.admission_nonce_hmac=$5 AND j.state='admitted' FOR UPDATE OF j`,
             [input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac])).rows[0]
@@ -353,7 +357,14 @@ export function createAdmissionService(deps: {
           const currentGrantDeadline=input.authorityGrant?.expiresAt??(proof?input.selectedScopeGrant?.expiresAt??null:null)
           const currentGrantClockSql="($9::double precision IS NULL OR clock_timestamp()<to_timestamp($9::double precision))"
           const originRows=[...origin.fences,...selected.fences],originLocked=await lockOriginPolicyFences(client,originRows,sourcePoolContext(deps.pool).namespace)
-          const sourcesCurrent=!frozen||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant)
+          const machineSources=frozen?.machine_sources===true
+          const sourcesCurrent=!machineSources||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant)
+          if(shared&&frozen&&!machineSources){
+            await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
+          }
+          // The no-machine path avoids a savepoint and native lookup. The
+          // atomic UPDATE still rejects a machine dependency added since the
+          // earlier injection lock read, before it can return any pack text.
           const originMatches=sourcesCurrent&&originLocked&&await lifecycleFrameCurrent(client,input.installationId,frozen?.query_context?.lifecycle,deps.lifecycleMode??'off')&&(!frozen||origin.stamp===(frozen.query_context?.originPolicyStamp??null))&&selected.matches&&selectionMatches
           const originFences=JSON.stringify(originRows)
           const selectionProof=JSON.stringify(proof??null)
@@ -373,13 +384,13 @@ export function createAdmissionService(deps: {
               AND j.admission_nonce_hmac = $5
               AND p.pack_id = j.pack_id AND p.installation_id = j.installation_id
               AND $6::boolean AND ${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)} AND ${selectedScopeFenceSql('$8')} AND ${currentGrantClockSql}
-              AND p.state = 'ready' AND ${lifecycleFrameFenceSql()} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
+              AND p.state = 'ready' AND ${lifecycleFrameFenceSql()} AND ${currentMachineSourcesSql} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
               AND j.consumption_generation=COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               AND NOT EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
             RETURNING p.pack_id::text, p.stable_text, p.dynamic_text,
                       p.stable_hash, p.dynamic_hash
-          `, [input.injectionId, input.installationId, input.sessionId, input.packId, nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline])
+          `, [input.injectionId, input.installationId, input.sessionId, input.packId, nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline,machineSources])
           const row = consumed.rows[0]
           if (row) {
             return {
@@ -395,7 +406,7 @@ export function createAdmissionService(deps: {
           }
           const state = await client.query<{ state: string; expired: boolean }>(`
             UPDATE memory_context_injections j
-            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${lifecycleFrameFenceSql()} OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)}) OR NOT (${selectedScopeFenceSql('$8')}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
+            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${lifecycleFrameFenceSql()} OR NOT (${currentGrantClockSql}) OR NOT (${originPolicyFenceSql('$7',sourcePoolContext(deps.pool).namespace)}) OR NOT (${selectedScopeFenceSql('$8')}) OR NOT (${currentMachineSourcesSql}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
               OR j.consumption_generation IS NULL OR j.consumption_generation<>COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               OR EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))
@@ -405,7 +416,7 @@ export function createAdmissionService(deps: {
             WHERE j.injection_id = $1 AND j.installation_id = $2 AND j.session_id = $3 AND j.pack_id = $4
               AND j.admission_nonce_hmac=$5 AND p.pack_id=j.pack_id AND p.installation_id=j.installation_id
             RETURNING j.state, j.admission_expires_at < clock_timestamp() AS expired
-          `, [input.injectionId, input.installationId, input.sessionId, input.packId,nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline])
+          `, [input.injectionId, input.installationId, input.sessionId, input.packId,nonceHmac,originMatches,originFences,selectionProof,currentGrantDeadline,machineSources])
           if (!state.rows[0]) return { ok: false, error: 'not_found' }
           if (state.rows[0].expired || state.rows[0].state === 'expired') {
             return { ok: false, error: 'expired' }
