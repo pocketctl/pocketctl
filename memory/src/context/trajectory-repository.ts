@@ -42,6 +42,7 @@ export interface RecordTrajectoryInput {
   degradedComponents: readonly string[]
   stages: readonly TrajectoryStageInput[]
   candidates: readonly TrajectoryCandidateInput[]
+  retrievedVersionIds?: readonly string[]
 }
 
 export function createTrajectoryRepository(pool: pg.Pool) {
@@ -57,8 +58,10 @@ export function createTrajectoryRepository(pool: pg.Pool) {
     async record(input: RecordTrajectoryInput): Promise<string> {
       const trajectoryId = randomUUID()
       const identity = this.requestHmac({ ...input.requestKey, query: input.query })
-      // One statement gives the header, stages and candidates the same
-      // transaction boundary without keeping a client across round trips.
+      const retrievedVersionIds = input.retrievedVersionIds ?? []
+      const recordUsage = retrievedVersionIds.length > 0
+      // Record retrieval observations atomically with the content-free audit.
+      // Only versions still current in this snapshot receive a usage signal.
       await pool.query(`
         WITH trajectory AS (
           INSERT INTO memory_retrieval_trajectories
@@ -74,7 +77,7 @@ export function createTrajectoryRepository(pool: pg.Pool) {
           SELECT trajectory.trajectory_id, s.ordinal, s.stage, s.outcome, s.count, s.duration, s.reason
           FROM trajectory CROSS JOIN jsonb_to_recordset($12::jsonb)
             AS s(ordinal integer, stage text, outcome text, count integer, duration integer, reason text)
-        )
+        )${recordUsage ? ', candidates AS (' : ''}
         INSERT INTO memory_retrieval_candidates
           (trajectory_id, installation_id, version_id, metadata_rank, lexical_rank,
            vector_rank, fused_score, authority_score, freshness_score, scope_score,
@@ -83,6 +86,12 @@ export function createTrajectoryRepository(pool: pg.Pool) {
         FROM trajectory CROSS JOIN unnest($13::uuid[], $14::integer[], $15::integer[], $16::integer[],
           $17::real[], $18::real[], $19::real[], $20::real[], $21::real[],
           $22::integer[], $23::text[], $24::text[], $25::integer[]) AS candidate
+        ${recordUsage ? `)
+        INSERT INTO memory_claim_usage (installation_id, claim_id, signal_key, signal, occurred_at)
+        SELECT t.installation_id, c.claim_id, t.trajectory_id::text, 'retrieved', clock_timestamp()
+        FROM trajectory t JOIN knowledge_claims c USING (installation_id)
+        WHERE c.current_version_id=ANY($26::uuid[])
+        ON CONFLICT DO NOTHING` : ''}
       `, [
         trajectoryId, input.installationId, identity.hmac, identity.keyId,
         input.repositoryId, input.branch, input.rankingPolicyVersionId,
@@ -105,6 +114,7 @@ export function createTrajectoryRepository(pool: pg.Pool) {
         input.candidates.map(candidate => candidate.decision),
         input.candidates.map(candidate => candidate.reasonCode),
         input.candidates.map(candidate => candidate.finalOrdinal),
+        ...(recordUsage ? [retrievedVersionIds] : []),
       ])
       return trajectoryId
     },

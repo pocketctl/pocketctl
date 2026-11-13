@@ -15,6 +15,46 @@ export function effectiveContextSettingsFingerprint(settings: EffectiveContextSe
   })).digest()
 }
 
+type SettingsScope = {
+  installationId: string
+  repositoryId?: string | null
+  sessionId?: string | null
+  agent?: string | null
+}
+type ScopedSetting = Pick<ContextSettingsRow,'scopeKind'|'scopeKey'|'agent'|'mode'|'maxTokens'|'revision'>
+
+/** Shared selection rules for compilation and admission's locked pack snapshot. */
+export function resolveContextSettings(input:SettingsScope,rows:readonly ScopedSetting[]):EffectiveContextSettings {
+  const applying: ScopedSetting[] = []
+  for (const scopeKind of ['installation', 'repository', 'session'] as const) {
+    const scopeKey = scopeKind === 'installation' ? 'global'
+      : scopeKind === 'repository' ? (input.repositoryId ?? '')
+      : (input.sessionId ?? '')
+    if (!scopeKey) continue
+    const scoped = rows.filter(row => row.scopeKind === scopeKind && row.scopeKey === scopeKey)
+    const agentRow = input.agent ? scoped.find(row => row.agent === input.agent) : undefined
+    const genericRow = scoped.find(row => row.agent === null)
+    // Agent-specific row overrides the generic row at the same scope;
+    // a generic ceiling still applies when only an agent row exists.
+    if (agentRow) applying.push(agentRow)
+    if (genericRow && (!agentRow || genericRow.mode !== agentRow.mode || agentRow.maxTokens === null)) {
+      applying.push(genericRow)
+    }
+  }
+  if (applying.length === 0) {
+    return { mode: 'off', maxTokens: null, revisions: [] }
+  }
+  const modes = applying.map(row => row.mode)
+  const tokens = applying
+    .map(row => row.maxTokens)
+    .filter((value): value is number => value !== null)
+  return {
+    mode: minContextMode(modes),
+    maxTokens: tokens.length > 0 ? Math.min(...tokens) : null,
+    revisions: applying.map(row => row.revision),
+  }
+}
+
 /**
  * Context mode settings per (installation, scope, agent) with CAS revisions
  * (plan section 6.4). A more-specific row may only turn the mode DOWN; the
@@ -103,47 +143,9 @@ export function createContextSettingsRepository(pool: pg.Pool) {
       }))
     },
 
-    /**
-     * Effective settings for one request: installation row, the repository
-     * row for the resolved repository, the session row, each with agent
-     * specificity overriding agent-generic. The mode is the minimum; the
-     * token budget is the tightest bound.
-     */
-    async resolve(input: {
-      installationId: string
-      repositoryId?: string | null
-      sessionId?: string | null
-      agent?: string | null
-    }): Promise<EffectiveContextSettings> {
-      const rows = await this.list({ installationId: input.installationId })
-      const applying: ContextSettingsRow[] = []
-      for (const scopeKind of ['installation', 'repository', 'session'] as const) {
-        const scopeKey = scopeKind === 'installation' ? 'global'
-          : scopeKind === 'repository' ? (input.repositoryId ?? '')
-          : (input.sessionId ?? '')
-        if (!scopeKey) continue
-        const scoped = rows.filter(row => row.scopeKind === scopeKind && row.scopeKey === scopeKey)
-        const agentRow = input.agent ? scoped.find(row => row.agent === input.agent) : undefined
-        const genericRow = scoped.find(row => row.agent === null)
-        // Agent-specific row overrides the generic row at the same scope;
-        // a generic ceiling still applies when only an agent row exists.
-        if (agentRow) applying.push(agentRow)
-        if (genericRow && (!agentRow || genericRow.mode !== agentRow.mode || agentRow.maxTokens === null)) {
-          applying.push(genericRow)
-        }
-      }
-      if (applying.length === 0) {
-        return { mode: 'off', maxTokens: null, revisions: [] }
-      }
-      const modes = applying.map(row => row.mode)
-      const tokens = applying
-        .map(row => row.maxTokens)
-        .filter((value): value is number => value !== null)
-      return {
-        mode: minContextMode(modes),
-        maxTokens: tokens.length > 0 ? Math.min(...tokens) : null,
-        revisions: applying.map(row => row.revision),
-      }
+    async resolve(input: SettingsScope): Promise<EffectiveContextSettings> {
+      return resolveContextSettings(input,await this.list({installationId:input.installationId}))
+
     },
   }
 }

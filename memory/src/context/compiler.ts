@@ -480,7 +480,6 @@ export function createContextCompiler(deps: {
       }
 
       for (const entry of persona) {
-        const statement = redactSensitive(await statementFor(deps.pool, input.installationId, entry.versionId))
         drafts.push({
           itemId: deterministicItemId([
             inputDigest.toString('hex'), policy.effectivePolicyHash.toString('hex'),
@@ -492,7 +491,7 @@ export function createContextCompiler(deps: {
           layer: 'L3',
           section: 'stable',
           representation: 'summary',
-          statement,
+          statement: '',
           scopeKind: 'installation',
           reasonCodes: ['persona', 'l3_stable'],
           evidenceIds: [],
@@ -540,6 +539,7 @@ export function createContextCompiler(deps: {
       const versionIds = [...new Set(drafts.map(draft => draft.versionId))]
       const facts = await contextClaimFacts(deps.pool, input.installationId, versionIds, {
         includeEvidenceIds: selectedReferences.length === 0,
+        personaVersionIds: [...personaVersionIds],
       })
       const eligibleDrafts = drafts.flatMap(draft => {
         const source = facts.get(draft.versionId)
@@ -548,7 +548,8 @@ export function createContextCompiler(deps: {
         const needsScene = draft.claimType === 'work_method' && draft.layer === 'L2' && !selectedItemReferences.has(draft.itemId)
         return source && (!needsScene || (lifecycle?.consume && source.lifecycle?.spaceId))
           && eligibleContextFacts(source,queryContext)
-          ? [{ ...draft, evidenceIds: source.evidenceIds ?? draft.evidenceIds }]
+          ? [{ ...draft, statement: draft.layer === 'L3' ? redactSensitive(source.personaStatement ?? '') : draft.statement,
+            evidenceIds: source.evidenceIds ?? draft.evidenceIds }]
           : []
       })
       const deduped = dedupeItems(eligibleDrafts.map(draft => ({
@@ -670,14 +671,6 @@ export function createContextCompiler(deps: {
       }
     },
   }
-}
-
-async function statementFor(pool: pg.Pool, installationId: string, versionId: string): Promise<string> {
-  const result = await pool.query<{ statement: string }>(`
-    SELECT statement FROM knowledge_versions
-    WHERE installation_id = $1 AND version_id = $2
-  `, [installationId, versionId])
-  return result.rows[0]?.statement ?? ''
 }
 
 export type ContextCompiler = ReturnType<typeof createContextCompiler>

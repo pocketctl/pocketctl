@@ -65,6 +65,16 @@ export function createGrantGuard(deps: GrantGuardDeps) {
   return {
     warmSigningKeys: verifier.warmSigningKeys,
 
+    // Only the native Context nonce endpoints have the matching in-transaction
+    // installation check. Return signed facts here for that boundary.
+    async signedPersonalContext(authorization:string|undefined,sessionId:string):Promise<VerifiedMemoryGrantV1|undefined>{
+      if(!shared||!authorization?.startsWith('Bearer '))return undefined
+      const signed=await verifier.verifySignedV1(authorization.slice(7),'memory.context',sessionId)
+      if(!signed||signed.callerType!=='daemon'||!Number.isSafeInteger(Number(signed.subjectUserId)))return undefined
+      const {subjectUserId,...grant}=signed
+      return {...grant,userId:Number(subjectUserId)}
+    },
+
     async guard(input: {
       authorization: string | undefined
       requiredService: string
@@ -211,4 +221,5 @@ export function createGrantGuard(deps: GrantGuardDeps) {
   }
 }
 
-export type GrantGuard = Omit<ReturnType<typeof createGrantGuard>, 'warmSigningKeys'>
+type GuardMethods=Omit<ReturnType<typeof createGrantGuard>,'warmSigningKeys'>
+export type GrantGuard=Omit<GuardMethods,'signedPersonalContext'>&Partial<Pick<GuardMethods,'signedPersonalContext'>>

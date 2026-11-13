@@ -150,7 +150,7 @@ describeWithDatabase('retrieval trajectory audit (PostgreSQL)', () => {
     expect(roundTrips).toBeLessThanOrEqual(6)
   })
 
-  test('a rejected candidate rolls back the trajectory and all candidate audit rows', async () => {
+  test('a rejected candidate rolls back the trajectory, candidates, and retrieval usage', async () => {
     const versionId = (await pool.query('SELECT version_id::text FROM knowledge_versions LIMIT 1')).rows[0].version_id
     const candidate = { versionId, metadataRank: 1, lexicalRank: null, vectorRank: null,
       fusedScore: 0.5, authorityScore: 0, freshnessScore: 1, scopeScore: 0, loadoutScore: 0,
@@ -159,8 +159,8 @@ describeWithDatabase('retrieval trajectory audit (PostgreSQL)', () => {
       repositoryId: null, branch: null, rankingPolicyVersionId: null, backendPlan: {},
       resultState: 'completed', degradedComponents: [],
       stages: [{ stage: 'pools', outcome: 'ok', candidateCount: 2, durationMs: 1 }],
-      candidates: [candidate, candidate] })).rejects.toMatchObject({ code: '23505' })
-    for (const table of ['memory_retrieval_trajectories', 'memory_retrieval_stages', 'memory_retrieval_candidates']) {
+      candidates: [candidate, candidate], retrievedVersionIds: [versionId] })).rejects.toMatchObject({ code: '23505' })
+    for (const table of ['memory_retrieval_trajectories', 'memory_retrieval_stages', 'memory_retrieval_candidates', 'memory_claim_usage']) {
       expect((await pool.query(`SELECT count(*)::int AS count FROM ${table}`)).rows[0].count).toBe(0)
     }
   })

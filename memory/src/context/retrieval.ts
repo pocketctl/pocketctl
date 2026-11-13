@@ -331,10 +331,8 @@ export function createContextRetrieval(deps: {
         degradedComponents,
         stages,
         candidates: trajectoryCandidates,
+        retrievedVersionIds: input.lifecycle?.consume ? candidates.map(candidate => candidate.versionId) : undefined,
       })
-
-      if(input.lifecycle?.consume&&candidates.length)await deps.pool.query(`INSERT INTO memory_claim_usage(installation_id,claim_id,signal_key,signal,occurred_at)
-        SELECT $1,c.claim_id,$2,'retrieved',clock_timestamp() FROM knowledge_claims c WHERE c.installation_id=$1 AND c.current_version_id=ANY($3::uuid[]) ON CONFLICT DO NOTHING`,[input.installationId,trajectoryId,candidates.map(c=>c.versionId)])
       return { outcome, degradedComponents, candidates, trajectoryId }
     },
   }

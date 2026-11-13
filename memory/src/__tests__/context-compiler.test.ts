@@ -28,15 +28,18 @@ function fakeDeps(overrides: {
 } = {}) {
   const persisted: Array<Record<string, unknown>> = []
   const completed: Array<Record<string, unknown>> = []
+  const statements: string[] = []
   const deps = {
     pool: {
       query: vi.fn(async (sql: string, values?:unknown[]) => {
+        statements.push(sql)
         if (sql.includes('AS source_metadata_owned')) {
           return { rows: (values?.[1] as string[]).map(version_id => ({
             version_id, claim_id: 'fixture-claim', scope_kind: 'installation', scope_key: 'global',
             repository_id: null, repo_snapshot_id: null, branch: null, applicability: null,
             consumption_hold_reason: null, current: true, time_eligible: true, source_metadata_owned: true,
             canonical_remote: null, ...(sql.includes('AS evidence_ids') ? { evidence_ids: ['e-1'] } : {}),
+            ...(sql.includes('AS persona_statement') && version_id === 'v-persona' ? { persona_statement: 'current Persona statement' } : {}),
           })) }
         }
         if (sql.includes('knowledge_versions')) return { rows: [{ statement: 'version statement here' }] }
@@ -104,7 +107,7 @@ function fakeDeps(overrides: {
         })) as [EffectivePolicy, EffectivePolicy]),
     } as unknown as PolicyResolver,
   }
-  return { deps, persisted, completed }
+  return { deps, persisted, completed, statements }
 }
 
 const REQUEST: CompileRequest = {
@@ -226,14 +229,19 @@ describe('context compiler (deterministic synchronous path)', () => {
   })
 
   test('an empty minimized query skips retrieval and still compiles Persona', async () => {
-    const { deps, persisted } = fakeDeps({
+    const { deps, persisted, statements } = fakeDeps({
       persona: [{ claimId: 'c-persona', versionId: 'v-persona' }],
       retrievalOutcome: 'retrieval_failed',
     })
     const outcome = await createContextCompiler(deps).compile({ ...REQUEST, query: '   ' })
     expect(outcome).toMatchObject({ kind: 'ready', itemCount: 1 })
     expect(deps.retrieval.retrieve).not.toHaveBeenCalled()
-    expect((persisted[0].items as Array<{ claimType: string }>)[0].claimType).toBe('work_method')
+    expect((persisted[0].items as Array<{ claimType: string }>)[0]).toMatchObject({
+      claimType: 'work_method',
+      statement: 'current Persona statement',
+    })
+    expect(statements.filter(sql => sql.includes('AS persona_statement'))).toHaveLength(1)
+    expect(statements.some(sql => /^\s*SELECT statement FROM knowledge_versions/.test(sql))).toBe(false)
   })
 
   test('unknown repository policy can suppress Persona completely', async () => {
