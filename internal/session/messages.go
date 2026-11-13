@@ -200,6 +200,10 @@ func (sm *SessionManager) dispatchUserMessage(ctx context.Context, sessionID str
 }
 
 func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, sessionID string, content string, hidden *memorycontext.PreparedContext) error {
+	return sm.dispatchUserMessageWithContextReceipt(ctx, sessionID, content, hidden, nil)
+}
+
+func (sm *SessionManager) dispatchUserMessageWithContextReceipt(ctx context.Context, sessionID string, content string, hidden *memorycontext.PreparedContext, delivered *bool) error {
 	correlation := userMessageCorrelationFrom(ctx)
 	ctx, release, err := sm.acquireObserverDrive(ctx, sessionID)
 	if err != nil {
@@ -231,6 +235,11 @@ func (sm *SessionManager) dispatchUserMessageWithContext(ctx context.Context, se
 				MemorySource: correlation.MemorySource, RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID, RetryOfTurnID: correlation.RetryOfTurnID}
 		}
 		if hidden != nil {
+			if codex, ok := ps.Backend.(*CodexAppServerBackend); ok && delivered != nil {
+				var err error
+				*delivered, err = codex.sendWithContextResult(ctx, sessionID, content, hidden)
+				return err
+			}
 			if aware, ok := ps.Backend.(interface {
 				SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error
 			}); ok {

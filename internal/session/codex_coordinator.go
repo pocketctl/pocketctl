@@ -27,6 +27,7 @@ type codexAppServerRuntime struct {
 	ProcessStartIdentity string
 	Endpoint             string
 	RemoteURI            string
+	PrivateStdio         bool
 	Client               codexRuntimeClient
 	Stop                 func() error
 }
@@ -39,14 +40,15 @@ type codexRuntimeClient interface {
 }
 
 type codexRuntimeSnapshot struct {
-	PID           int
-	Endpoint      string
-	RemoteURI     string
-	Binary        string
-	Version       string
-	SchemaHash    string
-	Generation    uint64
-	HiddenContext bool
+	PID             int
+	Endpoint        string
+	RemoteURI       string
+	Binary          string
+	Version         string
+	SchemaHash      string
+	Generation      uint64
+	HiddenContext   bool
+	IdleOnlyContext bool
 }
 
 type codexRuntimeStarter func(context.Context, string, string, uint64) (*codexAppServerRuntime, error)
@@ -64,6 +66,9 @@ type codexCoordinator struct {
 	titleMu          sync.Mutex
 	titleTurns       map[string]codexTitleTurn
 	sm               *SessionManager
+
+	startPrivateProject codexRuntimeStarter
+	runtimeCapabilities agentcontrol.CodexCapabilities
 
 	mu                 sync.Mutex
 	runtime            *codexAppServerRuntime
@@ -132,6 +137,10 @@ func (c *codexCoordinator) configureCodexHome(profile adapter.CodexHomeProfile) 
 func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version string, capabilities agentcontrol.CodexCapabilities) (codexRuntimeSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.ensureStartedLocked(ctx, binary, version, capabilities, false)
+}
+
+func (c *codexCoordinator) ensureStartedLocked(ctx context.Context, binary, version string, capabilities agentcontrol.CodexCapabilities, disconnected bool) (codexRuntimeSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return codexRuntimeSnapshot{}, err
 	}
@@ -140,20 +149,29 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 	}
 	var restoredThreads []string
 	restoredDetached := c.detachedThreadSnapshot()
+	privateProject := c.projectCwd != "" && capabilities.IdleOnlyContext && c.startPrivateProject != nil
 	if c.runtime != nil {
-		probeErr := c.probe(ctx, c.runtime)
+		private := c.runtime.PrivateStdio
+		probeErr := errors.New("Codex app-server disconnected")
+		if !disconnected {
+			probeErr = c.probe(ctx, c.runtime)
+		}
 		if err := ctx.Err(); err != nil {
 			return codexRuntimeSnapshot{}, err
 		}
-		activeLease := c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation)
+		activeLease := !private && c.sm != nil && hasActiveCodexLease(c.sm.leases.Snapshot(), c.generation)
 		compatible := codexRuntimeCompatible(c.binary, c.version, c.schemaHash, binary, version, capabilities.SchemaHash)
-		if probeErr == nil && compatible {
+		if probeErr == nil && compatible && (!privateProject || private) {
 			c.setHiddenContextProofLocked(binary, version, capabilities)
 			return c.snapshotLocked(), nil
 		}
 		if probeErr == nil && activeLease {
 			c.hiddenContextProof = codexRuntimeSnapshot{}
 			return c.snapshotLocked(), errCodexRuntimeUpgradeDeferred
+		}
+		if probeErr == nil && compatible && privateProject && !private && c.hasActiveNativeTurn() {
+			c.setHiddenContextProofLocked(binary, version, capabilities)
+			return c.snapshotLocked(), nil
 		}
 		if probeErr != nil && activeLease {
 			c.hiddenContextProof = codexRuntimeSnapshot{}
@@ -167,8 +185,15 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 			}
 		}
 		c.runtime = nil
-		if removeErr := c.removeState(); removeErr != nil && !os.IsNotExist(removeErr) {
-			return codexRuntimeSnapshot{}, removeErr
+		if private {
+			// Preserve the in-memory roster even if the first replacement fails.
+			c.turnMu.Lock()
+			clear(c.activeTurn)
+			c.turnMu.Unlock()
+		} else if !privateProject {
+			if err := c.removeState(); err != nil {
+				return codexRuntimeSnapshot{}, err
+			}
 		}
 	}
 	state, stateErr := c.readState()
@@ -191,16 +216,31 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 			if !ownerAvailable {
 				return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server handoff is still owned by live daemon pid %d", state.OwnerPID)
 			}
+			if state.PrivateStdio {
+				return codexRuntimeSnapshot{}, errors.New("previous Codex stdio app-server is still exiting")
+			}
 			activeLease := hasActiveCodexLease(state.Leases, state.Generation)
 			if err := ctx.Err(); err != nil {
 				return codexRuntimeSnapshot{}, err
 			}
-			if !compatible && !activeLease {
-				if err := stopPersistedCodexAppServer(state); err != nil {
-					return codexRuntimeSnapshot{}, fmt.Errorf("stop incompatible Codex app-server handoff: %w", err)
+			if !activeLease && (!compatible || privateProject) {
+				identity := ""
+				if privateProject {
+					// Refuse to resume the same rollouts until the old listener has
+					// exited. Preserve the state file if replacement startup fails.
+					var verified bool
+					identity, verified = codexHandoffProcessIdentity(state)
+					if !verified {
+						return codexRuntimeSnapshot{}, errors.New("cannot verify previous Codex project listener")
+					}
 				}
-				if err := c.removeState(); err != nil {
-					return codexRuntimeSnapshot{}, err
+				if err := stopPersistedCodexAppServer(state); err != nil {
+					return codexRuntimeSnapshot{}, fmt.Errorf("stop previous Codex app-server handoff: %w", err)
+				}
+				if privateProject {
+					if err := waitForCodexProcessExit(ctx, state.PID, identity); err != nil {
+						return codexRuntimeSnapshot{}, err
+					}
 				}
 			} else {
 				runtime, err := c.adopt(ctx, state)
@@ -239,27 +279,36 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 						}
 					}
 					snapshot := c.snapshotLocked()
-					if !compatible {
+					if !compatible || privateProject {
 						return snapshot, errCodexRuntimeUpgradeDeferred
 					}
 					return snapshot, nil
 				}
 			}
-		} else if err := c.removeState(); err != nil {
-			return codexRuntimeSnapshot{}, err
 		}
 	} else if !os.IsNotExist(stateErr) {
 		return codexRuntimeSnapshot{}, fmt.Errorf("read Codex app-server handoff: %w", stateErr)
+	} else if disconnected || c.projectCwd != "" && c.runtimeCapabilities.IdleOnlyContext && c.startPrivateProject != nil {
+		restoredThreads = append(restoredThreads, c.managedThreadSnapshot()...)
 	}
 	if err := ctx.Err(); err != nil {
 		return codexRuntimeSnapshot{}, err
 	}
 	generation := c.generation + 1
-	runtime, err := c.start(ctx, binary, version, generation)
+	start := c.start
+	if privateProject {
+		start = c.startPrivateProject
+	}
+	runtime, err := start(ctx, binary, version, generation)
 	if err != nil {
 		return codexRuntimeSnapshot{}, err
 	}
-	if runtime == nil || runtime.PID <= 0 || runtime.Endpoint == "" || runtime.RemoteURI == "" {
+	if runtime == nil || runtime.PID <= 0 || runtime.PrivateStdio != privateProject ||
+		(privateProject && (runtime.Endpoint != "" || runtime.RemoteURI != "" || runtime.ProcessStartIdentity == "" || runtime.Client == nil)) ||
+		(!privateProject && (runtime.Endpoint == "" || runtime.RemoteURI == "")) {
+		if runtime != nil && runtime.Stop != nil {
+			_ = runtime.Stop()
+		}
 		return codexRuntimeSnapshot{}, errors.New("Codex app-server starter returned incomplete runtime")
 	}
 	if c.projectCwd != "" {
@@ -293,6 +342,9 @@ func (c *codexCoordinator) ensureStarted(ctx context.Context, binary, version st
 }
 
 func probeCodexAppServer(ctx context.Context, runtime *codexAppServerRuntime) error {
+	if runtime != nil && runtime.PrivateStdio && runtime.Client != nil {
+		return runtime.Client.Call(ctx, "thread/list", map[string]int{"limit": 1}, nil)
+	}
 	if runtime == nil || runtime.Endpoint == "" {
 		return errors.New("Codex app-server endpoint is empty")
 	}
@@ -337,16 +389,17 @@ func (c *codexCoordinator) snapshotLocked() codexRuntimeSnapshot {
 
 func (c *codexCoordinator) setHiddenContextProofLocked(binary, version string, capabilities agentcontrol.CodexCapabilities) {
 	c.hiddenContextProof = codexRuntimeSnapshot{}
-	if c.runtime == nil || !capabilities.Managed() || !capabilities.HiddenContext || capabilities.SchemaHash == "" || capabilities.Version != version ||
+	c.runtimeCapabilities = capabilities
+	if c.runtime == nil || !capabilities.Managed() || !capabilities.HiddenContext || !capabilities.IdleOnlyContext || capabilities.SchemaHash == "" || capabilities.Version != version ||
 		!codexRuntimeCompatible(c.binary, c.version, c.schemaHash, binary, version, capabilities.SchemaHash) {
 		return
 	}
-	c.hiddenContextProof = codexRuntimeSnapshot{PID: c.runtime.PID, Binary: binary, Version: version, SchemaHash: capabilities.SchemaHash, Generation: c.generation, HiddenContext: true}
+	c.hiddenContextProof = codexRuntimeSnapshot{PID: c.runtime.PID, Binary: binary, Version: version, SchemaHash: capabilities.SchemaHash, Generation: c.generation, HiddenContext: true, IdleOnlyContext: capabilities.IdleOnlyContext}
 }
 
 func (c *codexCoordinator) hiddenContextSupportedLocked() bool {
 	proof := c.hiddenContextProof
-	return c.runtime != nil && proof.HiddenContext && proof.PID == c.runtime.PID && proof.Generation == c.generation &&
+	return c.runtime != nil && proof.HiddenContext && proof.IdleOnlyContext && proof.PID == c.runtime.PID && proof.Generation == c.generation &&
 		codexRuntimeCompatible(proof.Binary, proof.Version, proof.SchemaHash, c.binary, c.version, c.schemaHash)
 }
 
@@ -375,7 +428,7 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 		Cwd: c.projectCwd, CodexHomeID: c.codexHomeID, CodexHome: c.codexHome,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
 		ProcessStartIdentity: c.runtime.ProcessStartIdentity,
-		RemoteURI:            c.runtime.RemoteURI, Binary: c.binary, Version: c.version,
+		RemoteURI:            c.runtime.RemoteURI, PrivateStdio: c.runtime.PrivateStdio, Binary: c.binary, Version: c.version,
 		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
 		Threads:         threads,
 		DetachedThreads: detached,
@@ -420,7 +473,7 @@ func (c *codexCoordinator) shutdown() error {
 		c.waitForBackgroundWork(reconnectDone)
 		return nil
 	}
-	if c.sm != nil {
+	if c.sm != nil && !c.runtime.PrivateStdio {
 		for _, lease := range c.sm.leases.Active(c.generation) {
 			if lease.Agent == agentcontrol.AgentCodex {
 				err := c.persistOwnerLocked(0)
@@ -569,6 +622,7 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 		c.mu.Unlock()
 		return
 	}
+	private := c.runtime.PrivateStdio
 	reconnectCtx, cancelReconnect := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	c.reconnecting = true
@@ -584,6 +638,10 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 		c.mu.Unlock()
 		close(done)
 	}()
+	if private {
+		c.reconnectPrivateProject(reconnectCtx, generation)
+		return
+	}
 
 	delay := 100 * time.Millisecond
 	for attempt := 1; attempt <= 5; attempt++ {
@@ -641,6 +699,38 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 		c.replaceInteractionsLocked(nil)
 	}
 	c.mu.Unlock()
+}
+
+func (c *codexCoordinator) reconnectPrivateProject(parent context.Context, generation uint64) {
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	defer cancel()
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		c.mu.Lock()
+		if c.generation != generation || c.shuttingDown || ctx.Err() != nil {
+			c.mu.Unlock()
+			return
+		}
+		_, err = c.ensureStartedLocked(ctx, c.binary, c.version, c.runtimeCapabilities, true)
+		// A failed persist may have consumed a local generation. Track that
+		// failed attempt, while a successful concurrent start exits above.
+		generation = c.generation
+		c.mu.Unlock()
+		if err == nil {
+			return
+		}
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+	slog.Warn("replace disconnected Codex stdio app-server", "generation", generation, "error", err)
 }
 
 func (c *codexCoordinator) interactionBroker() *codexInteractions {
@@ -1462,6 +1552,27 @@ func (c *codexCoordinator) currentTurn(threadID string) string {
 	c.turnMu.RLock()
 	defer c.turnMu.RUnlock()
 	return c.activeTurn[threadID]
+}
+
+func (c *codexCoordinator) hasActiveNativeTurn() bool {
+	c.turnMu.RLock()
+	defer c.turnMu.RUnlock()
+	return len(c.activeTurn) != 0
+}
+
+func waitForCodexProcessExit(parent context.Context, pid int, identity string) error {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for codexProcessBirthMatches(pid, identity) {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for previous Codex project listener: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	return nil
 }
 
 // applyProjectedEvent mirrors native Codex state into the SessionManager. It

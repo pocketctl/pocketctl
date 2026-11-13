@@ -46,6 +46,71 @@ func TestSendControlPayloadReportsDisconnectedTransport(t *testing.T) {
 	}
 }
 
+func TestControlPayloadCannotOutliveItsDeadlineInWriterQueue(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	received := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		peer, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer peer.Close()
+		for {
+			_, body, err := peer.ReadMessage()
+			if err != nil {
+				return
+			}
+			received <- string(body)
+		}
+	}))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL(server.URL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := newTestClient(wsURL(server.URL))
+	client.conn = conn
+	client.writeMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			client.writeMu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	sent := make(chan error, 1)
+	go func() {
+		sent <- client.SendControlPayloadContext(ctx, []byte(`{"type":"memory_context_grant"}`))
+	}()
+	<-ctx.Done()
+	select {
+	case err := <-sent:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("send error=%v, want deadline", err)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("expired control request is still queued behind the writer")
+	}
+	client.writeMu.Unlock()
+	locked = false
+
+	const next = `{"type":"session_registration"}`
+	if err := client.SendControlPayload([]byte(next)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-received:
+		if got != next {
+			t.Fatalf("socket received expired payload: %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expired request blocked a subsequent control write")
+	}
+}
+
 func TestCollaborationLifecycleAndReceiptsAreSequencedForReplay(t *testing.T) {
 	c := newTestClient("ws://example")
 	for _, kind := range []string{"session_created", "collaboration_context_receipt", "collaboration_dispatch_receipt"} {

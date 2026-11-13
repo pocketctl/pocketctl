@@ -3909,7 +3909,7 @@ func handleUserMessageCommand(
 }
 
 type memoryContextControlSender interface {
-	SendControlPayload([]byte) error
+	SendControlPayloadContext(context.Context, []byte) error
 }
 
 // wireMemoryContext installs the authenticated daemon→Relay broker and the
@@ -3917,12 +3917,34 @@ type memoryContextControlSender interface {
 // coordinator; only an exact per-session runtime probe can enable injection.
 func wireMemoryContext(sm *session.SessionManager, sender memoryContextControlSender) *memorycontext.GrantClient {
 	grants := &memorycontext.GrantClient{
-		Send:    func(_ context.Context, payload []byte) error { return sender.SendControlPayload(payload) },
+		Send:    sender.SendControlPayloadContext,
 		Timeout: 750 * time.Millisecond,
 	}
 	grants.Reply = grants.WaitReply
 	sm.SetMemoryContext(&memorycontext.Coordinator{
 		Grants: grants, Memory: memorycontext.NewMemoryClient(), Deadline: 750 * time.Millisecond,
+		ObserveCompileTiming: func(timing memorycontext.CompileTiming) {
+			logger := slog.Default()
+			level := slog.LevelDebug
+			if timing.Total >= 500*time.Millisecond {
+				level = slog.LevelInfo
+			}
+			milliseconds := func(offset time.Duration) any {
+				if offset < 0 {
+					return nil
+				}
+				return offset.Milliseconds()
+			}
+			logger.Log(context.Background(), level, "memory_context_compile_timing",
+				"grant_ms", timing.Grant.Milliseconds(), "repository_wait_ms", timing.RepositoryWait.Milliseconds(),
+				"compile_started_at_ms", milliseconds(timing.CompileStartedAt),
+				"connection_requested_at_ms", milliseconds(timing.ConnectionRequestedAt),
+				"connection_ready_at_ms", milliseconds(timing.ConnectionReadyAt),
+				"tls_started_at_ms", milliseconds(timing.TLSStartedAt), "tls_completed_at_ms", milliseconds(timing.TLSCompletedAt),
+				"compile_request_written_at_ms", milliseconds(timing.RequestWrittenAt),
+				"compile_response_started_at_ms", milliseconds(timing.ResponseStartedAt),
+				"total_ms", timing.Total.Milliseconds(), "outcome", timing.Outcome)
+		},
 	}, func() bool { return true }, sm.MemoryContextCapability)
 	return grants
 }

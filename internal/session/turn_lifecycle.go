@@ -83,12 +83,15 @@ var ErrQueuedSessionBusy = errors.New("queued session busy")
 var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
 
 type userMessageCorrelation struct {
-	MemorySource  *protocol.MemorySourceProvenance
-	RetryOfTurnID string
-	InputMode     string
-	RequestID     string
-	MsgID         string
-	TurnID        string
+	MemorySource      *protocol.MemorySourceProvenance
+	RetryOfTurnID     string
+	InputMode         string
+	RequireContext    bool
+	contextRuntime    codexRuntimeClient
+	contextGeneration uint64
+	RequestID         string
+	MsgID             string
+	TurnID            string
 }
 
 type userMessageCorrelationKey struct{}
@@ -392,7 +395,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		in.InputMode = protocol.InputModeNewTurn
 	}
 	ctx = context.WithValue(ctx, codexInvocationKey{}, in.InvocationID)
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode, RetryOfTurnID: in.RetryOfTurnID})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode, RetryOfTurnID: in.RetryOfTurnID, RequireContext: in.SkipMemoryContext && in.HiddenContext != nil})
 	if agent == adapter.AgentCodex && (in.InvocationID == "command:review" || in.InvocationID == "command:compact") {
 		_, err := sm.invokeCodexCommand(ctx, in.SessionID, in.Content, in.InvocationID, true)
 		return err
@@ -435,16 +438,22 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 			return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 		}
 		if in.HiddenContext == nil && !in.SkipMemoryContext {
+			ctx = sm.bindCodexContextRuntime(ctx, in.SessionID)
 			in.HiddenContext = sm.prepareMemoryContext(ctx, in, requestID, agent)
 		}
-		if err := sm.dispatchUserMessageWithContext(ctx, in.SessionID, in.Content, in.HiddenContext); err != nil {
+		delivered := true // Managed backends other than Codex retain their existing receipt contract.
+		if err := sm.dispatchUserMessageWithContextReceipt(ctx, in.SessionID, in.Content, in.HiddenContext, &delivered); err != nil {
 			if !in.SuppressContextReceipt {
 				sm.recordMemoryContextReceipt(ctx, in.HiddenContext, false, "dispatch_failed")
 			}
 			return err
 		}
 		if !in.SuppressContextReceipt {
-			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, true, "accepted")
+			outcome := "accepted"
+			if !delivered {
+				outcome = "not_injected"
+			}
+			sm.recordMemoryContextReceipt(ctx, in.HiddenContext, delivered, outcome)
 		}
 		return nil
 	}

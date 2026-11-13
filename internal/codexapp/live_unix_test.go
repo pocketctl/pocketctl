@@ -5,6 +5,7 @@ package codexapp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,56 @@ import (
 	"testing"
 	"time"
 )
+
+func TestInstalledCodexAppServerStdioInitialize(t *testing.T) {
+	if os.Getenv("POCKETCTL_CODEX_SMOKE") != "1" {
+		t.Skip("set POCKETCTL_CODEX_SMOKE=1 to test the installed Codex CLI")
+	}
+	binary, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "app-server", "--listen", "stdio://")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "HOME="+cmd.Dir, "CODEX_HOME="+cmd.Dir)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	childInput, parentInput, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer childInput.Close()
+	defer parentInput.Close()
+	cmd.Stdin = childInput
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Wait()
+	defer syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = childInput.Close()
+	client := NewStdioClient(output, parentInput)
+	defer client.Close()
+	params := map[string]any{
+		"clientInfo":   map[string]string{"name": "pocketctl-smoke", "version": "0.1"},
+		"capabilities": map[string]any{"experimentalApi": true},
+	}
+	if err := client.Initialize(ctx, params, nil); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	var result struct{ Data []json.RawMessage }
+	if err := client.Call(ctx, "thread/list", map[string]any{"limit": 1}, &result); err != nil {
+		t.Fatalf("thread/list: %v", err)
+	}
+	if result.Data == nil || len(result.Data) != 0 {
+		t.Fatalf("expected the isolated home to have an empty thread list")
+	}
+}
 
 func TestInstalledCodexAppServerUnixInitialize(t *testing.T) {
 	if os.Getenv("POCKETCTL_CODEX_SMOKE") != "1" {

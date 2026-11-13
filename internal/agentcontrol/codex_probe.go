@@ -31,6 +31,8 @@ type CodexCapabilities struct {
 	MCPElicitation  bool
 	ThreadInjection bool
 	HiddenContext   bool
+	AtomicContext   bool
+	IdleOnlyContext bool
 	SchemaHash      string
 }
 
@@ -79,6 +81,8 @@ func (p CodexProbe) Probe(ctx context.Context, binary, version string) (CodexCap
 	caps.MCPElicitation = containsAll(schemaText, "mcpServer/elicitation/request")
 	caps.ThreadInjection = containsAll(schemaText, "thread/inject_items")
 	caps.HiddenContext = supportsCodexHiddenContextSchema(schema)
+	caps.AtomicContext = caps.HiddenContext && supportsCodexAtomicContextSchema(schema)
+	caps.IdleOnlyContext = supportsCodexApplicationContextMethod(schema, "turn/startIfIdle")
 	caps.Core = appServer && containsAll(schemaText,
 		"initialize", "thread/start", "thread/resume", "thread/turns/list",
 		"turn/start", "turn/interrupt", "serverRequest/resolved",

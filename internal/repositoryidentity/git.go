@@ -24,33 +24,59 @@ type Observation struct {
 // to a credential-free host/path identity. Repositories without a network
 // origin remain unknown instead of falling back to an absolute path.
 func Resolve(parent context.Context, cwd string) (Observation, bool) {
+	return resolve(parent, cwd, gitOutput)
+}
+
+func resolve(parent context.Context, cwd string, readGit func(context.Context, string, ...string) (string, error)) (Observation, bool) {
 	if strings.TrimSpace(cwd) == "" {
 		return Observation{}, false
 	}
 	ctx, cancel := context.WithTimeout(parent, resolveTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", cwd, "remote", "get-url", "origin")
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
-	output, err := cmd.Output()
-	if err != nil {
-		return Observation{}, false
+	// Each read is independent. Use the same deadline for all three so a slow
+	// remote or branch lookup cannot starve the commit lookup.
+	start := func(args ...string) <-chan string {
+		result := make(chan string, 1)
+		go func() {
+			value, err := readGit(ctx, cwd, args...)
+			if err != nil {
+				value = ""
+			}
+			result <- strings.TrimSpace(value)
+		}()
+		return result
 	}
-	repositoryID, ok := canonicalRemote(string(output))
+	receive := func(result <-chan string) string {
+		select {
+		case value := <-result:
+			return value
+		case <-ctx.Done():
+			select {
+			case value := <-result:
+				return value
+			default:
+				return ""
+			}
+		}
+	}
+	remote := start("remote", "get-url", "origin")
+	branch := start("symbolic-ref", "--quiet", "--short", "HEAD")
+	commit := start("rev-parse", "--verify", "HEAD")
+	repositoryID, ok := canonicalRemote(receive(remote))
 	if !ok {
 		return Observation{}, false
 	}
-	branch, _ := gitOutput(ctx, cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
-	commitSHA, _ := gitOutput(ctx, cwd, "rev-parse", "--verify", "HEAD")
 	return Observation{
 		RepositoryID: repositoryID,
-		Branch:       strings.TrimSpace(branch),
-		CommitSHA:    strings.TrimSpace(commitSHA),
+		Branch:       receive(branch),
+		CommitSHA:    receive(commit),
 	}, true
 }
 
 func gitOutput(ctx context.Context, cwd string, args ...string) (string, error) {
 	gitArgs := append([]string{"-C", cwd}, args...)
 	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	cmd.WaitDelay = 25 * time.Millisecond
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	return string(output), err

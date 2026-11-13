@@ -68,13 +68,21 @@ func TestCodexMemoryContextStaysShadowOnlyWithoutExactInjectionProbe(t *testing.
 // These hand-checked shapes mirror the generated native ClientRequest schema.
 const codexHiddenSchemaFixture = `{"title":"ClientRequest","description":"initialize thread/start thread/resume thread/turns/list turn/interrupt serverRequest/resolved","definitions":{"ThreadInjectItemsParams":{"type":"object","required":["threadId","items"],"properties":{"threadId":{"type":"string"},"items":{"type":"array","items":true}}},"TurnStartParams":{"type":"object","required":["threadId","input"],"properties":{"threadId":{"type":"string"},"input":{"type":"array","items":{"$ref":"#/definitions/UserInput"}}}},"UserInput":{"oneOf":[{"type":"object","required":["type","text"],"properties":{"type":{"type":"string","enum":["text"]},"text":{"type":"string"}}}]}},"oneOf":[{"type":"object","required":["id","method","params"],"properties":{"id":{"type":"string"},"method":{"type":"string","enum":["thread/inject_items"]},"params":{"$ref":"#/definitions/ThreadInjectItemsParams"}}},{"type":"object","required":["id","method","params"],"properties":{"id":{"type":"string"},"method":{"type":"string","enum":["turn/start"]},"params":{"$ref":"#/definitions/TurnStartParams"}}}]}{"title":"ThreadInjectItemsResponse","type":"object"}`
 
+func codexIdleContextSchemaFixture() string {
+	const contextField = `"additionalContext":{"type":["object","null"],"additionalProperties":{"type":"object","required":["kind","value"],"properties":{"kind":{"type":"string","enum":["application"]},"value":{"type":"string"}}}},`
+	const ordinaryTurn = `{"type":"object","required":["id","method","params"],"properties":{"id":{"type":"string"},"method":{"type":"string","enum":["turn/start"]},"params":{"$ref":"#/definitions/TurnStartParams"}}}`
+	idleTurn := strings.Replace(ordinaryTurn, "turn/start", "turn/startIfIdle", 1)
+	schema := strings.Replace(codexHiddenSchemaFixture, `"input":{"type":"array"`, contextField+`"input":{"type":"array"`, 1)
+	return strings.Replace(schema, ordinaryTurn, ordinaryTurn+","+idleTurn, 1)
+}
+
 func nativeMemoryCodexBackend(t *testing.T) (*CodexAppServerBackend, *fakeCodexRuntimeClient) {
 	t.Helper()
 	probe := agentcontrol.CodexProbe{
 		Run: func(context.Context, string, ...string) ([]byte, error) {
 			return []byte("--remote --listen unix://"), nil
 		},
-		GenerateSchema: func(context.Context, string) ([]byte, error) { return []byte(codexHiddenSchemaFixture), nil },
+		GenerateSchema: func(context.Context, string) ([]byte, error) { return []byte(codexIdleContextSchemaFixture()), nil },
 	}
 	caps, err := probe.Probe(context.Background(), "/test/codex", "0.154.0")
 	if err != nil {
@@ -82,57 +90,200 @@ func nativeMemoryCodexBackend(t *testing.T) (*CodexAppServerBackend, *fakeCodexR
 	}
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
 	coord := newVerifiedTestCodexCoordinator(sm)
+	coord.projectCwd = t.TempDir()
 	coord.statePath = t.TempDir() + "/state.json"
 	rpc := newFakeCodexRuntimeClient()
-	coord.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
-		return &codexAppServerRuntime{PID: 123456789, Endpoint: "/test/socket", RemoteURI: "unix:///test/socket", Client: rpc}, nil
+	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"native-turn"}}`)
+	rpc.results["turn/startIfIdle"] = rpc.results["turn/start"]
+	coord.startPrivateProject = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+		return &codexAppServerRuntime{PID: 123456789, ProcessStartIdentity: "fixture", PrivateStdio: true, Client: rpc}, nil
 	}
 	coord.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
 	snapshot, err := coord.ensureStarted(context.Background(), "/test/codex", "0.154.0", caps)
 	if err != nil {
 		t.Fatal(err)
 	}
+	rpc.calls = nil // Project startup sets skill roots before the user RPCs.
 	t.Cleanup(func() { coord.mu.Lock(); coord.stopEventPumpLocked(); coord.mu.Unlock(); coord.pumpWG.Wait() })
 	return newCodexAppServerBackend(sm, coord, rpc, snapshot.Generation), rpc
 }
 
-func TestCodexHiddenContextUsesHistoryInjectionBeforeUnchangedTurn(t *testing.T) {
+func TestCodexWithoutIdleAdmissionSendsOnlyTheOrdinaryUserTurn(t *testing.T) {
+	for _, atomic := range []bool{false, true} {
+		t.Run(fmt.Sprint(atomic), func(t *testing.T) {
+			b, rpc := nativeMemoryCodexBackend(t)
+			b.coord.hiddenContextProof.IdleOnlyContext = false
+			b.coord.runtimeCapabilities.AtomicContext = atomic
+			pack := &memorycontext.PreparedContext{StableText: "private evidence"}
+
+			delivered, err := b.sendWithContextResult(context.Background(), "thread", "ordinary user text", pack)
+			if err != nil || delivered || len(rpc.calls) != 1 || rpc.calls[0].method != "turn/start" ||
+				strings.Contains(string(rpc.calls[0].params), "private evidence") ||
+				!strings.Contains(string(rpc.calls[0].params), "ordinary user text") {
+				t.Fatalf("legacy runtime did not preserve ordinary input without evidence: delivered=%t, err=%v, calls=%+v", delivered, err, rpc.calls)
+			}
+			if b.memoryContextNativeSupported(context.Background()) {
+				t.Fatal("legacy runtime advertised native Context")
+			}
+		})
+	}
+}
+
+func TestCodexWithoutIdleAdmissionRejectsRequiredContextBeforeWriting(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	b.coord.hiddenContextProof.IdleOnlyContext = false
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequireContext: true})
+	err := b.SendWithContext(ctx, "thread", "user", &memorycontext.PreparedContext{StableText: "private evidence"})
+	if err == nil || len(rpc.calls) != 0 {
+		t.Fatalf("required Context was not rejected before native dispatch: err=%v, calls=%+v", err, rpc.calls)
+	}
+}
+
+func TestCodexHiddenContextUsesApplicationContextOnSupportedRuntime(t *testing.T) {
 	b, rpc := nativeMemoryCodexBackend(t)
 	if !b.memoryContextNativeSupported(context.Background()) {
-		t.Fatal("fresh exact schema must enable native hidden context")
+		t.Fatal("the private runtime with an exact idle-only schema did not advertise native Context")
 	}
-	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{MsgID: "user-1"})
-	user := "literal <pocketctl_memory_context user text\nunchanged"
-	if err := b.SendWithContext(ctx, "thread", user, &memorycontext.PreparedContext{PackID: "pack-1", StableText: "hidden fact", DynamicText: "dynamic fact"}); err != nil {
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{MsgID: "user-atomic"})
+	pack := &memorycontext.PreparedContext{PackID: "pack-atomic", StableText: "stored evidence"}
+	if err := b.SendWithContext(ctx, "thread", "original user text", pack); err != nil {
 		t.Fatal(err)
 	}
-	if len(rpc.calls) != 2 || rpc.calls[0].method != "thread/inject_items" || rpc.calls[1].method != "turn/start" {
-		t.Fatalf("native operations=%+v", rpc.calls)
+	if len(rpc.calls) != 1 || rpc.calls[0].method != "turn/startIfIdle" {
+		t.Fatalf("atomic context operations=%+v", rpc.calls)
 	}
-	var injected struct {
-		ThreadID string `json:"threadId"`
-		Items    []struct {
-			Type, ID, Role string
-			Content        []struct{ Type, Text string }
-		}
+	var params struct {
+		Input               []map[string]string
+		AdditionalContext   map[string]map[string]string
+		ClientUserMessageID string
 	}
-	if err := json.Unmarshal(rpc.calls[0].params, &injected); err != nil {
+	if err := json.Unmarshal(rpc.calls[0].params, &params); err != nil {
 		t.Fatal(err)
 	}
-	if injected.ThreadID != "thread" || len(injected.Items) != 1 {
-		t.Fatalf("injection=%+v", injected)
+	entry := params.AdditionalContext["pocketctl-memory-context"]
+	if len(params.AdditionalContext) != 1 || len(entry) != 2 || entry["kind"] != "application" ||
+		entry["value"] != memorycontext.RenderCodexEnvelope(pack) || len(params.Input) != 1 ||
+		params.Input[0]["text"] != "original user text" || params.ClientUserMessageID != "user-atomic" {
+		t.Fatalf("unexpected atomic context parameters: %+v", params)
 	}
-	item := injected.Items[0]
-	if item.Type != "message" || item.Role != "developer" || item.ID != "pocketctl-memory-context:pack-1" || len(item.Content) != 1 || item.Content[0].Type != "input_text" || item.Content[0].Text != "<pocketctl_memory_context schema=\"1\" pack_id=\"pack-1\">\n[stable]\nhidden fact\n[dynamic]\ndynamic fact\n</pocketctl_memory_context>" {
-		t.Fatalf("hidden native item=%+v", item)
+}
+
+func TestCodexHiddenContextRejectsAtomicInjectionOnTerminalAccessibleRuntime(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	b.coord.mu.Lock()
+	b.coord.runtime.PrivateStdio = false
+	b.coord.runtime.Endpoint = "/test/socket"
+	b.coord.runtime.RemoteURI = "unix:///test/socket"
+	b.coord.mu.Unlock()
+	if b.memoryContextNativeSupported(context.Background()) {
+		t.Fatal("a terminal-accessible runtime advertised atomic hidden Context")
 	}
-	var turnParams map[string]any
-	if err := json.Unmarshal(rpc.calls[1].params, &turnParams); err != nil {
-		t.Fatal(err)
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequireContext: true})
+	if err := b.SendWithContext(ctx, "thread", "user", &memorycontext.PreparedContext{StableText: "hidden"}); err == nil {
+		t.Fatal("required Context was accepted on a terminal-accessible runtime")
 	}
-	input := turnParams["input"].([]any)
-	if len(input) != 1 || len(input[0].(map[string]any)) != 2 || input[0].(map[string]any)["text"] != user || turnParams["clientUserMessageId"] != "user-1" {
-		t.Fatalf("user input mutated=%v", turnParams)
+	if len(rpc.calls) != 0 {
+		t.Fatalf("terminal-accessible runtime received hidden dispatch: %+v", rpc.calls)
+	}
+}
+
+func TestCodexContextReceiptTracksNativeDeliveryWhenTurnBecomesActive(t *testing.T) {
+	for _, active := range []bool{true, false} {
+		t.Run(fmt.Sprint(active), func(t *testing.T) {
+			b, rpc := nativeMemoryCodexBackend(t)
+			rpc.results["turn/startIfIdle"] = json.RawMessage(`{"turn":{"id":"new-turn"}}`)
+			b.sm.sessions["thread"] = &ProcessState{SessionID: "thread", Source: "daemon", Agent: adapter.AgentCodex,
+				ControlMode: protocol.ControlManaged, Status: protocol.StatusIdle, Cwd: t.TempDir(), Backend: b}
+			memory := &deferredReceiptMemory{receipts: make(chan memorycontext.ReceiptRequest, 1)}
+			coordinator := &memorycontext.Coordinator{Memory: memory, Grants: grantTransportFunc(func(context.Context, string, string) (*protocol.MemoryContextGrantResult, error) {
+				return &protocol.MemoryContextGrantResult{Type: "memory_context_grant_result", Grant: "grant", ExpiresIn: 300,
+					InstallationID: "install", SessionID: "thread", ProviderPublicOrigin: "https://memory.example", Services: []string{"memory.context"}}, nil
+			})}
+			b.sm.SetMemoryContext(coordinator, func() bool { return true }, nil)
+			ctx := context.Background()
+			pack, outcome := coordinator.Prepare(ctx, memorycontext.TurnRequest{ClientRequestID: "req", SessionID: "thread",
+				Agent: adapter.AgentCodex, UserContent: "user", IsNewTurn: true, Mode: memorycontext.ModeEnabled, Capability: memorycontext.CapabilityNativeHiddenV1})
+			if pack == nil {
+				t.Fatalf("prepare: %+v", outcome)
+			}
+			if active {
+				b.coord.setActiveTurn("thread", "earlier-turn")
+			}
+			if err := b.sm.SendMessageWithInput(ctx, UserMessageInput{SessionID: "thread", Content: "user", HiddenContext: pack}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case receipt := <-memory.receipts:
+				if receipt.Delivered == active {
+					t.Fatalf("receipt does not match native delivery: %+v", receipt)
+				}
+			default:
+				t.Fatal("missing Context receipt")
+			}
+			if active && (len(rpc.calls) != 1 || rpc.calls[0].method != "turn/steer") {
+				t.Fatalf("steering should send only user input: %+v", rpc.calls)
+			}
+		})
+	}
+}
+
+func TestCodexDropsExpiredAutomaticContextAndPreservesOriginalInput(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	pack := &memorycontext.PreparedContext{StableText: "hidden", HandoffDeadline: time.Now().Add(-time.Second)}
+	delivered, err := b.sendWithContextResult(context.Background(), "thread", "original", pack)
+	if err != nil || delivered || len(rpc.calls) != 1 || rpc.calls[0].method != "turn/start" ||
+		strings.Contains(string(rpc.calls[0].params), "hidden") || !strings.Contains(string(rpc.calls[0].params), "original") {
+		t.Fatalf("expired Context changed the ordinary turn: delivered=%t, err=%v, calls=%+v", delivered, err, rpc.calls)
+	}
+}
+
+func TestCodexContextMissingNativeTurnIDIsUncertain(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	rpc.results["turn/startIfIdle"] = json.RawMessage(`{"turn":{}}`)
+	delivered, err := b.sendWithContextResult(context.Background(), "thread", "original", &memorycontext.PreparedContext{StableText: "hidden"})
+	if delivered || !errors.Is(err, errNativeSessionCreateUncertain) || len(rpc.calls) != 1 {
+		t.Fatalf("ambiguous Context acknowledgement: delivered=%t, err=%v, calls=%+v", delivered, err, rpc.calls)
+	}
+}
+
+func TestCodexDropsContextBoundToAnEarlierRuntimeGeneration(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{contextRuntime: rpc, contextGeneration: b.generation - 1})
+	delivered, err := b.sendWithContextResult(ctx, "thread", "original", &memorycontext.PreparedContext{StableText: "hidden"})
+	if err != nil || delivered || len(rpc.calls) != 1 || rpc.calls[0].method != "turn/start" || strings.Contains(string(rpc.calls[0].params), "hidden") {
+		t.Fatalf("stale generation received Context: delivered=%t, err=%v, calls=%+v", delivered, err, rpc.calls)
+	}
+}
+
+func TestCodexIdleOnlyContextBusyDoesNotResendEvidence(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	rpc.errs["turn/startIfIdle"] = &codexapp.RPCError{Code: -32600, Data: json.RawMessage(`{"reason":"threadBusy"}`)}
+	delivered, err := b.sendWithContextResult(context.Background(), "thread", "original", &memorycontext.PreparedContext{StableText: "hidden"})
+	if err != nil || delivered || len(rpc.calls) != 2 || rpc.calls[0].method != "turn/startIfIdle" || rpc.calls[1].method != "turn/start" ||
+		!strings.Contains(string(rpc.calls[0].params), "hidden") || strings.Contains(string(rpc.calls[1].params), "hidden") {
+		t.Fatalf("busy native thread received evidence or lost the original input: %t, %v, %+v", delivered, err, rpc.calls)
+	}
+}
+
+func TestCodexIdleOnlyContextDoesNotRetryNewTurnOrAmbiguousResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		nativeErr error
+		want      error
+	}{
+		{"new turn", protocol.InputModeNewTurn, &codexapp.RPCError{Code: -32600, Data: json.RawMessage(`{"reason":"threadBusy"}`)}, ErrQueuedSessionBusy},
+		{"lost response", "", context.DeadlineExceeded, errNativeSessionCreateUncertain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, rpc := nativeMemoryCodexBackend(t)
+			rpc.errs["turn/startIfIdle"] = tc.nativeErr
+			ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{InputMode: tc.mode})
+			delivered, err := b.sendWithContextResult(ctx, "thread", "original", &memorycontext.PreparedContext{StableText: "hidden"})
+			if delivered || !errors.Is(err, tc.want) || len(rpc.calls) != 1 || rpc.calls[0].method != "turn/startIfIdle" {
+				t.Fatalf("idle-only rejection = %t, %v, %+v", delivered, err, rpc.calls)
+			}
+		})
 	}
 }
 
@@ -140,30 +291,12 @@ func TestCodexHiddenContextRejectsUnprobedRuntimeBeforeSending(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1))
 	rpc := newFakeCodexRuntimeClient()
 	b := newCodexAppServerBackend(sm, newVerifiedTestCodexCoordinator(sm), rpc, 1)
-	if err := b.SendWithContext(context.Background(), "thread", "user", &memorycontext.PreparedContext{StableText: "hidden"}); err == nil {
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequireContext: true})
+	if err := b.SendWithContext(ctx, "thread", "user", &memorycontext.PreparedContext{StableText: "hidden"}); err == nil {
 		t.Fatal("unprobed runtime accepted hidden memory")
 	}
 	if len(rpc.calls) != 0 {
 		t.Fatalf("unsupported runtime wrote native task: %+v", rpc.calls)
-	}
-}
-
-func TestCodexHiddenContextInjectionErrorNeverStartsUserTurn(t *testing.T) {
-	for _, err := range []error{&codexapp.RPCError{Code: -32602, Message: "invalid history"}, context.DeadlineExceeded} {
-		t.Run(err.Error(), func(t *testing.T) {
-			b, rpc := nativeMemoryCodexBackend(t)
-			rpc.errs["thread/inject_items"] = err
-			got := b.SendWithContext(context.Background(), "thread", "user", &memorycontext.PreparedContext{StableText: "hidden"})
-			if !errors.Is(got, err) {
-				t.Fatalf("injection error=%v", got)
-			}
-			if errors.Is(got, errNativeSessionCreateUncertain) != !codexCreateRejected(err) {
-				t.Fatalf("wrong uncertainty fence: %v", got)
-			}
-			if len(rpc.calls) != 1 || rpc.calls[0].method != "thread/inject_items" {
-				t.Fatalf("failed injection submitted user turn: %+v", rpc.calls)
-			}
-		})
 	}
 }
 
@@ -207,17 +340,18 @@ func TestCodexHiddenContextRuntimeIdentityChangeFailsClosed(t *testing.T) {
 		if b.memoryContextNativeSupported(context.Background()) {
 			t.Fatal("stale runtime identity retained native hidden capability")
 		}
-		if err := b.startTurnWithContext(context.Background(), "thread", "user", protocol.SessionConfig{}, &memorycontext.PreparedContext{StableText: "hidden"}); err == nil || len(rpc.calls) != 0 {
+		ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequireContext: true})
+		if err := b.startTurnWithContext(ctx, "thread", "user", protocol.SessionConfig{}, &memorycontext.PreparedContext{StableText: "hidden"}); err == nil || len(rpc.calls) != 0 {
 			t.Fatalf("stale proof submitted hidden task: %v %+v", err, rpc.calls)
 		}
 	}
 }
 
-func TestCodexHiddenContextLostFirstInjectionKeepsCollaborationQuarantine(t *testing.T) {
+func TestCodexHiddenContextLostFirstTurnResponseKeepsCollaborationQuarantine(t *testing.T) {
 	b, rpc := nativeMemoryCodexBackend(t)
 	sm, created := collaborationCreateManager(t, &collaborationCreateBackend{})
 	b.sm = sm
-	rpc.errs["thread/inject_items"] = context.DeadlineExceeded
+	rpc.errs["turn/startIfIdle"] = context.DeadlineExceeded
 	start := sm.createDeps.startCodexManaged
 	sm.createDeps.startCodexManaged = func(sm *SessionManager, ctx context.Context, cfg protocol.SessionConfig, cli, cwd, model, worktree, branch string) (string, bool, error) {
 		id, handled, err := start(sm, ctx, cfg, cli, cwd, model, worktree, branch)
@@ -235,17 +369,17 @@ func TestCodexHiddenContextLostFirstInjectionKeepsCollaborationQuarantine(t *tes
 	registered := false
 	_, err := sm.CreateCollaborationSessionRegistered(context.Background(), auth, teamContext, adapter.AgentCodex, "user", func(context.Context, string) error { registered = true; return nil })
 	if !registered || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errNativeSessionCreateUncertain) {
-		t.Fatalf("first hidden injection did not retain uncertainty: registered=%t err=%v", registered, err)
+		t.Fatalf("first hidden turn did not retain uncertainty: registered=%t err=%v", registered, err)
 	}
 	if sm.sessions["created-1"] == nil || sm.collaborationBindings[auth.BindingID].NativeSessionID != "created-1" || sm.collaborationCalls[auth.CallID] != "created-1" {
 		t.Fatal("lost hidden response lost exact native ownership")
 	}
-	if len(rpc.calls) != 1 || rpc.calls[0].method != "thread/inject_items" {
+	if len(rpc.calls) != 1 || rpc.calls[0].method != "turn/startIfIdle" {
 		t.Fatalf("lost hidden response wrote task or cleanup: %+v", rpc.calls)
 	}
 	auth.CallID = "retry-call"
 	if _, err := sm.CreateCollaborationSessionRegistered(context.Background(), auth, teamContext, adapter.AgentCodex, "user", func(context.Context, string) error { return nil }); !errors.Is(err, ErrCollaborationBinding) || *created != 1 || len(rpc.calls) != 1 {
-		t.Fatalf("uncertain hidden injection was replayed: %v attempts=%d calls=%d", err, *created, len(rpc.calls))
+		t.Fatalf("uncertain hidden turn was replayed: %v attempts=%d calls=%d", err, *created, len(rpc.calls))
 	}
 }
 

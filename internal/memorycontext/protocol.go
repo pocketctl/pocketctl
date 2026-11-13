@@ -17,6 +17,7 @@ type CompileRequest struct {
 	FactAt                 string              `json:"fact_at,omitempty"`
 	KnownAt                string              `json:"known_at,omitempty"`
 	EvidenceReadCapability string              `json:"evidence_read_capability,omitempty"`
+	PrepareContext         bool                `json:"prepare_context,omitempty"`
 	SchemaVersion          int                 `json:"schema_version"`
 	ClientRequestID        string              `json:"client_request_id"`
 	SessionID              string              `json:"session_id"`
@@ -45,14 +46,23 @@ type RepositoryHint struct {
 
 // CompileResponse is the frozen outcome union (plan 10.2).
 type CompileResponse struct {
-	EvidenceReadCapability string    `json:"evidence_read_capability,omitempty"`
-	Outcome                string    `json:"outcome"`
-	RunID                  string    `json:"run_id,omitempty"`
-	Reason                 string    `json:"reason,omitempty"`
-	DegradedComponents     []string  `json:"degraded_components,omitempty"`
-	Pack                   *WirePack `json:"pack,omitempty"`
-	AdmissionRequired      bool      `json:"admission_required"`
-	EffectiveMode          string    `json:"effective_mode,omitempty"`
+	EvidenceReadCapability string          `json:"evidence_read_capability,omitempty"`
+	Outcome                string          `json:"outcome"`
+	RunID                  string          `json:"run_id,omitempty"`
+	Reason                 string          `json:"reason,omitempty"`
+	DegradedComponents     []string        `json:"degraded_components,omitempty"`
+	Pack                   *WirePack       `json:"pack,omitempty"`
+	AdmissionRequired      bool            `json:"admission_required"`
+	EffectiveMode          string          `json:"effective_mode,omitempty"`
+	Handoff                *CompileHandoff `json:"handoff,omitempty"`
+}
+
+// CompileHandoff holds text consumed server-side for an opted-in Codex turn.
+type CompileHandoff struct {
+	Status      string    `json:"status"`
+	InjectionID string    `json:"injection_id,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	PackText
 }
 
 // WirePack is the bounded pack summary returned to the daemon. Full stable
@@ -96,6 +106,7 @@ type PreparedContext struct {
 	InjectionID            string
 	Nonce                  string
 	ExpiresAt              time.Time
+	HandoffDeadline        time.Time
 	StableText             string
 	DynamicText            string
 	StableDigest           string

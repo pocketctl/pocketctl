@@ -23,6 +23,8 @@ import (
 
 var codexWebSocketListenRE = regexp.MustCompile(`listening on:\s*(ws://127\.0\.0\.1:\d+)`)
 
+func codexPrivateProjectStarter(_ string) codexRuntimeStarter { return nil }
+
 func startCodexAppServer(ctx context.Context, binary, _ string, _ uint64) (*codexAppServerRuntime, error) {
 	return startCodexAppServerForHome(ctx, binary, "", 0, "", "")
 }

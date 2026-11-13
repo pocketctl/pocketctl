@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
-	"golang.org/x/sys/unix"
 )
 
 const maxDirectoryEntries = 100000
@@ -22,13 +21,6 @@ type directoryCursor struct {
 	Query    string
 	After    string
 	Modified int64
-}
-
-// directoryAccess consults the OS (including ACLs), not just Unix mode bits.
-// This does not write probe files into directories during browsing.
-func directoryAccess(path string) (browse, write bool) {
-	browse = unix.Access(path, unix.R_OK|unix.X_OK) == nil
-	return browse, browse && unix.Access(path, unix.W_OK|unix.X_OK) == nil
 }
 
 func (sm *SessionManager) DirectoryQuery(ctx context.Context, cmd protocol.ClientMessage) protocol.DaemonEvent {

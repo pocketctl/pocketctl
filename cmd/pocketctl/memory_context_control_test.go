@@ -21,9 +21,13 @@ type recordingMemoryControlSender struct {
 	payloads chan []byte
 }
 
-func (s *recordingMemoryControlSender) SendControlPayload(payload []byte) error {
-	s.payloads <- append([]byte(nil), payload...)
-	return nil
+func (s *recordingMemoryControlSender) SendControlPayloadContext(ctx context.Context, payload []byte) error {
+	select {
+	case s.payloads <- append([]byte(nil), payload...):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func TestWireMemoryContextInstallsCorrelatedProductionBroker(t *testing.T) {

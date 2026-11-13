@@ -76,6 +76,53 @@ func TestCodexProbeStructurallyValidatesHiddenHistoryAndUserTurn(t *testing.T) {
 	}
 }
 
+func TestCodexProbeVerifiesApplicationContextShape(t *testing.T) {
+	const field = `"additionalContext":{"type":["object","null"],"additionalProperties":{"type":"object","required":["kind","value"],"properties":{"kind":{"type":"string","enum":["untrusted","application"]},"value":{"type":"string"}}}},`
+	base := nativeHiddenSchema + nativeHiddenResponseSchema
+	atomic := strings.Replace(base, `"input":{"type":"array"`, field+`"input":{"type":"array"`, 1)
+	for _, tc := range []struct {
+		name, schema string
+		atomic       bool
+	}{
+		{"application", atomic, true},
+		{"legacy", base, false},
+		{"untrusted only", strings.Replace(atomic, `,"application"`, "", 1), false},
+		{"value must be string", strings.Replace(atomic, `"value":{"type":"string"}`, `"value":{"type":"number"}`, 1), false},
+		{"context must be object", strings.Replace(atomic, `["object","null"]`, `["array","null"]`, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := CodexProbe{Run: func(context.Context, string, ...string) ([]byte, error) {
+				return []byte("--remote --listen unix://"), nil
+			},
+				GenerateSchema: func(context.Context, string) ([]byte, error) { return []byte(tc.schema), nil }}
+			caps, err := p.Probe(context.Background(), "/test/codex", "0.167.1")
+			if err != nil || !caps.HiddenContext || caps.AtomicContext != tc.atomic {
+				t.Fatalf("capabilities=%+v err=%v want atomic=%t", caps, err, tc.atomic)
+			}
+		})
+	}
+}
+
+func TestCodexProbeRequiresIdleOnlyMethodForSafeApplicationContext(t *testing.T) {
+	const field = `"additionalContext":{"type":["object","null"],"additionalProperties":{"type":"object","required":["kind","value"],"properties":{"kind":{"type":"string","enum":["application"]},"value":{"type":"string"}}}},`
+	const method = `{"type":"object","required":["id","method","params"],"properties":{"id":{"type":"string"},"method":{"type":"string","enum":["turn/startIfIdle"]},"params":{"$ref":"#/definitions/TurnStartParams"}}}`
+	base := strings.Replace(nativeHiddenSchema, `"input":{"type":"array"`, field+`"input":{"type":"array"`, 1)
+	withMethod := strings.TrimSuffix(base, `]}`) + `,` + method + `]}`
+	for _, tc := range []struct {
+		schema string
+		want   bool
+	}{
+		{base, false},
+		{withMethod, true},
+		{strings.Replace(withMethod, `"enum":["application"]`, `"enum":["untrusted"]`, 1), false},
+		{strings.Replace(withMethod, `"threadId":{"type":"string"},`+field, `"threadId":{"type":"number"},`+field, 1), false},
+	} {
+		if got := supportsCodexApplicationContextMethod([]byte(tc.schema), "turn/startIfIdle"); got != tc.want {
+			t.Fatalf("idle-only application Context = %t, want %t", got, tc.want)
+		}
+	}
+}
+
 func TestCodexProbeReportsGranularCapabilities(t *testing.T) {
 	probe := CodexProbe{
 		Timeout: time.Second,
