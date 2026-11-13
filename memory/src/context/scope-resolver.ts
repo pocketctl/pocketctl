@@ -1,3 +1,6 @@
+import {MemoryApiError} from '../api/errors.js'
+import {currentPersonalInstallation} from '../sources/current-grant.js'
+import type {VerifiedMemoryGrantV1} from '../auth/grant-guard.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {sharedSessionRepository} from '../sources/session-repository.js'
 import type pg from 'pg'
@@ -19,8 +22,17 @@ export function createScopeResolver(pool: pg.Pool) {
       repositoryIdHint?: string | null
       repositoryKeyHint?: string | null
       unknownRepositoryBehavior?: 'persona_only' | 'empty'
+      signedPersonalGrant?: VerifiedMemoryGrantV1
     }): Promise<ScopeResolution> {
-      const scope = (await pool.query<{ session_known: boolean; repository_id: string | null; generation: string }>(`
+      const grant=input.signedPersonalGrant
+      if(grant&&(sourcePoolContext(pool).namespace!=='memory'||grant.installationId!==input.installationId
+        ||grant.sessionId!==input.sessionId||grant.callerType!=='daemon'||grant.userId===undefined)){
+        throw new MemoryApiError('unauthorized','grant rejected')
+      }
+      const scope = (await pool.query<{
+        session_known: boolean; repository_id: string | null; generation: string
+        local_status?:string|null; authority?:Parameters<typeof currentPersonalInstallation>[0]
+      }>(`
         SELECT EXISTS (
           SELECT 1 FROM source_sessions
           WHERE installation_id = $1 AND session_id = $2 AND deleted_at IS NULL
@@ -31,7 +43,16 @@ export function createScopeResolver(pool: pg.Pool) {
           LIMIT 1
         ) AS repository_id,
           COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=$1),1)::text AS generation
+          ${grant?`,(SELECT local_status FROM memory_installations WHERE installation_id=$1) AS local_status,
+          (SELECT state FROM shared.memory_current_grant_states(ARRAY[$1::uuid],ARRAY[]::uuid[]) LIMIT 1) AS authority`:''}
       `, [input.installationId, input.sessionId, input.repositoryIdHint || null, input.repositoryKeyHint || null])).rows[0]
+      if(grant){
+        const current=currentPersonalInstallation(scope?.authority)
+        if(!scope?.local_status||['purging','purged','integrity_error'].includes(scope.local_status)
+          ||!current.current||current.configVersion!==grant.configVersion||current.ownerUserId!==String(grant.userId)){
+          throw new MemoryApiError('unauthorized','grant rejected')
+        }
+      }
       let repositoryId = scope?.repository_id ?? null
       if (!repositoryId && !input.repositoryIdHint && !input.repositoryKeyHint) {
         if(sourcePoolContext(pool).namespace==='memory')repositoryId=await sharedSessionRepository(pool,input.installationId,input.sessionId)

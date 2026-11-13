@@ -9,13 +9,14 @@ import {
   type ContextCompilePhase,
   type SelectedContextReference,
 } from '../context/compiler.js'
-import type { AdmissionService } from '../context/admission-service.js'
+import type { AdmissionService, ConsumeResult } from '../context/admission-service.js'
 import { createFeedbackService, type FeedbackService } from '../context/feedback-service.js'
 import type { PackRepository } from '../context/pack-repository.js'
 import { createContextSettingsRepository, type ContextSettingsRepository } from '../context/settings-repository.js'
 import { createLoadoutRepository, type LoadoutRepository } from '../context/loadout-repository.js'
 import { createInvalidationService } from '../context/invalidation-service.js'
 import type { ContextMode } from '../context/types.js'
+import { createScopeResolver } from '../context/scope-resolver.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
 import { registerApiErrorDiagnostics } from './error-diagnostics.js'
@@ -115,6 +116,16 @@ function encodePackCursor(row: { created_at: Date; created_at_cursor?: string; p
   })).toString('base64url')
 }
 
+function packText(pack: Extract<ConsumeResult, { ok: true }>['pack']) {
+  return {
+    pack_id: pack.packId,
+    stable_text: pack.stableText,
+    dynamic_text: pack.dynamicText,
+    stable_hash: pack.stableHash,
+    dynamic_hash: pack.dynamicHash,
+  }
+}
+
 interface CompileBody {
   schema_version?: number
   client_request_id?: unknown
@@ -122,6 +133,7 @@ interface CompileBody {
   agent?: unknown
   adapter_capability?: unknown
   evidence_read_capability?:unknown
+  prepare_context?: unknown
   repository_hint?: {
     repository_id?: unknown
     branch?: unknown
@@ -142,6 +154,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
   registerApiErrorDiagnostics(app, deps.unexpectedErrorSink)
   const logger = createMemoryLogger('warn')
   const idempotency = createIdempotencyStore(deps.pool)
+  const compileScope = createScopeResolver(deps.pool)
   const mutation = async (
     req: Pick<import('fastify').FastifyRequest, 'headers' | 'body' | 'params'>,
     installationId: string,
@@ -274,6 +287,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       || !boundedString(body.agent, 64)
       || (body.adapter_capability !== 'native_hidden_v1' && body.adapter_capability !== 'shadow_only')
       ||(body.evidence_read_capability!==undefined&&!['bounded_excerpt_v1','on_demand_v1'].includes(String(body.evidence_read_capability)))
+      || (body.prepare_context !== undefined && typeof body.prepare_context !== 'boolean')
       || typeof body.query !== 'string'
       || references === null
       || !optionalUuid(body.scene_id)
@@ -307,7 +321,16 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       ? Date.parse(body.requested_at)
       : NaN
     const daemonRequestAgeMs = arrivedAt - requestedAt
-    const grant = await daemonGuard(req.headers.authorization, body.session_id)
+    const repositoryHint = body.repository_hint?.repository_id
+    const repositoryId = typeof repositoryHint==='string'&&UUID_RE.test(repositoryHint)?repositoryHint:null
+    const repositoryKey = canonicalRepositoryKey(repositoryHint)?repositoryHint:null
+    const signed = isPhysicalSourcePool(deps.pool) && !references.length && (repositoryId || repositoryKey)
+      ? await deps.guard.signedPersonalContext?.(req.headers.authorization, body.session_id) : undefined
+    const grant = signed ?? await daemonGuard(req.headers.authorization, body.session_id)
+    const resolved = signed ? await compileScope.resolve({
+      installationId: signed.installationId, sessionId: body.session_id,
+      repositoryIdHint: repositoryId, repositoryKeyHint: repositoryKey, signedPersonalGrant: signed,
+    }) : undefined
     const verifiedAt = performance.now()
     if (references.length > 0 && (!sharedAuthorized(grant, grant.installationId)
       || references.some(reference=>!sharedAuthorized(grant,reference.installation_id)))) {
@@ -328,11 +351,8 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       agent: body.agent,
       adapterCapability: body.adapter_capability,
       evidenceReadCapability:body.evidence_read_capability==='on_demand_v1'&&body.adapter_capability==='native_hidden_v1'?'on_demand_v1':undefined,
-      repositoryId: typeof body.repository_hint?.repository_id === 'string'
-        && UUID_RE.test(body.repository_hint.repository_id)
-        ? body.repository_hint.repository_id : null,
-      repositoryKey: canonicalRepositoryKey(body.repository_hint?.repository_id)
-        ? body.repository_hint?.repository_id : null,
+      repositoryId,
+      repositoryKey,
       branch: typeof body.repository_hint?.branch === 'string'
         ? body.repository_hint.branch : null,
       repoSnapshotId:typeof body.repository_hint?.repo_snapshot_id==='string'?body.repository_hint.repo_snapshot_id:null,
@@ -344,6 +364,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       query,
       requestKey: deps.requestKey,
       selectedReferences: references,
+      ...(resolved ? {resolvedScope:resolved} : {}),
       ...(deps.sharedScopesEnabled && 'version' in grant ? {selectedScopeGrant:grant}:{}),
     }, (phase, ms) => { phases[phase] = ms }).catch(async error=>{await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined);throw error})
 
@@ -406,7 +427,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
           if (proven) evidenceCapability='on_demand_v1'
         }
         logLatency()
-        return {
+        const ready = {
           outcome: 'ready',
           ...(body.evidence_read_capability?{evidence_read_capability:evidenceCapability}:{}),
           pack: {
@@ -417,6 +438,32 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
           },
           admission_required: true,
         }
+        if (!body.prepare_context || body.agent !== 'codex' || body.adapter_capability !== 'native_hidden_v1'
+          || references.length || 'version' in grant || !isPhysicalSourcePool(deps.pool) || reply.raw.destroyed) return ready
+
+        // Keep the admission and single-use consumption transactions, including
+        // their current-authority checks. The nonce never leaves this request.
+        reply.header('Cache-Control', 'no-store')
+        const binding = {
+          installationId: grant.installationId, sessionId: body.session_id,
+          packId: outcome.packId, authorityGrant: grant,
+        }
+        const admitted = await deps.admission.admit({
+          ...binding, clientRequestId: body.client_request_id,
+          agent: body.agent, adapter: 'codex-app-server', grantConfigVersion: grant.configVersion,
+        })
+        const result = { ...ready, admission_required: false }
+        if (!admitted.ok) return { ...result, handoff: { status: 'admission_failed' } }
+        if ('existing' in admitted) return { ...result, handoff: { status: 'existing' } }
+        if (reply.raw.destroyed) return { ...result, handoff: { status: 'pack_unavailable' } }
+        const consumed = await deps.admission.consume({
+          ...binding, injectionId: admitted.injectionId, nonce: admitted.nonce,
+        })
+        if (!consumed.ok) return { ...result, handoff: { status: 'pack_unavailable' } }
+        return { ...result, handoff: {
+          status: 'prepared', injection_id: admitted.injectionId,
+          expires_at: admitted.expiresAt.toISOString(), ...packText(consumed.pack),
+        } }
       }
       case 'degraded':
         return { outcome: 'degraded', reason: outcome.reason }
@@ -501,13 +548,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       reply.code(result.error === 'expired' ? 410 : result.error === 'already_consumed' ? 409 : 404)
       return { error: { code: result.error } }
     }
-    return {
-      pack_id: result.pack.packId,
-      stable_text: result.pack.stableText,
-      dynamic_text: result.pack.dynamicText,
-      stable_hash: result.pack.stableHash,
-      dynamic_hash: result.pack.dynamicHash,
-    }
+    return packText(result.pack)
   })
 
   app.post('/api/v1/memory/context/injections/:injectionId/receipt', async (req, reply) => {

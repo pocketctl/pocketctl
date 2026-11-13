@@ -3,6 +3,8 @@ import Fastify from 'fastify'
 import { registerContextRoutes } from '../api/context-routes.js'
 import type { GrantGuard } from '../auth/grant-guard.js'
 import { createCorsHostPolicy } from '../auth/cors-host-policy.js'
+import { bindSourcePool, registerPhysicalSourcePool } from '../sources/pool-context.js'
+import type pg from 'pg'
 
 const INSTALLATION = '0d0d0d0d-0d0d-40d0-80d0-0d0d0d0d0d0d'
 
@@ -99,6 +101,55 @@ describe('context route contracts (unit)', () => {
     const consume=vi.fn(async()=>({ok:false,error:'expired'})),app=appWith({sharedScopesEnabled:true,guard:{guard:async()=>grant} as never,admission:{consume} as never})
     const response=await app.inject({method:'GET',url:'/api/v1/memory/context/packs/11111111-1111-4111-8111-111111111111/text?session_id=ses-1&injection_id=22222222-2222-4222-8222-222222222222&nonce=one-time',headers:{host:'memory.test',authorization:'Bearer v2'}})
     expect(response.statusCode).toBe(410);expect(consume).toHaveBeenCalledWith(expect.objectContaining({selectedScopeGrant:grant}))
+  })
+
+  test('opt-in Codex compile prepares text once and never returns the consumed nonce', async () => {
+    const packId = '11111111-1111-4111-8111-111111111111'
+    const injectionId = '22222222-2222-4222-8222-222222222222'
+    const expiresAt = new Date()
+    const guard = stubGuard({})
+    const admit = vi.fn()
+      .mockResolvedValueOnce({ ok: true, injectionId, nonce: 'private-nonce', expiresAt })
+      .mockResolvedValueOnce({ ok: true, existing: true, injectionId, state: 'prepared' })
+    const consume = vi.fn(async () => ({
+      ok: true, pack: { packId, stableText: 'evidence', dynamicText: '', stableHash: 'hash', dynamicHash: '' },
+    }))
+    const pool = {} as pg.Pool
+    bindSourcePool(pool, { namespace: 'memory' })
+    registerPhysicalSourcePool(pool)
+    const app = appWith({
+      pool, guard, admission: { admit, consume } as never,
+      compiler: { compile: async () => ({ kind: 'ready', packId, stableTokens: 2, dynamicTokens: 0, itemCount: 1 }) } as never,
+    })
+    try {
+      const request = {
+        method: 'POST' as const, url: '/api/v1/memory/context/compile',
+        headers: { host: 'memory.test', authorization: 'Bearer g' },
+        payload: { schema_version: 1, client_request_id: 'turn-1', session_id: 'ses-1',
+          agent: 'codex', adapter_capability: 'native_hidden_v1', query: 'q', prepare_context: true },
+      }
+      const first = await app.inject(request)
+      expect(first.statusCode).toBe(200)
+      expect(first.json()).toMatchObject({ outcome: 'ready', admission_required: false, handoff: {
+        status: 'prepared', injection_id: injectionId, expires_at: expiresAt.toISOString(),
+        pack_id: packId, stable_text: 'evidence', stable_hash: 'hash',
+      } })
+      expect(first.body).not.toContain('private-nonce')
+      expect(admit).toHaveBeenCalledWith(expect.objectContaining({ packId, adapter: 'codex-app-server', sessionId: 'ses-1' }))
+      expect(consume).toHaveBeenCalledWith(expect.objectContaining({ packId, injectionId, nonce: 'private-nonce', sessionId: 'ses-1' }))
+      expect(guard.guard).toHaveBeenCalledTimes(1)
+
+      const duplicate = await app.inject(request)
+      expect(duplicate.json().handoff).toEqual({ status: 'existing' })
+      expect(consume).toHaveBeenCalledTimes(1)
+
+      const legacy = await app.inject({ ...request, payload: { ...request.payload, prepare_context: undefined } })
+      expect(legacy.json()).toMatchObject({ outcome: 'ready', admission_required: true })
+      expect(legacy.json().handoff).toBeUndefined()
+      expect(admit).toHaveBeenCalledTimes(2)
+    } finally {
+      await app.close()
+    }
   })
 
   test('compile rejects a malformed body with a bounded error', async () => {

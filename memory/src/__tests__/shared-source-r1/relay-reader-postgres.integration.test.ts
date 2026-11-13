@@ -1568,7 +1568,45 @@ suite('controlled personal Relay source reader',()=>{
    if(verifyRetry)await expect(http(path+'/text?'+query.toString())).rejects.toThrow('409')
   }
   try{
+   const staleCompile = await fetch(client.url+'/compile',{
+    method:'POST',headers:{authorization:'Bearer '+client.issueGrant('999'),'content-type':'application/json'},
+    body:JSON.stringify({session_id:context.sessionId,client_request_id:'stale-before-context-scope',agent:'codex',
+     schema_version:1,adapter_capability:'native_hidden_v1',query:statement,repository_hint:{repository_id:repository}}),
+   })
+   expect(staleCompile.status).toBe(401)
+   expect((await runtime.query("SELECT 1 FROM memory_context_packs WHERE client_request_id='stale-before-context-scope'")).rows).toEqual([])
    await deliver('warmup',(_name,run)=>run())
+   const prepare=async(requestId:string,grant=client.issueGrant())=>{
+    const response=await fetch(client.url+'/compile',{
+     method:'POST',signal:AbortSignal.timeout(2000),
+     headers:{authorization:'Bearer '+grant,'content-type':'application/json'},
+     body:JSON.stringify({
+      schema_version:1,client_request_id:requestId,session_id:context.sessionId,agent:'codex',
+      adapter_capability:'native_hidden_v1',prepare_context:true,query:statement,
+      repository_hint:{repository_id:repository,commit_sha:commit},
+     }),
+    })
+    expect(response.ok).toBe(true)
+    return {body:await response.json(),cache:response.headers.get('cache-control')}
+   }
+   const prepared=await prepare('inline-personal')
+   expect(prepared.cache).toBe('no-store')
+   expect(prepared.body).toMatchObject({outcome:'ready',admission_required:false,
+    handoff:{status:'prepared',pack_id:prepared.body.pack.pack_id}})
+   for(const evidenceId of [firstEvidence,secondEvidence])expect(prepared.body.handoff.dynamic_text).toContain(evidenceId)
+   expect(prepared.body.handoff.nonce).toBeUndefined()
+   expect((await prepare('inline-personal')).body.handoff).toEqual({status:'existing'})
+   expect((await runtime.query(`SELECT state FROM memory_context_injections
+    WHERE installation_id=$1 AND client_request_id='inline-personal'`,[installation])).rows)
+    .toEqual([{state:'prepared'}])
+
+   const previousGrant=client.issueGrant()
+   client.beforeNextConsume(()=>pool.query("UPDATE public.extension_installations SET config_version=2 WHERE installation_id=$1",[installation]).then(()=>undefined))
+   try{
+    expect((await prepare('inline-authority-changed',previousGrant)).body.handoff).toEqual({status:'pack_unavailable'})
+    expect((await runtime.query(`SELECT count(*)::int AS n FROM memory_context_injections
+     WHERE installation_id=$1 AND client_request_id='inline-authority-changed' AND state IN ('prepared','delivered')`,[installation])).rows[0].n).toBe(0)
+   }finally{await pool.query("UPDATE public.extension_installations SET config_version=1 WHERE installation_id=$1",[installation])}
    await deliver('mixed-language-identifier',(_name,run)=>run(),{queryText:mixedLanguageQuery})
    const prefacedQuestion='For the PocketCtl migration source verification and review, '+mixedLanguageQuery
    await deliver('prefaced-identifier',(_name,run)=>run(),{queryText:prefacedQuestion})
@@ -1641,9 +1679,11 @@ suite('controlled personal Relay source reader',()=>{
     expect(compile.queries.some(query=>query.statement.startsWith('WITH evidence_written AS'))).toBe(false)
     expect(compile.queries.some(query=>query.statement.startsWith('SELECT mode,generation::text FROM shared.memory_source_modes'))).toBe(false)
     expect(compile.queries.some(query=>query.statement.startsWith('SELECT clock_timestamp() < to_timestamp'))).toBe(false)
-    expect(compile.queries.length).toBeLessThanOrEqual(34)
+    expect(compile.queries.some(query=>query.statement.startsWith('SELECT local_status, relay_status, config_version::text AS config_version'))).toBe(false)
+    expect(compile.queries.length).toBeLessThanOrEqual(33)
     expect(admit.queries.some(query=>query.statement.startsWith('SELECT setting_id::text, installation_id::text, scope_kind'))).toBe(false)
-    expect(admit.queries.length).toBeLessThanOrEqual(10)
+    expect(admit.queries.some(query=>query.statement.startsWith('WITH items AS MATERIALIZED'))).toBe(false)
+    expect(admit.queries.length).toBeLessThanOrEqual(9)
     expect(consume.queries.length).toBeLessThanOrEqual(5)
     if(process.env.CONTEXT_TEST_DB_DELAY_MS){
      expect(compile.ms).toBeLessThan(500)
