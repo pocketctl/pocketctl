@@ -3,7 +3,7 @@ import {withdrawnDeliveryJoinSql} from '../episodes/delivery-withdrawal.js'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
 import {retainedSourceRead,type SourceReadGrant} from './retained-read.js'
 import {assertRetainedSourceGuards,adoptRetainedSourceRead} from './retained-authority.js'
-import {assertCurrentGrantClock} from '../governance/authorization.js'
+import {assertCurrentGrantClock,TargetBindingError} from '../governance/authorization.js'
 import type pg from 'pg'
 import {sourcePoolContext} from './pool-context.js'
 import {guardRetainedEvidence,registerRetainedReadCheck} from './retained-authority.js'
@@ -12,7 +12,13 @@ import {guardRetainedEvidence,registerRetainedReadCheck} from './retained-author
  * the final authority/root barrier and transaction. */
 const observedStatements=new WeakMap<object,string>()
 export function rememberRetainedVersionStatement(value:object,statement:string):void{observedStatements.set(value,statement)}
-export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,installationId:string,ids:readonly string[],options:{expectedStatements?:ReadonlyMap<string,string>;expectedBodyStates?:ReadonlyMap<string,string>;requireCurrent?:boolean;requireAvailable?:boolean;asOf?:Date;expectedSnapshot?:string;recordCheck?:boolean}={}):Promise<void>{
+type RetainedVersionOptions={expectedStatements?:ReadonlyMap<string,string>;expectedBodyStates?:ReadonlyMap<string,string>;requireCurrent?:boolean;requireAvailable?:boolean;asOf?:Date;expectedSnapshot?:string;recordCheck?:boolean}
+
+export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,installationId:string,ids:readonly string[],options:RetainedVersionOptions={}):Promise<void>{
+ await checkRetainedVersions(client,installationId,ids,options)
+}
+
+async function checkRetainedVersions(client:Pick<pg.PoolClient,'query'>,installationId:string,ids:readonly string[],options:RetainedVersionOptions,expiresAt?:number):Promise<void>{
  if(sourcePoolContext(client).namespace!=='memory')return
  const versions=[...new Set(ids)].sort()
  if(versions.length>512)throw Error('source_reference_limit')
@@ -49,7 +55,11 @@ export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,i
  UNION ALL SELECT 'evidence',to_jsonb(e) FROM evidence e
  UNION ALL SELECT 'capsule',to_jsonb(c) FROM capsules c
  UNION ALL SELECT 'mode',jsonb_build_object('mode',mode,'generation',generation::text)
-  FROM shared.memory_source_modes WHERE installation_id=$1`,[installationId,versions,options.asOf??null])
+  FROM shared.memory_source_modes WHERE installation_id=$1
+ ${expiresAt===undefined?'':`UNION ALL SELECT 'grant_clock',to_jsonb(clock_timestamp()<to_timestamp($4::double precision))
+  WHERE (SELECT count(*) FROM versions)<=$5::integer AND (SELECT count(*) FROM evidence)<=4096
+    AND (SELECT count(*) FROM capsules)<=4096`}`,
+ [installationId,versions,options.asOf??null,...(expiresAt===undefined?[]:[expiresAt,versions.length])])
  const current=rows.filter(row=>row.kind==='version').map(row=>row.value)
   .sort((a,b)=>a.version_id.localeCompare(b.version_id))
  const evidence=rows.filter(row=>row.kind==='evidence').map(row=>row.value)
@@ -81,10 +91,16 @@ export async function guardRetainedVersions(client:Pick<pg.PoolClient,'query'>,i
   if(unique.length>512)throw Error('source_reference_limit')
   if((await client.query('SELECT shared.lock_memory_delivery_commit($1::jsonb) AS locked',[JSON.stringify(unique)])).rows[0]?.locked!==true)throw Error('source_reference_changed')
  }
+ const onlyHumanCapsules=evidence.length>0&&evidence.every(row=>row.evidence_kind==='accepted_excerpt'
+  &&!row.source_event_id&&!row.artifact_id&&row.provenance_kind!=='team_session')
+  &&lockedCapsules.every(row=>row.retention_basis==='user_accepted')
+ if(expiresAt!==undefined&&!onlyHumanCapsules)throw Error('source_reference_changed')
  await guardRetainedEvidence(client,installationId,evidence,{locked:{mode,capsules:lockedCapsules}})
+ if(expiresAt!==undefined&&rows.find(row=>row.kind==='grant_clock')?.value!==true)throw new TargetBindingError('grant expired')
  if(options.recordCheck!==false){
   const repeated={...options,asOf:options.asOf?new Date(options.asOf):undefined,expectedSnapshot:snapshot,recordCheck:false}
-  await registerRetainedReadCheck(client,installationId,db=>guardRetainedVersions(db,installationId,versions,repeated))
+  await registerRetainedReadCheck(client,installationId,db=>checkRetainedVersions(db,installationId,versions,repeated),
+   onlyHumanCapsules?(db,deadline)=>checkRetainedVersions(db,installationId,versions,repeated,deadline):undefined)
  }
 }
 

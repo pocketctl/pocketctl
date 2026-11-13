@@ -134,77 +134,83 @@ export function createCapabilityVerifier(options: CapabilityVerifierOptions) {
     return refreshed ? createPublicKey({ key: refreshed.jwk, format: 'jwk' }) : null
   }
 
+  async function verifySignedV1(
+    token: string,
+    requiredService: string,
+    requestSessionId?: string,
+  ): Promise<(VerifiedGrant & { subjectUserId:string }) | null> {
+    let header: { kid?: unknown; alg?: unknown }
+    try {
+      const decoded = jwt.decode(token, { complete: true })
+      header = (decoded as { header: { kid?: unknown; alg?: unknown } }).header
+    } catch {
+      return null
+    }
+    if (header?.alg !== 'RS256' || typeof header.kid !== 'string') return null
+    const key = await keyFor(header.kid)
+    if (!key) return null
+
+    let payload: Record<string, unknown>
+    try {
+      payload = jwt.verify(token, key, {
+        algorithms: ['RS256'],
+        issuer: options.issuer,
+        audience: providerId,
+        clockTolerance: CLOCK_TOLERANCE_SECONDS,
+      }) as Record<string, unknown>
+    } catch {
+      return null
+    }
+
+    if (payload.token_type !== 'extension_capability') return null
+    if (payload.provider_id !== providerId) return null
+    const currentEpochSeconds = Math.floor(Date.now() / 1000)
+    if (typeof payload.iat !== 'number' || !Number.isFinite(payload.iat)
+      || typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)
+      || payload.iat > currentEpochSeconds + CLOCK_TOLERANCE_SECONDS
+      || payload.exp <= payload.iat
+      || payload.exp - payload.iat > CAPABILITY_GRANT_MAX_TTL_SECONDS) return null
+    const subject = typeof payload.sub === 'string' ? /^user:([1-9]\d*)$/.exec(payload.sub) : null
+    if (!subject) return null
+    if (typeof payload.installation_id !== 'string' || !Array.isArray(payload.services)) return null
+    if (typeof payload.config_version !== 'string') return null
+
+    if (!(payload.services as unknown[]).includes(requiredService)) return null
+
+    const grantSession = payload.session_id
+    if (requestSessionId !== undefined || grantSession !== undefined) {
+      if (typeof grantSession !== 'string' || grantSession !== requestSessionId) return null
+    }
+
+    return {
+      installationId: payload.installation_id,
+      subjectUserId:subject[1],
+      callerType: typeof payload.caller_type === 'string' ? payload.caller_type : '',
+      ...(typeof grantSession === 'string' ? { sessionId: grantSession } : {}),
+      services: payload.services as string[],
+      configVersion: payload.config_version,
+      expiresAt: payload.exp,
+    }
+  }
+
   return {
     /** Warm only public signing keys. Verification still rechecks each grant. */
     async warmSigningKeys(): Promise<void> {
       await fetchJwks(1_000).catch(() => undefined)
     },
 
-    async verify(
-      token: string,
-      requiredService: string,
-      requestSessionId?: string,
-    ): Promise<VerifiedGrant | null> {
-      let header: { kid?: unknown; alg?: unknown }
-      try {
-        const decoded = jwt.decode(token, { complete: true })
-        header = (decoded as { header: { kid?: unknown; alg?: unknown } }).header
-      } catch {
-        return null
-      }
-      if (header?.alg !== 'RS256' || typeof header.kid !== 'string') return null
-      const key = await keyFor(header.kid)
-      if (!key) return null
+    verifySignedV1,
 
-      let payload: Record<string, unknown>
-      try {
-        payload = jwt.verify(token, key, {
-          algorithms: ['RS256'],
-          issuer: options.issuer,
-          audience: providerId,
-          clockTolerance: CLOCK_TOLERANCE_SECONDS,
-        }) as Record<string, unknown>
-      } catch {
-        return null
-      }
-
-      if (payload.token_type !== 'extension_capability') return null
-      if (payload.provider_id !== providerId) return null
-      const currentEpochSeconds = Math.floor(Date.now() / 1000)
-      if (typeof payload.iat !== 'number' || !Number.isFinite(payload.iat)
-        || typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)
-        || payload.iat > currentEpochSeconds + CLOCK_TOLERANCE_SECONDS
-        || payload.exp <= payload.iat
-        || payload.exp - payload.iat > CAPABILITY_GRANT_MAX_TTL_SECONDS) return null
-      const subject = typeof payload.sub === 'string' ? /^user:([1-9]\d*)$/.exec(payload.sub) : null
-      if (!subject) return null
-      if (typeof payload.installation_id !== 'string' || !Array.isArray(payload.services)) return null
-      if (typeof payload.config_version !== 'string') return null
-
-      const installation = await options.lookupInstallation(payload.installation_id)
-      if (!installation) return null
-      if (installation.local_status === 'purging' || installation.local_status === 'purged'
-        || installation.local_status === 'integrity_error') return null
-      if (installation.relay_status === 'revoking' || installation.relay_status === 'revoked') return null
-      if (String(installation.config_version) !== payload.config_version) return null
-      if(installation.owner_user_id!==undefined&&String(installation.owner_user_id)!==subject[1])return null
-
-      if (!(payload.services as unknown[]).includes(requiredService)) return null
-
-      const grantSession = payload.session_id
-      if (requestSessionId !== undefined || grantSession !== undefined) {
-        if (typeof grantSession !== 'string' || grantSession !== requestSessionId) return null
-      }
-
-      return {
-        installationId: payload.installation_id,
-        ...(installation.owner_user_id!==undefined?{userId:Number(subject[1])}:{}),
-        callerType: typeof payload.caller_type === 'string' ? payload.caller_type : '',
-        ...(typeof grantSession === 'string' ? { sessionId: grantSession } : {}),
-        services: payload.services as string[],
-        configVersion: payload.config_version,
-        expiresAt: payload.exp,
-      }
+    async verify(token: string, requiredService: string, requestSessionId?: string): Promise<VerifiedGrant | null> {
+      const signed=await verifySignedV1(token,requiredService,requestSessionId)
+      if(!signed)return null
+      const {subjectUserId,...grant}=signed
+      const installation=await options.lookupInstallation(grant.installationId)
+      if(!installation||['purging','purged','integrity_error'].includes(installation.local_status)
+        ||['revoking','revoked'].includes(installation.relay_status)
+        ||String(installation.config_version)!==grant.configVersion
+        ||installation.owner_user_id!==undefined&&String(installation.owner_user_id)!==subjectUserId)return null
+      return {...grant,...(installation.owner_user_id!==undefined?{userId:Number(subjectUserId)}:{})}
     },
 
     /**

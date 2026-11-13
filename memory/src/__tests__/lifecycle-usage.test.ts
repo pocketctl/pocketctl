@@ -1,7 +1,7 @@
 import {describe,it,expect} from 'vitest'
 import {usageEffect} from '../context/usage-aggregation.js'
 import {eligibleContextFacts,type ContextClaimFacts} from '../context/consumption.js'
-const facts:ContextClaimFacts={claimId:'c',versionId:'v',current:true,timeEligible:true,sourceMetadataOwned:true,canonicalRemote:null,scopeKind:'installation',scopeKey:'i',repositoryId:null,snapshotId:null,branch:null,applicability:null,lifecycle:{hot:true,spaceId:'work',destinations:['work'],spaceActive:true,consume:true}}
+const facts:ContextClaimFacts={claimId:'c',versionId:'v',ownerScopeKind:'personal',current:true,timeEligible:true,sourceMetadataOwned:true,canonicalRemote:null,scopeKind:'installation',scopeKey:'i',repositoryId:null,snapshotId:null,branch:null,applicability:null,lifecycle:{hot:true,spaceId:'work',destinations:['work'],spaceActive:true,consume:true}}
 const frame={repositoryId:null,repoSnapshotId:null,branch:null,taskScopeKey:null}
 describe('lifecycle usage and scene consumption',()=>{
  it('AC-31 delivery and reported use never confirm usefulness',()=>{for(const signal of ['retrieved','delivered','agent_reported_used'] as const)expect(usageEffect(signal).confirmed).toBe(false);expect(usageEffect('user_confirmed')).toEqual({delivered:false,confirmed:true,refreshAuthority:false})})

@@ -19,6 +19,7 @@ import type { ContextMode } from '../context/types.js'
 import { createIdempotencyStore } from './idempotency.js'
 import { createTransactionBoundPool } from './transaction-bound-pool.js'
 import { registerApiErrorDiagnostics } from './error-diagnostics.js'
+import {isPhysicalSourcePool} from '../sources/pool-context.js'
 import { createMemoryLogger } from '../logging.js'
 
 /**
@@ -181,6 +182,16 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       throw new MemoryApiError('unauthorized', 'grant rejected')
     }
     return grant
+  }
+
+  const nonceGuard=async(authorization:string|undefined,sessionId:string):Promise<{
+    grant:Awaited<ReturnType<typeof daemonGuard>>
+    verifyInstallation:boolean
+  }>=>{
+    const signed=isPhysicalSourcePool(deps.pool)
+      ? await deps.guard.signedPersonalContext?.(authorization,sessionId) : undefined
+    return signed ? {grant:signed,verifyInstallation:true}
+      : {grant:await daemonGuard(authorization,sessionId),verifyInstallation:false}
   }
 
   const selectedReferences = (value: unknown): SelectedContextReference[] | null => {
@@ -433,8 +444,9 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       || !['codex-app-server', 'opencode-server', 'claude-print-resume'].includes(body.adapter)) {
       throw new MemoryApiError('invalid_request', 'invalid admit body')
     }
-    const grant = await daemonGuard(req.headers.authorization, body.session_id)
+    const {grant,verifyInstallation}=await nonceGuard(req.headers.authorization,body.session_id)
     const result = await deps.admission.admit({
+      verifyInstallation,
       installationId: grant.installationId,
       sessionId: body.session_id,
       clientRequestId: body.client_request_id,
@@ -474,8 +486,9 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       || typeof query.nonce !== 'string' || query.nonce.length === 0 || query.nonce.length > 128) {
       throw new MemoryApiError('invalid_request', 'invalid pack consume request')
     }
-    const grant = await daemonGuard(req.headers.authorization, query.session_id)
+    const {grant,verifyInstallation}=await nonceGuard(req.headers.authorization,query.session_id)
     const result = await deps.admission.consume({
+      verifyInstallation,
       installationId: grant.installationId,
       sessionId: query.session_id,
       packId,

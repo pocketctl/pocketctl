@@ -14,7 +14,10 @@ interface RetainedEvidenceOptions {
  /** Already read in the caller's locking snapshot on this transaction. */
  locked?:{mode:SourceMode;capsules:readonly LockedCapsule[]}
 }
-interface Guard {assertCurrent(client:Db,options?:SourceCommitOptions):Promise<void>}
+interface Guard {
+ assertCurrent(client:Db,options?:SourceCommitOptions):Promise<void>
+ assertCurrentWithPersonalGrant?(client:Db,expiresAt:number):Promise<void>
+}
 interface ConsumerGuards {installationId:string;mode:string;generation:string;ids:Set<string>;governedIds:Set<string>;guards:Guard[]}
 const attached=new WeakMap<object,Map<string,ConsumerGuards>>()
 export const detachRetainedSourceGuards=(client:object)=>attached.delete(sourceConnectionKey(client))
@@ -150,6 +153,13 @@ export async function assertRetainedSourceGuards(client:Db,finalGrant?:{
  const states=attached.get(sourceConnectionKey(client))
  const state=finalGrant&&states?.size===1?states.get(finalGrant.installationId):undefined
  const expiresAt=finalGrant?.grant.expiresAt
+ // A standalone, entirely local version check can observe mode and the
+ // signed grant clock in its final locking snapshot.
+ if(state?.guards.length===1&&finalGrant?.grant.scopeBindings===undefined
+   &&expiresAt!==undefined&&Number.isFinite(expiresAt)){
+  const check=state.guards[0].assertCurrentWithPersonalGrant
+  if(check){await check(client,expiresAt);return}
+ }
  // A single retained mode with no dependent guards has no blocking work
  // after this read. Scoped grants still recheck bindings and member clocks.
  if(state&&!state.guards.length&&finalGrant?.grant.scopeBindings===undefined
@@ -197,10 +207,10 @@ export function adoptRetainedSourceRead(client:object,value:object):void{
 
 /** Bounded local derived-row validation carried with an in-memory read proof.
  * The check must use metadata SQL/NOWAIT only, with no writes or network IO. */
-export async function registerRetainedReadCheck(client:Db,installationId:string,check:(db:Db)=>Promise<void>):Promise<void>{
+export async function registerRetainedReadCheck(client:Db,installationId:string,check:Guard['assertCurrent'],personalCheck?:Guard['assertCurrentWithPersonalGrant']):Promise<void>{
  if(sourcePoolContext(client).namespace!=='memory')return
  if(!attached.get(sourceConnectionKey(client))?.has(installationId))await guardRetainedEvidence(client,installationId,[])
  const state=attached.get(sourceConnectionKey(client))!.get(installationId)!
  if(state.guards.length>=256)throw Error('source_reference_limit')
- state.guards.push({assertCurrent:check})
+ state.guards.push({assertCurrent:check,assertCurrentWithPersonalGrant:personalCheck})
 }

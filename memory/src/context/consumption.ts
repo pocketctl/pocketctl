@@ -41,12 +41,13 @@ export function contextClaimEligible(facts:ClaimConsumptionFacts,frame:ContextQu
  return claimConsumptionDecision(facts,{repositoryId:frame.repositoryId,snapshotId:frame.repoSnapshotId,branch:frame.branch,taskScopeKey:frame.taskScopeKey}).eligible
 }
 export interface ContextClaimFacts extends ClaimConsumptionFacts {
- versionId:string;claimId:string;lifecycle?:{assertionMode?:string;hot:boolean;spaceId:string|null;destinations:string[];spaceActive:boolean;consume:boolean};current:boolean;timeEligible:boolean;sourceMetadataOwned:boolean;canonicalRemote:string|null;originPolicy?:OriginPolicyDecision
- evidenceIds?:string[]
+ versionId:string;claimId:string;ownerScopeKind:string;lifecycle?:{assertionMode?:string;hot:boolean;spaceId:string|null;destinations:string[];spaceActive:boolean;consume:boolean};current:boolean;timeEligible:boolean;sourceMetadataOwned:boolean;canonicalRemote:string|null;originPolicy?:OriginPolicyDecision
+ evidenceIds?:string[];personaStatement?:string
 }
-export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationId:string,versionIds:readonly string[],options:{lock?:boolean;includeEvidenceIds?:boolean}={}):Promise<Map<string,ContextClaimFacts>>{
+export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationId:string,versionIds:readonly string[],options:{lock?:boolean;includeEvidenceIds?:boolean;personaVersionIds?:readonly string[]}={}):Promise<Map<string,ContextClaimFacts>>{
  if(!versionIds.length)return new Map()
- const rows=(await pool.query(`SELECT l.storage_tier,l.body_state,l.assertion_mode,logical.space_id::text,space.destinations,space.state AS space_state,cp.consume_mode,${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required,v.version_id::text,c.claim_id::text,c.scope_kind,c.scope_key,v.repository_id::text,v.repo_snapshot_id::text,v.branch,
+ const includePersonaStatements=Boolean(options.personaVersionIds?.length)
+ const rows=(await pool.query(`SELECT l.storage_tier,l.body_state,l.assertion_mode,logical.space_id::text,space.destinations,space.state AS space_state,cp.consume_mode,${ORIGIN_POLICY_REQUIRED_SQL} AS origin_policy_required,v.version_id::text,c.claim_id::text,c.owner_scope_kind,c.scope_kind,c.scope_key,v.repository_id::text,v.repo_snapshot_id::text,v.branch,
    to_jsonb(v)->'applicability' AS applicability,to_jsonb(c)->>'consumption_hold_reason' AS consumption_hold_reason,
    to_jsonb(c)->>'canonical_repository_key' AS canonical_repository_key,r.canonical_remote,
    (c.state='active' AND ${currentClaimVersionSql()}) AS current,
@@ -60,6 +61,7 @@ export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationI
      WHERE e.installation_id=v.installation_id AND e.version_id=v.version_id
      ORDER BY e.ordinal ASC LIMIT 4
    ) AS evidence_ids`:''}
+   ${includePersonaStatements?', CASE WHEN v.version_id=ANY($3::uuid[]) THEN v.statement END AS persona_statement':''}
    FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
    LEFT JOIN memory_claim_lifecycle l ON l.installation_id=c.installation_id AND l.claim_id=c.claim_id
    LEFT JOIN memory_logical_claims logical ON logical.installation_id=c.installation_id AND logical.claim_id=c.claim_id
@@ -67,13 +69,15 @@ export async function contextClaimFacts(pool:pg.Pool|pg.PoolClient,installationI
    LEFT JOIN memory_curation_policies cp ON cp.installation_id=c.installation_id
    LEFT JOIN repositories r ON r.installation_id=v.installation_id AND r.repository_id=v.repository_id
    LEFT JOIN repo_snapshots s ON s.installation_id=v.installation_id AND s.repository_id=v.repository_id AND s.repo_snapshot_id=v.repo_snapshot_id
-   WHERE v.installation_id=$1 AND v.version_id=ANY($2::uuid[]) ${options.lock?'FOR SHARE OF c,v':''}`,[installationId,versionIds])).rows
+   WHERE v.installation_id=$1 AND v.version_id=ANY($2::uuid[]) ${options.lock?'FOR SHARE OF c,v':''}`,
+   [installationId,versionIds,...(includePersonaStatements?[options.personaVersionIds]:[])])).rows
  const origin=await originPolicyDecisions(pool,installationId,rows.filter(row=>row.origin_policy_required).map(row=>row.version_id))
- return new Map(rows.map(row=>[row.version_id,{versionId:row.version_id,claimId:row.claim_id,scopeKind:row.scope_kind,scopeKey:row.scope_key,
+ return new Map(rows.map(row=>[row.version_id,{versionId:row.version_id,claimId:row.claim_id,ownerScopeKind:row.owner_scope_kind,scopeKind:row.scope_kind,scopeKey:row.scope_key,
   repositoryId:row.repository_id,snapshotId:row.repo_snapshot_id,branch:row.branch,applicability:row.applicability,
   canonicalRepositoryKey:row.canonical_repository_key,consumptionHoldReason:row.consumption_hold_reason,canonicalRemote:row.canonical_remote,
   lifecycle:{assertionMode:row.assertion_mode,hot:(!row.storage_tier||row.storage_tier==='hot')&&(!row.body_state||row.body_state==='present'),spaceId:row.space_id,destinations:row.destinations??[],spaceActive:row.space_state==='active',consume:row.consume_mode==='enabled'},
   ...(options.includeEvidenceIds?{evidenceIds:row.evidence_ids}:{}),
+  ...(typeof row.persona_statement==='string'?{personaStatement:row.persona_statement}:{}),
   current:row.current,timeEligible:row.time_eligible,sourceMetadataOwned:row.source_metadata_owned,...(row.origin_policy_required?{originPolicy:origin.get(row.version_id)??{eligible:false,reason:'origin_policy_requires_review' as const,stamp:null}}:{})}]))
 }
 export function eligibleContextFacts(facts:ContextClaimFacts,frame:ContextQueryFrame):boolean{

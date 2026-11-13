@@ -81,10 +81,30 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
  const deferred=deferredSourcePreparation<PreparedEvidenceSources>(pool,canonicalJsonString(['evidence',installationId,[...new Set(evidenceIds)].sort()]),physical=>prepareEvidenceSources(physical,installationId,evidenceIds))
  if(deferred)return deferred
  const ids=[...new Set(evidenceIds)]
- const [rows,mode]=await Promise.all([
-  evidenceBindings(pool,installationId,ids),
-  sourcePoolContext(pool).namespace==='memory'?currentRetainedSourceMode(pool,installationId):undefined,
- ])
+ const shared=sourcePoolContext(pool).namespace==='memory'
+ let rows:Binding[]
+ let mode:Awaited<ReturnType<typeof currentRetainedSourceMode>>|undefined
+ if(shared&&ids.length>0&&ids.length<=256){
+  // One snapshot and pool checkout for the common pack-sized batch. The
+  // singleton preserves the mode even when no requested evidence exists.
+  const result=await pool.query<Binding&{source_mode:string;mode_generation:string}>(`
+   SELECT binding.*,COALESCE(m.mode,'legacy-feed') AS source_mode,COALESCE(m.generation::text,'1') AS mode_generation
+   FROM (VALUES (1)) seed
+   LEFT JOIN LATERAL (${boundQuery()}) binding ON TRUE
+   LEFT JOIN shared.memory_source_modes m ON m.installation_id=$1
+  `,[installationId,ids])
+  const [first]=result.rows
+  mode={mode:first.source_mode,generation:first.mode_generation}
+  rows=result.rows
+   .filter(row=>row.evidence_id!==null)
+   .map(({source_mode,mode_generation,...binding})=>binding)
+   .sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
+ }else{
+  [rows,mode]=await Promise.all([
+   evidenceBindings(pool,installationId,ids),
+   shared?currentRetainedSourceMode(pool,installationId):undefined,
+  ])
+ }
  const allIds=[...new Set(rows.flatMap(r=>r.resolved_event_id?[r.resolved_event_id]:[]))]
  const authority=mode&&mode.mode!=='legacy-feed'&&allIds.length?await prepareSourceAuthorities(pool,installationId,allIds):undefined
  const bodyIds=[...new Set(rows.filter(r=>!retainedTeam(r)&&!r.body_reclaimed_at&&!r.retention_denied&&r.resolved_event_id).map(r=>r.resolved_event_id!))]

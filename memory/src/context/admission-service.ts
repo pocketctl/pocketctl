@@ -1,4 +1,5 @@
 import {DIRECT_MACHINE_PACK_VERSIONS_SQL,MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
+import {MemoryApiError} from '../api/errors.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import {currentPersonalInstallation,lockCurrentRelayAuthority,personalLifecycleAuthorityStampSql,personalLifecycleAuthorityStateSql,personalLifecycleDeliveryStampSql} from '../sources/current-grant.js'
@@ -11,8 +12,8 @@ import {TargetBindingError,type V2GrantFacts} from '../governance/authorization.
 import {WIKI_SOURCE_TIME_INVALID_SQL} from './consumption.js'
 import { createHash, createHmac, randomBytes, randomUUID } from 'crypto'
 import type pg from 'pg'
-import { createContextSettingsRepository, effectiveContextSettingsFingerprint } from './settings-repository.js'
-import { createLoadoutRepository, resolvedLoadoutFingerprint } from './loadout-repository.js'
+import { resolveContextSettings, effectiveContextSettingsFingerprint } from './settings-repository.js'
+import { loadoutItemsSql, resolveLoadoutItems, resolvedLoadoutFingerprint } from './loadout-repository.js'
 import { createPolicyRepository } from '../policies/repository.js'
 import { createPolicyResolver } from '../policies/resolver.js'
 import { resolveSelectedContextReferences, type SelectedContextReference } from './compiler.js'
@@ -79,6 +80,20 @@ export function createAdmissionService(deps: {
     }
   }
 
+  // The native lock reports busy and missing alike. On this failure path
+  // only, classify a definitively stale signed grant without waiting.
+  const rejectStalePersonalGrant = async (client:pg.PoolClient,grant:PersonalGrant) => {
+    const {rows}=await client.query<{local_status:string;authority:NativeInstallationState|null}>(`
+      SELECT local_status,${nativeInstallationStateSql('$1')} AS authority
+      FROM memory_installations WHERE installation_id=$1
+    `,[grant.installationId])
+    const row=rows[0]
+    if(!row||!matchesPersonalGrant(row.authority,grant)
+      ||['purging','purged','integrity_error'].includes(row.local_status)){
+      throw new MemoryApiError('unauthorized','grant rejected')
+    }
+  }
+
   return {
     async admit(input: {
       installationId: string
@@ -91,6 +106,7 @@ export function createAdmissionService(deps: {
       sharedGrantAuthorized?: boolean
       selectedScopeGrant?:V2GrantFacts
       authorityGrant?:PackAuthorityGrant
+      verifyInstallation?:boolean
     }): Promise<AdmissionResult> {
       const grant = input.authorityGrant
       const nativeGrant = sourcePoolContext(deps.pool).namespace === 'memory'
@@ -115,45 +131,81 @@ export function createAdmissionService(deps: {
           FROM session_lock
         `, [input.installationId, input.sessionId])
         if (!locks.rows[0]?.locked) {
+          if(input.verifyInstallation&&nativeGrant)await rejectStalePersonalGrant(client,nativeGrant)
           await client.query('ROLLBACK')
           return { ok: false, error: 'claim_invalid' }
         }
 
-        // Read Relay facts in the fresh snapshot after the authority fence.
-        // The Memory row contributes its local readiness independently.
-        const installation = await client.query<{
-          relay_status: string
-          local_status: string
-          config_version: string
-          native_authority: NativeInstallationState
-          grant_alive: boolean
-          prior: { injection_id: string; state: string; expired: boolean } | null
+        // The native authority and purge locks already hold. Preserve the
+        // installation -> prior nonce -> pack lock order in this snapshot.
+        const observed = (await client.query<{
+          local_status:string
+          grant_current:boolean
+          prior:{injection_id:string;state:string;expired:boolean}|null
+          state: string | null
+          agent: string
+          mode: string
+          repository_id: string | null
+          effective_policy_hash: Buffer
+          settings_fingerprint: Buffer | null
+          loadout_fingerprint: Buffer | null
+          loadout_revision: string
+          selected_references: SelectedContextReference[]
+          query_context:ContextQueryFrame|null;consumption_generation:string|null
+          has_shared_items: boolean
         }>(`
           WITH installation AS MATERIALIZED (
             SELECT installation_id,relay_status,local_status,config_version::text
             FROM memory_installations WHERE installation_id=$1 FOR SHARE
-          ), prior AS (
+          ), authority AS MATERIALIZED (
+            SELECT installation.*,
+              ${nativeGrant?nativeInstallationStateSql('$1'):'NULL::jsonb'} AS native
+            FROM installation
+          ), checked AS MATERIALIZED (
+            SELECT authority.*,(
+              ${nativeGrant?`native @> '{"owner_scope_kind":"personal","owner_exists":true,"provider_enabled":true,"status":"active"}'
+                AND native->>'config_version'=$4 AND ($7::text IS NULL OR native->>'owner_user_id'=$7)`
+                :"relay_status='active' AND config_version=$4 AND $7::text IS NULL"}
+              AND ($6::double precision IS NULL OR clock_timestamp()<to_timestamp($6::double precision))
+            ) AS grant_current FROM authority
+          ), prior AS MATERIALIZED (
             SELECT j.injection_id::text,j.state,COALESCE(j.admission_expires_at<NOW(),FALSE) AS expired
-            FROM installation i JOIN memory_context_injections j USING(installation_id)
-            WHERE i.local_status='ready' AND ($5::boolean OR (i.relay_status='active' AND i.config_version=$4))
-              AND j.session_id=$2 AND j.client_request_id=$3
+            FROM checked i JOIN memory_context_injections j USING(installation_id)
+            WHERE i.local_status='ready' AND i.grant_current AND j.session_id=$2 AND j.client_request_id=$3
             ORDER BY j.created_at DESC LIMIT 1 FOR UPDATE OF j
+          ), locked_pack AS MATERIALIZED (
+            SELECT p.state,p.agent,p.mode,p.repository_id::text,p.effective_policy_hash,
+              p.settings_fingerprint,p.loadout_fingerprint,p.loadout_revision::text,
+              p.selected_references,p.query_context,p.consumption_generation::text
+            FROM checked i JOIN memory_context_packs p USING(installation_id)
+            WHERE i.local_status='ready' AND i.grant_current AND p.pack_id=$5
+              AND p.session_id=$2 AND p.client_request_id=$3
+              AND NOT EXISTS(SELECT 1 FROM prior WHERE state IN ('admitted','prepared','delivered','delivery_failed','skipped'))
+            FOR UPDATE OF p
           )
-          SELECT installation.*,(SELECT to_jsonb(prior) FROM prior) AS prior,
-            ${nativeGrant?nativeInstallationStateSql('$1'):'NULL'} AS native_authority,
-            ($6::double precision IS NULL OR clock_timestamp()<to_timestamp($6::double precision)) AS grant_alive
-          FROM installation
-        `, [input.installationId,input.sessionId,input.clientRequestId,input.grantConfigVersion,Boolean(nativeGrant),nativeGrant?.expiresAt??null])
-        const installationRow = installation.rows[0]
-        if (!installationRow || installationRow.local_status !== 'ready' || !installationRow.grant_alive
-          || (nativeGrant ? !matchesPersonalGrant(installationRow.native_authority,nativeGrant)
-            : installationRow.relay_status !== 'active' || installationRow.config_version !== input.grantConfigVersion)) {
+          SELECT i.local_status,
+            i.grant_current AND ($6::double precision IS NULL OR clock_timestamp()<to_timestamp($6::double precision)) AS grant_current,
+            (SELECT to_jsonb(prior) FROM prior) AS prior, p.*,
+            CASE WHEN p.state = 'ready' THEN EXISTS (
+            SELECT 1 FROM memory_context_pack_items i
+            JOIN knowledge_claims c USING (installation_id, claim_id)
+            WHERE i.pack_id = $5 AND i.installation_id = $1
+              AND c.owner_scope_kind <> 'personal'
+          ) ELSE FALSE END AS has_shared_items
+          FROM checked i LEFT JOIN locked_pack p ON TRUE
+        `,[input.installationId,input.sessionId,input.clientRequestId,input.grantConfigVersion,input.packId,
+          nativeGrant?.expiresAt??null,nativeGrant?.userId?.toString()??null])).rows[0]
+        if(input.verifyInstallation&&(!observed||!observed.grant_current
+          ||['purging','purged','integrity_error'].includes(observed.local_status))){
+          throw new MemoryApiError('unauthorized','grant rejected')
+        }
+        if(!observed||observed.local_status!=='ready'||!observed.grant_current){
           await client.query('COMMIT')
-          return { ok: false, error: 'mode_off' }
+          return {ok:false,error:'mode_off'}
         }
 
         // A previously admitted request keeps the original nonce history.
-        const prior = installationRow.prior
+        const prior = observed.prior
         if (prior?.state === 'admitted' && prior.expired) {
           await client.query(`
             UPDATE memory_context_injections SET state = 'expired'
@@ -167,43 +219,15 @@ export function createAdmissionService(deps: {
           return { ok: true, existing: true, injectionId: prior.injection_id, state: prior.state }
         }
 
-        const pack = await client.query<{
-          state: string
-          agent: string
-          mode: string
-          repository_id: string | null
-          effective_policy_hash: Buffer
-          settings_fingerprint: Buffer | null
-          loadout_fingerprint: Buffer | null
-          loadout_revision: string
-          selected_references: SelectedContextReference[]
-          query_context:ContextQueryFrame|null;consumption_generation:string|null
-        }>(`
-          SELECT state, agent, mode, repository_id::text, effective_policy_hash,
-                 settings_fingerprint, loadout_fingerprint, loadout_revision::text,
-                 selected_references,query_context,consumption_generation::text
-          FROM memory_context_packs
-          WHERE pack_id = $1 AND installation_id = $2 AND session_id = $3
-            AND client_request_id = $4
-          FOR UPDATE
-        `, [input.packId, input.installationId, input.sessionId, input.clientRequestId])
-        const packRow = pack.rows[0]
-        if (!packRow || packRow.state !== 'ready') {
+        const packRow=observed
+        if(packRow.state!=='ready'){
           await client.query('COMMIT')
-          return { ok: false, error: 'pack_not_ready' }
+          return {ok:false,error:'pack_not_ready'}
         }
         const queryContext=packRow.query_context??{repositoryId:packRow.repository_id,repoSnapshotId:null,branch:null,taskScopeKey:null}
         const selectedReferences = Array.isArray(packRow.selected_references)
           ? packRow.selected_references : []
-        const sharedItems = await client.query<{ n: number }>(`
-          SELECT COUNT(*)::int AS n
-          FROM memory_context_pack_items i
-          JOIN knowledge_claims c
-            ON c.installation_id = i.installation_id AND c.claim_id = i.claim_id
-          WHERE i.pack_id = $1 AND i.installation_id = $2
-            AND c.owner_scope_kind <> 'personal'
-        `, [input.packId, input.installationId])
-        if (Number(sharedItems.rows[0]?.n ?? 0) > 0 && selectedReferences.length === 0) {
+        if (packRow.has_shared_items && selectedReferences.length === 0) {
           await client.query('COMMIT')
           return { ok: false, error: 'mode_off' }
         }
@@ -239,12 +263,38 @@ export function createAdmissionService(deps: {
         // but on this transaction's connection. Any changed head, scope row or
         // loadout makes the immutable ready pack stale.
         const transactionPool = createTransactionBoundPool(client)
-        const currentSettings = await createContextSettingsRepository(transactionPool).resolve({
+        const configuration = (await client.query<{
+          settings: Array<Omit<Parameters<typeof resolveContextSettings>[1][number],'revision'>&{revision:string}>
+          loadout: {revision:string;items:Parameters<typeof resolveLoadoutItems>[0]}|null
+        }>(`
+          WITH loadout AS MATERIALIZED (
+            SELECT loadout_id,revision::text FROM memory_context_loadouts
+            WHERE installation_id=$1 AND repository_id IS NOT DISTINCT FROM $2::uuid
+              AND agent IS NOT DISTINCT FROM $4
+          )
+          SELECT COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+              'scopeKind',s.scope_kind,'scopeKey',s.scope_key,'agent',s.agent,
+              'mode',s.mode,'maxTokens',s.max_tokens,'revision',s.revision::text))
+            FROM memory_context_settings s WHERE s.installation_id=$1
+              AND (s.agent IS NULL OR s.agent=$4)
+              AND ((s.scope_kind='installation' AND s.scope_key='global')
+                OR (s.scope_kind='repository' AND s.scope_key=$2::uuid::text)
+                OR (s.scope_kind='session' AND s.scope_key=$3))
+          ),'[]'::jsonb) AS settings, (
+            SELECT jsonb_build_object('revision',l.revision,'items',COALESCE((
+              SELECT jsonb_agg(item ORDER BY item.priority DESC,item.item_id ASC) FROM (
+                ${loadoutItemsSql('l.loadout_id')}
+              ) item
+            ),'[]'::jsonb)) FROM loadout l
+          ) AS loadout
+        `,[input.installationId,packRow.repository_id,input.sessionId,input.agent])).rows[0]
+        const currentSettings = resolveContextSettings({
           installationId: input.installationId,
           repositoryId: packRow.repository_id,
           sessionId: input.sessionId,
           agent: input.agent,
-        })
+        },configuration.settings.map(setting=>({...setting,revision:Number(setting.revision)})))
         if (currentSettings.mode !== 'enabled') {
           await client.query('COMMIT')
           return { ok: false, error: 'mode_off' }
@@ -270,11 +320,9 @@ export function createAdmissionService(deps: {
           await client.query('COMMIT')
           return { ok: false, error: 'pack_mismatch' }
         }
-        const currentLoadout = await createLoadoutRepository(transactionPool).resolve({
-          installationId: input.installationId,
-          repositoryId: packRow.repository_id,
-          agent: input.agent,
-        })
+        const currentLoadout = configuration.loadout
+          ? {revision:Number(configuration.loadout.revision),items:resolveLoadoutItems(configuration.loadout.items)}
+          : {revision:1,items:[]}
         if (Number(packRow.loadout_revision) !== currentLoadout.revision
           || !packRow.loadout_fingerprint
           || !packRow.loadout_fingerprint.equals(resolvedLoadoutFingerprint(currentLoadout))) {
@@ -308,6 +356,12 @@ export function createAdmissionService(deps: {
         }
         const dependencies=validity.versions
         const facts=await contextClaimFacts(client,input.installationId,dependencies,{lock:true})
+        // FOR SHARE returns the current Claim tuple after a concurrent
+        // owner change. An earlier unlocked snapshot can see the old owner.
+        if(selectedReferences.length===0&&[...facts.values()].some(source=>source.ownerScopeKind!=='personal')){
+          await client.query('COMMIT')
+          return {ok:false,error:'mode_off'}
+        }
         let sourceInvalid=dependencies.some(versionId=>{const source=facts.get(versionId);return !source||!eligibleContextFacts(source,queryContext)
           ||(packRow.consumption_generation===null&&source.applicability!=null)})
         const originStamp=queryContext.originPolicyStamp??null
@@ -402,6 +456,7 @@ export function createAdmissionService(deps: {
       nonce: string
       selectedScopeGrant?:V2GrantFacts
       authorityGrant?:PackAuthorityGrant
+      verifyInstallation?:boolean
     }): Promise<ConsumeResult> {
       const shared=sourcePoolContext(deps.pool).namespace==='memory'
       const grant = input.authorityGrant
@@ -418,6 +473,12 @@ export function createAdmissionService(deps: {
       const frameFence=lifecycleFrameFenceSql('p',deps.lifecycleMode??'off',shared?'memory':'public')
       const machineSourcesSql=shared?`EXISTS (${MACHINE_PACK_VERSIONS_SQL})`:'FALSE'
       const currentMachineSourcesSql=`($10::boolean OR NOT (${machineSourcesSql}))`
+      const unselectedSharedClaimSql=`(
+        COALESCE(p.selected_references,'[]'::jsonb)='[]'::jsonb AND EXISTS(
+          SELECT 1 FROM memory_context_pack_items item
+          JOIN knowledge_claims c USING(installation_id,claim_id)
+          WHERE item.installation_id=p.installation_id AND item.pack_id=p.pack_id AND c.owner_scope_kind<>'personal'
+        ))`
       const client=await deps.pool.connect()
       try {
         // The bounded personal handoff touches one installation and injection.
@@ -427,6 +488,7 @@ export function createAdmissionService(deps: {
         // installation and injection. Read current facts after the fence.
         const result:ConsumeResult=await (async()=>{
           if (nativeGrant && !await lockCurrentRelayAuthority(client, [input.installationId])) {
+            if(input.verifyInstallation)await rejectStalePersonalGrant(client,nativeGrant)
             return { ok: false, error: 'not_found' }
           }
           const nonceHmac = createHmac('sha256', deps.nonceHmacKey).update(input.nonce).digest()
@@ -439,24 +501,29 @@ export function createAdmissionService(deps: {
           const observed=(await client.query<{
             injection_id:string|null;query_context:ContextQueryFrame|null;machine_sources:boolean|null
             native_authority?:NativeInstallationState
+            local_status?:string
             delivery_authority_sha256?:string|null
           }>(nativeGrant?`
             WITH installation AS MATERIALIZED (
-              SELECT installation_id FROM memory_installations
-              WHERE installation_id=$2 AND local_status='ready' FOR SHARE
+              SELECT installation_id,local_status FROM memory_installations
+              WHERE installation_id=$2 FOR SHARE
             )
-            SELECT authority.state AS native_authority,pack.*,
+            SELECT i.local_status,authority.state AS native_authority,pack.*,
               CASE WHEN ${personalLifecycleAuthorityStateSql('authority.state')}
                 THEN ${personalLifecycleDeliveryStampSql('i.installation_id',personalLifecycleAuthorityStampSql('authority.state'))}
               END AS delivery_authority_sha256
             FROM installation i
             LEFT JOIN LATERAL shared.memory_current_grant_states(ARRAY[i.installation_id],ARRAY[]::uuid[]) authority ON TRUE
-            LEFT JOIN LATERAL (${packSql}) pack ON TRUE
+            LEFT JOIN LATERAL (${packSql}) pack ON i.local_status='ready'
           `:packSql,[input.injectionId,input.installationId,input.sessionId,input.packId,nonceHmac])).rows[0]
           const nativeCurrent = !nativeGrant || matchesPersonalGrant(observed?.native_authority, nativeGrant)
             && (!selectedPrimary || (observed?.native_authority?.authorization_epoch===selectedPrimary.authorization_epoch
               && observed.native_authority.owner_scope_id===selectedPrimary.owner_scope_id))
-          const frozen = nativeCurrent && observed?.injection_id ? observed : undefined
+          if(input.verifyInstallation&&(!nativeCurrent||!observed?.local_status
+            ||['purging','purged','integrity_error'].includes(observed.local_status))){
+            throw new MemoryApiError('unauthorized','grant rejected')
+          }
+          const frozen = nativeCurrent && observed?.injection_id && (!nativeGrant||observed.local_status==='ready') ? observed : undefined
           const proof=frozen?.query_context?.selectedScopeProof
           const verifyEmptyOriginAtHandoff=Boolean(physical&&nativeGrant&&frozen&&!proof
             && frozen.query_context?.originPolicyStamp==null)
@@ -489,7 +556,7 @@ export function createAdmissionService(deps: {
           const currentGrantClockSql="($9::double precision IS NULL OR clock_timestamp()<to_timestamp($9::double precision))"
           const originRows=[...origin.fences,...selected.fences],originLocked=await lockOriginPolicyFences(client,originRows,sourcePoolContext(deps.pool).namespace)
           const machineSources=frozen?.machine_sources===true
-          const sourcesCurrent=nativeCurrent&&(!machineSources||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant))
+          const sourcesCurrent=nativeCurrent&&(!nativeGrant||!!frozen)&&(!machineSources||await machinePackSourcesAvailable(client,input.installationId,input.packId,input.authorityGrant))
           if(shared&&!physical&&!nativeGrant&&frozen&&!machineSources){
             await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
           }
@@ -520,7 +587,7 @@ export function createAdmissionService(deps: {
               AND j.admission_nonce_hmac = $5
               AND p.pack_id = j.pack_id AND p.installation_id = j.installation_id
               AND $6::boolean AND ${emptyOriginFence} AND ${dependencyFence} AND ${currentGrantClockSql}
-              AND p.state = 'ready' AND ${frameFence} AND ${currentMachineSourcesSql} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
+              AND p.state = 'ready' AND NOT ${unselectedSharedClaimSql} AND ${frameFence} AND ${currentMachineSourcesSql} AND NOT (${WIKI_SOURCE_TIME_INVALID_SQL})
               AND j.consumption_generation=COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               AND NOT EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp())))
@@ -545,7 +612,7 @@ export function createAdmissionService(deps: {
           const originWasCurrent=originMatches&&(!verifyEmptyOriginAtHandoff||row?.origin_absent===true)
           const state = await client.query<{ state: string; expired: boolean }>(`
             UPDATE memory_context_injections j
-            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${frameFence} OR NOT (${currentGrantClockSql}) OR NOT (${dependencyFence}) OR NOT (${currentMachineSourcesSql}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready'
+            SET state = CASE WHEN j.state = 'admitted' AND (NOT $6::boolean OR NOT ${frameFence} OR NOT (${currentGrantClockSql}) OR NOT (${dependencyFence}) OR NOT (${currentMachineSourcesSql}) OR ${WIKI_SOURCE_TIME_INVALID_SQL} OR j.admission_expires_at < clock_timestamp() OR p.state<>'ready' OR ${unselectedSharedClaimSql}
               OR j.consumption_generation IS NULL OR j.consumption_generation<>COALESCE((SELECT generation FROM memory_scope_consumption_generations WHERE installation_id=p.installation_id),1)
               OR EXISTS(SELECT 1 FROM memory_context_pack_items item JOIN knowledge_versions version ON version.installation_id=item.installation_id AND version.version_id=item.version_id
                 WHERE item.pack_id=p.pack_id AND (NOT ${deliveryVersionAvailableSql('version')} OR NOT ${revisionTimeSql('version')} OR (version.valid_from IS NOT NULL AND version.valid_from>clock_timestamp()) OR (version.valid_until IS NOT NULL AND version.valid_until<=clock_timestamp()))))

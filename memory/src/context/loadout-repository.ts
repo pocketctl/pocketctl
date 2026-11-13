@@ -31,6 +31,53 @@ export function resolvedLoadoutFingerprint(loadout: {
   })).digest()
 }
 
+type LoadoutItemRow = {
+  item_id: string
+  asset_kind: string
+  claim_id: string | null
+  representation: string
+  priority: number
+  claim_type: string | null
+  state: string | null
+  current_version_id: string | null
+}
+
+export function loadoutItemsSql(loadoutId:string):string {
+  return `SELECT i.item_id::text, i.asset_kind, i.claim_id::text, i.representation,
+               i.priority, c.claim_type, c.state, c.current_version_id::text
+        FROM memory_context_loadout_items i
+        LEFT JOIN knowledge_claims c
+          ON c.claim_id = i.claim_id AND c.installation_id = i.installation_id
+        WHERE i.loadout_id = ${loadoutId}`
+}
+
+export function resolveLoadoutItems(rows:readonly LoadoutItemRow[]):ResolvedLoadoutItem[] {
+  return rows.map(item => {
+    const resolved: ResolvedLoadoutItem = {
+      itemId: item.item_id,
+      assetKind: item.asset_kind as ResolvedLoadoutItem['assetKind'],
+      representation: item.representation as LoadoutRepresentation,
+      priority: Number(item.priority),
+      claimId: item.claim_id,
+      status: 'asset_unavailable',
+      claimType: item.claim_type,
+      versionId: item.current_version_id,
+    }
+    if (INERT_ASSET_KINDS.has(item.asset_kind)) return resolved
+    if (!item.claim_id || item.state !== 'active' || !item.current_version_id) {
+      resolved.status = 'claim_inactive'
+      return resolved
+    }
+    const requiredType = REQUIRED_CLAIM_TYPE[item.asset_kind]
+    if (requiredType && item.claim_type !== requiredType) {
+      resolved.status = 'claim_inactive'
+      return resolved
+    }
+    resolved.status = 'resolved'
+    return resolved
+  })
+}
+
 /**
  * Context loadouts scoped by Installation/Repository/Agent (plan 9.3).
  * A pinned item improves ELIGIBILITY only: resolution still requires an
@@ -116,50 +163,13 @@ export function createLoadoutRepository(pool: pg.Pool) {
       `, [input.installationId, input.repositoryId, input.agent])
       const row = loadout.rows[0]
       if (!row) return { revision: 1, items: [] }
-      const items = await pool.query<{
-        item_id: string
-        asset_kind: string
-        claim_id: string | null
-        representation: string
-        priority: number
-        claim_type: string | null
-        state: string | null
-        current_version_id: string | null
-      }>(`
-        SELECT i.item_id::text, i.asset_kind, i.claim_id::text, i.representation,
-               i.priority, c.claim_type, c.state, c.current_version_id::text
-        FROM memory_context_loadout_items i
-        LEFT JOIN knowledge_claims c
-          ON c.claim_id = i.claim_id AND c.installation_id = i.installation_id
-        WHERE i.loadout_id = $1
+      const items = await pool.query<LoadoutItemRow>(`
+        ${loadoutItemsSql('$1')}
         ORDER BY i.priority DESC, i.item_id ASC
       `, [row.loadout_id])
       return {
         revision: Number(row.revision),
-        items: items.rows.map(item => {
-          const resolved: ResolvedLoadoutItem = {
-            itemId: item.item_id,
-            assetKind: item.asset_kind as ResolvedLoadoutItem['assetKind'],
-            representation: item.representation as LoadoutRepresentation,
-            priority: Number(item.priority),
-            claimId: item.claim_id,
-            status: 'asset_unavailable',
-            claimType: item.claim_type,
-            versionId: item.current_version_id,
-          }
-          if (INERT_ASSET_KINDS.has(item.asset_kind)) return resolved
-          if (!item.claim_id || item.state !== 'active' || !item.current_version_id) {
-            resolved.status = 'claim_inactive'
-            return resolved
-          }
-          const requiredType = REQUIRED_CLAIM_TYPE[item.asset_kind]
-          if (requiredType && item.claim_type !== requiredType) {
-            resolved.status = 'claim_inactive'
-            return resolved
-          }
-          resolved.status = 'resolved'
-          return resolved
-        }),
+        items: resolveLoadoutItems(items.rows),
       }
     },
   }

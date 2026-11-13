@@ -1639,13 +1639,107 @@ suite('controlled personal Relay source reader',()=>{
     expect(usage.rows).toEqual([{signal:'retrieved',claim_id:claim}])
     expect(compile.queries.some(query=>query.statement.startsWith('SELECT wanted.version_id::text, ARRAY'))).toBe(false)
     expect(compile.queries.some(query=>query.statement.startsWith('WITH evidence_written AS'))).toBe(false)
-    expect(compile.queries.length).toBeLessThanOrEqual(36)
-    expect(admit.queries.length).toBeLessThanOrEqual(14)
-    expect(consume.queries.length).toBeLessThanOrEqual(6)
+    expect(compile.queries.some(query=>query.statement.startsWith('SELECT mode,generation::text FROM shared.memory_source_modes'))).toBe(false)
+    expect(compile.queries.some(query=>query.statement.startsWith('SELECT clock_timestamp() < to_timestamp'))).toBe(false)
+    expect(compile.queries.length).toBeLessThanOrEqual(34)
+    expect(admit.queries.some(query=>query.statement.startsWith('SELECT setting_id::text, installation_id::text, scope_kind'))).toBe(false)
+    expect(admit.queries.length).toBeLessThanOrEqual(10)
+    expect(consume.queries.length).toBeLessThanOrEqual(5)
     if(process.env.CONTEXT_TEST_DB_DELAY_MS){
      expect(compile.ms).toBeLessThan(500)
      expect(result.ms).toBeLessThan(710)
     }
+   }
+   const {guardRetainedVersions}=await import('../../sources/retained-versions.js')
+   const {assertRetainedSourceGuards}=await import('../../sources/retained-authority.js')
+   const reader=await runtime.connect()
+   try{
+    await reader.query('BEGIN')
+    await guardRetainedVersions(reader,installation,[version],{requireCurrent:true,requireAvailable:true})
+    const finalGrant=(expiresAt:number)=>({installationId:installation,grant:{expiresAt}})
+    await expect(assertRetainedSourceGuards(reader,finalGrant(0))).rejects.toThrow('grant expired')
+    await expect(assertRetainedSourceGuards(reader,finalGrant(Date.now()/1000+60))).resolves.toBeUndefined()
+    await pool.query('UPDATE shared.memory_source_modes SET generation=generation+1 WHERE installation_id=$1',[installation])
+    try{
+     await expect(assertRetainedSourceGuards(reader,finalGrant(Date.now()/1000+60))).rejects.toThrow('source_reference_changed')
+    }finally{
+     await pool.query('UPDATE shared.memory_source_modes SET generation=generation-1 WHERE installation_id=$1',[installation])
+    }
+   }finally{await reader.query('ROLLBACK');reader.release()}
+   const missingSelection=await context.compile('shared-item-without-selection')
+   if(missingSelection.kind!=='ready')throw Error('fixture expected a ready pack')
+   await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='team' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+   try{
+    await expect(context.admit(missingSelection.packId,'shared-item-without-selection')).resolves.toEqual({ok:false,error:'mode_off'})
+    expect((await runtime.query(`SELECT count(*)::int AS n FROM memory_context_injections
+     WHERE installation_id=$1 AND pack_id=$2`,[installation,missingSelection.packId])).rows[0].n).toBe(0)
+   }finally{
+    await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='personal' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+   }
+   const reclassified=await context.compile('claim-reclassified-before-admission')
+   if(reclassified.kind!=='ready')throw Error('fixture expected a ready pack')
+   const blocker=await pool.connect()
+   try{
+    await blocker.query('BEGIN')
+    await blocker.query('SELECT 1 FROM memory.memory_context_packs WHERE pack_id=$1 FOR UPDATE',[reclassified.packId])
+    const pending=context.admit(reclassified.packId,'claim-reclassified-before-admission')
+    try{
+     const blockerPid=(await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+     let packLockObserved=false
+     for(let n=0;n<50&&!packLockObserved;n++){
+      packLockObserved=Boolean((await pool.query(`SELECT EXISTS(
+       SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))
+      ) AS waiting`,[blockerPid])).rows[0].waiting)
+      if(!packLockObserved)await wait(10)
+     }
+     expect(packLockObserved).toBe(true)
+     await blocker.query("UPDATE memory.knowledge_claims SET owner_scope_kind='team' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+     await blocker.query('COMMIT')
+     await expect(pending).resolves.toEqual({ok:false,error:'mode_off'})
+     expect((await runtime.query(`SELECT count(*)::int AS n FROM memory_context_injections
+      WHERE installation_id=$1 AND pack_id=$2`,[installation,reclassified.packId])).rows[0].n).toBe(0)
+    }finally{
+     await blocker.query('ROLLBACK')
+     await pending.catch(()=>undefined)
+     await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='personal' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+    }
+   }finally{blocker.release()}
+   const claimRace=await context.compile('claim-reclassified-at-final-lock')
+   if(claimRace.kind!=='ready')throw Error('fixture expected a ready pack')
+   const claimWriter=await pool.connect()
+   try{
+    await claimWriter.query('BEGIN')
+    await claimWriter.query("UPDATE memory.knowledge_claims SET owner_scope_kind='team' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+    let checkedClaimLocks=false
+    const original=pg.Client.prototype.query as (...args:any[])=>any
+    const lockProbe=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:any[]){
+     if(typeof args[0]==='string'&&args[0].includes('AS source_metadata_owned')&&args[0].includes('FOR SHARE OF c,v'))checkedClaimLocks=true
+     return original.apply(this,args)
+    })
+    const pending=context.admit(claimRace.packId,'claim-reclassified-at-final-lock')
+    try{
+     for(let n=0;n<100&&!checkedClaimLocks;n++)await wait(5)
+     expect(checkedClaimLocks).toBe(true)
+     await claimWriter.query('COMMIT')
+     await expect(pending).resolves.toEqual({ok:false,error:'mode_off'})
+     expect((await runtime.query('SELECT 1 FROM memory_context_injections WHERE installation_id=$1 AND pack_id=$2',[installation,claimRace.packId])).rowCount).toBe(0)
+    }finally{
+     await claimWriter.query('ROLLBACK')
+     await pending.catch(()=>undefined)
+     lockProbe.mockRestore()
+     await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='personal' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+    }
+   }finally{claimWriter.release()}
+   const reclassifiedAfterAdmission=await context.compile('claim-reclassified-before-handoff')
+   if(reclassifiedAfterAdmission.kind!=='ready')throw Error('fixture expected ready pack')
+   const ticketBeforeReclassification=await context.admit(reclassifiedAfterAdmission.packId,'claim-reclassified-before-handoff')
+   if(!ticketBeforeReclassification.ok||!('nonce' in ticketBeforeReclassification))throw Error('fixture expected admission')
+   await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='team' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
+   try{
+    await expect(context.consume(reclassifiedAfterAdmission.packId,ticketBeforeReclassification.injectionId,
+      ticketBeforeReclassification.nonce)).resolves.toEqual({ok:false,error:'expired'})
+   }finally{
+    await runtime.query("UPDATE knowledge_claims SET owner_scope_kind='personal' WHERE installation_id=$1 AND claim_id=$2",[installation,claim])
    }
    const {createHash}=await import('node:crypto')
    const binding=Buffer.alloc(32,1)
@@ -1674,6 +1768,12 @@ suite('controlled personal Relay source reader',()=>{
    try{
     await expect.soft(deliver('native-current-admit',(_name,run)=>run(),{configVersion:'2',verifyRetry:true})).resolves.toBeUndefined()
     await expect.soft(deliver('native-stale-token',(_name,run)=>run())).rejects.toThrow('401')
+    await expect(deliver('native-revoked-before-admit',(_name,run)=>run(),{
+      configVersion:'2',beforeAdmit:async()=>{await pool.query("UPDATE public.extension_installations SET config_version=3 WHERE installation_id=$1",[installation])},
+    })).rejects.toThrow('/admit: 401')
+    expect((await runtime.query(`SELECT 1 FROM memory_context_injections
+      WHERE installation_id=$1 AND client_request_id='native-revoked-before-admit'`,[installation])).rowCount).toBe(0)
+
    }finally{await pool.query("UPDATE public.extension_installations SET config_version=1 WHERE installation_id=$1",[installation])}
 
    const busyAdmission=await context.compile('busy-authority-admit')
@@ -1808,11 +1908,21 @@ suite('controlled personal Relay source reader',()=>{
     disabledBeforeConsume=true
    })
    try{
-    await expect.soft(deliver('native-revoked-before-text',(_name,run)=>run())).rejects.toThrow(/text: (404|410)/)
+    await expect.soft(deliver('native-revoked-before-text',(_name,run)=>run())).rejects.toThrow(/text: 401/)
     expect.soft(disabledBeforeConsume).toBe(true)
     const injection=(await runtime.query("SELECT state FROM memory_context_injections WHERE installation_id=$1 AND client_request_id='native-revoked-before-text'",[installation])).rows[0]
     expect.soft(injection?.state).not.toBe('prepared')
    }finally{await pool.query("UPDATE public.extension_providers SET status='enabled' WHERE provider_id='pocketctl-memory'")}
+   client.beforeNextConsume(async()=>{
+    await runtime.query("UPDATE memory_installations SET local_status='syncing' WHERE installation_id=$1",[installation])
+   })
+   try{
+    await expect(deliver('native-not-ready-before-text',(_name,run)=>run())).rejects.toThrow(/text: (404|410)/)
+    expect((await runtime.query(`SELECT state FROM memory_context_injections
+      WHERE installation_id=$1 AND client_request_id='native-not-ready-before-text'`,[installation])).rows[0].state).not.toBe('prepared')
+   }finally{
+    await runtime.query("UPDATE memory_installations SET local_status='ready' WHERE installation_id=$1",[installation])
+   }
    const {resolveLifecycleReadFrame,resolveLifecycleFrame}=await import('../../context/lifecycle-frame.js')
    const scenesUrl=new URL('/api/v1/memory/scenes',client.url)
    const readScenes=()=>fetch(scenesUrl,{headers:{authorization:'Bearer '+client.issueGrant('1','memory.search')},signal:AbortSignal.timeout(2500)})
