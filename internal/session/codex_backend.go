@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"log/slog"
 	"strings"
 	"time"
@@ -12,6 +12,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/codexapp"
+	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
 )
@@ -79,8 +80,12 @@ func (b *CodexAppServerBackend) memoryContextNativeSupported(ctx context.Context
 	}
 	b.coord.mu.Lock()
 	defer b.coord.mu.Unlock()
-	return !b.coord.shuttingDown && b.coord.hiddenContextSupportedLocked() && b.generation == b.coord.generation &&
-		b.coord.runtime.Client == b.client
+	if b.coord.shuttingDown || !b.coord.hiddenContextSupportedLocked() ||
+		b.generation != b.coord.generation || b.coord.runtime.Client != b.client {
+		return false
+	}
+	runtime := b.coord.runtime
+	return runtime.PrivateStdio && runtime.Endpoint == "" && runtime.RemoteURI == ""
 }
 
 // tryCreateManagedCodexSession selects app-server only after enablement and a
@@ -305,24 +310,34 @@ func (b *CodexAppServerBackend) Resume(ctx context.Context, threadID string) err
 	return nil
 }
 
-// SendWithContext injects native developer history before the unchanged user
-// turn. The thread operation lock orders both RPCs against sends and unloads.
+// SendWithContext submits application Context and the user input through the
+// native idle-only turn operation.
 func (b *CodexAppServerBackend) SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
-	current, release, err := b.beginThreadOperation(ctx, sessionID, true)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return current.sendWithContext(ctx, sessionID, content, hidden)
+	_, err := b.sendWithContextResult(ctx, sessionID, content, hidden)
+	return err
 }
 
-func (b *CodexAppServerBackend) sendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error {
-	if turnID := b.coord.currentTurn(sessionID); turnID != "" {
-		if userMessageCorrelationFrom(ctx).InputMode == protocol.InputModeNewTurn {
-			return ErrQueuedSessionBusy
+func (b *CodexAppServerBackend) sendWithContextResult(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) (bool, error) {
+	current, release, err := b.beginThreadOperation(ctx, sessionID, true)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	correlation := userMessageCorrelationFrom(ctx)
+	if hidden != nil && correlation.contextRuntime != nil {
+		if current.client != correlation.contextRuntime || current.generation != correlation.contextGeneration {
+			if correlation.RequireContext {
+				return false, fmt.Errorf("Codex Memory Context runtime changed")
+			}
+			hidden = nil
+		}
+	}
+	if turnID := current.coord.currentTurn(sessionID); turnID != "" {
+		if correlation.InputMode == protocol.InputModeNewTurn || correlation.RequireContext {
+			return false, ErrQueuedSessionBusy
 		}
 		// Steering stays addendum-only: no pack, no injection.
-		return b.send(ctx, sessionID, content)
+		return false, current.send(ctx, sessionID, content)
 	}
 	config := protocol.SessionConfig{}
 	b.sm.mu.RLock()
@@ -333,7 +348,23 @@ func (b *CodexAppServerBackend) sendWithContext(ctx context.Context, sessionID, 
 		config.Permission = clonePermission(ps.Permission)
 	}
 	b.sm.mu.RUnlock()
-	return b.startTurnWithContext(ctx, sessionID, content, config, hidden)
+	return current.startTurnWithContextResult(ctx, sessionID, content, config, hidden)
+}
+
+func (sm *SessionManager) bindCodexContextRuntime(ctx context.Context, sessionID string) context.Context {
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	var backend *CodexAppServerBackend
+	if ps != nil {
+		backend, _ = ps.Backend.(*CodexAppServerBackend)
+	}
+	sm.mu.RUnlock()
+	if backend == nil {
+		return ctx
+	}
+	correlation := userMessageCorrelationFrom(ctx)
+	correlation.contextRuntime, correlation.contextGeneration, _ = backend.coord.backendClient()
+	return withUserMessageCorrelation(ctx, correlation)
 }
 
 func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content string) error {
@@ -380,15 +411,19 @@ func (b *CodexAppServerBackend) startTurn(ctx context.Context, threadID, content
 	return b.startTurnWithContext(ctx, threadID, content, config, nil)
 }
 
-// startTurnWithContext is the Phase 2 native history delivery path.
-// Without a pack the wire shape is byte-identical to the legacy startTurn.
+// startTurnWithContext uses the ordinary turn request when no pack is delivered.
 func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, threadID, content string, config protocol.SessionConfig, hidden *memorycontext.PreparedContext) error {
+	_, err := b.startTurnWithContextResult(ctx, threadID, content, config, hidden)
+	return err
+}
+
+func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, threadID, content string, config protocol.SessionConfig, hidden *memorycontext.PreparedContext) (bool, error) {
 	input := memorycontext.BuildCodexInput(nil, content)
 	if b.coord.projectCwd != "" && strings.HasPrefix(strings.TrimSpace(content), "/") {
 		id, _ := ctx.Value(codexInvocationKey{}).(string)
 		skill, err := b.sm.resolveCodexSkill(ctx, threadID, content, id)
 		if err != nil {
-			return err
+			return false, err
 		}
 		input = append(input, map[string]any{"type": "skill", "name": skill.Name, "path": skill.Path})
 		ctx = context.WithValue(ctx, codexInvocationKey{}, nativeSkillID(threadID, skill.Path))
@@ -425,39 +460,75 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 	}
 
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
-	if items := memorycontext.BuildCodexHistoryItems(hidden); len(items) != 0 {
-		if !b.memoryContextNativeSupported(ctx) {
-			return fmt.Errorf("Codex native hidden context is unavailable for this runtime")
+	correlation := userMessageCorrelationFrom(ctx)
+	const idleTurnMethod = "turn/startIfIdle"
+	turnMethod := "turn/start"
+	call := b.client.Call
+	evidenceSent := false
+	if hidden != nil && (hidden.StableText != "" || hidden.DynamicText != "") {
+		deadline := hidden.HandoffDeadline
+		if !hidden.ExpiresAt.IsZero() && (deadline.IsZero() || hidden.ExpiresAt.Before(deadline)) {
+			deadline = hidden.ExpiresAt
 		}
-		// Do not submit or retry a task after a rejected or ambiguous history
-		// write. A lost ACK may hide persisted items; first-create callers must
-		// retain their exact native binding through the existing quarantine seam.
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := b.client.Call(ctx, "thread/inject_items", map[string]any{"threadId": threadID, "items": items}, nil); err != nil {
-			injectErr := fmt.Errorf("Codex hidden history injection: %w", err)
-			if !codexCreateRejected(err) {
-				return errors.Join(injectErr, errNativeSessionCreateUncertain)
+		switch {
+		case !b.memoryContextNativeSupported(ctx):
+			if correlation.RequireContext {
+				return false, fmt.Errorf("Codex idle-only Context admission is unavailable for this runtime")
 			}
-			return injectErr
+		case !deadline.IsZero() && !time.Now().Before(deadline):
+			if correlation.RequireContext {
+				return false, fmt.Errorf("Codex Memory Context handoff expired")
+			}
+		default:
+			turnMethod = idleTurnMethod
+			params["additionalContext"] = map[string]any{
+				memorycontext.CodexDeveloperItemTag: map[string]string{"kind": "application", "value": memorycontext.RenderCodexEnvelope(hidden)},
+			}
+			if writer, ok := b.client.(interface {
+				CallWithWriteContext(context.Context, context.Context, string, any, any) error
+			}); ok && !deadline.IsZero() {
+				writeCtx, cancel := context.WithDeadline(ctx, deadline)
+				defer cancel()
+				call = func(ctx context.Context, method string, params, result any) error {
+					return writer.CallWithWriteContext(ctx, writeCtx, method, params, result)
+				}
+			}
+			evidenceSent = true
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	var response struct {
 		Turn struct {
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
-	if err := b.client.Call(ctx, "turn/start", params, &response); err != nil {
+	err := call(ctx, turnMethod, params, &response)
+	busy := turnMethod == idleTurnMethod && codexIdleTurnRejected(err)
+	if busy && (correlation.InputMode == protocol.InputModeNewTurn || correlation.RequireContext) {
+		return false, ErrQueuedSessionBusy
+	}
+	if err != nil && evidenceSent && (busy || errors.Is(err, codexapp.ErrRequestNotWritten)) && ctx.Err() == nil && !correlation.RequireContext {
+		// The write queue declined the request before transmission, or Core
+		// explicitly rejected it without retaining input. Only send user text.
+		delete(params, "additionalContext")
+		evidenceSent = false
+		err = b.client.Call(ctx, "turn/start", params, &response)
+	}
+	if err != nil {
 		turnErr := fmt.Errorf("Codex turn/start: %w", err)
 		if !codexCreateRejected(err) {
 			// The native turn may have started before its response was lost.
 			// Creation rollback must retain the exact thread and binding.
-			return errors.Join(turnErr, errNativeSessionCreateUncertain)
+			return false, errors.Join(turnErr, errNativeSessionCreateUncertain)
 		}
-		return turnErr
+		return false, turnErr
+	}
+	if evidenceSent && response.Turn.ID == "" {
+		return false, fmt.Errorf("%w: Codex Context turn acknowledgement missing turn id", errNativeSessionCreateUncertain)
 	}
 	if response.Turn.ID != "" {
 		b.coord.setActiveTurn(threadID, response.Turn.ID)
@@ -473,7 +544,18 @@ func (b *CodexAppServerBackend) startTurnWithContext(ctx context.Context, thread
 		}
 
 	}
-	return nil
+	return evidenceSent, nil
+}
+
+func codexIdleTurnRejected(err error) bool {
+	var reply *codexapp.RPCError
+	if !errors.As(err, &reply) || reply.Code != -32600 {
+		return false
+	}
+	var data struct {
+		Reason string `json:"reason"`
+	}
+	return json.Unmarshal(reply.Data, &data) == nil && data.Reason == "threadBusy"
 }
 
 // reserveNativeTurn adopts the native turn identity returned by turn/start

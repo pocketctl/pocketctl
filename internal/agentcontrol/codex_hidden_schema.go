@@ -59,6 +59,49 @@ func supportsCodexHiddenContextSchema(raw []byte) bool {
 	return false
 }
 
+func supportsCodexAtomicContextSchema(raw []byte) bool {
+	return supportsCodexApplicationContextMethod(raw, "turn/start")
+}
+
+func supportsCodexApplicationContextMethod(raw []byte, method string) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var requests, responses []codexSchemaNode
+	for {
+		var document map[string]any
+		if err := decoder.Decode(&document); err != nil {
+			if err != io.EOF {
+				return false
+			}
+			break
+		}
+		collectCodexSchemaNodes(document, document, "", &requests, &responses)
+	}
+	for _, request := range requests {
+		start := request.methodParams(method)
+		props := schemaMap(start["properties"])
+		if !schemaObjectRequired(start, "threadId", "input") || schemaMap(props["threadId"])["type"] != "string" || schemaMap(props["input"])["type"] != "array" {
+			continue
+		}
+		context := request.resolve(schemaMap(props["additionalContext"]))
+		object := context["type"] == "object"
+		for _, value := range schemaList(context["type"]) {
+			object = object || value == "object"
+		}
+		entry := request.resolve(schemaMap(context["additionalProperties"]))
+		entryProps := schemaMap(entry["properties"])
+		kind := request.resolve(schemaMap(entryProps["kind"]))
+		if !object || !schemaObjectRequired(entry, "kind", "value") || schemaMap(entryProps["value"])["type"] != "string" || kind["type"] != "string" {
+			continue
+		}
+		for _, value := range schemaList(kind["enum"]) {
+			if value == "application" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type codexSchemaNode struct{ root, node map[string]any }
 
 func collectCodexSchemaNodes(root, node map[string]any, name string, requests, responses *[]codexSchemaNode) {

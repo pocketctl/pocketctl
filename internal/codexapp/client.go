@@ -13,6 +13,9 @@ import (
 
 var ErrClosed = errors.New("codex app-server connection closed")
 
+// ErrRequestNotWritten marks a canceled request that never reached transport.
+var ErrRequestNotWritten = errors.New("codex app-server request not written")
+
 type RPCError struct {
 	Code    int             `json:"code"`
 	Message string          `json:"message"`
@@ -36,10 +39,10 @@ type response struct {
 }
 
 type Client struct {
-	conn *websocket.Conn
+	transport messageTransport
 
 	nextID  atomic.Int64
-	write   sync.Mutex
+	write   chan struct{}
 	mu      sync.Mutex
 	pending map[string]chan response
 	events  chan Inbound
@@ -47,9 +50,19 @@ type Client struct {
 	once    sync.Once
 }
 
+type messageTransport interface {
+	readMessage() ([]byte, error)
+	writeMessage(context.Context, []byte) error
+	Close() error
+}
+
 func NewClient(conn *websocket.Conn) *Client {
+	return newClient(websocketTransport{conn})
+}
+
+func newClient(transport messageTransport) *Client {
 	c := &Client{
-		conn: conn, pending: make(map[string]chan response),
+		transport: transport, write: make(chan struct{}, 1), pending: make(map[string]chan response),
 		events: make(chan Inbound, 128), done: make(chan struct{}),
 	}
 	go c.readLoop()
@@ -60,12 +73,18 @@ func (c *Client) Events() <-chan Inbound { return c.events }
 func (c *Client) Done() <-chan struct{}  { return c.done }
 
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
+	return c.CallWithWriteContext(ctx, ctx, method, params, result)
+}
+
+// CallWithWriteContext bounds request delivery separately from waiting for
+// an acknowledgement. After writing, cancellation follows the caller.
+func (c *Client) CallWithWriteContext(ctx, writeCtx context.Context, method string, params any, result any) error {
 	id := numberID(c.nextID.Add(1))
 	wait := make(chan response, 1)
 	c.mu.Lock()
 	c.pending[id.Key()] = wait
 	c.mu.Unlock()
-	if err := c.writeMessage(map[string]any{"id": id, "method": method, "params": params}); err != nil {
+	if err := c.writeMessage(writeCtx, map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		c.removePending(id.Key())
 		return err
 	}
@@ -107,7 +126,7 @@ func (c *Client) decodeResponse(reply response, result any) error {
 }
 
 func (c *Client) Notify(method string, params any) error {
-	return c.writeMessage(map[string]any{"method": method, "params": params})
+	return c.writeMessage(context.Background(), map[string]any{"method": method, "params": params})
 }
 
 func (c *Client) Respond(id RequestID, result any, rpcErr *RPCError) error {
@@ -117,7 +136,7 @@ func (c *Client) Respond(id RequestID, result any, rpcErr *RPCError) error {
 	} else {
 		message["result"] = result
 	}
-	return c.writeMessage(message)
+	return c.writeMessage(context.Background(), message)
 }
 
 func (c *Client) Initialize(ctx context.Context, params any, result any) error {
@@ -128,25 +147,35 @@ func (c *Client) Initialize(ctx context.Context, params any, result any) error {
 }
 
 func (c *Client) Close() error {
-	err := c.conn.Close()
+	err := c.transport.Close()
 	c.failAll(ErrClosed)
 	return err
 }
 
-func (c *Client) writeMessage(value any) error {
+func (c *Client) writeMessage(ctx context.Context, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	select {
+	case c.write <- struct{}{}:
+		defer func() { <-c.write }()
+	case <-ctx.Done():
+		return errors.Join(ErrRequestNotWritten, ctx.Err())
+	case <-c.done:
+		return ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(ErrRequestNotWritten, err)
+	}
 	select {
 	case <-c.done:
 		return ErrClosed
 	default:
 	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	c.write.Lock()
-	defer c.write.Unlock()
-	if err := c.conn.WriteMessage(websocket.TextMessage, raw); err != nil {
+	if err := c.transport.writeMessage(ctx, raw); err != nil {
 		c.failAll(err)
+		_ = c.transport.Close()
 		return err
 	}
 	return nil
@@ -155,13 +184,11 @@ func (c *Client) writeMessage(value any) error {
 func (c *Client) readLoop() {
 	defer close(c.events)
 	for {
-		messageType, raw, err := c.conn.ReadMessage()
+		raw, err := c.transport.readMessage()
 		if err != nil {
 			c.failAll(err)
+			_ = c.transport.Close()
 			return
-		}
-		if messageType != websocket.TextMessage {
-			continue
 		}
 		var envelope struct {
 			ID     json.RawMessage `json:"id"`

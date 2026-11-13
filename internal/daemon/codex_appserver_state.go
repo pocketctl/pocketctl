@@ -22,6 +22,7 @@ type CodexAppServerState struct {
 	OwnerPID             int                           `json:"owner_pid"`
 	Endpoint             string                        `json:"endpoint"`
 	RemoteURI            string                        `json:"remote_uri"`
+	PrivateStdio         bool                          `json:"private_stdio,omitempty"`
 	Binary               string                        `json:"binary"`
 	Version              string                        `json:"version"`
 	SchemaHash           string                        `json:"schema_hash,omitempty"`

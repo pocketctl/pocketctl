@@ -3,7 +3,10 @@ package memorycontext
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
+	"net/http/httptrace"
+	"sync/atomic"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -19,11 +22,14 @@ type Coordinator struct {
 	Grants   GrantTransport
 	Memory   MemoryClient
 	Deadline time.Duration
+	// ObserveCompileTiming receives only elapsed times and a bounded outcome.
+	ObserveCompileTiming func(CompileTiming)
 	// ReceiptRetryDelay is injectable for tests. Production uses a short
 	// backoff because receipt retries must never delay or resend the user turn.
 	ReceiptRetryDelay time.Duration
 	// Now is injectable for tests.
-	Now func() time.Time
+	Now                   func() time.Time
+	resolveRepositoryHint func(context.Context, string) *RepositoryHint
 }
 
 // TurnRequest describes one new-turn enrichment decision.
@@ -63,6 +69,22 @@ type Outcome struct {
 	Pack   *PreparedContext
 }
 
+// CompileTiming uses the daemon's monotonic clock. Negative offsets mark
+// boundaries the request did not reach. It contains no request or user data.
+type CompileTiming struct {
+	Grant                 time.Duration
+	RepositoryWait        time.Duration
+	CompileStartedAt      time.Duration
+	ConnectionRequestedAt time.Duration
+	ConnectionReadyAt     time.Duration
+	TLSStartedAt          time.Duration
+	TLSCompletedAt        time.Duration
+	RequestWrittenAt      time.Duration
+	ResponseStartedAt     time.Duration
+	Total                 time.Duration
+	Outcome               string
+}
+
 func (c *Coordinator) deadline() time.Duration {
 	if c.Deadline > 0 {
 		return c.Deadline
@@ -98,7 +120,7 @@ func repositoryHint(ctx context.Context, cwd string) *RepositoryHint {
 // Prepare runs the enabled-mode synchronous flow. The returned context, if
 // any, is valid for one admission window; every error returns (nil, outcome)
 // and the caller MUST dispatch the original user input unchanged.
-func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*PreparedContext, Outcome) {
+func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (_ *PreparedContext, outcome Outcome) {
 	// Only new turns inject: steer/addendum input remains part of the
 	// active turn (plan 8.3).
 	if !req.IsNewTurn || req.Mode == ModeOff {
@@ -118,10 +140,46 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 	ctx, cancel := context.WithTimeout(parent, deadline)
 	defer cancel()
 	started := time.Now()
+	var timing CompileTiming
+	var connectionRequested, connectionReady, tlsStarted, tlsCompleted, requestWritten, responseStarted atomic.Int64
+	if observe := c.ObserveCompileTiming; observe != nil {
+		timing.CompileStartedAt = -1
+		for _, stamp := range []*atomic.Int64{&connectionRequested, &connectionReady, &tlsStarted, &tlsCompleted, &requestWritten, &responseStarted} {
+			stamp.Store(-1)
+		}
+		defer func() {
+			timing.ConnectionRequestedAt = time.Duration(connectionRequested.Load())
+			timing.ConnectionReadyAt = time.Duration(connectionReady.Load())
+			timing.TLSStartedAt = time.Duration(tlsStarted.Load())
+			timing.TLSCompletedAt = time.Duration(tlsCompleted.Load())
+			timing.RequestWrittenAt = time.Duration(requestWritten.Load())
+			timing.ResponseStartedAt = time.Duration(responseStarted.Load())
+			timing.Total = time.Since(started)
+			timing.Outcome = outcome.Kind
+			switch outcome.Reason {
+			case "scoped_grant_unavailable", "grant_unavailable", "deadline_before_compile", "memory_unavailable",
+				"admission_failed", "admission_existing", "pack_unavailable", "compile_outcome":
+				timing.Outcome = outcome.Reason
+			}
+			observe(timing)
+		}()
+	}
 
 	requestID := req.ClientRequestID
 	if requestID == "" {
 		requestID = newRequestID()
+	}
+
+	// Git and the authenticated grant are independent. Keep the original
+	// bounded observation and wait for it only while the turn is still live.
+	var repository chan *RepositoryHint
+	if req.Cwd != "" {
+		repository = make(chan *RepositoryHint, 1)
+		resolve := c.resolveRepositoryHint
+		if resolve == nil {
+			resolve = repositoryHint
+		}
+		go func() { repository <- resolve(ctx, req.Cwd) }()
 	}
 
 	var grant *protocol.MemoryContextGrantResult
@@ -135,22 +193,38 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 	} else {
 		grant, err = c.Grants.RequestContextGrant(ctx, requestID, req.SessionID)
 	}
+	grantFinished := time.Now()
+	timing.Grant = grantFinished.Sub(started)
 	if err != nil {
 		return nil, Outcome{Kind: "dispatched", Reason: "grant_unavailable"}
 	}
 
+	var hint *RepositoryHint
+	if repository != nil {
+		select {
+		case hint = <-repository:
+		case <-ctx.Done():
+			timing.RepositoryWait = time.Since(grantFinished)
+			return nil, Outcome{Kind: "dispatched", Reason: "deadline_before_compile"}
+		}
+	}
+	timing.RepositoryWait = time.Since(grantFinished)
+	if ctx.Err() != nil {
+		return nil, Outcome{Kind: "dispatched", Reason: "deadline_before_compile"}
+	}
 	query, useful := SanitizeQuery(req.UserContent)
 	if !useful {
 		query = ""
 	}
 	compileReq := CompileRequest{
 		SceneID: req.SceneID, TaskScopeKey: req.TaskScopeKey, Destination: req.Destination, FactAt: req.FactAt, KnownAt: req.KnownAt,
+		PrepareContext:     req.Agent == "codex" && len(req.SelectedReferences) == 0 && len(req.ScopeInstallationIDs) == 0,
 		SchemaVersion:      1,
 		ClientRequestID:    requestID,
 		SessionID:          req.SessionID,
 		Agent:              req.Agent,
 		AdapterCapability:  string(req.Capability),
-		RepositoryHint:     repositoryHint(ctx, req.Cwd),
+		RepositoryHint:     hint,
 		Query:              query,
 		RequestedAt:        started.UTC(),
 		SelectedReferences: req.SelectedReferences,
@@ -158,7 +232,28 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 	if ResolveEvidenceReadCapability(req.Capability, req.EvidenceReadProbe) == "on_demand_v1" {
 		compileReq.EvidenceReadCapability = "on_demand_v1"
 	}
-	compiled, err := c.Memory.Compile(ctx, grant.ProviderPublicOrigin, grant.Grant, compileReq)
+	compileCtx := ctx
+	timing.CompileStartedAt = time.Since(started)
+	if c.ObserveCompileTiming != nil {
+		record := func(stamp *atomic.Int64) { stamp.CompareAndSwap(-1, int64(time.Since(started))) }
+		compileCtx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+			GetConn:           func(string) { record(&connectionRequested) },
+			GotConn:           func(httptrace.GotConnInfo) { record(&connectionReady) },
+			TLSHandshakeStart: func() { record(&tlsStarted) },
+			TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+				if err == nil {
+					record(&tlsCompleted)
+				}
+			},
+			GotFirstResponseByte: func() { record(&responseStarted) },
+			WroteRequest: func(info httptrace.WroteRequestInfo) {
+				if info.Err == nil {
+					record(&requestWritten)
+				}
+			},
+		})
+	}
+	compiled, err := c.Memory.Compile(compileCtx, grant.ProviderPublicOrigin, grant.Grant, compileReq)
 	if err != nil {
 		return nil, Outcome{Kind: "dispatched", Reason: "memory_unavailable"}
 	}
@@ -180,28 +275,54 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		return nil, Outcome{Kind: "dispatched", Reason: "compile_outcome"}
 	}
 
-	admitted, err := c.Memory.Admit(ctx, grant.ProviderPublicOrigin, grant.Grant, compiled.Pack.PackID, AdmitRequest{
-		ClientRequestID: requestID,
-		SessionID:       req.SessionID,
-		Agent:           req.Agent,
-		Adapter:         nativeAdapterForAgent(req.Agent),
-	})
-	if err != nil {
-		if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
-			return c.rebuildSelectedContext(ctx, req, requestID)
+	var admitted *AdmitResponse
+	var text *PackText
+	if compileReq.PrepareContext && compiled.Handoff != nil {
+		handoff := compiled.Handoff
+		switch handoff.Status {
+		case "admission_failed":
+			return nil, Outcome{Kind: "dispatched", Reason: "admission_failed"}
+		case "existing":
+			return nil, Outcome{Kind: "skipped", Reason: "admission_existing"}
+		case "prepared":
+			if compiled.AdmissionRequired || handoff.InjectionID == "" {
+				return nil, Outcome{Kind: "dispatched", Reason: "pack_unavailable"}
+			}
+			admitted = &AdmitResponse{InjectionID: handoff.InjectionID, ExpiresAt: handoff.ExpiresAt}
+			text = &handoff.PackText
+		default:
+			return nil, Outcome{Kind: "dispatched", Reason: "pack_unavailable"}
 		}
-		return nil, Outcome{Kind: "dispatched", Reason: "admission_failed"}
-	}
-	if admitted.Existing || admitted.Nonce == "" {
-		// A duplicate request returns existing state; without a fresh nonce
-		// there is nothing this attempt may deliver.
-		if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
-			return c.rebuildSelectedContext(ctx, req, requestID)
+	} else {
+		admitted, err = c.Memory.Admit(ctx, grant.ProviderPublicOrigin, grant.Grant, compiled.Pack.PackID, AdmitRequest{
+			ClientRequestID: requestID,
+			SessionID:       req.SessionID,
+			Agent:           req.Agent,
+			Adapter:         nativeAdapterForAgent(req.Agent),
+		})
+		if err != nil {
+			if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
+				return c.rebuildSelectedContext(ctx, req, requestID)
+			}
+			return nil, Outcome{Kind: "dispatched", Reason: "admission_failed"}
 		}
-		return nil, Outcome{Kind: "skipped", Reason: "admission_existing"}
+		if admitted.Existing || admitted.Nonce == "" {
+			// A duplicate request returns existing state; without a fresh nonce
+			// there is nothing this attempt may deliver.
+			if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
+				return c.rebuildSelectedContext(ctx, req, requestID)
+			}
+			return nil, Outcome{Kind: "skipped", Reason: "admission_existing"}
+		}
+		text, err = c.Memory.ConsumePack(ctx, grant.ProviderPublicOrigin, grant.Grant,
+			compiled.Pack.PackID, req.SessionID, admitted.InjectionID, admitted.Nonce)
 	}
-	text, err := c.Memory.ConsumePack(ctx, grant.ProviderPublicOrigin, grant.Grant,
-		compiled.Pack.PackID, req.SessionID, admitted.InjectionID, admitted.Nonce)
+	// A successful response can race the context's cancellation callback.
+	// Enforce the same monotonic deadline before handing the pack to the caller.
+	handoffDeadline, _ := ctx.Deadline()
+	if ctx.Err() != nil || !time.Now().Before(handoffDeadline) {
+		return nil, Outcome{Kind: "dispatched", Reason: "pack_unavailable"}
+	}
 	if err != nil || text == nil || text.PackID != compiled.Pack.PackID ||
 		(text.StableText == "" && text.DynamicText == "") {
 		if len(req.SelectedReferences) > 0 && req.rebuildAttempt == 0 {
@@ -219,6 +340,7 @@ func (c *Coordinator) Prepare(parent context.Context, req TurnRequest) (*Prepare
 		InjectionID:            admitted.InjectionID,
 		Nonce:                  admitted.Nonce,
 		ExpiresAt:              admitted.ExpiresAt,
+		HandoffDeadline:        handoffDeadline,
 		StableText:             text.StableText,
 		DynamicText:            text.DynamicText,
 		StableDigest:           text.StableDigest,

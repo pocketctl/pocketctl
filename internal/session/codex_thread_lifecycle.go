@@ -160,6 +160,14 @@ func (b *CodexAppServerBackend) beginThreadOperation(ctx context.Context, id str
 	current := *b
 	b.coord.mu.Lock()
 	stopped := b.coord.shuttingDown
+	privateProject := b.coord.projectCwd != "" && b.coord.startPrivateProject != nil && b.coord.runtimeCapabilities.IdleOnlyContext
+	if !stopped && privateProject && b.coord.runtime == nil {
+		if _, err := b.coord.ensureStartedLocked(ctx, b.coord.binary, b.coord.version, b.coord.runtimeCapabilities, false); err != nil {
+			b.coord.mu.Unlock()
+			unlock()
+			return nil, nil, fmt.Errorf("recover Codex project runtime: %w", err)
+		}
+	}
 	b.coord.mu.Unlock()
 	if stopped {
 		unlock()
@@ -167,6 +175,9 @@ func (b *CodexAppServerBackend) beginThreadOperation(ctx context.Context, id str
 	}
 	if client, generation, ok := b.coord.backendClient(); ok {
 		current.client, current.generation = client, generation
+	} else if privateProject {
+		unlock()
+		return nil, nil, fmt.Errorf("Codex project runtime is unavailable")
 	}
 	if err := ctx.Err(); err != nil {
 		unlock()

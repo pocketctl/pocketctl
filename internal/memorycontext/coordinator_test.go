@@ -2,8 +2,12 @@ package memorycontext
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"os/exec"
 	"sync/atomic"
 	"testing"
@@ -40,6 +44,7 @@ type fakeMemory struct {
 	lastAdmitRequest   AdmitRequest
 	pack               *PackText
 	packErr            error
+	beforePackReturn   func()
 	fetchCalls         int
 	receiptErr         error
 	receiptCalls       int
@@ -70,6 +75,9 @@ func (f *fakeMemory) Compile(ctx context.Context, origin, grant string, req Comp
 }
 func (f *fakeMemory) ConsumePack(ctx context.Context, origin, grant, packID, sessionID, injectionID, nonce string) (*PackText, error) {
 	f.fetchCalls++
+	if f.beforePackReturn != nil {
+		f.beforePackReturn()
+	}
 	return f.pack, f.packErr
 }
 func (f *fakeMemory) Admit(ctx context.Context, origin, grant, packID string, req AdmitRequest) (*AdmitResponse, error) {
@@ -104,12 +112,170 @@ func newTurn() TurnRequest {
 	}
 }
 
+func TestPrepareUsesInlineCodexHandoffWithoutRepeatingAdmission(t *testing.T) {
+	var request struct {
+		PrepareContext bool `json:"prepare_context"`
+	}
+	var response string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/memory/context/compile" {
+			t.Errorf("unexpected follow-up request: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		_, _ = w.Write([]byte(response))
+	}))
+	defer server.Close()
+	grant := *readyGrant
+	grant.ProviderPublicOrigin = server.URL
+	c := coordinator(&fakeGrants{grant: &grant}, NewMemoryClient())
+	response = `{"outcome":"ready","pack":{"pack_id":"pack-1"},"admission_required":false,"handoff":{"status":"prepared","pack_id":"pack-1","injection_id":"inj-1","stable_text":"evidence"}}`
+	pack, out := c.Prepare(context.Background(), newTurn())
+	if !request.PrepareContext || pack == nil || pack.InjectionID != "inj-1" || pack.StableText != "evidence" || out.Kind != "injected" {
+		t.Fatalf("expected prepared inline Context, got opt-in=%v outcome=%+v", request.PrepareContext, out)
+	}
+	response = `{"outcome":"ready","pack":{"pack_id":"pack-1"},"admission_required":false,"handoff":{"status":"existing"}}`
+	pack, out = c.Prepare(context.Background(), newTurn())
+	if pack != nil || out.Reason != "admission_existing" {
+		t.Fatalf("duplicate inline admission must not hand off text: %+v", out)
+	}
+	response = `{"outcome":"ready","pack":{"pack_id":"pack-1"},"admission_required":false,"handoff":{"status":"prepared","pack_id":"wrong","injection_id":"inj-1","stable_text":"evidence"}}`
+	pack, out = c.Prepare(context.Background(), newTurn())
+	if pack != nil || out.Reason != "pack_unavailable" {
+		t.Fatalf("mismatched inline pack must be rejected: %+v", out)
+	}
+}
+
+func TestPrepareReportsWhereTheCompileRequestStopped(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		reply             func(http.ResponseWriter, *http.Request)
+		grantError        error
+		waitForRepository bool
+		stage             string
+		written           bool
+	}{
+		{name: "grant deadline", grantError: context.DeadlineExceeded, stage: "grant_unavailable"},
+		{name: "repository deadline", waitForRepository: true, stage: "deadline_before_compile"},
+		{name: "HTTP response failure", reply: func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}, stage: "memory_unavailable", written: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			grant := *readyGrant
+			if tc.reply != nil {
+				server := httptest.NewServer(http.HandlerFunc(tc.reply))
+				t.Cleanup(server.Close)
+				grant.ProviderPublicOrigin = server.URL
+			}
+			c := coordinator(&fakeGrants{grant: &grant, err: tc.grantError}, NewMemoryClient())
+			var observed []CompileTiming
+			c.ObserveCompileTiming = func(timing CompileTiming) { observed = append(observed, timing) }
+			turn := newTurn()
+			if tc.waitForRepository {
+				turn.Cwd = t.TempDir()
+				c.Deadline = 20 * time.Millisecond
+				c.resolveRepositoryHint = func(ctx context.Context, _ string) *RepositoryHint {
+					<-ctx.Done()
+					return nil
+				}
+			}
+			_, outcome := c.Prepare(context.Background(), turn)
+			if outcome.Reason != tc.stage || len(observed) != 1 {
+				t.Fatalf("outcome=%+v timing=%+v", outcome, observed)
+			}
+			timing := observed[0]
+			if timing.Outcome != tc.stage || (timing.RequestWrittenAt >= 0) != tc.written ||
+				(timing.CompileStartedAt >= 0) != tc.written || timing.Total < timing.Grant {
+				t.Fatalf("wrong stage attribution: %+v", timing)
+			}
+		})
+	}
+}
+
+func TestPrepareDistinguishesTransportFailureBeforeWriteFromResponseFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		tlsConnected bool
+		wroteRequest bool
+	}{
+		{name: "TLS failed before request write"},
+		{name: "response failed after request write", tlsConnected: true, wroteRequest: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := coordinator(&fakeGrants{grant: readyGrant}, &httpClient{HTTP: &http.Client{Transport: compileTimingTransport(func(req *http.Request) (*http.Response, error) {
+				trace := httptrace.ContextClientTrace(req.Context())
+				trace.GetConn("private.test:443")
+				trace.TLSHandshakeStart()
+				if tc.tlsConnected {
+					trace.TLSHandshakeDone(tls.ConnectionState{}, nil)
+					trace.GotConn(httptrace.GotConnInfo{})
+				} else {
+					trace.TLSHandshakeDone(tls.ConnectionState{}, errors.New("TLS rejected"))
+				}
+				if tc.wroteRequest {
+					trace.WroteRequest(httptrace.WroteRequestInfo{})
+					trace.GotFirstResponseByte()
+				}
+				return nil, errors.New("fixture transport failure")
+			})}})
+			var observed CompileTiming
+			c.ObserveCompileTiming = func(timing CompileTiming) { observed = timing }
+			_, outcome := c.Prepare(context.Background(), newTurn())
+			if outcome.Reason != "memory_unavailable" || observed.CompileStartedAt < 0 ||
+				observed.ConnectionRequestedAt < observed.CompileStartedAt || observed.TLSStartedAt < observed.ConnectionRequestedAt {
+				t.Fatalf("incorrect compile and TLS start boundaries: %+v %+v", outcome, observed)
+			}
+			if (observed.TLSCompletedAt >= 0) != tc.tlsConnected || (observed.ConnectionReadyAt >= 0) != tc.tlsConnected ||
+				(observed.RequestWrittenAt >= 0) != tc.wroteRequest || (observed.ResponseStartedAt >= 0) != tc.wroteRequest {
+				t.Fatalf("incorrect TLS completion and HTTP boundaries: %+v", observed)
+			}
+		})
+	}
+}
+
+type compileTimingTransport func(*http.Request) (*http.Response, error)
+
+func (f compileTimingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestPrepareSkipsAddenda(t *testing.T) {
 	c := coordinator(&fakeGrants{}, &fakeMemory{})
 	addendum := newTurn()
 	addendum.IsNewTurn = false
 	if _, out := c.Prepare(context.Background(), addendum); out.Kind != "skipped" {
 		t.Fatalf("addendum must never inject, got %s", out.Kind)
+	}
+}
+
+type handoffDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c handoffDeadlineContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
+}
+
+func TestPrepareDiscardsPackWhenHandoffDeadlineHasPassed(t *testing.T) {
+	// Report a real deadline while withholding cancellation notification. This
+	// models a successful response competing with a late timer callback.
+	parent := handoffDeadlineContext{Context: context.Background(), deadline: time.Now().Add(25 * time.Millisecond)}
+	memory := &fakeMemory{
+		compile: &CompileResponse{Outcome: "ready", Pack: &WirePack{PackID: "pack"}},
+		admit:   &AdmitResponse{InjectionID: "injection", Nonce: "nonce"},
+		pack:    &PackText{PackID: "pack", DynamicText: "synthetic evidence"},
+		beforePackReturn: func() {
+			time.Sleep(time.Until(parent.deadline) + time.Millisecond)
+		},
+	}
+	pack, out := coordinator(&fakeGrants{grant: readyGrant}, memory).Prepare(parent, newTurn())
+	if memory.fetchCalls != 1 || pack != nil || out.Kind != "dispatched" || out.Reason != "pack_unavailable" {
+		t.Fatalf("late result escaped the deadline: fetches=%d pack=%t outcome=%+v", memory.fetchCalls, pack != nil, out)
 	}
 }
 
@@ -142,6 +308,44 @@ func TestPrepareRunsShadowCompilationAsynchronouslyWithoutInjecting(t *testing.T
 			t.Fatal("shadow compilation did not start")
 		}
 		close(release)
+	}
+}
+
+type overlappingGrantTransport struct {
+	fakeGrants
+	repositoryStarted <-chan struct{}
+}
+
+func (g overlappingGrantTransport) RequestContextGrant(ctx context.Context, _, _ string) (*protocol.MemoryContextGrantResult, error) {
+	select {
+	case <-g.repositoryStarted:
+		return readyGrant, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestPrepareStartsRepositoryProbeWhileGrantIsPending(t *testing.T) {
+	repositoryStarted := make(chan struct{})
+	memory := &fakeMemory{
+		compile:        &CompileResponse{Outcome: "empty"},
+		compileStarted: make(chan CompileRequest, 1),
+	}
+	c := coordinator(&overlappingGrantTransport{repositoryStarted: repositoryStarted}, memory)
+	c.resolveRepositoryHint = func(context.Context, string) *RepositoryHint {
+		close(repositoryStarted)
+		return &RepositoryHint{RepositoryID: "example.test/team/repo", CommitSHA: "0123456789abcdef"}
+	}
+	req := newTurn()
+	req.Cwd = t.TempDir()
+	_, outcome := c.Prepare(context.Background(), req)
+	select {
+	case compiled := <-memory.compileStarted:
+		if compiled.RepositoryHint == nil || compiled.RepositoryHint.CommitSHA != "0123456789abcdef" {
+			t.Fatalf("compile lost the explicit repository observation: %+v", compiled.RepositoryHint)
+		}
+	default:
+		t.Fatalf("compile did not start within the shared deadline: %+v", outcome)
 	}
 }
 

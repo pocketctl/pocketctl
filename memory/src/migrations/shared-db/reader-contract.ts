@@ -2,7 +2,8 @@ import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadata
 // Scope usage is separate from canonical custody. Enumerating eligible input
 // must skip expired use before LIMIT; explicit keys remain denied references.
 const sourceTurn=(e:string,r:string)=>`COALESCE(${r}.turn_id,${e}.payload->>'turn_id',${e}.payload->>'source_turn_id',CASE WHEN to_jsonb(${e})->>'source_header_version'='1' THEN to_jsonb(${e})->'source_classification'->'memory_source'->>'turn_id' END)`
-const usageDenied=(e:string,r:string)=>`${r}.body_reclaimed_at IS NOT NULL OR EXISTS(SELECT 1 FROM memory.memory_source_retention_receipts receipt WHERE receipt.installation_id=(p_scope->>'installationId')::uuid AND receipt.session_id=COALESCE(to_jsonb(${e})->>'logical_source_session_id',${e}.session_id) AND(receipt.turn_id=${sourceTurn(e,r)} OR ${sourceTurn(e,r)} IS NULL))`
+export const relaySourceUsageDeniedSql=(e:string,r:string,scope='p_scope')=>`${r}.body_reclaimed_at IS NOT NULL OR EXISTS(SELECT 1 FROM memory.memory_source_retention_receipts receipt WHERE receipt.installation_id=(${scope}->>'installationId')::uuid AND receipt.session_id=COALESCE(to_jsonb(${e})->>'logical_source_session_id',${e}.session_id) AND(receipt.turn_id=${sourceTurn(e,r)} OR ${sourceTurn(e,r)} IS NULL))`
+const usageDenied=relaySourceUsageDeniedSql
 // Headerless hot history can need the ordinary version-locked reader.
 // Detect that case only during body-capable enumeration. The keyed metadata
 // observation and the final selected fence never access historical payload.

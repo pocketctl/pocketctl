@@ -132,6 +132,29 @@ type connectionStatusEvent struct {
 // replaces the original event (return nil to forward it unchanged).
 type OnEvent func(evt protocol.DaemonEvent) []protocol.DaemonEvent
 
+// socketWriter serializes Gorilla writes and lets bounded control calls
+// abandon the queue without closing a healthy connection.
+type socketWriter struct {
+	once sync.Once
+	slot chan struct{}
+}
+
+func (w *socketWriter) Lock() {
+	w.lockContext(context.Background())
+}
+
+func (w *socketWriter) lockContext(ctx context.Context) bool {
+	w.once.Do(func() { w.slot = make(chan struct{}, 1) })
+	select {
+	case w.slot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (w *socketWriter) Unlock() { <-w.slot }
+
 type Client struct {
 	TeamConfigInventory func() map[string]*protocol.TeamConfigCapabilities
 
@@ -158,7 +181,7 @@ type Client struct {
 	agentTeamsStepsEnabled     bool // explicit frozen transfer capability from the configured bridge
 	conn                       *websocket.Conn
 	connMu                     sync.Mutex
-	writeMu                    sync.Mutex // protects WriteMessage on conn
+	writeMu                    socketWriter // protects WriteMessage on conn
 	outputCh                   <-chan protocol.DaemonEvent
 	sendCh                     chan []byte
 	logger                     *slog.Logger
@@ -1069,6 +1092,21 @@ func (c *Client) SendControlPayload(data []byte) error {
 	return c.sendMsg(json.RawMessage(data))
 }
 
+// SendControlPayloadContext cancels the writer wait when the context ends.
+// Once writing, the socket uses the earlier of its own and the caller's deadline.
+func (c *Client) SendControlPayloadContext(ctx context.Context, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !json.Valid(data) {
+		return fmt.Errorf("invalid control payload")
+	}
+	if err := c.requireHostAwake(); err != nil {
+		return err
+	}
+	return c.writeMessage(ctx, data)
+}
+
 func (c *Client) sendMsg(v any) error {
 	if err := c.requireHostAwake(); err != nil {
 		return err
@@ -1077,29 +1115,38 @@ func (c *Client) sendMsg(v any) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	return c.writeMessage(context.Background(), data)
+}
+
+func (c *Client) writeMessage(ctx context.Context, data []byte) error {
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
 	if conn == nil {
 		return fmt.Errorf("websocket disconnected")
 	}
-	c.writeMu.Lock()
+	if !c.writeMu.lockContext(ctx) {
+		return ctx.Err()
+	}
 	defer c.writeMu.Unlock()
 	if err := c.requireHostAwake(); err != nil {
 		return err
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(c.writeWait))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(c.writeWait)
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
+		deadline = callerDeadline
+	}
+	_ = conn.SetWriteDeadline(deadline)
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		// On a half-open socket a write fails (TCP eventually gives up) while the
-		// read side stays blocked. Close the conn so readPump's ReadMessage
-		// errors out, closes `done`, and Run reconnects — otherwise a failed ping
-		// write would just be logged and the daemon would hang on a dead link.
-		// Closing the captured conn is safe even if it's already been replaced by
-		// a fresh connection (we only close this specific one).
-		conn.Close()
+		// A failed write leaves Gorilla's write state unusable. Close only
+		// the captured connection so readPump can reconnect.
+		_ = conn.Close()
 		return fmt.Errorf("write: %w", err)
 	}
-	return nil
+	return ctx.Err()
 }
 
 // sendEvent delivers a daemon event to the relay with at-least-once semantics:

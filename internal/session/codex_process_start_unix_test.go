@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/platform"
+	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
 func TestStartCodexAppServerWaitsForInitializedPrivateSocket(t *testing.T) {
@@ -42,6 +44,141 @@ func TestStartCodexAppServerWaitsForInitializedPrivateSocket(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode=%o want 600", info.Mode().Perm())
+	}
+}
+
+func TestStartCodexStdioAppServerHasNoRemoteEndpointAndReapsProcess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCodexStdioHelperProcess$")
+	cmd.Env = []string{"POCKETCTL_CODEX_STDIO_HELPER=1", "GORACE=atexit_sleep_ms=0"}
+	runtime, err := startCodexStdioProcess(ctx, cmd, t.TempDir(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	if !runtime.PrivateStdio || runtime.RemoteURI != "" || runtime.Endpoint != "" || runtime.PID <= 0 || !codexProcessBirthMatches(runtime.PID, runtime.ProcessStartIdentity) {
+		t.Fatalf("invalid private app-server runtime: %+v", runtime)
+	}
+	if err := probeCodexAppServer(ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if codexProcessBirthMatches(runtime.PID, runtime.ProcessStartIdentity) {
+		t.Fatal("private app-server process was not reaped")
+	}
+}
+
+func TestInstalledCodexPrivateStdioProcess(t *testing.T) {
+	if os.Getenv("POCKETCTL_CODEX_SMOKE") != "1" {
+		t.Skip("set POCKETCTL_CODEX_SMOKE=1 to test the installed Codex CLI")
+	}
+	binary, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.Command(binary, "app-server", "--listen", "stdio://")
+	cmd.Env = []string{"HOME=" + dir, "CODEX_HOME=" + dir}
+	runtime, err := startCodexStdioProcess(ctx, cmd, dir, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Stop() })
+	if err := probeCodexAppServer(ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if codexProcessBirthMatches(runtime.PID, runtime.ProcessStartIdentity) {
+		t.Fatal("installed app-server process was not reaped")
+	}
+}
+
+func TestInstalledCodexPrivateProjectCoordinator(t *testing.T) {
+	if os.Getenv("POCKETCTL_CODEX_SMOKE") != "1" {
+		t.Skip("set POCKETCTL_CODEX_SMOKE=1 to test the installed Codex CLI")
+	}
+	binary, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	capabilities, err := (agentcontrol.CodexProbe{}).Probe(ctx, binary, "0.167.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !capabilities.IdleOnlyContext {
+		t.Skip("installed Codex lacks idle-only Context admission")
+	}
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 64))
+	provider := newCodexRuntimeProvider(sm)
+	project, err := provider.projectCoordinator(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = project.shutdown() })
+	first, err := project.ensureStarted(ctx, binary, capabilities.Version, capabilities)
+	if err != nil || first.RemoteURI != "" || !first.HiddenContext {
+		t.Fatalf("private project start = %+v, %v", first, err)
+	}
+	client, _, ok := project.backendClient()
+	if !ok {
+		t.Fatal("project client unavailable")
+	}
+	backend := newCodexAppServerBackend(sm, project, client, first.Generation)
+	threadID, err := backend.Start(ctx, protocol.SessionConfig{Cwd: project.projectCwd})
+	if err != nil || threadID == "" {
+		t.Fatalf("create durable project thread: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		current, generation, ok := project.backendClient()
+		if ok && current != client && generation > first.Generation {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("private project did not restart the installed Codex process")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	second, ok := project.status()
+	if !ok || second.PID == first.PID || second.RemoteURI != "" || !second.HiddenContext {
+		t.Fatalf("private replacement = %+v", second)
+	}
+	if err := backend.Resume(ctx, threadID); err != nil {
+		t.Fatalf("resume the same thread in the replacement generation: %v", err)
+	}
+}
+
+func TestCodexStdioHelperProcess(t *testing.T) {
+	if os.Getenv("POCKETCTL_CODEX_STDIO_HELPER") != "1" {
+		return
+	}
+	input := json.NewDecoder(os.Stdin)
+	output := json.NewEncoder(os.Stdout)
+	for {
+		var request struct{ ID json.RawMessage }
+		if err := input.Decode(&request); err != nil {
+			os.Exit(0)
+		}
+		if len(request.ID) > 0 {
+			_ = output.Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
+		}
 	}
 }
 

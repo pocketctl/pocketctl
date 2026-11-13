@@ -137,6 +137,7 @@ func newCodexRuntimeProvider(sm *SessionManager) *CodexRuntimeProvider {
 		coord.start = func(ctx context.Context, binary, version string, generation uint64) (*codexAppServerRuntime, error) {
 			return startCodexAppServerForHome(ctx, binary, version, generation, profile.ID, profile.Home)
 		}
+		coord.startPrivateProject = codexPrivateProjectStarter(profile.Home)
 		return coord
 	}
 	profiles := adapter.CodexHomeProfiles()
