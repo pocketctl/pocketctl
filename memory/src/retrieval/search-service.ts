@@ -119,16 +119,24 @@ export interface SearchServiceDeps {
 }
 
 // The rest of a native prompt can specify output format without describing the
-// subject. Try its leading question only when the same code identifier also
-// appears as a whole token in the document.
+// subject. Score the leading question and, when it has a preamble, the
+// question from its first code identifier. Each score requires its own
+// whole-token identifier match in the document.
 function leadingCodeQuestion(query: string) {
   const end = query.search(/[?？]/u)
   if (end < 0 || !query.slice(end + 1).trim()) return null
   const question = query.slice(0, end).trim()
-  const codeIdentifier = /(?<![\p{L}\p{N}_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\p{L}\p{N}_])/gu
-  const identifiers = [...new Set(question.toLowerCase().match(codeIdentifier) ?? [])].slice(0, 8)
+  const codeIdentifier = /(?<![\p{L}\p{N}_])[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+(?![\p{L}\p{N}_])/gu
+  const matches = [...question.matchAll(codeIdentifier)]
+  const identifiers = [...new Set(matches.map(match => match[0].toLowerCase()))].slice(0, 8)
   if (!identifiers.length) return null
-  return { question, pattern: String.raw`\m(${identifiers.join('|')})\M` }
+  const firstIdentifier = matches[0]
+  return {
+    question,
+    pattern: String.raw`\m(${identifiers.join('|')})\M`,
+    identifierQuestion: firstIdentifier.index > 0 ? question.slice(firstIdentifier.index) : null,
+    firstIdentifierPattern: String.raw`\m${firstIdentifier[0].toLowerCase()}\M`,
+  }
 }
 
 export function createSearchService(deps: SearchServiceDeps) {
@@ -252,8 +260,12 @@ export function createSearchService(deps: SearchServiceDeps) {
           SELECT version_id,authority,freshness_at,
             CASE WHEN search_vector@@q.terms THEN ts_rank(search_vector,q.terms) END AS fts_score,
             word_similarity($16,search_document) AS trigram_score,
-            CASE WHEN $28::text IS NOT NULL AND search_document ~* $29::text
-              THEN word_similarity($28,search_document) END AS question_score
+            GREATEST(
+              CASE WHEN $28::text IS NOT NULL AND search_document ~* $29::text
+                THEN word_similarity($28,search_document) END,
+              CASE WHEN $30::text IS NOT NULL AND search_document ~* $31::text
+                THEN word_similarity($30,search_document) END
+            ) AS question_score
           FROM eligible CROSS JOIN (SELECT websearch_to_tsquery('simple'::regconfig,$16) terms) q
         `:''}
         ), metadata_candidates AS(
@@ -312,7 +324,10 @@ export function createSearchService(deps: SearchServiceDeps) {
         query,queryEmbedding,deps.embed?.provider??null,deps.embed?.model??null,deps.embed?.dimensions??null,budget,
         [...queryTokensLower],input.taskScopeKey??null,input.lifecycle?.spaceId??null,input.lifecycle?.destination??null,input.lifecycle?.consume??false,
         ...(shared?[input.lifecycle?.authorizationEpoch??null]:[]),
-        ...(nativeLexical ? [codeQuestion?.question ?? null, codeQuestion?.pattern ?? null] : []),
+        ...(nativeLexical ? [
+          codeQuestion?.question ?? null, codeQuestion?.pattern ?? null,
+          codeQuestion?.identifierQuestion ?? null, codeQuestion?.firstIdentifierPattern ?? null,
+        ] : []),
       ]),input.localOnly&&!nativeLexical?readEmbeddingMode():undefined])
       const localMode=nativeLexical?prefiltered.rows[0]?.local_embedding_mode:localEmbeddingMode?.rows[0]?.embedding_mode
       if(localMode==='shadow'||localMode==='enabled')degraded.push('embedding')

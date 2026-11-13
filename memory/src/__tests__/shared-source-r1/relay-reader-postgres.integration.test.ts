@@ -1570,6 +1570,11 @@ suite('controlled personal Relay source reader',()=>{
   try{
    await deliver('warmup',(_name,run)=>run())
    await deliver('mixed-language-identifier',(_name,run)=>run(),{queryText:mixedLanguageQuery})
+   const prefacedQuestion='For the PocketCtl migration source verification and review, '+mixedLanguageQuery
+   await deliver('prefaced-identifier',(_name,run)=>run(),{queryText:prefacedQuestion})
+   await deliver('prefaced-different-identifier',(_name,run)=>run(),{
+    queryText:prefacedQuestion.replace('memory_jobs','memory_jobs_archive'),expectEmpty:true,
+   })
    await deliver('different-identifier',(_name,run)=>run(),{
     queryText:mixedLanguageQuery.replace('memory_jobs','memory_jobs_archive'),expectEmpty:true,
    })
