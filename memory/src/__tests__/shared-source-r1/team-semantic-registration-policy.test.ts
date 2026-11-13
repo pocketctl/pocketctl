@@ -1,5 +1,5 @@
 import {expect,test} from 'vitest'
-import {memoryForwardTableRoster} from '../../migrations/shared-forward/engine.js'
+import {memoryForwardTableRoster} from '../../migrations/shared-forward/copy-schema-roster.js'
 import {JSON_COLUMN_POLICY} from '../../migrations/shared-source/json-reference-policy.js'
 import {classifyObject} from '../../migrations/shared-source/classification.js'
 test('semantic metadata is an explicit schema94 additive roster and never silently backfilled into schema93',()=>{

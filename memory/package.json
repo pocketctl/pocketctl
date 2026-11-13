@@ -19,7 +19,6 @@
     "retention:report": "tsx src/retention/cli.ts report",
     "migration:plan": "tsx src/migrations/governance-v2/cli.ts plan",
     "migration:shared-source": "tsx src/migrations/shared-source/cli.ts",
-    "migration:shared-forward": "tsx src/migrations/shared-forward/cli.ts",
     "migration:source-maintenance": "tsx src/migrations/shared-forward/source-maintenance-cli.ts"
   },
   "dependencies": {

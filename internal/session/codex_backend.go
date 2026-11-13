@@ -351,20 +351,34 @@ func (b *CodexAppServerBackend) sendWithContextResult(ctx context.Context, sessi
 	return current.startTurnWithContextResult(ctx, sessionID, content, config, hidden)
 }
 
-func (sm *SessionManager) bindCodexContextRuntime(ctx context.Context, sessionID string) context.Context {
+func (sm *SessionManager) bindCodexContextRuntime(ctx context.Context, sessionID string) (context.Context, error) {
 	sm.mu.RLock()
 	ps := sm.sessions[sessionID]
+	enabled := sm.memoryContext != nil && sm.memoryContextReady != nil && sm.memoryContextCapability != nil
 	var backend *CodexAppServerBackend
 	if ps != nil {
 		backend, _ = ps.Backend.(*CodexAppServerBackend)
 	}
+	ready := sm.memoryContextReady
+	owned := ps != nil && ps.Source == "daemon" && ps.Agent == adapter.AgentCodex && ps.ControlMode == protocol.ControlManaged
 	sm.mu.RUnlock()
 	if backend == nil {
-		return ctx
+		return ctx, nil
 	}
 	correlation := userMessageCorrelationFrom(ctx)
-	correlation.contextRuntime, correlation.contextGeneration, _ = backend.coord.backendClient()
-	return withUserMessageCorrelation(ctx, correlation)
+	if enabled && owned && ready() && correlation.InputMode != protocol.InputModeSteer && backend.memoryContextNativeSupported(ctx) && backend.coord.threadDetached(sessionID) {
+		// Restore an idle, unloaded thread before allocating the Context budget.
+		// Ordinary dispatch takes this same lock and rechecks the native turn.
+		resumed, release, err := backend.beginThreadOperation(ctx, sessionID, true)
+		if err != nil {
+			return ctx, err
+		}
+		correlation.contextRuntime, correlation.contextGeneration = resumed.client, resumed.generation
+		release()
+	} else {
+		correlation.contextRuntime, correlation.contextGeneration, _ = backend.coord.backendClient()
+	}
+	return withUserMessageCorrelation(ctx, correlation), nil
 }
 
 func (b *CodexAppServerBackend) Send(ctx context.Context, sessionID, content string) error {

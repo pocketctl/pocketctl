@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto'
 import type {RetainedClosure} from './source-maintenance-retained.js'
 import {retainedReferenceRoster,referenceChannelSql,SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS} from './source-reference-contract.js'
 import {hash,qi} from './source-maintenance-common.js'
-import {memoryForwardTableRoster} from './engine.js'
+import {memoryForwardTableRoster} from './copy-schema-roster.js'
 export interface PersonalDirectClosureScope {personalInstallationId:string;organizationInstallationId:string}
 export interface PersonalDirectClosure extends RetainedClosure {verificationScope:'finite-personal-direct-launch';databaseLayout:'copied-target'|'original-schema84';channels:{path:string;rows:number;digest:string}[]}
 export class PersonalDirectReferenceError extends Error {
