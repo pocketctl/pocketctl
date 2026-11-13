@@ -187,6 +187,51 @@ func TestCodexHiddenContextRejectsAtomicInjectionOnTerminalAccessibleRuntime(t *
 	}
 }
 
+func TestDetachedCodexResumesBeforeMemoryContext(t *testing.T) {
+	for _, resumeFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(resumeFails), func(t *testing.T) {
+			backend, rpc := nativeMemoryCodexBackend(t)
+			backend.sm.sessions["thread"] = &ProcessState{SessionID: "thread", Source: "daemon", Agent: adapter.AgentCodex,
+				ControlMode: protocol.ControlManaged, Status: protocol.StatusIdle, Cwd: t.TempDir(), Backend: backend}
+			backend.coord.markSubscribed("thread")
+			backend.coord.restoreDetachedThreads([]string{"thread"})
+			resumeError := errors.New("fixture resume failure")
+			if resumeFails {
+				rpc.errs["thread/resume"] = resumeError
+			}
+			memory := &deferredReceiptMemory{receipts: make(chan memorycontext.ReceiptRequest, 1)}
+			grants := 0
+			coordinator := &memorycontext.Coordinator{Memory: memory, Grants: grantTransportFunc(func(context.Context, string, string) (*protocol.MemoryContextGrantResult, error) {
+				grants++
+				if len(rpc.calls) != 1 || rpc.calls[0].method != "thread/resume" || backend.coord.threadDetached("thread") {
+					t.Fatalf("Context requested before the thread was resumed: %+v", rpc.calls)
+				}
+				return &protocol.MemoryContextGrantResult{Type: "memory_context_grant_result", Grant: "grant", ExpiresIn: 300,
+					InstallationID: "install", SessionID: "thread", ProviderPublicOrigin: "https://memory.example", Services: []string{"memory.context"}}, nil
+			})}
+			backend.sm.SetMemoryContext(coordinator, func() bool { return true }, backend.sm.MemoryContextCapability)
+			err := backend.sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "thread", Content: "original user input", InputMode: protocol.InputModeNewTurn})
+			if resumeFails {
+				if !errors.Is(err, resumeError) || grants != 0 || len(rpc.calls) != 1 {
+					t.Fatalf("resume failure retried or requested a grant: err=%v grants=%d calls=%+v", err, grants, rpc.calls)
+				}
+				return
+			}
+			if err != nil || grants != 1 || len(rpc.calls) != 2 || rpc.calls[1].method != "turn/startIfIdle" {
+				t.Fatalf("unexpected dispatch: err=%v grants=%d calls=%+v", err, grants, rpc.calls)
+			}
+			select {
+			case receipt := <-memory.receipts:
+				if !receipt.Delivered || receipt.OutcomeCode != "accepted" {
+					t.Fatalf("unexpected evidence receipt: %+v", receipt)
+				}
+			default:
+				t.Fatal("missing delivery receipt")
+			}
+		})
+	}
+}
+
 func TestCodexContextReceiptTracksNativeDeliveryWhenTurnBecomesActive(t *testing.T) {
 	for _, active := range []bool{true, false} {
 		t.Run(fmt.Sprint(active), func(t *testing.T) {

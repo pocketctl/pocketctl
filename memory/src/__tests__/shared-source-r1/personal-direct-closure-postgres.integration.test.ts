@@ -5,7 +5,7 @@ import {directLaunchFixture,type DirectLaunchFixture} from './direct-launch-fixt
 import {collectPersonalDirectClosure} from '../../migrations/shared-forward/personal-direct-closure.js'
 import {collectRetainedClosure} from '../../migrations/shared-forward/source-maintenance-retained.js'
 import {planPersonalDirectPrivacy,applyPersonalDirectPrivacy,verifyPersonalDirectPrivacy,type PersonalDirectPrivacyConfig} from '../../migrations/shared-forward/personal-direct-privacy.js'
-import {memoryForwardTableRoster} from '../../migrations/shared-forward/engine.js'
+import {memoryForwardTableRoster} from '../../migrations/shared-forward/copy-schema-roster.js'
 const url=process.env.PERSONAL_CLOSURE_TEST_DATABASE_URL,sourceUrl=process.env.PERSONAL_CLOSURE_SOURCE_TEST_DATABASE_URL,suite=url||sourceUrl?describe:describe.skip
 suite('finite personal direct-launch metadata closure',()=>{
  let f:DirectLaunchFixture,c:pg.PoolClient,personal:string,organization:string,session:string,event:string,artifact:string,closed=false

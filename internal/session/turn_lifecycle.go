@@ -438,7 +438,10 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 			return sm.dispatchUserMessage(ctx, in.SessionID, in.Content)
 		}
 		if in.HiddenContext == nil && !in.SkipMemoryContext {
-			ctx = sm.bindCodexContextRuntime(ctx, in.SessionID)
+			ctx, err = sm.bindCodexContextRuntime(ctx, in.SessionID)
+			if err != nil {
+				return err
+			}
 			in.HiddenContext = sm.prepareMemoryContext(ctx, in, requestID, agent)
 		}
 		delivered := true // Managed backends other than Codex retain their existing receipt contract.
