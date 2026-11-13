@@ -19,7 +19,7 @@ import { createPolicyResolver } from '../policies/resolver.js'
 import { resolveSelectedContextReferences, type SelectedContextReference } from './compiler.js'
 import {originPolicyCorpusSnapshot,originPolicyCorpusVersionsSql,originPolicyFenceSql,lockOriginPolicyFences} from '../governance/origin-policy.js'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
-import {contextClaimFacts,eligibleContextFacts,fenceConsumptionGeneration,ContextConsumptionChangedError,type ContextQueryFrame} from './consumption.js'
+import {contextPackClaimFacts,eligibleContextFacts,fenceConsumptionGeneration,ContextConsumptionChangedError,type ContextQueryFrame} from './consumption.js'
 
 /**
  * Admission is the linearization point for mode-off and revocation
@@ -153,6 +153,8 @@ export function createAdmissionService(deps: {
           selected_references: SelectedContextReference[]
           query_context:ContextQueryFrame|null;consumption_generation:string|null
           has_shared_items: boolean
+          tombstoned: boolean
+          item_versions: string[]
         }>(`
           WITH installation AS MATERIALIZED (
             SELECT installation_id,relay_status,local_status,config_version::text
@@ -191,7 +193,17 @@ export function createAdmissionService(deps: {
             JOIN knowledge_claims c USING (installation_id, claim_id)
             WHERE i.pack_id = $5 AND i.installation_id = $1
               AND c.owner_scope_kind <> 'personal'
-          ) ELSE FALSE END AS has_shared_items
+          ) ELSE FALSE END AS has_shared_items,
+            CASE WHEN p.state='ready' THEN EXISTS(
+              SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=$1
+              AND (t.session_id=$2 OR EXISTS(
+                SELECT 1 FROM memory_context_pack_evidence pe
+                JOIN knowledge_evidence e USING(installation_id,evidence_id)
+                JOIN work_episodes w ON w.installation_id=e.installation_id AND w.episode_id=e.episode_id
+                WHERE pe.pack_id=$5 AND w.session_id=t.session_id))
+            ) ELSE FALSE END AS tombstoned,
+            ARRAY(SELECT DISTINCT item.version_id::text FROM memory_context_pack_items item
+              WHERE item.pack_id=$5 AND item.installation_id=$1 AND p.state='ready') AS item_versions
           FROM checked i LEFT JOIN locked_pack p ON TRUE
         `,[input.installationId,input.sessionId,input.clientRequestId,input.grantConfigVersion,input.packId,
           nativeGrant?.expiresAt??null,nativeGrant?.userId?.toString()??null])).rows[0]
@@ -330,32 +342,18 @@ export function createAdmissionService(deps: {
           return { ok: false, error: 'pack_mismatch' }
         }
 
-        // Observe liveness, Session tombstones and dependency membership in
-        // one snapshot. The exact claim rows are still locked and rechecked below.
-        const validity = (await client.query<{invalid:boolean; tombstoned:boolean; versions:string[]}>(`
-          WITH items AS MATERIALIZED (
-            SELECT claim_id, version_id
-            FROM memory_context_pack_items WHERE pack_id=$1 AND installation_id=$2
-          )
-          SELECT EXISTS(
-            SELECT 1 FROM items i JOIN knowledge_claims c ON c.installation_id=$2 AND c.claim_id=i.claim_id
-            WHERE c.state<>'active' OR c.current_version_id IS DISTINCT FROM i.version_id
-              OR NOT EXISTS(SELECT 1 FROM knowledge_evidence e WHERE e.installation_id=$2 AND e.version_id=i.version_id)
-          ) AS invalid, EXISTS(
-            SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=$2
-            AND (t.session_id=$3 OR EXISTS(
-              SELECT 1 FROM memory_context_pack_evidence pe
-              JOIN knowledge_evidence e USING(installation_id,evidence_id)
-              JOIN work_episodes w ON w.installation_id=e.installation_id AND w.episode_id=e.episode_id
-              WHERE pe.pack_id=$1 AND w.session_id=t.session_id))
-          ) AS tombstoned, ARRAY(SELECT DISTINCT version_id::text FROM items) AS versions
-        `,[input.packId,input.installationId,input.sessionId])).rows[0]
-        if(validity.invalid||validity.tombstoned){
+        if(packRow.tombstoned){
           await client.query('COMMIT')
-          return { ok: false, error: 'claim_invalid' }
+          return {ok:false,error:'claim_invalid'}
         }
-        const dependencies=validity.versions
-        const facts=await contextClaimFacts(client,input.installationId,dependencies,{lock:true})
+        // The Session and installation purge locks cover the earlier
+        // tombstone read. Observe Claim and evidence facts on locked rows.
+        const dependencies=packRow.item_versions
+        const {facts,invalidClaim}=await contextPackClaimFacts(client,input.installationId,input.packId)
+        if(invalidClaim||dependencies.some(versionId=>!facts.has(versionId))){
+          await client.query('COMMIT')
+          return {ok:false,error:'claim_invalid'}
+        }
         // FOR SHARE returns the current Claim tuple after a concurrent
         // owner change. An earlier unlocked snapshot can see the old owner.
         if(selectedReferences.length===0&&[...facts.values()].some(source=>source.ownerScopeKind!=='personal')){

@@ -14,6 +14,7 @@ import {withdrawnDeliveryJoinSql} from '../episodes/delivery-withdrawal.js'
 import { redactSensitive } from '../logging.js'
 import type { ContextRetrieval } from './retrieval.js'
 import type { ScopeResolver } from './scope-resolver.js'
+import type { ScopeResolution } from './types.js'
 import type { LoadoutRepository } from './loadout-repository.js'
 import { resolvedLoadoutFingerprint } from './loadout-repository.js'
 import type { ContextSettingsRepository } from './settings-repository.js'
@@ -43,6 +44,7 @@ export type CompileOutcome =
 
 export interface CompileRequest {
   authorityGrant?:PackAuthorityGrant
+  resolvedScope?:ScopeResolution
   installationId: string
   sessionId: string
   clientRequestId: string
@@ -269,7 +271,7 @@ export function createContextCompiler(deps: {
         checkpoint = now
       }
       // Scope resolution samples the fence before snapshot-dependent inputs.
-      const resolvedScope = await deps.scope.resolve({
+      const resolvedScope = input.resolvedScope ?? await deps.scope.resolve({
         installationId: input.installationId,
         sessionId: input.sessionId,
         repositoryIdHint: input.repositoryId ?? null,
@@ -393,14 +395,14 @@ export function createContextCompiler(deps: {
 		}
 		return { kind: 'degraded', reason: 'compile_in_progress' }
 	  }
-      const persona = selectedReferences.length || (!resolvedScope.repositoryKnown && policyDoc.unknown_repository_behavior === 'empty')
-        ? [] : await deps.scope.personaVersions({ installationId: input.installationId })
       mark('reserve')
+      const personaPending = selectedReferences.length || (!resolvedScope.repositoryKnown && policyDoc.unknown_repository_behavior === 'empty')
+        ? [] : deps.scope.personaVersions({ installationId: input.installationId })
       // A native turn shares the daemon deadline with grant, admission and
       // consumption. Keep remote embedding off that synchronous path and
       // apply the configured degradation policy to the local retrieval pools.
-      const retrieval = selectedReferences.length === 0 && (resolvedScope.repositoryKnown||lifecycle?.spaceId) && minimizedQuery.length > 0
-        ? await deps.retrieval.retrieve({
+      const retrievalPending = selectedReferences.length === 0 && (resolvedScope.repositoryKnown||lifecycle?.spaceId) && minimizedQuery.length > 0
+        ? deps.retrieval.retrieve({
         authorityGrant:input.authorityGrant,
             installationId: input.installationId,
             query: minimizedQuery,
@@ -419,6 +421,7 @@ export function createContextCompiler(deps: {
             rankingPolicy: rankingPolicy.document as RankingPolicyDocument,
           })
         : { outcome: 'empty' as const, degradedComponents: [], candidates: [], trajectoryId: '' }
+      const [persona, retrieval] = await Promise.all([personaPending, retrievalPending])
       mark('retrieve')
       if (retrieval.outcome === 'retrieval_failed') {
         await deps.generation.complete({
