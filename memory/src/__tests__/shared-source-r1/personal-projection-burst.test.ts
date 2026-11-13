@@ -34,11 +34,11 @@ test('slow successful first page respects the one-second cooperative continuatio
  const error=await f.run().catch(e=>e);expect(error).toBeInstanceOf(JobDeferredError);expect(io.prepare).toHaveBeenCalledOnce();expect(error.availableAt.getTime()-Date.now()).toBe(1000)
 })
 test('unchanged committed progress does not spin or invent another page',async()=>{
- const p={state:'scanning',next_cursor:'fixed',source_version:{content:'1'}},f=fixture([p,p])
+ const p={state:'scanning',next_cursor:'fixed',source_version:{metadataWave:{phase:'scanning'}}},f=fixture([p,p])
  await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError);expect(io.persist).toHaveBeenCalledOnce()
 })
 test.each([undefined,{state:'ready',next_cursor:null,source_version:{content:'2'}}])('disappearing or replaced durable progress cannot restart the old scan: %s',async next=>{
- const p={state:'scanning',next_cursor:'fixed',source_version:{content:'1'}},f=fixture([p,next])
+ const p={state:'scanning',next_cursor:'fixed',source_version:{metadataWave:{phase:'scanning'}}},f=fixture([p,next])
  await expect(f.run()).rejects.toThrow('canonical_reference_cursor_changed');expect(io.persist).toHaveBeenCalledOnce()
 })
 test('privacy denial on a later fresh page propagates and never refreshes the old scope seal',async()=>{
@@ -100,6 +100,30 @@ test('an authority denial before ready recovery prevents watermark completion an
 test('explicit changed metadata input waits with original delay and no inline proof retry',async()=>{
  const f=fixture(),changed=new SourceUnavailableError('changed');io.prepare.mockRejectedValueOnce(changed)
  const error=await f.run().catch(e=>e);expect(error).toBeInstanceOf(JobDeferredError);expect(error.reason).toBe('source_not_ready');expect(error.availableAt.getTime()-Date.now()).toBe(1000);expect(io.prepare).toHaveBeenCalledOnce();expect(io.persist).not.toHaveBeenCalled();expect(io.scope).toHaveBeenCalledOnce()
+})
+
+test.each([undefined, 'old-page'])('ordinary personal projection defers when its current read keeps changing (%s)', async cursor => {
+ const progress = cursor ? {state:'scanning', next_cursor:cursor, source_version:{content:'1'}} : undefined
+ const f = fixture([progress])
+ io.prepare.mockRejectedValueOnce(new SourceUnavailableError('source_metadata_proof_unavailable'))
+ io.genericPrepare.mockRejectedValue(new SourceUnavailableError('changed'))
+
+ const failure = await f.run().catch(error => error)
+ expect(failure).toBeInstanceOf(JobDeferredError)
+ expect(failure.reason).toBe('source_not_ready')
+ expect(failure.availableAt.getTime()-Date.now()).toBe(1000)
+ expect(io.genericPrepare.mock.calls.map(call => call[3].cursor)).toEqual(cursor ? [cursor, undefined] : [undefined])
+ expect(io.genericPersist).not.toHaveBeenCalled()
+})
+
+test('ordinary personal projection propagates a revocation after restarting from an old cursor', async () => {
+ const f = fixture([{state:'scanning', next_cursor:'old-page', source_version:{content:'1'}}])
+ const denied = new SourceUnavailableError('revoked')
+ io.genericPrepare.mockRejectedValueOnce(new SourceUnavailableError('changed')).mockRejectedValueOnce(denied)
+
+ await expect(f.run()).rejects.toBe(denied)
+ expect(io.genericPrepare).toHaveBeenCalledTimes(2)
+ expect(io.genericPersist).not.toHaveBeenCalled()
 })
 
 test('realistic 201ms successful pages complete full tail full work within one original claim',async()=>{

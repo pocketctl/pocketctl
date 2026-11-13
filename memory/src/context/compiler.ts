@@ -1,4 +1,4 @@
-import type {PackAuthorityGrant} from './pack-repository.js'
+import type {ContextPackPersistPhase, PackAuthorityGrant} from './pack-repository.js'
 import {isPhysicalSourcePool,sourcePoolContext} from '../sources/pool-context.js'
 import {readCurrentPolicyAuthority,CurrentPolicyScopeStaleError} from '../governance/current-policy-authority.js'
 import {resolveLifecycleFrame,lifecycleFrameCurrent} from './lifecycle-frame.js'
@@ -246,7 +246,7 @@ export async function readContextCorpusFingerprint(pool:Pick<pg.Pool,'query'>,in
   return result.rows[0]?.fingerprint??''
 }
 
-export type ContextCompilePhase = 'scope' | 'inputs' | 'configuration' | 'reserve' | 'retrieve' | 'assemble' | 'persist'
+export type ContextCompilePhase = 'scope' | 'inputs' | 'configuration' | 'reserve' | 'retrieve' | 'assemble' | 'persist' | ContextPackPersistPhase
 
 export function createContextCompiler(deps: {
   pool: pg.Pool
@@ -619,7 +619,7 @@ export function createContextCompiler(deps: {
           selectedReferences:renderedReferences,
           state: 'empty',
           errorCode: emptyReason,
-        })
+        }, observe)
         mark('persist')
         void packId
         return {
@@ -651,7 +651,7 @@ export function createContextCompiler(deps: {
         externalItems:keptExternal,
         selectedReferences:renderedReferences,
         state: mode === 'enabled' ? 'ready' : 'shadow',
-      })
+      }, observe)
 
       mark('persist')
       if (mode === 'shadow') return { kind: 'shadow', packId }

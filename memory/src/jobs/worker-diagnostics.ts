@@ -2,6 +2,7 @@ import { RelayRequestError } from '../relay/errors.js'
 import { JOB_TYPES, JobTerminalError, type JobClaim } from './types.js'
 
 const KNOWN_CODES = new Set(['projection_source_changed','inbox_body_unavailable','job_aborted_before_dispatch','git_poll_failed','extraction_unconfigured',
+ 'canonical_reference_mapping_required','canonical_reference_busy','canonical_reference_changed','canonical_reference_conflict','canonical_reference_cursor_changed',
  'source_execution_generation_changed','source_execution_required','source_shadow_provider_forbidden','source_execution_scope_mismatch','source_executions_not_drained','source_execution_requires_read_committed','source_provider_effect_unrecorded'])
 const ERROR_NAMES = new Set(['Error','TypeError','RangeError','SyntaxError','AbortError'])
 const SQLSTATES = new Set(['40001','40P01','55P03','57014','23502','23503','23505','23514','08001','08003','08006','53300','53400','57P01','42P01','42703'])

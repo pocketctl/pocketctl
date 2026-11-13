@@ -796,6 +796,59 @@ suite('continuous personal canonical content uses current scope seal',()=>{
   finally{await scheduler.stop();await queue.stop()}
  },30000)
 
+ test('a new sealed dispatch advances an older ready checkpoint and keeps the original source UUID',async()=>{
+  const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  const rootKey=f.root(source),signal=new AbortController().signal,errors:unknown[]=[]
+  const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'advance-ready-scheduler',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'advance-ready-worker',signal,onError:e=>errors.push(e)})
+  queue.register('project_shared_source',createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0}),{branch:'canonical'})
+  queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
+  const snapshot=async()=>(await f.pool.query(`
+   SELECT d.scan_id::text AS scan,d.work_revision::text AS revision,d.dispatch_complete,
+    p.dispatched_revision::text AS dispatched,p.processed_revision::text AS processed,
+    t.source_version AS target,c.source_version AS checkpoint,c.state,
+    j.state AS job_state
+   FROM shared.memory_source_distributions d
+   JOIN shared.memory_source_progress p USING(source_kind,root_key)
+   JOIN shared.memory_source_distribution_targets t ON t.scan_id=d.scan_id AND t.installation_id=p.installation_id
+   JOIN memory.memory_canonical_projection_progress c ON c.installation_id=p.installation_id
+    AND c.source_kind=d.source_kind AND c.root_key=d.root_key AND c.context_key=shared.memory_source_scope_key(t.source_scope)
+   JOIN memory.memory_jobs j ON j.installation_id=t.installation_id AND j.job_type='project_shared_source'
+    AND j.payload->>'distribution_scan'=d.scan_id::text AND j.payload->>'target_cursor'=t.cursor_key
+   WHERE d.source_kind='relay_event' AND d.root_key=$1 AND p.installation_id=$2`,[rootKey,installation])).rows[0]
+  const references=async()=>(await f.runtime.query(`
+   SELECT canonical_key,source_event_id::text,payload FROM source_events
+   WHERE installation_id=$1 AND session_id=$2 ORDER BY canonical_key::bigint`,[installation,source.session])).rows
+  const until=async(check:(row:Awaited<ReturnType<typeof snapshot>>)=>boolean,runWorker=true)=>{
+   for(let step=0;step<160;step++){
+    await scheduler.runOnce()
+    if(runWorker)await queue.tick()
+    if(errors.length)throw errors[0]
+    const row=await snapshot()
+    if(row&&check(row))return row
+    await delay(25)
+   }
+   throw Error('ready_checkpoint_watermark_did_not_advance')
+  }
+  try{
+   const first=await f.event(source)
+   const prior=await until(row=>row.state==='ready'&&row.job_state==='completed'&&row.processed===row.revision)
+   const original=await references()
+   expect(original).toEqual([{canonical_key:first,source_event_id:expect.any(String),payload:null}])
+   const second=await f.event(source,true)
+   const newer=await until(row=>row.scan!==prior.scan&&row.dispatch_complete,false)
+   expect(BigInt(newer.revision)).toBeGreaterThan(BigInt(prior.revision))
+   expect(newer).toMatchObject({state:'ready',checkpoint:prior.checkpoint,processed:prior.revision,dispatched:newer.revision,job_state:'pending'})
+   expect(newer.target.authorization).toBe(prior.checkpoint.authorization)
+   expect(newer.target.content).not.toEqual(prior.checkpoint.content)
+   const advanced=await until(row=>row.scan===newer.scan&&row.state==='ready'&&row.job_state==='completed'&&row.processed===newer.revision)
+   expect(advanced.checkpoint).toMatchObject({authorization:newer.target.authorization,content:newer.target.content})
+   expect(await references()).toEqual([...original,{canonical_key:second,source_event_id:expect.any(String),payload:null}])
+   expect(errors).toEqual([])
+  }finally{await scheduler.stop();await queue.stop()}
+ },30000)
+
  test('the concrete metadata reader fetches one private hot body and keeps both real native proof checks',async()=>{
   const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
   await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])

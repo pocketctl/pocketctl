@@ -145,6 +145,7 @@ describe('context route contracts (unit)', () => {
     const app = appWith({ compiler: { compile: async (_input: unknown, observe: (phase: string, ms: number) => void) => {
       await new Promise(resolve => setTimeout(resolve, 425))
       observe('retrieve', 400)
+      observe('persist_commit', 13)
       return { kind: 'ready', packId: 'private-pack', stableTokens: 0, dynamicTokens: 2, itemCount: 1 }
     } } as never })
     try {
@@ -158,7 +159,7 @@ describe('context route contracts (unit)', () => {
       const line = log.mock.calls.map(call => String(call[0])).find(value => value.includes('context_compile_latency'))
       expect(line).toBeDefined()
       const timing = JSON.parse(line!)
-      expect(timing).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number), retrieve_ms: 400, daemon_request_age_ms: expectedAge })
+      expect(timing).toMatchObject({ outcome: 'ready', grant_ms: expect.any(Number), compile_ms: expect.any(Number), retrieve_ms: 400, persist_commit_ms: 13, daemon_request_age_ms: expectedAge })
       if (timestamp === 'daemon-start') {
         expect(timing.daemon_request_age_ms).toBeGreaterThanOrEqual(300)
         expect(timing.daemon_request_age_ms).toBeLessThan(700)
