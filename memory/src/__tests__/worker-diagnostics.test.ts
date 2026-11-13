@@ -9,6 +9,19 @@ describe('safe worker diagnostics', () => {
     const privateError=Object.assign(new Error('private body'),{code:'private/path',name:'secret name'})
     expect(workerErrorFields(privateError)).toEqual({code:'handler_failed_Error'})
   })
+  test('distinguishes mapping and lock failures in canonical projection without exposing arbitrary details', () => {
+    const categories = [
+      'canonical_reference_mapping_required', 'canonical_reference_busy', 'canonical_reference_changed',
+      'canonical_reference_conflict', 'canonical_reference_cursor_changed',
+    ]
+    for (const message of categories) {
+      const error = Object.assign(new Error(message), { code: 'P0001', detail: 'private source metadata' })
+      expect(workerErrorFields(error)).toEqual({ code: message })
+    }
+    expect(workerErrorFields(Object.assign(new Error('canonical_reference_mapping_required private'), {
+      code: 'P0001', detail: 'private source metadata',
+    }))).toEqual({ code: 'handler_failed_Error' })
+  })
   test('bounds terminal codes and includes only validated job fence diagnostics', () => {
     expect(workerErrorCode(new JobTerminalError('codegraph_parse_timeout'))).toBe('handler_failed_codegraph_parse_timeout')
     expect(workerErrorCode(new JobTerminalError('private/path'))).toBe('handler_failed_terminal_error')

@@ -4,7 +4,7 @@ import type { ContextRetrieval } from '../context/retrieval.js'
 import type { ScopeResolver } from '../context/scope-resolver.js'
 import type { LoadoutRepository } from '../context/loadout-repository.js'
 import type { ContextSettingsRepository } from '../context/settings-repository.js'
-import type { PackRepository } from '../context/pack-repository.js'
+import { createPackRepository, type PackRepository } from '../context/pack-repository.js'
 import type { GenerationRunRepository } from '../generation/repository.js'
 import type { PolicyResolver, EffectivePolicy } from '../policies/resolver.js'
 import {
@@ -118,6 +118,31 @@ const REQUEST: CompileRequest = {
 }
 
 describe('context compiler (deterministic synchronous path)', () => {
+  test.each(['persist_connect', 'persist_commit'])('a throwing pack observer cannot change the transaction at %s', async failedPhase => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM stored')) return { rowCount: 1, rows: [{ stable_tokens: 2, dynamic_tokens: 3 }] }
+      if (sql.includes('FROM memory_scope_consumption_generations')) return { rows: [{ generation: '1', stamped: true }] }
+      return { rows: [] }
+    })
+    const release = vi.fn()
+    const packs = createPackRepository({ connect: async () => ({ query, release }) } as never)
+    const observe = vi.fn((phase: string) => {
+      if (phase === failedPhase) throw Error('fixture timing observer')
+    })
+    const hash = Buffer.alloc(32)
+    await expect(packs.persistWithSummary({
+      installationId: INSTALLATION, generationRunId: null, trajectoryId: null,
+      sessionId: REQUEST.sessionId, clientRequestId: REQUEST.clientRequestId, agent: REQUEST.agent,
+      repositoryId: null, mode: 'enabled', state: 'empty', items: [],
+      effectivePolicyHash: hash, settingsFingerprint: hash, loadoutFingerprint: hash, inputDigest: hash,
+      policyRevision: 1, settingsRevision: 1, loadoutRevision: 1,
+    }, observe)).resolves.toMatchObject({ stableTokens: 2, dynamicTokens: 3 })
+    expect(observe).toHaveBeenCalledWith(failedPhase, expect.any(Number))
+    expect(query).toHaveBeenCalledWith('COMMIT')
+    expect(query).not.toHaveBeenCalledWith('ROLLBACK')
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   test('mode off short-circuits before any run reservation', async () => {
     const { deps } = fakeDeps({ mode: 'off' })
     const compiler = createContextCompiler(deps)

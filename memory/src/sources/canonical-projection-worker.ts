@@ -103,14 +103,20 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
   // under an exact full-root version. Start it from the beginning when the
   // selected reader could not prove its page.
   const cursorForOrdinary=!personal||ordinaryContinuation?progress?.next_cursor??undefined:undefined
-  let page
-  try{page=await prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor:cursorForOrdinary})}
-  catch(error){
+  const readOrdinaryPage=(cursor?:string)=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor})
+  const page=await readOrdinaryPage(cursorForOrdinary).catch(error=>{
    // A newer source revision invalidates the old cursor. Restart enumeration
    // under the new authority snapshot; existing source UUIDs are reused.
    if(!cursorForOrdinary||!(error instanceof SourceUnavailableError)||error.code!=='changed')throw error
-   page=await prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize})
-  }
+   return readOrdinaryPage()
+  }).catch(error=>{
+   // A changing personal root needs a fresh execution, just like the selected
+   // metadata path. No prepared proof reached the write transaction.
+   if(personal&&error instanceof SourceUnavailableError&&error.code==='changed'){
+    throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+   }
+   throw error
+  })
   if(signal.aborted)throw Error('canonical_projection_aborted')
   // Body IO can span a control change or a newer distribution. The immutable
   // execution clock and source/root fences repeat this at physical COMMIT.

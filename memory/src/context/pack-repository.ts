@@ -159,11 +159,26 @@ export interface PersistPackInput {
 
 const FOREIGN_PACK_SQL="(p.query_context ? 'selectedScopeProof' OR EXISTS(SELECT 1 FROM jsonb_array_elements(COALESCE(p.selected_references,'[]'::jsonb)) r WHERE r->>'installation_id' IS DISTINCT FROM p.installation_id::text))"
 
+export type ContextPackPersistPhase =
+  | 'persist_prepare' | 'persist_connect' | 'persist_authority' | 'persist_insert'
+  | 'persist_fence' | 'persist_evidence_commit' | 'persist_commit'
+
+type ObservePackPersistence = (phase: ContextPackPersistPhase, ms: number) => void
+
 export function createPackRepository(pool: pg.Pool) {
   type StoredTokens = { stable_tokens: number; dynamic_tokens: number; evidence_proven?: boolean }
   const boundedTransaction = isPhysicalSourcePool(pool)
   const repository = {
-    async persistWithSummary(input: PersistPackInput): Promise<{ packId: string; stableTokens: number; dynamicTokens: number; evidenceProven?: boolean }> {
+    async persistWithSummary(input: PersistPackInput, observe?: ObservePackPersistence): Promise<{ packId: string; stableTokens: number; dynamicTokens: number; evidenceProven?: boolean }> {
+      let checkpoint = observe ? performance.now() : 0
+      const mark = (phase: ContextPackPersistPhase) => {
+        if (!observe) return
+        const now = performance.now()
+        const elapsed = Math.round(now - checkpoint)
+        checkpoint = now
+        // Timing diagnostics cannot change a pack write or its commit result.
+        try { observe(phase, elapsed) } catch { /* best-effort diagnostics */ }
+      }
       const stableItems: RenderItem[] = input.items
         .filter(item => item.section === 'stable')
         .map(item => ({ ...item, evidenceIds: item.evidenceIds }))
@@ -195,10 +210,12 @@ export function createPackRepository(pool: pg.Pool) {
         itemId: item.itemId, evidenceId, versionId: item.versionId,
       })))
       const prepared=sourcePoolContext(pool).namespace==='memory'?await prepareEvidenceSources(pool,input.installationId,[...new Set(evidence.map(ref=>ref.evidenceId))]):undefined
+      mark('persist_prepare')
       const client = await pool.connect()
       let lockedEvidence:Awaited<ReturnType<PreparedEvidenceSources['lockForPack']>>|undefined
       let commitDispatched = false
       try {
+        mark('persist_connect')
         await client.query(boundedTransaction ? "BEGIN; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'" : 'BEGIN')
         if(prepared){
           const grant=input.authorityGrant
@@ -212,6 +229,7 @@ export function createPackRepository(pool: pg.Pool) {
           }catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
           lockedEvidence=await prepared.lockForPack(client);attachPreparedEvidence(client,prepared)
         }
+        mark('persist_authority')
         const humanCapsules=lockedEvidence?.humanCapsules
         const lockedReferences=humanCapsules&&evidence.length ? evidence.map(ref=>{
           const proof=humanCapsules.get(ref.evidenceId.toLowerCase())
@@ -311,6 +329,7 @@ export function createPackRepository(pool: pg.Pool) {
             WHERE run_id = $1
           `, [input.generationRunId, packId])
         }
+        mark('persist_insert')
         if(input.queryContext?.selectedScopeProof){
           const proof=input.queryContext.selectedScopeProof
           if(!await selectedScopeContextCurrent(client,proof))throw new ContextConsumptionChangedError()
@@ -380,11 +399,14 @@ export function createPackRepository(pool: pg.Pool) {
         const tokens = inserted.rows[0] ?? (await client.query<StoredTokens>(
           'SELECT stable_tokens, dynamic_tokens FROM memory_context_packs WHERE pack_id=$1', [packId],
         )).rows[0]
+        mark('persist_fence')
         if(lockedEvidence){
           try{await lockedEvidence.assertForCommit(input.authorityGrant!)}catch(error){if(error instanceof TargetBindingError)throw new ContextConsumptionChangedError();throw error}
         }
+        mark('persist_evidence_commit')
         commitDispatched = true
         await client.query('COMMIT')
+        mark('persist_commit')
         return { packId, stableTokens: tokens?.stable_tokens ?? 0, dynamicTokens: tokens?.dynamic_tokens ?? 0, evidenceProven }
       } catch (error) {
         const rolledBack = await client.query('ROLLBACK').then(() => true, () => false)
@@ -599,8 +621,8 @@ export function createPackRepository(pool: pg.Pool) {
 
   return {
     ...repository,
-    async persist(input: PersistPackInput): Promise<string> {
-      return (await repository.persistWithSummary(input)).packId
+    async persist(input: PersistPackInput, observe?: ObservePackPersistence): Promise<string> {
+      return (await repository.persistWithSummary(input, observe)).packId
     },
   }
 }
