@@ -338,6 +338,10 @@
           <button v-if="hasMore && !historyReadFailed" type="button" @click="loadMoreMobileHistory">{{ t('attention.load_more') }}</button>
           <button v-else-if="historyFeedback" type="button" @click="retryHistory">{{ t('common.retry') }}</button>
         </div>
+        <div v-if="taskSnapshotError" class="mobile-history-feedback" role="status" data-testid="task-snapshot-error">
+          <span>{{ t('session.task_snapshot_failed') }}</span>
+          <button type="button" @click="retryTaskSnapshot">{{ t('common.retry') }}</button>
+        </div>
         <!-- Empty state when no messages -->
         <div v-if="!isLoading && renderMessages.length === 0 && !historyReadFailed" class="chat-empty-state">
           <svg class="empty-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -1152,6 +1156,25 @@ let olderReplayScrollTop = 0
 let olderReadingAnchor: { id: string; top: number } | undefined
 const historyFeedback = ref('')
 const historyReadFailed = ref(false)
+// Supplement requests keep their own identity: automatic older pages may
+// advance replayReqId before an initial snapshot arrives.
+const taskSnapshotError = ref(false)
+let taskSnapshotReqId = -1
+let taskSnapshotTimer: ReturnType<typeof setTimeout> | undefined
+function clearTaskSnapshotTimer() {
+  if (taskSnapshotTimer) clearTimeout(taskSnapshotTimer)
+  taskSnapshotTimer = undefined
+}
+function armTaskSnapshotDeadline() {
+  clearTaskSnapshotTimer()
+  taskSnapshotTimer = setTimeout(() => { taskSnapshotTimer = undefined; taskSnapshotError.value = true }, 2500)
+}
+function retryTaskSnapshot() {
+  if (taskSnapshotTimer || focusedSubAgentId.value || taskSnapshotReqId < 0) return
+  taskSnapshotError.value = false
+  armTaskSnapshotDeadline()
+  send({ type: 'replay_task_snapshot', session_id: sessionId.value, req_id: taskSnapshotReqId })
+}
 let historyPageTimer: ReturnType<typeof setTimeout> | undefined
 let mobileHistoryNeedsGesture = false
 const loadedHistoryIDs = new Set<string>()
@@ -2347,6 +2370,9 @@ function settleReplayLocalMessage(message: any, target: any[]) {
 }
 
 function loadHistory() {
+  clearTaskSnapshotTimer()
+  taskSnapshotError.value = false
+  taskSnapshotReqId = -1
   if (historyPageTimer) clearTimeout(historyPageTimer)
   clearHistorySlowTimer()
   isSlowLoading.value = false
@@ -2383,7 +2409,8 @@ function loadHistory() {
   if (focusedSubAgentId.value) {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
-    send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
+    taskSnapshotReqId = replayReqId.value
+    send({ type: 'replay', session_id: sessionId.value, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value, task_snapshot: true })
     try {
       send({ type: 'list_commands', session_id: sessionId.value }); requestInvocations()
     } catch (error) {
@@ -4238,10 +4265,31 @@ onMounted(() => {
       nextTick(scrollToBottom)
     }
   }))
+  cleanups.push(onEvent('task_snapshot', (msg: any) => {
+    if (msg.session_id !== sessionId.value || msg.req_id !== taskSnapshotReqId || focusedSubAgentId.value) return
+    clearTaskSnapshotTimer()
+    if (!['partial', 'complete'].includes(msg.status) || !Array.isArray(msg.events)) {
+      taskSnapshotError.value = true
+      return
+    }
+    taskSnapshotError.value = false
+    if (msg.status === 'partial') armTaskSnapshotDeadline()
+    for (const event of msg.events) {
+      if (event.session_id && event.session_id !== sessionId.value) continue
+      if (event.agent_id || event.payload?.agent_id) continue
+      if (event.type === 'agent_plan' || event.type === 'agent_todo') {
+        acceptAgentPlan({ ...event, session_id: sessionId.value })
+      }
+    }
+  }))
   cleanups.push(onEvent('replay_end', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
     if (historyPageTimer) clearTimeout(historyPageTimer)
+    if (msg.req_id === taskSnapshotReqId) {
+      if (msg.task_snapshot_status === 'pending') armTaskSnapshotDeadline()
+      else if (msg.task_snapshot_status === 'error') taskSnapshotError.value = true
+    }
     if (msg.error) {
       resetReplayTrustBuffers()
       finishHistoryViewportFill()
@@ -4534,7 +4582,8 @@ onMounted(() => {
       resetReplayTrustBuffers()
       replayReqId.value++
       isLoading.value = true
-      send({ type: 'replay', session_id: msg.session_id, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value })
+      taskSnapshotReqId = replayReqId.value
+      send({ type: 'replay', session_id: msg.session_id, direction: 'backward', limit: pageSize.value, req_id: replayReqId.value, task_snapshot: true })
     }
   }))
 
@@ -4647,6 +4696,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  clearTaskSnapshotTimer()
   if (historyPageTimer) clearTimeout(historyPageTimer)
   clearTimeout(invocationTimer)
   for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer)

@@ -35,6 +35,7 @@ export const OBSERVER_NATIVE_DRIVE_MESSAGE_TYPES: ReadonlySet<string> = new Set(
 export const OBSERVER_READ_ONLY_SESSION_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   'replay',
   'replay_subagent',
+  'replay_task_snapshot',
   'list_commands',
   'list_session_agents',
   'get_session_meta',

@@ -2371,19 +2371,44 @@ export async function getLatestAgentPlan(pool: pg.Pool, sessionId: string): Prom
   return (await hydratePostgresEventRows(pool, sessionId, result.rows))[0];
 }
 
-// Initial replay must restore each task source independently, including clears.
+// Select compact metadata/IDs before loading payloads: sorting complete JSON
+// bodies spills large session task histories to disk even when only a few heads win.
 export async function getLatestAgentTaskLists(pool: pg.Pool, sessionId: string): Promise<any[]> {
-  const result = await pool.query(
-    `SELECT DISTINCT ON (event_type, COALESCE(COALESCE(payload,body_header)->>'part_id', event_type))
-       id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
-     FROM events WHERE session_id = $1 AND event_type IN ('agent_plan','agent_todo')
-       AND COALESCE(COALESCE(payload,body_header)->>'agent_id', '') = ''
-     ORDER BY event_type, COALESCE(COALESCE(payload,body_header)->>'part_id', event_type),
-       CASE WHEN event_type = 'agent_plan'
-         AND (COALESCE(payload,body_header)->>'revision') ~ '^[1-9][0-9]*$'
-         THEN (COALESCE(payload,body_header)->>'revision')::numeric ELSE 0 END DESC,
-       id DESC`, [sessionId]);
+  const result = await pool.query(LATEST_AGENT_TASK_LISTS_SQL, [sessionId]);
   return hydratePostgresEventRows(pool, sessionId, result.rows);
+}
+
+export const LATEST_AGENT_TASK_LISTS_SQL = `WITH latest_task_ids AS MATERIALIZED (
+  SELECT DISTINCT ON (event_type, COALESCE(body_header->>'part_id', payload->>'part_id', event_type)) id
+  FROM events WHERE session_id = $1 AND event_type IN ('agent_plan','agent_todo')
+    AND COALESCE(COALESCE(payload,body_header)->>'agent_id', '') = ''
+  ORDER BY event_type, COALESCE(body_header->>'part_id', payload->>'part_id', event_type),
+    CASE WHEN event_type = 'agent_plan'
+      AND (COALESCE(body_header->>'revision', payload->>'revision')) ~ '^[1-9][0-9]*$'
+      THEN (COALESCE(body_header->>'revision', payload->>'revision'))::numeric ELSE 0 END DESC,
+    id DESC
+)
+SELECT e.id, e.session_id, e.event_type, e.payload, e.created_at,
+  ${EVENT_BODY_COLUMNS.split(', ').map(column => `e.${column}`).join(', ')}
+FROM events e JOIN latest_task_ids ON latest_task_ids.id=e.id ORDER BY e.id`;
+
+/** A real server-side deadline; hydration retains the original authenticated
+ * reader and pool. The router additionally bounds acquisition and object I/O. */
+export async function getLatestAgentTaskListsWithTimeout(pool: pg.Pool, sessionId: string): Promise<any[]> {
+  const client = await pool.connect();
+  let rows: any[];
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query("SELECT set_config('statement_timeout', '1000', true)");
+    rows = (await client.query(LATEST_AGENT_TASK_LISTS_SQL, [sessionId])).rows;
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  return hydratePostgresEventRows(pool, sessionId, rows);
 }
 
 export interface CompleteBackwardReplayPage {

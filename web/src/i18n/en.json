@@ -2167,6 +2167,7 @@
   "attention.notification.reason.resumed": "New business interaction",
   "attention.notification.reason.purge": "More than 60 days without business activity",
   "attention.notification.reason.archive": "More than 30 days without business activity",
+  "session.task_snapshot_failed": "Task plans could not be synchronized. You can continue reading the conversation.",
   "session.history_read_failed": "History content is temporarily unavailable. Please retry.",
   "attention.notification.stage.database": "Session data",
   "attention.notification.stage.objects": "Cold stored bodies",

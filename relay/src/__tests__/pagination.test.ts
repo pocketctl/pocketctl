@@ -22,7 +22,7 @@ function createMockPool() {
       }
       if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
       if (sql.includes('SELECT 1 FROM events')) return Promise.resolve({ rows: [] })
-      if (sql.includes("event_type = 'agent_plan'")) return Promise.resolve({ rows: latestTypedRow ? [latestTypedRow] : [] })
+      if (sql.includes('DISTINCT ON') || sql.includes("event_type = 'agent_plan'")) return Promise.resolve({ rows: latestTypedRow ? [latestTypedRow] : [] })
       if (sql.includes('FROM events')) return Promise.resolve({ rows: replayRows })
       return Promise.resolve({ rows: [], rowCount: 0 })
     }),
@@ -30,7 +30,7 @@ function createMockPool() {
     _setReplayRows: (rows: any[]) => { replayRows = rows },
     _setChildSession: (hit: boolean) => { childSessionHit = hit },
     _setLatestTypedRow: (row: any | undefined) => { latestTypedRow = row },
-    connect: vi.fn(),
+    connect: vi.fn(async () => ({ query: mockPool.query, release: vi.fn() })),
     end: vi.fn(),
   }
   return mockPool as any
@@ -413,7 +413,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     const replayed = clientWs._sent
       .filter((message: any) => message.type === 'replay_batch')
       .flatMap((message: any) => message.events)
-    expect(replayed.map((event: any) => event.type)).toEqual(['agent_plan', 'agent_text', 'agent_text'])
+    expect(replayed.map((event: any) => event.type)).toEqual(['agent_text', 'agent_text', 'agent_plan'])
     const end = clientWs._sent.find((message: any) => message.type === 'replay_end')
     expect(end).toMatchObject({ req_id: 7, count: 3, logical_count: 2, last_seq: 101, newest_seq: 102 })
   })
@@ -814,4 +814,12 @@ test('restores independent task sources and retains empty snapshots', async () =
   expect(sql).toContain("event_type IN ('agent_plan','agent_todo')")
   expect(sql).toContain("->>'part_id'")
   expect(sql).toContain("->>'agent_id', '') = ''")
+})
+
+test('task source selection materializes winning IDs before loading any body', async () => {
+  const pool = { query: vi.fn().mockResolvedValue({ rows: [] }) } as any
+  await getLatestAgentTaskLists(pool, 's')
+  const sql = pool.query.mock.calls[0][0]
+  expect(sql).toContain('AS MATERIALIZED')
+  expect(sql).toContain('JOIN latest_task_ids')
 })
