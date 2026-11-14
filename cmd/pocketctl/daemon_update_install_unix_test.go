@@ -11,6 +11,24 @@ import (
 	"github.com/pocketctl/pocketctl/internal/update"
 )
 
+func TestUpdateRejectsSudoUserBeforeRuntimeAccess(t *testing.T) {
+	for _, tt := range []struct {
+		euid    int
+		sudoUID string
+		reject  bool
+	}{
+		{0, "501", true}, {0, "1000", true}, {0, "0", false}, {0, "", false}, {501, "501", false},
+	} {
+		err := validateUpdateUser(tt.euid, tt.sudoUID)
+		if (err != nil) != tt.reject {
+			t.Fatalf("euid=%d SUDO_UID=%q err=%v", tt.euid, tt.sudoUID, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "pocketctl daemon update") {
+			t.Fatalf("missing actionable command: %v", err)
+		}
+	}
+}
+
 func TestUpdateSudoAuthorizationAndInstallBoundary(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires ordinary user")

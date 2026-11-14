@@ -313,7 +313,7 @@ func (p *CodexRuntimeProvider) Release(_ context.Context, req agentcontrol.Relea
 	return nil
 }
 
-func (p *CodexRuntimeProvider) Status(_ context.Context, _ agentcontrol.RuntimeStatusRequest) (agentcontrol.RuntimeStatusResult, error) {
+func (p *CodexRuntimeProvider) Status(ctx context.Context, _ agentcontrol.RuntimeStatusRequest) (agentcontrol.RuntimeStatusResult, error) {
 	cfg, err := agentcontrol.LoadConfig()
 	if err != nil {
 		return agentcontrol.RuntimeStatusResult{}, err
@@ -321,9 +321,29 @@ func (p *CodexRuntimeProvider) Status(_ context.Context, _ agentcontrol.RuntimeS
 	if cfg.Codex.State != agentcontrol.StateEnabled {
 		return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchNative), Reason: "Codex agent integration is not enabled"}, nil
 	}
-	snapshot, running := p.coordinator.status()
-	if !running {
-		return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchManaged), Reason: "runtime has not started"}, nil
+	c := p.coordinator
+	c.mu.Lock()
+	runtime := c.runtime
+	if runtime == nil || c.shuttingDown {
+		c.mu.Unlock()
+		return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchNative), Reason: "runtime has not started"}, nil
+	}
+	snapshot, probe := c.snapshotLocked(), c.probe
+	c.mu.Unlock()
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	probeErr := probe(probeCtx, runtime)
+	if err := ctx.Err(); err != nil {
+		return agentcontrol.RuntimeStatusResult{}, err
+	}
+	if probeErr != nil {
+		return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchNative), Reason: probeErr.Error()}, nil
+	}
+	c.mu.Lock()
+	current := c.runtime == runtime && c.generation == snapshot.Generation && !c.shuttingDown
+	c.mu.Unlock()
+	if !current {
+		return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchNative), Reason: "runtime changed during status probe"}, nil
 	}
 	return agentcontrol.RuntimeStatusResult{Mode: string(agentcontrol.LaunchManaged), BaseURL: snapshot.RemoteURI, Generation: snapshot.Generation}, nil
 }

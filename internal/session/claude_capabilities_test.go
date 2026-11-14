@@ -39,8 +39,8 @@ func TestManagedCodexAdvertisesMessageAcceptanceAndQueue(t *testing.T) {
 	}
 	if got := sm.sessionCapabilitiesLocked(&ProcessState{
 		Agent: adapter.AgentCodex, ControlMode: protocol.ControlUnmanagedActive,
-	}); len(got) != 0 {
-		t.Fatalf("unmanaged Codex gained receipt capability: %v", got)
+	}); !sameStrings(got, []string{"history_sync"}) {
+		t.Fatalf("unmanaged Codex must advertise history only: %v", got)
 	}
 }
 

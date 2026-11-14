@@ -248,7 +248,7 @@ func (sm *SessionManager) ListSessions() []SessionInfo {
 			Source:         ps.Source,
 			Cwd:            ps.Cwd,
 			Model:          ps.Model,
-			ControlMode:    ps.ControlMode,
+			ControlMode:    sessionControlMode(ps),
 			CodexHomeID:    ps.CodexHomeID,
 			CodexHomeLabel: ps.CodexHomeLabel,
 		}
@@ -544,7 +544,14 @@ func (sm *SessionManager) SessionControlMode(sessionID string) string {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	if state := sm.sessions[sessionID]; state != nil {
-		return state.ControlMode
+		return sessionControlMode(state)
 	}
 	return ""
+}
+
+func sessionControlMode(state *ProcessState) string {
+	if state.Agent == adapter.AgentCodex && state.ControlMode == "" {
+		return protocol.ControlLegacyReadOnly
+	}
+	return state.ControlMode
 }

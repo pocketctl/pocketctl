@@ -364,9 +364,14 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 	defer cancel()
 	if runtime, runtimeErr := runtimeStatus(statusCtx); runtimeErr == nil {
 		status.RuntimeReachable = runtime.Mode == string(LaunchManaged)
+		if agent == AgentCodex && !status.RuntimeReachable && status.Error == "" {
+			status.Error = runtime.Reason
+		}
 		if status.RuntimeReachable && status.State == StateEnabled && status.PathActive && status.CapabilityReason == "" {
 			status.EffectiveMode = string(LaunchManaged)
 		}
+	} else if agent == AgentCodex && status.Error == "" {
+		status.Error = runtimeErr.Error()
 	}
 	return status
 }

@@ -2,8 +2,51 @@ package update
 
 import (
 	"io"
+	"os"
+	"strings"
 	"testing"
 )
+
+func captureProgress(t *testing.T, run func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = old; f.Close() }()
+	run()
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestProgressClearsShrinkingTerminalFrames(t *testing.T) {
+	p := &progressBar{total: 20 * 1024 * 1024, width: 22, isTTY: true}
+	out := captureProgress(t, func() {
+		p.read = 1023 * 1024
+		p.render()
+		p.read = 1024 * 1024
+		p.render()
+	})
+	frames := strings.Split(out, "\r")[1:]
+	for _, frame := range frames {
+		if !strings.Contains(frame, "\x1b[K") {
+			t.Fatalf("terminal frame does not clear old tail: %q", frame)
+		}
+	}
+}
+
+func TestProgressCompletionNeverFabricatesDownloadedBytes(t *testing.T) {
+	p := &progressBar{total: 1000, read: 160, width: 22, isTTY: true}
+	out := captureProgress(t, p.Done)
+	if strings.Contains(out, "100%") || !strings.Contains(out, "160 B") {
+		t.Fatalf("partial transfer falsely reported complete: %q", out)
+	}
+}
 
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
@@ -15,8 +58,8 @@ func TestHumanBytes(t *testing.T) {
 		{1023, "1023 B"},
 		{1024, "1.0 KB"},
 		{1536, "1.5 KB"},
-		{10_485_760, "10.0 MB"},                       // 10 MiB
-		{18_874_317, "18.0 MB"},                       // ~18 MiB
+		{10_485_760, "10.0 MB"}, // 10 MiB
+		{18_874_317, "18.0 MB"}, // ~18 MiB
 		{1 << 30, "1.0 GB"},
 	}
 	for _, c := range cases {

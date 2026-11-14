@@ -3,9 +3,11 @@ package session
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -47,13 +49,24 @@ func codexHandoffArgsMatch(state *daemon.CodexAppServerState, process platform.P
 	}
 	args := process.Args
 	commandIndex := 1
+	if state.ProcessExecutable != "" && normalizeCwd(process.Executable) != normalizeCwd(state.ProcessExecutable) {
+		return false
+	}
 	if normalizeCwd(process.Executable) != normalizeCwd(state.Binary) {
-		// npm's executable is a Node script. Accept only the exact script at the
-		// interpreter's script position; never search arbitrary argv for codex.js.
-		if len(args) < 3 || !filepath.IsAbs(args[1]) || normalizeCwd(args[1]) != normalizeCwd(state.Binary) || !codexNodeInterpreterMatches(state.Binary, process.Executable) {
-			return false
+		// New handoffs pin the ready process image, which may have replaced the
+		// npm Node launcher through execve. Old handoffs require proof that this
+		// exact image is the native dependency of the saved npm package.
+		if state.ProcessExecutable != "" && filepath.Base(process.Executable) != "node" ||
+			state.ProcessExecutable == "" && codexNpmExecutableMatches(state.Binary, state.Version, process.Executable) {
+			commandIndex = 1
+		} else {
+			// npm's executable is a Node script. Accept only the exact script at the
+			// interpreter's script position; never search arbitrary argv for codex.js.
+			if len(args) < 3 || !filepath.IsAbs(args[1]) || normalizeCwd(args[1]) != normalizeCwd(state.Binary) || !codexNodeInterpreterMatches(state.Binary, process.Executable) {
+				return false
+			}
+			commandIndex = 2
 		}
-		commandIndex = 2
 	}
 	if len(args) <= commandIndex || args[commandIndex] != "app-server" {
 		return false
@@ -78,6 +91,102 @@ func codexHandoffArgsMatch(state *daemon.CodexAppServerState, process platform.P
 		}
 	}
 	return listeners == 1
+}
+
+func codexNpmPlatform(goos, arch string) (string, string) {
+	switch goos + "/" + arch {
+	case "darwin/arm64":
+		return "codex-darwin-arm64", "aarch64-apple-darwin"
+	case "darwin/amd64":
+		return "codex-darwin-x64", "x86_64-apple-darwin"
+	case "linux/arm64":
+		return "codex-linux-arm64", "aarch64-unknown-linux-musl"
+	case "linux/amd64":
+		return "codex-linux-x64", "x86_64-unknown-linux-musl"
+	case "windows/arm64":
+		return "codex-win32-arm64", "aarch64-pc-windows-msvc"
+	case "windows/amd64":
+		return "codex-win32-x64", "x86_64-pc-windows-msvc"
+	}
+	return "", ""
+}
+
+type codexNpmMetadata struct {
+	Name                 string            `json:"name"`
+	Version              string            `json:"version"`
+	OptionalDependencies map[string]string `json:"optionalDependencies"`
+}
+
+func readCodexNpmPackage(path string) (codexNpmMetadata, bool) {
+	var metadata codexNpmMetadata
+	file, err := os.Open(filepath.Join(path, "package.json"))
+	if err != nil {
+		return metadata, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 16*1024+1))
+	if err != nil || len(data) > 16*1024 {
+		return metadata, false
+	}
+	err = json.Unmarshal(data, &metadata)
+	return metadata, err == nil
+}
+
+// Recover a legacy JS-only handoff without accepting arbitrary "codex" argv.
+// Resolve the same platform package locations used by Node module resolution;
+// package identities, version, executable path, birth token and listener must
+// all agree. Never run a launcher to discover its native dependency.
+func codexNpmExecutableMatches(script, version, executable string) bool {
+	script, err := filepath.EvalSymlinks(script)
+	if err != nil || filepath.Base(script) != "codex.js" || filepath.Base(filepath.Dir(script)) != "bin" {
+		return false
+	}
+	root := filepath.Dir(filepath.Dir(script))
+	launcher, ok := readCodexNpmPackage(root)
+	version = strings.TrimPrefix(version, "v")
+	if !ok || launcher.Name != "@openai/codex" || version == "" {
+		return false
+	}
+	pkg, triple := codexNpmPlatform(runtime.GOOS, runtime.GOARCH)
+	if pkg == "" {
+		return false
+	}
+	name := "codex"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	actual, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return false
+	}
+	matches := func(base string) bool {
+		expected, err := filepath.EvalSymlinks(filepath.Join(base, "vendor", triple, "bin", name))
+		if err != nil || expected != actual {
+			return false
+		}
+		info, err := os.Stat(expected)
+		return err == nil && info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode().Perm()&0111 != 0)
+	}
+	roots := []string{filepath.Join(root, "node_modules", "@openai", pkg)}
+	for dir := filepath.Dir(root); ; dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == "node_modules" {
+			roots = append(roots, filepath.Join(dir, "@openai", pkg))
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	for _, candidate := range roots {
+		metadata, ok := readCodexNpmPackage(candidate)
+		dependency := launcher.OptionalDependencies["@openai/"+pkg]
+		aliasVersion := version + "-" + strings.TrimPrefix(pkg, "codex-")
+		exactPackage := dependency == version && metadata.Name == "@openai/"+pkg && metadata.Version == version
+		exactAlias := dependency == "npm:@openai/codex@"+aliasVersion && metadata.Name == "@openai/codex" && metadata.Version == aliasVersion
+		if ok && (exactPackage || exactAlias) && matches(candidate) {
+			return true
+		}
+	}
+	return launcher.Version == version && matches(root) // Legacy packages bundled vendor/ directly.
 }
 
 func codexNodeInterpreterMatches(script, executable string) bool {
