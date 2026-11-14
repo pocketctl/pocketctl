@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -4905,6 +4906,10 @@ func readJSONLLines(path string, maxLines int) []string {
 // ---------- daemon update ----------
 
 func cmdDaemonUpdate(args []string) {
+	if err := validateUpdateUser(os.Geteuid(), os.Getenv("SUDO_UID")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	fs := flag.NewFlagSet("daemon update", flag.ExitOnError)
 	versionFlag := fs.String("version", "", "Specific version to update to (e.g. v0.1.0, default: latest)")
 	noRestart := fs.Bool("no-restart", false, "Download and replace binary without restarting daemon")
@@ -4979,7 +4984,9 @@ func cmdDaemonUpdate(args []string) {
 	// 3. Download
 	fmt.Println()
 	fmt.Println(i18n.T("update.downloading"))
-	tmpPath, err := update.DownloadAndVerify(binInfo)
+	downloadCtx, stopDownload := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopDownload()
+	tmpPath, err := update.DownloadAndVerifyContext(downloadCtx, binInfo)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, i18n.T("update.download_fail", err))
 		os.Exit(1)

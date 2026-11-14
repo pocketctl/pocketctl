@@ -855,6 +855,96 @@ describe('observer session projection', () => {
     return { pool, upsert, materializer }
   }
 
+  test('Codex discovery without a managed claim revokes stale control in storage and delivery', async () => {
+    const { upsert, materializer } = materializerFor()
+    const result = await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'native-after-restart', agent: 'codex',
+      source: 'terminal', status: 'idle', resync: true,
+    }))
+    const args = upsert.mock.calls.at(-1)!
+    expect(args[11]).toBe('legacy_read_only')
+    expect(args[12]).toEqual(['history_sync'])
+    expect(result.deliveries[0].payload).toMatchObject({
+      control_mode: 'legacy_read_only', capabilities: ['history_sync'],
+    })
+  })
+
+  test('explicit loss of Codex control removes write capabilities even if metadata omits capabilities', async () => {
+    const { materializer } = materializerFor()
+    vi.spyOn(db, 'getSessionRuntimePolicy').mockResolvedValue({
+      daemonId: 'daemon-1', agentType: 'codex', source: 'terminal',
+      controlMode: 'managed', capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    const update = vi.spyOn(db, 'updateSessionControl').mockResolvedValue(undefined)
+    const result = await materializer.materialize(inputFor({
+      type: 'session_meta', session_id: 'lost-control', control_mode: 'legacy_read_only',
+    }))
+    expect(update).toHaveBeenCalledWith(expect.anything(), 'lost-control', 'legacy_read_only', ['history_sync'])
+    expect(result.deliveries[0].payload).toMatchObject({ capabilities: ['history_sync'] })
+  })
+
+  test('partial Codex model metadata does not revoke existing control', async () => {
+    const { materializer } = materializerFor()
+    vi.spyOn(db, 'getSessionRuntimePolicy').mockResolvedValue({
+      daemonId: 'daemon-1', agentType: 'codex', source: 'terminal',
+      controlMode: 'managed', capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    const update = vi.spyOn(db, 'updateSessionControl').mockResolvedValue(undefined)
+    await materializer.materialize(inputFor({ type: 'session_meta', session_id: 'still-managed', model: 'model' }))
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  test.each(['session_discovered', 'session_meta'])('a same-user foreign daemon cannot revoke current managed control via %s', async type => {
+    const { upsert, materializer } = materializerFor()
+    vi.spyOn(db, 'getSessionRuntimePolicy').mockResolvedValue({
+      daemonId: 'current-daemon', agentType: 'codex', source: 'terminal',
+      controlMode: 'managed', capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    const update = vi.spyOn(db, 'updateSessionControl').mockResolvedValue(undefined)
+    const result = await materializer.materialize(inputFor({
+      type, session_id: 'current-session', agent: 'codex',
+      ...(type === 'session_meta' ? { control_mode: 'legacy_read_only' } : { resync: true }),
+    }))
+    expect(upsert).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
+    expect(result.deliveries).toEqual([])
+  })
+
+  test('an explicit managed discovery still permits same-user runtime relocation', async () => {
+    const { upsert, materializer } = materializerFor()
+    vi.spyOn(db, 'getSessionRuntimePolicy').mockResolvedValue({
+      daemonId: 'previous-daemon', agentType: 'codex', source: 'terminal',
+      controlMode: 'managed', capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    const result = await materializer.materialize(inputFor({
+      type: 'session_discovered', session_id: 'relocated', agent: 'codex',
+      control_mode: 'managed', capabilities: ['message_acceptance_receipt'],
+    }))
+    expect(upsert.mock.calls.at(-1)![2]).toBe('daemon-1')
+    expect(result.deliveries[0].payload).toMatchObject({ daemon_id: 'daemon-1', control_mode: 'managed' })
+  })
+
+  test.each(['session_discovered', 'session_meta'])('Codex %s revocation commits under the fence and cannot replay over a later owner', async type => {
+    const { upsert, materializer } = materializerFor()
+    const policy = vi.spyOn(db, 'getSessionRuntimePolicy').mockResolvedValue({
+      daemonId: 'daemon-1', agentType: 'codex', source: 'terminal',
+      controlMode: 'managed', capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    const update = vi.spyOn(db, 'updateSessionControl').mockResolvedValue(undefined)
+    const result = await materializer.materialize(inputFor({
+      type, session_id: 'delayed-revocation', agent: 'codex',
+      ...(type === 'session_meta' ? { control_mode: 'legacy_read_only' } : { resync: true }),
+    }), undefined, { deferEffects: true })
+    expect(type === 'session_meta' ? update : upsert).toHaveBeenCalledTimes(1)
+    policy.mockResolvedValue({
+      daemonId: 'successor-daemon', agentType: 'codex', source: 'terminal',
+      controlMode: 'managed', capabilities: ['message_acceptance_receipt'], status: 'idle',
+    })
+    await result.applyEffects!()
+    expect(type === 'session_meta' ? update : upsert).toHaveBeenCalledTimes(1)
+    expect(result.deliveries).toEqual([])
+  })
+
   test('zcode observer session_discovered is recorded with server-derived read-only policy', async () => {
     const { upsert, materializer } = materializerFor()
     await materializer.materialize(inputFor({

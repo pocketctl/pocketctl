@@ -25,6 +25,7 @@ import (
 type codexAppServerRuntime struct {
 	PID                  int
 	ProcessStartIdentity string
+	ProcessExecutable    string
 	Endpoint             string
 	RemoteURI            string
 	PrivateStdio         bool
@@ -428,6 +429,7 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 		Cwd: c.projectCwd, CodexHomeID: c.codexHomeID, CodexHome: c.codexHome,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
 		ProcessStartIdentity: c.runtime.ProcessStartIdentity,
+		ProcessExecutable:    c.runtime.ProcessExecutable,
 		RemoteURI:            c.runtime.RemoteURI, PrivateStdio: c.runtime.PrivateStdio, Binary: c.binary, Version: c.version,
 		SchemaHash: c.schemaHash, Generation: c.generation, Leases: leases,
 		Threads:         threads,

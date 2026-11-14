@@ -343,6 +343,24 @@ func TestOpenCodeInstallerStatusReportsReachableManagedRuntime(t *testing.T) {
 	}
 }
 
+func TestCodexInstallerStatusReportsEndpointFailureReason(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	real := testExecutable(t, "real-codex")
+	installer := Installer{
+		ResolveCodex: func(context.Context) (string, string, error) { return real, "0.167.1", nil },
+		ProbeCodex: func(context.Context, string, string) (CodexCapabilities, error) {
+			return CodexCapabilities{Core: true, TerminalRemote: true}, nil
+		},
+		RuntimeStatusAgent: func(context.Context, string) (RuntimeStatusResult, error) {
+			return RuntimeStatusResult{Mode: string(LaunchNative), Reason: "runtime has not started"}, nil
+		},
+	}
+	status := installer.StatusAgent(context.Background(), AgentCodex)
+	if status.RuntimeReachable || status.Error != "runtime has not started" {
+		t.Fatalf("runtime failure was hidden: %+v", status)
+	}
+}
+
 func TestCodexInstallerEnableDisableRoundTrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix symlink/profile behavior")

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { reactive, ref } from 'vue'
 import SessionDetail from '../SessionDetail.vue'
 import * as organization from '../../services/sessionOrganization'
+import { resetAgentPlanProgressForTests } from '../../composables/useAgentPlanProgress'
 
 const websocketMock = vi.hoisted(() => ({
   handlers: new Map<string, (message: any) => void>(),
@@ -131,7 +132,69 @@ describe('SessionDetail history loading', () => {
     expect(vm.isLoading).toBe(false)
     wrapper.unmount()
   })
+  test('task snapshots finish independently of body cursors and ignore stale responses', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const request = websocketMock.send.mock.calls.map(([msg])=>msg).filter(msg=>msg.type==='replay').at(-1)!
+    expect(request.task_snapshot).toBe(true)
+    websocketMock.handlers.get('replay_batch')?.({session_id:'session-http-lan',req_id:request.req_id,direction:'backward',events:[{type:'agent_text',session_id:'session-http-lan',text:'Body'}]})
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:request.req_id,last_seq:100,has_more:false,task_snapshot_status:'pending'})
+    await flushPromises()
+    const vm=wrapper.vm as any
+    expect(vm.isLoading).toBe(false)
+    const handler=websocketMock.handlers.get('task_snapshot')
+    expect(handler).toBeTypeOf('function')
+    handler?.({session_id:'session-http-lan',req_id:request.req_id,status:'partial',events:[{type:'agent_plan',session_id:'session-http-lan',event_id:'other-8',part_id:'other',revision:8,plan:[{step:'Historical source',status:'pending'}]}]})
+    expect(vm.currentPlan?.items.map((item:any)=>item.step)).toEqual(['Historical source'])
+    expect(vm.taskSnapshotError).toBe(false)
+    handler?.({session_id:'session-http-lan',req_id:request.req_id,status:'complete',events:[{type:'agent_plan',session_id:'session-http-lan',event_id:'plan-9',part_id:'plan',revision:9,plan:[{step:'Main source',status:'in_progress'}]}]})
+    expect(vm.currentPlan?.items.map((item:any)=>item.step)).toEqual(['Historical source','Main source'])
+    websocketMock.handlers.get('agent_plan')?.({type:'agent_plan',session_id:'session-http-lan',event_id:'other-10',part_id:'other',revision:10,plan:[{step:'New live revision',status:'completed'}]})
+    handler?.({session_id:'session-http-lan',req_id:request.req_id,status:'partial',events:[{type:'agent_plan',session_id:'session-http-lan',event_id:'other-7',part_id:'other',revision:7,plan:[{step:'Stale snapshot',status:'pending'}]}]})
+    expect(vm.currentPlan?.items.map((item:any)=>item.step)).toEqual(['New live revision','Main source'])
+    handler?.({session_id:'session-http-lan',req_id:request.req_id,status:'complete',events:[{type:'agent_plan',session_id:'session-http-lan',event_id:'plan-clear-10',part_id:'plan',revision:10,status:'cleared',plan:[]}]})
+    expect(vm.currentPlan?.items.map((item:any)=>item.step)).toEqual(['New live revision'])
+    handler?.({session_id:'session-http-lan',req_id:request.req_id,status:'complete',events:[{type:'agent_plan',session_id:'session-http-lan',event_id:'other-clear-11',part_id:'other',revision:11,status:'cleared',plan:[]}]})
+    expect(vm.currentPlan).toBeUndefined()
+    handler?.({session_id:'session-http-lan',req_id:request.req_id,status:'complete',events:[{type:'agent_plan',session_id:'session-http-lan',event_id:'other-stale-10',part_id:'other',revision:10,plan:[{step:'Must not resurrect',status:'pending'}]}]})
+    expect(vm.currentPlan).toBeUndefined()
+    expect(vm.loadedMinId).toBe(100)
+    expect(vm.taskSnapshotError).toBe(false)
+    handler?.({session_id:'session-http-lan',req_id:Number(request.req_id)-1,status:'error'})
+    expect(vm.taskSnapshotError).toBe(false)
+    expect(vm.messages.filter((m:any)=>m.type==='agent_text').map((m:any)=>m.content)).toEqual(['Body'])
+    wrapper.unmount()
+  })
+  test('task snapshot errors retain the conversation and expose independent retry', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const request = websocketMock.send.mock.calls.map(([msg])=>msg).filter(msg=>msg.type==='replay').at(-1)!
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:request.req_id,has_more:false,task_snapshot_status:'pending'})
+    websocketMock.handlers.get('task_snapshot')?.({session_id:'session-http-lan',req_id:request.req_id,status:'error',retryable:true})
+    await flushPromises()
+    expect(wrapper.find('[data-testid="task-snapshot-error"]').exists()).toBe(true)
+    const count=websocketMock.send.mock.calls.filter(([msg])=>msg.type==='replay').length
+    await wrapper.get('[data-testid="task-snapshot-error"] button').trigger('click')
+    expect(websocketMock.send).toHaveBeenCalledWith({type:'replay_task_snapshot',session_id:'session-http-lan',req_id:request.req_id})
+    expect(websocketMock.send.mock.calls.filter(([msg])=>msg.type==='replay')).toHaveLength(count)
+    wrapper.unmount()
+  })
+  test('a missing snapshot times out and its retry remains available', async () => {
+    vi.useFakeTimers()
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const request = websocketMock.send.mock.calls.map(([msg])=>msg).filter(msg=>msg.type==='replay').at(-1)!
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:request.req_id,has_more:false,task_snapshot_status:'pending'})
+    await vi.advanceTimersByTimeAsync(3000)
+    await wrapper.get('[data-testid="task-snapshot-error"] button').trigger('click')
+    expect(websocketMock.send).toHaveBeenCalledWith({type:'replay_task_snapshot',session_id:'session-http-lan',req_id:request.req_id})
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
   beforeEach(() => {
+    resetAgentPlanProgressForTests()
     localStorage.removeItem('pocketctl.mobile.showToolCalls')
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })))
     routeMock.current = reactive({ params: { id: 'session-http-lan' }, query: {} as Record<string, string> })

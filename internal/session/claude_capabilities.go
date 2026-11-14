@@ -65,7 +65,7 @@ func (sm *SessionManager) baseSessionCapabilitiesLocked(state *ProcessState) []s
 			}
 			return capabilities
 		}
-		return nil
+		return []string{ClaudeCapabilityHistorySync}
 	case adapter.AgentZcodeManaged:
 		if state.ControlMode == protocol.ControlManaged {
 			return []string{MessageAcceptanceReceiptCapability}

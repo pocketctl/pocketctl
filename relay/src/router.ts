@@ -325,6 +325,13 @@ export class Router {
     this.messageQueue.start();
   }
   private clients = new Map<WebSocket, ClientConnection>();
+  // Only in-flight immutable reads are shared. Owner and full cursor/scope are
+  // part of every key; completed results are never a cross-navigation cache.
+  private replayReads = new Map<string, Promise<any>>();
+  private replayReplies = new WeakMap<WebSocket, Map<string, Promise<void>>>();
+  private taskSnapshotReplies = new WeakMap<WebSocket, Map<string, Promise<void>>>();
+  private taskSnapshotReads = new Map<string, Promise<any[]>>();
+
   private sessionToDaemon = new Map<string, string>();
   private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; hostQuotaKind?: 'zcode'|'codex'|'reset'; reply?: any; timer: ReturnType<typeof setTimeout> }>();
   private documentResolveLimiter = new SessionDocumentReadLimiter(20, 10);
@@ -2713,7 +2720,8 @@ export class Router {
       }
       if (msg.type !== 'user_message' && msg.type !== 'session_document_resolve') client.subscribedSessions.add(msg.session_id);
     }
-    if (msg.type === 'replay') { withSessionHistoryScope({ userId: client.userId! }, () => this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit)); return; }
+    if (msg.type === 'replay') { withSessionHistoryScope({ userId: client.userId! }, () => this.handleReplay(clientWs, msg.session_id, msg.last_seq, msg.req_id, msg.direction, msg.limit, msg.task_snapshot === true)); return; }
+    if (msg.type === 'replay_task_snapshot') { withSessionHistoryScope({ userId: client.userId! }, () => this.sendTaskSnapshot(clientWs, msg.session_id, msg.req_id)); return; }
     if (msg.type === 'replay_subagent') { withSessionHistoryScope({ userId: client.userId! }, () => this.handleReplaySubagent(clientWs, msg.session_id, msg.agent_id, msg.last_seq, msg.req_id, msg.limit, msg.direction)); return; }
     if (msg.type === 'list_sessions') { this.handleListSessions(clientWs, client.userId, msg); return; }
     if (msg.type === 'list_daemons') { console.log('[router] list_daemons from user', client.userId, 'daemons in map:', this.daemons.size); this.handleListDaemons(clientWs, client.userId); return; }
@@ -3331,101 +3339,182 @@ export class Router {
     }
   }
 
-  private async handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number): Promise<void> {
+  private shareReplayRead<T>(reads: Map<string, Promise<T>>, key: string, work: () => Promise<T>): Promise<T> {
+    const existing = reads.get(key);
+    if (existing) return existing;
+    if (reads.size >= 128) return Promise.reject(new Error('history read capacity exceeded'));
+    const pending = work();
+    reads.set(key, pending);
+    void pending.then(() => reads.delete(key), () => reads.delete(key));
+    return pending;
+  }
+
+  private async readTaskSnapshot(clientWs: WebSocket, sessionId: string): Promise<any[]> {
+    const owner = this.clients.get(clientWs)?.userId;
+    if (owner == null) throw new Error('authenticated history scope required');
+    const pending = this.shareReplayRead(this.taskSnapshotReads, JSON.stringify([owner, sessionId]), async () => {
+      const rows = await db.getLatestAgentTaskListsWithTimeout(this.pool, sessionId);
+      // Authorize the completed snapshot inside the same total deadline. A
+      // blocked sessions lookup must not retain the response after body success.
+      if (!await db.getSessionRuntimePolicy(this.pool, sessionId, owner)) {
+        throw new Error('task snapshot no longer authorized');
+      }
+      return rows;
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Bound connection acquisition and cold-object IO as well as the server
+      // query. Late work stays in the bounded map until it actually finishes.
+      const rows = await Promise.race([pending, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('task snapshot deadline')), 1500);
+      })]);
+      if (this.clients.get(clientWs)?.userId !== owner) throw new Error('history account changed');
+      return rows;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private shareReplayReply(clientWs: WebSocket, replies: WeakMap<WebSocket, Map<string, Promise<void>>>, key: string, work: () => Promise<void>): Promise<void> {
+    let socketReplies = replies.get(clientWs);
+    if (!socketReplies) { socketReplies = new Map(); replies.set(clientWs, socketReplies); }
+    return this.shareReplayRead(socketReplies, key, work);
+  }
+
+  private sendTaskSnapshot(clientWs: WebSocket, sessionId: string, reqId?: number): Promise<void> {
+    return this.shareReplayReply(clientWs, this.taskSnapshotReplies,
+      JSON.stringify([this.clients.get(clientWs)?.userId, sessionId, reqId]),
+      () => this.performTaskSnapshot(clientWs, sessionId, reqId)).catch(() => {
+        this.send(clientWs, { type: 'task_snapshot', session_id: sessionId,
+          ...(reqId === undefined ? {} : { req_id: reqId }), status: 'error',
+          error: 'task_snapshot_unavailable', retryable: true });
+      });
+  }
+
+  private async performTaskSnapshot(clientWs: WebSocket, sessionId: string, reqId?: number): Promise<void> {
+    const owner = this.clients.get(clientWs)?.userId;
+    let result: any;
+    try {
+      const rows = await this.readTaskSnapshot(clientWs, sessionId);
+      result = { status: 'complete', events: rows.map(row => row.payload) };
+    } catch {
+      result = { status: 'error', error: 'task_snapshot_unavailable', retryable: true };
+    }
+    // The bounded read rechecks ownership; also fence socket identity changes.
+    if (owner == null || this.clients.get(clientWs)?.userId !== owner) return;
+    const envelope = (value: any) => ({ type: 'task_snapshot', session_id: sessionId,
+      ...(reqId === undefined ? {} : { req_id: reqId }), ...value });
+    if (result.status === 'error' || result.events.length === 0) {
+      this.send(clientWs, envelope(result));
+      return;
+    }
+    const frames = this.buildReplayBatches<any>(result.events, events => envelope({ status: 'complete', events }));
+    frames.forEach((frame, index) => this.send(clientWs, {
+      ...frame, status: index === frames.length - 1 ? 'complete' : 'partial',
+    }));
+  }
+
+  private handleReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number, independentTasks = false): Promise<void> {
+    return this.shareReplayReply(clientWs, this.replayReplies,
+      JSON.stringify([this.clients.get(clientWs)?.userId, sessionId, lastSeq ?? 0, reqId, direction, limit, independentTasks]),
+      () => this.performReplay(clientWs, sessionId, lastSeq, reqId, direction, limit, independentTasks)).catch(() => {
+        this.send(clientWs, { type: 'replay_end', session_id: sessionId,
+          ...(reqId === undefined ? {} : { req_id: reqId }), count: 0, last_seq: lastSeq,
+          has_more: false, error: 'history_unavailable', retryable: true });
+      });
+  }
+
+  private async performReplay(clientWs: WebSocket, sessionId: string, lastSeq: number, reqId?: number, direction?: string, limit?: number, independentTasks = false): Promise<void> {
     const startedAt = Date.now();
+    const owner = this.clients.get(clientWs)?.userId;
     const withReq = (obj: any) => reqId !== undefined ? { ...obj, req_id: reqId } : obj;
-    // Explicit forward/backward requests are paginated by complete logical
-    // streams. Direction-less forward replay remains the legacy unbounded path.
     const isBackward = direction === 'backward';
     const isPagedForward = direction === 'forward' && limit !== undefined && limit > 0;
+    const isInitial = isBackward && (!lastSeq || lastSeq <= 0);
     const lim = (isBackward || isPagedForward) && limit && limit > 0 ? limit : 100;
     try {
-      const runtime = await db.getSessionRuntime(this.pool, sessionId);
-      const currentStatus = runtime.status;
-      let events: any[];
-      let logicalCount = 0;
-      let replayLastSeq = lastSeq;
-      let replayNewestSeq = lastSeq ?? 0;
-      let hasMore = false;
-      if (isBackward) {
-        const page = await db.getCompleteBackwardReplayPage(
-          this.pool,
-          sessionId,
-          lastSeq && lastSeq > 0 ? lastSeq : undefined,
-          lim,
-        );
-        events = page.events;
-        logicalCount = page.logicalCount;
-        replayLastSeq = page.oldestId;
-        replayNewestSeq = page.events.length > 0 ? page.events[page.events.length - 1].id : (lastSeq ?? 0);
-        hasMore = page.hasMore;
-        if (!lastSeq || lastSeq <= 0) {
-          const latestLists = await db.getLatestAgentTaskLists(this.pool, sessionId);
-          events = [...events, ...latestLists.filter(list => !events.some(event => event.id === list.id))]
-            .sort((left, right) => left.id - right.id);
-        }
-      } else if (isPagedForward) {
-        const page = await db.getCompleteForwardReplayPage(
-          this.pool,
-          sessionId,
-          lastSeq ?? 0,
-          lim,
-        );
-        events = page.events;
-        logicalCount = page.logicalCount;
-        replayLastSeq = page.newestId;
-        replayNewestSeq = page.newestId;
-        hasMore = page.hasMore;
-      } else {
-        events = await db.getEventsAfter(this.pool, sessionId, lastSeq ?? 0);
-        replayNewestSeq = events.length > 0 ? events[events.length - 1].id : (lastSeq ?? 0);
-      }
-      if (events.length === 0) {
-        this.observeInitialReplayPage({
-          sessionId, isInitialPage: isBackward && (!lastSeq || lastSeq <= 0),
-          eventCount: 0, logicalCount: 0, batchCount: 0, payloadBytes: 0,
-          durationMs: Date.now() - startedAt, hasMore,
+      const key = JSON.stringify([owner, sessionId, lastSeq ?? 0, direction ?? '', lim, isPagedForward]);
+      let { runtime, currentStatus, events, logicalCount, replayLastSeq, replayNewestSeq, hasMore } =
+        await this.shareReplayRead(this.replayReads, key, async () => {
+          const runtime = await db.getSessionRuntime(this.pool, sessionId);
+          const currentStatus = runtime.status;
+          let events: any[];
+          let logicalCount = 0;
+          let replayLastSeq = lastSeq;
+          let replayNewestSeq = lastSeq ?? 0;
+          let hasMore = false;
+          if (isBackward) {
+            const page = await db.getCompleteBackwardReplayPage(
+              this.pool,
+              sessionId,
+              lastSeq && lastSeq > 0 ? lastSeq : undefined,
+              lim,
+            );
+            events = page.events;
+            logicalCount = page.logicalCount;
+            replayLastSeq = page.oldestId;
+            replayNewestSeq = page.events.length > 0 ? page.events[page.events.length - 1].id : (lastSeq ?? 0);
+            hasMore = page.hasMore;
+
+          } else if (isPagedForward) {
+            const page = await db.getCompleteForwardReplayPage(
+              this.pool,
+              sessionId,
+              lastSeq ?? 0,
+              lim,
+            );
+            events = page.events;
+            logicalCount = page.logicalCount;
+            replayLastSeq = page.newestId;
+            replayNewestSeq = page.newestId;
+            hasMore = page.hasMore;
+          } else {
+            events = await db.getEventsAfter(this.pool, sessionId, lastSeq ?? 0);
+            replayNewestSeq = events.length > 0 ? events[events.length - 1].id : (lastSeq ?? 0);
+          }
+          return { runtime, currentStatus, events, logicalCount, replayLastSeq, replayNewestSeq, hasMore };
         });
-        this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, logical_count: 0, last_seq: replayLastSeq, newest_seq: replayNewestSeq, has_more: hasMore, status: currentStatus, turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt }));
-        return;
-      }
-      replayNewestSeq = events.reduce((newest, event) => Math.max(newest, event.id), replayNewestSeq);
-      // Both forward and complete backward pages are ASC, including across
-      // replay batches, so stream assemblers always receive chunk zero first.
-      const batches = this.buildReplayBatches(events, (slice) => withReq({
-          type: 'replay_batch',
-          session_id: sessionId,
-          events: slice.map(e => e.payload),
-          last_seq: isBackward ? slice[0].id : slice[slice.length - 1].id,
-          direction: direction || 'forward',
+      if (owner == null || this.clients.get(clientWs)?.userId !== owner) return;
+      replayNewestSeq = events.reduce((newest: number, event: any) => Math.max(newest, event.id), replayNewestSeq);
+      const batches = this.buildReplayBatches<any>(events, (slice) => withReq({
+        type: 'replay_batch', session_id: sessionId, events: slice.map(e => e.payload),
+        last_seq: isBackward ? slice[0].id : slice[slice.length - 1].id,
+        direction: direction || 'forward',
       }));
-      const payloadBytes = batches.reduce(
-        (total, batch) => total + Buffer.byteLength(JSON.stringify(batch), 'utf8'),
-        0,
-      );
-      this.observeInitialReplayPage({
-        sessionId, isInitialPage: isBackward && (!lastSeq || lastSeq <= 0),
+      this.observeInitialReplayPage({ sessionId, isInitialPage: isInitial,
         eventCount: events.length, logicalCount, batchCount: batches.length,
-        payloadBytes, durationMs: Date.now() - startedAt, hasMore,
-      });
-      for (const batch of batches) {
-        this.send(clientWs, batch);
+        payloadBytes: batches.reduce((total, batch) => total + Buffer.byteLength(JSON.stringify(batch), 'utf8'), 0),
+        durationMs: Date.now() - startedAt, hasMore });
+      for (const batch of batches) this.send(clientWs, batch);
+      let taskFields = {};
+      let supplementalCount = 0;
+      if (isInitial) {
+        if (independentTasks) taskFields = { task_snapshot_status: 'pending' };
+        else {
+          try {
+            const lists = await this.readTaskSnapshot(clientWs, sessionId);
+            if (this.clients.get(clientWs)?.userId !== owner) return;
+            const supplemental = lists.filter(list => !events.some((event: any) => event.id === list.id));
+            supplementalCount = supplemental.length;
+            for (const batch of this.buildReplayBatches(supplemental, slice => withReq({
+              type: 'replay_batch', session_id: sessionId, events: slice.map(e => e.payload),
+              last_seq: replayLastSeq, direction: 'backward',
+            }))) this.send(clientWs, batch);
+            taskFields = { task_snapshot_status: 'complete' };
+          } catch {
+            taskFields = { task_snapshot_status: 'error', task_snapshot_retryable: true };
+          }
+        }
       }
-      this.send(clientWs, withReq({
-        type: 'replay_end',
-        session_id: sessionId,
-        count: events.length,
-        logical_count: logicalCount,
-        last_seq: isBackward ? replayLastSeq : events[events.length - 1].id,
-        newest_seq: replayNewestSeq,
-        has_more: hasMore,
-        status: currentStatus,
-        turn_started_at: runtime.turnStartedAt,
-        last_activity_at: runtime.lastActivityAt,
-      }));
+      if (this.clients.get(clientWs)?.userId !== owner) return;
+      this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId,
+        count: events.length + supplementalCount, logical_count: logicalCount,
+        last_seq: isBackward ? replayLastSeq : (events.at(-1)?.id ?? replayLastSeq),
+        newest_seq: replayNewestSeq, has_more: hasMore, status: currentStatus,
+        turn_started_at: runtime.turnStartedAt, last_activity_at: runtime.lastActivityAt, ...taskFields }));
+      if (isInitial && independentTasks) await this.sendTaskSnapshot(clientWs, sessionId, reqId);
     } catch (err) {
       console.error('replay error:', err);
-      // Always send replay_end so the client doesn't hang on isLoading
       this.send(clientWs, withReq({ type: 'replay_end', session_id: sessionId, count: 0, last_seq: lastSeq, has_more: false, error: 'history_unavailable', retryable: true }));
     }
   }

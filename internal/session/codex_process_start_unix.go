@@ -54,7 +54,13 @@ func adoptCodexAppServer(ctx context.Context, state *daemon.CodexAppServerState)
 	}
 	owned := *state
 	owned.ProcessStartIdentity = identity
-	runtime := &codexAppServerRuntime{PID: state.PID, ProcessStartIdentity: identity, Endpoint: state.Endpoint, RemoteURI: state.RemoteURI, Client: client}
+	process, err := platform.InspectProcess(ctx, state.PID)
+	if err != nil || !codexHandoffArgsMatch(&owned, process) || !codexProcessBirthMatches(state.PID, identity) {
+		_ = client.Close()
+		return nil, errors.New("Codex app-server changed during adoption")
+	}
+	owned.ProcessExecutable = normalizeCwd(process.Executable)
+	runtime := &codexAppServerRuntime{PID: state.PID, ProcessStartIdentity: identity, ProcessExecutable: owned.ProcessExecutable, Endpoint: state.Endpoint, RemoteURI: state.RemoteURI, Client: client}
 	runtime.Stop = func() error {
 		_ = client.Close()
 		return stopPersistedCodexAppServer(&owned)
@@ -211,7 +217,13 @@ func startCodexAppServerWithIdentity(ctx context.Context, binary string, generat
 	}
 	phase = ""
 	stderr.finish("", generation)
-	runtime := &codexAppServerRuntime{PID: cmd.Process.Pid, ProcessStartIdentity: processIdentity, Endpoint: socketPath, RemoteURI: "unix://" + socketPath, Client: client}
+	process, err := platform.InspectProcess(readyCtx, cmd.Process.Pid)
+	if err != nil || !codexProcessBirthMatches(cmd.Process.Pid, processIdentity) {
+		_ = client.Close()
+		_ = stop()
+		return nil, errors.New("Codex app-server process changed before ready")
+	}
+	runtime := &codexAppServerRuntime{PID: cmd.Process.Pid, ProcessStartIdentity: processIdentity, ProcessExecutable: normalizeCwd(process.Executable), Endpoint: socketPath, RemoteURI: "unix://" + socketPath, Client: client}
 	runtime.Stop = func() error {
 		_ = client.Close()
 		return stop()

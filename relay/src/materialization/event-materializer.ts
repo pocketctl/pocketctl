@@ -331,15 +331,37 @@ export class EventMaterializer {
     return input.payload
   }
 
-  private async normalizeObserverPolicy(input: MaterializationInput): Promise<MaterializationInput> {
-    let observer = input.eventType === 'session_discovered'
-      && isObserverAgentType(input.payload.agent)
-    if (!observer && input.eventType === 'session_meta'
+  private async normalizeObserverPolicy(input: MaterializationInput): Promise<MaterializationInput | null> {
+    let agentType = input.eventType === 'session_discovered' ? input.payload.agent : undefined
+    let policy: Awaited<ReturnType<typeof db.getSessionRuntimePolicy>> = null
+    if ((input.eventType === 'session_meta'
+      || agentType === 'codex' && input.payload.control_mode !== 'managed')
       && input.sessionId && input.userId !== null) {
-      const policy = await db.getSessionRuntimePolicy(
-        this.options.pool, input.sessionId, input.userId,
+      policy = await db.getSessionRuntimePolicy(
+        this.effectPool, input.sessionId, input.userId,
       )
-      observer = isObserverAgentType(policy?.agentType)
+      if (input.eventType === 'session_meta') agentType = policy?.agentType
+    }
+    const observer = isObserverAgentType(agentType)
+    // Discovery is a full daemon snapshot. An absent managed claim must not
+    // inherit a stale writable policy from before daemon restart. Metadata-only
+    // updates remain partial unless they explicitly revoke control.
+    if (agentType === 'codex' && input.payload.control_mode !== 'managed'
+      && (input.eventType === 'session_discovered' || typeof input.payload.control_mode === 'string')) {
+      // A native history copy on another same-user machine cannot revoke or
+      // steal a session currently managed elsewhere. An explicit managed
+      // discovery continues to use the established relocation path.
+      if (policy?.controlMode === 'managed' && policy.daemonId && policy.daemonId !== input.daemonId) return null
+      return {
+        ...input,
+        payload: {
+          ...input.payload,
+          agent: 'codex',
+          control_mode: typeof input.payload.control_mode === 'string' && input.payload.control_mode
+            ? input.payload.control_mode : 'legacy_read_only',
+          capabilities: ['history_sync'],
+        },
+      }
     }
     if (!observer) return input
     return {
@@ -351,6 +373,12 @@ export class EventMaterializer {
         capabilities: ['history_sync'],
       },
     }
+  }
+
+  private isCodexControlRevocation(input: MaterializationInput): boolean {
+    return input.payload.agent === 'codex' && input.payload.control_mode !== 'managed'
+      && typeof input.payload.control_mode === 'string'
+      && ['session_discovered', 'session_meta'].includes(input.eventType)
   }
 
   private async upsertDiscoveredSession(
@@ -541,6 +569,11 @@ export class EventMaterializer {
         ))
       }
       if (options.observerPolicyPrefix) return true
+      // The upsert may already have committed as the fenced control prefix.
+      // The runtime binding is idempotent and belongs to the deferred phase.
+      if (this.isCodexControlRevocation(input) && effect.resuming) {
+        this.options.hooks?.bindSession?.(sessionId, input.daemonId)
+      }
       if (input.userId !== null) {
         await effect.step(() => this.options.hooks?.broadcastQuota?.(input.userId!))
       }
@@ -565,6 +598,7 @@ export class EventMaterializer {
           this.effectPool, sessionId, payload.control_mode as string, payload.capabilities as string[],
         ))
       }
+      if (options.observerPolicyPrefix) return true
       if (typeof payload.model === 'string' || typeof payload.effort === 'string') {
         await effect.step(() => db.updateSessionMetadata(
           this.effectPool, sessionId,
@@ -743,7 +777,7 @@ export class EventMaterializer {
   private businessEffect(
     input: MaterializationInput,
     result: MaterializationResult,
-    scope: 'all' | 'observer_policy_prefix' = 'all',
+    scope: 'all' | 'control_policy_prefix' = 'all',
   ): MaterializationEffect {
     return async (effect) => {
       // Activity is appended after every event's existing effects so durable
@@ -820,7 +854,10 @@ export class EventMaterializer {
           },
         ))
       }
-      if (scope === 'observer_policy_prefix') {
+      if (scope === 'control_policy_prefix') {
+        if (!observerDiscovery) {
+          await this.materializeSessionLifecycle(input, result, effect, { observerPolicyPrefix: true })
+        }
         return
       }
       if (await this.materializeSessionLifecycle(input, result, effect, {
@@ -970,7 +1007,9 @@ export class EventMaterializer {
         input.eventType === 'user_message_receipt' ? input.payload.status as 'accepted' | 'rejected' : 'session_active')
     }
     await this.authorizeDaemonSession(input)
-    input = await this.normalizeObserverPolicy(input)
+    const normalized = await this.normalizeObserverPolicy(input)
+    if (!normalized) return { eventId: null, inserted: false, completed: true, deliveries: [] }
+    input = normalized
     if ([
       'session_discovered',
       'interaction_result',
@@ -1007,15 +1046,15 @@ export class EventMaterializer {
       )],
     }
     if (options.deferEffects && !event.completed
-      && input.eventType === 'session_discovered'
-      && isObserverAgentType(input.payload.agent)) {
+      && (input.eventType === 'session_discovered' && isObserverAgentType(input.payload.agent)
+        || this.isCodexControlRevocation(input))) {
       // Router's legacy path defers ordinary effects until daemon seq ordering
-      // catches up. Observer classification is authorization state, so commit
-      // its ownership-guarded business-effect prefix with the canonical event
+      // catches up. Observer classification and Codex control revocation are
+      // authorization state, so commit the guarded policy prefix with the event
       // while this session's cross-process advisory transaction is still held.
       // Driving the real effect program preserves the established policy-first
       // ordinals and resumes from the ledger's recorded next step.
-      await this.businessEffect(input, result, 'observer_policy_prefix')(
+      await this.businessEffect(input, result, 'control_policy_prefix')(
         this.createEffectContext(
           this.options.pool, event.rowID, event.nextStep, assertClaim,
         ),
@@ -1045,6 +1084,11 @@ export class EventMaterializer {
         // Do not recreate session metadata or broadcast this stale event.
         if (input.sessionId && await db.isSessionDeleted(lateEffectPool, input.sessionId)) {
           throw new db.DeletedDaemonSessionError()
+        }
+        if (this.isCodexControlRevocation(input)
+          && !await lateMaterializer.normalizeObserverPolicy(input)) {
+          result.deliveries = []
+          return
         }
         const latest = await db.getEventEffectState(latePool, event.rowID)
         if(latest?.ownerRetired)throw new db.UnknownDaemonSessionError()

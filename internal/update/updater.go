@@ -60,13 +60,8 @@ var ghProxies = []string{
 // is unreachable.
 var apiClient = &http.Client{Timeout: 10 * time.Second}
 
-// downloadClient has a generous timeout for large binary downloads (~10–50 MB).
-// Each attempt has its own deadline; the retry loop in downloadOne provides
-// additional resilience for transient failures.
-//
-// Kept moderate (3 min, down from 10) so a hung proxy is abandoned fast enough
-// to fall through to the next candidate URL in DownloadAndVerify.
-var downloadClient = &http.Client{Timeout: 3 * time.Minute}
+// Download deadlines and inactivity cancellation are applied per request.
+var downloadClient = &http.Client{}
 
 // CheckLatest queries the GitHub releases API for the latest version tag.
 func CheckLatest() (tag string, err error) {
@@ -269,117 +264,6 @@ func ResolveBinary(tag string) (*BinaryInfo, error) {
 		Size:         size,
 		Name:         name,
 	}, nil
-}
-
-// DownloadAndVerify downloads the binary, verifies the official SHA256 and
-// size, and returns the temp path. Every candidate is validated against the
-// same official digest; a mismatch (e.g. a poisoned mirror) only eliminates
-// that candidate and the chain continues to the next mirror.
-func DownloadAndVerify(info *BinaryInfo) (tmpPath string, err error) {
-	urls := append([]string{info.URL}, info.FallbackURLs...)
-
-	var lastErr error
-	for _, url := range urls {
-		tmpPath, lastErr = downloadOne(url, info.SHA, info.Size)
-		if lastErr == nil {
-			return tmpPath, nil
-		}
-		// All errors, including digest mismatches and 404s, only eliminate
-		// the current candidate; safe mirrors later in the chain may still
-		// serve the officially digested bytes.
-	}
-	return "", lastErr
-}
-
-// downloadOne downloads from a single URL with retries on transient errors.
-// A digest or size mismatch eliminates this candidate immediately (no retry);
-// the caller continues with the next mirror.
-func downloadOne(url, expectedSHA string, expectedSize int64) (string, error) {
-	var lastErr error
-	for attempt := 0; attempt < maxDownloadRetries; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second) // backoff: 1s, 2s
-		}
-
-		tmpFile, err := os.CreateTemp("", "pocketctl-update-*")
-		if err != nil {
-			return "", fmt.Errorf("create temp file: %w", err)
-		}
-		tmpPath := tmpFile.Name()
-
-		// Use a fresh client per attempt (no connection reuse across retries)
-		resp, err := downloadClient.Get(url)
-		if err != nil {
-			tmpFile.Close()
-			os.Remove(tmpPath)
-			lastErr = fmt.Errorf("download %s: %w", url, err)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			tmpFile.Close()
-			os.Remove(tmpPath)
-			lastErr = fmt.Errorf("download %s returned %s", url, resp.Status)
-			// 404 / 410 eliminate this candidate — don't retry it, let the
-			// caller fall through to the next mirror.
-			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-				return "", lastErr
-			}
-			continue
-		}
-
-		// Stream through a progress bar so the user sees a live percentage
-		// (Content-Length known) or a spinner + running byte count (chunked).
-		bar := newProgressBar(resp.ContentLength)
-		written, copyErr := io.Copy(tmpFile, &progressReader{r: resp.Body, bar: bar})
-		bar.Done()
-		resp.Body.Close()
-		tmpFile.Close()
-
-		if copyErr != nil {
-			os.Remove(tmpPath)
-			lastErr = fmt.Errorf("read response: %w", copyErr)
-			continue // transient — retry
-		}
-
-		if written == 0 {
-			os.Remove(tmpPath)
-			lastErr = fmt.Errorf("downloaded file is empty")
-			continue
-		}
-
-		// Official size check (skipped for legacy sidecar-only releases).
-		if expectedSize > 0 && written != expectedSize {
-			os.Remove(tmpPath)
-			return "", fmt.Errorf("size mismatch for %s: official %d bytes, got %d", url, expectedSize, written)
-		}
-
-		// SHA256 verification against the official digest — always required.
-		if expectedSHA == "" {
-			os.Remove(tmpPath)
-			return "", fmt.Errorf("no official checksum available for %s", url)
-		}
-		actual, err := fileSHA256(tmpPath)
-		if err != nil {
-			os.Remove(tmpPath)
-			lastErr = fmt.Errorf("compute SHA256: %w", err)
-			continue
-		}
-		if !strings.EqualFold(actual, expectedSHA) {
-			os.Remove(tmpPath)
-			return "", fmt.Errorf("SHA256 mismatch: expected %s, got %s", expectedSHA, actual)
-		}
-
-		// Make executable
-		if err := os.Chmod(tmpPath, 0755); err != nil {
-			os.Remove(tmpPath)
-			return "", fmt.Errorf("chmod: %w", err)
-		}
-
-		return tmpPath, nil
-	}
-	return "", lastErr
 }
 
 // ReplaceBinary safely replaces the running binary with a new one at tmpPath.

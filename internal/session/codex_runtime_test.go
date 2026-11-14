@@ -8,12 +8,65 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
+
+func TestCodexRuntimeStatusRequiresAHealthyExistingEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := agentcontrol.DefaultConfig()
+	cfg.Codex.State = agentcontrol.StateEnabled
+	if err := agentcontrol.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	p := newCodexRuntimeProvider(NewSessionManager(make(chan protocol.DaemonEvent, 1)))
+	p.coordinator.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+		t.Fatal("status started a runtime")
+		return nil, nil
+	}
+	status, err := p.Status(context.Background(), agentcontrol.RuntimeStatusRequest{})
+	if err != nil || status.Mode == string(agentcontrol.LaunchManaged) {
+		t.Fatalf("nonexistent runtime reports managed reachability: %+v %v", status, err)
+	}
+	p.coordinator.runtime = &codexAppServerRuntime{PID: 123, Endpoint: "/tmp/status.sock", RemoteURI: "unix:///tmp/status.sock"}
+	p.coordinator.probe = func(context.Context, *codexAppServerRuntime) error { return errors.New("unreachable") }
+	status, err = p.Status(context.Background(), agentcontrol.RuntimeStatusRequest{})
+	if err != nil || status.Mode == string(agentcontrol.LaunchManaged) || !strings.Contains(status.Reason, "unreachable") {
+		t.Fatalf("failed endpoint reports reachable: %+v %v", status, err)
+	}
+	p.coordinator.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+	status, err = p.Status(context.Background(), agentcontrol.RuntimeStatusRequest{})
+	if err != nil || status.Mode != string(agentcontrol.LaunchManaged) || status.BaseURL == "" {
+		t.Fatalf("healthy endpoint not reported: %+v %v", status, err)
+	}
+	p.coordinator.probe = func(ctx context.Context, _ *codexAppServerRuntime) error { <-ctx.Done(); return ctx.Err() }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = p.Status(ctx, agentcontrol.RuntimeStatusRequest{})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("status lost caller cancellation: %v", err)
+	}
+}
+
+func TestNativeCodexDiscoveryExplicitlyClearsOldManagedClaims(t *testing.T) {
+	sm := NewSessionManager(nil)
+	sm.sessions["native"] = &ProcessState{SessionID: "native", Agent: adapter.AgentCodex, Source: "terminal", Status: protocol.StatusIdle}
+	if got := sm.SessionControlMode("native"); got != protocol.ControlLegacyReadOnly {
+		t.Fatalf("native discovery omitted control revocation: %q", got)
+	}
+	if caps := sm.SessionCapabilities("native"); len(caps) != 1 || caps[0] != "history_sync" {
+		t.Fatalf("native discovery lacks explicit history-only capabilities: %v", caps)
+	}
+	for _, s := range sm.ListSessions() {
+		if s.SessionID == "native" && s.ControlMode != protocol.ControlLegacyReadOnly {
+			t.Fatalf("snapshot retained ambiguous control: %+v", s)
+		}
+	}
+}
 
 func TestCodexRuntimeAcquireReturnsManagedRemoteAndLease(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

@@ -5,7 +5,7 @@ export const knownNonTimelineControlEventTypes = new Set<string>([
   'session_organization_changed',
   'daemon_list', 'daemon_status', 'command_list',
   'session_agent_list', 'session_agent_changed', 'session_meta',
-  'replay_batch', 'replay_end',
+  'replay_batch', 'replay_end', 'task_snapshot',
   'user_message_ack', 'user_message_nack', 'user_message_receipt',
   'queue_dispatch_started', 'message_queue_state',
   'subagent_title_update', 'subagent_usage', 'permission_config_changed',

@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/pocketctl/pocketctl/internal/i18n"
 )
 
 // progressBar renders an in-place percentage download bar to stderr.
@@ -22,6 +24,7 @@ type progressBar struct {
 	started bool
 	last    time.Time
 	spin    int
+	out     io.Writer
 }
 
 // newProgressBar builds a bar for the given total byte count (-1 = unknown).
@@ -30,7 +33,14 @@ func newProgressBar(total int64) *progressBar {
 	if fi, err := os.Stderr.Stat(); err == nil {
 		isTTY = fi.Mode()&os.ModeCharDevice != 0
 	}
-	return &progressBar{total: total, width: 22, isTTY: isTTY}
+	return &progressBar{total: total, width: 22, isTTY: isTTY, out: os.Stderr}
+}
+
+func (p *progressBar) output() io.Writer {
+	if p.out != nil {
+		return p.out
+	}
+	return os.Stderr
 }
 
 // Add advances the byte counter and redraws (throttled). Safe to call with n<=0.
@@ -62,45 +72,55 @@ func (p *progressBar) render() {
 		filled := int(frac * float64(p.width))
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", p.width-filled)
 		pct := int(frac * 100)
-		fmt.Fprintf(os.Stderr, "\r%s[%s] %3d%%  %s / %s ", label, bar, pct, humanBytes(p.read), humanBytes(p.total))
+		fmt.Fprintf(p.output(), "\r%s[%s] %3d%%  %s / %s \x1b[K", label, bar, pct, humanBytes(p.read), humanBytes(p.total))
 		return
 	}
 	// Unknown total: pulsing spinner + running byte count (no percentage).
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	s := spinners[p.spin%len(spinners)]
 	p.spin++
-	fmt.Fprintf(os.Stderr, "\r%s%s %s ", label, s, humanBytes(p.read))
+	fmt.Fprintf(p.output(), "\r%s%s %s \x1b[K", label, s, humanBytes(p.read))
 }
 
-// Done finalizes the bar: on a TTY it snaps to 100% and prints a newline so the
-// cursor lands on a fresh line; off a TTY it emits a one-line summary.
+// Done finalizes a successful transfer without fabricating bytes received.
 func (p *progressBar) Done() {
+	p.Finish(nil)
+}
+
+// Finish reports the actual transfer count, including on interrupted reads.
+// Completion of a transfer is separate from official size/hash verification.
+func (p *progressBar) Finish(err error) {
 	if !p.isTTY {
+		if err != nil {
+			fmt.Fprintln(p.output(), i18n.T("update.transfer_interrupted", humanBytes(p.read)))
+			return
+		}
 		if p.total > 0 {
-			fmt.Fprintf(os.Stderr, "  ⬇️  downloaded %s / %s\n", humanBytes(p.read), humanBytes(p.total))
+			fmt.Fprintf(p.output(), "  ⬇️  downloaded %s / %s\n", humanBytes(p.read), humanBytes(p.total))
 		} else if p.read > 0 {
-			fmt.Fprintf(os.Stderr, "  ⬇️  downloaded %s\n", humanBytes(p.read))
+			fmt.Fprintf(p.output(), "  ⬇️  downloaded %s\n", humanBytes(p.read))
 		}
 		return
 	}
-	if p.total > 0 {
-		p.read = p.total
-		p.render()
-	}
-	fmt.Fprint(os.Stderr, "\n")
+	p.render()
+	fmt.Fprint(p.output(), "\n")
 }
 
 // progressReader wraps an io.Reader, forwarding every Read to a progressBar so
 // io.Copy(dst, &progressReader{r: body, bar: bar}) drives a live download bar.
 type progressReader struct {
-	r   io.Reader
-	bar *progressBar
+	r          io.Reader
+	bar        *progressBar
+	onProgress func()
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
 	n, err := pr.r.Read(p)
 	if n > 0 {
 		pr.bar.Add(n)
+		if pr.onProgress != nil {
+			pr.onProgress()
+		}
 	}
 	return n, err
 }

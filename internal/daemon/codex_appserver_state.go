@@ -19,6 +19,7 @@ type CodexAppServerState struct {
 	CodexHome            string                        `json:"codex_home,omitempty"`
 	PID                  int                           `json:"pid"`
 	ProcessStartIdentity string                        `json:"process_start_identity,omitempty"`
+	ProcessExecutable    string                        `json:"process_executable,omitempty"`
 	OwnerPID             int                           `json:"owner_pid"`
 	Endpoint             string                        `json:"endpoint"`
 	RemoteURI            string                        `json:"remote_uri"`

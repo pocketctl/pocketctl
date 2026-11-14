@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,6 +12,14 @@ import (
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/update"
 )
+
+func validateUpdateUser(euid int, sudoUID string) error {
+	uid, err := strconv.Atoi(sudoUID)
+	if euid == 0 && err == nil && uid > 0 {
+		return fmt.Errorf("%s", i18n.T("update.sudo_misuse"))
+	}
+	return nil
+}
 
 // prepareUpdateInstall runs before any download or process stop. Only the
 // installation child is elevated; this process keeps the original UID/HOME.
