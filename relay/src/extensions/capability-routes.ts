@@ -64,8 +64,24 @@ export type GrantMintResult =
 export function createCapabilityGrantService(
   deps: CapabilityRouteDeps,
   grantKeys: GrantKeyMaterial,
+  options: { backgroundAuditLimit?: number } = {},
 ) {
+  const pendingAudits = new Set<Promise<unknown>>()
+  let drainingAudits = false
   return {
+    async drainAudits(timeoutMs: number): Promise<boolean> {
+      drainingAudits = true
+      if (pendingAudits.size === 0) return true
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          Promise.all(pendingAudits).then(() => true),
+          new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs) }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    },
     async mint(input: GrantMintInput): Promise<GrantMintResult> {
       if (deps.mode !== 'enabled') {
         return { ok: false, error: new ExtensionApiError('feature_disabled', 'grants require RELAY_EXTENSIONS=enabled') }
@@ -151,7 +167,7 @@ export function createCapabilityGrantService(
       })
       // Bounded audit: provider allowlist id and a service-count category only.
       // Never the grant, jti, session id or service list itself.
-      await deps.pool.query(
+      const audit = deps.pool.query(
         `INSERT INTO audit_log (user_id, action, details) VALUES ($1, $2, $3::jsonb)`,
         [input.userId, 'extension_capability_grant', JSON.stringify({
           provider_id: row.provider_id,
@@ -160,6 +176,14 @@ export function createCapabilityGrantService(
           caller_type: input.callerType,
         })],
       ).catch(() => undefined)
+      if (!drainingAudits && pendingAudits.size < (options.backgroundAuditLimit ?? 0)) {
+        // Return the signed grant while the best-effort write is pending.
+        // Fall back to awaiting completion once the background slots are busy.
+        pendingAudits.add(audit)
+        void audit.finally(() => { pendingAudits.delete(audit) })
+      } else {
+        await audit
+      }
       const providerPublicOrigin = deps.providerPublicOrigins?.get(row.provider_id)
       return {
         ok: true,

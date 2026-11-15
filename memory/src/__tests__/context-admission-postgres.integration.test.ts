@@ -1,3 +1,5 @@
+import * as usageStatistics from '../platform-statistics/service.js'
+import {vi} from 'vitest'
 import pg from 'pg'
 import {queryHookPool} from './helpers/query-hook-pool.js'
 import { createHash } from 'crypto'
@@ -179,6 +181,22 @@ describeWithDatabase('context admission fence (PostgreSQL)', () => {
     expect((await pool.query('SELECT 1 FROM memory_context_injections WHERE pack_id=$1',[packId])).rowCount).toBe(0)
     expect((await pool.query('SELECT state FROM memory_context_packs WHERE pack_id=$1',[packId])).rows[0].state).toBe('invalidated')
   })
+  test('statistics failure rolls back the single-use consumption and permits exact retry',async()=>{
+    const packId=await persistReadyPack('statistics-atomic-consume')
+    const ticket=await admitFor(packId)
+    if(!ticket.ok||!('nonce' in ticket))throw Error('admission failed')
+    const input={installationId:INSTALLATION,sessionId:'ses-a',packId,injectionId:ticket.injectionId,nonce:ticket.nonce}
+    const capture=vi.spyOn(usageStatistics,'recordUsage').mockRejectedValueOnce(new Error('statistics_unavailable')).mockResolvedValue(undefined)
+    try{
+      await expect(admission.consume(input)).rejects.toThrow('statistics_unavailable')
+      expect((await pool.query('SELECT state FROM memory_context_injections WHERE injection_id=$1',[ticket.injectionId])).rows[0].state).toBe('admitted')
+      expect((await admission.consume(input)).ok).toBe(true)
+      expect(await admission.consume(input)).toEqual({ok:false,error:'already_consumed'})
+      expect(capture).toHaveBeenCalledTimes(2)
+      expect(capture).toHaveBeenLastCalledWith(expect.objectContaining({release:expect.any(Function)}),expect.objectContaining({requestId:ticket.injectionId,operation:'context-pack-text',kind:'read'}))
+    }finally{capture.mockRestore()}
+  })
+
   test('a changed consumption generation expires an unconsumed ticket with an explicit outcome',async()=>{
     const packId=await persistReadyPack('cr-epoch-ticket'),admitted=await admitFor(packId)
     if(!admitted.ok||!('nonce' in admitted))throw new Error('fixture admission failed')

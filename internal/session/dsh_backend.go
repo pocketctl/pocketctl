@@ -18,6 +18,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/dshapp"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 type dshSummary struct {
@@ -882,6 +883,7 @@ func (c *dshCoordinator) durable(id string, e dshEvent, history bool, currentTur
 			usage := base
 			usage.Type = "agent_text"
 			usage.EventID += ":usage"
+			usage.UsageMeta = usageanalytics.Metadata("dsh", data.Message.ID, "", "", usage.Model, "unknown", e.Seq)
 			usage.Usage = &protocol.ContextUsage{InputTokens: data.Usage.Input, OutputTokens: data.Usage.Output, TotalTokens: data.Usage.Total, CacheRead: data.Usage.CacheRead, CacheCreate: data.Usage.CacheWrite}
 			c.sm.outputCh <- usage
 		}
@@ -941,6 +943,9 @@ func (c *dshCoordinator) durable(id string, e dshEvent, history bool, currentTur
 		base.Type = "tool_call"
 		base.CallID = data.CallID
 		base.Tool = data.Name
+		events := []protocol.DaemonEvent{base}
+		usageanalytics.Enrich(events, "dsh", "", "", base.Model, "unknown", int64(e.Seq), false)
+		base = events[0]
 		if json.Valid([]byte(data.Arguments)) {
 			base.Input = json.RawMessage(data.Arguments)
 		}
@@ -967,8 +972,12 @@ func (c *dshCoordinator) durable(id string, e dshEvent, history bool, currentTur
 			base.Output += block.Text
 		}
 		if data.Message.IsError {
+			base.Status = "error"
 			base.Error = base.Output
 		}
+		events := []protocol.DaemonEvent{base}
+		usageanalytics.Enrich(events, "dsh", "", "", base.Model, "unknown", int64(e.Seq), true)
+		base = events[0]
 		c.sm.outputCh <- base
 	case "session/title":
 		c.updateTitle(id, data.Title)

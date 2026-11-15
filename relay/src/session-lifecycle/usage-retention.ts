@@ -44,6 +44,12 @@ export async function retainSessionUsageInTransaction(db: Pick<pg.PoolClient,'qu
   await db.query(`INSERT INTO session_usage_retention_totals(user_id,session_id,daemon_id,agent_type,total_tokens,tok_input,tok_output,tok_cache_read,tok_cache_create)
     SELECT user_id,session_id,daemon_id,COALESCE(agent_type,'unknown'),COALESCE(total_tokens,0),COALESCE(tok_input,0),COALESCE(tok_output,0),COALESCE(tok_cache_read,0),COALESCE(tok_cache_create,0)
     FROM sessions WHERE session_id=$1 AND user_id IS NOT NULL AND daemon_id IS NOT NULL ON CONFLICT(user_id,session_id) DO NOTHING`,[sessionId])
+  const usageSchema=(await db.query("SELECT to_regclass('public.usage_token_projection') IS NOT NULL AS ready")).rows[0]?.ready
+  if(usageSchema){
+   await db.query('UPDATE usage_token_projection SET attribution_revoked=TRUE WHERE source_session=$1',[sessionId])
+   await db.query('UPDATE usage_call_facts SET attribution_revoked=TRUE WHERE source_session=$1',[sessionId])
+   await db.query('UPDATE usage_skill_facts SET attribution_revoked=TRUE WHERE source_session=$1',[sessionId])
+  }
   if(!retainLegacyDaily)return
   // Fill missing historical rollups while canonical rows are still present.
   // Existing authoritative rollups survive unchanged, including counters whose

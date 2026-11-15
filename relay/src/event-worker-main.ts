@@ -1,3 +1,5 @@
+import { ensurePlatformStatisticsSchema } from './platform-statistics/schema.js'
+import { startPlatformStatisticsCollector } from './platform-statistics/collector.js'
 import { hostname } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import type pg from 'pg'
@@ -61,6 +63,7 @@ export function createRetentionLoop(options: RetentionLoopOptions) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let activeRun: Promise<void> | undefined
   let stopped = true
+  let nextDelayMs = intervalMs
 
   const schedule = (delayMs: number): void => {
     if (stopped || timer) return
@@ -70,14 +73,23 @@ export function createRetentionLoop(options: RetentionLoopOptions) {
         .catch((error) => console.error('[inbox-retention] cleanup failed', {
           errorName: error instanceof Error ? error.name : typeof error,
         }))
-        .finally(() => schedule(intervalMs))
+        .finally(() => schedule(nextDelayMs))
     }, delayMs)
     timer.unref?.()
   }
 
   const runOnce = async (): Promise<void> => {
     if (activeRun) return activeRun
-    const run = options.retention.runOnce().then(() => undefined)
+    nextDelayMs = intervalMs
+    const run = options.retention.runOnce().then(value => {
+      if (!value || typeof value !== 'object') return
+      const stats = value as { moreWork?: boolean; failures?: unknown[] }
+      if (stats.failures?.length) console.error('[inbox-retention] partial cleanup', value)
+      else console.info('[inbox-retention] cleanup completed', value)
+      // Failed stages back off inside InboxRetention; healthy full batches
+      // must keep draining independently.
+      if (stats.moreWork) nextDelayMs = Math.min(1000, intervalMs)
+    })
     activeRun = run
     try {
       await run
@@ -187,6 +199,12 @@ export async function assertDurableIngressSchema(pool: Pick<pg.Pool, 'query'>): 
       AND to_regclass('daemon_ack_checkpoint') IS NOT NULL
       AND to_regclass('realtime_outbox') IS NOT NULL
       AND to_regclass('request_push_effect') IS NOT NULL
+      AND to_regclass('ingress_retention_status') IS NOT NULL
+      AND (SELECT count(*) = 4 FROM pg_index WHERE indisvalid AND indisready
+        AND indexrelid IN (to_regclass('idx_event_inbox_receipt_inbox_id'),
+          to_regclass('idx_event_inbox_receipt_retention'),
+          to_regclass('idx_event_inbox_retention_state'),
+          to_regclass('idx_realtime_outbox_delivered_retention')))
       AND to_regclass('idx_event_inbox_stream_unresolved') IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -325,6 +343,7 @@ export async function main(): Promise<void> {
   const teamRunWorker = teamConfig.autorun === 'on'
     ? createTeamRunWorker(pool, { workerId: `${workerId}:team-run`, externalEnabledForTeam: teamId => teamExternalExecutorEnabled(teamConfig, teamId) })
     : undefined
+  let stopStatistics = () => {}
   const runtime = createWorkerRuntime({
     assertSchemaReady: async () => {
       if(await relaySharedTarget(pool)){await assertSharedRelayRuntime(pool);await assertRelaySchemaContract(pool)}
@@ -348,12 +367,15 @@ export async function main(): Promise<void> {
     lifecycleWorker,
     pool,
   })
+  await ensurePlatformStatisticsSchema(pool)
+  stopStatistics = await startPlatformStatisticsCollector(pool, 'materializer')
   await runtime.start()
 
   let stopping = false
   const shutdown = (signal: string): void => {
     if (stopping) return
     stopping = true
+    stopStatistics()
     void runtime.stop(signal).then(
       () => { process.exitCode = 0 },
       (error) => {

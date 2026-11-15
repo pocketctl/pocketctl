@@ -48,3 +48,18 @@ describe('ContextPackDetail', () => {
     expect(empty.find('[data-testid="context-pack-detail"]').exists()).toBe(false)
   })
 })
+
+test('content, item provenance and trajectory have separate accessible tabs and usage stays unconfirmed', async () => {
+  const pack={pack_id:'pack',state:'ready',client_request_id:'request',created_at:'2026-11-06',delivery:{state:'delivered',outcome_code:null},mode:'enabled',agent:'codex',stable_text:'full stable',dynamic_text:'full dynamic',stable_tokens:12,dynamic_tokens:3,error_code:null,policy_revision:1,settings_revision:2,loadout_revision:3,items:[{item_id:'item',claim_id:'claim',version_id:'version',claim_type:'fact',layer:'dynamic',section:'knowledge',representation:'full',reason_codes:['matched'],token_count:3,ordinal:1,evidence_ids:['evidence-one']}],trajectory:{result_state:'ready',degraded_components:['source'],candidates:[{version_id:'version',decision:'included',reason_code:'matched',final_ordinal:1}]}}
+  const wrapper=mount(ContextPackDetail,{props:{pack},attachTo:document.body})
+  expect(wrapper.get('[data-testid="detail-use"]').text()).toBe('未确认')
+  const tabs=wrapper.findAll('[role="tab"]');expect(tabs).toHaveLength(3)
+  await tabs[1]!.trigger('click')
+  expect(wrapper.get('[data-testid="detail-items"]').isVisible()).toBe(true)
+  expect(wrapper.get('[data-testid="detail-items"]').text()).toContain('evidence-one')
+  expect(wrapper.get('[data-testid="detail-stable"]').isVisible()).toBe(false)
+  await tabs[2]!.trigger('click')
+  expect(wrapper.get('[data-testid="detail-trajectory"]').isVisible()).toBe(true)
+  expect(wrapper.get('[data-testid="detail-trajectory"]').text()).toContain('included')
+  wrapper.unmount()
+})

@@ -1,0 +1,6 @@
+import {randomBytes,createHmac,timingSafeEqual} from 'node:crypto'
+import {UsageError} from './contracts.js'
+function snapshotSecret(){const configured=process.env.PERSONAL_USAGE_SNAPSHOT_SECRET??process.env.JWT_SECRET;if(!configured||configured.length<32)throw new UsageError('snapshot_secret_not_configured',503);return configured}
+interface Snapshot {actor:number;daemon:string;range:string;as_of:string;revision:string;authorization_revision:string;expires:number}
+export function issueSnapshot(data:Omit<Snapshot,'expires'>){const body=Buffer.from(JSON.stringify({...data,expires:Date.now()+300000})).toString('base64url');return body+'.'+createHmac('sha256',snapshotSecret()).update(body).digest('base64url')}
+export function readSnapshot(token:string,actor:number,daemon:string,range:string):Snapshot {try{const [body,signature]=token.split('.');const sig=Buffer.from(signature,'base64url'),expected=createHmac('sha256',snapshotSecret()).update(body).digest();if(sig.length!==expected.length||!timingSafeEqual(sig,expected))throw Error();const s=JSON.parse(Buffer.from(body,'base64url').toString()) as Snapshot;if(s.actor!==actor||s.daemon!==daemon||s.range!==range)throw Error();if(s.expires<Date.now())throw new UsageError('snapshot_expired',409);return s}catch(e){if(e instanceof UsageError)throw e;throw new UsageError('snapshot_invalid',403)}}

@@ -1,0 +1,4 @@
+export type UsageRange='today'|'7d'|'14d'|'30d'|'all'
+export interface UsageAmounts {input:string|null;output:string|null;cache_read:string|null;cache_create:string|null;total:string|null;requests:string|null}
+export interface UsageMeta {contract:'personal-v1';scope:{kind:'personal';daemon:string};range:UsageRange;as_of:string;requested_from:string;to_exclusive:string;display_from:string;granularity:string;coverage:string;snapshot_token:string;revision:string}
+export interface UsageDashboard {meta:UsageMeta;hosts:{daemon_id:string;name:string;historical:boolean}[];overview:Record<string,UsageAmounts>;analysis:UsageAmounts&{series:any[];granularity:string;coverage:string};distributions:Record<string,any[]>;heatmap:{days:any[];active_days:number;peak:any;requested_from:string;to_exclusive:string};unattributed_total:string|null}

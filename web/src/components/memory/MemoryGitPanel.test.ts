@@ -7,7 +7,7 @@ const caps={mode:'shadow',can_configure:false,can_preview:true,can_sync:true,can
 const page=()=>({items:[{connectionId:'connection',installationId:'scope-a',repositoryId:'repo',ownerScopeKind:'team',ownerScopeId:'team',provider:'github',providerRepositoryId:'123',targetBranch:'main',rootPath:'knowledge',syncMode:'shadow',writeMode:'off',state:'active',generation:'9007199254740993',capabilities:{...caps},last_success:'2026-09-02T01:00:00Z',current_error:'remote_unconfirmed',cleanup_pending:true,cleanup:[{export_id:'export',old_run_id:'old',cleanup_pending:true,recognized_at:null}],exports:[{export_id:'export',generation:'9007199254740993',base_commit:'a'.repeat(40),created_at:'2026-09-02'}],runs:[{run_id:'run',state:'dead',unfinished:true,eligible:true,reason_code:'remote_unconfirmed'}],proposals:[{proposal_id:'proposal',revision:'9007199254740995',state:'conflicted',export_id:'export'}]}],next_cursor:null})
 const detail=()=>({proposal_id:'proposal',connection_id:'connection',export_id:'export',generation:'9007199254740993',revision:'9007199254740995',state:'conflicted',key:{kind:'rule',id:'rule'},head_commit:'b'.repeat(40),proposed_hash:'c'.repeat(64),policy_hash:'d'.repeat(64),current_policy_hash:'d'.repeat(64),expected_asset_revision:'7',expected_inputs:{base:'e'.repeat(64),memory:'f'.repeat(64),git:'a'.repeat(64)},versions:{base:{revision:'1',version_id:'b',path:'rule.yaml',content_hash:'base-hash',source_digest:'source',editable:{statement:'Common original'}},memory:{revision:'7',version_id:'m',path:'rule.yaml',content_hash:'memory-hash',source_digest:'source',editable:{statement:'Current Memory'}},git:{revision:'1',version_id:'g',path:'rule.yaml',content_hash:'git-hash',source_digest:'source',editable:{statement:'Git proposal'}}},conflicts:[{field:'statement',reason:'both_changed'}],gate_reasons:['conflict'],review_reset:true,source:{kind:'git',author_status:'unknown'},capabilities:{...caps}})
 beforeEach(()=>{vi.clearAllMocks();sessionStorage.clear();api.connections.mockResolvedValue(page());api.proposal.mockResolvedValue(detail())})
-async function panel(){const module=await import('./MemoryGitPanel.vue').catch(()=>null);expect(module,'Git workbench exists').not.toBeNull();const wrapper=mount(module!.default,{props:{scopeId:'scope-a'}});await flushPromises();return wrapper}
+async function panel(attach=false){const module=await import('./MemoryGitPanel.vue').catch(()=>null);expect(module,'Git workbench exists').not.toBeNull();const wrapper=mount(module!.default,{attachTo:attach?document.body:undefined,props:{scopeId:'scope-a'}});await flushPromises();return wrapper}
 test('shows B/M/G, versions, conflicts, cleanup/current error and server capabilities',async()=>{
   const w=await panel()
   expect(w.text()).toContain('Common original');expect(w.text()).toContain('Current Memory');expect(w.text()).toContain('Git proposal')
@@ -229,4 +229,25 @@ test('child page is aborted and stale content discarded after connection or gene
   await w.get('[data-testid="git-refresh"]').trigger('click');await flushPromises()
   resolve({connection_id:'connection',generation:value.items[0].generation,items:[{export_id:'stale-generation-secret'}],next_cursor:null});await flushPromises()
   expect(w.text()).not.toContain('stale-generation-secret');w.unmount()
+})
+
+
+test('switches between sync and unfinished operations without losing an unknown original request',async()=>{
+  api.review.mockRejectedValue(new TypeError('response lost'))
+  const w=await panel(true)
+  await w.get('[data-testid="git-review"]').trigger('click');await flushPromises()
+  const key=api.review.mock.calls[0][3]
+  await w.setProps({section:'sync'})
+  expect(w.get('[data-testid="git-intents"]').isVisible()).toBe(false)
+  expect(w.get('[data-testid="git-review"]').isVisible()).toBe(true)
+  await w.setProps({section:'operations'})
+  expect(w.get('[data-testid="git-intents"]').isVisible()).toBe(true)
+  expect(w.get('[data-testid="git-review"]').isVisible()).toBe(false)
+  expect(w.get('[data-testid="git-intents"]').text()).toContain(key)
+  expect(w.get('[data-testid="git-cleanup"]').isVisible()).toBe(true)
+  api.review.mockResolvedValue({decisionId:'confirmed'})
+  await w.get('[data-testid="git-retry-intent"]').trigger('click');await flushPromises()
+  expect(api.review.mock.calls[1][3]).toBe(key)
+  expect(w.get('[data-testid="git-intents"]').text()).not.toContain(key)
+  w.unmount()
 })

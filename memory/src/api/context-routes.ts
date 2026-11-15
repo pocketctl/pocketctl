@@ -1,3 +1,4 @@
+import {actorUsageContext,recordUsage} from '../platform-statistics/service.js'
 import {invalidateLifecycleObservation} from '../claims/lifecycle-observation.js'
 import type { FastifyInstance } from 'fastify'
 import type { CorsHostPolicy } from '../auth/cors-host-policy.js'
@@ -157,12 +158,13 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
   const compileScope = createScopeResolver(deps.pool)
   const mutation = async (
     req: Pick<import('fastify').FastifyRequest, 'headers' | 'body' | 'params'>,
-    installationId: string,
+    grant: Awaited<ReturnType<GrantGuard['guard']>>,
     operation: string,
     run: (transactionPool: import('pg').Pool) => Promise<
       { ok: true; metadata: Record<string, unknown> } | { ok: false; error: unknown }
     >,
   ) => {
+    const installationId=grant.installationId
     const key = req.headers['idempotency-key']
     if (typeof key !== 'string' || key.length === 0 || key.length > 256) {
       throw new MemoryApiError('invalid_request', 'Idempotency-Key header required')
@@ -172,7 +174,11 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       operation,
       key,
       requestCanonical: JSON.stringify({ params: req.params ?? {}, body: req.body ?? {} }),
-      run: async client => run(createTransactionBoundPool(client)),
+      run: async client => {
+        const result=await run(createTransactionBoundPool(client))
+        if(result.ok)await recordUsage(client,{...actorUsageContext(grant),requestId:key,kind:'write',operation,humanActivity:grant.callerType==='web'})
+        return result
+      },
     })
   }
   const daemonGuard = async (authorization: string | undefined, sessionId: string) => {
@@ -667,7 +673,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       || !optionalBoundedString(body.reason_code, 64)) {
       throw new MemoryApiError('invalid_request', 'invalid feedback action')
     }
-    const outcome = await mutation(req, grant.installationId, 'context_feedback', async transactionPool => {
+    const outcome = await mutation(req, grant, 'context_feedback', async transactionPool => {
       const result = await createFeedbackService({ pool: transactionPool }).submit({
         installationId: grant.installationId,
         injectionId: typeof body.injection_id === 'string' ? body.injection_id : null,
@@ -766,7 +772,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
       expectedRevision: body.expected_revision as number,
       createOnly: body.create_only === true,
     }
-    const outcome = await mutation(req, grant.installationId, 'context_settings', async transactionPool => {
+    const outcome = await mutation(req, grant, 'context_settings', async transactionPool => {
       const result = await createContextSettingsRepository(transactionPool).upsert({
         installationId: grant.installationId,
         ...setting,
@@ -837,7 +843,7 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     const repositoryId = typeof body.repository_id === 'string' ? body.repository_id : null
     const agent = typeof body.agent === 'string' ? body.agent : null
     const expectedRevision = body.expected_revision as number
-    const outcome = await mutation(req, grant.installationId, 'context_loadouts', async transactionPool => {
+    const outcome = await mutation(req, grant, 'context_loadouts', async transactionPool => {
       const result = await createLoadoutRepository(transactionPool).replace({
         installationId: grant.installationId,
         repositoryId,

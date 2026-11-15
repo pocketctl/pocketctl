@@ -2,74 +2,70 @@ import { describe, expect, test, vi } from 'vitest'
 import { cleanStaleEvents } from '../db.js'
 import { InboxRetention } from '../inbox-retention.js'
 
-function retentionPool(blockedUndelivered: number, deletedCompleted: number) {
+function retentionPool(failInbox=false) {
   const calls: Array<{ sql: string; params?: unknown[] }> = []
   const client = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
-      calls.push({ sql, params })
-      if (sql.includes('blocked_undelivered')) {
-        return { rows: [{ blocked_undelivered: blockedUndelivered }], rowCount: 1 }
+      calls.push({sql,params})
+      if (sql.includes('SELECT i.inbox_id FROM event_inbox')) return {rows:[{inbox_id:'1'}],rowCount:1}
+      if (sql.includes('DELETE FROM event_inbox i')) {
+        if (failInbox) throw Object.assign(new Error('sensitive detail'),{code:'57014'})
+        return {rows:[],rowCount:1}
       }
-      if (sql.includes('DELETE FROM event_inbox')) {
-        return { rows: [], rowCount: deletedCompleted }
-      }
-      return { rows: [], rowCount: 0 }
+      if (sql.includes('DELETE FROM realtime_outbox') || sql.includes('DELETE FROM event_inbox_receipt')) return {rows:[],rowCount:1}
+      if (sql.includes('GROUP BY reason')) return {rows:[{reason:'undelivered',count:1}],rowCount:1}
+      return {rows:[],rowCount:0}
     }),
-    release: vi.fn(),
+    release:vi.fn(),
   }
-  return {
-    calls,
-    client,
-    pool: { connect: vi.fn().mockResolvedValue(client) } as any,
-  }
+  return {calls,client,pool:{connect:vi.fn().mockResolvedValue(client)} as any}
 }
 
 describe('InboxRetention', () => {
-  test('deletes only old completed rows whose outbox is fully delivered', async () => {
-    const { calls, client, pool } = retentionPool(1, 1)
-
-    await expect(new InboxRetention(pool).runOnce()).resolves.toEqual({
-      deletedCompleted: 1,
-      blockedUndelivered: 1,
+  test('commits stages separately and records results without business payloads', async () => {
+    const {calls,client,pool}=retentionPool()
+    await expect(new InboxRetention(pool).runOnce()).resolves.toMatchObject({
+      deletedCompleted:1,deletedOutbox:1,deletedReceipts:1,blockedUndelivered:1,failures:[],moreWork:false,
     })
-
-    const sql = calls.map(({ sql }) => sql.replace(/\s+/g, ' ').trim()).join('\n')
-    expect(sql).toContain('i.status = 2')
-    expect(sql).toContain("i.completed_at < NOW() - INTERVAL '6 hours'")
-    expect(sql).toContain('o.delivered_at IS NULL')
-    expect(sql).toContain('FOR UPDATE OF i SKIP LOCKED')
-    expect(sql).toContain('r.inbox_id IS NULL')
-    expect(sql).toContain('c.ack_seq >= r.seq')
-    expect(sql).toContain('DELETE FROM session_document_uploads')
-    expect(sql).toContain('FOR UPDATE SKIP LOCKED')
-    expect(sql).not.toContain('resetStaleClaims')
-    expect(client.release).toHaveBeenCalledOnce()
+    expect(calls.filter(x=>x.sql==='COMMIT')).toHaveLength(5)
+    expect(client.release).toHaveBeenCalledTimes(5)
+    expect(calls.filter(x=>x.sql.includes('DELETE FROM')&&!x.sql.includes('DELETE FROM event_inbox i')).every(x=>x.params?.[0]===1000)).toBe(true)
   })
-
-  test('uses the fixed 1000-row batch and rolls back failures', async () => {
-    const failure = new Error('delete failed')
-    const { calls, client, pool } = retentionPool(0, 0)
-    client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      calls.push({ sql, params })
-      if (sql.includes('blocked_undelivered')) return { rows: [{ blocked_undelivered: 0 }], rowCount: 1 }
-      if (sql.includes('DELETE FROM event_inbox')) throw failure
-      return { rows: [], rowCount: 0 }
+  test('reports a failed stage, retains previous successes, and still attempts later stages', async () => {
+    const {calls,pool}=retentionPool(true)
+    await expect(new InboxRetention(pool).runOnce()).resolves.toMatchObject({
+      deletedCompleted:0,deletedOutbox:1,deletedReceipts:1,
+      failures:[{stage:'inbox',code:'57014',receiptPersisted:true}],
     })
-
-    await expect(new InboxRetention(pool).runOnce()).rejects.toBe(failure)
-
-    const deleteCall = calls.find(({ sql }) => sql.includes('DELETE FROM event_inbox'))
-    expect(deleteCall?.params).toEqual([1_000])
-    expect(calls.at(-1)?.sql).toBe('ROLLBACK')
-    expect(client.release).toHaveBeenCalledOnce()
+    expect(calls.filter(x=>x.sql==='ROLLBACK')).toHaveLength(1)
+    expect(calls.filter(x=>x.sql==='COMMIT')).toHaveLength(5)
+    expect(calls.some(x=>x.sql.includes('DELETE FROM session_document_uploads'))).toBe(true)
+    expect(JSON.stringify(calls)).not.toContain('sensitive detail')
   })
-
+  test('backs off only the failed stage while independent stages keep running', async () => {
+    vi.useFakeTimers()
+    try {
+      const {calls,pool}=retentionPool(true)
+      const retention=new InboxRetention(pool)
+      await retention.runOnce()
+      await retention.runOnce()
+      expect(calls.filter(x=>x.sql.includes('DELETE FROM event_inbox i'))).toHaveLength(1)
+      expect(calls.filter(x=>x.sql.includes('DELETE FROM realtime_outbox'))).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(60000)
+      await retention.runOnce()
+      expect(calls.filter(x=>x.sql.includes('DELETE FROM event_inbox i'))).toHaveLength(2)
+    } finally { vi.useRealTimers() }
+  })
+  test('a connection failure cannot claim cleanup success', async () => {
+    const pool={connect:vi.fn().mockRejectedValue(Object.assign(new Error('offline'),{code:'08006'}))} as any
+    const result=await new InboxRetention(pool).runOnce()
+    expect(result.failures).toHaveLength(5)
+    expect(result.failures.every(x=>x.code==='08006'&&!x.receiptPersisted)).toBe(true)
+    expect(result.deletedCompleted).toBe(0)
+  })
   test('retired event-age retention never removes canonical history', async () => {
-    const pool = {
-      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 4 }),
-    } as any
-
-    await expect(cleanStaleEvents(pool, 90)).resolves.toBe(0)
+    const pool={query:vi.fn().mockResolvedValue({rows:[],rowCount:4})} as any
+    await expect(cleanStaleEvents(pool,90)).resolves.toBe(0)
     expect(pool.query).not.toHaveBeenCalled()
   })
 })

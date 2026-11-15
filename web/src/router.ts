@@ -31,6 +31,7 @@ export const appRoutes: RouteRecordRaw[] = [
   { path: '/hosts', component: HostsView, meta: { requiresAuth: true } },
   { path: '/inbox', component: AttentionInboxView, meta: { requiresAuth: true } },
   { path: '/memory', component: MemoryView, meta: { requiresAuth: true } },
+  { path: '/admin/statistics', component: () => import('./views/PlatformStatisticsView.vue'), meta: { requiresAuth: true } },
   { path: '/teams', component: TeamsView, meta: { requiresAuth: true, requiresTeam: true } },
   { path: '/team/:teamId/sessions', name: 'team-sessions', component: TeamSessionListView, props: true, meta: { requiresAuth: true, requiresTeam: true, sessionScope: 'team' } },
   { path: '/team/:teamId/session/:id', name: 'team-session', component: TeamSessionDetail, props: true, meta: { requiresAuth: true, requiresTeam: true, sessionScope: 'team' } },

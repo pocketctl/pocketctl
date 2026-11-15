@@ -78,7 +78,12 @@ export async function assertExactSourceEpisode(c:pg.Client,d:CleanupDependencies
   if(entries.length&&episode.document_compiler_version!==EPISODE_PACKET_COMPILER_VERSION)throw Error('cleanup_exact_source_packet_version_unsupported')
   for(const entry of entries){
    if(entry.source_event_id!==undefined&&!uuid.test(String(entry.source_event_id))||entry.artifact_id!==undefined&&!uuid.test(String(entry.artifact_id))||entry.kind==='event'&&entry.artifact_id!==undefined||entry.kind==='episode'&&(entry.source_event_id!==undefined||entry.artifact_id!==undefined))throw Error('cleanup_exact_source_manifest_unparsed')
-   if((entry.kind==='event'&&!entry.source_event_id)||(entry.kind==='artifact'&&!entry.artifact_id)||!['event','artifact','episode'].includes(String(entry.kind))||!['substantive','verification','auxiliary','outcome','omission'].includes(String(entry.evidence_role))||typeof entry.excerpt_hash!=='string'||!/^[a-f0-9]{64}$/.test(entry.excerpt_hash)||!Number.isSafeInteger(entry.excerpt_length)||typeof entry.truncated!=='boolean')throw Error('cleanup_exact_source_manifest_unparsed')
+   // Packet v6 emits a truncated digest of redacted text. The manifest
+   // digest is a shape check, separate from the source UUID ownership below.
+   if((entry.kind==='event'&&!entry.source_event_id)||(entry.kind==='artifact'&&!entry.artifact_id)
+    ||!['event','artifact','episode'].includes(String(entry.kind))||!['substantive','verification','auxiliary','outcome','omission'].includes(String(entry.evidence_role))
+    ||typeof entry.excerpt_hash!=='string'||!/^(?:[a-f0-9]{16}|[a-f0-9]{64})$/.test(entry.excerpt_hash)
+    ||!Number.isSafeInteger(entry.excerpt_length)||typeof entry.truncated!=='boolean')throw Error('cleanup_exact_source_manifest_unparsed')
    if(entry.source_provenance&&hash(entry.source_provenance)!==hash({}))throw Error('cleanup_exact_source_provenance_requires_authority_adapter')
    if(entry.source_event_id&&d.sourceEventIds.includes(String(entry.source_event_id))||entry.artifact_id&&allArtifacts.includes(String(entry.artifact_id))){
     const owner=(await c.query(`SELECT installation_id::text FROM memory.source_events WHERE source_event_id=$1::uuid UNION ALL SELECT installation_id::text FROM memory.source_artifacts WHERE artifact_id=$2::uuid`,[entry.source_event_id??null,entry.artifact_id??null])).rows

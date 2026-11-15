@@ -17,6 +17,7 @@ const {
   enableMemoryServices,
   searchMemory,
   listMemoryScenes,
+  createMemoryPersonalScene,
   correctMemoryClaim,
   sendMemoryFeedback,
   MemoryClientError,
@@ -533,3 +534,21 @@ test('scene metadata uses the selected readable scope and search forwards explic
   const params=new URLSearchParams(calls.find(c=>c.path.endsWith('/candidates'))!.search)
   expect(Object.fromEntries(params)).toEqual({submission_id:'submission',decision_id:'decision',cursor:'cursor'})
  })
+
+
+test('personal scene creation uses the personal v1 manage grant accepted by the manage API',async()=>{
+ const {calls}=relayAndProviderFetch({providerHandler:(_url,init)=>{
+  const token=(init.headers as Record<string,string>).Authorization
+  return token==='Bearer grant-token-1'?Response.json({space_id:'scene-one',name:'Acceptance',domain:'personal_project',destinations:['personal']}):Response.json({error:{code:'unauthorized',message:'grant rejected'}},{status:401})
+ }})
+ await expect(createMemoryPersonalScene('inst-1','Acceptance','same-scene-request')).resolves.toMatchObject({space_id:'scene-one'})
+ expect(calls.filter(c=>c.path==='/api/extensions/v2/grants')).toHaveLength(0)
+ expect(JSON.parse(String(calls.find(c=>c.path==='/api/extensions/v1/grants')!.init.body))).toEqual({installation_id:'inst-1',caller_type:'web',services:['memory.manage']})
+ const provider=calls.find(c=>c.path==='/api/v1/memory/scenes')!
+ expect((provider.init.headers as Record<string,string>)['Idempotency-Key']).toBe('same-scene-request')
+})
+test('personal scene creation refuses an installation different from the discovered personal target',async()=>{
+ const {calls}=relayAndProviderFetch({})
+ await expect(createMemoryPersonalScene('other-installation','Acceptance','same-scene-request')).rejects.toMatchObject({code:'personal_target_changed'})
+ expect(calls).toHaveLength(1);expect(calls[0].path).toBe('/api/extensions/v1/installations')
+})

@@ -94,6 +94,8 @@ export interface MaterializedDelivery {
 }
 
 export interface MaterializationResult {
+  /** Validated canonical input for post-transaction projections. */
+  canonicalInput?: MaterializationInput;
   eventId: number | null;
   inserted: boolean;
   completed: boolean;

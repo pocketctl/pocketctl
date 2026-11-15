@@ -1,3 +1,4 @@
+import {actorUsageContext,isSuccessfulMcpRead,statisticsRequestId,recordUsage} from '../platform-statistics/service.js'
 import type {SearchServiceDeps} from '../retrieval/search-service.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { McpServer, createMcpHandler, type McpHttpHandler } from '@modelcontextprotocol/server'
@@ -141,6 +142,15 @@ export function registerMcpRoute(app: FastifyInstance, deps: McpRouteDeps): void
     reply.code(response.status)
     const responseContentType = response.headers.get('content-type')
     if (responseContentType) reply.header('content-type', responseContentType)
-    return Buffer.from(await response.arrayBuffer())
+    const output=Buffer.from(await response.arrayBuffer())
+    if(response.status>=200&&response.status<300){
+      let result:unknown
+      try{const text=output.toString('utf8');result=JSON.parse(text.startsWith('event:')||text.startsWith('data:')?text.split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trim()).join('\n'):text)}catch{/* Protocol responses are not successful business calls. */}
+      if(isSuccessfulMcpRead(request.body,result)){
+        const call=request.body as {params:{name:string}}
+        await recordUsage(deps.pool,{...actorUsageContext(grant),requestId:statisticsRequestId(request),kind:'read',operation:'mcp:'+call.params.name})
+      }
+    }
+    return output
   })
 }

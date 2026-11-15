@@ -579,3 +579,90 @@ job/output/Git/replay adapters and actual runtime reopening remain separate work
 The result does not authorize runtime activation or establish product acceptance.
 This workflow creates no body/config backup, rollback artifact, paid replay or
 production deployment.
+
+
+## Restriction lookup after verified physical copy
+
+A populated copied target needs the following nonunique lookup for the finite
+personal-direct privacy review. `source_artifacts` may contain hundreds of
+thousands of rows; checking absent Sessions with only its event/turn indexes
+repeats a sequential scan for every restricted root.
+
+```sql
+CREATE INDEX source_artifacts_installation_session_lookup
+  ON memory.source_artifacts (installation_id, session_id);
+```
+
+Prepare this physical index only after independent copy verification and before
+privacy review or reopening. Keep both Memory units stopped, runtime writers
+fenced and `activation_ready=false`; check the target identity and exact existing
+index definition first. Refuse a conflicting name. Admit current free space,
+index build/temp/WAL reserves and the safety margin separately; this does not
+renew an expired copy window or credit eventual source-database deletion. This
+index is an explicit post-copy catalog change, not a new schema ledger version,
+a body/provenance mutation or activation of retained/Team platforms. Preserve the
+original copy manifest and proof rather than re-running the original catalog
+comparison after this deliberate physical change.
+
+The production preparation of 2026-11-09 used a frozen 50-root metadata-only
+comparison: the same result hash took 7260 ms before and 4 ms after; index size
+was 2170880 bytes. See the diagnostic and preparation receipts under
+`docs/reports/memory-shared-source-direct-launch-candidate-20261108-evidence/release-scope-20261109/`.
+The original privacy statement/lock limits (5 s/1 s), 10-second public-control
+window and fresh 15-second systemd evidence remain unchanged. A successful
+lookup is supporting evidence; run the complete current privacy plan/apply/verify
+before original-reference binding or source activation.
+
+## Column statistics during offline original-reference binding
+
+After copying rows with no canonical binding and then binding a finite prefix,
+the verified partial indexes can still have an estimated zero rows. A controlled
+reader may repeatedly scan the whole growing partial index instead of using a
+selective lookup. Confirm this with the actual bounded controlled-reader plan;
+changing plan-cache mode or enlarging timeouts is not a substitute.
+
+With both Memory units stopped, source frozen, runtime writers fenced, exact
+database identities checked and personal mode still shared-shadow, refresh only
+the relevant statistics:
+
+```sql
+ANALYZE memory.source_events
+  (installation_id, source_kind, canonical_key, mapping_state,
+   canonical_session_key, adapter_version);
+```
+
+This changes planner statistics, not business rows, source bodies, schema or
+privileges. Keep original statement and lock budgets, retain successful binding
+page proofs, and compare the same bounded result hash before and after. The
+2026-11-09 preparation took 1139 ms; the same 32-source read fell from 1429 ms to
+51 ms, and a 256-source page completed in 465 ms. The statistics are estimates,
+not actual row-count evidence. Preserve the original copy manifest and continue
+the full current binder and commit fences for every remaining source.
+
+## Original unknown order and current canonical order
+
+A current canonical reader can independently prove a Journal order while an
+original Memory row has no proven order. Binding must keep that original
+`source_sequence` NULL and its provenance unknown. Do not copy the current
+sequence into the original mapping. A positively proved original sequence is
+also preserved when the current Journal/header no longer exposes an order.
+When both independently prove an order, their values must match. Body,
+classification, original identity and current authority checks always apply.
+
+The 2026-11-09 fixed-page diagnostic authenticated all 256 mappings and found
+one sequence-only difference, with body, identity, timestamp and classification
+unchanged. A real PG13 failing regression and PG13/17 positive and conflicting
+order cases cover this boundary. A source-exact private maintenance helper may
+carry this correction without replacing the running application; record its
+source commit, source/artifact hashes, compiler and original dependency imports
+separately from the application release identity.
+
+### Finite retirement scan preparation (2026-11-09)
+
+The original full-session unresolved predicate must remain intact. On the copied corpus it timed out at the existing five-second limit while the normal session index visited about 62k candidates. A separately bounded offline preparation created the temporary partial index `memory.source_events_retirement_unresolved_lookup` on `(installation_id, session_id)` with that exact predicate. It occupies 6,701,056 bytes; the unchanged check returned zero rows in 1 ms. The finite operator verifies its OID and definition hash and drops it after all fixed-scope retirement pages and actual reader barriers succeed. It is not a permanent runtime input or an extension of the original copy window.
+
+The frozen selected array and manifest stay unchanged. Execution pages may group current cold references by archive manifest/chunk (up to the existing helper limit of 128) to avoid rereading many unrelated chunks. Current body/hash/scope checks, archive budgets and post-retirement actual reader verification still run for every UUID. Already-retired rows require fresh equivalent-source and reader proof.
+
+### 已提交分页实际读取证明的有限续作
+
+若退役因原库排空检查等中断，固定范围和旧失败回执保持。可复用已完成分页的实际body读取证明，但须验证原回执文件hash、固定manifest、精确source UUID集合、原元数据与当前NULL payload、当前canonical header和提交权限；记录fresh与reused覆盖数，不将header复核计为重新读取body。未匹配的分页仍执行原逐条body等价/CAS/清除后实际reader。source_not_drained只能记录其他backend并有界重试原检查，不忽略额外连接。所有分页覆盖完成后再按OID及definition hash移除临时原谓词索引。

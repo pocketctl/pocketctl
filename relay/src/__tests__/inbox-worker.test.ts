@@ -1,4 +1,6 @@
+import {withCanonicalReplayRows} from './fixtures/canonical-replay-unit.js'
 import { describe, expect, test, vi } from 'vitest'
+import {ReplayConflictError} from '../materialization/replay-compatibility.js'
 import { ExtensionJournalOwnerMissingError } from '../extensions/journal.js'
 import { ClientEventOwnershipError } from '../db.js'
 import { createInboxWorker, safeMaterializationError } from '../inbox-worker.js'
@@ -312,7 +314,7 @@ describe('inbox worker', () => {
   test('reuses the original non-zero event id when inbox completion fails and the row is retried', async () => {
     let completed = false
     const ledgerPool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('INSERT INTO events')) {
           return {
             rows: [{ id: 73, inserted: !completed, effect_status: completed ? 'completed' : 'pending', effect_step: 0 }],
@@ -324,7 +326,7 @@ describe('inbox worker', () => {
         }
         if (sql.includes("effect_status = 'completed'")) completed = true
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const repository = {
       resetStaleClaims: vi.fn().mockResolvedValue(0),
@@ -882,4 +884,12 @@ describe('extension authorization defects dead-letter immediately', () => {
     expect(safeMaterializationError(new ExtensionJournalOwnerMissingError())).toBe('extension_journal_owner_missing')
     expect(safeMaterializationError(new ClientEventOwnershipError())).toBe('client_event_ownership_mismatch')
   })
+})
+
+
+test('replay diagnostics distinguish conflicts without exposing arbitrary messages',()=>{
+  expect(safeMaterializationError(new ReplayConflictError('replay_payload_conflict'))).toBe('replay_payload_conflict')
+  expect(safeMaterializationError(new ReplayConflictError('replay_provenance_conflict'))).toBe('replay_provenance_conflict')
+  expect(safeMaterializationError(new Error('canonical_source_header_mismatch'))).toBe('canonical_source_header_mismatch')
+  expect(safeMaterializationError(new Error('canonical_source_header_mismatch secret body'))).toBe('materialization_failed')
 })

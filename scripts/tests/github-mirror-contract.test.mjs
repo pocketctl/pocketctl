@@ -152,6 +152,21 @@ for (const testFile of walkFiles(path.join(repoRoot, 'relay/src/__tests__'))) {
   }
 }
 
+// Web tests also import shared JSON fixtures directly. Validate those paths
+// before exporting so the filtered checkout retains executable tests.
+for (const testFile of walkFiles(path.join(repoRoot, 'web/src'))) {
+  if (!/\.test\.[cm]?[jt]sx?$/.test(testFile)) continue
+  const testText = fs.readFileSync(testFile, 'utf8')
+  for (const match of testText.matchAll(/from\s+['"](\.[^'"]+\.json)['"]/g)) {
+    const relativePath = path.relative(repoRoot, path.resolve(path.dirname(testFile), match[1]))
+    if (relativePath.startsWith('..')) continue
+    assert.ok(
+      mirrorCovers(relativePath),
+      `web test dependency is absent from public mirror: ${relativePath}`,
+    )
+  }
+}
+
 assert.ok(
   ![...mirrored].some((entry) => entry === 'ios' || entry.startsWith('ios/')),
   'the public GitHub mirror must not include iOS source or project files',

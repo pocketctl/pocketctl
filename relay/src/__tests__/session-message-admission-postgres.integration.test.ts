@@ -9,6 +9,8 @@ import { getQuotaSnapshot, reserveConcurrentSession } from '../quota.js'
 import { resolveEntitlements } from '../entitlements.js'
 import { Router } from '../router.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
+import { createPostgresExtensionJournalSink } from '../extensions/journal.js'
+import { RELAY_SOURCE_HEADER_SQL } from '../shared-source/header-contract.js'
 
 const enabled = process.env.RUN_POSTGRES_INTEGRATION === '1' && process.env.TEST_DATABASE_URL
 const suite = enabled ? describe : describe.skip
@@ -308,9 +310,10 @@ suite('durable session message admission PostgreSQL', () => {
     expect(client._sent).toContainEqual(expect.objectContaining({type:'quota_status',resources:expect.objectContaining({concurrent_sessions:expect.objectContaining({reserved:0})})}))
   })
 
-  test('rename chain accepts only trusted intermediate request aliases and rebases deferred effects', async () => {
+  test.each([false,true])('rename chain accepts trusted aliases and preserves canonical journal (shared headers: %s)', async sharedHeaders => {
+    if(sharedHeaders) for(const sql of RELAY_SOURCE_HEADER_SQL.slice(1,-1)) await pool.query(sql)
     await admit('chain')
-    const materializer=new EventMaterializer({pool})
+    const materializer=new EventMaterializer({pool,extensionJournalSink:createPostgresExtensionJournalSink({sharedHeaders})})
     const first=await materializer.materialize({inboxId:99304,userId,daemonId:'admission-daemon',sessionId:'admission-session',eventType:'session_status',payload:{request_id:'chain',status:'running'}},undefined,{deferEffects:true})
     await renameOwnedDaemonSession(pool,{userId,daemonId:'admission-daemon',oldSessionId:'admission-session',newSessionId:'middle-session'})
     await renameOwnedDaemonSession(pool,{userId,daemonId:'admission-daemon',oldSessionId:'middle-session',newSessionId:'final-session'})
@@ -318,6 +321,10 @@ suite('durable session message admission PostgreSQL', () => {
     expect(first.deliveries[0].sessionId).toBe('final-session')
     await materializer.materialize({inboxId:99308,userId,daemonId:'admission-daemon',sessionId:'middle-session',eventType:'session_status',payload:{request_id:'chain',status:'running'}})
     expect((await pool.query("SELECT count(*)::int n FROM events WHERE event_type='session_status' AND payload->>'request_id'='chain'")).rows[0].n).toBe(1)
+    const saved=(await pool.query('SELECT payload,logical_source_session_id,session_id FROM events WHERE id=$1',[first.eventId])).rows[0]
+    expect(saved).toMatchObject({session_id:'final-session',logical_source_session_id:'admission-session',payload:{session_id:'admission-session'}})
+    expect((await pool.query('SELECT session_id,payload FROM extension_source_outbox WHERE source_id=$1',['event:'+first.eventId])).rows).toEqual([{session_id:'admission-session',payload:saved.payload}])
+    await expect(materializer.materialize({inboxId:99309,userId,daemonId:'admission-daemon',sessionId:'middle-session',eventType:'session_status',payload:{request_id:'chain',status:'idle'}})).rejects.toThrow('replay_payload_conflict')
     await materializer.materialize({inboxId:99305,userId,daemonId:'admission-daemon',sessionId:'middle-session',eventType:'user_message_receipt',payload:{request_id:'chain',msg_id:'chain',status:'accepted'}})
     await expect(materializer.materialize({inboxId:99306,userId,daemonId:'admission-daemon',sessionId:'untrusted-alias',eventType:'user_message_receipt',payload:{request_id:'chain',msg_id:'chain',status:'accepted'}})).rejects.toMatchObject({code:'quota_reservation_binding_mismatch'})
     expect(await snapshot()).toMatchObject({used:2,reserved:0})

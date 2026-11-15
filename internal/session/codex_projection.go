@@ -14,6 +14,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 // logicalCodexTurnID derives the PocketCtl logical id from the native turn id.
@@ -139,7 +140,17 @@ func (p *codexProjection) ProjectHistorical(in codexapp.Inbound) []protocol.Daem
 	return events
 }
 
-func (p *codexProjection) project(in codexapp.Inbound, historical bool) []protocol.DaemonEvent {
+func (p *codexProjection) project(in codexapp.Inbound, historical bool) (events []protocol.DaemonEvent) {
+	defer func() {
+		for i := range events {
+			e := &events[i]
+			if (e.Type == "tool_call" || e.Type == "tool_result") && e.CallID != "" && e.CallMeta == nil {
+				mapped := []protocol.DaemonEvent{*e}
+				usageanalytics.Enrich(mapped, "codex-managed", "", "", "", "unknown", int64(e.Revision), false)
+				*e = mapped[0]
+			}
+		}
+	}()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if in.ID != nil { // server requests are handled by the interaction broker.
@@ -502,6 +513,31 @@ func (p *codexProjection) projectItem(method string, raw json.RawMessage, histor
 	events := p.synthesizeActiveTurn(params.ThreadID, params.TurnID, historical)
 	event, ok := p.convertItem(method, params.ThreadID, params.TurnID, params.Item)
 	if ok {
+		if event.Type == "tool_call" || event.Type == "tool_result" {
+			kind := "unknown"
+			name := event.Tool
+			server := ""
+			outcome := "unknown"
+			revision := int64(0)
+			if params.Item.Type == "mcpToolCall" {
+				kind = "mcp"
+				name = params.Item.Tool
+				server = params.Item.Server
+			}
+			if params.Item.Type == "commandExecution" || params.Item.Type == "fileChange" {
+				kind = "builtin"
+			}
+			if method == "item/completed" {
+				revision = 1
+				if params.Item.Status == "completed" {
+					outcome = "success"
+				}
+				if params.Item.Status == "failed" || params.Item.Status == "error" || (params.Item.ExitCode != nil && *params.Item.ExitCode != 0) || (len(params.Item.Error) > 0 && string(params.Item.Error) != "null") {
+					outcome = "failure"
+				}
+			}
+			event.CallMeta = &protocol.CallMetadata{Version: 1, InvocationID: params.Item.ID, Revision: revision, ToolKind: kind, ToolName: name, MCPServer: server, Outcome: outcome, EvidenceKind: "codex_native_item"}
+		}
 		stampTurnIdentity(&event, params.ThreadID, params.TurnID, "")
 		event.MemoryNative = &protocol.MemoryNativeEvent{Producer: "codex", RecordID: params.Item.ID, RootID: params.TurnID, UserRoot: params.Item.Type == "userMessage", CompleteCall: params.Item.Type == "commandExecution" || params.Item.Type == "mcpToolCall" || params.Item.Type == "dynamicToolCall", Skill: strings.EqualFold(params.Item.Tool, "skill"), UnknownChild: p.memoryUnknownOverflow || p.memoryUnknownTurns[memoryTurn]}
 		events = append(events, event)
@@ -719,6 +755,7 @@ func (p *codexProjection) projectUsage(raw json.RawMessage) []protocol.DaemonEve
 			TotalTokens:     params.TokenUsage.Last.TotalTokens,
 		},
 	}
+	usageEvent.UsageMeta = usageanalytics.Metadata("codex-managed", "", "", "", "", "includes_cache", 0)
 	stampTurnIdentity(&usageEvent, params.ThreadID, params.TurnID, "")
 	return []protocol.DaemonEvent{usageEvent}
 }

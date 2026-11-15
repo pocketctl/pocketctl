@@ -1,4 +1,6 @@
 import {attachSourceMetrics,createSourceGaugeCollector} from './sources/metrics.js'
+import {initializePlatformStatistics} from './platform-statistics/schema.js'
+import {registerPlatformStatisticsRoutes} from './platform-statistics/routes.js'
 import {loadBudgetUncertainty,loadBusinessHealth, summarizeBusinessHealth} from './reporting/business-health.js'
 import {loadLifecycleHealth,summarizeLifecycleHealth} from './reporting/lifecycle-health.js'
 import {updateBusinessHealthGauges} from './metrics.js'
@@ -85,11 +87,14 @@ async function main(): Promise<void> {
   const warmConnections = retainedConnections
     ? Promise.allSettled(Array.from({ length: retainedConnections }, () => pool.query('SELECT 1')))
     : undefined
+  const stopStatistics=await initializePlatformStatistics(pool,{role:'api',namespace:config.databaseNamespace,verifyOnly:config.schemaStartup==='verify'})
   const providerBudgetStore = config.providerBudget ? createProviderBudgetStore(pool) : undefined
   const providerDrain=new ProviderDrain()
   await validateTombstoneKeyring(pool, config.tombstoneHmacKeys)
   const schemaReady = true
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 })
+
+  registerPlatformStatisticsRoutes(app,{pool})
 
   app.get('/health', async () => ({ status: 'ok' }))
 
@@ -389,6 +394,7 @@ async function main(): Promise<void> {
     await app.close()
     const providerOutcome=await providerDrain.wait(10_000)
     if(!providerOutcome.drained)console.error('memory-api provider_drain_deadline',providerOutcome)
+    stopStatistics()
     await pool.end()
     process.exit(providerOutcome.drained?0:1)
   }

@@ -3,6 +3,7 @@ import {createCanonicalProjectionHandler} from './sources/canonical-projection-w
 import {createSharedSourceScheduler} from './sources/shared-scheduler.js'
 import {wakeCompletedPersonalProjection} from './sources/projection-job-handoff.js'
 import {createNativeInstallationDiscovery} from './installations/native-discovery.js'
+import {initializePlatformStatistics} from './platform-statistics/schema.js'
 import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
 import {createLifecycleAssessmentService} from './claims/lifecycle-assessment.js'
 import {createLifecycleJobHandler} from './claims/lifecycle-job.js'
@@ -95,6 +96,7 @@ async function main(): Promise<void> {
   const config = loadMemoryConfig()
   const pool = createMemoryPool(config)
   await prepareMemoryStartup(pool,config)
+  const stopStatistics=await initializePlatformStatistics(pool,{role:'worker',namespace:config.databaseNamespace,verifyOnly:config.schemaStartup==='verify'})
   if(config.delegatedPublishMode!=='enabled'){
     const c=await pool.connect();try{await c.query('BEGIN');await c.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))");await c.query("UPDATE memory_jobs SET state='dead',claim_epoch=claim_epoch+1,claimed_by=NULL,claim_expires_at=NULL,last_error_code='delegated_publish_off' WHERE job_type='execute_publication_delegation' AND state IN('pending','running')");await c.query('COMMIT')}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
   }
@@ -835,6 +837,7 @@ async function main(): Promise<void> {
   // Idle keep-alive scrapers would otherwise hold close() open indefinitely.
   metricsServer.closeIdleConnections()
   await new Promise<void>(resolve => metricsServer.close(() => resolve()))
+  stopStatistics()
   await pool.end()
   logger.log('info', 'worker_stopped', { job_outcome: jobOutcome ?? 'off',feed_drained:feedDrained,provider_drained:providerOutcome.drained })
   process.exit(jobOutcome === 'deadline'||!feedDrained||!providerOutcome.drained ? 1 : 0)

@@ -34,3 +34,21 @@ test('AC-46 assessment unknown outcome remains distinct from a completed low-val
  expect(wrapper.get('[data-testid="lifecycle-assessments"]').text()).toContain('memory.lifecycle.assessments')
  expect(wrapper.get('[data-testid="lifecycle-assessments"]').text()).toContain('8 / 2');wrapper.unmount()
 })
+
+test('processing records select full result and source without hiding unknown notices',async()=>{
+ read.mockResolvedValue({...snapshot(),records:[{bundle_id:'source-1',state:'failed',reason:'failed',updated_at:'2026-11-06T00:00:00Z',run_state:'failed',run_reason:'failed',action:null,decision_state:null,decision_reason:''},{bundle_id:'source-2',state:'completed',reason:'completed',updated_at:'2026-11-06T00:01:00Z',run_state:null,run_reason:'',action:'accepted',decision_state:'completed',decision_reason:'completed'}]})
+ const wrapper=mount(MemoryLifecyclePanel,{props:{installationId:'one'}});await flushPromises()
+ await wrapper.get('[data-testid="lifecycle-record-source-2"]').trigger('click')
+ expect(wrapper.get('[data-testid="lifecycle-record-detail"]').text()).toContain('source-2')
+ expect(wrapper.get('[data-testid="lifecycle-provenance-unknown"]').isVisible()).toBe(true)
+ wrapper.unmount()
+})
+
+test('assessment provider unknown remains immediately visible beside actual configuration fences',async()=>{
+ read.mockResolvedValue({...snapshot(),configured_mode:'enabled',policy_mode:'shadow',revision:8,assessments:{provider_result_unknown:2},assessment_usage:{input_tokens:4,output_tokens:1}})
+ const wrapper=mount(MemoryLifecyclePanel,{props:{installationId:'one'}});await flushPromises()
+ expect(wrapper.get('[data-testid="lifecycle-assessment-unknown"]').element.closest('details')).toBeNull()
+ expect(wrapper.get('[data-testid="lifecycle-mode-fences"]').text()).toContain('enabled')
+ expect(wrapper.get('[data-testid="lifecycle-mode-fences"]').text()).toContain('shadow')
+ wrapper.unmount()
+})

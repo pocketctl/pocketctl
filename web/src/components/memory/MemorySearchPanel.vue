@@ -32,14 +32,19 @@
               <option v-for="value in selectedScene?.destinations || []" :key="value" :value="value">{{ t(`memory.destination_${value}`) }}</option>
             </select></ActionSelect></label>
           </div>
-          <div v-if="personalTaskOwner" class="memory-scene-filters" data-testid="memory-task-filters">
+          <details v-if="personalTaskOwner" class="memory-task-disclosure" data-testid="memory-task-disclosure"
+            :open="taskFiltersExpanded || !!taskScopeKey || !!tasksError"
+            @toggle="taskFiltersExpanded = ($event.target as HTMLDetailsElement).open">
+            <summary>{{ t('memory.ui.search_legacy_tasks') }}<span v-if="taskScopeKey">{{ t('memory.ui.filter_active') }}</span></summary>
+          <div class="memory-scene-filters" data-testid="memory-task-filters">
             <label>{{ t('memory.task_scope') }}<ActionSelect><select v-model="taskScopeKey" :aria-label="t('memory.task_scope')" :disabled="tasksLoading" data-testid="memory-task-select">
               <option value="">{{ t('memory.task_scope_default') }}</option>
               <option v-for="task in taskOptions" :key="task.key" :value="task.key">{{ task.label }}</option>
             </select></ActionSelect></label>
             <button v-if="tasksCursor || tasksError" type="button" class="memory-button" :disabled="tasksLoading" @click="loadTasks(!!tasksCursor)">{{ tasksError ? t('common.retry') : t('memory.task_scope_more') }}</button>
           </div>
-          <p v-if="personalTaskOwner" class="memory-notice" :role="tasksError ? 'alert' : 'status'">{{ tasksError ? t('memory.task_scope_failed') : t('memory.task_scope_hint') }}</p>
+          <p class="memory-notice" :role="tasksError ? 'alert' : 'status'">{{ tasksError ? t('memory.task_scope_failed') : t('memory.task_scope_hint') }}</p>
+          </details>
           <p v-if="scenesLoading" role="status">{{ t('memory.scene_loading') }}</p>
           <div v-else-if="scenesError" class="memory-notice is-error" role="alert" data-testid="memory-scene-error">{{ t('memory.scene_failed') }} <button type="button" class="memory-button" @click="loadScenes">{{ t('memory.scene_retry') }}</button></div>
           <p v-else-if="scenes.length" class="memory-notice" role="status" data-testid="memory-scene-hint">{{ t('memory.scene_hint') }} <span v-if="scenesHasMore">{{ t('memory.scene_more') }}</span></p>
@@ -182,6 +187,7 @@ function scopeLabel(scope: MemoryGovernanceScope): string {
   return scope.owner_scope_kind === 'personal' ? kind : `${kind} · ${scope.name || scope.owner_scope_id.slice(0, 20)}`
 }
 const selectedScopeIds = ref<string[]>([])
+const taskFiltersExpanded = ref(false)
 let controller: AbortController | undefined
 let previewRequestId = 0
 let previewTrigger: HTMLElement | null = null

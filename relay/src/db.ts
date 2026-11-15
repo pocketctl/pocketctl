@@ -1,7 +1,11 @@
+import {consolidatePersonalUsage} from './usage-analytics/machine-consolidation.js';
+import {initUsageTeamHistory} from './usage-analytics/team-history.js';
+import { initUsageAnalyticsSchema } from './usage-analytics/schema.js';
 import {assertNativeInputStartCompatible,installNativeInputStart} from './shared-source/input-start.js'
 import {initNativeSessionAliasSchema,assertNativeRetirementUpgradeInput} from './session-alias/schema.js';
 import {installRelaySchemaContract} from './schema-runtime.js';
 import { initMessageQueueSchema } from './session-message-queue/schema.js';
+import { recordRegistration } from './platform-statistics/facts.js';
 import {initMaintenanceSummarySchema} from './session-lifecycle/maintenance-summary.js';
 import { initSessionShareSchema } from './session-share/store.js';
 import { initPreferenceSchema } from './user-preferences.js';
@@ -877,6 +881,8 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   await initMaintenanceSummarySchema(pool);
   // Team Memory bindings reference pre-existing Extension installations.
   await initTeamSchema(pool);
+  await initUsageAnalyticsSchema(pool);
+  await initUsageTeamHistory(pool);
   // The lifecycle fence trigger targets collaboration_session_agent_bindings,
   // so it must run after the team schema has created that table.
   await initLifecycleDependencyFenceSchema(pool);
@@ -1605,6 +1611,7 @@ export async function consolidateOfflineMachineDaemons(
        WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
       [input.daemonId, input.userId, oldDaemonIds],
     );
+    await consolidatePersonalUsage(client,input.userId,input.daemonId,oldDaemonIds);
     await client.query(
       `UPDATE token_usage_facts SET daemon_id = $1
        WHERE user_id = $2 AND daemon_id = ANY($3::varchar[])`,
@@ -3489,6 +3496,7 @@ export async function createUserWithWelcomeEmail(
       [normalizedEmail, passwordHash, displayName || null],
     );
     const user = result.rows[0];
+    await recordRegistration(client, user.id, user.created_at!);
     await client.query(
       `INSERT INTO email_outbox (user_id, email_type, recipient_email, locale)
        VALUES ($1, 'welcome', $2, $3)

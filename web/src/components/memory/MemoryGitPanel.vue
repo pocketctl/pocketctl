@@ -6,7 +6,8 @@ import {useLocale} from '../../composables/useLocale'
 import {memoryGit} from '../../services/memoryGit'
 import type {MemoryGitConnection,MemoryGitExpected,MemoryGitPage,MemoryGitProposal} from '../../types/memoryGit'
 import {createClientId} from '../../utils/clientId'
-const props=defineProps<{scopeId:string;connectionId?:string}>(),{t}=useLocale()
+const props=withDefaults(defineProps<{scopeId:string;connectionId?:string;section?:'all'|'sync'|'operations'}>(),{section:'all'}),{t}=useLocale()
+const showSync=computed(()=>props.section!=='operations'),showOperations=computed(()=>props.section!=='sync')
 const page=ref<MemoryGitPage|null>(null),selected=ref(''),detail=ref<MemoryGitProposal|null>(null),error=ref(''),loading=ref(false),busy=ref(false),unavailable=ref(false)
 const exportId=ref(''),assetId=ref(''),assetKind=ref<'claim'|'rule'|'wiki'|'skill'>('rule')
 const assets=ref<Array<{kind:'claim'|'rule'|'wiki'|'skill';id:string;label:string}>>([]),assetChoice=ref(''),assetsLoaded=ref(false)
@@ -188,11 +189,13 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
       <button class="memory-button" data-testid="git-refresh" :disabled="loading || !scopeId" @click="refresh()">{{ t('memory.git.refresh') }}</button></header>
     <div v-if="error" class="memory-notice is-error" role="alert">{{ error }}</div>
     <p v-if="storageWarning" role="alert">{{ t('memory.git.intent_storage_warning') }}</p>
+    <p v-if="!showOperations && intents.length" class="memory-notice" role="status">{{ t('memory.ui.git_unfinished_notice') }} {{ intents.length }}</p>
+    <div v-show="showOperations" data-testid="git-intents"><h4 v-if="section !== 'all'">{{ t('memory.ui.git_operations') }}</h4><p v-if="!intents.length" class="memory-git-muted">{{ t('memory.ui.git_no_intents') }}</p>
     <section v-for="intent in intents" :key="intent.key" class="memory-notice" role="status"><strong>{{ t(intent.state==='pending'?'memory.git.intent_pending':'memory.git.intent_unknown') }}</strong>
       <p>{{ intent.operation }} · <code>{{ intent.scope }} / {{ intent.connection }} / {{ intent.resource }}</code></p><code>{{ intent.key }}</code>
       <p v-if="!retryable(intent)">{{ t('memory.git.intent_manual') }}</p>
       <button class="memory-button" data-testid="git-retry-intent" :disabled="busy || !retryable(intent)" @click="retryIntent(intent)">{{ t('memory.git.intent_retry') }}</button>
-      <button class="memory-button" :disabled="intent.state==='pending'" @click="handled(intent)">{{ t('memory.git.intent_handled') }}</button></section>
+      <button class="memory-button" :disabled="intent.state==='pending'" @click="handled(intent)">{{ t('memory.git.intent_handled') }}</button></section></div>
     <p v-if="unavailable" role="status">{{ t('memory.git.unavailable') }}</p>
     <p v-else-if="loading && !page" role="status">{{ t('memory.git.loading') }}</p>
     <p v-else-if="page && !page.items.length" role="status">{{ t('memory.git.empty') }}</p>
@@ -202,7 +205,7 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
         <button v-for="c in page.items" :key="c.connectionId" class="memory-git-connection" :class="{active:selected===c.connectionId}" :aria-pressed="selected===c.connectionId" @click="choose(c)">
           <strong>{{ c.provider }} · {{ c.targetBranch }}</strong><span>{{ c.capabilities.mode }} · {{ c.state }}</span><code>{{ c.connectionId }}</code></button>
         <button v-if="page.next_cursor" class="memory-button" @click="refresh(page.next_cursor!)">{{ t('memory.git.next') }}</button>
-        <template v-if="connection">
+        <template v-if="connection && showOperations">
           <h4>{{ t('memory.git.runs') }}</h4>
           <p v-for="run in connection.runs" :key="run.run_id"><code>{{ run.run_id }}</code><span>{{ run.state }} · {{ run.reason_code }} {{ run.unfinished ? t('memory.git.unfinished') : '' }}</span></p>
         </template>
@@ -210,11 +213,12 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
       <main v-if="connection" class="memory-git-detail">
         <dl class="memory-git-status"><div><dt>{{ t('memory.git.last_success') }}</dt><dd>{{ connection.last_success ?? t('memory.git.not_run') }}</dd></div>
           <div><dt>{{ t('memory.git.current_error') }}</dt><dd>{{ connection.current_error ?? '—' }}</dd></div><div><dt>{{ t('memory.git.generation') }}</dt><dd><code>{{ connection.generation }}</code></dd></div></dl>
-        <div v-if="connection.cleanup_pending || connection.cleanup_total || connection.cleanup.length" class="memory-notice" role="status" data-testid="git-cleanup"><strong>{{ t('memory.git.cleanup_pending') }} · {{ connection.cleanup_pending_count ?? 0 }} / {{ connection.cleanup_total ?? connection.cleanup.length }}</strong><p>{{ t('memory.git.cleanup_description') }}</p>
+        <div v-show="showOperations" v-if="connection.cleanup_pending || connection.cleanup_total || connection.cleanup.length" class="memory-notice" role="status" data-testid="git-cleanup"><strong>{{ t('memory.git.cleanup_pending') }} · {{ connection.cleanup_pending_count ?? 0 }} / {{ connection.cleanup_total ?? connection.cleanup.length }}</strong><p>{{ t('memory.git.cleanup_description') }}</p>
           <div v-for="entry in connection.cleanup" :key="entry.export_id"><code>{{ entry.export_id }}</code><span v-if="entry.recognized_at"> · {{ t('memory.git.recognized') }}</span>
             <button class="memory-button" :disabled="busy || !entry.cleanup_pending || !connection.capabilities.can_sync" @click="sync('recover',entry.export_id)">{{ t('memory.git.reconcile') }}</button></div>
           <button v-if="cleanupContinued" class="memory-button" data-testid="git-cleanup-first" :disabled="cleanupPageLoading" @click="loadChildren('cleanup')">{{ t('memory.git.first_page') }}</button>
           <button v-if="connection.cleanup_next_cursor" class="memory-button" data-testid="git-cleanup-next" :disabled="cleanupPageLoading" @click="loadChildren('cleanup',connection.cleanup_next_cursor)">{{ t('memory.git.next_cleanup') }}</button></div>
+        <details v-show="showSync" :open="section === 'all'" class="memory-git-advanced"><summary>{{ t('memory.ui.git_exports_advanced') }}</summary>
         <div class="memory-git-actions"><label>{{ t('memory.git.export') }}<ActionSelect><select v-model="exportId"><option v-for="e in connection.exports" :key="e.export_id" :value="e.export_id">{{ e.export_id }}</option></select></ActionSelect></label>
           <button class="memory-button" :disabled="busy || !exportId || !connection.capabilities.can_sync" @click="sync('enroll')">{{ t('memory.git.enroll') }}</button>
           <button class="memory-button" :disabled="busy || !exportId || !connection.capabilities.can_sync" @click="sync('poll')">{{ t('memory.git.sync') }}</button></div>
@@ -230,7 +234,8 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
           <details><summary>{{t('memory.git_setup.manual_asset')}}</summary><label>{{ t('memory.git.asset_kind') }}<ActionSelect><select v-model="assetKind"><option>claim</option><option>rule</option><option>wiki</option><option>skill</option></select></ActionSelect></label>
           <label>{{ t('memory.git.asset_id') }}<input v-model="assetId" required /></label></details><button class="memory-button" :disabled="busy || !assetId">{{ t('memory.git.preview') }}</button>
           <button class="memory-button is-primary" type="button" :disabled="busy||!assetId" @click="preview(true)">{{t('memory.git_setup.create_export')}}</button></form></details>
-        <nav class="memory-git-proposals" :aria-label="t('memory.git.proposals')"><button v-for="p in connection.proposals" :key="p.proposal_id" class="memory-button" :aria-pressed="detail?.proposal_id===p.proposal_id" @click="loadProposal(p.proposal_id)">{{ p.state }} · {{ p.revision }}</button></nav>
+        </details>
+        <div v-show="showSync" data-testid="git-sync-section"><nav class="memory-git-proposals" :aria-label="t('memory.git.proposals')"><button v-for="p in connection.proposals" :key="p.proposal_id" class="memory-button" :aria-pressed="detail?.proposal_id===p.proposal_id" @click="loadProposal(p.proposal_id)">{{ p.state }} · {{ p.revision }}</button></nav>
         <p>{{ t('memory.git.proposal_total') }}: {{ connection.proposal_total ?? connection.proposals.length }}</p>
         <div class="memory-git-actions"><button v-if="proposalContinued" class="memory-button" data-testid="git-proposals-first" :disabled="proposalPageLoading" @click="loadChildren('proposals')">{{ t('memory.git.first_page') }}</button>
           <button v-if="connection.proposals_next_cursor" class="memory-button" data-testid="git-proposals-next" :disabled="proposalPageLoading" @click="loadChildren('proposals',connection.proposals_next_cursor)">{{ t('memory.git.next_proposals') }}</button></div>
@@ -253,8 +258,16 @@ onBeforeUnmount(()=>{suspendIntents(true);cancel()})
             <button class="memory-button" :disabled="busy || !detail.capabilities.can_resolve" @click="resolve('memory')">{{ t('memory.git.use_memory') }}</button>
             <button class="memory-button" :disabled="busy || !detail.capabilities.can_resolve" @click="resolve('git')">{{ t('memory.git.use_git') }}</button></div>
         </article>
+        </div>
         <p class="memory-git-muted">{{ t('memory.git.external_write_disabled') }} · external_write_disabled</p>
       </main>
     </div>
   </section>
 </template>
+
+<style scoped>
+.memory-git{container-type:inline-size;font-size:13px;line-height:1.7;min-width:0}.memory-git-toolbar h3{font-size:17px}.memory-git-toolbar p{font-size:12px;color:var(--fg-secondary)}.memory-git-workspace{display:grid;grid-template-columns:210px minmax(0,1fr);border:1px solid var(--border);border-radius:10px;overflow:clip;margin-top:18px}.memory-git-queue{padding:16px 12px;background:var(--bg-secondary);border-right:1px solid var(--border);min-width:0}.memory-git-connection{display:block;width:100%;text-align:left;padding:12px;margin-bottom:6px;background:none;border:1px solid transparent;border-radius:6px;color:var(--fg);cursor:pointer}.memory-git-connection>*{display:block;overflow-wrap:anywhere}.memory-git-connection strong{font-size:13px;font-weight:550}.memory-git-connection span{font-size:12px;color:var(--fg-secondary)}.memory-git-connection.active{background:var(--brand-soft,var(--bg));border-color:var(--accent)}.memory-git-detail{padding:20px 24px;min-width:0}.memory-git code,.memory-git pre{font-size:11px;overflow-wrap:anywhere}.memory-git pre{white-space:pre-wrap;line-height:1.8}.memory-git-versions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--border);border-radius:8px;overflow:clip}.memory-git-versions>section{padding:14px;min-width:0}.memory-git-versions>section+section{border-left:1px solid var(--border)}.memory-git-versions h4{font-size:12px}.memory-git-status{display:flex;flex-wrap:wrap;gap:16px}.memory-git-status>div{min-width:0}.memory-git-status dt{font-size:11px;color:var(--fg-secondary)}.memory-git-status dd{margin:0;overflow-wrap:anywhere}.memory-git-advanced{border-block:1px solid var(--border);padding:14px 0;margin:18px 0}.memory-git summary{cursor:pointer;font-size:12px}.memory-git-advanced>summary{font-size:13px}.memory-git-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:12px 0}.memory-git-proposals{display:flex;gap:6px;flex-wrap:wrap;margin-top:18px}.memory-git-result{padding:16px;border:1px solid var(--border);border-radius:8px;margin:18px 0}.memory-git-toolbar{display:flex;align-items:start;justify-content:space-between;gap:12px;flex-wrap:wrap}.memory-git h4{margin:12px 0}.memory-git-muted{color:var(--fg-secondary);font-size:12px}
+@container (max-width:900px){.memory-git-versions{grid-template-columns:1fr}.memory-git-versions>section+section{border-left:0;border-top:1px solid var(--border)}}
+@container (max-width:650px){.memory-git-workspace{grid-template-columns:1fr}.memory-git-queue{border-right:0;border-bottom:1px solid var(--border)}.memory-git-detail{padding:18px 16px}}
+@media(max-width:760px){.memory-git button,.memory-git summary{min-height:44px}.memory-git input{min-height:44px;font-size:16px}}
+</style>

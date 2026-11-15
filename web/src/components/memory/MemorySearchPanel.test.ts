@@ -205,12 +205,15 @@ describe('MemorySearchPanel', () => {
     wrapper.unmount()
   })
 
- test('creating a scene preserves explicit legacy task search',async()=>{
+ test('legacy task filters open for an active task and keep its exact search scope',async()=>{
   memoryClient.listMemoryScenes.mockResolvedValue({scenes:[{id:'scene-a',name:'Acceptance',domain:'personal_project',destinations:['personal']}],has_more:false})
   memoryClient.listMemoryClaims.mockResolvedValue({claims:[{scope_kind:'task',scope_key:'turn:verified',statement:'Verified legacy task'}],next_cursor:null,total_count:1})
   memoryClient.searchMemory.mockResolvedValue({hits:[],degradedComponents:[]})
   const wrapper=mount(MemorySearchPanel,{props:{installationId:'personal',scopes:[{installation_id:'personal',owner_scope_kind:'personal',permissions:['read']} as any]}});await flushPromises()
-  await wrapper.get('[data-testid="memory-task-select"]').setValue('turn:verified');await wrapper.get('[data-testid="memory-search-input"]').setValue('legacy');await wrapper.get('form').trigger('submit');await flushPromises()
+  expect(wrapper.get<HTMLDetailsElement>('[data-testid="memory-task-disclosure"]').element.open).toBe(false)
+  await wrapper.get('[data-testid="memory-task-select"]').setValue('turn:verified')
+  expect(wrapper.get<HTMLDetailsElement>('[data-testid="memory-task-disclosure"]').element.open).toBe(true)
+  await wrapper.get('[data-testid="memory-search-input"]').setValue('legacy');await wrapper.get('form').trigger('submit');await flushPromises()
   expect(memoryClient.searchMemory).toHaveBeenCalledWith('legacy',{taskScopeKey:'turn:verified',scopeInstallationIds:['personal']},expect.any(AbortSignal));wrapper.unmount()
  })
  test('personal task selection sends exact task scope and clears on owner change', async () => {

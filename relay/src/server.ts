@@ -1,4 +1,9 @@
+import {registerPersonalUsageRoutes,personalUsageQuery,usageErrorReply} from './usage-analytics/routes.js'
 import {prepareRelaySchema,type RelaySchemaStrategy} from './schema-runtime.js';
+import { ensurePlatformStatisticsSchema } from './platform-statistics/schema.js';
+import { startPlatformStatisticsCollector } from './platform-statistics/collector.js';
+import { registerPlatformStatisticsRoutes } from './platform-statistics/routes.js';
+import { createPlatformStatisticsMemoryReader } from './platform-statistics-upstream.js';
 import {registerMaintenanceRoutes} from './extensions/maintenance-routes.js'
 import { finishDatabaseStartup } from './startup-readiness.js';
 import {TeamExternalStopService} from './team/external-stop.js';
@@ -1088,6 +1093,16 @@ async function main() {
   const teamRunService = new TeamRunService(pool, {
     event: () => {}, // Shared delivery comes from the transactional Team journal.
   }, teamId => teamExternalExecutorEnabled(teamConfig, teamId))
+  const memoryContextGrantBroker = extensionConfig.mode === 'enabled'
+    ? createMemoryContextGrantBroker({
+        pool: pools.control,
+        issuer: publicIssuer,
+        mode: extensionConfig.mode,
+        v2Mode: extensionV2Mode,
+        providerPublicOrigins: extensionConfig.providerPublicOrigins,
+        grantKeys: extensionGrantKeys,
+      })
+    : undefined
   router = new Router(pools, {
     teamSubscriptionAuthorizer: { sharedHighWater: (userId,sessionId) => teamSessionService.sharedHighWater(userId,sessionId), canSubscribe: (userId, sessionId) => teamSessionService.canSubscribe(userId, sessionId) },
     teamDispatchBroker: {
@@ -1135,14 +1150,7 @@ async function main() {
         providerPublicOrigins: extensionConfig.providerPublicOrigins,
         grantKeys: extensionGrantKeys,
       }),
-      memoryContextGrantBroker: createMemoryContextGrantBroker({
-        pool: pools.control,
-        issuer: publicIssuer,
-        mode: extensionConfig.mode,
-        v2Mode: extensionV2Mode,
-        providerPublicOrigins: extensionConfig.providerPublicOrigins,
-        grantKeys: extensionGrantKeys,
-      }),
+      memoryContextGrantBroker,
       memoryCodegraphGrantBroker: createMemoryCodegraphGrantBroker({
         pool: pools.control,
         issuer: publicIssuer,
@@ -1235,6 +1243,8 @@ async function main() {
       console.error(`[attention-inbox] ${component} failed:`, error instanceof Error ? error.name : typeof error)
     },
   })
+  let stopPlatformStatistics = () => {}
+  let stopInlineStatistics = () => {}
   let shuttingDown = false
   let databaseReady = false
   const tPool = (typeof performance !== 'undefined' ? performance.now() : Date.now())
@@ -1245,6 +1255,9 @@ async function main() {
       if(installConfiguredHistoryReader(pools.query, lifecycleConfig)){if(schemaStrategy==='verify')await assertSessionColdBodiesEnabled(pools.query);else await enableSessionColdBodies(pools.query)}
       const catalogReady = await initializeExtensionProviderCatalog(pools.query, extensionConfig.mode)
       if (!catalogReady) console.warn('[extensions] provider catalog unavailable while extensions are off')
+      await ensurePlatformStatisticsSchema(pools.query)
+      stopPlatformStatistics = await startPlatformStatisticsCollector(pools.query, 'relay')
+      if (runtimeConfig.materializationMode === 'inline') stopInlineStatistics = await startPlatformStatisticsCollector(pools.query, 'materializer')
       await assertRelayMaterializationReady(runtimeConfig.materializationMode, pools.query)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
       const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -1456,6 +1469,10 @@ async function main() {
     pool, repository: notificationRepository, enabled: notificationsEnabled,
     verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
   });
+  registerPlatformStatisticsRoutes(app, {
+    pool, verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),
+    memoryReader: createPlatformStatisticsMemoryReader(),
+  })
   registerSessionLifecycleStatusRoutes(app, {
     pool, config: lifecycleConfig,
     verifyAccessToken: (token, authPool) => verifyAccessTokenWithRevocation(token, authPool),
@@ -2015,12 +2032,15 @@ async function main() {
     return { success: true };
   });
 
+  registerPersonalUsageRoutes(app,{pool,verify:token=>verifyAccessTokenWithRevocation(token,pool),ready:()=>databaseReady})
   registerPreferenceRoutes(app, { pool, verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool), ready: () => databaseReady })
   app.get('/api/tokens/sessions', async (req, reply) => {
     const header = req.headers.authorization
     const actor = header?.startsWith('Bearer ') ? await verifyAccessTokenWithRevocation(header.slice(7), pool) : null
     if (!actor) return reply.code(401).send({ error: 'authorization_required' })
     if (!databaseReady) return reply.code(503).send({ error: 'database_unavailable' })
+    if((req.query as any).contract!==undefined&&(req.query as any).contract!=='personal-v1')return reply.code(400).send({error:'unsupported_contract'})
+    if((req.query as any).contract==='personal-v1'){try{return await personalUsageQuery(pool,actor.userId,req.query as Record<string,unknown>,'sessions')}catch(e){return usageErrorReply(reply,e)}}
     try { return await getTokenSessionAnalytics(pool, actor.userId, parseTokenSessionQuery(req.query as Record<string, unknown>), tokenFeatures.dashboardV2) }
     catch (error) { if (error instanceof TokenQueryError) return reply.code(400).send({error:'invalid_query',message:error.message}); throw error }
   })
@@ -2075,6 +2095,8 @@ async function main() {
     const payload = await verifyAccessTokenWithRevocation(authHeader.slice(7), pool);
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
+    if((req.query as any).contract!==undefined&&(req.query as any).contract!=='personal-v1')return reply.code(400).send({error:'unsupported_contract'})
+    if((req.query as any).contract==='personal-v1'){try{return await personalUsageQuery(pool,payload.userId,req.query as Record<string,unknown>,'dashboard')}catch(e){return usageErrorReply(reply,e)}}
     const daemon = ((req.query as any).daemon as string) || 'all';
     const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
     let sessionQuery
@@ -2115,6 +2137,8 @@ async function main() {
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     const { sessionId } = req.params as any;
+    if((req.query as any).contract!==undefined&&(req.query as any).contract!=='personal-v1')return reply.code(400).send({error:'unsupported_contract'})
+    if((req.query as any).contract==='personal-v1'){try{return await personalUsageQuery(pool,payload.userId,req.query as Record<string,unknown>,'session',sessionId)}catch(e){return usageErrorReply(reply,e)}}
     const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
     if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
     const trend = tokenFeatures.dashboardV2
@@ -2748,13 +2772,13 @@ async function main() {
     console.log(`[startup] pool=${(tPool - tStart).toFixed(0)}ms database=${databaseReady ? 'ready' : 'initializing'} listen=${(tListen - tInit).toFixed(0)}ms total=${(tListen - tStart).toFixed(0)}ms`)
   } catch (err) { console.error('failed to start:', err); process.exit(1) }
 
-  // Graceful shutdown: tell peers we're restarting, then terminate every WS
-  // immediately so the old process exits in <1s. The old code's `await
-  // app.close()` blocked ~30s on ws's closeTimeout when a peer didn't ack the
-  // close frame; terminate() bypasses that. A 2s race guards any stray conn.
+  // Terminate each WebSocket after notifying peers so an unacknowledged close
+  // frame cannot delay Fastify shutdown. Bound the Fastify and grant-audit
+  // drains separately before closing the database pools.
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    stopPlatformStatistics(); stopInlineStatistics();
     console.log(`[shutdown] received ${signal}, draining...`);
     router.beginShutdown();
     await router.stopDurableIngress({ flushDeadlineMs: 1_500 });
@@ -2783,6 +2807,9 @@ async function main() {
     try {
       await Promise.race([app.close(), new Promise(r => setTimeout(r, 2000))])
     } catch (e) { console.error('[shutdown] close error:', e) }
+    if (memoryContextGrantBroker && !(await memoryContextGrantBroker.drainAudits(1_500))) {
+      console.warn('[shutdown] context grant audit drain timed out')
+    }
     try { await closeRelayPools(pools) } catch (e) { console.error('[shutdown] pool.end error:', e) }
     router.stop()
     process.exit(0)

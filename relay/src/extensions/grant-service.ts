@@ -512,9 +512,12 @@ export function createMemoryContextGrantBroker(deps: MemoryMcpGrantBrokerDeps & 
     providerPublicOrigins: deps.providerPublicOrigins,
     ttlSeconds: ttl,
   }
-  const mint = createCapabilityGrantService(routeDeps, deps.grantKeys)
+  // Two overlapping personal Context requests can finish their grants while
+  // both audits settle. Further requests still wait for their own audit.
+  const mint = createCapabilityGrantService(routeDeps, deps.grantKeys, { backgroundAuditLimit: 2 })
 
   return {
+    drainAudits: mint.drainAudits,
     /**
      * Resolve (installation, session ownership) in ONE query: the session
      * must belong to the authenticated user and exactly one active Memory

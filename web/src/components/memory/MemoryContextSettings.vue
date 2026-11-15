@@ -13,7 +13,7 @@
         <div class="scope">
           <strong>{{ t(`memory.context.scope.${row.scopeKind}`) }}</strong>
           <span>{{ row.scopeKey }} · {{ row.agent || t('memory.context.allAgents') }}</span>
-          <span>{{ t('memory.context.maxTokens') }}: {{ row.maxTokens ?? t('memory.context.inheritTokens') }}</span>
+          <span>{{ t('memory.context.maxTokens') }}: {{ row.maxTokens ?? t('memory.context.inheritTokens') }} · {{ t('memory.ui.context.revision') }} {{ row.revision }}</span>
         </div>
         <span class="modes" role="group" :aria-label="`${t('memory.context.modeLabel')} · ${row.scopeKey}`">
           <button v-for="mode in modes" :key="mode" class="memory-button"
@@ -44,12 +44,13 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { ContextSettings } from '../../types/memory'
 import { listContextSettings, putContextSetting } from '../../services/memoryClient'
 
 const { t } = useLocale()
+const emit=defineEmits<{(event:'draft-change',dirty:boolean):void}>()
 const modes = ['off', 'shadow', 'enabled'] as const
 const scopes = ['installation', 'repository', 'session'] as const
 const agents = ['codex', 'claude-code', 'opencode'] as const
@@ -123,7 +124,13 @@ async function createSetting(): Promise<void> {
   } finally { busy.value = false }
 }
 
-defineExpose({ refresh })
+function discardDraft():void{
+  if(busy.value)return
+  adding.value=false;createError.value=''
+  Object.assign(draft,{scope:'installation',key:'',agent:'',mode:'off',tokens:''})
+}
+watch(adding,value=>emit('draft-change',value),{immediate:true})
+defineExpose({ refresh, discardDraft })
 void refresh()
 </script>
 
@@ -135,4 +142,6 @@ void refresh()
 .context-form label { display: grid; gap: 7px; min-width: 0; font-size: 12px; color: var(--fg-secondary); }
 .form-wide { grid-column: 1 / -1; }
 @media (max-width: 600px) { .context-form { grid-template-columns: minmax(0, 1fr); } }
+.memory-context-settings{padding:0;border:0;background:transparent;min-width:0}.memory-context-settings h3{font-size:16px;margin:0 0 12px}.memory-context-settings .hint{font-size:12px;line-height:1.7;color:var(--muted);margin:8px 0}.memory-context-settings .row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--border);padding:14px 0;font-size:13px}.modes{display:flex;gap:6px}.scope strong{font-size:13px}.scope span{font-size:12px}.modes button{font-size:12px}.modes button.active{color:var(--accent);background:var(--accent-muted);border-color:var(--accent)}.context-form select,.context-form input{box-sizing:border-box;width:100%;min-width:0;font:inherit;font-size:13px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:9px 10px}.actions{display:flex;gap:8px}.error{color:var(--error)}
+@media(max-width:600px){.context-form input,.context-form select{font-size:16px;min-height:44px}.memory-context-settings button{min-height:44px}}
 </style>

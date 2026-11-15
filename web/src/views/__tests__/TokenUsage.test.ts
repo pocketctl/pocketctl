@@ -1,80 +1,15 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import {describe,it,expect,vi,beforeEach} from 'vitest'
+import {mount,flushPromises} from '@vue/test-utils'
+import {useLocale} from '../../composables/useLocale'
 import TokenUsage from '../TokenUsage.vue'
-
-vi.mock('vue-router', () => ({
-  useRoute: () => ({ query: { daemon: 'daemon-1' } }),
-}))
-
-vi.mock('../../composables/useAuth', () => ({
-  useAuth: () => ({
-    accessToken: { value: 'tk' },
-    apiGetAuth: async (url: string) => {
-      const response = await fetch(url)
-      return { ok: response.ok, data: await response.json() }
-    },
-  }),
-}))
-
-const sessionsWithChildren = {
-  total: 1000, today: 100, thisMonth: 500,
-  sessions: [{
-    session_id: 'p1', title: 'parent', total_tokens: 1000, tok_input: 400, tok_output: 300,
-    tok_cache_read: 200, tok_cache_create: 100, model: 'm', agent_type: 'claude-code', status: 'running',
-    created_at: '2026-07-01T00:00:00Z',
-    children: [{ agentId: 'a1', agentType: 'Explore', title: '探索', tokenIn: 100, tokenOut: 200, tokenCache: 50, tokenCacheCreate: 30 }],
-  }],
-}
-
-describe('TokenUsage.vue (P1a)', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
-      ok: true, status: 200, json: async () =>
-        /\/api\/tokens\/sessions\?/.test(url) ? sessionsWithChildren
-        : { summary: { total: 1000, today: 100, thisWeek: 300, thisMonth: 500 }, dailySeries: [], byModel: [], byDaemon: [] },
-    } as any)))
-  })
-
-  test('summary total 标注含子代理；session 展开显示子代理拆分行', async () => {
-    const w = mount(TokenUsage)
-    await flushPromises()
-    // summary 卡 total 区域含「含子」标注（title 属性或文本）
-    expect(w.html()).toMatch(/含子代理|incl.*sub[- ]?agent/i)
-  })
-
-  test('uses the host query from a host-card token destination', async () => {
-    mount(TokenUsage)
-    await flushPromises()
-
-    expect(fetch).toHaveBeenCalledWith('/api/tokens/dashboard?daemon=daemon-1&days=270')
-    expect(fetch).toHaveBeenCalledWith('/api/tokens/sessions?daemon=daemon-1&page=1&limit=5&q=')
-  })
-  test('keeps the latest host selection when a previous session request resolves late', async () => {
-    let resolvePrevious!: (value: unknown) => void
-    const previousSessions = new Promise(resolve => { resolvePrevious = resolve })
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
-      ok: true,
-      json: async () => {
-        if (url === '/api/tokens/sessions?daemon=daemon-1&page=1&limit=5&q=') return previousSessions
-        if (url.startsWith('/api/tokens/sessions?daemon=all')) {const second=url.includes('page=2');return {total:6,sessions:Array.from({length:second?1:5},(_,index)=>({session_id:'new-'+(second?5:index),title:'Latest host session '+(second?6:index+1),total_tokens:200,agent_type:'codex',created_at:'2026-10-02'}))}}
-        return {summary:{total:url.includes('daemon=all')?200:100},dailySeries:[],byModel:[],byDaemon:url.includes('daemon=all')?[{daemon_id:'daemon-2',hostname:'New host',total:200}]:[]}
-      },
-    })))
-    const wrapper=mount(TokenUsage,{global:{stubs:{ActionList:{template:'<div><slot /></div>'}}}})
-    await flushPromises()
-    await wrapper.get('.host-select-btn').trigger('click')
-    await wrapper.get('.action-item').trigger('click')
-    await flushPromises()
-    expect(wrapper.text()).toContain('Latest host session')
-    expect(wrapper.findAll('.session-row')).toHaveLength(5)
-    await wrapper.get('.page-controls').findAll('button')[2]!.trigger('click')
-    await flushPromises()
-    expect(wrapper.text()).toContain('Latest host session 6')
-    resolvePrevious({sessions:[{session_id:'old',title:'Previous host session',total_tokens:100}]})
-    await flushPromises()
-    expect(wrapper.text()).toContain('Latest host session')
-    expect(wrapper.text()).not.toContain('Previous host session')
-    wrapper.unmount()
-  })
-
+import fixture from '../../../../tests/fixtures/usage-analytics/personal-v1.json'
+vi.mock('vue-router',()=>({useRoute:()=>({query:{daemon:'usage-fixture-mac'}})}))
+vi.mock('../../composables/useAuth',async()=>{const {ref}=await import('vue');return {useAuth:()=>({accessToken:ref('fixture'),apiGetAuth:async(url:string)=>{const r=await fetch(url);return {ok:r.ok,data:await r.json()}}})}})
+beforeEach(()=>{useLocale().setLocale('zh');vi.stubGlobal('fetch',vi.fn(async(url:string)=>({ok:true,json:async()=>url.startsWith('/api/tokens/sessions')?structuredClone(fixture.sessions):url.startsWith('/api/usage/calls')?structuredClone(fixture.calls):structuredClone(fixture.dashboard)})));HTMLDialogElement.prototype.showModal=function(){this.open=true};HTMLDialogElement.prototype.close=function(){this.open=false}})
+describe('personal-v1 TokenUsage',()=>{
+ it('retains host deep link, explicit contract and fixed365 overview',async()=>{const w=mount(TokenUsage);await flushPromises();expect(fetch).toHaveBeenCalledWith('/api/tokens/dashboard?contract=personal-v1&daemon=usage-fixture-mac&range=30d');expect(w.text()).toContain('近365天');expect(w.text()).toContain('10,800');expect(w.findAll('.calendar button')).toHaveLength(90);w.unmount()})
+ it('shows unknown as dash, keeps all distribution categories and read-only overview',async()=>{const data=structuredClone(fixture.dashboard);data.analysis.requests=null as any;vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>data})));const w=mount(TokenUsage);await flushPromises();expect(w.text()).toContain('—');expect(w.findAll('.pu-summary button')).toHaveLength(0);await w.findAll('.pu-segment button')[2]!.trigger('click');expect(w.text()).toContain('fixture-model-a');expect(w.text()).toContain('fixture-model-b');w.unmount()})
+ it('loads sessions by server paging and snapshot, never per daemon fanout',async()=>{const w=mount(TokenUsage);await flushPromises();await w.get('[role="tablist"]').findAll('button')[2]!.trigger('click');await flushPromises();expect(w.text()).toContain('Personal usage synthetic fixture');const requests=(fetch as any).mock.calls.map((r:any)=>r[0]);expect(requests.some((r:string)=>r.includes('snapshot_token=synthetic-fixture-snapshot')&&r.includes('limit=20'))).toBe(true);expect(requests.some((r:string)=>r.includes('by-daemon'))).toBe(false);w.unmount()})
+ it('I11 opens a nearby-scope dialog and closes it when host changes',async()=>{const original=HTMLElement.prototype.matches;vi.spyOn(HTMLElement.prototype,'matches').mockImplementation(function(this:HTMLElement,selector){return selector===':popover-open'?false:original.call(this,selector)});const w=mount(TokenUsage);await flushPromises();await w.findAll('button').find(b=>b.text()==='统计说明')!.trigger('click');await flushPromises();expect((w.get('dialog').element as HTMLDialogElement).open).toBe(true);await w.get('select[aria-label="统计主机"]').setValue('all');await flushPromises();expect((w.get('dialog').element as HTMLDialogElement).open).toBe(false);w.unmount();vi.restoreAllMocks()})
+ it('rejects old success response as upgrade required',async()=>{vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>({summary:{total:0}})})));const w=mount(TokenUsage);await flushPromises();expect(w.text()).toContain('服务需升级');expect(w.findAll('.pu-summary')).toHaveLength(0);w.unmount()})
 })

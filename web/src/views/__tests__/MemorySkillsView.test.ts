@@ -37,7 +37,8 @@ function candidate(): MemorySkillCandidate {
 function policy(): MemorySkillPolicyState { return { revision: 2, version_id: 'policy-2', hash: 'policy-hash',
   policy: { minimum_independent_successes: 2, auto_mode: 'off', canary_mode: 'off' }, can_manage_policy: true } }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r }); return { promise, resolve } }
-async function open() { const view = mount(View, { props: { scopeId: 'scope-a' } }); await flushPromises(); await view.get('[data-testid="skill-select-skill-1"]').trigger('click'); await flushPromises(); return view }
+async function open(attach = false) { const view = mount(View, { attachTo: attach ? document.body : undefined, props: { scopeId: 'scope-a' } }); await flushPromises(); await view.get('[data-testid="skill-select-skill-1"]').trigger('click'); await flushPromises(); return view }
+async function chooseDetail(view: Awaited<ReturnType<typeof open>>, id: string) { await view.get(`[data-section-id="${id}"]`).trigger('click') }
 beforeEach(() => {
   vi.resetAllMocks()
   api.list.mockResolvedValue({ items: [skill()], next_cursor: null, ...modes })
@@ -52,7 +53,9 @@ describe('Skill governance workspace', () => {
     const view = await open()
     expect(view.get('[data-testid="skill-modes"]').text()).toContain('off')
     expect(view.find('[data-testid="skill-manual-review"]').exists()).toBe(true)
+    await chooseDetail(view, 'evidence')
     expect(view.get('[data-testid="skill-evidence"]').text()).toContain('src/main.ts')
+    await chooseDetail(view, 'publication')
     expect(view.get('[data-testid="skill-replay-summary"]').text()).toContain('memory.skills.historical_session')
     expect(view.get('[data-testid="skill-replay-summary"]').text()).toContain('memory.skills.golden_task')
     expect(view.get('[data-testid="skill-execution"]').text()).toContain('failed')
@@ -77,9 +80,11 @@ describe('Skill governance workspace', () => {
     api.diff.mockResolvedValue({ from_version_id: 'version-1', to_version_id: 'version-2', changes: [{ field: 'title', before: 'Original', after: 'Revised' }] })
     api.replay.mockResolvedValue(skill().replay)
     const view = await open()
+    await chooseDetail(view, 'versions')
     await view.get('[data-testid="skill-diff"]').trigger('click'); await flushPromises()
     expect(api.diff).toHaveBeenCalledWith('scope-a', 'skill-1', 'version-1', 'version-2', expect.any(AbortSignal))
     expect(view.get('[data-testid="skill-diff-result"]').text()).toContain('Original')
+    await chooseDetail(view, 'publication')
     await view.get('[data-testid="skill-case-trusted-history"]').setValue(true)
     await view.get('[data-testid="skill-case-trusted-golden"]').setValue(true)
     await view.get('[data-testid="skill-replay"]').trigger('click'); await flushPromises()
@@ -143,7 +148,7 @@ describe('Skill governance workspace', () => {
   })
   test('saves a versioned policy with CAS and shows a policy conflict', async () => {
     api.updatePolicy.mockRejectedValue(Object.assign(new Error('policy_changed'), { status: 409 }))
-    const view = await open(); await view.get('[data-testid="skill-policy-minimum"]').setValue(3)
+    const view = await open(); await view.get('.memory-skill-policy summary').trigger('click'); await view.get('[data-testid="skill-policy-minimum"]').setValue(3)
     await view.get('.memory-skill-policy form').trigger('submit'); await flushPromises()
     expect(api.updatePolicy).toHaveBeenCalledWith('scope-a', 2, { minimum_independent_successes: 3, auto_mode: 'off', canary_mode: 'off' }, expect.any(AbortSignal))
     expect(view.get('[data-testid="skill-policy-error"]').text()).toContain('conflict')
@@ -152,10 +157,11 @@ describe('Skill governance workspace', () => {
     // Engineering-only fixture: this does not assert that the live product gate is open.
     const allowed = skill(); allowed.permissions.can_publish = true; allowed.eligibility!.manual_eligible = true; allowed.eligibility!.product_gate = 'open'
     api.detail.mockResolvedValue(allowed); api.publish.mockResolvedValue({ revision: 1 }); api.revoke.mockResolvedValue({ skill_id: 'skill-1' })
-    const view = await open(); await view.get('[data-testid="skill-publish"]').trigger('click')
+    const view = await open(); await chooseDetail(view, 'publication'); await view.get('[data-testid="skill-publish"]').trigger('click')
     expect(api.publish).not.toHaveBeenCalled()
     await view.get('[data-testid="skill-confirm"]').trigger('click'); await flushPromises()
     expect(api.publish).toHaveBeenCalledWith('scope-a', 'skill-1', { version_id: 'version-2', expected_revision: 4, expected_publication_revision: 0, mode: 'manual' }, expect.any(AbortSignal))
+    await view.get('.memory-skill-more summary').trigger('click')
     await view.get('[data-testid="skill-revoke"]').trigger('click'); expect(api.revoke).not.toHaveBeenCalled()
     await view.get('[data-testid="skill-confirm"]').trigger('click'); await flushPromises()
     expect(api.revoke).toHaveBeenCalledWith('scope-a', 'skill-1', 4, expect.any(AbortSignal))
@@ -163,7 +169,7 @@ describe('Skill governance workspace', () => {
   test('confirms the selected rollback target with both head revisions', async () => {
     const allowed = skill({ publication: { revision: 3 } }); allowed.permissions.can_rollback = true
     api.detail.mockResolvedValue(allowed); api.rollback.mockResolvedValue({ revision: 4 })
-    const view = await open(); await view.get('[data-testid="skill-rollback-target"]').setValue('version-1')
+    const view = await open(); await chooseDetail(view, 'publication'); await view.get('[data-testid="skill-rollback-target"]').setValue('version-1')
     await view.get('[data-testid="skill-rollback"]').trigger('click'); expect(api.rollback).not.toHaveBeenCalled()
     await view.get('[data-testid="skill-confirm"]').trigger('click'); await flushPromises()
     expect(api.rollback).toHaveBeenCalledWith('scope-a', 'skill-1', { target_version_id: 'version-1', expected_revision: 4, expected_publication_revision: 3 }, expect.any(AbortSignal))
@@ -182,12 +188,16 @@ describe('Skill governance workspace', () => {
     allowed.eligibility!.manual_eligible = true; allowed.eligibility!.product_gate = 'open'
     api.detail.mockResolvedValue(allowed)
     const view = await open()
+    await view.get('.memory-skill-policy summary').trigger('click')
+    await view.get('.memory-skill-more summary').trigger('click')
     await view.get('[data-testid="skill-review-outcome"]').setValue('accepted_as_is')
+    await chooseDetail(view, 'publication')
     await view.get('[data-testid="skill-case-trusted-history"]').setValue(true)
     await view.get('[data-testid="skill-rollback-target"]').setValue('version-1')
     await view.get('[data-testid="skill-edit"]').trigger('click')
     await view.get('[data-testid="skill-edit-title"]').setValue('Unsaved critical change')
     for (const action of ['approve', 'request_changes', 'reject', 'replay', 'publish', 'rollback', 'revoke', 'policy-save']) {
+      await chooseDetail(view, ['replay', 'publish', 'rollback'].includes(action) ? 'publication' : 'document')
       const button = view.get(`[data-testid="skill-${action}"]`)
       expect(button.attributes('disabled'), action).toBeDefined()
       // Even a stale/programmatic click must honor the handler's editor guard.
@@ -197,6 +207,7 @@ describe('Skill governance workspace', () => {
     await flushPromises()
     expect(api.review).not.toHaveBeenCalled(); expect(api.replay).not.toHaveBeenCalled(); expect(api.publish).not.toHaveBeenCalled()
     expect(api.rollback).not.toHaveBeenCalled(); expect(api.revoke).not.toHaveBeenCalled(); expect(api.updatePolicy).not.toHaveBeenCalled()
+    await chooseDetail(view, 'document')
     expect(view.get('[data-testid="skill-edit-title"]').element).toHaveProperty('value', 'Unsaved critical change')
     await view.get('[data-testid="skill-editor"] footer button:last-child').trigger('click')
     await view.get('[data-testid="skill-review-outcome"]').setValue('accepted_as_is')
@@ -208,7 +219,7 @@ describe('Skill governance workspace', () => {
     api.detail.mockResolvedValue(value)
     const first = deferred<unknown>(), second = deferred<unknown>()
     api.diff.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
-    const view = await open(); await view.get('[data-testid="skill-diff"]').trigger('click')
+    const view = await open(); await chooseDetail(view, 'versions'); await view.get('[data-testid="skill-diff"]').trigger('click')
     await view.get('[data-testid="skill-diff-from"]').setValue('version-0')
     await view.get('[data-testid="skill-diff"]').trigger('click')
     second.resolve({ from_version_id: 'version-0', to_version_id: 'version-2', changes: [{ field: 'title', before: 'Selected comparison', after: 'Current' }] })
@@ -219,4 +230,113 @@ describe('Skill governance workspace', () => {
     await view.get('[data-testid="skill-diff-from"]').setValue('version-1')
     expect(view.find('[data-testid="skill-diff-result"]').exists()).toBe(false)
   })
+})
+
+
+describe('Skill detail reading and draft navigation', () => {
+  test('opens document first and reveals evidence, versions and publication only in their selected section', async () => {
+    const view = await open(true)
+    expect(view.get('[data-testid="skill-document"]').isVisible()).toBe(true)
+    expect(view.get('[data-testid="skill-evidence"]').isVisible()).toBe(false)
+    expect(view.get('[data-testid="skill-replay-summary"]').isVisible()).toBe(false)
+    const choose = async (id: string) => { await view.get(`[data-section-id="${id}"]`).trigger('click') }
+    await choose('evidence')
+    expect(view.get('[data-testid="skill-evidence"]').isVisible()).toBe(true)
+    expect(view.get('[data-testid="skill-document"]').isVisible()).toBe(false)
+    await choose('versions')
+    expect(view.get('[data-testid="skill-diff"]').isVisible()).toBe(true)
+    await choose('publication')
+    expect(view.get('[data-testid="skill-replay-summary"]').isVisible()).toBe(true)
+    expect(view.get('[data-testid="skill-publication"]').isVisible()).toBe(true)
+    view.unmount()
+  })
+  test('keeps edited fields when cancelling a selection change and discards only after confirmation', async () => {
+    const view = await open(true)
+    await view.get('[data-testid="skill-edit"]').trigger('click')
+    await view.get('[data-testid="skill-edit-title"]').setValue('Keep this draft')
+    await view.get('[data-testid="skill-candidate-candidate-1"]').trigger('click')
+    expect(view.get('[data-testid="skill-leave-confirmation"]').isVisible()).toBe(true)
+    expect(view.find('[data-testid="skill-candidate-detail"]').exists()).toBe(false)
+    await view.get('[data-testid="skill-leave-cancel"]').trigger('click')
+    expect(view.get('[data-testid="skill-edit-title"]').element).toHaveProperty('value', 'Keep this draft')
+    await view.get('[data-testid="skill-candidate-candidate-1"]').trigger('click')
+    await view.get('[data-testid="skill-leave-discard"]').trigger('click')
+    expect(view.get('[data-testid="skill-candidate-detail"]').isVisible()).toBe(true)
+    expect(view.find('[data-testid="skill-editor"]').exists()).toBe(false)
+    view.unmount()
+  })
+  test('does not submit new filters while a document draft is awaiting a leave decision', async () => {
+    const view = await open(true)
+    await view.get('[data-testid="skill-edit"]').trigger('click')
+    await view.get('[data-testid="skill-edit-title"]').setValue('Unsaved')
+    await view.get('[data-testid="skill-repository-filter"]').setValue('repo-other')
+    await view.get('form').trigger('submit')
+    expect(api.list).toHaveBeenCalledTimes(1)
+    await view.get('[data-testid="skill-leave-discard"]').trigger('click'); await flushPromises()
+    expect(api.list).toHaveBeenLastCalledWith('scope-a', expect.objectContaining({repository_id: 'repo-other'}), expect.any(AbortSignal))
+    expect(view.find('[data-testid="skill-detail"]').exists()).toBe(false)
+    view.unmount()
+  })
+})
+
+test('keeps the selected row and original detail when returning to the mobile list', async () => {
+  const view = await open()
+  await view.get('[data-testid="skill-back"]').trigger('click')
+  expect(view.get('[data-testid="skill-select-skill-1"]').attributes('aria-pressed')).toBe('true')
+  expect(view.get('.memory-skill-layout').classes()).not.toContain('detail-open')
+  expect(view.find('[data-testid="skill-detail"]').exists()).toBe(true)
+  expect(api.detail).toHaveBeenCalledTimes(1)
+  view.unmount()
+})
+
+test('shows the server publication head separately from the current document and marks historical published version', async () => {
+  api.detail.mockResolvedValue(skill({ publication: { current_version_id: 'version-1', state: 'active', revision: '3' } }))
+  const view = await open()
+  expect(view.get('.memory-skill-badges').text()).toContain('v2')
+  expect(view.get('[data-testid="skill-publication-head"]').text()).toContain('v1')
+  await view.get('[data-section-id="versions"]').trigger('click')
+  expect(view.get('[data-testid="skill-published-version"]').text()).toContain('version-1')
+  view.unmount()
+})
+
+test('retains structured editor input across reading tabs and clears it on an external authorization scope change', async () => {
+  const view = await open()
+  await view.get('[data-testid="skill-edit"]').trigger('click')
+  await view.get('[data-testid="skill-edit-title"]').setValue('Private edited title')
+  await view.get('[data-section-id="evidence"]').trigger('click')
+  await view.get('[data-section-id="document"]').trigger('click')
+  expect(view.get('[data-testid="skill-edit-title"]').element).toHaveProperty('value', 'Private edited title')
+  await view.setProps({ scopeId: 'scope-other' }); await flushPromises()
+  expect(view.find('[data-testid="skill-editor"]').exists()).toBe(false)
+  expect(view.text()).not.toContain('Private edited title')
+  view.unmount()
+})
+
+test('preserves line and permission separators while editing and saves all structured fields with original sources', async () => {
+  const view = await open()
+  await view.get('[data-testid="skill-edit"]').trigger('click')
+  const preconditions = view.findAll('textarea').find(input => input.element.value === 'Repository access')!
+  ;(preconditions.element as HTMLTextAreaElement).value = 'Repository access\n'
+  await preconditions.trigger('input')
+  expect(preconditions.element).toHaveProperty('value', 'Repository access\n')
+  ;(preconditions.element as HTMLTextAreaElement).value = 'Repository access\nRead grant'
+  await preconditions.trigger('input')
+  const permissions = view.findAll('input').find(input => input.element.value === 'repository:read')!
+  ;(permissions.element as HTMLInputElement).value = 'repository:read, '
+  await permissions.trigger('input')
+  expect(permissions.element).toHaveProperty('value', 'repository:read, ')
+  ;(permissions.element as HTMLInputElement).value = 'repository:read, evidence:read'
+  await permissions.trigger('input')
+  await view.get('[data-testid="skill-editor"]').trigger('submit'); await flushPromises()
+  expect(api.edit).toHaveBeenCalledWith('scope-a', 'skill-1', 4, expect.objectContaining({preconditions:['Repository access','Read grant'], steps:[expect.objectContaining({permissions:['repository:read','evidence:read'],operation:'read',tool:'read_file'})],source_tokens:['src_1']}),expect.any(AbortSignal))
+  view.unmount()
+})
+
+test('keeps server state enums in localized filters and never applies the state filter to candidates', async () => {
+  const view = await open()
+  await view.get('.memory-skill-toolbar select').setValue('reviewed')
+  await view.get('.memory-skill-toolbar').trigger('submit'); await flushPromises()
+  expect(api.list).toHaveBeenLastCalledWith('scope-a', { repository_id: '', state: 'reviewed' }, expect.any(AbortSignal))
+  expect(api.candidates).toHaveBeenLastCalledWith('scope-a', { repository_id: '' }, expect.any(AbortSignal))
+  view.unmount()
 })

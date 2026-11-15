@@ -112,3 +112,14 @@ test('preserves session ID casing and does not merge case-distinct sessions', as
   await wrapper.get('form').trigger('submit'); await flushPromises()
   expect(api.putContextSetting).toHaveBeenCalledWith(expect.objectContaining({ scope_key: 'Session-ABC' }))
 })
+
+test('exposes draft preservation and explicit discard without changing saved rules', async () => {
+  const wrapper=await openForm()
+  await wrapper.get('[data-testid="context-scope"]').setValue('session')
+  await wrapper.get('[data-testid="context-key"]').setValue('unfinished-session')
+  expect(wrapper.emitted('draft-change')?.at(-1)).toEqual([true])
+  ;(wrapper.vm as unknown as {discardDraft():void}).discardDraft();await flushPromises()
+  expect(wrapper.find('form').exists()).toBe(false)
+  expect(wrapper.emitted('draft-change')?.at(-1)).toEqual([false])
+  expect(api.putContextSetting).not.toHaveBeenCalled()
+})

@@ -4,7 +4,7 @@ import { TeamDeliveryCache, deliveryCacheScope } from '../teamDeliveryCache'
 let cache:TeamDeliveryCache
 const a=deliveryCacheScope(1,'https://one.test'),b=deliveryCacheScope(2,'https://one.test'),otherRelay=deliveryCacheScope(1,'https://two.test')
 beforeEach(()=>{vi.stubGlobal('indexedDB',new IDBFactory());cache=new TeamDeliveryCache()})
-afterEach(()=>vi.unstubAllGlobals())
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals()})
 const put=(scope:string,id:string,kind:'detail'|'file'|'cards'='detail',tasks=[id],data:unknown={text:'private'})=>cache.write(scope,kind,id,'team',tasks,data,cache.ticket())
 test('a fresh instance reads persisted data but another account or Relay cannot',async()=>{
  await put(a,'task');expect((await new TeamDeliveryCache().read(a,'detail','task'))?.data).toEqual({text:'private'});expect(await cache.read(b,'detail','task')).toBeNull();expect(await cache.read(otherRelay,'detail','task')).toBeNull()
@@ -25,8 +25,17 @@ test('logout races cannot resurrect content from an in-flight write',async()=>{
 })
 test('expired snapshots are not returned and oldest rows are evicted at the bound',async()=>{
  const now=vi.spyOn(Date,'now');now.mockReturnValue(100);await put(a,'expired');now.mockReturnValue(8*86400000);expect(await cache.read(a,'detail','expired')).toBeNull()
- for(let i=0;i<513;i++){now.mockReturnValue(8*86400000+i);await put(a,'task'+i)}
- expect(await cache.read(a,'detail','task0')).toBeNull();expect(await cache.read(a,'detail','task512')).not.toBeNull();now.mockRestore()
+ // Seed the persisted boundary in one transaction. Repeating write() 513
+ // times repeatedly scans the full cache and tests fixture speed, not eviction.
+ const db=await new Promise<IDBDatabase>((resolve,reject)=>{const r=indexedDB.open('pocketctl-team-delivery-cache-v1',1);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})
+ try{
+  await new Promise<void>((resolve,reject)=>{const tx=db.transaction('entries','readwrite'),store=tx.objectStore('entries');store.clear()
+   for(let i=0;i<512;i++){const id='task'+i;store.put({key:JSON.stringify([a,'detail',id]),scope:a,kind:'detail',id,team:'team',tasks:[id],at:8*86400000+i,size:18,data:{text:'private'}})}
+   tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)
+  })
+ }finally{db.close()}
+ now.mockReturnValue(8*86400000+512);await put(a,'task512')
+ expect(await cache.read(a,'detail','task0')).toBeNull();expect(await cache.read(a,'detail','task1')).not.toBeNull();expect(await cache.read(a,'detail','task512')).not.toBeNull()
 })
 test('64 MiB total file budget evicts oldest entries; oversized entries are not persisted',async()=>{
  await put(a,'one','file',['task'],new ArrayBuffer(32*1024*1024));await put(a,'two','file',['task'],new ArrayBuffer(32*1024*1024));await put(a,'three','file',['task'],new ArrayBuffer(1));await put(a,'oversized','file',['task'],new ArrayBuffer(32*1024*1024+1));expect(await cache.read(a,'file','one')).toBeNull();expect(await cache.read(a,'file','two')).not.toBeNull();expect(await cache.read(a,'file','three')).not.toBeNull();expect(await cache.read(a,'file','oversized')).toBeNull()

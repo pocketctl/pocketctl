@@ -12,6 +12,13 @@ export function withSessionHistoryScope<T>(scope: HistoryScope, work: () => T): 
 }
 type Queryable = Pick<pg.Pool, 'query'>
 const readers = new WeakMap<Queryable, SessionHistoryBodyReader>()
+const readerConfigs = new WeakMap<Queryable, {storage: ArchiveStorage; limits: ArchiveLimits}>()
+/** Bind archive authorization/manifest queries to the caller's fence client.
+ * Reusing the pool-backed reader would deadlock a one-connection pool. */
+export function inheritPostgresHistoryBodyReader(source: Queryable, target: Queryable): void {
+  const config = readerConfigs.get(source)
+  if (config) installPostgresHistoryBodyReader(target, config.storage, config.limits)
+}
 export function invalidatePostgresHistoryBodies(db:Queryable,userId:number,sessionId:string):void{
   readers.get(db)?.invalidate(userId,sessionId)
 }
@@ -51,6 +58,7 @@ export function installPostgresHistoryBodyReader(db: Queryable, storage: Archive
       return { manifest, key: row.object_key, state: row.state }
     },
   })
+  readerConfigs.set(db, {storage, limits})
   readers.set(db, reader)
   return reader
 }

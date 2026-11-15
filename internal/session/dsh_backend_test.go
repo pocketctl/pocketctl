@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -223,5 +224,80 @@ func TestDSHTodoProjectionAndTurnReset(t *testing.T) {
 	c.durable("s", dshEvent{Seq: 3, Type: "todo/write", Data: json.RawMessage(`{"todos":[{"content":"Bad","status":"unknown"}]}`)}, true, &turn)
 	if len(out) != 0 {
 		t.Fatal("invalid status published")
+	}
+}
+
+func TestPersonalUsageDSHNativeCallEvidence(t *testing.T) {
+	out := make(chan protocol.DaemonEvent, 10)
+	sm := NewSessionManager(out)
+	c := sm.ensureDSH()
+	defer sm.ShutdownDSH()
+	sm.sessions["fixture"] = &ProcessState{SessionID: "fixture", Agent: adapter.AgentDSH, Backend: &dshBackend{coord: c}, ControlMode: protocol.ControlManaged}
+	current := 1
+	c.durable("fixture", dshEvent{Type: "tool/call", Seq: 1, Data: json.RawMessage(`{"callId":"call-1","name":"read","arguments":"{}"}`)}, false, &current)
+	if len(out) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out))
+	}
+	event := <-out
+	if event.Type != "tool_call" || event.CallMeta == nil || event.CallMeta.InvocationID != "call-1" {
+		t.Fatalf("native evidence %+v", event)
+	}
+}
+
+func TestPersonalUsageDSHErrorWithoutBody(t *testing.T) {
+	out := make(chan protocol.DaemonEvent, 10)
+	sm := NewSessionManager(out)
+	c := sm.ensureDSH()
+	defer sm.ShutdownDSH()
+	sm.sessions["fixture"] = &ProcessState{SessionID: "fixture", Agent: adapter.AgentDSH, Backend: &dshBackend{coord: c}, ControlMode: protocol.ControlManaged}
+	turn := 1
+	c.durable("fixture", dshEvent{Type: "tool/result", Seq: 1, Data: json.RawMessage(`{"message":{"toolCallId":"call","isError":true,"content":[]}}`)}, false, &turn)
+	if len(out) != 1 {
+		t.Fatalf("events %d", len(out))
+	}
+	event := <-out
+	if event.CallMeta == nil || event.CallMeta.Outcome != "failure" {
+		t.Fatalf("explicit native error lost: %+v", event)
+	}
+}
+
+func TestPersonalUsageDSHNativeMessageUsageIdentity(t *testing.T) {
+	out := make(chan protocol.DaemonEvent, 10)
+	sm := NewSessionManager(out)
+	c := sm.ensureDSH()
+	defer sm.ShutdownDSH()
+	sm.sessions["fixture"] = &ProcessState{SessionID: "fixture", Agent: adapter.AgentDSH, Backend: &dshBackend{coord: c}, ControlMode: protocol.ControlManaged}
+	turn := 1
+	var observed []protocol.DaemonEvent
+	for index, snapshot := range []struct {
+		seq     int64
+		message string
+		input   int
+	}{{10, "native-message", 100}, {11, "native-message", 130}, {10, "native-message", 100}, {12, "", 140}} {
+		raw := fmt.Sprintf(`{"message":{"id":"%s","content":[]},"usage":{"inputTokens":%d,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0}}`, snapshot.message, snapshot.input)
+		c.durable("fixture", dshEvent{Type: "assistant/message", Seq: snapshot.seq, Data: json.RawMessage(raw)}, true, &turn)
+		if index == 2 {
+			if len(out) != 0 {
+				t.Fatal("native durable replay emitted a duplicate")
+			}
+			continue
+		}
+		if len(out) != 1 {
+			t.Fatalf("expected one usage-only event, got %d", len(out))
+		}
+		event := <-out
+		if event.UsageMeta == nil || event.UsageMeta.SourceUsageID != snapshot.message || event.UsageMeta.Revision != snapshot.seq || event.UsageMeta.RequestID != "" {
+			t.Fatalf("native message evidence lost: %+v", event.UsageMeta)
+		}
+		observed = append(observed, event)
+	}
+	if target := os.Getenv("POCKETCTL_USAGE_DSH_FIXTURE_OUT"); target != "" {
+		raw, err := json.MarshalIndent(observed, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(target, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

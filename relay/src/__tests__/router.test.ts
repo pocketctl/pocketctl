@@ -1,3 +1,4 @@
+import {withCanonicalReplayRows} from './fixtures/canonical-replay-unit.js'
 import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createHash } from 'node:crypto'
@@ -22,7 +23,7 @@ function createMockPool(eventInsertIDs?: number[]) {
   const queries: { sql: string; params: any[] }[] = []
   let lastEventID = 1
   const mockPool = {
-    query: vi.fn((sql: string, params?: any[]) => {
+    query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       queries.push({ sql, params: params || [] })
       let result: any = { rows: [], rowCount: 0 }
@@ -90,7 +91,7 @@ function createMockPool(eventInsertIDs?: number[]) {
         result = { rows: [], rowCount: 1 }
       }
       return Promise.resolve(result)
-    }),
+    })),
     _queries: queries,
     connect: vi.fn(async () => ({
       query: (sql: string, params?: any[]) => mockPool.query(sql, params),
@@ -148,14 +149,14 @@ test('external executor capabilities survive registration and inventory refresh 
   const registration = pool._queries.find((q: any) => q.sql.includes('INSERT INTO daemons') && q.sql.includes('collaboration_capabilities'))
   expect(JSON.parse(registration.params[10])).toEqual(capabilities)
   const originalQuery = pool.query.getMockImplementation()
-  pool.query.mockImplementation((sql: string, params: any[]) => {
+  pool.query.mockImplementation(withCanonicalReplayRows((sql: string, params: any[]) => {
       const native=nativeAliasUnitResult(sql,params);if(native)return native
     if (sql.includes('UPDATE daemons SET agents')) {
       expect(JSON.parse(params[1])).toEqual(capabilities)
       return Promise.resolve({ rows: [], rowCount: 1 })
     }
     return originalQuery(sql, params)
-  })
+  }))
   expect(await router.refreshDaemonAgents(ws, message, 1)).toBe(true)
 })
 
@@ -790,7 +791,7 @@ describe('Router - daemon disconnect', () => {
   test('session_id_changed renames the owned temp id onto the real Codex id', async () => {
     const renameQueries: { sql: string; params: any[] }[] = []
     const pool: any = {
-      query: vi.fn(async (sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         renameQueries.push({ sql, params: params || [] })
         if (sql.includes('ORDER BY session_id FOR UPDATE')) {
@@ -810,7 +811,7 @@ describe('Router - daemon disconnect', () => {
           return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
       _queries: renameQueries,
     }
@@ -1199,7 +1200,7 @@ describe('Router - session→daemon routing resilience', () => {
     // Custom pool: the reconcile UPDATE returns one zombie that the daemon no
     // longer reports as live. Everything else falls through to empty results.
     const reconcilePool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('RETURNING daemon_id')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
         if (sql.includes('SELECT registration_id FROM daemons')) return Promise.resolve({ rows: [{ registration_id: 'current' }], rowCount: 1 })
@@ -1207,7 +1208,7 @@ describe('Router - session→daemon routing resilience', () => {
           return Promise.resolve({ rows: [{ session_id: 'zombie-1' }], rowCount: 1 })
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
-      }),
+      })),
       end: vi.fn(),
     }
     reconcilePool.connect = vi.fn(async () => ({ query: reconcilePool.query, release: vi.fn() }))
@@ -1272,13 +1273,13 @@ describe('Router - session→daemon routing resilience', () => {
   test('fails closed before native routing when the ownership-scoped runtime policy lookup fails', async () => {
     const policyPool = createMockPool()
     const originalQuery = policyPool.query.getMockImplementation()!
-    policyPool.query = vi.fn((sql: string, params?: any[]) => {
+    policyPool.query = vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('WITH owned_session')) {
         return Promise.reject(new Error('runtime policy unavailable'))
       }
       return originalQuery(sql, params)
-    })
+    }))
     const guardedRouter = new Router(policyPool)
     const daemonWs = createMockWs()
     await guardedRouter.registerDaemon(daemonWs, {
@@ -1783,7 +1784,7 @@ describe('Router - event delivery dedup + ack', () => {
   const queries: { sql: string; params: any[] }[] = []
   let eventInserts = 0
   const dedupPool: any = {
-    query: vi.fn((sql: string, params?: any[]) => {
+    query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
     queries.push({ sql, params: params || [] })
     if (sql.includes('INSERT INTO events')) {
@@ -1801,7 +1802,7 @@ describe('Router - event delivery dedup + ack', () => {
     if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [{ '?column?': 1 }], rowCount: 1 })
     if (sql.includes('session_target AS')) return Promise.resolve({ rows: [{ session_exists: true, claimed: true, applied: true }], rowCount: 1 })
     return Promise.resolve({ rows: [], rowCount: 1 })
-    }),
+    })),
     connect: vi.fn(async () => ({
     query: (sql: string, params?: any[]) => dedupPool.query(sql, params),
     release: vi.fn(),
@@ -1908,7 +1909,7 @@ describe('Router - event delivery dedup + ack', () => {
   const updates: string[] = []
   let releaseModel!: (result: any) => void
   const orderedPool: any = {
-    query: vi.fn((sql: string, params?: any[]) => {
+    query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
     if (sql.includes('INSERT INTO events')) {
       const payload = JSON.parse(params?.[2] || '{}')
@@ -1924,7 +1925,7 @@ describe('Router - event delivery dedup + ack', () => {
     }
     if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
     return Promise.resolve({ rows: [], rowCount: 1 })
-    }),
+    })),
     connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => orderedPool.query(sql, params), release: vi.fn() })),
     end: vi.fn(),
   }
@@ -1964,7 +1965,7 @@ describe('Router - event delivery dedup + ack', () => {
     let releaseCreate!: (result: any) => void
     let eventID = 0
     const orderedPool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('WITH target AS MATERIALIZED')) {
           return Promise.resolve({ rows: [{ matched: true, changed: true }], rowCount: 1 })
@@ -1988,7 +1989,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => orderedPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(orderedPool)
@@ -2009,12 +2010,12 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('special-branch persistence rejection withholds ack and all effects', async () => {
   const rejectedPool: any = {
-    query: vi.fn((sql: string, nativeParams: any[] = []) => {
+    query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
     if (sql.includes('INSERT INTO events')) return Promise.reject(new Error('db down'))
     if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
     return Promise.resolve({ rows: [], rowCount: 1 })
-    }),
+    })),
     connect: vi.fn(async () => ({ query: (sql: string) => rejectedPool.query(sql), release: vi.fn() })), end: vi.fn(),
   }
   const r = new Router(rejectedPool)
@@ -2037,7 +2038,7 @@ describe('Router - event delivery dedup + ack', () => {
   test('acks subagent agent_text usage without requiring a root session token row', async () => {
     const tokenUpdates: string[] = []
     const missingRootPool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return Promise.resolve({ rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] })
@@ -2049,7 +2050,7 @@ describe('Router - event delivery dedup + ack', () => {
         if (sql.includes("effect_status = 'completed'")) return Promise.resolve({ rows: [], rowCount: 1 })
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => missingRootPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(missingRootPool)
@@ -2085,7 +2086,7 @@ describe('Router - event delivery dedup + ack', () => {
     let releaseInsert!: (result: any) => void
     let inserts = 0
     const inflightPool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('RETURNING daemon_id')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
         if (sql.includes('INSERT INTO events')) {
@@ -2094,7 +2095,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => inflightPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(inflightPool)
@@ -2116,7 +2117,7 @@ describe('Router - event delivery dedup + ack', () => {
     const releases = new Map<string, (result: any) => void>()
     const updates: string[] = []
     const racePool: any = {
-      query: vi.fn((sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           const payload = JSON.parse(params?.[2] || '{}')
@@ -2128,7 +2129,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => racePool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(racePool)
@@ -2157,7 +2158,7 @@ describe('Router - event delivery dedup + ack', () => {
   test('rejects messages from a replaced daemon socket before they can seed the new cursor', async () => {
     const models: string[] = []
     const pool: any = {
-      query: vi.fn(async (sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] }
@@ -2168,7 +2169,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
       end: vi.fn(),
     }
@@ -2213,13 +2214,13 @@ describe('Router - event delivery dedup + ack', () => {
   test('does not activate a socket that closes while registration is awaiting pre-activation work', async () => {
     let releaseUpsert!: () => void
     const pool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO daemons')) return new Promise(resolve => { releaseUpsert = () => resolve({ rows: [], rowCount: 1 }) })
         if (sql.includes('SELECT user_id FROM daemons')) return Promise.resolve({ rows: [] })
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
       end: vi.fn(),
     }
@@ -2239,11 +2240,11 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('treats a post-activation alias rejection as best-effort and accepts a contender', async () => {
     const pool = createMockPool()
-    pool.query.mockImplementation((sql: string, params?: any[]) => {
+    pool.query.mockImplementation(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('SELECT alias FROM daemons')) return Promise.reject(new Error('alias unavailable'))
       return createMockPool().query(sql, params)
-    })
+    }))
     const r = new Router(pool)
     const first = createMockWs()
     const second = createMockWs()
@@ -2258,11 +2259,11 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('does not let a hanging post-activation alias lookup block the registration chain', async () => {
     const pool = createMockPool()
-    pool.query.mockImplementation((sql: string, params?: any[]) => {
+    pool.query.mockImplementation(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('SELECT alias FROM daemons')) return new Promise(() => {})
       return createMockPool().query(sql, params)
-    })
+    }))
     const r = new Router(pool)
     const outcome = (promise: Promise<boolean>) => Promise.race([
       promise.then(() => 'registered'),
@@ -2511,7 +2512,7 @@ describe('Router - event delivery dedup + ack', () => {
     let tokenTotal = 0
     let insertCount = 0
     const pool: any = {
-      query: vi.fn(async (sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           insertCount++
@@ -2533,7 +2534,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return { rows: [{ daemon_id: 'daemon-1', status: 'online' }] }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })),
       end: vi.fn(),
     }
@@ -2568,7 +2569,7 @@ describe('Router - event delivery dedup + ack', () => {
     let releaseOld!: (result: any) => void
     const completed: string[] = []
     const pool: any = {
-      query: vi.fn((sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return Promise.resolve({ rows: [{ id: params?.[2]?.includes('old') ? 1 : 2, inserted: true, effect_status: 'pending', effect_step: 0 }] })
@@ -2580,7 +2581,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(pool)
@@ -2602,7 +2603,7 @@ describe('Router - event delivery dedup + ack', () => {
 
   test('does not deadlock new registration when the retiring effect rejects', async () => {
     const pool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return Promise.resolve({ rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] })
@@ -2610,7 +2611,7 @@ describe('Router - event delivery dedup + ack', () => {
         if (sql.includes('UPDATE sessions SET model')) return Promise.reject(new Error('retiring effect failed'))
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(pool)
@@ -2628,7 +2629,7 @@ describe('Router - event delivery dedup + ack', () => {
     process.env.DAEMON_CURSOR_RETIRE_MS = '100'
     let releaseOld!: (result: any) => void
     const pool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return Promise.resolve({ rows: [{ id: 1, inserted: true, effect_status: 'pending', effect_step: 0 }] })
@@ -2636,7 +2637,7 @@ describe('Router - event delivery dedup + ack', () => {
         if (sql.includes('UPDATE sessions SET model')) return new Promise(resolve => { releaseOld = resolve })
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     try {
@@ -2660,7 +2661,7 @@ describe('Router - event delivery dedup + ack', () => {
     let releaseFirstCost!: (result: any) => void
     let eventID = 0
     const costPool: any = {
-      query: vi.fn((sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('INSERT INTO events')) return Promise.resolve({ rows: [{ id: ++eventID }] })
         if (sql.includes('status = $3')) return Promise.resolve({ rows: [], rowCount: 1 })
@@ -2671,7 +2672,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => costPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(costPool)
@@ -2713,7 +2714,7 @@ describe('Router - event delivery dedup + ack', () => {
     let eventInsert = 0
     let modelAttempts = 0
     const retryPool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           eventInsert++
@@ -2728,7 +2729,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => retryPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(retryPool)
@@ -2755,7 +2756,7 @@ describe('Router - event delivery dedup + ack', () => {
     let tokenUpdates = 0
     let deviceReads = 0
     const checkpointPool: any = {
-      query: vi.fn((sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return Promise.resolve({ rows: [{
@@ -2784,7 +2785,7 @@ describe('Router - event delivery dedup + ack', () => {
         if (sql.includes('SELECT plan, whitelist')) return Promise.resolve({ rows: [{ plan: 'free', whitelist: false }] })
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => checkpointPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(checkpointPool)
@@ -2817,7 +2818,7 @@ describe('Router - event delivery dedup + ack', () => {
     let status = 'pending'
     let attempts = 0
     const restartPool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           const inserted = firstInsert
@@ -2835,7 +2836,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => restartPool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const event = { type: 'session_model_changed', session_id: 'sess-1', event_id: 'restart-pending', model: 'new', seq: 1 }
@@ -2863,7 +2864,7 @@ describe('Router - event delivery dedup + ack', () => {
     let status = 'pending'
     let modelUpdates = 0
     const pool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('INSERT INTO events')) {
           return Promise.resolve({ rows: [{ id: 31, inserted: false, effect_status: status, effect_step: 0 }] })
@@ -2881,7 +2882,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 1 })
-      }),
+      })),
       connect: vi.fn(async () => ({ query: (sql: string, params?: any[]) => pool.query(sql, params), release: vi.fn() })), end: vi.fn(),
     }
     const r = new Router(pool)
@@ -2898,7 +2899,7 @@ describe('Router - event delivery dedup + ack', () => {
     // is in flight when we ping.
     let releaseInsert: (() => void) | undefined
     const pendingPool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('RETURNING daemon_id')) {
           return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
@@ -2911,7 +2912,7 @@ describe('Router - event delivery dedup + ack', () => {
         }
         if (sql.includes('FROM daemons')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1', status: 'online' }] })
         return Promise.resolve({ rows: [], rowCount: 0 })
-      }),
+      })),
       end: vi.fn(),
     }
     pendingPool.connect = vi.fn(async () => ({ query: pendingPool.query, release: vi.fn() }))
@@ -3008,14 +3009,14 @@ describe('Router - WS authorization gate (P0-1)', () => {
   // simulating a session that belongs to a different user than the caller.
   function denyingPool(): any {
     const pool: any = {
-      query: vi.fn((sql: string, nativeParams: any[] = []) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
         if (sql.includes('SELECT 1 FROM sessions')) return Promise.resolve({ rows: [], rowCount: 0 })
         if (sql.includes('FROM sessions') && sql.includes('SELECT')) {
           return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }] })
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
-      }),
+      })),
       end: vi.fn(),
     }
     pool.connect = vi.fn(async () => ({ query: pool.query, release: vi.fn() }))
@@ -3116,7 +3117,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
   test('handleForceKick revokes daemons.active_token_jti, not an empty jti', async () => {
     const revokeInserts: any[][] = []
     const pool: any = {
-      query: vi.fn((sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows((sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         if (sql.includes('RETURNING daemon_id')) return Promise.resolve({ rows: [{ daemon_id: 'daemon-1' }], rowCount: 1 })
         if (sql.includes('SELECT active_token_jti')) {
@@ -3127,7 +3128,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
           return Promise.resolve({ rows: [], rowCount: 1 })
         }
         return Promise.resolve({ rows: [], rowCount: 0 })
-      }),
+      })),
       end: vi.fn(),
     }
     pool.connect = vi.fn(async () => ({ query: pool.query, release: vi.fn() }))
@@ -3329,7 +3330,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
       const client = await originalConnect()
       let boundedLookup = false
       return {
-        query: vi.fn(async (sql: string, params?: any[]) => {
+        query: vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
           if (sql.includes("set_config('statement_timeout'")) boundedLookup = true
           if (boundedLookup) boundedSql.push(sql)
@@ -3337,7 +3338,7 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
             throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
           }
           return client.query(sql, params)
-        }),
+        })),
         release: vi.fn(() => {
           if (boundedLookup) boundedReleaseCount++
           client.release()
@@ -3702,14 +3703,14 @@ describe('Router - force kick revokes the daemon-specific token (P0-2)', () => {
       const client = await originalConnect()
       let offlineTransaction = false
       return {
-        query: vi.fn(async (sql: string, params?: any[]) => {
+        query: vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
           if (sql.includes("set_config('statement_timeout'")) offlineTransaction = true
           if (sql.includes("UPDATE daemons SET status = 'offline'")) {
             throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' })
           }
           return client.query(sql, params)
-        }),
+        })),
         release: vi.fn(() => {
           if (offlineTransaction) offlineReleases++
           client.release()
@@ -3813,13 +3814,13 @@ describe('Router - list_daemons restart grace', () => {
   beforeEach(() => { pool = createMockPool(); router = new Router(pool) })
 
   test('DB-online daemon not in memory is optimistic online within startup grace', async () => {
-    pool.query.mockImplementation(async (sql: string, nativeParams: any[] = []) => {
+    pool.query.mockImplementation(withCanonicalReplayRows(async (sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('FROM daemons')) {
         return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString(), user_id: 1 }] }
       }
       return { rows: [], rowCount: 0 }
-    })
+    }))
     const clientWs = createMockWs()
     await (router as any).handleListDaemons(clientWs, 1)
     const list = clientWs._sent.find((m: any) => m.type === 'daemon_list')
@@ -3832,11 +3833,11 @@ describe('Router - list_daemons restart grace', () => {
     ['offline', new Date().toISOString()],
     ['online', new Date(0).toISOString()],
   ])('startup grace must not resurrect %s hosts with stale or offline presence', async (status, lastHeartbeat) => {
-    pool.query.mockImplementation(async (sql: string, nativeParams: any[] = []) => {
+    pool.query.mockImplementation(withCanonicalReplayRows(async (sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('FROM daemons')) return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], status, last_heartbeat: lastHeartbeat, user_id: 1 }] }
       return { rows: [], rowCount: 0 }
-    })
+    }))
     const clientWs = createMockWs()
     await (router as any).handleListDaemons(clientWs, 1)
     const list = clientWs._sent.find((m: any) => m.type === 'daemon_list')
@@ -3847,13 +3848,13 @@ describe('Router - list_daemons restart grace', () => {
   test('DB-online daemon not in memory goes offline after startup grace elapses', async () => {
     process.env.RELAY_LIST_GRACE_MS = '0'
     const router2 = new Router(pool)
-    pool.query.mockImplementation(async (sql: string, nativeParams: any[] = []) => {
+    pool.query.mockImplementation(withCanonicalReplayRows(async (sql: string, nativeParams: any[] = []) => {
       const native=nativeAliasUnitResult(sql,nativeParams);if(native)return native
       if (sql.includes('FROM daemons')) {
         return { rows: [{ daemon_id: 'd-db', hostname: 'host-db', agents: [], alias: null, status: 'online', last_heartbeat: new Date().toISOString(), user_id: 1 }] }
       }
       return { rows: [], rowCount: 0 }
-    })
+    }))
     const clientWs = createMockWs()
     await (router2 as any).handleListDaemons(clientWs, 1)
     const list = clientWs._sent.find((m: any) => m.type === 'daemon_list')
@@ -3880,7 +3881,7 @@ describe('Router - daemon session ownership enforcement', () => {
   ) {
     const pool = createMockPool()
     const original = pool.query
-    pool.query = vi.fn(async (sql: string, params?: any[]) => {
+    pool.query = vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('session_allowed')) {
         // Mirror the SQL rule: params are [sessionId, userId, daemonId].
@@ -3895,7 +3896,7 @@ describe('Router - daemon session ownership enforcement', () => {
         return { rows: [{ session_exists: Boolean(row), session_allowed: allowed }], rowCount: 1 }
       }
       return original(sql, params)
-    })
+    }))
     return pool
   }
 
@@ -4168,11 +4169,11 @@ describe('Router - deleted session isolation', () => {
     const gate = deferred<void>()
     vi.spyOn(db, 'isSessionDeleted').mockImplementation(async (_pool, id) => id === 'deleted-session')
     const original = pool.query.getMockImplementation()
-    pool.query.mockImplementation(async (sql: string, params?: any[]) => {
+    pool.query.mockImplementation(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('INSERT INTO events') && params?.[0] === 'slow-session') await gate.promise
       return original(sql, params)
-    })
+    }))
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'slow-session', text: 'first', seq: 1 })
     await tick()
     router.handleDaemonMessage('daemon-1', { type: 'session_discovered', session_id: 'deleted-session', agent: 'codex', seq: 2 })
@@ -4195,11 +4196,11 @@ describe('Router - deleted session isolation', () => {
     let deleted = false
     vi.spyOn(db, 'isSessionDeleted').mockImplementation(async (_pool, id) => deleted && id === 'deleted-later')
     const gate = deferred<void>(), original = pool.query.getMockImplementation()
-    pool.query.mockImplementation(async (sql: string, params?: any[]) => {
+    pool.query.mockImplementation(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
       if (sql.includes('INSERT INTO events') && params?.[0] === 'slow-session') await gate.promise
       return original(sql, params)
-    })
+    }))
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'slow-session', text: 'first', seq: 1 })
     router.handleDaemonMessage('daemon-1', { type: 'agent_text', session_id: 'deleted-later', text: 'must not broadcast', seq: 2 })
     await tick()

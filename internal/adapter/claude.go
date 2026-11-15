@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"github.com/pocketctl/pocketctl/internal/memorycontext"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 type ClaudeStreamEvent struct {
@@ -55,6 +57,7 @@ type TokenUsage struct {
 }
 
 type ClaudeContent struct {
+	IsError   bool            `json:"is_error,omitempty"`
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
 	Name      string          `json:"name,omitempty"`
@@ -203,12 +206,16 @@ func (a *ClaudeAdapter) convertSystem(raw ClaudeStreamEvent, sid string) ([]prot
 	return nil, nil
 }
 
-func (a *ClaudeAdapter) convertAssistant(raw ClaudeStreamEvent, sid string) ([]protocol.DaemonEvent, error) {
+func (a *ClaudeAdapter) convertAssistant(raw ClaudeStreamEvent, sid string) (events []protocol.DaemonEvent, err error) {
+	defer func() {
+		if raw.Message != nil {
+			events = enrichClaudeUsage(events, raw.Message.ID, "", raw.Message.Model, sid, raw.Message.Usage)
+		}
+	}()
 	if raw.Message == nil {
 		return nil, nil
 	}
 	isSynthetic := raw.Message.Model == "<synthetic>"
-	var events []protocol.DaemonEvent
 	for _, c := range raw.Message.Content {
 		switch c.Type {
 		case "text":
@@ -330,6 +337,12 @@ func (a *ClaudeAdapter) convertUser(raw ClaudeStreamEvent, sid string) ([]protoc
 				output = c.Text
 			}
 			events = append(events, protocol.DaemonEvent{
+				CallMeta: usageanalytics.ClaudeCall(c.ToolUseID, "", "", func() string {
+					if c.IsError {
+						return "failure"
+					}
+					return "success"
+				}()),
 				Type:      "tool_result",
 				SessionID: sid,
 				CallID:    c.ToolUseID,
@@ -417,4 +430,51 @@ func BuildInteractiveArgs(config protocol.SessionConfig) []string {
 		args = append(args, "--allowedTools", strings.Join(config.AllowedTools, ","))
 	}
 	return args
+}
+
+func enrichClaudeUsage(events []protocol.DaemonEvent, id, at, model, sid string, usage *TokenUsage) []protocol.DaemonEvent {
+	if model == "<synthetic>" {
+		return events
+	}
+	attached := false
+	for _, e := range events {
+		if e.Usage != nil {
+			attached = true
+			break
+		}
+	}
+	if !attached && usage != nil {
+		events = append(events, protocol.DaemonEvent{Type: "agent_text", SessionID: sid, Model: CleanModelName(model), Usage: &protocol.ContextUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, CacheRead: usage.CacheRead, CacheCreate: usage.CacheCreation}})
+	}
+	seen := false
+	revision := int64(0)
+	if stamp, err := time.Parse(time.RFC3339Nano, at); err == nil {
+		revision = stamp.UnixMicro()
+	}
+	for i := range events {
+		ev := &events[i]
+		if ev.Usage != nil {
+			if seen {
+				ev.Usage = nil
+				ev.CostUSD = 0
+			} else {
+				seen = true
+				ev.UsageMeta = usageanalytics.Metadata("claude-code", id, id, at, CleanModelName(model), "excludes_cache", revision)
+			}
+		}
+		if ev.Type == "tool_call" {
+			ev.CallMeta = usageanalytics.ClaudeCall(ev.CallID, ev.Tool, at, "")
+			if ev.Tool == "Skill" && ev.CallMeta != nil {
+				var data struct {
+					Skill string `json:"skill"`
+				}
+				if json.Unmarshal(ev.Input, &data) == nil && data.Skill != "" {
+					ev.CallMeta.EvidenceKind = "native_skill_execution"
+					ev.CallMeta.SkillKey = data.Skill
+					ev.CallMeta.SkillName = data.Skill
+				}
+			}
+		}
+	}
+	return events
 }

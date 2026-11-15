@@ -235,8 +235,14 @@ export function listMemoryScenes(installationId?:string):Promise<MemorySceneList
   return installationId?scopedMemoryJson<MemorySceneList>(installationId,'memory.search',path):memoryJson<MemorySceneList>('memory.search',path)
 }
 
-export function createMemoryPersonalScene(installationId:string,name:string,idempotencyKey:string):Promise<{space_id:string;name:string;domain:'personal_project';destinations:['personal']}> {
- return scopedMemoryJson(installationId,'memory.manage','/api/v1/memory/scenes',{method:'POST',headers:{'Idempotency-Key':idempotencyKey},body:JSON.stringify({expected_revision:0,name,domain:'personal_project'})})
+export async function createMemoryPersonalScene(installationId:string,name:string,idempotencyKey:string):Promise<{space_id:string;name:string;domain:'personal_project';destinations:['personal']}> {
+ const scope=personalScope()
+ const installation=state.installation??await discoverMemoryInstallation()
+ assertPersonalScope(scope)
+ if(installation?.installation_id!==installationId)throw new MemoryClientError(409,'personal_target_changed','Personal Memory target changed; reopen the page')
+ // This personal manage route accepts a v1 grant. Never substitute a scoped
+ // v2 grant or silently send a named scene to another personal installation.
+ return memoryJson('memory.manage','/api/v1/memory/scenes',{method:'POST',headers:{'Idempotency-Key':idempotencyKey},body:JSON.stringify({expected_revision:0,name,domain:'personal_project'})})
 }
 
 /** Search; superseded calls are aborted so only the newest response lands. */

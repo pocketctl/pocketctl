@@ -118,6 +118,7 @@
 
 <script setup lang="ts">
 import { ref, computed, provide, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { usePlatformStatisticsAccess } from './composables/usePlatformStatisticsAccess'
 import { useRoute, useRouter } from 'vue-router'
 import { useTeamDeliveryInbox } from './composables/useTeamDeliveryInbox'
 import { useAuth } from './composables/useAuth'
@@ -147,6 +148,9 @@ const route = useRoute()
 const { isLoggedIn, user, accessToken, canReadOfflineTeams } = useAuth()
 const shellVisible = computed(() => isLoggedIn.value || (canReadOfflineTeams?.value && route.path === '/teams'))
 const teamAccess = useTeamAccess()
+const platformStatisticsAccess = usePlatformStatisticsAccess()
+watch(accessToken, () => { platformStatisticsAccess.syncIdentity(); void platformStatisticsAccess.refresh() }, { immediate: true })
+watch(() => route.fullPath, () => { platformStatisticsAccess.syncIdentity(); void platformStatisticsAccess.refresh() })
 const router = useRouter()
 watch(accessToken, () => { void teamAccess.refresh() }, { immediate: true })
 watch(teamAccess.denied, denied => {
@@ -156,7 +160,7 @@ const refreshTeamAccess = () => { void teamAccess.refresh() }
 let teamAccessTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   window.addEventListener('focus', refreshTeamAccess)
-  teamAccessTimer = setInterval(refreshTeamAccess, 30_000)
+  teamAccessTimer = setInterval(() => { refreshTeamAccess(); platformStatisticsAccess.syncIdentity(); void platformStatisticsAccess.refresh() }, 30_000)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('focus', refreshTeamAccess)
@@ -226,6 +230,7 @@ const navigationItems = computed(() => {
     { id: 'hosts', to: '/hosts', label: 'nav.hosts', icon: 'hosts' },
     { id: 'settings', to: '/settings', label: 'nav.settings', icon: 'settings' },
   ].filter(item => item.id !== 'teams' || teamAccess.enabled.value)
+  if (platformStatisticsAccess.allowed.value) items.push({ id: 'statistics', to: '/admin/statistics', label: 'stats.title', icon: 'tokens' })
   if (canReadOfflineTeams?.value) return [{ id: 'teams', to: '/teams', label: 'team.title', icon: 'teams', section: 'nav.manage' }]
   if (!showMobileShell.value) return items
   return [
@@ -235,12 +240,14 @@ const navigationItems = computed(() => {
     { id: 'agents', to: '/hosts?view=agents', label: 'mobile.host_agent_manage', icon: 'agent' },
     ...items.filter(item => ['memory', 'teams'].includes(item.id)).map(item => ({ ...item, section: undefined })),
     { id: 'tokens', to: '/tokens', label: 'mobile.host_token_usage', icon: 'tokens', section: 'nav.manage' },
+    ...items.filter(item => item.id === 'statistics'),
     { id: 'archive', to: '/sessions?view=archived', label: 'workspace.archived', icon: 'archive' },
     { id: 'settings', to: '/settings', label: 'nav.settings', icon: 'settings' },
     { id: 'connect', to: '/hosts', label: 'workspace.connect_host', icon: 'plus' },
   ]
 })
 function navigationActive(id: string) {
+  if (id === 'statistics') return route.path === '/admin/statistics'
   if (id === 'agents') return route.path === '/hosts' && route.query.view === 'agents'
   if (id === 'hosts') return route.path === '/hosts' && route.query.view !== 'agents'
   if (id === 'archive') return route.path === '/sessions' && route.query.view === 'archived'
@@ -304,6 +311,7 @@ const pageTitle = computed(() => {
     '/tokens': t('replica.token_usage'),
     '/inbox': t('attention.title'),
     '/memory': t('nav.memory'),
+    '/admin/statistics': t('stats.title'),
     '/teams': t('team.title'),
   }
   if (isTeamSessionRoute.value || route.name === 'team-sessions') return t('workspace.team_sessions')

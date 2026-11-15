@@ -1,3 +1,4 @@
+import {actorUsageContext,recordUsage} from '../platform-statistics/service.js'
 import {registerLifecycleManageRoutes} from '../curation/manage-routes.js'
 import {writeManualEntry} from '../claims/manual-entry.js'
 import {ClaimIdentityWriteError} from '../claims/identity-writer.js'
@@ -389,7 +390,10 @@ export function registerManageRoutes(app: FastifyInstance, deps: ManageRouteDeps
       requestCanonical: JSON.stringify({ params: request.params ?? {}, body: request.body ?? {} }),
       run: async client => {
         const result = await run(grant, createTransactionBoundPool(client), client)
-        if (result.ok) afterCommit = result.afterCommit
+        if (result.ok) {
+          await recordUsage(client,{...actorUsageContext(grant),requestId:key,kind:'write',operation,humanActivity:grant.callerType==='web'})
+          afterCommit = result.afterCommit
+        }
         return result
       },
     })

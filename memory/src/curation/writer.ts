@@ -1,3 +1,4 @@
+import {recordFirstClaim} from '../platform-statistics/service.js'
 import type pg from 'pg'
 import {randomUUID,createHash} from 'node:crypto'
 import type {TombstoneHmacKey} from '../config.js'
@@ -73,5 +74,6 @@ export async function writeLifecycleConclusion(c:pg.PoolClient,input:WriteConclu
   const deferred=(await c.query(`UPDATE memory_task_bundles SET state='deferred_semantic',reason_code=$3,semantic_deadline=COALESCE(semantic_deadline,clock_timestamp()+interval '7 days'),next_evaluate_at=COALESCE(semantic_deadline,clock_timestamp()+interval '7 days') WHERE installation_id=$1 AND bundle_id=$2 RETURNING semantic_deadline`,[installationId,input.bundleId,relation.reason])).rows[0]
   await c.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload,available_at) VALUES(gen_random_uuid(),$1,'curate_conclusions',$2,86,$3::jsonb,$4) ON CONFLICT DO NOTHING`,[installationId,`curate-deadline:${candidateId}`,JSON.stringify({candidate_id:candidateId,bundle_id:input.bundleId,run_id:runId}),deferred.semantic_deadline])
  }
+ if(!target&&claimId&&['create','create_variant'].includes(action))await recordFirstClaim(c,{installationId,claimId,source:'automatic'})
  return {action,reason:relation.reason,claimId,versionId,decisionId}
 }

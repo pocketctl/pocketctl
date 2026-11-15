@@ -1,9 +1,11 @@
 import { generateKeyPairSync } from 'crypto'
 import jwt from 'jsonwebtoken'
+import { createCapabilityGrantService } from '../extensions/capability-routes.js'
 import { describe, expect, test, vi } from 'vitest'
 import {
   createMemoryContextGrantBroker,
   createMemoryMcpGrantBroker,
+  handleMemoryContextGrantMessage,
   handleMemoryMcpGrantMessage,
 } from '../extensions/grant-service.js'
 import { verifyCapabilityGrant, verifyCapabilityGrantV2, resolveGrantKeyMaterial } from '../extensions/capability-grant.js'
@@ -238,6 +240,188 @@ describe('session-bound context grant broker (Phase 2)', () => {
     expect(result.expires_in).toBeLessThanOrEqual(300)
     const verified = verifyCapabilityGrant(verifiedKeys().publicKeyPem, result.grant, ISSUER)
     expect(verified).toMatchObject({ userId: 42, callerType: 'daemon' })
+  })
+
+  test('sends the daemon Context grant while its best-effort audit is pending', async () => {
+    const pool = contextPoolWith({
+      installations: [INSTALL],
+      ownedSessions: [{ session_id: 'ses-own', user_id: 42 }],
+    })
+    const originalQuery = pool.query.getMockImplementation()!
+    let auditStarted!: () => void
+    let releaseAudit!: () => void
+    const started = new Promise<void>(resolve => { auditStarted = resolve })
+    const pending = new Promise<void>(resolve => { releaseAudit = resolve })
+    pool.query.mockImplementation(async (sql, params) => {
+      if (/INSERT INTO audit_log/.test(sql)) {
+        auditStarted()
+        await pending
+        return { rows: [] }
+      }
+      return originalQuery(sql, params)
+    })
+    const broker = createMemoryContextGrantBroker({
+      pool: pool as any,
+      issuer: ISSUER,
+      mode: 'enabled',
+      providerPublicOrigins: new Map([['pocketctl-memory', 'https://memory.example']]),
+      grantKeys: grantKeysMaterial,
+    })
+    const sent = vi.fn()
+    const result = handleMemoryContextGrantMessage(
+      broker, { userId: 42 },
+      { type: 'memory_context_grant', session_id: 'ses-own', request_id: 'context-budget' },
+      sent,
+    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await started
+      expect(await Promise.race([
+        result.then(() => 'sent'),
+        new Promise<string>(resolve => { timer = setTimeout(() => resolve('blocked'), 100) }),
+      ])).toBe('sent')
+      const reply = JSON.parse(sent.mock.calls[0][0])
+      expect(reply).toMatchObject({ type: 'memory_context_grant_result', request_id: 'context-budget' })
+      expect(verifyCapabilityGrant(verifiedKeys().publicKeyPem, reply.grant, ISSUER))
+        .toMatchObject({ sessionId: 'ses-own', services: ['memory.context'] })
+      expect(pool.query.mock.calls.filter(([sql]) => /INSERT INTO audit_log/.test(sql))).toHaveLength(1)
+      let drained = false
+      const drain = broker.drainAudits(1_000).then(result => { drained = true; return result })
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(drained).toBe(false)
+      releaseAudit()
+      expect(await drain).toBe(true)
+    } finally {
+      if (timer) clearTimeout(timer)
+      releaseAudit()
+      await result
+    }
+  })
+
+  test('returns two overlapping personal Context grants before their audits, and waits at the limit', async () => {
+    const pool = contextPoolWith({
+      installations: [INSTALL],
+      ownedSessions: ['first', 'second', 'third'].map(session_id => ({ session_id, user_id: 42 })),
+    })
+    const originalQuery = pool.query.getMockImplementation()!
+    const releaseAudits: Array<() => void> = []
+    const auditStarts = Array.from({ length: 3 }, () => {
+      let started!: () => void
+      const promise = new Promise<void>(resolve => { started = resolve })
+      return { promise, started }
+    })
+    pool.query.mockImplementation(async (sql, params) => {
+      if (!/INSERT INTO audit_log/.test(sql)) return originalQuery(sql, params)
+      const audit = auditStarts[releaseAudits.length]
+      await new Promise<void>(resolve => {
+        releaseAudits.push(resolve)
+        audit.started()
+      })
+      return { rows: [] }
+    })
+    const broker = createMemoryContextGrantBroker({
+      pool: pool as any,
+      issuer: ISSUER,
+      mode: 'enabled',
+      providerPublicOrigins: new Map([['pocketctl-memory', 'https://memory.example']]),
+      grantKeys: grantKeysMaterial,
+    })
+    const replies = new Map<string, { grant: string }>()
+    const request = (sessionId: string) => handleMemoryContextGrantMessage(
+      broker, { userId: 42 },
+      { type: 'memory_context_grant', session_id: sessionId, request_id: sessionId },
+      payload => { replies.set(sessionId, JSON.parse(payload)) },
+    )
+
+    const first = request('first')
+    const second = request('second')
+    let third: Promise<void> | undefined
+    try {
+      await Promise.all(auditStarts.slice(0, 2).map(audit => audit.promise))
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect([...replies.keys()].sort()).toEqual(['first', 'second'])
+      for (const [sessionId, reply] of replies) {
+        expect(reply).toMatchObject({ type: 'memory_context_grant_result', request_id: sessionId })
+        expect(verifyCapabilityGrant(verifiedKeys().publicKeyPem, reply.grant, ISSUER))
+          .toMatchObject({ sessionId, services: ['memory.context'] })
+      }
+
+      third = request('third')
+      await auditStarts[2].promise
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(replies.has('third')).toBe(false)
+      releaseAudits[2]()
+      await third
+      expect(replies.get('third')).toMatchObject({ type: 'memory_context_grant_result', request_id: 'third' })
+      expect(releaseAudits).toHaveLength(3)
+
+      let drained = false
+      const drain = broker.drainAudits(1000).then(result => { drained = true; return result })
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(drained).toBe(false)
+      releaseAudits[0]()
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(drained).toBe(false)
+      releaseAudits[1]()
+      expect(await drain).toBe(true)
+    } finally {
+      for (const release of releaseAudits) release()
+      await Promise.all([first, second, third])
+      expect(await broker.drainAudits(1000)).toBe(true)
+    }
+  })
+
+  test('keeps waiting for audit completion when the background slot is occupied', async () => {
+    const pool = contextPoolWith({
+      installations: [INSTALL],
+      ownedSessions: [{ session_id: 'ses-own', user_id: 42 }],
+    })
+    const originalQuery = pool.query.getMockImplementation()!
+    let releaseFirst!: () => void
+    let releaseSecond!: () => void
+    let secondStarted!: () => void
+    const first = new Promise<void>(resolve => { releaseFirst = resolve })
+    const second = new Promise<void>(resolve => { releaseSecond = resolve })
+    const started = new Promise<void>(resolve => { secondStarted = resolve })
+    let audits = 0
+    pool.query.mockImplementation(async (sql, params) => {
+      if (/INSERT INTO audit_log/.test(sql)) {
+        if (++audits === 1) {
+          await first
+        } else {
+          secondStarted()
+          await second
+        }
+        return { rows: [] }
+      }
+      return originalQuery(sql, params)
+    })
+    const service = createCapabilityGrantService({
+      pool: pool as any,
+      verifyAccessToken: async () => null,
+      issuer: ISSUER,
+      mode: 'enabled',
+    }, grantKeysMaterial, { backgroundAuditLimit: 1 })
+    const input = {
+      userId: 42, installationId: INSTALL.installation_id, sessionId: 'ses-own',
+      callerType: 'daemon' as const, services: ['memory.context'],
+    }
+    let saturated: Promise<unknown> | undefined
+    try {
+      expect(await service.mint(input)).toMatchObject({ ok: true })
+      let returned = false
+      saturated = service.mint(input).then(result => { returned = true; return result })
+      await started
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(returned).toBe(false)
+      releaseSecond()
+      expect(await saturated).toMatchObject({ ok: true })
+      expect(audits).toBe(2)
+    } finally {
+      releaseFirst()
+      releaseSecond()
+      await saturated
+    }
   })
 
   test('caps both the response and minted JWT lifetime at 300 seconds', async () => {

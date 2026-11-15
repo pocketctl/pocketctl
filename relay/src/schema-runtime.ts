@@ -1,3 +1,4 @@
+import {assertUsageAnalyticsSchema} from './usage-analytics/schema.js'
 import {assertNativeInputStartSchema} from './shared-source/input-start.js'
 import {assertNativeSessionAliasSchema} from './session-alias/schema.js'
 import {assertRelaySessionCaptureContract} from './shared-source/session-capture.js'
@@ -70,6 +71,7 @@ export async function assertRelaySchemaContract(pool:pg.Pool):Promise<void>{
    const actual=(await c.query('SELECT attname FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped',['public.'+table])).rows.map(r=>r.attname)
    if(columns.some(column=>!actual.includes(column)))throw new Error('relay_schema_contract_missing')
   }
+  if(process.env.PERSONAL_USAGE_ENABLED==='true'||process.env.PERSONAL_USAGE_WRITE==='true')await assertUsageAnalyticsSchema(c as unknown as pg.Pool)
   await assertNativeSessionAliasSchema(c as unknown as pg.Pool)
   await assertNativeInputStartSchema(c as unknown as pg.Pool)
   await c.query('COMMIT')
