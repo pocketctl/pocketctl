@@ -1,4 +1,4 @@
-import { loadReplayCanonical } from './replay-compatibility.js'
+import { loadReplayCanonical, loadReplayCanonicalEvent } from './replay-compatibility.js'
 import { inheritPostgresHistoryBodyReader } from '../session-history/postgres-reader.js'
 import {projectUsageCall} from '../usage-analytics/call-projector.js'
 import { recoverContinueAdmission, completeContinueAdmission, claimContinueAdmissionOutcome, AdmissionSessionMovedError, mutateContinueAdmissionSession } from '../session-message-admissions.js'
@@ -959,6 +959,7 @@ export class EventMaterializer {
   private async appendExtensionJournal(
     input: MaterializationInput,
     eventId: number,
+    sourceSessionId = this.ledgerSessionId(input),
   ): Promise<void> {
     if (!this.extensionJournalSink) return
     const eligibility = extensionJournalEligibility({
@@ -977,7 +978,7 @@ export class EventMaterializer {
       {
         sourceEventId: eventId,
         ownerUserId: input.userId!,
-        sessionId: this.ledgerSessionId(input),
+        sessionId: sourceSessionId,
         eventType: input.eventType,
         occurredAt: input.receivedAt ?? null,
         payload: input.payload,
@@ -1036,11 +1037,13 @@ export class EventMaterializer {
       this.ledgerSessionId(input),
     )
     const transportPayload = input.payload
+    let sourceSessionId = this.ledgerSessionId(input)
     if (!event.inserted) {
-      const canonical = await loadReplayCanonical(this.options.pool, event.rowID, input.userId, this.ledgerSessionId(input), input.eventType, true, input.payload)
-      input = { ...input, payload: canonical }
+      const canonical = await loadReplayCanonicalEvent(this.options.pool, event.rowID, input.userId, this.ledgerSessionId(input), input.eventType, true, input.payload, Boolean(input.context?.admission))
+      input = { ...input, payload: canonical.payload }
+      sourceSessionId = canonical.logicalSession
     }
-    await this.appendExtensionJournal(input, event.rowID)
+    await this.appendExtensionJournal(input, event.rowID, sourceSessionId)
     if(process.env.PERSONAL_USAGE_WRITE==='true')await projectUsageCall(this.options.pool,input,event.rowID)
     // This scoped pool is the canonical event's fence transaction. The fact
     // key is stable across ledger replay and adds no effect-step ordinal.
@@ -1058,6 +1061,7 @@ export class EventMaterializer {
         event.rowID,
         this.deliveryAudience(input),
         this.deliveryPayload({ ...input, payload: { ...input.payload,
+          ...(input.context?.admission ? {session_id:input.sessionId} : {}),
           ...(transportPayload.seq === undefined ? {} : { seq: transportPayload.seq }),
           ...(transportPayload.resync === undefined ? {} : { resync: transportPayload.resync }),
         } }),

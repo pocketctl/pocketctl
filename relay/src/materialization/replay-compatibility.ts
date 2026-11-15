@@ -51,11 +51,15 @@ export function assertReplayCompatible(canonical: Record<string, unknown>, raw: 
 
 /** Caller holds the session fence. Cold content is read from its authenticated
  * archive, never reconstructed from incoming bytes. Re-check the published hash. */
-export async function loadReplayCanonical(pool: Pick<pg.Pool, 'query'>, eventId: number,
-  owner: number | null, logicalSession: string, eventType: string, lock = true, incoming?: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const row = (await pool.query(`SELECT events.*,id::text,(SELECT jsonb_build_object('agent_type',s.agent_type,'source',s.source,'control_mode',s.control_mode) FROM sessions s WHERE s.session_id=events.session_id) AS replay_session
+export async function loadReplayCanonicalEvent(pool: Pick<pg.Pool, 'query'>, eventId: number,
+  owner: number | null, logicalSession: string, eventType: string, lock = true, incoming?: Record<string, unknown>, rebaseAdmissionSession = false): Promise<{payload: Record<string, unknown>; logicalSession: string}> {
+  const row = (await pool.query(`SELECT events.*,id::text,(SELECT jsonb_build_object('agent_type',s.agent_type,'source',s.source,'control_mode',s.control_mode) FROM sessions s WHERE s.session_id=events.session_id) AS replay_session,
+    (public.native_session_authority(payload->>'session_id',$2,NULL)->>'sessionId'=$3) AS payload_session_current
     FROM events WHERE id=$1 AND user_id IS NOT DISTINCT FROM $2 AND NOT owner_retired
-    AND logical_source_session_id=$3 AND event_type=$4 AND effect_status IN ('none','pending','completed')
+    AND (logical_source_session_id=$3 OR
+      (public.native_event_authority(id,$2)->>'state'='current'
+       AND public.native_session_authority($3,$2,NULL)->>'state'='current'
+       AND public.native_session_authority($3,$2,NULL)->>'sessionId'=events.session_id)) AND event_type=$4 AND effect_status IN ('none','pending','completed')
     AND (public.native_event_authority(id,$2)->>'state'='current' OR
       (session_id=$3 AND NOT EXISTS(SELECT 1 FROM sessions WHERE session_id=$3)
        AND NOT EXISTS(SELECT 1 FROM session_aliases WHERE old_session_id=$3)
@@ -72,6 +76,17 @@ export async function loadReplayCanonical(pool: Pick<pg.Pool, 'query'>, eventId:
   if (row.source_header_version != null && (row.source_header_version !== 1
     || canonicalPayloadHash(payload).toString('hex') !== row.canonical_payload_hash))
     throw new ReplayConflictError('replay_canonical_unavailable')
-  if (incoming) assertReplayCompatible(payload, incoming, replayMemoryProducer(row.replay_session))
-  return payload
+  // Admission recovery rewrites only the trusted route address. Compare it
+  // against the original address without changing canonical bytes or proof.
+  const comparable = incoming && rebaseAdmissionSession && row.payload_session_current === true
+    && incoming.session_id === logicalSession && typeof payload.session_id === 'string'
+    ? {...incoming,session_id:payload.session_id} : incoming
+  if (comparable) assertReplayCompatible(payload, comparable, replayMemoryProducer(row.replay_session))
+  return {payload,logicalSession:row.logical_source_session_id}
+}
+
+/** Recovery callers retain strict payload comparison and the original body. */
+export async function loadReplayCanonical(pool: Pick<pg.Pool, 'query'>, eventId: number,
+  owner: number | null, logicalSession: string, eventType: string, lock = true, incoming?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return (await loadReplayCanonicalEvent(pool,eventId,owner,logicalSession,eventType,lock,incoming)).payload
 }
