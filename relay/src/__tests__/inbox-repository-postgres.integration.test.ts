@@ -404,6 +404,29 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
     expect(second.map((entry) => entry.seq)).toEqual([2])
   })
 
+  test('uses inbox order for equal sequences and rediscovers streams after the queue empties', async () => {
+    const options = { workerId: 'tie-worker', limit: 32, shardCount: 1, shardIndex: 0 }
+    expect(await repo.claimBatch(options)).toEqual([])
+    // Distinct canonical records may share the same ordering coordinate;
+    // their inbox IDs, not priority, break the tie within a stream.
+    const inserted = await pool.query(`INSERT INTO event_inbox
+      (daemon_id,daemon_generation,seq,dedup_key,event_type,priority_class,payload)
+      VALUES ('z-stream',9,7,'tie-first','agent_text',1,'{}'),
+             ('z-stream',9,7,'tie-second','session_status',0,'{}') RETURNING inbox_id`)
+    const first = (await repo.claimBatch(options))[0]
+    expect(first.inboxId).toBe(Number(inserted.rows[0].inbox_id))
+    // A committed in-flight head also blocks its equal-seq successor.
+    expect(await repo.claimBatch(options)).toEqual([])
+    await repo.complete(first.inboxId, null, options.workerId, first.attempts)
+    const second = (await repo.claimBatch(options))[0]
+    expect(second.inboxId).toBe(Number(inserted.rows[1].inbox_id))
+    await repo.complete(second.inboxId, null, options.workerId, second.attempts)
+    expect(await repo.claimBatch(options)).toEqual([])
+    await repo.persistBatch([event(1, { daemonId: 'a-new-stream', dedupKey: 'new-stream' })])
+    expect((await repo.claimBatch(options)).map(row => [row.daemonId, row.seq]))
+      .toEqual([['a-new-stream', 1]])
+  })
+
   test('blocks later rows while the stream head is retry-delayed', async () => {
     await repo.persistBatch([event(1), event(2), event(3)])
     const head = (await repo.claimBatch({

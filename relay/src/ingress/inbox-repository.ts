@@ -423,16 +423,30 @@ export class InboxRepository {
     }
     const claimStartedAt = performance.now()
     try {
+      // Seek directly to each stream's first unresolved row using
+      // idx_event_inbox_stream_unresolved. DISTINCT ON traverses every pending
+      // row on every claim (or scans/sorts the whole table as visibility drifts).
+      // Include claimed and retry-delayed heads here: filtering them before
+      // choosing the head would let a successor overtake its ordering fence.
       const result = await this.pool.query<ClaimedRow>(
-      `WITH stream_heads AS MATERIALIZED (
-         SELECT DISTINCT ON (daemon_id, daemon_generation)
-                inbox_id
-         FROM event_inbox
-         WHERE status IN (0, 1)
-         ORDER BY daemon_id ASC,
-                  daemon_generation ASC,
-                  seq ASC,
-                  inbox_id ASC
+      `WITH RECURSIVE stream_heads AS (
+         (SELECT daemon_id, daemon_generation, inbox_id
+          FROM event_inbox
+          WHERE status IN (0, 1)
+          ORDER BY daemon_id, daemon_generation, seq, inbox_id
+          LIMIT 1)
+         UNION ALL
+         SELECT next_head.daemon_id, next_head.daemon_generation, next_head.inbox_id
+         FROM stream_heads previous_head
+         CROSS JOIN LATERAL (
+           SELECT daemon_id, daemon_generation, inbox_id
+           FROM event_inbox
+           WHERE status IN (0, 1)
+             AND (daemon_id, daemon_generation)
+                 > (previous_head.daemon_id, previous_head.daemon_generation)
+           ORDER BY daemon_id, daemon_generation, seq, inbox_id
+           LIMIT 1
+         ) next_head
        ),
        candidates AS (
          SELECT inbox.inbox_id

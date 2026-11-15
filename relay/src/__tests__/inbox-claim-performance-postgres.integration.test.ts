@@ -41,6 +41,48 @@ describeWithDatabase('inbox claim performance PostgreSQL regression', () => {
     )
   })
 
+  test('examines bounded inbox tuples when claiming two streams with a deep mixed backlog', async () => {
+    // Regresses the global DISTINCT scan even when a warm CI database hides
+    // its wall-clock cost. Measure the actual claim, including its UPDATE.
+    await pool.query(`INSERT INTO event_inbox
+      (daemon_id,daemon_generation,seq,dedup_key,event_type,priority_class,payload,status)
+      SELECT CASE WHEN g<=40000 THEN 'deep-a' ELSE 'deep-b' END,1,g,'deep-'||g,
+        'agent_text',1,jsonb_build_object('text',repeat(md5(g::text),16)),
+        CASE WHEN g>80000 THEN 2 ELSE 0 END
+      FROM generate_series(1,160000) g`)
+    await pool.query('ANALYZE event_inbox')
+    const client = await pool.connect()
+    let statement = ''
+    let parameters: unknown[] = []
+    try {
+      await client.query('BEGIN')
+      const repository = new InboxRepository({
+        query: async (sql: string, values: unknown[]) => {
+          statement = sql
+          parameters = values
+          return client.query(sql, values)
+        },
+      } as never)
+      const claimed = await repository.claimBatch({ workerId: 'bounded', limit: 32, shardCount: 1, shardIndex: 0 })
+      expect(claimed.map(row => [row.daemonId, row.seq])).toEqual([['deep-a', 1], ['deep-b', 40001]])
+      await client.query('ROLLBACK')
+      await client.query('BEGIN')
+      const result = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`, parameters)
+      type Plan = { 'Relation Name'?: string; 'Actual Rows'?: number; 'Actual Loops'?: number;
+        'Rows Removed by Filter'?: number; Plans?: Plan[] }
+      const examined = (node: Plan): number =>
+        (node['Relation Name'] === 'event_inbox'
+          ? ((node['Actual Rows'] ?? 0) + (node['Rows Removed by Filter'] ?? 0)) * (node['Actual Loops'] ?? 0)
+          : 0) + (node.Plans ?? []).reduce((sum, child) => sum + examined(child), 0)
+      // A generous resource budget independent of CPU speed, cache warmth or
+      // exact planner node names. Full-table and full-pending scans violate it.
+      expect(examined(result.rows[0]['QUERY PLAN'][0].Plan)).toBeLessThan(1000)
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+  }, 30_000)
+
   test('claims the single seq-1 head of a 10,000-row same-daemon backlog inside the statement timeout', async () => {
     // Seed the whole backlog in one SQL statement so the fixture itself never
     // becomes the measured cost.

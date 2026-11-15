@@ -11,6 +11,7 @@ import {
   RealtimeOutboxWriter,
 } from '../materialization/realtime-outbox.js'
 import { Router } from '../router.js'
+import { assertDurableIngressTestDatabase, resetDurableIngressTestDatabase } from './durable-ingress-test-db.js'
 
 const databaseUrl = process.env.TEST_DATABASE_URL
 const integrationEnabled = Boolean(databaseUrl && process.env.RUN_POSTGRES_INTEGRATION === '1')
@@ -32,10 +33,7 @@ describeWithDatabase('durable ingress controlled recovery', () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 8 })
-    const database = await pool.query<{ database_name: string }>('SELECT current_database() AS database_name')
-    if (!/test/i.test(database.rows[0]?.database_name ?? '')) {
-      throw new Error('Refusing PostgreSQL integration test against non-test database')
-    }
+    await assertDurableIngressTestDatabase(pool, databaseUrl!)
     await initDB(pool)
   }, 30_000)
 
@@ -44,17 +42,9 @@ describeWithDatabase('durable ingress controlled recovery', () => {
   })
 
   beforeEach(async () => {
-    await pool.query(
-      'TRUNCATE realtime_outbox, event_inbox_receipt, event_inbox, daemon_ack_checkpoint RESTART IDENTITY CASCADE',
-    )
-    await pool.query(`DELETE FROM events WHERE session_id = 'recovery-session'`)
-    await pool.query(`DELETE FROM sessions WHERE session_id = 'recovery-session'`)
-    await pool.query(`DELETE FROM daemons WHERE daemon_id = 'recovery-daemon'`)
-    await pool.query(`DELETE FROM users WHERE email = 'recovery@example.test'`)
-    await pool.query(`DELETE FROM events WHERE session_id = 'recovery-push-session'`)
-    await pool.query(`DELETE FROM sessions WHERE session_id = 'recovery-push-session'`)
-    await pool.query(`DELETE FROM daemons WHERE daemon_id = 'recovery-push-daemon'`)
-    await pool.query(`DELETE FROM users WHERE email = 'recovery-push@example.test'`)
+    // DELETE creates durable retirement evidence; reusing these fixed fixture
+    // IDs must reset the dedicated test identity space, not bypass the guard.
+    await resetDurableIngressTestDatabase(pool, databaseUrl!)
   })
 
   test('deduplicates request-id push effect across fresh Workers without collapsing distinct event ids', async () => {
