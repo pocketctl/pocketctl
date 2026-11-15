@@ -52,6 +52,9 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
       // Recreate the pre-accounting schema, before the Team extension existed.
       // Drop its dependent table explicitly so initDB must restore the FK too.
       await upgradePool.query(`DROP TABLE team_external_usage_facts`)
+      // The newer projection function has the table's composite type in its
+      // signature; it did not exist in the pre-accounting fixture either.
+      await upgradePool.query(`DROP FUNCTION usage_project_token_fact(token_usage_facts)`)
       await upgradePool.query(`DROP TABLE token_usage_facts`)
       await upgradePool.query(`
         CREATE TABLE token_usage_facts (
@@ -105,6 +108,8 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
       `)
 
       await Promise.all([initDB(upgradePool), initDB(concurrentUpgradePool)])
+      expect((await upgradePool.query("SELECT to_regprocedure('usage_project_token_fact(token_usage_facts)') IS NOT NULL AS restored")).rows[0].restored).toBe(true)
+      expect((await upgradePool.query("SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid='token_usage_facts'::regclass AND tgname='usage_token_fact_capture'")).rows[0].n).toBe(1)
 
       const teamForeignKey = await upgradePool.query(`
         SELECT 1 FROM pg_constraint
