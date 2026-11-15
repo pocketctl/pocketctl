@@ -20,8 +20,9 @@ export function replayMemoryProducer(session: {agent_type?: unknown; source?: un
 }
 
 /** Producer metadata never upgrades an existing event's provenance. The only
- * asymmetric migration accepted is an absent proof followed by an explicitly
- * unknown, incomplete, identity-bound envelope from an upgraded producer. */
+ * asymmetric migrations accepted are an absent proof or an exact historical
+ * producer=unknown placeholder followed by an explicitly unknown, incomplete,
+ * identity-bound envelope from the registered producer. Canonical proof stays. */
 export function assertReplayCompatible(canonical: Record<string, unknown>, raw: Record<string, unknown>, producer?: string): void {
   const incoming = sanitizeJSONBPayload(raw)
   const stable = typeof canonical.event_id === 'string' && canonical.event_id.length > 0
@@ -38,7 +39,11 @@ export function assertReplayCompatible(canonical: Record<string, unknown>, raw: 
   const role = ['user_text', 'user_message'].includes(String(canonical.type)) ? 'user'
     : ['tool_call', 'tool_result'].includes(String(canonical.type)) ? 'tool'
     : canonical.type === 'agent_text' ? 'assistant' : 'system'
-  if (canonical.memory_source !== undefined || !proof
+  // Historical producers also persisted the same unknown observation with an
+  // unknown producer. Compare every field, including the exact field set;
+  // this is replay tolerance, never validation or upgrading of that old proof.
+  const legacyPlaceholder = proof && isDeepStrictEqual(canonical.memory_source, {...proof,producer:'unknown'})
+  if ((canonical.memory_source !== undefined && !legacyPlaceholder) || !proof
     || !isDeepStrictEqual(proof, incoming.memory_source)
     || proof.sequence !== '1' || proof.invocation_id !== proof.turn_id
     || proof.skill_state !== 'unknown' || proof.lineage_complete !== false

@@ -38,8 +38,8 @@ suite('canonical replay compatibility', () => {
   const proof = () => ({version:1,producer:'codex',session_id:'replay-session',event_id:'event-1',turn_id:'turn-1',sequence:'1',invocation_id:'turn-1',source_role:'tool',skill_state:'unknown',lineage_complete:false,derived_from_event_ids:[]})
   function materializer(shared=true) { return new EventMaterializer({pool,extensionJournalSink:shared?createPostgresExtensionJournalSink({sharedHeaders:true}):null}) }
   function input(payload:Record<string,unknown>) { return {inboxId:0,userId:owner,daemonId:'replay-daemon',sessionId:'replay-session',eventType:'tool_call',payload} }
-  test.each(['seq','resync','legacy-proof'])('accepts %s while retaining canonical headers and body',async kind=>{
-    const original=body(), m=materializer()
+  test.each(['seq','resync','legacy-proof','legacy-unknown-producer'])('accepts %s while retaining canonical headers and body',async kind=>{
+    const original={...body(),...(kind==='legacy-unknown-producer'?{memory_source:{...proof(),producer:'unknown'}}:{})}, m=materializer()
     const first=await m.materialize(input(original))
     const before=(await pool.query('SELECT payload,source_sequence,canonical_payload_hash,source_classification FROM events WHERE id=$1',[first.eventId])).rows[0]
     const changed={...original,...(kind==='seq'?{seq:99}:kind==='resync'?{resync:true}:{memory_source:proof()})}
@@ -48,7 +48,34 @@ suite('canonical replay compatibility', () => {
     expect(replay.inserted).toBe(false)
     expect((await pool.query('SELECT payload,source_sequence,canonical_payload_hash,source_classification FROM events WHERE id=$1',[first.eventId])).rows[0]).toEqual(before)
     expect(replay.deliveries[0].payload.input).toEqual({file:'synthetic'})
-    expect(replay.deliveries[0].payload.memory_source).toBeUndefined()
+    expect(replay.deliveries[0].payload.memory_source).toEqual(original.memory_source)
+  })
+  test('provenance recovery accepts only verified placeholder replay and completes once with original evidence',async()=>{
+    const original={...body(),memory_source:{...proof(),producer:'unknown'}}
+    const first=await materializer().materialize(input(original))
+    const before=(await pool.query('SELECT payload,source_sequence,canonical_payload_hash,source_classification FROM events WHERE id=$1',[first.eventId])).rows[0]
+    const repository=await enqueue([
+      {...body(),seq:10,resync:true,memory_source:proof()},
+      {...body(),seq:11,resync:true,memory_source:{...proof(),skill_state:'non_skill',lineage_complete:true}},
+      {...body(),seq:12,resync:true,memory_source:{...proof(),producer:'opencode'}},
+      {...body(),seq:13,resync:true,input:{file:'changed'},memory_source:proof()},
+    ])
+    await pool.query("UPDATE event_inbox SET status=3,attempts=12,last_error='replay_provenance_conflict'")
+    const ids=(await pool.query('SELECT inbox_id::text FROM event_inbox ORDER BY seq')).rows.map(r=>r.inbox_id)
+    const manifest=await planReplayRecovery(pool,{daemonId:'replay-daemon',ownerId:owner,generation:'1'},ids)
+    expect(manifest.entries.map(e=>e.inboxId)).toEqual(ids.slice(0,1))
+    expect(manifest.excluded.map(e=>e.reason)).toEqual(['replay_provenance_conflict','replay_provenance_conflict','replay_payload_conflict'])
+    expect((await applyReplayRecovery(pool,manifest,manifest.digest,true)).applied).toBe(1)
+    const worker=createInboxWorker({repository,materializer:materializer(),outboxWriter:new RealtimeOutboxWriter(pool),workerId:'recovered-worker',shardCount:1,shardIndex:0})
+    await worker.runOnce();await worker.runOnce()
+    expect((await pool.query('SELECT status FROM event_inbox ORDER BY seq')).rows.map(r=>r.status)).toEqual([2,3,3,3])
+    expect((await pool.query('SELECT payload,source_sequence,canonical_payload_hash,source_classification FROM events WHERE id=$1',[first.eventId])).rows[0]).toEqual(before)
+    expect((await pool.query('SELECT payload FROM extension_source_outbox')).rows[0].payload).toEqual(original)
+    const outbox=(await pool.query('SELECT event_id,payload FROM realtime_outbox')).rows
+    expect(outbox).toHaveLength(1)
+    expect(outbox[0].event_id).toBe(String(first.eventId))
+    expect(outbox[0].payload.memory_source).toEqual(original.memory_source)
+    expect((await applyReplayRecovery(pool,manifest,manifest.digest,true)).alreadyApplied).toBe(1)
   })
   test('pre-header replay repairs journal without replaying completed effects',async()=>{
     const first=await materializer(false).materialize(input(body()))
@@ -56,6 +83,31 @@ suite('canonical replay compatibility', () => {
     expect(result.eventId).toBe(first.eventId)
     expect((await pool.query('SELECT source_header_version FROM events')).rows[0].source_header_version).toBe(1)
     expect((await pool.query('SELECT payload FROM extension_source_outbox')).rows[0].payload).toEqual(body())
+  })
+  test('observer metadata recovery matches server read-only normalization while retaining raw inbox',async()=>{
+    await pool.query("UPDATE sessions SET agent_type='codex-desktop',source='observer',control_mode='legacy_read_only' WHERE session_id='replay-session'")
+    const original={type:'session_meta',session_id:'replay-session',event_id:'meta-1',turn_id:'turn-1',effort:'high',seq:1,
+      memory_source:{...proof(),event_id:'meta-1',source_role:'system',producer:'unknown'}}
+    const m=materializer(),first=await m.materialize({...input(original),eventType:'session_meta'})
+    const incoming={...original,seq:10,resync:true,memory_source:{...original.memory_source,producer:'codex'}}
+    const repository=await enqueue([incoming,{...incoming,seq:11,effort:'low'}])
+    await pool.query("UPDATE event_inbox SET status=3,attempts=12,last_error='replay_provenance_conflict'")
+    const ids=(await pool.query('SELECT inbox_id::text FROM event_inbox ORDER BY seq')).rows.map(r=>r.inbox_id)
+    const scope={daemonId:'replay-daemon',ownerId:owner,generation:'1'}
+    const manifest=await planReplayRecovery(pool,scope,ids)
+    expect(manifest.entries.map(e=>e.inboxId)).toEqual(ids.slice(0,1))
+    expect(manifest.excluded.map(e=>e.reason)).toEqual(['replay_payload_conflict'])
+    await pool.query("UPDATE sessions SET agent_type='codex',source='terminal',control_mode='managed' WHERE session_id='replay-session'")
+    expect((await planReplayRecovery(pool,scope,[ids[0]])).entries).toHaveLength(0)
+    await expect(applyReplayRecovery(pool,manifest,manifest.digest,true)).rejects.toThrow('replay_payload_conflict')
+    await pool.query("UPDATE sessions SET agent_type='codex-desktop',source='observer',control_mode='legacy_read_only' WHERE session_id='replay-session'")
+    expect((await applyReplayRecovery(pool,manifest,manifest.digest,true)).applied).toBe(1)
+    const worker=createInboxWorker({repository,materializer:m,outboxWriter:new RealtimeOutboxWriter(pool),workerId:'observer-recovery',shardCount:1,shardIndex:0})
+    await worker.runOnce()
+    expect((await pool.query('SELECT status,payload FROM event_inbox ORDER BY seq')).rows).toEqual([{status:2,payload:incoming},{status:3,payload:{...incoming,seq:11,effort:'low'}}])
+    const canonical=(await pool.query('SELECT payload FROM events WHERE id=$1',[first.eventId])).rows[0].payload
+    expect(canonical).toEqual({...original,control_mode:'legacy_read_only',capabilities:['history_sync']})
+    expect((await pool.query('SELECT payload FROM realtime_outbox')).rows[0].payload.memory_source).toEqual(original.memory_source)
   })
   test.each(['body','proof','identity'])('rejects conflicting %s even when journal is disabled',async kind=>{
     const m=materializer(false);await m.materialize(input(body()))

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type pg from 'pg'
 import { canonicalPayloadHash, canonicalSourceClassification } from '@pocketctl/session-source'
-import { assertDaemonSessionAccess, lockSessionMaterializationFence, nativeSessionFenceSet } from '../db.js'
+import { assertDaemonSessionAccess, getSessionRuntimePolicy, lockSessionMaterializationFence, nativeSessionFenceSet } from '../db.js'
 import { inheritPostgresHistoryBodyReader } from '../session-history/postgres-reader.js'
 import { loadReplayCanonical } from '../materialization/replay-compatibility.js'
 import { safeMaterializationError } from '../inbox-worker.js'
@@ -38,7 +38,7 @@ async function target(db: DB): Promise<RecoveryManifest['target']> {
 async function candidate(db: DB, scope: RecoveryScope, id: string, lock: boolean): Promise<RecoveryEntry> {
   const row = (await db.query(`SELECT to_jsonb(i) AS snapshot FROM event_inbox i WHERE inbox_id=$1 ${lock?'FOR UPDATE':''}`, [id])).rows[0]?.snapshot
   if (!row || !Number.isSafeInteger(row.inbox_id) || !Number.isSafeInteger(row.seq) || !Number.isSafeInteger(row.daemon_generation) || row.daemon_id !== scope.daemonId || row.user_id !== scope.ownerId || String(row.daemon_generation) !== scope.generation
-    || row.status !== 3 || !['materialization_failed','canonical_source_header_mismatch'].includes(row.last_error)
+    || row.status !== 3 || !['materialization_failed','canonical_source_header_mismatch','replay_provenance_conflict'].includes(row.last_error)
     || row.claimed_by !== null || row.claimed_at !== null || row.materialized_event_id !== null) throw Error('ineligible_dead_letter')
   if(row.payload?.resync !== true)throw Error('replay_marker_required')
   const stableId = row.payload?.event_id, requestId = row.payload?.request_id
@@ -51,7 +51,19 @@ async function candidate(db: DB, scope: RecoveryScope, id: string, lock: boolean
   const event = (await db.query(`SELECT e.id::text,e.effect_status,e.source_header_version,e.source_sequence::text,e.source_classification
     FROM events e WHERE e.session_id=$1 AND e.event_hash=$2`,[row.session_id,eventHash])).rows[0]
   if (!event || !['completed','none'].includes(event.effect_status)) throw Error('completed_canonical_required')
-  const payload = await loadReplayCanonical(db,Number(event.id),scope.ownerId,row.session_id,row.event_type,lock,row.payload)
+  let comparable = row.payload
+  // EventMaterializer.normalizeObserverPolicy supplies these server-owned
+  // read-only fields before persistence. Match that path for omitted fields
+  // only, under current authenticated Desktop observer authority. Keep the
+  // original inbox bytes/fingerprint; never ignore changed content or control.
+  if (row.event_type==='session_meta' && row.payload.control_mode===undefined && row.payload.capabilities===undefined) {
+    const policy=await getSessionRuntimePolicy(db as pg.Pool,row.session_id,scope.ownerId)
+    if (policy?.agentType==='codex-desktop' && policy.source==='observer' && policy.controlMode==='legacy_read_only')
+      comparable={...row.payload,control_mode:'legacy_read_only',capabilities:['history_sync']}
+  }
+  // An error label alone never makes provenance conflicts recoverable: reload
+  // authenticated canonical content and re-run the strict compatibility check.
+  const payload = await loadReplayCanonical(db,Number(event.id),scope.ownerId,row.session_id,row.event_type,lock,comparable)
   if (event.source_header_version != null && !isDeepStrictEqual(event.source_classification,
     canonicalSourceClassification({source_kind:'canonical_event',session_id:row.session_id,source_seq:event.source_sequence,payload}))) throw Error('canonical_source_header_mismatch')
   const journal = (await db.query("SELECT source_seq::text,owner_user_id,session_id,event_type,payload FROM extension_source_outbox WHERE source_kind='canonical_event' AND source_id=$1",['event:'+event.id])).rows[0]
