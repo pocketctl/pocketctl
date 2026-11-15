@@ -59,6 +59,9 @@ export function safeMaterializationError(error: unknown): string {
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
   if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
     || code === 'quota_reservation_binding_mismatch') return code
+  if (['replay_payload_conflict', 'replay_provenance_conflict', 'replay_canonical_unavailable'].includes(code)) return code
+  const message = error instanceof Error ? error.message : ''
+  if (message === 'canonical_source_header_mismatch') return 'canonical_source_header_mismatch'
   if (code.startsWith('08') || code.startsWith('53') || code === '57P01' || code === '57P03') return 'database_unavailable'
   return 'materialization_failed'
 }
@@ -69,6 +72,7 @@ export function safeMaterializationError(error: unknown): string {
  */
 export function isPermanentMaterializationError(error: unknown): boolean {
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+  if (['replay_payload_conflict', 'replay_provenance_conflict'].includes(code)) return true
   if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
     || code === 'quota_reservation_binding_mismatch') return true
   const name = errorName(error)

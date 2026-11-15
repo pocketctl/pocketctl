@@ -1,3 +1,4 @@
+import {withCanonicalReplayRows} from './fixtures/canonical-replay-unit.js'
 import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import pg from 'pg'
@@ -115,7 +116,7 @@ function sessionPool(
   const value: any = {
     state,
     queries,
-    query: vi.fn(async (sql: string, params: any[] = []) => {
+    query: vi.fn(withCanonicalReplayRows(async (sql: string, params: any[] = []) => {
       queries.push({ sql, params })
       const native=nativeAliasUnitResult(sql,params);if(native)return native
       if (sql.includes('SELECT 1 FROM daemons')) return { rows: [{ owned: true }], rowCount: 1 }
@@ -255,7 +256,7 @@ function sessionPool(
         return { rows: [], rowCount: 1 }
       }
       return { rows: [], rowCount: 1 }
-    }),
+    })),
   }
   value.connect = vi.fn(async () => {
     let releaseFence: (() => void) | undefined

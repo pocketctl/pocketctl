@@ -123,7 +123,7 @@ suite('contiguous side-effect-free history batching', () => {
   test('old pending effect ledgers fall back instead of being marked completed by the shortcut', async () => {
     const repository = await seed(64);
     await pool.query(`INSERT INTO events(session_id,event_type,payload,event_hash,user_id,effect_status,effect_step)
-   VALUES('replay-session','tool_result','{}',substring(md5('replay-session:tool_result:event:history:0'),1,16),$1,'pending',2)`, [userId]);
+   SELECT 'replay-session','tool_result',payload,substring(md5('replay-session:tool_result:event:history:0'),1,16),$1,'pending',2 FROM event_inbox WHERE seq=1`, [userId]);
     let ordinary = 0;
     const materializer = new EventMaterializer({ pool: measured });
     const materialize = materializer.materialize.bind(materializer);
@@ -153,7 +153,7 @@ suite('contiguous side-effect-free history batching', () => {
   test('repeated fallback does not spend pending followers retry budgets', async () => {
     const repository = await seed(64);
     await pool.query(`INSERT INTO events(session_id,event_type,payload,event_hash,user_id,effect_status,effect_step)
-      VALUES('replay-session','tool_result','{}',substring(md5('replay-session:tool_result:event:history:31'),1,16),$1,'pending',2)`, [userId]);
+      SELECT 'replay-session','tool_result',payload,substring(md5('replay-session:tool_result:event:history:31'),1,16),$1,'pending',2 FROM event_inbox WHERE seq=32`, [userId]);
     const materializer = new EventMaterializer({ pool: measured });
     const ordinary = materializer.materialize.bind(materializer);
     let fail = true;
@@ -205,7 +205,7 @@ suite('contiguous side-effect-free history batching', () => {
     expect(Number((await pool.query('SELECT sum(attempts) FROM event_inbox WHERE status=0')).rows[0].sum)).toBe(0);
   });
   test('duplicate immutable IDs retain one canonical identity and one delivery per receipt', async () => {
-    const repository = await seed(64, (_, payload) => { payload.event_id = 'same-immutable-event'; });
+    const repository = await seed(64, (_, payload) => { payload.event_id = 'same-immutable-event'; payload.output = 'same canonical body'; });
     await worker(repository).runOnce();
     expect(Number((await pool.query('SELECT count(*) FROM events')).rows[0].count)).toBe(1);
     expect(Number((await pool.query('SELECT count(*) FROM extension_source_outbox')).rows[0].count)).toBe(1);

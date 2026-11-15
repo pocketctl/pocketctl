@@ -1,3 +1,4 @@
+import {withCanonicalReplayRows} from './fixtures/canonical-replay-unit.js'
 import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EventMaterializer } from '../materialization/event-materializer.js'
@@ -29,13 +30,13 @@ function inputFor(payload: Record<string, unknown>): MaterializationInput {
 }
 
 function pools() {
-  const query = vi.fn(async (sql: string,params?:any[]) => {
+  const query = vi.fn(withCanonicalReplayRows(async (sql: string,params?:any[]) => {
     if(sql.includes('public.native_session_authority'))return {rows:[{authority:{state:'current',sessionId:params![0]}}],rowCount:1}
     if (sql.includes('INSERT INTO events')) return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
     if (sql.includes('SELECT effect_status')) return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
     if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
     return { rows: [], rowCount: 1 }
-  })
+  }))
   return { query }
 }
 
@@ -46,11 +47,11 @@ describe('EventMaterializer', () => {
     const project = vi.fn().mockRejectedValueOnce(new Error('Team receipt transaction failed')).mockResolvedValue(undefined)
     const materializer = new EventMaterializer({ pool: pool as never, teamEventProjector: project })
     await expect(materializer.materialize(input)).rejects.toThrow('Team receipt transaction failed')
-    pool.query.mockImplementation(async (sql: string) => {
+    pool.query.mockImplementation(withCanonicalReplayRows(async (sql: string) => {
       if (sql.includes('INSERT INTO events')) return { rows: [{ id: 91, inserted: false, effect_status: 'completed', effect_step: 0 }], rowCount: 1 }
       if (sql.includes('session_allowed')) return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
       return { rows: [], rowCount: 1 }
-    })
+    }))
     await materializer.materialize(input)
     expect(project).toHaveBeenCalledTimes(2)
     expect(project).toHaveBeenLastCalledWith(input, 91)
@@ -93,10 +94,10 @@ describe('EventMaterializer', () => {
   })
 
   test('a mismatched real reservation cannot fall through to a continue admission', async () => {
-    const pool = {query:vi.fn(async (sql:string) => {
+    const pool = {query:vi.fn(withCanonicalReplayRows(async (sql:string) => {
       if (sql.includes('FROM quota_reservations reservation')) return {rows:[{id:'real-reservation',resource:'concurrent_session',operation:'resume',daemon_id:'wrong-daemon',session_id:'ses-1',state:'pending'}]}
       return {rows:[]}
-    })}
+    }))}
     await expect(new EventMaterializer({pool:pool as never}).materialize(inputFor({type:'session_status',session_id:'ses-1',request_id:'request-1',status:'running'}))).rejects.toMatchObject({code:'quota_reservation_binding_mismatch'})
     expect(pool.query.mock.calls.some(([sql]) => sql.includes('FROM session_message_admissions'))).toBe(false)
   })
@@ -170,11 +171,11 @@ describe('EventMaterializer', () => {
   test('completed ledger rows skip effects but still return their delivery for outbox recovery', async () => {
     const apply = vi.fn()
     const materializer = new EventMaterializer({
-      pool: { query: vi.fn(async (sql: string) => {
+      pool: { query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if(sql.includes('native_session_alias_set'))return {rows:[{ids:['root']}],rowCount:1}
         if (sql.includes('INSERT INTO events')) return { rows: [{ id: 99, inserted: false, effect_status: 'completed', effect_step: 3 }], rowCount: 1 }
         return { rows: [], rowCount: 1 }
-      }) } as never,
+      })) } as never,
     })
     const payload = { type: 'agent_text', session_id: 'ses-1', usage: { input_tokens: 3 } }
 
@@ -228,12 +229,12 @@ describe('EventMaterializer', () => {
 
   test('does not create a delivery for an unknown session_status', async () => {
     const pool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('INSERT INTO events')) return { rows: [{ id: 32, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
         if (sql.includes('SELECT effect_status')) return { rows: [{ effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
         if (sql.includes('UPDATE sessions')) return { rows: [], rowCount: 0 }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const materializer = new EventMaterializer({ pool: pool as never })
 
@@ -249,7 +250,7 @@ describe('EventMaterializer', () => {
     let effectStep = 0
     let decisionWrites = 0
     const pool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('INSERT INTO events')) {
           return {
             rows: [{ id: 44, inserted: effectStatus === 'pending' && effectStep === 0, effect_status: effectStatus, effect_step: effectStep }],
@@ -269,7 +270,7 @@ describe('EventMaterializer', () => {
           return { rows: [{ effect_status: effectStatus, effect_step: effectStep }], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const materializer = new EventMaterializer({ pool: pool as never })
     const input = inputFor({ type: 'session_status', session_id: 'late', status: 'busy' })
@@ -285,7 +286,7 @@ describe('EventMaterializer', () => {
     let failCompletion = true
     let sessionExists = false
     const pool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 45, inserted: effectStep === 0, effect_status: 'pending', effect_step: effectStep }], rowCount: 1 }
         }
@@ -304,7 +305,7 @@ describe('EventMaterializer', () => {
           return { rows: [{ effect_status: 'pending', effect_step: effectStep }], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const materializer = new EventMaterializer({ pool: pool as never })
     const input = inputFor({ type: 'session_status', session_id: 'late', status: 'busy' })
@@ -318,7 +319,7 @@ describe('EventMaterializer', () => {
     let completed = false
     let inserted = true
     const pool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('INSERT INTO events')) {
           const row = { id: 73, inserted, effect_status: completed ? 'completed' : 'pending', effect_step: 0 }
           inserted = false
@@ -332,7 +333,7 @@ describe('EventMaterializer', () => {
           return { rows: [], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const materializer = new EventMaterializer({ pool: pool as never })
     const input = inputFor({ type: 'agent_text', session_id: 'ses-1', text: 'same' })
@@ -369,7 +370,7 @@ describe('EventMaterializer', () => {
 
   test('reuses the session-fence PoolClient for subagent usage', async () => {
     const client = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if(sql.includes('native_session_alias_set'))return {rows:[{ids:['root']}],rowCount:1}
         if (sql.includes('INSERT INTO subagent_usage_seen')) {
           return { rows: [{ usage_hash: 'hash' }], rowCount: 1 }
@@ -378,7 +379,7 @@ describe('EventMaterializer', () => {
           return { rows: [{ session_exists: true, session_allowed: true }], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
       connect: vi.fn().mockRejectedValue(new Error('Client has already been connected. You cannot reuse a client.')),
       release: vi.fn(),
     }
@@ -412,7 +413,7 @@ describe('EventMaterializer', () => {
     let relationApplied = false
     let ledgerCompleted = false
     const client = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if(sql.includes('native_session_alias_set'))return {rows:[{ids:['root']}],rowCount:1}
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 92, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
@@ -423,7 +424,7 @@ describe('EventMaterializer', () => {
         if (sql.includes('INSERT INTO subagents')) relationApplied = true
         if (sql.includes("effect_status = 'completed'")) ledgerCompleted = true
         return { rows: [], rowCount: 1 }
-      }),
+      })),
       connect: vi.fn().mockRejectedValue(new Error('Client has already been connected. You cannot reuse a client.')),
       release: vi.fn(),
     }
@@ -571,7 +572,7 @@ describe('EventMaterializer', () => {
 
   test('rejects a tombstoned session on the legacy inline path before any canonical event write', async () => {
     const pool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('FROM deleted_sessions')) return { rows: [{ exists: true }], rowCount: 1 }
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 91, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
@@ -580,7 +581,7 @@ describe('EventMaterializer', () => {
           return { rows: [{ session_exists: false, session_allowed: false }], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const materializer = new EventMaterializer({ pool: pool as never })
     const input = {
@@ -642,7 +643,7 @@ describe('EventMaterializer', () => {
 
   test('active status settles only an exact resume binding, never a create reservation', async () => {
     const pool = {
-      query: vi.fn(async (sql: string) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string) => {
         if (sql.includes('INSERT INTO events')) {
           return { rows: [{ id: 93, inserted: true, effect_status: 'pending', effect_step: 0 }], rowCount: 1 }
         }
@@ -656,7 +657,7 @@ describe('EventMaterializer', () => {
           return { rows: [{ session_exists: true, suppressed: false, foreign_owner: false }], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
     }
     const settle = vi.fn().mockResolvedValue(undefined)
     const releasePendingOperation = vi.fn().mockResolvedValue(undefined)
@@ -1045,7 +1046,7 @@ describe('EventMaterializer daemon session ownership', () => {
   ) {
     const queries: { sql: string; params: any[] }[] = []
     const pool = {
-      query: vi.fn(async (sql: string, params?: any[]) => {
+      query: vi.fn(withCanonicalReplayRows(async (sql: string, params?: any[]) => {
       const native=nativeAliasUnitResult(sql,params??[]);if(native)return native
         queries.push({ sql, params: params ?? [] })
         if (sql.includes('INSERT INTO events')) {
@@ -1078,7 +1079,7 @@ describe('EventMaterializer daemon session ownership', () => {
           return { rows: [], rowCount: 1 }
         }
         return { rows: [], rowCount: 1 }
-      }),
+      })),
       _queries: queries,
     }
     return pool

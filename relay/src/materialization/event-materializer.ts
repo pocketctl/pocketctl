@@ -1,3 +1,5 @@
+import { loadReplayCanonical } from './replay-compatibility.js'
+import { inheritPostgresHistoryBodyReader } from '../session-history/postgres-reader.js'
 import {projectUsageCall} from '../usage-analytics/call-projector.js'
 import { recoverContinueAdmission, completeContinueAdmission, claimContinueAdmissionOutcome, AdmissionSessionMovedError, mutateContinueAdmissionSession } from '../session-message-admissions.js'
 import { recordMaterializedActivity } from '../platform-statistics/facts.js'
@@ -1033,11 +1035,18 @@ export class EventMaterializer {
       input.context?.admission?.sessionId ?? this.ledgerSessionId(input),
       this.ledgerSessionId(input),
     )
+    const transportPayload = input.payload
+    if (!event.inserted) {
+      const canonical = await loadReplayCanonical(this.options.pool, event.rowID, input.userId, this.ledgerSessionId(input), input.eventType, true, input.payload)
+      input = { ...input, payload: canonical }
+    }
     await this.appendExtensionJournal(input, event.rowID)
     if(process.env.PERSONAL_USAGE_WRITE==='true')await projectUsageCall(this.options.pool,input,event.rowID)
     // This scoped pool is the canonical event's fence transaction. The fact
     // key is stable across ledger replay and adds no effect-step ordinal.
-    await recordMaterializedActivity(this.options.pool, input, event.rowID)
+    // Canonical content may predate the transport replay marker. Preserve
+    // the incoming suppression so historical recovery is not fresh activity.
+    if (transportPayload.resync !== true) await recordMaterializedActivity(this.options.pool, input, event.rowID)
     const result: MaterializationResult = {
       eventId: event.rowID,
       inserted: event.inserted,
@@ -1048,9 +1057,13 @@ export class EventMaterializer {
         input,
         event.rowID,
         this.deliveryAudience(input),
-        this.deliveryPayload(input),
+        this.deliveryPayload({ ...input, payload: { ...input.payload,
+          ...(transportPayload.seq === undefined ? {} : { seq: transportPayload.seq }),
+          ...(transportPayload.resync === undefined ? {} : { resync: transportPayload.resync }),
+        } }),
       )],
     }
+    if (this.options.teamEventProjector) result.canonicalInput = input
     if (options.deferEffects && !event.completed
       && (input.eventType === 'session_discovered' && isObserverAgentType(input.payload.agent)
         || this.isCodexControlRevocation(input))) {
@@ -1171,7 +1184,7 @@ export class EventMaterializer {
         // projection committed; the inbox (or legacy sequence ACK) owns retry.
         const projectTeam = async () => {
           await options.assertClaim?.()
-          await project(input, result.eventId)
+          await project(result.canonicalInput ?? input, result.eventId)
         }
         if (options.deferEffects) {
           const apply = result.applyEffects
@@ -1210,6 +1223,7 @@ export class EventMaterializer {
         throw new LostClaimError(head.inboxId);
       }
       const scopedPool = client as unknown as pg.Pool;
+      inheritPostgresHistoryBodyReader(this.options.pool, scopedPool);
       if (await db.isSessionDeleted(scopedPool, head.sessionId!))
         throw new db.DeletedDaemonSessionError();
       await db.assertDaemonSessionAccess(scopedPool, { sessionId: head.sessionId!, userId: head.userId, daemonId: head.daemonId, policy: 'must_exist' });
@@ -1217,13 +1231,17 @@ export class EventMaterializer {
       const stored = await db.persistReplayContentBatch(client, head.sessionId!, inputs.map(input => ({ eventType: input.eventType, payload: input.payload, userId: input.userId! })));
       const results: MaterializationResult[] = [];
       for (let i = 0; i < inputs.length; i++) {
-        const input = inputs[i], event = stored[i];
+        let input = inputs[i]; const event = stored[i];
+        if (!event.inserted || stored.slice(0, i).some(previous => previous.rowID === event.rowID)) {
+          const canonical = await loadReplayCanonical(scopedPool, event.rowID, input.userId, scoped.ledgerSessionId(input), input.eventType, true, input.payload);
+          input = { ...input, payload: canonical };
+        }
         // Journal uses the same transaction; a failure rolls every canonical
         // write back and the worker falls back to ordered single-row handling.
         await scoped.appendExtensionJournal(input, event.rowID);
         if(process.env.PERSONAL_USAGE_WRITE==='true')await projectUsageCall(scopedPool,input,event.rowID);
         results.push({ eventId: event.rowID, inserted: event.inserted, completed: true,
-          deliveries: [this.delivery(input, event.rowID, this.deliveryAudience(input), this.deliveryPayload(input))] });
+          deliveries: [this.delivery(input, event.rowID, this.deliveryAudience(input), this.deliveryPayload({ ...input, payload: { ...input.payload, seq: inputs[i].payload.seq, resync: inputs[i].payload.resync } }))] });
       }
       await assertClaim();
       await claims.complete(client, results);
@@ -1260,6 +1278,7 @@ export class EventMaterializer {
         // one would wait on itself forever. Deferred effect closures are the
         // exception: they run post-commit and must use the original pool.
         const queryable = client as unknown as pg.Pool
+        inheritPostgresHistoryBodyReader(this.options.pool, queryable)
         const scoped = new EventMaterializer({
           ...this.options,
           pool: queryable,
