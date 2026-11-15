@@ -11,6 +11,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 // opencode.go holds opencode's data shapes and the single Part→DaemonEvent
@@ -719,7 +720,14 @@ func (s *OpencodeSync) deriveStatus(ordered []OpencodeMessageWithParts) string {
 // Tool parts are observed as their state evolves: pending/running yields a
 // tool_call; completed/error yields a tool_result. OpencodeSync deduplicates an
 // exact canonical snapshot while preserving same-state input/output mutation.
-func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonEvent {
+func ConvertOpencodePart(p *OpencodePart, role, model string) (events []protocol.DaemonEvent) {
+	defer func() {
+		at := ""
+		if p.Time.Created > 0 {
+			at = time.UnixMilli(p.Time.Created).UTC().Format(time.RFC3339Nano)
+		}
+		usageanalytics.Enrich(events, "opencode", p.ID, at, model, "unknown", 0, true)
+	}()
 	switch p.Type {
 	case "text":
 		text := strings.TrimSpace(p.Text)
@@ -794,7 +802,7 @@ func ConvertOpencodePart(p *OpencodePart, role, model string) []protocol.DaemonE
 			if out == "" {
 				out = p.State.Error
 			}
-			return []protocol.DaemonEvent{{Type: "tool_result", CallID: p.CallID, Output: out, Error: p.State.Error}}
+			return []protocol.DaemonEvent{{Type: "tool_result", CallID: p.CallID, Output: out, Error: p.State.Error, Status: "error"}}
 		default: // pending | running
 			return []protocol.DaemonEvent{{Type: "tool_call", CallID: p.CallID, Tool: p.Tool, Input: p.State.Input}}
 		}

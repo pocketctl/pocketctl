@@ -102,6 +102,31 @@ describe('standalone event worker runtime', () => {
     expect(deps.pool.end).toHaveBeenCalledOnce()
   })
 
+  test('healthy retention backlog keeps draining while another stage fails', async () => {
+    vi.useFakeTimers()
+    const log = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const retention = { runOnce: vi.fn()
+      .mockResolvedValueOnce({ moreWork: true, failures: [] })
+      .mockResolvedValueOnce({ moreWork: true, failures: [{stage:'inbox',code:'57014'}] })
+      .mockResolvedValue({ moreWork: false, failures: [] }) }
+    const loop = createRetentionLoop({retention})
+    try {
+      loop.start()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(retention.runOnce).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(retention.runOnce).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(retention.runOnce).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(59999)
+      expect(retention.runOnce).toHaveBeenCalledTimes(3)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(retention.runOnce).toHaveBeenCalledTimes(4)
+      expect(error).toHaveBeenCalled()
+    } finally { await loop.stop(); log.mockRestore(); error.mockRestore(); vi.useRealTimers() }
+  })
+
   test('retention loop never overlaps and stop waits for the active batch', async () => {
     let timerCallback: (() => void) | undefined
     let finish: (() => void) | undefined

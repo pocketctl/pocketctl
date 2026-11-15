@@ -1,0 +1,9 @@
+import pg from 'pg'
+import {backfillUsage} from './backfill.js'
+// Explicit database identity and owner are mandatory. Defaults are read-only.
+const args=process.argv.slice(2),expected=args.shift(),values=new Map<string,string>();let apply=false,fromStart=false
+while(args.length){const key=args.shift()!;if(key==='--apply')apply=true;else if(key==='--from-start')fromStart=true;else if(['--owner','--batch','--max-batches'].includes(key)&&args.length)values.set(key,args.shift()!);else throw Error('usage: backfill-main EXPECTED_DATABASE --owner ID [--batch 200] [--max-batches 1] [--apply] [--from-start]')}
+const owner=Number(values.get('--owner')),batch=Number(values.get('--batch')??200),max=Number(values.get('--max-batches')??1)
+if(!expected||!process.env.PERSONAL_USAGE_BACKFILL_DATABASE_URL||!Number.isSafeInteger(owner)||owner<=0||!Number.isInteger(batch)||batch<1||batch>1000||!Number.isInteger(max)||max<1||max>100)throw Error('explicit_database_owner_and_bounded_batch_required')
+const pool=new pg.Pool({connectionString:process.env.PERSONAL_USAGE_BACKFILL_DATABASE_URL,max:1,application_name:'pocketctl-personal-usage-backfill'})
+try{if((await pool.query('SELECT current_database() AS database_name')).rows[0].database_name!==expected)throw Error('backfill_database_identity_mismatch');if(!(await pool.query('SELECT 1 FROM users WHERE id=$1',[owner])).rows.length)throw Error('owner_not_found');const asOf=new Date();for(let i=0;i<max;i++){const client=await pool.connect();try{await client.query('BEGIN');const report=await backfillUsage(client as unknown as pg.Pool,owner,{limit:batch,dryRun:!apply,asOf,after:i===0&&fromStart?'':undefined});await client.query('COMMIT');console.log(JSON.stringify({...report,as_of:asOf.toISOString()}));if(!apply||report.candidates<batch)break}catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}}}finally{await pool.end()}

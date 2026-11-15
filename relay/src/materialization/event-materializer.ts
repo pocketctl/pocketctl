@@ -1,4 +1,6 @@
+import {projectUsageCall} from '../usage-analytics/call-projector.js'
 import { recoverContinueAdmission, completeContinueAdmission, claimContinueAdmissionOutcome, AdmissionSessionMovedError, mutateContinueAdmissionSession } from '../session-message-admissions.js'
+import { recordMaterializedActivity } from '../platform-statistics/facts.js'
 import { createHash } from 'crypto'
 import type pg from 'pg'
 import * as db from '../db.js'
@@ -1032,6 +1034,10 @@ export class EventMaterializer {
       this.ledgerSessionId(input),
     )
     await this.appendExtensionJournal(input, event.rowID)
+    if(process.env.PERSONAL_USAGE_WRITE==='true')await projectUsageCall(this.options.pool,input,event.rowID)
+    // This scoped pool is the canonical event's fence transaction. The fact
+    // key is stable across ledger replay and adds no effect-step ordinal.
+    await recordMaterializedActivity(this.options.pool, input, event.rowID)
     const result: MaterializationResult = {
       eventId: event.rowID,
       inserted: event.inserted,
@@ -1215,6 +1221,7 @@ export class EventMaterializer {
         // Journal uses the same transaction; a failure rolls every canonical
         // write back and the worker falls back to ordered single-row handling.
         await scoped.appendExtensionJournal(input, event.rowID);
+        if(process.env.PERSONAL_USAGE_WRITE==='true')await projectUsageCall(scopedPool,input,event.rowID);
         results.push({ eventId: event.rowID, inserted: event.inserted, completed: true,
           deliveries: [this.delivery(input, event.rowID, this.deliveryAudience(input), this.deliveryPayload(input))] });
       }

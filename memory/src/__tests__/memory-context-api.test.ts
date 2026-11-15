@@ -1,3 +1,4 @@
+import * as usageStatistics from '../platform-statistics/service.js'
 import { describe, expect, test, vi } from 'vitest'
 import Fastify from 'fastify'
 import { registerContextRoutes } from '../api/context-routes.js'
@@ -104,6 +105,7 @@ describe('context route contracts (unit)', () => {
   })
 
   test('opt-in Codex compile prepares text once and never returns the consumed nonce', async () => {
+    const usage=vi.spyOn(usageStatistics,'recordUsage').mockRejectedValue(new Error('statistics_unavailable'))
     const packId = '11111111-1111-4111-8111-111111111111'
     const injectionId = '22222222-2222-4222-8222-222222222222'
     const expiresAt = new Date()
@@ -138,18 +140,33 @@ describe('context route contracts (unit)', () => {
       expect(admit).toHaveBeenCalledWith(expect.objectContaining({ packId, adapter: 'codex-app-server', sessionId: 'ses-1' }))
       expect(consume).toHaveBeenCalledWith(expect.objectContaining({ packId, injectionId, nonce: 'private-nonce', sessionId: 'ses-1' }))
       expect(guard.guard).toHaveBeenCalledTimes(1)
+      expect(usage).not.toHaveBeenCalled()
 
       const duplicate = await app.inject(request)
       expect(duplicate.json().handoff).toEqual({ status: 'existing' })
       expect(consume).toHaveBeenCalledTimes(1)
+      expect(usage).not.toHaveBeenCalled()
 
       const legacy = await app.inject({ ...request, payload: { ...request.payload, prepare_context: undefined } })
       expect(legacy.json()).toMatchObject({ outcome: 'ready', admission_required: true })
       expect(legacy.json().handoff).toBeUndefined()
       expect(admit).toHaveBeenCalledTimes(2)
     } finally {
+      usage.mockRestore()
       await app.close()
     }
+  })
+
+  test('GET returns already consumed pack bytes without a second postcommit statistics write',async()=>{
+    const usage=vi.spyOn(usageStatistics,'recordUsage').mockRejectedValue(new Error('statistics_unavailable'))
+    const packId='11111111-1111-4111-8111-111111111111'
+    const app=appWith({admission:{consume:async()=>({ok:true,pack:{packId,stableText:'evidence',dynamicText:'',stableHash:'hash',dynamicHash:''}})} as never})
+    try{
+      const response=await app.inject({method:'GET',url:`/api/v1/memory/context/packs/${packId}/text?session_id=ses-a&injection_id=22222222-2222-4222-8222-222222222222&nonce=one`,headers:{host:'memory.test',authorization:'Bearer g'}})
+      expect(response.statusCode).toBe(200)
+      expect(response.json().stable_text).toBe('evidence')
+      expect(usage).not.toHaveBeenCalled()
+    }finally{usage.mockRestore();await app.close()}
   })
 
   test('compile rejects a malformed body with a bounded error', async () => {

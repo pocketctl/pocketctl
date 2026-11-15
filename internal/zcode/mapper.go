@@ -11,6 +11,7 @@ import (
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 // mapper.go converts whitelisted ZCode rows into DaemonEvents. It is fully
@@ -194,7 +195,13 @@ func (mp *Mapper) SubagentDiscovered(wireParentID, wireChildID, agentType, title
 // Returns: (event, reason). reason=="" means an event was produced; "unknown"
 // means no event and the part type should be counted; "step-start" means no
 // content event (status-only).
-func (mp *Mapper) MapPart(wireSessionID, wireMessageID, nativePartID string, part ZcodePartData, model, prevEventID string, revision int) (protocol.DaemonEvent, string) {
+func (mp *Mapper) MapPart(wireSessionID, wireMessageID, nativePartID string, part ZcodePartData, model, prevEventID string, revision int) (mapped protocol.DaemonEvent, reason string) {
+	defer func() {
+		events := []protocol.DaemonEvent{mapped}
+		usageanalytics.Enrich(events, "zcode", nativePartID, "", model, "unknown", int64(revision), true)
+		mapped = events[0]
+	}()
+
 	base := protocol.DaemonEvent{
 		SessionID:       wireSessionID,
 		MessageID:       wireMessageID,

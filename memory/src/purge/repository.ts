@@ -1,6 +1,7 @@
 import {legacyTransportRetired} from '../sources/transport-state.js'
 import {assertIndependentAcceptedEvidence,independentlyAcceptedVersionSupportSql} from '../claims/accepted-evidence-policy.js'
 import {rollupFeedbackBeforeInstallationPurge,minimizeSessionFeedback,minimizeEpisodeFeedback} from '../claims/feedback-policy.js'
+import {purgeStatistics} from '../platform-statistics/service.js'
 import {cleanupRevokedSharedClaims} from '../governance/retention-service.js'
 import { createHash, createHmac } from 'crypto'
 import type pg from 'pg'
@@ -421,6 +422,7 @@ async function purgeSessionRows(
     AND EXISTS(SELECT 1 FROM memory_skill_replay_cases c WHERE c.installation_id=r.installation_id
       AND c.run_id=r.run_id AND c.session_id=$2)`,[input.installationId,input.sessionId])
 
+  await purgeStatistics(client,input.installationId)
   await minimizeSessionFeedback(client,input.installationId,input.sessionId)
   // Phase 2 purge order: stop session-scoped context generation and remove
   // every pack whose turn or Evidence source belongs to the purged Session
@@ -767,6 +769,7 @@ async function purgeInstallationRows(
   await client.query(`
     SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1, 0))
   `, [input.installationId])
+  await purgeStatistics(client,input.installationId)
   await rollupFeedbackBeforeInstallationPurge(client,input.installationId)
   // Packs and loadouts have restrictive repository FKs. Remove their owned
   // children first, while the installation fence still excludes new Context

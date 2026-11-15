@@ -1,0 +1,62 @@
+[
+  {
+    "type": "agent_text",
+    "event_id": "dsh:fixture:10:usage",
+    "session_id": "fixture",
+    "turn_id": "turn:v1:dsh:_HcJEEYnsglVlevNNyMJuDmD50KW2ygcqW-2SWjF-gU",
+    "usage_meta": {
+      "version": 1,
+      "provider": "dsh",
+      "source_usage_id": "native-message",
+      "revision": 10,
+      "mode": "cumulative",
+      "input_semantics": "unknown"
+    },
+    "usage": {
+      "input_tokens": 100
+    },
+    "source_turn_id": "1",
+    "turn_origin": "native",
+    "turn_confidence": "native"
+  },
+  {
+    "type": "agent_text",
+    "event_id": "dsh:fixture:11:usage",
+    "session_id": "fixture",
+    "turn_id": "turn:v1:dsh:_HcJEEYnsglVlevNNyMJuDmD50KW2ygcqW-2SWjF-gU",
+    "usage_meta": {
+      "version": 1,
+      "provider": "dsh",
+      "source_usage_id": "native-message",
+      "revision": 11,
+      "mode": "cumulative",
+      "input_semantics": "unknown"
+    },
+    "usage": {
+      "input_tokens": 130
+    },
+    "source_turn_id": "1",
+    "turn_origin": "native",
+    "turn_confidence": "native"
+  },
+  {
+    "type": "agent_text",
+    "event_id": "dsh:fixture:12:usage",
+    "session_id": "fixture",
+    "turn_id": "turn:v1:dsh:_HcJEEYnsglVlevNNyMJuDmD50KW2ygcqW-2SWjF-gU",
+    "usage_meta": {
+      "version": 1,
+      "provider": "dsh",
+      "source_usage_id": "",
+      "revision": 12,
+      "mode": "cumulative",
+      "input_semantics": "unknown"
+    },
+    "usage": {
+      "input_tokens": 140
+    },
+    "source_turn_id": "1",
+    "turn_origin": "native",
+    "turn_confidence": "native"
+  }
+]

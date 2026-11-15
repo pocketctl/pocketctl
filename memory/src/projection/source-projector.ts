@@ -245,17 +245,21 @@ async function projectRow(
 
 /** Reuses deterministic derived projections without manufacturing a Feed ID
  * or persisting an event body. Caller owns the current root/output transaction. */
-export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number):Promise<void>{
+export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number,options:{scheduleCompilation?:boolean}={}):Promise<void>{
  const row:ProjectionRow={session_id:fact.sessionId,turn_id:fact.turnId,event_type:fact.eventType,recorded_at:fact.occurredAt,data:fact.payload}
- await upsertSession(client,installationId,row)
- await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs)
+ const historical=options.scheduleCompilation===false
+ await upsertSession(client,installationId,row,historical)
+ await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs,options.scheduleCompilation)
 }
 
-async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number):Promise<void>{
+async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,scheduleCompilation=true):Promise<void>{
   const data = sourceRow.data ?? {}
 
   if (sourceRow.turn_id) {
     await upsertTurn(client, installationId, sourceRow, eventId)
+  }
+
+  if (sourceRow.turn_id && scheduleCompilation) {
     // Terminal or late same-turn events (re)schedule episode compilation;
     // every event pushes availability past its own stabilization window, so
     // a late arrival re-delays the compile.
@@ -315,6 +319,7 @@ async function upsertSession(
   client: Pick<pg.PoolClient, 'query'>,
   installationId: string,
   row: ProjectionRow,
+  historical = false,
 ): Promise<void> {
   const data = row.data ?? {}
   const agentType = row.event_type === 'session_discovered' && typeof data.agent === 'string'
@@ -330,18 +335,30 @@ async function upsertSession(
        worktree_path, worktree_branch, first_recorded_at, last_recorded_at, last_feed_id)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
     ON CONFLICT (installation_id, session_id) DO UPDATE SET
-      agent_type = COALESCE(EXCLUDED.agent_type, source_sessions.agent_type),
-      daemon_id = COALESCE(EXCLUDED.daemon_id, source_sessions.daemon_id),
-      status = COALESCE(EXCLUDED.status, source_sessions.status),
-      cwd_observation = COALESCE(EXCLUDED.cwd_observation, source_sessions.cwd_observation),
-      worktree_path = COALESCE(EXCLUDED.worktree_path, source_sessions.worktree_path),
-      worktree_branch = COALESCE(EXCLUDED.worktree_branch, source_sessions.worktree_branch),
+      agent_type = CASE WHEN $11 AND EXCLUDED.last_recorded_at < source_sessions.last_recorded_at
+        THEN COALESCE(source_sessions.agent_type, EXCLUDED.agent_type)
+        ELSE COALESCE(EXCLUDED.agent_type, source_sessions.agent_type) END,
+      daemon_id = CASE WHEN $11 AND EXCLUDED.last_recorded_at < source_sessions.last_recorded_at
+        THEN COALESCE(source_sessions.daemon_id, EXCLUDED.daemon_id)
+        ELSE COALESCE(EXCLUDED.daemon_id, source_sessions.daemon_id) END,
+      status = CASE WHEN $11 AND EXCLUDED.last_recorded_at < source_sessions.last_recorded_at
+        THEN COALESCE(source_sessions.status, EXCLUDED.status)
+        ELSE COALESCE(EXCLUDED.status, source_sessions.status) END,
+      cwd_observation = CASE WHEN $11 AND EXCLUDED.last_recorded_at < source_sessions.last_recorded_at
+        THEN COALESCE(source_sessions.cwd_observation, EXCLUDED.cwd_observation)
+        ELSE COALESCE(EXCLUDED.cwd_observation, source_sessions.cwd_observation) END,
+      worktree_path = CASE WHEN $11 AND EXCLUDED.last_recorded_at < source_sessions.last_recorded_at
+        THEN COALESCE(source_sessions.worktree_path, EXCLUDED.worktree_path)
+        ELSE COALESCE(EXCLUDED.worktree_path, source_sessions.worktree_path) END,
+      worktree_branch = CASE WHEN $11 AND EXCLUDED.last_recorded_at < source_sessions.last_recorded_at
+        THEN COALESCE(source_sessions.worktree_branch, EXCLUDED.worktree_branch)
+        ELSE COALESCE(EXCLUDED.worktree_branch, source_sessions.worktree_branch) END,
       last_recorded_at = GREATEST(source_sessions.last_recorded_at,EXCLUDED.last_recorded_at),
       last_feed_id = CASE WHEN EXCLUDED.last_feed_id IS NULL THEN source_sessions.last_feed_id ELSE GREATEST(COALESCE(source_sessions.last_feed_id, 0), EXCLUDED.last_feed_id) END
   `, [
     installationId, row.session_id, agentType, daemonId,
     typeof data.status === 'string' ? data.status : null,
-    cwd, worktreePath, worktreeBranch, row.recorded_at, row.feed_id===undefined?null:String(row.feed_id),
+    cwd, worktreePath, worktreeBranch, row.recorded_at, row.feed_id===undefined?null:String(row.feed_id), historical,
   ])
 }
 

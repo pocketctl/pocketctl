@@ -1,3 +1,4 @@
+import {ensurePlatformStatisticsSchema} from './platform-statistics/schema.js'
 import pg from 'pg'
 import {resolve} from 'node:path'
 import {pathToFileURL} from 'node:url'
@@ -15,6 +16,7 @@ export async function migrateRelay(args=process.argv.slice(2)):Promise<number>{
   await assertRelaySharedContract(pool)
   if(await relaySharedTarget(pool))await assertRelayCaptureMigrationCompatible(pool)
   await initDB(pool)
+  await ensurePlatformStatisticsSchema(pool,process.env,{migrate:true})
   if(await relaySharedTarget(pool)){
    await applyRelaySourceCapture(pool)
    await applyRelayTeamSourceCapture(pool)

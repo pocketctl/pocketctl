@@ -215,3 +215,60 @@ test('a delivery change discards late continuation rows', async () => {
   expect(wrapper.find('[data-testid="memory-candidate-row-candidate-2"]').exists()).toBe(true)
   wrapper.unmount()
 })
+
+test('empty inline correction cannot accept the original statement and keeps original evidence', async () => {
+  vi.clearAllMocks()
+  memoryClient.listMemoryCandidates.mockResolvedValue({ candidates: [candidates[0]] })
+  const wrapper = mount(CandidateReviewList); await flushPromises()
+  await wrapper.get('[data-testid="memory-edit-start-candidate-1"]').trigger('click')
+  await wrapper.get('[data-testid="memory-edit-candidate-1"]').setValue('   ')
+  expect(wrapper.get('[data-testid="memory-accept-candidate-1"]').attributes('disabled')).toBeDefined()
+  await wrapper.get('[data-testid="memory-accept-candidate-1"]').trigger('click'); await flushPromises()
+  expect(memoryClient.acceptMemoryCandidate).not.toHaveBeenCalled()
+  expect(wrapper.get('[data-testid="memory-candidate-evidence-candidate-1"]').text()).toContain('Verified branch order')
+  expect(wrapper.text()).toContain('memory.ui.review.emptyCorrection')
+  wrapper.unmount()
+})
+
+test('missing confidence stays unknown and read-only rejects are disabled', async () => {
+  memoryClient.listMemoryCandidates.mockResolvedValue({ candidates: [{ ...candidates[0], confidence: '', read_only: true }] })
+  const wrapper = mount(CandidateReviewList); await flushPromises()
+  expect(wrapper.get('[data-testid="memory-confidence"]').text()).toContain('memory.ui.review.confidenceUnknown')
+  expect(wrapper.text()).not.toContain('0%')
+  expect(wrapper.get('[data-testid="memory-reject-candidate-1"]').attributes('disabled')).toBeDefined()
+  wrapper.unmount()
+})
+
+test('unavailable sources never show old excerpts and block acceptance while permitted rejection stays available', async () => {
+  vi.clearAllMocks()
+  memoryClient.listMemoryCandidates.mockResolvedValue({ candidates: [{ ...candidates[0], evidence_state:'unavailable' }] })
+  const wrapper=mount(CandidateReviewList);await flushPromises()
+  expect(wrapper.get('[data-testid="memory-candidate-evidence-candidate-1"]').text()).not.toContain('Verified branch order')
+  expect(wrapper.get('[data-testid="memory-accept-candidate-1"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.get('[data-testid="memory-reject-candidate-1"]').attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})
+
+test('late acceptance after delivery identity changes does not open an old scope claim',async()=>{
+ vi.clearAllMocks()
+ let finish!:(value:unknown)=>void
+ memoryClient.listMemoryCandidates.mockResolvedValue({candidates:[candidates[0]]})
+ memoryClient.acceptMemoryCandidate.mockImplementationOnce(()=>new Promise(r=>finish=r))
+ const wrapper=mount(CandidateReviewList);await flushPromises()
+ await wrapper.get('[data-testid="memory-accept-candidate-1"]').trigger('click')
+ memoryClient.listMemoryCandidates.mockResolvedValue({candidates:[candidates[1]]})
+ await wrapper.setProps({delivery:{submissionId:'new',decisionId:'new'}});await flushPromises()
+ finish({claim_id:'old-claim'});await flushPromises()
+ expect(wrapper.emitted('accepted')).toBeUndefined()
+ expect(wrapper.get('[data-testid="memory-candidate-statement-candidate-2"]').text()).toContain('baseline failure')
+ wrapper.unmount()
+})
+
+test('read-only hashed candidates cannot be selected for bulk rejection',async()=>{
+ vi.clearAllMocks()
+ memoryClient.listMemoryCandidates.mockResolvedValue({candidates:[{...candidates[0],read_only:true,content_hash:'a'.repeat(64)}]})
+ const wrapper=mount(CandidateReviewList);await flushPromises()
+ expect(wrapper.find('.memory-candidate-list input[type=checkbox]').exists()).toBe(false)
+ expect(wrapper.text()).toContain('memory.ui.review.readOnly')
+ wrapper.unmount()
+})

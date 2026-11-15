@@ -1,5 +1,6 @@
 import {guardRetainedEvidence,assertRetainedSourceGuards} from '../sources/retained-authority.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
+import {recordFirstClaim} from '../platform-statistics/service.js'
 import { expireCandidateIfDue } from './candidate-expiry.js'
 import {candidateReviewHash} from './review-hash.js'
 import {normalizeFeedbackReason} from './feedback-policy.js'
@@ -261,6 +262,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             ON CONFLICT DO NOTHING
           `, [input.installationId, `index:${versionId}`, JSON.stringify({ version_id: versionId })])
 
+          await recordFirstClaim(client,{installationId:input.installationId,claimId,source:input.automationAuthority?'automatic':'manual'})
           await assertRetainedSourceGuards(client);await client.query('COMMIT')
           return {
             ok: true,

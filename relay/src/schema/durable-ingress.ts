@@ -61,7 +61,29 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
     ALTER TABLE event_inbox_receipt
     ALTER COLUMN inbox_id DROP NOT NULL;
 
+    -- Parent retention cascades one lookup per inbox row. Without this index
+    -- each lookup scans all receipts and the entire cleanup batch times out.
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_receipt_inbox_id
+    ON event_inbox_receipt (inbox_id);
+
     -- The UNIQUE constraint above already indexes this exact stream key.
+
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_receipt_retention
+      ON event_inbox_receipt (received_at, receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_event_inbox_retention_state
+      ON event_inbox (status, received_at, inbox_id);
+
+    -- One bounded receipt per stage; no business identifiers or payloads.
+    CREATE TABLE IF NOT EXISTS ingress_retention_status (
+      stage TEXT PRIMARY KEY CHECK(stage IN ('outbox','receipts','inbox','uploads','inspection')),
+      last_attempt_at TIMESTAMPTZ NOT NULL,
+      last_success_at TIMESTAMPTZ,
+      last_deleted INT NOT NULL DEFAULT 0,
+      deleted_total BIGINT NOT NULL DEFAULT 0,
+      last_error_code TEXT,
+      duration_ms INT NOT NULL DEFAULT 0,
+      detail JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
 
     CREATE TABLE IF NOT EXISTS daemon_ack_checkpoint (
       daemon_id VARCHAR(64) NOT NULL,
@@ -96,6 +118,9 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_realtime_outbox_undelivered
     ON realtime_outbox (created_at, outbox_id)
     WHERE delivered_at IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_realtime_outbox_delivered_retention
+      ON realtime_outbox (delivered_at, outbox_id) WHERE delivered_at IS NOT NULL;
 
     -- Events are deleted by session retention. The cascading foreign key must
     -- find referencing deliveries without scanning the outbox for every event.

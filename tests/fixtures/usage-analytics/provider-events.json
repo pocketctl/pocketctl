@@ -1,0 +1,261 @@
+{
+  "claude": [
+    {
+      "type": "agent_text",
+      "session_id": "native",
+      "text": "synthetic",
+      "cost_usd": 0.000612,
+      "usage_meta": {
+        "version": 1,
+        "provider": "claude-code",
+        "source_usage_id": "native-message",
+        "request_id": "native-message",
+        "revision": 1794650400000001,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.000001Z",
+        "model": "source-model",
+        "input_semantics": "excludes_cache"
+      },
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 40
+      },
+      "model": "source-model"
+    },
+    {
+      "type": "agent_text",
+      "session_id": "native",
+      "text": "synthetic",
+      "cost_usd": 0.000579,
+      "usage_meta": {
+        "version": 1,
+        "provider": "claude-code",
+        "source_usage_id": "native-message",
+        "request_id": "native-message",
+        "revision": 1794650400000002,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.000002Z",
+        "model": "source-model",
+        "input_semantics": "excludes_cache"
+      },
+      "usage": {
+        "input_tokens": 90,
+        "output_tokens": 20,
+        "cache_read_tokens": 30
+      },
+      "model": "source-model"
+    },
+    {
+      "type": "agent_text",
+      "session_id": "native",
+      "text": "synthetic",
+      "cost_usd": 0.000504,
+      "usage_meta": {
+        "version": 1,
+        "provider": "claude-code",
+        "source_usage_id": "native-message",
+        "request_id": "native-message",
+        "revision": 1794650400000003,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.000003Z",
+        "model": "source-model",
+        "input_semantics": "excludes_cache"
+      },
+      "usage": {
+        "input_tokens": 90,
+        "output_tokens": 15,
+        "cache_read_tokens": 30
+      },
+      "model": "source-model"
+    }
+  ],
+  "opencode": [
+    {
+      "type": "agent_text",
+      "event_id": "opencode:part:native-part:final:6ea82533fcb4d5fe",
+      "session_id": "native",
+      "turn_id": "turn:v1:opencode:IDQMpYbnDrInspwm-nzG9RyWlHtGHlX8rjonHKI2M3o",
+      "usage_meta": {
+        "version": 1,
+        "provider": "opencode",
+        "source_usage_id": "native-part",
+        "revision": 0,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.001Z",
+        "agent_type": "opencode",
+        "input_semantics": "unknown"
+      },
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 40
+      },
+      "source_turn_id": "user",
+      "turn_origin": "source_message",
+      "turn_confidence": "derived"
+    },
+    {
+      "type": "agent_text",
+      "event_id": "opencode:part:native-part:final:e57cfe4b773f7bcd",
+      "previous_event_id": "opencode:part:native-part:final:6ea82533fcb4d5fe",
+      "session_id": "native",
+      "turn_id": "turn:v1:opencode:IDQMpYbnDrInspwm-nzG9RyWlHtGHlX8rjonHKI2M3o",
+      "usage_meta": {
+        "version": 1,
+        "provider": "opencode",
+        "source_usage_id": "native-part",
+        "revision": 0,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.001Z",
+        "agent_type": "opencode",
+        "input_semantics": "unknown"
+      },
+      "usage": {
+        "input_tokens": 90,
+        "output_tokens": 20,
+        "cache_read_tokens": 30
+      },
+      "source_turn_id": "user",
+      "turn_origin": "source_message",
+      "turn_confidence": "derived"
+    },
+    {
+      "type": "agent_text",
+      "event_id": "opencode:part:native-part:final:18bc69e6ec8a9df5",
+      "previous_event_id": "opencode:part:native-part:final:e57cfe4b773f7bcd",
+      "session_id": "native",
+      "turn_id": "turn:v1:opencode:IDQMpYbnDrInspwm-nzG9RyWlHtGHlX8rjonHKI2M3o",
+      "usage_meta": {
+        "version": 1,
+        "provider": "opencode",
+        "source_usage_id": "native-part",
+        "revision": 0,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.001Z",
+        "agent_type": "opencode",
+        "input_semantics": "unknown"
+      },
+      "usage": {
+        "input_tokens": 90,
+        "output_tokens": 15,
+        "cache_read_tokens": 30
+      },
+      "source_turn_id": "user",
+      "turn_origin": "source_message",
+      "turn_confidence": "derived"
+    },
+    {
+      "type": "agent_text",
+      "event_id": "opencode:part:native-part:final:e57cfe4b773f7bcd",
+      "session_id": "native",
+      "turn_id": "turn:v1:opencode:IDQMpYbnDrInspwm-nzG9RyWlHtGHlX8rjonHKI2M3o",
+      "usage_meta": {
+        "version": 1,
+        "provider": "opencode",
+        "source_usage_id": "native-part",
+        "revision": 0,
+        "mode": "cumulative",
+        "occurred_at": "2026-11-14T10:00:00.001Z",
+        "agent_type": "opencode",
+        "input_semantics": "unknown"
+      },
+      "usage": {
+        "input_tokens": 90,
+        "output_tokens": 20,
+        "cache_read_tokens": 30
+      },
+      "source_turn_id": "user",
+      "turn_origin": "source_message",
+      "turn_confidence": "derived"
+    }
+  ],
+  "opencode_calls": [
+    {
+      "type": "tool_call",
+      "event_id": "opencode:tool:native-call:running:498eeac5aa9a1bb3",
+      "session_id": "native-calls",
+      "call_id": "native-call",
+      "tool": "Read",
+      "call_meta": {
+        "version": 1,
+        "invocation_id": "native-call",
+        "revision": 0,
+        "tool_kind": "unknown",
+        "tool_name": "Read",
+        "occurred_at": "2026-11-14T10:00:00Z",
+        "outcome": "unknown",
+        "evidence_kind": "native_tool_lifecycle"
+      }
+    },
+    {
+      "type": "tool_result",
+      "event_id": "opencode:tool:native-call:completed:e22ed50538459861",
+      "previous_event_id": "opencode:tool:native-call:running:498eeac5aa9a1bb3",
+      "session_id": "native-calls",
+      "call_id": "native-call",
+      "output": "variant-1",
+      "call_meta": {
+        "version": 1,
+        "invocation_id": "native-call",
+        "revision": 0,
+        "tool_kind": "unknown",
+        "occurred_at": "2026-11-14T10:00:00Z",
+        "outcome": "success",
+        "evidence_kind": "native_tool_lifecycle"
+      }
+    },
+    {
+      "type": "tool_result",
+      "event_id": "opencode:tool:native-call:error:a6b464822d29fae9",
+      "previous_event_id": "opencode:tool:native-call:completed:e22ed50538459861",
+      "session_id": "native-calls",
+      "call_id": "native-call",
+      "output": "variant-2",
+      "status": "error",
+      "call_meta": {
+        "version": 1,
+        "invocation_id": "native-call",
+        "revision": 0,
+        "tool_kind": "unknown",
+        "occurred_at": "2026-11-14T10:00:00Z",
+        "outcome": "failure",
+        "evidence_kind": "native_tool_lifecycle"
+      }
+    },
+    {
+      "type": "tool_result",
+      "event_id": "opencode:tool:native-call:completed:2f11660bc6152ed3",
+      "previous_event_id": "opencode:tool:native-call:error:a6b464822d29fae9",
+      "session_id": "native-calls",
+      "call_id": "native-call",
+      "output": "variant-3",
+      "call_meta": {
+        "version": 1,
+        "invocation_id": "native-call",
+        "revision": 0,
+        "tool_kind": "unknown",
+        "occurred_at": "2026-11-14T10:00:00Z",
+        "outcome": "success",
+        "evidence_kind": "native_tool_lifecycle"
+      }
+    },
+    {
+      "type": "tool_result",
+      "event_id": "opencode:tool:native-call:error:a6b464822d29fae9",
+      "session_id": "native-calls",
+      "call_id": "native-call",
+      "output": "variant-2",
+      "status": "error",
+      "call_meta": {
+        "version": 1,
+        "invocation_id": "native-call",
+        "revision": 0,
+        "tool_kind": "unknown",
+        "occurred_at": "2026-11-14T10:00:00Z",
+        "outcome": "failure",
+        "evidence_kind": "native_tool_lifecycle"
+      }
+    }
+  ]
+}

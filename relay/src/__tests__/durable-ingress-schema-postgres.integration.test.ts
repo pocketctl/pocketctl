@@ -63,6 +63,7 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
           'idx_event_inbox_dedup',
           'idx_event_inbox_pending_claim',
           'event_inbox_receipt_daemon_id_daemon_generation_seq_key',
+          'idx_event_inbox_receipt_inbox_id',
           'idx_event_inbox_completed_cleanup',
           'idx_event_inbox_stream_unresolved',
           'idx_realtime_outbox_undelivered'
@@ -74,6 +75,7 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
       'idx_event_inbox_completed_cleanup',
       'idx_event_inbox_dedup',
       'idx_event_inbox_pending_claim',
+      'idx_event_inbox_receipt_inbox_id',
       'idx_event_inbox_stream_unresolved',
       'idx_realtime_outbox_undelivered',
     ])
@@ -116,6 +118,15 @@ describeWithDatabase('durable ingress PostgreSQL schema', () => {
     await initDurableIngressSchema(pool)
     await expect(assertDurableIngressSchema(pool)).resolves.toBeUndefined()
   })
+
+  test.each(['idx_event_inbox_receipt_inbox_id','idx_event_inbox_receipt_retention',
+    'idx_event_inbox_retention_state','idx_realtime_outbox_delivered_retention'])(
+    'readiness requires valid retention index %s', async index => {
+      await pool.query(`DROP INDEX ${index}`)
+      await expect(assertDurableIngressSchema(pool)).rejects.toThrow('durable ingress schema not ready')
+      await initDurableIngressSchema(pool)
+      await expect(assertDurableIngressSchema(pool)).resolves.toBeUndefined()
+    })
 
   test('declares the required types, defaults, nullability, checks, keys, and foreign-key actions', async () => {
     const columns = await pool.query<{

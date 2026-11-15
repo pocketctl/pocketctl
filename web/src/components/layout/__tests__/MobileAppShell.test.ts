@@ -11,13 +11,15 @@ import { resetAgentPlanProgressForTests, useAgentPlanProgress } from '../../../c
 
 const mobile = ref(true)
 const loggedIn = ref(true)
+const statisticsAllowed = ref(false)
+vi.mock('../../../composables/usePlatformStatisticsAccess', () => ({ usePlatformStatisticsAccess: () => ({ allowed: statisticsAllowed, status: ref('idle'), refresh: vi.fn(async () => statisticsAllowed.value), syncIdentity: vi.fn(), invalidate: vi.fn() }) }))
 const connected = ref(true)
 const sidebarDaemons = ref(new Map<string, { online: boolean }>())
 const send = vi.fn()
 const teamEnabled = ref(false)
 const accessToken = ref('fixture-token')
 const canReadOfflineTeams = ref(false)
-beforeEach(() => { vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('isolated shell test')) })
+beforeEach(() => { statisticsAllowed.value = false; vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('isolated shell test')) })
 afterEach(() => { vi.restoreAllMocks() })
 let realTeamAccess: ReturnType<typeof createTeamAccessController> | undefined
 
@@ -54,7 +56,7 @@ function testRouter(path = '/sessions') {
     history: createMemoryHistory(),
     routes: [
       { path: '/teams', meta: { requiresTeam: true }, component: { template: '<div>Team content</div>' } },
-      ...['/inbox', '/hosts', '/memory'].map(path => ({ path, component: { template: '<div>Content</div>' } })),
+      ...['/inbox', '/hosts', '/memory', '/admin/statistics'].map(path => ({ path, component: { template: '<div>Content</div>' } })),
       { path: '/sessions', component: { template: '<div>Sessions content</div>' } },
       { path: '/settings', component: { template: '<div>Settings content</div>' } },
       { path: '/session/:id', component: { template: '<div>Session content</div>' } },
@@ -65,6 +67,25 @@ function testRouter(path = '/sessions') {
 }
 
 describe('mobile application shell', () => {
+  test.each([true,false])('statistics navigation follows server capability on mobile=%s', async narrow => {
+    const previousMobile = mobile.value; mobile.value = narrow
+    const router = testRouter('/settings'); await router.isReady()
+    const App = (await import('../../../App.vue')).default
+    const wrapper = mount(App, { global: { plugins: [router] } })
+    try {
+      if (narrow) await wrapper.get('.mobile-menu-trigger').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('a[href="/admin/statistics"]').exists()).toBe(false)
+      statisticsAllowed.value = true; await flushPromises()
+      expect(wrapper.get('a[href="/admin/statistics"]').text()).toContain(useLocale().t('stats.title'))
+      await router.push('/admin/statistics'); await flushPromises()
+      if (narrow) await wrapper.get('.mobile-menu-trigger').trigger('click')
+      expect(wrapper.get('a[href="/admin/statistics"]').attributes('aria-current')).toBe('page')
+      statisticsAllowed.value = false; await flushPromises()
+      expect(wrapper.find('a[href="/admin/statistics"]').exists()).toBe(false)
+    } finally { wrapper.unmount(); mobile.value = previousMobile }
+  })
+
   test('offline Team cache keeps normal navigation without showing new-session actions', async () => {
     const previousMobile = mobile.value, previousLogin = loggedIn.value
     mobile.value = true; loggedIn.value = false; canReadOfflineTeams.value = true

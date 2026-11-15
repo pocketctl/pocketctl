@@ -1,3 +1,4 @@
+import {applyPlatformStatisticsSchema,statisticsEnabled} from './platform-statistics/schema.js'
 import pg from 'pg'
 import {pathToFileURL} from 'node:url'
 import {resolve} from 'node:path'
@@ -21,6 +22,7 @@ export async function migrateMain(args=process.argv.slice(2)):Promise<number>{
   const preservedInstallations=targetProfile==='personal-relay-only'?normalizeTargetInstallations(rawInstallations?.split(',').map(id=>id.trim().toLowerCase())):undefined
   if((await pool.query('SELECT current_database() AS name')).rows[0].name!==expectedDatabase)throw new Error('migration_database_identity_mismatch')
   await applyMemorySchema(pool,{namespace:namespace as 'public'|'memory'})
+  if(statisticsEnabled())await applyPlatformStatisticsSchema(pool,namespace as 'public'|'memory')
   if(namespace==='memory'){
    await applySharedSourceContract(pool,{targetProfile,preservedInstallations})
    if(process.env.MEMORY_MIGRATION_ROLES)await provisionSharedDatabase(pool,JSON.parse(process.env.MEMORY_MIGRATION_ROLES))

@@ -1,4 +1,6 @@
 import { MessageQueueService } from './session-message-queue/service.js';
+import { recordHumanDecision } from './platform-statistics/facts.js';
+import { platformStatisticsConfig } from './platform-statistics/config.js';
 import { SessionDocumentReadLimiter } from './session-documents/routes.js';
 import type { WebSocket } from 'ws';
 import {
@@ -3236,7 +3238,17 @@ export class Router {
             this.send(daemon.ws,{type:msg.type,session_id:msg.session_id,request_id:id,content:msg.content,invocation_id:msg.invocation_id});
             return;
           }
-          this.send(daemon.ws, outbound);
+          if (platformStatisticsConfig().enabled && client.userId !== null
+            && ['approval_response', 'question_response', 'question_reject', 'interactive_response'].includes(msg.type)
+            && typeof msg.request_id === 'string' && msg.request_id.length > 0) {
+            await db.withSessionMaterializationFence(this.controlPool, msg.session_id, async lockedClient => {
+              const currentPolicy = await db.getSessionRuntimePolicy(lockedClient as unknown as pg.Pool, msg.session_id, client.userId!);
+              if (!currentPolicy || isObserverAgentType(currentPolicy.agentType)
+                || daemon.ws.readyState !== 1 || daemon.ws.bufferedAmount > 4 * 1024 * 1024) return;
+              this.send(daemon.ws, outbound);
+              await recordHumanDecision(lockedClient, { userId: client.userId!, sessionId: msg.session_id, requestId: msg.request_id, type: msg.type });
+            });
+          } else this.send(daemon.ws, outbound);
           // L2 (web-post-send-feedback): ack so the web client clears its ack-timeout.
           if (msg.type === 'user_message' && msg.msg_id) {
             this.send(clientWs, { type: 'user_message_ack', msg_id: msg.msg_id });
@@ -3310,11 +3322,13 @@ export class Router {
             // this path. The outbox carries delivery, never approval truth.
             await lockedClient.query(`INSERT INTO team_private_command_outbox(owner_user_id,daemon_id,session_id,request_id,command)
               VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT(owner_user_id,session_id,request_id) DO NOTHING`,[userId,daemonId,command.session_id,command.request_id,JSON.stringify(command)]);
+            await recordHumanDecision(lockedClient, { userId, sessionId: command.session_id, requestId: command.request_id, type: command.type });
             return {accepted:true};
           }
 
           // Rebuild the outbound object so API-only or caller-controlled fields can
           // never leak into the daemon protocol.
+          if (platformStatisticsConfig().enabled && daemon.ws.bufferedAmount > 4 * 1024 * 1024) return { accepted: false, code: 'daemon_unreachable' };
           if (command.type === 'approval_response') {
             this.send(daemon.ws,attentionNativeCommand(command,daemon.collaborationCapabilities,policy.agentType));
           } else if (command.type === 'question_response') {
@@ -3331,6 +3345,7 @@ export class Router {
               request_id: command.request_id,
             });
           }
+          await recordHumanDecision(lockedClient, { userId, sessionId: command.session_id, requestId: command.request_id, type: command.type });
           return { accepted: true };
         },
       );

@@ -35,11 +35,11 @@
         <p v-if="moreError" role="alert" data-testid="memory-review-more-error">{{ moreError }}</p>
         <button v-if="nextCursor" type="button" class="memory-button" :disabled="moreLoading" data-testid="memory-review-load-more" @click="loadMore">{{ moreLoading ? t('common.loading') : t('memory.review_load_more') }}</button>
         <label class="memory-policy-field"><input v-model="evidenceFilter" type="checkbox" @change="applyFilters"/>{{ t('memory.governance.automation.needsEvidence') }}</label>
-        <div v-if="bulkSelected.length" class="memory-governance-actions"><span>{{ bulkSelected.length }}/20</span><button type="button" :disabled="bulkBusy || candidates.some(c => bulkSelected.includes(c.candidate_id) && !canAccept(c))" @click="bulkReview('accept')">{{ t('memory.governance.automation.bulkAccept') }}</button><button type="button" :disabled="bulkBusy" @click="bulkReview('reject')">{{ t('memory.governance.automation.bulkReject') }}</button></div>
+        <div v-if="bulkSelected.length" class="memory-governance-actions"><span>{{ bulkSelected.length }}/20</span><button type="button" :disabled="bulkBusy || actionBusy || candidates.some(c => bulkSelected.includes(c.candidate_id) && !canAccept(c))" @click="bulkReview('accept')">{{ t('memory.governance.automation.bulkAccept') }}</button><button type="button" :disabled="bulkBusy || actionBusy" @click="bulkReview('reject')">{{ t('memory.governance.automation.bulkReject') }}</button></div>
         <ul v-if="bulkResults.length" aria-live="polite"><li v-for="r in bulkResults" :key="r.id">{{ r.id }} · {{ t(`memory.governance.automation.result.${r.status}`) }}</li></ul>
         <ul class="memory-candidate-list" data-testid="memory-review-items">
           <li v-for="candidate in pageCandidates" :key="candidate.candidate_id">
-            <label v-if="candidate.content_hash && !shadow" class="memory-policy-field"><input v-model="bulkSelected" type="checkbox" :value="candidate.candidate_id" :disabled="bulkBusy||(!bulkSelected.includes(candidate.candidate_id)&&bulkSelected.length>=20)"/>{{ t('memory.governance.automation.select') }}</label>
+            <label v-if="candidate.content_hash && !shadow && !candidate.read_only" class="memory-policy-field"><input v-model="bulkSelected" type="checkbox" :value="candidate.candidate_id" :disabled="bulkBusy||(!bulkSelected.includes(candidate.candidate_id)&&bulkSelected.length>=20)"/>{{ t('memory.governance.automation.select') }}</label>
             <button type="button" class="memory-candidate-row"
               :class="{ selected: candidate.candidate_id === selectedCandidateId }"
               :aria-current="candidate.candidate_id === selectedCandidateId ? 'true' : undefined"
@@ -81,12 +81,14 @@
             <p class="memory-detail-overline">{{ t('memory.candidate') }} · {{ humanizeType(selectedCandidate.claim_type) }}</p>
             <h3 :data-testid="`memory-candidate-statement-${selectedCandidate.candidate_id}`">{{ selectedCandidate.statement }}</h3>
           </div>
-          <div class="memory-confidence-ring" :style="{ '--memory-confidence': confidencePercent(selectedCandidate.confidence) }">
-            <span>{{ confidencePercent(selectedCandidate.confidence) }}</span>
-          </div>
+          <span class="memory-candidate-status">{{ candidateStatus(selectedCandidate.status) }}</span>
         </header>
 
-        <p class="memory-governance-muted">{{ t('memory.governance.automation.mode') }}: {{ selectedCandidate.automation_mode??'off' }} · {{ selectedCandidate.automation_advice?.reason??t('memory.governance.automation.notEvaluated') }}</p>
+        <div class="memory-review-advice">
+          <p class="memory-governance-muted">{{ t('memory.governance.automation.mode') }}: {{ selectedCandidate.automation_mode ?? t('memory.ui.review.unknown') }} · {{ selectedCandidate.automation_advice?.recommendation }} {{ selectedCandidate.automation_advice?.reason ?? t('memory.governance.automation.notEvaluated') }}</p>
+          <p class="memory-governance-muted">{{ t('memory.governance.automation.adviceOnly') }}</p>
+          <p class="memory-governance-muted" data-testid="memory-confidence">{{ t('memory.ui.review.confidence') }}: {{ confidencePercent(selectedCandidate.confidence) }}</p>
+        </div>
         <details v-if="selectedCandidate.delivery_source" class="memory-edit-panel memory-delivery-source" data-testid="memory-delivery-source" open>
           <summary>{{ t('memory.delivery_source') }} · {{ t(selectedCandidate.delivery_source.state === 'available' ? 'memory.delivery_pending' : 'memory.delivery_withdrawn') }}</summary>
           <p class="memory-governance-muted">{{ t('memory.delivery_personal_only') }}</p>
@@ -102,7 +104,7 @@
         <dl class="memory-fact-grid">
           <div><dt>{{ t('memory.scope') }}</dt><dd>{{ selectedCandidate.scope_kind }}</dd></div>
           <div><dt>{{ t('memory.repository') }}</dt><dd :data-testid="`memory-candidate-repository-${selectedCandidate.candidate_id}`">{{ selectedCandidate.repository_id || selectedCandidate.scope_key }}</dd></div>
-          <div><dt>{{ t('memory.branch') }}</dt><dd>{{ selectedCandidate.branch || '—' }}</dd></div>
+          <div v-if="selectedCandidate.branch"><dt>{{ t('memory.branch') }}</dt><dd>{{ selectedCandidate.branch }}</dd></div>
         </dl>
 
         <template v-if="structuredEntries.length">
@@ -114,40 +116,47 @@
           </dl>
         </template>
 
-        <div class="memory-section-label"><span>{{ t('memory.evidence_title') }}</span></div>
+        <div class="memory-section-label"><span>{{ t('memory.evidence_title') }} · {{ selectedCandidate.evidence.length }}</span></div>
         <ul class="memory-evidence-thread" :data-testid="`memory-candidate-evidence-${selectedCandidate.candidate_id}`">
-          <li v-for="item in selectedCandidate.evidence" :key="item.handle">
+          <li v-if="!readableEvidence(selectedCandidate)" class="memory-notice" role="status">{{ t('memory.ui.review.evidenceUnavailable') }}</li>
+          <li v-for="(item, index) in readableEvidence(selectedCandidate) ? selectedCandidate.evidence : []" :key="item.handle">
+            <span class="memory-evidence-number">{{ index + 1 }}</span>
             <blockquote>{{ item.excerpt }}</blockquote>
-            <footer><code>{{ item.handle }}</code><span>{{ t('memory.source_record') }}</span></footer>
+            <footer><code>{{ item.handle }}</code><span>{{ selectedCandidate.source_kind || t('memory.source_record') }}</span></footer>
           </li>
         </ul>
 
-        <div v-if="editingId === selectedCandidate.candidate_id" class="memory-edit-panel">
+        <div v-if="editingId === selectedCandidate.candidate_id" class="memory-edit-panel" data-testid="memory-correction-panel">
           <label :for="`memory-edit-${selectedCandidate.candidate_id}`">{{ t('memory.correct_before_accept') }}</label>
           <textarea :id="`memory-edit-${selectedCandidate.candidate_id}`" v-model="editedStatement" rows="4"
             :data-testid="`memory-edit-${selectedCandidate.candidate_id}`"/>
+          <p v-if="!editedStatement.trim()" role="status">{{ t('memory.ui.review.emptyCorrection') }}</p>
         </div>
 
         <p v-if="errorFor(selectedCandidate.candidate_id)" class="memory-review-inline-error" role="alert"
           :data-testid="`memory-review-action-error-${selectedCandidate.candidate_id}`">
           {{ errorFor(selectedCandidate.candidate_id) }}
         </p>
+        <p v-if="selectedCandidate.read_only && !shadow" class="memory-notice">{{ t('memory.ui.review.readOnly') }}</p>
         <p v-if="shadow" class="memory-notice" data-testid="memory-shadow-readonly">{{ t('memory.shadow_candidate_readonly') }}</p>
         <p v-if="shadow && selectedCandidate.evidence_state === 'unavailable'" class="memory-error" role="alert">{{ t('memory.shadow_evidence_unavailable') }}</p>
-        <div v-if="!shadow" class="memory-review-actions">
-          <button type="button" class="memory-button memory-review-action is-danger" :data-testid="`memory-reject-${selectedCandidate.candidate_id}`" @click="reject(selectedCandidate)">
+        <footer v-if="!shadow" class="memory-review-decision">
+          <p class="memory-governance-muted">{{ t('memory.ui.review.personalAcceptance') }}</p>
+        <div class="memory-review-actions">
+          <button type="button" class="memory-button memory-review-action is-danger" :disabled="selectedCandidate.read_only || actionBusy" :data-testid="`memory-reject-${selectedCandidate.candidate_id}`" @click="reject(selectedCandidate)">
             {{ t('memory.reject') }}
           </button>
           <button type="button" class="memory-button memory-review-action is-edit"
-            :disabled="!canAccept(selectedCandidate)" :aria-pressed="editingId === selectedCandidate.candidate_id"
+            :disabled="!canAccept(selectedCandidate) || actionBusy" :aria-pressed="editingId === selectedCandidate.candidate_id"
             :data-testid="`memory-edit-start-${selectedCandidate.candidate_id}`" @click="toggleEdit(selectedCandidate)">
-            {{ t('memory.edit') }}
+            {{ t(editingId === selectedCandidate.candidate_id ? 'memory.ui.review.cancelCorrection' : 'memory.edit') }}
           </button>
           <button type="button" class="memory-button memory-review-action is-success" :data-testid="`memory-accept-${selectedCandidate.candidate_id}`"
-            :disabled="!canAccept(selectedCandidate)" @click="accept(selectedCandidate, editingId === selectedCandidate.candidate_id)">
-            {{ t('memory.accept_publish') }}
+            :disabled="!canAccept(selectedCandidate) || actionBusy || (editingId === selectedCandidate.candidate_id && !editedStatement.trim())" @click="accept(selectedCandidate, editingId === selectedCandidate.candidate_id)">
+            {{ t(editingId === selectedCandidate.candidate_id ? 'memory.ui.review.acceptCorrection' : 'memory.ui.review.acceptCandidate') }}
           </button>
         </div>
+        </footer>
       </article>
       <div v-else class="memory-review-no-selection">
         <span>{{ t('memory.no_filtered_candidates') }}</span>
@@ -158,7 +167,7 @@
 
 <script setup lang="ts">
 import ActionSelect from '../ActionSelect.vue'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { acceptMemoryCandidate, listMemoryCandidates, listMemoryShadowCandidates, MemoryClientError, rejectMemoryCandidate } from '../../services/memoryClient'
 import type { MemoryCandidate } from '../../types/memory'
@@ -178,6 +187,7 @@ const nextCursor=ref<string|null>(null),totalCount=ref(0),moreLoading=ref(false)
 const editingId = ref<string | null>(null)
 const editedStatement = ref('')
 const errors = ref<Record<string, string>>({})
+const actionBusy = ref(false)
 const currentPage = ref(1)
 const filterQuery = ref('')
 const filterType = ref('all')
@@ -186,8 +196,8 @@ const bulkSelected=ref<string[]>([]),bulkBusy=ref(false),reviewStarted=ref(perfo
 const evidenceFilter=ref(false)
 const bulkResults=ref<Array<{id:string;status:string}>>([])
 async function bulkReview(action:'accept'|'reject'){
- if(bulkBusy.value || (action === 'accept' && candidates.value.some(c => bulkSelected.value.includes(c.candidate_id) && !canAccept(c))))return
- const snapshots=candidates.value.filter(c=>bulkSelected.value.includes(c.candidate_id)&&c.content_hash).slice(0,20).map(c=>({...c}))
+ if(props.shadow || actionBusy.value || bulkBusy.value || (action === 'accept' && candidates.value.some(c => bulkSelected.value.includes(c.candidate_id) && !canAccept(c))))return
+ const snapshots=candidates.value.filter(c=>bulkSelected.value.includes(c.candidate_id)&&c.content_hash&&!c.read_only).slice(0,20).map(c=>({...c}))
  bulkBusy.value=true;bulkResults.value=[]
  for(const c of snapshots){
   const proof={expectedHash:c.content_hash!}
@@ -263,14 +273,16 @@ async function loadMore():Promise<void>{
   finally{if(generation===loadGeneration)moreLoading.value=false}
 }
 
-watch(() => props.delivery, () => { candidates.value = []; selectedCandidateId.value = null; bulkSelected.value = []; editingId.value = null; void refresh() }, { immediate: true })
+watch(() => [props.delivery, props.shadow], () => { candidates.value = []; selectedCandidateId.value = null; bulkSelected.value = []; editingId.value = null; void refresh() }, { immediate: true })
 onBeforeUnmount(() => { loadGeneration++ })
 defineExpose({ refresh })
 
 function humanizeType(value: string): string { return value.replace(/_/g, ' ') }
-function confidencePercent(value: string): string {
+function candidateStatus(value:string):string{const key=`memory.status_${value}`;const translated=t(key);return translated===key?humanizeType(value):translated}
+function confidencePercent(value: string | null | undefined): string {
+  if (value == null || !value.trim()) return t('memory.ui.review.confidenceUnknown')
   const number = Number(value)
-  return Number.isFinite(number) ? `${Math.round(number <= 1 ? number * 100 : number)}%` : value
+  return Number.isFinite(number) ? `${Math.round(number <= 1 ? number * 100 : number)}%` : t('memory.ui.review.confidenceUnknown')
 }
 function formatDate(value: string): string {
   if (!value) return '—'
@@ -302,7 +314,8 @@ function reviewActionError(error: unknown, fallback: string): string {
   }
   return error instanceof Error ? error.message : fallback
 }
-function canAccept(candidate: MemoryCandidate): boolean { return !props.shadow && !candidate.read_only && (!candidate.delivery_source || candidate.delivery_source.state === 'available') }
+function readableEvidence(candidate:MemoryCandidate):boolean{return candidate.evidence_state!=='unavailable'&&(!candidate.delivery_source||candidate.delivery_source.state==='available')}
+function canAccept(candidate: MemoryCandidate): boolean { return !props.shadow && !candidate.read_only && readableEvidence(candidate) }
 function toggleEdit(candidate: MemoryCandidate): void {
   if (!canAccept(candidate)) return
   if (editingId.value === candidate.candidate_id) {
@@ -311,35 +324,44 @@ function toggleEdit(candidate: MemoryCandidate): void {
   }
   editingId.value = candidate.candidate_id
   editedStatement.value = candidate.statement
+  void nextTick(() => document.getElementById(`memory-edit-${candidate.candidate_id}`)?.focus())
 }
 
 async function accept(candidate: MemoryCandidate, edited: boolean): Promise<void> {
-  if (!canAccept(candidate)) return
+  if (!canAccept(candidate) || actionBusy.value || (edited && !editedStatement.value.trim())) return
+  actionBusy.value = true
+  const generation=loadGeneration
   errors.value[candidate.candidate_id] = ''
   try {
-    const accepted = await acceptMemoryCandidate(candidate.candidate_id, Number(candidate.revision), edited ? editedStatement.value.trim() || candidate.statement : null, `web-accept-${candidate.candidate_id}-${Date.now()}`,...(candidate.content_hash?[{expectedHash:candidate.content_hash,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value)))}]:[]))
+    const accepted = await acceptMemoryCandidate(candidate.candidate_id, Number(candidate.revision), edited ? editedStatement.value.trim() : null, `web-accept-${candidate.candidate_id}-${Date.now()}`,...(candidate.content_hash?[{expectedHash:candidate.content_hash,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value)))}]:[]))
+    if(generation!==loadGeneration)return
     emit('accepted', accepted.claim_id)
     editingId.value = null
     await refresh()
     emit('changed')
   } catch (err) {
-    errors.value[candidate.candidate_id] = reviewActionError(err, t('memory.accept_failed'))
-  }
+    if(generation===loadGeneration)errors.value[candidate.candidate_id] = reviewActionError(err, t('memory.accept_failed'))
+  } finally { actionBusy.value = false }
 }
 
 async function reject(candidate: MemoryCandidate): Promise<void> {
-  if(props.shadow || candidate.read_only)return
+  if(props.shadow || candidate.read_only || actionBusy.value)return
+  actionBusy.value = true
+  const generation=loadGeneration
   errors.value[candidate.candidate_id] = ''
   try {
     await rejectMemoryCandidate(candidate.candidate_id, Number(candidate.revision), null, `web-reject-${candidate.candidate_id}-${Date.now()}`,...(candidate.content_hash?[{expectedHash:candidate.content_hash,reviewDurationMs:Math.min(86400000,Math.max(0,Math.round(performance.now()-reviewStarted.value)))}]:[]))
+    if(generation!==loadGeneration)return
     await refresh()
     emit('changed')
   } catch (err) {
-    errors.value[candidate.candidate_id] = reviewActionError(err, t('memory.reject_failed'))
-  }
+    if(generation===loadGeneration)errors.value[candidate.candidate_id] = reviewActionError(err, t('memory.reject_failed'))
+  } finally { actionBusy.value = false }
 }
 </script>
 
 <style scoped>
 .memory-delivery-source .memory-fact-grid dd { white-space: normal; overflow-wrap: anywhere; }
+.memory-review-detail{padding:24px;min-width:0}.memory-review-detail-head{align-items:flex-start}.memory-review-detail-head h3{font-size:18px;line-height:1.8;font-weight:500;white-space:pre-wrap;overflow-wrap:anywhere;margin:12px 0}.memory-review-advice{font-size:12px}.memory-review-advice p{margin:5px 0}.memory-review-detail .memory-fact-grid{display:flex;flex-wrap:wrap;gap:10px 28px;padding:8px 0;border:0;background:transparent}.memory-review-detail .memory-fact-grid div{min-width:120px}.memory-review-detail .memory-fact-grid dd{white-space:normal;overflow-wrap:anywhere}.memory-evidence-thread li{position:relative;padding-left:26px}.memory-evidence-number{position:absolute;left:0;top:10px;font-size:12px;color:var(--muted)}.memory-evidence-thread blockquote{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.75}.memory-evidence-thread code{overflow-wrap:anywhere;white-space:normal}.memory-review-decision{margin-top:24px;border-top:1px solid var(--border);padding-top:14px}.memory-review-detail .memory-review-actions{position:static;box-shadow:none;background:transparent;backdrop-filter:none;margin:0;padding:8px 0;border:0;display:flex;gap:8px}.memory-review-actions .is-danger{margin-right:auto}.memory-review-detail .memory-review-actions .is-success,.memory-review-detail .memory-review-actions .is-success:hover:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff}.memory-edit-panel textarea{width:100%;box-sizing:border-box;min-height:140px;font:inherit;line-height:1.7}
+@media(max-width:700px){.memory-review-detail{padding:16px}.memory-review-detail .memory-review-actions{flex-wrap:wrap}.memory-review-actions button{min-height:44px}.memory-edit-panel textarea{font-size:16px}}
 </style>

@@ -1,3 +1,4 @@
+import {actorUsageContext,recordUsage} from '../platform-statistics/service.js'
 import {DIRECT_MACHINE_PACK_VERSIONS_SQL,MACHINE_PACK_VERSIONS_SQL,fenceMachinePackSources,machinePackSourcesAvailable,type PackAuthorityGrant} from './pack-repository.js'
 import {MemoryApiError} from '../api/errors.js'
 import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
@@ -627,6 +628,7 @@ export function createAdmissionService(deps: {
           }
           return { ok: false, error: 'already_consumed' }
         })()
+        if(result.ok)await recordUsage(client,{...actorUsageContext(input.selectedScopeGrant??input.authorityGrant??{installationId:input.installationId}),requestId:input.injectionId,kind:'read',operation:'context-pack-text'})
         await client.query('COMMIT')
         return result
       }catch(error){

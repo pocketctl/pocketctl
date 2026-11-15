@@ -1,4 +1,5 @@
 import {assertRetainedVersionResponse} from '../sources/retained-versions.js'
+import {actorUsageContext,statisticsRequestId,recordUsage} from '../platform-statistics/service.js'
 import {EvidenceReferenceQuerySchema,EvidenceContentQuerySchema} from './schemas.js'
 import {resolveLifecycleReadFrame,listLifecycleReadScenes} from '../context/lifecycle-frame.js'
 import {recordRecallMetrics} from '../metrics.js'
@@ -78,6 +79,13 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
   const reads = createMemoryReadService(deps.pool, deps.cursorSigningKey)
   const authenticated = new WeakMap<object, { service: string; grant: VerifiedMemoryGrant }>()
 
+  async function captureRead(request:object,grant:VerifiedMemoryGrant) {
+    const req=request as {id?:string;method?:string;url?:string;headers:{'idempotency-key'?:string}}
+    const path=req.url?.split('?')[0]??'read'
+    await recordUsage(deps.pool,{...actorUsageContext(grant),requestId:statisticsRequestId(request),
+      kind:'read',operation:path,humanActivity:grant.callerType==='web'&&req.method==='POST'&&['/api/v1/memory/search','/api/v1/memory/recall'].includes(path)})
+  }
+
   function resourceId(value: string, reply: ReplyLike): string | undefined {
     const parsed = UUIDSchema.safeParse(value)
     if (parsed.success) return parsed.data
@@ -104,7 +112,10 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
       const grant = cached?.service === service
         ? cached.grant
         : await authenticateRead(request, reply, service)
-      return grant ? await handler(grant) : undefined
+      if(!grant)return undefined
+      const result=await handler(grant)
+      if(result!==undefined)await captureRead(request,grant)
+      return result
     } catch (error) {
       if (error instanceof MemoryApiError) {
         reply.code(error.httpStatus).send(errorBody(error))
@@ -136,7 +147,9 @@ export function registerReadRoutes(app: FastifyInstance, deps: ReadRouteDeps): v
           return undefined
         }
       }
-      return await handler(grant)
+      const result=await handler(grant)
+      if(result!==undefined)await captureRead(request,grant)
+      return result
     } catch (error) {
       if (error instanceof MemoryApiError) {
         reply.code(error.httpStatus).send(errorBody(error))

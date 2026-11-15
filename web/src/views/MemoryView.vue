@@ -1,5 +1,5 @@
 <template>
-  <div class="memory-workbench memory-layout-v2 design-surface content memory-page" :class="{ 'is-mobile': isMobile }">
+  <div class="memory-workbench memory-layout-v2 memory-layout-v3 design-surface content memory-page" :class="{ 'is-mobile': isMobile }">
 
     <section v-if="loading" class="memory-gate memory-loading-gate" data-testid="memory-loading">
       <div class="memory-gate-mark is-loading" aria-hidden="true"><span class="memory-spinner"></span></div>
@@ -35,11 +35,11 @@
     <section v-else class="memory-workspace" data-testid="memory-workspace">
       <div v-if="isMobile" class="memory-scope"><WorkspaceIcon name="memory" class="icon" /><span class="grow">{{ t('replica.personal_memory') }}</span></div>
       <div class="memory-workspace-shell memory-grid" data-testid="memory-workbench-frame">
-        <MemoryModuleNavigation v-model="active" :review-count="lifecycleMode === 'enabled' ? null : reviewCount" />
+        <MemoryModuleNavigation :model-value="active" @update:model-value="chooseModule" :review-count="lifecycleMode === 'enabled' ? null : reviewCount" />
         <div class="memory-workspace-main memory-stage">
           <div class="memory-module-picker">
             <label for="memory-module-select">{{ t('memory.module') }}
-              <ActionSelect><select id="memory-module-select" v-model="active" :aria-label="t('memory.choose_module')" data-testid="memory-module-select">
+              <ActionSelect><select id="memory-module-select" :value="active" @change="chooseModule(($event.target as HTMLSelectElement).value as MemoryModule)" :aria-label="t('memory.choose_module')" data-testid="memory-module-select">
                 <optgroup v-for="group in MEMORY_MODULE_GROUPS" :key="group.id" :label="t(`memory.group_${group.id}`)">
                   <option v-for="module in group.modules" :key="module" :value="module">{{ t(`memory.tab_${module}`) }}</option>
                 </optgroup>
@@ -48,19 +48,33 @@
           </div>
           <header class="memory-module-header" :aria-label="t('memory.workspace_label')" data-testid="memory-workspace-toolbar">
             <div class="memory-module-heading"><h2>{{ t(`memory.tab_${active}`) }}</h2><p :id="`memory-description-${active}`" data-testid="memory-workspace-description">{{ t(`memory.module_${active}_copy`) }}</p></div>
-            <div class="memory-page-status-row">
-              <span class="memory-page-status"><span class="memory-status-dot"></span>{{ t('memory.services_enabled') }}</span>
-              <MemoryOperationalStatus :installation-id="installation.installation_id" />
+            <div class="memory-module-actions">
+              <div class="memory-page-status-row">
+                <span class="memory-page-status"><span class="memory-status-dot"></span>{{ t('memory.services_enabled') }}</span>
+                <MemoryOperationalStatus :installation-id="installation.installation_id" />
+              </div>
+              <button v-if="active === 'claims'" type="button" class="memory-button is-primary" data-testid="memory-claim-create" @click="manualClaimOpen = true">+ {{ t('memory.new_claim') }}</button>
             </div>
           </header>
-          <div v-if="active === 'claims'" class="memory-knowledge-heading"><h3>{{ t('memory.knowledge_versions') }}</h3>
-            <button type="button" class="memory-button" data-testid="memory-claim-create" @click="manualClaimOpen = true">+ {{ t('memory.new_claim') }}</button>
-          </div>
 
       <div class="memory-module-stage" data-testid="memory-module-stage">
         <div :id="`memory-panel-${active}`" class="memory-module-body" role="tabpanel" :aria-label="t(`memory.tab_${active}`)" :aria-describedby="`memory-description-${active}`">
           <MemorySearchPanel v-if="active === 'search'" :installation-id="installation.installation_id" :scopes="governanceScopes" @select-claim="selectClaim"/>
-          <template v-if="active === 'review'">
+          <MemoryReviewWorkspace v-if="active === 'review'" :lifecycle-mode="lifecycleMode"
+            :initial-section="deliveryReview ? 'personal' : 'automatic'">
+            <template #automatic><MemoryLifecyclePanel :installation-id="installation.installation_id" :show-legacy="false" @mode="lifecycleMode = $event" /></template>
+            <template #personal>
+
+            <details v-if="lifecycleMode === 'shadow'" class="memory-personal-review" data-testid="memory-shadow-candidates" @toggle="shadowCandidatesOpen = ($event.target as HTMLDetailsElement).open">
+              <summary>{{ t('memory.shadow_candidates') }}</summary><p class="memory-notice">{{ t('memory.shadow_candidate_readonly') }}</p>
+              <CandidateReviewList v-if="shadowCandidatesOpen" shadow />
+            </details><section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
+            <p v-if="deliveryReview" class="memory-notice">当前仅查看所选交付及验收记录的个人候选。</p>
+            <CandidateReviewList ref="reviewList" :delivery="deliveryReview" @accepted="rememberAcceptedClaim"
+              @changed="refreshReview" @count="reviewCount = $event"/>
+            </section>
+            </template>
+            <template #shared>
             <MemoryScopeSwitcher v-if="governanceScopes.length > 0" v-model="governanceTarget"
               :scopes="governanceScopes" />
             <MemoryGovernanceQueue v-if="governanceTarget && selectedGovernanceScope?.owner_scope_kind !== 'personal'" :entries="governanceQueue"
@@ -90,16 +104,8 @@
               </button>
             </div>
             <p v-else-if="governanceError" class="memory-error" role="alert">{{ governanceError }}</p>
-            <MemoryLifecyclePanel :installation-id="installation.installation_id" @mode="lifecycleMode = $event">
-            <details v-if="lifecycleMode === 'shadow'" class="memory-personal-review" data-testid="memory-shadow-candidates" @toggle="shadowCandidatesOpen = ($event.target as HTMLDetailsElement).open">
-              <summary>{{ t('memory.shadow_candidates') }}</summary><p class="memory-notice">{{ t('memory.shadow_candidate_readonly') }}</p>
-              <CandidateReviewList v-if="shadowCandidatesOpen" shadow />
-            </details><section class="memory-personal-review"><h3>{{ t('memory.personal_review') }}</h3><p class="memory-notice">{{ t('memory.personal_review_copy') }}</p>
-            <p v-if="deliveryReview" class="memory-notice">当前仅查看所选交付及验收记录的个人候选。</p>
-            <CandidateReviewList ref="reviewList" :delivery="deliveryReview" @accepted="rememberAcceptedClaim"
-              @changed="refreshReview" @count="reviewCount = $event"/>
-            </section></MemoryLifecyclePanel>
-          </template>
+            </template>
+          </MemoryReviewWorkspace>
           <ClaimDetailPanel :key="`${installation.installation_id}:${manualClaimRevision}`" v-if="active === 'claims'" :claim-id="claimId"
             :installation-id="claimSourceInstallationId" @changed="refreshReview"
             @propose="openPromotion"/>
@@ -118,28 +124,23 @@
             </div>
             <p v-else-if="governanceScopesLoading" role="status">{{ t('memory.skills.loading') }}</p>
             <template v-else>
-              <MemoryScopeSwitcher v-model="governanceTarget" :scopes="governanceScopes" />
-              <MemorySkillsView :scope-id="governanceTarget" />
+              <MemoryScopeSwitcher :model-value="governanceTarget" :scopes="governanceScopes" @update:model-value="chooseGovernanceScope" />
+              <MemorySkillsView ref="skillsView" :scope-id="governanceTarget" />
             </template>
           </template>
           <template v-if="active === 'git'">
-            <MemoryGitProjects @changed="loadGovernanceScopes" />
             <div v-if="governanceScopesError" class="memory-notice is-error" role="alert" data-testid="git-scope-error"><p>{{ governanceScopesError }}</p><button class="memory-button" :disabled="governanceScopesLoading" @click="loadGovernanceScopes">{{ t('memory.git.refresh') }}</button></div>
             <p v-else-if="governanceScopesLoading" role="status">{{ t('memory.git.loading') }}</p>
-            <template v-else>
-              <MemoryScopeSwitcher v-model="gitTarget" :scopes="gitScopes" />
-              <MemoryGitPanel v-if="gitTarget" :scope-id="gitTarget" />
-              <template v-else>
-                <p role="status">{{ t('memory.git.shared_scope_required') }}</p>
-                <MemoryFeatureIntro feature="git" />
+            <MemoryScopeSwitcher v-else v-model="gitTarget" :scopes="gitScopes" />
+            <MemoryGitWorkspace>
+              <template #projects><MemoryGitProjects @changed="loadGovernanceScopes" /></template>
+              <template #sync="{ section }">
+                <MemoryGitPanel v-if="!governanceScopesError && !governanceScopesLoading && gitTarget" :scope-id="gitTarget" :section="section" />
+                <template v-else><p role="status">{{ t('memory.git.shared_scope_required') }}</p><MemoryFeatureIntro feature="git" /></template>
               </template>
-            </template>
+            </MemoryGitWorkspace>
           </template>
-          <section v-if="active === 'context'" data-testid="memory-panel-context">
-            <MemoryContextSettings />
-            <ContextPackList @select="selectedContextPack = $event" />
-            <ContextPackDetail :pack="selectedContextPack" />
-          </section>
+          <MemoryContextWorkspace v-if="active === 'context'" />
           <MemoryPersonaPanel v-if="active === 'persona'" data-testid="memory-panel-persona" />
           <MemoryPolicyEditor v-if="active === 'policies'" data-testid="memory-panel-policies" />
           <MemoryLoadoutEditor v-if="active === 'loadouts'" data-testid="memory-panel-loadouts" />
@@ -181,9 +182,6 @@ import { useRoute } from 'vue-router'
 import MemoryManualClaimDialog from '../components/memory/MemoryManualClaimDialog.vue'
 import ActionSelect from '../components/ActionSelect.vue'
 import WorkspaceIcon from '../components/WorkspaceIcon.vue'
-import MemoryContextSettings from '../components/memory/MemoryContextSettings.vue'
-import ContextPackList from '../components/memory/ContextPackList.vue'
-import ContextPackDetail from '../components/memory/ContextPackDetail.vue'
 import MemoryPersonaPanel from '../components/memory/MemoryPersonaPanel.vue'
 import MemoryPolicyEditor from '../components/memory/MemoryPolicyEditor.vue'
 import MemoryLoadoutEditor from '../components/memory/MemoryLoadoutEditor.vue'
@@ -198,7 +196,7 @@ import {
   proposeGovernanceClaim, startScopeTransfer, updateScopeLifecycle,
 } from '../services/memoryClient'
 import type {
-  ContextPackListEntry, MemoryClaimDetail, MemoryEvidence, MemoryGovernanceQueueEntry,
+  MemoryClaimDetail, MemoryEvidence, MemoryGovernanceQueueEntry,
   MemoryGovernanceScope, MemoryInstallation, MemoryReviewPolicyDocument, MemoryScopeMember,
 } from '../types/memory'
 import { promotionTargetsForSource } from '../utils/memoryGovernance'
@@ -222,25 +220,40 @@ import MemoryFeatureIntro from '../components/memory/MemoryFeatureIntro.vue'
 import MemoryGitPanel from '../components/memory/MemoryGitPanel.vue'
 import MemoryGitProjects from '../components/memory/MemoryGitProjects.vue'
 import MemoryModuleNavigation from '../components/memory/MemoryModuleNavigation.vue'
-import { MEMORY_MODULE_GROUPS, type MemoryModule } from '../components/memory/memoryModules'
+import MemoryReviewWorkspace from '../components/memory/MemoryReviewWorkspace.vue'
+import MemoryGitWorkspace from '../components/memory/MemoryGitWorkspace.vue'
+import MemoryContextWorkspace from '../components/memory/MemoryContextWorkspace.vue'
+import { MEMORY_MODULE_GROUPS, MEMORY_MODULE_ORDER, type MemoryModule } from '../components/memory/memoryModules'
 
 const { t } = useLocale()
 const { isMobile } = useResponsiveLayout()
-const selectedContextPack = ref<ContextPackListEntry | null>(null)
 
 const installation = ref<MemoryInstallation | null>(null)
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
 const route = useRoute()
-const active = ref<MemoryModule>(route?.query.tab === 'review' ? 'review' : route?.query.tab === 'codegraph' ? 'codegraph' : 'search')
+const moduleFromQuery = (value: unknown): MemoryModule => typeof value === 'string' && MEMORY_MODULE_ORDER.includes(value as MemoryModule) ? value as MemoryModule : 'search'
+const active = ref<MemoryModule>(moduleFromQuery(route?.query.tab))
+const skillsView = ref<InstanceType<typeof MemorySkillsView> | null>(null)
+function chooseModule(value: MemoryModule): void {
+  if (!MEMORY_MODULE_ORDER.includes(value) || value === active.value) return
+  const select = () => { active.value = value }
+  if (active.value === 'skills' && skillsView.value) skillsView.value.requestLeave(select)
+  else select()
+}
+function chooseGovernanceScope(value: string): void {
+  const select = () => { governanceTarget.value = value }
+  if (active.value === 'skills' && skillsView.value) skillsView.value.requestLeave(select)
+  else select()
+}
 const deliveryReview = computed(() => {
   const submissionId = route?.query.submission, decisionId = route?.query.decision
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
   return typeof submissionId === 'string' && typeof decisionId === 'string' && uuid.test(submissionId) && uuid.test(decisionId)
     ? { submissionId, decisionId } : undefined
 })
-watch(() => route?.query.tab, value => { if (value === 'review' || value === 'codegraph') active.value = value })
+watch(() => route?.query.tab, value => { chooseModule(moduleFromQuery(value)) })
 const queryUUID = (value:unknown):string => typeof value==='string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : ''
 const phase4RepositoryId = ref(queryUUID(route?.query.repository_id))
 const queryScope=(value:unknown):string=>value==null || value==='' ? '' : queryUUID(value)||'invalid-scope'
@@ -671,3 +684,4 @@ async function enableServices(): Promise<void> {
 </script>
 
 <style src="../components/memory/memory-workbench.css"></style>
+<style src="../components/memory/memory-ui-v3.css"></style>

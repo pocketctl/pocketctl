@@ -1,0 +1,22 @@
+# Optional overlay. Explicit enablement is required; account ID is an optional extra pin.
+# Server code restricts access to the single designated current account email.
+services:
+  relay:
+    environment:
+      PLATFORM_STATS_ENABLED: "${PLATFORM_STATS_ENABLED:-false}"
+      PLATFORM_STATS_OWNER_USER_ID: "${PLATFORM_STATS_OWNER_USER_ID:-}"
+      PLATFORM_STATS_EXCLUDED_USER_IDS: "${PLATFORM_STATS_EXCLUDED_USER_IDS:-}"
+      PLATFORM_STATS_EXCLUDED_INSTALLATION_IDS: "${PLATFORM_STATS_EXCLUDED_INSTALLATION_IDS:-}"
+      PLATFORM_STATS_MEMORY_BASE_URL: "${PLATFORM_STATS_MEMORY_BASE_URL:-http://memory-api:8090}"
+      PLATFORM_STATS_INTERNAL_TOKEN: "${PLATFORM_STATS_INTERNAL_TOKEN:-}"
+  relay-worker:
+    environment:
+      PLATFORM_STATS_ENABLED: "${PLATFORM_STATS_ENABLED:-false}"
+      PLATFORM_STATS_EXCLUDED_USER_IDS: "${PLATFORM_STATS_EXCLUDED_USER_IDS:-}"
+  memory-api:
+    environment:
+      PLATFORM_STATS_ENABLED: "${PLATFORM_STATS_ENABLED:-false}"
+      PLATFORM_STATS_INTERNAL_TOKEN: "${PLATFORM_STATS_INTERNAL_TOKEN:-}"
+  memory-worker:
+    environment:
+      PLATFORM_STATS_ENABLED: "${PLATFORM_STATS_ENABLED:-false}"

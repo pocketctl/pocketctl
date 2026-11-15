@@ -353,7 +353,9 @@ type DaemonEvent struct {
 	ReceiptStatus          string                     `json:"receipt_status,omitempty"`     // for command_receipt: success/failed/unavailable
 	Message                string                     `json:"message,omitempty"`            // for command_receipt message
 	Operation              string                     `json:"operation,omitempty"`          // failing interaction operation, for correlated UI rollback
-	Usage                  *ContextUsage              `json:"usage,omitempty"`              // token usage for agent_text events
+	UsageMeta              *UsageMetadata             `json:"usage_meta,omitempty"`
+	CallMeta               *CallMetadata              `json:"call_meta,omitempty"`
+	Usage                  *ContextUsage              `json:"usage,omitempty"` // token usage for agent_text events
 	Permission             *PermissionConfig          `json:"permission,omitempty"`
 	PermissionEffective    string                     `json:"permission_effective,omitempty"`
 	PermissionMutable      bool                       `json:"permission_mutable,omitempty"`
@@ -976,4 +978,33 @@ type SessionRegistrationAck struct {
 	RequestID string `json:"request_id,omitempty"`
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"` // "ready"
+}
+
+// UsageMetadata is versioned evidence for personal-v1. Legacy Usage semantics remain unchanged.
+type UsageMetadata struct {
+	Version         int    `json:"version"`
+	Provider        string `json:"provider"`
+	SourceUsageID   string `json:"source_usage_id"`
+	RequestID       string `json:"request_id,omitempty"`
+	Revision        int64  `json:"revision"`
+	Mode            string `json:"mode"`
+	OccurredAt      string `json:"occurred_at,omitempty"`
+	Model           string `json:"model,omitempty"`
+	AgentType       string `json:"agent_type,omitempty"`
+	InputSemantics  string `json:"input_semantics"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	ChildAgentID    string `json:"child_agent_id,omitempty"`
+}
+type CallMetadata struct {
+	Version      int    `json:"version"`
+	InvocationID string `json:"invocation_id"`
+	Revision     int64  `json:"revision"`
+	ToolKind     string `json:"tool_kind"`
+	ToolName     string `json:"tool_name,omitempty"`
+	MCPServer    string `json:"mcp_server,omitempty"`
+	OccurredAt   string `json:"occurred_at,omitempty"`
+	Outcome      string `json:"outcome"`
+	EvidenceKind string `json:"evidence_kind"`
+	SkillKey     string `json:"skill_key,omitempty"`
+	SkillName    string `json:"skill_name,omitempty"`
 }

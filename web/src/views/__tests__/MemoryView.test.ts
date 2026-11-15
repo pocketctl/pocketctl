@@ -1,6 +1,6 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
-import { ref } from 'vue'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { defineComponent, reactive, ref } from 'vue'
 import type { MemoryCodeRepository } from '../../types/memory'
 
 vi.mock('../../composables/useResponsiveLayout', () => ({
@@ -25,7 +25,8 @@ vi.mock('../../composables/useLocale', async () => {
 
 vi.mock('../../services/memoryOperationalStatus',()=>({readMemoryOperationalStatus:async()=>({state:'ready',last_error_code:null})}))
 
-const memoryRoute = { query: {} as Record<string, string> }
+enableAutoUnmount(afterEach)
+const memoryRoute = reactive({ query: {} as Record<string, string> })
 vi.mock('../../components/memory/MemoryGitProjects.vue', () => ({ default: { template: '<section data-testid="git-projects-entry" />' } }))
 vi.mock('vue-router', async () => ({ ...(await vi.importActual('vue-router')), useRoute: () => memoryRoute }))
 
@@ -298,6 +299,40 @@ describe('MemoryView', () => {
     )
     expect(view.find('[data-testid="memory-tab-search"]').exists()).toBe(true)
     expect(view.find('[data-testid="memory-tab-settings"]').exists()).toBe(true)
+  })
+
+  test('Skills module and scope changes wait for the draft decision', async () => {
+    memoryRoute.query = { tab: 'skills' }
+    memoryInstallation.value = activeInstallation()
+    memoryClient.listGovernanceScopes.mockResolvedValueOnce({ scopes: [
+      { installation_id: 'scope-a', owner_scope_kind: 'team', state: 'active', permissions: ['read'], owner_scope_id: 'a', authorization_epoch: '1' },
+      { installation_id: 'scope-b', owner_scope_kind: 'team', state: 'active', permissions: ['read'], owner_scope_id: 'b', authorization_epoch: '1' },
+    ] })
+    let leave: (() => void) | undefined
+    const requestLeave = vi.fn((action: () => void) => { leave = action })
+    const Skills = defineComponent({
+      props: ['scopeId'], setup(_props, { expose }) { expose({ requestLeave }); return {} },
+      template: '<div data-testid="guarded-skills">{{ scopeId }}</div>',
+    })
+    const view = mount(MemoryView, { global: { stubs: { MemorySkillsView: Skills } } })
+    await flushPromises()
+    expect(view.get('[data-testid="guarded-skills"]').text()).toBe('scope-a')
+    view.findComponent({ name: 'MemoryScopeSwitcher' }).vm.$emit('update:modelValue', 'scope-b')
+    await flushPromises()
+    expect(requestLeave).toHaveBeenCalledTimes(1)
+    expect(view.get('[data-testid="guarded-skills"]').text()).toBe('scope-a')
+    leave!(); await flushPromises()
+    expect(view.get('[data-testid="guarded-skills"]').text()).toBe('scope-b')
+    await view.get('[data-testid="memory-tab-search"]').trigger('click')
+    expect(requestLeave).toHaveBeenCalledTimes(2)
+    expect(view.find('[data-testid="guarded-skills"]').exists()).toBe(true)
+    memoryRoute.query = { tab: 'context' }; await flushPromises()
+    expect(requestLeave).toHaveBeenCalledTimes(3)
+    expect(view.find('[data-testid="guarded-skills"]').exists()).toBe(true)
+    leave!(); await flushPromises()
+    expect(view.find('[data-testid="guarded-skills"]').exists()).toBe(false)
+    expect(view.get('[data-testid="memory-workspace-description"]').text()).toBeTruthy()
+    view.unmount()
   })
 
   test('Skills navigation renders the scope-aware governance workspace', async () => {
@@ -603,7 +638,7 @@ describe('MemoryView', () => {
     expect(view.get('[data-testid="memory-edit-start-candidate-1"]').classes()).toContain('memory-review-action')
     expect(view.get('[data-testid="memory-accept-candidate-1"]').classes()).toContain('memory-review-action')
     expect(view.get('[data-testid="memory-accept-candidate-1"]').find('svg').exists()).toBe(false)
-    expect(view.get('[data-testid="memory-accept-candidate-1"]').text()).toContain('接受并入库')
+    expect(view.get('[data-testid="memory-accept-candidate-1"]').text()).toContain('接受候选')
   })
 
   test('keeps reviewing after acceptance and opens the accepted claim from the claims tab', async () => {

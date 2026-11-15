@@ -69,11 +69,12 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
         (inbox_id, delivery_key, event_id, user_id, session_id, event_type, audience, request_id, payload, delivered_at)
       SELECT inbox_id, 'inbox:' || inbox_id || ':session:-:0', NULL, NULL, session_id,
              event_type, 'session', NULL, payload,
-             CASE WHEN dedup_key = 'eligible' THEN NOW() ELSE NULL END
+             CASE WHEN dedup_key = 'eligible' THEN NOW() - INTERVAL '7 hours' ELSE NULL END
       FROM event_inbox WHERE dedup_key IN ('eligible', 'blocked')
     `)
 
-    await expect(retention.runOnce()).resolves.toEqual({
+    await pool.query("INSERT INTO daemon_ack_checkpoint(daemon_id,daemon_generation,ack_seq) VALUES('retention-d',1,6)")
+    await expect(retention.runOnce()).resolves.toMatchObject({
       deletedCompleted: 1,
       blockedUndelivered: 1,
     })
@@ -95,6 +96,7 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
       FROM generate_series(1, 1001) AS n
     `)
 
+    await pool.query("INSERT INTO daemon_ack_checkpoint(daemon_id,daemon_generation,ack_seq) VALUES('retention-batch',1,1001)")
     expect((await retention.runOnce()).deletedCompleted).toBe(1_000)
     const count = await pool.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM event_inbox WHERE daemon_id = 'retention-batch'`,
@@ -369,6 +371,7 @@ describeWithDatabase('InboxRetention PostgreSQL integration', () => {
       ) RETURNING inbox_id
     `, [userId, date])
 
+    await pool.query("INSERT INTO daemon_ack_checkpoint(daemon_id,daemon_generation,ack_seq) VALUES('retention-token-daemon',1,1)")
     expect((await retention.runOnce()).deletedCompleted).toBe(0)
     expect((await pool.query(
       `SELECT 1 FROM event_inbox WHERE inbox_id = $1`, [inbox.rows[0].inbox_id],

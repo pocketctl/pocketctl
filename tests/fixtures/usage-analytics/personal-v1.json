@@ -1,0 +1,1358 @@
+{
+  "dashboard": {
+    "meta": {
+      "contract": "personal-v1",
+      "accounting_version": "normalized-v1",
+      "scope": {
+        "kind": "personal",
+        "daemon": "all"
+      },
+      "range": "all",
+      "window_days": 365,
+      "timezone": "UTC",
+      "requested_from": "2025-11-15T00:00:00.000Z",
+      "to_exclusive": "2026-11-14T13:48:14.428Z",
+      "as_of": "2026-11-14T13:48:14.428Z",
+      "display_from": "2025-11-15T00:00:00.000Z",
+      "granularity": "month",
+      "coverage": "partial",
+      "snapshot_token": "synthetic-fixture-snapshot",
+      "revision": "31"
+    },
+    "hosts": [
+      {
+        "daemon_id": "usage-fixture-linux",
+        "name": "Fixture Linux",
+        "historical": false
+      },
+      {
+        "daemon_id": "usage-fixture-mac",
+        "name": "Fixture Mac",
+        "historical": false
+      }
+    ],
+    "overview": {
+      "all": {
+        "input": "4950",
+        "output": "1800",
+        "cache_read": "3600",
+        "cache_create": "450",
+        "total": "10800",
+        "requests": "9",
+        "coverage": "partial"
+      },
+      "today": {
+        "input": "550",
+        "output": "200",
+        "cache_read": "400",
+        "cache_create": "50",
+        "total": "1200",
+        "requests": "1",
+        "coverage": "partial"
+      },
+      "7d": {
+        "input": "1650",
+        "output": "600",
+        "cache_read": "1200",
+        "cache_create": "150",
+        "total": "3600",
+        "requests": "3",
+        "coverage": "partial"
+      },
+      "30d": {
+        "input": "2750",
+        "output": "1000",
+        "cache_read": "2000",
+        "cache_create": "250",
+        "total": "6000",
+        "requests": "5",
+        "coverage": "partial"
+      }
+    },
+    "analysis": {
+      "input": "4950",
+      "output": "1800",
+      "cache_read": "3600",
+      "cache_create": "450",
+      "total": "10800",
+      "requests": "9",
+      "display_from": "2025-11-15T00:00:00.000Z",
+      "granularity": "month",
+      "series": [
+        {
+          "bucket_start": "2025-11-15T00:00:00.000Z",
+          "end_exclusive": "2025-12-01T00:00:00.000Z",
+          "partial_period": true,
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "bucket_start": "2025-12-01T00:00:00.000Z",
+          "end_exclusive": "2026-01-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-01-01T00:00:00.000Z",
+          "end_exclusive": "2026-02-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-02-01T00:00:00.000Z",
+          "end_exclusive": "2026-03-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-03-01T00:00:00.000Z",
+          "end_exclusive": "2026-04-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-04-01T00:00:00.000Z",
+          "end_exclusive": "2026-05-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-05-01T00:00:00.000Z",
+          "end_exclusive": "2026-06-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": "1100",
+          "output": "400",
+          "cache_read": "800",
+          "cache_create": "100",
+          "total": "2400",
+          "requests": "2",
+          "coverage": "partial"
+        },
+        {
+          "bucket_start": "2026-06-01T00:00:00.000Z",
+          "end_exclusive": "2026-07-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-07-01T00:00:00.000Z",
+          "end_exclusive": "2026-08-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-08-01T00:00:00.000Z",
+          "end_exclusive": "2026-09-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "bucket_start": "2026-09-01T00:00:00.000Z",
+          "end_exclusive": "2026-10-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "bucket_start": "2026-10-01T00:00:00.000Z",
+          "end_exclusive": "2026-11-01T00:00:00.000Z",
+          "partial_period": false,
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "bucket_start": "2026-11-01T00:00:00.000Z",
+          "end_exclusive": "2026-11-14T13:48:14.428Z",
+          "partial_period": true,
+          "input": "2200",
+          "output": "800",
+          "cache_read": "1600",
+          "cache_create": "200",
+          "total": "4800",
+          "requests": "4",
+          "coverage": "partial"
+        }
+      ],
+      "coverage": "partial"
+    },
+    "distributions": {
+      "host": [
+        {
+          "id": "usage-fixture-mac",
+          "name": "usage-fixture-mac",
+          "input": "4950",
+          "output": "1800",
+          "cache_read": "3600",
+          "cache_create": "450",
+          "total": "10800",
+          "requests": "9",
+          "coverage": "partial"
+        }
+      ],
+      "agent": [
+        {
+          "id": "claude-code",
+          "name": "claude-code",
+          "input": "4950",
+          "output": "1800",
+          "cache_read": "3600",
+          "cache_create": "450",
+          "total": "10800",
+          "requests": "9",
+          "coverage": "partial"
+        }
+      ],
+      "model": [
+        {
+          "id": "fixture-model-b",
+          "name": "fixture-model-b",
+          "input": "2750",
+          "output": "1000",
+          "cache_read": "2000",
+          "cache_create": "250",
+          "total": "6000",
+          "requests": "5",
+          "coverage": "partial"
+        },
+        {
+          "id": "fixture-model-a",
+          "name": "fixture-model-a",
+          "input": "2200",
+          "output": "800",
+          "cache_read": "1600",
+          "cache_create": "200",
+          "total": "4800",
+          "requests": "4",
+          "coverage": "partial"
+        }
+      ]
+    },
+    "heatmap": {
+      "window_days": 90,
+      "requested_from": "2026-08-17T00:00:00.000Z",
+      "to_exclusive": "2026-11-14T13:48:14.428Z",
+      "days": [
+        {
+          "date": "2026-08-17",
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "date": "2026-08-18",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-19",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-20",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-21",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-22",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-23",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-24",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-25",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-26",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-27",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-28",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-29",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-30",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-08-31",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-01",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-02",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-03",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-04",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-05",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-06",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-07",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-08",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-09",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-10",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-11",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-12",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-13",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-14",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-15",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-16",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-17",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-18",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-19",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-20",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-21",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-22",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-23",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-24",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-25",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-26",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-27",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-28",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-29",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-09-30",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-01",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-02",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-03",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-04",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-05",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-06",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-07",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-08",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-09",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-10",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-11",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-12",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-13",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-14",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-15",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-16",
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "date": "2026-10-17",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-18",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-19",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-20",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-21",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-22",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-23",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-24",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-25",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-26",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-27",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-28",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-29",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-30",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-10-31",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-01",
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "date": "2026-11-02",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-03",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-04",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-05",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-06",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-07",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-08",
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "date": "2026-11-09",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-10",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-11",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-12",
+          "input": null,
+          "output": null,
+          "cache_read": null,
+          "cache_create": null,
+          "total": null,
+          "requests": null,
+          "coverage": "not_collected"
+        },
+        {
+          "date": "2026-11-13",
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        },
+        {
+          "date": "2026-11-14",
+          "input": "550",
+          "output": "200",
+          "cache_read": "400",
+          "cache_create": "50",
+          "total": "1200",
+          "requests": "1",
+          "coverage": "partial"
+        }
+      ],
+      "active_days": 6,
+      "peak": {
+        "date": "2026-08-17",
+        "input": "550",
+        "output": "200",
+        "cache_read": "400",
+        "cache_create": "50",
+        "total": "1200",
+        "requests": "1",
+        "coverage": "partial"
+      },
+      "coverage": "partial"
+    },
+    "unattributed_total": null
+  },
+  "sessions": {
+    "meta": {
+      "contract": "personal-v1",
+      "accounting_version": "normalized-v1",
+      "scope": {
+        "kind": "personal",
+        "daemon": "all"
+      },
+      "range": "all",
+      "window_days": 365,
+      "timezone": "UTC",
+      "requested_from": "2025-11-15T00:00:00.000Z",
+      "to_exclusive": "2026-11-14T13:48:14.428Z",
+      "as_of": "2026-11-14T13:48:14.428Z",
+      "display_from": "2025-11-15T00:00:00.000Z",
+      "granularity": "day",
+      "coverage": "unknown",
+      "snapshot_token": "synthetic-fixture-snapshot",
+      "revision": "31"
+    },
+    "sessions": [
+      {
+        "session_id": "usage-fixture-session",
+        "title": "Personal usage synthetic fixture",
+        "agent_type": "claude-code",
+        "model": "fixture-model",
+        "status": "running",
+        "daemon_id": "usage-fixture-mac",
+        "updated_at": "2026-11-14T13:45:30.975Z",
+        "archived": false,
+        "content_state": "hot",
+        "input": "4950",
+        "output": "1800",
+        "cache_read": "3600",
+        "cache_create": "450",
+        "total": "10800",
+        "requests": "9",
+        "models": [
+          "fixture-model-a",
+          "fixture-model-b"
+        ],
+        "body_available": true,
+        "stats_available": true,
+        "children": []
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "limit": 20,
+    "unattributed_total": null
+  },
+  "calls": {
+    "meta": {
+      "contract": "personal-v1",
+      "accounting_version": "normalized-v1",
+      "scope": {
+        "kind": "personal",
+        "daemon": "all"
+      },
+      "range": "all",
+      "window_days": 365,
+      "timezone": "UTC",
+      "requested_from": "2025-11-15T00:00:00.000Z",
+      "to_exclusive": "2026-11-14T13:48:14.428Z",
+      "as_of": "2026-11-14T13:48:14.428Z",
+      "display_from": "2026-11-14",
+      "granularity": "day",
+      "coverage": "partial",
+      "snapshot_token": "synthetic-fixture-snapshot",
+      "revision": "31"
+    },
+    "summary": {
+      "tools": "10",
+      "mcp": "3",
+      "skills": "1",
+      "builtin": "7",
+      "unclassified": null
+    },
+    "series": [
+      {
+        "bucket_start": "2026-11-14T00:00:00.000Z",
+        "end_exclusive": "2026-11-14T13:48:14.428Z",
+        "partial_period": true,
+        "tools": "10",
+        "mcp": "3",
+        "skills": "1",
+        "coverage": "partial"
+      }
+    ],
+    "granularity": "day",
+    "display_from": "2026-11-14",
+    "category": "tools",
+    "ranking": [
+      {
+        "object_id": "eyJraW5kIjoidG9vbHMiLCJuYW1lIjoiUmVhZCIsInNlcnZlciI6bnVsbCwidG9vbF9raW5kIjoiYnVpbHRpbiJ9",
+        "name": "Read",
+        "mcp_server": null,
+        "count": "7",
+        "success": "6",
+        "failure": "1",
+        "unknown": "0",
+        "sessions": "1",
+        "coverage": "partial"
+      },
+      {
+        "object_id": "eyJraW5kIjoidG9vbHMiLCJuYW1lIjoibWNwX19maXh0dXJlX19yZWFkIiwic2VydmVyIjoiZml4dHVyZSIsInRvb2xfa2luZCI6Im1jcCJ9",
+        "name": "mcp__fixture__read",
+        "mcp_server": "fixture",
+        "count": "3",
+        "success": "3",
+        "failure": "0",
+        "unknown": "0",
+        "sessions": "1",
+        "coverage": "partial"
+      }
+    ],
+    "total": 2,
+    "page": 1,
+    "limit": 20,
+    "coverage": "partial"
+  },
+  "coverage": {
+    "meta": {
+      "contract": "personal-v1",
+      "accounting_version": "normalized-v1",
+      "scope": {
+        "kind": "personal",
+        "daemon": "all"
+      },
+      "range": "all",
+      "window_days": 365,
+      "timezone": "UTC",
+      "requested_from": "2025-11-15T00:00:00.000Z",
+      "to_exclusive": "2026-11-14T13:48:14.428Z",
+      "as_of": "2026-11-14T13:48:14.428Z",
+      "display_from": "2025-11-15T00:00:00.000Z",
+      "granularity": "day",
+      "coverage": "unknown",
+      "snapshot_token": "synthetic-fixture-snapshot",
+      "revision": "31"
+    },
+    "coverage": [],
+    "reason": "Only explicit continuous source evidence can establish complete coverage; online status does not."
+  }
+}

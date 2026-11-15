@@ -131,6 +131,13 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   expect(generate).toHaveBeenCalledTimes(1)
   expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows).toEqual([{state:'provider_result_unknown',error_code:'provider_result_unknown'}])
  })
+ test('a primary timeout followed by fallback budget refusal is held instead of retried as free budget waiting',async()=>{
+  const f=await fixture(),generate=vi.fn(async()=>({ok:false,code:'budget_exceeded',retryable:false,timeoutFallback:{primary:{code:'http_error',detail:'timeout',billingUncertain:true,budgetReservationId:'synthetic-reservation'}}}))
+  const w=worker({generateJson:generate} as unknown as TextGenerator)
+  await w.consolidate(f.job,signal());await w.consolidate(f.job,signal())
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows).toEqual([{state:'provider_result_unknown',error_code:'provider_result_unknown'}])
+ })
  test('AC-15 expired provider lease becomes unknown and never repeats the provider call',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{await pool.query("UPDATE memory_curation_runs SET claim_expires_at=clock_timestamp()-interval '1 second'");return success()})
   const w=worker({generateJson:generate} as TextGenerator)

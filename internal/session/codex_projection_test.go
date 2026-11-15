@@ -454,3 +454,22 @@ func assertCodexTextEvent(
 		t.Fatalf("text event=%+v", got)
 	}
 }
+
+func TestPersonalUsageCodexNativeMCPIdentity(t *testing.T) {
+	p := newCodexProjection(1)
+	var found bool
+	for _, method := range []string{"item/started", "item/completed"} {
+		events := p.Project(codexNotification(method, `{"threadId":"fixture-thread","turnId":"fixture-turn","item":{"id":"native-mcp-call","type":"mcpToolCall","server":"server-a","tool":"read","status":"completed","result":{}}}`))
+		for _, event := range events {
+			if event.CallMeta != nil {
+				found = true
+				if event.CallMeta.InvocationID != "native-mcp-call" || event.CallMeta.ToolKind != "mcp" || event.CallMeta.MCPServer != "server-a" || event.CallMeta.ToolName != "read" {
+					t.Fatalf("%+v", event.CallMeta)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("native MCP metadata missing")
+	}
+}

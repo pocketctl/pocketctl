@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { memorySkills } from '../services/memorySkills'
 import { createClientId } from '../utils/clientId'
@@ -7,6 +7,7 @@ import type { MemorySkillCandidate, MemorySkillDetail, MemorySkillDiff, MemorySk
   MemorySkillModes, MemorySkillPolicy, MemorySkillPolicyState, MemorySkillReplayCase, MemorySkillReviewOutcome, MemorySkillSummary } from '../types/memorySkills'
 import MemorySkillDocumentView from '../components/memory/MemorySkillDocument.vue'
 import MemorySkillEditor from '../components/memory/MemorySkillEditor.vue'
+import MemorySectionTabs from '../components/memory/MemorySectionTabs.vue'
 
 const props = defineProps<{ scopeId: string }>()
 const { t } = useLocale()
@@ -17,6 +18,28 @@ const detail = ref<MemorySkillDetail | null>(null), candidate = ref<MemorySkillC
 const selectedId = ref(''), loading = ref(false), candidateLoading = ref(false), detailLoading = ref(false), busy = ref(false)
 const listError = ref(''), candidateError = ref(''), detailError = ref(''), actionError = ref(''), success = ref('')
 const policyError = ref(''), casesError = ref(''), policyLoading = ref(false)
+const mobileDetailOpen = ref(false)
+const detailTab = ref('document'), editorDirty = ref(false), leavePending = ref(false)
+const leaveDialog = ref<HTMLElement>(), indexElement = ref<HTMLElement>()
+let pendingLeave: (() => void) | null = null, leaveFocus: HTMLElement | null = null
+const hasUnsavedChanges = computed(() => editing.value && editorDirty.value)
+const detailTabs = computed(() => [
+  { id: 'document', label: t('memory.ui.skill_document') },
+  { id: 'evidence', label: t('memory.skills.evidence'), badge: detail.value?.sources.length },
+  { id: 'versions', label: t('memory.skills.versions'), badge: detail.value?.versions.length },
+  { id: 'publication', label: t('memory.ui.skill_validation_publication') },
+])
+function requestLeave(action: () => void) {
+  if (!hasUnsavedChanges.value) { action(); return }
+  pendingLeave = action; leaveFocus = document.activeElement as HTMLElement | null; leavePending.value = true
+  void nextTick(() => leaveDialog.value?.querySelector<HTMLButtonElement>('button')?.focus())
+}
+function cancelLeave() { pendingLeave = null; leavePending.value = false; leaveFocus?.focus() }
+function discardAndLeave() {
+  const action = pendingLeave; pendingLeave = null; leavePending.value = false; editing.value = false; editorDirty.value = false; action?.()
+}
+function backToIndex() { requestLeave(() => { mobileDetailOpen.value = false; void nextTick(() => indexElement.value?.querySelector<HTMLButtonElement>('button[aria-pressed=true], button')?.focus()) }) }
+defineExpose({ hasUnsavedChanges, requestLeave })
 const editing = ref(false), fromVersion = ref(''), rollbackTarget = ref('')
 const reviewOutcome = ref<MemorySkillReviewOutcome | ''>('')
 const diff = ref<MemorySkillDiff | null>(null), cases = ref<MemorySkillReplayCase[]>([]), selectedCases = ref<string[]>([])
@@ -30,6 +53,8 @@ const replayKinds = ['historical_session', 'golden_task'] as const
 const permissions = computed(() => detail.value?.permissions)
 const priorVersions = computed(() => detail.value?.versions.filter(v => v.version_id !== detail.value?.version_id) ?? [])
 const blockedReasons = computed(() => detail.value?.eligibility?.reason_codes ?? [])
+const publishedVersionId = computed(() => typeof detail.value?.publication?.current_version_id === 'string' ? detail.value.publication.current_version_id : '')
+const publishedVersion = computed(() => detail.value?.versions.find(version => version.version_id === publishedVersionId.value))
 const publicationRevision = computed(() => Number(detail.value?.publication?.revision ?? 0))
 const stringify = (value: unknown) => JSON.stringify(value, null, 2)
 function message(error: unknown): string {
@@ -39,7 +64,8 @@ function message(error: unknown): string {
 }
 function clearSelection() {
   detailController.abort(); detailController = new AbortController(); selectionEpoch++; diffEpoch++
-  detail.value = null; candidate.value = null; selectedId.value = ''; editing.value = false
+  detail.value = null; candidate.value = null; selectedId.value = ''; editing.value = false; editorDirty.value = false; detailTab.value = 'document'; mobileDetailOpen.value = false
+  pendingLeave = null; leavePending.value = false
   reviewOutcome.value = ''
   fromVersion.value = ''; rollbackTarget.value = ''; diff.value = null; cases.value = []; selectedCases.value = []
   confirmation.value = null; detailError.value = ''; casesError.value = ''; actionError.value = ''; success.value = ''; detailLoading.value = false
@@ -90,9 +116,9 @@ function refresh() {
 watch(() => props.scopeId, () => { repositoryDraft.value = ''; repositoryFilter.value = ''; stateDraft.value = ''; stateFilter.value = ''; refresh() }, { immediate: true })
 watch(fromVersion, () => { diffEpoch++; diff.value = null }, { flush: 'sync' })
 onBeforeUnmount(() => { epoch++; selectionEpoch++; controller.abort(); detailController.abort() })
-function filter() { repositoryFilter.value = repositoryDraft.value.trim(); stateFilter.value = stateDraft.value; refresh() }
+function filter() { requestLeave(() => { repositoryFilter.value = repositoryDraft.value.trim(); stateFilter.value = stateDraft.value; refresh() }) }
 async function selectSkill(skillId: string) {
-  clearSelection(); selectedId.value = skillId; detailLoading.value = true
+  clearSelection(); mobileDetailOpen.value = true; selectedId.value = skillId; detailLoading.value = true
   const own = epoch, selected = selectionEpoch
   const signal = detailController.signal
   try {
@@ -108,7 +134,7 @@ async function selectSkill(skillId: string) {
   } catch (error) { if (own === epoch && selected === selectionEpoch) detailError.value = message(error) }
   finally { if (own === epoch && selected === selectionEpoch) detailLoading.value = false }
 }
-function selectCandidate(value: MemorySkillCandidate) { clearSelection(); candidate.value = value }
+function selectCandidate(value: MemorySkillCandidate) { clearSelection(); mobileDetailOpen.value = true; candidate.value = value }
 async function mutate(work: (scope: string, signal: AbortSignal) => Promise<unknown>, skillId?: string) {
   if (busy.value) return
   const own = epoch
@@ -132,7 +158,7 @@ function saveDocument(document: MemorySkillDocument) {
   const value = detail.value
   if (value?.permissions.can_edit) void mutate((scope, signal) => memorySkills.edit(scope, value.skill_id, value.revision, document, signal))
 }
-function beginEdit() { confirmation.value = null; reviewOutcome.value = ''; editing.value = true }
+function beginEdit() { confirmation.value = null; reviewOutcome.value = ''; detailTab.value = 'document'; editorDirty.value = false; editing.value = true }
 function review(decision: typeof reviewActions[number]) {
   const value = detail.value
   if (editing.value || busy.value || !value?.permissions.can_review || (decision === 'approve' && !reviewOutcome.value)) return
@@ -199,7 +225,7 @@ async function savePolicy() {
       <form class="memory-skill-toolbar" @submit.prevent="filter">
         <label>{{ t('memory.phase4.repository_id') }}<input v-model="repositoryDraft" :placeholder="t('memory.skills.all_repositories')" data-testid="skill-repository-filter" /></label>
         <label>{{ t('memory.skills.state') }}<select v-model="stateDraft"><option value="">{{ t('memory.skills.all_states') }}</option>
-          <option v-for="state in ['draft', 'reviewed', 'rejected', 'revoked']" :key="state">{{ state }}</option>
+          <option v-for="state in ['draft', 'reviewed', 'rejected', 'revoked']" :key="state" :value="state">{{ t(`memory.ui.skill_state_${state}`) }}</option>
         </select></label>
         <button class="memory-button" type="submit" :disabled="busy || loading" data-testid="skill-refresh">{{ t('memory.skills.refresh') }}</button>
       </form>
@@ -210,30 +236,31 @@ async function savePolicy() {
       </div>
       <p v-if="actionError" class="memory-error" role="alert" data-testid="skill-action-error">{{ actionError }}</p>
       <p v-if="success" role="status" class="memory-skill-success">{{ success }}</p>
-      <div class="memory-skill-layout">
-        <aside class="memory-skill-index" :aria-label="t('memory.skills.library')">
-          <section><h2>{{ t('memory.skills.library') }}</h2>
+      <div class="memory-skill-layout" :class="{ 'detail-open': mobileDetailOpen }">
+        <aside ref="indexElement" class="memory-skill-index" :aria-label="t('memory.skills.library')">
+          <section><h2>{{ t('memory.skills.library') }} <small>{{ t('memory.ui.loaded') }} {{ skills.length }}</small></h2>
             <p v-if="loading" role="status" data-testid="skill-loading">{{ t('memory.skills.loading') }}</p>
             <div v-else-if="listError" role="alert" data-testid="skill-list-error"><p class="memory-error">{{ listError }}</p><button class="memory-button" @click="loadSkills()">{{ t('memory.skills.retry') }}</button></div>
             <p v-else-if="!skills.length" class="memory-skill-muted" data-testid="skill-empty">{{ t('memory.skills.empty') }}</p>
             <button v-for="skill in skills" :key="skill.skill_id" type="button" class="memory-skill-row" :class="{ selected: selectedId === skill.skill_id }"
-              :disabled="busy" :aria-pressed="selectedId === skill.skill_id" :data-testid="`skill-select-${skill.skill_id}`" @click="selectSkill(skill.skill_id)">
-              <strong>{{ skill.title }}</strong><span>{{ skill.state }} · v{{ skill.version_number }} · {{ skill.risk }}</span>
+              :disabled="busy" :aria-pressed="selectedId === skill.skill_id" :data-testid="`skill-select-${skill.skill_id}`" @click="requestLeave(() => selectSkill(skill.skill_id))">
+              <strong>{{ skill.title }}</strong><span>{{ t(`memory.ui.skill_state_${skill.state}`) }} · v{{ skill.version_number }} · {{ skill.risk }}</span>
             </button>
             <button v-if="nextCursor" class="memory-button" :disabled="loading || busy" data-testid="skill-more" @click="loadSkills(true)">{{ t('memory.skills.load_more') }}</button>
           </section>
-          <section><h2>{{ t('memory.skills.candidates') }}</h2>
+          <section><h2>{{ t('memory.skills.candidates') }} <small>{{ t('memory.ui.loaded') }} {{ candidates.length }}</small></h2><p class="memory-skill-muted memory-skill-index-help">{{ t('memory.ui.skill_candidate_hint') }}</p>
             <p v-if="candidateLoading" role="status">{{ t('memory.skills.loading') }}</p>
             <div v-else-if="candidateError" role="alert"><p class="memory-error">{{ candidateError }}</p><button class="memory-button" @click="loadCandidates()">{{ t('memory.skills.retry') }}</button></div>
             <p v-else-if="!candidates.length" class="memory-skill-muted">{{ t('memory.skills.no_candidates') }}</p>
-            <button v-for="item in candidates" :key="item.candidate_id" type="button" class="memory-skill-row" :disabled="busy"
-              :aria-pressed="candidate?.candidate_id === item.candidate_id" :data-testid="`skill-candidate-${item.candidate_id}`" @click="selectCandidate(item)">
+            <button v-for="item in candidates" :key="item.candidate_id" type="button" class="memory-skill-row" :disabled="busy" :class="{ selected: candidate?.candidate_id === item.candidate_id }"
+              :aria-pressed="candidate?.candidate_id === item.candidate_id" :data-testid="`skill-candidate-${item.candidate_id}`" @click="requestLeave(() => selectCandidate(item))">
               <strong>{{ item.document.title }}</strong><span>candidate · g{{ item.generation }} · {{ item.risk }}</span>
             </button>
             <button v-if="candidateCursor" class="memory-button" :disabled="candidateLoading || busy" @click="loadCandidates(true)">{{ t('memory.skills.load_more') }}</button>
           </section>
         </aside>
         <div class="memory-skill-main" aria-live="polite">
+          <button v-if="selectedId || candidate" class="memory-button memory-skill-back" data-testid="skill-back" @click="backToIndex">← {{ t('memory.ui.skill_back') }}</button>
           <p v-if="detailLoading" role="status">{{ t('memory.skills.loading') }}</p>
           <div v-if="detailError" role="alert" data-testid="skill-detail-error"><p class="memory-error">{{ detailError }}</p><button class="memory-button" @click="selectSkill(selectedId)">{{ t('memory.skills.retry') }}</button></div>
           <p v-if="!detail && !candidate && !detailLoading && !detailError" class="memory-skill-placeholder">{{ t('memory.skills.select') }}</p>
@@ -247,28 +274,32 @@ async function savePolicy() {
             <p v-else class="memory-skill-muted">{{ t('memory.skills.read_only') }}</p>
           </article>
           <article v-if="detail" data-testid="skill-detail">
-            <header class="memory-skill-detail-head"><div><p class="memory-eyebrow">{{ detail.state }} · v{{ detail.version_number }} · r{{ detail.revision }}</p><h2>{{ detail.title }}</h2></div><span class="memory-skill-risk" :data-risk="detail.risk">{{ detail.risk }}</span></header>
+            <header class="memory-skill-detail-head"><div><p class="memory-eyebrow">{{ t('memory.ui.skill_document') }}</p><h2>{{ detail.title }}</h2><p class="memory-skill-badges"><span>{{ t(`memory.ui.skill_state_${detail.state}`) }}</span><span>{{ t('memory.ui.skill_current_document') }} v{{ detail.version_number }}</span><span v-if="detail.publication" data-testid="skill-publication-head">{{ t(detail.publication.state === 'active' ? 'memory.ui.skill_effective_publication' : 'memory.ui.skill_publication_record') }} <code>{{ publishedVersion ? `v${publishedVersion.version_number}` : publishedVersionId || '—' }}</code> · {{ detail.publication.state ?? '—' }}</span><span class="memory-skill-risk" :data-risk="detail.risk">{{ detail.risk }}</span></p></div><div class="memory-skill-actions"><button v-if="permissions?.can_edit && !editing" class="memory-button" :disabled="busy" data-testid="skill-edit" @click="beginEdit">{{ t('memory.skills.edit') }}</button><details v-if="permissions?.can_revoke" class="memory-skill-more"><summary>{{ t('memory.ui.more_actions') }}</summary><button class="memory-button is-danger" :disabled="busy || editing" data-testid="skill-revoke" @click="requestConfirmation('revoke')">{{ t('memory.skills.revoke') }}</button></details></div></header>
             <p v-if="detail.risk !== 'low'" class="memory-skill-warning" data-testid="skill-manual-review">{{ t('memory.skills.manual_review') }}</p>
             <p v-if="detail.risk_reasons.length">{{ detail.risk_reasons.join(' · ') }}</p>
-            <dl class="memory-skill-provenance"><dt>{{ t('memory.skills.version') }}</dt><dd>{{ detail.version_id }}</dd><dt>{{ t('memory.skills.document_hash') }}</dt><dd>{{ detail.document_hash }}</dd><dt>{{ t('memory.skills.source_digest') }}</dt><dd>{{ detail.source_digest }}</dd><dt>{{ t('memory.skills.policy_hash') }}</dt><dd>{{ detail.policy_hash }}</dd></dl>
-            <div class="memory-skill-actions">
-              <button v-if="permissions?.can_edit && !editing" class="memory-button" :disabled="busy" data-testid="skill-edit" @click="beginEdit">{{ t('memory.skills.edit') }}</button>
-              <template v-if="permissions?.can_review"><label>{{ t('memory.skills.review_outcome') }}<select v-model="reviewOutcome" :disabled="busy || editing" data-testid="skill-review-outcome"><option value="">{{ t('memory.skills.choose_review_outcome') }}</option><option v-for="outcome in reviewOutcomes" :key="outcome" :value="outcome">{{ t(`memory.skills.${outcome}`) }}</option></select></label><button v-for="action in reviewActions" :key="action" class="memory-button" :disabled="busy || editing || (action === 'approve' && !reviewOutcome)" :data-testid="`skill-${action}`" @click="review(action)">{{ t(`memory.skills.${action}`) }}</button></template>
-              <button v-if="permissions?.can_revoke" class="memory-button is-danger" :disabled="busy || editing" data-testid="skill-revoke" @click="requestConfirmation('revoke')">{{ t('memory.skills.revoke') }}</button>
-            </div>
+            <p v-if="!permissions?.can_edit" class="memory-skill-muted">{{ t('memory.skills.read_only') }}</p>
+            <MemorySectionTabs v-model="detailTab" :items="detailTabs" :label="t('memory.ui.skill_detail_sections')" panel-prefix="skill-section" />
+            <section v-show="detailTab === 'document'" id="skill-section-document" role="tabpanel" :aria-label="t('memory.ui.skill_document')">
             <p v-if="editing" class="memory-skill-warning" data-testid="skill-edit-pending">{{ t('memory.skills.edit_pending') }}</p>
-            <MemorySkillEditor v-if="editing && permissions?.can_edit" :document="detail.document" :busy="busy" @save="saveDocument" @cancel="editing = false" />
+            <MemorySkillEditor v-if="editing && permissions?.can_edit" :document="detail.document" :busy="busy" @save="saveDocument" @dirty="editorDirty = $event" @cancel="editing = false; editorDirty = false" />
             <MemorySkillDocumentView v-else :document="detail.document" />
-            <section class="memory-skill-section"><h3>{{ t('memory.skills.evidence') }}</h3>
+            <section v-if="permissions?.can_review" class="memory-skill-section" data-testid="skill-review-section"><h3>{{ t('memory.ui.skill_review_version') }} v{{ detail.version_number }}</h3><p class="memory-skill-muted">{{ t('memory.ui.skill_review_separate') }}</p><div class="memory-skill-actions">
+              <template v-if="permissions?.can_review"><label>{{ t('memory.skills.review_outcome') }}<select v-model="reviewOutcome" :disabled="busy || editing" data-testid="skill-review-outcome"><option value="">{{ t('memory.skills.choose_review_outcome') }}</option><option v-for="outcome in reviewOutcomes" :key="outcome" :value="outcome">{{ t(`memory.skills.${outcome}`) }}</option></select></label><button v-for="action in reviewActions" :key="action" class="memory-button" :disabled="busy || editing || (action === 'approve' && !reviewOutcome)" :data-testid="`skill-${action}`" @click="review(action)">{{ t(`memory.skills.${action}`) }}</button></template>
+            </div></section>
+            </section>
+            <section v-show="detailTab === 'evidence'" id="skill-section-evidence" role="tabpanel" :aria-label="t('memory.skills.evidence')" class="memory-skill-section"><h3>{{ t('memory.skills.evidence') }}</h3>
+              <details><summary>{{ t('memory.ui.skill_identifiers') }}</summary>
+            <dl class="memory-skill-provenance"><dt>{{ t('memory.skills.version') }}</dt><dd>{{ detail.version_id }}</dd><dt>{{ t('memory.skills.document_hash') }}</dt><dd>{{ detail.document_hash }}</dd><dt>{{ t('memory.skills.source_digest') }}</dt><dd>{{ detail.source_digest }}</dd><dt>{{ t('memory.skills.policy_hash') }}</dt><dd>{{ detail.policy_hash }}</dd></dl>
+              </details>
               <dl v-for="source in detail.sources" :key="source.token" class="memory-skill-provenance" data-testid="skill-evidence"><dt>{{ source.token }}</dt><dd>{{ source.handle }}</dd><dt>SHA</dt><dd>{{ source.excerpt_hash }}</dd><dt>{{ t('memory.skills.evidence_id') }}</dt><dd>{{ source.evidence_id ?? source.event_id ?? source.artifact_id ?? '—' }}</dd></dl>
             </section>
-            <section class="memory-skill-section"><h3>{{ t('memory.skills.versions') }}</h3>
-              <ol class="memory-skill-version-list"><li v-for="version in detail.versions" :key="version.version_id">v{{ version.version_number }} · {{ version.risk }} <code>{{ version.version_id }}</code></li></ol>
+            <section v-show="detailTab === 'versions'" id="skill-section-versions" role="tabpanel" :aria-label="t('memory.skills.versions')" class="memory-skill-section"><h3>{{ t('memory.skills.versions') }}</h3>
+              <ol class="memory-skill-version-list"><li v-for="version in detail.versions" :key="version.version_id">v{{ version.version_number }} · {{ version.risk }} <span v-if="version.version_id === publishedVersionId" data-testid="skill-published-version">{{ t('memory.ui.skill_publication_record') }} · {{ version.version_id }}</span><code>{{ version.version_id }}</code></li></ol>
               <div v-if="priorVersions.length" class="memory-skill-actions"><label>{{ t('memory.skills.compare_from') }}<select v-model="fromVersion" data-testid="skill-diff-from"><option v-for="version in priorVersions" :key="version.version_id" :value="version.version_id">v{{ version.version_number }}</option></select></label>
                 <button class="memory-button" :disabled="busy" data-testid="skill-diff" @click="compare">{{ t('memory.skills.compare') }}</button></div>
               <div v-if="diff" data-testid="skill-diff-result"><p class="memory-skill-muted"><code>{{ diff.from_version_id }}</code> → <code>{{ diff.to_version_id }}</code></p><p v-if="!diff.changes.length">{{ t('memory.skills.no_changes') }}</p><div v-for="change in diff.changes" :key="change.field" class="memory-skill-diff"><h4>{{ t(`memory.skills.${change.field}`) }}</h4><div><pre>{{ stringify(change.before) }}</pre><pre>{{ stringify(change.after) }}</pre></div></div></div>
             </section>
-            <section class="memory-skill-section" data-testid="skill-replay-summary"><h3>Replay <span class="memory-skill-muted">{{ detail.replay.state }}</span></h3>
+            <div v-show="detailTab === 'publication'" id="skill-section-publication" role="tabpanel" :aria-label="t('memory.ui.skill_validation_publication')"><section class="memory-skill-section memory-skill-replay" data-testid="skill-replay-summary"><h3>Replay <span class="memory-skill-muted">{{ detail.replay.state }}</span></h3>
               <table><thead><tr><th>{{ t('memory.skills.case_kind') }}</th><th>{{ t('memory.skills.total') }}</th><th>{{ t('memory.skills.passed') }}</th><th>{{ t('memory.skills.failed') }}</th><th>{{ t('memory.skills.pending') }}</th><th>{{ t('memory.skills.cancelled') }}</th></tr></thead>
                 <tbody><tr v-for="kind in replayKinds" :key="kind"><th>{{ t(`memory.skills.${kind}`) }}</th><td>{{ detail.replay.kinds[kind].total }}</td><td>{{ detail.replay.kinds[kind].passed }}</td><td>{{ detail.replay.kinds[kind].failed }}</td><td>{{ detail.replay.kinds[kind].pending }}</td><td>{{ detail.replay.kinds[kind].cancelled }}</td></tr></tbody></table>
               <p class="memory-skill-muted">{{ t('memory.skills.fixture') }} {{ detail.replay.provenance.fixture }} · {{ t('memory.skills.recorded') }} {{ detail.replay.provenance.recorded }} · {{ t('memory.skills.natural_executions') }} {{ detail.replay.natural_execution_count }}</p>
@@ -292,6 +323,7 @@ async function savePolicy() {
               <p v-else class="memory-skill-muted">{{ t('memory.skills.rollback_unavailable') }}</p>
             </section>
             <section class="memory-skill-section"><h3>{{ t('memory.skills.executions') }}</h3><p v-if="!detail.executions.length" class="memory-skill-muted">{{ t('memory.skills.no_executions') }}</p><pre v-for="(execution, index) in detail.executions" :key="index" data-testid="skill-execution">{{ stringify(execution) }}</pre></section>
+            </div>
             <div v-if="confirmation" class="memory-skill-confirm" role="alertdialog" aria-modal="false" :aria-label="t('memory.skills.confirm_title')" data-testid="skill-confirmation">
               <h3>{{ t('memory.skills.confirm_title') }}</h3><p>{{ t(`memory.skills.${confirmation}_confirm`) }}</p><code>{{ detail.version_id }} · r{{ detail.revision }}</code>
               <div class="memory-skill-actions"><button class="memory-button is-primary" :disabled="busy || editing" data-testid="skill-confirm" @click="confirmAction">{{ t('memory.skills.confirm') }}</button><button class="memory-button" @click="confirmation = null">{{ t('memory.skills.cancel') }}</button></div>
@@ -299,10 +331,13 @@ async function savePolicy() {
           </article>
         </div>
       </div>
+      <div v-if="leavePending" ref="leaveDialog" class="memory-skill-confirm" role="alertdialog" :aria-label="t('memory.ui.skill_unsaved_title')" data-testid="skill-leave-confirmation" @keydown.esc="cancelLeave">
+        <h3>{{ t('memory.ui.skill_unsaved_title') }}</h3><p>{{ t('memory.ui.skill_unsaved_body') }}</p><div class="memory-skill-actions"><button type="button" class="memory-button" data-testid="skill-leave-cancel" @click="cancelLeave">{{ t('memory.ui.keep_editing') }}</button><button type="button" class="memory-button is-danger" data-testid="skill-leave-discard" @click="discardAndLeave">{{ t('memory.ui.discard_changes') }}</button></div>
+      </div>
       <details class="memory-skill-policy"><summary>{{ t('memory.skills.policy') }}</summary>
         <p v-if="policyLoading">{{ t('memory.skills.loading') }}</p><div v-if="policyError" role="alert"><p class="memory-error" data-testid="skill-policy-error">{{ policyError }}</p><button class="memory-button" @click="loadPolicy">{{ t('memory.skills.retry') }}</button></div>
-        <form v-if="policyState && policyDraft" @submit.prevent="savePolicy"><p>r{{ policyState.revision }} · <code>{{ policyState.hash }}</code></p>
-          <fieldset :disabled="!policyState.can_manage_policy || busy"><legend>{{ t('memory.skills.policy_limits') }}</legend>
+        <form v-if="policyState && policyDraft" @submit.prevent="savePolicy"><p>{{ t('memory.ui.skill_policy_scope') }} <code>{{ scopeId }}</code> · r{{ policyState.revision }} · <code>{{ policyState.hash }}</code></p>
+          <fieldset :disabled="!policyState.can_manage_policy || busy || editing"><legend>{{ t('memory.skills.policy_limits') }}</legend>
             <label>{{ t('memory.skills.minimum_successes') }}<input v-model.number="policyDraft.minimum_independent_successes" type="number" min="2" max="100" required data-testid="skill-policy-minimum" /></label>
             <label>{{ t('memory.skills.auto_publish') }}<select v-model="policyDraft.auto_mode"><option>off</option><option>shadow</option></select></label>
             <label>Canary<select v-model="policyDraft.canary_mode"><option>off</option><option>shadow</option></select></label>
@@ -345,5 +380,15 @@ async function savePolicy() {
 .memory-skill-confirm{border:1px solid var(--border);padding:20px;background:var(--bg-secondary);margin-top:20px;border-radius:8px}
 .memory-skill-policy{border-top:1px solid var(--border);padding-top:20px}.memory-skill-policy summary{cursor:pointer}.memory-skill-policy form{max-width:640px}.memory-skill-policy fieldset{display:grid;grid-template-columns:2fr 1fr 1fr;gap:16px}
 .memory-skills-workspace :deep(.memory-skill-editor){margin-top:20px;display:grid;gap:12px}.memory-skills-workspace :deep(.memory-skill-fields)>*{flex:1}
-@media(max-width:760px){.memory-skills-workspace{padding:12px}.memory-skill-layout{grid-template-columns:1fr}.memory-skill-index{border-right:0;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr;gap:12px;padding-right:0}.memory-skill-index section+section{margin-top:0}.memory-skill-main{padding:20px 0}.memory-skill-modes{gap:12px;flex-wrap:wrap}.memory-skill-diff>div{grid-template-columns:1fr}.memory-skill-policy fieldset{grid-template-columns:1fr}.memory-skill-provenance{grid-template-columns:80px minmax(0,1fr)}}
+/* Reading and editing keep the document width; state comes from the server. */
+.memory-skills-workspace{container-type:inline-size;padding:0;line-height:1.7}
+.memory-skill-layout{grid-template-columns:232px minmax(0,1fr);border:1px solid var(--border);border-radius:10px;overflow:clip;align-items:start}
+.memory-skill-index{padding:18px 12px;background:var(--bg-secondary);align-self:stretch}.memory-skill-index h2{display:flex;justify-content:space-between;gap:8px}.memory-skill-index small{font-size:10px;font-weight:400}.memory-skill-index-help{font-size:11px;padding:0 8px}
+.memory-skill-row.selected{background:var(--brand-soft,var(--bg));border-color:var(--accent);box-shadow:inset 2px 0 var(--accent)}
+.memory-skill-detail-head{align-items:start}.memory-skill-detail-head h2{font-size:20px;line-height:1.55;overflow-wrap:anywhere;margin-bottom:8px}.memory-skill-detail-head .memory-skill-actions{margin:0}.memory-eyebrow{font-size:11px;color:var(--fg-secondary);margin:0 0 6px}
+.memory-skill-badges{display:flex;gap:6px;flex-wrap:wrap;font-size:11px}.memory-skill-badges>span{padding:2px 7px;border:1px solid var(--border);border-radius:4px}.memory-skill-more{position:relative;font-size:12px}.memory-skill-more summary{cursor:pointer;padding:8px}.memory-skill-more[open]{padding-bottom:8px}.memory-skill-more button{display:block}
+.memory-skill-main{padding:22px 24px}.memory-skill-main [role=tabpanel]{margin-top:0;border-top:0;padding-top:0}.memory-skill-back{display:none}.memory-skill-replay{overflow-x:auto}.memory-skill-replay table{min-width:420px}
+.memory-skill-policy{margin-top:22px}.memory-skills-workspace :deep(.memory-skill-document){line-height:1.9}.memory-skills-workspace :deep(.memory-skill-document li){margin:8px 0;overflow-wrap:anywhere}.memory-skills-workspace :deep(.memory-skill-document small){font-size:11px;line-height:1.7}
+@container (max-width:700px){.memory-skill-layout{grid-template-columns:1fr}.memory-skill-index{border-right:0;border-bottom:0}.memory-skill-main{display:none;padding:20px 16px}.detail-open>.memory-skill-index{display:none}.detail-open>.memory-skill-main{display:block}.memory-skill-back{display:inline-flex;margin-bottom:16px}.memory-skill-diff>div{grid-template-columns:1fr}.memory-skill-policy fieldset{grid-template-columns:1fr}}
+@media(max-width:760px){.memory-skill-modes{gap:12px;flex-wrap:wrap}.memory-skill-toolbar{align-items:stretch}.memory-skill-toolbar>*{flex:1;min-width:140px}.memory-skills-workspace :deep(button),.memory-skills-workspace :deep(summary){min-height:44px}.memory-skills-workspace :deep(input:not([type=checkbox])),.memory-skills-workspace :deep(select),.memory-skills-workspace :deep(textarea){font-size:16px;min-height:44px}.memory-skills-workspace :deep(.memory-skill-document){font-size:14px}.memory-skill-provenance{grid-template-columns:80px minmax(0,1fr)}}
 </style>

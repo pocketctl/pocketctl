@@ -1,3 +1,4 @@
+import {recordFirstClaim} from '../platform-statistics/service.js'
 import type pg from 'pg'
 import {TargetBindingError} from '../governance/authorization.js'
 import type { ClaimType, ScopeKind } from './types.js'
@@ -76,5 +77,6 @@ export async function writeManualEntry(client: pg.PoolClient, input: ManualEntry
     [input.installationId,claimId,lifecycleKind[claimType]??'fact',prior?'user_corrected':'none'])
   await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
     VALUES(gen_random_uuid(),$1,'index_claim_version',$2,90,$3::jsonb) ON CONFLICT DO NOTHING`,[input.installationId,`index:${versionId}`,JSON.stringify({version_id:versionId})])
+  if(!prior)await recordFirstClaim(client,{installationId:input.installationId,claimId,source:'manual'})
   return {ok:true as const,metadata:{claim_id:claimId,version_id:versionId,version_number:versionNumber,state:'active',source_kind:'manual_entry'}}
 }

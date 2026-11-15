@@ -12,6 +12,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/codexhome"
 	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 // CodexHome returns Codex's home directory, honoring the CODEX_HOME environment
@@ -358,6 +359,7 @@ func (a *CodexAdapter) ParseStreamLine(line string) ([]protocol.DaemonEvent, err
 // only bounded Plan identity state; Codex has no slash-command state, so
 // SetPendingCmd is a no-op.
 type CodexJSONLParser struct {
+	usageModel              string
 	plan                    codexPlanTracker
 	turns                   codexTurnTracker
 	pendingAgentMessageText string
@@ -384,6 +386,14 @@ func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 	var payload codexPayload
 	if json.Unmarshal([]byte(line), &raw) != nil || json.Unmarshal(raw.Payload, &payload) != nil {
 		return events, nil
+	}
+	if raw.Type == "turn_context" && payload.Model != "" {
+		p.usageModel = payload.Model
+	}
+	for i := range events {
+		if events[i].UsageMeta != nil {
+			events[i].UsageMeta.Model = p.usageModel
+		}
 	}
 	events = p.turns.decorate(raw.Type, payload, events)
 
@@ -445,7 +455,20 @@ func normalizeCodexAgentMessage(text string) string {
 // session is non-nil when called from the streaming adapter (so it can record
 // the session id/model parsed from session_meta); nil when called from the
 // JSONL parser (events are stamped by the tailer instead).
-func parseCodexLine(line string, session *CodexAdapter, plan *codexPlanTracker) ([]protocol.DaemonEvent, error) {
+func parseCodexLine(line string, session *CodexAdapter, plan *codexPlanTracker) (events []protocol.DaemonEvent, err error) {
+	defer func() {
+		var record struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil {
+			return
+		}
+		model := ""
+		if session != nil {
+			model = session.model
+		}
+		usageanalytics.Enrich(events, "codex", "", record.Timestamp, model, "includes_cache", 0, false)
+	}()
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return nil, nil

@@ -2228,4 +2228,75 @@ suite('controlled personal Relay source reader',()=>{
  })
 
 
+ test('the shared-active curation queue retains one uncertain attempt through worker replacement',async()=>{
+  const {randomUUID}=await import('node:crypto')
+  const {createCurationWorker}=await import('../../curation/worker.js')
+  const {stageLifecycleTurn}=await import('../../curation/task-repository.js')
+  const {createJobWorker}=await import('../../jobs/worker.js')
+  const {createJobRepository}=await import('../../jobs/repository.js')
+  const {createProviderBudgetStore,withTextProviderBudget}=await import('../../model/provider-budget.js')
+  const installationId=randomUUID(),source=randomUUID(),canonical='9007199254741771',session='uncertain-'+source,turn='turn-'+source,at=new Date()
+  const provenance={version:1,producer:'codex',session_id:session,turn_id:turn,event_id:randomUUID(),sequence:'1',invocation_id:'synthetic-user',source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}
+  const payload={text:'This isolated test simulates a provider response timeout.',turn_id:turn,actor_scope:'user',memory_source:provenance}
+  const payloadHash=canonicalPayloadHash(payload)
+  await pool.query("UPDATE shared.memory_source_contract SET activation_ready=TRUE")
+  await pool.query("INSERT INTO public.sessions VALUES($1,1,'daemon','codex','hot','codex')",[session])
+  await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status,body_storage) VALUES($1,1,$2,'user_text',$3,'completed','hot')",[canonical,session,payload])
+  await pool.query("SELECT shared.mark_memory_source_dirty('relay_event',$1)",['1:'+session])
+  await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id,owner_scope_kind,owner_scope_id,status,authorization_epoch,config_version,granted_scopes,enabled_services) VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'])",[installationId])
+  await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-active',2)",[installationId])
+  await runtime.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[installationId])
+  await runtime.query("INSERT INTO memory_owner_scopes(installation_id,owner_scope_kind,owner_scope_id) VALUES($1,'personal',$1)",[installationId])
+  await runtime.query("INSERT INTO memory_curation_policies(installation_id,mode) VALUES($1,'enabled')",[installationId])
+  await runtime.query("INSERT INTO source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at) VALUES($1,$2,$3,$3)",[installationId,session,at])
+  const scope={installationId,principalUserId:'1',ownerScopeKind:'personal' as const,ownerScopeId:installationId,authorizationRevision:'1',configVersion:'1',modeGeneration:'2'}
+  const reader=createPostgresSharedSourceReader(runtime),root={kind:'relay_event' as const,key:'1:'+session}
+  const page=await reader.getHeads(scope,root,[canonical]),head=page.heads[0]
+  await sealRoot(root.key)
+  await runtime.query(`INSERT INTO memory_canonical_projection_progress(installation_id,source_kind,root_key,context_key,source_version,state)
+   VALUES($1,'relay_event',$2,$3,$4,'ready')`,[installationId,root.key,canonicalPayloadHash(scope).toString('hex'),page.version])
+  const client=await runtime.connect()
+  try{
+   await client.query('BEGIN')
+   const event=(await client.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash,classification,source_provenance,
+    source_kind,canonical_key,canonical_session_key,source_version,content_hash,hash_version,mapping_state,adapter_version)
+    VALUES($1,$2,'feed',$3,$4,$5,'user_text',$6,NULL,$7,$8,$9,'relay_event',$3,$4,$10,$11,'canonical-json-sha256-v1','verified','v1') RETURNING *`,
+   [source,installationId,canonical,session,turn,at,payloadHash,head.classification,{memory:provenance},page.version,Buffer.from(head.contentHash,'hex')])).rows[0]
+   await stageLifecycleTurn(client,{installationId,sessionId:session,turnId:turn,events:[{...event,payload}]},
+    {mode:'enabled',revision:1,authorizationEpoch:'1',version:'memory-lifecycle-v1'})
+   await client.query('COMMIT')
+  }finally{await client.query('ROLLBACK');client.release()}
+  const first=(await runtime.query("SELECT job_id,payload FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task'",[installationId])).rows[0]
+  const jobs=createJobRepository(runtime),budgetKey=randomUUID(),errors:string[]=[]
+  const {JOB_PRIORITIES}=await import('../../jobs/types.js')
+  const concurrencyLimits=Object.fromEntries(Object.keys(JOB_PRIORITIES).map(kind=>[kind,kind==='consolidate_task'?8:0]))
+  let calls=0
+  const run=async(workerId:string)=>{
+   const worker=createJobWorker({pool:runtime,jobs,workerId,concurrencyLimits,signal:new AbortController().signal,onError:error=>errors.push(String(error))})
+   const model=withTextProviderBudget({async generateJson(){calls++;return {ok:false,code:'http_error',detail:'timeout',retryable:true}}},
+    createProviderBudgetStore(runtime),{key:budgetKey,maxRequests:10,maxInputTokens:100000,maxOutputTokens:10000,maxOutputTokensPerRequest:100})
+   const curator=createCurationWorker({pool:runtime,mode:'enabled',textGenerator:model,modelFingerprint:'uncertain-canonical-synthetic'})
+   worker.register('consolidate_task',(job,signal,ctx)=>curator.consolidate(job,signal,ctx?.fence))
+   try{await worker.tick()}finally{await worker.stop()}
+  }
+  await run('uncertain-original-worker')
+  expect(errors).toEqual([])
+  const receipt=async()=>(await pool.query(`SELECT a.reservation_id,a.state AS attempt_state,e.branch,b.state AS budget_state,b.actual_input_tokens,b.actual_output_tokens
+   FROM shared.memory_source_provider_attempts a JOIN shared.memory_source_executions e USING(execution_id)
+   JOIN memory.memory_provider_budget_reservations b USING(reservation_id) WHERE e.installation_id=$1`,[installationId])).rows
+  const firstReceipt=await receipt()
+  if(firstReceipt.length!==1)throw Error('synthetic_curation_not_called:'+JSON.stringify((await runtime.query('SELECT state,attempts,last_error_code,claim_epoch FROM memory_jobs WHERE job_id=$1',[first.job_id])).rows))
+  expect(firstReceipt).toEqual([{reservation_id:expect.any(String),attempt_state:'uncertain',branch:'canonical-active',budget_state:'reserved',actual_input_tokens:'0',actual_output_tokens:'0'}])
+  expect((await runtime.query('SELECT state,error_code FROM memory_curation_runs WHERE installation_id=$1',[installationId])).rows).toEqual([{state:'provider_result_unknown',error_code:'provider_result_unknown'}])
+  await jobs.enqueueJob({installationId,jobType:'consolidate_task',idempotencyKey:'isolated-unknown-redelivery',payload:first.payload})
+  await run('uncertain-replacement-worker')
+  expect(errors).toEqual([])
+  expect(calls).toBe(1)
+  expect(await receipt()).toEqual(firstReceipt)
+  expect((await runtime.query("SELECT state,attempts FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task' ORDER BY job_id",[installationId])).rows).toEqual([{state:'completed',attempts:1},{state:'completed',attempts:1}])
+  for(const table of ['memory_candidates','knowledge_claims','memory_usage_outbox','memory_curation_decisions']){
+   expect((await runtime.query('SELECT 1 FROM '+table+' WHERE installation_id=$1',[installationId])).rowCount).toBe(0)
+  }
+ })
+
 })

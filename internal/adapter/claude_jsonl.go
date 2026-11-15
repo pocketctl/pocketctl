@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/usageanalytics"
 )
 
 // JSONL entry structures — Claude Code's session history format
@@ -28,6 +29,7 @@ type JSONLEntry struct {
 }
 
 type JSONLMessage struct {
+	ID         string          `json:"id,omitempty"`
 	Role       string          `json:"role"`
 	Model      string          `json:"model,omitempty"`       // "<synthetic>" marks local-command replies
 	StopReason string          `json:"stop_reason,omitempty"` // assistant terminal evidence (end_turn, tool_use, …) — preserved, not guessed
@@ -44,6 +46,7 @@ type JSONLContentBlock struct {
 	ID        string          `json:"id,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
 }
 
 // computeTurnCost estimates per-turn cost from usage tokens.
@@ -163,7 +166,12 @@ func parseAssistantJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, 
 			// Skip thinking blocks
 		}
 	}
-	return events, nil
+
+	id := entry.Message.ID
+	if id == "" {
+		id = entry.UUID
+	}
+	return enrichClaudeUsage(events, id, entry.Timestamp, entry.Message.Model, sid, entry.Message.Usage), nil
 }
 
 func parseUserJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error) {
@@ -204,7 +212,13 @@ func parseUserJSONL(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error
 				output = b.Text
 			}
 			events = append(events, protocol.DaemonEvent{
-				Type:      "tool_result",
+				Type: "tool_result",
+				CallMeta: usageanalytics.ClaudeCall(b.ToolUseID, "", entry.Timestamp, func() string {
+					if b.IsError {
+						return "failure"
+					}
+					return "success"
+				}()),
 				SessionID: sid,
 				CallID:    b.ToolUseID,
 				Output:    output,
@@ -531,7 +545,16 @@ func isEntryPureInterruptMarker(entry JSONLEntry) bool {
 
 // parseAssistant mirrors ClaudeAdapter.convertAssistant: synthetic text blocks
 // (model "<synthetic>") become command_receipt, real text becomes agent_text.
-func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]protocol.DaemonEvent, error) {
+func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) (events []protocol.DaemonEvent, err error) {
+	defer func() {
+		if entry.Message != nil {
+			id := entry.Message.ID
+			if id == "" {
+				id = entry.UUID
+			}
+			events = enrichClaudeUsage(events, id, entry.Timestamp, entry.Message.Model, sid, entry.Message.Usage)
+		}
+	}()
 	if entry.Message == nil {
 		return nil, nil
 	}
@@ -543,7 +566,6 @@ func (p *JSONLStreamParser) parseAssistant(entry JSONLEntry, sid string) ([]prot
 		return nil, nil
 	}
 
-	var events []protocol.DaemonEvent
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
