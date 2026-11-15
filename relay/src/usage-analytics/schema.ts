@@ -139,4 +139,15 @@ export async function initUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){await d
  `)
  if(process.env.PERSONAL_USAGE_WRITE==='true')await db.query('UPDATE usage_analytics_state SET write_enabled=TRUE')
 }
-export async function assertUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){const r=await db.query("SELECT to_regclass('public.usage_analytics_state') IS NOT NULL AS ready");if(!r.rows[0]?.ready)throw Error('usage_schema_migrator_required');const v=await db.query('SELECT version FROM usage_analytics_state');if(v.rows.length!==1||v.rows[0].version!==1)throw Error('usage_schema_unsupported')}
+export async function assertUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){
+ const r=await db.query("SELECT to_regclass('public.usage_analytics_state') IS NOT NULL AS ready")
+ if(!r.rows[0]?.ready)throw Error('usage_schema_migrator_required')
+ const v=await db.query('SELECT version,write_enabled FROM usage_analytics_state')
+ if(v.rows.length!==1||v.rows[0].version!==1)throw Error('usage_schema_unsupported')
+ // The database switch activates token-fact triggers independently of the
+ // process flag. A missing nextval capability otherwise rolls back ingress.
+ if(v.rows[0].write_enabled===true||process.env.PERSONAL_USAGE_WRITE==='true'){
+  const capability=await db.query("SELECT COALESCE(has_sequence_privilege(current_user,to_regclass('public.usage_change_revision'),'USAGE'),FALSE) AS ready")
+  if(!capability.rows[0]?.ready)throw Error('usage_change_sequence_usage_required')
+ }
+}

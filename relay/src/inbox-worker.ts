@@ -57,6 +57,7 @@ export function safeMaterializationError(error: unknown): string {
   if (name === 'SessionDocumentExpiredError') return 'document_upload_expired'
   if (name === 'SessionDocumentMaterializerUnavailableError') return 'document_materializer_unavailable'
   const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+  if (code === '42501') return 'database_permission_denied'
   if (code === 'session_ownership_violation' || code === 'unknown_daemon_session'
     || code === 'quota_reservation_binding_mismatch') return code
   if (['replay_payload_conflict', 'replay_provenance_conflict', 'replay_canonical_unavailable'].includes(code)) return code

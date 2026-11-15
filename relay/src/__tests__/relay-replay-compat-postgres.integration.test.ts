@@ -1,4 +1,5 @@
 import {planReplayRecovery,applyReplayRecovery,REPLAY_RECOVERY_AUDIT_SQL} from '../ops/replay-recovery.js'
+import {planUsageWriteRecovery,applyUsageWriteRecovery,USAGE_RECOVERY_AUDIT_SQL} from '../ops/usage-write-recovery.js'
 import pg from 'pg'
 import { createHash, randomUUID } from 'node:crypto'
 import { InboxRepository } from '../ingress/inbox-repository.js'
@@ -24,17 +25,51 @@ suite('canonical replay compatibility', () => {
     await assertDurableIngressTestDatabase(pool,url!)
     await initDB(pool)
     await pool.query(REPLAY_RECOVERY_AUDIT_SQL)
+    await pool.query(USAGE_RECOVERY_AUDIT_SQL)
     for (const sql of RELAY_SOURCE_HEADER_SQL.slice(1,-1)) await pool.query(sql)
   },60000)
   afterAll(async () => { await pool?.end() })
   beforeEach(async () => {
     await resetDurableIngressTestDatabase(pool,url!)
     await pool.query('TRUNCATE relay_replay_recovery_audit')
+    await pool.query('TRUNCATE relay_usage_write_recovery_audit')
     owner = (await pool.query("INSERT INTO users(email,password_hash) VALUES('replay@test.invalid','x') RETURNING id")).rows[0].id
     await pool.query("INSERT INTO daemons(daemon_id,user_id) VALUES('replay-daemon',$1)",[owner])
     await pool.query("INSERT INTO sessions(session_id,daemon_id,user_id,agent_type,status,cwd) VALUES('replay-session','replay-daemon',$1,'codex','idle','/synthetic')",[owner])
   })
   const body = () => ({type:'tool_call',session_id:'replay-session',event_id:'event-1',turn_id:'turn-1',seq:1,name:'read',input:{file:'synthetic'}})
+  test('first-write recovery retains the inbox and records usage plus delivery exactly once',async()=>{
+    const payload={type:'agent_text',session_id:'replay-session',event_id:'usage-1',seq:10,usage:{input_tokens:4,output_tokens:2}}
+    const repository=await enqueue([payload])
+    await pool.query("UPDATE event_inbox SET status=3,attempts=12,completed_at=NOW(),last_error='materialization_failed'")
+    const id=(await pool.query('SELECT inbox_id::text FROM event_inbox')).rows[0].inbox_id
+    const manifest=await planUsageWriteRecovery(pool,{daemonId:'replay-daemon',ownerId:owner,generation:'1'},[id])
+    expect(manifest.entries).toHaveLength(1)
+    expect((await applyUsageWriteRecovery(pool,manifest,manifest.digest)).applied).toBe(1)
+    const worker=createInboxWorker({repository,materializer:new EventMaterializer({pool,writeTokenUsageFacts:true,extensionJournalSink:null}),outboxWriter:new RealtimeOutboxWriter(pool),workerId:'usage-recovery',shardCount:1,shardIndex:0})
+    await worker.runOnce();await worker.runOnce()
+    expect((await pool.query('SELECT status,payload FROM event_inbox')).rows).toEqual([{status:2,payload}])
+    expect((await pool.query('SELECT count(*) FROM realtime_outbox')).rows[0].count).toBe('1')
+    expect((await pool.query('SELECT count(*) FROM token_usage_facts WHERE fact_key=$1',['inbox:'+id])).rows[0].count).toBe('1')
+    expect((await applyUsageWriteRecovery(pool,manifest,manifest.digest)).alreadyApplied).toBe(1)
+  })
+  test('first-write recovery refuses changed manifests, active claims, altered rows and new canonical writes',async()=>{
+    const payload={type:'agent_text',session_id:'replay-session',event_id:'usage-1',seq:10,usage:{input_tokens:4}}
+    await enqueue([payload,{...payload,event_id:'usage-2',seq:11}])
+    await pool.query("UPDATE event_inbox SET status=3,attempts=12,completed_at=NOW(),last_error='materialization_failed'")
+    const ids=(await pool.query('SELECT inbox_id::text FROM event_inbox ORDER BY seq')).rows.map(r=>r.inbox_id)
+    const manifest=await planUsageWriteRecovery(pool,{daemonId:'replay-daemon',ownerId:owner,generation:'1'},ids)
+    await expect(applyUsageWriteRecovery(pool,manifest,'wrong')).rejects.toThrow('manifest_digest_mismatch')
+    await pool.query('UPDATE event_inbox SET status=1 WHERE inbox_id=$1',[ids[1]])
+    await expect(applyUsageWriteRecovery(pool,manifest,manifest.digest)).rejects.toThrow('active_claims_present')
+    await pool.query('UPDATE event_inbox SET status=3,attempts=13 WHERE inbox_id=$1',[ids[1]])
+    await expect(applyUsageWriteRecovery(pool,manifest,manifest.digest)).rejects.toThrow('candidate_changed')
+    expect((await pool.query('SELECT count(*) FROM event_inbox WHERE status=0')).rows[0].count).toBe('0')
+    expect((await pool.query('SELECT count(*) FROM relay_usage_write_recovery_audit')).rows[0].count).toBe('0')
+    await pool.query('UPDATE event_inbox SET attempts=12 WHERE inbox_id=$1',[ids[1]])
+    await new EventMaterializer({pool,extensionJournalSink:null}).materialize({...input(payload),eventType:'agent_text'})
+    await expect(applyUsageWriteRecovery(pool,manifest,manifest.digest)).rejects.toThrow('canonical_already_exists')
+  })
   const proof = () => ({version:1,producer:'codex',session_id:'replay-session',event_id:'event-1',turn_id:'turn-1',sequence:'1',invocation_id:'turn-1',source_role:'tool',skill_state:'unknown',lineage_complete:false,derived_from_event_ids:[]})
   function materializer(shared=true) { return new EventMaterializer({pool,extensionJournalSink:shared?createPostgresExtensionJournalSink({sharedHeaders:true}):null}) }
   function input(payload:Record<string,unknown>) { return {inboxId:0,userId:owner,daemonId:'replay-daemon',sessionId:'replay-session',eventType:'tool_call',payload} }
