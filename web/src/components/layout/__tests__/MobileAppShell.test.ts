@@ -1,7 +1,7 @@
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
-import { computed, ref } from 'vue'
+import { beforeAll, beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
+import { computed, ref, type Component } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import logoDark from '../../../assets/logo-github-org.svg'
 import logoLight from '../../../assets/logo-github-org-light.svg'
@@ -9,6 +9,10 @@ import type { createTeamAccessController } from '../../../composables/useTeamAcc
 import type { TeamCapabilities } from '../../../types/team'
 import { resetAgentPlanProgressForTests, useAgentPlanProgress } from '../../../composables/useAgentPlanProgress'
 
+// Compile the full application once in suite preparation, outside each
+// navigation assertion's timeout and before changing shared responsive state.
+let App: Component
+beforeAll(async () => { App = (await import('../../../App.vue')).default })
 const mobile = ref(true)
 const loggedIn = ref(true)
 const statisticsAllowed = ref(false)
@@ -70,7 +74,6 @@ describe('mobile application shell', () => {
   test.each([true,false])('statistics navigation follows server capability on mobile=%s', async narrow => {
     const previousMobile = mobile.value; mobile.value = narrow
     const router = testRouter('/settings'); await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
       if (narrow) await wrapper.get('.mobile-menu-trigger').trigger('click')
@@ -90,7 +93,6 @@ describe('mobile application shell', () => {
     const previousMobile = mobile.value, previousLogin = loggedIn.value
     mobile.value = true; loggedIn.value = false; canReadOfflineTeams.value = true
     const router = testRouter('/teams'); await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
       await wrapper.get('.mobile-menu-trigger').trigger('click'); await flushPromises()
@@ -107,7 +109,6 @@ describe('mobile application shell', () => {
     send.mockClear()
     const router = testRouter('/settings')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
       expect(send).not.toHaveBeenCalledWith({ type: 'list_daemons' })
@@ -145,7 +146,6 @@ describe('mobile application shell', () => {
     localStorage.setItem('pocketctl-theme', theme)
     const router = testRouter('/memory')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     const assertLogoOnAllModules = async (expectedTheme: string) => {
       for (const path of ['/sessions', '/memory', '/teams']) {
@@ -187,7 +187,6 @@ describe('mobile application shell', () => {
     mobile.value = true; teamEnabled.value = true
     const router = testRouter(path)
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { attachTo: document.body, global: { plugins: [router] } })
     try {
       expect(wrapper.find('.mobile-topbar').exists()).toBe(true)
@@ -215,7 +214,6 @@ describe('mobile application shell', () => {
     await realTeamAccess.refresh()
     const router = testRouter('/teams')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
       await flushPromises()
@@ -237,7 +235,6 @@ describe('mobile application shell', () => {
   test('keeps Team out of the mobile bottom nav and gates the desktop entry by account', async () => {
     const router = testRouter('/settings')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
       teamEnabled.value = false; mobile.value = true
@@ -257,7 +254,6 @@ describe('mobile application shell', () => {
   test('replaces the desktop sidebar with accessible mobile navigation', async () => {
     const router = testRouter('/settings')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
     expect(wrapper.find('.mobile-app-shell').exists()).toBe(true)
@@ -272,7 +268,6 @@ describe('mobile application shell', () => {
   test('mobile navigation uses the drawer and leaves the working area free of bottom tabs', async () => {
     const router = testRouter('/settings')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     try {
       expect(wrapper.find('.mobile-bottom-nav').exists()).toBe(false)
@@ -283,7 +278,6 @@ describe('mobile application shell', () => {
   test('lets the session list render its iOS-style navigation chrome', async () => {
     const router = testRouter()
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
     expect(wrapper.find('.mobile-topbar').exists()).toBe(false)
@@ -294,7 +288,6 @@ describe('mobile application shell', () => {
   test('hides bottom navigation inside a session to maximize message space', async () => {
     const router = testRouter('/session/ses_1')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
     expect(wrapper.find('.mobile-topbar-back').exists()).toBe(true)
@@ -309,7 +302,6 @@ describe('mobile application shell', () => {
     })
     const router = testRouter('/session/ses_1')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
     const input = document.createElement('input')
     document.body.appendChild(input)
@@ -338,7 +330,6 @@ describe('mobile application shell', () => {
     })
     const router = testRouter('/session/ses_1')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
     expect(wrapper.find('.mobile-plan-action').exists()).toBe(false)
@@ -355,7 +346,6 @@ describe('mobile application shell', () => {
     mobile.value = false
     const router = testRouter()
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
     expect(wrapper.find('.sidebar').exists()).toBe(true)
@@ -368,7 +358,6 @@ describe('mobile application shell', () => {
     localStorage.removeItem('pocketctl_sidebar_collapsed')
     const router = testRouter('/session/ses_1')
     await router.isReady()
-    const App = (await import('../../../App.vue')).default
     const wrapper = mount(App, { global: { plugins: [router] } })
 
     expect(wrapper.get('.app-layout').classes()).not.toContain('sidebar-collapsed')
