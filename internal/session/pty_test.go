@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"os"
 	"path/filepath"
@@ -141,13 +142,22 @@ func TestStartPTYCliStdinWriteRead(t *testing.T) {
 	if _, err := ptmx.Write([]byte("hello-pty\r")); err != nil {
 		t.Fatalf("write stdin: %v", err)
 	}
-	buf := make([]byte, 512)
-	n, err := ptmx.Read(buf)
-	if err != nil {
-		t.Skipf("read stdout (pty echo timing): %v", err)
+	type echoResult struct {
+		line string
+		err  error
 	}
-	if !strings.Contains(string(buf[:n]), "hello-pty") {
-		t.Errorf("expected echo of 'hello-pty', got %q", buf[:n])
+	result := make(chan echoResult, 1)
+	go func() {
+		line, err := bufio.NewReader(ptmx).ReadString('\n')
+		result <- echoResult{line, err}
+	}()
+	select {
+	case echo := <-result:
+		if echo.err != nil || !strings.Contains(echo.line, "hello-pty") {
+			t.Fatalf("expected echo of 'hello-pty', got %q (%v)", echo.line, echo.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the PTY echo")
 	}
 }
 

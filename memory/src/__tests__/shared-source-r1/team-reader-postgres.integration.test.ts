@@ -17,10 +17,10 @@ suite('Team independent canonical reader adapters',()=>{
   if(!url||!/(^|_)test$/.test(new URL(url).pathname.slice(1)))throw Error('isolated_test_required')
   pool=new pg.Pool({connectionString:url});await pool.query('DROP SCHEMA IF EXISTS memory CASCADE; DROP SCHEMA IF EXISTS shared CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public')
   const inputFoundation=await beginFreshInputFixture(pool)
-  await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
+  await applyMemorySchema(pool,{namespace:'memory'})
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY,team_enabled boolean); INSERT INTO public.users VALUES(1,true),(2,true);
    CREATE TABLE public.extension_providers(provider_id text,status text); INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0,subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT now());
    CREATE TABLE public.extension_scope_memberships(scope_kind text,scope_id uuid,user_id int,state text,roles text[],membership_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),membership_revision bigint DEFAULT 1);
    CREATE TABLE public.extension_teams(team_id uuid,organization_id uuid,state text,authorization_epoch bigint DEFAULT 1);
    CREATE TABLE public.extension_organizations(organization_id uuid,state text,authorization_epoch bigint DEFAULT 1);
@@ -40,11 +40,13 @@ suite('Team independent canonical reader adapters',()=>{
    INSERT INTO public.team_task_specs VALUES('task',1,'delivery goal','delivery criteria',1,1,'2026-11-01T00:00:00Z');
    CREATE TABLE public.team_artifact_revocations(submission_id uuid);
    CREATE TABLE public.team_delivery_memory_withdrawals(team_id text,team_session_id text,submission_id uuid,decision_id uuid);
+   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,ack_feed_id bigint NOT NULL DEFAULT 0,snapshot_required_at timestamptz,lease_epoch bigint NOT NULL DEFAULT 0,lease_token_hash bytea,lease_expires_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    DO $$ BEGIN
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_team_memory') THEN CREATE ROLE shared_team_memory LOGIN PASSWORD 'only-test';END IF;
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_team_relay') THEN CREATE ROLE shared_team_relay NOLOGIN;END IF;
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_team_migrator') THEN CREATE ROLE shared_team_migrator NOLOGIN;END IF;
    END $$;`)
+  await applySharedSourceContract(pool)
   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}');",[inst])
   await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[inst])
   await pool.query("INSERT INTO public.team_memory_bindings VALUES('b','team',$1,'personal',$1,'active',1)",[inst])

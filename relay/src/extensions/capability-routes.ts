@@ -111,11 +111,15 @@ export function createCapabilityGrantService(
         status: string
         enabled_services: string[]
         config_version: string | number
+        session_owned: boolean
       }>(
-        `SELECT provider_id, owner_user_id, status, enabled_services, config_version
+        `SELECT provider_id, owner_user_id, status, enabled_services, config_version,
+           ($3::text IS NULL OR EXISTS (
+             SELECT 1 FROM sessions s WHERE s.session_id = $3 AND s.user_id = $2
+           )) AS session_owned
          FROM extension_installations
          WHERE installation_id = $1 AND owner_user_id = $2`,
-        [input.installationId, input.userId],
+        [input.installationId, input.userId, sessionId],
       )
       const row = installation.rows[0]
       if (!row) {
@@ -135,19 +139,8 @@ export function createCapabilityGrantService(
         return { ok: false, error: new ExtensionApiError('forbidden', 'requested services are not enabled for this installation') }
       }
 
-      if (sessionId !== null) {
-        // Session ownership in the same SQL boundary as the installation
-        // lookup: one owner-scoped existence check, no separate unrestricted
-        // read helper.
-        const owned = await deps.pool.query(
-          `SELECT 1 FROM sessions s
-           JOIN extension_installations i ON i.owner_user_id = s.user_id
-           WHERE i.installation_id = $1 AND s.session_id = $2`,
-          [input.installationId, sessionId],
-        )
-        if ((owned.rowCount ?? 0) === 0) {
-          return { ok: false, error: new ExtensionApiError('not_found', 'session not found or not owned') }
-        }
+      if (sessionId !== null && row.session_owned !== true) {
+        return { ok: false, error: new ExtensionApiError('not_found', 'session not found or not owned') }
       }
 
       const ttl = Math.min(

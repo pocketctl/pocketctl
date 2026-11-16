@@ -150,7 +150,7 @@ describe('session-bound context grant broker (Phase 2)', () => {
     return {
       query: vi.fn(async (sql: string, params?: unknown[]) => {
         if (/installation_id = .1 AND owner_user_id = .2/.test(sql)) {
-          const [installationId, userId] = params as [string, number]
+          const [installationId, userId, sessionId] = params as [string, number, string | null]
           const match = input.installations.find(row =>
             row.installation_id === installationId && row.owner_user_id === userId)
           return {
@@ -160,6 +160,8 @@ describe('session-bound context grant broker (Phase 2)', () => {
               status: match.status,
               enabled_services: match.enabled_services,
               config_version: 1,
+              session_owned: sessionId === null || input.ownedSessions.some(row =>
+                row.user_id === userId && row.session_id === sessionId),
             }] : [],
           }
         }
@@ -182,13 +184,6 @@ describe('session-bound context grant broker (Phase 2)', () => {
           const [installationId] = params as [string, number]
           const match = input.installations.find(row => row.installation_id === installationId)
           return { rows: match ? [{ status: match.status, enabled_services: match.enabled_services }] : [] }
-        }
-        if (/FROM sessions s/.test(sql)) {
-          const [installationId, sessionId] = params as [string, string]
-          const installation = input.installations.find(row => row.installation_id === installationId)
-          const owned = installation && input.ownedSessions.some(row =>
-            row.user_id === installation.owner_user_id && row.session_id === sessionId)
-          return { rows: owned ? [{ '?column?': 1 }] : [], rowCount: owned ? 1 : 0 }
         }
         return { rows: [] }
       }),
@@ -486,6 +481,39 @@ describe('session-bound context grant broker (Phase 2)', () => {
       type: 'memory_context_grant_result',
       installation_id: INSTALL.installation_id,
     })
+  })
+
+  test('session-bound Context mint uses one fresh authorization lookup after resolution', async () => {
+    const pool = contextPoolWith({
+      installations: [INSTALL],
+      ownedSessions: [{ session_id: 'ses-own', user_id: 42 }],
+    })
+    const broker = createMemoryContextGrantBroker({
+      pool: pool as any, issuer: ISSUER, mode: 'enabled', grantKeys: grantKeysMaterial,
+      providerPublicOrigins: new Map([['pocketctl-memory', 'https://memory.example']]),
+    })
+    expect(await broker.requestGrant({ userId: 42 }, 'ses-own')).toMatchObject({ type: 'memory_context_grant_result' })
+    expect(pool.query.mock.calls.filter(([sql]) => !sql.includes('INSERT INTO audit_log'))).toHaveLength(2)
+    expect(await broker.drainAudits(1000)).toBe(true)
+  })
+
+  test('a Session transferred after resolution does not receive a signed Context grant', async () => {
+    const ownedSessions = [{ session_id: 'ses-own', user_id: 42 }]
+    const pool = contextPoolWith({ installations: [INSTALL], ownedSessions })
+    const original = pool.query.getMockImplementation()!
+    pool.query.mockImplementation(async (sql, params) => {
+      const result = await original(sql, params)
+      if (sql.includes('FROM extension_installations i')) ownedSessions[0].user_id = 77
+      return result
+    })
+    const broker = createMemoryContextGrantBroker({
+      pool: pool as any, issuer: ISSUER, mode: 'enabled', grantKeys: grantKeysMaterial,
+      providerPublicOrigins: new Map([['pocketctl-memory', 'https://memory.example']]),
+    })
+    expect(await broker.requestGrant({ userId: 42 }, 'ses-own')).toEqual({
+      type: 'memory_context_grant_error', code: 'internal_error',
+    })
+    expect(pool.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO audit_log'))).toBe(false)
   })
 
   test('session ownership and active context installation resolve in one query', async () => {
