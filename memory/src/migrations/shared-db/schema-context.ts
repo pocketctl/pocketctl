@@ -11,7 +11,7 @@ export async function assertMemoryNamespace(db:Pick<pg.Pool,'query'>,namespace:M
  if(namespace==='public'&&(state.shared||state.target))throw new Error('shared_source_requires_memory_namespace')
  if(namespace==='memory'&&state.legacy)throw new Error('dual_memory_namespace_forbidden')
  if(state.shared){
-  const versions=(await db.query("SELECT version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version,COALESCE(to_jsonb(contract)->>'delivery_source_set_capture_version','0') AS delivery_source_set_capture_version FROM shared.memory_source_contract contract")).rows
+  const versions=(await db.query("SELECT version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'processing_read_version','0') AS processing_read_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version,COALESCE(to_jsonb(contract)->>'delivery_source_set_capture_version','0') AS delivery_source_set_capture_version FROM shared.memory_source_contract contract")).rows
   if(versions.length!==1||versions[0].version!==1)throw new Error('unsupported_shared_source_contract')
   if(!['0','1'].includes(versions[0].input_start_version))throw new Error('unsupported_shared_input_start_contract')
   if(!['0','1'].includes(versions[0].execution_version))throw new Error('unsupported_shared_execution_contract')
@@ -19,6 +19,7 @@ export async function assertMemoryNamespace(db:Pick<pg.Pool,'query'>,namespace:M
   if(!['0','1'].includes(versions[0].distribution_version))throw new Error('unsupported_shared_distribution_contract')
   if(!['0','1'].includes(versions[0].shadow_version))throw new Error('unsupported_shared_shadow_contract')
   if(!['0','1'].includes(versions[0].processing_pin_version))throw new Error('unsupported_shared_processing_pin_contract')
+  if(!['0','1'].includes(versions[0].processing_read_version))throw new Error('unsupported_shared_processing_read_contract')
   if(!['0','1'].includes(versions[0].mode_version))throw new Error('unsupported_shared_mode_contract')
   if(!['0','1'].includes(versions[0].delivery_source_set_capture_version))throw new Error('unsupported_delivery_source_set_capture_contract')
  }

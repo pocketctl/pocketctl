@@ -2,6 +2,7 @@
  * the original reader/commit fences; privacy deletion never calls this gate. */
 export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS processing_pin_version INT NOT NULL DEFAULT 0`,
+ `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS processing_read_version INT NOT NULL DEFAULT 0`,
  `CREATE TABLE IF NOT EXISTS shared.memory_source_processing_windows(
   owner_user_id INT NOT NULL CHECK(owner_user_id>0),session_id TEXT NOT NULL CHECK(length(session_id) BETWEEN 1 AND 512),
   activity_epoch BIGINT NOT NULL CHECK(activity_epoch>=0),business_activity_at TIMESTAMPTZ,
@@ -15,12 +16,13 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
   activity_epoch BIGINT NOT NULL,lease_until TIMESTAMPTZ NOT NULL,hard_deadline TIMESTAMPTZ NOT NULL,
   PRIMARY KEY(execution_id,owner_user_id,session_id),CHECK(lease_until<=hard_deadline),
   FOREIGN KEY(owner_user_id,session_id) REFERENCES shared.memory_source_processing_windows(owner_user_id,session_id))`,
+ `ALTER TABLE shared.memory_source_processing_pins ADD COLUMN IF NOT EXISTS blocks_purge BOOLEAN NOT NULL DEFAULT TRUE`,
  `CREATE INDEX IF NOT EXISTS memory_source_processing_pins_installation ON shared.memory_source_processing_pins(installation_id,lease_until)`,
  `CREATE INDEX IF NOT EXISTS memory_source_processing_pins_expiry ON shared.memory_source_processing_pins(lease_until,execution_id)`,
  `CREATE INDEX IF NOT EXISTS memory_source_processing_pins_root ON shared.memory_source_processing_pins(owner_user_id,session_id,lease_until)`,
  `CREATE OR REPLACE FUNCTION shared.acquire_memory_source_processing_pin(p_execution UUID,p_scope JSONB,p_root TEXT,p_version JSONB,p_renew BOOLEAN)
   RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE e RECORD;s RECORD;w RECORD;pin RECORD;owner_id INT;session_key TEXT;native JSONB;stamp TIMESTAMPTZ;BEGIN
+  DECLARE e RECORD;s RECORD;w RECORD;pin RECORD;owner_id INT;session_key TEXT;native JSONB;stamp TIMESTAMPTZ;has_pin BOOLEAN;protect_purge BOOLEAN;deadline TIMESTAMPTZ;BEGIN
    IF current_setting('transaction_isolation')<>'read committed' OR p_renew IS NULL OR p_execution IS NULL
     OR p_scope IS NULL OR jsonb_typeof(p_scope)<>'object' OR octet_length(p_scope::text)>32768
     OR p_scope - 'installationId' - 'principalUserId' - 'ownerScopeKind' - 'ownerScopeId' - 'authorizationRevision' - 'configVersion' - 'modeGeneration'<>'{}'::jsonb
@@ -43,14 +45,15 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
    IF session_key IS NULL THEN RETURN FALSE;END IF;
    SELECT activity_epoch,last_business_activity_at INTO s FROM public.sessions WHERE session_id=native->>'sessionId' AND user_id=owner_id;
    IF NOT FOUND OR s.activity_epoch IS NULL OR s.activity_epoch<0 THEN RETURN FALSE;END IF;
-   IF NOT pg_try_advisory_xact_lock(hashtextextended('processing-pin:installation:'||e.installation_id::text,0)) THEN RETURN FALSE;END IF;
-   IF NOT pg_try_advisory_xact_lock(hashtextextended('processing-pin:root:'||owner_id::text||':'||session_key,0)) THEN RETURN FALSE;END IF;
+   IF NOT pg_try_advisory_xact_lock(hashtextextended('processing-pin:installation:'||e.installation_id::text,0)) THEN RAISE EXCEPTION 'source_processing_pin_busy' USING ERRCODE='55P03';END IF;
+   IF NOT pg_try_advisory_xact_lock(hashtextextended('processing-pin:root:'||owner_id::text||':'||session_key,0)) THEN RAISE EXCEPTION 'source_processing_pin_busy' USING ERRCODE='55P03';END IF;
    stamp=clock_timestamp();
    -- Bounded lease GC. Window metadata deliberately survives release/expiry.
    DELETE FROM shared.memory_source_processing_pins WHERE ctid IN(SELECT ctid FROM shared.memory_source_processing_pins
     WHERE lease_until<=stamp ORDER BY lease_until LIMIT 128 FOR UPDATE SKIP LOCKED);
    SELECT * INTO pin FROM shared.memory_source_processing_pins WHERE execution_id=p_execution AND owner_user_id=owner_id AND session_id=session_key;
-   IF NOT FOUND THEN
+   has_pin=FOUND;
+   IF NOT has_pin THEN
     IF p_renew THEN RETURN FALSE;END IF;
     IF (SELECT count(*) FROM shared.memory_source_processing_pins WHERE installation_id=e.installation_id AND lease_until>stamp)>=64
      OR (SELECT count(*) FROM shared.memory_source_processing_pins WHERE owner_user_id=owner_id AND session_id=session_key AND lease_until>stamp)>=8 THEN RETURN FALSE;END IF;
@@ -66,14 +69,25 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
     UPDATE shared.memory_source_processing_windows SET activity_epoch=s.activity_epoch,business_activity_at=s.last_business_activity_at,
      started_at=stamp,hard_deadline=stamp+interval '2 minutes' WHERE owner_user_id=owner_id AND session_id=session_key RETURNING * INTO w;
    END IF;
-   IF w.hard_deadline<=stamp THEN RETURN FALSE;END IF;
+   -- Ordinary retention protection is a root budget, not a source read ban.
+   -- A fresh execution can process still-current data after that budget ends,
+   -- but cannot delay purge. Its separate processing deadline is immutable
+   -- even across release/reacquire under the same original job claim.
+   protect_purge=CASE WHEN has_pin THEN pin.blocks_purge ELSE w.hard_deadline>stamp END;
+   deadline=CASE WHEN has_pin THEN pin.hard_deadline
+     WHEN protect_purge THEN w.hard_deadline ELSE e.created_at+interval '2 minutes' END;
+   deadline=LEAST(deadline,e.created_at+interval '2 minutes');
+   IF deadline<=stamp THEN RETURN FALSE;END IF;
    -- A fresh independently current read may refresh the vector; an old
    -- prepared page still needs its own original current-version fence.
-   INSERT INTO shared.memory_source_processing_pins(execution_id,installation_id,owner_user_id,session_id,source_scope,source_version,activity_epoch,lease_until,hard_deadline)
-    VALUES(p_execution,e.installation_id,owner_id,session_key,p_scope,p_version,s.activity_epoch,LEAST(stamp+interval '30 seconds',w.hard_deadline),w.hard_deadline)
+   INSERT INTO shared.memory_source_processing_pins(execution_id,installation_id,owner_user_id,session_id,source_scope,source_version,activity_epoch,lease_until,hard_deadline,blocks_purge)
+    VALUES(p_execution,e.installation_id,owner_id,session_key,p_scope,p_version,s.activity_epoch,LEAST(stamp+interval '30 seconds',deadline),deadline,protect_purge)
     ON CONFLICT(execution_id,owner_user_id,session_id) DO UPDATE SET source_version=EXCLUDED.source_version,activity_epoch=EXCLUDED.activity_epoch,lease_until=EXCLUDED.lease_until,hard_deadline=EXCLUDED.hard_deadline;
    RETURN TRUE;
-   EXCEPTION WHEN lock_not_available OR invalid_text_representation OR numeric_value_out_of_range THEN RETURN FALSE;
+   EXCEPTION WHEN lock_not_available THEN
+    IF SQLERRM='source_processing_pin_busy' THEN RAISE;END IF;
+    RETURN FALSE;
+   WHEN invalid_text_representation OR numeric_value_out_of_range THEN RETURN FALSE;
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.check_memory_source_processing_pin_commit() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE e RECORD;BEGIN
@@ -134,9 +148,9 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
     IF NOT FOUND THEN RAISE EXCEPTION 'processing_pin_purge_identity';END IF;
    END LOOP;
    RETURN EXISTS(SELECT 1 FROM shared.memory_source_processing_pins WHERE owner_user_id=p_owner AND session_id=ANY(alias_ids)
-    AND lease_until>clock_timestamp() AND hard_deadline>clock_timestamp());
+    AND blocks_purge AND lease_until>clock_timestamp() AND hard_deadline>clock_timestamp());
   END $$`,
  `REVOKE ALL ON shared.memory_source_processing_windows,shared.memory_source_processing_pins FROM PUBLIC`,
  `REVOKE ALL ON FUNCTION shared.acquire_memory_source_processing_pin(UUID,JSONB,TEXT,JSONB,BOOLEAN),shared.release_memory_source_processing_pins(UUID),shared.check_memory_source_processing_pin_commit(),shared.check_memory_execution_processing_commit(),shared.guard_memory_source_processing_pins(UUID,INT),shared.memory_source_processing_blocks_purge(INT,TEXT[]) FROM PUBLIC`,
- `UPDATE shared.memory_source_contract SET processing_pin_version=1 WHERE singleton`,
+ `UPDATE shared.memory_source_contract SET processing_pin_version=1,processing_read_version=1 WHERE singleton`,
 ] as const

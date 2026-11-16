@@ -79,13 +79,64 @@ suite('bounded durable native personal processing pins',()=>{
   await pool.query("UPDATE shared.memory_source_processing_windows SET started_at=t.stamp-interval '3 minutes',hard_deadline=t.stamp-interval '1 minute' FROM(SELECT clock_timestamp() AS stamp)t")
   await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[execution])
   await pool.query('UPDATE public.sessions SET activity_epoch=activity_epoch+1')
-  expect(await pin()).toBe(false)
+  expect(await pin()).toBe(true)
+  expect(await blocks()).toBe(false)
   await pool.query('UPDATE memory.memory_jobs SET claim_epoch=claim_epoch+1 WHERE job_id=$1',[job])
   const epoch=(await pool.query('SELECT claim_epoch::text FROM memory.memory_jobs WHERE job_id=$1',[job])).rows[0].claim_epoch
   const next=(await runtime.query("SELECT shared.capture_memory_job_source($1,'worker',$2,'canonical-active') AS e",[job,epoch])).rows[0].e.executionId
-  expect(await pin(next)).toBe(false)
+  expect(await pin(next)).toBe(true)
+  expect(await blocks()).toBe(false)
+  await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[next])
   await pool.query("UPDATE public.sessions SET activity_epoch=activity_epoch+1,last_business_activity_at=last_business_activity_at+interval '1 second'")
   expect(await pin(next)).toBe(true)
+  expect(await blocks()).toBe(true)
+ })
+ const expiredWindow=async()=>{
+  expect(await pin()).toBe(true)
+  await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[execution])
+  await pool.query("UPDATE shared.memory_source_processing_windows SET started_at=t.stamp-interval '3 minutes',hard_deadline=t.stamp-interval '1 minute' FROM(SELECT clock_timestamp() AS stamp)t")
+ }
+ test('expired quiet root can process under original authority without delaying ordinary purge',async()=>{
+  await expiredWindow()
+  const original=(await pool.query('SELECT hard_deadline::text FROM shared.memory_source_processing_windows')).rows[0].hard_deadline
+  const epoch=(await pool.query('SELECT claim_epoch FROM memory.memory_jobs WHERE job_id=$1',[job])).rows[0].claim_epoch
+  await withSourceJobExecution(runtime,{jobId:job,claimedBy:'worker',claimEpoch:epoch},async()=>{
+   await protectSourceExecutionBodies(runtime,scope,root,version)
+   expect(await blocks()).toBe(false)
+   await assertSourceProviderExecution()
+   const c=await runtime.connect()
+   try{await c.query('BEGIN');await guardSourceExecutionCommit(c,inst);await c.query('COMMIT')}finally{await c.query('ROLLBACK');c.release()}
+   expect((await pool.query('SELECT hard_deadline::text FROM shared.memory_source_processing_windows')).rows[0].hard_deadline).toBe(original)
+   await pool.query("INSERT INTO public.deleted_sessions VALUES('session')")
+   await expect(assertSourceProviderExecution()).rejects.toThrow('processing_pin_expired_or_unavailable')
+  })
+  expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_processing_pins')).rows[0].n).toBe(0)
+ })
+ test('unprotected processing deadline cannot be renewed or reacquired by an old execution',async()=>{
+  await expiredWindow();expect(await pin()).toBe(true);expect(await blocks()).toBe(false)
+  const first=(await pool.query('SELECT hard_deadline::text FROM shared.memory_source_processing_pins')).rows[0].hard_deadline
+  expect(await pin(execution,scope,version,true)).toBe(true)
+  await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[execution])
+  expect(await pin()).toBe(true)
+  expect((await pool.query('SELECT hard_deadline::text FROM shared.memory_source_processing_pins')).rows[0].hard_deadline).toBe(first)
+  await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[execution])
+  await pool.query("UPDATE shared.memory_source_executions SET created_at=clock_timestamp()-interval '3 minutes' WHERE execution_id=$1",[execution])
+  expect(await pin()).toBe(false)
+  await pool.query("UPDATE public.sessions SET activity_epoch=activity_epoch+1,last_business_activity_at=last_business_activity_at+interval '1 second'")
+  expect(await pin()).toBe(false)
+  await pool.query('UPDATE memory.memory_jobs SET claim_epoch=claim_epoch+1 WHERE job_id=$1',[job])
+  const nextEpoch=(await pool.query('SELECT claim_epoch FROM memory.memory_jobs WHERE job_id=$1',[job])).rows[0].claim_epoch
+  const next=(await runtime.query("SELECT shared.capture_memory_job_source($1,'worker',$2,'canonical-active') AS e",[job,nextEpoch])).rows[0].e.executionId
+  expect(await pin(next)).toBe(true)
+  expect(await blocks()).toBe(true)
+ })
+ test.each(['deleted','revoked','generation','version'])('expired-root recovery never bypasses %s authority',async denial=>{
+  await expiredWindow()
+  if(denial==='deleted')await pool.query("INSERT INTO public.deleted_sessions VALUES('session')")
+  if(denial==='revoked')await pool.query("UPDATE public.extension_installations SET status='revoking' WHERE installation_id=$1",[inst])
+  if(denial==='generation')await pool.query('UPDATE shared.memory_source_modes SET generation=generation+1 WHERE installation_id=$1',[inst])
+  try{expect(await pin(execution,scope,denial==='version'?{...version,storage:'99'}:version)).toBe(false)}
+  finally{await pool.query("UPDATE public.extension_installations SET status='active' WHERE installation_id=$1",[inst])}
  })
  test('original claim, control, mode, full version and cross-installation are rechecked',async()=>{
   expect(await pin(execution,{...scope,installationId:job})).toBe(false)
@@ -321,19 +372,20 @@ suite('bounded durable native personal processing pins',()=>{
   try{
    await locker.query('BEGIN');await locker.query("SELECT pg_advisory_xact_lock(hashtextextended('processing-pin:root:1:session',0))")
    const started=performance.now()
-   await expect(pins.protect(scope,root,version)).rejects.toThrow('processing_pin_expired_or_unavailable')
+   await expect(pins.protect(scope,root,version)).rejects.toMatchObject({code:'source_store_busy'})
    expect(performance.now()-started).toBeLessThan(2000)
    expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_processing_windows')).rows[0].n).toBe(0)
   }finally{await locker.query('ROLLBACK');locker.release();await pins.close()}
  })
 
- test.each(['content','authorization','storage','revoke','window','job-expiry','owner','control','mode'])('bounded class retries still reject permanent %s denial under the original immutable authority',async denial=>{
+ test.each(['content','authorization','storage','revoke','execution-expiry','job-expiry','owner','control','mode'])('bounded class retries still reject permanent %s denial under the original immutable authority',async denial=>{
   const pins=new SourceProcessingPins(runtime,execution),expected={...version}
   if(['content','authorization','storage'].includes(denial))(expected as any)[denial]='9'
   if(denial==='revoke')await pool.query("INSERT INTO public.deleted_sessions VALUES('session')")
-  if(denial==='window'){
+  if(denial==='execution-expiry'){
    expect(await pin()).toBe(true);await runtime.query('SELECT shared.release_memory_source_processing_pins($1)',[execution])
    await pool.query("UPDATE shared.memory_source_processing_windows SET started_at=t.stamp-interval '3 minutes',hard_deadline=t.stamp-interval '1 minute' FROM(SELECT clock_timestamp() AS stamp)t")
+   await pool.query("UPDATE shared.memory_source_executions SET created_at=clock_timestamp()-interval '3 minutes' WHERE execution_id=$1",[execution])
   }
   if(denial==='job-expiry')await pool.query("UPDATE memory.memory_jobs SET claim_expires_at=clock_timestamp()-interval '1 second' WHERE job_id=$1",[job])
   if(denial==='owner')await pool.query("UPDATE memory.memory_jobs SET claimed_by='another-worker' WHERE job_id=$1",[job])
@@ -341,6 +393,54 @@ suite('bounded durable native personal processing pins',()=>{
   if(denial==='mode')await pool.query("UPDATE shared.memory_source_modes SET mode='paused' WHERE installation_id=$1",[inst])
   try{await expect(pins.protect(scope,root,expected)).rejects.toThrow('processing_pin_expired_or_unavailable');expect(pins.count).toBe(0)}finally{await pins.close()}
   expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_processing_pins')).rows[0].n).toBe(0)
+ })
+
+ test('startup rejects the old processing-read contract until repeat migration and provisioning',async()=>{
+  await pool.query("UPDATE shared.memory_source_modes SET mode='paused';UPDATE shared.memory_source_contract SET processing_read_version=0")
+  try{
+   await expect(assertSharedRuntimeContract(runtime)).rejects.toThrow('unsupported_shared_processing_read_contract')
+   await applySharedSourceContract(pool)
+   await provisionSharedDatabase(pool,{memoryRole:'processing_pin_memory',relayRole:'processing_pin_relay',migratorRole:'processing_pin_migrator'})
+   await assertSharedRuntimeContract(runtime)
+   expect((await pool.query('SELECT processing_pin_version,processing_read_version FROM shared.memory_source_contract')).rows[0]).toEqual({processing_pin_version:1,processing_read_version:1})
+  }
+  finally{await pool.query('UPDATE shared.memory_source_contract SET processing_read_version=1')}
+ })
+
+ test('pipeline health reports current failed/stalled dispatch and clears superseded or revoked targets',async()=>{
+  const scan='30000000-0000-0000-0000-000000000083',projection='40000000-0000-0000-0000-000000000083'
+  const health=async()=>(await runtime.query('SELECT * FROM shared.memory_source_pipeline_health($1)',[inst])).rows[0]
+  // Seed diagnostic states as fixture admin; no processing capability is run
+  // with trigger bypass, and health itself uses the least-privilege runtime.
+  const seedDistribution=async(sql:string,args?:unknown[])=>{
+   const c=await pool.connect()
+   try{await c.query('BEGIN;SET LOCAL session_replication_role=replica');await c.query(sql,args);await c.query('COMMIT')}
+   catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
+  }
+  try{
+   await seedDistribution("INSERT INTO shared.memory_source_distributions(source_kind,root_key,scan_id,work_revision,control_revision,state) VALUES('relay_event','1:session',$1,1,shared.memory_source_control_snapshot()::bigint,'sealed')",[scan])
+   await pool.query("INSERT INTO shared.memory_source_distribution_targets(scan_id,cursor_key,installation_id,source_scope,source_version,target_mode,state) VALUES($1,'target',$2,$3,$4,'shared-active','current')",[scan,inst,scope,version])
+   await pool.query("INSERT INTO shared.memory_source_progress(installation_id,source_kind,root_key,mode_generation,binding_revision,authorization_revision,dispatched_revision,processed_revision,bootstrap_state,updated_at) VALUES($1,'relay_event','1:session',2,1,1,1,0,'ready',clock_timestamp()-interval '10 minutes')",[inst])
+   await pool.query("INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,attempts,created_at,completed_at,payload) VALUES($1,$2,'project_shared_source','shared-source:'||$3||':'||encode(sha256(convert_to('target','UTF8')),'hex'),90,'dead',12,clock_timestamp()-interval '10 minutes',clock_timestamp(),$4)",[projection,inst,scan,{scope,root,distribution_scan:scan,target_cursor:'target'}])
+   expect(await health()).toMatchObject({failed_jobs:'1',stalled_roots:'1'})
+   await pool.query("INSERT INTO memory.memory_canonical_projection_progress(installation_id,source_kind,root_key,context_key,source_version,state,updated_at) VALUES($1,'relay_event','1:session',shared.memory_source_scope_key($2),$3,'ready',clock_timestamp()-interval '1 day')",[inst,scope,version])
+   await pool.query("UPDATE memory.memory_jobs SET state='pending',created_at=clock_timestamp() WHERE job_id=$1",[projection])
+   expect(await health()).toMatchObject({failed_jobs:'0',stalled_roots:'0'})
+   await pool.query("UPDATE memory.memory_jobs SET state='dead',created_at=clock_timestamp()-interval '10 minutes' WHERE job_id=$1",[projection])
+   expect(await health()).toMatchObject({failed_jobs:'1',stalled_roots:'1'})
+   await pool.query("UPDATE shared.memory_source_distribution_targets SET state='revoked' WHERE scan_id=$1",[scan])
+   expect(await health()).toMatchObject({failed_jobs:'0',stalled_roots:'0'})
+   await pool.query("UPDATE shared.memory_source_distribution_targets SET state='current' WHERE scan_id=$1",[scan])
+   await pool.query('UPDATE shared.memory_source_progress SET processed_revision=dispatched_revision,updated_at=clock_timestamp() WHERE installation_id=$1',[inst])
+   expect(await health()).toMatchObject({failed_jobs:'0',stalled_roots:'0'})
+   await pool.query('UPDATE shared.memory_source_progress SET processed_revision=0 WHERE installation_id=$1',[inst])
+   await seedDistribution('UPDATE shared.memory_source_distributions SET scan_id=gen_random_uuid()')
+   expect(await health()).toMatchObject({failed_jobs:'0',stalled_roots:'0'})
+  }finally{
+   await pool.query('DELETE FROM shared.memory_source_distribution_targets;DELETE FROM shared.memory_source_distributions;DELETE FROM shared.memory_source_progress')
+   await pool.query('DELETE FROM memory.memory_jobs WHERE job_id=$1',[projection])
+   await pool.query('DELETE FROM memory.memory_canonical_projection_progress WHERE installation_id=$1',[inst])
+  }
  })
 
 })

@@ -6,6 +6,27 @@ const scope={installationId:'10000000-0000-0000-0000-000000000088',principalUser
 const root={kind:'relay_event' as const,key:'1:session'},version={content:'1',authorization:'1',storage:'1'}
 const never=()=>new Promise<any>(()=>undefined)
 describe('actual processing-pin module with unresponsive connected transport',()=>{
+ test('background renewal preserves exact busy refusal at every later positive boundary',async()=>{
+  vi.useFakeTimers()
+  let busy=false,attempts=0
+  const pool={connect:async()=>({release:()=>{},query:async(sql:string)=>{
+   if(sql.includes('acquire_memory_source_processing_pin')){
+    attempts++
+    if(busy)throw Object.assign(new Error('source_processing_pin_busy'),{code:'55P03'})
+   }
+   return {rows:[{valid:true}]}
+  }})} as unknown as pg.Pool
+  const pins=new SourceProcessingPins(pool,crypto.randomUUID())
+  try{
+   await pins.protect(scope,root,version);busy=true
+   await vi.advanceTimersByTimeAsync(10500)
+   expect(attempts).toBe(5)
+   await expect(pins.assertCurrent()).rejects.toMatchObject({code:'source_store_busy'})
+   await expect(pins.protect(scope,root,version)).rejects.toMatchObject({code:'source_store_busy'})
+   expect(()=>pins.assertUsable()).toThrow('source_store_busy')
+   expect(attempts).toBe(5)
+  }finally{await pins.close();vi.useRealTimers()}
+ })
  test.each(['BEGIN','SET LOCAL','acquire_memory_source_processing_pin','COMMIT','ROLLBACK'])('bounds a connected %s hang and destroys the socket before returning',async phase=>{
   const destroy=vi.fn(),release=vi.fn(),queries:string[]=[]
   let began!:()=>void;const entered=new Promise<void>(resolve=>{began=resolve})

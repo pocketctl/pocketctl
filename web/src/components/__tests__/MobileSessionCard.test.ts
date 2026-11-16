@@ -2,6 +2,7 @@ import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { Window } from 'happy-dom'
 import MobileSessionCard from '../MobileSessionCard.vue'
 import { useLocale } from '../../composables/useLocale'
 
@@ -163,6 +164,46 @@ describe('MobileSessionCard', () => {
     expect(wrapper.emitted('open')).toBeUndefined()
     await wrapper.get('.tray-pin').trigger('click')
     expect(wrapper.emitted('pin')).toHaveLength(1)
+    expect(wrapper.classes()).not.toContain('tray-open')
+  })
+
+  test.each(['running', 'exited'])('hides action backgrounds until swiping a %s card, including cancellation', async status => {
+    const wrapper = mount(MobileSessionCard, { props: { session: { ...session, status }, effectiveStatus: status, relativeTime: '刚刚', expanded: false } })
+    const rendering = new Window({ width: 390, height: 844 })
+    const style = rendering.document.createElement('style')
+    style.textContent = readFileSync(resolve(process.cwd(), 'src/components/MobileSessionCard.vue'), 'utf8').match(/<style scoped>([\s\S]*?)<\/style>/)![1]
+    rendering.document.head.append(style)
+    const trayVisibility = () => {
+      rendering.document.body.innerHTML = wrapper.html()
+      return rendering.getComputedStyle(rendering.document.querySelector('.mobile-card-tray')!).visibility
+    }
+    try {
+      const card = wrapper.get('.mobile-session-card')
+      expect(trayVisibility()).toBe('hidden')
+      await card.trigger('touchstart', { touches: [{ clientX: 300, clientY: 100 }] })
+      await card.trigger('touchmove', { touches: [{ clientX: 270, clientY: 101 }] })
+      expect(trayVisibility()).toBe('visible')
+      expect(wrapper.get('.mobile-card-tray').attributes('inert')).toBeDefined()
+      await card.trigger('touchcancel')
+      expect(trayVisibility()).toBe('hidden')
+      await card.trigger('touchstart', { touches: [{ clientX: 300, clientY: 100 }] })
+      await card.trigger('touchmove', { touches: [{ clientX: 60, clientY: 101 }] })
+      await card.trigger('touchend')
+      expect(trayVisibility()).toBe('visible')
+      expect(wrapper.get('.mobile-card-tray').attributes('inert')).toBeUndefined()
+      await card.trigger('keydown', { key: 'Escape' })
+      expect(trayVisibility()).toBe('hidden')
+    } finally { await rendering.happyDOM.close() }
+  })
+
+  test('offers resume only inside the exited card swipe tray and closes it before opening', async () => {
+    const wrapper = mount(MobileSessionCard, { props: { session: { ...session, status: 'exited' }, effectiveStatus: 'exited', relativeTime: '刚刚', expanded: false } })
+    expect(wrapper.find('.mobile-exit-card .mobile-resume').exists()).toBe(false)
+    expect(wrapper.get('.mobile-exit-reason').text()).toBe('已退出')
+    await wrapper.get('.mobile-session-card').trigger('keydown', { key: 'ArrowLeft' })
+    expect(wrapper.get('.mobile-card-tray .mobile-resume').text()).toBe('恢复会话')
+    await wrapper.get('.mobile-card-tray .mobile-resume').trigger('click')
+    expect(wrapper.emitted('open')).toHaveLength(1)
     expect(wrapper.classes()).not.toContain('tray-open')
   })
 

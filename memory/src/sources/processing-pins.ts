@@ -145,24 +145,32 @@ export class SourceProcessingPins {
  private renewal:Promise<void>|undefined
  private chain:Promise<void>=Promise.resolve()
  private failed=false
+ private busyFailure:SourceUnavailableError|undefined
  private closed=false
  private closing:Promise<void>|undefined
  constructor(private readonly pool:pg.Pool,private readonly executionId:string){}
- assertUsable():void{if(this.failed||this.closed)throw unavailable()}
+ private fail(error:unknown):void{
+  if(!this.failed&&error instanceof SourceUnavailableError&&error.code==='source_store_busy')this.busyFailure=error
+  this.failed=true
+ }
+ assertUsable():void{if(this.closed)throw unavailable();if(this.failed)throw this.busyFailure??unavailable()}
  get count():number{return this.pins.size}
  private key(pin:Pin){return canonicalJsonString([pin.scope,pin.root])}
  private async acquire(pin:Pin,renew:boolean,deadline=performance.now()+2000,signal?:AbortSignal){
   try{
+   this.assertUsable()
    if(pin.currentProtection)await currentProtectionSerial(this.pool,pin.scope.installationId,deadline,()=>!this.failed&&!this.closed&&!signal?.aborted,()=>this.acquireBounded(pin,renew,deadline,signal),signal)
    else await this.acquireBounded(pin,renew,deadline)
-  }catch(error){this.failed=true;throw error}
+  }catch(error){this.fail(error);throw error}
  }
  private async acquireBounded(pin:Pin,renew:boolean,deadline:number,signal?:AbortSignal){
-  if(this.failed||this.closed||signal?.aborted)throw unavailable()
+  this.assertUsable();if(signal?.aborted)throw unavailable()
   try{
+   let lastBusy=false
    for(let attempt=0;attempt<4;attempt++){
     this.assertUsable()
     let protectedVersion=pin.version
+    lastBusy=false
     const ok=await metadata(this.pool,async c=>{
      // Metadata-only workflows protect a fixed selection independently of
      // its moving root. This is a fresh complete authority observation, inside
@@ -177,7 +185,12 @@ export class SourceProcessingPins {
      return (await c.query('SELECT shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,$4::jsonb,$5) AS valid',
       [this.executionId,JSON.stringify(pin.scope),pin.root.key,JSON.stringify(protectedVersion),renew])).rows[0]?.valid
     },
-     deadline,()=>!this.closed&&!this.failed&&!signal?.aborted,signal)
+     deadline,()=>!this.closed&&!this.failed&&!signal?.aborted,signal).catch(error=>{
+      // Only the explicit SQL mutex refusal is retryable. FALSE still covers
+      // permanent policy/version denial and must never become a busy success.
+      if(error?.code!=='55P03'||error?.message!=='source_processing_pin_busy')throw error
+      lastBusy=true;return false
+     })
     this.assertUsable()
     if(ok===true){pin.version=protectedVersion;return}
     if(ok!==false)throw unavailable()
@@ -188,8 +201,9 @@ export class SourceProcessingPins {
     // metadata has COMMITted and returned its physical client before backoff.
     await new Promise(resolve=>setTimeout(resolve,delay))
    }
+   if(lastBusy)throw new SourceUnavailableError('source_store_busy')
    throw unavailable()
-  }catch(error){this.failed=true;throw error}
+  }catch(error){this.fail(error);throw error}
  }
  private serial(work:()=>Promise<void>):Promise<void>{
   const result=this.chain.then(work)
@@ -198,14 +212,14 @@ export class SourceProcessingPins {
  }
  async protect(scope:SourceScope,root:SourceRoot,version:SourceVersion):Promise<void>{
   const pin={scope:structuredClone(scope),root:{...root},version:{...version}},key=this.key(pin)
-  try{await this.serial(async()=>{await this.acquire(pin,this.pins.has(key));this.pins.set(key,pin)});this.schedule()}catch(error){this.failed=true;throw error}
+  try{await this.serial(async()=>{await this.acquire(pin,this.pins.has(key));this.pins.set(key,pin)});this.schedule()}catch(error){this.fail(error);throw error}
  }
  /** Internal metadata protection only; content proofs are held separately by
   * the opaque selected reader and its physical selected-source commit fence. */
  async protectCurrent(scope:SourceScope,root:SourceRoot):Promise<void>{
   const deadline=performance.now()+2000,controller=new AbortController()
   const pin:Pin={scope:structuredClone(scope),root:{...root},version:{content:'0',authorization:'0',storage:'0'},currentProtection:true},key=this.key(pin)
-  try{await withinProtectionDeadline(this.serial(async()=>{await this.acquire(pin,this.pins.has(key),deadline,controller.signal);this.pins.set(key,pin)}),deadline,()=>controller.abort());this.schedule()}catch(error){this.failed=true;throw error}
+  try{await withinProtectionDeadline(this.serial(async()=>{await this.acquire(pin,this.pins.has(key),deadline,controller.signal);this.pins.set(key,pin)}),deadline,()=>controller.abort());this.schedule()}catch(error){this.fail(error);throw error}
  }
  private schedule(){
   if(this.timer||this.renewal||this.closed||this.failed)return
@@ -213,18 +227,18 @@ export class SourceProcessingPins {
    this.timer=undefined
    const deadline=[...this.pins.values()].some(p=>p.currentProtection)?performance.now()+2000:undefined
    const controller=new AbortController(),work=this.serial(()=>this.renew(deadline,controller.signal))
-   this.renewal=(deadline?withinProtectionDeadline(work,deadline,()=>controller.abort()):work).catch(()=>{this.failed=true}).finally(()=>{this.renewal=undefined;this.schedule()})
+   this.renewal=(deadline?withinProtectionDeadline(work,deadline,()=>controller.abort()):work).catch(error=>{this.fail(error)}).finally(()=>{this.renewal=undefined;this.schedule()})
   },10000)
   this.timer.unref()
  }
  private async renew(deadline?:number,signal?:AbortSignal){for(const pin of this.pins.values())await this.acquire(pin,true,pin.currentProtection?deadline:undefined,pin.currentProtection?signal:undefined)}
  async assertCurrent():Promise<void>{
-  if(this.failed||this.closed)throw unavailable()
+  this.assertUsable()
   // Recheck at every new expensive dispatch/positive output boundary. A
   // timer's in-flight renewal is awaited; renewal chains cannot overlap.
   const deadline=[...this.pins.values()].some(p=>p.currentProtection)?performance.now()+2000:undefined
-  const controller=new AbortController(),work=(async()=>{if(this.renewal)await this.renewal;if(this.failed||controller.signal.aborted)throw unavailable();await this.serial(()=>this.renew(deadline,controller.signal))})()
-  try{await(deadline?withinProtectionDeadline(work,deadline,()=>controller.abort()):work)}catch(error){this.failed=true;throw error}
+  const controller=new AbortController(),work=(async()=>{if(this.renewal)await this.renewal;this.assertUsable();if(controller.signal.aborted)throw unavailable();await this.serial(()=>this.renew(deadline,controller.signal))})()
+  try{await(deadline?withinProtectionDeadline(work,deadline,()=>controller.abort()):work)}catch(error){this.fail(error);throw error}
  }
  close():Promise<void>{
   if(this.closing)return this.closing
