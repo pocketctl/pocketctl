@@ -12,3 +12,10 @@ test('current failed packets alert independently of successful work elsewhere',(
  expect(evaluateBusinessHealth({...healthy,last_extract_seconds:1,unresolved_extractions:0,failed_extractions_24h:9}).reasons).toEqual([])
  expect(evaluateBusinessHealth({...healthy,extraction_mode:'off',unresolved_extractions:1}).reasons).toEqual([])
 })
+
+test('shared source failures and stalled consumption alert with legacy extraction off',()=>{
+ expect(evaluateBusinessHealth({...healthy,feed_enabled:false,extraction_mode:'off',source_failed_jobs:1,source_stalled_roots:1}).reasons)
+  .toEqual(['source_processing_failed','source_processing_stalled'])
+ expect(evaluateBusinessHealth({...healthy,feed_enabled:false,extraction_mode:'off',failed_jobs_24h:'10',source_failed_jobs:0,source_stalled_roots:0}).reasons).toEqual([])
+ expect(evaluateBusinessHealth({...healthy,relay_status:'paused',source_failed_jobs:1,source_stalled_roots:1}).reasons).toEqual([])
+})

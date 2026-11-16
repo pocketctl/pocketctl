@@ -32,7 +32,7 @@ describe('safe worker diagnostics', () => {
 })
 
 test('preserves finite source failures and rejects arbitrary source codes',()=>{
- for(const code of ['source_store_unavailable','source_store_timeout','source_store_busy','source_reference_unproven','source_body_reclaimed'])
+ for(const code of ['source_store_unavailable','source_store_timeout','source_store_busy','source_reference_unproven','source_body_reclaimed','processing_pin_expired_or_unavailable'])
   expect(workerErrorFields(new SourceUnavailableError(code))).toEqual({code})
  expect(workerErrorFields(new SourceUnavailableError('private/path'))).toEqual({code:'handler_failed_Error'})
 })

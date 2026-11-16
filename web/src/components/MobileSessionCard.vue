@@ -1,6 +1,8 @@
 <template>
-  <div ref="stack" class="mobile-card-stack" :class="{ 'tray-open': trayOpen, 'drag-placeholder': dragging }">
+  <div ref="stack" class="mobile-card-stack" :class="{ 'tray-open': trayOpen, 'tray-revealed': offset < 0, 'drag-placeholder': dragging }" :style="{ '--tray-button-width': `${trayButtonWidth}px` }">
+    <div class="mobile-card-swipe">
     <div class="mobile-card-tray" :aria-hidden="!trayOpen" :inert="!trayOpen">
+      <button v-if="canResume" type="button" class="mobile-resume" @click="act('resume')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m9 5 10 7-10 7Z" /></svg><span>{{ t('mobile.sessions_resume') }}</span></button>
       <button v-if="!archived" type="button" class="tray-pin" @click="act('pin')"><WorkspaceIcon name="pin" /><span>{{ t(session.pinned ? 'session.actions.unpin' : 'session.actions.pin') }}</span></button>
       <button type="button" class="tray-more" @click="act('more')"><WorkspaceIcon name="more" /><span>{{ t('mobile.sessions_more') }}</span></button>
       <button v-if="terminal" type="button" class="tray-delete" @click="act('delete')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6" /></svg><span>{{ t('session.actions.delete') }}</span></button>
@@ -73,6 +75,8 @@
       </div>
 
     </article>
+    </div>
+    </div>
 
     <div v-if="isExited" class="mobile-exit-card">
       <span class="mobile-exit-mark" aria-hidden="true">!</span>
@@ -80,10 +84,8 @@
       <button v-if="hasChildren" type="button" @click="$emit('show-children')">
         {{ t('mobile.sessions_subagents', { count: session.children.length }) }} <span aria-hidden="true">›</span>
       </button>
-      <button v-if="!isReadOnlyObserver && !archived" type="button" class="mobile-resume" @click="$emit('open')">{{ t('mobile.sessions_resume') }}</button>
     </div>
     <slot v-if="!archived" />
-    </div>
     <Teleport to="body"><div v-if="dragging" class="mobile-session-drag-ghost" :style="{ left: `${dragPosition.x}px`, top: `${dragPosition.y}px`, width: `${dragWidth}px` }">{{ session.title || session.session_id.slice(0, 8) }}</div></Teleport>
   </div>
 </template>
@@ -127,7 +129,9 @@ const trayOpen = ref(false)
 const offset = ref(0)
 const gesture = ref<'swipe' | 'scroll' | 'drag' | null>(null)
 const terminal = computed(() => ['exited', 'completed', 'killed', 'error'].includes(props.session.status))
-const trayWidth = computed(() => (1 + Number(!props.archived) + Number(terminal.value)) * 76 - 8)
+// Four actions still fit a narrow phone card, including its project indentation.
+const trayButtonWidth = computed(() => canResume.value ? 52 : 68)
+const trayWidth = computed(() => (1 + Number(!props.archived) + Number(terminal.value) + Number(canResume.value)) * (trayButtonWidth.value + 8) - 8)
 let pointerStart: { x: number; y: number; offset: number } | null = null
 let dragOrigin = { x: 0, y: 0 }
 let dropTarget: HTMLElement | null = null
@@ -152,6 +156,7 @@ const canInlineExpand = computed(() => hasChildren.value && !isExited.value && !
 const hasContext = computed(() => Boolean(agentLabel.value || props.session.model || props.session.subagent_count > 0 || isExited.value))
 const normalizedAgent = computed(() => (props.session.agent || props.session.agent_type) === 'claude' ? 'claude-code' : props.session.agent || props.session.agent_type || '')
 const isReadOnlyObserver = computed(() => isReadOnlyObserverAgent(normalizedAgent.value))
+const canResume = computed(() => isExited.value && !isReadOnlyObserver.value && !props.archived)
 const agentLabel = computed(() => agentDisplayName(normalizedAgent.value))
 const exitReasonLabel = computed(() => ({
   normal_exit: t('workspace.normal_exit'),
@@ -170,9 +175,10 @@ function setTray(open: boolean) {
   offset.value = open ? -trayWidth.value : 0
   if (open) document.dispatchEvent(new CustomEvent('pocketctl:session-tray', { detail: props.session.session_id }))
 }
-function act(action: 'pin' | 'more' | 'delete') {
+function act(action: 'pin' | 'more' | 'delete' | 'resume') {
   setTray(false)
-  if (action === 'more') emit('long-press', props.session)
+  if (action === 'resume') emit('open')
+  else if (action === 'more') emit('long-press', props.session)
   else if (action === 'pin') emit('pin')
   else emit('delete')
 }
@@ -350,7 +356,6 @@ onBeforeUnmount(() => { cancelPointer(); document.removeEventListener('pointerdo
 .mobile-exit-mark { color: var(--warning, #d29922); font-weight: 700; }
 .mobile-exit-reason { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-exit-card button { padding: 0; border: 0; color: var(--fg-tertiary, #8b949e); background: transparent; font-size: 10px; white-space: nowrap; }
-.mobile-exit-card .mobile-resume { color: var(--fg, #e6edf3); font-weight: 600; }
 @keyframes mobile-pulse { 0% { opacity: .8; transform: scale(1); } 100% { opacity: 0; transform: scale(1.6); } }
 @media (prefers-reduced-motion: reduce) { .pulse-ring { animation: none; } .mobile-session-card, .mobile-subagent-toggle svg { transition: none; } }
 
@@ -368,10 +373,13 @@ onBeforeUnmount(() => { cancelPointer(); document.removeEventListener('pointerdo
 
 .mobile-card-slide { position: relative; z-index: 1; transition: transform .2s ease; }
 .mobile-card-slide.swiping { transition: none; }
-.mobile-card-tray { position: absolute; inset: 0 0 0 auto; display: flex; gap: 8px; align-items: stretch; }
-.mobile-card-tray button { width: 68px; padding: 8px 4px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 5px; border: 0; border-radius: 11px; color: white; font-size: 10px; }
+.mobile-card-swipe { position: relative; overflow: hidden; border-radius: 12px; }
+.mobile-card-tray { position: absolute; inset: 0 0 0 auto; display: flex; gap: 8px; align-items: stretch; visibility: hidden; }
+.tray-revealed .mobile-card-tray { visibility: visible; }
+.mobile-card-tray button { width: var(--tray-button-width); padding: 8px 4px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 5px; border: 0; border-radius: 11px; color: white; font-size: 10px; }
 .mobile-card-tray svg { width: 19px; height: 19px; }
 .tray-pin { background: #3478f6; }.tray-more { background: #586574; }.tray-delete { background: #d94444; }
+.mobile-card-tray .mobile-resume { background: #238636; }
 .mobile-card-stack.drag-placeholder { opacity: .35; }
 .mobile-session-drag-ghost { position: fixed; z-index: 500; pointer-events: none; padding: 20px 14px; border: 1px solid var(--accent); border-radius: 12px; background: var(--surface); color: var(--fg); box-shadow: 0 12px 32px #0004; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media(prefers-reduced-motion: reduce) { .mobile-card-slide { transition: none; } }

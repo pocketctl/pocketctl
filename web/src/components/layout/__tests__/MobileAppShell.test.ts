@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { Window } from 'happy-dom'
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeAll, beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
@@ -71,6 +73,61 @@ function testRouter(path = '/sessions') {
 }
 
 describe('mobile application shell', () => {
+  test.each([
+    { width: 390, collapsed: true }, { width: 390, collapsed: false },
+    { width: 768, collapsed: true }, { width: 768, collapsed: false },
+  ])('shows the mobile drawer with real CSS at $width px, desktop collapsed=$collapsed', async ({ width, collapsed }) => {
+    const preference = localStorage.getItem('pocketctl_sidebar_collapsed')
+    const rendering = new Window({ width, height: 844 })
+    const styles = rendering.document.createElement('style')
+    // happy-dom drops compact @media(...) rules; spacing is CSS-equivalent.
+    const [sharedCss, referenceCss, overrideCss, teamsCss, appSource] = [
+      '../../../assets/web-shared.css', '../../../assets/reference-workspace.css',
+      '../../../assets/reference-overrides.css', '../../../assets/reference-teams.css', '../../../App.vue',
+    ].map(path => readFileSync(new URL(path, import.meta.url), 'utf8'))
+    styles.textContent = [sharedCss, referenceCss, overrideCss, teamsCss,
+      appSource.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? ''].join('\n').replace(/@media\(/g, '@media (')
+    rendering.document.head.append(styles)
+    localStorage.setItem('pocketctl_sidebar_collapsed', String(collapsed))
+    mobile.value = true
+    const router = testRouter('/settings')
+    await router.isReady()
+    const wrapper = mount(App, { attachTo: document.body, global: { plugins: [router] } })
+    const drawerDisplay = () => {
+      rendering.document.body.innerHTML = wrapper.html()
+      return rendering.getComputedStyle(rendering.document.querySelector('.sidebar')!).display
+    }
+    try {
+      await wrapper.get('.mobile-menu-trigger').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.mobile-nav-backdrop').exists()).toBe(true)
+      expect(drawerDisplay()).toBe('flex')
+      expect(wrapper.get('.app-layout').classes()).toContain('nav-open')
+      await wrapper.get('.mobile-nav-backdrop').trigger('click')
+      expect(wrapper.find('.sidebar').exists()).toBe(false)
+      expect(wrapper.get('.app-layout').classes()).not.toContain('nav-open')
+      await wrapper.get('.mobile-menu-trigger').trigger('click')
+      await wrapper.get('.sidebar').trigger('keydown', { key: 'Escape' })
+      expect(wrapper.find('.sidebar').exists()).toBe(false)
+      await wrapper.get('.mobile-menu-trigger').trigger('click')
+      await wrapper.get('.sidebar a[href="/hosts"]').trigger('click')
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe('/hosts')
+      expect(wrapper.find('.sidebar').exists()).toBe(false)
+      await wrapper.get('.mobile-menu-trigger').trigger('click')
+      expect(drawerDisplay()).toBe('flex')
+      mobile.value = false
+      await flushPromises()
+      expect(wrapper.get('.app-layout').classes()).not.toContain('nav-open')
+      expect(wrapper.get('.app-layout').classes().includes('sidebar-collapsed')).toBe(collapsed)
+      expect(localStorage.getItem('pocketctl_sidebar_collapsed')).toBe(String(collapsed))
+    } finally {
+      wrapper.unmount(); styles.remove(); mobile.value = true
+      if (preference === null) localStorage.removeItem('pocketctl_sidebar_collapsed')
+      else localStorage.setItem('pocketctl_sidebar_collapsed', preference)
+    }
+  })
+
   test.each([true,false])('statistics navigation follows server capability on mobile=%s', async narrow => {
     const previousMobile = mobile.value; mobile.value = narrow
     const router = testRouter('/settings'); await router.isReady()

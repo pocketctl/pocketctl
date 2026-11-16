@@ -2,7 +2,7 @@ import {UNRESOLVED_EXTRACTION_SOURCE} from '../extraction/recovery.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 
-export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap'] as const
+export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap', 'source_processing_failed', 'source_processing_stalled'] as const
 export type BusinessHealthReason = typeof BUSINESS_HEALTH_REASONS[number]
 export interface BusinessHealthRow {
   installation_id: string
@@ -21,6 +21,8 @@ export interface BusinessHealthRow {
   last_feed_id?: string | null
   pending_jobs?: string
   failed_jobs_24h?: string
+  source_failed_jobs?: string | number
+  source_stalled_roots?: string | number
   failed_extractions_24h?: string | number
   quarantined_extractions_24h?: string | number
   uncertain_extractions_24h?: string | number
@@ -40,6 +42,8 @@ export function evaluateBusinessHealth(row: BusinessHealthRow, enabled = true) {
     && (row.last_extract_seconds == null || Number(row.last_extract_seconds) > 3600)) reasons.push('extraction_stalled')
   if (extraction && Number(row.unresolved_extractions ?? 0) > 0) reasons.push('extraction_failed')
   if (active && Number(row.evidence_gaps) > 0) reasons.push('evidence_gap')
+  if (active && Number(row.source_failed_jobs ?? 0) > 0) reasons.push('source_processing_failed')
+  if (active && Number(row.source_stalled_roots ?? 0) > 0) reasons.push('source_processing_stalled')
   const integrity = row.local_status === 'integrity_error'
   const state = integrity ? 'error' : reasons.length || row.local_status === 'degraded' ? 'degraded'
     : row.local_status === 'ready' ? 'ready' : 'syncing'
@@ -72,9 +76,12 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
         AND inbox.projection_state='quarantined' AND inbox.error_code='oversized_content') AS evidence_gaps,
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='pending') AS pending_jobs,
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='dead'
-        AND j.created_at>NOW()-INTERVAL '24 hours') AS failed_jobs_24h
+        AND j.created_at>NOW()-INTERVAL '24 hours') AS failed_jobs_24h,
+      ${shared?'pipeline.failed_jobs':'0'} AS source_failed_jobs,
+      ${shared?'pipeline.stalled_roots':'0'} AS source_stalled_roots
     FROM memory_installations i
     ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
+    ${shared?'LEFT JOIN LATERAL shared.memory_source_pipeline_health(i.installation_id) pipeline ON TRUE':''}
     ${shared?'LEFT JOIN memory_owner_scopes owner_scope USING(installation_id) LEFT JOIN memory_native_control_observations native_control USING(installation_id)':''}
     LEFT JOIN memory_feature_settings f ON f.installation_id=i.installation_id
     LEFT JOIN LATERAL (SELECT MAX(completed_at) AS last_extract_at FROM memory_extraction_runs r
@@ -105,6 +112,9 @@ export function summarizeBusinessHealth(rows: BusinessHealthRow[], enabled = tru
   const degraded = health.some(item => ['error', 'degraded'].includes(item.state))
   return {status: degraded ? 'degraded' : 'ready', readiness: 'ready',
     operational: {status: degraded ? 'degraded' : 'healthy', reasons,
+      source_failed_jobs: rows.reduce((sum,row)=>sum+Number(row.source_failed_jobs??0),0),
+      source_stalled_roots: rows.reduce((sum,row)=>sum+Number(row.source_stalled_roots??0),0),
+      source_counts_capped: rows.some(row=>Number(row.source_failed_jobs??0)>=1001||Number(row.source_stalled_roots??0)>=1001),
       evidence_gaps: rows.reduce((sum, row) => sum + Number(row.evidence_gaps ?? 0), 0),
       failed_extractions_24h: rows.reduce((sum,row)=>sum+Number(row.failed_extractions_24h??0),0),
       quarantined_extractions_24h: rows.reduce((sum,row)=>sum+Number(row.quarantined_extractions_24h??0),0),
