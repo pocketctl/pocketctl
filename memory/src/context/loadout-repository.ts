@@ -156,21 +156,19 @@ export function createLoadoutRepository(pool: pg.Pool) {
       repositoryId: string | null
       agent: string | null
     }): Promise<{ revision: number; items: ResolvedLoadoutItem[] }> {
-      const loadout = await pool.query<{ loadout_id: string; revision: string }>(`
-        SELECT loadout_id::text, revision::text FROM memory_context_loadouts
-        WHERE installation_id = $1 AND repository_id IS NOT DISTINCT FROM $2
-          AND agent IS NOT DISTINCT FROM $3
+      const loadout = await pool.query<{ revision: string; items: LoadoutItemRow[] }>(`
+        SELECT l.revision::text, COALESCE((
+          SELECT jsonb_agg(item ORDER BY item.priority DESC, item.item_id ASC)
+          FROM (${loadoutItemsSql('l.loadout_id')}) item
+        ), '[]'::jsonb) AS items
+        FROM memory_context_loadouts l
+        WHERE l.installation_id = $1 AND l.repository_id IS NOT DISTINCT FROM $2
+          AND l.agent IS NOT DISTINCT FROM $3
       `, [input.installationId, input.repositoryId, input.agent])
       const row = loadout.rows[0]
-      if (!row) return { revision: 1, items: [] }
-      const items = await pool.query<LoadoutItemRow>(`
-        ${loadoutItemsSql('$1')}
-        ORDER BY i.priority DESC, i.item_id ASC
-      `, [row.loadout_id])
-      return {
-        revision: Number(row.revision),
-        items: resolveLoadoutItems(items.rows),
-      }
+      return row
+        ? { revision: Number(row.revision), items: resolveLoadoutItems(row.items) }
+        : { revision: 1, items: [] }
     },
   }
 }

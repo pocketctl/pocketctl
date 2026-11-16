@@ -32,12 +32,10 @@ function installationPool(overrides: Record<string, unknown> = {}, sessionOwned 
             status: 'active',
             enabled_services: ['memory.search', 'memory.recall'],
             config_version: 2,
+            session_owned: sessionOwned,
             ...overrides,
           }],
         }
-      }
-      if (/JOIN extension_installations i ON i.owner_user_id = s.user_id/.test(sql)) {
-        return { rows: sessionOwned ? [{ '?column?': 1 }] : [], rowCount: sessionOwned ? 1 : 0 }
       }
       return { rows: [] }
     }),

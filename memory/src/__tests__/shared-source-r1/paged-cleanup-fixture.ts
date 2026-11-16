@@ -37,7 +37,7 @@ export async function createPagedFixture(url:string){
    CREATE TABLE public.paged_cancel_probe(id integer PRIMARY KEY);
    CREATE TABLE public.paged_canonical_sentinel(id bigint PRIMARY KEY,body text);
    INSERT INTO public.paged_canonical_sentinel VALUES(9007199254740993,'canonical must survive');`)
-  await pool.query("ALTER TABLE public.extension_installations ADD COLUMN start_policy TEXT NOT NULL DEFAULT 'retained_history'")
+  await pool.query("ALTER TABLE public.extension_installations ADD COLUMN start_policy TEXT NOT NULL DEFAULT 'retained_history', ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
   await applySharedSourceContract(pool)
   await installNativeAliasFixture(pool)
   await pool.query(`ALTER TABLE public.events ADD COLUMN created_at timestamptz,ADD COLUMN source_header_version integer,ADD COLUMN source_sequence bigint,ADD COLUMN canonical_payload_hash text,ADD COLUMN source_classification jsonb`)

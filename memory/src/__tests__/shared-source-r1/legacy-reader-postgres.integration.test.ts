@@ -1,3 +1,5 @@
+import {beginFreshInputFixture} from './input-start-fixture.js'
+import {installNativeAliasFixture} from './native-alias-fixture.js'
 import pg from 'pg'
 import {afterAll,beforeAll,describe,expect,test} from 'vitest'
 import {applyMemorySchema} from '../../schema.js'
@@ -16,24 +18,28 @@ suite('explicit proven historical source archive',()=>{
   if(!url||!/(^|_)test$/.test(new URL(url).pathname.slice(1)))throw Error('isolated_test_required')
   pool=new pg.Pool({connectionString:url})
   await pool.query('DROP SCHEMA IF EXISTS memory CASCADE;DROP SCHEMA IF EXISTS shared CASCADE;DROP SCHEMA public CASCADE;CREATE SCHEMA public')
-  await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
+  const inputFoundation=await beginFreshInputFixture(pool)
+  await applyMemorySchema(pool,{namespace:'memory'})
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY);INSERT INTO public.users VALUES(1),(2);
    CREATE TABLE public.daemons(daemon_id text,user_id int);
    CREATE TABLE public.sessions(session_id text,user_id int,daemon_id text,source text,content_state text,agent_type text);
    CREATE TABLE public.deleted_sessions(session_id text);
    CREATE TABLE public.extension_providers(provider_id text,status text);INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}');
+   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT now(),start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,ack_feed_id bigint NOT NULL DEFAULT 0,snapshot_required_at timestamptz,lease_epoch bigint NOT NULL DEFAULT 0,lease_token_hash bytea,lease_expires_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    DO $$ BEGIN
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_legacy_memory') THEN CREATE ROLE shared_legacy_memory LOGIN PASSWORD 'only-test';END IF;
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_legacy_relay') THEN CREATE ROLE shared_legacy_relay NOLOGIN;END IF;
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_legacy_migrator') THEN CREATE ROLE shared_legacy_migrator NOLOGIN;END IF;
    END $$;`)
+  await applySharedSourceContract(pool)
   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'personal',$1,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}')",[inst])
   await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[inst])
   await pool.query("INSERT INTO shared.memory_source_modes(installation_id,mode,generation) VALUES($1,'shared-active',2)",[inst])
   for(const [id,seq,type] of [[a,'9007199254740993','agent_text'],[b,'9007199254740994','user_text']])await pool.query(`INSERT INTO memory.source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash,classification,source_provenance,
    source_kind,canonical_key,canonical_session_key,source_version,source_sequence,content_hash,hash_version,mapping_state,adapter_version,legacy_owner_user_id,legacy_manifest_hash)
    VALUES($1::uuid,$2,'snapshot',$1::text,'legacy-session','legacy-turn',$3,now(),$4,$5,'{}',$8::jsonb,'legacy_archive',$1::text,'legacy-session','{"content":"1","authorization":"1","storage":"0"}',$6,$5,'canonical-json-sha256-v1','verified','legacy-archive-v1',1,$7)`,[id,inst,type,payload,canonicalPayloadHash(payload),seq,'a'.repeat(64),id===b?{memory:originalProof}:{}])
+  await installNativeAliasFixture(pool,{inputPolicy:'retained_history',inputFoundation})
   await provisionSharedDatabase(pool,{memoryRole:'shared_legacy_memory',relayRole:'shared_legacy_relay',migratorRole:'shared_legacy_migrator'})
   const r=new URL(url);r.username='shared_legacy_memory';r.password='only-test';runtime=createMemoryPool({databaseUrl:r.href,databaseNamespace:'memory',dbPoolMax:3})
  },60000)

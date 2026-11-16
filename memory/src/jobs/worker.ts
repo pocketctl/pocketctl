@@ -1,3 +1,4 @@
+import {SourceUnavailableError} from '@pocketctl/session-source'
 import type pg from 'pg'
 import { workerErrorCode } from './worker-diagnostics.js'
 import { JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
@@ -144,6 +145,15 @@ export function createJobWorker(options: JobWorkerOptions) {
           outcome=completed?"completed":"lost"
         } catch (error) {
           if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
+          // Only deterministic source projection may defer a positively classified lock conflict.
+          // Persisted source_wait_count bounds repeated deferral; model-bearing jobs retain
+          // their accounting/recovery path and timeouts remain actionable failures.
+          const waits=claim.payload.source_wait_count??0
+          if(error instanceof SourceUnavailableError&&error.code==='source_store_busy'
+            &&['project_shared_source','compile_episode'].includes(claim.job_type)
+            &&Number.isSafeInteger(waits)&&Number(waits)>=0&&Number(waits)<60){
+            error=new JobDeferredError('source_not_ready',new Date(Date.now()+1000+Math.floor(Math.random()*1000)))
+          }
           if (error instanceof JobDeferredError) {
             const deferred=await options.jobs.deferJob({ jobId:claim.job_id,claimedBy:options.workerId,
               claimEpoch:claim.claim_epoch,reason:error.reason,availableAt:error.availableAt })

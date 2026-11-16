@@ -80,7 +80,7 @@ export async function inputStartFixture(url:string){
 export type InputStartFixture=Awaited<ReturnType<typeof inputStartFixture>>
 
 const freshFoundations=new WeakMap<object,{pool:Pick<pg.Pool,'query'>;database:string}>()
-const foundationDatabases=new Set(['shared_r1_reader_test','shared_r1_team_test','team_semantic_registration_test','shared_r1_input_test','relay_capture_test','relay_r1_control_test','relay_team_capture_test','relay_r1_feed_mode_test','shared_r1_namespace_test','shared_processing_pin_test'])
+const foundationDatabases=new Set(['shared_r1_reader_test','shared_r1_team_test','shared_r1_legacy_test','team_semantic_registration_test','shared_r1_input_test','relay_capture_test','relay_r1_control_test','relay_team_capture_test','relay_r1_feed_mode_test','shared_r1_namespace_test','shared_processing_pin_test'])
 /** Mint only immediately after a fixture has removed its old shared namespace;
  * a mature shared-v1/native-loss state cannot obtain this test-only token. */
 export async function beginFreshInputFixture(pool:Pick<pg.Pool,'query'>):Promise<object>{
@@ -111,7 +111,7 @@ export async function declareFreshInputFoundation(pool:Pick<pg.Pool,'query'>,tok
  * fixtures. It neither creates a runtime fallback nor fabricates old starts. */
 export async function installRetainedInputStartFixture(pool:Pick<pg.Pool,'query'>,policy:'retained_history',foundation?:object):Promise<void>{
  const db=(await pool.query('SELECT current_database() AS database_name')).rows[0].database_name
- if(policy!=='retained_history'||!['shared_r1_reader_test','shared_r1_team_test','team_semantic_registration_test','shared_r1_input_test','relay_r1_feed_mode_test','shared_r1_namespace_test','shared_processing_pin_test'].includes(db))throw Error('dedicated_retained_input_fixture_required')
+ if(policy!=='retained_history'||!['shared_r1_reader_test','shared_r1_team_test','shared_r1_legacy_test','team_semantic_registration_test','shared_r1_input_test','relay_r1_feed_mode_test','shared_r1_namespace_test','shared_processing_pin_test'].includes(db))throw Error('dedicated_retained_input_fixture_required')
  if(foundation)await declareFreshInputFoundation(pool,foundation)
  // Empty native table scaffolding only where an older independent fixture
  // did not need that source kind. Production capture/guard functions are real.

@@ -21,6 +21,9 @@ export class PostgresRelaySourceStore implements SourceStore {
  protected async query(sql:string,args:any[]){
   try{return await this.db.query(sql,args)}catch(error){
    const message=(error as Error).message
+   const sqlstate=(error as {code?:unknown}).code
+   if(sqlstate==='57014'||message==='source_query_deadline_exceeded')throw new SourceUnavailableError('source_store_timeout')
+   if(['55P03','40001','40P01'].includes(String(sqlstate)))throw new SourceUnavailableError('source_store_busy')
    for(const state of ['revoked','deleted','changed'])if(message==='source_'+state)throw new SourceUnavailableError(state)
    if(message==='source_metadata_proof_unavailable')throw new SourceUnavailableError('source_metadata_proof_unavailable')
    throw new SourceUnavailableError('source_store_unavailable')

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { workerErrorFields, workerErrorCode } from '../jobs/worker-diagnostics.js'
+import {SourceUnavailableError} from '@pocketctl/session-source'
 import { JobTerminalError } from '../jobs/types.js'
 
 describe('safe worker diagnostics', () => {
@@ -28,4 +29,10 @@ describe('safe worker diagnostics', () => {
     const fields=workerErrorFields(new Error('private'),{job_id:'11111111-1111-4111-8111-111111111111',job_type:'project_feed',attempts:3,claim_epoch:5,payload:{text:'secret'}} as never)
     expect(fields).toEqual({code:'handler_failed_Error',job_id:'11111111-1111-4111-8111-111111111111',job_type:'project_feed',attempt:3,claim_epoch:5})
   })
+})
+
+test('preserves finite source failures and rejects arbitrary source codes',()=>{
+ for(const code of ['source_store_unavailable','source_store_timeout','source_store_busy','source_reference_unproven','source_body_reclaimed'])
+  expect(workerErrorFields(new SourceUnavailableError(code))).toEqual({code})
+ expect(workerErrorFields(new SourceUnavailableError('private/path'))).toEqual({code:'handler_failed_Error'})
 })

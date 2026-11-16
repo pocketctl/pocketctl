@@ -1,3 +1,4 @@
+import {reconcileExpiredCurationRuns} from './curation/reconcile-expired.js'
 import {attachSourceMetrics} from './sources/metrics.js'
 import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
 import {createSharedSourceScheduler} from './sources/shared-scheduler.js'
@@ -660,6 +661,8 @@ async function main(): Promise<void> {
     const enqueueLifecycleSweep=async()=>{
       await jobRepository.enqueueJob({jobType:'evaluate_claim_lifecycle',idempotencyKey:`lifecycle:${Math.floor(Date.now()/60000)}`,priority:96})
       if(!config.lifecycleMode||config.lifecycleMode==='off')return
+      const reconciled=await reconcileExpiredCurationRuns(pool).catch(loopError('curation_reconcile'))
+      if(reconciled)logger.log('warn','curation_expired_reconciled',{count:reconciled})
       const authority=lifecycleOwnerJoin(pool,'i.installation_id')
       const rows=(await pool.query(`SELECT l.installation_id,l.claim_id FROM memory_claim_lifecycle l
         JOIN memory_curation_policies p USING(installation_id) JOIN memory_installations i USING(installation_id)

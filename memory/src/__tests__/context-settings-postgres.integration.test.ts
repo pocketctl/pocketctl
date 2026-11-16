@@ -198,6 +198,26 @@ describeWithDatabase('context settings and loadouts (PostgreSQL)', () => {
     expect(statuses.wiki).toBe('asset_unavailable')
   })
 
+  test('reads loadout revision and items from the same snapshot during replacement', async () => {
+    const scope = { installationId: INSTALLATION, repositoryId: REPO_A, agent: 'codex' }
+    const oldItem = { itemId: crypto.randomUUID(), assetKind: 'wiki' as const, claimId: null,
+      externalAssetRef: 'wiki:old', representation: 'reference' as const, priority: 10 }
+    const newItem = { ...oldItem, itemId: crypto.randomUUID(), externalAssetRef: 'wiki:new' }
+    expect(await loadouts.replace({ ...scope, items: [oldItem], expectedRevision: 1 })).toEqual({ ok: true, revision: 1 })
+    let replaced = false
+    const racingReader = { async query(sql: string, parameters: unknown[]) {
+      const result = await pool.query(sql, parameters)
+      if (!replaced) {
+        replaced = true
+        expect(await loadouts.replace({ ...scope, items: [newItem], expectedRevision: 1 })).toEqual({ ok: true, revision: 2 })
+      }
+      return result
+    } } as pg.Pool
+    const original = await createLoadoutRepository(racingReader).resolve(scope)
+    expect(original).toMatchObject({ revision: 1, items: [{ itemId: oldItem.itemId }] })
+    expect(await loadouts.resolve(scope)).toMatchObject({ revision: 2, items: [{ itemId: newItem.itemId }] })
+  })
+
   test('cross-installation repository keys are invisible to resolution', async () => {
     const other = '88888888-8888-4888-8888-888888888888'
     await pool.query(`

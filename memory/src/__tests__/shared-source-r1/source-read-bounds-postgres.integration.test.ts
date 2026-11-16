@@ -47,7 +47,7 @@ suite('factory-bound physical source SQL has finite native Memory lifetime',()=>
   await f.pool.query(readDefinition.replace(/BEGIN/i,'BEGIN PERFORM pg_sleep(6);'))
   const started=performance.now()
   try{
-   await expect(heads(db)).rejects.toThrow('shared_source_unavailable:source_store_unavailable')
+   await expect(heads(db)).rejects.toThrow('shared_source_unavailable:source_store_timeout')
    expect(performance.now()-started).toBeLessThan(5800)
    expect((await f.pool.query("SELECT state,query FROM pg_stat_activity WHERE pid=$1 AND state='active'",[pid])).rows).toEqual([])
   }finally{await f.pool.query(readDefinition)}
@@ -57,7 +57,7 @@ suite('factory-bound physical source SQL has finite native Memory lifetime',()=>
  test('server lock timeout bounds blocked source SQL independently of statement timeout',async()=>{
   const db=pool(),locker=await f.pool.connect();await locker.query('BEGIN;LOCK public.events IN ACCESS EXCLUSIVE MODE')
   const started=performance.now()
-  try{await expect(heads(db)).rejects.toThrow('source_store_unavailable');expect(performance.now()-started).toBeLessThan(1800)}finally{await locker.query('ROLLBACK');locker.release()}
+  try{await expect(heads(db)).rejects.toThrow('source_store_busy');expect(performance.now()-started).toBeLessThan(1800)}finally{await locker.query('ROLLBACK');locker.release()}
   expect((await heads(db)).heads).toHaveLength(1)
  },10000)
 
@@ -86,7 +86,7 @@ suite('factory-bound physical source SQL has finite native Memory lifetime',()=>
   held.release()
   const started=performance.now(),pending=heads(db).then(()=>null,e=>e)
   await Promise.race([arrived,sleep(1000).then(()=>{throw Error('physical_source_phase_not_reached:'+phase)})])
-  expect(await pending).toMatchObject({message:'shared_source_unavailable:'+(phase==='ROLLBACK'?'revoked':'source_store_unavailable')});expect(performance.now()-started).toBeLessThan(8700)
+  expect(await pending).toMatchObject({message:'shared_source_unavailable:'+(phase==='ROLLBACK'?'revoked':'source_store_timeout')});expect(performance.now()-started).toBeLessThan(8700)
   expect((held as any).connection.stream.destroyed).toBe(true);await noBackend(pid)
   const sentAtTimeout=sent.length
   if(phase==='ROLLBACK')fail(Error('late_rollback_rejection'));else finish({rows:[]})

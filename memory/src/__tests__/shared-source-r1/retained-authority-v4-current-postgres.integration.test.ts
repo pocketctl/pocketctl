@@ -1,6 +1,7 @@
 /** Native RED scaffold. Run only after root releases an isolated fresh *_test
  * database; source presence/skip is not verification or acceptance. */
 import pg from 'pg'
+import {once} from 'node:events'
 import {randomUUID} from 'node:crypto'
 import {mkdtemp,rm,rename} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
@@ -74,7 +75,11 @@ suite('G2 v4 current verification on the caller physical transaction',()=>{
   const c=new pg.Client({connectionString:url});await c.connect()
   try{
    await expect(verifyPagedCleanupCurrent(c,identity,f.config,capability)).rejects.toThrow('paged_current_transaction_required')
-   await c.query('BEGIN');await expect(c.query('SELECT 1/0')).rejects.toMatchObject({code:'22012'})
+   await c.query('BEGIN')
+   // PostgreSQL reports the query error before ReadyForQuery records the failed transaction.
+   const serverReady=once(c.connection,'readyForQuery',{signal:AbortSignal.timeout(2000)})
+   await Promise.all([serverReady,expect(c.query('SELECT 1/0')).rejects.toMatchObject({code:'22012'})])
+   expect(c.getTransactionStatus()).toBe('E')
    await expect(verifyPagedCleanupCurrent(c,identity,f.config,capability)).rejects.toThrow('paged_current_transaction_required');await c.query('ROLLBACK')
    await c.query('BEGIN READ ONLY');await expect(verifyPagedCleanupCurrent(c,identity,f.config,capability)).rejects.toThrow('paged_current_transaction_contract');await c.query('ROLLBACK')
    await c.query('BEGIN');await expect(verifyPagedCleanupCurrent(c,identity,f.config,capability)).rejects.toThrow('paged_current_transaction_contract');await c.query('ROLLBACK')
