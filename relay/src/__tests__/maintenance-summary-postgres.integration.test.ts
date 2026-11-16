@@ -12,13 +12,16 @@ import {registerMaintenanceRoutes} from '../extensions/maintenance-routes.js'
 import {signProviderExtensionToken} from '../extensions/provider-auth.js'
 const suite=process.env.RUN_SESSION_LIFECYCLE_POSTGRES==='1'?describe:describe.skip
 suite('one notification for the entire maintenance cycle',()=>{
- let pool:pg.Pool,repo:AttentionNotificationRepository,user:number,other:number
- const installation=randomUUID(),slot=maintenanceSlot('archive',new Date()),day=new Date(slot.getTime()+8*3600000).toISOString().slice(0,10)
+ let pool:pg.Pool,repo:AttentionNotificationRepository,user:number,other:number,installation:string
+ const slot=maintenanceSlot('archive',new Date()),day=new Date(slot.getTime()+8*3600000).toISOString().slice(0,10)
  const beforeDeadline=new Date(slot.getTime()+3600000),afterDeadline=new Date(slot.getTime()+3*3600000)
  beforeAll(async()=>{pool=await lifecycleTestPool();await initDB(pool);repo=new AttentionNotificationRepository(pool,'maintenance-test')},30000)
  afterAll(async()=>{await pool?.end()})
  beforeEach(async()=>{
   await pool.query('TRUNCATE users,daemons,sessions,extension_providers,session_lifecycle_daily_runs CASCADE')
+  // Native input-start facts survive business-table cleanup by design. Each
+  // test represents a new installation instead of reusing an immutable ID.
+  installation=randomUUID()
   user=(await pool.query("INSERT INTO users(email,password_hash) VALUES('maint@test.invalid','x') RETURNING id")).rows[0].id
   other=(await pool.query("INSERT INTO users(email,password_hash) VALUES('other@test.invalid','x') RETURNING id")).rows[0].id
   await pool.query("INSERT INTO daemons(daemon_id,user_id) VALUES('maint-a',$1),('maint-b',$1)",[user])
