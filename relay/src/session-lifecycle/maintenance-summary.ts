@@ -3,7 +3,7 @@ import type pg from 'pg'
 
 export const maintenanceCounts = [
  'candidates_expired','inbox_body','inbox_metadata','inbox_metadata_blocked',
- 'inbox_skipped_snapshot','inbox_skipped_inactive','inbox_skipped_unacknowledged',
+ 'inbox_skipped_retired','inbox_skipped_snapshot','inbox_skipped_inactive','inbox_skipped_unacknowledged',
  'source_events','source_artifacts','source_snapshots','source_candidates','source_episodes',
  'source_skipped','source_migration_protected',
 ] as const

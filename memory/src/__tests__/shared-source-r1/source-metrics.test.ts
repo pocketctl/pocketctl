@@ -41,3 +41,9 @@ test('scrapes share one bounded read-only transaction and pace subsequent attemp
  expect(connects).toBe(1);expect(calls).toEqual(['BEGIN READ ONLY',"SET LOCAL statement_timeout='3s'; SET LOCAL lock_timeout='1s'",'SELECT shared.memory_source_health() AS health','COMMIT','release'])
  now=15000;await collect();expect(connects).toBe(2)
 })
+
+test('source timeout and contention remain distinct bounded metric reasons',async()=>{
+ const registry=new Registry(),metrics=createSourceMetrics(registry)
+ metrics.readerError('getHeads','relay_event','source_store_timeout');metrics.readerError('getHeads','relay_event','source_store_busy')
+ const text=await registry.metrics();expect(text).toContain('reason="source_store_timeout"');expect(text).toContain('reason="source_store_busy"')
+})

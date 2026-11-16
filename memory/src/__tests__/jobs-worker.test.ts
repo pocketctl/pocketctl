@@ -1,3 +1,4 @@
+import {SourceUnavailableError} from '@pocketctl/session-source'
 import { describe, expect, test } from 'vitest'
 import { createJobWorker, type JobWorkerOptions } from '../jobs/worker.js'
 import type { JobRepository } from '../jobs/repository.js'
@@ -279,4 +280,25 @@ describe('job worker per-claim lease renewal', () => {
     await worker.stop()
     expect(fences).toEqual([{ jobId: 'job-f', claimedBy: 'worker-1', claimEpoch: 9 }])
   })
+})
+
+test('transient source lock contention defers projection without consuming the failure budget',async()=>{
+ const {jobs}=fakeJobs([claim({job_type:'project_shared_source'})]);const deferred:any[]=[],failed:any[]=[]
+ jobs.deferJob=async x=>{deferred.push(x);return true};jobs.rescheduleJob=async x=>{failed.push(x);return true}
+ const worker=createJobWorker(workerOptions({jobs}));worker.register('project_shared_source',async()=>{throw new SourceUnavailableError('source_store_busy')})
+ await worker.tick();expect(deferred).toHaveLength(1);expect(deferred[0].reason).toBe('source_not_ready');expect(failed).toHaveLength(0)
+})
+test('source timeouts and model-bearing jobs remain visible failures, not automatic deferrals',async()=>{
+ for(const [job_type,code]of [['compile_episode','source_store_timeout'],['consolidate_task','source_store_busy']] as const){
+  const {jobs}=fakeJobs([claim({job_type})]);const failed:any[]=[];jobs.rescheduleJob=async x=>{failed.push(x);return true}
+  const worker=createJobWorker(workerOptions({jobs}));worker.register(job_type,async()=>{throw new SourceUnavailableError(code)})
+  await worker.tick();expect(failed).toHaveLength(1);expect(failed[0].errorCode).toBe(code)
+ }
+})
+
+test('persistent source contention exhausts its bounded deferral allowance',async()=>{
+ const {jobs}=fakeJobs([claim({payload:{source_wait_count:60}})]);const failures:any[]=[]
+ jobs.rescheduleJob=async x=>{failures.push(x);return true}
+ const worker=createJobWorker(workerOptions({jobs}));worker.register('compile_episode',async()=>{throw new SourceUnavailableError('source_store_busy')})
+ await worker.tick();expect(failures).toHaveLength(1);expect(failures[0].errorCode).toBe('source_store_busy')
 })

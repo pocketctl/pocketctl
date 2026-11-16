@@ -6,7 +6,7 @@ const modes=['legacy-feed','shared-shadow','shared-active','paused'] as const
 const states=['pending','leased','dead'] as const
 const copies=['source_events','source_artifacts','memory_feed_inbox','memory_snapshot_events'] as const
 const operations=['listHeads','getHeads','resolveBodies','checkCurrent','checkAuthority'] as const
-const reasons=['revoked','deleted','changed','archive_unavailable','archive_binding_invalid','archive_namespace_mismatch','hash_mismatch','source_body_reclaimed','source_store_unavailable','body_byte_limit','source_metadata_conflict','other'] as const
+const reasons=['revoked','deleted','changed','archive_unavailable','archive_binding_invalid','archive_namespace_mismatch','hash_mismatch','source_body_reclaimed','source_store_unavailable','source_store_timeout','source_store_busy','body_byte_limit','source_metadata_conflict','other'] as const
 const bounded=(value:string,values:readonly string[])=>values.includes(value)?value:'other'
 export function createSourceMetrics(registry:Registry){
  const ready=new Gauge({name:'pocketctl_memory_source_activation_ready',help:'Shared source contract readiness; not business acceptance',registers:[registry]})
