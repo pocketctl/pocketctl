@@ -1,3 +1,4 @@
+import { observeWorkerStage } from './worker-observability.js'
 import {
   InboxRepository,
   LostClaimError,
@@ -26,6 +27,7 @@ export interface InboxWorkerDeps {
   workerId: string
   shardCount: number
   shardIndex: number
+  streamConcurrency?: number
   batchSize?: number
   pollIntervalMs?: number
   maxDrainPasses?: number
@@ -93,6 +95,9 @@ export function retryDelayMs(attempts: number, random: () => number): number {
 }
 
 export function createInboxWorker(deps: InboxWorkerDeps) {
+  const streamConcurrency = deps.streamConcurrency ?? 1
+  if (!Number.isSafeInteger(streamConcurrency) || streamConcurrency < 1 || streamConcurrency > 8)
+    throw new Error('streamConcurrency must be an integer between 1 and 8')
   const batchSize = Math.max(1, Math.trunc(deps.batchSize ?? 32))
   const pollIntervalMs = Math.max(1, Math.trunc(deps.pollIntervalMs ?? 50))
   const maxDrainPasses = Math.max(1, Math.trunc(deps.maxDrainPasses ?? DEFAULT_DRAIN_PASSES))
@@ -127,7 +132,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
         error.name = 'SessionDocumentMaterializerUnavailableError'
         throw error
       }
-      const result = await materializer.materialize({
+      const result = await observeWorkerStage('materialize', () => materializer.materialize({
         inboxId: row.inboxId,
         userId: row.userId,
         daemonId: row.daemonId,
@@ -137,15 +142,15 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
         payload: row.payload,
         receivedAt: row.receivedAt,
         context: row.materializationContext,
-      }, undefined, { assertClaim })
+      }, undefined, { assertClaim }))
       if (deps.outboxWriter) {
-        await deps.outboxWriter.complete(
+        await observeWorkerStage('complete', () => deps.outboxWriter!.complete(
           row.inboxId,
           result.eventId,
           result.deliveries,
           deps.workerId,
           row.attempts,
-        )
+        ))
       } else {
         await deps.repository.complete(row.inboxId, result.eventId, deps.workerId, row.attempts)
       }
@@ -223,41 +228,59 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
     }
 
     scheduleHeartbeat()
-    // Repository claim guarantees one minimum pending seq per daemon generation.
-    // Keep this loop serial as an additional in-process ordering fence for fakes
-    // and future query changes that return more than one row for a daemon.
-    try {
-      for (const row of rows) {
-        const assertClaim = async (): Promise<void> => {
-          if (!activeClaims.get(row.inboxId)?.owned) throw new LostClaimError(row.inboxId)
-        }
-        if (deps.repository.readReplayPrefix && deps.materializer.materializeReplayBatch
-          && deps.outboxWriter?.completeReplayBatch && isSideEffectFreeReplay(materializationInput(row))) {
-          try {
-            const tail = await deps.repository.readReplayPrefix(row, Math.min(32, batchSize))
-            if (tail.length) {
-              const prefix = [row, ...tail]
-              workerBatchSize.observe(prefix.length)
-              const complete = deps.outboxWriter.completeReplayBatch.bind(deps.outboxWriter)
-              await deps.materializer.materializeReplayBatch(prefix.map(materializationInput), assertClaim, {
-                workerId: deps.workerId,
-                fences: prefix.map(item => ({ inboxId: item.inboxId, attempts: item.attempts })),
-                complete: (client, results) => complete(client, prefix.map((item, i) => ({
-                  inboxId: item.inboxId, attempts: item.attempts,
-                  eventId: results[i].eventId, deliveries: results[i].deliveries,
-                })), deps.workerId),
-              })
-              activeClaims.delete(row.inboxId)
-              continue
-            }
-          } catch {
-            // The transaction rolls back followers without claiming them or
-            // spending their retries. Preserve the established head retry path.
+    // A lane owns a complete stream prefix. Even if a future claim query returns
+    // multiple rows per stream, their ordering fence stays intact.
+    const groups = new Map<string, InboxRow[]>()
+    rows.forEach((row, index) => {
+      const key = streamConcurrency === 1 ? String(index) : JSON.stringify([row.daemonId, row.daemonGeneration])
+      const group = groups.get(key) ?? []
+      group.push(row)
+      groups.set(key, group)
+    })
+    const streams = [...groups.values()]
+    let nextStream = 0
+    const runLane = async (): Promise<void> => {
+      while (nextStream < streams.length) {
+        const stream = streams[nextStream++]
+        for (const row of stream) {
+          const assertClaim = async (): Promise<void> => {
+            if (!activeClaims.get(row.inboxId)?.owned) throw new LostClaimError(row.inboxId)
           }
+          if (deps.repository.readReplayPrefix && deps.materializer.materializeReplayBatch
+            && deps.outboxWriter?.completeReplayBatch && isSideEffectFreeReplay(materializationInput(row))) {
+            try {
+              const tail = await deps.repository.readReplayPrefix(row, Math.min(32, batchSize))
+              if (tail.length) {
+                const prefix = [row, ...tail]
+                workerBatchSize.observe(prefix.length)
+                const complete = deps.outboxWriter.completeReplayBatch.bind(deps.outboxWriter)
+                await observeWorkerStage('replay_batch', () => deps.materializer.materializeReplayBatch!(prefix.map(materializationInput), assertClaim, {
+                  workerId: deps.workerId,
+                  fences: prefix.map(item => ({ inboxId: item.inboxId, attempts: item.attempts })),
+                  complete: (client, results) => complete(client, prefix.map((item, i) => ({
+                    inboxId: item.inboxId, attempts: item.attempts,
+                    eventId: results[i].eventId, deliveries: results[i].deliveries,
+                  })), deps.workerId),
+                }))
+                activeClaims.delete(row.inboxId)
+                continue
+              }
+            } catch {
+              // The transaction rolls back followers without claiming them or
+              // spending their retries. Preserve the established head retry path.
+            }
+          }
+          await processRow(row, assertClaim)
+          activeClaims.delete(row.inboxId)
         }
-        await processRow(row, assertClaim)
-        activeClaims.delete(row.inboxId)
       }
+    }
+    try {
+      // Do not close leases or return from stop() while sibling lanes still run.
+      const results = await Promise.allSettled(Array.from(
+        { length: Math.min(streamConcurrency, streams.length) }, () => runLane()))
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed?.status === 'rejected') throw failed.reason
     } finally {
       leaseClosed = true
       if (heartbeatTimer) clearTimer(heartbeatTimer)

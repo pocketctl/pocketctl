@@ -1,4 +1,6 @@
 import type pg from 'pg'
+import { isDeepStrictEqual } from 'node:util'
+import { EVENT_BODY_COLUMNS, hydratePostgresEventRows, withSessionHistoryScope } from '../session-history/postgres-reader.js'
 import {sharedSourceHeadersEnabled,sessionTransportConsumerPolicyEnabled} from '../shared-source/headers.js'
 import {readSessionTransportConsumerPolicy,recordSessionTransportBodyOmission} from '../shared-source/consumer-policy.js'
 import {canonicalPayloadHash,canonicalSourceClassification} from '@pocketctl/session-source'
@@ -114,10 +116,14 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
       }
       const payloadHash=canonicalPayloadHash(payload).toString('hex')
       let originalSequence:string|undefined
+      let authenticatedLegacyCold = false
+      let publishedHeader: { hash: unknown; classification: unknown } | undefined
       if(options.sharedHeaders){
-        const canonical=(await client.query(`SELECT source_header_version,source_sequence::text FROM public.events
+        const canonical=(await client.query(`SELECT id::text,session_id,event_type,${EVENT_BODY_COLUMNS},source_header_version,source_sequence::text,canonical_payload_hash,source_classification FROM public.events
           WHERE id=$1::bigint AND NOT owner_retired AND user_id=$2 AND logical_source_session_id=$3 AND event_type=$4
-           AND (payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND source_header_version=1 AND canonical_payload_hash=$6))
+           AND (payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND
+             ((source_header_version=1 AND canonical_payload_hash=$6) OR
+              (source_header_version IS NULL AND source_sequence IS NULL AND canonical_payload_hash IS NULL AND source_classification IS NULL))))
            AND ((session_id=$3 AND NOT EXISTS(SELECT 1 FROM public.session_aliases a WHERE a.old_session_id=$3)
              AND NOT EXISTS(SELECT 1 FROM public.deleted_sessions d WHERE d.session_id=$3)
              AND (NOT EXISTS(SELECT 1 FROM public.sessions s WHERE s.session_id=$3)
@@ -128,21 +134,38 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
           [String(input.sourceEventId),input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload),payloadHash])).rows
         if(canonical.length!==1)throw Error('canonical_source_header_mismatch')
         const row=canonical[0]
+        // Pre-header events may already be archived. Authenticate the original
+        // bytes under this transaction's owner/session fence; incoming replay
+        // bytes alone are never evidence for creating a source header.
+        if (row.body_storage === 'cold' && row.source_header_version == null) {
+          const hydrated = await withSessionHistoryScope({userId: input.ownerUserId}, () =>
+            hydratePostgresEventRows(client, row.session_id, [row]))
+          if (hydrated.length !== 1 || canonicalPayloadHash(hydrated[0].payload).toString('hex') !== payloadHash)
+            throw Error('canonical_source_header_mismatch')
+          authenticatedLegacyCold = true
+        }
         if(row.source_header_version!=null){
           if(row.source_header_version!==1 || !/^[1-9][0-9]{0,18}$/.test(row.source_sequence??'') || BigInt(row.source_sequence)>9223372036854775807n)throw Error('canonical_source_header_mismatch')
           originalSequence=row.source_sequence
+          publishedHeader = {hash: row.canonical_payload_hash, classification: row.source_classification}
         }else if(row.source_sequence!=null)throw Error('canonical_source_header_mismatch')
       }
       const persistHeader=async(sequence:string)=>{
         const hash=payloadHash
         const classification=canonicalSourceClassification({source_kind:'canonical_event',session_id:input.sessionId,source_seq:sequence,payload})
         if(Buffer.byteLength(JSON.stringify(classification))>65536)throw Error('canonical_source_header_limit')
+        // The row remains locked: an exact published header needs verification,
+        // not another tuple/WAL version on every duplicate replay.
+        if (originalSequence === sequence && publishedHeader?.hash === hash
+          && isDeepStrictEqual(publishedHeader.classification, classification)) return
         const saved=await client.query(`UPDATE public.events SET source_header_version=1,source_sequence=$6::bigint,
           canonical_payload_hash=$7,source_classification=$8::jsonb
           WHERE id=$1::bigint AND NOT owner_retired AND user_id=$2 AND logical_source_session_id=$3 AND event_type=$4
-            AND(payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND source_header_version=1 AND canonical_payload_hash=$7)) AND effect_status IN ('none','pending','completed')
+            AND(payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND
+              ((source_header_version=1 AND canonical_payload_hash=$7) OR
+               ($9::boolean AND source_header_version IS NULL AND source_sequence IS NULL AND canonical_payload_hash IS NULL AND source_classification IS NULL)))) AND effect_status IN ('none','pending','completed')
             AND (source_header_version IS NULL OR (source_header_version=1 AND source_sequence=$6::bigint AND canonical_payload_hash=$7 AND source_classification=$8::jsonb))
-          RETURNING id`,[String(input.sourceEventId),input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload),sequence,hash,JSON.stringify(classification)])
+          RETURNING id`,[String(input.sourceEventId),input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload),sequence,hash,JSON.stringify(classification),authenticatedLegacyCold])
         if(saved.rowCount!==1)throw Error('canonical_source_header_mismatch')
       }
       if(options.consumerPolicy){

@@ -893,3 +893,57 @@ test('replay diagnostics distinguish conflicts without exposing arbitrary messag
   expect(safeMaterializationError(new Error('canonical_source_header_mismatch'))).toBe('canonical_source_header_mismatch')
   expect(safeMaterializationError(new Error('canonical_source_header_mismatch secret body'))).toBe('materialization_failed')
 })
+
+test('bounded stream concurrency preserves same-stream order and waits for all claims', async () => {
+  const gate = deferred<void>()
+  const started: number[] = []
+  const completed: number[] = []
+  const repository = {
+    resetStaleClaims: vi.fn().mockResolvedValue(0),
+    claimBatch: vi.fn().mockResolvedValueOnce([
+      row({inboxId:1,daemonId:'a'}), row({inboxId:2,daemonId:'a',seq:2}),
+      row({inboxId:3,daemonId:'b'}), row({inboxId:4,daemonId:'c'}),
+    ]).mockResolvedValue([]),
+    renewClaims: vi.fn(), complete: vi.fn(), reschedule: vi.fn(), deadLetter: vi.fn(),
+  }
+  let active=0,maxActive=0
+  const materializer={materialize:vi.fn(async (input:{inboxId:number})=>{
+    started.push(input.inboxId);active++;maxActive=Math.max(active,maxActive)
+    if(input.inboxId===1)await gate.promise
+    completed.push(input.inboxId);active--
+    return {eventId:input.inboxId,inserted:true,completed:true,deliveries:[]}
+  })}
+  const worker=createInboxWorker({repository,materializer:materializer as never,
+    workerId:'worker',shardCount:1,shardIndex:0,streamConcurrency:2})
+  const running=worker.runOnce()
+  try {
+    await vi.waitFor(()=>expect(completed).toContain(4))
+    expect(started).not.toContain(2)
+    expect(maxActive).toBe(2)
+  } finally {gate.resolve();await running}
+  expect(completed.indexOf(2)).toBeGreaterThan(completed.indexOf(1))
+  expect(repository.complete).toHaveBeenCalledTimes(4)
+})
+
+test('a failed lane does not close the batch while a sibling is still materializing',async()=>{
+  const gate=deferred<void>(),entered=deferred<void>()
+  const error=new Error('database unavailable')
+  const repository={resetStaleClaims:vi.fn().mockResolvedValue(0),
+    claimBatch:vi.fn().mockResolvedValueOnce([row({daemonId:'a'}),row({inboxId:2,daemonId:'b'})]).mockResolvedValue([]),
+    renewClaims:vi.fn(),complete:vi.fn(),reschedule:vi.fn().mockRejectedValue(error),deadLetter:vi.fn()}
+  const materializer={materialize:vi.fn(async(input:{inboxId:number})=>{
+    if(input.inboxId===1)throw error
+    entered.resolve();await gate.promise
+    return {eventId:2,inserted:true,completed:true,deliveries:[]}
+  })}
+  const worker=createInboxWorker({repository,materializer:materializer as never,
+    workerId:'worker',shardCount:1,shardIndex:0,streamConcurrency:2})
+  let settled=false
+  const running=worker.runOnce().catch(e=>{settled=true;return e})
+  await entered.promise
+  await new Promise(resolve=>setImmediate(resolve))
+  expect(settled).toBe(false)
+  gate.resolve()
+  expect(await running).toBe(error)
+  expect(repository.complete).toHaveBeenCalledWith(2,2,'worker',1)
+})

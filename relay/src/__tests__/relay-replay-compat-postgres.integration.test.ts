@@ -150,6 +150,20 @@ suite('canonical replay compatibility', () => {
     await expect(m.materialize(input(changed))).rejects.toThrow(/replay_(payload|provenance)_conflict/)
     expect((await pool.query('SELECT payload FROM events')).rows[0].payload).toEqual(body())
   })
+  test('an identical published header is verified without rewriting the event row', async()=>{
+    const original=body(),first=await materializer().materialize(input(original))
+    const before=(await pool.query('SELECT xmin::text AS revision FROM events WHERE id=$1',[first.eventId])).rows[0]
+    const client=await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await createPostgresExtensionJournalSink({sharedHeaders:true}).appendCanonicalEvent(client,{
+        sourceEventId:first.eventId!,ownerUserId:owner,sessionId:'replay-session',
+        eventType:'tool_call',occurredAt:null,payload:original,
+      })
+      await client.query('COMMIT')
+    } finally {await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT xmin::text AS revision FROM events WHERE id=$1',[first.eventId])).rows[0]).toEqual(before)
+  })
   test('existing pre-header journal sequence is retained', async()=>{
     const legacy = new EventMaterializer({pool,extensionJournalSink:createPostgresExtensionJournalSink()})
     await legacy.materialize(input(body()))
@@ -168,8 +182,8 @@ suite('canonical replay compatibility', () => {
     if(kind==='alias') await pool.query("INSERT INTO session_aliases(old_session_id,next_session_id,original_daemon_id,owner_user_id,request_daemon_id,blocked) VALUES('replay-session','missing','replay-daemon',$1,'replay-daemon',true)",[owner])
     await expect(materializer().materialize(input({...body(),seq:9}))).rejects.toThrow()
   })
-  test('cold replay reads authenticated archive and fails closed on damaged content with pool size one',async()=>{
-    const original=body();const first=await materializer().materialize(input(original))
+  test.each([true,false])('cold replay authenticates archived content with existing headers=%s and pool size one',async(existingHeaders)=>{
+    const original=body();const first=await materializer(existingHeaders).materialize(input(original))
     await enableSessionColdBodies(pool)
     const storage=Object.assign(new MemoryArchiveStorage(),{namespace:'replay-isolated'})
     const limits={maxRawBytes:1048576,maxCompressedBytes:1048576,maxRecords:32}
@@ -180,9 +194,15 @@ suite('canonical replay compatibility', () => {
     await pool.query("INSERT INTO session_archive_manifests(manifest_id,user_id,session_id,activity_epoch,schema_version,codec,state,event_high_water,published_at,storage_namespace) VALUES($1,$2,'replay-session',$3,1,'gzip','published',$4,NOW(),$5)",[manifestId,owner,epoch,first.eventId,storage.namespace])
     await pool.query('INSERT INTO session_archive_chunks(manifest_id,ordinal,object_key,first_event_id,last_event_id,event_count,raw_bytes,compressed_bytes,raw_sha256,compressed_sha256) VALUES($1,0,$2,$3,$3,1,$4,$5,$6,$7)',[manifestId,key,String(first.eventId),m.rawBytes,m.compressedBytes,m.rawSha256,m.compressedSha256])
     await pool.query("UPDATE events SET body_storage='cold',payload=NULL,body_manifest_id=$1,body_chunk_ordinal=0,body_owner_user_id=$2,body_session_id='replay-session',body_activity_epoch=$3",[manifestId,owner,epoch])
+    if (!existingHeaders) {
+      await storage.put(key,Buffer.from('corrupt before header creation'))
+      await expect(materializer().materialize(input({...original,seq:98,resync:true}))).rejects.toThrow()
+      expect((await pool.query('SELECT source_header_version FROM events')).rows[0].source_header_version).toBeNull()
+      await storage.put(key,encoded.bytes)
+    }
     const replay=await materializer().materialize(input({...original,seq:99,resync:true}))
     expect(replay.deliveries[0].payload.input).toEqual(original.input)
-    expect((await pool.query('SELECT payload FROM events')).rows[0].payload).toBeNull()
+    expect((await pool.query('SELECT payload,source_header_version FROM events')).rows[0]).toEqual({payload:null,source_header_version:1})
     await storage.put(key,Buffer.from('corrupt'))
     await expect(materializer().materialize(input({...original,seq:100}))).rejects.toThrow()
   })

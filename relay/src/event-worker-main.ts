@@ -1,5 +1,6 @@
 import { ensurePlatformStatisticsSchema } from './platform-statistics/schema.js'
 import { startPlatformStatisticsCollector } from './platform-statistics/collector.js'
+import { createWorkerMetricsServer } from './worker-observability.js'
 import { hostname } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import type pg from 'pg'
@@ -116,6 +117,7 @@ export function createRetentionLoop(options: RetentionLoopOptions) {
 }
 
 interface WorkerRuntimeDeps {
+  observability?: {start(): Promise<void>; stop(): Promise<void>};
   assertSchemaReady(): Promise<void>;
   worker: { start(): void; stop(): Promise<void> };
   retention: { start(): void; stop(): Promise<void> };
@@ -144,6 +146,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
       if (started) return
       try {
         await deps.assertSchemaReady()
+        await deps.observability?.start()
         deps.worker.start()
         workerStarted = true
         deps.retention.start()
@@ -154,6 +157,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
         started = true
       } catch (error) {
         await Promise.allSettled([
+          ...(deps.observability ? [deps.observability.stop()] : []),
           ...(workerStarted ? [deps.worker.stop()] : []),
           ...(retentionStarted ? [deps.retention.stop()] : []),
           ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
@@ -172,6 +176,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
         let drainFailure: unknown
         if (started) {
           const drained = await Promise.allSettled([
+            ...(deps.observability ? [deps.observability.stop()] : []),
             deps.worker.stop(),
             deps.retention.stop(),
             ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
@@ -284,6 +289,7 @@ export async function main(): Promise<void> {
     }))
     : undefined
   const worker = createInboxWorker({
+    streamConcurrency: strictPositiveEnvInt('RELAY_WORKER_STREAM_CONCURRENCY', 1),
     repository,
     materializer: new EventMaterializer({
       pool,
@@ -345,6 +351,8 @@ export async function main(): Promise<void> {
     : undefined
   let stopStatistics = () => {}
   const runtime = createWorkerRuntime({
+    observability: process.env.RELAY_WORKER_METRICS_PORT
+      ? createWorkerMetricsServer(pool, strictPositiveEnvInt('RELAY_WORKER_METRICS_PORT', 8081)) : undefined,
     assertSchemaReady: async () => {
       if(await relaySharedTarget(pool)){await assertSharedRelayRuntime(pool);await assertRelaySchemaContract(pool)}
       await assertDurableIngressSchema(pool)
