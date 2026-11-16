@@ -7,6 +7,7 @@
       'standalone-route': !!route.meta.standalone,
       'sidebar-collapsed': sidebarCollapsed,
       'mobile-shell-active': showMobileShell,
+      'nav-open': showMobileShell && mobileNavOpen,
       'mobile-session-route': showMobileShell && isSessionRoute,
       'mobile-team-session-route': showMobileShell && isTeamSessionRoute,
       'mobile-session-list-route': showMobileShell && isSessionListRoute,
