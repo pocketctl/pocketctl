@@ -1,5 +1,5 @@
 <template>
-  <header class="mobile-topbar">
+  <header class="mobile-topbar" :class="{ 'session-mode': isSession }">
     <button
       v-if="isSession"
       type="button"
@@ -20,8 +20,8 @@
     </div>
 
     <button v-if="moduleAction" class="mobile-topbar-action module-action" :aria-label="t(moduleAction==='register'?'dashboard.register_host':moduleAction==='team'?'team.create':'common.retry')" @click="$emit('module-action')"><WorkspaceIcon :name="moduleAction==='register'?'host-add':moduleAction==='team'?'plus':'refresh'" /></button>
-    <TopbarGithubLink />
-    <div :class="['mobile-connection', { 'is-session-status': isSession && sessionStatus }]" role="status" aria-live="polite">
+    <TopbarGithubLink v-if="!isSession" />
+    <div :class="['mobile-connection', { 'is-session-status': isSession && sessionStatus, 'loading-more': isSession && sessionStatusLabel === t('session.history_loading_more') }]" role="status" aria-live="polite">
       <span :class="['mobile-connection-dot', displayStatusClass]"></span>
       <span>{{ displayStatusLabel }}</span>
     </div>
@@ -111,6 +111,10 @@ const displayStatusLabel = computed(() => props.isSession && props.sessionStatus
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   backdrop-filter: blur(14px);
 }
+.mobile-topbar.session-mode { padding-right: 104px; }
+.mobile-connection.loading-more { display: flex !important; flex-shrink: 0; }
+/* The shared mobile shell hides normal connection text with font-size:0. */
+.mobile-connection.loading-more span:last-child { display: inline !important; font-size: 11px !important; }
 .mobile-brand {
   width: 34px;
   height: 34px;

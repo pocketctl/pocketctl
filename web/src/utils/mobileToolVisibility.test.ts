@@ -20,6 +20,8 @@ describe('mobile tool visibility', () => {
       expect(showsMobileMessage({ type: 'tool_call', tool }, true)).toBe(true)
     }
     expect(showsMobileMessage({ type: 'tool_call', tool: 'AskUserQuestion' }, false)).toBe(true)
+    expect(showsMobileMessage({ type: 'cached_tool_group' }, false)).toBe(false)
+    expect(showsMobileMessage({ type: 'cached_tool_group' }, true)).toBe(true)
     for (const type of ['agent_text', 'approval_request', 'question_request', 'mcp_elicitation_request', 'interactive_prompt', 'error', 'agent_file_change']) {
       expect(showsMobileMessage({ type }, false)).toBe(true)
     }

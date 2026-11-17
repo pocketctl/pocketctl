@@ -2,12 +2,12 @@
   <!-- Tool call: full-width card. No left bar (too noisy); the card itself
        (border + surface bg) is the visual container, matching codex/zcode. -->
   <div class="tool-wrap">
-    <div :class="['tool-card', { expanded: message.expanded }]" @click="toggleExpand">
+    <div :class="['tool-card', { expanded: message.expanded }]">
       <!-- Header -->
-      <div class="tool-header">
+      <button type="button" class="tool-header" :aria-expanded="!!message.expanded" @click="toggleExpand">
         <ToolIcon :tool="message.tool || ''" class="tool-icon" />
         <span class="tool-name">{{ message.tool || 'Unknown' }}</span>
-        <span class="tool-args">{{ args }}</span>
+        <span class="tool-args" :title="args">{{ args }}</span>
         <span class="tool-status">
           <!-- check icon -->
           <svg v-if="message.status === 'completed'" class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -26,7 +26,7 @@
         <svg class="tool-chevron" :class="{ open: message.expanded }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M6 9l6 6 6-6" />
         </svg>
-      </div>
+      </button>
 
       <!-- Body -->
       <div v-if="message.expanded" class="tool-body" @click.stop>
@@ -128,7 +128,6 @@ function toggleOutput() { emit('toggleOutput') }
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  cursor: pointer;
   /* min-width:0 so long code/output inside doesn't stretch the card width */
   min-width: 0;
   transition: background var(--transition), border-color var(--transition);
@@ -136,6 +135,7 @@ function toggleOutput() { emit('toggleOutput') }
 .tool-card:hover { border-color: var(--border-light); }
 
 .tool-header {
+  width: 100%; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -147,7 +147,7 @@ function toggleOutput() { emit('toggleOutput') }
   font-weight: 600;
   font-size: 13px;
   color: var(--accent);
-  flex-shrink: 0;
+  max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tool-args {
   flex: 1;
@@ -209,7 +209,9 @@ function toggleOutput() { emit('toggleOutput') }
   white-space: pre-wrap;
   word-break: break-all;
 }
-.tool-input { color: var(--success); }
+.tool-input { color: var(--fg-secondary); max-height: 280px; overflow: auto; }
+.tool-header:hover { background: var(--surface-hover); }
+.tool-header:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tool-output-wrap { min-width: 0; }
 .tool-output-wrap :deep(.md-code-block) {
   margin: 4px 0 0;

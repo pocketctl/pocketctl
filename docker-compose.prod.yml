@@ -121,6 +121,7 @@ services:
       AUTH_CODE_PEPPER: ${AUTH_CODE_PEPPER:?AUTH_CODE_PEPPER is required}
       # JWT 签名密钥同样必填：缺失/为空会让 relay 在容器内反复 FATAL 重启。
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      WEB_CACHE_SECRET: "${WEB_CACHE_SECRET:-}"
       # M-4:production SaaS 固定 enforce;源码在 production+saas 下拒绝任何
       # 其他值,环境变量无法再静默降级(observe/off 只允许自托管部署显式选择)。
       QUOTA_ENFORCEMENT: enforce

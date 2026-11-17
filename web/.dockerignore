@@ -16,6 +16,12 @@ node_modules
 dist
 coverage
 .vite
+# Tests run from the repository, where shared fixtures are available.
+# They are not runtime inputs and may reference files outside this build context.
+**/__tests__
+**/*.test.ts
+**/*.spec.ts
+browser-tests
 vite.config.js
 vite.config.d.ts
 *.log

@@ -27,6 +27,7 @@ interface HistoryViewportFillStart {
 }
 
 interface HistoryViewportPageMeasurement {
+  minimumVisibleMessages?: number
   visibleMessages?: number
   viewportHeight: number
   contentHeight: number
@@ -119,7 +120,9 @@ export class HistoryViewportFillCoordinator {
       return this.finish('invalid_geometry')
     }
 
-    const targetReached = active.targetVisibleMessages
+    const targetReached = input.minimumVisibleMessages
+      ? (input.visibleMessages ?? 0) >= input.minimumVisibleMessages
+      : active.targetVisibleMessages
       ? (input.visibleMessages ?? 0) >= active.targetVisibleMessages
       : active.mode === 'older'
       ? input.contentHeight - active.baselineContentHeight >= historyOlderTargetHeight(input.viewportHeight)

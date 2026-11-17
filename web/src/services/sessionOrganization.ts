@@ -1,3 +1,4 @@
+import { personalReadCache } from './personalReadCache'
 import { useAuth } from '../composables/useAuth'
 import { getRelayOrigin } from '../composables/useEnv'
 
@@ -26,6 +27,7 @@ export interface OrganizedPage {
 }
 
 export async function organizationRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const ticket = personalReadCache.ticket()
   const { accessToken, doRefreshToken } = useAuth()
   const headers = new Headers(init.headers)
   if (init.body != null) headers.set('Content-Type', 'application/json')
@@ -37,8 +39,9 @@ export async function organizationRequest<T>(path: string, init: RequestInit = {
   if (response.status === 401 && await doRefreshToken()) response = await request()
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(body.error || `HTTP ${response.status}`)
+    throw Object.assign(new Error(body.error || `HTTP ${response.status}`), { status: response.status })
   }
+  if (init.method && init.method !== 'GET' && !path.endsWith('/seen')) await personalReadCache.evict('navigation', ticket)
   return response.json() as Promise<T>
 }
 export const listProjects = (daemonId?: string) => organizationRequest<ProjectSnapshot>(`/api/session-projects${daemonId ? `?daemon_id=${encodeURIComponent(daemonId)}` : ''}`)

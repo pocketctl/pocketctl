@@ -102,7 +102,7 @@
           </button>
           <span class="topbar-status"><span class="dot" :class="{off:!connected}" />{{ t(connected?'workspace.all_normal':reconnecting?'replica.relay_connecting':'replica.relay_disconnected') }}</span>
           <RouterLink class="theme-toggle" to="/inbox" :aria-label="t('attention.entry_count',{count:attentionTotalCount}) + ' · ' + t('attention.notification.unread_count',{count:notifications.unread.value})"><WorkspaceIcon name="inbox" /><span v-if="notifications.unread.value || attentionTotalCount" class="notification-dot">●</span></RouterLink>
-          <TopbarGithubLink />
+          <TopbarGithubLink v-if="!isSessionRoute" />
           <button class="theme-toggle" @click="toggleLocale" :title="locale === 'zh' ? 'English' : '中文'" ><WorkspaceIcon name="globe" /><span>{{ locale === 'zh' ? '中' : 'EN' }}</span></button>
           <button class="theme-toggle" @click="toggleTheme" :title="t('common.toggle_theme')">
             <svg v-if="!isDark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>

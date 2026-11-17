@@ -136,3 +136,10 @@ describe('mobile visible-message history budget', () => {
     expect(fill.recordPage({ viewportHeight: 0, contentHeight: 0, hasMore: true, cursor: 100, visibleMessages: 0, now: 10 })).toEqual({ kind: 'finish', reason: 'cursor_did_not_advance' })
   })
 })
+
+test('a tall cached viewport cannot satisfy the authoritative visible-message minimum', () => {
+  const fill=new HistoryViewportFillCoordinator()
+  fill.begin({mode:'initial',baselineContentHeight:0,now:1000})
+  expect(fill.recordPage({viewportHeight:800,contentHeight:4000,visibleMessages:1,minimumVisibleMessages:28,hasMore:true,cursor:100,now:1100})).toEqual({kind:'continue',cursor:100})
+  expect(fill.recordPage({viewportHeight:800,contentHeight:4000,visibleMessages:30,minimumVisibleMessages:28,hasMore:true,cursor:50,now:1200})).toEqual({kind:'finish',reason:'target_reached'})
+})

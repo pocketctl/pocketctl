@@ -1,6 +1,7 @@
+import { personalReadCache } from '../services/personalReadCache'
 import { ref, computed } from 'vue'
 import { teamDeliveryCache } from '../services/teamDeliveryCache'
-import { getRelayOrigin } from './useEnv'
+import { getRelayOrigin, getRelayWs } from './useEnv'
 import { useLocale } from './useLocale'
 import { applyQuotaPayload } from './useQuota'
 
@@ -18,8 +19,11 @@ const accessToken = ref('')
 const refreshToken = ref('')
 const offlineIdentity = ref(false)
 const OFFLINE_IDENTITY = 'pocketctl_team_offline_identity'
+const LOCAL_SIGNOUT = 'pocketctl_signed_out'
 const offlineOrigin = () => getRelayOrigin() || location.origin
 let authGeneration = 0
+let loggingOut = false
+let verifiedRelay = ''
 function hasOfflineIdentity(): boolean {
   try {
     const saved = JSON.parse(localStorage.getItem(OFFLINE_IDENTITY) || 'null')
@@ -102,7 +106,7 @@ async function fetchGetAuth(path: string): Promise<{ ok: boolean; status: number
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (accessToken.value) headers['Authorization'] = `Bearer ${accessToken.value}`
   try {
-    const res = await fetch(url, { method: 'GET', headers, credentials: 'include' })
+    const res = await fetch(url, { method: 'GET', headers, credentials: 'include', cache: 'no-store' })
     const data = await res.json()
     return { ok: res.ok, status: res.status, data }
   } catch {
@@ -117,8 +121,9 @@ async function fetchGetAuth(path: string): Promise<{ ok: boolean; status: number
  */
 async function fetchProfile() {
   if (!accessToken.value) return
+  const generation = authGeneration, origin = offlineOrigin()
   const { ok, data } = await apiGetAuth('/api/user/profile')
-  if (!ok || !data?.id) return
+  if (!ok || !data?.id || generation !== authGeneration || origin !== offlineOrigin()) return
   user.value = {
     id: data.id,
     email: data.email ?? null,
@@ -140,8 +145,10 @@ async function sendEmailCode(email: string): Promise<string | null> {
 }
 
 async function loginViaEmail(email: string, code: string): Promise<string | null> {
+  const generation = authGeneration, origin = offlineOrigin()
   const { ok, data } = await apiRequest('/api/auth/email/verify', { email, code, lang: locale.value })
   if (!ok) return data.error || '验证失败'
+  if (generation !== authGeneration || origin !== offlineOrigin()) return '登录状态已改变，请重试'
   saveTokens(data)
   return null
 }
@@ -178,9 +185,11 @@ async function createQrLogin(): Promise<{ data: QrCreateResult | null; error: st
  * Returns: 'pending' | 'scanned' | 'confirmed' (tokens saved) | 'expired' | '<error msg>'
  */
 async function pollQrLogin(qrToken: string): Promise<QrStatus | string> {
+  const generation = authGeneration, origin = offlineOrigin()
   const { ok, data } = await apiGet(`/api/auth/qr/status?qr_token=${encodeURIComponent(qrToken)}`)
   if (!ok) return data.error || '查询失败'
   if (data.status === 'confirmed') {
+    if (generation !== authGeneration || origin !== offlineOrigin()) return '登录状态已改变，请重试'
     saveTokens(data)
     return 'confirmed'
   }
@@ -223,8 +232,10 @@ async function renameSession(sessionId: string, title: string): Promise<string |
 // --- Legacy (deprecated) ---
 
 async function login(email: string, password: string): Promise<string | null> {
+  const generation = authGeneration, origin = offlineOrigin()
   const { ok, data } = await apiRequest('/api/auth/login', { email, password })
   if (!ok) return data.error || '登录失败'
+  if (generation !== authGeneration || origin !== offlineOrigin()) return '登录状态已改变，请重试'
   saveTokens(data)
   return null
 }
@@ -254,8 +265,21 @@ export function isTokenExpired(token: string, skewSec = 30, nowSec = Math.floor(
 }
 
 function saveTokens(data: any) {
+  if (loggingOut) return
+  localStorage.removeItem(LOCAL_SIGNOUT)
   authGeneration++
   offlineIdentity.value = false
+  const cacheOrigin = offlineOrigin(), cacheAuthGeneration = authGeneration, cacheRelay = getRelayWs()
+  verifiedRelay = cacheRelay
+  personalReadCache.activate({ origin: cacheOrigin + '|' + cacheRelay, user: data.user.id, current: () => getRelayWs() === cacheRelay && user.value?.id === data.user.id }, async () => {
+    await Promise.resolve()
+    if (loggingOut || offlineOrigin() !== cacheOrigin || getRelayWs() !== cacheRelay || user.value?.id !== data.user.id) return null
+    const result = await fetchGetAuth('/api/user/cache-key')
+    if (authGeneration !== cacheAuthGeneration || offlineOrigin() !== cacheOrigin || getRelayWs() !== cacheRelay) return null
+    if (result.status === 401) { await doRefreshToken(); return null }
+    if (result.status === 403) { clearAuthState(); return null }
+    return result.ok ? result.data : null
+  })
   if(user.value && user.value.id!==data.user?.id)void teamDeliveryCache.purge().catch(()=>{})
   accessToken.value = data.access_token
   refreshToken.value = ''
@@ -271,6 +295,7 @@ function saveTokens(data: any) {
 // during one page load and redirect an authorized user out of their session.
 let pendingRefresh: Promise<boolean> | undefined
 function doRefreshToken(): Promise<boolean> {
+  if (loggingOut || localStorage.getItem(LOCAL_SIGNOUT) === '1') return Promise.resolve(false)
   if (!pendingRefresh) {
     pendingRefresh = refreshAuthToken().finally(() => { pendingRefresh = undefined })
   }
@@ -300,6 +325,7 @@ async function refreshAuthToken(): Promise<boolean> {
 }
 
 function clearAuthState() {
+  personalReadCache.invalidate()
   authGeneration++
   offlineIdentity.value = false
   localStorage.removeItem(OFFLINE_IDENTITY)
@@ -313,15 +339,33 @@ function clearAuthState() {
 }
 
 async function logout() {
+  loggingOut = true
   const legacyRefreshToken = localStorage.getItem('pocketctl_refresh_token') || refreshToken.value
-  // 先调 relay 清 HttpOnly cookie(必须带 credentials:include 让浏览器接受 Set-Cookie),
-  // 再清内存。如果先 clearAuthState,accessToken 变空 → router.beforeEach 触发
-  // doRefreshToken → cookie 还在 → relay 返回新 token → 恢复登录态 → 退出失效。
+  // Fence cookie restoration even if logout is offline or its response is lost.
+  // Only an explicit successful login clears this local sign-out intent.
+  localStorage.setItem(LOCAL_SIGNOUT, '1')
+  clearAuthState() // Also closes the socket synchronously via the identity watcher.
   try {
     await apiRequest('/api/auth/logout', legacyRefreshToken ? { refresh_token: legacyRefreshToken } : {})
-  } catch {}
-  clearAuthState()
+  } catch {} finally { loggingOut = false }
 }
+
+// Other tabs immediately drop auth, plaintext and keys; do not rebroadcast.
+if (typeof window !== 'undefined') window.addEventListener('storage', event => {
+  let invalidate = event.key === 'pocketctl-personal-cache-invalidation' || event.key === 'pocketctl_relay_url'
+  if (event.key === 'pocketctl_user') {
+    try { invalidate = JSON.parse(event.newValue || 'null')?.id !== user.value?.id } catch { invalidate = true }
+  }
+  if (!invalidate) return
+  // Another tab owns the new identity. Never remove its profile or rebroadcast a logout.
+  personalReadCache.invalidate(false)
+  authGeneration++
+  accessToken.value = ''; user.value = null; offlineIdentity.value = false
+})
+
+if (typeof window !== 'undefined') window.addEventListener('focus', () => {
+  if (verifiedRelay && getRelayWs() !== verifiedRelay) clearAuthState()
+})
 
 const isLoggedIn = computed(() => !!accessToken.value && !!user.value)
 
