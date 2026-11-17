@@ -86,6 +86,7 @@ services:
       TOKEN_USAGE_DASHBOARD_V2: "${TOKEN_USAGE_DASHBOARD_V2:-false}"
       PORT: 8080
       JWT_SECRET: pocketctl-local-dev-secret-2024
+      WEB_CACHE_SECRET: "${WEB_CACHE_SECRET:-}"
       WEB_APP_URL: "http://localhost"
       NODE_ENV: development
       POCKETCTL_MODE: self-hosted

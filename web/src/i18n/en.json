@@ -1,4 +1,12 @@
 {
+  "session.history_loading_more": "Loading more…",
+  "session.cached_tool_details": "Details available after refresh",
+  "session.cache_status_unknown": "Status pending refresh",
+  "session.cache_updating": "Cached · Updating",
+  "session.cache_failed": "Cached · Update failed; content may be outdated",
+  "session.tool_group_heading": "Tool calls",
+  "session.fullscreen_enter": "Expand conversation",
+  "session.fullscreen_exit": "Exit fullscreen",
   "memory.personal_scenes": "Personal project scenes",
   "memory.personal_scenes_copy": "Organize knowledge for personal projects. Creating a scene does not enable consumption or formal writes, or change models or budgets.",
   "memory.scene_name": "Scene name",

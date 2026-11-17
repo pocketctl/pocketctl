@@ -1,5 +1,5 @@
 <template>
-  <div class="session-layout">
+  <div v-if="!cachePrivacyBlocked" class="session-layout" :class="{ 'session-fullscreen': sessionFullscreen }">
     <ShareLinkDialog v-if="showShareManager" :key="sessionId" :session-id="sessionId" :title="sessionTitle" @close="showShareManager=false" @manage="showShareManager=false;router.push({path:'/settings',query:{section:'shares'}})" />
     <!-- Session List Panel -->
     <div class="session-panel">
@@ -30,7 +30,7 @@
               class="agent-filter-option host-filter-option" :data-host-filter="host.daemon_id"
               :aria-pressed="selectedHostId === host.daemon_id" @click="selectHostFilter(host.daemon_id)">
               <span :class="['status-dot', { online: host.online }]" aria-hidden="true"></span>
-              <span class="host-filter-copy"><span>{{ host.name }}</span><small>{{ host.daemon_id ? `${host.online ? t('dashboard.online') : t('dashboard.offline')} · ${host.daemon_id}` : t('session.host_filter_all_hint') }}</small></span>
+              <span class="host-filter-copy"><span>{{ host.name }}</span><small>{{ host.daemon_id ? `${navigationFresh ? (host.online ? t('dashboard.online') : t('dashboard.offline')) : t('session.cache_status_unknown')} · ${host.daemon_id}` : t('session.host_filter_all_hint') }}</small></span>
               <span class="agent-filter-count">{{ host.count }}</span>
               <span class="host-filter-check" aria-hidden="true">{{ selectedHostId === host.daemon_id ? '✓' : '' }}</span>
             </button>
@@ -69,10 +69,11 @@
       </div>
       <div v-if="!hasNoSessions" class="session-panel-presence">
         <span :class="['status-dot', { online: scopedOnlineHostCount > 0 }]"></span>
-        <span class="session-panel-presence-copy">{{ t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
+        <span class="session-panel-presence-copy">{{ showingCachedNavigation ? t('session.cache_status_unknown') : t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
         <button type="button" class="session-search-toggle" :aria-label="t('workspace.search_sessions')" :aria-expanded="sessionSearchOpen" @click="sessionSearchOpen = !sessionSearchOpen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg></button>
       </div>
       <div v-if="sessionSearchOpen" class="session-browser-search"><input v-model="sessionSearch" type="search" :aria-label="t('workspace.search_session_titles')" :placeholder="t('workspace.search_sessions_placeholder')" /></div>
+      <div v-if="showingCachedNavigation" class="cache-preview-notice" role="status">{{ t(navigationFailed ? 'session.cache_failed' : 'session.cache_updating') }}</div>
       <div class="session-list">
         <button v-if="archivedView" type="button" class="archive-back" @click="leaveArchived">‹ <span> {{ t('mobile.back_to_sessions') }} </span></button>
         <div v-else class="project-section-label">
@@ -80,13 +81,13 @@
           <CreateProjectControl @created="refreshProjects" />
         </div>
         <template v-for="s in sidebarEntries" :key="s.kind === 'session' ? s.session_id : `${s.kind}-${s.id}`">
-          <div v-if="s.kind === 'project'" class="project-heading" :draggable="true" @dragstart="dragProjectId = s.id" @dragover.prevent @drop.prevent="dropOnProject(s.id)">
+          <div v-if="s.kind === 'project'" class="project-heading" :draggable="!s.__cached" @dragstart="dragProjectId = s.id" @dragover.prevent @drop.prevent="dropOnProject(s.id)">
             <button type="button" class="project-toggle" :aria-expanded="!collapsedProjects[s.id]" @click="toggleProject(s.id)">
               <svg v-if="collapsedProjects[s.id]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
               <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M3 10V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2M4 10h17l-3 10H2z"/></svg>
               <span>{{ s.name }}</span><small>{{ s.count }}</small>
             </button>
-            <button type="button" class="project-menu-button" :title="t('workspace.project_actions')" @click="projectMenuId = projectMenuId === s.id ? null : s.id">···</button>
+            <button type="button" v-if="!s.__cached" class="project-menu-button" :title="t('workspace.project_actions')" @click="projectMenuId = projectMenuId === s.id ? null : s.id">···</button>
             <div v-if="projectMenuId === s.id" class="project-menu">
               <button @click="newSessionProjectId = s.id; emitNewSession(); projectMenuId = null"> {{ t('workspace.create_in_project') }} </button>
               <button @click="editProjectName(s)"> {{ t('workspace.rename') }} </button>
@@ -97,7 +98,7 @@
           <div v-else-if="s.kind === 'ungrouped'" class="project-heading ungrouped-heading" @dragover.prevent @drop.prevent="dropOnProject(null)"> {{ t('workspace.ungrouped') }} <small>{{ s.count }}</small></div>
           <button v-else-if="s.kind === 'loadMore'" type="button" :class="['archive-back', { 'project-load-more': s.id !== 'ungrouped' }]" :data-project-load-more="s.id" @click="loadMoreSidebar(s.id)"> {{ t('attention.load_more') }} </button>
           <div v-else :class="['session-list-item', { active: s.session_id === sessionId, 'pending-delete': (s as any).__pendingDelete, 'has-children': s.children && s.children.length, 'in-project': !!s.project_id }]"
-            draggable="true" @dragstart="dragSessionId = s.session_id" @dragend="dragSessionId = null" @dragover.prevent @drop.prevent="dropOnSession(s)"
+            :draggable="!s.__cached" @dragstart="dragSessionId = s.session_id" @dragend="dragSessionId = null" @dragover.prevent @drop.prevent="dropOnSession(s)"
             @click="!(s as any).__pendingDelete && $router.push(archivedView ? {path:`/session/${s.session_id}`, query:{...route.query, view:'archived'}} : `/session/${s.session_id}`)">
             <span v-if="s.children && s.children.length" class="sl-fold" @click.stop="toggleFold(s.session_id)">{{ folded[s.session_id] ? '▾' : '▸' }}</span>
             <span :class="['status-dot', s.statusEffective || s.status]" style="width:7px;height:7px;"></span>
@@ -110,7 +111,7 @@
               </div>
               <div class="sl-meta"><AgentBadge :agent="s.agent_type" size="sm" />{{ formatRelativeTime(s.last_activity_at || s.created_at) }}<span v-if="!selectedHostId && uniqueHosts.length > 1" :title="sessionHostName(s)"> · {{ sessionHostName(s) }}</span><span v-if="s.subagent_count > 0"> · {{ t('session.sub_agents', { n: s.subagent_count }) }}</span></div>
             </div>
-            <SessionActions :session="s" :projects="projects" :archived-view="archivedView" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" @moved="onMoved" @archived="onArchived" />
+            <SessionActions v-if="!s.__cached" :session="s" :projects="projects" :archived-view="archivedView" @startRename="startRename" @deleted="onDeleted" @pinned="onPinned" @moved="onMoved" @archived="onArchived" />
           </div>
           <div v-if="s.kind === 'session' && s.children && s.children.length && folded[s.session_id]" class="sl-children">
             <div v-for="c in s.children" :key="c.agentId" class="sl-child" role="button" tabindex="0"
@@ -134,7 +135,6 @@
 
     <!-- Chat Main Area -->
     <div class="chat-area">
-      <TopbarGithubLink v-if="hasNoSessions" class="session-empty-github" />
       <!-- The session list can arrive after the replay request on a direct URL. -->
       <div
         v-if="hasNoSessions && isLoading"
@@ -194,9 +194,8 @@
             </span>
           </div>
         </div>
-        <div class="session-toolbar-actions"><button v-if="!focusedSubAgentId" class="btn small" @click="showShareManager=true">{{ t('sharing.share') }}</button>
-          <TopbarGithubLink />
-          <span :class="['status-pill', statusClass]"><span class="pulse"></span><span class="status-pill-label">{{ statusLabel }}</span></span>
+        <div class="session-toolbar-actions">
+          <span :class="['status-pill', statusClass, { 'loading-more': isLoadingBackward }]" role="status" aria-live="polite" :aria-busy="isLoadingBackward"><span class="pulse"></span><span class="status-pill-label">{{ toolbarStatusLabel }}</span></span>
         <div class="session-id-box">
           <code class="session-id-text">{{ sessionId?.slice(0, 8) }}</code>
           <button class="copy-btn" @click="copySessionId" :title="copied ? t('common.copied') : t('session.actions.copy_id')">
@@ -213,10 +212,12 @@
       </div>
 
       <div ref="toolbarOverflowEl" :class="['toolbar-overflow', { 'mobile-session-toolbar-overflow': isMobile }]">
+        <SessionFullscreenToggle v-model="sessionFullscreen" :escape-blocked="toolbarOverflowOpen || showShareManager || showHelpModal || (!!currentPlan && planPanelOpen) || fileChangePanelOpen" />
         <button type="button" class="toolbar-more-btn" :aria-label="t('session.actions.more')" :aria-expanded="toolbarOverflowOpen" @click.stop="toolbarOverflowOpen = !toolbarOverflowOpen">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
+          <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="share" role="menuitem" @click="toolbarOverflowOpen=false; showShareManager=true">{{ t('sharing.share') }}</button>
           <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
           <button v-if="currentSessionAgent==='zcode' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="zcode-quota" role="menuitem" @click="openZcodeQuota"><span>{{ zcodeQuota?.title || t('zcode_quota.title') }}<small class="tool-visibility-hint">{{ zcodeQuota?.summary }}</small></span></button>
           <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
@@ -276,8 +277,9 @@
         class="chat-messages"
         :style="{ '--composer-float-clearance': `${messageBottomClearance}px` }"
         @scroll="onMessagesScroll"
-        @wheel.passive="promptReading = false"
-        @touchstart.passive="promptReading = false"
+        @wheel.passive="onHistoryWheel"
+        @touchstart.passive="onHistoryTouchStart"
+        @touchend.passive="onHistoryTouchEnd"
       >
         <button v-if="returnTeamSessionID && returnTeamID" type="button" class="banner banner-info team-return-banner" @click="returnToTeamSession"> {{ t('workspace.return_shared_session') }} </button>
         <div v-if="!isComposerVisible" class="messages-bottom-spacer" aria-hidden="true"></div>
@@ -301,6 +303,7 @@
           <button v-if="interruptPendingDraft" type="button" class="interrupt-pending-retry" @click="restoreInterruptPendingDraft">{{ t('common.retry') }}</button>
         </div>
 
+<div v-if="cachedHistory.length" class="cache-preview-notice" role="status" data-testid="history-cache-preview">{{ t(historyReadFailed || isSlowLoading ? 'session.cache_failed' : 'session.cache_updating') }}</div>
         <!-- Timeline -->
         <div class="timeline" v-if="milestones.length > 0">
           <template v-for="(m, i) in milestones" :key="i">
@@ -333,7 +336,7 @@
           </template>
         </div>
 
-        <div v-if="!isLoading && !isLoadingBackward && ((isMobile && (historyFeedback || hasMore)) || historyReadFailed)" class="mobile-history-feedback" role="status">
+        <div v-if="!isLoading && !isLoadingBackward && (historyFeedback || (isMobile && hasMore) || historyReadFailed)" class="mobile-history-feedback" role="status">
           <span>{{ historyFeedback }}</span>
           <button v-if="hasMore && !historyReadFailed" type="button" @click="loadMoreMobileHistory">{{ t('attention.load_more') }}</button>
           <button v-else-if="historyFeedback" type="button" @click="retryHistory">{{ t('common.retry') }}</button>
@@ -381,6 +384,10 @@
           />
 
           </div></article>
+          <div v-else-if="msg.type === 'cached_tool_group'" class="cached-tool-summary" :aria-label="t('session.cached_tool_details')">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="3"/><path d="m5 7 3 3-3 3m5 0h5"/></svg>
+            <div><strong>{{ t('session.tool_group_heading') }} <small>{{ msg.count }}</small></strong><span>{{ msg.tools.join(' · ') }} · {{ t('session.cached_tool_details') }}</span></div>
+          </div>
           <OpenCodeReasoningCard
             v-else-if="msg.type === 'agent_reasoning'"
             :content="msg.content"
@@ -753,13 +760,15 @@
 </template>
 
 <script setup lang="ts">
+import { personalReadCache } from '../services/personalReadCache'
+import { navigationSessions, historyPreview, cacheReadDenied } from '../services/sessionCacheProjection'
 import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
+import SessionFullscreenToggle from '../components/session/SessionFullscreenToggle.vue'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, provide } from 'vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
 import ActionList from '../components/ActionList.vue'
-import TopbarGithubLink from '../components/TopbarGithubLink.vue'
 import RenameProjectAction from '../components/RenameProjectAction.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { normalizeEffort, shouldShowEffort } from '../utils/effort'
@@ -846,7 +855,7 @@ import { listTeams } from '../services/teamClient'
 import type { TeamSummary } from '../types/team'
 import { useTeamAccess } from '../composables/useTeamAccess'
 import { useScopedSessionDraft, type SessionScope } from '../composables/useScopedSessionState'
-import { listProjects, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject } from '../services/sessionOrganization'
+import { listProjects, reorderProjects, listOrganizedSessions, moveSession, reorderSession, markSessionSeen, getSessionSummary, type SessionProject, type OrganizedPage } from '../services/sessionOrganization'
 import { fetchSessionDocumentDownload, type SessionDocumentMetadata } from '../services/sessionDocuments'
 
 const { renamingId, renameInput, startRename, commitRename, cancelRename } = useSessionRename()
@@ -918,6 +927,7 @@ async function downloadSessionDocument(document: SessionDocumentMetadata): Promi
 const { acceptAgentPlan, planForSession } = useAgentPlanProgress()
 const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
+const sessionFullscreen = ref(false)
 const toolbarOverflowOpen = ref(false)
 const toolbarOverflowEl = ref<HTMLElement | null>(null)
 const codexQuota = ref<InstanceType<typeof CodexQuota>|null>(null)
@@ -976,6 +986,7 @@ function toggleFileChangeFromOverflow() {
 }
 function closeFileChangePanel() { setFileChangePanelOpen(false) }
 function onFileChangePanelKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && (hostFilterOpen.value || fileChangePanelOpen.value || toolbarOverflowOpen.value || agentFilterOpen.value)) event.preventDefault()
   if (event.key === 'Escape' && hostFilterOpen.value) {
     hostFilterOpen.value = false
     hostFilterTrigger.value?.focus()
@@ -1019,6 +1030,58 @@ const explicitlyRoutedLiveEventTypes = new Set<string>([
   'session_id_changed', 'session_documents_changed',
 ])
 const allSessions = ref<any[]>([])
+const cachePrivacyBlocked = ref(false)
+const cachedSessions = ref<any[]>([])
+const cachedHosts = ref<Record<string, any>>({})
+const cachedOrganization = ref<any>(null)
+const cachedHistory = ref<any[]>([])
+const navigationFresh = ref(false)
+const navigationFailed = ref(false)
+const historyCacheReady = ref(false)
+let historyCacheRequest = 0
+let navigationRequest = 0
+let historyCacheTimer: ReturnType<typeof setTimeout> | undefined
+const listedSessions = computed(() => navigationFresh.value ? allSessions.value : cachedSessions.value.length ? cachedSessions.value : allSessions.value)
+const showingCachedNavigation = computed(() => !navigationFresh.value && cachedSessions.value.length > 0 || !!cachedOrganization.value)
+const historyCacheName = () => 'history:' + JSON.stringify([sessionId.value, focusedSubAgentId.value || ''])
+function saveHistoryPreview() {
+  if (cachedHistory.value.length || cachePrivacyBlocked.value || returnTeamSessionID.value || returnTeamID.value || !historyCacheReady.value || focusedSubAgentId.value || browseScope.value.type !== 'personal' || !allSessions.value.some(s => s.session_id === sessionId.value && !s.team_id && !s.share_id)) return
+  void personalReadCache.write(historyCacheName(), historyPreview(sourceMessages.value))
+}
+function scheduleHistoryPreview() {
+  if (historyCacheTimer) clearTimeout(historyCacheTimer)
+  historyCacheTimer = setTimeout(saveHistoryPreview, 500)
+}
+function hydrateHistoryPreview() {
+  const request = ++historyCacheRequest, key = loadKey.value, ticket = personalReadCache.ticket()
+  cachedHistory.value = []; historyCacheReady.value = false
+  // Focused agents and Team/shared surfaces need their own offline policy.
+  if (focusedSubAgentId.value || returnTeamSessionID.value || returnTeamID.value || browseScope.value.type !== 'personal') return
+  void personalReadCache.read<any[]>(historyCacheName(), ticket).then(rows => {
+    if (rows && personalReadCache.valid(ticket) && request === historyCacheRequest && key === loadKey.value && !historyCacheReady.value && !messages.value.some(row => row.__msg_id && !row.__echo_reconciled)) {
+      cachedHistory.value = historyPreview(rows)
+      nextTick(() => { if (autoScroll.value) scrollToBottom() })
+    }
+  })
+}
+function publishHistoryPreview() {
+    const cacheAnchor = cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined
+    const cachedAnchorMessage = cachedHistory.value.find(row => String(row.id) === cacheAnchor?.id)
+    const cachedScrollTop = messagesEl.value?.scrollTop
+    cachedHistory.value = []; historyCacheReady.value = true; historyCacheRequest++
+    if (cacheAnchor) nextTick(() => {
+      const match = sourceMessages.value.find(row => row.type === cachedAnchorMessage?.type && row.role === cachedAnchorMessage?.role && row.content === cachedAnchorMessage?.content && row.call_id === cachedAnchorMessage?.call_id)
+      if (!restoreHistoryReadingAnchor({ ...cacheAnchor, id: String(match?.id || cacheAnchor.id) }) && messagesEl.value && cachedScrollTop !== undefined) messagesEl.value.scrollTop = cachedScrollTop
+    })
+}
+async function hydrateNavigationPreview() {
+  const ticket = personalReadCache.ticket()
+  const [sessions, hosts] = await Promise.all([personalReadCache.read<any[]>('sessions', ticket), personalReadCache.read<Record<string, any>>('hosts', ticket)])
+  if (!personalReadCache.valid(ticket)) return
+  if (!navigationFresh.value && sessions) cachedSessions.value = navigationSessions(sessions)
+  if (hosts && !hostsFresh) cachedHosts.value = hosts
+}
+
 // P2: per-agent message buckets for sub-agent events (keyed by agentId)
 const subagentMessages = ref<Record<string, any[]>>({})
 // P1a: children token map keyed by agentId
@@ -1138,7 +1201,7 @@ const pageSize = computed(() => isMobile.value ? 20 : 50)  // session-history-pa
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
-const historyViewportFill = new HistoryViewportFillCoordinator()
+const historyViewportFill = new HistoryViewportFillCoordinator({ maxPages: 20, maxElapsedMs: 8000 })
 let historyViewportResizeObserver: ResizeObserver | null = null
 let historyViewportResizeTimer: ReturnType<typeof setTimeout> | null = null
 let settledHistoryViewportHeight = 0
@@ -1205,6 +1268,13 @@ async function toggleMobileToolCalls() {
   mobileShowToolCalls.value = !mobileShowToolCalls.value
   saveMobileToolVisibility(mobileShowToolCalls.value)
 }
+watch(sessionFullscreen, async () => {
+  const anchor = historyReadingAnchor(), context = loadKey.value, following = autoScroll.value
+  await nextTick()
+  if (context !== loadKey.value) return
+  if (following) scrollToBottom()
+  else restoreHistoryReadingAnchor(anchor)
+}, { flush: 'pre' })
 watch(showToolCalls, async (value) => {
   const parent = messagesEl.value
   const context = loadKey.value
@@ -1230,14 +1300,14 @@ function loadMoreMobileHistory() {
   beginHistoryFill({ mode: 'older', baselineContentHeight: messagesEl.value?.scrollHeight ?? 0, requestedCursor: loadedMinId.value })
   requestOlderHistoryPage(loadedMinId.value)
 }
-function armMobileHistoryTimeout() {
+function armHistoryPageTimeout() {
   if (historyPageTimer) clearTimeout(historyPageTimer)
-  if (!isMobile.value) return
   const request = replayReqId.value
   historyPageTimer = setTimeout(() => {
     if (request !== replayReqId.value) return
     replayReqId.value++
     resetReplayTrustBuffers()
+    historyReadFailed.value = historyViewportFill.mode === 'initial'
     finishHistoryViewportFill()
     historyFeedback.value = t('session.history_partial_failure')
   }, 10_000)
@@ -1275,7 +1345,7 @@ const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'op
 // resume command (see buildResumeCommand). Used as a fail-closed gate for
 // canWriteWhenConnected and the read-only banner.
 const isReadOnlyObserverSession = computed(() => isReadOnlyObserverAgent(currentSessionAgent.value))
-const interactionCardsDisabled = computed(() => isReadOnlyObserverSession.value || isDisconnected.value || (
+const interactionCardsDisabled = computed(() => !!cachedHistory.value.length || cachePrivacyBlocked.value || isReadOnlyObserverSession.value || isDisconnected.value || (
   interactionConnectivity.value !== 'ready' || (
   currentSessionAgent.value === 'opencode'
   && !canControlOpenCodeInteractions(currentSessionAgent.value, currentSession.value?.control_mode, currentSessionCapabilities.value)
@@ -1361,14 +1431,15 @@ function setDaemonConnectivity(daemonId: string, online: boolean, update: any = 
   }
 }
 // Local host selection state (initialized from URL ?host= for backward compat)
+let hostsFresh = false
 const selectedHostId = ref((route.query.host as string) || '')
 // Include connected hosts with no sessions as well as offline session hosts.
 const uniqueHosts = computed(() => {
   const hosts = new Map<string, { daemon_id: string; name: string; online: boolean; count: number }>()
-  for (const [id, d] of Object.entries(daemons.value)) {
+  for (const [id, d] of Object.entries({ ...cachedHosts.value, ...daemons.value })) {
     hosts.set(id, { daemon_id: id, name: d.daemon_alias || d.hostname || id.slice(0, 8), online: !!d.online, count: 0 })
   }
-  for (const s of allSessions.value) {
+  for (const s of listedSessions.value) {
     if (!s.daemon_id) continue
     const existing = hosts.get(s.daemon_id)
     if (existing) {
@@ -1390,7 +1461,7 @@ const selectedHostLabel = computed(() => selectedHostId.value
   : t('session.host_filter_all'))
 const filteredHostOptions = computed(() => {
   const query = hostSearch.value.trim().toLocaleLowerCase()
-  return [{ daemon_id: '', name: t('session.host_filter_all'), online: uniqueHosts.value.some(host => host.online), count: allSessions.value.length }, ...uniqueHosts.value]
+  return [{ daemon_id: '', name: t('session.host_filter_all'), online: uniqueHosts.value.some(host => host.online), count: listedSessions.value.length }, ...uniqueHosts.value]
     .filter(host => `${host.name} ${host.daemon_id}`.toLocaleLowerCase().includes(query))
 })
 const scopedHosts = computed(() => uniqueHosts.value.filter(host => !selectedHostId.value || host.daemon_id === selectedHostId.value))
@@ -1411,11 +1482,11 @@ function selectHostFilter(id: string) {
   hostFilterTrigger.value?.focus()
 }
 function sessionHostName(session: any): string {
-  const d = daemons.value[session.daemon_id]
+  const d = daemons.value[session.daemon_id] || cachedHosts.value[session.daemon_id]
   return d?.daemon_alias || d?.hostname || session.daemon_alias || session.hostname || session.daemon_id?.slice(0, 8) || t('session.unknown_host')
 }
 const hostScopedSessions = computed(() => {
-  const active = allSessions.value.filter((s: any) => !s.archived_at)
+  const active = listedSessions.value.filter((s: any) => !s.archived_at)
   if (!selectedHostId.value) return active
   return active.filter((s: any) => s.daemon_id === selectedHostId.value)
 })
@@ -1475,30 +1546,56 @@ function toggleProject(id: string) {
   if (!collapsedProjects.value[id] && !sidebarBuckets.value[id]) void loadSidebarBucket(id).catch(error => console.error('project bucket failed',error))
 }
 async function refreshProjects() {
+  const request = ++navigationRequest, host = selectedHostId.value, ticket = personalReadCache.ticket()
+  const cacheKey = 'organization:' + JSON.stringify([host, 'active'])
+  cachedOrganization.value = null; navigationFailed.value = false
+  let settled = false
+  void personalReadCache.read<any>(cacheKey, ticket).then(snapshot => {
+    if (!settled && request === navigationRequest && personalReadCache.valid(ticket) && snapshot) cachedOrganization.value = snapshot
+  })
   try {
-    const snapshot = await listProjects(selectedHostId.value || undefined)
+    const snapshot = await listProjects(host || undefined)
+    const buckets: Record<string, OrganizedPage> = Object.fromEntries(await Promise.all(['ungrouped', ...snapshot.projects.filter(p => !collapsedProjects.value[p.id]).map(p => p.id)].map(async bucket => {
+      const page = await listOrganizedSessions({ bucket, daemonId: host || undefined, limit: bucket === 'ungrouped' ? 30 : 5 })
+      return [bucket, page] as const
+    })))
+    if (request !== navigationRequest || host !== selectedHostId.value || cachePrivacyBlocked.value) return
+    settled = true; cachedOrganization.value = null
     projects.value = snapshot.projects
     archivedCount.value = snapshot.archived_count
     ungroupedCount.value = snapshot.ungrouped_count
     projectOrderRevision.value = snapshot.project_order_revision
     ungroupedRevision.value = snapshot.ungrouped_revision
-    await Promise.all([loadSidebarBucket('ungrouped'),...snapshot.projects.filter(p => !collapsedProjects.value[p.id]).map(p => loadSidebarBucket(p.id))])
+    sidebarBuckets.value = Object.fromEntries(Object.entries(buckets).map(([id, page]) => [id, page.sessions]))
+    sidebarCursors.value = Object.fromEntries(Object.entries(buckets).map(([id, page]) => [id, page.next_cursor]))
     organizationLoaded.value = true
-  } catch (error) { console.error('project list failed', error) }
+    void personalReadCache.write(cacheKey, {
+      projects: snapshot.projects.map(p => ({ id: p.id, name: p.name, count: p.count })),
+      ungrouped_count: snapshot.ungrouped_count,
+      buckets: Object.fromEntries(Object.entries(buckets).map(([id, page]) => [id, navigationSessions(page.sessions)])),
+    }, ticket)
+  } catch (error) {
+    if (request !== navigationRequest) return
+    navigationFailed.value = true
+    if (cacheReadDenied(error)) { settled = true; cachedOrganization.value = null; cachedSessions.value = []; void personalReadCache.remove(cacheKey, ticket) }
+  }
 }
 async function loadSidebarBucket(bucket: string, cursor?: string) {
-  const page = await listOrganizedSessions({ bucket, daemonId:selectedHostId.value || undefined, limit:bucket === 'ungrouped' ? 30 : 5, cursor })
+  const request = navigationRequest, host = selectedHostId.value
+  const page = await listOrganizedSessions({ bucket, daemonId: host || undefined, limit: bucket === 'ungrouped' ? 30 : 5, cursor })
+  if (request !== navigationRequest || host !== selectedHostId.value || cachePrivacyBlocked.value) return
   sidebarBuckets.value[bucket] = cursor
-    ? [...(sidebarBuckets.value[bucket] || []),...page.sessions.filter(s => !(sidebarBuckets.value[bucket] || []).some(old => old.session_id === s.session_id))]
+    ? [...(sidebarBuckets.value[bucket] || []), ...page.sessions.filter(s => !(sidebarBuckets.value[bucket] || []).some(old => old.session_id === s.session_id))]
     : page.sessions
   sidebarCursors.value[bucket] = page.next_cursor
 }
+
 async function loadMoreSidebar(id: string) {
   if (id === 'archived') return openArchived(archivedCursor.value || undefined)
   try { await loadSidebarBucket(id,sidebarCursors.value[id] || undefined) }
   catch (error) { window.alert(error instanceof Error ? error.message : t('workspace.load_failed')) }
 }
-watch(selectedHostId, () => { void refreshProjects() })
+watch(selectedHostId, () => { projects.value = []; sidebarBuckets.value = {}; sidebarCursors.value = {}; organizationLoaded.value = false; void refreshProjects() })
 function sortBucket(sessions: any[], mode: string) {
   return [...sessions].sort((a,b) => a.pinned !== b.pinned ? (a.pinned ? -1 : 1)
     : mode === 'manual' ? Number(a.manual_rank ?? 1e15) - Number(b.manual_rank ?? 1e15)
@@ -1507,6 +1604,11 @@ function sortBucket(sessions: any[], mode: string) {
         - Math.max(new Date(a.last_activity_at || 0).getTime(),new Date(a.membership_changed_at || 0).getTime(),new Date(a.created_at || 0).getTime())))
 }
 const sidebarEntries = computed<any[]>(() => {
+  if (!archivedView.value && cachedOrganization.value) {
+    const snapshot = cachedOrganization.value
+    const rows = (id: string) => (snapshot.buckets?.[id] || []).filter((s: any) => matchesSessionSearch(s) && (selectedAgentType.value === 'all' || normalizedAgentType(s) === selectedAgentType.value)).map((s: any) => ({ ...s, kind: 'session', __cached: true }))
+    return [...snapshot.projects.flatMap((p: any) => [{ ...p, kind: 'project', __cached: true }, ...(collapsedProjects.value[p.id] ? [] : rows(p.id))]), { kind: 'ungrouped', id: 'ungrouped', count: snapshot.ungrouped_count }, ...rows('ungrouped')]
+  }
   if (archivedView.value) return [...archivedSessions.value.filter(s => !!s.archived_at && matchesSessionSearch(s)).map(s => ({ ...s, kind: 'session' })),...(archivedCursor.value ? [{kind:'loadMore',id:'archived'}] : [])]
   const out: any[] = []
   const live = new Map(allSessions.value.map((s:any) => [s.session_id,s]))
@@ -1639,7 +1741,9 @@ watch(() => sessionId.value, (sid) => {
   }
 })
 
+const toolbarStatusLabel = computed(() => isLoadingBackward.value ? t('session.history_loading_more') : statusLabel.value)
 const statusClass = computed(() => {
+  if (isLoadingBackward.value) return 'running'
   const map: Record<string, string> = { running: 'running', busy: 'running', retry: 'running', waiting_approval: 'running', waiting_question: 'running', idle: 'running', completed: '', error: '', killed: '', disconnected: '', exited: '' }
   return map[status.value] || ''
 })
@@ -1684,7 +1788,7 @@ function interactionDisabledReason(message: any): string {
 }
 // True when there are zero sessions at all — the whole chat area should show
 // a welcoming empty state instead of "unknown host" / error messages.
-const hasNoSessions = computed(() => allSessions.value.length === 0)
+const hasNoSessions = computed(() => listedSessions.value.length === 0 && !cachedHistory.value.length)
 
 // Empty state copy — adapts to whether a host is connected and sessions exist.
 const chatEmptyTitle = computed(() => {
@@ -1739,10 +1843,10 @@ const focusedSubAgentTokenTotal = computed(() => {
 const sourceMessages = computed<any[]>(() =>
   associateReplyRetries(focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value),
 )
-const renderMessages = computed(() => sourceMessages.value.filter(message => showsMobileMessage(message, showToolCalls.value)))
+const renderMessages = computed(() => (cachedHistory.value.length ? cachedHistory.value : sourceMessages.value).filter(message => showsMobileMessage(message, showToolCalls.value)))
 const replyRows = computed(() => projectReplies(renderMessages.value))
 const lastQuestionForReply = computed(() => [...sourceMessages.value].reverse().find(m => m.role === 'user' && !m.retry_of_turn_id && (!m.deliveryStatus || m.deliveryStatus === 'accepted')))
-const replyAgentLabel = computed(() => agentReplyLabel(focusedSubAgentId.value ? focusedSubAgentInfo.value?.agentType : currentSessionAgent.value))
+const replyAgentLabel = computed(() => agentReplyLabel(focusedSubAgentId.value ? focusedSubAgentInfo.value?.agentType : currentSessionAgent.value || listedSessions.value.find(s => s.session_id === sessionId.value)?.agent_type))
 function isLatestReply(reply: ReplyGroup): boolean {
   const pending = [...sourceMessages.value].reverse().find(m => m.role === 'user')
   if (pending?.retry_of_turn_id && !pending.turn_id && pending.deliveryStatus !== 'failed') return false
@@ -1841,6 +1945,7 @@ watch(
   { immediate: true },
 )
 const canWriteWhenConnected = computed(() => {
+  if (cachedHistory.value.length || cachePrivacyBlocked.value) return false
   // Fail-closed agent gate: permanent observer sessions can NEVER be written
   // to, regardless of status, source, control_mode, or capabilities. This check
   // takes precedence over every other writeability rule.
@@ -2078,12 +2183,12 @@ function retryLastPrompt() {
 const daemonName = computed(() => {
   const id = currentHostId.value
   if (id) {
-    const d = daemons.value[id]
+    const d = daemons.value[id] || cachedHosts.value[id]
     if (d) return d.daemon_alias || d.hostname || id.slice(0, 8)
-    const s = allSessions.value.find((s: any) => s.daemon_id === id)
+    const s = listedSessions.value.find((s: any) => s.daemon_id === id)
     return s?.daemon_alias || s?.hostname || id.slice(0, 8)
   }
-  const s = allSessions.value.find((s: any) => s.session_id === sessionId.value)
+  const s = listedSessions.value.find((s: any) => s.session_id === sessionId.value)
   return s?.daemon_alias || s?.hostname || s?.daemon_id?.slice(0, 8) || t('session.unknown_host')
 })
 
@@ -2095,7 +2200,7 @@ const toolbarContextParts = computed(() => {
 })
 
 const sessionTitle = computed(() => {
-  const s = allSessions.value.find(s => s.session_id === sessionId.value)
+  const s = listedSessions.value.find(s => s.session_id === sessionId.value)
   return s?.title
 })
 
@@ -2103,13 +2208,13 @@ const mobileSessionTitle = computed(() => focusedSubAgentId.value
   ? focusedSubAgentInfo.value?.title || focusedSubAgentId.value.slice(0, 8)
   : sessionTitle.value || sessionId.value?.slice(0, 8) || '')
 
-watch([mobileSessionTitle, daemonName, currentHostId, status, statusLabel], () => {
+watch([mobileSessionTitle, daemonName, currentHostId, status, toolbarStatusLabel], () => {
   setSessionHeader({
     title: mobileSessionTitle.value,
     host: daemonName.value,
     hostId: currentHostId.value,
     status: status.value,
-    statusLabel: statusLabel.value,
+    statusLabel: toolbarStatusLabel.value,
   })
 }, { immediate: true })
 
@@ -2335,7 +2440,7 @@ function prependOlderReplayEvents(events: any[]) {
   const readingAnchor = olderReadingAnchor
   nextTick(() => {
     if (!messagesEl.value) return
-    if (isMobile.value && restoreHistoryReadingAnchor(readingAnchor)) return
+    if (restoreHistoryReadingAnchor(readingAnchor)) return
     const delta = messagesEl.value.scrollHeight - olderReplayScrollHeight
     messagesEl.value.scrollTop = olderReplayScrollTop + delta
   })
@@ -2370,6 +2475,7 @@ function settleReplayLocalMessage(message: any, target: any[]) {
 }
 
 function loadHistory() {
+  hydrateHistoryPreview()
   clearTaskSnapshotTimer()
   taskSnapshotError.value = false
   taskSnapshotReqId = -1
@@ -2405,7 +2511,7 @@ function loadHistory() {
   hasMore.value = false
   resetReplayTrustBuffers()
   beginHistoryFill({ mode: 'initial', baselineContentHeight: 0 })
-  armMobileHistoryTimeout()
+  armHistoryPageTimeout()
   if (focusedSubAgentId.value) {
     send({ type: 'replay_subagent', session_id: sessionId.value, agent_id: focusedSubAgentId.value, limit: pageSize.value, req_id: replayReqId.value })
   } else {
@@ -2437,12 +2543,12 @@ function finishHistoryViewportFill(mode = historyViewportFill.mode): void {
   isLoadingBackward.value = false
   clearHistorySlowTimer()
   isSlowLoading.value = false
-  if (mode === 'initial' || mode === 'resize') nextTick(scrollToBottom)
+  if (mode === 'initial' || mode === 'resize') nextTick(() => { if (autoScroll.value) scrollToBottom() })
 }
 
 function requestOlderHistoryPage(cursor: number): boolean {
   const element = messagesEl.value
-  olderReadingAnchor = isMobile.value ? historyReadingAnchor() : undefined
+  olderReadingAnchor = historyReadingAnchor()
   if (element) {
     olderReplayScrollHeight = element.scrollHeight
     olderReplayScrollTop = element.scrollTop
@@ -2460,8 +2566,8 @@ function requestOlderHistoryPage(cursor: number): boolean {
       })
   if (!sent) {
     finishHistoryViewportFill()
-    if (isMobile.value) historyFeedback.value = t('session.history_partial_failure')
-  } else armMobileHistoryTimeout()
+    historyFeedback.value = t('session.history_partial_failure')
+  } else armHistoryPageTimeout()
   return sent
 }
 
@@ -2485,15 +2591,21 @@ async function settleHistoryReplayPage(msg: any): Promise<void> {
     contentHeight: element?.scrollHeight ?? 0,
     hasMore: hasMore.value,
     cursor: replayCursor,
-    visibleMessages: renderMessages.value.filter(message => loadedHistoryIDs.has(String(message.id)) && !isHiddenAuxiliary(message) && !isToolGroupContinuation(message)).length,
+    minimumVisibleMessages: cachedHistory.value.length ? Math.max(20, Math.ceil((element?.clientHeight || window.innerHeight) / 40) + 8) : undefined,
+    visibleMessages: (() => {
+      const visible = sourceMessages.value.filter(message => showsMobileMessage(message, showToolCalls.value))
+      const groups = buildToolCallGrouping(visible)
+      return visible.filter(message => loadedHistoryIDs.has(String(message.id)) && !isHiddenAuxiliary(message) && !groups.continuations.has(message)).length
+    })(),
   })
   if (decision.kind === 'continue') {
     requestOlderHistoryPage(decision.cursor)
     return
   }
-  if (isMobile.value && ['page_limit_reached', 'time_limit_reached'].includes(decision.reason)) {
+  if (['target_reached', 'no_more'].includes(decision.reason)) { publishHistoryPreview(); saveHistoryPreview() }
+  if (['page_limit_reached', 'time_limit_reached'].includes(decision.reason)) {
     historyFeedback.value = t('session.history_continue')
-  } else if (isMobile.value && ['invalid_cursor', 'cursor_did_not_advance'].includes(decision.reason)) {
+  } else if (['invalid_cursor', 'cursor_did_not_advance'].includes(decision.reason)) {
     historyFeedback.value = t('session.history_partial_failure')
   }
   finishHistoryViewportFill(mode)
@@ -2551,6 +2663,26 @@ function requestSessionMeta() {
   }
 }
 
+let historyTouchStartY: number | null = null
+function onHistoryWheel(event: WheelEvent) {
+  promptReading.value = false
+  if (event.deltaY < 0 && !isLoadingBackward.value && !isLoading.value) {
+    mobileHistoryNeedsGesture = false
+    onMessagesScroll()
+  }
+}
+function onHistoryTouchStart(event: TouchEvent) {
+  promptReading.value = false
+  historyTouchStartY = event.touches[0]?.clientY ?? null
+}
+function onHistoryTouchEnd(event: TouchEvent) {
+  const end = event.changedTouches[0]?.clientY
+  if (historyTouchStartY !== null && end !== undefined && end - historyTouchStartY > 24 && !isLoadingBackward.value && !isLoading.value) {
+    mobileHistoryNeedsGesture = false
+    onMessagesScroll()
+  }
+  historyTouchStartY = null
+}
 function onMessagesScroll() {
   if (!messagesEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
@@ -3999,6 +4131,7 @@ function flushLiveContent(): void {
 }
 
 function processImmediateLiveEvent(msg: any, options?: { scroll?: boolean }): void {
+  scheduleHistoryPreview()
   flushLiveContent()
   processEvent(msg)
   if (options?.scroll && !promptReading.value) nextTick(() => { if (!promptReading.value) scrollToBottom() })
@@ -4015,6 +4148,7 @@ const loadKey = computed(() => sessionId.value + '::' + (route.query.subagent as
 
 // Watch for session switch / focus change — clear messages and replay new context
 watch(loadKey, (newKey, oldKey) => {
+  sessionFullscreen.value = false
   if (newKey && newKey !== oldKey) {
     promptReading.value = false
     clearAllToolTimeouts()   // reset tool timeout guards on session switch
@@ -4069,7 +4203,19 @@ const cleanups: (() => void)[] = []
 onMounted(() => {
 	if (archivedView.value) void openArchived()
 	void refreshProjects()
+  void hydrateNavigationPreview()
+  cleanups.push(personalReadCache.onInvalidate(() => {
+    cachedSessions.value = []; cachedHosts.value = {}; cachedOrganization.value = null; cachedHistory.value = []
+    historyCacheRequest++
+    if (!personalReadCache.ticket().scope) {
+      cachePrivacyBlocked.value = true; navigationRequest++
+      messages.value = []; subagentMessages.value = {}; allSessions.value = []; projects.value = []; sidebarBuckets.value = {}; daemons.value = {}
+      messageInput.value = ''; historyCacheReady.value = false; statusReady.value = false; runtimeSnapshotReady.value = false
+    }
+  }))
 	cleanups.push(onEvent('session_organization_changed', () => {
+    void personalReadCache.evict('navigation')
+    cachedOrganization.value = null
 		void refreshProjects()
 		if (archivedView.value) void openArchived()
 		send({ type: 'list_sessions' })
@@ -4096,7 +4242,9 @@ onMounted(() => {
 	}))
 
 	cleanups.push(onEvent('session_list', (msg: any) => {
+    navigationFresh.value = true; cachedSessions.value = []
     allSessions.value = msg.sessions || []
+    void personalReadCache.write('sessions', navigationSessions(allSessions.value))
     if (sessionId.value !== 'default' && !allSessions.value.some((s:any) => s.session_id === sessionId.value)) {
       void getSessionSummary(sessionId.value).then(summary => {
         if (sessionId.value === summary.session_id && !allSessions.value.some((s:any) => s.session_id === summary.session_id)) allSessions.value.push(summary)
@@ -4179,7 +4327,10 @@ onMounted(() => {
         online: d.daemon_online ?? d.online ?? (d.status === 'online'),
       }
     }
+    hostsFresh = true
     daemons.value = map
+    cachedHosts.value = {}
+    void personalReadCache.write('hosts', Object.fromEntries(Object.entries(map).map(([id, host]) => [id, { hostname: host.hostname, daemon_alias: host.daemon_alias, online: false }])))
   }))
   cleanups.push(onEvent('daemon_status', (msg: any) => {
     if (!msg.daemon_id) return
@@ -4262,7 +4413,7 @@ onMounted(() => {
       const previousIDs = new Set(sourceMessages.value.map(message => message.id))
       for (const evt of progressiveReplayEvents.takeReady(replayContext)) processEvent(evt, messages.value, undefined, true)
       for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
-      nextTick(scrollToBottom)
+      if (!cachedHistory.value.length) nextTick(() => { if (autoScroll.value) scrollToBottom() })
     }
   }))
   cleanups.push(onEvent('task_snapshot', (msg: any) => {
@@ -4291,12 +4442,14 @@ onMounted(() => {
       else if (msg.task_snapshot_status === 'error') taskSnapshotError.value = true
     }
     if (msg.error) {
+      if (cacheReadDenied(msg.error)) { cachedHistory.value = []; historyCacheRequest++; void personalReadCache.remove(historyCacheName()) }
       resetReplayTrustBuffers()
       finishHistoryViewportFill()
       historyReadFailed.value = true
       historyFeedback.value = t('session.history_read_failed')
       return
     }
+    if (!msg.has_more) publishHistoryPreview()
     const previousIDs = new Set(sourceMessages.value.map(message => message.id))
     const wasLoadingBackward = isLoadingBackward.value
     const replayContext = replaySessionTrustContext()
@@ -4304,7 +4457,7 @@ onMounted(() => {
       prependOlderReplayEvents(olderReplayEvents.takeFinal(replayContext))
     } else {
       for (const evt of progressiveReplayEvents.takeFinal(replayContext)) processEvent(evt, messages.value, undefined, true)
-      nextTick(scrollToBottom)
+      nextTick(() => { if (autoScroll.value) scrollToBottom() })
     }
     for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
     if (!wasLoadingBackward) {
@@ -4353,6 +4506,7 @@ onMounted(() => {
       runtimeSnapshotReady.value = true
     }
     reconcileVisibleUnresolvedTools(status.value)
+    saveHistoryPreview()
     if (hasMore.value) void settleHistoryReplayPage(msg)
     else finishHistoryViewportFill(historyViewportFill.mode)
   }))
@@ -4552,6 +4706,7 @@ onMounted(() => {
       if (lastActivityAt) ls.last_activity_at = lastActivityAt
     }
     if (msg.session_id === sessionId.value) {
+      scheduleHistoryPreview()
       const wasTurnActive = isTurnActive.value
       if (!wasTurnActive && isTurnActiveStatus(msg.status)) {
         resumeStartAt = parseTurnStart(msg.turn_started_at || msg.payload?.turn_started_at) ?? Date.now()
@@ -4589,6 +4744,10 @@ onMounted(() => {
 
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
+    if (cacheReadDenied(msg.code || msg.error)) {
+      cachedHistory.value = []; historyCacheRequest++; historyCacheReady.value = false
+      void personalReadCache.remove(historyCacheName())
+    }
     if (msg.operation === 'set_session_model' && msg.request_id === dshSettingsPending.value) { dshSettingsPending.value = ''; dshSettingsError.value = msg.error || t('session.dsh.failed'); requestSessionMeta(); return }
     if (msg.operation === 'user_message' && (msg.msg_id || msg.request_id)) {
       const message = findMessageByCorrelation(eventCorrelation(msg))
@@ -4646,6 +4805,11 @@ onMounted(() => {
 
   cleanups.push(onEvent('session_deleted', (msg: any) => {
     sessionDocumentState.sessionDeleted(msg.session_id)
+    void personalReadCache.remove('history:' + JSON.stringify([msg.session_id, '']))
+    void personalReadCache.remove('sessions')
+    cachedSessions.value = cachedSessions.value.filter(s => s.session_id !== msg.session_id)
+    if (sessionId.value === msg.session_id) { cachedHistory.value = []; historyCacheRequest++ }
+    void refreshProjects()
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
       liveContentBatcher.reset(liveContentContextKey.value)
@@ -4662,6 +4826,9 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('session_title_update', (msg: any) => {
+    void personalReadCache.evict('navigation')
+    cachedOrganization.value = null
+    void refreshProjects()
     const s = allSessions.value.find((x: any) => x.session_id === msg.session_id)
     if (s) s.title = msg.title
   }))
@@ -4696,6 +4863,9 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  saveHistoryPreview()
+  historyCacheRequest++; navigationRequest++
+  if (historyCacheTimer) clearTimeout(historyCacheTimer)
   clearTaskSnapshotTimer()
   if (historyPageTimer) clearTimeout(historyPageTimer)
   clearTimeout(invocationTimer)
@@ -4839,7 +5009,7 @@ onMounted(() => {
 .chat-area { --composer-float-clearance: 156px; --session-content-gutter: max(20px, calc(50% - 460px)); flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; max-width: 100%; overflow: hidden; background: var(--bg); transition: background var(--transition); }
 
 /* Toolbar: identity is allowed to shrink; actions always retain a stable lane. */
-.chat-toolbar { min-height: 62px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 58px 7px 18px; gap: 16px; background: color-mix(in srgb, var(--topbar-bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); transition: background var(--transition), border-color var(--transition); }
+.chat-toolbar { min-height: 62px; border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 7px 100px 7px 18px; gap: 16px; background: color-mix(in srgb, var(--topbar-bg) 92%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); transition: background var(--transition), border-color var(--transition); }
 .session-toolbar-identity { flex: 1 1 auto; min-width: 120px; display: flex; align-items: center; gap: 10px; }
 .session-toolbar-back { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid transparent; border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
 .session-toolbar-back:hover { color: var(--fg); border-color: var(--border); background: var(--surface-hover); }
@@ -4874,11 +5044,23 @@ onMounted(() => {
 .model-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--accent-muted); color: var(--accent); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .effort-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: var(--radius-full); font-size: 12px; font-weight: 600; background: var(--warning-bg); color: var(--warning); white-space: nowrap; }
 
+.status-pill.loading-more { flex-shrink: 0; white-space: nowrap; }
+.status-pill.loading-more .status-pill-label { display: inline !important; }
+.status-pill.loading-more .pulse { animation: history-loading-pulse 1s ease-in-out infinite; }
+.cached-tool-summary { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; color: var(--fg-tertiary); }
+.cached-tool-summary > svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.cached-tool-summary > div { min-width: 0; }
+.cached-tool-summary strong { display: block; color: var(--fg); font-size: 13px; }
+.cached-tool-summary small { margin-left: 6px; font: 11px var(--font-mono); color: var(--fg-tertiary); }
+.cached-tool-summary span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+@keyframes history-loading-pulse { 50% { opacity: .35; } }
+@media(prefers-reduced-motion: reduce) { .status-pill.loading-more .pulse { animation: none; } }
+.cache-preview-notice { padding: 8px 14px; color: var(--fg-tertiary); font-size: 12px; }
 .session-id-box { min-height: 32px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 9px; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-md); }
 .session-id-text { font-family: var(--font-mono); font-size: 12px; color: var(--fg-secondary); }
 .copy-btn { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; background: none; border: none; color: var(--fg-tertiary); cursor: pointer; border-radius: 4px; padding: 0; transition: color 0.15s, background 0.15s; }
 .copy-btn:hover { color: var(--accent); background: var(--accent-muted); }
-.toolbar-overflow { position: absolute; z-index: 55; top: 15px; right: 18px; flex: 0 0 auto; }
+.toolbar-overflow { display: flex; align-items: center; gap: 6px; position: absolute; z-index: 55; top: 15px; right: 18px; flex: 0 0 auto; }
 .toolbar-more-btn { width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--fg-secondary); background: transparent; cursor: pointer; }
 .toolbar-more-btn:hover, .toolbar-more-btn[aria-expanded="true"] { color: var(--fg); border-color: var(--accent); background: var(--accent-muted); }
 .toolbar-more-btn svg { width: 17px; height: 17px; fill: currentColor; }
@@ -4943,7 +5125,6 @@ onMounted(() => {
 
 /* Welcome empty state — fills entire chat-area when no sessions exist */
 .chat-welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 16px; padding: 40px 20px; text-align: center; }
-.session-empty-github { position: absolute; z-index: 2; top: 14px; right: 18px; }
 .chat-welcome .welcome-icon { color: var(--fg-tertiary); opacity: 0.3; }
 .chat-welcome .welcome-title { font-size: 20px; font-weight: 600; color: var(--fg-secondary); margin: 0; }
 .chat-welcome .welcome-desc { font-size: 14px; color: var(--fg-tertiary); line-height: 1.6; max-width: 380px; margin: 0; }
@@ -5142,7 +5323,7 @@ onMounted(() => {
   .session-id-box { display: none; }
 }
 @media (max-width: 900px) and (min-width: 769px) {
-  .chat-toolbar { padding: 7px 52px 7px 12px; gap: 8px; }
+  .chat-toolbar { padding: 7px 94px 7px 12px; gap: 8px; }
   .status-pill { padding: 5px 7px; }
   .status-pill-label { display: none; }
   .session-toolbar-identity { min-width: 0; }
@@ -5152,6 +5333,9 @@ onMounted(() => {
   .chat-area { --composer-float-clearance: 112px; --session-content-gutter: 14px; }
   .session-layout > .session-panel,
   .session-layout .chat-toolbar { display: none; }
+  .session-fullscreen .chat-toolbar { display: flex; padding-right: 104px; }
+  .session-fullscreen .chat-toolbar .session-toolbar-actions > :not(.status-pill) { display: none; }
+  .session-fullscreen .chat-toolbar .status-pill { display: flex; }
   .mobile-session-toolbar-overflow {
     position: fixed;
     z-index: 82;
@@ -5434,3 +5618,11 @@ onMounted(() => {
 </style>
 
 <style scoped>.scroll-to-bottom.has-unread{width:auto;min-width:90px;border-radius:20px;gap:6px;padding:0 12px;font-size:12px;min-height:40px}</style>
+
+<style>
+.session-layout.session-fullscreen > .chat-area { position: fixed; inset: 0; height: 100dvh; width: 100%; z-index: 70; }
+.session-layout.session-fullscreen > .session-panel { display: none; }
+@media (max-width: 768px) {
+  .session-layout.session-fullscreen > .chat-area { height: var(--visual-viewport-bottom, 100dvh); bottom: auto; }
+}
+</style>

@@ -1,6 +1,7 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { reactive, ref } from 'vue'
+import { personalReadCache } from '../../services/personalReadCache'
 import SessionDetail from '../SessionDetail.vue'
 import * as organization from '../../services/sessionOrganization'
 import { resetAgentPlanProgressForTests } from '../../composables/useAgentPlanProgress'
@@ -53,6 +54,157 @@ vi.mock('../../services/sessionOrganization', () => ({
 }))
 
 describe('SessionDetail history loading', () => {
+  test('cache is a display projection and replay atomically replaces it without duplicating live messages', async () => {
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? [{id:'cached-q',type:'user_text',role:'user',content:'Old question'}, {id:'cached-a',type:'agent_text',content:'Old answer'}] : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const vm = wrapper.vm as any
+    expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(true)
+    expect(vm.messages).toHaveLength(0)
+    expect(vm.canWriteWhenConnected).toBe(false)
+    websocketMock.handlers.get('replay_batch')?.({ session_id:'session-http-lan', req_id:1, direction:'backward', events:[{type:'user_text',text:'Current question',session_id:'session-http-lan',event_id:'q'}, {type:'agent_text',text:'Current answer',session_id:'session-http-lan',event_id:'a'}] })
+    await flushPromises()
+    expect(vm.renderMessages[0].content).toBe('Old question')
+    vm.processEvent({ type:'agent_text',text:'Live update',session_id:'session-http-lan',event_id:'live' })
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:1,has_more:false,status:'idle'})
+    await flushPromises()
+    expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(false)
+    expect(vm.renderMessages.map((m:any)=>m.content)).toEqual(['Current question','Current answer','Live update'])
+    wrapper.unmount()
+  })
+
+  test('late cache cannot replace a completed replay or another route', async () => {
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    let resolve!: (value:any)=>void
+    vi.spyOn(personalReadCache, 'read').mockImplementation(name => name.startsWith('history:') ? new Promise(r=>{resolve=r}) : Promise.resolve(null))
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:1,has_more:false})
+    resolve([{id:'old',type:'agent_text',content:'late cache'}])
+    await flushPromises()
+    expect((wrapper.vm as any).cachedHistory).toEqual([])
+    routeMock.current.params.id='new-session'
+    await flushPromises()
+    const newResolve=resolve
+    routeMock.current.params.id='third-session'
+    await flushPromises()
+    newResolve([{id:'old',type:'agent_text',content:'wrong session'}])
+    await flushPromises()
+    expect((wrapper.vm as any).cachedHistory).toEqual([])
+    wrapper.unmount()
+  })
+
+  test('cache denial removes preview while transient replay errors keep it marked stale', async () => {
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? [{id:'old',type:'agent_text',content:'cached'}] : null)
+    const remove = vi.spyOn(personalReadCache, 'remove').mockResolvedValue()
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:1,error:'history_unavailable'})
+    await flushPromises()
+    expect(wrapper.get('[data-testid="history-cache-preview"]').text()).toBe('session.cache_failed')
+    websocketMock.handlers.get('error')?.({session_id:'session-http-lan',error:'session not found or not owned'})
+    await flushPromises()
+    expect((wrapper.vm as any).cachedHistory).toEqual([])
+    expect(remove).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  test('fullscreen immediately precedes actions; sharing only appears in that menu', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions:[{session_id:'session-http-lan'}] })
+    await flushPromises()
+    expect(wrapper.findComponent({name:'TopbarGithubLink'}).exists()).toBe(false)
+    expect(wrapper.get('.toolbar-more-btn').element.previousElementSibling?.tagName.toLowerCase()).toBe('session-fullscreen-toggle-stub')
+    expect(wrapper.find('[data-toolbar-action="share"]').exists()).toBe(false)
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+    await wrapper.get('[data-toolbar-action="share"]').trigger('click')
+    expect((wrapper.vm as any).showShareManager).toBe(true)
+    expect((wrapper.vm as any).toolbarOverflowOpen).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('loading older history advertises progress, deduplicates repeated gestures and restores runtime status', async () => {
+    const wrapper=shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({sessions:[{session_id:'session-http-lan'}]})
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:1,has_more:false,status:'idle'})
+    await flushPromises()
+    const vm=wrapper.vm as any
+    vm.hasMore=true; vm.loadedMinId=100
+    const before=websocketMock.send.mock.calls.filter(([m])=>m.type==='replay').length
+    for(let i=0;i<3;i++) {
+      vm.onHistoryTouchStart({touches:[{clientY:100}]})
+      vm.onHistoryTouchEnd({changedTouches:[{clientY:160}]})
+    }
+    await flushPromises()
+    expect(websocketMock.send.mock.calls.filter(([m])=>m.type==='replay')).toHaveLength(before+1)
+    expect(wrapper.get('.status-pill').classes()).toContain('loading-more')
+    expect(wrapper.get('.status-pill').attributes('aria-busy')).toBe('true')
+    expect(wrapper.get('.status-pill').text()).toBe('session.history_loading_more')
+    const request=websocketMock.send.mock.calls.map(([m])=>m).filter(m=>m.type==='replay').at(-1)!
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:request.req_id,has_more:false,status:'idle'})
+    await flushPromises()
+    expect(wrapper.get('.status-pill').classes()).not.toContain('loading-more')
+    expect(wrapper.get('.status-pill').text()).toBe('session.status.idle')
+    wrapper.unmount()
+  })
+
+  test('tool-dense initial pages keep the cached viewport until enough authoritative content is available', async () => {
+    vi.stubGlobal('requestAnimationFrame',(callback:FrameRequestCallback)=>{callback(0);return 1})
+    vi.spyOn(personalReadCache,'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache,'read').mockImplementation(async name=>name.startsWith('history:') ? [{id:'cached',type:'agent_text',content:'Keep this full cached preview'}] : null)
+    const wrapper=shallowMount(SessionDetail)
+    await flushPromises()
+    websocketMock.handlers.get('replay_batch')?.({session_id:'session-http-lan',req_id:1,direction:'backward',events:[{type:'tool_call',session_id:'session-http-lan',call_id:'t1',tool:'Read',input:'{}'},{type:'tool_result',session_id:'session-http-lan',call_id:'t1',output:'done'}]})
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:1,last_seq:100,has_more:true,status:'idle'})
+    await flushPromises()
+    expect((wrapper.vm as any).cachedHistory).toHaveLength(1)
+    expect((wrapper.vm as any).isLoadingBackward).toBe(true)
+    const request=websocketMock.send.mock.calls.map(([m])=>m).filter(m=>m.type==='replay').at(-1)!
+    websocketMock.handlers.get('replay_batch')?.({session_id:'session-http-lan',req_id:request.req_id,direction:'backward',events:Array.from({length:25},(_,i)=>({type:'user_text',session_id:'session-http-lan',text:'Older question '+i,event_id:'older-'+i}))})
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:request.req_id,last_seq:1,has_more:false,status:'idle'})
+    await flushPromises()
+    expect((wrapper.vm as any).cachedHistory).toHaveLength(0)
+    expect((wrapper.vm as any).messages.filter((m:any)=>m.role==='user')).toHaveLength(25)
+    wrapper.unmount()
+  })
+
+  test('Team return routes neither hydrate nor persist history when navigating away', async () => {
+    routeMock.current.query.return_team_session='team-session'
+    const read=vi.spyOn(personalReadCache,'read').mockResolvedValue(null)
+    const write=vi.spyOn(personalReadCache,'write').mockResolvedValue()
+    const wrapper=shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({sessions:[{session_id:'session-http-lan'}]})
+    websocketMock.handlers.get('replay_batch')?.({session_id:'session-http-lan',req_id:1,events:[{type:'agent_text',text:'private team',session_id:'session-http-lan'}]})
+    websocketMock.handlers.get('replay_end')?.({session_id:'session-http-lan',req_id:1,has_more:false})
+    await flushPromises()
+    routeMock.current.params.id='next'
+    await flushPromises()
+    expect(read.mock.calls.some(([name])=>name.startsWith('history:'))).toBe(false)
+    expect(write.mock.calls.some(([name])=>name.startsWith('history:'))).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('fullscreen preserves messages and draft without another replay, and resets on navigation', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.messages = [{type:'agent_text',content:'Retain this answer'}]
+    vm.messageInput = 'Keep this draft'
+    const before = websocketMock.send.mock.calls.length
+    wrapper.findComponent({name:'SessionFullscreenToggle'}).vm.$emit('update:modelValue', true)
+    await flushPromises()
+    expect(wrapper.get('.session-layout').classes()).toContain('session-fullscreen')
+    expect(vm.messages[0].content).toBe('Retain this answer')
+    expect(vm.messageInput).toBe('Keep this draft')
+    expect(websocketMock.send.mock.calls.length).toBe(before)
+    routeMock.current.params.id = 'another-session'
+    await flushPromises()
+    expect(wrapper.get('.session-layout').classes()).not.toContain('session-fullscreen')
+    wrapper.unmount()
+  })
+
   test('replayed retry echoes retain one question and separate copy ranges', async () => {
     const wrapper = shallowMount(SessionDetail)
     websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })

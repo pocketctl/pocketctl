@@ -1,3 +1,4 @@
+import { registerWebCacheKey } from './web-cache-key.js';
 import {registerPersonalUsageRoutes,personalUsageQuery,usageErrorReply} from './usage-analytics/routes.js'
 import {prepareRelaySchema,type RelaySchemaStrategy} from './schema-runtime.js';
 import { ensurePlatformStatisticsSchema } from './platform-statistics/schema.js';
@@ -1917,6 +1918,7 @@ async function main() {
   // ---- REST API: Device Registration (Phase 3) ----
 
   // Get current user profile (including subscription plan)
+  registerWebCacheKey(app, pool);
   app.get('/api/user/profile', async (req, reply) => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {

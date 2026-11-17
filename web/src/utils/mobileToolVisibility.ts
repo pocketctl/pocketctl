@@ -7,5 +7,5 @@ export function saveMobileToolVisibility(value: boolean): void {
   try { localStorage.setItem(MOBILE_TOOL_VISIBILITY_KEY, String(value)) } catch { /* In-memory preference remains usable. */ }
 }
 export function showsMobileMessage(message: { type?: string; tool?: string }, showTools: boolean): boolean {
-  return showTools || message.type !== 'tool_call' || message.tool === 'AskUserQuestion'
+  return showTools || (message.type !== 'cached_tool_group' && message.type !== 'tool_call') || message.tool === 'AskUserQuestion'
 }

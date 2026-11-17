@@ -1,4 +1,12 @@
 {
+  "session.history_loading_more": "加载更多",
+  "session.cached_tool_details": "详情将在同步后显示",
+  "session.cache_status_unknown": "状态待更新",
+  "session.cache_updating": "缓存 · 更新中",
+  "session.cache_failed": "缓存 · 更新失败，内容可能已过期",
+  "session.tool_group_heading": "工具调用",
+  "session.fullscreen_enter": "全屏显示会话",
+  "session.fullscreen_exit": "退出全屏",
   "memory.personal_scenes": "个人项目场景",
   "memory.personal_scenes_copy": "为个人项目建立知识分类。创建场景不会开启场景消费、自动写入或修改模型与预算。",
   "memory.scene_name": "场景名称",
