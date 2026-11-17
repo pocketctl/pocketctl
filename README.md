@@ -123,6 +123,7 @@ Repositories and agent processes stay on your development machine. Session conte
 - Read-only share links allow anonymous access, expire after 15 minutes, and can be revoked early. Revocation cannot retract content already loaded or saved.
 - Teams share explicitly contributed collaboration content, not native private session logs automatically.
 - Explicit `pocketctl memory sync-repo` uploads filtered committed source to the configured Memory service for Code Graph; `--dry-run` stays local.
+- The current source adds encrypted on-device caching of personal session lists, project groups, and host names in the Web client (AES-256-GCM, per-user keys derived through an authenticated Relay cache-key endpoint). Cached entries carry no online, running, or control privileges, never store full session bodies, expire after seven days, and are cleared on sign-out. This requires the updated Relay and Web client and is not included in the v0.5.18 release.
 
 See [data processing and experimental retention](docs/security-and-data.md) and the [Privacy Policy](https://www.pocketctl.me/privacy.html).
 
