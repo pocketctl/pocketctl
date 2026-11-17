@@ -369,7 +369,7 @@
           <!-- User message (right bubble) -->
           <article v-if="msg.role === 'user'" class="session-message-row member" :data-user-message-id="String(msg.id)" tabindex="-1" :aria-label="t('team.me')"><div class="message-body">
           <MessageUser
-            :content="cleanContent(msg.content)"
+            :content="messageDisplayContent(msg)"
             :data-delivery-status="msg.deliveryStatus || undefined"
           />
 
@@ -377,7 +377,7 @@
           <!-- Agent text message -->
           <article v-else-if="msg.type === 'agent_text'" class="session-message-row reply-paragraph"><div class="message-body">
           <MessageAgent
-            :content="cleanContent(msg.content)"
+            :content="messageDisplayContent(msg)"
             :show-label="false"
             :streaming="msg.streaming"
             :agent-type="focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent"
@@ -509,7 +509,7 @@
           </template>
         </div>
 
-          <ReplyFooter v-if="reply.kind === 'reply'" :status="statusForReply(reply)" :content="cleanContent(replyText(reply))"
+          <ReplyFooter v-if="reply.kind === 'reply'" :status="statusForReply(reply)" :content="replyDisplayContent(reply)"
             :duration="isLatestReply(reply) ? (isTurnWorking && turnStartTime !== null ? fmtDuration(turnElapsed) : lastTurnDuration !== null ? fmtDuration(lastTurnDuration) : undefined) : undefined"
             :ended-at="isLatestReply(reply) && completedBarVisible && completedTurnEndedAt ? t('session.ended_at', { time: formatDateTime(completedTurnEndedAt) }) : undefined"
             :usage="isLatestReply(reply) && lastAgentUsage?.output_tokens ? t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) : undefined"
@@ -766,6 +766,7 @@ import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
 import SessionFullscreenToggle from '../components/session/SessionFullscreenToggle.vue'
+import type { ComputedRef } from 'vue'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, provide } from 'vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
 import ActionList from '../components/ActionList.vue'
@@ -1847,11 +1848,37 @@ const renderMessages = computed(() => (cachedHistory.value.length ? cachedHistor
 const replyRows = computed(() => projectReplies(renderMessages.value))
 const lastQuestionForReply = computed(() => [...sourceMessages.value].reverse().find(m => m.role === 'user' && !m.retry_of_turn_id && (!m.deliveryStatus || m.deliveryStatus === 'accepted')))
 const replyAgentLabel = computed(() => agentReplyLabel(focusedSubAgentId.value ? focusedSubAgentInfo.value?.agentType : currentSessionAgent.value || listedSessions.value.find(s => s.session_id === sessionId.value)?.agent_type))
-function isLatestReply(reply: ReplyGroup): boolean {
+// Resolve once per relevant message change, not once per footer field. Scanning
+// the entire history for each reply makes every stream frame quadratic.
+const latestReply = computed(() => {
   const pending = [...sourceMessages.value].reverse().find(m => m.role === 'user')
-  if (pending?.retry_of_turn_id && !pending.turn_id && pending.deliveryStatus !== 'failed') return false
-  return reply === replyRows.value.at(-1) && (!reply.prompt || reply.prompt === lastQuestionForReply.value)
+  if (pending?.retry_of_turn_id && !pending.turn_id && pending.deliveryStatus !== 'failed') return undefined
+  const reply = replyRows.value.at(-1)
+  return reply && (!reply.prompt || reply.prompt === lastQuestionForReply.value) ? reply : undefined
+})
+function isLatestReply(reply: ReplyGroup): boolean { return reply === latestReply.value }
+// Weak keys retain only live projection/message objects. Vue tracks content
+// mutations inside each computed, so snapshots and terminal text stay fresh
+// while draft edits and another message's chunks reuse unchanged clean text.
+const messageDisplayCache = new WeakMap<object, ComputedRef<string>>()
+const replyDisplayCache = new WeakMap<ReplyGroup, ComputedRef<string>>()
+function messageDisplayContent(message: any): string {
+  let content = messageDisplayCache.get(message)
+  if (!content) {
+    content = computed(() => cleanContent(message.content))
+    messageDisplayCache.set(message, content)
+  }
+  return content.value
 }
+function replyDisplayContent(reply: ReplyGroup): string {
+  let content = replyDisplayCache.get(reply)
+  if (!content) {
+    content = computed(() => cleanContent(replyText(reply)))
+    replyDisplayCache.set(reply, content)
+  }
+  return content.value
+}
+
 function statusForReply(reply: ReplyGroup): string {
   const projected = replyStatus(reply)
   if (projected === 'waiting' || projected === 'failed') return projected

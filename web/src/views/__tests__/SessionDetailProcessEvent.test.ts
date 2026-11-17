@@ -57,6 +57,82 @@ async function openToolbarOverflow(wrapper: ReturnType<typeof shallowMount>) {
 }
 
 describe('SessionDetail processEvent integration', () => {
+  test('continuous output and composer edits do not rescan unchanged history', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'running', daemon_online: true }]
+    vm.messages = Array.from({ length: 200 }, (_, i) => [
+      { id: `u-${i}`, role: 'user', type: 'user_text', content: `Question ${i}`, turn_id: `t-${i}` },
+      { id: `a-${i}`, role: 'agent', type: 'agent_text', content: `Answer ${i} ` + 'long historical paragraph '.repeat(80), turn_id: `t-${i}`, streaming: i === 199 },
+    ]).flat()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAllComponents(MessageAgent)).toHaveLength(200)
+    const originalReplace = String.prototype.replace
+    let cleans = 0
+    const replace = vi.spyOn(String.prototype, 'replace').mockImplementation(function (this: string, ...args: any[]) {
+      if (args[0] instanceof RegExp && args[0].source.startsWith('<oai-mem-citation>')) cleans++
+      return originalReplace.apply(this, args as any)
+    } as any)
+    const samples: number[] = []
+    try {
+      for (let i = 0; i < 10; i++) {
+        const started = performance.now()
+        vm.messages.at(-1).content += ` chunk-${i}`
+        await wrapper.vm.$nextTick()
+        samples.push(performance.now() - started)
+      }
+      const streamCleans = cleans
+      cleans = 0
+      vm.messageInput = 'typing while output continues'
+      await wrapper.vm.$nextTick()
+      console.info('STREAM_RENDER_BENCH', JSON.stringify({rows: 400, updates: 10, streamCleans, typingCleans: cleans, totalMs: samples.reduce((a,b)=>a+b,0), maxMs: Math.max(...samples)}))
+      expect(streamCleans).toBeLessThanOrEqual(20)
+      expect(cleans).toBe(0)
+    } finally { replace.mockRestore(); wrapper.unmount() }
+  }, 30000)
+
+  test('cached display text follows snapshots, terminal copies, prepend and selected bucket', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle', daemon_online: true }]
+    vm.messages = [
+      { id: 'user', role: 'user', type: 'user_text', content: '<command-name>/model</command-name>', turn_id: 'turn' },
+      { id: 'answer', role: 'agent', type: 'agent_text', content: 'first <b>body</b>', turn_id: 'turn', streaming: true },
+    ]
+    await wrapper.vm.$nextTick()
+    const footer = () => wrapper.findAllComponents({ name: 'ReplyFooter' }).at(-1)!
+    expect(wrapper.findComponent(MessageAgent).props('content')).toBe('first body')
+    vm.messages[1].content = 'replacement <i>snapshot</i>'
+    await wrapper.vm.$nextTick()
+    expect(footer().props('content')).toBe('replacement snapshot')
+    vm.messages[1].content += ' final'
+    vm.processEvent({ type: 'turn_status', turn_id: 'turn', turn_status: 'completed' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(MessageAgent).props('streaming')).toBe(false)
+    expect(footer().props('content')).toBe('replacement snapshot final')
+    const oldReply = vm.replyRows.at(-1)
+    vm.messages.unshift({ id: 'older', role: 'user', type: 'user_text', content: 'older' })
+    await wrapper.vm.$nextTick()
+    expect(footer().props('content')).toBe('replacement snapshot final')
+    expect(vm.isLatestReply(oldReply)).toBe(false)
+    expect(vm.isLatestReply(vm.replyRows.at(-1))).toBe(true)
+    vm.messages = [{ id: 'answer', role: 'agent', type: 'agent_text', content: 'same id new object' }]
+    await wrapper.vm.$nextTick()
+    expect(footer().props('content')).toBe('same id new object')
+    routeMock.current.query = { subagent: 'child' }
+    await wrapper.vm.$nextTick()
+    vm.subagentMessages = { child: [{ id: 'answer', role: 'agent', type: 'agent_text', content: 'child isolated content' }] }
+    await wrapper.vm.$nextTick()
+    expect(footer().props('content')).toBe('child isolated content')
+    routeMock.current.params.id = 'ses_2'
+    routeMock.current.query = {}
+    await wrapper.vm.$nextTick()
+    vm.messages = [{ id: 'answer', role: 'agent', type: 'agent_text', content: 'other session content' }]
+    await wrapper.vm.$nextTick()
+    expect(footer().props('content')).toBe('other session content')
+    wrapper.unmount()
+  })
+
   test('terminal turns stop their partial stream on live delivery and replay without changing text', async () => {
     for (const historical of [false, true]) {
       const wrapper = shallowMount(SessionDetail)
