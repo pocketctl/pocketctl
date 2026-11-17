@@ -46,21 +46,36 @@ export function createUsageWorker(options: UsageWorkerOptions) {
             cost_micros: fact.costMicros ?? 0,
             occurred_at: fact.occurredAt.toISOString(),
           }))
-          try {
-            await options.reportUsage(installationId, facts)
-          } catch (error) {
-            const errorCode = boundedErrorCode(error)
-            for (const fact of sourceFacts) {
-              const attempts = await outbox.markAttempt(installationId, fact.usageId, errorCode)
-              if (attempts >= MAX_ATTEMPTS) await outbox.markDeadLetter(installationId, fact.usageId)
+          // A deterministic payload rejection must not spend the attempts of
+          // valid siblings. Bound extra calls; untouched sub-batches stay pending.
+          let callsRemaining = 15
+          const deliver = async (batch: typeof facts): Promise<void> => {
+            if (callsRemaining <= 0) return
+            callsRemaining--
+            try {
+              await options.reportUsage(installationId, batch)
+            } catch (error) {
+              const errorCode = boundedErrorCode(error)
+              const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined
+              if (errorCode === 'invalid_request' && status === 400 && batch.length > 1) {
+                const middle = Math.ceil(batch.length / 2)
+                await deliver(batch.slice(0, middle))
+                await deliver(batch.slice(middle))
+                return
+              }
+              for (const fact of batch) {
+                const attempts = await outbox.markAttempt(installationId, String(fact.usage_id), errorCode)
+                if (attempts >= MAX_ATTEMPTS) await outbox.markDeadLetter(installationId, String(fact.usage_id))
+              }
+              options.onError?.(error)
+              return
             }
-            options.onError?.(error)
-            continue
+            for (const fact of batch) {
+              await outbox.markReported(installationId, String(fact.usage_id))
+              sent++
+            }
           }
-          for (const fact of facts) {
-            await outbox.markReported(installationId, String(fact.usage_id))
-            sent++
-          }
+          await deliver(facts)
         }
         return sent
       } finally {

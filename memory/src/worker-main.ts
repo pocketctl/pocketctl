@@ -247,6 +247,10 @@ async function main(): Promise<void> {
         metrics.jobRuntime.observe({type:job.job_type,result},seconds)
         wakeCompletedPersonalProjection(job,result,root=>sharedSourceScheduler?.wake(root))
       },
+      onDeferred:(error,job)=>{
+        const fields=workerErrorFields(error,job)
+        if(fields.source_stage||String(fields.code).startsWith('source_metadata_'))logger.log('warn','source_job_deferred',fields)
+      },
       onError: loopError('jobs'),
     })
     const gitConfig=config.gitSync??loadGitSyncConfig({})
@@ -653,14 +657,19 @@ async function main(): Promise<void> {
     jobWorker.register('expire_claims', async () => {
       await lifecycle.expireDueClaims()
     })
-    const enqueueExpirySweep = () => jobRepository.enqueueJob({
+    const enqueueExpirySweep = async () => {
+      if (!await lifecycle.hasDueExpiry()) return
+      return jobRepository.enqueueJob({
       jobType: 'expire_claims',
       idempotencyKey: `expire:${Math.floor(Date.now() / 60_000)}`,
       priority: 95,
-    })
+      })
+    }
     const enqueueLifecycleSweep=async()=>{
-      await jobRepository.enqueueJob({jobType:'evaluate_claim_lifecycle',idempotencyKey:`lifecycle:${Math.floor(Date.now()/60000)}`,priority:96})
       if(!config.lifecycleMode||config.lifecycleMode==='off')return
+      for(const installationId of await lifecycle.listDueInstallations()){
+        await jobRepository.enqueueJob({installationId,jobType:'evaluate_claim_lifecycle',idempotencyKey:`lifecycle:${Math.floor(Date.now()/60000)}`,priority:96})
+      }
       const reconciled=await reconcileExpiredCurationRuns(pool).catch(loopError('curation_reconcile'))
       if(reconciled)logger.log('warn','curation_expired_reconciled',{count:reconciled})
       const authority=lifecycleOwnerJoin(pool,'i.installation_id')

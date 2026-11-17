@@ -1,3 +1,5 @@
+import {createHealthSnapshot,registerReadiness} from './reporting/readiness.js'
+import {queryHealth} from './reporting/health-query.js'
 import {attachSourceMetrics,createSourceGaugeCollector} from './sources/metrics.js'
 import {initializePlatformStatistics} from './platform-statistics/schema.js'
 import {registerPlatformStatisticsRoutes} from './platform-statistics/routes.js'
@@ -98,20 +100,15 @@ async function main(): Promise<void> {
 
   app.get('/health', async () => ({ status: 'ok' }))
 
-  app.get('/ready', async (_req, reply) => {
-    if (!schemaReady) {
-      reply.code(503)
-      return { status: 'unavailable' }
-    }
-    try {
-      await pool.query('SELECT 1')
-      const lifecycleMode=config.mode==='off'?'off':config.lifecycleMode??'off'
-      return { ...summarizeBusinessHealth(await loadBusinessHealth(pool), config.mode !== 'off'), lifecycle:summarizeLifecycleHealth(await loadLifecycleHealth(pool,lifecycleMode),lifecycleMode), budget_uncertainty:await loadBudgetUncertainty(pool), compatibility:MEMORY_BRIDGE_COMPATIBILITY }
-    } catch {
-      reply.code(503)
-      return { status: 'unavailable' }
-    }
-  })
+  const healthSnapshot=createHealthSnapshot({load:async()=>{
+    const lifecycleMode=config.mode==='off'?'off':config.lifecycleMode??'off'
+    return {...summarizeBusinessHealth(await loadBusinessHealth(pool),config.mode!=='off'),
+      lifecycle:summarizeLifecycleHealth(await loadLifecycleHealth(pool,lifecycleMode),lifecycleMode),
+      budget_uncertainty:await loadBudgetUncertainty(pool)}
+  }})
+  registerReadiness(app,{probe:()=>queryHealth(pool,'SELECT 1'),health:healthSnapshot,compatibility:MEMORY_BRIDGE_COMPATIBILITY})
+  app.addHook('onClose',async()=>{await healthSnapshot.stop()})
+  healthSnapshot.start()
 
   // Bounded Prometheus metrics with the frozen label allowlists.
   const metrics = createMemoryMetrics()

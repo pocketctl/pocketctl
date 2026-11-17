@@ -51,7 +51,7 @@ export async function lifecycleStatus(db: Pick<pg.Pool, 'query'>, installationId
   const assessments=(await db.query(`SELECT state AS key,count(*)::text AS count,COALESCE(sum(input_tokens),0)::text AS input_tokens,COALESCE(sum(output_tokens),0)::text AS output_tokens
     FROM memory_lifecycle_assessment_runs WHERE installation_id=$1 GROUP BY state`,[installationId])).rows
   const assessmentUsage=assessments.reduce((sum,row)=>({input_tokens:sum.input_tokens+Number(row.input_tokens),output_tokens:sum.output_tokens+Number(row.output_tokens)}),{input_tokens:0,output_tokens:0})
-  const records = (await db.query(`SELECT b.bundle_id,b.state,b.reason_code,b.updated_at,
+  const records = (await db.query(`SELECT b.bundle_id,b.state,b.reason_code,b.updated_at,b.next_evaluate_at,b.semantic_deadline,
     r.state AS run_state,r.error_code AS run_reason,r.mode AS run_mode,
     d.action,d.state AS decision_state,d.reason_code AS decision_reason
     FROM memory_task_bundles b
@@ -69,6 +69,9 @@ export async function lifecycleStatus(db: Pick<pg.Pool, 'query'>, installationId
     stage_jobs: jobs.map(r=>({stage:r.job_type,state:r.state,count:Number(r.count),oldest_seconds:r.oldest_seconds})),
     oldest_pending_seconds: age, usage: {input_tokens: Number(usage?.input_tokens ?? 0)+assessmentUsage.input_tokens, output_tokens: Number(usage?.output_tokens ?? 0)+assessmentUsage.output_tokens},
     records: records.slice(0, 50).map(r => ({bundle_id: r.bundle_id, state: r.state, reason: lifecycleReason(r.reason_code), updated_at: r.updated_at,
+      next_evaluate_at:r.next_evaluate_at??null, semantic_deadline:r.semantic_deadline??null,
+      waiting_for:r.run_state==='provider_result_unknown'?'provider_reconciliation':r.state==='deferred_semantic'?'new_evidence_or_semantic_deadline':null,
+      automatic_model_retry:r.run_state==='provider_result_unknown'?false:null,
       run_state: r.run_state, run_reason: lifecycleReason(r.run_reason), run_mode: r.run_mode,
       action: r.action, decision_state: r.decision_state, decision_reason: lifecycleReason(r.decision_reason)})), has_more: records.length > 50,
   }

@@ -66,6 +66,14 @@ describe('extension usage routes', () => {
     expect(response.json().ingested).toBe(2)
   })
 
+  test.each(['curation','review_shadow','build_wiki','extract_skill_candidate'])('accepts Memory producer operation %s', async operation => {
+    const app = track(makeApp())
+    const response = await app.inject({method:'POST',url:'/api/extensions/v1/usage/batch',
+      headers:{authorization:`Bearer ${providerToken()}`},
+      payload:{installation_id:INSTALLATION,facts:[fact({operation})]}})
+    expect(response.statusCode).toBe(200)
+  })
+
   test('rejects operations outside the allowlist', async () => {
     const app = track(makeApp())
     const response = await app.inject({

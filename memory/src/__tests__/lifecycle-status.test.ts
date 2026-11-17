@@ -41,3 +41,9 @@ test('AC-42 machine authority compatibility never becomes human approved',async(
  expect(versionAuthorityCompatibility('future_machine')).toEqual({recognized:false,human_approved:false})
  expect(versionAuthorityCompatibility('user_corrected')).toEqual({recognized:true,human_approved:true})
 })
+
+test('unknown provider results expose accounting reconciliation without a paid retry',async()=>{
+ const query=vi.fn(async(sql:string)=>({rows:sql.includes('SELECT b.bundle_id')?[{bundle_id:'b',state:'blocked',run_state:'provider_result_unknown',next_evaluate_at:new Date('2026-11-20Z')}]:[]}))
+ const result=await lifecycleStatus({query} as unknown as pg.Pool,'installation','enabled')
+ expect(result.records[0]).toMatchObject({waiting_for:'provider_reconciliation',automatic_model_retry:false,next_evaluate_at:expect.any(Date)})
+})

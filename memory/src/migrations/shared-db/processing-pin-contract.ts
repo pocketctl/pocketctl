@@ -31,20 +31,20 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
     OR p_version - 'content' - 'authorization' - 'storage'<>'{}'::jsonb
     OR EXISTS(SELECT 1 FROM jsonb_each(p_version) entry WHERE jsonb_typeof(entry.value)<>'string')
     OR COALESCE(p_version->>'content','')!~'^[0-9]{1,19}$' OR COALESCE(p_version->>'authorization','')!~'^[0-9]{1,19}$'
-    OR COALESCE(p_version->>'storage','')!~'^[0-9]{1,19}$' OR p_root IS NULL OR length(p_root) NOT BETWEEN 1 AND 1024 THEN RETURN FALSE;END IF;
+    OR COALESCE(p_version->>'storage','')!~'^[0-9]{1,19}$' OR p_root IS NULL OR length(p_root) NOT BETWEEN 1 AND 1024 THEN PERFORM set_config('pocketctl.processing_pin_reason','invalid_input',TRUE); RETURN FALSE;END IF;
    SELECT * INTO e FROM shared.memory_source_executions WHERE execution_id=p_execution;
    IF NOT FOUND OR e.branch NOT IN('canonical-active','canonical-shadow') OR e.installation_id::text IS DISTINCT FROM p_scope->>'installationId'
     OR e.generation::text IS DISTINCT FROM p_scope->>'modeGeneration'
-    OR NOT shared.assert_memory_job_source(p_execution,CASE WHEN e.branch='canonical-shadow' THEN 'compare' ELSE 'provider' END) THEN RETURN FALSE;END IF;
+    OR NOT shared.assert_memory_job_source(p_execution,CASE WHEN e.branch='canonical-shadow' THEN 'compare' ELSE 'provider' END) THEN PERFORM set_config('pocketctl.processing_pin_reason','execution_invalid',TRUE); RETURN FALSE;END IF;
    -- All later locks are try/NOWAIT: never wait for Relay while holding a job.
-   IF NOT shared.lock_memory_personal_source_commit(p_scope,'relay_event',p_root,p_version,FALSE) THEN RETURN FALSE;END IF;
+   IF NOT shared.lock_memory_personal_source_commit(p_scope,'relay_event',p_root,p_version,FALSE) THEN PERFORM set_config('pocketctl.processing_pin_reason','authority_or_version_changed',TRUE); RETURN FALSE;END IF;
    owner_id=(p_scope->>'principalUserId')::int;session_key=substr(p_root,strpos(p_root,':')+1);
    native=public.native_session_authority(session_key,owner_id,NULL);
-   IF native->>'state' IS DISTINCT FROM 'current' THEN RETURN FALSE;END IF;
+   IF native->>'state' IS DISTINCT FROM 'current' THEN PERFORM set_config('pocketctl.processing_pin_reason','native_unavailable',TRUE); RETURN FALSE;END IF;
    session_key=native->>'originSessionId';
-   IF session_key IS NULL THEN RETURN FALSE;END IF;
+   IF session_key IS NULL THEN PERFORM set_config('pocketctl.processing_pin_reason','native_unavailable',TRUE); RETURN FALSE;END IF;
    SELECT activity_epoch,last_business_activity_at INTO s FROM public.sessions WHERE session_id=native->>'sessionId' AND user_id=owner_id;
-   IF NOT FOUND OR s.activity_epoch IS NULL OR s.activity_epoch<0 THEN RETURN FALSE;END IF;
+   IF NOT FOUND OR s.activity_epoch IS NULL OR s.activity_epoch<0 THEN PERFORM set_config('pocketctl.processing_pin_reason','activity_unavailable',TRUE); RETURN FALSE;END IF;
    IF NOT pg_try_advisory_xact_lock(hashtextextended('processing-pin:installation:'||e.installation_id::text,0)) THEN RAISE EXCEPTION 'source_processing_pin_busy' USING ERRCODE='55P03';END IF;
    IF NOT pg_try_advisory_xact_lock(hashtextextended('processing-pin:root:'||owner_id::text||':'||session_key,0)) THEN RAISE EXCEPTION 'source_processing_pin_busy' USING ERRCODE='55P03';END IF;
    stamp=clock_timestamp();
@@ -54,15 +54,15 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
    SELECT * INTO pin FROM shared.memory_source_processing_pins WHERE execution_id=p_execution AND owner_user_id=owner_id AND session_id=session_key;
    has_pin=FOUND;
    IF NOT has_pin THEN
-    IF p_renew THEN RETURN FALSE;END IF;
+    IF p_renew THEN PERFORM set_config('pocketctl.processing_pin_reason','renewal_missing',TRUE); RETURN FALSE;END IF;
     IF (SELECT count(*) FROM shared.memory_source_processing_pins WHERE installation_id=e.installation_id AND lease_until>stamp)>=64
-     OR (SELECT count(*) FROM shared.memory_source_processing_pins WHERE owner_user_id=owner_id AND session_id=session_key AND lease_until>stamp)>=8 THEN RETURN FALSE;END IF;
-   ELSIF pin.lease_until<=stamp OR pin.source_scope IS DISTINCT FROM p_scope THEN RETURN FALSE;
+     OR (SELECT count(*) FROM shared.memory_source_processing_pins WHERE owner_user_id=owner_id AND session_id=session_key AND lease_until>stamp)>=8 THEN PERFORM set_config('pocketctl.processing_pin_reason','capacity_limit',TRUE); RETURN FALSE;END IF;
+   ELSIF pin.lease_until<=stamp OR pin.source_scope IS DISTINCT FROM p_scope THEN PERFORM set_config('pocketctl.processing_pin_reason','lease_or_scope_changed',TRUE); RETURN FALSE;
    END IF;
    INSERT INTO shared.memory_source_processing_windows(owner_user_id,session_id,activity_epoch,business_activity_at,started_at,hard_deadline)
     VALUES(owner_id,session_key,s.activity_epoch,s.last_business_activity_at,stamp,stamp+interval '2 minutes') ON CONFLICT DO NOTHING;
    SELECT * INTO w FROM shared.memory_source_processing_windows WHERE owner_user_id=owner_id AND session_id=session_key FOR UPDATE NOWAIT;
-   IF s.activity_epoch<w.activity_epoch THEN RETURN FALSE;END IF;
+   IF s.activity_epoch<w.activity_epoch THEN PERFORM set_config('pocketctl.processing_pin_reason','activity_regressed',TRUE); RETURN FALSE;END IF;
    -- Epoch also changes on non-business transitions. Only a verified native
    -- business edge may reopen the absolute window, never a new worker/claim.
    IF s.activity_epoch>w.activity_epoch AND s.last_business_activity_at>COALESCE(w.business_activity_at,'-infinity'::timestamptz) THEN
@@ -77,17 +77,17 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
    deadline=CASE WHEN has_pin THEN pin.hard_deadline
      WHEN protect_purge THEN w.hard_deadline ELSE e.created_at+interval '2 minutes' END;
    deadline=LEAST(deadline,e.created_at+interval '2 minutes');
-   IF deadline<=stamp THEN RETURN FALSE;END IF;
+   IF deadline<=stamp THEN PERFORM set_config('pocketctl.processing_pin_reason','execution_deadline',TRUE); RETURN FALSE;END IF;
    -- A fresh independently current read may refresh the vector; an old
    -- prepared page still needs its own original current-version fence.
    INSERT INTO shared.memory_source_processing_pins(execution_id,installation_id,owner_user_id,session_id,source_scope,source_version,activity_epoch,lease_until,hard_deadline,blocks_purge)
     VALUES(p_execution,e.installation_id,owner_id,session_key,p_scope,p_version,s.activity_epoch,LEAST(stamp+interval '30 seconds',deadline),deadline,protect_purge)
     ON CONFLICT(execution_id,owner_user_id,session_id) DO UPDATE SET source_version=EXCLUDED.source_version,activity_epoch=EXCLUDED.activity_epoch,lease_until=EXCLUDED.lease_until,hard_deadline=EXCLUDED.hard_deadline;
-   RETURN TRUE;
+   PERFORM set_config('pocketctl.processing_pin_reason','acquired',TRUE); RETURN TRUE;
    EXCEPTION WHEN lock_not_available THEN
     IF SQLERRM='source_processing_pin_busy' THEN RAISE;END IF;
-    RETURN FALSE;
-   WHEN invalid_text_representation OR numeric_value_out_of_range THEN RETURN FALSE;
+    PERFORM set_config('pocketctl.processing_pin_reason','lock_conflict',TRUE); RETURN FALSE;
+   WHEN invalid_text_representation OR numeric_value_out_of_range THEN PERFORM set_config('pocketctl.processing_pin_reason','invalid_input',TRUE); RETURN FALSE;
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.check_memory_source_processing_pin_commit() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE e RECORD;BEGIN

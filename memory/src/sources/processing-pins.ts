@@ -1,3 +1,4 @@
+import {annotateSourceFailure} from './diagnostics.js'
 import type pg from 'pg'
 import {AsyncLocalStorage} from 'node:async_hooks'
 import {JobDeferredError} from '../jobs/types.js'
@@ -71,11 +72,12 @@ export function runSelectedSourceTransaction<T>(pool:pg.Pool,installationId:stri
  * Destruction also prevents a late response from sending any subsequent SQL. */
 async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadline=performance.now()+2000,active=()=>true,signal?:AbortSignal,selected=false,onRetryableRollback?:()=>void):Promise<T>{
  let expired=false,connectionExpired=false,released=false,client:pg.PoolClient|undefined,originalQuery:pg.PoolClient['query']|undefined
+ let stage='metadata_checkout'
  let commitSent=false,commitAcknowledged=false,callbackActive=false,primaryFailureKnown=false
  let primaryFailure:unknown
  // Once a policy/predicate or authoritative server denial is known, cleanup
  // transport loss must not turn that failure into a successful-looking defer.
- const failure=()=>selected&&primaryFailureKnown?primaryFailure:selected?new SelectedSourceTransactionUnavailable(commitAcknowledged?'committed':commitSent?'unknown':'not-dispatched'):unavailable()
+ const failure=()=>selected&&primaryFailureKnown?primaryFailure:annotateSourceFailure(selected?new SelectedSourceTransactionUnavailable(commitAcknowledged?'committed':commitSent?'unknown':'not-dispatched'):unavailable(),stage,'transport_deadline')
  let totalTimer:ReturnType<typeof setTimeout>|undefined,connectTimer:ReturnType<typeof setTimeout>|undefined
  let abort:(()=>void)|undefined
  const discard=(c:pg.PoolClient)=>{
@@ -106,15 +108,18 @@ async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadl
      return (query as any).apply(physical,args)
     } as pg.PoolClient['query']
    }
+   stage='metadata_transaction'
    live();await client.query('BEGIN')
    live();await client.query(selected?"SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='1s'":"SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='250ms'")
    live();let result:T
    callbackActive=true
    try{result=await work(client)}finally{callbackActive=false}
+   if(selected)stage='selected_commit'
    live();await client.query('COMMIT');commitAcknowledged=true
    live();return result
   }catch(error){
    const code=(error as {code?:string}).code
+   if(code==='57014'||code==='55P03')annotateSourceFailure(error,stage,code==='57014'?'statement_timeout':'lock_conflict')
    if(selected&&commitSent&&!commitAcknowledged&&(!code||!(/^[0-9A-Z]{5}$/.test(code))||code.startsWith('08')||code.startsWith('57'))){release(true);throw failure()}
    // COMMIT uncertainty above takes precedence; only a known primary failure
    // reaches cleanup. Retain it across a hung rollback or cancellation.
@@ -166,7 +171,7 @@ export class SourceProcessingPins {
  private async acquireBounded(pin:Pin,renew:boolean,deadline:number,signal?:AbortSignal){
   this.assertUsable();if(signal?.aborted)throw unavailable()
   try{
-   let lastBusy=false
+   let lastBusy=false,lastReason='acquire_denied'
    for(let attempt=0;attempt<4;attempt++){
     this.assertUsable()
     let protectedVersion=pin.version
@@ -182,8 +187,12 @@ export class SourceProcessingPins {
       protectedVersion={content:current.content_revision,authorization:current.authorization_revision,storage:current.storage_revision}
      }
      this.assertUsable();if(performance.now()>=deadline)throw unavailable()
-     return (await c.query('SELECT shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,$4::jsonb,$5) AS valid',
-      [this.executionId,JSON.stringify(pin.scope),pin.root.key,JSON.stringify(protectedVersion),renew])).rows[0]?.valid
+     const row=(await c.query(`WITH acquired AS MATERIALIZED (
+       SELECT shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,$4::jsonb,$5) AS valid)
+       SELECT valid,current_setting('pocketctl.processing_pin_reason',true) AS reason FROM acquired`,
+      [this.executionId,JSON.stringify(pin.scope),pin.root.key,JSON.stringify(protectedVersion),renew])).rows[0]
+     lastReason=typeof row?.reason==='string'?row.reason:'acquire_denied'
+     return row?.valid
     },
      deadline,()=>!this.closed&&!this.failed&&!signal?.aborted,signal).catch(error=>{
       // Only the explicit SQL mutex refusal is retryable. FALSE still covers
@@ -202,7 +211,7 @@ export class SourceProcessingPins {
     await new Promise(resolve=>setTimeout(resolve,delay))
    }
    if(lastBusy)throw new SourceUnavailableError('source_store_busy')
-   throw unavailable()
+   throw annotateSourceFailure(unavailable(),renew?'pin_renew':'pin_acquire',lastReason)
   }catch(error){this.fail(error);throw error}
  }
  private serial(work:()=>Promise<void>):Promise<void>{

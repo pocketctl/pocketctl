@@ -1,3 +1,4 @@
+import {createMemoryLogger} from '../logging.js'
 import {preparedSourceEvents} from '../sources/prepared-sources.js'
 import type pg from 'pg'
 import {createHash} from 'node:crypto'
@@ -5,10 +6,13 @@ import {admitLifecycleSources,LIFECYCLE_SOURCE_POLICY} from '../episodes/source-
 import {computeSourceDigest,type PacketSourceEvent} from '../episodes/packet.js'
 import type {CurationPolicy} from './policy.js'
 import {canonicalPayloadHash} from '../inbox/canonical-json.js'
+const admissionLogger=createMemoryLogger('info')
 /** Stage an admitted, bounded source revision. No model or Claim write here.
  * Caller holds session/installation purge locks and the policy owner fence. */
 export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,input:{installationId:string;sessionId:string;turnId:string;events:PacketSourceEvent[]},policy:CurationPolicy){
  const admitted=admitLifecycleSources(input)
+ // Evaluated counts, not committed output; no source identities or content.
+ admissionLogger.log('info','source_admission_evaluated',{allowed:admitted.events.length,excluded:input.events.length-admitted.events.length,...admitted.diagnostics})
  const digest=lifecycleSourceDigest(input.installationId,input.events)
  const unknown=admitted.receipts.some(r=>!r.admission.allowed&&r.admission.reason==='provenance_unknown')
  if(!admitted.events.length){

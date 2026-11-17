@@ -1,3 +1,4 @@
+import {planSourceProjectionRepair,applySourceProjectionRepair} from '../../maintenance/repair-source-projections.js'
 import {afterAll,beforeAll,describe,expect,test} from 'vitest'
 import {directLaunchFixture,type DirectLaunchFixture} from './direct-launch-fixture.js'
 import {createSharedSourceScheduler} from '../../sources/shared-scheduler.js'
@@ -26,6 +27,33 @@ suite('quiet expired roots recover through the actual deterministic worker',()=>
   const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'expired-root-worker',signal,onError:e=>errors.push(e)})
   queue.register('project_shared_source',createCanonicalProjectionHandler(f.runtime,{pageSize:1,stabilizationMs:0}),{branch:'canonical'})
   queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
+  // Freeze and recover a deterministic dead projection, including refusal of
+  // source drift. This exercises the production repair API with the app role.
+  let projection:string|undefined
+  for(let n=0;n<50&&!projection;n++){
+   await scheduler.runOnce()
+   projection=(await f.runtime.query("SELECT job_id FROM memory_jobs WHERE installation_id=$1 AND job_type='project_shared_source' LIMIT 1",[inst])).rows[0]?.job_id
+  }
+  expect(projection).toBeTruthy()
+  await f.pool.query("UPDATE memory.memory_jobs SET state='dead',attempts=10,last_error_code='processing_pin_expired_or_unavailable',completed_at=clock_timestamp() WHERE job_id=$1",[projection])
+  const planner=await f.runtime.connect()
+  await planner.query('BEGIN READ ONLY')
+  const manifest=await planSourceProjectionRepair(planner,[projection!])
+  await planner.query('COMMIT');planner.release()
+  await f.event(source)
+  const repair=await f.runtime.connect()
+  try{
+   await repair.query('BEGIN')
+   await expect(applySourceProjectionRepair(repair,manifest)).rejects.toThrow('source_repair_source_changed')
+   await repair.query('ROLLBACK')
+   const fresh=await planSourceProjectionRepair(repair,[projection!])
+   await repair.query('BEGIN')
+   expect(await applySourceProjectionRepair(repair,fresh)).toEqual([{jobId:projection,state:'requeued'}])
+   await repair.query('COMMIT')
+   await repair.query('BEGIN')
+   expect(await applySourceProjectionRepair(repair,fresh)).toEqual([{jobId:projection,state:'already_resumed'}])
+   await repair.query('COMMIT')
+  }finally{await repair.query('ROLLBACK').catch(()=>undefined);repair.release()}
   let observedUnprotected=false
   const closeObserver=observeProjectionCommits(f.runtime,async event=>{
    if(event.installationId!==inst)return

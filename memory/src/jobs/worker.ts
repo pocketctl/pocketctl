@@ -32,6 +32,7 @@ export interface JobWorkerOptions {
   concurrencyLimits?: Partial<Record<JobType, number>>
   leaseMs?: number
   perInstallationLimit?: number
+  onDeferred?(error:JobDeferredError,job:JobClaim):void
   onExecution?(job:JobClaim,result:"completed"|"deferred"|"failed"|"lost",seconds:number):void
   onClaim?(job:JobClaim):void
   /** Bounded wait for in-flight handlers after abort (plan: 20s). */
@@ -158,6 +159,7 @@ export function createJobWorker(options: JobWorkerOptions) {
             const deferred=await options.jobs.deferJob({ jobId:claim.job_id,claimedBy:options.workerId,
               claimEpoch:claim.claim_epoch,reason:error.reason,availableAt:error.availableAt })
             outcome=deferred?"deferred":"lost"
+            if(deferred)options.onDeferred?.(error,claim)
             return
           }
           options.onError?.(error, claim)

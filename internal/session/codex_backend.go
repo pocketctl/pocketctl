@@ -520,6 +520,9 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
+	correlationForMemory := userMessageCorrelationFrom(ctx)
+	finishMemoryDispatch := b.sm.beginMemoryCodexDispatch(UserMessageInput{SessionID: threadID, RequestID: correlationForMemory.RequestID, MsgID: correlationForMemory.MsgID, InvocationID: codexInvocationFrom(ctx)})
+	defer finishMemoryDispatch(false)
 	err := call(ctx, turnMethod, params, &response)
 	busy := turnMethod == idleTurnMethod && codexIdleTurnRejected(err)
 	if busy && (correlation.InputMode == protocol.InputModeNewTurn || correlation.RequireContext) {
@@ -558,6 +561,7 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 		}
 
 	}
+	finishMemoryDispatch(true)
 	return evidenceSent, nil
 }
 
