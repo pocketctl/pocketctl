@@ -136,6 +136,15 @@ export function createLifecycleService(pool: pg.Pool, claims: ClaimRepository, o
      * valid_until passed NOW() expires. Idempotent, removes the search
      * projection, records feedback, never mutates the immutable version.
      */
+    async hasDueExpiry(): Promise<boolean> {
+      const result=await pool.query(`SELECT EXISTS(
+        SELECT 1 FROM knowledge_claims c JOIN knowledge_versions v
+          ON v.installation_id=c.installation_id AND v.version_id=c.current_version_id
+        WHERE c.state='active' AND ${currentClaimVersionSql()} AND v.valid_until<=clock_timestamp()
+      ) AND NOT EXISTS(SELECT 1 FROM memory_jobs WHERE job_type='expire_claims' AND state IN('pending','running')) AS due`)
+      return result.rows[0]?.due===true
+    },
+
     async expireDueClaims(): Promise<number> {
       const client = await pool.connect()
       try {

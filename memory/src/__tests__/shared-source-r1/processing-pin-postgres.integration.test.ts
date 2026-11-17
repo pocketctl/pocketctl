@@ -60,6 +60,14 @@ suite('bounded durable native personal processing pins',()=>{
  })
  const pin=async(id=execution,s=scope,v=version,renew=false)=>(await runtime.query('SELECT shared.acquire_memory_source_processing_pin($1,$2,$3,$4,$5) AS ok',[id,s,root.key,v,renew])).rows[0].ok
  const blocks=async()=>(await relay.query("SELECT shared.memory_source_processing_blocks_purge(1,ARRAY['session']) AS blocked")).rows[0].blocked
+ test('reports a finite denial reason in the same statement without altering boolean compatibility',async()=>{
+  const row=(await runtime.query(`WITH acquired AS MATERIALIZED (
+   SELECT shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,$4::jsonb,FALSE) AS valid)
+   SELECT valid,current_setting('pocketctl.processing_pin_reason',true) AS reason FROM acquired`,
+   [execution,JSON.stringify(scope),root.key,JSON.stringify({...version,content:'999'})])).rows[0]
+  expect(row).toEqual({valid:false,reason:'authority_or_version_changed'})
+  expect(await pin()).toBe(true)
+ })
  test('metadata lease is short and protects ordinary purge; cooling and expiry remain allowed',async()=>{
   expect(await pin()).toBe(true);expect(await blocks()).toBe(true)
   const first=(await pool.query('SELECT *,lease_until-clock_timestamp() AS remaining FROM shared.memory_source_processing_pins')).rows[0]

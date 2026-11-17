@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "operations": [
+    "episode_extract",
+    "candidate_extract",
+    "embedding",
+    "rerank",
+    "recall",
+    "knowledge_merge",
+    "curation",
+    "review_shadow",
+    "build_wiki",
+    "extract_skill_candidate"
+  ]
+}

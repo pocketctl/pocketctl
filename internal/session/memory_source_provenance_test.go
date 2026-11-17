@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMemorySourceProvenanceIndependentInput(t *testing.T) {
@@ -629,5 +630,160 @@ func TestMemorySourceProvenanceCodexNativeUnknownBudgetCannotForgetTaint(t *test
 	}
 	if !found {
 		t.Fatal("fixture emitted no output")
+	}
+}
+
+type beforeReplyCodexClient struct {
+	*fakeCodexRuntimeClient
+	before func()
+}
+
+func (c *beforeReplyCodexClient) Call(ctx context.Context, method string, params, result any) error {
+	if method == "turn/start" && c.before != nil {
+		c.before()
+	}
+	return c.fakeCodexRuntimeClient.Call(ctx, method, params, result)
+}
+func TestMemorySourceCodexOutputBeforeAcceptedReply(t *testing.T) {
+	b, rpc := nativeMemoryCodexBackend(t)
+	b.coord.markSubscribed("thread")
+	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"native"}}`)
+	var observed []protocol.DaemonEvent
+	drain := func() {
+		for _, e := range drainEvents(b.sm.outputCh) {
+			b.sm.EnrichOutgoingEvent(&e)
+			observed = append(observed, e)
+		}
+	}
+	b.client = &beforeReplyCodexClient{fakeCodexRuntimeClient: rpc, before: func() {
+		p := newCodexProjection(1)
+		b.coord.publishProjected(p.Project(codexNotification("item/completed", `{"threadId":"thread","turnId":"native","item":{"id":"a1","type":"agentMessage","text":"early native result"}}`)))
+		drain()
+	}}
+	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequestID: "request", MsgID: "message"})
+	if err := b.startTurn(ctx, "thread", "input", protocol.SessionConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	drain()
+	found := false
+	for _, e := range observed {
+		if e.Type == "agent_text" {
+			found = true
+			if e.MemorySource == nil || !e.MemorySource.LineageComplete || e.MemorySource.SkillState != "non_skill" {
+				t.Fatalf("accepted native output lost provenance before RPC ACK: %+v", e.MemorySource)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("native output disappeared")
+	}
+}
+
+func TestMemorySourceCodexDispatchBufferDoesNotUpgradeRejectedOrForeignEvents(t *testing.T) {
+	for _, accepted := range []bool{false, true} {
+		t.Run(strconv.FormatBool(accepted), func(t *testing.T) {
+			sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
+			in := UserMessageInput{SessionID: "thread", RequestID: "r", MsgID: "m"}
+			finish := sm.beginMemoryCodexDispatch(in)
+			p := newCodexProjection(1)
+			for _, native := range []string{"native", "foreign"} {
+				events := p.Project(codexNotification("item/completed", `{"threadId":"thread","turnId":"`+native+`","item":{"id":"a-`+native+`","type":"agentMessage","text":"observed"}}`))
+				for _, event := range events {
+					if event.Type == "agent_text" && !sm.bufferMemoryCodexEvent(event) {
+						t.Fatal("event was not buffered")
+					}
+				}
+			}
+			if accepted {
+				sm.registerMemoryInput(in, logicalCodexTurnID("thread", "native"), "codex", "native")
+			}
+			finish(accepted)
+			events := drainEvents(sm.outputCh)
+			if len(events) != 2 {
+				t.Fatalf("lost events: %d", len(events))
+			}
+			for _, event := range events {
+				want := accepted && event.MemoryNative.RootID == "native"
+				if event.MemorySource == nil || event.MemorySource.LineageComplete != want {
+					t.Fatalf("unaccepted event was upgraded: %+v", event.MemorySource)
+				}
+			}
+		})
+	}
+}
+
+func TestMemorySourceCodexDispatchOverflowAndResyncStayUnknown(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 300))
+	in := UserMessageInput{SessionID: "thread", RequestID: "r", MsgID: "m"}
+	finish := sm.beginMemoryCodexDispatch(in)
+	p := newCodexProjection(1)
+	var sample protocol.DaemonEvent
+	for _, event := range p.Project(codexNotification("item/completed", `{"threadId":"thread","turnId":"native","item":{"id":"a","type":"agentMessage","text":"observed"}}`)) {
+		if event.Type == "agent_text" {
+			sample = event
+		}
+	}
+	resync := sample
+	resync.Resync = true
+	if sm.bufferMemoryCodexEvent(resync) {
+		t.Fatal("historical replay entered dispatch buffer")
+	}
+	for i := 0; i < 257; i++ {
+		if !sm.bufferMemoryCodexEvent(sample) {
+			t.Fatalf("lost buffer ownership at %d", i)
+		}
+	}
+	sm.registerMemoryInput(in, logicalCodexTurnID("thread", "native"), "codex", "native")
+	finish(true)
+	events := drainEvents(sm.outputCh)
+	if len(events) != 257 {
+		t.Fatalf("overflow lost events: %d", len(events))
+	}
+	for _, event := range events {
+		if event.MemorySource == nil || event.MemorySource.LineageComplete {
+			t.Fatal("overflow upgraded provenance")
+		}
+	}
+}
+
+func TestMemorySourceCodexDispatchDoesNotBorrowSuccessorRoot(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
+	in := UserMessageInput{SessionID: "thread", RequestID: "r", MsgID: "m"}
+	finish := sm.beginMemoryCodexDispatch(in)
+	p := newCodexProjection(1)
+	for _, event := range p.Project(codexNotification("item/completed", `{"threadId":"thread","turnId":"native","item":{"id":"a","type":"agentMessage","text":"observed"}}`)) {
+		if event.Type == "agent_text" {
+			sm.bufferMemoryCodexEvent(event)
+		}
+	}
+	sm.registerMemoryInput(UserMessageInput{SessionID: "thread", RequestID: "next", MsgID: "next"}, logicalCodexTurnID("thread", "native"), "codex", "native")
+	finish(true)
+	for _, event := range drainEvents(sm.outputCh) {
+		if event.MemorySource == nil || event.MemorySource.LineageComplete {
+			t.Fatal("borrowed successor authority")
+		}
+	}
+}
+
+func TestMemorySourceCodexDispatchTimeoutFlushesUnknownOnce(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 32))
+	finish := sm.beginMemoryCodexDispatch(UserMessageInput{SessionID: "thread", RequestID: "r", MsgID: "m"})
+	p := newCodexProjection(1)
+	for _, event := range p.Project(codexNotification("item/completed", `{"threadId":"thread","turnId":"native","item":{"id":"a","type":"agentMessage","text":"observed"}}`)) {
+		if event.Type == "agent_text" {
+			sm.bufferMemoryCodexEvent(event)
+		}
+	}
+	select {
+	case event := <-sm.outputCh:
+		if event.MemorySource == nil || event.MemorySource.LineageComplete {
+			t.Fatal("timeout upgraded provenance")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("dispatch buffer retained event beyond deadline")
+	}
+	finish(true)
+	if len(drainEvents(sm.outputCh)) != 0 {
+		t.Fatal("late ACK duplicated timed out event")
 	}
 }

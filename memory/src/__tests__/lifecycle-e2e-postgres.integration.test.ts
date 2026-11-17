@@ -5,6 +5,7 @@ import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {lifecyclePipelineFixture} from '../testing/lifecycle-pipeline-fixture.js'
 import {createClaimRepository} from '../claims/repository.js'
+import {createLifecycleService} from '../claims/lifecycle-service.js'
 import {reclaimColdClaimBody} from '../retention/claim-history.js'
 import {canonicalPayloadHash} from '../inbox/canonical-json.js'
 import {stageLifecycleTurn} from '../curation/task-repository.js'
@@ -30,6 +31,17 @@ suite('lifecycle pipeline with declared synthetic model',()=>{
  afterAll(async()=>{await pool?.end()})
  beforeEach(async()=>{await pool.query('TRUNCATE memory_installations CASCADE')})
  const {fixture,ingest,deliver}=lifecyclePipelineFixture({query:(...args:any[])=>pool.query(...args as [any]),connect:()=>pool.connect()} as pg.Pool)
+ test('idle lifecycle maintenance avoids jobs until actual expiry exists',async()=>{
+  const f=await fixture(),claim=await ingest(f,'trains')
+  const service=createLifecycleService(pool,createClaimRepository(pool),{lifecycleMode:'enabled'})
+  expect(await service.hasDueExpiry()).toBe(false)
+  expect(await service.listDueInstallations()).toEqual([])
+  await pool.query("UPDATE knowledge_versions SET valid_until=clock_timestamp()-interval '1 second' WHERE version_id=$1",[claim.versionId])
+  expect(await service.hasDueExpiry()).toBe(true)
+  await pool.query("INSERT INTO memory_jobs(job_id,job_type,idempotency_key) VALUES(gen_random_uuid(),'expire_claims','idle-regression')")
+  expect(await service.hasDueExpiry()).toBe(false)
+  expect(await service.expireDueClaims()).toBe(1)
+ })
  test('AC-54 staged_source_to_current_context_update_and_scene_variant',async()=>{
   const f=await fixture(),first=await ingest(f,'trains'),a=await deliver(f)
   expect(a.items.some(i=>i.version_id===first.versionId)).toBe(true)
@@ -73,8 +85,14 @@ suite('lifecycle pipeline with declared synthetic model',()=>{
  })
  test('AC-21 normal_user_correction_survives_machine_update',async()=>{
   const f=await fixture(),first=await ingest(f,'trains'),revision=Number((await pool.query('SELECT revision FROM knowledge_claims WHERE claim_id=$1',[first.claimId])).rows[0].revision)
-  const correction=await createClaimRepository(pool).correctClaim({installationId:f.personal,claimId:first.claimId!,expectedRevision:revision,statement:'I prefer buses for personal travel.',evidence:[],inheritCurrentEvidence:true})
-  expect(correction.ok).toBe(true);if(!correction.ok)return
+  const claims=createClaimRepository(pool)
+  const correctionInput={installationId:f.personal,claimId:first.claimId!,expectedRevision:revision,statement:'I prefer buses for personal travel.'}
+  // Machine-concluded capsules are not user-accepted evidence. A correction
+  // supplies its own explicit evidence instead of upgrading retained authority.
+  expect(await claims.correctClaim({...correctionInput,evidence:[],inheritCurrentEvidence:true})).toMatchObject({ok:false,error:{code:'evidence_required'}})
+  const episode=(await pool.query('SELECT episode_id FROM work_episodes WHERE installation_id=$1 LIMIT 1',[f.personal])).rows[0].episode_id
+  const correction=await claims.correctClaim({...correctionInput,evidence:[{evidenceKind:'episode',episodeId:episode,locator:{},excerpt:'I prefer buses for personal travel.',occurredAt:new Date()}]})
+  expect(correction).toMatchObject({ok:true});if(!correction.ok)return
   const next=await ingest(f,'planes');expect(next.action).toBe('defer')
   expect((await pool.query('SELECT current_version_id FROM knowledge_claims WHERE claim_id=$1',[first.claimId])).rows[0].current_version_id).toBe(correction.versionId)
   const delivered=await deliver(f);expect(delivered.items.some(i=>i.version_id===correction.versionId)).toBe(true)

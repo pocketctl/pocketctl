@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import {gitBootstrapStatus} from './readiness.js'
 import { z } from 'zod'
 import type { V2GrantFacts } from '../governance/authorization.js'
 import { requireGitPermission, type GitPermission } from './authorization.js'
@@ -115,7 +116,14 @@ export function createGitReadService(deps: GitReadDeps) {
           const exports=(await client.query(`SELECT export_id,generation::text,base_commit,created_at FROM memory_git_snapshots WHERE installation_id=$1 AND connection_id=$2 ORDER BY created_at DESC LIMIT 20`,[id.installationId,c.connectionId])).rows
           const cleanup=await childPage(client,id,c.connectionId,'cleanup',{limit:50})
           const success=(await client.query(`SELECT max(created_at) AS last_success FROM memory_git_audit_events WHERE installation_id=$1 AND connection_id=$2 AND action='apply' AND outcome='allowed'`,[id.installationId,c.connectionId])).rows[0]
-          return {runs,proposals:proposals.items,proposals_next_cursor:proposals.next_cursor,proposal_total:proposals.total,exports,
+          const bootstrap=(await client.query(`SELECT
+            EXISTS(SELECT 1 FROM memory_git_snapshots s WHERE s.installation_id=$1 AND s.connection_id=$2
+              AND s.generation=$3 AND (s.expires_at IS NULL OR s.expires_at>clock_timestamp())) AS snapshot,
+            EXISTS(SELECT 1 FROM memory_git_sync_principals p JOIN memory_git_snapshots s
+              ON s.installation_id=p.installation_id AND s.connection_id=p.connection_id AND s.export_id=p.export_id
+              WHERE p.installation_id=$1 AND p.connection_id=$2 AND p.generation=$3 AND s.generation=$3
+                AND (s.expires_at IS NULL OR s.expires_at>clock_timestamp())) AS principal`,[id.installationId,c.connectionId,c.generation])).rows[0]
+          return {bootstrap:gitBootstrapStatus(await mode(c),bootstrap),runs,proposals:proposals.items,proposals_next_cursor:proposals.next_cursor,proposal_total:proposals.total,exports,
             cleanup:cleanup.items,cleanup_next_cursor:cleanup.next_cursor,cleanup_total:cleanup.total,cleanup_pending_count:cleanup.pending_count,
             last_success:success?.last_success??null,current_error:runs.find(r=>r.reason_code)?.reason_code??null,cleanup_pending:cleanup.cleanup_pending}
         })

@@ -149,12 +149,15 @@ db('Self-service Git project setup',()=>{
     try{
       const i=input(),created=await app.inject({method:'POST',url:`/api/v1/memory/git/projects/${i.project_id}/connect`,headers:{'idempotency-key':'rest-connect'},payload:i})
       expect(created.statusCode,created.body).toBe(200);const c=created.json().project
+      const bootstrap=async()=>(await app.inject({url:`/api/v1/memory/git/connections?connection_id=${c.connection_id}`})).json().items[0].bootstrap
+      expect(await bootstrap()).toMatchObject({state:'required',reason:'initial_export_required'})
       const local=await app.inject({method:'POST',url:`/api/v1/memory/git/connections/${c.connection_id}/previews`,headers:{'idempotency-key':'rest-local-preview'},payload:{expected_generation:c.generation,assets:[{kind:'rule',id:f.rule.claimId}],reason_code:'manual_preview'}})
       expect(local.statusCode,local.body).toBe(200)
       const rejected=await app.inject({url:`/api/v1/memory/git/exports/${local.json().export_id}/bundle`})
       expect(rejected.statusCode,rejected.body).toBe(409);expect(rejected.json().error.code).toBe('external_export_required')
       const saved=await app.inject({method:'POST',url:`/api/v1/memory/git/connections/${c.connection_id}/exports`,headers:{'idempotency-key':'rest-export'},payload:{expected_generation:c.generation,assets:[{kind:'rule',id:f.rule.claimId}],reason_code:'manual_preview'}})
       expect(saved.statusCode,saved.body).toBe(200);exported=saved.json()
+      expect(await bootstrap()).toMatchObject({state:'required',reason:'sync_principal_required'})
       const archive=await app.inject({url:`/api/v1/memory/git/exports/${exported.export_id}/bundle`})
       expect(archive.statusCode,archive.body).toBe(200);expect(archive.json().publishable).toBe(true)
       const bundle=await createGitExportService(deps).loadRegisteredBase(f.grant,{installationId:f.installationId,connectionId:c.connection_id,expectedGeneration:c.generation,exportId:exported.export_id})
@@ -162,6 +165,7 @@ db('Self-service Git project setup',()=>{
       const subject={installationId:f.installationId,connectionId:c.connection_id,exportId:exported.export_id,expectedGeneration:c.generation},inbox=createGitInboxService(deps)
       const enrolled=await app.inject({method:'POST',url:`/api/v1/memory/git/connections/${c.connection_id}/sync`,headers:{'idempotency-key':'rest-enroll'},payload:{expected_generation:c.generation,export_id:exported.export_id,action:'enroll'}})
       expect(enrolled.statusCode,enrolled.body).toBe(200)
+      expect(await bootstrap()).toMatchObject({state:'registered',reason:'poll_admission_required'})
       await inbox.receive(subject,{source:'webhook',eventId:'synthetic-verified-change',changeNumber:'7'})
       const [job]=await createJobRepository(pool).claimJobs({workerId:'managed-git-test',limit:1,leaseMs:30_000})
       await createGitSyncWorker(deps).handle(job,new AbortController().signal,{fence:{jobId:job.job_id,claimedBy:'managed-git-test',claimEpoch:job.claim_epoch}})

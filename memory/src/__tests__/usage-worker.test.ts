@@ -43,4 +43,38 @@ describe('usage worker isolation and retry accounting', () => {
     expect(await worker.runOnce()).toBe(0)
     expect(query.mock.calls.some(([sql]) => String(sql).includes('dead_lettered_at = NOW()'))).toBe(true)
   })
+  test('isolates a rejected fact without charging valid siblings a failed attempt', async () => {
+    const updates: Array<{sql:string; args:unknown[]}> = []
+    const query = vi.fn(async (sql:string,args:unknown[] = []) => {
+      if(sql.includes('SELECT installation_id'))return {rows:['bad','good'].map(usage_id=>({...FACT,usage_id,installation_id:'11111111-1111-4111-8111-111111111111'}))}
+      updates.push({sql,args});return {rows:[{attempts:10}]}
+    })
+    const reportUsage = vi.fn(async (_id:string,facts:Array<Record<string,unknown>>) => {
+      if(facts.some(f=>f.usage_id==='bad'))throw Object.assign(new Error('rejected'),{code:'invalid_request',status:400})
+      return facts.length
+    })
+    const worker=createUsageWorker({pool:{query} as never,reportUsage})
+    expect(await worker.runOnce()).toBe(1)
+    expect(updates.filter(u=>u.sql.includes('last_error_code')).map(u=>u.args[1])).toEqual(['bad'])
+    expect(updates.filter(u=>u.sql.includes('reported_at = NOW()')).map(u=>u.args[1])).toEqual(['good'])
+  })
+  test('does not split rate limits even when their code is invalid_request', async () => {
+    const query=vi.fn(async (sql:string)=>({rows:sql.includes('SELECT installation_id')
+      ? ['one','two'].map(usage_id=>({...FACT,usage_id,installation_id:'11111111-1111-4111-8111-111111111111'})):[{attempts:1}]}))
+    const reportUsage=vi.fn(async()=>{throw Object.assign(new Error('rate limit'),{code:'invalid_request',status:429})})
+    await createUsageWorker({pool:{query} as never,reportUsage}).runOnce()
+    expect(reportUsage).toHaveBeenCalledTimes(1)
+  })
+
+  test('bounds poison-batch isolation while leaving unvisited facts untouched',async()=>{
+    const query=vi.fn(async(sql:string)=>({rows:sql.includes('SELECT installation_id')
+      ? Array.from({length:100},(_,i)=>({...FACT,usage_id:`bad-${i}`,installation_id:'11111111-1111-4111-8111-111111111111'})):[{attempts:1}]}))
+    const reportUsage=vi.fn(async()=>{throw Object.assign(new Error('bad fact'),{code:'invalid_request',status:400})})
+    await createUsageWorker({pool:{query} as never,reportUsage}).runOnce()
+    expect(reportUsage).toHaveBeenCalledTimes(15)
+    const attempts=query.mock.calls.filter(([sql])=>sql.includes('RETURNING attempts')).length
+    expect(attempts).toBeGreaterThan(0);expect(attempts).toBeLessThan(15)
+    expect(query.mock.calls.some(([sql])=>sql.includes('dead_lettered_at = NOW()'))).toBe(false)
+  })
+
 })

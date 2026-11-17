@@ -2,7 +2,7 @@ import {UNRESOLVED_EXTRACTION_SOURCE} from '../extraction/recovery.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 
-export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap', 'source_processing_failed', 'source_processing_stalled'] as const
+export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap', 'source_processing_failed', 'source_processing_stalled','usage_reporting_blocked'] as const
 export type BusinessHealthReason = typeof BUSINESS_HEALTH_REASONS[number]
 export interface BusinessHealthRow {
   installation_id: string
@@ -21,6 +21,7 @@ export interface BusinessHealthRow {
   last_feed_id?: string | null
   pending_jobs?: string
   failed_jobs_24h?: string
+  usage_dead_letters?: string | number
   source_failed_jobs?: string | number
   source_stalled_roots?: string | number
   failed_extractions_24h?: string | number
@@ -44,6 +45,7 @@ export function evaluateBusinessHealth(row: BusinessHealthRow, enabled = true) {
   if (active && Number(row.evidence_gaps) > 0) reasons.push('evidence_gap')
   if (active && Number(row.source_failed_jobs ?? 0) > 0) reasons.push('source_processing_failed')
   if (active && Number(row.source_stalled_roots ?? 0) > 0) reasons.push('source_processing_stalled')
+  if(active&&Number(row.usage_dead_letters??0)>0)reasons.push('usage_reporting_blocked')
   const integrity = row.local_status === 'integrity_error'
   const state = integrity ? 'error' : reasons.length || row.local_status === 'degraded' ? 'degraded'
     : row.local_status === 'ready' ? 'ready' : 'syncing'
@@ -78,7 +80,9 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='dead'
         AND j.created_at>NOW()-INTERVAL '24 hours') AS failed_jobs_24h,
       ${shared?'pipeline.failed_jobs':'0'} AS source_failed_jobs,
-      ${shared?'pipeline.stalled_roots':'0'} AS source_stalled_roots
+      ${shared?'pipeline.stalled_roots':'0'} AS source_stalled_roots,
+      (SELECT count(*)::text FROM (SELECT 1 FROM memory_usage_outbox u WHERE u.installation_id=i.installation_id
+        AND u.reported_at IS NULL AND u.dead_lettered_at IS NOT NULL LIMIT 1001) dead_usage) AS usage_dead_letters
     FROM memory_installations i
     ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
     ${shared?'LEFT JOIN LATERAL shared.memory_source_pipeline_health(i.installation_id) pipeline ON TRUE':''}
@@ -112,6 +116,8 @@ export function summarizeBusinessHealth(rows: BusinessHealthRow[], enabled = tru
   const degraded = health.some(item => ['error', 'degraded'].includes(item.state))
   return {status: degraded ? 'degraded' : 'ready', readiness: 'ready',
     operational: {status: degraded ? 'degraded' : 'healthy', reasons,
+      usage_dead_letters: rows.reduce((sum,row)=>sum+Number(row.usage_dead_letters??0),0),
+      usage_counts_capped: rows.some(row=>Number(row.usage_dead_letters??0)>=1001),
       source_failed_jobs: rows.reduce((sum,row)=>sum+Number(row.source_failed_jobs??0),0),
       source_stalled_roots: rows.reduce((sum,row)=>sum+Number(row.source_stalled_roots??0),0),
       source_counts_capped: rows.some(row=>Number(row.source_failed_jobs??0)>=1001||Number(row.source_stalled_roots??0)>=1001),

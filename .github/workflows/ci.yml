@@ -18,6 +18,8 @@ jobs:
           node-version: '22'
       - name: Scan tracked source for secrets
         run: bash scripts/secret-scan.sh
+      - name: Verify Memory usage protocol
+        run: node scripts/generate-memory-usage-contract.mjs --check
       - name: Verify public mirror dependencies
         run: node scripts/tests/github-mirror-contract.test.mjs
 

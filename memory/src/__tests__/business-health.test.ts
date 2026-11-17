@@ -19,3 +19,8 @@ test('shared source failures and stalled consumption alert with legacy extractio
  expect(evaluateBusinessHealth({...healthy,feed_enabled:false,extraction_mode:'off',failed_jobs_24h:'10',source_failed_jobs:0,source_stalled_roots:0}).reasons).toEqual([])
  expect(evaluateBusinessHealth({...healthy,relay_status:'paused',source_failed_jobs:1,source_stalled_roots:1}).reasons).toEqual([])
 })
+
+test('usage dead letters remain degraded even when model execution is idle',()=>{
+ expect(evaluateBusinessHealth({...healthy,usage_dead_letters:24,extraction_mode:'off'}).reasons).toEqual(['usage_reporting_blocked'])
+ expect(evaluateBusinessHealth({...healthy,usage_dead_letters:0}).reasons).toEqual([])
+})

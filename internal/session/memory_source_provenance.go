@@ -80,6 +80,7 @@ func (sm *SessionManager) memoryEventProducer(ev *protocol.DaemonEvent) string {
 type memorySourceLedger struct {
 	mu       sync.Mutex
 	bindings map[string]*memorySourceBinding
+	pending  map[string]*memoryDispatchBuffer
 }
 type memorySourceBinding struct {
 	root       *protocol.MemorySourceProvenance
@@ -135,6 +136,9 @@ func (sm *SessionManager) discardMemoryInput(sessionID, turnID string) {
 }
 
 func (sm *SessionManager) stampNativeMemorySource(ev *protocol.DaemonEvent) {
+	sm.stampNativeMemorySourceForInput(ev, "")
+}
+func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEvent, expectedInput string) {
 	if ev == nil || ev.MemorySource != nil || ev.MemoryNative == nil || ev.Resync || ev.SessionID == "" || ev.TurnID == "" {
 		return
 	}
@@ -143,7 +147,7 @@ func (sm *SessionManager) stampNativeMemorySource(ev *protocol.DaemonEvent) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.bindings[ev.SessionID]
-	if b == nil || b.root.Producer != n.Producer || n.Sidechain || n.RecordID == "" || len(b.records) > 4096 {
+	if b == nil || (expectedInput != "" && b.root.EventID != expectedInput) || b.root.Producer != n.Producer || n.Sidechain || n.RecordID == "" || len(b.records) > 4096 {
 		return
 	}
 	// Claude's PTY does not accept a client message UUID. Bind only the native

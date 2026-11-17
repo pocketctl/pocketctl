@@ -786,7 +786,9 @@ func (c *codexCoordinator) publishProjectedAt(events []protocol.DaemonEvent, rec
 			// otherwise a late thread/started revokes queue support on clients.
 			event = c.sm.codexSessionMetadata(event)
 		}
-		c.sm.outputCh <- event
+		if !c.sm.bufferMemoryCodexEvent(event) {
+			c.sm.outputCh <- event
+		}
 		c.observeTitleEvent(event)
 	}
 }

@@ -5,6 +5,8 @@ internal
 memory
 relay
 shared/session-source
+shared/contracts/memory-usage-v1.json
+scripts/generate-memory-usage-contract.mjs
 scripts/build-session-source.mjs
 web
 testdata/contracts

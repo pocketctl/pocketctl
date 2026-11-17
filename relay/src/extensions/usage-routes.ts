@@ -1,3 +1,4 @@
+import {MEMORY_USAGE_OPERATIONS} from './memory-usage-contract.js'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type pg from 'pg'
 import type { ExtensionMode } from './types.js'
@@ -15,9 +16,7 @@ export interface UsageRouteDeps {
 }
 
 const INSTALLATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const USAGE_OPERATIONS: readonly string[] = [
-  'episode_extract', 'candidate_extract', 'embedding', 'rerank', 'recall', 'knowledge_merge',
-]
+const USAGE_OPERATIONS: readonly string[] = MEMORY_USAGE_OPERATIONS
 const MAX_BATCH = 100
 const MAX_USAGE_ID_LENGTH = 128
 const MAX_MODEL_LENGTH = 128

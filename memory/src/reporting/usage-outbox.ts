@@ -1,9 +1,10 @@
 import type pg from 'pg'
+import type {MemoryUsageOperation} from './memory-usage-contract.js'
 
 export interface UsageFact {
   installationId: string
   usageId: string
-  operation: string
+  operation: MemoryUsageOperation
   model?: string
   inputTokens?: number
   outputTokens?: number
@@ -61,7 +62,7 @@ export function createUsageOutbox(pool: pg.Pool) {
       return result.rows.map(row => ({
         installationId: row.installation_id,
         usageId: row.usage_id,
-        operation: row.operation,
+        operation: row.operation as MemoryUsageOperation,
         model: row.model ?? undefined,
         inputTokens: Number(row.input_tokens),
         outputTokens: Number(row.output_tokens),
