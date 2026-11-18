@@ -17,6 +17,33 @@ import (
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
+func TestCodexPermissionCommandReceiptProjectsOnlyFinalSubmissions(t *testing.T) {
+	cmd := protocol.ClientMessage{Type: "invoke_command", SessionID: "s", CommandReceiptID: "origin",
+		InvocationID: "command:permissions"}
+	for _, content := range []string{"/permissions", "/permissions danger-full-access", "/model"} {
+		cmd.Content = content
+		if _, ok := CodexPermissionCommandReceipt(cmd, map[string]any{"kind": "choose"}, nil); ok {
+			t.Fatalf("unexpected receipt for %s", content)
+		}
+	}
+	cmd.Content = "/permissions danger-full-access confirm"
+	result := map[string]any{"kind": "text", "text": "applied"}
+	receipt, ok := CodexPermissionCommandReceipt(cmd, result, nil)
+	if !ok || receipt.RequestID != "origin" || receipt.Command != "/permissions" ||
+		receipt.ReceiptStatus != "success" || receipt.PermissionEffective != "next_turn" ||
+		receipt.EventID == "" || receipt.Permission == nil || !receipt.Permission.DangerousBypass {
+		t.Fatalf("unexpected terminal receipt: %+v", receipt)
+	}
+	receipt, ok = CodexPermissionCommandReceipt(cmd, nil, context.DeadlineExceeded)
+	if !ok || receipt.ReceiptStatus != "unknown" || receipt.PermissionEffective != "" {
+		t.Fatalf("unexpected timeout receipt: %+v", receipt)
+	}
+	cmd.InvocationID = "skill:permissions"
+	if _, ok := CodexPermissionCommandReceipt(cmd, result, nil); ok {
+		t.Fatal("same-name skill produced a permission receipt")
+	}
+}
+
 func TestCodexInvocationRecoveryDoesNotPermanentlyDisableCommands(t *testing.T) {
 	sm, _, _, _ := invocationFixture(t)
 	provider := sm.CodexRuntimeProvider()
@@ -245,7 +272,9 @@ func TestClaudeSkillInvocationMetadata(t *testing.T) {
 
 func TestCodexInvocationNativeControlsApplyLatestPermissions(t *testing.T) {
 	sm, _, rpc, _ := invocationFixture(t)
-	sm.sessions["s"].Permission = &protocol.PermissionConfig{Agent: "codex", SandboxMode: "read-only", ApprovalPolicy: "on-request"}
+	if _, err := sm.InvokeCodexCommand(context.Background(), "s", "/permissions read-only", "command:permissions"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sm.invokeCodexCommand(context.Background(), "s", "/compact", "command:compact", true); err != nil {
 		t.Fatal(err)
 	}

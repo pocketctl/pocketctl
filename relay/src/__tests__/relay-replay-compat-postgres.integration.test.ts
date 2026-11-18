@@ -8,7 +8,9 @@ import { RealtimeOutboxWriter } from '../materialization/realtime-outbox.js'
 import { installPostgresHistoryBodyReader } from '../session-history/postgres-reader.js'
 import { MemoryArchiveStorage, encodeArchiveChunk, archiveObjectKey } from '@pocketctl/session-source'
 import { enableSessionColdBodies } from '../session-lifecycle/cold-schema.js'
-import { beforeAll, beforeEach, afterAll, describe, test, expect } from 'vitest'
+import { beforeAll, beforeEach, afterAll, describe, test, expect, vi } from 'vitest'
+import { Router } from '../router.js'
+import type WebSocket from 'ws'
 import {ensurePlatformStatisticsSchema} from '../platform-statistics/schema.js'
 import { initDB } from '../db.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
@@ -73,6 +75,35 @@ suite('canonical replay compatibility', () => {
   const proof = () => ({version:1,producer:'codex',session_id:'replay-session',event_id:'event-1',turn_id:'turn-1',sequence:'1',invocation_id:'turn-1',source_role:'tool',skill_state:'unknown',lineage_complete:false,derived_from_event_ids:[]})
   function materializer(shared=true) { return new EventMaterializer({pool,extensionJournalSink:shared?createPostgresExtensionJournalSink({sharedHeaders:true}):null}) }
   function input(payload:Record<string,unknown>) { return {inboxId:0,userId:owner,daemonId:'replay-daemon',sessionId:'replay-session',eventType:'tool_call',payload} }
+  test('persists one terminal Codex permission receipt and replays its originating request', async () => {
+    const receipt = {
+      type: 'command_receipt', session_id: 'replay-session', event_id: 'permission-receipt-1',
+      request_id: 'originating-request', command: '/permissions', receipt_status: 'success',
+      permission_effective: 'next_turn',
+      permission: { agent: 'codex', preset: 'custom', sandbox_mode: 'read-only', approval_policy: 'on-request' },
+    }
+    const m = materializer(false)
+    const first = await m.materialize({ ...input(receipt), eventType: receipt.type })
+    const duplicate = await m.materialize({ ...input(receipt), eventType: receipt.type })
+    expect(duplicate.eventId).toBe(first.eventId)
+    expect(duplicate.inserted).toBe(false)
+    expect(first.deliveries).toEqual([expect.objectContaining({ payload: expect.objectContaining(receipt) })])
+
+    const messages: Record<string, unknown>[] = []
+    const client = { readyState: 1, send: (raw: string) => messages.push(JSON.parse(raw)) } as unknown as WebSocket
+    const router = new Router(pool)
+    router.registerClient(client, owner)
+    try {
+      await router.handleClientMessage(client, { type: 'replay', session_id: receipt.session_id, req_id: 1 })
+      await vi.waitFor(() => expect(messages.some(message => message.type === 'replay_end')).toBe(true))
+      const replay = messages.filter(message => message.type === 'replay_batch')
+        .flatMap(message => message.events as Record<string, unknown>[])
+        .filter(message => message.type === 'command_receipt')
+      expect(replay).toEqual([expect.objectContaining(receipt)])
+    } finally {
+      router.unregisterClient(client)
+    }
+  })
   test.each(['seq','resync','legacy-proof','legacy-unknown-producer'])('accepts %s while retaining canonical headers and body',async kind=>{
     const original={...body(),...(kind==='legacy-unknown-producer'?{memory_source:{...proof(),producer:'unknown'}}:{})}, m=materializer()
     const first=await m.materialize(input(original))

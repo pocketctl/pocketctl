@@ -4260,6 +4260,12 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					event.Error = invocationErr.Error()
 					event.Code = codexInvocationErrorCode(invocationErr)
 				}
+				if receipt, ok := session.CodexPermissionCommandReceipt(cmd, result, invocationErr); ok {
+					if receipt.ReceiptStatus == "unknown" {
+						event.Code = "invocation_timeout"
+					}
+					client.SendDurableEvent(receipt)
+				}
 				client.SendMsg(event)
 
 			case "consume_codex_reset_credit", "consume_zcode_reset_credit", "read_quota_reset_result":
