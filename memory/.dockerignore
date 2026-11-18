@@ -4,3 +4,4 @@ src/__tests__
 *.md
 .env
 .env.*
+src/**/*.test.ts
