@@ -13,6 +13,7 @@ try {
     'relay-root': { type: 'string' }, 'env-file': { type: 'string' },
     'release-file': { type: 'string' }, 'archive-dir': { type: 'string' },
     'backup-dir': { type: 'string', default: '/var/backups/pocketctl-relay' },
+    'no-backup': { type: 'boolean', default: false },
     'service-user': { type: 'string', default: 'pocketctl' },
   } })
   const relay = values['relay-root'] ?? path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'relay')
@@ -84,16 +85,16 @@ try {
         effectiveAt: null, transitionDeadline: null, storageNamespace: storage.namespace, evidence: {} }
       atomicWrite(releaseFile, JSON.stringify(draft, null, 2) + '\n', 0o640, process.getuid(), group)
     }
-    if (changed) {
+    if (changed && !values['no-backup']) {
       const backupDirectory = values['backup-dir']
       fs.mkdirSync(backupDirectory, { recursive: true, mode: 0o700 })
       const stat = fs.lstatSync(backupDirectory)
       if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077)) throw new Error('invalid_backup_directory')
       const backup = path.join(backupDirectory, `relay.env-pre-lifecycle-${new Date().toISOString().replace(/[:.]/g, '')}-${randomUUID()}`)
       fs.writeFileSync(backup, original, { flag: 'wx', mode: 0o600 })
-      atomicWrite(envFile, updated, 0o600, envStat.uid, envStat.gid)
       summary.environment_backup = backup
     }
+    if (changed) atomicWrite(envFile, updated, 0o600, envStat.uid, envStat.gid)
   }
   console.log(JSON.stringify(summary))
 } catch (error) {
