@@ -1587,18 +1587,23 @@ func cmdDaemonStart(args []string) {
 		return sm.DispatchMemoryContextControl(message)
 	}
 	client.SetAgentManageable(agentManageable)
-	client.TeamConfigInventory = func() map[string]*protocol.TeamConfigCapabilities {
+	client.TeamConfigInventory = func(ctx context.Context) (map[string]*protocol.TeamConfigCapabilities, bool) {
 		result := map[string]*protocol.TeamConfigCapabilities{}
+		timedOut := false
 		for _, agent := range []string{adapter.AgentCodex, adapter.AgentClaude, adapter.AgentDSH} {
-			capabilityCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if ctx.Err() != nil {
+				return nil, false
+			}
+			capabilityCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			cap := sm.TeamConfigCapabilities(capabilityCtx, agent)
+			timedOut = timedOut || capabilityCtx.Err() == context.DeadlineExceeded
 			cancel()
-			if cap != nil {
+			if cap != nil && ctx.Err() == nil {
 				result[agent] = cap
 				sm.RememberTeamConfigCapability(agent, cap.Revision)
 			}
 		}
-		return result
+		return result, timedOut
 	}
 	client.SetAgentInventory(agents)
 	client.SetVersion(version)

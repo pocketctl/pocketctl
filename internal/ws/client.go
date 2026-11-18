@@ -156,7 +156,8 @@ func (w *socketWriter) lockContext(ctx context.Context) bool {
 func (w *socketWriter) Unlock() { <-w.slot }
 
 type Client struct {
-	TeamConfigInventory func() map[string]*protocol.TeamConfigCapabilities
+	// TeamConfigInventory returns available settings and whether discovery timed out.
+	TeamConfigInventory func(context.Context) (map[string]*protocol.TeamConfigCapabilities, bool)
 
 	replayACKs *replayACKCache // protected by outMu; populated only by real ACKs
 
@@ -180,6 +181,7 @@ type Client struct {
 	agentTeamsEnabled          bool // fixed external installation; never inferred from CLI discovery
 	agentTeamsStepsEnabled     bool // explicit frozen transfer capability from the configured bridge
 	conn                       *websocket.Conn
+	inventoryRefresh           chan struct{} // per-connection, protected by connMu
 	connMu                     sync.Mutex
 	writeMu                    socketWriter // protects WriteMessage on conn
 	outputCh                   <-chan protocol.DaemonEvent
@@ -446,24 +448,6 @@ func (c *Client) SetAgentManageable(m map[string]bool) {
 	c.agentManageable = m
 }
 
-// ResendRegister re-sends the register message to push updated info (e.g. new agent versions after upgrade).
-func (c *Client) ResendRegister() {
-	c.connMu.Lock()
-	conn := c.conn
-	c.connMu.Unlock()
-	if conn == nil {
-		return
-	}
-	register := c.agentRegisterMessage()
-	if c.activeSessionIDsFn != nil {
-		register.ActiveSessionIDs = c.activeSessionIDsFn()
-	}
-	c.outMu.Lock()
-	register.AckedSeq = c.ackedSeq // durable baseline so the relay seeds its persisted mark
-	c.outMu.Unlock()
-	c.SendMsg(register)
-}
-
 // SetStartedAt sets the daemon start timestamp for register messages.
 func (c *Client) SetStartedAt(t int64) { c.startedAt = t }
 
@@ -718,8 +702,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	powerDone := make(chan struct{})
 	defer close(powerDone)
 	go c.watchHostPower(ctx, conn, powerDone)
+	refresh := make(chan struct{}, 1)
 	c.connMu.Lock()
 	c.conn = conn
+	c.inventoryRefresh = refresh
 	c.connMu.Unlock()
 
 	// Reset per-connection ack capability: re-determined by this connection's
@@ -755,14 +741,11 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 
 	c.logger.Info("sending register", "daemonID", c.daemonID, "hostname", c.hostname)
-	register := c.agentRegisterMessage()
-	if c.activeSessionIDsFn != nil {
-		register.ActiveSessionIDs = c.activeSessionIDsFn()
+	initialInventory := c.agentRegisterMessage()
+	if err := c.sendRegistration(ctx, conn, initialInventory); err != nil {
+		conn.Close()
+		return err
 	}
-	c.outMu.Lock()
-	register.AckedSeq = c.ackedSeq // durable baseline so the relay seeds its persisted mark
-	c.outMu.Unlock()
-	c.SendMsg(register)
 	c.logger.Info("register sent")
 
 	done := make(chan struct{})
@@ -790,6 +773,15 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	case <-done:
 		return readPumpError(readErr, "connection closed before register_ack")
 	}
+
+	// Separate model discovery from both admission and the event/replay loop.
+	// Legacy Relays without register_ack reach this point after registerAckWait.
+	refreshCtx, cancelRefresh := context.WithCancel(ctx)
+	defer cancelRefresh()
+	if c.TeamConfigInventory != nil {
+		c.ResendRegister()
+	}
+	go c.refreshRegistration(refreshCtx, conn, refresh, initialInventory, time.Minute)
 
 	// Replay any events the relay hasn't acked (lost mid-flight on the previous
 	// connection) before resuming live delivery, so no event is silently dropped
@@ -1125,6 +1117,10 @@ func (c *Client) writeMessage(ctx context.Context, data []byte) error {
 	if conn == nil {
 		return fmt.Errorf("websocket disconnected")
 	}
+	return c.writeMessageTo(ctx, conn, data)
+}
+
+func (c *Client) writeMessageTo(ctx context.Context, conn *websocket.Conn, data []byte) error {
 	if !c.writeMu.lockContext(ctx) {
 		return ctx.Err()
 	}
