@@ -218,6 +218,10 @@
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
           <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="share" role="menuitem" @click="toolbarOverflowOpen=false; showShareManager=true">{{ t('sharing.share') }}</button>
+          <button type="button" class="toolbar-overflow-item" data-toolbar-action="refresh-latest" role="menuitem"
+            :disabled="!connected || latestCursor === undefined || latestRequest !== null" @click="refreshLatestMessages">
+            <span>{{ t('session.actions.refresh_latest') }}</span><span aria-hidden="true">↻</span>
+          </button>
           <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
           <button v-if="currentSessionAgent==='zcode' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="zcode-quota" role="menuitem" @click="openZcodeQuota"><span>{{ zcodeQuota?.title || t('zcode_quota.title') }}<small class="tool-visibility-hint">{{ zcodeQuota?.summary }}</small></span></button>
           <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
@@ -271,6 +275,7 @@
         :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div class="chat-message-viewport">
+      <div v-if="latestNotice" class="latest-refresh-feedback" role="status">{{ t(latestNotice) }}</div>
       <SessionPromptAnchor :message="latestPrompt" :container="messagesEl" :context="loadKey" @navigate="beginPromptReading" />
       <div
         ref="messagesEl"
@@ -1200,6 +1205,61 @@ let historySlowTimer: ReturnType<typeof setTimeout> | null = null
 // session-history-pagination: backward pagination state
 const pageSize = computed(() => isMobile.value ? 20 : 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
+// Forward requests have a separate ID range and cursor so they can finish
+// independently of an older-page read and its scroll anchor.
+const latestCursor = ref<number>()
+const latestRequest = ref<number | null>(null)
+let latestSequence = 0
+const latestEvents = new ReplaySessionTrustBuffer<any>()
+const latestNotice = ref('')
+let latestTimer: ReturnType<typeof setTimeout> | undefined
+const liveOverlap = new Set<string>()
+const replayOverlap = new Set<string>()
+
+function overlapKey(event: any): string | undefined {
+  const identity = event.seq ?? event.payload?.seq ?? event.event_id ?? event.payload?.event_id
+  if (identity == null) return
+  return JSON.stringify([event.session_id ?? sessionId.value, event.agent_id ?? '', event.type ?? event.event_type, identity])
+}
+
+function finishLatest(notice = '') {
+  clearTimeout(latestTimer)
+  latestRequest.value = null
+  latestEvents.reset()
+  latestNotice.value = notice
+  if (notice) latestTimer = setTimeout(() => { latestNotice.value = '' }, 2500)
+}
+
+function requestLatestPage() {
+  clearTimeout(latestTimer)
+  latestRequest.value = --latestSequence
+  latestNotice.value = 'session.refreshing_latest'
+  latestTimer = setTimeout(() => finishLatest('session.history_read_failed'), 10000)
+  const agent = focusedSubAgentId.value
+  if (!send({
+    type: agent ? 'replay_subagent' : 'replay', session_id: sessionId.value,
+    ...(agent ? { agent_id: agent } : {}), direction: 'forward',
+    last_seq: latestCursor.value, limit: pageSize.value, req_id: latestRequest.value,
+  })) finishLatest('session.history_read_failed')
+}
+
+function refreshLatestMessages() {
+  if (!connected.value || latestCursor.value === undefined || latestRequest.value !== null) return
+  toolbarOverflowOpen.value = false
+  requestLatestPage()
+}
+
+function resetLatest() {
+  finishLatest()
+  latestCursor.value = undefined
+  liveOverlap.clear()
+  replayOverlap.clear()
+}
+
+watch(connected, online => {
+  if (!online && latestRequest.value !== null) finishLatest('session.history_read_failed')
+})
+
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
 const historyViewportFill = new HistoryViewportFillCoordinator({ maxPages: 20, maxElapsedMs: 8000 })
@@ -2514,6 +2574,7 @@ function settleReplayLocalMessage(message: any, target: any[]) {
 }
 
 function loadHistory() {
+  resetLatest()
   hydrateHistoryPreview()
   clearTaskSnapshotTimer()
   taskSnapshotError.value = false
@@ -4151,6 +4212,13 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
 // into one ordered flush per animation frame (plus a short timer fallback for
 // background tabs); every other live event flushes pending content first so
 // control events never reorder ahead of it.
+function applyLiveContent(event: any) {
+  const key = overlapKey(event)
+  if (key && replayOverlap.delete(key)) return
+  if (key) liveOverlap.add(key)
+  processEvent(event)
+}
+
 function isBatchableLiveContent(msg: any): boolean {
   const type = msg.type || msg.event_type
   if (type === 'agent_text' || type === 'agent_reasoning') return true
@@ -4167,7 +4235,7 @@ const liveContentBatcher = createLiveSessionEventBatcher<any>({
     // be yanked back to the bottom by output they never followed.
     const shouldFollow = autoScroll.value
     for (const evt of events) {
-      processEvent(evt)
+      applyLiveContent(evt)
       if ((evt.type || evt.event_type) === 'tool_result') {
         const callId = evt.call_id || evt.payload?.call_id
         if (callId) clearToolTimeout(callId)
@@ -4188,7 +4256,7 @@ function flushLiveContent(): void {
 function processImmediateLiveEvent(msg: any, options?: { scroll?: boolean }): void {
   scheduleHistoryPreview()
   flushLiveContent()
-  processEvent(msg)
+  applyLiveContent(msg)
   if (options?.scroll && !promptReading.value) nextTick(() => { if (!promptReading.value) scrollToBottom() })
 }
 
@@ -4263,6 +4331,7 @@ onMounted(() => {
     cachedSessions.value = []; cachedHosts.value = {}; cachedOrganization.value = null; cachedHistory.value = []
     historyCacheRequest++
     if (!personalReadCache.ticket().scope) {
+      resetLatest()
       cachePrivacyBlocked.value = true; navigationRequest++
       messages.value = []; subagentMessages.value = {}; allSessions.value = []; projects.value = []; sidebarBuckets.value = {}; daemons.value = {}
       messageInput.value = ''; historyCacheReady.value = false; statusReady.value = false; runtimeSnapshotReady.value = false
@@ -4454,6 +4523,10 @@ onMounted(() => {
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
+      latestEvents.append(replaySessionTrustContext(), Array.isArray(msg.events) ? msg.events : [])
+      return
+    }
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
     const isBackward = msg.direction === 'backward'
     // Relay sends every replay batch in id ASC order. Keeping this order across
@@ -4490,6 +4563,28 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('replay_end', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
+      const next = normalizeReplayCursor(msg.newest_seq ?? msg.last_seq) ?? 0
+      if (msg.error || (msg.has_more && next <= (latestCursor.value ?? 0))) {
+        finishLatest('session.history_read_failed')
+        return
+      }
+      flushLiveContent()
+      for (const event of latestEvents.takeFinal(replaySessionTrustContext())) {
+        const key = overlapKey(event)
+        if (key && liveOverlap.delete(key)) continue
+        if (key) replayOverlap.add(key)
+        processEvent(event, messages.value, undefined, true)
+      }
+      latestCursor.value = Math.max(latestCursor.value ?? 0, next)
+      if (autoScroll.value) nextTick(() => { if (autoScroll.value) scrollToBottom() })
+      if (msg.has_more) requestLatestPage()
+      else {
+        saveHistoryPreview()
+        finishLatest('session.latest_synced')
+      }
+      return
+    }
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
     if (historyPageTimer) clearTimeout(historyPageTimer)
     if (msg.req_id === taskSnapshotReqId) {
@@ -4506,6 +4601,9 @@ onMounted(() => {
     }
     if (!msg.has_more) publishHistoryPreview()
     const previousIDs = new Set(sourceMessages.value.map(message => message.id))
+    if (!isLoadingBackward.value && (msg.newest_seq === 0 || normalizeReplayCursor(msg.newest_seq) !== undefined)) {
+      latestCursor.value = Number(msg.newest_seq)
+    }
     const wasLoadingBackward = isLoadingBackward.value
     const replayContext = replaySessionTrustContext()
     if (wasLoadingBackward) {
@@ -4800,6 +4898,7 @@ onMounted(() => {
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
     if (cacheReadDenied(msg.code || msg.error)) {
+      resetLatest()
       cachedHistory.value = []; historyCacheRequest++; historyCacheReady.value = false
       void personalReadCache.remove(historyCacheName())
     }
@@ -4867,6 +4966,7 @@ onMounted(() => {
     void refreshProjects()
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
+      resetLatest()
       liveContentBatcher.reset(liveContentContextKey.value)
       messages.value=[]
       const next = allSessions.value[0]
@@ -4918,6 +5018,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  resetLatest()
   saveHistoryPreview()
   historyCacheRequest++; navigationRequest++
   if (historyCacheTimer) clearTimeout(historyCacheTimer)
@@ -5136,6 +5237,7 @@ onMounted(() => {
 @keyframes menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Messages */
+.latest-refresh-feedback { position: absolute; bottom: 12px; align-self: center; z-index: 3; pointer-events: none; background: var(--surface); color: var(--fg-secondary); border: 1px solid var(--border); border-radius: 16px; padding: 5px 12px; font-size: 12px; }
 .chat-message-viewport { position:relative; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
 .chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 24px var(--session-content-gutter) calc(24px + var(--composer-float-clearance)); display: flex; flex-direction: column; align-items: stretch; gap: 14px; position: relative; overflow-anchor: none; scrollbar-gutter: stable; background: var(--bg); }
 /* min-width:0 lets long content (code/URLs) wrap instead of overflowing

@@ -54,6 +54,33 @@ vi.mock('../../services/sessionOrganization', () => ({
 }))
 
 describe('SessionDetail history loading', () => {
+  test('refresh action follows the forward cursor, keeps history and ignores live overlap and late pages', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const sid = 'session-http-lan'
+    const emit = (type: string, payload: object) => websocketMock.handlers.get(type)?.({ session_id: sid, ...payload })
+    const event = (text: string, seq: number) => ({ type: 'user_text', session_id: sid, text, seq })
+    emit('replay_batch', { req_id: 1, direction: 'backward', events: [event('Earlier message', 1)] })
+    emit('replay_end', { req_id: 1, last_seq: 1, newest_seq: '10', has_more: false })
+    emit('user_text', event('Live arrival', 2))
+    emit('session_list', { sessions: [{ session_id: sid, daemon_id: 'd1' }] })
+    await wrapper.vm.$nextTick()
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+    await wrapper.get('[data-toolbar-action="refresh-latest"]').trigger('click')
+    const first = websocketMock.send.mock.calls.at(-1)![0]
+    expect(first).toMatchObject({ type: 'replay', direction: 'forward', last_seq: 10 })
+    emit('replay_batch', { req_id: first.req_id, events: [event('Live arrival', 2), event('Recovered', 3)] })
+    emit('replay_end', { req_id: first.req_id, newest_seq: 20, has_more: true })
+    const next = websocketMock.send.mock.calls.at(-1)![0]
+    expect(next).toMatchObject({ direction: 'forward', last_seq: 20 })
+    expect(next.req_id).not.toBe(first.req_id)
+    emit('replay_end', { req_id: next.req_id, newest_seq: 20, has_more: false })
+    emit('replay_batch', { req_id: first.req_id, events: [event('Late arrival', 4)] })
+    expect((wrapper.vm as any).messages.map((m: any) => m.content)).toEqual(['Earlier message', 'Live arrival', 'Recovered'])
+    expect((wrapper.vm as any).loadedMinId).toBe(1)
+    wrapper.unmount()
+  })
+
   test('cache is a display projection and replay atomically replaces it without duplicating live messages', async () => {
     vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
     vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? [{id:'cached-q',type:'user_text',role:'user',content:'Old question'}, {id:'cached-a',type:'agent_text',content:'Old answer'}] : null)

@@ -29,6 +29,12 @@ class LocalSocket {
   send(raw:string){const message=JSON.parse(raw);later(()=>{
     if(message.type==='list_sessions')this.emit({type:'session_list',sessions:[session]})
     if(message.type==='list_daemons')this.emit({type:'daemon_list',daemons:[{daemon_id:'local-host',hostname:'本地预览',status:'online'}]})
+    if(message.type==='replay' && message.direction==='forward'){
+      const newest = performanceRows * 2 + 101
+      if(message.last_seq < newest)this.emit({type:'replay_batch',session_id:id,req_id:message.req_id,direction:'forward',events:[{type:'agent_text',session_id:id,event_id:'refresh-latest',text:'手动刷新补回的消息',seq:newest}]})
+      this.emit({type:'replay_end',session_id:id,req_id:message.req_id,last_seq:newest,newest_seq:newest,has_more:false})
+      return
+    }
     if(message.type==='replay' && message.last_seq){
       queued.push(()=>{
         this.emit({type:'replay_batch',session_id:id,req_id:message.req_id,direction:'backward',events:[{type:'user_text',session_id:id,text:'Earlier history is loaded without jumping.',event_id:'older-question',seq:1}]})
@@ -42,7 +48,7 @@ class LocalSocket {
       ]).flat() : [
         {type:'user_text',session_id:id,text:'先检查当前列表。',msg_id:'old',seq:1},reply(0),
         {type:'user_text',session_id:id,text:question,msg_id:'latest',seq:3},reply(1), {type:'tool_call',session_id:id,call_id:'display-tool',tool:'Read',input:{file_path:'/demo/src/session.ts'},seq:10}, {type:'tool_result',session_id:id,call_id:'display-tool',output:'export const cached = true;\n// synthetic output',seq:11}]})
-      this.emit({type:'replay_end',session_id:id,req_id:message.req_id,last_seq:sequence,has_more:olderFixture,status:'idle'})
+      this.emit({type:'replay_end',session_id:id,req_id:message.req_id,last_seq:sequence,newest_seq:sequence,has_more:olderFixture,status:'idle'})
     }
     if(message.type==='get_session_meta')this.emit({type:'session_meta',session_id:id,agent:'codex',model:'gpt-5.4',control_mode:'managed',status:'idle',capabilities:performanceRows ? session.capabilities : ['user_message']})
     if(message.type==='user_message'){

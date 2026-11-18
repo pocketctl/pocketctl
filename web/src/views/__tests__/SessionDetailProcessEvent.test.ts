@@ -633,7 +633,7 @@ describe('SessionDetail processEvent integration', () => {
 
     expect(mobileOverflow.get('.toolbar-overflow-menu').attributes('role')).toBe('menu')
     expect(mobileOverflow.findAll('[data-toolbar-action]').map(item => item.attributes('data-toolbar-action'))).toEqual([
-      'share', 'show-tool-calls', 'plan', 'edited-files', 'copy-id', 'resume',
+      'share', 'refresh-latest', 'show-tool-calls', 'plan', 'edited-files', 'copy-id', 'resume',
     ])
 
     let planRequests = 0
