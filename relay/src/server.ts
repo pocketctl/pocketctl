@@ -1,5 +1,5 @@
 import { registerWebCacheKey } from './web-cache-key.js';
-import {registerPersonalUsageRoutes,personalUsageQuery,usageErrorReply} from './usage-analytics/routes.js'
+import {registerPersonalUsageRoutes,replyPersonalUsage} from './usage-analytics/routes.js'
 import {prepareRelaySchema,type RelaySchemaStrategy} from './schema-runtime.js';
 import { ensurePlatformStatisticsSchema } from './platform-statistics/schema.js';
 import { startPlatformStatisticsCollector } from './platform-statistics/collector.js';
@@ -2042,7 +2042,7 @@ async function main() {
     if (!actor) return reply.code(401).send({ error: 'authorization_required' })
     if (!databaseReady) return reply.code(503).send({ error: 'database_unavailable' })
     if((req.query as any).contract!==undefined&&(req.query as any).contract!=='personal-v1')return reply.code(400).send({error:'unsupported_contract'})
-    if((req.query as any).contract==='personal-v1'){try{return await personalUsageQuery(pool,actor.userId,req.query as Record<string,unknown>,'sessions')}catch(e){return usageErrorReply(reply,e)}}
+    if((req.query as any).contract==='personal-v1'){return replyPersonalUsage(req,reply,pool,actor.userId,'sessions')}
     try { return await getTokenSessionAnalytics(pool, actor.userId, parseTokenSessionQuery(req.query as Record<string, unknown>), tokenFeatures.dashboardV2) }
     catch (error) { if (error instanceof TokenQueryError) return reply.code(400).send({error:'invalid_query',message:error.message}); throw error }
   })
@@ -2098,7 +2098,7 @@ async function main() {
     if (!payload) { reply.code(401); return { error: 'invalid token' }; }
     if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     if((req.query as any).contract!==undefined&&(req.query as any).contract!=='personal-v1')return reply.code(400).send({error:'unsupported_contract'})
-    if((req.query as any).contract==='personal-v1'){try{return await personalUsageQuery(pool,payload.userId,req.query as Record<string,unknown>,'dashboard')}catch(e){return usageErrorReply(reply,e)}}
+    if((req.query as any).contract==='personal-v1'){return replyPersonalUsage(req,reply,pool,payload.userId,'dashboard')}
     const daemon = ((req.query as any).daemon as string) || 'all';
     const days = Math.min(Math.max(parseInt((req.query as any).days as string) || 30, 1), 365);
     let sessionQuery
@@ -2140,7 +2140,7 @@ async function main() {
     if (!databaseReady) { reply.code(503); return { error: 'token accounting initializing' }; }
     const { sessionId } = req.params as any;
     if((req.query as any).contract!==undefined&&(req.query as any).contract!=='personal-v1')return reply.code(400).send({error:'unsupported_contract'})
-    if((req.query as any).contract==='personal-v1'){try{return await personalUsageQuery(pool,payload.userId,req.query as Record<string,unknown>,'session',sessionId)}catch(e){return usageErrorReply(reply,e)}}
+    if((req.query as any).contract==='personal-v1'){return replyPersonalUsage(req,reply,pool,payload.userId,'session',sessionId)}
     const owned = await isSessionOwnedByUser(pool, payload.userId, sessionId);
     if (!owned) { reply.code(404); return { error: 'session not found or not owned' }; }
     const trend = tokenFeatures.dashboardV2

@@ -1,9 +1,13 @@
 package ws
 
 import (
+	"context"
+	"encoding/json"
 	"maps"
 	"reflect"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pocketctl/pocketctl/internal/discovery"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 )
@@ -52,7 +56,6 @@ func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 	if c.dshTeamCallable {
 		capabilities = append(capabilities, protocol.CapabilityTeamDSHV1)
 	}
-	configs := map[string]*protocol.TeamConfigCapabilities{}
 	agents := append([]string(nil), c.agents...)
 	manageable := maps.Clone(c.agentManageable)
 	if c.agentTeamsEnabled {
@@ -74,15 +77,8 @@ func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 			capabilities = append(capabilities, "team_external_agentteams_steps_v1")
 		}
 	}
-	if c.TeamConfigInventory != nil {
-		configs = c.TeamConfigInventory()
-		if len(configs) > 0 {
-			capabilities = append(capabilities, protocol.CapabilityTeamConfigV2)
-		}
-	}
 	return protocol.RegisterMessage{
-		TeamAgentConfigs: configs,
-		Type:             "register", DaemonID: c.daemonID, Hostname: c.hostname,
+		Type: "register", DaemonID: c.daemonID, Hostname: c.hostname,
 		Agents: agents, AgentVersions: maps.Clone(c.agentVersions),
 		AgentLatests: maps.Clone(c.agentLatests), AgentManageable: manageable,
 		OS: c.osName, IP: c.localIP, Arch: c.arch, Version: c.version, StartedAt: c.startedAt,
@@ -100,4 +96,72 @@ func (c *Client) SetAgentTeamsStepsEnabled(enabled bool) {
 	c.agentMu.Lock()
 	c.agentTeamsStepsEnabled = enabled
 	c.agentMu.Unlock()
+}
+
+// ResendRegister coalesces inventory changes for the current connection. The
+// worker only starts after admission, so a refresh cannot race the handshake.
+func (c *Client) ResendRegister() {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	select {
+	case c.inventoryRefresh <- struct{}{}:
+	default:
+	}
+}
+
+// Registration always carries the current durable watermark and session routes.
+func (c *Client) sendRegistration(ctx context.Context, conn *websocket.Conn, register protocol.RegisterMessage) error {
+	if c.activeSessionIDsFn != nil {
+		register.ActiveSessionIDs = c.activeSessionIDsFn()
+	}
+	c.outMu.Lock()
+	register.AckedSeq = c.ackedSeq
+	c.outMu.Unlock()
+	data, err := json.Marshal(register)
+	if err != nil {
+		return err
+	}
+	return c.writeMessageTo(ctx, conn, data)
+}
+
+func (c *Client) refreshRegistration(ctx context.Context, conn *websocket.Conn, requests <-chan struct{}, last protocol.RegisterMessage, retryDelay time.Duration) {
+	var retry <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-requests:
+		case <-retry:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		var configs map[string]*protocol.TeamConfigCapabilities
+		retry = nil
+		if c.TeamConfigInventory != nil {
+			var timedOut bool
+			configs, timedOut = c.TeamConfigInventory(ctx)
+			if timedOut {
+				retry = time.After(retryDelay)
+			}
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		register := c.agentRegisterMessage()
+		if len(configs) > 0 {
+			register.TeamAgentConfigs = configs
+			register.Capabilities = append(register.Capabilities, protocol.CapabilityTeamConfigV2)
+		}
+		if reflect.DeepEqual(register, last) {
+			continue
+		}
+		if err := c.sendRegistration(ctx, conn, register); err != nil {
+			if ctx.Err() == nil {
+				c.logger.Warn("refresh daemon inventory failed", "error", err)
+			}
+			continue
+		}
+		last = register
+	}
 }

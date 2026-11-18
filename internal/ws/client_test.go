@@ -2350,3 +2350,192 @@ func TestQueuedDispatchEvidenceSurvivesDisconnectedTransport(t *testing.T) {
 		}
 	}
 }
+
+func newInventoryTestRelay(t *testing.T) (*Client, <-chan *websocket.Conn) {
+	t.Helper()
+	upgrader := websocket.Upgrader{}
+	peers := make(chan *websocket.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if peer, err := upgrader.Upgrade(w, r, nil); err == nil {
+			peers <- peer
+		}
+	}))
+	t.Cleanup(server.Close)
+	return newTestClient(wsURL(server.URL)), peers
+}
+
+func TestRegistrationAndHeartbeatWhileTeamInventoryIsBlocked(t *testing.T) {
+	c, peers := newInventoryTestRelay(t)
+	c.pongWait = 3 * time.Second
+	c.activeSessionIDsFn = func() []string { return []string{"session-a"} }
+	c.ackedSeq = 7
+	connected := make(chan struct{}, 1)
+	c.OnConnectionStatus = func(status ConnectionStatus, _ string) {
+		if status == ConnectionConnected {
+			connected <- struct{}{}
+		}
+	}
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(releaseProbe) })
+	c.TeamConfigInventory = func(context.Context) (map[string]*protocol.TeamConfigCapabilities, bool) {
+		close(probeStarted)
+		<-releaseProbe
+		return map[string]*protocol.TeamConfigCapabilities{"codex": {Revision: "rev-a"}}, false
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.connectAndServe(ctx)
+	peer := <-peers
+	defer peer.Close()
+	peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var first protocol.RegisterMessage
+	if err := peer.ReadJSON(&first); err != nil {
+		t.Fatalf("initial registration blocked by team discovery: %v", err)
+	}
+	if first.Type != "register" || first.AckedSeq != 7 || !reflect.DeepEqual(first.ActiveSessionIDs, []string{"session-a"}) || len(first.TeamAgentConfigs) != 0 {
+		t.Fatalf("initial registration: %+v", first)
+	}
+	select {
+	case <-probeStarted:
+		t.Fatal("team discovery started before registration acknowledgement")
+	default:
+	}
+	if err := peer.WriteJSON(protocol.RegisterAckMessage{Type: "register_ack", SupportsEventAck: true}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("team discovery did not start after registration")
+	}
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("blocked model discovery kept daemon status from reporting connected")
+	}
+	heartbeats := 0
+	for {
+		var message protocol.RegisterMessage
+		if err := peer.ReadJSON(&message); err != nil {
+			t.Fatal(err)
+		}
+		if message.Type == "ping" {
+			if err := peer.WriteJSON(map[string]string{"type": "pong"}); err != nil {
+				t.Fatal(err)
+			}
+			heartbeats++
+			if heartbeats == 2 {
+				release.Do(func() { close(releaseProbe) })
+			}
+			continue
+		}
+		if heartbeats < 2 || message.Type != "register" || message.TeamAgentConfigs["codex"] == nil || message.TeamAgentConfigs["codex"].Revision != "rev-a" || !containsCapability(message.Capabilities, protocol.CapabilityTeamConfigV2) {
+			t.Fatalf("refreshed registration: %+v", message)
+		}
+		break
+	}
+}
+
+func TestReplacementConnectionRefreshesInventoryIndependently(t *testing.T) {
+	c, peers := newInventoryTestRelay(t)
+	c.pongWait = 3 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	oldProbe := make(chan context.Context, 1)
+	releaseOld := make(chan struct{})
+	defer close(releaseOld)
+	var calls atomic.Int32
+	c.TeamConfigInventory = func(probeCtx context.Context) (map[string]*protocol.TeamConfigCapabilities, bool) {
+		revision := "current"
+		if calls.Add(1) == 1 {
+			oldProbe <- probeCtx
+			<-releaseOld
+			revision = "stale"
+		}
+		return map[string]*protocol.TeamConfigCapabilities{"codex": {Revision: revision}}, false
+	}
+
+	connect := func() (*websocket.Conn, <-chan error) {
+		stopped := make(chan error, 1)
+		go func() { stopped <- c.connectAndServe(ctx) }()
+		peer := <-peers
+		t.Cleanup(func() { peer.Close() })
+		peer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		var first protocol.RegisterMessage
+		if err := peer.ReadJSON(&first); err != nil || first.Type != "register" || len(first.TeamAgentConfigs) != 0 {
+			t.Fatalf("initial registration: %+v, err=%v", first, err)
+		}
+		if err := peer.WriteJSON(protocol.RegisterAckMessage{Type: "register_ack", SupportsEventAck: true}); err != nil {
+			t.Fatal(err)
+		}
+		return peer, stopped
+	}
+
+	first, stopped := connect()
+	var oldCtx context.Context
+	select {
+	case oldCtx = <-oldProbe:
+	case <-time.After(time.Second):
+		t.Fatal("first probe did not start")
+	}
+	first.Close()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("blocked probe prevented disconnect")
+	}
+	if oldCtx.Err() == nil {
+		t.Fatal("disconnect did not cancel inventory discovery")
+	}
+	second, _ := connect()
+	for {
+		var msg protocol.RegisterMessage
+		if err := second.ReadJSON(&msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg.Type == "ping" {
+			continue
+		}
+		if msg.Type != "register" || msg.TeamAgentConfigs["codex"] == nil || msg.TeamAgentConfigs["codex"].Revision != "current" {
+			t.Fatalf("replacement inventory: %+v", msg)
+		}
+		break
+	}
+}
+
+func TestTeamInventoryRetriesTimedOutProviderOnSameConnection(t *testing.T) {
+	c, peers := newInventoryTestRelay(t)
+	conn, _, err := websocket.DefaultDialer.Dial(c.relayURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	peer := <-peers
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	c.TeamConfigInventory = func(context.Context) (map[string]*protocol.TeamConfigCapabilities, bool) {
+		calls++
+		configs := map[string]*protocol.TeamConfigCapabilities{"claude-code": {Revision: "available"}}
+		if calls == 1 {
+			return configs, true
+		}
+		configs["codex"] = &protocol.TeamConfigCapabilities{Revision: "recovered"}
+		return configs, false
+	}
+	requests := make(chan struct{}, 1)
+	requests <- struct{}{}
+	go c.refreshRegistration(ctx, conn, requests, c.agentRegisterMessage(), time.Millisecond)
+	peer.SetReadDeadline(time.Now().Add(time.Second))
+	var partial, recovered protocol.RegisterMessage
+	if err := peer.ReadJSON(&partial); err != nil || partial.TeamAgentConfigs["claude-code"] == nil || partial.TeamAgentConfigs["codex"] != nil {
+		t.Fatalf("partial inventory: %+v, err=%v", partial, err)
+	}
+	if err := peer.ReadJSON(&recovered); err != nil || recovered.TeamAgentConfigs["codex"] == nil || recovered.TeamAgentConfigs["claude-code"] == nil {
+		t.Fatalf("recovered inventory: %+v, err=%v", recovered, err)
+	}
+}

@@ -1,1 +1,14 @@
-<!doctype html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>会话显示 · 实际 Web 组件</title></head><body><div id="app"></div><script type="module" src="./session-display-harness.ts"></script></body></html>
+<!doctype html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>会话显示 · 实际 Web 组件</title></head><body>
+<div id="app">Loading actual SessionDetail module…</div>
+<script>
+// Local harness diagnostics: keep startup exceptions visible when the browser
+// automation surface cannot read the developer console. Never used by product.
+function showHarnessError(message) {
+  let box = document.getElementById('harness-startup-error');
+  if (!box) { box = document.createElement('pre'); box.id = 'harness-startup-error'; box.style = 'position:fixed;inset:0;z-index:99999;background:#fff;color:#900;white-space:pre-wrap;padding:24px;overflow:auto'; document.body.append(box); }
+  box.textContent += String(message) + '\n';
+}
+window.addEventListener('error', event => showHarnessError(event.error?.stack || event.message || ('Resource failed: ' + event.target?.src)), true);
+window.addEventListener('unhandledrejection', event => showHarnessError(event.reason?.stack || event.reason));
+</script>
+<script type="module" src="./session-display-harness.ts"></script></body></html>

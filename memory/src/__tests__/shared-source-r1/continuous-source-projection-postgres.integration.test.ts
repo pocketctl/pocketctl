@@ -1059,4 +1059,31 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    expect(observed).toBe(true)
   }finally{await scheduler.stop();await queue.stop()}
  },15000)
+ test('selected reads evaluate native event authority once per returned event with identical metadata',async()=>{
+  const source=await f.source()
+  await f.install(source,'retained_history')
+  const ids=[await f.event(source),await f.event(source)]
+  const root=f.root(source)
+  const {source_scope:scope}=(await f.runtime.query(
+   "SELECT source_scope FROM shared.enumerate_memory_source_targets('relay_event',$1,'',1)",[root])).rows[0]
+  const client=await f.pool.connect()
+  try{
+   await client.query("BEGIN; SET LOCAL track_functions='pl'; SET LOCAL ROLE direct_launch_memory")
+   const calls=async()=>Number((await client.query(
+    "SELECT pg_stat_get_xact_function_calls('public.native_event_authority(bigint,integer)'::regprocedure) AS n")).rows[0].n)
+   const counts:number[]=[]
+   const read=async(mode:number)=>{
+    const before=await calls()
+    const {page}=(await client.query('SELECT shared.read_memory_relay_sources($1,$2,NULL,$3,$4) AS page',
+     [scope,root,ids.length,[mode,...ids]])).rows[0]
+    counts.push((await calls())-before)
+    return page.rows
+   }
+   const body=await read(-1),metadata=await read(-2)
+   expect(body.map((row:{id:string})=>row.id)).toEqual(ids)
+   expect(metadata).toEqual(body.map((row:{metadata:unknown})=>row.metadata))
+   expect(counts).toEqual([ids.length,ids.length])
+  }finally{await client.query('ROLLBACK');client.release()}
+ })
+
 })

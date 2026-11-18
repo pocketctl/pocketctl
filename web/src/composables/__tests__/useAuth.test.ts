@@ -263,6 +263,44 @@ describe('useAuth — authenticated GET', () => {
     })
     expect(accessToken.value).toBe('fresh-token')
   })
+
+  test('passes the abort signal and exposes HTTP status when GET options are supplied', async () => {
+    const { apiGetAuth } = useAuth()
+    const signal = new AbortController().signal
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: false, status: 409, json: async () => ({ error: 'snapshot_expired' }),
+    } as Response)
+
+    expect(await apiGetAuth('/api/tokens/sessions', { signal })).toEqual({
+      ok: false, status: 409, data: { error: 'snapshot_expired' },
+    })
+    expect(fetchSpy).toHaveBeenCalledWith('/api/tokens/sessions', expect.objectContaining({ signal }))
+  })
+
+  test('stops the authenticated GET retry when the request aborts during token refresh', async () => {
+    const { apiGetAuth, accessToken } = useAuth()
+    accessToken.value = 'expired-token'
+    const controller = new AbortController()
+    let finishRefresh!: (value: Response) => void
+    const refreshStarted = new Promise<void>(didStart => {
+      vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({ error: 'expired' }) } as Response)
+        .mockImplementationOnce(() => {
+          didStart()
+          return new Promise(resolve => { finishRefresh = resolve })
+        })
+    })
+
+    const result = expect(apiGetAuth('/api/tokens/sessions', { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    await refreshStarted
+    controller.abort()
+    finishRefresh({
+      ok: true, status: 200,
+      json: async () => ({ access_token: 'fresh-token', user: { id: 1 } }),
+    } as Response)
+    await result
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('useAuth — QR Scan-Login', () => {

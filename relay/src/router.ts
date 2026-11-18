@@ -2650,6 +2650,7 @@ export class Router {
         if (!policy) {
           this.send(clientWs, {
             type: 'error', session_id: sessionId, error: 'session not found or not owned',
+            ...(msg.type === 'invoke_command' ? { request_id: msg.request_id } : {}),
           });
           return;
         }
@@ -2658,6 +2659,7 @@ export class Router {
     } catch {
       this.send(clientWs, {
         type: 'error', session_id: sessionId, error: 'session not found or not owned',
+        ...(msg.type === 'invoke_command' ? { request_id: msg.request_id, code: 'invocation_timeout' } : {}),
       });
     }
   }
@@ -3228,14 +3230,22 @@ export class Router {
           if (['list_invocations', 'invoke_command', 'read_codex_rate_limits'].includes(msg.type)) {
             const reject = (error: string) => this.send(clientWs, {type:'invocation_result', session_id:msg.session_id, request_id:msg.request_id, error});
             if (typeof msg.request_id !== 'string' || !msg.request_id || msg.request_id.length > 128 || (msg.type === 'invoke_command' && (typeof msg.content !== 'string' || msg.content.length > 32768)) || (msg.invocation_id != null && (typeof msg.invocation_id !== 'string' || msg.invocation_id.length > 128))) { reject('invalid_request'); return; }
-            const fingerprint = JSON.stringify([msg.type,msg.session_id,msg.content,msg.invocation_id]);
+            // Use the originating request UUID for the durable timeline receipt.
+            // The transport request retains its separate relay-generated identity.
+            const receiptID = msg.type === 'invoke_command' && msg.record_command_receipt === true
+              && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(msg.request_id) ? msg.request_id : undefined;
+            const fingerprint = JSON.stringify([msg.type,msg.session_id,msg.content,msg.invocation_id,receiptID]);
             const existing = [...this.invocationRequests.values()].find(p => p.client === clientWs && p.requestId === msg.request_id);
             if (existing) { if (existing.fingerprint !== fingerprint) reject('request_id_conflict'); else if (existing.reply) this.send(clientWs,existing.reply); return; }
             if (this.invocationRequests.size >= 2048 || [...this.invocationRequests.values()].filter(p => p.client === clientWs && !p.reply).length >= 4) { reject('busy'); return; }
             const id = randomUUID();
-            const timer = setTimeout(() => { this.invocationRequests.delete(id); reject('调用超时，请刷新后确认状态'); },20_000); timer.unref?.();
+            const timer = setTimeout(() => {
+              this.invocationRequests.delete(id);
+              this.send(clientWs, { type: 'invocation_result', session_id: msg.session_id, request_id: msg.request_id,
+                code: 'invocation_timeout', error: '调用超时，请刷新后确认状态' });
+            }, 20_000); timer.unref?.();
             this.invocationRequests.set(id,{client:clientWs,daemonId,daemonWs:daemon.ws,sessionId:msg.session_id,requestId:msg.request_id,fingerprint,timer});
-            this.send(daemon.ws,{type:msg.type,session_id:msg.session_id,request_id:id,content:msg.content,invocation_id:msg.invocation_id});
+            this.send(daemon.ws,{type:msg.type,session_id:msg.session_id,request_id:id,content:msg.content,invocation_id:msg.invocation_id,command_receipt_id:receiptID});
             return;
           }
           if (platformStatisticsConfig().enabled && client.userId !== null

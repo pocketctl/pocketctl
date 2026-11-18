@@ -139,8 +139,13 @@ export async function initUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){await d
  `)
  if(process.env.PERSONAL_USAGE_WRITE==='true')await db.query('UPDATE usage_analytics_state SET write_enabled=TRUE')
 }
-export async function assertUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){
- const r=await db.query("SELECT to_regclass('public.usage_analytics_state') IS NOT NULL AS ready")
+export async function readUsageAnalyticsSchemaCapabilities(db:Pick<pg.Pool,'query'>){
+ const r=await db.query(`
+  SELECT to_regclass('public.usage_analytics_state') IS NOT NULL AS ready,
+   EXISTS (SELECT 1 FROM pg_attribute
+    WHERE attrelid=to_regclass('public.usage_scope_changes') AND attname='legacy_day'
+      AND attnum>0 AND NOT attisdropped) AS history_watermark
+ `)
  if(!r.rows[0]?.ready)throw Error('usage_schema_migrator_required')
  const v=await db.query('SELECT version,write_enabled FROM usage_analytics_state')
  if(v.rows.length!==1||v.rows[0].version!==1)throw Error('usage_schema_unsupported')
@@ -150,4 +155,9 @@ export async function assertUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){
   const capability=await db.query("SELECT COALESCE(has_sequence_privilege(current_user,to_regclass('public.usage_change_revision'),'USAGE'),FALSE) AS ready")
   if(!capability.rows[0]?.ready)throw Error('usage_change_sequence_usage_required')
  }
+ return {historyWatermark:r.rows[0].history_watermark===true}
+}
+
+export async function assertUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>):Promise<void>{
+ await readUsageAnalyticsSchemaCapabilities(db)
 }

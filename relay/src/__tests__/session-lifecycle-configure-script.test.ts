@@ -36,9 +36,9 @@ describe('atomic filesystem lifecycle configuration script', () => {
     mkdirSync(archive, { mode: 0o700 }); writeFileSync(envFile, original, { mode: 0o600 })
   })
   afterEach(() => { rmSync(directory, { recursive: true, force: true }) })
-  function run(apply = true) {
+  function run(apply = true, extraArgs: string[] = []) {
     return spawnSync(process.execPath, [script, '--relay-root', compiledRelay, '--env-file', envFile, '--release-file', releaseFile,
-      '--archive-dir', archive, '--backup-dir', backups, '--service-user', userInfo().username, ...(apply ? ['--apply'] : [])], { encoding: 'utf8' })
+      '--archive-dir', archive, '--backup-dir', backups, '--service-user', userInfo().username, ...(apply ? ['--apply'] : []), ...extraArgs], { encoding: 'utf8' })
   }
   test('preserves secrets and kill switch while preparing real storage and an unpublished release record', () => {
     const result = run()
@@ -66,6 +66,13 @@ describe('atomic filesystem lifecycle configuration script', () => {
     expect(readFileSync(envFile, 'utf8')).toBe(before)
     expect(readFileSync(releaseFile, 'utf8')).toBe(published)
     expect(readdirSync(backups).length).toBe(count)
+  })
+  test('deploy can apply lifecycle settings without creating a configuration backup', () => {
+    const result = run(true, ['--no-backup'])
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({ applied: true, environment_changed: true })
+    expect(readFileSync(envFile, 'utf8')).toContain('SESSION_LIFECYCLE_STORAGE_DRIVER=filesystem\n')
+    expect(existsSync(backups)).toBe(false)
   })
   test('preview makes no file changes or fake publication', () => {
     const result = run(false)

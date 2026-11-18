@@ -21,6 +21,19 @@ describe('Codex invocation routing',()=>{
   await router.handleClientMessage(a,{...msg,content:'/compact'});expect(a.sent.at(-1).error).toBe('request_id_conflict')
   router.unregisterClient(a);router.unregisterClient(b);expect(r.invocationRequests.size).toBe(0)
  })
+ test('preserves the originating UUID for an opted-in history receipt',async()=>{
+  const {router,a,d}=fixture()
+  const origin='AABBCCDD-1234-5678-ABCD-ABCDEFFEDCBA'
+  const msg={type:'invoke_command',session_id:'s',request_id:origin,content:'/permissions read-only',record_command_receipt:true}
+  await router.handleClientMessage(a,msg)
+  await router.handleClientMessage(a,msg)
+  expect(d.sent).toHaveLength(1)
+  expect(d.sent[0]).toMatchObject({command_receipt_id:origin})
+  expect(d.sent[0].request_id).not.toBe(origin)
+  await router.handleClientMessage(a,{...msg,record_command_receipt:false})
+  expect(a.sent.at(-1)?.error).toBe('request_id_conflict')
+  router.unregisterClient(a)
+ })
  test('rejects unowned sessions and never routes offline requests elsewhere',async()=>{
   const {router,r,a,d}=fixture()
   await router.handleClientMessage(a,{type:'list_invocations',session_id:'other',request_id:'1'});expect(d.sent).toHaveLength(0)

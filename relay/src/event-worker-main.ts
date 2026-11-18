@@ -36,6 +36,8 @@ import { sessionLifecycleConfig } from './session-lifecycle/config.js'
 import { assertSessionLifecycleSchema } from './session-lifecycle/schema.js'
 import { installConfiguredHistoryReader,configuredArchiveStorage } from './session-history/runtime.js'
 import { createSessionLifecycleWorker } from './session-lifecycle/worker.js'
+import { assertHistorySchema } from './usage-analytics/history-schema.js'
+import { createHistoryWorker } from './usage-analytics/history-worker.js'
 
 const EXTENSION_PROJECTOR_INTERVAL_MS = 500
 
@@ -125,6 +127,7 @@ interface WorkerRuntimeDeps {
   extensionProjector?: { start(): void; stop(): Promise<void> };
   teamRunWorker?: { start(): void; stop(): Promise<void> };
   lifecycleWorker?: { start(): void; stop(): Promise<void> };
+  usageHistoryWorker?: { start(): void; stop(): Promise<void> };
   pool: { end(): Promise<void> };
 }
 
@@ -154,6 +157,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
         deps.extensionProjector?.start()
         deps.teamRunWorker?.start()
         deps.lifecycleWorker?.start()
+        deps.usageHistoryWorker?.start()
         started = true
       } catch (error) {
         await Promise.allSettled([
@@ -163,6 +167,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
           ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
           ...(deps.teamRunWorker ? [deps.teamRunWorker.stop()] : []),
           ...(deps.lifecycleWorker ? [deps.lifecycleWorker.stop()] : []),
+          ...(deps.usageHistoryWorker ? [deps.usageHistoryWorker.stop()] : []),
         ])
         workerStarted = false
         retentionStarted = false
@@ -182,6 +187,7 @@ export function createWorkerRuntime(deps: WorkerRuntimeDeps) {
             ...(deps.extensionProjector ? [deps.extensionProjector.stop()] : []),
             ...(deps.teamRunWorker ? [deps.teamRunWorker.stop()] : []),
             ...(deps.lifecycleWorker ? [deps.lifecycleWorker.stop()] : []),
+            ...(deps.usageHistoryWorker ? [deps.usageHistoryWorker.stop()] : []),
           ])
           drainFailure = drained.find((result) => result.status === 'rejected')?.reason
           started = false
@@ -349,6 +355,7 @@ export async function main(): Promise<void> {
   const teamRunWorker = teamConfig.autorun === 'on'
     ? createTeamRunWorker(pool, { workerId: `${workerId}:team-run`, externalEnabledForTeam: teamId => teamExternalExecutorEnabled(teamConfig, teamId) })
     : undefined
+  const usageHistoryWorker = process.env.PERSONAL_USAGE_HISTORY_WRITE === 'true' ? createHistoryWorker(pool) : undefined
   let stopStatistics = () => {}
   const runtime = createWorkerRuntime({
     observability: process.env.RELAY_WORKER_METRICS_PORT
@@ -358,6 +365,7 @@ export async function main(): Promise<void> {
       await assertDurableIngressSchema(pool)
       await assertSessionLifecycleSchema(pool)
       await assertTokenUsageWriteContinuity(pool, tokenFeatures)
+      if (usageHistoryWorker) await assertHistorySchema(pool, { write: true })
       if (sessionDocumentConfig.captureMode === 'on') await assertSessionDocumentSchema(pool)
       if (extensionConfig.mode !== 'off') await assertExtensionSchema(pool)
       if (teamConfig.autorun === 'on') {
@@ -373,6 +381,7 @@ export async function main(): Promise<void> {
     extensionProjector,
     teamRunWorker,
     lifecycleWorker,
+    usageHistoryWorker,
     pool,
   })
   await ensurePlatformStatisticsSchema(pool)

@@ -102,6 +102,7 @@ type ClientMessage struct {
 	MemoryContextHint *MemoryContextHint          `json:"memory_context_hint,omitempty"`
 	RetryOfTurnID     string                      `json:"retry_of_turn_id,omitempty"`
 	ForkFrom          string                      `json:"fork_from,omitempty"`
+	CommandReceiptID  string                      `json:"command_receipt_id,omitempty"`
 	InvocationID      string                      `json:"invocation_id,omitempty"`
 	Path              string                      `json:"path,omitempty"`
 	Query             string                      `json:"query,omitempty"`

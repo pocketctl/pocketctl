@@ -238,6 +238,49 @@ func choices(title string, options []map[string]any) map[string]any {
 }
 func textResult(text string) map[string]any { return map[string]any{"kind": "text", "text": text} }
 
+// CodexPermissionCommandReceipt projects the result of an opted-in final
+// permission submission. Option reads and confirmation prompts are ephemeral.
+func CodexPermissionCommandReceipt(cmd protocol.ClientMessage, result map[string]any, invocationErr error) (protocol.DaemonEvent, bool) {
+	if cmd.Type != "invoke_command" || cmd.SessionID == "" || cmd.CommandReceiptID == "" ||
+		(cmd.InvocationID != "" && cmd.InvocationID != "command:permissions") {
+		return protocol.DaemonEvent{}, false
+	}
+	name, args, err := splitInvocation(cmd.Content)
+	permission := codexInvocationPermission(args)
+	if err != nil || name != "permissions" || permission == nil ||
+		(invocationErr == nil && result["kind"] != "text") {
+		return protocol.DaemonEvent{}, false
+	}
+
+	event := protocol.DaemonEvent{
+		Type: "command_receipt", SessionID: cmd.SessionID, RequestID: cmd.CommandReceiptID,
+		EventID: "codex:permission-receipt:" + cmd.SessionID + ":" + cmd.CommandReceiptID,
+		Command: "/permissions", ReceiptStatus: "success", Permission: permission,
+		PermissionEffective: "next_turn",
+	}
+	event.Message, _ = result["text"].(string)
+	if invocationErr != nil {
+		event.ReceiptStatus = "failed"
+		event.PermissionEffective = ""
+		event.Message = invocationErr.Error()
+		if errors.Is(invocationErr, context.DeadlineExceeded) || errors.Is(invocationErr, context.Canceled) {
+			event.ReceiptStatus = "unknown"
+		}
+	}
+	return event, true
+}
+
+func codexInvocationPermission(args string) *protocol.PermissionConfig {
+	switch args {
+	case "read-only", "workspace-write":
+		return &protocol.PermissionConfig{Agent: "codex", Preset: "custom", SandboxMode: args, ApprovalPolicy: "on-request"}
+	case "danger-full-access confirm":
+		return &protocol.PermissionConfig{Agent: "codex", Preset: "full_access", DangerousBypass: true}
+	default:
+		return nil
+	}
+}
+
 // InvokeCodexCommand performs control-only operations. Skills return a validated
 // identity; clients then send the original draft through user_message, preserving
 // quota admission, message correlation, hidden context and canonical turn identity.
@@ -418,10 +461,8 @@ func (sm *SessionManager) invokeCodexCommand(ctx context.Context, id, text, entr
 		if args == "danger-full-access" {
 			return choices("完全访问会关闭沙箱和逐项审批，是否启用？", []map[string]any{choice("确认启用完全访问", "danger-full-access confirm")}), nil
 		}
-		permission := &protocol.PermissionConfig{Agent: "codex", Preset: "custom", SandboxMode: args, ApprovalPolicy: "on-request"}
-		if args == "danger-full-access confirm" {
-			permission = &protocol.PermissionConfig{Agent: "codex", Preset: "full_access", DangerousBypass: true}
-		} else if args != "read-only" && args != "workspace-write" {
+		permission := codexInvocationPermission(args)
+		if permission == nil {
 			return nil, errors.New("不支持的权限配置")
 		}
 		sm.mu.RLock()

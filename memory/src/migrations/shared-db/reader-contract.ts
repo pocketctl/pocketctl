@@ -100,11 +100,12 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
     input_fingerprint=${metadataInputFingerprint()};
     IF metadata_only THEN
      WITH admitted AS MATERIALIZED(
-      SELECT e.id,${metadataRowLocator()} AS value,${metadataInputAdmission()} AS admission FROM public.events e
+      SELECT e.id,${metadataRowLocator('e','r','e.xmin::text','native','input_fingerprint','event_authority.value')} AS value,${metadataInputAdmission()} AS admission FROM public.events e
       LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid AND r.source_kind='relay_event'
        AND r.canonical_key=e.id::text AND r.mapping_state='verified'
+      CROSS JOIN LATERAL(SELECT public.native_event_authority(e.id,e.user_id) AS value OFFSET 0) event_authority
       WHERE e.id=ANY(p_ids[2:]) AND e.session_id=native->>'sessionId' AND e.user_id=(p_scope->>'principalUserId')::int
-       AND NOT e.owner_retired AND e.effect_status IN('none','completed') AND public.native_event_authority(e.id,e.user_id)->>'state'='current'
+       AND NOT e.owner_retired AND e.effect_status IN('none','completed') AND event_authority.value->>'state'='current'
        AND NOT(${metadataUsageDenied()})),observed AS(SELECT id,value,admission FROM admitted WHERE admission<>'denied' ORDER BY id LIMIT p_limit)
      SELECT jsonb_build_object('contract','personal-metadata-observation-v1','version',jsonb_build_object('content',a.content_revision,'authorization',a.authorization_revision,'storage',a.storage_revision),
       'inputFingerprint',input_fingerprint,'nativeSessionFingerprint',encode(sha256(convert_to(native::text,'UTF8')),'hex'),
@@ -115,7 +116,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
      RETURN NEXT observation-'admissions';RETURN;
     END IF;
     WITH selected AS MATERIALIZED(
-     SELECT event_row.*,event_row.xmin::text AS memory_source_xmin,input_admission.value AS memory_input_admission,legacy_fallback.required AS memory_legacy_fallback FROM(
+     SELECT event_row.*,event_row.xmin::text AS memory_source_xmin,event_authority.value AS memory_event_authority,input_admission.value AS memory_input_admission,legacy_fallback.required AS memory_legacy_fallback FROM(
       SELECT id FROM public.events WHERE session_id=native->>'sessionId' AND(p_after IS NULL OR id>p_after)
        AND(NOT keyed_mode OR id=ANY(p_ids[2:])) ORDER BY id OFFSET 0)ordered
      CROSS JOIN LATERAL(SELECT event_body.*,event_body.xmin AS xmin FROM public.events event_body WHERE id=ordered.id OFFSET 0)event_row
@@ -123,8 +124,9 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       AND eligible_ref.source_kind='relay_event' AND eligible_ref.canonical_key=event_row.id::text AND eligible_ref.mapping_state='verified'
      CROSS JOIN LATERAL(SELECT ${metadataInputAdmission('event_row','eligible_ref','keyed_mode')} AS value OFFSET 0)input_admission
      CROSS JOIN LATERAL(SELECT CASE WHEN NOT keyed_mode THEN ${legacySelectionFallback('event_row','eligible_ref')} ELSE FALSE END AS required OFFSET 0)legacy_fallback
+     CROSS JOIN LATERAL(SELECT public.native_event_authority(event_row.id,event_row.user_id) AS value OFFSET 0) event_authority
      WHERE NOT event_row.owner_retired AND event_row.user_id=(p_scope->>'principalUserId')::int
-      AND public.native_event_authority(event_row.id,event_row.user_id)->>'state'='current'
+      AND event_authority.value->>'state'='current'
       AND event_row.effect_status IN('none','completed')
       AND (legacy_fallback.required OR NOT(${metadataUsageDenied('event_row','eligible_ref')})) AND input_admission.value<>'denied'
      ORDER BY ordered.id LIMIT p_limit),legacy_required AS MATERIALIZED(
@@ -145,7 +147,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       'header_ref_conflict',e.source_header_version=1 AND r.source_event_id IS NOT NULL AND
        (encode(r.content_hash,'hex') IS DISTINCT FROM e.canonical_payload_hash OR r.source_sequence IS NOT NULL AND r.source_sequence::text IS DISTINCT FROM e.source_sequence::text OR r.classification IS DISTINCT FROM e.source_classification),
       'journal_sequences',(SELECT jsonb_agg(j.source_seq::text ORDER BY j.source_seq) FROM public.extension_source_outbox j WHERE j.source_kind='canonical_event' AND j.source_id='event:'||e.id::text AND j.owner_user_id=e.user_id AND j.session_id=e.logical_source_session_id AND j.event_type=e.event_type),
-      'retention_denied',FALSE,'input_admission',e.memory_input_admission,'metadata',${metadataRowLocator('e','r','e.memory_source_xmin')}) AS value
+      'retention_denied',FALSE,'input_admission',e.memory_input_admission,'metadata',${metadataRowLocator('e','r','e.memory_source_xmin','native','input_fingerprint','e.memory_event_authority')}) AS value
      FROM page e LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid
       AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified')
     SELECT jsonb_build_object('contract','personal-metadata-observation-v1','version',jsonb_build_object('content',a.content_revision,'authorization',a.authorization_revision,'storage',a.storage_revision),

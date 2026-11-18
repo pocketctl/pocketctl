@@ -218,6 +218,10 @@
         </button>
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
           <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="share" role="menuitem" @click="toolbarOverflowOpen=false; showShareManager=true">{{ t('sharing.share') }}</button>
+          <button type="button" class="toolbar-overflow-item" data-toolbar-action="refresh-latest" role="menuitem"
+            :disabled="!connected || latestCursor === undefined || latestRequest !== null" @click="refreshLatestMessages">
+            <span>{{ t('session.actions.refresh_latest') }}</span><span aria-hidden="true">↻</span>
+          </button>
           <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
           <button v-if="currentSessionAgent==='zcode' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="zcode-quota" role="menuitem" @click="openZcodeQuota"><span>{{ zcodeQuota?.title || t('zcode_quota.title') }}<small class="tool-visibility-hint">{{ zcodeQuota?.summary }}</small></span></button>
           <button v-if="isMobile" type="button" class="toolbar-overflow-item toolbar-overflow-action" role="menuitemcheckbox"
@@ -271,6 +275,7 @@
         :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div class="chat-message-viewport">
+      <div v-if="latestNotice" class="latest-refresh-feedback" role="status">{{ t(latestNotice) }}</div>
       <SessionPromptAnchor :message="latestPrompt" :container="messagesEl" :context="loadKey" @navigate="beginPromptReading" />
       <div
         ref="messagesEl"
@@ -369,7 +374,7 @@
           <!-- User message (right bubble) -->
           <article v-if="msg.role === 'user'" class="session-message-row member" :data-user-message-id="String(msg.id)" tabindex="-1" :aria-label="t('team.me')"><div class="message-body">
           <MessageUser
-            :content="cleanContent(msg.content)"
+            :content="messageDisplayContent(msg)"
             :data-delivery-status="msg.deliveryStatus || undefined"
           />
 
@@ -377,7 +382,7 @@
           <!-- Agent text message -->
           <article v-else-if="msg.type === 'agent_text'" class="session-message-row reply-paragraph"><div class="message-body">
           <MessageAgent
-            :content="cleanContent(msg.content)"
+            :content="messageDisplayContent(msg)"
             :show-label="false"
             :streaming="msg.streaming"
             :agent-type="focusedSubAgentId ? focusedSubAgentInfo?.agentType : currentSessionAgent"
@@ -509,7 +514,7 @@
           </template>
         </div>
 
-          <ReplyFooter v-if="reply.kind === 'reply'" :status="statusForReply(reply)" :content="cleanContent(replyText(reply))"
+          <ReplyFooter v-if="reply.kind === 'reply'" :status="statusForReply(reply)" :content="replyDisplayContent(reply)"
             :duration="isLatestReply(reply) ? (isTurnWorking && turnStartTime !== null ? fmtDuration(turnElapsed) : lastTurnDuration !== null ? fmtDuration(lastTurnDuration) : undefined) : undefined"
             :ended-at="isLatestReply(reply) && completedBarVisible && completedTurnEndedAt ? t('session.ended_at', { time: formatDateTime(completedTurnEndedAt) }) : undefined"
             :usage="isLatestReply(reply) && lastAgentUsage?.output_tokens ? t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) : undefined"
@@ -766,6 +771,7 @@ import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
 import SessionFullscreenToggle from '../components/session/SessionFullscreenToggle.vue'
+import type { ComputedRef } from 'vue'
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, provide } from 'vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
 import ActionList from '../components/ActionList.vue'
@@ -1199,6 +1205,61 @@ let historySlowTimer: ReturnType<typeof setTimeout> | null = null
 // session-history-pagination: backward pagination state
 const pageSize = computed(() => isMobile.value ? 20 : 50)  // session-history-pagination: 一次加载 50 条（平衡首屏/翻页性能）
 const loadedMinId = ref(0)      // oldest loaded event id (backward cursor)
+// Forward requests have a separate ID range and cursor so they can finish
+// independently of an older-page read and its scroll anchor.
+const latestCursor = ref<number>()
+const latestRequest = ref<number | null>(null)
+let latestSequence = 0
+const latestEvents = new ReplaySessionTrustBuffer<any>()
+const latestNotice = ref('')
+let latestTimer: ReturnType<typeof setTimeout> | undefined
+const liveOverlap = new Set<string>()
+const replayOverlap = new Set<string>()
+
+function overlapKey(event: any): string | undefined {
+  const identity = event.seq ?? event.payload?.seq ?? event.event_id ?? event.payload?.event_id
+  if (identity == null) return
+  return JSON.stringify([event.session_id ?? sessionId.value, event.agent_id ?? '', event.type ?? event.event_type, identity])
+}
+
+function finishLatest(notice = '') {
+  clearTimeout(latestTimer)
+  latestRequest.value = null
+  latestEvents.reset()
+  latestNotice.value = notice
+  if (notice) latestTimer = setTimeout(() => { latestNotice.value = '' }, 2500)
+}
+
+function requestLatestPage() {
+  clearTimeout(latestTimer)
+  latestRequest.value = --latestSequence
+  latestNotice.value = 'session.refreshing_latest'
+  latestTimer = setTimeout(() => finishLatest('session.history_read_failed'), 10000)
+  const agent = focusedSubAgentId.value
+  if (!send({
+    type: agent ? 'replay_subagent' : 'replay', session_id: sessionId.value,
+    ...(agent ? { agent_id: agent } : {}), direction: 'forward',
+    last_seq: latestCursor.value, limit: pageSize.value, req_id: latestRequest.value,
+  })) finishLatest('session.history_read_failed')
+}
+
+function refreshLatestMessages() {
+  if (!connected.value || latestCursor.value === undefined || latestRequest.value !== null) return
+  toolbarOverflowOpen.value = false
+  requestLatestPage()
+}
+
+function resetLatest() {
+  finishLatest()
+  latestCursor.value = undefined
+  liveOverlap.clear()
+  replayOverlap.clear()
+}
+
+watch(connected, online => {
+  if (!online && latestRequest.value !== null) finishLatest('session.history_read_failed')
+})
+
 const isLoadingBackward = ref(false)  // a pagination (scroll-up) request in flight
 const hasMore = ref(false)      // relay signaled older events exist
 const historyViewportFill = new HistoryViewportFillCoordinator({ maxPages: 20, maxElapsedMs: 8000 })
@@ -1255,14 +1316,24 @@ function historyReadingAnchor(allowed?: Set<string>): { id: string; top: number 
     if (rect.bottom > top) return { id, top: rect.top - top }
   }
 }
-function restoreHistoryReadingAnchor(anchor: typeof olderReadingAnchor): boolean {
+function restoreHistoryReadingAnchor(anchor: typeof olderReadingAnchor, keepVisible = false): boolean {
   const parent = messagesEl.value
   if (!parent || !anchor) return false
   const row = Array.from(parent.querySelectorAll<HTMLElement>('[data-history-message-id]')).find(row => row.dataset.historyMessageId === anchor.id)
   const element = row && Array.from(row.children).find(child => child.getBoundingClientRect().height > 0)
   if (!element) return false
-  parent.scrollTop += element.getBoundingClientRect().top - parent.getBoundingClientRect().top - anchor.top
+  const rect = element.getBoundingClientRect()
+  const top = keepVisible ? Math.max(anchor.top, Math.min(0, 24 - rect.height)) : anchor.top
+  parent.scrollTop += rect.top - parent.getBoundingClientRect().top - top
   return true
+}
+
+let historyViewportWidth = 0
+let fullscreenReadingPosition: { context: string; anchor: ReturnType<typeof historyReadingAnchor> } | undefined
+function rememberFullscreenReadingPosition() {
+  fullscreenReadingPosition = sessionFullscreen.value && !autoScroll.value
+    ? { context: loadKey.value, anchor: historyReadingAnchor() }
+    : undefined
 }
 async function toggleMobileToolCalls() {
   mobileShowToolCalls.value = !mobileShowToolCalls.value
@@ -1272,8 +1343,10 @@ watch(sessionFullscreen, async () => {
   const anchor = historyReadingAnchor(), context = loadKey.value, following = autoScroll.value
   await nextTick()
   if (context !== loadKey.value) return
+  historyViewportWidth = messagesEl.value?.clientWidth ?? 0
   if (following) scrollToBottom()
   else restoreHistoryReadingAnchor(anchor)
+  rememberFullscreenReadingPosition()
 }, { flush: 'pre' })
 watch(showToolCalls, async (value) => {
   const parent = messagesEl.value
@@ -1847,11 +1920,37 @@ const renderMessages = computed(() => (cachedHistory.value.length ? cachedHistor
 const replyRows = computed(() => projectReplies(renderMessages.value))
 const lastQuestionForReply = computed(() => [...sourceMessages.value].reverse().find(m => m.role === 'user' && !m.retry_of_turn_id && (!m.deliveryStatus || m.deliveryStatus === 'accepted')))
 const replyAgentLabel = computed(() => agentReplyLabel(focusedSubAgentId.value ? focusedSubAgentInfo.value?.agentType : currentSessionAgent.value || listedSessions.value.find(s => s.session_id === sessionId.value)?.agent_type))
-function isLatestReply(reply: ReplyGroup): boolean {
+// Resolve once per relevant message change, not once per footer field. Scanning
+// the entire history for each reply makes every stream frame quadratic.
+const latestReply = computed(() => {
   const pending = [...sourceMessages.value].reverse().find(m => m.role === 'user')
-  if (pending?.retry_of_turn_id && !pending.turn_id && pending.deliveryStatus !== 'failed') return false
-  return reply === replyRows.value.at(-1) && (!reply.prompt || reply.prompt === lastQuestionForReply.value)
+  if (pending?.retry_of_turn_id && !pending.turn_id && pending.deliveryStatus !== 'failed') return undefined
+  const reply = replyRows.value.at(-1)
+  return reply && (!reply.prompt || reply.prompt === lastQuestionForReply.value) ? reply : undefined
+})
+function isLatestReply(reply: ReplyGroup): boolean { return reply === latestReply.value }
+// Weak keys retain only live projection/message objects. Vue tracks content
+// mutations inside each computed, so snapshots and terminal text stay fresh
+// while draft edits and another message's chunks reuse unchanged clean text.
+const messageDisplayCache = new WeakMap<object, ComputedRef<string>>()
+const replyDisplayCache = new WeakMap<ReplyGroup, ComputedRef<string>>()
+function messageDisplayContent(message: any): string {
+  let content = messageDisplayCache.get(message)
+  if (!content) {
+    content = computed(() => cleanContent(message.content))
+    messageDisplayCache.set(message, content)
+  }
+  return content.value
 }
+function replyDisplayContent(reply: ReplyGroup): string {
+  let content = replyDisplayCache.get(reply)
+  if (!content) {
+    content = computed(() => cleanContent(replyText(reply)))
+    replyDisplayCache.set(reply, content)
+  }
+  return content.value
+}
+
 function statusForReply(reply: ReplyGroup): string {
   const projected = replyStatus(reply)
   if (projected === 'waiting' || projected === 'failed') return projected
@@ -2475,6 +2574,7 @@ function settleReplayLocalMessage(message: any, target: any[]) {
 }
 
 function loadHistory() {
+  resetLatest()
   hydrateHistoryPreview()
   clearTaskSnapshotTimer()
   taskSnapshotError.value = false
@@ -2617,9 +2717,22 @@ watch(messagesEl, (element) => {
   if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
   historyViewportResizeTimer = null
   settledHistoryViewportHeight = 0
+  historyViewportWidth = element?.clientWidth ?? 0
+  fullscreenReadingPosition = undefined
   if (!element || typeof ResizeObserver === 'undefined') return
 
   historyViewportResizeObserver = new ResizeObserver((entries) => {
+    const width = element.clientWidth
+    const widthChanged = historyViewportWidth !== width
+    historyViewportWidth = width
+    if (widthChanged && sessionFullscreen.value) {
+      // Rewrapping changes the message heights above the viewport.
+      if (autoScroll.value) scrollToBottom()
+      else if (fullscreenReadingPosition?.context === loadKey.value) {
+        restoreHistoryReadingAnchor(fullscreenReadingPosition.anchor, true)
+        rememberFullscreenReadingPosition()
+      }
+    }
     const observedHeight = entries[0]?.contentRect.height ?? element.clientHeight
     if (!Number.isFinite(observedHeight) || observedHeight <= 0) return
     if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
@@ -2685,8 +2798,11 @@ function onHistoryTouchEnd(event: TouchEvent) {
 }
 function onMessagesScroll() {
   if (!messagesEl.value) return
+  // A resize can clamp scrollTop before its observer restores the reading position.
+  if (historyViewportResizeObserver && sessionFullscreen.value && messagesEl.value.clientWidth !== historyViewportWidth) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
   autoScroll.value = !promptReading.value && scrollHeight - scrollTop - clientHeight < 60
+  rememberFullscreenReadingPosition()
   if (isMobile.value && historyViewportFill.mode) return
   if (isMobile.value && mobileHistoryNeedsGesture) {
     if (scrollTop >= 60) mobileHistoryNeedsGesture = false
@@ -4096,6 +4212,13 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
 // into one ordered flush per animation frame (plus a short timer fallback for
 // background tabs); every other live event flushes pending content first so
 // control events never reorder ahead of it.
+function applyLiveContent(event: any) {
+  const key = overlapKey(event)
+  if (key && replayOverlap.delete(key)) return
+  if (key) liveOverlap.add(key)
+  processEvent(event)
+}
+
 function isBatchableLiveContent(msg: any): boolean {
   const type = msg.type || msg.event_type
   if (type === 'agent_text' || type === 'agent_reasoning') return true
@@ -4112,7 +4235,7 @@ const liveContentBatcher = createLiveSessionEventBatcher<any>({
     // be yanked back to the bottom by output they never followed.
     const shouldFollow = autoScroll.value
     for (const evt of events) {
-      processEvent(evt)
+      applyLiveContent(evt)
       if ((evt.type || evt.event_type) === 'tool_result') {
         const callId = evt.call_id || evt.payload?.call_id
         if (callId) clearToolTimeout(callId)
@@ -4133,7 +4256,7 @@ function flushLiveContent(): void {
 function processImmediateLiveEvent(msg: any, options?: { scroll?: boolean }): void {
   scheduleHistoryPreview()
   flushLiveContent()
-  processEvent(msg)
+  applyLiveContent(msg)
   if (options?.scroll && !promptReading.value) nextTick(() => { if (!promptReading.value) scrollToBottom() })
 }
 
@@ -4208,6 +4331,7 @@ onMounted(() => {
     cachedSessions.value = []; cachedHosts.value = {}; cachedOrganization.value = null; cachedHistory.value = []
     historyCacheRequest++
     if (!personalReadCache.ticket().scope) {
+      resetLatest()
       cachePrivacyBlocked.value = true; navigationRequest++
       messages.value = []; subagentMessages.value = {}; allSessions.value = []; projects.value = []; sidebarBuckets.value = {}; daemons.value = {}
       messageInput.value = ''; historyCacheReady.value = false; statusReady.value = false; runtimeSnapshotReady.value = false
@@ -4399,6 +4523,10 @@ onMounted(() => {
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
+      latestEvents.append(replaySessionTrustContext(), Array.isArray(msg.events) ? msg.events : [])
+      return
+    }
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
     const isBackward = msg.direction === 'backward'
     // Relay sends every replay batch in id ASC order. Keeping this order across
@@ -4435,6 +4563,28 @@ onMounted(() => {
   }))
   cleanups.push(onEvent('replay_end', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
+    if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
+      const next = normalizeReplayCursor(msg.newest_seq ?? msg.last_seq) ?? 0
+      if (msg.error || (msg.has_more && next <= (latestCursor.value ?? 0))) {
+        finishLatest('session.history_read_failed')
+        return
+      }
+      flushLiveContent()
+      for (const event of latestEvents.takeFinal(replaySessionTrustContext())) {
+        const key = overlapKey(event)
+        if (key && liveOverlap.delete(key)) continue
+        if (key) replayOverlap.add(key)
+        processEvent(event, messages.value, undefined, true)
+      }
+      latestCursor.value = Math.max(latestCursor.value ?? 0, next)
+      if (autoScroll.value) nextTick(() => { if (autoScroll.value) scrollToBottom() })
+      if (msg.has_more) requestLatestPage()
+      else {
+        saveHistoryPreview()
+        finishLatest('session.latest_synced')
+      }
+      return
+    }
     if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
     if (historyPageTimer) clearTimeout(historyPageTimer)
     if (msg.req_id === taskSnapshotReqId) {
@@ -4451,6 +4601,9 @@ onMounted(() => {
     }
     if (!msg.has_more) publishHistoryPreview()
     const previousIDs = new Set(sourceMessages.value.map(message => message.id))
+    if (!isLoadingBackward.value && (msg.newest_seq === 0 || normalizeReplayCursor(msg.newest_seq) !== undefined)) {
+      latestCursor.value = Number(msg.newest_seq)
+    }
     const wasLoadingBackward = isLoadingBackward.value
     const replayContext = replaySessionTrustContext()
     if (wasLoadingBackward) {
@@ -4745,6 +4898,7 @@ onMounted(() => {
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
     if (cacheReadDenied(msg.code || msg.error)) {
+      resetLatest()
       cachedHistory.value = []; historyCacheRequest++; historyCacheReady.value = false
       void personalReadCache.remove(historyCacheName())
     }
@@ -4812,6 +4966,7 @@ onMounted(() => {
     void refreshProjects()
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
+      resetLatest()
       liveContentBatcher.reset(liveContentContextKey.value)
       messages.value=[]
       const next = allSessions.value[0]
@@ -4863,6 +5018,7 @@ function onPinned(sessionId: string, pinned: boolean) {
 }
 
 onUnmounted(() => {
+  resetLatest()
   saveHistoryPreview()
   historyCacheRequest++; navigationRequest++
   if (historyCacheTimer) clearTimeout(historyCacheTimer)
@@ -5081,6 +5237,7 @@ onMounted(() => {
 @keyframes menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Messages */
+.latest-refresh-feedback { position: absolute; bottom: 12px; align-self: center; z-index: 3; pointer-events: none; background: var(--surface); color: var(--fg-secondary); border: 1px solid var(--border); border-radius: 16px; padding: 5px 12px; font-size: 12px; }
 .chat-message-viewport { position:relative; display:flex; flex-direction:column; flex:1; min-height:0; overflow:hidden; }
 .chat-messages { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; padding: 24px var(--session-content-gutter) calc(24px + var(--composer-float-clearance)); display: flex; flex-direction: column; align-items: stretch; gap: 14px; position: relative; overflow-anchor: none; scrollbar-gutter: stable; background: var(--bg); }
 /* min-width:0 lets long content (code/URLs) wrap instead of overflowing
@@ -5090,13 +5247,14 @@ onMounted(() => {
    Left-aligned (natural document flow), unlike centered tool cards. */
 .chat-messages > .agent-block { min-width: 0; max-width: 760px; width: fit-content; align-self: flex-start; }
 /* Errors / banners: full width within 860px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
-.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.tool-call-group):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.tool-call-group):not(.receipt-card):not(.turn-status-bar):not(.unified-reply) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
+.chat-messages > .unified-reply { min-width: 0; max-width: var(--session-reply-max-width, 860px); width: 100%; align-self: center; }
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap, .chat-messages > .tool-call-group { min-width: 0; max-width: 860px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 78%; }
 .chat-messages > .banner { margin-bottom: 0; }
 .chat-messages > .messages-bottom-spacer { width: 100%; max-width: none; min-height: 0; flex: 1 0 0; }
-.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 860px; width: 100%; align-self: center; padding: 9px 2px 2px; border: 0; border-top: 1px solid var(--border); border-radius: 0; color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); }
+.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: var(--session-reply-max-width, 860px); width: 100%; align-self: center; padding: 9px 2px 2px; border: 0; border-top: 1px solid var(--border); border-radius: 0; color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); }
 .turn-group-label { color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: .04em; }
 .turn-group-state { color: var(--warning); }
 .turn-group-continuation { color: var(--accent); }
@@ -5622,6 +5780,12 @@ onMounted(() => {
 <style>
 .session-layout.session-fullscreen > .chat-area { position: fixed; inset: 0; height: 100dvh; width: 100%; z-index: 70; }
 .session-layout.session-fullscreen > .session-panel { display: none; }
+@media (width > 768px) {
+  .session-layout.session-fullscreen > .chat-area {
+    --session-content-gutter: clamp(14px, calc(10% - 64px), 160px);
+    --session-reply-max-width: 100%;
+  }
+}
 @media (max-width: 768px) {
   .session-layout.session-fullscreen > .chat-area { height: var(--visual-viewport-bottom, 100dvh); bottom: auto; }
 }

@@ -138,6 +138,70 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   expect(generate).toHaveBeenCalledTimes(1)
   expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows).toEqual([{state:'provider_result_unknown',error_code:'provider_result_unknown'}])
  })
+ test('long consolidation renews the run while its queue claim is live',async()=>{
+  const f=await fixture()
+  const fence={jobId:f.job.job_id,claimedBy:'lease-test',claimEpoch:1}
+  await pool.query(`UPDATE memory_jobs SET state='running',claimed_by=$2,claim_epoch=1,
+   claim_expires_at=clock_timestamp()+interval '30 seconds' WHERE job_id=$1`,[fence.jobId,fence.claimedBy])
+  let renewed=false
+  const generate=vi.fn(async()=>{
+   // Advance the run's age in PostgreSQL and trigger the next timer tick.
+   await pool.query(`UPDATE memory_curation_runs SET started_at=clock_timestamp()-interval '5 minutes',
+    claim_expires_at=clock_timestamp()+interval '30 seconds'`)
+   await vi.advanceTimersByTimeAsync(60000)
+   for(let i=0;i<100&&!renewed;i++){
+    renewed=(await pool.query("SELECT claim_expires_at>clock_timestamp()+interval '4 minutes' AS live FROM memory_curation_runs")).rows[0].live
+    if(!renewed)await new Promise(resolve=>setTimeout(resolve,10))
+   }
+   return success()
+  })
+  vi.useFakeTimers({toFake:['setInterval','clearInterval']})
+  try{await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal(),fence)}
+  finally{vi.useRealTimers()}
+  expect(renewed).toBe(true)
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state FROM memory_curation_runs')).rows).toEqual([{state:'completed'}])
+  expect((await pool.query("SELECT count(*)::int n FROM memory_usage_outbox WHERE operation='curation'")).rows[0].n).toBe(1)
+ })
+ test('a replaced run claim keeps its deadline and bundle when the old response arrives',async()=>{
+  const f=await fixture(),fence={jobId:f.job.job_id,claimedBy:'old-owner',claimEpoch:1}
+  await pool.query("UPDATE memory_jobs SET state='running',claimed_by=$2,claim_epoch=1,claim_expires_at=now()+interval '30 seconds' WHERE job_id=$1",[fence.jobId,fence.claimedBy])
+  let deadline:string|undefined
+  const generate=vi.fn(async()=>{
+   deadline=(await pool.query(`UPDATE memory_curation_runs SET claim_epoch=claim_epoch+1,
+    claim_expires_at=clock_timestamp()+interval '20 seconds' RETURNING claim_expires_at::text`)).rows[0].claim_expires_at
+   await vi.advanceTimersByTimeAsync(60000)
+   return success()
+  })
+  vi.useFakeTimers({toFake:['setInterval','clearInterval']})
+  try{await expect(worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal(),fence)).rejects.toThrow('curation_lease_lost')}
+  finally{vi.useRealTimers()}
+  const run=(await pool.query('SELECT state,claim_expires_at::text FROM memory_curation_runs')).rows[0]
+  expect(run).toEqual({state:'running',claim_expires_at:deadline})
+  expect((await pool.query('SELECT state FROM memory_task_bundles WHERE bundle_id=$1',[f.bundleId])).rows[0].state).toBe('running')
+ })
+ test.each(['expired_run','reclaimed_job'])('heartbeat cannot revive %s',async scenario=>{
+  const f=await fixture(),fence={jobId:f.job.job_id,claimedBy:'lease-test',claimEpoch:1}
+  await pool.query("UPDATE memory_jobs SET state='running',claimed_by=$2,claim_epoch=1,claim_expires_at=now()+interval '30 seconds' WHERE job_id=$1",[fence.jobId,fence.claimedBy])
+  let deadline:string|undefined
+  const generate=vi.fn(async()=>{
+   if(scenario==='reclaimed_job')await pool.query("UPDATE memory_jobs SET claimed_by='successor',claim_epoch=2 WHERE job_id=$1",[fence.jobId])
+   const seconds=scenario==='expired_run'?-1:20
+   deadline=(await pool.query(`UPDATE memory_curation_runs SET claim_expires_at=clock_timestamp()+$1*interval '1 second'
+    RETURNING claim_expires_at::text`,[seconds])).rows[0].claim_expires_at
+   await vi.advanceTimersByTimeAsync(60000)
+   return success()
+  })
+  vi.useFakeTimers({toFake:['setInterval','clearInterval']})
+  try{
+   const work=worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal(),fence)
+   if(scenario==='reclaimed_job')await expect(work).rejects.toThrow('job fence no longer owned')
+   else await work
+  }finally{vi.useRealTimers()}
+  const run=(await pool.query('SELECT state,claim_expires_at::text,result FROM memory_curation_runs')).rows[0]
+  expect(run).toEqual({state:scenario==='expired_run'?'provider_result_unknown':'failed',claim_expires_at:deadline,result:null})
+  expect(generate).toHaveBeenCalledTimes(1)
+ })
  test('AC-15 expired provider lease becomes unknown and never repeats the provider call',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{await pool.query("UPDATE memory_curation_runs SET claim_expires_at=clock_timestamp()-interval '1 second'");return success()})
   const w=worker({generateJson:generate} as TextGenerator)

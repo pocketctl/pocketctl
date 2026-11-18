@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/agentcontrol"
+	"github.com/pocketctl/pocketctl/internal/config"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 )
 
@@ -162,16 +163,24 @@ func (p *CodexRuntimeProvider) shutdownAll() error {
 	return errors.Join(errs...)
 }
 
-// Extra roots are confined to this cwd's nearest repository. Native global and
-// system skills remain native. No project files are copied or rewritten.
+// Extra roots are confined to this cwd's nearest repository below the user
+// home, or to the cwd itself when there is no repository in scope.
 func codexProjectSkillRoots(cwd string) ([]string, error) {
 	canonical, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return nil, err
 	}
 	cwd = canonical
+	home, err := config.HomeDir()
+	if err == nil {
+		home, _ = filepath.EvalSymlinks(home)
+	}
+	// Home-level agent directories contain user state and are not project roots.
+	if cwd == home {
+		return nil, nil
+	}
 	root := cwd
-	for dir := cwd; ; dir = filepath.Dir(dir) {
+	for dir := cwd; dir != home; dir = filepath.Dir(dir) {
 		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 			root = dir
 			break
