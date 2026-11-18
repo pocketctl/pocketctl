@@ -1,6 +1,7 @@
 import {consolidatePersonalUsage} from './usage-analytics/machine-consolidation.js';
 import {initUsageTeamHistory} from './usage-analytics/team-history.js';
 import { initUsageAnalyticsSchema } from './usage-analytics/schema.js';
+import { initHistorySchema } from './usage-analytics/history-schema.js';
 import {assertNativeInputStartCompatible,installNativeInputStart} from './shared-source/input-start.js'
 import {initNativeSessionAliasSchema,assertNativeRetirementUpgradeInput} from './session-alias/schema.js';
 import {installRelaySchemaContract} from './schema-runtime.js';
@@ -882,6 +883,7 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
   // Team Memory bindings reference pre-existing Extension installations.
   await initTeamSchema(pool);
   await initUsageAnalyticsSchema(pool);
+  await initHistorySchema(pool);
   await initUsageTeamHistory(pool);
   // The lifecycle fence trigger targets collaboration_session_agent_bindings,
   // so it must run after the team schema has created that table.

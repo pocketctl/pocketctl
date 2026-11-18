@@ -90,26 +90,37 @@ async function apiGet(path: string): Promise<{ ok: boolean; data: any }> {
   }
 }
 
-/** Authenticated GET with 401 → refresh → retry (mirrors apiRequest semantics). */
-async function apiGetAuth(path: string): Promise<{ ok: boolean; data: any }> {
-  let result = await fetchGetAuth(path)
+type AuthenticatedGetResult = { ok: boolean; status: number; data: any }
+type AuthenticatedGetOptions = { signal?: AbortSignal }
+
+/** Authenticated GET with one token-refresh retry and optional request cancellation. */
+function apiGetAuth(path: string): Promise<Omit<AuthenticatedGetResult, 'status'>>
+function apiGetAuth(path: string, options: AuthenticatedGetOptions): Promise<AuthenticatedGetResult>
+async function apiGetAuth(path: string, options?: AuthenticatedGetOptions) {
+  const signal = options?.signal
+  let result = await fetchGetAuth(path, signal)
+  signal?.throwIfAborted()
   if (result.status === 401) {
     const refreshed = await doRefreshToken()
-    if (refreshed) result = await fetchGetAuth(path)
+    signal?.throwIfAborted()
+    if (refreshed) result = await fetchGetAuth(path, signal)
   }
-  return { ok: result.ok, data: result.data }
+  signal?.throwIfAborted()
+  return options ? result : { ok: result.ok, data: result.data }
 }
 
-async function fetchGetAuth(path: string): Promise<{ ok: boolean; status: number; data: any }> {
+async function fetchGetAuth(path: string, signal?: AbortSignal): Promise<AuthenticatedGetResult> {
+  signal?.throwIfAborted()
   const origin = getRelayOrigin()
   const url = origin ? `${origin}${path}` : path
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (accessToken.value) headers['Authorization'] = `Bearer ${accessToken.value}`
   try {
-    const res = await fetch(url, { method: 'GET', headers, credentials: 'include', cache: 'no-store' })
+    const res = await fetch(url, { method: 'GET', headers, credentials: 'include', cache: 'no-store', signal })
     const data = await res.json()
     return { ok: res.ok, status: res.status, data }
   } catch {
+    signal?.throwIfAborted()
     return { ok: false, status: 0, data: { error: '网络请求失败' } }
   }
 }

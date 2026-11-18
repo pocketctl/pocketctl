@@ -1,3 +1,4 @@
+import {assertHistorySchema} from './usage-analytics/history-schema.js'
 import {assertUsageAnalyticsSchema} from './usage-analytics/schema.js'
 import {assertNativeInputStartSchema} from './shared-source/input-start.js'
 import {assertNativeSessionAliasSchema} from './session-alias/schema.js'
@@ -72,6 +73,7 @@ export async function assertRelaySchemaContract(pool:pg.Pool):Promise<void>{
    if(columns.some(column=>!actual.includes(column)))throw new Error('relay_schema_contract_missing')
   }
   if(process.env.PERSONAL_USAGE_ENABLED==='true'||process.env.PERSONAL_USAGE_WRITE==='true')await assertUsageAnalyticsSchema(c as unknown as pg.Pool)
+  if(process.env.PERSONAL_USAGE_HISTORY_READ==='true')await assertHistorySchema(c)
   await assertNativeSessionAliasSchema(c as unknown as pg.Pool)
   await assertNativeInputStartSchema(c as unknown as pg.Pool)
   await c.query('COMMIT')
