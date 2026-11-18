@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -360,6 +361,73 @@ func TestCodexInvocationCompactionRequiresNativeCompletion(t *testing.T) {
 	}
 	if again := p.Project(codexapp.Inbound{Method: "item/completed", Params: params}); len(again) != 0 {
 		t.Fatal("duplicate completion")
+	}
+}
+
+func TestCodexProjectSkillsStopBeforeUserHome(t *testing.T) {
+	fixture, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	userHome := filepath.Join(fixture, "home")
+	repo := filepath.Join(userHome, "repo")
+	subdir := filepath.Join(repo, "subdir")
+	claude := filepath.Join(repo, ".claude")
+	codex := filepath.Join(subdir, ".codex")
+	control := filepath.Join(userHome, ".codex", "app-server-control")
+	for _, dir := range []string{filepath.Join(repo, ".git"), control} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, root := range []string{claude, codex} {
+		skillDir := filepath.Join(root, "custom", "review")
+		if err := os.MkdirAll(skillDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: review\ndescription: Review fixture\n---\nReview only\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(fixture, "socket-target")
+	if err := os.WriteFile(outside, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(control, "app-server-control.sock")); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(fixture, "home-alias")
+	if err := os.Symlink(userHome, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", alias)
+
+	for _, tc := range []struct {
+		name string
+		cwd  string
+		want []string
+	}{
+		{name: "home", cwd: userHome},
+		{name: "home alias", cwd: alias},
+		{name: "nested project", cwd: subdir, want: []string{codex, claude}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpc := newFakeCodexRuntimeClient()
+			c := &codexCoordinator{projectCwd: tc.cwd}
+			if err := c.configureProjectSkills(context.Background(), rpc); err != nil {
+				t.Fatal(err)
+			}
+			call := rpc.lastCall(t, "skills/extraRoots/set")
+			var params struct {
+				ExtraRoots []string `json:"extraRoots"`
+			}
+			if err := json.Unmarshal(call.params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if params.ExtraRoots == nil || !slices.Equal(params.ExtraRoots, tc.want) {
+				t.Fatalf("extraRoots = %s, want array with roots %v", call.params, tc.want)
+			}
+		})
 	}
 }
 
