@@ -1,4 +1,4 @@
-import { config, shallowMount } from '@vue/test-utils'
+import { config, flushPromises, shallowMount } from '@vue/test-utils'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { reactive, ref } from 'vue'
 import { readFileSync } from 'node:fs'
@@ -400,6 +400,57 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
     vi.unstubAllGlobals()
     vi.useRealTimers()
+  })
+
+  test('keeps the visible message or the bottom when fullscreen width changes', async () => {
+    let resizeTimeline: ResizeObserverCallback | undefined
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(element: Element) {
+        if (element.classList.contains('chat-messages')) resizeTimeline = this.callback
+      }
+      disconnect() {}
+    })
+    const wrapper = shallowMount(SessionDetail)
+    try {
+      const vm = wrapper.vm as any
+      vm.allSessions = [{ session_id: 'ses_1', daemon_id: 'daemon-1', status: 'idle' }]
+      vm.messages = [{ id: 'reply-a', type: 'agent_text', content: 'The visible answer' }]
+      await wrapper.vm.$nextTick()
+
+      const viewport = wrapper.get<HTMLDivElement>('.chat-messages')
+      const answer = viewport.get('[data-history-message-id="reply-a"] .reply-paragraph')
+      let width = 1280
+      let contentHeight = 1600
+      let answerTop = -40
+      Object.defineProperties(viewport.element, {
+        clientWidth: { get: () => width },
+        clientHeight: { get: () => 600 },
+        scrollHeight: { get: () => contentHeight },
+      })
+      vi.spyOn(answer.element, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, answerTop, width, 200))
+      wrapper.findComponent({ name: 'SessionFullscreenToggle' }).vm.$emit('update:modelValue', true)
+      await flushPromises()
+
+      viewport.element.scrollTop = 500
+      await viewport.trigger('scroll')
+      width = 1920
+      answerTop = -140
+      expect(resizeTimeline).toBeDefined()
+      resizeTimeline!([{ contentRect: { height: 600 } } as ResizeObserverEntry], {} as ResizeObserver)
+      expect(viewport.element.scrollTop).toBe(400)
+
+      viewport.element.scrollTop = 1000
+      await viewport.trigger('scroll')
+      width = 1280
+      contentHeight = 2100
+      await viewport.trigger('scroll')
+      resizeTimeline!([{ contentRect: { height: 600 } } as ResizeObserverEntry], {} as ResizeObserver)
+      expect(viewport.element.scrollTop).toBe(contentHeight)
+    } finally {
+      wrapper.unmount()
+      vi.unstubAllGlobals()
+    }
   })
 
   test('does not refill on viewport growth while the user is reading older history', async () => {

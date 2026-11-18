@@ -1256,14 +1256,24 @@ function historyReadingAnchor(allowed?: Set<string>): { id: string; top: number 
     if (rect.bottom > top) return { id, top: rect.top - top }
   }
 }
-function restoreHistoryReadingAnchor(anchor: typeof olderReadingAnchor): boolean {
+function restoreHistoryReadingAnchor(anchor: typeof olderReadingAnchor, keepVisible = false): boolean {
   const parent = messagesEl.value
   if (!parent || !anchor) return false
   const row = Array.from(parent.querySelectorAll<HTMLElement>('[data-history-message-id]')).find(row => row.dataset.historyMessageId === anchor.id)
   const element = row && Array.from(row.children).find(child => child.getBoundingClientRect().height > 0)
   if (!element) return false
-  parent.scrollTop += element.getBoundingClientRect().top - parent.getBoundingClientRect().top - anchor.top
+  const rect = element.getBoundingClientRect()
+  const top = keepVisible ? Math.max(anchor.top, Math.min(0, 24 - rect.height)) : anchor.top
+  parent.scrollTop += rect.top - parent.getBoundingClientRect().top - top
   return true
+}
+
+let historyViewportWidth = 0
+let fullscreenReadingPosition: { context: string; anchor: ReturnType<typeof historyReadingAnchor> } | undefined
+function rememberFullscreenReadingPosition() {
+  fullscreenReadingPosition = sessionFullscreen.value && !autoScroll.value
+    ? { context: loadKey.value, anchor: historyReadingAnchor() }
+    : undefined
 }
 async function toggleMobileToolCalls() {
   mobileShowToolCalls.value = !mobileShowToolCalls.value
@@ -1273,8 +1283,10 @@ watch(sessionFullscreen, async () => {
   const anchor = historyReadingAnchor(), context = loadKey.value, following = autoScroll.value
   await nextTick()
   if (context !== loadKey.value) return
+  historyViewportWidth = messagesEl.value?.clientWidth ?? 0
   if (following) scrollToBottom()
   else restoreHistoryReadingAnchor(anchor)
+  rememberFullscreenReadingPosition()
 }, { flush: 'pre' })
 watch(showToolCalls, async (value) => {
   const parent = messagesEl.value
@@ -2644,9 +2656,22 @@ watch(messagesEl, (element) => {
   if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
   historyViewportResizeTimer = null
   settledHistoryViewportHeight = 0
+  historyViewportWidth = element?.clientWidth ?? 0
+  fullscreenReadingPosition = undefined
   if (!element || typeof ResizeObserver === 'undefined') return
 
   historyViewportResizeObserver = new ResizeObserver((entries) => {
+    const width = element.clientWidth
+    const widthChanged = historyViewportWidth !== width
+    historyViewportWidth = width
+    if (widthChanged && sessionFullscreen.value) {
+      // Rewrapping changes the message heights above the viewport.
+      if (autoScroll.value) scrollToBottom()
+      else if (fullscreenReadingPosition?.context === loadKey.value) {
+        restoreHistoryReadingAnchor(fullscreenReadingPosition.anchor, true)
+        rememberFullscreenReadingPosition()
+      }
+    }
     const observedHeight = entries[0]?.contentRect.height ?? element.clientHeight
     if (!Number.isFinite(observedHeight) || observedHeight <= 0) return
     if (historyViewportResizeTimer) clearTimeout(historyViewportResizeTimer)
@@ -2712,8 +2737,11 @@ function onHistoryTouchEnd(event: TouchEvent) {
 }
 function onMessagesScroll() {
   if (!messagesEl.value) return
+  // A resize can clamp scrollTop before its observer restores the reading position.
+  if (historyViewportResizeObserver && sessionFullscreen.value && messagesEl.value.clientWidth !== historyViewportWidth) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
   autoScroll.value = !promptReading.value && scrollHeight - scrollTop - clientHeight < 60
+  rememberFullscreenReadingPosition()
   if (isMobile.value && historyViewportFill.mode) return
   if (isMobile.value && mobileHistoryNeedsGesture) {
     if (scrollTop >= 60) mobileHistoryNeedsGesture = false
@@ -5117,13 +5145,14 @@ onMounted(() => {
    Left-aligned (natural document flow), unlike centered tool cards. */
 .chat-messages > .agent-block { min-width: 0; max-width: 760px; width: fit-content; align-self: flex-start; }
 /* Errors / banners: full width within 860px, centered. (tool-wrap + receipt-card excluded — left-aligned) */
-.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.tool-call-group):not(.receipt-card):not(.turn-status-bar) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
+.chat-messages > *:not(.msg):not(.agent-block):not(.tool-wrap):not(.tool-call-group):not(.receipt-card):not(.turn-status-bar):not(.unified-reply) { min-width: 0; max-width: 860px; width: 100%; align-self: center; }
+.chat-messages > .unified-reply { min-width: 0; max-width: var(--session-reply-max-width, 860px); width: 100%; align-self: center; }
 /* Tool cards: left-aligned, not centered. */
 .chat-messages > .tool-wrap, .chat-messages > .tool-call-group { min-width: 0; max-width: 860px; width: 100%; align-self: flex-start; }
 .chat-messages > *.msg { min-width: 0; max-width: 78%; }
 .chat-messages > .banner { margin-bottom: 0; }
 .chat-messages > .messages-bottom-spacer { width: 100%; max-width: none; min-height: 0; flex: 1 0 0; }
-.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 860px; width: 100%; align-self: center; padding: 9px 2px 2px; border: 0; border-top: 1px solid var(--border); border-radius: 0; color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); }
+.turn-group-header { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: var(--session-reply-max-width, 860px); width: 100%; align-self: center; padding: 9px 2px 2px; border: 0; border-top: 1px solid var(--border); border-radius: 0; color: var(--fg-secondary); background: transparent; font: 600 11px/1 var(--font-mono); }
 .turn-group-label { color: var(--fg-tertiary); text-transform: uppercase; letter-spacing: .04em; }
 .turn-group-state { color: var(--warning); }
 .turn-group-continuation { color: var(--accent); }
@@ -5649,6 +5678,12 @@ onMounted(() => {
 <style>
 .session-layout.session-fullscreen > .chat-area { position: fixed; inset: 0; height: 100dvh; width: 100%; z-index: 70; }
 .session-layout.session-fullscreen > .session-panel { display: none; }
+@media (width > 768px) {
+  .session-layout.session-fullscreen > .chat-area {
+    --session-content-gutter: clamp(14px, calc(10% - 64px), 160px);
+    --session-reply-max-width: 100%;
+  }
+}
 @media (max-width: 768px) {
   .session-layout.session-fullscreen > .chat-area { height: var(--visual-viewport-bottom, 100dvh); bottom: auto; }
 }
