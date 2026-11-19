@@ -6,6 +6,12 @@
 /* ---- DARK THEME (default) ---- */
 :root,
 [data-theme="dark"] {
+  --session-emphasis: #ff9dc8;
+  --session-command: #82c4ff;
+  --session-code: #96dca9;
+  --session-table-heading: #e9c383;
+  --session-output: #a3adba;
+
   --bg:              #0d1117;
   --bg-secondary:   #010409;
   --surface:         #161b22;
@@ -55,6 +61,12 @@
 
 /* ---- LIGHT THEME ---- */
 [data-theme="light"] {
+  --session-emphasis: #93245b;
+  --session-command: #155f9e;
+  --session-code: #216843;
+  --session-table-heading: #78510c;
+  --session-output: #576573;
+
   --bg:              #ffffff;
   --bg-secondary:   #f6f8fa;
   --surface:         #ffffff;

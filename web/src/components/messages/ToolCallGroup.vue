@@ -33,7 +33,7 @@
               <svg v-else viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg>
             </span>
             <span class="tool-step-name">{{ actionLabel(message.tool) }}</span>
-            <span class="tool-step-args" :title="argsFor(message)">{{ argsFor(message) || message.tool || t('session.tool_unknown') }}</span>
+            <span class="tool-step-args" :title="argsFor(message)"><ToolCommandText :tool="message.tool" :text="argsFor(message) || message.tool || t('session.tool_unknown')" /></span>
             <span v-if="durationFor(message)" class="tool-step-duration">{{ durationFor(message) }}</span>
             <span class="tool-step-view">{{ t('session.tool_view_detail') }}</span>
             <svg class="tool-step-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 5 5-5 5"/></svg>
@@ -53,7 +53,7 @@
               <button type="button" :class="{ active: tabFor(message, index) === 'input' }" data-detail-tab="input" role="tab" :aria-selected="tabFor(message, index) === 'input'" @click="setTab(message, index, 'input')">{{ t('session.tool_input') }}</button>
               <button type="button" :class="{ active: tabFor(message, index) === 'output' }" data-detail-tab="output" role="tab" :aria-selected="tabFor(message, index) === 'output'" @click="setTab(message, index, 'output')">{{ t('session.tool_output') }} <span v-if="outputText(message)">{{ t('session.tool_output_lines', { n: outputLineCount(message) }) }}</span></button>
             </div>
-            <div class="tool-detail-panel" data-detail-panel="input" :hidden="tabFor(message, index) !== 'input'"><pre>{{ inputText(message) || '—' }}</pre></div>
+            <div class="tool-detail-panel" data-detail-panel="input" :hidden="tabFor(message, index) !== 'input'"><pre><ToolCommandText :tool="message.tool" :text="inputText(message) || '—'" /></pre></div>
             <div class="tool-detail-panel" data-detail-panel="output" :hidden="tabFor(message, index) !== 'output'">
               <div v-if="message.status === 'running' && !outputText(message)" class="tool-detail-pending"><span class="tool-step-spinner"></span>{{ t('session.tool_running') }}</div>
               <div v-else-if="message.status === 'timeout' && !outputText(message)" class="tool-detail-pending timeout">{{ t('session.tool_timeout') }}</div>
@@ -79,9 +79,10 @@
 </template>
 
 <script setup lang="ts">
+import ToolCommandText from './ToolCommandText.vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-import { toolArgs, toolInputText } from '../../utils/toolDisplay'
+import { isShellTool, parseSimpleToolCommand, toolArgs, toolInputText } from '../../utils/toolDisplay'
 
 const props = defineProps<{ messages: any[] }>()
 const { t } = useLocale()
@@ -110,10 +111,10 @@ const groupStatusLabel = computed(() => {
 const groupSummary = computed(() => {
   const counts = new Map<string, number>()
   for (const message of props.messages) {
-    const label = actionLabel(message.tool)
+    const label = parseSimpleToolCommand(message.tool, argsFor(message))?.[2] || actionLabel(message.tool)
     counts.set(label, (counts.get(label) || 0) + 1)
   }
-  return [...counts].map(([label, count]) => label + ' ' + count).join(' · ')
+  return [...counts].map(([label, count]) => count > 1 ? label + ' ' + count : label).join(' · ')
 })
 const groupDuration = computed(() => {
   const values = props.messages.map(durationMs)
@@ -139,7 +140,7 @@ function actionLabel(tool: string): string {
   if (tool === 'Read') return t('session.tool_action_read')
   if (tool === 'Grep' || tool === 'Glob' || tool === 'WebSearch' || tool === 'WebFetch') return t('session.tool_action_search')
   if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'ApplyPatch' || tool === 'apply_patch') return t('session.tool_action_update')
-  if (tool === 'Bash' || tool === 'Shell' || tool === 'exec_command') return t('session.tool_action_command')
+  if (isShellTool(tool)) return t('session.tool_action_command')
   if (tool === 'Agent' || tool === 'Task') return t('session.tool_action_agent')
   return tool || t('session.tool_action_other')
 }
@@ -265,7 +266,8 @@ onUnmounted(() => {
 .tool-step-status.attention { color: var(--warning); }
 .tool-step-status.error { color: var(--error); }
 .tool-step-name { color: var(--fg-secondary); font-size: 11px; font-weight: 610; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tool-step-args { min-width: 0; overflow: hidden; color: var(--fg-tertiary); font: 12px/1.35 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.tool-step-args {
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; min-width: 0; overflow: hidden; color: var(--fg-tertiary); font: 12px/1.35 var(--font-mono); overflow-wrap:anywhere; white-space:pre-wrap; }
 .tool-step-duration { color: var(--fg-tertiary); font: 11px/1 var(--font-mono); }
 .tool-step-view { color: var(--fg-tertiary); font-size: 11px; }
 .tool-step:hover .tool-step-view, .tool-step[aria-expanded="true"] .tool-step-view { color: var(--accent); }
@@ -314,4 +316,5 @@ onUnmounted(() => {
   .tool-group-chevron, .tool-step-chevron { transition: none; }
 }
 @keyframes tool-group-spin { to { transform: rotate(360deg); } }
+.tool-detail-panel .tool-detail-output { color:var(--session-output); border-inline-start:2px solid var(--border-light); }
 </style>

@@ -7,7 +7,7 @@
       <button type="button" class="tool-header" :aria-expanded="!!message.expanded" @click="toggleExpand">
         <ToolIcon :tool="message.tool || ''" class="tool-icon" />
         <span class="tool-name">{{ message.tool || 'Unknown' }}</span>
-        <span class="tool-args" :title="args">{{ args }}</span>
+        <span class="tool-args" :title="args"><ToolCommandText :tool="message.tool" :text="args" /></span>
         <span class="tool-status">
           <!-- check icon -->
           <svg v-if="message.status === 'completed'" class="status-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -34,7 +34,7 @@
         <div class="tool-section">
           <div class="tool-label">{{ t('session.tool_input') }}</div>
         </div>
-        <div class="tool-code tool-input">{{ inputText }}</div>
+        <div class="tool-code tool-input"><ToolCommandText :tool="message.tool" :text="inputText" /></div>
 
         <!-- Output -->
         <template v-if="fullOutput">
@@ -77,6 +77,7 @@
 </template>
 
 <script setup lang="ts">
+import ToolCommandText from './ToolCommandText.vue'
 import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import MarkdownRenderer from '../MarkdownRenderer.vue'
@@ -150,6 +151,7 @@ function toggleOutput() { emit('toggleOutput') }
   max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .tool-args {
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
   flex: 1;
   min-width: 0;
   font-size: 12px;
@@ -157,7 +159,8 @@ function toggleOutput() { emit('toggleOutput') }
   font-family: var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
 }
 .tool-status { flex-shrink: 0; display: flex; align-items: center; }
 .status-check { color: var(--success); }
@@ -212,7 +215,8 @@ function toggleOutput() { emit('toggleOutput') }
 .tool-input { color: var(--fg-secondary); max-height: 280px; overflow: auto; }
 .tool-header:hover { background: var(--surface-hover); }
 .tool-header:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.tool-output-wrap { min-width: 0; }
+.tool-output-wrap { min-width:0; border-inline-start:2px solid var(--border-light); }
+.tool-output-wrap :deep(pre code) { color:var(--session-output); }
 .tool-output-wrap :deep(.md-code-block) {
   margin: 4px 0 0;
   /* Constrain code block so very long single-line content (e.g. minified

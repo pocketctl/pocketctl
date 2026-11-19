@@ -72,4 +72,7 @@ const preview = computed(() => streamingParagraphs(props.content))
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
+.agent-body :deep(.md-prose strong) { color:var(--session-emphasis); }
+.agent-body :deep(.md-prose code:not(pre code)) { color:var(--session-code); }
+.agent-body :deep(.md-prose th) { color:var(--session-table-heading); }
 </style>

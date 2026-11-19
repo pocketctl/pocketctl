@@ -12,6 +12,19 @@ export function toolIcon(tool: string): string {
   return icons[tool] || '🔧'
 }
 
+export function isShellTool(tool?: string): boolean {
+  return /^(bash|shell|exec_command|shell_command|commandExecution)$/i.test(tool || '')
+}
+
+export function parseSimpleToolCommand(tool: string | undefined, text: string) {
+  if (!isShellTool(tool) || text.length > 4096) return null
+  // Only style complete, simple commands. Preserve the original spacing and
+  // fall back to the entire verbatim input for shell expressions or JSON.
+  const simple = /^([ \t]*)([\w./-]+)((?:[ \t]+(?:[\w./:@%+=,-]+|'[^'\r\n]*'|"[^"\\$`\r\n]*"))*[ \t]*)$/
+  const match = simple.exec(text)
+  return match?.[0] === text ? match : null
+}
+
 /** Short argument summary shown in the collapsed header. */
 export function toolArgs(msg: any): string {
   return msg.inputDesc || msg.description || ''
@@ -33,15 +46,17 @@ export function toolInputText(msg: any): string {
  */
 export function formatToolInput(tool: string, input: any): string {
   if (!input) return ''
-  if (typeof input === 'string') return input.slice(0, 80)
+  if (typeof input === 'string') return isShellTool(tool) ? input : input.slice(0, 80)
   if (typeof input === 'object') {
+    if (isShellTool(tool)) {
+      const command = input.command ?? input.cmd
+      if (typeof command === 'string') return command
+    }
     switch (tool) {
       case 'Read':
       case 'Write':
       case 'Edit':
         return input.file_path || input.path || ''
-      case 'Bash':
-        return input.command || ''
       case 'Glob':
       case 'Grep':
         return input.pattern || input.query || ''
@@ -65,7 +80,6 @@ export function formatToolInput(tool: string, input: any): string {
  */
 export function inferOutputLanguage(tool: string, inputDesc: string): string | undefined {
   switch (tool) {
-    case 'Bash': return 'bash'
     case 'Read':
     case 'Write':
     case 'Edit':
