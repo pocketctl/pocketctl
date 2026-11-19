@@ -5,12 +5,16 @@ import {spawnSync} from 'node:child_process'
 import {expect,test} from 'vitest'
 async function fixture(failHealth:boolean,policy:string|undefined='forward-only',failDrain=false){
  const source=await readFile(resolve('../.claude/skills/deploy-mem-online/scripts/deploy-mem-online.sh'),'utf8')
- const body=source.match(/cat > "\$apply_script" <<'REMOTE_APPLY'\n([\s\S]*?)\nREMOTE_APPLY/)?.[1]
+ const body=source.match(/<<'REMOTE_APPLY'\n([\s\S]*?)\nREMOTE_APPLY/)?.[1]
  if(!body)throw Error('remote_apply_script_not_found')
+ // Apply prepends both statistics helpers before the remote heredoc.
+ const helpers=source.match(/\n(platform_statistics_policy\(\) \{[\s\S]+?)\nmake_remote_preflight\(\)/)?.[1]
+ if(!helpers)throw Error('remote_apply_helpers_not_found')
  const root=await mkdtemp(join(tmpdir(),'memory-forward-deploy-')),bin=join(root,'bin'),log=join(root,'commands.log'),staged=join(root,'staged.env'),script=join(root,'apply.sh')
- await mkdir(bin);await mkdir(join(root,'memory'));await mkdir(join(root,'deploy/systemd'),{recursive:true})
+ await mkdir(bin);await mkdir(join(root,'memory'));await mkdir(join(root,'relay'));await mkdir(join(root,'deploy/systemd'),{recursive:true})
+ await writeFile(join(root,'relay/.env'),'PLATFORM_STATS_ENABLED=false\n')
  await writeFile(staged,'MEMORY_DATABASE_URL=postgres://synthetic-only/new_authority\n');await writeFile(join(root,'memory/.env'),'MEMORY_DATABASE_URL=postgres://synthetic-only/old_authority\n')
- await writeFile(join(root,'deploy/systemd/pocketctl-memory-api.service'),'fixture');await writeFile(join(root,'deploy/systemd/pocketctl-memory-worker.service'),'fixture');await writeFile(script,body)
+ await writeFile(join(root,'deploy/systemd/pocketctl-memory-api.service'),'fixture');await writeFile(join(root,'deploy/systemd/pocketctl-memory-worker.service'),'fixture');await writeFile(script,[helpers,body].join('\n'))
  const stub=`#!/bin/sh
 name=\${0##*/}
 printf '%s %s\\n' "$name" "$*" >> "$TEST_LOG"
@@ -24,19 +28,21 @@ case "$name" in
   if [ "$TEST_FAIL_HEALTH" = 1 ]; then exit 22; fi
   case "$*" in *metrics*) printf '403';; *ready*) printf '{"readiness":"ready"}';; *) printf '{"status":"ok"}';; esac;;
  systemctl) case "$*" in *LoadState*) printf 'loaded';; *ActiveState*) if [ "$TEST_FAIL_DRAIN" = 1 ]; then printf 'active'; else printf 'inactive'; fi;; *MainPID*|*NRestarts*) printf '0';; esac;;
- node) case "$*" in *cleanup-production-backups*) exit 78;; esac
+ node)
+  if [ "$1" = --input-type=module ]; then exec "$TEST_NODE" "$@"; fi
+  case "$*" in *cleanup-production-backups*) exit 78;; esac
   [ -z "$BACKUP_FILE" ] || exit 79;;
 esac
 exit 0
 `
  for(const name of ['install','git','npm','systemd-analyze','systemctl','nginx','node','curl','sleep','journalctl','pg_dump','pg_restore']){const path=join(bin,name);await writeFile(path,stub);await chmod(path,0o700)}
- const run=spawnSync('/bin/bash',[script,root,staged,...(policy?[policy]:[])],{env:{...process.env,PATH:bin+':'+process.env.PATH,TEST_ROOT:root,TEST_LOG:log,TEST_STAGED:staged,TEST_FAIL_HEALTH:failHealth?'1':'0',TEST_FAIL_DRAIN:failDrain?'1':'0'},encoding:'utf8'})
+ const run=spawnSync('/bin/bash',[script,root,staged,...(policy?[policy]:[])],{env:{...process.env,PATH:bin+':'+process.env.PATH,TEST_ROOT:root,TEST_NODE:process.execPath,TEST_LOG:log,TEST_STAGED:staged,TEST_FAIL_HEALTH:failHealth?'1':'0',TEST_FAIL_DRAIN:failDrain?'1':'0'},encoding:'utf8'})
  return {run,commands:await readFile(log,'utf8'),env:await readFile(join(root,'memory/.env'),'utf8')}
 }
 test('forward-only deployment performs no data/config backup, backup cleanup or rollback',async()=>{
  const {run,commands,env}=await fixture(false)
  expect(run.status,run.stderr).toBe(0)
- expect(run.stdout).toContain('policy=forward-only backup=none rollback=disabled')
+ expect(run.stdout).toContain('policy=forward-only runtime_backup=none rollback=disabled')
  expect(commands).not.toMatch(/pg_dump|pg_restore|cleanup-production-backups|\/var\/backups/)
  expect(commands).not.toContain('node --env-file')
  expect(env).toContain('new_authority')
