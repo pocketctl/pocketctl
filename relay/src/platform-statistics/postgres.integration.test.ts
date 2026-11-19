@@ -91,12 +91,47 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
   it('keeps zero complete only inside coverage and marks unknown Memory unavailable', async () => {
     await pool.query("UPDATE platform_statistics_coverage SET starts_at='2026-11-01T10:00:00Z'")
     const result = await readPlatformStatistics(pool, config, range, undefined, now)
-    expect(result.metrics.newUsers).toMatchObject({ value: null,status: 'partial',reason: 'before_forward_coverage' })
+    expect(result.metrics.newUsers).toMatchObject({ value: 0,status: 'partial',reason: 'before_forward_coverage' })
     expect(result.daily[1].newUsers).toMatchObject({ value: 0,status: 'complete' })
     expect(result.metrics.memory).toMatchObject({ value: null,status: 'unavailable' })
     expect(result.metrics.activeUsers.status).toBe('partial')
     expect(result.previous.newUsers).toMatchObject({ value: null,status: 'unavailable' })
   })
+  it('shows the first observed session immediately, then keeps it in historical daily and distinct totals', async () => {
+    const started = '2026-11-01T02:40:00Z'
+    await pool.query('UPDATE platform_statistics_coverage SET starts_at=$1', [started])
+    const snapshot = memory()
+    snapshot.coverageStart = started
+    await recordMaterializedActivity(pool, output(), 1)
+    const today = new Date('2026-11-01T03:01:00Z')
+    const dayRange = parseStatisticsRange({ from: '2026-11-01', to: '2026-11-01' }, today)
+    const live = await readPlatformStatistics(pool, config, dayRange, async () => snapshot, today)
+    const observed = { value: 1, status: 'partial', reason: 'before_forward_coverage' }
+    expect(live.metrics.sessions).toMatchObject(observed)
+    expect(live.metrics.memory).toMatchObject({ value: 0, status: 'partial' })
+    expect(live.previous.sessions).toMatchObject({ value: null, status: 'unavailable' })
+
+    await recordMaterializedActivity(pool, output({ receivedAt: new Date('2026-11-02T03:00:00Z') }), 2)
+    const history = await readPlatformStatistics(pool, config, range, async () => snapshot, now)
+    expect(history.metrics.sessions).toMatchObject(observed)
+    expect(history.daily[0].sessions).toMatchObject(observed)
+    expect(history.daily[1].sessions).toMatchObject({ value: 1, status: 'complete' })
+    expect(history.comparisonAvailable).toBe(false)
+    expect(statisticsCsv(history)).toContain('"current","2026-11-01","sessions","1","partial"')
+  })
+
+  it('keeps observed sessions around outages and does not infer zero across adjacent blind intervals', async () => {
+    await pool.query(`INSERT INTO platform_statistics_gaps VALUES
+      ('sessions','2026-10-31T16:00Z','2026-11-01T12:00Z','collector_interrupted'),
+      ('sessions','2026-11-01T11:00Z','2026-11-01T16:00Z','collector_interrupted'),
+      ('sessions','2026-11-01T16:00Z','2026-11-01T21:00Z','collector_interrupted')`)
+    await recordMaterializedActivity(pool, output({ receivedAt: new Date('2026-11-02T03:00:00Z') }), 1)
+    const result = await readPlatformStatistics(pool, config, range, async () => memory(), now)
+    expect(result.daily[0].sessions).toMatchObject({ value: null, status: 'partial', reason: 'coverage_gap' })
+    expect(result.daily[1].sessions).toMatchObject({ value: 1, status: 'partial', reason: 'coverage_gap' })
+    expect(result.metrics.sessions).toMatchObject({ value: 1, status: 'partial' })
+  })
+
   it('rejects resync, telemetry, empty output, unproven human events and foreign owners', async () => {
     await recordMaterializedActivity(pool, output({ payload: { text: 'x', resync: true } }), 1)
     await recordMaterializedActivity(pool, output({ payload: { text: 'x', content_class: 'telemetry' } }), 2)
@@ -144,10 +179,10 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
   it('records a durable gap when a collector resumes after a stale lease', async () => {
     await pool.query("UPDATE platform_statistics_collectors SET last_seen='2026-11-01T00:00:00Z' WHERE channel='materializer'")
     const stale = await readPlatformStatistics(pool, config, range, async () => memory(), now)
-    expect(stale.metrics.sessions).toMatchObject({ value: null,status: 'partial' })
+    expect(stale.metrics.sessions).toMatchObject({ value: 0,status: 'partial' })
     await heartbeatPlatformStatisticsCollector(pool, 'materializer', now)
     const resumed = await readPlatformStatistics(pool, config, range, async () => memory(), now)
-    expect(resumed.metrics.sessions).toMatchObject({ value: null,status: 'partial' })
+    expect(resumed.metrics.sessions).toMatchObject({ value: 0,status: 'partial' })
     expect((await pool.query("SELECT 1 FROM platform_statistics_gaps WHERE reason='collector_interrupted'")).rowCount).toBe(2)
   })
   it('reruns aggregate-only summary and CSV with owner auth and no-store', async () => {
@@ -178,7 +213,7 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
   it('does not claim complete zero while accepted relevant inbox work remains unresolved', async () => {
     await pool.query("INSERT INTO event_inbox VALUES('2026-11-01T03:00:00Z',0,'agent_text',1,'{}')")
     const result = await readPlatformStatistics(pool, config, range, async () => memory(), now)
-    expect(result.metrics.sessions).toMatchObject({ value: null,status: 'partial',reason: 'source_cutoff_incomplete' })
+    expect(result.metrics.sessions).toMatchObject({ value: 0,status: 'partial',reason: 'source_cutoff_incomplete' })
     expect(result.metrics.activeUsers.status).toBe('partial')
     expect(result.metrics.newUsers).toMatchObject({ value: 0,status: 'complete' })
     await pool.query('UPDATE event_inbox SET status=2')
