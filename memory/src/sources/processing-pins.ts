@@ -1,9 +1,9 @@
-import {annotateSourceFailure} from './diagnostics.js'
+import {annotateSourceFailure,copySourceFailure} from './diagnostics.js'
 import type pg from 'pg'
 import {AsyncLocalStorage} from 'node:async_hooks'
 import {JobDeferredError} from '../jobs/types.js'
 import {canonicalJsonString,SourceUnavailableError,type SourceRoot,type SourceScope,type SourceVersion} from '@pocketctl/session-source'
-import {sourceConnectionKey} from './pool-context.js'
+import {sourceConnectionKey,sourcePoolContext,type SourceTimingStage} from './pool-context.js'
 interface Pin {scope:SourceScope;root:SourceRoot;version:SourceVersion;currentProtection?:true}
 const unavailable=()=>new SourceUnavailableError('processing_pin_expired_or_unavailable')
 const protectionQueues=new WeakMap<object,Map<string,Promise<void>>>()
@@ -31,22 +31,27 @@ async function currentProtectionSerial<T>(pool:pg.Pool,installationId:string,dea
  const identity=sourceConnectionKey(pool),owner=protectionOwner.getStore()
  if(owner?.active&&owner.identity===identity&&owner.installationId===installationId)throw Error('source_metadata_nested_operation')
  let queues=protectionQueues.get(identity);if(!queues){queues=new Map();protectionQueues.set(identity,queues)}
+ const queuedAt=performance.now()
+ const waitingFailure=()=>annotateSourceFailure(failure(),'metadata_queue',signal?.aborted?'cancelled':'transport_deadline',{started:queuedAt,deadline})
  const previous=queues.get(installationId)??Promise.resolve();let begun=false,cancelled=false
  const queued=previous.then(async()=>{
-  if(cancelled||!active()||signal?.aborted||performance.now()>=deadline)throw failure()
-  begun=true;const ownership={identity,installationId,active:true}
+  if(cancelled||!active()||signal?.aborted||performance.now()>=deadline)throw waitingFailure()
+  begun=true
+  sourcePoolContext(pool).observeDuration?.('metadata_queue',performance.now()-queuedAt)
+  const ownership={identity,installationId,active:true}
   try{return await protectionOwner.run(ownership,work)}finally{ownership.active=false}
  })
  const tail=queued.then(()=>undefined,()=>undefined);queues.set(installationId,tail)
  void tail.then(()=>{if(queues!.get(installationId)===tail)queues!.delete(installationId)})
  let timer:ReturnType<typeof setTimeout>|undefined,abort:(()=>void)|undefined
  const waiting=new Promise<never>((_,reject)=>{
-  timer=setTimeout(()=>{if(!begun){cancelled=true;reject(failure())}},Math.max(0,deadline-performance.now()))
-  abort=()=>{cancelled=true;if(!begun)reject(failure())}
+  timer=setTimeout(()=>{if(!begun){cancelled=true;reject(waitingFailure())}},Math.max(0,deadline-performance.now()))
+  abort=()=>{cancelled=true;if(!begun)reject(waitingFailure())}
   if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true})
  })
  try{return await Promise.race([queued,waiting])}
- finally{clearTimeout(timer);if(abort)signal?.removeEventListener('abort',abort)}
+ finally{if(!begun)sourcePoolContext(pool).observeDuration?.('metadata_queue',performance.now()-queuedAt)
+  clearTimeout(timer);if(abort)signal?.removeEventListener('abort',abort)}
 }
 /** Selected bodies are already prepared. The queue is local contention
  * avoidance only; the callback keeps every original SQL authority fence. */
@@ -72,12 +77,19 @@ export function runSelectedSourceTransaction<T>(pool:pg.Pool,installationId:stri
  * Destruction also prevents a late response from sending any subsequent SQL. */
 async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadline=performance.now()+2000,active=()=>true,signal?:AbortSignal,selected=false,onRetryableRollback?:()=>void):Promise<T>{
  let expired=false,connectionExpired=false,released=false,client:pg.PoolClient|undefined,originalQuery:pg.PoolClient['query']|undefined
- let stage='metadata_checkout'
+ let stage:SourceTimingStage='metadata_checkout',stageStarted=performance.now()
+ const observe=sourcePoolContext(pool).observeDuration
+ const nextStage=(next:SourceTimingStage)=>{
+  const now=performance.now()
+  observe?.(stage,now-stageStarted)
+  stage=next
+  stageStarted=now
+ }
  let commitSent=false,commitAcknowledged=false,callbackActive=false,primaryFailureKnown=false
  let primaryFailure:unknown
  // Once a policy/predicate or authoritative server denial is known, cleanup
  // transport loss must not turn that failure into a successful-looking defer.
- const failure=()=>selected&&primaryFailureKnown?primaryFailure:annotateSourceFailure(selected?new SelectedSourceTransactionUnavailable(commitAcknowledged?'committed':commitSent?'unknown':'not-dispatched'):unavailable(),stage,'transport_deadline')
+ const failure=()=>selected&&primaryFailureKnown?primaryFailure:annotateSourceFailure(selected?new SelectedSourceTransactionUnavailable(commitAcknowledged?'committed':commitSent?'unknown':'not-dispatched'):unavailable(),stage,signal?.aborted?'cancelled':'transport_deadline',{started:stageStarted,deadline})
  let totalTimer:ReturnType<typeof setTimeout>|undefined,connectTimer:ReturnType<typeof setTimeout>|undefined
  let abort:(()=>void)|undefined
  const discard=(c:pg.PoolClient)=>{
@@ -108,18 +120,18 @@ async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadl
      return (query as any).apply(physical,args)
     } as pg.PoolClient['query']
    }
-   stage='metadata_transaction'
+   nextStage('metadata_transaction')
    live();await client.query('BEGIN')
    live();await client.query(selected?"SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='1s'":"SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='250ms'")
    live();let result:T
    callbackActive=true
    try{result=await work(client)}finally{callbackActive=false}
-   if(selected)stage='selected_commit'
+   live();nextStage(selected?'selected_commit':'metadata_commit')
    live();await client.query('COMMIT');commitAcknowledged=true
    live();return result
   }catch(error){
    const code=(error as {code?:string}).code
-   if(code==='57014'||code==='55P03')annotateSourceFailure(error,stage,code==='57014'?'statement_timeout':'lock_conflict')
+   if(code==='57014'||code==='55P03')annotateSourceFailure(error,stage,code==='57014'?'statement_timeout':'lock_conflict',{started:stageStarted,deadline})
    if(selected&&commitSent&&!commitAcknowledged&&(!code||!(/^[0-9A-Z]{5}$/.test(code))||code.startsWith('08')||code.startsWith('57'))){release(true);throw failure()}
    // COMMIT uncertainty above takes precedence; only a known primary failure
    // reaches cleanup. Retain it across a hung rollback or cancellation.
@@ -140,7 +152,7 @@ async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadl
  })
  // Promise.race consumes late operation rejections after socket destruction.
  const cancelled=new Promise<never>((_,reject)=>{abort=()=>{expired=true;release(true);reject(failure())};if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true})})
- return Promise.race([operation,timeout,cancelled]).finally(()=>{clearTimeout(totalTimer);clearTimeout(connectTimer);if(abort)signal?.removeEventListener('abort',abort)})
+ return Promise.race([operation,timeout,cancelled]).finally(()=>{observe?.(stage,performance.now()-stageStarted);clearTimeout(totalTimer);clearTimeout(connectTimer);if(abort)signal?.removeEventListener('abort',abort)})
 }
 /** Private execution lifetime: one renewal chain, no timer promise rejection,
  * no source/body data persisted, and no transaction spans the caller's IO. */
@@ -150,23 +162,27 @@ export class SourceProcessingPins {
  private renewal:Promise<void>|undefined
  private chain:Promise<void>=Promise.resolve()
  private failed=false
- private busyFailure:SourceUnavailableError|undefined
+ private firstFailure:SourceUnavailableError|undefined
  private closed=false
  private closing:Promise<void>|undefined
  constructor(private readonly pool:pg.Pool,private readonly executionId:string){}
  private fail(error:unknown):void{
-  if(!this.failed&&error instanceof SourceUnavailableError&&error.code==='source_store_busy')this.busyFailure=error
+  if(this.failed)return
   this.failed=true
+  this.firstFailure=error instanceof SourceUnavailableError && error.code==='source_store_busy' ? error : unavailable()
+  copySourceFailure(error,this.firstFailure)
  }
- assertUsable():void{if(this.closed)throw unavailable();if(this.failed)throw this.busyFailure??unavailable()}
+ assertUsable():void{if(this.closed)throw unavailable();if(this.failed)throw this.firstFailure??unavailable()}
  get count():number{return this.pins.size}
  private key(pin:Pin){return canonicalJsonString([pin.scope,pin.root])}
  private async acquire(pin:Pin,renew:boolean,deadline=performance.now()+2000,signal?:AbortSignal){
+  const started=performance.now()
   try{
    this.assertUsable()
    if(pin.currentProtection)await currentProtectionSerial(this.pool,pin.scope.installationId,deadline,()=>!this.failed&&!this.closed&&!signal?.aborted,()=>this.acquireBounded(pin,renew,deadline,signal),signal)
    else await this.acquireBounded(pin,renew,deadline)
   }catch(error){this.fail(error);throw error}
+  finally{sourcePoolContext(this.pool).observeDuration?.(renew?'pin_renew':'pin_acquire',performance.now()-started)}
  }
  private async acquireBounded(pin:Pin,renew:boolean,deadline:number,signal?:AbortSignal){
   this.assertUsable();if(signal?.aborted)throw unavailable()
@@ -205,6 +221,9 @@ export class SourceProcessingPins {
     if(ok!==false)throw unavailable()
     // FALSE includes permanent denial. Retry only the exact same immutable
     // metadata with the full SQL fence; never refresh a vector/window or job.
+    // Repeating the same execution cannot recreate a missing renewal or
+    // repair malformed inputs. Keep retries for ambiguous and busy denials.
+    if(!lastBusy && (lastReason==='invalid_input'||lastReason==='renewal_missing'))break
     const delay=[25,50,100][attempt]
     if(delay===undefined||performance.now()+delay>=deadline)break
     // metadata has COMMITted and returned its physical client before backoff.

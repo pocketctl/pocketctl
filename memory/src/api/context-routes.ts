@@ -153,7 +153,7 @@ interface CompileBody {
 
 export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDeps) {
   registerApiErrorDiagnostics(app, deps.unexpectedErrorSink)
-  const logger = createMemoryLogger('warn')
+  const logger = createMemoryLogger('info')
   const idempotency = createIdempotencyStore(deps.pool)
   const compileScope = createScopeResolver(deps.pool)
   const mutation = async (
@@ -375,11 +375,13 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
     }, (phase, ms) => { phases[phase] = ms }).catch(async error=>{await invalidateLifecycleObservation(deps.pool,grant.installationId,'unavailable').catch(()=>undefined);throw error})
 
     const finishedAt = performance.now()
+    const loggedPack = outcome.kind === 'ready' && UUID_RE.test(outcome.packId) ? { pack_id: outcome.packId } : {}
     const logLatency = () => {
       const responseAt = performance.now()
       if (body.adapter_capability !== 'native_hidden_v1' || (!reply.raw.destroyed && responseAt - startedAt < 400)) return
       logger.log('warn', 'context_compile_latency', {
         outcome: outcome.kind,
+        ...loggedPack,
         daemon_request_age_ms: daemonRequestAgeMs >= -5000 && daemonRequestAgeMs <= 60000 ? daemonRequestAgeMs : null,
         grant_ms: Math.round(verifiedAt - startedAt),
         compile_ms: Math.round(finishedAt - verifiedAt),
@@ -444,8 +446,13 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
           },
           admission_required: true,
         }
+        const recordHandoff = (state:'separate_admission'|'client_closed'|'admission_failed'|'existing'|'pack_unavailable'|'prepared'|'admission_error'|'consume_error') =>
+          logger.log('info','context_ready_handoff',{state,...loggedPack,inline_requested:body.prepare_context===true})
         if (!body.prepare_context || body.agent !== 'codex' || body.adapter_capability !== 'native_hidden_v1'
-          || references.length || 'version' in grant || !isPhysicalSourcePool(deps.pool) || reply.raw.destroyed) return ready
+          || references.length || 'version' in grant || !isPhysicalSourcePool(deps.pool) || reply.raw.destroyed) {
+          recordHandoff(reply.raw.destroyed?'client_closed':'separate_admission')
+          return ready
+        }
 
         // Keep the admission and single-use consumption transactions, including
         // their current-authority checks. The nonce never leaves this request.
@@ -457,15 +464,28 @@ export function registerContextRoutes(app: FastifyInstance, deps: ContextRouteDe
         const admitted = await deps.admission.admit({
           ...binding, clientRequestId: body.client_request_id,
           agent: body.agent, adapter: 'codex-app-server', grantConfigVersion: grant.configVersion,
-        })
+        }).catch(error=>{recordHandoff('admission_error');throw error})
         const result = { ...ready, admission_required: false }
-        if (!admitted.ok) return { ...result, handoff: { status: 'admission_failed' } }
-        if ('existing' in admitted) return { ...result, handoff: { status: 'existing' } }
-        if (reply.raw.destroyed) return { ...result, handoff: { status: 'pack_unavailable' } }
+        if (!admitted.ok) {
+          recordHandoff('admission_failed')
+          return { ...result, handoff: { status: 'admission_failed' } }
+        }
+        if ('existing' in admitted) {
+          recordHandoff('existing')
+          return { ...result, handoff: { status: 'existing' } }
+        }
+        if (reply.raw.destroyed) {
+          recordHandoff('client_closed')
+          return { ...result, handoff: { status: 'pack_unavailable' } }
+        }
         const consumed = await deps.admission.consume({
           ...binding, injectionId: admitted.injectionId, nonce: admitted.nonce,
-        })
-        if (!consumed.ok) return { ...result, handoff: { status: 'pack_unavailable' } }
+        }).catch(error=>{recordHandoff('consume_error');throw error})
+        if (!consumed.ok) {
+          recordHandoff('pack_unavailable')
+          return { ...result, handoff: { status: 'pack_unavailable' } }
+        }
+        recordHandoff('prepared')
         return { ...result, handoff: {
           status: 'prepared', injection_id: admitted.injectionId,
           expires_at: admitted.expiresAt.toISOString(), ...packText(consumed.pack),

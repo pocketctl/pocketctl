@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import type {ArchiveReadStorage,ArchiveLimits} from '@pocketctl/session-source'
-export interface SourcePoolContext {namespace:'public'|'memory';readerObserver?:(operation:string,kind:string,reason:string)=>void;archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits}}
+export type SourceTimingStage = 'metadata_queue' | 'metadata_checkout' | 'metadata_transaction' | 'metadata_commit' | 'selected_commit' | 'pin_acquire' | 'pin_renew'
+export interface SourcePoolContext {namespace:'public'|'memory';observeDuration?:(stage:SourceTimingStage,milliseconds:number)=>void;readerObserver?:(operation:string,kind:string,reason:string)=>void;archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits}}
 const contexts=new WeakMap<object,SourcePoolContext>()
 const aliases=new WeakMap<object,object>()
 // Factory-owned identity is deliberately separate from inherited context.

@@ -1,6 +1,6 @@
-import {Counter,Gauge,type Registry} from 'prom-client'
+import {Counter,Gauge,Histogram,type Registry} from 'prom-client'
 import type pg from 'pg'
-import {bindSourcePool,sourcePoolContext} from './pool-context.js'
+import {bindSourcePool,sourcePoolContext,type SourceTimingStage} from './pool-context.js'
 const kinds=['relay_event','team_collaboration','team_delivery','legacy_archive'] as const
 const modes=['legacy-feed','shared-shadow','shared-active','paused'] as const
 const states=['pending','leased','dead'] as const
@@ -15,11 +15,17 @@ export function createSourceMetrics(registry:Registry){
  const installations=new Gauge({name:'pocketctl_memory_source_installations',help:'Installation counts by source input mode',labelNames:['mode'] as const,registers:[registry]})
  const bytes=new Gauge({name:'pocketctl_memory_source_copy_allocated_bytes',help:'Physical allocation of Memory source/transport copies including indexes and TOAST',labelNames:['table'] as const,registers:[registry]})
  const errors=new Counter({name:'pocketctl_memory_source_reader_errors_total',help:'Reader failures with finite labels; no identities or raw error messages',labelNames:['operation','kind','reason'] as const,registers:[registry]})
- return {ready,roots,age,installations,bytes,readerError(operation:string,kind:string,reason:string){errors.inc({operation:bounded(operation,operations),kind:bounded(kind,kinds),reason:bounded(reason,reasons)})}}
+ const duration=new Histogram({
+  name:'pocketctl_memory_source_processing_stage_seconds',
+  help:'Source metadata stage duration; pin acquire and renew include nested metadata stages',
+  labelNames:['stage'] as const, buckets:[0.005,0.025,0.1,0.25,0.5,1,2,5],registers:[registry],
+ })
+ const observeDuration=(stage:SourceTimingStage,milliseconds:number)=>duration.observe({stage},milliseconds/1000)
+ return {ready,roots,age,installations,bytes,observeDuration,readerError(operation:string,kind:string,reason:string){errors.inc({operation:bounded(operation,operations),kind:bounded(kind,kinds),reason:bounded(reason,reasons)})}}
 }
 export type SourceMetrics=ReturnType<typeof createSourceMetrics>
 export function attachSourceMetrics(pool:object,metrics:SourceMetrics):void{
- bindSourcePool(pool,{...sourcePoolContext(pool),readerObserver:(operation,kind,reason)=>metrics.readerError(operation,kind,reason)})
+ bindSourcePool(pool,{...sourcePoolContext(pool),observeDuration:metrics.observeDuration,readerObserver:(operation,kind,reason)=>metrics.readerError(operation,kind,reason)})
 }
 const numeric=(value:unknown)=>{if(typeof value!=='string'||!/^\d+(\.\d+)?$/.test(value)||!Number.isFinite(Number(value)))throw Error('source_health_invalid');return Number(value)}
 export async function updateSourceGauges(db:Pick<pg.Pool,'query'>,metrics:SourceMetrics):Promise<void>{

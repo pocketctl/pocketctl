@@ -13,7 +13,7 @@ export function taskTopicDescriptor(spans:TaskPartition['spans'],sources:readonl
 }
 /** Caller holds this session's purge fence. Recheck source admission on every
  * read: a persisted hint is not permission to reuse withdrawn/excluded text. */
-export async function loadTaskCatalog(c:Pick<pg.PoolClient,'query'>,installationId:string,sessionId:string):Promise<TaskCatalogEntry[]> {
+export async function loadTaskCatalog(c:Pick<pg.PoolClient,'query'>,installationId:string,sessionId:string,selectedIds?:ReadonlySet<string>):Promise<TaskCatalogEntry[]> {
  const rows=(await c.query(`SELECT b.bundle_id::text,b.space_id::text,b.revision,b.parent_revision,b.spans,b.source_digest,b.topic_descriptor,p.bundle_id::text AS parent_id,p.revision AS current_parent_revision,p.session_id,p.task_key,p.source_digest AS parent_digest
   FROM memory_task_bundles b JOIN memory_task_bundles p ON p.installation_id=b.installation_id AND p.bundle_id=b.parent_bundle_id
   JOIN memory_spaces s ON s.installation_id=b.installation_id AND s.space_id=b.space_id AND s.state='active'
@@ -23,6 +23,8 @@ export async function loadTaskCatalog(c:Pick<pg.PoolClient,'query'>,installation
   ORDER BY b.updated_at DESC,b.bundle_id LIMIT 64`,[installationId,sessionId])).rows
  const result:TaskCatalogEntry[]=[]
  for(const row of rows){
+  // Keep the same bounded catalog, then revalidate only references used by this result.
+  if(selectedIds && !selectedIds.has(row.bundle_id))continue
   try{
    const source=await loadCurrentLifecycleSources(c,installationId,{bundle_id:row.parent_id,session_id:row.session_id,task_key:row.task_key,source_digest:row.parent_digest})
    const spans=row.spans as TaskPartition['spans']

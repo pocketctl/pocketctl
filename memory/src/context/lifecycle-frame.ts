@@ -148,7 +148,7 @@ export async function lifecycleFrameCurrent(c:Pick<pg.Pool,'query'>,installation
  return row?.valid===true
 }
 /** SQL metadata gate precedes lexical/vector ranking and body hydration. */
-export function lifecycleClaimSql(spaceParam:string,destinationParam:string,consumeParam:string,claim='c',version='v',native?:{installation:string;epoch:string}):string{
+export function lifecycleClaimSql(spaceParam:string,destinationParam:string,consumeParam:string,claim='c',version='v',native?:{installation:string;epoch:string},typedBody=false):string{
  const owner=native?`EXISTS (SELECT 1 FROM (${nativePersonalSceneOwner(native.installation)}) owner
    WHERE owner.authorization_epoch::text=${native.epoch}::text)`
   :`EXISTS (SELECT 1 FROM memory_owner_scopes owner WHERE owner.installation_id=${claim}.installation_id
@@ -160,7 +160,7 @@ export function lifecycleClaimSql(spaceParam:string,destinationParam:string,cons
  JOIN memory_curation_policies cp USING(installation_id)
  WHERE logical.installation_id=${claim}.installation_id AND logical.claim_id=${claim}.claim_id AND logical.space_id=${spaceParam}::uuid AND space.state='active' AND ${destinationParam}::text=ANY(space.destinations)
  AND cp.consume_mode='enabled')))
- AND COALESCE(to_jsonb(${version})->>'body_state','present')='present'`}
+ AND COALESCE(${typedBody ? `${version}.body_state` : `to_jsonb(${version})->>'body_state'`},'present')='present'`}
 
 /** A session switch invalidates only that session. Evaluated in the final
  * consume UPDATE snapshot rather than relying on an earlier async check. */

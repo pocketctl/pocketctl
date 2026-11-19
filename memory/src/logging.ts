@@ -1,6 +1,7 @@
 /**
  * Bounded, redaction-first logging. Log lines may only carry fixed event
- * names, allowlisted error codes and low-cardinality fields; anything
+ * names, allowlisted error codes, low-cardinality fields and server-generated
+ * pack IDs for delivery tracing. Anything
  * resembling tokens, cursors, lease material, absolute paths or session
  * bodies is dropped or masked before serialization.
  */

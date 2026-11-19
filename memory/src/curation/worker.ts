@@ -1,3 +1,4 @@
+import {createMemoryLogger} from '../logging.js'
 import {withTransaction} from '../db.js'
 import {startCurationLeaseRenewal} from './run-lease.js'
 import {prepareCurationSources,attachPreparedSources} from '../sources/prepared-sources.js'
@@ -18,6 +19,11 @@ import {extractConclusions,CONCLUSION_PROMPT_VERSION} from './conclusion-extract
 import type {ConclusionEvidence} from './conclusion-validator.js'
 import {loadCurrentLifecycleSources,refreshLifecycleProcessingReceipt} from './task-repository.js'
 import {loadTaskCatalog,taskTopicDescriptor} from './task-catalog.js'
+const bindingLogger=createMemoryLogger('warn')
+function bindingConflict(reason:'unknown_task'|'catalog_changed'|'write_conflict',expected?:number,current?:number):Error {
+ bindingLogger.log('warn','curation_task_binding_changed',{reason,expected_revision:expected??null,current_revision:current??null})
+ return new Error('task_binding_changed')
+}
 const hash=(v:unknown)=>createHash('sha256').update(canonicalPacketJson(v)).digest('hex')
 export async function curationTransaction<T>(pool:pg.Pool,installationId:string,bundleId:string,fn:(client:pg.PoolClient,bundle:any)=>Promise<T>,options:{sourceCommit?:boolean}={}):Promise<T|null>{
  const shared=sourcePoolContext(pool).namespace==='memory'
@@ -121,20 +127,26 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
      await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code=$3,next_evaluate_at=$4 WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId,code,retryAt]);return ['budget_exceeded','budget_unavailable'].includes(code)?retryAt:undefined
     }
     await c.query(`UPDATE memory_curation_runs SET state='completed',result=$3::jsonb,input_tokens=$4,output_tokens=$5,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2`,[installationId,reservation.runId,JSON.stringify(result.tasks),result.usage.inputTokens,result.usage.outputTokens])
-    const currentTasks=result.tasks.some(task=>task.task_id)?await loadTaskCatalog(c,installationId,bundle.session_id):[]
+    const selectedIds=new Set(result.tasks.flatMap(task=>task.task_id?[task.task_id]:[]))
+    const currentTasks=selectedIds.size?await loadTaskCatalog(c,installationId,bundle.session_id,selectedIds):[]
     let unresolved=result.tasks.some(task=>task.rejections.length>0)
     for(const task of result.tasks){
      if(!task.space_id){unresolved=true;continue}
      if(!(await c.query("SELECT 1 FROM memory_spaces WHERE installation_id=$1 AND space_id=$2 AND state='active' FOR SHARE",[installationId,task.space_id])).rowCount)throw new Error('scene_changed')
      const previous=task.task_id?reservation.tasks.find(t=>t.id===task.task_id):undefined
-     if(task.task_id&&(!previous||!currentTasks.some(t=>t.id===previous.id&&t.revision===previous.revision&&t.space_id===task.space_id)))throw new Error('task_binding_changed')
+     if(task.task_id){
+      if(!previous)throw bindingConflict('unknown_task')
+      const current=currentTasks.find(t=>t.id===previous.id)
+      if(!current||current.revision!==previous.revision||current.space_id!==task.space_id)
+       throw bindingConflict('catalog_changed',previous.revision,current?.revision)
+     }
      const childId=task.task_id??randomUUID(),childDigest=Buffer.from(hash({source:reservation.digest.toString('hex'),spans:task.spans,space:task.space_id}),'hex')
      const child=(await c.query(`INSERT INTO memory_task_bundles(installation_id,bundle_id,session_id,task_key,space_id,source_digest,watermark,bundle_kind,parent_bundle_id,parent_revision,spans,state,topic_descriptor)
       VALUES($1,$2,$3,$4,$5,$6,$7,'task',$8,$9,$10::jsonb,'completed',$11)
       ON CONFLICT(installation_id,bundle_id) DO UPDATE SET revision=memory_task_bundles.revision+1,source_digest=EXCLUDED.source_digest,parent_bundle_id=EXCLUDED.parent_bundle_id,parent_revision=EXCLUDED.parent_revision,spans=EXCLUDED.spans,topic_descriptor=EXCLUDED.topic_descriptor,state='completed',updated_at=clock_timestamp()
       WHERE memory_task_bundles.session_id=EXCLUDED.session_id AND memory_task_bundles.space_id=EXCLUDED.space_id AND memory_task_bundles.body_state='present' AND memory_task_bundles.revision=$12 RETURNING revision`,
       [installationId,childId,bundle.session_id,`task:${childId}`,task.space_id,childDigest,bundle.watermark,bundleId,reservation.revision,JSON.stringify(task.spans),taskTopicDescriptor(task.spans,reservation.evidence),previous?.revision??0])).rows[0]
-     if(!child)throw new Error('task_binding_changed')
+     if(!child)throw bindingConflict('write_conflict',previous?.revision)
      await c.query('DELETE FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[installationId,childId])
      await c.query(`INSERT INTO memory_task_bundle_sources SELECT installation_id,$3,source_event_id,source_digest,source_sequence FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2 AND source_event_id=ANY($4::uuid[])`,[installationId,bundleId,childId,[...new Set(task.spans.map(s=>s.event_id))]])
      const childRun=(await c.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,authorization_epoch,parent_run_id,completed_at)
