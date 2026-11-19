@@ -28,10 +28,12 @@ export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,inpu
  admitted.events.reduce((m,e)=>{const n=BigInt((e.source_provenance!.memory as any).sequence);return n>m?n:m},0n).toString()])).rows[0]
  if(!changed)return
  await client.query('DELETE FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[input.installationId,changed.bundle_id])
- for(const event of admitted.events){
-  await client.query(`INSERT INTO memory_task_bundle_sources(installation_id,bundle_id,source_event_id,source_digest,source_sequence) VALUES($1,$2,$3,$4,$5)`,
-   [input.installationId,changed.bundle_id,event.source_event_id,event.payload_hash,(event.source_provenance!.memory as any).sequence])
- }
+ // Store the complete admitted set in the caller's existing transaction.
+ // Unnest avoids holding the source fence across a round trip per event.
+ await client.query(`INSERT INTO memory_task_bundle_sources(installation_id,bundle_id,source_event_id,source_digest,source_sequence)
+  SELECT $1,$2,member.id,member.digest,member.seq FROM unnest($3::uuid[],$4::bytea[],$5::bigint[]) AS member(id,digest,seq)`,
+  [input.installationId,changed.bundle_id,admitted.events.map(event=>event.source_event_id),
+   admitted.events.map(event=>event.payload_hash),admitted.events.map(event=>(event.source_provenance!.memory as {sequence:string}).sequence)])
  await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
  VALUES(gen_random_uuid(),$1,'consolidate_task',$2,84,$3::jsonb) ON CONFLICT DO NOTHING`,[input.installationId,`consolidate:${changed.bundle_id}:${changed.revision}`,
  JSON.stringify({bundle_id:changed.bundle_id,bundle_revision:Number(changed.revision),mode:policy.mode,policy_revision:policy.revision,authorization_epoch:policy.authorizationEpoch})])

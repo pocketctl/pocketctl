@@ -11,11 +11,30 @@ interface Counts { newUsers: number; activeUsers: number; sessions: number }
 interface Coverage { metric: string; starts_at: Date | string }
 function metric(value: number, coverageStart: string | null, start: string, end: string, gaps: Gap[], key: MetricKey, dataThrough: string, extraReason?: string): Metric {
   if (!coverageStart) return unavailable('source_coverage_unknown')
-  const reason = extraReason || (Date.parse(coverageStart) > Date.parse(start) ? 'before_forward_coverage' : undefined)
-    || (gaps.some(gap => gap.metric === key && Date.parse(String(gap.starts_at)) < Date.parse(end) && Date.parse(String(gap.ends_at)) > Date.parse(start)) ? 'coverage_gap' : undefined)
-    || (Date.parse(dataThrough) < Date.parse(end) ? 'source_cutoff_incomplete' : undefined)
-  if (Date.parse(coverageStart) >= Date.parse(end)) return { value: null, status: 'unavailable', coverageStart, reason: 'before_forward_coverage' }
-  return { value: reason ? null : value, status: reason ? 'partial' : 'complete', coverageStart, ...(reason ? { reason } : {}) }
+  const from = Date.parse(start), to = Date.parse(end), first = Date.parse(coverageStart)
+  if (first >= to) return { value: null, status: 'unavailable', coverageStart, reason: 'before_forward_coverage' }
+  // Missing attribution or a failed source makes the computed population unreliable.
+  if (extraReason) return { value: null, status: 'partial', coverageStart, reason: extraReason }
+
+  const through = Date.parse(dataThrough)
+  const coveredEnd = Math.min(to, through)
+  let cursor = Math.max(from, first)
+  let hasGap = false
+  // Gaps arrive sorted by start. Advance across overlapping outages until the
+  // first observed instant, so a wholly unobserved window never reports zero.
+  for (const gap of gaps) {
+    if (gap.metric !== key) continue
+    const gapStart = new Date(gap.starts_at).getTime(), gapEnd = new Date(gap.ends_at).getTime()
+    if (gapStart >= to) break
+    if (gapEnd <= from) continue
+    hasGap = true
+    if (gapStart > cursor) break
+    cursor = Math.max(cursor, gapEnd)
+  }
+  const reason = first > from ? 'before_forward_coverage' : hasGap ? 'coverage_gap'
+    : through < to ? 'source_cutoff_incomplete' : undefined
+  if (!reason) return { value, status: 'complete', coverageStart }
+  return { value: value > 0 || cursor < coveredEnd ? value : null, status: 'partial', coverageStart, reason }
 }
 function latest(...values: Array<string | null>): string | null {
   return values.some(value => !value) ? null : new Date(Math.max(...values.map(value => Date.parse(value!)))).toISOString()
@@ -123,7 +142,9 @@ export async function readPlatformStatistics(pool: Pool, config: StatisticsConfi
     const usageReason = (actors: MemoryActor[]) => mappingLimitExceeded || memory?.actorLimitExceeded ? 'memory_actor_limit_exceeded'
       : actors.some(actor => allowed(actor) && !owners.has(actorKey(actor))) ? 'memory_actor_owner_unknown' : undefined
     const memoryGaps: Gap[] = memory?.gaps.flatMap(gap => (gap.metric === 'memory' ? ['memory'] : ['memoryUsers','readRequests','activeUsers']).map(key => ({ metric: key, starts_at: gap.from, ends_at: gap.to }))) ?? []
-    const allGaps = [...gaps, ...memoryGaps]
+    const byStart = (a: Gap, b: Gap) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime()
+    gaps.sort(byStart)
+    const allGaps = [...gaps, ...memoryGaps].sort(byStart)
     const dataThrough = new Date(Math.min(Date.parse(materializerThrough),memory ? Date.parse(memory.dataThrough) : now.getTime())).toISOString()
     const bins = [{ start: range.start,end: range.end,humanIds: memory ? humanIds(memory.periods.current.actors) : [] },
       { start: range.previousStart,end: range.previousEnd,humanIds: memory ? humanIds(memory.periods.previous.actors) : [] }]

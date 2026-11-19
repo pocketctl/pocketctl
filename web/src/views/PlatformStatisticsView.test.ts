@@ -48,6 +48,6 @@ test('switching token clears protected data before a new request settles',async(
 test('partial period observation never masquerades as a full period total',async()=>{
  const result=snapshot();result.metrics.memory={value:4,status:'partial',coverageStart:null};api.read.mockResolvedValue(result)
  wrapper=mount(PlatformStatisticsView);await flushPromises()
- expect(wrapper.get('[data-metric="memory"] .ps-value').text()).toBe('—')
- expect(wrapper.get('[data-metric="memory"] .ps-change').text()).toContain('stats.partial')
+ expect(wrapper.get('[data-metric="memory"] .ps-value').text()).toBe('4')
+ expect(wrapper.get('[data-metric="memory"] .ps-change').text()).toContain('stats.observedPartial')
 })

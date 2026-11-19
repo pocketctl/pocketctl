@@ -1,11 +1,33 @@
 import type pg from 'pg'
 import {describe,expect,test,vi} from 'vitest'
 import {SourceProcessingPins,runSelectedSourceTransaction} from '../../sources/processing-pins.js'
-import {bindSourceConnectionAlias} from '../../sources/pool-context.js'
+import {bindSourceConnectionAlias,bindSourcePool} from '../../sources/pool-context.js'
+import {workerErrorFields} from '../../jobs/worker-diagnostics.js'
 const scope={installationId:'10000000-0000-0000-0000-000000000088',principalUserId:'1',ownerScopeKind:'personal' as const,ownerScopeId:'10000000-0000-0000-0000-000000000088',authorizationRevision:'1',configVersion:'1',modeGeneration:'2'}
 const root={kind:'relay_event' as const,key:'1:session'},version={content:'1',authorization:'1',storage:'1'}
 const never=()=>new Promise<any>(()=>undefined)
 describe('actual processing-pin module with unresponsive connected transport',()=>{
+ test('a missing renewal is terminal for this execution and records one physical attempt',async()=>{
+  const stages:string[]=[]
+  let calls=0
+  const pool={connect:async()=>({release(){},query:async(sql:string)=>{
+   if(!sql.includes('acquire_memory_source_processing_pin'))return {rows:[]}
+   calls++
+   return {rows:[calls===1?{valid:true}:{valid:false,reason:'renewal_missing'}]}
+  }})} as unknown as pg.Pool
+  bindSourcePool(pool,{namespace:'memory',observeDuration:(stage,ms)=>{expect(ms).toBeGreaterThanOrEqual(0);stages.push(stage)}})
+  const pins=new SourceProcessingPins(pool,crypto.randomUUID())
+  try{
+   await pins.protect(scope,root,version)
+   const failure=await pins.assertCurrent().then(()=>null,error=>error)
+   expect(workerErrorFields(failure)).toMatchObject({source_stage:'pin_renew',source_reason:'renewal_missing'})
+   const fenced=await pins.assertCurrent().then(()=>null,error=>error)
+   expect(workerErrorFields(fenced)).toMatchObject({source_stage:'pin_renew',source_reason:'renewal_missing'})
+   expect(calls).toBe(2)
+   expect(stages).toEqual(['metadata_checkout','metadata_transaction','metadata_commit','pin_acquire',
+    'metadata_checkout','metadata_transaction','metadata_commit','pin_renew'])
+  }finally{await pins.close()}
+ })
  test('background renewal preserves exact busy refusal at every later positive boundary',async()=>{
   vi.useFakeTimers()
   let busy=false,attempts=0
@@ -53,7 +75,7 @@ describe('actual processing-pin module with unresponsive connected transport',()
   const destroy=vi.fn(),release=vi.fn(),query=vi.fn(),client={connection:{stream:{destroy}},release,query}
   const pool={connect:()=>new Promise(resolve=>{connected=resolve})} as unknown as pg.Pool
   const pins=new SourceProcessingPins(pool,'20000000-0000-0000-0000-000000000088'),work=pins.protect(scope,root,version).then(()=>null,error=>error)
-  await new Promise(resolve=>setTimeout(resolve,1100));expect(await work).toBeInstanceOf(Error)
+  await new Promise(resolve=>setTimeout(resolve,1100));expect(workerErrorFields(await work)).toMatchObject({source_stage:'metadata_checkout',source_stage_ms:expect.any(Number),source_remaining_ms:expect.any(Number)})
   connected(client);await new Promise(resolve=>setTimeout(resolve,20));await pins.close()
   expect(destroy).toHaveBeenCalledOnce();expect(release).toHaveBeenCalledExactlyOnceWith(true);expect(query).not.toHaveBeenCalled()
  },3000)

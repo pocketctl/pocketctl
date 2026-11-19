@@ -1,3 +1,4 @@
+import {readFile} from 'node:fs/promises'
 import {planSourceProjectionRepair,applySourceProjectionRepair} from '../../maintenance/repair-source-projections.js'
 import {afterAll,beforeAll,describe,expect,test} from 'vitest'
 import {directLaunchFixture,type DirectLaunchFixture} from './direct-launch-fixture.js'
@@ -74,6 +75,16 @@ suite('quiet expired roots recover through the actual deterministic worker',()=>
     await new Promise(resolve=>setTimeout(resolve,30))
    }
    expect(complete).toBe(true);expect(observedUnprotected).toBe(true)
+   const trace=await readFile('../scripts/verification/memory-lifecycle/trace-receipt.sql','utf8')
+   const bindings=[inst,source.session,'direct-turn-'+source.session]
+   const traceClient=await f.runtime.connect()
+   try{
+    await traceClient.query('BEGIN READ ONLY')
+    const traced=(await traceClient.query(trace,bindings)).rows[0]
+    expect(traced).toMatchObject({sampled:'3',matched_headers:'3',projection_differences:'0',incomplete_at_relay:'0'})
+    const missing=(await traceClient.query(trace,[inst,source.session,'absent-turn'])).rows[0]
+    expect(missing).toMatchObject({sampled:'0',matched_headers:'0'})
+   }finally{await traceClient.query('ROLLBACK');traceClient.release()}
    expect((await f.pool.query('SELECT hard_deadline<clock_timestamp() AS expired FROM shared.memory_source_processing_windows WHERE owner_user_id=$1 AND session_id=$2',[source.owner,source.session])).rows[0].expired).toBe(true)
    expect((await f.runtime.query("SELECT count(*)::int AS n FROM memory_jobs WHERE installation_id=$1 AND state='dead'",[inst])).rows[0].n).toBe(0)
    const row=(await loadBusinessHealth(f.runtime)).find(r=>r.installation_id===inst)!

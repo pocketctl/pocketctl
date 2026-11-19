@@ -4,3 +4,5 @@
 @media(prefers-reduced-motion:reduce){.ps-page *{animation:none!important;scroll-behavior:auto!important}}
 
 .ps-page :is(button,input,summary,a):focus-visible{outline:2px solid var(--accent);outline-offset:3px}.ps-table tbody th{font-weight:400;color:var(--ink);background:transparent}.ps-meter i:nth-child(3){background:var(--line)}
+
+.ps-chart .point.partial{stroke-dasharray:3 2;stroke-width:2.5}

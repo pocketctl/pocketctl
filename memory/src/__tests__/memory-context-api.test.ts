@@ -105,6 +105,7 @@ describe('context route contracts (unit)', () => {
   })
 
   test('opt-in Codex compile prepares text once and never returns the consumed nonce', async () => {
+    const logs=vi.spyOn(console,'log').mockImplementation(()=>{})
     const usage=vi.spyOn(usageStatistics,'recordUsage').mockRejectedValue(new Error('statistics_unavailable'))
     const packId = '11111111-1111-4111-8111-111111111111'
     const injectionId = '22222222-2222-4222-8222-222222222222'
@@ -150,8 +151,13 @@ describe('context route contracts (unit)', () => {
       const legacy = await app.inject({ ...request, payload: { ...request.payload, prepare_context: undefined } })
       expect(legacy.json()).toMatchObject({ outcome: 'ready', admission_required: true })
       expect(legacy.json().handoff).toBeUndefined()
+      const handoffs=logs.mock.calls.map(call=>JSON.parse(String(call[0]))).filter(line=>line.event==='context_ready_handoff')
+      expect(handoffs.map(line=>[line.state,line.inline_requested])).toEqual([['prepared',true],['existing',true],['separate_admission',false]])
+      expect(handoffs.every(line=>line.pack_id===packId)).toBe(true)
+      expect(JSON.stringify(handoffs)).not.toMatch(/private-nonce|turn-1|ses-1|evidence/)
       expect(admit).toHaveBeenCalledTimes(2)
     } finally {
+      logs.mockRestore()
       usage.mockRestore()
       await app.close()
     }

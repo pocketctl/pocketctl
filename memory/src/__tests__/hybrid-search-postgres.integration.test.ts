@@ -435,9 +435,17 @@ describeWithDatabase('hybrid claim search (PostgreSQL)', () => {
       dimensions: 2,
       embed: vi.fn(async () => { throw new Error('provider down') }),
     }
-    const result = await createSearchService({ pool, embed, recallEmbeddingTimeoutMs: 500, cursorSigningKey: 'test-cursor-signing-key' })
-      .search({ installationId: INSTALLATION, query: 'degrade lexical vitest' })
+    const service = createSearchService({pool,embed,recallEmbeddingTimeoutMs:500,cursorSigningKey:'test-cursor-signing-key'})
+    const input = {installationId:INSTALLATION,query:'degrade lexical vitest'}
+    const result = await service.search(input)
     expect(result.degradedComponents).toEqual(['embedding'])
+    expect(result.embeddingObservation).toBeUndefined()
+    const failed = await service.internalRecall(input)
+    expect(failed.embeddingObservation?.reason).toBe('provider_failed')
+    embed.embed.mockClear()
+    const local = await service.internalRecall({...input,localOnly:true})
+    expect(local.embeddingObservation).toEqual({reason:'local_only',durationMs:0})
+    expect(embed.embed).not.toHaveBeenCalled()
     expect(result.hits.length).toBeGreaterThanOrEqual(1)
   })
 

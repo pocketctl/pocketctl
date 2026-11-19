@@ -1,6 +1,6 @@
 import type {LifecycleFrame} from './lifecycle-frame.js'
 import type pg from 'pg'
-import type { SearchService, SearchHit } from '../retrieval/search-service.js'
+import type { SearchService, SearchHit, SearchResult } from '../retrieval/search-service.js'
 import {diversifyRecall} from '../retrieval/recall-pools.js'
 import type {
   TrajectoryRepository,
@@ -101,6 +101,7 @@ export function createContextRetrieval(deps: {
       let degradedComponents: string[]
       let failed = false
       let poolTruncated=false
+      let embeddingObservation:SearchResult['embeddingObservation']
       try {
         const recall=deps.search.internalRecall?.bind(deps.search)??deps.search.search.bind(deps.search)
         const searched = await recall({
@@ -119,6 +120,7 @@ export function createContextRetrieval(deps: {
         hits = searched.hits
         poolTruncated=searched.candidatePoolTruncated??false
         degradedComponents = searched.degradedComponents
+        embeddingObservation=searched.embeddingObservation
         stages.push(
           { stage: 'pools', outcome: 'ok', candidateCount: hits.length, durationMs: Date.now() - started,
             degradedReason: degradedComponents.length > 0 ? degradedComponents.join('|') : null },
@@ -319,6 +321,7 @@ export function createContextRetrieval(deps: {
         branch: input.branch ?? null,
         rankingPolicyVersionId: input.rankingPolicyVersionId ?? null,
         backendPlan: {
+          ...(embeddingObservation ? {queryEmbedding:embeddingObservation}:{}),
           pools: ['metadata', 'lexical', ...(input.localOnly || degradedComponents.includes('embedding') ? [] : ['vector'])],
           degraded: degradedComponents,
           limit,

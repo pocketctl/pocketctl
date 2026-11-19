@@ -74,6 +74,7 @@ export interface SearchResult {
   hits: SearchHit[]
   nextCursor: string | null
   degradedComponents: string[]
+  embeddingObservation?: { reason: 'local_only'|'provider_unconfigured'|'consent_mismatch'|'provider_failed'|'provider_timeout'|'usage_write_failed'|'invalid_vector'|'empty_vector'|'available'; durationMs:number }
   poolSizes: Record<string, number>
   rankedPools?:RankedPool[]
   candidatePoolTruncated?:boolean
@@ -160,39 +161,58 @@ export function createSearchService(deps: SearchServiceDeps) {
         : null
 
       const queryTokensLower=new Set(query.toLowerCase().split(/[^a-z0-9_\u3040-\u30ff\u3400-\u9fff]+/i).filter(token=>token.length>1))
-      const readEmbeddingMode=()=>deps.pool.query<{embedding_mode:string|null;embedding_consent_fingerprint:string|null}>(`
-        SELECT embedding_mode,embedding_consent_fingerprint FROM memory_feature_settings WHERE installation_id=$1`,[input.installationId])
+      const readEmbeddingMode=()=>deps.pool.query<{embedding_mode:string|null;embedding_consent_fingerprint:string|null;typed_revision:boolean}>(`
+        SELECT embedding_mode,embedding_consent_fingerprint,
+          (SELECT count(*)=3 FROM pg_attribute WHERE attrelid='knowledge_versions'::regclass
+            AND NOT attisdropped AND attname IN ('body_state','effective_from','effective_until')) AS typed_revision
+        FROM memory_feature_settings WHERE installation_id=$1`,[input.installationId])
       const embeddingMode=input.localOnly?undefined:await readEmbeddingMode()
       const mode=embeddingMode?.rows[0]?.embedding_mode
       const consentMatches=!deps.embeddingConsentFingerprint||embeddingMode?.rows[0]?.embedding_consent_fingerprint===deps.embeddingConsentFingerprint
       let queryEmbedding:number[]|null=null
       const embeddingEnabled = mode === 'shadow' || mode === 'enabled'
-      if (embeddingEnabled && (!deps.embed || !consentMatches)) degraded.push('embedding')
+      let embeddingObservation:SearchResult['embeddingObservation']
+      if (embeddingEnabled && (!deps.embed || !consentMatches)) {
+        degraded.push('embedding')
+        embeddingObservation={reason:!consentMatches?'consent_mismatch':'provider_unconfigured',durationMs:0}
+      }
       if (embeddingEnabled && !input.localOnly && deps.embed && consentMatches) {
+        const started=performance.now()
+        const controller=new AbortController()
+        let reason:NonNullable<SearchResult['embeddingObservation']>['reason']='provider_failed'
         try{
-          const controller=new AbortController()
           const embedded=await withTimeout(deps.embed.embed({operation:'recall_query',texts:[query],signal:controller.signal}),deps.recallEmbeddingTimeoutMs,controller)
+          reason='usage_write_failed'
           await deps.pool.query(`INSERT INTO memory_usage_outbox(installation_id,usage_id,operation,model,input_tokens,output_tokens,
             embedding_tokens,cached_tokens,cost_micros,occurred_at)
             VALUES($1,'embedding:query:'||gen_random_uuid()::text,'embedding',$2,0,0,$3,0,$4,NOW())`,
             [input.installationId,deps.embed.model,embedded.tokens,embedded.costMicros??0])
           const vector=embedded.vectors[0]
-          if(!vector||vector.length!==deps.embed.dimensions)degraded.push('embedding')
-          else if(vector.every(value=>value===0))degraded.push('empty_vector')
-          else queryEmbedding=normalize(vector)
-        }catch{degraded.push('embedding')}
+          if(!vector||vector.length!==deps.embed.dimensions){reason='invalid_vector';degraded.push('embedding')}
+          else if(vector.every(value=>value===0)){reason='empty_vector';degraded.push('empty_vector')}
+          else {queryEmbedding=normalize(vector);reason='available'}
+        }catch{
+          if(controller.signal.aborted)reason='provider_timeout'
+          degraded.push('embedding')
+        }
+        embeddingObservation={reason,durationMs:Math.round(performance.now()-started)}
       }
       const shared = sourcePoolContext(deps.pool).namespace === 'memory'
       const nativeLexical = input.localOnly === true && !historicalSelection && shared
       const codeQuestion = nativeLexical ? leadingCodeQuestion(query) : null
-      const currentVersion = nativeLexical ? `(c.current_version_id=v.version_id AND COALESCE(v.body_state,'present')='present'
+      // Let PostgreSQL check withdrawn evidence as a set before ranking the corpus.
+      const deliveryAvailable = `NOT EXISTS(
+        SELECT 1 FROM knowledge_evidence de
+        JOIN memory_team_delivery_withdrawals dw ON ${withdrawnDeliveryJoinSql('de','dw')}
+        WHERE de.installation_id=v.installation_id AND de.version_id=v.version_id
+      )`
+      // Older independent installations can lack the expanded revision columns.
+      // Use their JSON-compatible predicate until the catalog proves all three.
+      const typedRevision=shared || embeddingMode?.rows[0]?.typed_revision===true
+      const currentVersion = typedRevision ? `(c.current_version_id=v.version_id AND COALESCE(v.body_state,'present')='present'
         AND COALESCE(v.effective_from,v.created_at)<=search_clock.as_of
         AND (v.effective_until IS NULL OR v.effective_until>search_clock.as_of)
-        AND NOT EXISTS(
-          SELECT 1 FROM knowledge_evidence de
-          JOIN memory_team_delivery_withdrawals dw ON ${withdrawnDeliveryJoinSql('de','dw')}
-          WHERE de.installation_id=v.installation_id AND de.version_id=v.version_id
-        ))` : currentClaimVersionSql('c','v','search_clock.as_of')
+        AND ${deliveryAvailable})` : currentClaimVersionSql('c','v','search_clock.as_of',deliveryAvailable)
       // SQL ranks the entire eligible corpus before bounded hydration. No UUID prefix scan.
       // Full-text matches sort above full-query trigram matches. The leading
       // question only breaks through when no full-query match uses that slot.
@@ -216,7 +236,7 @@ export function createSearchService(deps: SearchServiceDeps) {
         WHERE c.installation_id = $1
           AND c.state = 'active'
           AND c.consumption_hold_reason IS NULL
-          AND ${lifecycleClaimSql('$24','$25','$26','c','v',shared?{installation:'$1',epoch:'$27'}:undefined)}
+          AND ${lifecycleClaimSql('$24','$25','$26','c','v',shared?{installation:'$1',epoch:'$27'}:undefined,typedRevision)}
           AND (v.applicability IS NULL OR v.applicability->>'status'='verified')
           AND ${historicalSelection ? asOfClaimVersionSql('c','v','search_clock.as_of') : currentVersion}
           AND (v.valid_from IS NULL OR v.valid_from <= search_clock.as_of)
@@ -330,7 +350,10 @@ export function createSearchService(deps: SearchServiceDeps) {
         ] : []),
       ]),input.localOnly&&!nativeLexical?readEmbeddingMode():undefined])
       const localMode=nativeLexical?prefiltered.rows[0]?.local_embedding_mode:localEmbeddingMode?.rows[0]?.embedding_mode
-      if(localMode==='shadow'||localMode==='enabled')degraded.push('embedding')
+      if(localMode==='shadow'||localMode==='enabled'){
+        degraded.push('embedding')
+        embeddingObservation={reason:'local_only',durationMs:0}
+      }
       // The local settings row survives an empty candidate set so the caller
       // still sees the configured vector degradation for that search.
       const rankedRows=prefiltered.rows.filter((row):row is PrefilteredRow=>row.version_id!==null)
@@ -344,7 +367,7 @@ export function createSearchService(deps: SearchServiceDeps) {
       if(rows.length<rankedRows.length&&candidatePoolTruncated)degraded.push('post_filter_pool_truncated')
       if (rows.length === 0) {
         deps.onRecallMetrics?.({eligible:Number(rankedRows[0]?.eligible_count??0),hydrated:rankedRows.length,returned:0,truncated:candidatePoolTruncated,degraded:degraded.length>0,durationMs:performance.now()-started})
-        return { hits: [], nextCursor: null, degradedComponents: degraded, poolSizes: {} }
+        return { hits: [], nextCursor: null, degradedComponents: degraded, ...(internal && embeddingObservation ? {embeddingObservation}:{}), poolSizes: {} }
       }
       const byVersion = new Map(rows.map(row => [row.version_id, row]))
       const asOf = requestedAsOf ?? rows[0].search_as_of
@@ -493,6 +516,7 @@ export function createSearchService(deps: SearchServiceDeps) {
           ? encodeCursor(nextOffset, cursorContext, asOf, deps.cursorSigningKey,historicalSelection)
           : null,
         degradedComponents: degraded,
+        ...(internal && embeddingObservation ? {embeddingObservation}:{}),
         poolSizes,
         candidatePoolTruncated,
         ...(internal?{rankedPools:pools}:{}),
