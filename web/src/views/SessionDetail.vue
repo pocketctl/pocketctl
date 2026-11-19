@@ -3586,8 +3586,15 @@ function userMessageIdentity(evt: any) {
   const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
   const value = (key: string) => evt[key] || payload[key] || ''
   const scope = [value('session_id') || sessionId.value, value('agent_id')]
+  const eventId = value('event_id')
+  const userEventKey = eventId ? JSON.stringify([...scope, eventId]) : ''
+  const turn = value('turn_id')
+  const admitted = value('msg_id') && eventId === 'native-input:' + value('msg_id')
+  const native = value('part_id') && /^codex:[^:]+:user:/.test(eventId)
   return {
-    userEventKey: value('event_id') ? JSON.stringify([...scope, value('event_id')]) : '',
+    userEventKey,
+    codexTurnKey: String(turn).startsWith('turn:v1:codex:') && (admitted || native) ? JSON.stringify([...scope, turn]) : '',
+    admissionEventKey: admitted ? userEventKey : '',
     userPartKey: value('part_id') ? JSON.stringify([...scope, value('source_turn_id') || value('turn_id'), value('part_id')]) : '',
     // Claude source_turn_id identifies its native user record even without part_id.
     userNativeKey: String(value('turn_id')).startsWith('turn:v1:claude-code:') && value('source_turn_id')
@@ -3598,6 +3605,7 @@ function userMessageIdentity(evt: any) {
 function sameUserMessage(left: any, right: any): boolean {
   return Boolean(
     (left.userEventKey && left.userEventKey === right.userEventKey)
+    || (left.admissionEventKey && left.admissionEventKey === right.admissionEventKey)
     || (left.userPartKey && left.userPartKey === right.userPartKey)
     || (left.userNativeKey && left.userNativeKey === right.userNativeKey),
   )
@@ -3609,14 +3617,32 @@ function userIdentitiesConflict(left: any, right: any): boolean {
 }
 
 function preserveUserIdentity(message: any, identity: ReturnType<typeof userMessageIdentity>) {
+  if (identity.codexTurnKey) message.codexTurnKey = identity.codexTurnKey
+  if (identity.admissionEventKey) message.admissionEventKey = identity.admissionEventKey
   if (identity.userEventKey) message.userEventKey = identity.userEventKey
   if (identity.userPartKey) message.userPartKey = identity.userPartKey
   if (identity.userNativeKey) message.userNativeKey = identity.userNativeKey
 }
 
+// A Codex turn may contain several inputs. Pair only complementary halves,
+// retaining both identities so replay cannot consume another native item.
+function findCodexInputEcho(target: any[], identity: ReturnType<typeof userMessageIdentity>, text: string, correlation: ReturnType<typeof eventCorrelation>) {
+  if (!identity.codexTurnKey || (identity.admissionEventKey && identity.userPartKey)) return
+  return target.find(row => row.codexTurnKey === identity.codexTurnKey && row.content === text
+    && row.deliveryStatus !== 'failed' && !correlationsConflict(messageCorrelation(row), correlation)
+    && (identity.admissionEventKey ? row.userPartKey && !row.admissionEventKey : row.admissionEventKey && !row.userPartKey))
+}
+
 function withoutExistingUserMessages(page: any[], existing: any[]): any[] {
-  return page.filter(message => message.type !== 'user_text'
-    || !existing.some(candidate => candidate.type === 'user_text' && sameUserMessage(candidate, message)))
+  return page.filter(message => {
+    if (message.type !== 'user_text') return true
+    const match = existing.find(row => row.type === 'user_text' && sameUserMessage(row, message))
+      || findCodexInputEcho(existing, message, message.content, messageCorrelation(message))
+    if (!match) return true
+    preserveUserIdentity(match, message)
+    applyCanonicalCorrelation(match, messageCorrelation(message))
+    return false
+  })
 }
 
 const turnMetadataKeys = ['retry_of_turn_id', 'turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin', 'turn_confidence', 'previous_turn_id', 'continuation_reason', 'actor_scope', 'flow_scope', 'content_class', 'classifier_version'] as const
@@ -3702,7 +3728,9 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       settleReplayLocalMessage(retryEcho, target)
       return
     }
+    const correlation = eventCorrelation(evt)
     const existingByIdentity = target.find((message: any) => message.type === 'user_text' && sameUserMessage(message, identity))
+      || findCodexInputEcho(target, identity, text, correlation)
     if (existingByIdentity) {
       settleReplayLocalMessage(existingByIdentity, target)
       existingByIdentity.__echo_reconciled = true
@@ -3711,7 +3739,6 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       applyCanonicalCorrelation(existingByIdentity, eventCorrelation(evt))
       return
     }
-    const correlation = eventCorrelation(evt)
     const correlated = findMessageByCorrelation(correlation, target)
     if (correlated) {
       settleReplayLocalMessage(correlated, target)

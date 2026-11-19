@@ -1217,6 +1217,39 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
   })
 
+  test.each(['live', 'native first', 'older page'])('pairs Codex input echoes once (%s)', (mode) => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const text = '不对，项目已经迁移到外接磁盘上'
+    if (mode === 'live') vm.sendPromptText(text)
+    const msgId = mode === 'live' ? vm.messages.at(-1).__msg_id : 'send-1'
+    const common = { type: 'user_text', session_id: 'ses_1', turn_id: 'turn:v1:codex:t1', source_turn_id: 't1', text }
+    const admitted = { ...common, msg_id: msgId, request_id: msgId, event_id: 'native-input:' + msgId }
+    const native = { ...common, part_id: 'item1', event_id: 'codex:42:user:ses_1:t1:item1:hash' }
+    const bubbles = () => vm.messages.filter((m: any) => m.type === 'user_text')
+    if (mode === 'older page') {
+      vm.processEvent(native)
+      vm.isLoadingBackward = true
+      websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', direction: 'backward', events: [admitted] })
+      websocketMock.handlers.get('replay_end')!({ session_id: 'ses_1', has_more: false })
+    } else {
+      const [first, second] = mode === 'live' ? [admitted, native] : [native, admitted]
+      vm.processEvent(first)
+      vm.processEvent({ type: 'turn_status', turn_id: common.turn_id, turn_status: 'running' })
+      vm.processEvent(second)
+    }
+    expect(bubbles()).toHaveLength(1)
+    expect(bubbles()[0]).toMatchObject({ msg_id: msgId, content: text })
+    vm.processEvent(native)
+    vm.processEvent(admitted)
+    expect(bubbles()).toHaveLength(1)
+    // An independent native item and its own acknowledgement repeat the same words.
+    vm.processEvent({ ...native, part_id: 'item2', event_id: 'codex:42:user:ses_1:t1:item2:hash' })
+    vm.processEvent({ ...admitted, msg_id: 'send-2', request_id: 'send-2', event_id: 'native-input:send-2' })
+    expect(bubbles().map((m: any) => m.msg_id)).toEqual([msgId, 'send-2'])
+    wrapper.unmount()
+  })
+
   test.each([false, true])('merges Claude admitted and native echoes across lifecycle rows (local=%s)', (local) => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
