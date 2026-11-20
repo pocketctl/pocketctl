@@ -68,7 +68,7 @@ function decodeCursor(value: unknown): any {
   if (typeof value !== 'string' || value.length > 1024) return bad('invalid cursor');
   try { return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')); } catch { return bad('invalid cursor'); }
 }
-async function addChildren(pool: pg.Pool, rows: any[]): Promise<any[]> {
+async function addChildren(pool: Queryable, rows: any[]): Promise<any[]> {
   if (rows.length === 0) return rows;
   const children = await pool.query(`SELECT parent_session_id,agent_id,kind,agent_type,title,status,token_in,token_out,token_cache,token_cache_create
     FROM subagents WHERE parent_session_id=ANY($1::varchar[]) ORDER BY created_at ASC`, [rows.map(row => row.session_id)]);
@@ -89,6 +89,47 @@ async function addChildren(pool: pg.Pool, rows: any[]): Promise<any[]> {
       tokCacheRead:Number(row.tok_cache_read || 0), tokCacheCreate:Number(row.tok_cache_create || 0) };
   });
 }
+const sessionListColumns = `s.session_id,s.daemon_id,s.agent_type,s.active_agent,s.cwd,s.title,s.source,s.status,s.control_mode,s.capabilities,
+      s.codex_home_id,s.codex_home_label,s.created_at,s.updated_at,s.last_activity_at,s.turn_started_at,s.exit_reason,s.subagent_count,
+      s.pinned,s.pinned_at,s.project_id,s.archived_at,s.manual_rank,s.new_badge_pending,s.model,s.effort,s.parent_session_id,s.is_subagent,s.root_session_id,
+      s.total_tokens,s.tok_input,s.tok_output,s.tok_cache_read,s.tok_cache_create`;
+
+async function readSessionRefreshPage(pool: pg.Pool, userId: number, daemonId?: string) {
+  const params = [userId, daemonId ?? null];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const recent = await client.query(`SELECT recent.*,d.hostname,d.alias AS daemon_alias,
+      d.status='online' AS daemon_online FROM daemons d CROSS JOIN LATERAL (
+        SELECT ${sessionListColumns},s.membership_changed_at
+        FROM sessions s WHERE s.user_id=$1 AND s.daemon_id=d.daemon_id
+          AND s.archived_at IS NULL AND NOT COALESCE(s.is_subagent,false) AND s.session_id NOT LIKE 'pending-%'
+        ORDER BY COALESCE(s.last_activity_at,s.created_at) DESC,s.session_id DESC LIMIT 3
+      ) recent
+      LEFT JOIN session_projects p ON p.id=recent.project_id AND p.user_id=d.user_id
+      LEFT JOIN session_organization_settings cfg ON cfg.user_id=d.user_id
+      WHERE d.user_id=$1 AND ($2::text IS NULL OR d.daemon_id=$2)
+      ORDER BY recent.pinned DESC,
+        CASE WHEN COALESCE(p.order_mode,cfg.ungrouped_order_mode)='manual' THEN recent.manual_rank END ASC NULLS LAST,
+        CASE WHEN COALESCE(p.order_mode,cfg.ungrouped_order_mode)='manual' THEN recent.session_id END ASC,
+        recent.pinned_at DESC NULLS LAST,
+        GREATEST(recent.last_activity_at,recent.created_at,recent.membership_changed_at) DESC,recent.session_id DESC`, params);
+    const counts = await client.query(`SELECT daemon_id,project_id,
+      COUNT(*) FILTER (WHERE archived_at IS NULL)::int AS count,
+      COUNT(*) FILTER (WHERE archived_at IS NOT NULL)::int AS archived
+      FROM sessions WHERE user_id=$1 AND ($2::text IS NULL OR daemon_id=$2)
+        AND NOT COALESCE(is_subagent,false) AND session_id NOT LIKE 'pending-%'
+      GROUP BY daemon_id,project_id`, params);
+    const projects = await client.query('SELECT id,name,order_mode,revision FROM session_projects WHERE user_id=$1 ORDER BY sort_position,id', [userId]);
+    const page = { sessions: await addChildren(client, recent.rows), counts: counts.rows, projects: projects.rows };
+    await client.query('COMMIT');
+    return page;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
 function listFilter(query: any) {
   const archived = query.view === 'archived';
   const search = query.view === 'active' && typeof query.q === 'string' ? query.q.trim().slice(0, 100) : '';
@@ -105,6 +146,7 @@ export function registerSessionOrganizationRoutes(app: FastifyInstance, options:
   broadcast: (userId: number, payload: object) => void;
 }): void {
   const { pool, broadcast } = options;
+  const refreshes = new Map<string, { expires: number; result: Promise<unknown> }>();
   async function auth(req: FastifyRequest, reply: FastifyReply): Promise<number | null> {
     const header = req.headers.authorization;
     if (!header?.startsWith('Bearer ')) { reply.code(401).send({ error: 'authorization required' }); return null; }
@@ -177,6 +219,29 @@ export function registerSessionOrganizationRoutes(app: FastifyInstance, options:
     });
     changed(userId); return { revision: Number(revision) };
   }));
+  // Limit each host before joining children. A quiet host still contributes its
+  // own first page when another host has many more recent sessions.
+  app.get('/api/session-list-refresh', (req, reply) => run(req, reply, async userId => {
+    const daemonId = (req.query as { daemon_id?: string }).daemon_id;
+    if (daemonId !== undefined && (typeof daemonId !== 'string' || !daemonId || daemonId.length > 64)) bad('invalid daemon_id');
+    reply.header('Cache-Control', 'private, no-store');
+    const key = JSON.stringify([userId, daemonId ?? null]);
+    const previous = refreshes.get(key);
+    if (previous && previous.expires > performance.now()) return previous.result;
+    const entry = { expires: Infinity, result: readSessionRefreshPage(pool, userId, daemonId) };
+    refreshes.set(key, entry);
+    try {
+      const result = await entry.result;
+      entry.expires = performance.now() + 5000;
+      const timer = setTimeout(() => { if (refreshes.get(key) === entry) refreshes.delete(key); }, 5000);
+      timer.unref();
+      return result;
+    } catch (error) {
+      if (refreshes.get(key) === entry) refreshes.delete(key);
+      throw error;
+    }
+  }));
+
   app.get('/api/organized-sessions', (req, reply) => run(req, reply, async userId => {
     const filter = listFilter(req.query as any);
     const { archived, search, bucket, daemonId, limit } = filter;
@@ -216,10 +281,7 @@ export function registerSessionOrganizationRoutes(app: FastifyInstance, options:
         .replaceAll('$CURSOR_KEY', keyParam).replaceAll('$CURSOR_ID', idParam);
     }
     params.push(limit+1);
-    const result = await pool.query(`SELECT s.session_id,s.daemon_id,s.agent_type,s.active_agent,s.cwd,s.title,s.source,s.status,s.control_mode,s.capabilities,
-      s.codex_home_id,s.codex_home_label,s.created_at,s.updated_at,s.last_activity_at,s.turn_started_at,s.exit_reason,s.subagent_count,
-      s.pinned,s.pinned_at,s.project_id,s.archived_at,s.manual_rank,s.new_badge_pending,s.model,s.effort,s.parent_session_id,s.is_subagent,s.root_session_id,
-      s.total_tokens,s.tok_input,s.tok_output,s.tok_cache_read,s.tok_cache_create,d.status AS daemon_status,d.hostname,d.alias AS daemon_alias,
+    const result = await pool.query(`SELECT ${sessionListColumns},d.status AS daemon_status,d.hostname,d.alias AS daemon_alias,
       p.name AS project_name,(${key})::text AS cursor_key,
       COALESCE(s.pinned_at,'1970-01-01T00:00:00Z'::timestamptz)::text AS cursor_pin_at
       FROM sessions s LEFT JOIN daemons d ON d.daemon_id=s.daemon_id LEFT JOIN session_projects p ON p.id=s.project_id
