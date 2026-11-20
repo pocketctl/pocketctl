@@ -176,10 +176,15 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
     WHERE t.scan_id=p_scan AND t.installation_id=p_installation AND t.cursor_key COLLATE "C">p_after COLLATE "C"
     ORDER BY t.cursor_key COLLATE "C" LIMIT p_limit;
   END $$`,
+ `ALTER TABLE shared.memory_source_distributions ADD COLUMN IF NOT EXISTS offline_batch JSONB`,
+ `ALTER TABLE shared.memory_source_distribution_targets ADD COLUMN IF NOT EXISTS offline_batch JSONB, ADD COLUMN IF NOT EXISTS offline_ack JSONB`,
  `CREATE OR REPLACE FUNCTION shared.current_memory_source_distribution(p_kind TEXT,p_root TEXT,p_installation UUID) RETURNS JSONB
   LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
    SELECT jsonb_build_object('scanId',d.scan_id,'controlRevision',d.control_revision::text,'workRevision',d.work_revision::text,
     'contentPending',d.work_revision<>w.revision,
+    'offlineBatch',(SELECT t.offline_batch FROM shared.memory_source_distribution_targets t JOIN shared.memory_projection_policies p USING(installation_id)
+      WHERE d.source_kind='relay_event' AND t.scan_id=d.scan_id AND t.installation_id=p_installation
+       AND t.offline_batch->>'mode'=p.mode LIMIT 1),
     'targetCount',(SELECT count(*)::text FROM shared.memory_source_distribution_targets t WHERE t.scan_id=d.scan_id AND t.installation_id=p_installation))
    FROM shared.memory_source_distributions d JOIN shared.memory_source_work w USING(source_kind,root_key)
    -- Scope enumeration and content completion are different proofs. Personal

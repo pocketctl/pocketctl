@@ -22,7 +22,7 @@ export function observeProjectionCommits(pool:pg.Pool,onCommit:(event:{installat
    let result:any
    try{result=await(original as any).apply(client,args)}catch(error){prior=undefined;pending=undefined;throw error}
    if(!active)return result
-   if(compact.startsWith('SELECT source_version,next_cursor,state FROM memory_canonical_projection_progress')&&compact.endsWith('FOR UPDATE NOWAIT'))prior={key:JSON.stringify(values),value:structuredClone(result.rows[0]??null)}
+   if(/^SELECT source_version,next_cursor,state(?:,offline_basis)? FROM memory_canonical_projection_progress/.test(compact)&&compact.endsWith('FOR UPDATE NOWAIT'))prior={key:JSON.stringify(values),value:structuredClone(result.rows[0]??null)}
    if(/^INSERT INTO memory_canonical_projection_progress\(/.test(compact)){
     if(!prior||prior.key!==JSON.stringify(values.slice(0,4))||pending)errors.push(Error('test_projection_commit_prior_missing'))
     else pending={installationId:values[0],rootKey:values[2],before:prior.value,after:{source_version:typeof values[4]==='string'?JSON.parse(values[4]):structuredClone(values[4]),next_cursor:values[5],state:values[6]}}

@@ -81,12 +81,14 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
  personalAuthority(true),
  `REVOKE ALL ON FUNCTION shared.memory_retained_relay_authority(JSONB,TEXT,TEXT) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.read_memory_relay_sources(p_scope JSONB,p_root TEXT,p_after BIGINT,p_limit INT,p_ids BIGINT[])
-  RETURNS SETOF JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE a RECORD;native JSONB;selected_mode BOOLEAN;keyed_mode BOOLEAN;metadata_only BOOLEAN;input_fingerprint TEXT;observation JSONB;BEGIN
-   selected_mode=COALESCE(p_ids IS NOT NULL AND p_ids[1] IN(-1,-2),FALSE);metadata_only=selected_mode AND p_ids[1]=-2;keyed_mode=selected_mode AND cardinality(p_ids)>1;
+  RETURNS SETOF JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE a RECORD;native JSONB;bounded_mode BOOLEAN;selected_mode BOOLEAN;keyed_mode BOOLEAN;metadata_only BOOLEAN;input_fingerprint TEXT;observation JSONB;BEGIN
+   bounded_mode=COALESCE(p_ids[1]=-3,FALSE);
+   selected_mode=COALESCE(p_ids IS NOT NULL AND p_ids[1] IN(-1,-2,-3),FALSE);metadata_only=selected_mode AND p_ids[1]=-2;keyed_mode=selected_mode AND NOT bounded_mode AND cardinality(p_ids)>1;
    IF p_ids IS NOT NULL AND NOT selected_mode AND EXISTS(SELECT 1 FROM unnest(p_ids) k WHERE k<0) THEN RAISE EXCEPTION 'invalid_source_metadata_request';END IF;
    IF selected_mode THEN
     IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 256 OR p_after IS NOT NULL AND p_after<0 OR array_ndims(p_ids)<>1 OR array_lower(p_ids,1)<>1 OR cardinality(p_ids)>257 OR array_position(p_ids,NULL) IS NOT NULL
-     OR EXISTS(SELECT 1 FROM unnest(p_ids[2:]) k WHERE k<=0)
+     OR bounded_mode AND (cardinality(p_ids)<>2 OR p_ids[2]<0)
+     OR NOT bounded_mode AND EXISTS(SELECT 1 FROM unnest(p_ids[2:]) k WHERE k<=0)
      OR (SELECT count(*) FROM unnest(p_ids[2:]))<>(SELECT count(DISTINCT k) FROM unnest(p_ids[2:]) k)
      OR EXISTS(SELECT 1 FROM(SELECT k,lag(k) OVER(ORDER BY n) AS previous FROM unnest(p_ids[2:]) WITH ORDINALITY x(k,n)) ordered WHERE k<=previous)
      OR metadata_only AND NOT keyed_mode OR keyed_mode AND(p_after IS NOT NULL OR p_limit<>cardinality(p_ids)-1) THEN RAISE EXCEPTION 'invalid_source_metadata_request';END IF;
@@ -118,6 +120,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
     WITH selected AS MATERIALIZED(
      SELECT event_row.*,event_row.xmin::text AS memory_source_xmin,event_authority.value AS memory_event_authority,input_admission.value AS memory_input_admission,legacy_fallback.required AS memory_legacy_fallback FROM(
       SELECT id FROM public.events WHERE session_id=native->>'sessionId' AND(p_after IS NULL OR id>p_after)
+       AND id<=COALESCE(CASE WHEN bounded_mode THEN p_ids[2] END,9223372036854775807)
        AND(NOT keyed_mode OR id=ANY(p_ids[2:])) ORDER BY id OFFSET 0)ordered
      CROSS JOIN LATERAL(SELECT event_body.*,event_body.xmin AS xmin FROM public.events event_body WHERE id=ordered.id OFFSET 0)event_row
      LEFT JOIN memory.source_events eligible_ref ON eligible_ref.installation_id=(p_scope->>'installationId')::uuid

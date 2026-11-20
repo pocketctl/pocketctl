@@ -1,3 +1,4 @@
+import {APPEND_CAPTURE_V1_SHA256} from './offline-projection-contract.js'
 import {SHARED_SOURCE_DISTRIBUTION_FUNCTIONS} from './distribution-contract.js'
 import {assertTransportMetadataContract} from '../../sources/transport-state.js'
 import {assertTeamSemanticLegacySchema} from '../../sources/team-semantic-migration.js'
@@ -78,6 +79,7 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
    REVOKE ALL ON ALL TABLES IN SCHEMA memory FROM PUBLIC,${relay};
    REVOKE ALL ON ALL SEQUENCES IN SCHEMA memory FROM PUBLIC,${relay};
    REVOKE ALL ON ALL FUNCTIONS IN SCHEMA memory FROM PUBLIC,${relay};
+   GRANT EXECUTE ON FUNCTION shared.memory_projection_runtime_ready() TO ${memory},${relay};
    GRANT EXECUTE ON FUNCTION shared.mark_memory_source_dirty(TEXT,TEXT),shared.memory_source_processing_blocks_purge(INT,TEXT[]) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.assert_session_transport_consumer_policy(),shared.session_transport_consumer_policy(BIGINT),shared.record_session_transport_body_gap(BIGINT) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.acquire_memory_source_processing_pin(UUID,JSONB,TEXT,JSONB,BOOLEAN),shared.release_memory_source_processing_pins(UUID),shared.guard_memory_source_processing_pins(UUID,INT) TO ${memory};
@@ -160,7 +162,6 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
 // Relay capture v2 predates append classification. Pin the v1 scheduling
 // producer's physical body as well as the triggers that invoke it. Older
 // migrators can replace the function in place without changing its OID.
-const APPEND_CAPTURE_V1_SHA256='9994082cfa6f1bba3789d62f4483a11946c45b06da0033f3036c52d60b1a4ac2'
 export async function assertRelayEventAppendCapture(db:Pick<pg.PoolClient,'query'>):Promise<void>{
  const row=(await db.query(`SELECT EXISTS(SELECT 1 FROM pg_proc p
    WHERE p.oid=to_regprocedure('shared.capture_memory_relay_events()') AND p.prosecdef
@@ -234,7 +235,7 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
   }
   if(relayTarget||launch.sharedSourceProfile)await assertRelayEventAppendCapture(client)
   await assertMemorySchedulingContract(client)
-  const contract=(await client.query("SELECT version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'consumer_version','0') AS consumer_version,COALESCE(to_jsonb(contract)->>'commit_fence_version','0') AS commit_fence_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'processing_read_version','0') AS processing_read_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version FROM shared.memory_source_contract contract")).rows
+  const contract=(await client.query("SELECT version,to_jsonb(contract)->>'offline_projection_version' AS offline_projection_version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'consumer_version','0') AS consumer_version,COALESCE(to_jsonb(contract)->>'commit_fence_version','0') AS commit_fence_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'processing_read_version','0') AS processing_read_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version FROM shared.memory_source_contract contract")).rows
   if(contract.length!==1 || contract[0].version!==1)throw new Error('unsupported_shared_source_contract')
   if(contract[0].input_start_version!=='1')throw new Error('unsupported_shared_input_start_contract')
   if(!(await client.query('SELECT shared.memory_input_start_ready() AS ready')).rows[0]?.ready)throw Error('native_input_start_migrator_required')
@@ -242,6 +243,8 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
   if(contract[0].commit_fence_version!=='1')throw new Error('unsupported_shared_commit_fence_contract')
   if(contract[0].execution_version!=='1')throw new Error('unsupported_shared_execution_contract')
   if(contract[0].control_version!=='1')throw new Error('unsupported_shared_control_contract')
+  if(contract[0].offline_projection_version==='1'&&(await client.query('SELECT shared.memory_projection_runtime_ready() AS ready')).rows[0]?.ready!==true)
+   throw Error('offline_projection_capture_migration_required')
   if(contract[0].distribution_version!=='1')throw new Error('unsupported_shared_distribution_contract')
   if(contract[0].shadow_version!=='1')throw new Error('unsupported_shared_shadow_contract')
   if(contract[0].processing_pin_version!=='1')throw new Error('unsupported_shared_processing_pin_contract')

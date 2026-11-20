@@ -94,9 +94,10 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageDeriv
    const excluded=await prepareTeamSemanticPublication(pool,scope.installationId,root,{metadataOnly:true})
    if(excluded){await persistTeamSemanticPublication(pool,excluded,options.stabilizationMs);return}
   }
-  const readProgress=()=>observeProjectionStep(pool,'checkpoint',async()=>(await pool.query(`SELECT next_cursor,state,source_version FROM memory_canonical_projection_progress
+  const readProgress=()=>observeProjectionStep(pool,'checkpoint',async()=>(await pool.query(`SELECT next_cursor,state,source_version${contexts.offlineBatch?',offline_basis':''} FROM memory_canonical_projection_progress
    WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4`,[scope.installationId,root.kind,root.key,canonicalPayloadHash(scope).toString('hex')])).rows[0])
   const progress=await readProgress()
+  if(contexts.offlineBatch&&progress?.source_version?.offlineCovered===scan&&progress.offline_basis?.covered&&progress.offline_basis.scanId===scan)return
   if(progress?.state==='ready'||(!personal&&progress?.state==='raw_ready')){
    const current=await createObservedSourceReader(pool).checkCurrent(scope,root)
    if(current.state==='current'&&sameDerivedSourceVersion(current.version,progress.source_version)){
@@ -142,6 +143,7 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageDeriv
     const batchDerived=options.pageDerivedWriteInstallations?.includes(scope.installationId)===true && !historicalCompile
     const result=await persistPersonalMetadataReferencePage(pool,selected,options.stabilizationMs,signal,historicalCompile,batchDerived)
     if(result.contextReady){options.onReady?.(root);return}
+    if(result.frozenComplete)return
     if(signal.aborted)throw Error('canonical_projection_aborted')
     if(page===3||performance.now()-burstStarted>=burstBudgetMs)break
     // Read the acknowledged durable cursor, never refresh an old body proof

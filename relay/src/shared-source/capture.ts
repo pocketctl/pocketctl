@@ -1,3 +1,4 @@
+import {OFFLINE_PROJECTION_CAPTURE} from './offline-projection-capture.js'
 import {assertNativeInputStartCompatible} from './input-start.js'
 import {RELAY_SESSION_CAPTURE_SQL} from './session-capture.js'
 import type pg from 'pg'
@@ -30,6 +31,8 @@ export async function applyRelaySourceCapture(pool:pg.Pool):Promise<void>{
   await c.query("SELECT pg_advisory_xact_lock(hashtextextended('shared-source-contract-v1',0))")
   await assertRelayCaptureMigrationCompatible(c as unknown as pg.Pool)
   for(const sql of [...RELAY_SOURCE_HEADER_SQL,...RELAY_SOURCE_CAPTURE_SQL,...RELAY_SESSION_CAPTURE_SQL])await c.query(sql)
+  if((await c.query("SELECT to_regclass('shared.memory_projection_windows') IS NOT NULL AS ready")).rows[0]?.ready)
+   for(const sql of OFFLINE_PROJECTION_CAPTURE)await c.query(sql)
   await c.query('COMMIT')
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }

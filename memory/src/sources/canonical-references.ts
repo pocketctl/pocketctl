@@ -1,3 +1,4 @@
+import {planOfflinePage,type OfflineSeal,type OfflineBasis} from './offline-projection.js'
 import {ProjectionTiming,observeProjectionStep,commitOutcomeUnknown,ProjectionLockBusy,recordProjectionRollback} from './projection-diagnostics.js'
 import type pg from 'pg'
 import {JobDeferredError,JobTerminalError} from '../jobs/types.js'
@@ -13,7 +14,7 @@ import {readHistoricalIds,readHistoricalProjectionSeal,type HistoricalProjection
 import {projectCanonicalDerivedFact,projectNewCanonicalPage,type CanonicalDerivedFact} from '../projection/source-projector.js'
 
 interface MetadataWave {contract:'personal-metadata-wave-v1';through:string;after?:string;startVersion:SourceVersion;scopeHash:string;controlRevision:string;phase:'scanning'|'restart'}
-interface MetadataPage {wave:MetadataWave;prior:unknown;envelope:unknown;exhausted:boolean;nextAfter?:string;contextReady?:boolean}
+interface MetadataPage {offline?:{plan:ReturnType<typeof planOfflinePage>;seal:OfflineSeal};frozenComplete?:boolean;wave:MetadataWave;prior:unknown;envelope:unknown;exhausted:boolean;nextAfter?:string;contextReady?:boolean}
 interface HistoricalPage {
  client:pg.PoolClient
  guard:()=>Promise<void>
@@ -98,6 +99,9 @@ async function prepareReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRo
 export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,seal:MetadataScopeSeal,progress:unknown,limit=64):Promise<CanonicalReferencePage>{
  requireExecution(pool,scope.installationId)
  if(root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')throw Error('canonical_reference_request_invalid')
+ // Bind range, scope and checkpoint to the private page token before any IO.
+ // The final seal comparison must validate the exact range used for selection.
+ if(seal.offline){seal=structuredClone(seal);scope=structuredClone(scope);root=structuredClone(root);progress=structuredClone(progress)}
  const prior=progress as {source_version?:unknown;next_cursor?:string|null;state?:string}|undefined
  const candidate=(prior?.source_version as {metadataWave?:MetadataWave}|undefined)?.metadataWave
  const scopeHash=canonicalPayloadHash(scope).toString('hex')
@@ -114,7 +118,20 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
  // Restart with after=through is the single tail-due witness. Its first
  // observation freezes a new bound; subsequent tail pages retain that bound.
  const tailDue=wave?.phase==='restart'&&wave.after!==undefined&&BigInt(wave.after)===BigInt(wave.through)
- const reader=createObservedPersonalMetadataReader(pool),view=await observeProjectionStep(pool,'select_page',()=>reader.selectPage(scope,root,{limit,...(wave?{after:wave.after,...(!tailDue?{through:wave.through}:{})}:{})}))
+ const plan=seal.offline?planOfflinePage(seal.offline,prior):undefined
+ const request=plan&&seal.offline?.batch.mode==='active'?{...plan.request,limit:Math.min(64,limit)}:{limit,...(wave?{after:wave.after,...(!tailDue?{through:wave.through}:{})}:{})}
+ const reader=createObservedPersonalMetadataReader(pool),view=await observeProjectionStep(pool,'select_page',()=>reader.selectPage(scope,root,request))
+ if(plan&&seal.offline){
+  const proof=reader.proof(view) as {inputFingerprint:string;nativeSessionFingerprint:string}
+  if(proof.nativeSessionFingerprint!==plan.basis.native||plan.basis.input&&plan.basis.input!==proof.inputFingerprint
+    ||view.observedVersion.storage!==plan.basis.version.storage||view.observedVersion.authorization!==plan.basis.version.authorization
+    ||BigInt(view.observedVersion.content)<BigInt(plan.basis.version.content)){
+   // The native graph, input boundary or retention changed. Re-enter the
+   // existing full sweep with the same sealed scope and current authority.
+   return preparePersonalMetadataReferencePage(pool,scope,root,{...seal,offline:undefined},progress,limit)
+  }
+  plan.basis.input=proof.inputFingerprint
+ }
  if(tailDue)wave={...wave!,through:view.upperId,startVersion:{...view.observedVersion}}
  wave??={contract:'personal-metadata-wave-v1',through:view.upperId,startVersion:{...view.observedVersion},scopeHash,controlRevision:seal.controlRevision,phase:'scanning'}
  const heads=structuredClone([...view.heads]),bodies=heads.length?await observeProjectionStep(pool,'select_page',()=>reader.resolve(view)):[],payloads:Record<string,unknown>[]=[]
@@ -125,7 +142,7 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
   if(typeof turn==='string'&&turn&&turn.length<=1024)heads[n].turnKey=turn
   if(typeof heads[n].occurredAt!=='string'||!Number.isFinite(Date.parse(heads[n].occurredAt!)))throw Error('canonical_reference_timestamp_required')
  }
- const token=Object.freeze({}),metadata:MetadataPage={wave,prior:prior??null,envelope:personalMetadataEnvelope(pool,scope,root,reader.proof(view),seal,'reference'),exhausted:view.exhausted,nextAfter:view.nextAfter}
+ const token=Object.freeze({}),metadata:MetadataPage={...(plan&&seal.offline?{offline:{plan,seal:seal.offline}}:{}),wave,prior:prior??null,envelope:personalMetadataEnvelope(pool,scope,root,reader.proof(view),seal,'reference'),exhausted:view.exhausted,nextAfter:view.nextAfter}
  pages.set(token,{pool,execution:sourceExecutionTokenFor(pool,scope.installationId),scope:structuredClone(scope),root:structuredClone(root),heads,version:{...view.observedVersion},payloads,enumerated:true,metadata})
  return Object.freeze({token,count:heads.length,...(view.nextAfter?{nextCursor:view.nextAfter}:{}),hasMore:!view.exhausted})
 }
@@ -133,7 +150,7 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
 export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false,batchDerived=false){
  const p=pages.get(page.token);if(!p?.metadata)throw Error('canonical_reference_token_invalid')
  const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile,batchDerived})
- return {references,contextReady:p.metadata.contextReady===true}
+ return {references,contextReady:p.metadata.contextReady===true,frozenComplete:p.metadata.frozenComplete===true}
 }
 
 /** A new latest scan may find an already current context. It must still run
@@ -257,7 +274,7 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
   let checkpointDuplicate=false
   if(options.checkpoint){
    timing.enter('checkpoint')
-   const current=(await selectedLockQuery(`SELECT source_version,next_cursor,state FROM memory_canonical_projection_progress
+   const current=(await selectedLockQuery(`SELECT source_version,next_cursor,state${prepared.metadata?.prior&&Object.hasOwn(prepared.metadata.prior as object,'offline_basis')?',offline_basis':''} FROM memory_canonical_projection_progress
     WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4 FOR UPDATE NOWAIT`,[scope.installationId,root.kind,root.key,contextKey])).rows[0]
    const lastObserved=current?.source_version?.metadataWave?.startVersion??current?.source_version
    if(typeof lastObserved?.content==='string')timing.revisionChanged=lastObserved.content!==version.content
@@ -387,23 +404,52 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
    await query('UPDATE source_events SET canonical_projected_at=clock_timestamp() WHERE source_event_id=ANY($1::uuid[])',[projected])
   timing.enter('checkpoint')
   let finalVersion:unknown=version,finalCursor=prepared.nextCursor??null,finalState:string=checkpointState
+  let offlineBasis:OfflineBasis|undefined
   if(prepared.metadata){
-   const m=prepared.metadata,current=(await query('SELECT * FROM shared.memory_relay_source_authority($1::jsonb,$2,$3)',[JSON.stringify(scope),root.kind,root.key])).rows[0]
+   const m=prepared.metadata
+   const columns=m.offline?"*,shared.current_memory_source_distribution($2,$3,($1::jsonb->>'installationId')::uuid) AS seal":'*'
+   const current=(await query(`SELECT ${columns} FROM shared.memory_relay_source_authority($1::jsonb,$2,$3)`,[JSON.stringify(scope),root.kind,root.key])).rows[0]
    const ordinary=current?.state==='current'?{content:current.content_revision,authorization:current.authorization_revision,storage:current.storage_revision}:null
    m.contextReady=m.wave.phase==='scanning'&&m.exhausted&&canonicalJsonString(ordinary)===canonicalJsonString(m.wave.startVersion)
-   if(m.contextReady){finalVersion=ordinary;finalCursor=null;finalState='ready'}
-   else{
-    // An exhausted unstable full sweep buys exactly one tail. Exhausting
-    // that tail removes the cursor and imposes a full sweep from zero.
-    const wave:MetadataWave={...m.wave,phase:m.exhausted?'restart':m.wave.phase,after:m.exhausted?(m.wave.phase==='scanning'?m.wave.through:undefined):m.nextAfter}
-    finalVersion={metadataWave:wave};finalCursor=Buffer.from(canonicalJsonString(wave)).toString('base64url');finalState='scanning'
+   if(m.offline){
+    const {plan,seal}=m.offline,b={...plan.basis}
+    offlineBasis=b
+    const live=current?.seal
+    if(live?.scanId!==seal.scanId||live.controlRevision!==seal.controlRevision||live.workRevision!==seal.version.content
+      ||canonicalJsonString(live.offlineBatch)!==canonicalJsonString(seal.batch)
+      ||ordinary?.authorization!==b.version.authorization||ordinary.storage!==b.version.storage)
+     throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+    const shadow=seal.batch.mode==='shadow'
+    b.scanned+=heads.length
+    if(b.strategy==='shadow'){
+     const writes=new Set(projected)
+     b.outside+=result.filter(ref=>writes.has(ref.sourceEventId)&&!plan.contains(ref.canonicalKey)).length
+    }
+    b.covered=shadow?m.contextReady&&canonicalJsonString(ordinary)===canonicalJsonString(b.version):m.exhausted&&plan.last
+    if(!b.covered){if(m.exhausted)b.segment++;else b.after=m.nextAfter}
+    if(!shadow){
+     m.frozenComplete=b.covered
+     m.contextReady=b.covered&&canonicalJsonString(ordinary)===canonicalJsonString(b.version)
+     finalState=m.contextReady?'ready':'scanning'
+     finalVersion=m.contextReady?ordinary:b.covered?{offlineCovered:b.scanId}:{offlineScan:b.scanId}
+     finalCursor=b.covered?null:JSON.stringify([b.segment,b.after??null])
+    }
+   }
+   if(!m.offline||m.offline.seal.batch.mode==='shadow'){
+    if(m.contextReady){finalVersion=ordinary;finalCursor=null;finalState='ready'}
+    else{
+     // An exhausted unstable full sweep buys exactly one tail. Exhausting
+     // that tail removes the cursor and imposes a full sweep from zero.
+     const wave:MetadataWave={...m.wave,phase:m.exhausted?'restart':m.wave.phase,after:m.exhausted?(m.wave.phase==='scanning'?m.wave.through:undefined):m.nextAfter}
+     finalVersion={metadataWave:wave};finalCursor=Buffer.from(canonicalJsonString(wave)).toString('base64url');finalState='scanning'
+    }
    }
   }
   if(options.checkpoint&&!checkpointDuplicate){
-   await query(`INSERT INTO memory_canonical_projection_progress(installation_id,source_kind,root_key,context_key,source_version,next_cursor,state)
-    VALUES($1,$2,$3,$4,$5::jsonb,$6,$7) ON CONFLICT(installation_id,source_kind,root_key,context_key)
-    DO UPDATE SET source_version=EXCLUDED.source_version,next_cursor=EXCLUDED.next_cursor,state=EXCLUDED.state,updated_at=clock_timestamp()`,
-    [scope.installationId,root.kind,root.key,contextKey,JSON.stringify(finalVersion),finalCursor,finalState])
+   await query(`INSERT INTO memory_canonical_projection_progress(installation_id,source_kind,root_key,context_key,source_version,next_cursor,state${offlineBasis?',offline_basis':''})
+    VALUES($1,$2,$3,$4,$5::jsonb,$6,$7${offlineBasis?',$8::jsonb':''}) ON CONFLICT(installation_id,source_kind,root_key,context_key)
+    DO UPDATE SET ${offlineBasis?'offline_basis=EXCLUDED.offline_basis,':''}source_version=EXCLUDED.source_version,next_cursor=EXCLUDED.next_cursor,state=EXCLUDED.state,updated_at=clock_timestamp()`,
+    [scope.installationId,root.kind,root.key,contextKey,JSON.stringify(finalVersion),finalCursor,finalState,...(offlineBasis?[JSON.stringify(offlineBasis)]:[])])
   }
   if(options.checkpoint&&!team&&(prepared.metadata?prepared.metadata.contextReady:!prepared.nextCursor)){
    timing.enter('complete_watermark')
