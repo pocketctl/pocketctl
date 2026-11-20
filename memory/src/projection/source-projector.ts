@@ -1,3 +1,4 @@
+import {writePageSessions,writePageTurns,type SessionObservation,type TurnObservation} from './page-derived-writes.js'
 import {HISTORICAL_COMPILE_PRIORITY} from '../jobs/scheduling.js'
 import {JOB_PRIORITIES} from '../jobs/types.js'
 import {lockLegacySourceInput} from '../sources/input-mode.js'
@@ -254,21 +255,63 @@ interface TurnSchedulingOptions {
   scheduledTurns?: Set<string>
 }
 
+export type CanonicalDerivedFact = {sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>}
+
 /** Reuses deterministic derived projections without manufacturing a Feed ID
  * or persisting an event body. Caller owns the current root/output transaction. */
-export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number,options:TurnSchedulingOptions={}):Promise<void>{
+export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:CanonicalDerivedFact,stabilizationMs:number,options:TurnSchedulingOptions={}):Promise<void>{
  const row:ProjectionRow={session_id:fact.sessionId,turn_id:fact.turnId,event_type:fact.eventType,recorded_at:fact.occurredAt,data:fact.payload}
  const historical=options.scheduleCompilation===false
  await upsertSession(client,installationId,row,historical)
  await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs,options)
 }
 
-async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,options:TurnSchedulingOptions):Promise<void>{
-  const data = sourceRow.data ?? {}
+/** Only newly allocated personal events enter this path. The caller checkpoints the same transaction. */
+export async function projectNewCanonicalPage(
+  client: Pick<pg.PoolClient, 'query'>,
+  installationId: string,
+  facts: CanonicalDerivedFact[],
+  stabilizationMs: number,
+) {
+  if (!facts.length) return
+  const sessions: SessionObservation[] = []
+  const turns: TurnObservation[] = []
+  const rows = facts.map(fact => ({
+    session_id: fact.sessionId, turn_id: fact.turnId, event_type: fact.eventType,
+    recorded_at: fact.occurredAt, data: fact.payload,
+  }))
+  for (const [pos, row] of rows.entries()) {
+    sessions.push({session_id: row.session_id, occurred_at: row.recorded_at, ...sessionFields(row)})
+    if (row.turn_id) {
+      const {status, reason} = turnFields(row)
+      turns.push({
+        session_id: row.session_id, turn_id: row.turn_id, source_event_id: facts[pos].sourceEventId,
+        occurred_at: row.recorded_at, state: status, reason,
+      })
+    }
+  }
+  await writePageSessions(client, installationId, sessions)
+  const terminalTurns = await writePageTurns(client, installationId, turns, [...TERMINAL_TURN_STATES])
+  for (const turn of terminalTurns) {
+    await scheduleTerminalTurn(client, installationId, turn, stabilizationMs, false)
+  }
+  for (const [pos, row] of rows.entries()) {
+    await projectEventDetails(client, installationId, row, facts[pos].sourceEventId)
+  }
+}
 
+async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,options:TurnSchedulingOptions):Promise<void>{
   const {scheduleCompilation=true,historicalCompile=false,scheduledTurns}=options
   const terminal = sourceRow.turn_id && await upsertTurn(client, installationId, sourceRow, eventId)
   if (sourceRow.turn_id && terminal && scheduleCompilation && !scheduledTurns?.has(sourceRow.turn_id)) {
+    await scheduleTerminalTurn(client,installationId,sourceRow.turn_id,stabilizationMs,historicalCompile)
+    scheduledTurns?.add(sourceRow.turn_id)
+  }
+
+  await projectEventDetails(client,installationId,sourceRow,eventId)
+}
+
+async function scheduleTerminalTurn(client:Pick<pg.PoolClient,'query'>,installationId:string,turnId:string,stabilizationMs:number,historicalCompile:boolean) {
     // One notification per terminal turn in this projection transaction.
     // Keep its first pending deadline so a stream of late evidence cannot starve it.
     await client.query(`
@@ -306,10 +349,11 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
           WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL
           ELSE memory_jobs.completed_at
         END
-    `, [installationId, `compile_episode:${sourceRow.turn_id}`, stabilizationMs,historicalCompile?HISTORICAL_COMPILE_PRIORITY:JOB_PRIORITIES.compile_episode])
-    scheduledTurns?.add(sourceRow.turn_id)
-  }
+    `, [installationId, `compile_episode:${turnId}`, stabilizationMs,historicalCompile?HISTORICAL_COMPILE_PRIORITY:JOB_PRIORITIES.compile_episode])
+}
 
+async function projectEventDetails(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string) {
+  const data=sourceRow.data
   const artifact = classifyArtifact(sourceRow.event_type, data)
   if (artifact) {
     await client.query(`
@@ -328,12 +372,7 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
   await observeRepository(client, installationId, data, sourceRow.recorded_at)
 }
 
-async function upsertSession(
-  client: Pick<pg.PoolClient, 'query'>,
-  installationId: string,
-  row: ProjectionRow,
-  historical = false,
-): Promise<void> {
+function sessionFields(row:ProjectionRow) {
   const data = row.data ?? {}
   const agentType = row.event_type === 'session_discovered' && typeof data.agent === 'string'
     ? data.agent
@@ -342,6 +381,16 @@ async function upsertSession(
   const cwd = typeof data.cwd === 'string' ? data.cwd : null
   const worktreePath = typeof data.worktree_path === 'string' ? data.worktree_path : null
   const worktreeBranch = typeof data.worktree_branch === 'string' ? data.worktree_branch : null
+  return {agent_type:agentType, daemon_id:daemonId, status:typeof data.status==='string'?data.status:null, cwd, worktree_path:worktreePath, worktree_branch:worktreeBranch}
+}
+
+async function upsertSession(
+  client: Pick<pg.PoolClient, 'query'>,
+  installationId: string,
+  row: ProjectionRow,
+  historical = false,
+): Promise<void> {
+  const observation=sessionFields(row)
   await client.query(`
     INSERT INTO source_sessions
       (installation_id, session_id, agent_type, daemon_id, status, cwd_observation,
@@ -369,9 +418,8 @@ async function upsertSession(
       last_recorded_at = GREATEST(source_sessions.last_recorded_at,EXCLUDED.last_recorded_at),
       last_feed_id = CASE WHEN EXCLUDED.last_feed_id IS NULL THEN source_sessions.last_feed_id ELSE GREATEST(COALESCE(source_sessions.last_feed_id, 0), EXCLUDED.last_feed_id) END
   `, [
-    installationId, row.session_id, agentType, daemonId,
-    typeof data.status === 'string' ? data.status : null,
-    cwd, worktreePath, worktreeBranch, row.recorded_at, row.feed_id===undefined?null:String(row.feed_id), historical,
+    installationId, row.session_id, observation.agent_type, observation.daemon_id, observation.status,
+    observation.cwd, observation.worktree_path, observation.worktree_branch, row.recorded_at, row.feed_id===undefined?null:String(row.feed_id), historical,
   ])
 }
 
@@ -411,17 +459,24 @@ async function insertSourceEvent(
   return { sourceEventId: result.rows[0].source_event_id, inserted: result.rows[0].inserted }
 }
 
+function turnFields(row:ProjectionRow) {
+  const data = row.data ?? {}
+  const rawStatus = typeof data.turn_status === 'string' ? data.turn_status : data.status
+  const status = typeof rawStatus === 'string' && TURN_STATES.has(rawStatus)
+    ? rawStatus
+    : null
+  const rawReason = typeof data.turn_reason === 'string' ? data.turn_reason : data.reason
+  const reason = typeof rawReason === 'string' && rawReason.length > 0 ? rawReason : null
+  return {status,reason}
+}
+
 async function upsertTurn(
   client: Pick<pg.PoolClient, 'query'>,
   installationId: string,
   row: ProjectionRow,
   sourceEventId: string,
 ): Promise<boolean> {
-  const data = row.data ?? {}
-  const rawStatus = typeof data.turn_status === 'string' ? data.turn_status : data.status
-  const status = typeof rawStatus === 'string' && TURN_STATES.has(rawStatus)
-    ? rawStatus
-    : null
+  const {status,reason}=turnFields(row)
   const existing = await client.query<{ state: string }>(`
     SELECT state FROM source_turns
     WHERE installation_id = $1 AND turn_id = $2
@@ -443,8 +498,6 @@ async function upsertTurn(
     nextStatus = status ?? current
   }
 
-  const rawReason = typeof data.turn_reason === 'string' ? data.turn_reason : data.reason
-  const reason = typeof rawReason === 'string' && rawReason.length > 0 ? rawReason : null
   const turn = await client.query<{ terminal: boolean }>(`
     INSERT INTO source_turns
       (installation_id, turn_id, session_id, state, reason, started_at, terminal_at,

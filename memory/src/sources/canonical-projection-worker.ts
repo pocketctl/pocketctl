@@ -16,7 +16,7 @@ import {prepareMetadataScope} from './source-projection-admission.js'
 /** Each durable page commits its cursor, refs and derived facts together.
  * Personal metadata may continue a small successful-page burst; generic,
  * Team and shadow work retain their existing single-page admission. */
-export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
+export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageDerivedWriteInstallations?:readonly string[];pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
  const configuredSize=options.pageSize??64,deferMs=options.deferMs??1000
  if(!Number.isSafeInteger(configuredSize)||configuredSize<1||configuredSize>256||!Number.isSafeInteger(deferMs)||deferMs<0||deferMs>60000)throw Error('canonical_projection_options_invalid')
  return async(job,signal)=>{
@@ -139,7 +139,8 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
      throw error
     }
     if(signal.aborted)throw Error('canonical_projection_aborted')
-    const result=await persistPersonalMetadataReferencePage(pool,selected,options.stabilizationMs,signal,historicalCompile)
+    const batchDerived=options.pageDerivedWriteInstallations?.includes(scope.installationId)===true && !historicalCompile
+    const result=await persistPersonalMetadataReferencePage(pool,selected,options.stabilizationMs,signal,historicalCompile,batchDerived)
     if(result.contextReady){options.onReady?.(root);return}
     if(signal.aborted)throw Error('canonical_projection_aborted')
     if(page===3||performance.now()-burstStarted>=burstBudgetMs)break

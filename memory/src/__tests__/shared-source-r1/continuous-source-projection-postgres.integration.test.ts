@@ -1,3 +1,4 @@
+import * as pageWrites from '../../projection/page-derived-writes.js'
 import {workerErrorFields} from '../../jobs/worker-diagnostics.js'
 import {SHARED_JOB_CAPACITY} from '../../jobs/scheduling.js'
 import {APPEND_PROJECTION_PRIORITY} from '../../jobs/scheduling.js'
@@ -107,7 +108,8 @@ suite('continuous personal canonical content uses current scope seal',()=>{
   const upper=ids.at(-1)!,signal=new AbortController().signal,errors:unknown[]=[],waves:any[]=[]
   const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'wave-scheduler',signal,onError:e=>errors.push(e)})
   const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'wave-worker',signal,onError:e=>errors.push(e)})
-  const project=createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0});let late=false
+  const writes=vi.spyOn(pageWrites,'writePageSessions')
+  const project=createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0,pageDerivedWriteInstallations:[installation]});let late=false
   queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
   const closeObserver=observeProjectionCommits(f.runtime,async event=>{
    if(event.installationId!==installation||event.rootKey!==f.root(source))return
@@ -138,8 +140,11 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    expect(first.some(w=>w.phase==='scanning'&&BigInt(w.after)>200n)).toBe(true)
    const refs=(await f.runtime.query('SELECT canonical_key,payload FROM source_events WHERE installation_id=$1 ORDER BY canonical_key::bigint',[installation])).rows
    expect(refs.map(r=>r.canonical_key)).toEqual(ids.sort((a,b)=>BigInt(a)<BigInt(b)?-1:1));expect(refs.every(r=>r.payload===null)).toBe(true)
+   const counts=await f.runtime.query('SELECT sum(event_count)::int AS total FROM source_turns WHERE installation_id=$1',[installation])
+   expect(writes.mock.calls.some(([,id,rows])=>id===installation&&rows.length>1)).toBe(true)
+   expect(counts.rows[0].total).toBe(ids.length)
    expect(refs.slice(0,6).map(r=>r.canonical_key)).toEqual(['2','3','9','10','64','100']);expect(errors).toEqual([])
-  }finally{await closeObserver();await scheduler.stop();await queue.stop()}
+  }finally{writes.mockRestore();await closeObserver();await scheduler.stop();await queue.stop()}
  },40000)
  test('a native r+1 after dispatch leaves content pending but permits current-source metadata projection',async()=>{
   const errors:unknown[]=[],signal=new AbortController().signal

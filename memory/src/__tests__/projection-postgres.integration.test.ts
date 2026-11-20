@@ -2,7 +2,7 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
-import { createSourceProjector } from '../projection/source-projector.js'
+import { createSourceProjector, projectCanonicalDerivedFact, projectNewCanonicalPage, type CanonicalDerivedFact } from '../projection/source-projector.js'
 import { createProjectionHandler } from '../projection/repository.js'
 import { loadMemoryConfig } from '../config.js'
 import { canonicalPayloadHash } from '../inbox/canonical-json.js'
@@ -71,6 +71,73 @@ describeWithDatabase('L0/L0.5 source projector (PostgreSQL)', () => {
         (installation_id, provider_id, relay_status, local_status, config_version)
       VALUES ($1, 'pocketctl-memory', 'active', 'ready', 1)
     `, [INSTALLATION])
+  })
+
+  test('page folds preserve ordered session, turn, artifact and compile projections across retries', async () => {
+    const client=await pool.connect()
+    const facts:CanonicalDerivedFact[]=[
+      {agent:'codex',cwd:'/a',turn_status:'interrupt_requested'},
+      {status:'open',reason:'before'},
+      {turn_status:'completed',cwd:'/b',turn_reason:'done'},
+      {turn_status:'failed',reason:'late',path:'src/x.ts'},
+      {agent_type:'agent2',status:'running',reason:'other'},
+      {worktree_branch:'main'},
+    ].map((payload,i)=>({
+      sourceEventId:`12345678-0000-4000-8000-00000000000${i}`,sessionId:i===4?'s2':'s1',
+      turnId:i===5?null:i===4?'t2':'t1',eventType:['session_discovered','agent_text','agent_text','file_change','agent_text','agent_text'][i],
+      occurredAt:`2026-11-19T10:00:0${[2,3,4,1,5,0][i]}.123456Z`,payload,
+    }))
+    try{
+      await client.query('BEGIN')
+      for(const f of facts)await client.query(`INSERT INTO source_events
+        (source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash)
+        VALUES ($1::uuid,$2,'feed',$1::uuid::text,$3,$4,$5,$6,'{}',decode(repeat('0',64),'hex'))`,
+        [f.sourceEventId,INSTALLATION,f.sessionId,f.turnId,f.eventType,f.occurredAt])
+      await client.query('SAVEPOINT before_projection')
+      async function replay(batch:boolean){
+        for(const page of [facts.slice(0,2),facts.slice(2,3),facts.slice(3)]){
+          if(batch)await projectNewCanonicalPage(client,INSTALLATION,page,30000)
+          else{
+            const scheduledTurns=new Set<string>()
+            for(const f of page)await projectCanonicalDerivedFact(client,INSTALLATION,f,30000,{scheduledTurns})
+            // The canonical writer folds timestamp ranges after all ordered facts.
+            for(const f of page)await client.query('UPDATE source_sessions SET first_recorded_at=LEAST(first_recorded_at,$3) WHERE installation_id=$1 AND session_id=$2',[INSTALLATION,f.sessionId,f.occurredAt])
+          }
+        }
+        return (await client.query(`SELECT
+          (SELECT jsonb_agg(to_jsonb(s) ORDER BY session_id) FROM source_sessions s) AS sessions,
+          (SELECT jsonb_agg(to_jsonb(t) ORDER BY turn_id) FROM source_turns t) AS turns,
+          (SELECT jsonb_agg(to_jsonb(a)-'artifact_id' ORDER BY source_event_id) FROM source_artifacts a) AS artifacts,
+          (SELECT jsonb_agg(to_jsonb(j)-'job_id' ORDER BY idempotency_key) FROM memory_jobs j) AS jobs`)).rows[0]
+      }
+      const expected=await replay(false)
+      await client.query('ROLLBACK TO before_projection')
+      expect(await replay(true)).toEqual(expected)
+      await client.query('ROLLBACK TO before_projection')
+      expect(await replay(true)).toEqual(expected)
+    }finally{await client.query('ROLLBACK');client.release()}
+  })
+
+  test('concurrent pages preserve the first terminal state and add both event counts', async () => {
+    const first={sourceEventId:'00000000-0000-4000-8000-000000000001',sessionId:'session',
+      turnId:'turn',eventType:'turn_status',occurredAt:'2026-11-20T10:00:01Z',payload:{turn_status:'completed'}}
+    const late={...first,sourceEventId:'00000000-0000-4000-8000-000000000002',
+      occurredAt:'2026-11-20T10:00:00Z',payload:{turn_status:'running'}}
+    for(const fact of [first,late])await pool.query(`INSERT INTO source_events
+      (source_event_id,installation_id,origin,origin_position,event_type,occurred_at,payload,payload_hash)
+      VALUES ($1::uuid,$2,'feed',$1::uuid::text,'turn_status',$3,'{}','')`,[fact.sourceEventId,INSTALLATION,fact.occurredAt])
+    const a=await pool.connect(),b=await pool.connect()
+    try{
+      await a.query('BEGIN')
+      await b.query('BEGIN')
+      await projectNewCanonicalPage(a,INSTALLATION,[first],0)
+      const second=projectNewCanonicalPage(b,INSTALLATION,[late],0)
+      await Promise.all([a.query('COMMIT'),second])
+      await b.query('COMMIT')
+      const {rows}=await pool.query('SELECT state,event_count::int,first_source_event_id,last_source_event_id FROM source_turns WHERE installation_id=$1',[INSTALLATION])
+      expect(rows).toEqual([{state:'completed',event_count:2,first_source_event_id:first.sourceEventId,last_source_event_id:late.sourceEventId}])
+      expect((await pool.query("SELECT count(*)::int n FROM memory_jobs WHERE installation_id=$1 AND job_type='compile_episode'",[INSTALLATION])).rows[0].n).toBe(1)
+    }finally{await a.query('ROLLBACK');await b.query('ROLLBACK');a.release();b.release()}
   })
 
   test.each([

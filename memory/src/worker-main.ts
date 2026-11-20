@@ -297,7 +297,14 @@ async function main(): Promise<void> {
       },
     })
     jobWorker.register('project_feed', projection.handleProjectFeed)
-    if(config.databaseNamespace==='memory')jobWorker.register('project_shared_source',createCanonicalProjectionHandler(pool,{stabilizationMs:config.episodeStabilizationMs,sourceProfile:config.sharedSourceProfile,installationAllowlist:config.installationAllowlist}),{branch:'canonical'})
+    if (config.databaseNamespace === 'memory') {
+      jobWorker.register('project_shared_source', createCanonicalProjectionHandler(pool, {
+        pageDerivedWriteInstallations: config.pageDerivedWriteInstallations,
+        stabilizationMs: config.episodeStabilizationMs,
+        sourceProfile: config.sharedSourceProfile,
+        installationAllowlist: config.installationAllowlist,
+      }), {branch: 'canonical'})
+    }
     const episodes = createEpisodeRepository(pool, {
       lifecycleMode: config.lifecycleMode,
       stabilizationMs: config.episodeStabilizationMs,

@@ -10,7 +10,7 @@ import {createObservedPersonalMetadataReader} from './observed-reader.js'
 import {personalMetadataEnvelope,type MetadataScopeSeal} from './source-projection-admission.js'
 import {bindHistoricalOriginals} from './historical-originals.js'
 import {readHistoricalIds,readHistoricalProjectionSeal,type HistoricalProjectionRoot} from './historical-projection-authority.js'
-import {projectCanonicalDerivedFact} from '../projection/source-projector.js'
+import {projectCanonicalDerivedFact,projectNewCanonicalPage,type CanonicalDerivedFact} from '../projection/source-projector.js'
 
 interface MetadataWave {contract:'personal-metadata-wave-v1';through:string;after?:string;startVersion:SourceVersion;scopeHash:string;controlRevision:string;phase:'scanning'|'restart'}
 interface MetadataPage {wave:MetadataWave;prior:unknown;envelope:unknown;exhausted:boolean;nextAfter?:string;contextReady?:boolean}
@@ -130,9 +130,9 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
  return Object.freeze({token,count:heads.length,...(view.nextAfter?{nextCursor:view.nextAfter}:{}),hasMore:!view.exhausted})
 }
 
-export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false){
+export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false,batchDerived=false){
  const p=pages.get(page.token);if(!p?.metadata)throw Error('canonical_reference_token_invalid')
- const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile})
+ const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile,batchDerived})
  return {references,contextReady:p.metadata.contextReady===true}
 }
 
@@ -171,7 +171,7 @@ export async function completeReadyCanonicalProjection(pool:pg.Pool,scope:Source
 
 /** Bounded metadata-only physical transaction. It neither copies a body nor
  * rewrites an existing UUID, origin, original digest or provenance. */
-type PersistOptions={historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
+type PersistOptions={batchDerived?:boolean;historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
 export async function persistCanonicalReferencePage(pool:pg.Pool,page:CanonicalReferencePage,options:PersistOptions={}):Promise<CanonicalReference[]>{
  return persistReferencePage(pool,page,options)
 }
@@ -352,21 +352,28 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
    for(const row of inserted.rows)allocated.set(row.canonical_key,row.source_event_id)
   }
   const result:CanonicalReference[]=[],projected:string[]=[]
+  // Existing canonical rows without a completion marker retain their original
+  // session time-range semantics on the ordered recovery path.
+  const batchDerived=options.batchDerived && prepared.metadata && !options.historicalCompile &&
+    !existing.some(row=>row.origin==='canonical'&&!row.canonical_projected_at)
+  const pageFacts:CanonicalDerivedFact[]=[]
   const scheduledTurns=new Set<string>()
   for(const [ordinal,head] of heads.entries()){
    const old=matched.get(head.canonicalKey)
    const sourceEventId=old?.source_event_id??allocated.get(head.canonicalKey)
    if(!sourceEventId)throw Error('canonical_reference_conflict')
    if(options.project&&!team&&(!old||old.origin==='canonical'&&!old.canonical_projected_at)){
-    await projectCanonicalDerivedFact({query} as Pick<pg.PoolClient,'query'>,scope.installationId,
-     {sourceEventId,sessionId:head.sessionKey,turnId:head.turnKey??null,eventType:head.eventType,occurredAt:head.occurredAt!,payload:payloads[ordinal]},
+    const fact={sourceEventId,sessionId:head.sessionKey,turnId:head.turnKey??null,eventType:head.eventType,occurredAt:head.occurredAt!,payload:payloads[ordinal]}
+    if(batchDerived)pageFacts.push(fact)
+    else await projectCanonicalDerivedFact({query} as Pick<pg.PoolClient,'query'>,scope.installationId,fact,
      stabilizationMs,{scheduleCompilation:!historical,historicalCompile:options.historicalCompile,scheduledTurns})
     projected.push(sourceEventId)
    }
    result.push({sourceEventId,canonicalKey:head.canonicalKey,sessionId:head.sessionKey,created:!old})
    timing.rowsProcessed++
   }
-  if(missing.length){
+  if(batchDerived)await projectNewCanonicalPage({query} as Pick<pg.PoolClient,'query'>,scope.installationId,pageFacts,stabilizationMs)
+  else if(missing.length){
    // Merge timestamp ranges after ordered facts: historical session metadata
    // compares each event against the latest event observed so far.
    await query(`INSERT INTO source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at)
