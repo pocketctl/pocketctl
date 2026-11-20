@@ -1,3 +1,4 @@
+import {SHARED_JOB_CAPACITY} from './jobs/scheduling.js'
 import {reconcileExpiredCurationRuns} from './curation/reconcile-expired.js'
 import {attachSourceMetrics} from './sources/metrics.js'
 import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
@@ -234,6 +235,7 @@ async function main(): Promise<void> {
     jobWorker = createJobWorker({
       pool,
       jobs: jobRepository,
+      capacity: config.databaseNamespace==='memory' ? SHARED_JOB_CAPACITY : undefined,
       workerId: config.workerId,
       signal,
       leaseMs: config.jobLeaseMs,
@@ -249,7 +251,7 @@ async function main(): Promise<void> {
       },
       onDeferred:(error,job)=>{
         const fields=workerErrorFields(error,job)
-        if(fields.source_stage||String(fields.code).startsWith('source_metadata_'))logger.log('warn','source_job_deferred',fields)
+        if(fields.source_stage||fields.projection_reason||String(fields.code).startsWith('source_metadata_'))logger.log('warn','source_job_deferred',fields)
       },
       onError: loopError('jobs'),
     })

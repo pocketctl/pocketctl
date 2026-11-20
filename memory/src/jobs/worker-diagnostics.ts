@@ -1,13 +1,16 @@
+import {projectionErrorFields} from '../sources/projection-diagnostics.js'
 import {sourceFailureFields} from '../sources/diagnostics.js'
 import {SourceUnavailableError} from '@pocketctl/session-source'
 import { RelayRequestError } from '../relay/errors.js'
-import { JOB_TYPES, JobTerminalError, type JobClaim } from './types.js'
+import { JOB_TYPES, JobDeferredError, JobTerminalError, type JobClaim } from './types.js'
 
 const KNOWN_CODES = new Set(['projection_source_changed','inbox_body_unavailable','job_aborted_before_dispatch','git_poll_failed','extraction_unconfigured',
+ 'projection_commit_outcome_unknown','canonical_reference_budget_exceeded','canonical_reference_write_timeout','canonical_reference_unavailable','canonical_reference_wave_invalid','canonical_reference_metadata_limit',
+ 'canonical_reference_provenance_invalid','canonical_reference_timestamp_required','canonical_reference_payload_invalid','canonical_projection_aborted',
  'canonical_reference_mapping_required','canonical_reference_busy','canonical_reference_changed','canonical_reference_conflict','canonical_reference_cursor_changed',
  'source_execution_generation_changed','source_execution_required','source_shadow_provider_forbidden','source_execution_scope_mismatch','source_executions_not_drained','source_execution_requires_read_committed','source_provider_effect_unrecorded'])
 const COMMIT_CODES=new Set(['source_metadata_commit_outcome_unknown','source_metadata_commit_acknowledged','source_metadata_transaction_unavailable'])
-const SOURCE_CODES=new Set(['source_store_unavailable','source_store_timeout','source_store_busy','processing_pin_expired_or_unavailable','source_metadata_proof_unavailable','source_reference_unproven','source_body_reclaimed','source_metadata_conflict','body_hash_mismatch','body_set_mismatch','changed','revoked','deleted'])
+const SOURCE_CODES=new Set(['source_store_unavailable','source_store_timeout','source_store_busy','processing_pin_expired_or_unavailable','source_metadata_proof_unavailable','source_reference_unproven','body_hash_unavailable','archive_unconfigured','archive_binding_invalid','archive_namespace_mismatch','archive_io_limit','archive_unavailable','source_body_reclaimed','source_metadata_conflict','body_hash_mismatch','body_set_mismatch','changed','revoked','deleted'])
 const ERROR_NAMES = new Set(['Error','TypeError','RangeError','SyntaxError','AbortError'])
 const SQLSTATES = new Set(['40001','40P01','55P03','57014','23502','23503','23505','23514','08001','08003','08006','53300','53400','57P01','42P01','42703'])
 
@@ -21,14 +24,20 @@ export function workerErrorCode(error: unknown): string {
   const sqlstate = error && typeof error === 'object' && 'code' in error ? error.code : undefined
   if(typeof sqlstate==='string'&&COMMIT_CODES.has(sqlstate))return sqlstate
   if (typeof sqlstate === 'string' && SQLSTATES.has(sqlstate)) return 'postgres_error'
+  const {projection_stage:stage,projection_reason:reason}=projectionErrorFields(error)
+  if(error instanceof JobDeferredError && reason)return `projection_${reason}`
+  if(stage){
+    if(error instanceof Error && ['source_reference_changed','source_metadata_scan_changed','source_context_set_not_ready'].includes(error.message))return error.message
+    return `projection_${stage}_failed`
+  }
   const name=error instanceof Error && ERROR_NAMES.has(error.name) ? error.name : error instanceof Error ? 'Error' : 'unknown'
   return `handler_failed_${name}`
 }
 
 export function workerErrorFields(error: unknown, job?: JobClaim): Record<string, unknown> {
-  const fields: Record<string,unknown>={code:workerErrorCode(error),...sourceFailureFields(error)}
+  const fields: Record<string,unknown>={code:workerErrorCode(error),...sourceFailureFields(error),...projectionErrorFields(error)}
   const sqlstate=error && typeof error === 'object' && 'code' in error ? error.code : undefined
-  if(typeof sqlstate==='string' && SQLSTATES.has(sqlstate))fields.sqlstate=sqlstate
+  if(typeof sqlstate==='string' && (SQLSTATES.has(sqlstate)||sqlstate==='P0001'&&fields.projection_stage))fields.sqlstate=sqlstate
   if(job){
     if(JOB_TYPES.includes(job.job_type))fields.job_type=job.job_type
     if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.job_id))fields.job_id=job.job_id

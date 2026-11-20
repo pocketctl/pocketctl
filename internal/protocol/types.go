@@ -98,6 +98,7 @@ type MemoryContextHint struct {
 
 // Client → Daemon commands
 type ClientMessage struct {
+	TerminalSubmit    bool                        `json:"terminal_submit,omitempty"`
 	QueueDispatch     bool                        `json:"queue_dispatch,omitempty"`
 	MemoryContextHint *MemoryContextHint          `json:"memory_context_hint,omitempty"`
 	RetryOfTurnID     string                      `json:"retry_of_turn_id,omitempty"`

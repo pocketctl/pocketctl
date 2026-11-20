@@ -34,8 +34,21 @@ func (sm *SessionManager) claudeCapabilitiesLocked(state *ProcessState) []string
 	return capabilities
 }
 
+const CodexTerminalSubmitCapability = "codex_terminal_submit_v1"
+
+func supportsCodexTerminalSubmit(state *ProcessState) bool {
+	if state == nil || state.Agent != adapter.AgentCodex || state.Source != "terminal" || state.ControlMode != protocol.ControlManaged {
+		return false
+	}
+	backend, ok := state.Backend.(*CodexAppServerBackend)
+	return ok && backend != nil
+}
+
 func (sm *SessionManager) sessionCapabilitiesLocked(state *ProcessState) []string {
 	caps := sm.baseSessionCapabilitiesLocked(state)
+	if supportsCodexTerminalSubmit(state) {
+		caps = append(caps, CodexTerminalSubmitCapability)
+	}
 	if state != nil && sm.turnEnabled() && (state.Agent == adapter.AgentClaude && state.Source == "daemon" || state.Agent == adapter.AgentDSH || (state.Agent == adapter.AgentCodex || state.Agent == adapter.AgentOpencode) && state.ControlMode == protocol.ControlManaged) {
 		caps = append(caps, "message_queue_v1")
 	}

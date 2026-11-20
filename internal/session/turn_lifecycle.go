@@ -59,6 +59,7 @@ func (sm *SessionManager) turnEnabled() bool { return sm.turnMode != turnEnrichm
 // callers keep the SendMessage wrapper; the relay daemon handler populates
 // RequestID/MsgID so the daemon actually uses the relay-guaranteed ids.
 type UserMessageInput struct {
+	TerminalSubmit    bool
 	QueueDispatch     bool
 	MemoryContextHint *protocol.MemoryContextHint
 	RetryOfTurnID     string
@@ -83,6 +84,7 @@ var ErrQueuedSessionBusy = errors.New("queued session busy")
 var ErrSessionExecutionIdentityUnavailable = errors.New("session execution identity unavailable")
 
 type userMessageCorrelation struct {
+	TerminalSubmit    bool
 	MemorySource      *protocol.MemorySourceProvenance
 	RetryOfTurnID     string
 	InputMode         string
@@ -368,6 +370,15 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 	if err != nil {
 		return err
 	}
+	if in.TerminalSubmit {
+		sm.mu.RLock()
+		allowed := supportsCodexTerminalSubmit(sm.sessions[in.SessionID])
+		sm.mu.RUnlock()
+		if !allowed || in.InvocationID != "" || in.RetryOfTurnID != "" || in.QueueDispatch || in.MsgID == "" || in.RequestID == "" {
+			return fmt.Errorf("invalid Codex terminal submission")
+		}
+		in.InputMode = protocol.InputModeNewTurn
+	}
 	if in.QueueDispatch {
 		sm.mu.RLock()
 		supported := false
@@ -395,7 +406,7 @@ func (sm *SessionManager) SendMessageWithInput(ctx context.Context, in UserMessa
 		in.InputMode = protocol.InputModeNewTurn
 	}
 	ctx = context.WithValue(ctx, codexInvocationKey{}, in.InvocationID)
-	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode, RetryOfTurnID: in.RetryOfTurnID, RequireContext: in.SkipMemoryContext && in.HiddenContext != nil})
+	ctx = withUserMessageCorrelation(ctx, userMessageCorrelation{TerminalSubmit: in.TerminalSubmit, RequestID: in.RequestID, MsgID: in.MsgID, InputMode: in.InputMode, RetryOfTurnID: in.RetryOfTurnID, RequireContext: in.SkipMemoryContext && in.HiddenContext != nil})
 	if agent == adapter.AgentCodex && (in.InvocationID == "command:review" || in.InvocationID == "command:compact") {
 		_, err := sm.invokeCodexCommand(ctx, in.SessionID, in.Content, in.InvocationID, true)
 		return err

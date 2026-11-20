@@ -1,3 +1,5 @@
+import {HISTORICAL_COMPILE_PRIORITY} from '../jobs/scheduling.js'
+import {JOB_PRIORITIES} from '../jobs/types.js'
 import {lockLegacySourceInput} from '../sources/input-mode.js'
 import { parseMemorySourceProvenance } from '../episodes/skill-provenance.js'
 import type pg from 'pg'
@@ -245,14 +247,14 @@ async function projectRow(
 
 /** Reuses deterministic derived projections without manufacturing a Feed ID
  * or persisting an event body. Caller owns the current root/output transaction. */
-export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number,options:{scheduleCompilation?:boolean}={}):Promise<void>{
+export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number,options:{scheduleCompilation?:boolean;historicalCompile?:boolean}={}):Promise<void>{
  const row:ProjectionRow={session_id:fact.sessionId,turn_id:fact.turnId,event_type:fact.eventType,recorded_at:fact.occurredAt,data:fact.payload}
  const historical=options.scheduleCompilation===false
  await upsertSession(client,installationId,row,historical)
- await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs,options.scheduleCompilation)
+ await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs,options.scheduleCompilation,options.historicalCompile)
 }
 
-async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,scheduleCompilation=true):Promise<void>{
+async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,scheduleCompilation=true,historicalCompile=false):Promise<void>{
   const data = sourceRow.data ?? {}
 
   if (sourceRow.turn_id) {
@@ -266,7 +268,7 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
     await client.query(`
       INSERT INTO memory_jobs
         (job_id, installation_id, job_type, idempotency_key, priority, payload, available_at)
-      VALUES (gen_random_uuid(), $1, 'compile_episode', $2, 80, '{}'::jsonb,
+      VALUES (gen_random_uuid(), $1, 'compile_episode', $2, $4, '{}'::jsonb,
               NOW() + ($3 * INTERVAL '1 millisecond'))
       ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
         state = CASE
@@ -274,6 +276,8 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
           ELSE memory_jobs.state
         END,
         available_at = EXCLUDED.available_at,
+        priority = CASE WHEN memory_jobs.state IN ('completed','dead') OR (memory_jobs.priority=${HISTORICAL_COMPILE_PRIORITY} AND memory_jobs.state<>'running')
+          THEN EXCLUDED.priority ELSE memory_jobs.priority END,
         attempts = CASE
           WHEN memory_jobs.state = 'running' THEN memory_jobs.attempts
           ELSE 0
@@ -294,7 +298,7 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
           WHEN memory_jobs.state IN ('completed', 'dead') THEN NULL
           ELSE memory_jobs.completed_at
         END
-    `, [installationId, `compile_episode:${sourceRow.turn_id}`, stabilizationMs])
+    `, [installationId, `compile_episode:${sourceRow.turn_id}`, stabilizationMs,historicalCompile?HISTORICAL_COMPILE_PRIORITY:JOB_PRIORITIES.compile_episode])
   }
 
   const artifact = classifyArtifact(sourceRow.event_type, data)

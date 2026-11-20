@@ -4,7 +4,8 @@ import {afterAll,beforeAll,describe,expect,test} from 'vitest'
 import {inventoryMemory} from '../../migrations/governance-v2/inventory.js'
 import {applySharedSourceContract} from '../../migrations/shared-db/contract.js'
 import {verifyMemoryStartup,prepareMemoryStartup} from '../../startup-schema.js'
-import {applyMemorySchema} from '../../schema.js'
+import {applyMemorySchema,MEMORY_MIGRATIONS} from '../../schema.js'
+import {TABLE_POLICY} from '../../migrations/shared-source/table-policy.js'
 import {createMemoryPool} from '../../db.js'
 import {assertMemoryRuntimeCompatibility} from '../../migrations/governance-v2/compatibility.js'
 import {provisionSharedDatabase,assertSharedRuntimeContract} from '../../migrations/shared-db/namespace.js'
@@ -24,16 +25,28 @@ suite('shared DB namespace, migrator and least-privilege runtimes',()=>{
    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_r1_relay') THEN CREATE ROLE shared_r1_relay LOGIN PASSWORD 'only-test'; END IF;
    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_r1_migrator') THEN CREATE ROLE shared_r1_migrator NOLOGIN; END IF;
    END $$;`)
+  // The shared contract installs Session subscription triggers on Relay's
+  // installations and grants checkpoint updates to the restricted definer.
+  await pool.query(`CREATE TABLE public.users(id integer PRIMARY KEY);
+   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,status text,
+   owner_user_id int,owner_scope_kind text,owner_scope_id uuid,subscriptions text[],config_version bigint,
+   start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,snapshot_required_at timestamptz,
+   lease_epoch bigint,lease_token_hash text,lease_expires_at timestamptz,updated_at timestamptz)`)
   inputFoundation=await beginFreshInputFixture(pool)
  },60000)
  afterAll(async()=>{await pool?.end()})
  test('fresh target and repeat apply stay inside memory; functions and FK targets do not fall back to public',async()=>{
   await Promise.all([applyMemorySchema(pool,{namespace:'memory'}),applyMemorySchema(pool,{namespace:'memory'})])
-  expect((await pool.query("SELECT count(*)::int n FROM pg_class WHERE relnamespace='memory'::regnamespace AND relkind='r'")).rows[0].n).toBe(191)
+  // The two post-retirement receipts only exist after explicit transport retirement.
+  const retiredOnly=new Set(['memory_source_snapshot_receipts','memory_source_delivery_receipts'])
+  const tables=(await pool.query("SELECT relname FROM pg_class WHERE relnamespace='memory'::regnamespace AND relkind='r'")).rows
+  expect(tables.map(row=>row.relname).sort()).toEqual(Object.keys(TABLE_POLICY).filter(name=>!retiredOnly.has(name)).sort())
   const jsonColumns=(await pool.query(`SELECT c.relname||'.'||a.attname AS column_key FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
    WHERE c.relnamespace='memory'::regnamespace AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND a.atttypid IN('json'::regtype,'jsonb'::regtype) ORDER BY 1`)).rows.map(r=>r.column_key)
   expect(jsonColumns).toEqual(Object.keys(JSON_COLUMN_POLICY).sort())
-  expect((await pool.query("SELECT count(*)::int n FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r'")).rows[0].n).toBe(2)
+  const publicTables=(await pool.query("SELECT relname FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r' ORDER BY relname")).rows
+  expect(publicTables.map(row=>row.relname)).toEqual(['events','extension_checkpoints','extension_installations','knowledge_claims','users'])
   expect((await pool.query("SELECT count(*)::int n FROM pg_proc WHERE pronamespace='memory'::regnamespace AND NOT COALESCE(proconfig @> ARRAY['search_path=pg_catalog, memory, shared']::text[],false)")).rows[0].n).toBe(0)
   expect((await pool.query("SELECT count(*)::int n FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_class f ON f.oid=c.confrelid WHERE r.relnamespace='memory'::regnamespace AND f.relnamespace='public'::regnamespace")).rows[0].n).toBe(0)
  },60000)
@@ -50,7 +63,7 @@ suite('shared DB namespace, migrator and least-privilege runtimes',()=>{
  })
  test('legacy governance inventory explicitly reads the target namespace',async()=>{
   const inventory=await inventoryMemory(pool,{namespace:'memory'})
-  expect(inventory).toMatchObject({namespace:'memory',schemaVersion:96,compatible:true})
+  expect(inventory).toMatchObject({namespace:'memory',schemaVersion:Math.max(...MEMORY_MIGRATIONS.map(m=>m.version)),compatible:true})
  })
  test('provision isolates runtime roles, locks default privileges and rejects inherited owner escalation',async()=>{
   await installRetainedInputStartFixture(pool,'retained_history',inputFoundation)

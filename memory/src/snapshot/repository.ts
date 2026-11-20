@@ -1,3 +1,4 @@
+import {HISTORICAL_COMPILE_PRIORITY} from '../jobs/scheduling.js'
 import {snapshotLogicalSession,snapshotAliasRow,prepareSnapshotAliasRows} from '../sources/snapshot-alias.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {canonicalJsonString} from '@pocketctl/session-source'
@@ -359,15 +360,19 @@ export function createSnapshotRepository(pool: pg.Pool) {
             INSERT INTO memory_jobs
               (job_id, installation_id, job_type, idempotency_key, priority, payload)
             SELECT gen_random_uuid(), $1, 'compile_episode', 'compile_episode:' || t.turn_id,
-                   70, '{}'::jsonb
+                   ${HISTORICAL_COMPILE_PRIORITY}, '{}'::jsonb
             FROM source_turns t
             WHERE t.installation_id = $1 AND t.session_id = ANY($2::text[])
               AND t.terminal_at IS NOT NULL
               AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=t.installation_id AND r.turn_id=t.turn_id)
             ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
-              state = 'pending', available_at = NOW(), attempts = 0,
-              claimed_by = NULL, claim_expires_at = NULL,
-              last_error_code = NULL, completed_at = NULL
+              state = CASE WHEN memory_jobs.state='running' THEN 'running' ELSE 'pending' END,
+              available_at = NOW(), attempts = CASE WHEN memory_jobs.state='running' THEN memory_jobs.attempts ELSE 0 END,
+              priority = CASE WHEN memory_jobs.state IN ('pending','running') THEN memory_jobs.priority ELSE EXCLUDED.priority END,
+              claimed_by = CASE WHEN memory_jobs.state='running' THEN memory_jobs.claimed_by END,
+              claim_expires_at = CASE WHEN memory_jobs.state='running' THEN memory_jobs.claim_expires_at END,
+              last_error_code = CASE WHEN memory_jobs.state='running' THEN 'rerun_required' END,
+              completed_at = NULL
           `, [input.installationId, logicalSessions])
           await client.query(`
             UPDATE memory_snapshot_runs

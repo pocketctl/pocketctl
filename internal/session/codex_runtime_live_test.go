@@ -4,8 +4,14 @@ package session
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -66,7 +72,23 @@ func TestInstalledCodexRuntimeAcquireAndSecondClient(t *testing.T) {
 	// TestMain has already replaced HOME; its .codex need not exist. An
 	// explicit CODEX_HOME must exist, and must not reuse developer credentials.
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CODEX_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	// Only the installed app-server and its real native acknowledgement are
+	// under test. A synthetic loopback provider receives the model request.
+	requested := make(chan struct{}, 1)
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case requested <- struct{}{}:
+		default:
+		}
+		http.Error(w, "local fixture complete", http.StatusBadRequest)
+	}))
+	defer model.Close()
+	settings := fmt.Sprintf("model_provider = %q\nmodel = %q\n[model_providers.smoke]\nname = %q\nbase_url = %q\nwire_api = %q\nrequest_max_retries = 0\nstream_max_retries = 0\n", "smoke", "local-fixture", "Loopback", model.URL, "responses")
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(settings), 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("POCKETCTL_CODEX_HOMES", "")
 	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", shortCodexRuntimeDir(t))
 	cfg := agentcontrol.DefaultConfig()
@@ -75,9 +97,10 @@ func TestInstalledCodexRuntimeAcquireAndSecondClient(t *testing.T) {
 	if err := agentcontrol.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	sm := NewSessionManager(make(chan protocol.DaemonEvent, 8))
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 512))
 	provider := sm.CodexRuntimeProvider()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	provider.probe = (agentcontrol.CodexProbe{Timeout: 25 * time.Second}).Probe
+	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
 	defer cancel()
 	result, err := provider.Acquire(ctx, agentcontrol.AcquireRequest{
 		Agent: agentcontrol.AgentCodex, ClientPID: os.Getpid(),
@@ -119,5 +142,68 @@ func TestInstalledCodexRuntimeAcquireAndSecondClient(t *testing.T) {
 	}
 	if threadID == "" {
 		t.Fatal("thread/start returned an empty id")
+	}
+	// A second client creates a terminal thread, as the native TUI does.
+	var terminal struct{ Thread struct{ ID string } }
+	if err := second.Call(ctx, "thread/start", map[string]any{"cwd": t.TempDir(), "modelProvider": "smoke", "model": "local-fixture"}, &terminal); err != nil {
+		t.Fatal(err)
+	}
+	id := terminal.Thread.ID
+	// A new native thread writes its persistent rollout on the first turn.
+	// Let the independent client submit first. Its user-looking notification
+	// must not gain a direct input proof on the daemon connection.
+	var first struct{ Turn struct{ ID string } }
+	if err := second.Call(ctx, "turn/start", map[string]any{"threadId": id, "input": []map[string]string{{"type": "text", "text": "native fixture input"}}}, &first); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("native turn did not complete")
+		case message := <-second.Events():
+			var params struct {
+				ThreadID string
+				Turn     struct{ ID string }
+			}
+			if message.Method != "turn/completed" || json.Unmarshal(message.Params, &params) != nil || params.ThreadID != id || params.Turn.ID != first.Turn.ID {
+				continue
+			}
+		}
+		break
+	}
+	select {
+	case <-requested:
+	case <-ctx.Done():
+		t.Fatal("native model fixture was not reached")
+	}
+	for !slices.Contains(sm.SessionCapabilities(id), CodexTerminalSubmitCapability) {
+		select {
+		case <-ctx.Done():
+			t.Fatal("terminal did not register")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if err := sm.SendMessageWithInput(ctx, UserMessageInput{TerminalSubmit: true, SessionID: id, RequestID: "terminal-smoke", MsgID: "1227028c-a313-4802-a307-39d38cc9949f", Content: "loopback fixture input"}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("missing accepted terminal input")
+		case ev := <-sm.outputCh:
+			if ev.Type != "user_text" || ev.RequestID != "terminal-smoke" {
+				continue
+			}
+			if ev.SessionID != id || ev.SourceTurnID == "" || ev.TurnID != logicalCodexTurnID(id, ev.SourceTurnID) || ev.MemorySource == nil || !ev.MemorySource.LineageComplete {
+				t.Fatalf("invalid native input receipt for thread %q", id)
+			}
+			t.Logf("accepted terminal input: native turn %s, source %s", ev.SourceTurnID, ev.MemorySource.EventID)
+			select {
+			case <-requested:
+				return
+			case <-ctx.Done():
+				t.Fatal("local model fixture was not reached")
+			}
+		}
 	}
 }

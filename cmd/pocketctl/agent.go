@@ -129,6 +129,11 @@ func runAgentCommand(args []string, stdout, stderr io.Writer, manager any) error
 	}
 	ctx := context.Background()
 	switch args[1] {
+	case "submit":
+		if agent != agentcontrol.AgentCodex {
+			return fmt.Errorf("%s", i18n.T("agent.unknown_action", agent, args[1]))
+		}
+		return runCodexTerminalSubmit(args[2:], os.Stdin, stdout, stderr)
 	case "enable":
 		fs := flag.NewFlagSet("agent opencode enable", flag.ContinueOnError)
 		fs.SetOutput(stderr)

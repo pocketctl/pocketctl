@@ -1,3 +1,4 @@
+import {APPEND_PROJECTION_PRIORITY} from '../../jobs/scheduling.js'
 /** Distribution is metadata, separate from source processing. A root is not
  * acknowledged merely because its current page or one principal is ready. */
 export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
@@ -8,6 +9,7 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
   cursor_key TEXT NOT NULL DEFAULT '' CHECK(length(cursor_key)<=2048),state TEXT NOT NULL CHECK(state IN('scanning','sealed')),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),PRIMARY KEY(source_kind,root_key),
   FOREIGN KEY(source_kind,root_key) REFERENCES shared.memory_source_work(source_kind,root_key))`,
+ `ALTER TABLE shared.memory_source_distributions ADD COLUMN IF NOT EXISTS covers_event_append BOOLEAN NOT NULL DEFAULT FALSE`,
  `ALTER TABLE shared.memory_source_distributions ADD COLUMN IF NOT EXISTS dispatch_cursor TEXT NOT NULL DEFAULT '' CHECK(length(dispatch_cursor)<=2048)`,
  `ALTER TABLE shared.memory_source_distributions ADD COLUMN IF NOT EXISTS dispatch_complete BOOLEAN NOT NULL DEFAULT FALSE`,
  `ALTER TABLE shared.memory_source_distributions ADD COLUMN IF NOT EXISTS claim_token UUID,
@@ -39,7 +41,7 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.step_memory_source_distribution(p_kind TEXT,p_root TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT,p_scan UUID,p_after TEXT,p_limit INT)
   RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE d shared.memory_source_distributions;item RECORD;current_control BIGINT;page_count INT=0;claimed_frontier BIGINT;BEGIN
+  DECLARE d shared.memory_source_distributions;item RECORD;current_control BIGINT;page_count INT=0;claimed_frontier BIGINT;has_append BOOLEAN;BEGIN
    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 128 OR p_after IS NULL OR length(p_after)>2048
     OR p_kind IS NULL OR p_kind NOT IN('relay_event','team_collaboration','team_delivery') THEN RAISE EXCEPTION 'invalid_source_distribution_page';END IF;
    IF NOT shared.assert_memory_source_lease(p_kind,p_root,p_token,p_worker,p_revision) THEN RAISE EXCEPTION 'source_lease_lost';END IF;
@@ -74,18 +76,24 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
     IF NOT shared.guard_memory_control_commit(current_control) THEN RAISE EXCEPTION 'source_distribution_control_changed';END IF;
     RETURN jsonb_build_object('waiting',TRUE,'scanId',d.scan_id,'workRevision',d.work_revision::text,'claimedRevision',claimed_frontier::text);
    END IF;
-   IF FOUND AND(d.work_revision,d.control_revision) IS DISTINCT FROM(p_revision,current_control) THEN
+   -- Freeze the scheduling reason with the scan, before later appends or
+   -- dispatch-page retries can change the live root. Leave old seals unclassified.
+   IF d.scan_id IS NULL OR (d.work_revision,d.control_revision) IS DISTINCT FROM(p_revision,current_control) THEN
+    SELECT p_kind='relay_event' AND COALESCE(event_append_revision>processed_revision AND event_append_revision<=p_revision,FALSE)
+     INTO STRICT has_append FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root;
+   END IF;
+   IF d.scan_id IS NOT NULL AND(d.work_revision,d.control_revision) IS DISTINCT FROM(p_revision,current_control) THEN
     UPDATE shared.memory_source_distributions SET scan_id=gen_random_uuid(),work_revision=p_revision,control_revision=current_control,
-     cursor_key='',state='scanning',dispatch_cursor='',dispatch_complete=FALSE,updated_at=clock_timestamp() WHERE source_kind=p_kind AND root_key=p_root RETURNING * INTO d;
+     cursor_key='',state='scanning',dispatch_cursor='',dispatch_complete=FALSE,covers_event_append=has_append,updated_at=clock_timestamp() WHERE source_kind=p_kind AND root_key=p_root RETURNING * INTO d;
     -- A changed authority snapshot requires a fresh cursor, never adoption of
     -- the old caller's page position. Old metadata remains auditable.
     UPDATE shared.memory_source_distributions current_scan SET claim_token=w.lease_token,claim_owner=w.lease_owner,claim_until=w.lease_until
      FROM shared.memory_source_work w WHERE(current_scan.source_kind,current_scan.root_key)=(p_kind,p_root) AND(w.source_kind,w.root_key)=(p_kind,p_root);
     RETURN jsonb_build_object('scanId',d.scan_id,'state',d.state,'cursor','','reset',TRUE,'controlRevision',d.control_revision::text,'workRevision',d.work_revision::text);
-   ELSIF NOT FOUND THEN
+   ELSIF d.scan_id IS NULL THEN
     IF p_scan IS NOT NULL OR p_after<>'' THEN RAISE EXCEPTION 'source_distribution_cursor_changed';END IF;
-    INSERT INTO shared.memory_source_distributions(source_kind,root_key,scan_id,work_revision,control_revision,state)
-     VALUES(p_kind,p_root,gen_random_uuid(),p_revision,current_control,'scanning') RETURNING * INTO d;
+    INSERT INTO shared.memory_source_distributions(source_kind,root_key,scan_id,work_revision,control_revision,state,covers_event_append)
+     VALUES(p_kind,p_root,gen_random_uuid(),p_revision,current_control,'scanning',has_append) RETURNING * INTO d;
    ELSE
     IF p_scan IS DISTINCT FROM d.scan_id OR p_after IS DISTINCT FROM d.cursor_key THEN RAISE EXCEPTION 'source_distribution_cursor_changed';END IF;
    END IF;
@@ -109,7 +117,7 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.dispatch_memory_source_distribution(p_kind TEXT,p_root TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT,p_scan UUID,p_after TEXT,p_limit INT)
   RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE d shared.memory_source_distributions;item RECORD;page_count INT=0;BEGIN
+  DECLARE d shared.memory_source_distributions;item RECORD;page_count INT=0;projection_priority INT=52;BEGIN
    IF p_scan IS NULL OR p_after IS NULL OR length(p_after)>2048 OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 128 THEN RAISE EXCEPTION 'invalid_source_dispatch_page';END IF;
    IF NOT shared.assert_memory_source_lease(p_kind,p_root,p_token,p_worker,p_revision) THEN RAISE EXCEPTION 'source_lease_lost';END IF;
    SELECT * INTO d FROM shared.memory_source_distributions WHERE source_kind=p_kind AND root_key=p_root FOR UPDATE NOWAIT;
@@ -118,12 +126,13 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
    IF d.dispatch_complete OR d.dispatch_cursor IS DISTINCT FROM p_after THEN RAISE EXCEPTION 'source_distribution_cursor_changed';END IF;
    UPDATE shared.memory_source_distributions current_scan SET claim_token=w.lease_token,claim_owner=w.lease_owner,claim_until=w.lease_until
     FROM shared.memory_source_work w WHERE(current_scan.source_kind,current_scan.root_key)=(p_kind,p_root) AND(w.source_kind,w.root_key)=(p_kind,p_root);
+   IF d.covers_event_append THEN projection_priority=${APPEND_PROJECTION_PRIORITY};END IF;
    FOR item IN SELECT * FROM shared.memory_source_distribution_targets t WHERE t.scan_id=p_scan
     AND t.cursor_key COLLATE "C">d.dispatch_cursor COLLATE "C" ORDER BY t.cursor_key COLLATE "C" LIMIT p_limit LOOP
     IF item.state='current' THEN
      INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
       VALUES(gen_random_uuid(),item.installation_id,'project_shared_source',
-       'shared-source:'||p_scan::text||':'||encode(sha256(convert_to(item.cursor_key,'UTF8')),'hex'),52,
+       'shared-source:'||p_scan::text||':'||encode(sha256(convert_to(item.cursor_key,'UTF8')),'hex'),projection_priority,
        jsonb_build_object('scope',item.source_scope,'root',jsonb_build_object('kind',p_kind,'key',p_root),'distribution_scan',p_scan::text,'target_cursor',item.cursor_key))
       ON CONFLICT DO NOTHING;
      IF item.target_mode='shared-active' THEN

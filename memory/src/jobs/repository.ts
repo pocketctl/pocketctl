@@ -1,3 +1,4 @@
+import {jobCapacityClassSql, type JobCapacity} from './scheduling.js'
 import { createHash, randomUUID } from 'crypto'
 import type pg from 'pg'
 import { JOB_DEAD_LETTER_ATTEMPTS, JOB_PRIORITIES, type JobClaim, type JobType, type JobDeferReason } from './types.js'
@@ -18,11 +19,13 @@ export function retryDelayWithJitterMs(attempts:number,sample=Math.random()):num
 }
 
 interface JobRow {
+  priority: number
   job_id: string
   installation_id: string | null
   job_type: JobType
   idempotency_key: string
   payload: Record<string, unknown>
+  last_error_code: string | null
   attempts: number | string
   claim_epoch: number | string
 }
@@ -32,9 +35,11 @@ function toClaim(row: JobRow): JobClaim {
     job_id: row.job_id,
     installation_id: row.installation_id,
     job_type: row.job_type,
+    priority: row.priority,
     idempotency_key: row.idempotency_key,
     payload: row.payload ?? {},
     attempts: Number(row.attempts),
+    ...(row.last_error_code ? {last_error_code:row.last_error_code} : {}),
     claim_epoch: Number(row.claim_epoch),
   }
 }
@@ -79,44 +84,60 @@ export function createJobRepository(pool: pg.Pool) {
       workerId: string; limit: number; leaseMs: number
       globalLimit?: number; perInstallationLimit?: number
       typeLimits?: Partial<Record<JobType,number>>
+      capacity?: JobCapacity
     }): Promise<JobClaim[]> {
       if(input.limit===0)return []
       if(!Number.isInteger(input.limit)||input.limit<0||input.limit>1000||!Number.isFinite(input.leaseMs)||input.leaseMs<=0)throw new Error('invalid_claim_limits')
       const globalLimit=input.globalLimit??2147483647,tenantLimit=input.perInstallationLimit??2147483647
       const limits=input.typeLimits??{}
       if(!Number.isInteger(globalLimit)||globalLimit<1||!Number.isInteger(tenantLimit)||tenantLimit<1
-        ||Object.values(limits).some(n=>!Number.isInteger(n)||Number(n)<0))throw new Error('invalid_claim_limits')
+        ||[...Object.values(limits),...Object.values(input.capacity??{})].some(n=>!Number.isInteger(n)||Number(n)<0))throw new Error('invalid_claim_limits')
       const client=await pool.connect()
       try{
         await client.query('BEGIN')
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))")
         await client.query(`UPDATE memory_jobs SET state='pending',claimed_by=NULL,claim_expires_at=NULL
           WHERE state='running' AND claim_expires_at<=clock_timestamp()`)
+        const capacityClass = input.capacity ? jobCapacityClassSql : "'general'::text"
         const result=await client.query<JobRow>(`WITH live AS(
-          SELECT installation_id,job_type FROM memory_jobs WHERE state='running' AND claim_expires_at>clock_timestamp()
+          SELECT installation_id,job_type,${capacityClass} AS lane FROM memory_jobs
+          WHERE state='running' AND claim_expires_at>clock_timestamp()
         ), tenant AS(SELECT installation_id,count(*)::int n FROM live GROUP BY installation_id),
         kind AS(SELECT job_type,count(*)::int n FROM live GROUP BY job_type),
-        ranked AS(SELECT j.job_id,j.priority,j.available_at,j.created_at,
-          COALESCE(t.n,0) AS active_tenant,
-          ROW_NUMBER() OVER(PARTITION BY j.installation_id ORDER BY j.priority,j.available_at,j.created_at,j.job_id) AS tenant_rank,
-          ROW_NUMBER() OVER(PARTITION BY j.job_type ORDER BY j.priority,COALESCE(t.n,0),j.available_at,j.created_at,j.job_id) AS type_rank,
-          $5::int-COALESCE(t.n,0) AS tenant_room,
-          COALESCE(($6::jsonb->>j.job_type)::int,2147483647)-COALESCE(k.n,0) AS type_room
-          FROM memory_jobs j LEFT JOIN tenant t ON t.installation_id IS NOT DISTINCT FROM j.installation_id
+        lanes AS(SELECT lane,count(*)::int n FROM live GROUP BY lane),
+        eligible AS(
+          SELECT j.job_id,j.installation_id,j.job_type,j.priority,j.available_at,j.created_at,j.lane,
+            COALESCE(t.n,0) AS active_tenant,
+            $5::int-COALESCE(t.n,0) AS tenant_room,
+            COALESCE(($6::jsonb->>j.job_type)::int,2147483647)-COALESCE(k.n,0) AS type_room,
+            COALESCE(($7::jsonb->>j.lane)::int,2147483647)-COALESCE(l.n,0) AS lane_room
+          FROM (SELECT job_id,installation_id,job_type,priority,available_at,created_at,${capacityClass} AS lane
+                FROM memory_jobs WHERE state='pending' AND available_at<=clock_timestamp()) j
+          LEFT JOIN tenant t ON t.installation_id IS NOT DISTINCT FROM j.installation_id
           LEFT JOIN kind k ON k.job_type=j.job_type
-          WHERE j.state='pending' AND j.available_at<=clock_timestamp()
-            AND COALESCE(($6::jsonb->>j.job_type)::int,2147483647)>COALESCE(k.n,0)
-            AND $5::int>COALESCE(t.n,0)),
-        picked AS(SELECT j.job_id FROM memory_jobs j JOIN ranked r ON r.job_id=j.job_id
-          WHERE r.tenant_rank<=r.tenant_room AND r.type_rank<=r.type_room
+          LEFT JOIN lanes l ON l.lane=j.lane
+        ), tenant_order AS(
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,available_at,created_at,job_id) AS tenant_turn
+          FROM eligible WHERE tenant_room>0 AND type_room>0 AND lane_room>0
+        ), type_order AS(
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY job_type ORDER BY priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS type_rank
+          FROM tenant_order
+        ), lane_order AS(
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY lane ORDER BY priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS lane_rank
+          FROM type_order WHERE type_rank<=type_room
+        ), ranked AS(
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,available_at,created_at,job_id) AS tenant_rank
+          FROM lane_order WHERE lane_rank<=lane_room
+        ), picked AS(SELECT j.job_id,j.last_error_code FROM memory_jobs j JOIN ranked r ON r.job_id=j.job_id
+          WHERE r.tenant_rank<=r.tenant_room
           ORDER BY r.priority,r.active_tenant,r.tenant_rank,r.available_at,r.created_at,j.job_id
           FOR UPDATE OF j SKIP LOCKED
           LIMIT LEAST($3::int,GREATEST(0,$4::int-(SELECT count(*)::int FROM live))))
         UPDATE memory_jobs j SET state='running',claimed_by=$1,claim_epoch=j.claim_epoch+1,
           claim_expires_at=clock_timestamp()+($2*interval '1 millisecond'),attempts=j.attempts+1,last_error_code=NULL
         FROM picked WHERE j.job_id=picked.job_id
-        RETURNING j.job_id,j.installation_id,j.job_type,j.idempotency_key,j.payload,j.attempts,j.claim_epoch`,
-          [input.workerId,input.leaseMs,input.limit,globalLimit,tenantLimit,JSON.stringify(limits)])
+        RETURNING j.job_id,j.installation_id,j.job_type,j.idempotency_key,j.payload,j.attempts,j.claim_epoch,j.priority,picked.last_error_code`,
+          [input.workerId,input.leaseMs,input.limit,globalLimit,tenantLimit,JSON.stringify(limits),JSON.stringify(input.capacity??{})])
         await client.query('COMMIT');return result.rows.map(toClaim)
       }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
@@ -324,7 +345,13 @@ export function createJobRepository(pool: pg.Pool) {
                 available_at = NOW() + ($2 * INTERVAL '1 millisecond'),
                 claimed_by = NULL,
                 claim_expires_at = NULL,
-                last_error_code = $3
+                last_error_code = $3,
+                payload = CASE WHEN job_type='project_shared_source'
+                    AND $3 IN ('canonical_reference_budget_exceeded','canonical_reference_write_timeout')
+                  THEN jsonb_set(payload,'{projection_budget_step}',to_jsonb(CASE
+                    WHEN payload->>'projection_budget_step' ~ '^[1-6]$'
+                    THEN LEAST(6,(payload->>'projection_budget_step')::int+1) ELSE 1 END))
+                  ELSE payload END
             WHERE job_id = $1
           `, [input.jobId, delayMs, input.errorCode])
           await client.query('COMMIT')

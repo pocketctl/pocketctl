@@ -134,3 +134,31 @@ test('elapsed successful-page work stops before fourth IO after the one-second b
  const f=fixture();io.persist.mockImplementation(async()=>{await vi.advanceTimersByTimeAsync(450);return{contextReady:false}})
  await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError);expect(io.prepare).toHaveBeenCalledTimes(3);expect(performance.now()).toBe(1350)
 })
+
+test('a fresh claim reduces the page after a transaction budget overrun and retains the sealed cursor',async()=>{
+ const progress={state:'scanning',source_version:{content:'1'},next_cursor:'durable-cursor'}
+ const f=fixture([progress]);f.job.last_error_code='canonical_reference_budget_exceeded';f.job.attempts=3
+ await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
+ expect(io.genericPrepare.mock.calls[0][3]).toEqual({limit:16,cursor:'durable-cursor'})
+ expect(io.load.mock.calls[0][3]).toBe(scan)
+})
+
+test('missing page hash restarts through the version-locked ordinary reader', async () => {
+ const f = fixture()
+ io.prepare.mockRejectedValueOnce(new SourceUnavailableError('body_hash_unavailable'))
+ io.genericPrepare.mockResolvedValueOnce({token:{}, count:1, hasMore:false})
+ await f.run()
+ expect(io.genericPrepare).toHaveBeenCalledWith(f.pool, scope, root, {limit:64, cursor:undefined})
+ expect(io.genericPersist).toHaveBeenCalledOnce()
+ expect(io.persist).not.toHaveBeenCalled()
+})
+
+test('an unavailable or corrupt archive cannot advance the projection checkpoint', async () => {
+ const f = fixture()
+ const denied = new SourceUnavailableError('archive_binding_invalid')
+ io.prepare.mockRejectedValueOnce(new SourceUnavailableError('body_hash_unavailable'))
+ io.genericPrepare.mockRejectedValueOnce(denied)
+ await expect(f.run()).rejects.toBe(denied)
+ expect(io.genericPersist).not.toHaveBeenCalled()
+ expect(io.persist).not.toHaveBeenCalled()
+})

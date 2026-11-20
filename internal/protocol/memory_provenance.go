@@ -1,5 +1,17 @@
 package protocol
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
+// MemoryInputEventID identifies one correlated user dispatch. A matching ID
+// alone does not establish acceptance; the native transport must acknowledge it.
+func MemoryInputEventID(sessionID, requestID, messageID string) string {
+	digest := sha256.Sum256([]byte(sessionID + "\x00" + requestID + "\x00" + messageID))
+	return "input:" + hex.EncodeToString(digest[:])
+}
+
 // MemorySourceProvenance is producer metadata. It grants no permission and must
 // never be populated from agent text or a model's interpretation of its source.
 type MemorySourceProvenance struct {

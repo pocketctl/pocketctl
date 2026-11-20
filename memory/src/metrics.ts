@@ -1,3 +1,4 @@
+import {jobCapacityClassSql} from './jobs/scheduling.js'
 import {createSourceMetrics} from './sources/metrics.js'
 import {LIFECYCLE_HEALTH_REASONS,loadLifecycleHealth,evaluateLifecycleHealth,summarizeLifecycleHealth,type LifecycleMode} from './reporting/lifecycle-health.js'
 import {BUSINESS_HEALTH_REASONS, loadBudgetUncertainty,loadBusinessHealth, evaluateBusinessHealth} from './reporting/business-health.js'
@@ -104,6 +105,7 @@ export function createMemoryMetrics() {
     registers: [registry],
   })
 
+  const sourceQueueAge=new Gauge({name:'pocketctl_memory_source_queue_oldest_seconds',help:'Age since eligibility of oldest pending source or compile job by scheduling class',labelNames:['class'] as const,registers:[registry]})
   const jobQueueAge=new Gauge({name:'pocketctl_memory_job_queue_oldest_seconds',help:'Age since eligibility of oldest pending job',labelNames:['type'] as const,registers:[registry]})
   const jobStarved=new Gauge({name:'pocketctl_memory_job_starved',help:'Eligible pending jobs waiting over ten minutes',labelNames:['type'] as const,registers:[registry]})
   const jobWaiting=new Gauge({name:'pocketctl_memory_job_waiting',help:'Retained pending jobs waiting for budget or source readiness',labelNames:['type','reason'] as const,registers:[registry]})
@@ -159,7 +161,7 @@ export function createMemoryMetrics() {
     feedLag,
     inboxRows,
     projection,
-    jobs, jobQueueAge, jobStarved, jobWaiting, jobRuntime, jobRepeatClaims,
+    jobs, jobQueueAge, sourceQueueAge, jobStarved, jobWaiting, jobRuntime, jobRepeatClaims,
     snapshot,
     purge,
     relayRequests,
@@ -766,6 +768,13 @@ export async function updateJobSchedulingGauges(pool:Pick<pg.Pool,'query'>,metri
       COUNT(*) FILTER(WHERE last_error_code IN('budget_exceeded','budget_unavailable'))::text AS budget_wait,
       COUNT(*) FILTER(WHERE last_error_code='source_not_ready')::text AS source_wait
     FROM memory_jobs WHERE state='pending' GROUP BY job_type`)
+  const sourceAges=await pool.query<{lane:string;age:string}>(`
+    SELECT ${jobCapacityClassSql} AS lane,MAX(EXTRACT(EPOCH FROM clock_timestamp()-available_at))::text AS age
+    FROM memory_jobs WHERE state='pending' AND job_type IN ('project_shared_source','compile_episode')
+      AND available_at<=clock_timestamp() GROUP BY lane`)
+  const ageByLane=new Map(sourceAges.rows.map(row=>[row.lane,Number(row.age)]))
+  for(const lane of ['event_append','projection_scan','compile'])metrics.sourceQueueAge.set({class:lane},ageByLane.get(lane)??0)
+  metrics.sourceQueueAge.set({class:'snapshot_compile'},ageByLane.get('general')??0)
   const rows=new Map(result.rows.map(row=>[row.job_type,row]))
   for(const type of JOB_TYPES){
     const row=rows.get(type)

@@ -23,6 +23,7 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
  // FIFO contains only exact live-token candidates, never authority. Four is
  // a strict lease-admission bound, including the active source; all SQL remains
  // sequential on the original pool and every revisit recovers/renews normally.
+ let sourceClaimTurn=0
  const parked:SourceWorkClaim[]=[],deferredRoots=new Map<string,number>(),maxHeldSources=4
  // Only records an acknowledged frontier, never lease authority. Every visit
  // still crosses strict SQL renewal; any lost response requires recovery first.
@@ -32,8 +33,11 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
  async function nextSource(){
   if(source)return
   if(parked.length<maxHeldSources){
-   source=(await claimSourceWork(pool,workerId,30,1))[0]
+   // Three append-first admissions, then one scan-first. SQL falls back to
+   // the oldest eligible row of the other class when the preferred one is empty.
+   source=(await claimSourceWork(pool,workerId,30,1,sourceClaimTurn<3))[0]
    if(source){
+    sourceClaimTurn=(sourceClaimTurn+1)%4
     // Only ordinary SQL claim may reacquire an expired queued root. Discard
     // its obsolete local token so it cannot occupy a second queue slot.
     const stale=parked.findIndex(claim=>key(claim)===key(source!))

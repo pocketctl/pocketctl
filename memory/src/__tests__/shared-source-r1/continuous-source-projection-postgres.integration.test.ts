@@ -1,3 +1,6 @@
+import {workerErrorFields} from '../../jobs/worker-diagnostics.js'
+import {SHARED_JOB_CAPACITY} from '../../jobs/scheduling.js'
+import {APPEND_PROJECTION_PRIORITY} from '../../jobs/scheduling.js'
 import {setTimeout as delay} from 'node:timers/promises'
 import {randomUUID} from 'node:crypto'
 import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises'
@@ -126,6 +129,10 @@ suite('continuous personal canonical content uses current scope seal',()=>{
     if(n===249)throw Error('wave_drain_timeout');await delay(100)
    }
    expect(late).toBe(true)
+   const dispatched=await f.pool.query(`SELECT DISTINCT d.covers_event_append,j.priority FROM shared.memory_source_distributions d
+    JOIN memory.memory_jobs j ON j.installation_id=$1 AND j.job_type='project_shared_source' AND j.payload->>'distribution_scan'=d.scan_id::text
+    WHERE d.source_kind='relay_event' AND d.root_key=$2`,[installation,f.root(source)])
+   expect(dispatched.rows).toEqual([{covers_event_append:true,priority:APPEND_PROJECTION_PRIORITY}])
    const first=waves.filter(p=>p.source_version.metadataWave?.through===upper).map(p=>p.source_version.metadataWave)
    expect(first.length).toBeGreaterThanOrEqual(3)
    expect(first.some(w=>w.phase==='scanning'&&BigInt(w.after)>200n)).toBe(true)
@@ -532,7 +539,7 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    expect(result.inserted).toBe(true);ids.push(String(result.eventId))
   }
   const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'live-scheduler',signal,onError:e=>errors.push(e)})
-  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'live-worker',signal,onError:(e,j)=>{if(j&&j.installation_id===inst)errors.push({error:String(e),stack:e instanceof Error?e.stack:undefined,type:j.job_type})}})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'live-worker',signal,capacity:SHARED_JOB_CAPACITY,onError:(e,j)=>{if(j&&j.installation_id===inst)errors.push(workerErrorFields(e,j))}})
   const project=createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0})
   queue.register('project_shared_source',async(...args)=>{await delay(200);await project(...args)},{branch:'canonical'})
   queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
@@ -1038,7 +1045,10 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    VALUES($1,$2,'feed','alias-original',$3,'agent_text',now(),'{}'::jsonb,decode(repeat('b',64),'hex'))`,[unresolved,installation,original.session])
   const root={kind:'relay_event' as const,key:f.root(source)},signal=new AbortController().signal,errors:unknown[]=[]
   const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'alias-original-scheduler',signal,onError:e=>errors.push(e)})
-  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'alias-original-worker',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'alias-original-worker',signal,onError:(e,j)=>{if(!j||j.installation_id===installation)errors.push(e)}})
+  // Other installations share this fixture queue and may have eligible compiles.
+  // Exercise their normal handler and keep this alias assertion scoped to its installation.
+  queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
   const normal=createCanonicalProjectionHandler(f.runtime,{pageSize:1,stabilizationMs:0});let observed=false
   queue.register('project_shared_source',async(job,abort,context)=>{
    const jobRoot=job.payload.root as {key?:string}|undefined

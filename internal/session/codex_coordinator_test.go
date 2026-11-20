@@ -342,7 +342,7 @@ func TestCodexCoordinatorResumedThreadStatusWinsHistoricalHydration(t *testing.T
 				}
 				if event.Type == "session_meta" {
 					seenMeta = true
-					if event.ControlMode != protocol.ControlManaged || !sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance, "message_queue_v1"}) {
+					if event.ControlMode != protocol.ControlManaged || !sameStrings(event.Capabilities, []string{CodexCapabilityMessageAcceptance, CodexTerminalSubmitCapability, "message_queue_v1"}) {
 						t.Fatalf("restored metadata revoked managed composer: %+v", event)
 					}
 				}

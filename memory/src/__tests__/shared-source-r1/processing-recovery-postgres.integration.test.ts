@@ -1,3 +1,6 @@
+import {randomUUID} from 'node:crypto'
+import {archiveObjectKey,canonicalPayloadHash,createPostgresPersonalMetadataReader,encodeArchiveChunk,MemoryArchiveStorage} from '@pocketctl/session-source'
+import {bindSourcePool,sourcePoolContext} from '../../sources/pool-context.js'
 import {readFile} from 'node:fs/promises'
 import {planSourceProjectionRepair,applySourceProjectionRepair} from '../../maintenance/repair-source-projections.js'
 import {afterAll,beforeAll,describe,expect,test} from 'vitest'
@@ -110,4 +113,73 @@ suite('quiet expired roots recover through the actual deterministic worker',()=>
    expect(evaluateBusinessHealth(recovered).reasons).not.toContain('source_processing_failed')
   }finally{closeObserver();await queue.stop();await scheduler.stop()}
  },90000)
+ test('a real personal projection verifies a historical cold first page with no stored hash',async()=>{
+  const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
+  const root={kind:'relay_event' as const,key:f.root(source)}
+  await f.pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  const payload={text:'archived fixture',turn_id:'cold-first-page'}
+  const id=(await f.publisher.query(`INSERT INTO public.events(session_id,event_type,payload,event_hash,effect_status,user_id)
+   VALUES($1,'agent_text',$2,$3,'completed',$4) RETURNING id::text`,[source.session,payload,randomUUID().replaceAll('-',''),source.owner])).rows[0].id
+  const epoch=(await f.pool.query('SELECT activity_epoch::text FROM public.sessions WHERE session_id=$1',[source.session])).rows[0].activity_epoch
+  const manifestId=randomUUID(),key=archiveObjectKey(manifestId,0)
+  const limits={maxRawBytes:1048576,maxCompressedBytes:1048576,maxRecords:64}
+  const encoded=await encodeArchiveChunk({userId:source.owner,sessionId:source.session,activityEpoch:epoch,manifestId,ordinal:0},[{id,eventType:'agent_text',payload}],limits)
+  const manifest=encoded.manifest,storage=Object.assign(new MemoryArchiveStorage(),{namespace:'cold-first-page'})
+  await storage.put(key,encoded.bytes)
+  await f.pool.query(`INSERT INTO public.session_archive_manifests(manifest_id,user_id,session_id,activity_epoch,schema_version,codec,state,event_high_water,published_at,storage_namespace)
+   VALUES($1,$2,$3,$4,1,'gzip','published',$5,NOW(),$6)`,[manifestId,source.owner,source.session,epoch,id,storage.namespace])
+  await f.pool.query(`INSERT INTO public.session_archive_chunks(manifest_id,ordinal,object_key,first_event_id,last_event_id,event_count,raw_bytes,compressed_bytes,raw_sha256,compressed_sha256)
+   VALUES($1,0,$2,$3,$3,1,$4,$5,$6,$7)`,[manifestId,key,id,manifest.rawBytes,manifest.compressedBytes,manifest.rawSha256,manifest.compressedSha256])
+  await f.pool.query('ALTER TABLE public.events ALTER COLUMN payload DROP NOT NULL')
+  await f.pool.query(`UPDATE public.events SET payload=NULL,body_storage='cold',body_session_id=$1,body_manifest_id=$2,
+   body_chunk_ordinal=0,body_owner_user_id=$3,body_activity_epoch=$4 WHERE id=$5`,[source.session,manifestId,source.owner,epoch,id])
+  const scope=(await f.runtime.query("SELECT source_scope FROM shared.enumerate_memory_source_targets('relay_event',$1,'',64)",[root.key])).rows[0].source_scope
+  await expect(createPostgresPersonalMetadataReader(f.runtime).selectPage(scope,root,{limit:64})).rejects.toMatchObject({code:'body_hash_unavailable'})
+  const prior=sourcePoolContext(f.runtime),signal=new AbortController().signal,errors:unknown[]=[]
+  let reads=0
+  bindSourcePool(f.runtime,{...prior,archive:{storage:{namespace:storage.namespace,read:async k=>{reads++;return storage.read(k)}},limits}})
+  const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'cold-first-page-scheduler',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'cold-first-page-worker',signal,onError:e=>errors.push(e)})
+  queue.register('project_shared_source',createCanonicalProjectionHandler(f.runtime),{branch:'canonical'})
+  try{
+   let jobId:string|undefined
+   for(let n=0;n<50&&!jobId;n++){
+    await scheduler.runOnce()
+    jobId=(await f.runtime.query("SELECT job_id FROM memory_jobs WHERE installation_id=$1 AND job_type='project_shared_source'",[installation])).rows[0]?.job_id
+   }
+   expect(jobId).toBeTruthy()
+   await f.pool.query("UPDATE memory.memory_jobs SET state='dead',attempts=12,last_error_code='handler_failed_Error',completed_at=NOW() WHERE job_id=$1",[jobId])
+   const repair=await f.runtime.connect()
+   try{
+    const frozen=await planSourceProjectionRepair(repair,[jobId!])
+    // A successor that has already checkpointed this scope invalidates a
+    // first-page recovery even when the old job and archive are unchanged.
+    await repair.query('BEGIN')
+    await repair.query(`INSERT INTO memory_canonical_projection_progress
+     (installation_id,source_kind,root_key,context_key,source_version,state)
+     VALUES($1,'relay_event',$2,$3,'{}','ready')`,[installation,root.key,canonicalPayloadHash(scope).toString('hex')])
+    await expect(applySourceProjectionRepair(repair,frozen)).rejects.toThrow('source_repair_not_eligible')
+    await repair.query('ROLLBACK')
+    const reviewed=await planSourceProjectionRepair(repair,[jobId!])
+    await repair.query('BEGIN')
+    expect(await applySourceProjectionRepair(repair,reviewed)).toEqual([{jobId,state:'requeued'}])
+    await repair.query('COMMIT')
+   }finally{await repair.query('ROLLBACK');repair.release()}
+   let state=''
+   for(let i=0;i<100&&state!=='completed';i++){
+    await scheduler.runOnce();await queue.tick()
+    if(errors.length)throw errors[0]
+    state=(await f.runtime.query("SELECT state FROM memory_jobs WHERE installation_id=$1 AND job_type='project_shared_source'",[installation])).rows[0]?.state
+    if(state!=='completed')await new Promise(resolve=>setTimeout(resolve,30))
+   }
+   expect(state).toBe('completed')
+   expect(reads).toBeGreaterThan(0)
+   const compiles=await f.runtime.query("SELECT priority FROM memory_jobs WHERE installation_id=$1 AND job_type='compile_episode'",[installation])
+   expect(compiles.rows).toEqual([{priority:70}])
+   const ref=await f.runtime.query("SELECT encode(content_hash,'hex') AS hash,payload,mapping_state FROM source_events WHERE installation_id=$1 AND canonical_key=$2",[installation,id])
+   expect(ref.rows).toEqual([{hash:canonicalPayloadHash(payload).toString('hex'),payload:null,mapping_state:'verified'}])
+  }finally{await queue.stop();await scheduler.stop();bindSourcePool(f.runtime,prior)}
+ },90000)
+
 })

@@ -1,6 +1,7 @@
+import {ProjectionTiming,observeProjectionStep,commitOutcomeUnknown,ProjectionLockBusy,recordProjectionRollback} from './projection-diagnostics.js'
 import type pg from 'pg'
 import {JobDeferredError,JobTerminalError} from '../jobs/types.js'
-import {runSelectedSourceTransaction,SelectedSourceLockBusy} from './processing-pins.js'
+import {runSelectedSourceTransaction,SelectedSourceLockBusy,SelectedSourceTransactionUnavailable} from './processing-pins.js'
 import {canonicalJsonString,canonicalPayloadHash,createPostgresSharedSourceReader,SourceUnavailableError,teamReaderProjectionKey,type SourceHead,type SourceRoot,type SourceScope,type SourceVersion} from '@pocketctl/session-source'
 import {createObservedSourceReader} from './observed-reader.js'
 import {sourceConnectionKey,sourcePoolContext} from './pool-context.js'
@@ -113,10 +114,10 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
  // Restart with after=through is the single tail-due witness. Its first
  // observation freezes a new bound; subsequent tail pages retain that bound.
  const tailDue=wave?.phase==='restart'&&wave.after!==undefined&&BigInt(wave.after)===BigInt(wave.through)
- const reader=createObservedPersonalMetadataReader(pool),view=await reader.selectPage(scope,root,{limit,...(wave?{after:wave.after,...(!tailDue?{through:wave.through}:{})}:{})})
+ const reader=createObservedPersonalMetadataReader(pool),view=await observeProjectionStep(pool,'select_page',()=>reader.selectPage(scope,root,{limit,...(wave?{after:wave.after,...(!tailDue?{through:wave.through}:{})}:{})}))
  if(tailDue)wave={...wave!,through:view.upperId,startVersion:{...view.observedVersion}}
  wave??={contract:'personal-metadata-wave-v1',through:view.upperId,startVersion:{...view.observedVersion},scopeHash,controlRevision:seal.controlRevision,phase:'scanning'}
- const heads=structuredClone([...view.heads]),bodies=heads.length?await reader.resolve(view):[],payloads:Record<string,unknown>[]=[]
+ const heads=structuredClone([...view.heads]),bodies=heads.length?await observeProjectionStep(pool,'select_page',()=>reader.resolve(view)):[],payloads:Record<string,unknown>[]=[]
  for(const [n,body]of bodies.entries()){
   if(!body.payload||typeof body.payload!=='object'||Array.isArray(body.payload))throw Error('canonical_reference_payload_invalid')
   const payload=body.payload as Record<string,unknown>;payloads.push(payload)
@@ -129,38 +130,48 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
  return Object.freeze({token,count:heads.length,...(view.nextAfter?{nextCursor:view.nextAfter}:{}),hasMore:!view.exhausted})
 }
 
-export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal){
+export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false){
  const p=pages.get(page.token);if(!p?.metadata)throw Error('canonical_reference_token_invalid')
- const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal})
+ const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile})
  return {references,contextReady:p.metadata.contextReady===true}
 }
 
 /** A new latest scan may find an already current context. It must still run
  * ordinary physical installation completion, never return on a TS receipt. */
 export async function completeReadyCanonicalProjection(pool:pg.Pool,scope:SourceScope,root:SourceRoot,version:SourceVersion,options:{deferMs?:number}={}){
- requireExecution(pool,scope.installationId);const client=await pool.connect()
- let completing=false
+ requireExecution(pool,scope.installationId);const client=await observeProjectionStep(pool,'checkout',()=>pool.connect())
+ const timing=new ProjectionTiming(pool,'begin')
+ let completing=false,commitSent=false,discard=false
  try{
   await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='1s'")
   await guardSourceExecutionCommit(client,scope.installationId)
+  timing.enter('complete_watermark')
   completing=true
   const completed=await completeSourceProjection(client,scope,root,version)
   completing=false
-  await guardSourceExecutionCommit(client,scope.installationId);await client.query('COMMIT')
+  await guardSourceExecutionCommit(client,scope.installationId)
+  timing.enter('commit');commitSent=true
+  await client.query('COMMIT')
+  timing.finish()
   return completed
  }catch(error){
-  await client.query('ROLLBACK')
-  const failure=error as {code?:string;message?:string}|null
-  if(completing&&options.deferMs!==undefined&&(failure?.code==='55P03'||failure?.code==='P0001'&&failure.message==='source_reference_changed')){
-   throw new JobDeferredError('source_not_ready',new Date(Date.now()+options.deferMs))
+  if(commitSent&&commitOutcomeUnknown(error)){
+   discard=true
+   throw timing.failure(new Error('projection_commit_outcome_unknown'),true)
   }
-  throw error
- }finally{client.release()}
+  try{await client.query('ROLLBACK')}catch{discard=true}
+  const failure=error as {code?:string;message?:string}|null
+  if(completing&&!discard&&options.deferMs!==undefined&&(failure?.code==='55P03'||failure?.code==='P0001'&&failure.message==='source_reference_changed')){
+   throw timing.failure(new JobDeferredError('source_not_ready',new Date(Date.now()+options.deferMs)),false,
+    failure.code==='55P03'?'lock_conflict':'authority_or_version_changed')
+  }
+  throw timing.failure(error,commitSent)
+ }finally{client.release(discard)}
 }
 
 /** Bounded metadata-only physical transaction. It neither copies a body nor
  * rewrites an existing UUID, origin, original digest or provenance. */
-type PersistOptions={project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
+type PersistOptions={historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
 export async function persistCanonicalReferencePage(pool:pg.Pool,page:CanonicalReferencePage,options:PersistOptions={}):Promise<CanonicalReference[]>{
  return persistReferencePage(pool,page,options)
 }
@@ -186,20 +197,30 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
  if(options.checkpoint&&!options.project)throw Error('canonical_reference_projection_required')
  if(prepared.metadata&&(!options.project||!options.checkpoint))throw Error('canonical_reference_projection_required')
  if(!heads.length&&!options.checkpoint)return []
- const persist=async(client:pg.PoolClient,managed=false):Promise<CanonicalReference[]>=>{
- const deadline=performance.now()+5000
+ let discard=false
+ let activeWrite:ProjectionTiming|undefined
+ const persist=async(client:pg.PoolClient,managed=false,outerDeadline?:number):Promise<CanonicalReference[]>=>{
+ const timing=new ProjectionTiming(pool,'begin',{size:heads.length,historical:!!historical})
+ let commitSent=false
+ // Leave room for one server-side statement timeout and rollback before
+ // the outer transport deadline. A queued transaction inherits time already spent.
+ const deadline=outerDeadline===undefined?performance.now()+5000:outerDeadline-1100
  const query=(sql:string,args?:unknown[])=>{
-  if(performance.now()>=deadline)throw Error('canonical_reference_budget_exceeded')
+  if(performance.now()>=deadline){
+   if(outerDeadline!==undefined&&!activeWrite)throw new SelectedSourceTransactionUnavailable()
+   throw Error('canonical_reference_budget_exceeded')
+  }
   return client.query(sql,args)
  }
  const selectedLockQuery=async(sql:string,args?:unknown[])=>{
   try{return await query(sql,args)}catch(error){
-   if(prepared.metadata&&(error as {code?:string}).code==='55P03')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+  if(prepared.metadata&&(error as {code?:string}).code==='55P03')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
    throw error
   }
  }
  try{
   if(!managed){await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='1s';SET LOCAL lock_timeout='1s'")}
+  timing.enter('verify_version')
   if(historical)await historical.guard();else await guardSourceExecutionCommit(client,scope.installationId)
   const fn=root.kind==='relay_event'?'lock_memory_personal_source_commit':'lock_memory_team_source_commit'
   const personalProjection=root.kind==='relay_event'&&options.checkpoint
@@ -212,7 +233,7 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
    throw Error('canonical_reference_changed')
   }
   const mutex=(await query("SELECT pg_try_advisory_xact_lock(hashtextextended('canonical-projection:'||$1,0)) AS locked",[scope.installationId])).rows[0]?.locked
-  if(mutex!==true)throw Error('canonical_reference_busy')
+  if(mutex!==true)throw new ProjectionLockBusy()
   if(repair){
    // Only a complete roster may create a ready checkpoint. The existing
    // unkeyed authority supplies IDs inside SQL, with a separate empty tail.
@@ -235,8 +256,11 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
   const contextKey=canonicalPayloadHash(scope).toString('hex')
   let checkpointDuplicate=false
   if(options.checkpoint){
+   timing.enter('checkpoint')
    const current=(await selectedLockQuery(`SELECT source_version,next_cursor,state FROM memory_canonical_projection_progress
     WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4 FOR UPDATE NOWAIT`,[scope.installationId,root.kind,root.key,contextKey])).rows[0]
+   const lastObserved=current?.source_version?.metadataWave?.startVersion??current?.source_version
+   if(typeof lastObserved?.content==='string')timing.revisionChanged=lastObserved.content!==version.content
    if(prepared.metadata){
     if(canonicalJsonString(current??null)!==canonicalJsonString(prepared.metadata.prior))throw Error('canonical_reference_cursor_changed')
    }
@@ -259,15 +283,23 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
    ) AS unproven LIMIT 1`,[scope.installationId,sessions])
    if(unproven.rowCount)throw Error('canonical_reference_mapping_required')
   }
+  timing.enter('write_references')
+  activeWrite=timing
   const existing=(await selectedLockQuery(`SELECT s.source_event_id::text,s.canonical_key,s.canonical_session_key,s.session_id,s.turn_id,s.event_type,s.content_hash,s.classification,s.mapping_state,s.origin,s.adapter_version,s.source_provenance,s.canonical_projected_at,p.canonical_key AS matched_key,
    (s.occurred_at=p.occurred_at::timestamptz OR(s.origin IN('feed','snapshot') AND s.mapping_state='verified' AND s.source_kind='relay_event'
     AND s.occurred_at=date_trunc('milliseconds',p.occurred_at::timestamptz))) AS timestamp_matches FROM source_events s
    JOIN jsonb_to_recordset($3::jsonb) AS p(canonical_key text,occurred_at text,legacy_wire_key text) ON(p.canonical_key=s.canonical_key OR(s.source_kind IN('team_collaboration','team_delivery') AND p.legacy_wire_key=s.canonical_key))
    WHERE s.installation_id=$1 AND s.source_kind=$2 ORDER BY s.source_event_id FOR UPDATE OF s NOWAIT`,
    [scope.installationId,root.kind,JSON.stringify(heads.map(h=>({canonical_key:h.canonicalKey,occurred_at:h.occurredAt,legacy_wire_key:h.kind==='team_collaboration'||h.kind==='team_delivery'?h.locator?.teamWireKey:null})))])).rows
-  const result:CanonicalReference[]=[]
-  for(const [ordinal,head]of heads.entries()){
-   const candidates=existing.filter(r=>r.matched_key===head.canonicalKey),matches=candidates.filter(r=>r.canonical_key===head.canonicalKey)
+  const byKey=new Map<string,typeof existing>()
+  for(const row of existing){
+   const bucket=byKey.get(row.matched_key)
+   if(bucket)bucket.push(row)
+   else byKey.set(row.matched_key,[row])
+  }
+  const matched = new Map<string, (typeof existing)[number]>()
+  for(const head of heads){
+   const candidates=byKey.get(head.canonicalKey)??[],matches=candidates.filter(r=>r.canonical_key===head.canonicalKey)
    if(root.kind==='team_collaboration'||root.kind==='team_delivery')for(const candidate of candidates.filter(r=>r.canonical_key!==head.canonicalKey)){
     const proof=candidate.source_provenance?.team??candidate.source_provenance
     let key:string
@@ -291,31 +323,61 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
     if((root.kind==='team_collaboration'||root.kind==='team_delivery')&&canonicalJsonString(old.source_provenance?.team??old.source_provenance)!==canonicalJsonString(referenceProvenance(head,root)))throw Error('canonical_reference_conflict')
     if(old.mapping_state!=='verified'||old.canonical_session_key!==head.sessionKey||old.session_id!==head.sessionKey||(old.turn_id??null)!==(head.turnKey??null)||old.event_type!==head.eventType||!old.timestamp_matches
      ||!Buffer.isBuffer(old.content_hash)||old.content_hash.toString('hex')!==head.contentHash||canonicalJsonString(old.classification)!==canonicalJsonString(head.classification))throw Error('canonical_reference_conflict')
-    if(options.project&&!team&&old.origin==='canonical'&&!old.canonical_projected_at){
-     await projectCanonicalDerivedFact({query} as Pick<pg.PoolClient,'query'>,scope.installationId,{sourceEventId:old.source_event_id,sessionId:old.session_id,turnId:head.turnKey??null,eventType:head.eventType,occurredAt:head.occurredAt!,payload:payloads[ordinal]},stabilizationMs,{scheduleCompilation:!historical})
-     await query('UPDATE source_events SET canonical_projected_at=clock_timestamp() WHERE source_event_id=$1',[old.source_event_id])
-    }
-    result.push({sourceEventId:old.source_event_id,canonicalKey:head.canonicalKey,sessionId:old.session_id,created:false});continue
+    matched.set(head.canonicalKey,old)
    }
+  }
+
+  // Match and validate every old identity before allocating any new one.
+  // Only metadata crosses this bounded set operation. Keep derived facts in source order.
+  const missing=heads.filter(head=>!matched.has(head.canonicalKey))
+  const allocated=new Map<string,string>()
+  if(missing.length){
+   const sessions=[...new Set(missing.map(head=>head.sessionKey))]
    const alive=(await query(`SELECT 1 FROM memory_installations WHERE installation_id=$1 AND relay_status='active'
     AND local_status NOT IN('purging','purged','integrity_error') FOR KEY SHARE NOWAIT`,[scope.installationId])).rowCount
    if(!alive)throw Error('canonical_reference_unavailable')
-   if((await query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[scope.installationId,head.sessionKey])).rowCount)throw Error('canonical_reference_unavailable')
-   await query(`INSERT INTO source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at) VALUES($1,$2,$3::timestamptz,$3::timestamptz)
-    ON CONFLICT(installation_id,session_id) DO UPDATE SET first_recorded_at=LEAST(source_sessions.first_recorded_at,EXCLUDED.first_recorded_at),last_recorded_at=GREATEST(source_sessions.last_recorded_at,EXCLUDED.last_recorded_at)`,[scope.installationId,head.sessionKey,head.occurredAt])
-   const turn=head.turnKey??null
+   if((await query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=ANY($2::text[]) LIMIT 1',[scope.installationId,sessions])).rowCount)throw Error('canonical_reference_unavailable')
+   const rows=missing.map(head=>({canonical_key:head.canonicalKey,session_id:head.sessionKey,turn_id:head.turnKey??null,
+    event_type:head.eventType,occurred_at:head.occurredAt,classification:head.classification,hash:head.contentHash,
+    provenance:referenceProvenance(head,root),sequence:head.sourceSequence??null}))
    const inserted=await query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,classification,payload,payload_hash,
     source_provenance,source_kind,canonical_key,canonical_session_key,source_version,source_sequence,content_hash,hash_version,mapping_state,adapter_version)
-    VALUES(gen_random_uuid(),$1,'canonical',$2,$3,$4,$5,$6::timestamptz,$7::jsonb,NULL,$8,$9::jsonb,$10,$11,$3,$12::jsonb,$13::bigint,$8,'canonical-json-sha256-v1','verified','canonical-ref-v1')
-    ON CONFLICT DO NOTHING RETURNING source_event_id::text`,[scope.installationId,root.kind+':'+head.canonicalKey,head.sessionKey,turn,head.eventType,head.occurredAt,
-     JSON.stringify(head.classification),Buffer.from(head.contentHash,'hex'),JSON.stringify(referenceProvenance(head,root)),root.kind,head.canonicalKey,JSON.stringify(version),head.sourceSequence??null])
-   if(!inserted.rows[0])throw Error('canonical_reference_conflict')
-   if(options.project&&!team){
-    await projectCanonicalDerivedFact({query} as Pick<pg.PoolClient,'query'>,scope.installationId,{sourceEventId:inserted.rows[0].source_event_id,sessionId:head.sessionKey,turnId:head.turnKey??null,eventType:head.eventType,occurredAt:head.occurredAt!,payload:payloads[ordinal]},stabilizationMs,{scheduleCompilation:!historical})
-    await query('UPDATE source_events SET canonical_projected_at=clock_timestamp() WHERE source_event_id=$1',[inserted.rows[0].source_event_id])
-   }
-   result.push({sourceEventId:inserted.rows[0].source_event_id,canonicalKey:head.canonicalKey,sessionId:head.sessionKey,created:true})
+    SELECT gen_random_uuid(),$1,'canonical',$2::text||':'||p.canonical_key,p.session_id,p.turn_id,p.event_type,p.occurred_at,
+     p.classification,NULL,decode(p.hash,'hex'),p.provenance,$2,p.canonical_key,p.session_id,$3::jsonb,p.sequence,
+     decode(p.hash,'hex'),'canonical-json-sha256-v1','verified','canonical-ref-v1'
+    FROM jsonb_to_recordset($4::jsonb) AS p(canonical_key text,session_id text,turn_id text,event_type text,occurred_at timestamptz,
+     classification jsonb,hash text,provenance jsonb,sequence bigint)
+    ON CONFLICT DO NOTHING RETURNING source_event_id::text,canonical_key`,[scope.installationId,root.kind,JSON.stringify(version),JSON.stringify(rows)])
+   if(inserted.rowCount!==missing.length)throw Error('canonical_reference_conflict')
+   for(const row of inserted.rows)allocated.set(row.canonical_key,row.source_event_id)
   }
+  const result:CanonicalReference[]=[],projected:string[]=[]
+  for(const [ordinal,head] of heads.entries()){
+   const old=matched.get(head.canonicalKey)
+   const sourceEventId=old?.source_event_id??allocated.get(head.canonicalKey)
+   if(!sourceEventId)throw Error('canonical_reference_conflict')
+   if(options.project&&!team&&(!old||old.origin==='canonical'&&!old.canonical_projected_at)){
+    await projectCanonicalDerivedFact({query} as Pick<pg.PoolClient,'query'>,scope.installationId,
+     {sourceEventId,sessionId:head.sessionKey,turnId:head.turnKey??null,eventType:head.eventType,occurredAt:head.occurredAt!,payload:payloads[ordinal]},
+     stabilizationMs,{scheduleCompilation:!historical,historicalCompile:options.historicalCompile})
+    projected.push(sourceEventId)
+   }
+   result.push({sourceEventId,canonicalKey:head.canonicalKey,sessionId:head.sessionKey,created:!old})
+   timing.rowsProcessed++
+  }
+  if(missing.length){
+   // Merge timestamp ranges after ordered facts: historical session metadata
+   // compares each event against the latest event observed so far.
+   await query(`INSERT INTO source_sessions(installation_id,session_id,first_recorded_at,last_recorded_at)
+    SELECT $1,p.session_id,min(p.occurred_at),max(p.occurred_at)
+    FROM unnest($2::text[],$3::timestamptz[]) AS p(session_id,occurred_at) GROUP BY p.session_id ORDER BY p.session_id
+    ON CONFLICT(installation_id,session_id) DO UPDATE SET first_recorded_at=LEAST(source_sessions.first_recorded_at,EXCLUDED.first_recorded_at),
+     last_recorded_at=GREATEST(source_sessions.last_recorded_at,EXCLUDED.last_recorded_at)`,
+    [scope.installationId,missing.map(head=>head.sessionKey),missing.map(head=>head.occurredAt)])
+  }
+  if(projected.length)
+   await query('UPDATE source_events SET canonical_projected_at=clock_timestamp() WHERE source_event_id=ANY($1::uuid[])',[projected])
+  timing.enter('checkpoint')
   let finalVersion:unknown=version,finalCursor=prepared.nextCursor??null,finalState:string=checkpointState
   if(prepared.metadata){
    const m=prepared.metadata,current=(await query('SELECT * FROM shared.memory_relay_source_authority($1::jsonb,$2,$3)',[JSON.stringify(scope),root.kind,root.key])).rows[0]
@@ -336,24 +398,49 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
     [scope.installationId,root.kind,root.key,contextKey,JSON.stringify(finalVersion),finalCursor,finalState])
   }
   if(options.checkpoint&&!team&&(prepared.metadata?prepared.metadata.contextReady:!prepared.nextCursor)){
+   timing.enter('complete_watermark')
    if(historical)await historical.complete(version)
    else {
     const completed=await completeSourceProjection(client,scope,root,finalVersion)
     if((repair||reuseOriginals)&&!completed)throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
    }
   }
+  timing.enter('verify_version')
   if(historical)await historical.guard();else await guardSourceExecutionCommit(client,scope.installationId)
-  if(!managed)await query('COMMIT');return result
+  if(!managed){
+   timing.enter('commit')
+   if(performance.now()>=deadline)throw Error('canonical_reference_budget_exceeded')
+   commitSent=true
+   await client.query('COMMIT')
+  }
+  activeWrite=undefined
+  timing.finish()
+  return result
  }catch(error){
-  if(!managed)await client.query('ROLLBACK').catch(()=>undefined)
+  if(!managed&&commitSent&&commitOutcomeUnknown(error)){
+   discard=true
+   throw timing.failure(new Error('projection_commit_outcome_unknown'),true)
+  }
+  activeWrite=undefined
+  timing.failure(error,commitSent)
+  if(!managed){
+   try{await client.query('ROLLBACK');recordProjectionRollback(error);if(error instanceof ProjectionLockBusy)error.rollbackConfirmed=true}
+   catch{discard=true}
+  }
+  timing.failure(error,commitSent)
    if(prepared.metadata&&(error as {code?:string}).code==='55P03'&&(error as Error).message==='source_metadata_lock_busy')throw new SelectedSourceLockBusy()
   throw error
  }
  }
  if(historical)return persist(historical.client,true)
- if(prepared.metadata)return runSelectedSourceTransaction(pool,scope.installationId,options.signal,client=>persist(client,true))
- const client=await pool.connect()
- try{return await persist(client)}finally{client.release()}
+ if(prepared.metadata)return runSelectedSourceTransaction(pool,scope.installationId,options.signal,(client,deadline)=>persist(client,true,deadline),()=>{
+  if(!activeWrite)return undefined
+  const error=new Error('canonical_reference_write_timeout')
+  activeWrite.failure(error,false)
+  return error
+ })
+ const client=await observeProjectionStep(pool,'checkout',()=>pool.connect())
+ try{return await persist(client)}finally{client.release(discard)}
 }
 
 /** The reader wraps Team provenance; persisted references keep the existing

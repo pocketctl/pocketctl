@@ -104,8 +104,8 @@ describeWithDatabase('L0/L0.5 source projector (PostgreSQL)', () => {
     await project()
     expect(await delay(1)).toBe(expectedMs)
 
-    // Late events revive a finished job using the same configured window.
-    await pool.query(`UPDATE memory_jobs SET state='completed',completed_at=NOW()
+    // Late evidence revives a finished snapshot rebuild in the ordinary compile capacity.
+    await pool.query(`UPDATE memory_jobs SET state='completed',completed_at=NOW(),priority=70
       WHERE installation_id=$1 AND job_type='compile_episode'`, [INSTALLATION])
     await insertInboxRow(pool, {
       feed_id: 2, session_id: 'stabilization-session', turn_id: 'stabilization-turn',
@@ -113,8 +113,8 @@ describeWithDatabase('L0/L0.5 source projector (PostgreSQL)', () => {
     })
     await project()
     expect(await delay(2)).toBe(expectedMs)
-    expect((await pool.query(`SELECT state FROM memory_jobs
-      WHERE installation_id=$1 AND job_type='compile_episode'`, [INSTALLATION])).rows[0].state).toBe('pending')
+    expect((await pool.query(`SELECT state,priority FROM memory_jobs
+      WHERE installation_id=$1 AND job_type='compile_episode'`, [INSTALLATION])).rows[0]).toEqual({state:'pending',priority:80})
   })
 
   test('projects inbox rows in strict feed order and marks them projected', async () => {

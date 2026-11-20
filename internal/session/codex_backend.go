@@ -479,6 +479,13 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 	correlation := userMessageCorrelationFrom(ctx)
 	const idleTurnMethod = "turn/startIfIdle"
 	turnMethod := "turn/start"
+	if correlation.TerminalSubmit {
+		b.coord.mu.Lock()
+		if b.coord.hiddenContextSupportedLocked() && b.generation == b.coord.generation && b.coord.runtime.Client == b.client {
+			turnMethod = idleTurnMethod
+		}
+		b.coord.mu.Unlock()
+	}
 	call := b.client.Call
 	evidenceSent := false
 	if hidden != nil && (hidden.StableText != "" || hidden.DynamicText != "") {
@@ -544,8 +551,8 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 		}
 		return false, turnErr
 	}
-	if evidenceSent && response.Turn.ID == "" {
-		return false, fmt.Errorf("%w: Codex Context turn acknowledgement missing turn id", errNativeSessionCreateUncertain)
+	if (evidenceSent || correlation.MsgID != "") && response.Turn.ID == "" {
+		return false, fmt.Errorf("%w: Codex turn acknowledgement missing turn id", errNativeSessionCreateUncertain)
 	}
 	if response.Turn.ID != "" {
 		b.coord.setActiveTurn(threadID, response.Turn.ID)
@@ -553,9 +560,21 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 		// Persist accepted input identity as an authoritative echo. Native user items
 		// can arrive before the RPC reply; clients reconcile by this exact turn.
 		if correlation := userMessageCorrelationFrom(ctx); correlation.MsgID != "" {
-			b.sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: threadID,
-				MemorySource: b.sm.registerMemoryInput(UserMessageInput{SessionID: threadID, RequestID: correlation.RequestID, MsgID: correlation.MsgID, InvocationID: codexInvocationFrom(ctx)}, logicalCodexTurnID(threadID, response.Turn.ID), adapter.AgentCodex, response.Turn.ID), Text: content, MsgID: correlation.MsgID, RequestID: correlation.RequestID,
-				TurnID:        logicalCodexTurnID(threadID, response.Turn.ID),
+			input := UserMessageInput{SessionID: threadID, RequestID: correlation.RequestID, MsgID: correlation.MsgID, InvocationID: codexInvocationFrom(ctx)}
+			turnID := logicalCodexTurnID(threadID, response.Turn.ID)
+			// A terminal-accessible app-server accepts other writers into the same
+			// native turn. Its ACK identifies our input, not subsequent output.
+			causalRoot := ""
+			b.coord.mu.Lock()
+			runtime := b.coord.runtime
+			if runtime != nil && runtime.PrivateStdio && runtime.Endpoint == "" && runtime.RemoteURI == "" && b.generation == b.coord.generation {
+				causalRoot = response.Turn.ID
+			}
+			b.coord.mu.Unlock()
+			b.sm.outputCh <- protocol.DaemonEvent{
+				Type: "user_text", SessionID: threadID, MsgID: input.MsgID, RequestID: input.RequestID, Text: content,
+				MemorySource: b.sm.registerMemoryInput(input, turnID, adapter.AgentCodex, causalRoot),
+				TurnID:       turnID, SourceTurnID: response.Turn.ID,
 				RetryOfTurnID: correlation.RetryOfTurnID,
 				EventID:       "native-input:" + correlation.MsgID}
 		}
