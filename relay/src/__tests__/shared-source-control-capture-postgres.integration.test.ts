@@ -32,7 +32,7 @@ suite('transactional body-free current control capture',()=>{
   await applySharedSourceContract(pool);await declareFreshInputFoundation(pool,inputFoundation);await installer();await installer()
  },30000)
  beforeEach(async()=>{
-  await pool.query(`TRUNCATE public.extension_providers,public.extension_installations,public.users,public.extension_teams,public.extension_organizations,
+  await pool.query(`TRUNCATE shared.session_transport_body_gaps,public.extension_providers,public.extension_installations,public.users,public.extension_teams,public.extension_organizations,
    public.extension_scope_memberships,public.collaboration_teams,public.collaboration_sessions,public.team_memory_bindings,
    public.collaboration_session_participants,public.collaboration_team_memberships,public.daemons,public.team_agent_offers;
    TRUNCATE shared.memory_source_modes;`)
@@ -65,6 +65,26 @@ suite('transactional body-free current control capture',()=>{
    expect(JSON.stringify((await pool.query('SELECT * FROM shared.memory_source_control_work')).rows)).not.toMatch(/private|credential|granted_scopes|event_filter/)
    expect((await pool.query('SELECT 1 FROM shared.memory_source_work')).rowCount).toBe(0)
   }finally{await c.query('ROLLBACK');c.release()}
+ })
+ test('ordinary signups leave the current control revision and unrelated source work intact',async()=>{
+  const revision=async()=>(await pool.query('SELECT shared.memory_source_control_snapshot() AS value')).rows[0].value
+  const before=await revision()
+  await pool.query('INSERT INTO public.users(id,team_enabled) SELECT id,false FROM generate_series(10,109) id')
+  expect(await revision()).toBe(before)
+  expect(await rows()).toEqual([])
+  await pool.query("INSERT INTO public.extension_installations(installation_id,provider_id,owner_user_id) VALUES($1,'pocketctl-memory',10)",[scope])
+  expect(await rows()).toEqual([{control_kind:'installation',control_key:scope}])
+  await pool.query('UPDATE public.users SET team_enabled=true WHERE id=11; DELETE FROM public.users WHERE id=12')
+  expect((await rows()).filter(row=>row.control_kind==='user').map(row=>row.control_key)).toEqual(['11','12'])
+ })
+ test('mixed user inserts preserve Memory owners, shared principals, Team and previously revoked identities',async()=>{
+  await pool.query("UPDATE public.extension_installations SET owner_user_id=21; UPDATE public.extension_scope_memberships SET user_id=22")
+  await pool.query("UPDATE public.collaboration_session_participants SET user_id=23; UPDATE public.collaboration_team_memberships SET user_id=24")
+  await pool.query("SELECT shared.mark_memory_control_dirty('user','25')")
+  const before=(await pool.query("SELECT shared.memory_source_control_snapshot()::int AS value")).rows[0].value
+  await pool.query('INSERT INTO public.users(id,team_enabled) VALUES(20,false),(21,false),(22,false),(23,false),(24,false),(25,false),(26,true)')
+  expect((await rows()).filter(row=>row.control_kind==='user').map(row=>row.control_key)).toEqual(['21','22','23','24','25','26'])
+  expect((await pool.query("SELECT shared.memory_source_control_snapshot()::int AS value")).rows[0].value).toBe(before+6)
  })
  test('roles, participants, bindings, provider state and modes emit exact current control identities',async()=>{
   await pool.query("UPDATE public.extension_scope_memberships SET roles=ARRAY['reviewer'];UPDATE public.collaboration_session_participants SET state='removed';UPDATE public.team_memory_bindings SET state='revoked';UPDATE public.extension_providers SET status='disabled' WHERE provider_id='pocketctl-memory';UPDATE public.users SET team_enabled=false;UPDATE shared.memory_source_modes SET generation=generation+1")

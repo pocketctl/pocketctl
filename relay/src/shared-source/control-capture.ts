@@ -45,11 +45,22 @@ export async function applyRelayControlCapture(pool:pg.Pool):Promise<void>{
   await c.query('ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS control_capture_version INT NOT NULL DEFAULT 0')
   for(const d of descriptors){
    const facts=(table:string)=>`SELECT jsonb_build_array(${d.columns.map(name=>'r.'+name).join(',')}) AS fact FROM ${table} r`
+   // An ordinary signup has no existing Memory authority to invalidate. Later
+   // installation/membership changes publish their own controls in their write
+   // transaction. Keep historical identities and all UPDATE/DELETE fences.
+   const insertedFacts=d.kind==='user'
+    ? facts('control_new')+` WHERE r.team_enabled IS DISTINCT FROM FALSE
+       OR EXISTS(SELECT 1 FROM shared.memory_source_control_work w WHERE w.control_kind='user' AND w.control_key=r.id::text)
+       OR EXISTS(SELECT 1 FROM public.extension_installations i WHERE i.owner_user_id=r.id AND i.provider_id='pocketctl-memory')
+       OR EXISTS(SELECT 1 FROM public.extension_scope_memberships m WHERE m.user_id=r.id)
+       OR EXISTS(SELECT 1 FROM public.collaboration_team_memberships m WHERE m.user_id=r.id)
+       OR EXISTS(SELECT 1 FROM public.collaboration_session_participants p WHERE p.user_id=r.id)`
+    : facts('control_new')
    const emit=(rows:string)=>`FOR changed_control IN SELECT DISTINCT (${d.key}) COLLATE "C" AS control_key FROM (${rows}) changed
     ${d.providerIndex===undefined?'':`WHERE fact->>${d.providerIndex}='pocketctl-memory'`} ORDER BY 1
     LOOP PERFORM shared.mark_memory_control_dirty('${d.kind}',changed_control.control_key);END LOOP;`
    await c.query(`CREATE OR REPLACE FUNCTION shared.capture_memory_control_${d.id}() RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE changed_control RECORD;BEGIN
-    IF TG_OP='INSERT' THEN ${emit(facts('control_new'))}
+    IF TG_OP='INSERT' THEN ${emit(insertedFacts)}
     ELSIF TG_OP='DELETE' THEN ${emit(facts('control_old'))}
     ELSE ${emit('('+facts('control_new')+' EXCEPT '+facts('control_old')+') UNION ('+facts('control_old')+' EXCEPT '+facts('control_new')+')')}
     END IF;RETURN NULL;END $$`)
