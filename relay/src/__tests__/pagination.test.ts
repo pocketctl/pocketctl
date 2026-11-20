@@ -1,4 +1,4 @@
-import {nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
+import {isHistoryEventAuthorityQuery, nativeAliasUnitResult} from './fixtures/native-alias-unit.js'
 import { describe, test, expect, vi, beforeEach } from 'vitest'
 import { Router } from '../router.js'
 import { getCompleteBackwardReplayPage, getCompleteForwardReplayPage, getLatestAgentPlan, getLatestAgentTaskLists, getRecentEvents, getEventsBefore, getRecentSubagentEvents, getSubagentEventsBefore, listSessionsPageByDaemon } from '../db.js'
@@ -192,10 +192,82 @@ describe('db - complete backward replay pages', () => {
     expect(page.logicalCount).toBe(1)
     expect(page.hasMore).toBe(true)
     const scansIssued = pool.query.mock.calls.filter(([sql]: [string]) =>
-      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events') && !sql.startsWith('SELECT e.id::text')
+      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events') && !isHistoryEventAuthorityQuery(sql)
     )
     expect(scansIssued).toHaveLength(2)
     expect(scansIssued[1][0]).toContain('id <')
+  })
+
+  function backwardFixture(heads: any[]) {
+    const limits: number[] = []
+    const pool = { query: vi.fn(async (sql: string, args: any[] = []) => {
+      const native = nativeAliasUnitResult(sql, args)
+      if (native) return native
+      if (sql.includes('ORDER BY id DESC LIMIT')) {
+        const limit = args.at(-1)
+        limits.push(limit)
+        const before = args.length === 3 ? args[1] : Infinity
+        return { rows: heads.filter(row => row.id < before).slice(0, limit) }
+      }
+      if (sql.includes('SELECT 1 FROM events')) return { rows: heads.filter(row => row.id < args[1]).slice(0, 1) }
+      return { rows: [] }
+    }) } as any
+    return { pool, limits }
+  }
+
+  test('expands only continuation scans of long streams and preserves the next page cursor', async () => {
+    const chunks = streamRows(1989, 0)
+    const older = Array.from({ length: 25 }, (_, i) => ({ id: 922 - i, payload: { type: 'user_text' } }))
+    const { pool, limits } = backwardFixture([...chunks, ...older])
+    const page = await getCompleteBackwardReplayPage(pool, 's', undefined, 20)
+    expect(limits[0]).toBe(100)
+    expect(limits).toContain(256)
+    expect(limits.length).toBeLessThan(12)
+    expect(page.events.map(row => row.id)).toEqual([...chunks, ...older.slice(0, 19)].reverse().map(row => row.id))
+    expect(page).toMatchObject({ logicalCount: 20, hasMore: true, oldestId: older[18].id })
+    limits.length = 0
+    const previous = await getCompleteBackwardReplayPage(pool, 's', page.oldestId, 20)
+    expect(limits).toEqual([100])
+    expect(previous.events.map(row => row.id)).toEqual(older.slice(19).reverse().map(row => row.id))
+  })
+
+  test('handles interleaved streams, a sequence gap and an unreadable cold row beyond the ordinary window', async () => {
+    const heads: any[] = streamRows(700, 601)
+    const older = Array.from({ length: 210 }, (_, i) => ({ id: 600 - i, payload: { type: 'user_text' } }))
+    heads.push(
+      { id: 604, payload: { type: 'tool_result', stream_id: 'b', chunk_seq: 7, byte_offset: 7 } },
+      { id: 603, payload: { ...heads[0].payload, chunk_seq: 0, byte_offset: 0 } },
+      { id: 602, payload: { type: 'tool_result', stream_id: 'b', chunk_seq: 0, byte_offset: 0 } },
+      ...older,
+    )
+    heads[250] = { ...heads[250], body_storage: 'cold', payload: null }
+    const { pool, limits } = backwardFixture(heads)
+    const page = await getCompleteBackwardReplayPage(pool, 's', undefined, 1)
+    expect(limits).toEqual([100, 256])
+    expect(page).toMatchObject({ oldestId: 602, logicalCount: 2, hasMore: true })
+    expect(page.events.map(row => row.id)).toEqual(heads.slice(0, 103).reverse().map(row => row.id))
+  })
+
+  test('returns to the original window boundary after widening, without reading an older cold body', async () => {
+    const stream = streamRows(612, 257)
+    const older = Array.from({ length: 270 }, (_, i) => ({ id: 900 - i, payload: { type: 'user_text' } }))
+    const heads: any[] = [...stream, { id: 922, payload: { ...stream[0].payload, chunk_seq: 0, byte_offset: 0 } }, ...older]
+    heads[414] = { ...heads[414], body_storage: 'cold', payload: null }
+    const { pool, limits } = backwardFixture(heads)
+    const page = await getCompleteBackwardReplayPage(pool, 's', undefined, 1)
+    expect(limits).toEqual([100, 256, 256])
+    expect(page.events).toHaveLength(357)
+    expect(page).toMatchObject({ oldestId: 922, logicalCount: 1, hasMore: true })
+  })
+
+  test('a full window of retired heads does not hide an older authorized zero chunk', async () => {
+    const heads = streamRows(600, 0).map(row => ({
+      ...row, owner_retired: row.payload.chunk_seq > 500,
+    }))
+    const { pool } = backwardFixture(heads)
+    const page = await getCompleteBackwardReplayPage(pool, 's', undefined, 1)
+    expect(page.events.map(row => row.payload.chunk_seq)).toEqual(Array.from({ length: 501 }, (_, i) => i))
+    expect(page.hasMore).toBe(false)
   })
 
   test('keeps the subagent filter for scans and has-more lookup', async () => {
@@ -216,7 +288,7 @@ describe('db - complete backward replay pages', () => {
     const page = await getCompleteBackwardReplayPage(pool, 'sess-1', 9, 1, 'agent-a')
 
     expect(page.events).toHaveLength(1)
-    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events') && !sql.startsWith('SELECT e.id::text'))
+    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events') && !isHistoryEventAuthorityQuery(sql))
     expect(eventQueries).toHaveLength(2)
     expect(eventQueries.every(([sql]: [string]) => sql.includes("COALESCE(payload,body_header)->>'agent_id'"))).toBe(true)
   })
@@ -258,7 +330,7 @@ describe('db - complete forward replay pages', () => {
     expect(page.logicalCount).toBe(1)
     expect(page.hasMore).toBe(false)
     const scansIssued = pool.query.mock.calls.filter(([sql]: [string]) =>
-      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events') && !sql.startsWith('SELECT e.id::text')
+      sql.includes('FROM events') && !sql.includes('SELECT 1 FROM events') && !isHistoryEventAuthorityQuery(sql)
     )
     expect(scansIssued).toHaveLength(2)
     expect(scansIssued[1][0]).toContain('id >')
@@ -306,7 +378,7 @@ describe('db - complete forward replay pages', () => {
     const page = await getCompleteForwardReplayPage(pool, 'sess-1', 20, 1, 'agent-a')
 
     expect(page.events).toHaveLength(1)
-    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events') && !sql.startsWith('SELECT e.id::text'))
+    const eventQueries = pool.query.mock.calls.filter(([sql]: [string]) => sql.includes('FROM events') && !isHistoryEventAuthorityQuery(sql))
     expect(eventQueries.every(([sql]: [string]) => sql.includes("COALESCE(payload,body_header)->>'agent_id'"))).toBe(true)
   })
 })

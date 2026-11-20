@@ -1,3 +1,4 @@
+import { isHistoryEventAuthorityQuery } from './fixtures/native-alias-unit.js'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { Router } from '../router.js'
 // Match the ownership lookup itself, not nested session checks performed by
@@ -6,7 +7,7 @@ const isOwnershipLookup = (sql: string) => /^\s*(?:SELECT\s+1\s+FROM\s+sessions(
 function fixture(options: any = {}) {
   let taskRead = async (): Promise<any> => ({ rows: [] })
   const query = vi.fn(async (sql: string, parameters: any[] = []) => {
-    if (sql.includes('SELECT e.id::text FROM events') && sql.includes('id=ANY($1::bigint[])')) {
+    if (isHistoryEventAuthorityQuery(sql)) {
       return { rows: parameters[0].map((id: string) => ({ id: String(id) })) }
     }
     if (isOwnershipLookup(sql)) return { rows: [{}], rowCount: 1 }

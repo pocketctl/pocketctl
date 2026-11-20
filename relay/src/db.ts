@@ -56,7 +56,7 @@ import {
 import {
   countReplayLogicalItems,
   findCompleteForwardReplayBoundary,
-  findCompleteReplayBoundary,
+  BackwardReplayScan,
   hasOpenForwardReplayStreams,
   hasOpenReplayStreams,
 } from './replay-page.js';
@@ -2454,7 +2454,7 @@ function completeReplayFilter(sessionId: string, beforeId: number | undefined, a
   return { where: clauses.join(' AND '), params };
 }
 
-async function scanBackwardReplayEvents(
+async function readBackwardReplayHeads(
   pool: pg.Pool,
   sessionId: string,
   beforeId: number | undefined,
@@ -2469,7 +2469,7 @@ async function scanBackwardReplayEvents(
      ORDER BY id DESC LIMIT $${filter.params.length + 1}`,
     [...filter.params, limit],
   );
-  return hydratePostgresEventRows(pool, sessionId, result.rows);
+  return result.rows;
 }
 
 async function hasOlderReplayEvent(
@@ -2517,19 +2517,36 @@ export async function getCompleteBackwardReplayPage(
   agentId?: string,
 ): Promise<CompleteBackwardReplayPage> {
   const limit = Math.max(1, Math.trunc(logicalLimit));
-  const scanLimit = Math.max(100, limit * 2);
+  const baseLimit = Math.max(100, limit * 2);
+  const longStreamBatchSize = 256;
+  const scan = new BackwardReplayScan();
   const rowsDesc: any[] = [];
   let scanCursor = beforeId;
+  let scannedHeads = 0;
+  let allowExpansion = baseLimit < longStreamBatchSize;
 
   while (true) {
-    const rows = await scanBackwardReplayEvents(pool, sessionId, scanCursor, scanLimit, agentId);
-    if (rows.length === 0) break;
-    rowsDesc.push(...rows);
+    const longStream = allowExpansion
+      ? scan.streamWithRemainingChunks(longStreamBatchSize) : undefined;
+    // Align ordinary reads to the original windows, including after a wide read.
+    // This keeps a failure in a later window from invalidating a complete page.
+    const ordinaryLimit = baseLimit - (scannedHeads % baseLimit);
+    const scanLimit = longStream ? longStreamBatchSize : ordinaryLimit;
+    const heads = await readBackwardReplayHeads(pool, sessionId, scanCursor, scanLimit, agentId);
 
-    const boundary = findCompleteReplayBoundary(rowsDesc, limit);
+    // A sequence gap can put chunk zero much closer than predicted. A cold
+    // head can also hide that boundary. Keep speculative rows beyond the
+    // ordinary window out of archive IO and authority checks in either case.
+    const containsColdBody = heads.some(row => row.payload == null || row.body_storage === 'cold');
+    if (containsColdBody) allowExpansion = false;
+    const uncertainBoundary = longStream && heads.length > ordinaryLimit && (containsColdBody ||
+      heads.some(row => row.payload?.stream_id === longStream && row.payload.chunk_seq === 0));
+    const consumed = uncertainBoundary ? heads.slice(0, ordinaryLimit) : heads;
+    const rows = await hydratePostgresEventRows(pool, sessionId, consumed);
+    const boundary = scan.consume(rows, limit);
     if (boundary) {
-      const selectedDesc = rowsDesc.slice(0, boundary.endIndex + 1);
-      const events = [...selectedDesc].reverse();
+      rowsDesc.push(...rows.slice(0, boundary.endIndex + 1));
+      const events = rowsDesc.reverse();
       const oldestId = events[0].id;
       return {
         events,
@@ -2539,8 +2556,12 @@ export async function getCompleteBackwardReplayPage(
       };
     }
 
-    scanCursor = rows[rows.length - 1].id;
-    if (rows.length < scanLimit) break;
+    rowsDesc.push(...rows);
+    if (consumed.length === heads.length && heads.length < scanLimit) break;
+    scannedHeads += consumed.length;
+    // Retired or foreign heads can be filtered during hydration. Only the
+    // consumed SQL rows establish the next cursor and physical end of history.
+    scanCursor = consumed[consumed.length - 1].id;
   }
 
   if (rowsDesc.length === 0) {
@@ -2559,7 +2580,7 @@ export async function getCompleteBackwardReplayPage(
   return {
     events,
     oldestId,
-    logicalCount: countReplayLogicalItems(rowsDesc),
+    logicalCount: scan.logicalCount,
     hasMore: await hasOlderReplayEvent(pool, sessionId, oldestId, agentId),
   };
 }

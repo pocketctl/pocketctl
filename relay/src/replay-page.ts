@@ -48,35 +48,48 @@ export function hasOpenReplayStreams(rowsDesc: any[]): boolean {
   return openStreams.size > 0
 }
 
-/**
- * Finds the oldest row that closes a backwards-scanned page. Rows must arrive
- * newest first. A chunked stream is one logical item and is only complete once
- * the scan reaches its zero chunk.
- */
-export function findCompleteReplayBoundary(rowsDesc: any[], logicalLimit: number): ReplayBoundary | null {
-  const seenStreams = new Set<string>()
-  const openStreams = new Set<string>()
-  let logicalCount = 0
+/** Consumes authorized events newest first. Only a real zero chunk closes a stream. */
+export class BackwardReplayScan {
+  private readonly seen = new Set<string>()
+  private readonly open = new Map<string, number>()
+  logicalCount = 0
 
-  for (let index = 0; index < rowsDesc.length; index += 1) {
-    const stream = replayStream(rowsDesc[index]?.payload)
-    if (stream) {
-      if (!seenStreams.has(stream.id)) {
-        seenStreams.add(stream.id)
-        openStreams.add(stream.id)
-        logicalCount += 1
+  consume(rows: any[], limit: number): ReplayBoundary | null {
+    for (let index = 0; index < rows.length; index++) {
+      const payload = rows[index]?.payload
+      const stream = replayStream(payload)
+      if (stream) {
+        if (!this.seen.has(stream.id)) {
+          this.seen.add(stream.id)
+          this.open.set(stream.id, payload.chunk_seq)
+          this.logicalCount++
+        }
+        if (stream.startsAtZero) {
+          this.open.delete(stream.id)
+        } else {
+          const previous = this.open.get(stream.id)
+          if (previous !== undefined && payload.chunk_seq < previous) this.open.set(stream.id, payload.chunk_seq)
+        }
+      } else {
+        this.logicalCount++
       }
-      if (stream.startsAtZero) openStreams.delete(stream.id)
-    } else {
-      logicalCount += 1
-    }
 
-    if (logicalCount >= logicalLimit && openStreams.size === 0) {
-      return { endIndex: index, logicalCount }
+      if (this.logicalCount >= limit && this.open.size === 0) {
+        return { endIndex: index, logicalCount: this.logicalCount }
+      }
     }
+    return null
   }
 
-  return null
+  streamWithRemainingChunks(minimum: number): string | undefined {
+    for (const [id, lowestSequence] of this.open) {
+      if (lowestSequence >= minimum) return id
+    }
+  }
+}
+
+export function findCompleteReplayBoundary(rowsDesc: any[], logicalLimit: number): ReplayBoundary | null {
+  return new BackwardReplayScan().consume(rowsDesc, logicalLimit)
 }
 
 /** Rows arrive oldest first. A stream remains open until its final chunk is seen. */
