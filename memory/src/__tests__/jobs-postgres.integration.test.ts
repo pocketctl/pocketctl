@@ -67,6 +67,55 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     return repository.deferJob!(input)
   }
 
+  test('a source timeout stays in the next compile batch even when its retry becomes due', async () => {
+    const batched = createJobRepository(pool, { compileBatchIntervalMs: 3_600_000 })
+    await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:'compile_episode:timeout'})
+    await pool.query("UPDATE memory_jobs SET available_at=now()-interval '2 hours' WHERE job_type='compile_episode'")
+    const take = () => batched.claimJobs({workerId:'retry',limit:1,leaseMs:60000})
+    const [first] = await take()
+    expect(await jobs.deferJob({jobId:first.job_id,claimedBy:'retry',claimEpoch:first.claim_epoch,
+      reason:'source_not_ready',availableAt:new Date()})).toBe(true)
+    await pool.query("UPDATE memory_jobs SET available_at=now()-interval '2 hours' WHERE job_id=$1",[first.job_id])
+    expect(await take()).toEqual([])
+    // An existing job without the new payload field can still be claimed.
+    await pool.query("UPDATE memory_jobs SET payload=payload-'compile_last_claim_ms' WHERE job_id=$1",[first.job_id])
+    const [next] = await take()
+    expect(next.claim_epoch).toBe(first.claim_epoch+1)
+    expect(next.payload.source_wait_count).toBe(1)
+  })
+
+  test('fixed compile batches coalesce retries and share one slot across historical and ordinary jobs', async () => {
+    const batched = createJobRepository(pool, { compileBatchIntervalMs: 3_600_000 })
+    const claim = (workerId: string) => batched.claimJobs({
+      workerId, limit: 4, leaseMs: 60_000, capacity: SHARED_JOB_CAPACITY,
+    })
+    for (const [key, priority] of [['older', 80], ['history', HISTORICAL_COMPILE_PRIORITY]] as const) {
+      await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'compile_episode', idempotencyKey: key, priority })
+    }
+    await pool.query("UPDATE memory_jobs SET available_at=date_trunc('hour',now()) + interval '1 millisecond'")
+    await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'project_feed', idempotencyKey: 'immediate' })
+    expect((await claim('a')).map(job => job.job_type)).toEqual(['project_feed'])
+
+    await pool.query(`UPDATE memory_jobs SET available_at=date_trunc('hour',now()) -
+      CASE WHEN idempotency_key='older' THEN interval '2 minutes' ELSE interval '1 minute' END
+      WHERE job_type='compile_episode'`)
+    const claimed = (await Promise.all([claim('a'), claim('b')])).flat()
+    expect(claimed.map(job => job.idempotency_key)).toEqual(['older'])
+    const first=claimed[0]
+    // Expiry must not enable an extra attempt in the same batch.
+    await pool.query("UPDATE memory_jobs SET claim_expires_at=now()-interval '1 second' WHERE job_id=$1",[first.job_id])
+    const [second]=await claim('b')
+    expect(second.idempotency_key).toBe('history')
+    // A late projection during compilation leaves the turn dirty after ack.
+    await pool.query("UPDATE memory_jobs SET last_error_code='rerun_required' WHERE job_id=$1",[second.job_id])
+    expect(await jobs.completeJob({jobId:second.job_id,claimedBy:'b',claimEpoch:second.claim_epoch})).toBe(true)
+    expect(await claim('a')).toEqual([])
+    // Move both recorded claim times into the previous batch without sleeping.
+    await pool.query(`UPDATE memory_jobs SET payload=jsonb_set(payload,'{compile_last_claim_ms}',
+      to_jsonb(floor(extract(epoch FROM (now()-interval '1 hour'))*1000))) WHERE job_type='compile_episode'`)
+    expect((await claim('a')).map(job=>job.idempotency_key)).toEqual(['older'])
+  })
+
   test('budget deferral preserves failure attempts and gates the next claim', async () => {
     await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'extract_candidates', idempotencyKey: 'budget-wait' })
     await pool.query("UPDATE memory_jobs SET attempts=11 WHERE idempotency_key='budget-wait'")

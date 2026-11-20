@@ -352,6 +352,7 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
    for(const row of inserted.rows)allocated.set(row.canonical_key,row.source_event_id)
   }
   const result:CanonicalReference[]=[],projected:string[]=[]
+  const scheduledTurns=new Set<string>()
   for(const [ordinal,head] of heads.entries()){
    const old=matched.get(head.canonicalKey)
    const sourceEventId=old?.source_event_id??allocated.get(head.canonicalKey)
@@ -359,7 +360,7 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
    if(options.project&&!team&&(!old||old.origin==='canonical'&&!old.canonical_projected_at)){
     await projectCanonicalDerivedFact({query} as Pick<pg.PoolClient,'query'>,scope.installationId,
      {sourceEventId,sessionId:head.sessionKey,turnId:head.turnKey??null,eventType:head.eventType,occurredAt:head.occurredAt!,payload:payloads[ordinal]},
-     stabilizationMs,{scheduleCompilation:!historical,historicalCompile:options.historicalCompile})
+     stabilizationMs,{scheduleCompilation:!historical,historicalCompile:options.historicalCompile,scheduledTurns})
     projected.push(sourceEventId)
    }
    result.push({sourceEventId,canonicalKey:head.canonicalKey,sessionId:head.sessionKey,created:!old})

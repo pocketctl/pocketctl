@@ -231,7 +231,7 @@ async function main(): Promise<void> {
 
     // Handlers for compile_episode/snapshot_reconcile/purge register in later
     // tasks; unknown job types reschedule with a bounded no_handler code.
-    const jobRepository = createJobRepository(pool)
+    const jobRepository = createJobRepository(pool, { compileBatchIntervalMs: config.compileBatchIntervalMs })
     jobWorker = createJobWorker({
       pool,
       jobs: jobRepository,

@@ -102,12 +102,13 @@ export function createSourceProjector(pool: pg.Pool, options: SourceProjectorOpt
 
         let projected = 0
         let invalidated = 0
+        const scheduledTurns = new Set<string>()
         for (const row of claimed.rows) {
           if (row.body_reclaimed_at) throw new Error('inbox_body_unavailable')
           if (options.failOnEventType === row.event_type) {
             throw new Error(`injected failure for ${row.event_type}`)
           }
-          invalidated += await projectRow(client, installationId, row, stabilizationMs, options.purge)
+          invalidated += await projectRow(client, installationId, row, stabilizationMs, scheduledTurns, options.purge)
           projected++
         }
         await client.query('COMMIT')
@@ -136,6 +137,7 @@ async function projectRow(
   installationId: string,
   row: InboxRow,
   stabilizationMs: number,
+  scheduledTurns: Set<string>,
   purge?: SourceProjectorOptions['purge'],
 ): Promise<number> {
   const withdrawal = deliveryWithdrawal(row)
@@ -236,7 +238,7 @@ async function projectRow(
     )
     return 0
   }
-  await projectDerivedRows(client,installationId,sourceRow,event.sourceEventId,stabilizationMs)
+  await projectDerivedRows(client,installationId,sourceRow,event.sourceEventId,stabilizationMs,{scheduledTurns})
   await client.query(
     `UPDATE memory_feed_inbox SET projection_state = 'projected', projected_at = NOW()
      WHERE installation_id = $1 AND feed_id = $2`,
@@ -245,26 +247,30 @@ async function projectRow(
   return 0
 }
 
+interface TurnSchedulingOptions {
+  scheduleCompilation?: boolean
+  historicalCompile?: boolean
+  /** Shared only by rows of one installation in the same projection transaction. */
+  scheduledTurns?: Set<string>
+}
+
 /** Reuses deterministic derived projections without manufacturing a Feed ID
  * or persisting an event body. Caller owns the current root/output transaction. */
-export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number,options:{scheduleCompilation?:boolean;historicalCompile?:boolean}={}):Promise<void>{
+export async function projectCanonicalDerivedFact(client:Pick<pg.PoolClient,'query'>,installationId:string,fact:{sourceEventId:string;sessionId:string;turnId:string|null;eventType:string;occurredAt:string;payload:Record<string,unknown>},stabilizationMs:number,options:TurnSchedulingOptions={}):Promise<void>{
  const row:ProjectionRow={session_id:fact.sessionId,turn_id:fact.turnId,event_type:fact.eventType,recorded_at:fact.occurredAt,data:fact.payload}
  const historical=options.scheduleCompilation===false
  await upsertSession(client,installationId,row,historical)
- await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs,options.scheduleCompilation,options.historicalCompile)
+ await projectDerivedRows(client,installationId,row,fact.sourceEventId,stabilizationMs,options)
 }
 
-async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,scheduleCompilation=true,historicalCompile=false):Promise<void>{
+async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installationId:string,sourceRow:ProjectionRow,eventId:string,stabilizationMs:number,options:TurnSchedulingOptions):Promise<void>{
   const data = sourceRow.data ?? {}
 
-  if (sourceRow.turn_id) {
-    await upsertTurn(client, installationId, sourceRow, eventId)
-  }
-
-  if (sourceRow.turn_id && scheduleCompilation) {
-    // Terminal or late same-turn events (re)schedule episode compilation;
-    // every event pushes availability past its own stabilization window, so
-    // a late arrival re-delays the compile.
+  const {scheduleCompilation=true,historicalCompile=false,scheduledTurns}=options
+  const terminal = sourceRow.turn_id && await upsertTurn(client, installationId, sourceRow, eventId)
+  if (sourceRow.turn_id && terminal && scheduleCompilation && !scheduledTurns?.has(sourceRow.turn_id)) {
+    // One notification per terminal turn in this projection transaction.
+    // Keep its first pending deadline so a stream of late evidence cannot starve it.
     await client.query(`
       INSERT INTO memory_jobs
         (job_id, installation_id, job_type, idempotency_key, priority, payload, available_at)
@@ -275,7 +281,9 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
           WHEN memory_jobs.state IN ('completed', 'dead') THEN 'pending'
           ELSE memory_jobs.state
         END,
-        available_at = EXCLUDED.available_at,
+        available_at = CASE WHEN (memory_jobs.state='pending' AND memory_jobs.last_error_code IS NULL)
+          OR (memory_jobs.state='running' AND memory_jobs.last_error_code='rerun_required')
+          THEN LEAST(memory_jobs.available_at,EXCLUDED.available_at) ELSE EXCLUDED.available_at END,
         priority = CASE WHEN memory_jobs.state IN ('completed','dead') OR (memory_jobs.priority=${HISTORICAL_COMPILE_PRIORITY} AND memory_jobs.state<>'running')
           THEN EXCLUDED.priority ELSE memory_jobs.priority END,
         attempts = CASE
@@ -299,6 +307,7 @@ async function projectDerivedRows(client:Pick<pg.PoolClient,'query'>,installatio
           ELSE memory_jobs.completed_at
         END
     `, [installationId, `compile_episode:${sourceRow.turn_id}`, stabilizationMs,historicalCompile?HISTORICAL_COMPILE_PRIORITY:JOB_PRIORITIES.compile_episode])
+    scheduledTurns?.add(sourceRow.turn_id)
   }
 
   const artifact = classifyArtifact(sourceRow.event_type, data)
@@ -407,7 +416,7 @@ async function upsertTurn(
   installationId: string,
   row: ProjectionRow,
   sourceEventId: string,
-): Promise<void> {
+): Promise<boolean> {
   const data = row.data ?? {}
   const rawStatus = typeof data.turn_status === 'string' ? data.turn_status : data.status
   const status = typeof rawStatus === 'string' && TURN_STATES.has(rawStatus)
@@ -436,7 +445,7 @@ async function upsertTurn(
 
   const rawReason = typeof data.turn_reason === 'string' ? data.turn_reason : data.reason
   const reason = typeof rawReason === 'string' && rawReason.length > 0 ? rawReason : null
-  await client.query(`
+  const turn = await client.query<{ terminal: boolean }>(`
     INSERT INTO source_turns
       (installation_id, turn_id, session_id, state, reason, started_at, terminal_at,
        first_source_event_id, last_source_event_id, event_count)
@@ -448,10 +457,12 @@ async function upsertTurn(
       event_count = source_turns.event_count + 1,
       reason = COALESCE(EXCLUDED.reason, source_turns.reason),
       updated_at = NOW()
+    RETURNING terminal_at IS NOT NULL AS terminal
   `, [
     installationId, row.turn_id, row.session_id, nextStatus ?? 'running',
     reason, row.recorded_at, terminalAt, sourceEventId,
   ])
+  return turn.rows[0].terminal
 }
 
 /**

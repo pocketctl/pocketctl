@@ -112,6 +112,7 @@ export interface MemoryConfig {
   pollIntervalMs: number
   httpTimeoutMs: number
   jobLeaseMs: number
+  compileBatchIntervalMs: number
   episodeStabilizationMs: number
   extractionDebounceMs: number
   extractionMaxRunsPerEpisode: number
@@ -645,6 +646,9 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     pollIntervalMs: parseBoundedInteger('MEMORY_POLL_INTERVAL_MS', env.MEMORY_POLL_INTERVAL_MS, 1000, 100, 3_600_000),
     httpTimeoutMs: parseBoundedInteger('MEMORY_HTTP_TIMEOUT_MS', env.MEMORY_HTTP_TIMEOUT_MS, 10_000, 1000, 120_000),
     jobLeaseMs: parseBoundedInteger('MEMORY_JOB_LEASE_MS', env.MEMORY_JOB_LEASE_MS, 30_000, 1000, 600_000),
+    compileBatchIntervalMs: parseBoundedInteger(
+      'MEMORY_COMPILE_BATCH_INTERVAL_MS', env.MEMORY_COMPILE_BATCH_INTERVAL_MS, 300_000, 0, 3_600_000,
+    ),
     episodeStabilizationMs: parseBoundedInteger(
       'MEMORY_EPISODE_STABILIZATION_MS', env.MEMORY_EPISODE_STABILIZATION_MS, 30_000, 0, 3_600_000,
     ),

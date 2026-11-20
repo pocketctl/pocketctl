@@ -50,7 +50,11 @@ function toClaim(row: JobRow): JobClaim {
  * lease expired (and whose job was reclaimed under a bumped epoch) can never
  * finalize work a new worker already owns.
  */
-export function createJobRepository(pool: pg.Pool) {
+export function createJobRepository(pool: pg.Pool, options: { compileBatchIntervalMs?: number } = {}) {
+  const compileBatchMs = options.compileBatchIntervalMs ?? 0
+  if (!Number.isSafeInteger(compileBatchMs) || compileBatchMs < 0 || compileBatchMs > 3_600_000) {
+    throw new Error('invalid_compile_batch_interval')
+  }
   return {
     async enqueueJob(input: {
       installationId?: string | null
@@ -89,7 +93,9 @@ export function createJobRepository(pool: pg.Pool) {
       if(input.limit===0)return []
       if(!Number.isInteger(input.limit)||input.limit<0||input.limit>1000||!Number.isFinite(input.leaseMs)||input.leaseMs<=0)throw new Error('invalid_claim_limits')
       const globalLimit=input.globalLimit??2147483647,tenantLimit=input.perInstallationLimit??2147483647
-      const limits=input.typeLimits??{}
+      const limits={...input.typeLimits}
+      // The type cap includes both ordinary and historical compile lanes.
+      if (compileBatchMs > 0) limits.compile_episode = Math.min(1, limits.compile_episode ?? 1)
       if(!Number.isInteger(globalLimit)||globalLimit<1||!Number.isInteger(tenantLimit)||tenantLimit<1
         ||[...Object.values(limits),...Object.values(input.capacity??{})].some(n=>!Number.isInteger(n)||Number(n)<0))throw new Error('invalid_claim_limits')
       const client=await pool.connect()
@@ -99,7 +105,11 @@ export function createJobRepository(pool: pg.Pool) {
         await client.query(`UPDATE memory_jobs SET state='pending',claimed_by=NULL,claim_expires_at=NULL
           WHERE state='running' AND claim_expires_at<=clock_timestamp()`)
         const capacityClass = input.capacity ? jobCapacityClassSql : "'general'::text"
-        const result=await client.query<JobRow>(`WITH live AS(
+        // Drain turns that were ready at the last database-clock boundary. Store the
+        // claim time atomically: expiry, reruns and deferrals may all change available_at.
+        const result=await client.query<JobRow>(`WITH batch AS (
+          SELECT floor(extract(epoch FROM statement_timestamp()) * 1000 / NULLIF($8::integer, 0)) * $8 AS start_ms
+        ), live AS(
           SELECT installation_id,job_type,${capacityClass} AS lane FROM memory_jobs
           WHERE state='running' AND claim_expires_at>clock_timestamp()
         ), tenant AS(SELECT installation_id,count(*)::int n FROM live GROUP BY installation_id),
@@ -112,7 +122,12 @@ export function createJobRepository(pool: pg.Pool) {
             COALESCE(($6::jsonb->>j.job_type)::int,2147483647)-COALESCE(k.n,0) AS type_room,
             COALESCE(($7::jsonb->>j.lane)::int,2147483647)-COALESCE(l.n,0) AS lane_room
           FROM (SELECT job_id,installation_id,job_type,priority,available_at,created_at,${capacityClass} AS lane
-                FROM memory_jobs WHERE state='pending' AND available_at<=clock_timestamp()) j
+                FROM memory_jobs CROSS JOIN batch WHERE state='pending' AND available_at<=statement_timestamp()
+                  AND (job_type<>'compile_episode' OR $8=0 OR (
+                    available_at<=to_timestamp(batch.start_ms::double precision/1000)
+                    AND (jsonb_typeof(payload->'compile_last_claim_ms') IS DISTINCT FROM 'number'
+                      OR payload->'compile_last_claim_ms'<to_jsonb(batch.start_ms))
+                  ))) j
           LEFT JOIN tenant t ON t.installation_id IS NOT DISTINCT FROM j.installation_id
           LEFT JOIN kind k ON k.job_type=j.job_type
           LEFT JOIN lanes l ON l.lane=j.lane
@@ -120,7 +135,9 @@ export function createJobRepository(pool: pg.Pool) {
           SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,available_at,created_at,job_id) AS tenant_turn
           FROM eligible WHERE tenant_room>0 AND type_room>0 AND lane_room>0
         ), type_order AS(
-          SELECT *,ROW_NUMBER() OVER(PARTITION BY job_type ORDER BY priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS type_rank
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY job_type ORDER BY
+            CASE WHEN job_type='compile_episode' AND $8>0 THEN available_at END,
+            priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS type_rank
           FROM tenant_order
         ), lane_order AS(
           SELECT *,ROW_NUMBER() OVER(PARTITION BY lane ORDER BY priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS lane_rank
@@ -134,10 +151,13 @@ export function createJobRepository(pool: pg.Pool) {
           FOR UPDATE OF j SKIP LOCKED
           LIMIT LEAST($3::int,GREATEST(0,$4::int-(SELECT count(*)::int FROM live))))
         UPDATE memory_jobs j SET state='running',claimed_by=$1,claim_epoch=j.claim_epoch+1,
-          claim_expires_at=clock_timestamp()+($2*interval '1 millisecond'),attempts=j.attempts+1,last_error_code=NULL
+          claim_expires_at=clock_timestamp()+($2*interval '1 millisecond'),attempts=j.attempts+1,last_error_code=NULL,
+          payload=CASE WHEN j.job_type='compile_episode' AND $8>0 THEN
+            jsonb_set(j.payload,'{compile_last_claim_ms}',to_jsonb(floor(extract(epoch FROM statement_timestamp())*1000)))
+            ELSE j.payload END
         FROM picked WHERE j.job_id=picked.job_id
         RETURNING j.job_id,j.installation_id,j.job_type,j.idempotency_key,j.payload,j.attempts,j.claim_epoch,j.priority,picked.last_error_code`,
-          [input.workerId,input.leaseMs,input.limit,globalLimit,tenantLimit,JSON.stringify(limits),JSON.stringify(input.capacity??{})])
+          [input.workerId,input.leaseMs,input.limit,globalLimit,tenantLimit,JSON.stringify(limits),JSON.stringify(input.capacity??{}),compileBatchMs])
         await client.query('COMMIT');return result.rows.map(toClaim)
       }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },

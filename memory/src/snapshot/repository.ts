@@ -367,7 +367,8 @@ export function createSnapshotRepository(pool: pg.Pool) {
               AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=t.installation_id AND r.turn_id=t.turn_id)
             ON CONFLICT (installation_id, job_type, idempotency_key) DO UPDATE SET
               state = CASE WHEN memory_jobs.state='running' THEN 'running' ELSE 'pending' END,
-              available_at = NOW(), attempts = CASE WHEN memory_jobs.state='running' THEN memory_jobs.attempts ELSE 0 END,
+              available_at = CASE WHEN memory_jobs.state='pending' THEN LEAST(memory_jobs.available_at,NOW()) ELSE NOW() END,
+              attempts = CASE WHEN memory_jobs.state='running' THEN memory_jobs.attempts ELSE 0 END,
               priority = CASE WHEN memory_jobs.state IN ('pending','running') THEN memory_jobs.priority ELSE EXCLUDED.priority END,
               claimed_by = CASE WHEN memory_jobs.state='running' THEN memory_jobs.claimed_by END,
               claim_expires_at = CASE WHEN memory_jobs.state='running' THEN memory_jobs.claim_expires_at END,

@@ -117,6 +117,23 @@ describeWithDatabase('L0/L0.5 source projector (PostgreSQL)', () => {
       WHERE installation_id=$1 AND job_type='compile_episode'`, [INSTALLATION])).rows[0]).toEqual({state:'pending',priority:80})
   })
 
+  test('only terminal turns queue a compile and late events preserve the first pending deadline', async () => {
+    const row = {session_id:'batch-session',turn_id:'batch-turn'}
+    await insertInboxRow(pool,{...row,feed_id:1})
+    await projector.projectOnce(INSTALLATION)
+    const queued = () => pool.query("SELECT available_at::text FROM memory_jobs WHERE job_type='compile_episode'")
+    expect((await queued()).rows).toHaveLength(0)
+    await insertInboxRow(pool,{...row,feed_id:2,event_type:'turn_status',data:{status:'completed'}})
+    await projector.projectOnce(INSTALLATION)
+    const first=(await queued()).rows
+    expect(first).toHaveLength(1)
+    await insertInboxRow(pool,{...row,feed_id:3})
+    await insertInboxRow(pool,{...row,feed_id:4})
+    await projector.projectOnce(INSTALLATION)
+    expect((await queued()).rows).toEqual(first)
+    expect(Number((await pool.query('SELECT event_count FROM source_turns WHERE turn_id=$1',[row.turn_id])).rows[0].event_count)).toBe(4)
+  })
+
   test('projects inbox rows in strict feed order and marks them projected', async () => {
     await insertInboxRow(pool, {
       feed_id: 1, session_id: 'ses-1', turn_id: 'turn-1', event_type: 'session_created',
