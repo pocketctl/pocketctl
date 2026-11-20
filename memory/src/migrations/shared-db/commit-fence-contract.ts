@@ -4,7 +4,8 @@ import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadata
 export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.lock_memory_personal_source_commit(p_scope JSONB,p_kind TEXT,p_root TEXT,p_expected JSONB,p_retained BOOLEAN)
   RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE a RECORD;owner_id INT;installation UUID;session_key TEXT;native JSONB;fresh_native JSONB;session_ids TEXT[];sid TEXT;selected_mode BOOLEAN;ordinary_projection BOOLEAN;expected JSONB;execution RECORD;distribution RECORD;item RECORD;fresh_row JSONB;input_fingerprint TEXT;selected_ids BIGINT[];projection_keys TEXT[];turn_key TEXT;input_admission TEXT;lock_phase BOOLEAN:=FALSE;stale_scan BOOLEAN:=FALSE;BEGIN
+  DECLARE a RECORD;owner_id INT;installation UUID;session_key TEXT;native JSONB;fresh_native JSONB;session_ids TEXT[];sid TEXT;selected_mode BOOLEAN;ordinary_projection BOOLEAN;expected JSONB;execution RECORD;distribution RECORD;item RECORD;fresh_row JSONB;input_fingerprint TEXT;selected_ids BIGINT[];projection_keys TEXT[];turn_key TEXT;input_admission TEXT;lock_phase BOOLEAN:=FALSE;stale_scan BOOLEAN:=FALSE;
+   group_event_authority BOOLEAN:=FALSE;episode_rows JSONB;session_facts JSONB:='{}'::jsonb;logical_sid TEXT;session_fact JSONB;event_fact JSONB;BEGIN
    selected_mode=COALESCE(p_expected->>'contract'='personal-metadata-selection-v1',FALSE);
    ordinary_projection=COALESCE(p_expected->>'contract'='personal-reference-projection-v1',FALSE);
    expected=CASE WHEN selected_mode OR ordinary_projection THEN p_expected->'observedVersion' ELSE p_expected END;
@@ -160,22 +161,52 @@ export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
      PERFORM r.source_event_id FROM memory.source_events r WHERE r.installation_id=installation AND r.source_kind='relay_event' AND r.canonical_key=ANY(SELECT id::text FROM unnest(selected_ids) id) ORDER BY r.source_event_id FOR SHARE NOWAIT;lock_phase=FALSE;
      input_fingerprint=${metadataInputFingerprint()};
      IF input_fingerprint IS DISTINCT FROM p_expected->>'inputFingerprint' THEN RAISE lock_not_available;END IF;
+     IF p_expected->>'purpose'='episode' THEN
+      -- Relay can deploy a stricter per-event policy independently. Only the
+      -- reviewed v3 body may be factored into session and event predicates.
+      -- Any other definition retains the live native_event_authority call.
+      SELECT l.lanname='plpgsql' AND NOT p.prosecdef AND NOT p.proisstrict AND p.provolatile='s'
+       AND p.proconfig=ARRAY['search_path=pg_catalog, public'] AND has_function_privilege(p.oid,'EXECUTE')
+       AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='946a586d8f9b86a194ff890ffff986b3061d543b621a93bcd2c5762db9e7ad67'
+       INTO group_event_authority FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+       WHERE p.oid='public.native_event_authority(bigint,integer)'::regprocedure;
+      -- Selected events and their reference rows are already locked. Read membership
+      -- once, keeping a missing reference or turn as a negative per-event fact.
+      SELECT COALESCE(jsonb_object_agg(e.id::text,jsonb_build_array(e.logical_source_session_id,
+       t.turn_id IS NOT NULL AND (r.turn_id=turn_key OR (r.turn_id IS NULL AND r.session_id=t.session_id
+        AND r.event_type IN('session_created','session_discovered') AND r.occurred_at<=t.terminal_at)))), '{}'::jsonb)
+       INTO episode_rows FROM public.events e LEFT JOIN memory.source_events r
+        ON r.installation_id=installation AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified'
+       LEFT JOIN memory.source_turns t ON t.installation_id=r.installation_id AND t.turn_id=turn_key
+       WHERE e.id=ANY(selected_ids) AND e.user_id=owner_id AND NOT e.owner_retired
+        AND e.session_id=native->>'sessionId' AND e.effect_status IN('none','completed');
+     END IF;
      FOR item IN SELECT value FROM jsonb_array_elements(p_expected->'rows') LOOP
+      IF group_event_authority THEN
+       logical_sid=episode_rows->(item.value->>'id')->>0;
+       IF logical_sid IS NULL THEN RAISE lock_not_available;END IF;
+       -- Resolve in selected order: a later alias error must not mask an earlier
+       -- denial. owner_id is fixed for this invocation. Recompute on every fence.
+       session_fact=session_facts->logical_sid;
+       IF session_fact IS NULL THEN
+        session_fact=public.native_session_authority(logical_sid,owner_id,NULL);
+        session_facts=session_facts||jsonb_build_object(logical_sid,session_fact);
+       END IF;
+       IF session_fact->>'state' IS DISTINCT FROM 'current' OR session_fact->>'sessionId' IS DISTINCT FROM native->>'sessionId' THEN RAISE lock_not_available;END IF;
+       event_fact=session_fact||jsonb_build_object('eventId',item.value->>'id','logicalSessionId',logical_sid,'ownerRetired',FALSE);
+      END IF;
       -- Reuse the native authority for the row fingerprint and the current-state check.
       SELECT ${metadataRowLocator('e','r','e.xmin::text','native','input_fingerprint','event_authority.value')},${metadataInputAdmission()}
        INTO fresh_row,input_admission FROM public.events e LEFT JOIN memory.source_events r
        ON r.installation_id=installation AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified'
-       CROSS JOIN LATERAL(SELECT public.native_event_authority(e.id,owner_id) AS value OFFSET 0) event_authority
+       CROSS JOIN LATERAL(SELECT CASE WHEN group_event_authority THEN event_fact ELSE public.native_event_authority(e.id,owner_id) END AS value OFFSET 0) event_authority
        WHERE e.id=(item.value->>'id')::bigint AND e.user_id=owner_id AND NOT e.owner_retired AND e.session_id=native->>'sessionId'
         AND e.effect_status IN('none','completed') AND event_authority.value->>'state'='current'
         AND NOT(${metadataUsageDenied()});
       IF input_admission='unsupported' THEN RAISE EXCEPTION 'source_metadata_proof_unavailable';END IF;
       IF input_admission='unproven' THEN RAISE EXCEPTION 'source_input_start_unproven';END IF;
       IF NOT FOUND OR input_admission IS DISTINCT FROM 'eligible' OR fresh_row IS DISTINCT FROM item.value THEN RAISE lock_not_available;END IF;
-      IF p_expected->>'purpose'='episode' AND NOT EXISTS(SELECT 1 FROM memory.source_events r JOIN memory.source_turns t
-       ON t.installation_id=r.installation_id AND t.turn_id=turn_key WHERE r.installation_id=installation AND r.source_kind='relay_event'
-       AND r.canonical_key=item.value->>'id' AND r.mapping_state='verified' AND(r.turn_id=turn_key OR(r.turn_id IS NULL
-        AND r.session_id=t.session_id AND r.event_type IN('session_created','session_discovered') AND r.occurred_at<=t.terminal_at))) THEN RAISE lock_not_available;END IF;
+      IF episode_rows IS NOT NULL AND (episode_rows->(item.value->>'id')->1) IS DISTINCT FROM 'true'::jsonb THEN RAISE lock_not_available;END IF;
      END LOOP;
      FOR item IN SELECT value FROM jsonb_array_elements(p_expected->'cold') ORDER BY value->>'manifestId',(value->>'ordinal')::integer LOOP
       IF jsonb_typeof(item.value)<>'object' OR item.value-ARRAY['manifestId','ordinal','fingerprint']<>'{}'::jsonb
