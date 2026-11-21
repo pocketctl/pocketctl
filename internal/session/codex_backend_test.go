@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -758,6 +760,46 @@ func TestCodexAppServerBackendStartsNewTurnWhenIdle(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpc.lastCall(t, "turn/start")
+}
+
+func TestCodexNextTurnKeepsRootModelAfterChildOutput(t *testing.T) {
+	const root, child, model = "thr_idle", "sdk-child", "gpt-6.2-astra"
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 4))
+	coord := newVerifiedTestCodexCoordinator(sm)
+	rpc := newFakeCodexRuntimeClient()
+	rpc.results["turn/start"] = json.RawMessage(`{"turn":{"id":"turn_new","status":"inProgress"}}`)
+	backend := newCodexAppServerBackend(sm, coord, rpc, 1)
+	sm.sessions[root] = &ProcessState{SessionID: root, Agent: "codex", Model: model}
+
+	text := protocol.DaemonEvent{Type: "agent_text", SessionID: root, AgentID: child, Text: "child reply", Model: "GLM-5.2"}
+	got := sm.ProjectSessionModel(text, slog.Default())
+	if !reflect.DeepEqual(got, []protocol.DaemonEvent{text}) {
+		t.Fatal("child output must keep its model attribution without a root model update")
+	}
+	for _, evt := range []protocol.DaemonEvent{
+		{Type: "session_model_changed", SessionID: root, IsSubagent: true, Model: "GLM-5.2"},
+		{Type: "session_meta", SessionID: root, AgentID: child, Effort: "low"},
+	} {
+		if got := sm.ProjectSessionModel(evt, slog.Default()); len(got) != 0 {
+			t.Fatalf("child configuration forwarded to root: %+v", got)
+		}
+	}
+	if current, _ := sm.GetSessionModel(root); current != model {
+		t.Fatalf("session metadata model = %q", current)
+	}
+	if err := backend.Send(context.Background(), root, "next"); err != nil {
+		t.Fatal(err)
+	}
+	var params struct{ Model string }
+	if err := json.Unmarshal(rpc.lastCall(t, "turn/start").params, &params); err != nil || params.Model != model {
+		t.Fatalf("turn/start model = %q, err = %v", params.Model, err)
+	}
+
+	change := protocol.DaemonEvent{Type: "session_model_changed", SessionID: root, Model: "gpt-6.2-sol", Reason: protocol.TurnReasonUserRequested}
+	got = sm.ProjectSessionModel(change, slog.Default())
+	if current, _ := sm.GetSessionModel(root); current != change.Model || len(got) != 1 || got[0].PreviousModel != model {
+		t.Fatalf("root switch: model = %q, events = %+v", current, got)
+	}
 }
 
 func TestCodexAppServerBackendAppliesCurrentPermissionToNextTurn(t *testing.T) {

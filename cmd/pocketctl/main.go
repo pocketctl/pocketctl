@@ -57,7 +57,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/zcode"
 )
 
-var version = "0.5.20"
+var version = "0.5.21"
 
 // PR2 platform defaults for the daemon entry: daemonize + service via platform
 // interface (was direct syscall.SysProcAttr{Setsid} + internal/service).
@@ -1861,47 +1861,7 @@ func cmdDaemonStart(args []string) {
 				}
 			}
 		}
-		if evt.Type == "session_model_changed" && evt.Model != "" && evt.SessionID != "" {
-			current, _ := sm.GetSessionModel(evt.SessionID)
-			if evt.PreviousModel == "" && current != evt.Model {
-				evt.PreviousModel = current
-			}
-			if evt.Model == current {
-				// Explicit remote switches update the in-memory selection before
-				// publishing the confirmation event. Keep that correlated event.
-				if evt.Reason == protocol.TurnReasonUserRequested {
-					return []protocol.DaemonEvent{evt}
-				}
-				return nil
-			}
-			sm.SetSessionModel(evt.SessionID, evt.Model)
-			if current == "" {
-				// This is first discovery, not an explicit user model switch. Keep
-				// it durable for the session list while clients suppress the stream
-				// notice and only update their model badge.
-				evt.Reason = "initial_model"
-				return []protocol.DaemonEvent{evt}
-			}
-			logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
-			return []protocol.DaemonEvent{evt}
-		}
-		if evt.Type != "agent_text" || evt.Model == "" || evt.SessionID == "" {
-			return []protocol.DaemonEvent{evt}
-		}
-		current, _ := sm.GetSessionModel(evt.SessionID)
-		if evt.Model == current {
-			return []protocol.DaemonEvent{evt}
-		}
-		sm.SetSessionModel(evt.SessionID, evt.Model)
-		logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
-		// Older agents report only on agent_text. New Codex turn_context records
-		// are handled above and therefore reach clients before this reply.
-		return []protocol.DaemonEvent{evt, {
-			Type:          "session_model_changed",
-			SessionID:     evt.SessionID,
-			Model:         evt.Model,
-			PreviousModel: current,
-		}}
+		return sm.ProjectSessionModel(evt, logger)
 	}
 
 	// Wire terminal notifications

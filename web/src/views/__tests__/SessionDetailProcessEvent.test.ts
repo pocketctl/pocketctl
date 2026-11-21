@@ -1923,6 +1923,18 @@ describe('SessionDetail processEvent integration', () => {
     expect(errors[0]).toMatchObject({ content: event.error, eventKey: event.event_id })
   })
 
+  test('model-not-found renders a localized recovery hint once across live and replay', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const event = { type: 'error', session_id: 'ses_1', event_id: 'codex:error:model',
+      code: 'codex_model_not_found', error: 'daemon fallback' }
+    vm.processEvent(event)
+    vm.processEvent({ type: 'replay_batch', session_id: 'ses_1', events: [event] })
+    expect(vm.messages.filter((message: any) => message.type === 'error').map((message: any) => message.content))
+      .toEqual(['session.codex_model_not_found'])
+    wrapper.unmount()
+  })
+
   test('shows the complete typed Codex usage-limit error once across live and replay', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any

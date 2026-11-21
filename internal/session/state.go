@@ -1,6 +1,7 @@
 package session
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -499,6 +500,56 @@ func (sm *SessionManager) GetSessionModel(sessionID string) (string, bool) {
 		return "", false
 	}
 	return ps.Model, true
+}
+
+// ProjectSessionModel updates the model used for subsequent sends and publishes
+// changes to the root configuration. Child output shares the root SessionID.
+func (sm *SessionManager) ProjectSessionModel(evt protocol.DaemonEvent, logger *slog.Logger) []protocol.DaemonEvent {
+	if evt.AgentID != "" || evt.IsSubagent || evt.ActorScope == protocol.ActorScopeSubagent {
+		// session_meta and session_model_changed configure the root on existing
+		// clients. Keep model attribution on the child's text and usage events.
+		if evt.Type == "session_model_changed" || evt.Type == "session_meta" {
+			return nil
+		}
+		return []protocol.DaemonEvent{evt}
+	}
+	if (evt.Type != "session_model_changed" && evt.Type != "agent_text") || evt.Model == "" || evt.SessionID == "" {
+		return []protocol.DaemonEvent{evt}
+	}
+
+	sm.mu.Lock()
+	previous := ""
+	if ps := sm.sessions[evt.SessionID]; ps != nil {
+		previous = ps.Model
+		ps.Model = evt.Model
+	}
+	sm.mu.Unlock()
+
+	if evt.Type == "session_model_changed" {
+		if previous == evt.Model {
+			// Explicit switches cache the selection before publishing confirmation.
+			if evt.Reason == protocol.TurnReasonUserRequested {
+				return []protocol.DaemonEvent{evt}
+			}
+			return nil
+		}
+		if evt.PreviousModel == "" {
+			evt.PreviousModel = previous
+		}
+		if previous == "" {
+			evt.Reason = "initial_model"
+		} else {
+			logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", previous)
+		}
+		return []protocol.DaemonEvent{evt}
+	}
+	if previous == evt.Model {
+		return []protocol.DaemonEvent{evt}
+	}
+	logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", previous)
+	return []protocol.DaemonEvent{evt, {
+		Type: "session_model_changed", SessionID: evt.SessionID, Model: evt.Model, PreviousModel: previous,
+	}}
 }
 
 // SetSessionModel caches the resolved model for a session — e.g. a model extracted

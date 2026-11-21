@@ -4053,7 +4053,8 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     // Durable OpenCode errors can arrive both as live events and replay_batch.
     // Use the daemon's stable event_id (falling back to message_id) so refresh
     // and reconnect never render the same assistant error twice.
-    const errorText = evt.error || evt.content || evt.payload?.error || evt.payload?.content || 'Unknown error'
+    const code = evt.code || evt.payload?.code
+    const errorText = code === 'codex_model_not_found' ? t('session.codex_model_not_found') : evt.error || evt.content || evt.payload?.error || evt.payload?.content || 'Unknown error'
     const eventKey = evt.event_id || evt.payload?.event_id || (evt.message_id || evt.payload?.message_id ? `message:${evt.message_id || evt.payload?.message_id}` : '')
     const existing = eventKey && target.find((m: any) => m.type === 'error' && m.eventKey === eventKey)
     if (existing) {
@@ -4062,7 +4063,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     }
     target.push({
       id: nextId('e'), type: 'error', role: 'agent', content: errorText, error: errorText,
-      code: evt.code || evt.payload?.code,
+      code,
       eventKey, message_id: evt.message_id || evt.payload?.message_id, ...eventWithTurnMetadata(evt),
     })
   } else if (type === 'turn_status') {
