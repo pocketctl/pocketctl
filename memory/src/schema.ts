@@ -1,3 +1,4 @@
+import {SNAPSHOT_PROVENANCE_MIGRATION} from './migrations/shared-db/snapshot-provenance-migration.js'
 import {REVIEWER_WINDOW_MIGRATION} from './governance/reviewer-window-migration.js'
 import {TRANSPORT_METADATA_MIGRATION} from './sources/transport-metadata-migration.js'
 import {NATIVE_CONTROL_OBSERVATION_MIGRATION} from './installations/native-control-migration.js'
@@ -2309,6 +2310,10 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   RETENTION_REFERENCE_UUID_MIGRATION,
   CURATION_NATIVE_AUTHORITY_MIGRATION,
   CONTEXT_NATIVE_RECEIPT_MIGRATION,
+  SNAPSHOT_PROVENANCE_MIGRATION,
+  // Commit ADD COLUMN before the validation scan so normal reads and writes
+  // can continue. An interrupted scan resumes at this migration.
+  {version:105, statements:['ALTER TABLE source_events VALIDATE CONSTRAINT source_events_snapshot_format']},
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
@@ -2345,7 +2350,7 @@ export async function applyMemorySchema(pool: pg.Pool,options:{namespace?:Memory
           }
           // This replacement pins its own search path. Leave unrelated
           // shared-contract functions at their existing narrower settings.
-          if(namespace==='memory'&&migration.version!==CURATION_NATIVE_AUTHORITY_MIGRATION.version&&migration.version!==CONTEXT_NATIVE_RECEIPT_MIGRATION.version)await pinMemoryFunctions(client)
+          if(namespace==='memory'&&![CURATION_NATIVE_AUTHORITY_MIGRATION.version,CONTEXT_NATIVE_RECEIPT_MIGRATION.version,SNAPSHOT_PROVENANCE_MIGRATION.version,105].includes(migration.version))await pinMemoryFunctions(client)
           await client.query(
             'INSERT INTO memory_schema_migrations (version) VALUES ($1)',
             [migration.version],

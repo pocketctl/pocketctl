@@ -130,6 +130,7 @@ export interface MemoryConfig {
   extractionMaxChars: number
   allowedOrigins: readonly string[]
   allowedHosts: readonly string[]
+  compactSnapshotInstallations: readonly string[]
   pageDerivedWriteInstallations: readonly string[]
   installationAllowlist: readonly string[]
   tombstoneHmacKeys: readonly TombstoneHmacKey[]
@@ -677,6 +678,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ),
     allowedOrigins: parseAllowedOrigins(env.MEMORY_ALLOWED_ORIGINS),
     allowedHosts: parseAllowedHosts(env.MEMORY_ALLOWED_HOSTS),
+    compactSnapshotInstallations: parseInstallationAllowlist(env.MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS, 'MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS'),
     pageDerivedWriteInstallations: parseInstallationAllowlist(env.MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS, 'MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS'),
     installationAllowlist,
     tombstoneHmacKeys,

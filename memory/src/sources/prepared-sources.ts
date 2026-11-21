@@ -1,3 +1,4 @@
+import {snapshotProvenanceSql} from './snapshot-provenance.js'
 import {prepareTeamSemanticReferences} from './team-semantic-reader.js'
 import {deferredSourcePreparation} from './deferred-preparation.js'
 import {createObservedSourceReader,createObservedPersonalMetadataReader} from './observed-reader.js'
@@ -28,7 +29,7 @@ export interface PreparedEvent {
  payload_hash:Buffer;classification:Record<string,unknown>;source_provenance:Record<string,unknown>;body_reclaimed_at:Date|null;row_version:string
  payload:Record<string,unknown>;source_version?:unknown;source_kind?:string;canonical_key?:string;mapping_state?:string;content_hash?:Buffer
 }
-const metadata=`source_event_id::text,installation_id::text,session_id,turn_id,origin,origin_position,event_type,occurred_at,payload_hash,classification,source_provenance,body_reclaimed_at,xmin::text AS row_version,
+const metadata=`source_event_id::text,installation_id::text,session_id,turn_id,origin,origin_position,event_type,occurred_at,payload_hash,classification,${snapshotProvenanceSql('s')} AS source_provenance,body_reclaimed_at,xmin::text AS row_version,
  s.source_version,s.source_kind,s.canonical_key,s.mapping_state,s.content_hash`
 const clone=(row:PreparedEvent):PreparedEvent=>({...row,payload:structuredClone(row.payload),payload_hash:Buffer.from(row.payload_hash),...(row.content_hash?{content_hash:Buffer.from(row.content_hash)}:{}),classification:structuredClone(row.classification),source_provenance:structuredClone(row.source_provenance)})
 const stamp=(rows:PreparedEvent[])=>canonicalJsonString(rows.map(r=>({id:r.source_event_id,installation:r.installation_id,session:r.session_id,turn:r.turn_id,origin:r.origin,position:r.origin_position,type:r.event_type,at:new Date(r.occurred_at).toISOString(),hash:r.payload_hash.toString('hex'),contentHash:r.content_hash?.toString('hex'),classification:r.classification,provenance:r.source_provenance,reclaimed:r.body_reclaimed_at?String(r.body_reclaimed_at):null,row:r.row_version,descriptor:r.source_version,kind:r.source_kind,key:r.canonical_key,mapping:r.mapping_state})).sort((a,b)=>a.id.localeCompare(b.id)))

@@ -91,6 +91,9 @@ describe('memory config', () => {
     expect(loadMemoryConfig(baseEnv({
       MEMORY_INSTALLATION_ALLOWLIST: `${first}, ${second}, ${first}`,
     })).installationAllowlist).toEqual([first.toLowerCase(), second])
+    expect(loadMemoryConfig(baseEnv()).compactSnapshotInstallations).toEqual([])
+    expect(loadMemoryConfig(baseEnv({MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS:first})).compactSnapshotInstallations).toEqual([first.toLowerCase()])
+    expect(() => loadMemoryConfig(baseEnv({MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS:'invalid'}))).toThrow(/MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS/)
     expect(loadMemoryConfig(baseEnv()).pageDerivedWriteInstallations).toEqual([])
     expect(loadMemoryConfig(baseEnv({MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS:first})).pageDerivedWriteInstallations).toEqual([first.toLowerCase()])
     expect(() => loadMemoryConfig(baseEnv({MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS:'invalid'}))).toThrow(/MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS/)

@@ -1,3 +1,4 @@
+import {compactSnapshotFields,snapshotProvenanceSql} from './snapshot-provenance.js'
 import {planOfflinePage,type OfflineSeal,type OfflineBasis} from './offline-projection.js'
 import {ProjectionTiming,observeProjectionStep,commitOutcomeUnknown,ProjectionLockBusy,recordProjectionRollback} from './projection-diagnostics.js'
 import type pg from 'pg'
@@ -147,9 +148,9 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
  return Object.freeze({token,count:heads.length,...(view.nextAfter?{nextCursor:view.nextAfter}:{}),hasMore:!view.exhausted})
 }
 
-export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false,batchDerived=false){
+export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false,batchDerived=false,compactSnapshot=false){
  const p=pages.get(page.token);if(!p?.metadata)throw Error('canonical_reference_token_invalid')
- const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile,batchDerived})
+ const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile,batchDerived,compactSnapshot})
  return {references,contextReady:p.metadata.contextReady===true,frozenComplete:p.metadata.frozenComplete===true}
 }
 
@@ -188,7 +189,7 @@ export async function completeReadyCanonicalProjection(pool:pg.Pool,scope:Source
 
 /** Bounded metadata-only physical transaction. It neither copies a body nor
  * rewrites an existing UUID, origin, original digest or provenance. */
-type PersistOptions={batchDerived?:boolean;historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
+type PersistOptions={compactSnapshot?:boolean;batchDerived?:boolean;historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
 export async function persistCanonicalReferencePage(pool:pg.Pool,page:CanonicalReferencePage,options:PersistOptions={}):Promise<CanonicalReference[]>{
  return persistReferencePage(pool,page,options)
 }
@@ -354,16 +355,20 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
     AND local_status NOT IN('purging','purged','integrity_error') FOR KEY SHARE NOWAIT`,[scope.installationId])).rowCount
    if(!alive)throw Error('canonical_reference_unavailable')
    if((await query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=ANY($2::text[]) LIMIT 1',[scope.installationId,sessions])).rowCount)throw Error('canonical_reference_unavailable')
-   const rows=missing.map(head=>({canonical_key:head.canonicalKey,session_id:head.sessionKey,turn_id:head.turnKey??null,
-    event_type:head.eventType,occurred_at:head.occurredAt,classification:head.classification,hash:head.contentHash,
-    provenance:referenceProvenance(head,root),sequence:head.sourceSequence??null}))
+   const compact=options.compactSnapshot && prepared.metadata && !options.historicalCompile && scope.ownerScopeKind==='personal' && root.kind==='relay_event'
+   const rows=missing.map(head=>{
+    const snapshot=compact ? compactSnapshotFields(head) : null
+    return {canonical_key:head.canonicalKey,session_id:head.sessionKey,turn_id:head.turnKey??null,
+     event_type:head.eventType,occurred_at:head.occurredAt,classification:head.classification,hash:head.contentHash,
+     ...(snapshot??{provenance:referenceProvenance(head,root)}),sequence:head.sourceSequence??null}
+   })
    const inserted=await query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,classification,payload,payload_hash,
-    source_provenance,source_kind,canonical_key,canonical_session_key,source_version,source_sequence,content_hash,hash_version,mapping_state,adapter_version)
+    source_provenance,source_kind,canonical_key,canonical_session_key,source_version,source_sequence,content_hash,hash_version,mapping_state,adapter_version,snapshot_format)
     SELECT gen_random_uuid(),$1,'canonical',$2::text||':'||p.canonical_key,p.session_id,p.turn_id,p.event_type,p.occurred_at,
      p.classification,NULL,decode(p.hash,'hex'),p.provenance,$2,p.canonical_key,p.session_id,$3::jsonb,p.sequence,
-     decode(p.hash,'hex'),'canonical-json-sha256-v1','verified','canonical-ref-v1'
+     decode(p.hash,'hex'),'canonical-json-sha256-v1','verified','canonical-ref-v1',COALESCE(p.snapshot_format,0)
     FROM jsonb_to_recordset($4::jsonb) AS p(canonical_key text,session_id text,turn_id text,event_type text,occurred_at timestamptz,
-     classification jsonb,hash text,provenance jsonb,sequence bigint)
+     classification jsonb,hash text,provenance jsonb,sequence bigint,snapshot_format smallint)
     ON CONFLICT DO NOTHING RETURNING source_event_id::text,canonical_key`,[scope.installationId,root.kind,JSON.stringify(version),JSON.stringify(rows)])
    if(inserted.rowCount!==missing.length)throw Error('canonical_reference_conflict')
    for(const row of inserted.rows)allocated.set(row.canonical_key,row.source_event_id)
@@ -655,7 +660,7 @@ export async function projectHistoricalPersonalPage(pool:pg.Pool,input:Historica
   else await complete(version)
   if(prepared?.heads.length){
    const stored=await client.query(`SELECT source_event_id::text,canonical_key,canonical_session_key,source_sequence::text,
-    encode(content_hash,'hex') AS digest,origin,payload IS NULL AS reference_only,source_provenance,mapping_state
+    encode(content_hash,'hex') AS digest,origin,payload IS NULL AS reference_only,${snapshotProvenanceSql('source_events')} AS source_provenance,mapping_state
     FROM memory.source_events WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[])`,
     [input.installationId,references.map(ref=>ref.sourceEventId)])
    const byId=new Map(stored.rows.map(row=>[row.source_event_id,row]))

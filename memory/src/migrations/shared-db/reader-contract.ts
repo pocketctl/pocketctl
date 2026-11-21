@@ -1,3 +1,4 @@
+import {snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
 import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadataInputAdmission} from './personal-metadata-sql.js'
 // Scope usage is separate from canonical custody. Enumerating eligible input
 // must skip expired use before LIMIT; explicit keys remain denied references.
@@ -145,14 +146,15 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       'activity_epoch',e.body_activity_epoch::text,'body_owner_user_id',e.body_owner_user_id::text,
       'canonical_hash',COALESCE(e.canonical_payload_hash,encode(r.content_hash,'hex')),'source_header_version',e.source_header_version,
       'canonical_sequence',e.source_sequence::text,'ref_sequence',r.source_sequence::text,'ref_turn_id',COALESCE(r.turn_id,e.source_classification->'memory_source'->>'turn_id'),
-      'provenance',COALESCE(r.source_provenance,CASE WHEN e.source_header_version=1 THEN jsonb_build_object('memory',e.source_classification->'memory_source') END),
+      'provenance',COALESCE(ref_proof.value,CASE WHEN e.source_header_version=1 THEN jsonb_build_object('memory',e.source_classification->'memory_source') END),
       'classification',COALESCE(r.classification,e.source_classification),
       'header_ref_conflict',e.source_header_version=1 AND r.source_event_id IS NOT NULL AND
        (encode(r.content_hash,'hex') IS DISTINCT FROM e.canonical_payload_hash OR r.source_sequence IS NOT NULL AND r.source_sequence::text IS DISTINCT FROM e.source_sequence::text OR r.classification IS DISTINCT FROM e.source_classification),
       'journal_sequences',(SELECT jsonb_agg(j.source_seq::text ORDER BY j.source_seq) FROM public.extension_source_outbox j WHERE j.source_kind='canonical_event' AND j.source_id='event:'||e.id::text AND j.owner_user_id=e.user_id AND j.session_id=e.logical_source_session_id AND j.event_type=e.event_type),
-      'retention_denied',FALSE,'input_admission',e.memory_input_admission,'metadata',${metadataRowLocator('e','r','e.memory_source_xmin','native','input_fingerprint','e.memory_event_authority')}) AS value
+      'retention_denied',FALSE,'input_admission',e.memory_input_admission,'metadata',${metadataRowLocator('e','r','e.memory_source_xmin','native','input_fingerprint','e.memory_event_authority','ref_proof.value')}) AS value
      FROM page e LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid
-      AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified')
+      AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified'
+     CROSS JOIN LATERAL(SELECT ${snapshotProvenanceSql('r')} AS value OFFSET 0)ref_proof)
     SELECT jsonb_build_object('contract','personal-metadata-observation-v1','version',jsonb_build_object('content',a.content_revision,'authorization',a.authorization_revision,'storage',a.storage_revision),
      'inputFingerprint',input_fingerprint,'nativeSessionFingerprint',encode(sha256(convert_to(native::text,'UTF8')),'hex'),
      'upperId',COALESCE((SELECT boundary.id::text FROM public.events boundary WHERE boundary.session_id=native->>'sessionId' ORDER BY boundary.id DESC LIMIT 1),'0'),
@@ -188,7 +190,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       'source_header_version',to_jsonb(e)->>'source_header_version',
       'canonical_sequence',to_jsonb(e)->>'source_sequence','ref_sequence',r.source_sequence::text,
       'ref_turn_id',CASE WHEN r.source_event_id IS NOT NULL THEN r.turn_id WHEN to_jsonb(e)->>'source_header_version'='1' THEN to_jsonb(e)->'source_classification'->'memory_source'->>'turn_id' END,
-      'provenance',CASE WHEN r.source_event_id IS NOT NULL THEN r.source_provenance WHEN to_jsonb(e)->>'source_header_version'='1' THEN jsonb_build_object('memory',to_jsonb(e)->'source_classification'->'memory_source') END,
+      'provenance',CASE WHEN r.source_event_id IS NOT NULL THEN ${snapshotProvenanceSql('r')} WHEN to_jsonb(e)->>'source_header_version'='1' THEN jsonb_build_object('memory',to_jsonb(e)->'source_classification'->'memory_source') END,
       'classification',CASE WHEN r.source_event_id IS NOT NULL THEN r.classification WHEN to_jsonb(e)->>'source_header_version'='1' THEN to_jsonb(e)->'source_classification' END,
       'header_ref_conflict',to_jsonb(e)->>'source_header_version'='1' AND r.source_event_id IS NOT NULL AND
        (r.content_hash IS NOT NULL AND encode(r.content_hash,'hex') IS DISTINCT FROM to_jsonb(e)->>'canonical_payload_hash'

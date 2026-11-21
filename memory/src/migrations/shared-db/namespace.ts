@@ -1,3 +1,6 @@
+import {SHARED_SOURCE_READER_FUNCTIONS} from './reader-contract.js'
+import {SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS} from './commit-fence-contract.js'
+import {SHARED_INPUT_START_FUNCTIONS} from './input-start-contract.js'
 import {APPEND_CAPTURE_V1_SHA256} from './offline-projection-contract.js'
 import {SHARED_SOURCE_DISTRIBUTION_FUNCTIONS} from './distribution-contract.js'
 import {assertTransportMetadataContract} from '../../sources/transport-state.js'
@@ -194,6 +197,23 @@ export async function assertMemorySchedulingContract(db:Pick<pg.PoolClient,'quer
    [distributionSignatures,distributionBodies])).rows[0]
   if(capacityReady?.ready!==true)throw Error('shared_source_scheduling_migration_required')
 }
+const snapshotReaders=[
+ ['shared.read_memory_relay_sources(jsonb,text,bigint,integer,bigint[])',SHARED_SOURCE_READER_FUNCTIONS],
+ ['shared.lock_memory_personal_source_commit(jsonb,text,text,jsonb,boolean)',SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS],
+ ['shared.memory_relay_input_admitted(jsonb,bigint,boolean)',SHARED_INPUT_START_FUNCTIONS],
+] as const
+const snapshotReaderBodies=snapshotReaders.map(([signature,definitions])=>{
+ const ddl=definitions.find(sql=>sql.startsWith('CREATE OR REPLACE FUNCTION '+signature.split('(')[0]+'('))
+ if(!ddl)throw Error('snapshot_reader_definition_missing')
+ return ddl.split('AS $$')[1].slice(0,-2)
+})
+export async function assertSnapshotReaderContract(db:Pick<pg.PoolClient,'query'>){
+ const {rows}=await db.query(`SELECT NOT EXISTS(SELECT 1 FROM unnest($1::text[],$2::text[]) e(signature,body)
+  WHERE NOT EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure(e.signature) AND p.prosrc=e.body)) AS ready`,
+  [snapshotReaders.map(([signature])=>signature),snapshotReaderBodies])
+ if(!rows[0]?.ready)throw Error('snapshot_reader_migration_required')
+}
+
 export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[]}={}):Promise<void>{
  const client=await pool.connect()
  try{
@@ -235,6 +255,7 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
   }
   if(relayTarget||launch.sharedSourceProfile)await assertRelayEventAppendCapture(client)
   await assertMemorySchedulingContract(client)
+  await assertSnapshotReaderContract(client)
   const contract=(await client.query("SELECT version,to_jsonb(contract)->>'offline_projection_version' AS offline_projection_version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'consumer_version','0') AS consumer_version,COALESCE(to_jsonb(contract)->>'commit_fence_version','0') AS commit_fence_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'processing_read_version','0') AS processing_read_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version FROM shared.memory_source_contract contract")).rows
   if(contract.length!==1 || contract[0].version!==1)throw new Error('unsupported_shared_source_contract')
   if(contract[0].input_start_version!=='1')throw new Error('unsupported_shared_input_start_contract')

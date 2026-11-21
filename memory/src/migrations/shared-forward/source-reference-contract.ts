@@ -1,3 +1,5 @@
+import type pg from 'pg'
+import {snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
 import {JSON_COLUMN_POLICY} from '../shared-source/json-reference-policy.js'
 import {qi} from './source-maintenance-common.js'
 
@@ -17,6 +19,14 @@ export const UNREVIEWED_SESSION_ARRAY_KEYS=['session_ids','sessionIds','canonica
 export function declaredReferenceRoster(){return Object.entries(JSON_COLUMN_POLICY).filter(([,p])=>p.kind==='reference').map(([path])=>path)}
 export function retainedReferenceRoster(){
  return [...declaredReferenceRoster().filter(p=>p!=='source_events.source_version'),'source_events.source_provenance','source_artifacts.details']
+}
+export async function referenceValueSql(c:pg.Client,table:string,column:string,row='t'){
+ if(table==='source_events'&&column==='source_provenance'){
+  const {rowCount}=await c.query(`SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('memory.source_events')
+   AND attname='snapshot_format' AND NOT attisdropped`)
+  if(rowCount)return snapshotProvenanceSql(row)
+ }
+ return row+'.'+qi(column)
 }
 export function referenceChannelSql(table:string){
  let from='memory.'+qi(table)+' t',owner='t.installation_id'

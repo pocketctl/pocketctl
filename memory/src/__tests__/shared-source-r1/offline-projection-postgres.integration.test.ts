@@ -1,3 +1,6 @@
+import {createEpisodeRepository} from '../../episodes/repository.js'
+import {snapshotFormatPage} from '../../maintenance/snapshot-format.js'
+import {snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
 import {setTimeout as delay} from 'node:timers/promises'
 import {describe,expect,test} from 'vitest'
 import {directLaunchFixture} from './direct-launch-fixture.js'
@@ -29,7 +32,9 @@ const url=process.env.OFFLINE_PROJECTION_TEST_DATABASE_URL
    }
    throw Error('offline_projection_timeout '+JSON.stringify(await basis()))
   }
-  queue.register('project_shared_source',createCanonicalProjectionHandler(f.runtime,{pageSize:1,deferMs:5,pageDerivedWriteInstallations:[installation]}),{branch:'canonical'})
+  queue.register('compile_episode',createEpisodeRepository(f.runtime,{stabilizationMs:0}).handleCompileEpisode)
+  const compactSnapshotInstallations:string[]=[]
+  queue.register('project_shared_source',createCanonicalProjectionHandler(f.runtime,{pageSize:1,deferMs:5,stabilizationMs:0,compactSnapshotInstallations,pageDerivedWriteInstallations:[installation]}),{branch:'canonical'})
   let onPage:(()=>Promise<void>)|undefined
   const close=observeProjectionCommits(f.runtime,async e=>{
    if(e.rootKey===root&&onPage){const run=onPage;onPage=undefined;await run()}
@@ -52,6 +57,8 @@ const url=process.env.OFFLINE_PROJECTION_TEST_DATABASE_URL
    const history=[await f.event(source),await f.event(source),await f.event(source)]
    await drain(async()=>(await basis())?.state==='ready')
    expect((await basis()).b).toMatchObject({strategy:'baseline',scanned:history.length,covered:true})
+   expect((await f.runtime.query('SELECT DISTINCT snapshot_format FROM source_events WHERE installation_id=$1',[installation])).rows).toEqual([{snapshot_format:0}])
+   compactSnapshotInstallations.push(installation)
    const shadow=await f.event(source)
    await drain(async()=>(await basis())?.b?.strategy==='shadow'&&(await basis()).b.covered)
    expect((await basis()).b).toMatchObject({scanned:4,outside:0})
@@ -78,6 +85,10 @@ const url=process.env.OFFLINE_PROJECTION_TEST_DATABASE_URL
    expect((await basis()).b).toMatchObject({strategy:'incremental',scanned:1})
    const refs=await f.runtime.query('SELECT canonical_key FROM source_events WHERE installation_id=$1 ORDER BY canonical_key::bigint',[installation])
    expect(refs.rows.map(r=>r.canonical_key)).toEqual([late,...history,shadow,fresh,next])
+   const compact=(await f.runtime.query(`SELECT snapshot_format,source_provenance,classification->'memory_source' AS proof
+     FROM source_events WHERE installation_id=$1 AND canonical_key=$2`,[installation,fresh])).rows[0]
+   expect(compact).toMatchObject({snapshot_format:1,source_provenance:{state:'known'},proof:{version:1,session_id:source.session}})
+   expect(compact.source_provenance).not.toHaveProperty('memory')
    // A historical header/body touch creates a revision hole. The following
    // append cannot use its own interval to cover that change.
    await f.publisher.query('UPDATE public.events SET payload=payload WHERE id=$1',[history[0]])
@@ -151,10 +162,66 @@ const url=process.env.OFFLINE_PROJECTION_TEST_DATABASE_URL
    expect(dispatched).toBe(true)
    await drain(async()=>(await basis())?.state==='ready')
 
-   // Roll back the rollout while a fresh change is waiting for its time slot.
-   await f.event(source)
+   // Disable compact writes with existing compact rows still in use.
+   compactSnapshotInstallations.length=0
+   const legacyAgain=await f.event(source,true)
    await f.pool.query('DELETE FROM shared.memory_projection_policies WHERE installation_id=$1',[installation])
    await drain(async()=>(await f.runtime.query('SELECT count(*)::int AS n FROM source_events WHERE installation_id=$1',[installation])).rows[0].n===14)
+
+   expect((await f.runtime.query('SELECT snapshot_format FROM source_events WHERE installation_id=$1 AND canonical_key=$2',[installation,legacyAgain])).rows[0]).toEqual({snapshot_format:0})
+   await drain(async()=>(await f.runtime.query("SELECT 1 FROM work_episodes WHERE installation_id=$1 AND state='ready'",[installation])).rowCount===1)
+   const manifest=await f.runtime.query(`SELECT witness.value->'source_provenance'= ${snapshotProvenanceSql('s')} AS same
+     FROM work_episodes episode CROSS JOIN LATERAL jsonb_each(episode.evidence_manifest) witness
+     JOIN source_events s ON s.source_event_id=(witness.value->>'source_event_id')::uuid
+     WHERE episode.installation_id=$1 AND s.snapshot_format=1`,[installation])
+   expect(manifest.rows.length).toBeGreaterThan(0)
+   expect(manifest.rows.every(r=>r.same===true)).toBe(true)
+   const maintenance=await f.pool.connect()
+   try{
+    const logical=async()=>(await maintenance.query(`SELECT source_event_id,${snapshotProvenanceSql('s')} AS proof
+      FROM memory.source_events s WHERE installation_id=$1 ORDER BY source_event_id`,[installation])).rows
+    const before=await logical()
+    const preview=await snapshotFormatPage(maintenance,'preview',installation,null)
+    expect(preview).toMatchObject({scanned:14,changed:0,done:true})
+    expect(preview.eligible).toBeGreaterThan(0)
+    const locked=await f.pool.connect()
+    try{
+     await locked.query('BEGIN')
+     await locked.query('SELECT 1 FROM memory.source_events WHERE installation_id=$1 AND snapshot_format=0 LIMIT 1 FOR UPDATE',[installation])
+     await expect(snapshotFormatPage(maintenance,'pack',installation,null)).rejects.toMatchObject({code:'55P03'})
+     expect(await logical()).toEqual(before)
+    }finally{await locked.query('ROLLBACK');locked.release()}
+    expect((await snapshotFormatPage(maintenance,'pack',installation,null)).changed).toBe(preview.eligible)
+    expect((await snapshotFormatPage(maintenance,'pack',installation,null)).changed).toBe(0)
+    expect(await logical()).toEqual(before)
+    expect((await snapshotFormatPage(maintenance,'restore',installation,null)).changed).toBe(14)
+    expect(await logical()).toEqual(before)
+    const id=before[0].source_event_id
+    // A missing key, JSON null, empty object, and conflicting proof retain their own values.
+    for(const document of [{state:'unknown'},{state:'known',memory:null},{state:'known',memory:{}},{state:'known',memory:{version:2}}]){
+     const result=await maintenance.query(`UPDATE memory.source_events SET snapshot_format=1,source_provenance=$2
+      WHERE source_event_id=$1 RETURNING snapshot_format,source_provenance`,[id,document])
+     expect(result.rows[0]).toEqual({snapshot_format:0,source_provenance:document})
+    }
+    const proof={...before[0].proof,extra:{saved:true}}
+    await maintenance.query('UPDATE memory.source_events SET snapshot_format=1,source_provenance=$2 WHERE source_event_id=$1',[id,proof])
+    const result=await maintenance.query(`UPDATE memory.source_events SET classification=classification-'memory_source'
+     WHERE source_event_id=$1 RETURNING source_provenance,snapshot_format`,[id])
+    expect(result.rows[0]).toEqual({snapshot_format:0,source_provenance:proof})
+    // The retention guard can set body_reclaimed_at on an unrelated update.
+    // It must run before the storage-format guard and preserve the proof.
+    await maintenance.query('BEGIN')
+    try{
+     const target=before[1]
+     await maintenance.query('UPDATE memory.source_events SET snapshot_format=1 WHERE source_event_id=$1',[target.source_event_id])
+     await maintenance.query(`INSERT INTO memory.memory_source_retention_receipts(installation_id,turn_id,session_id,episode_id,source_digest,
+      compiler_version,extraction_completed_at,state) SELECT installation_id,turn_id,session_id,gen_random_uuid(),content_hash,'test',now(),'reclaiming'
+      FROM memory.source_events WHERE source_event_id=$1`,[target.source_event_id])
+     const reclaimed=await maintenance.query(`UPDATE memory.source_events SET canonical_projected_at=now()
+      WHERE source_event_id=$1 RETURNING snapshot_format,source_provenance,body_reclaimed_at IS NOT NULL AS reclaimed`,[target.source_event_id])
+     expect(reclaimed.rows[0]).toEqual({snapshot_format:0,source_provenance:target.proof,reclaimed:true})
+    }finally{await maintenance.query('ROLLBACK')}
+   }finally{maintenance.release()}
 
    const jobs=createJobRepository(f.runtime)
    for(const priority of [51,52])await jobs.enqueueJob({installationId:installation,jobType:'project_shared_source',

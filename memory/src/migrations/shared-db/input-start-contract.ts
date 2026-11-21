@@ -1,3 +1,4 @@
+import {snapshotMemorySql} from '../../sources/snapshot-provenance.js'
 import type pg from 'pg'
 /** Independent semantic compatibility check: no Relay implementation import or
  * private readiness function can replace this pre-DDL catalog/ACL audit. */
@@ -233,10 +234,10 @@ export const SHARED_INPUT_START_FUNCTIONS=[
    IF p_explicit AND EXISTS(SELECT 1 FROM memory.source_events r WHERE r.installation_id=(p_scope->>'installationId')::uuid
     AND r.source_kind='relay_event' AND r.mapping_state='verified' AND r.canonical_key=e.id::text
     AND r.canonical_session_key=e.logical_source_session_id AND r.session_id=e.logical_source_session_id AND r.event_type=e.event_type
-    AND r.hash_version='canonical-json-sha256-v1' AND r.content_hash IS NOT NULL AND r.source_provenance->'memory'->>'version'='1'
-    AND r.source_provenance->'memory'->>'session_id'=e.logical_source_session_id
-    AND r.classification->'memory_source'=r.source_provenance->'memory'
-    AND ((to_jsonb(e)->>'source_header_version') IS DISTINCT FROM '1' OR to_jsonb(e)->'source_classification'->'memory_source'=r.source_provenance->'memory')
+    AND r.hash_version='canonical-json-sha256-v1' AND r.content_hash IS NOT NULL AND ${snapshotMemorySql('r')}->>'version'='1'
+    AND ${snapshotMemorySql('r')}->>'session_id'=e.logical_source_session_id
+    AND (r.snapshot_format=1 OR r.classification->'memory_source'=r.source_provenance->'memory')
+    AND ((to_jsonb(e)->>'source_header_version') IS DISTINCT FROM '1' OR to_jsonb(e)->'source_classification'->'memory_source'=${snapshotMemorySql('r')})
     AND (encode(r.content_hash,'hex')=(to_jsonb(e)->>'canonical_payload_hash') OR((to_jsonb(e)->>'canonical_payload_hash') IS NULL AND(
      r.payload=e.payload AND r.content_hash=r.payload_hash
      -- Historical cold refs supply the expected canonical hash. The trusted
