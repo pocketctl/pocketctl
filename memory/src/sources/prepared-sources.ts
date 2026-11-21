@@ -1,11 +1,13 @@
-import {snapshotProvenanceSql} from './snapshot-provenance.js'
+import {prepareExcludedLifecycleTurn,type LifecycleDigestEvent} from '../curation/prepare-lifecycle-turn.js'
+import {boundedSourceQuery} from './bounded-source-query.js'
+import {snapshotMemorySql,snapshotProvenanceSql} from './snapshot-provenance.js'
 import {prepareTeamSemanticReferences} from './team-semantic-reader.js'
 import {deferredSourcePreparation} from './deferred-preparation.js'
 import {createObservedSourceReader,createObservedPersonalMetadataReader} from './observed-reader.js'
 import type pg from 'pg'
 import {canonicalPayloadHash,canonicalJsonString,verifyOriginalSourceHash,SourceUnavailableError,type SourceScope,type SourceRoot,type SourceVersion,type SourceHead} from '@pocketctl/session-source'
 import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
-import {sourceExecutionBranchFor,metadataSourceExecution,guardSourceExecutionCommit} from './source-execution.js'
+import {sourceExecutionBranchFor,metadataSourceExecution,protectMetadataSourceBodies,guardSourceExecutionCommit} from './source-execution.js'
 import {JobDeferredError} from '../jobs/types.js'
 import {SelectedSourceLockBusy} from './processing-pins.js'
 import {prepareSourceProjectionAdmission,prepareMetadataScope,personalMetadataEnvelope} from './source-projection-admission.js'
@@ -131,20 +133,7 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
  const initial=stamp(events),ordered=[...events].sort((a,b)=>new Date(a.occurred_at).getTime()-new Date(b.occurred_at).getTime()||a.source_event_id.localeCompare(b.source_event_id))
  return {bodyBytes:bytes,get events(){return ordered.map(clone)},async assertCurrent(client,options){
   if(selectedEpisode&&metadataSourceExecution(pool,installationId).token!==originalExecution)throw Error('source_execution_scope_mismatch')
-  for(const observation of metadataObservations){
-   try{
-    const locked=(await client.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS locked',
-     [JSON.stringify(observation.scope),observation.root.kind,observation.root.key,JSON.stringify(observation.envelope)])).rows[0]?.locked
-    if(locked!==true)throw Error('source_reference_changed')
-   }catch(error){
-    const code=(error as {code?:string}).code,message=(error as Error).message
-    // A proven old-scan replacement is a distinct version wait, never a
-    // generic FALSE/busy conversion. The old proof produces no output.
-    if(code==='55P03'&&message==='source_metadata_lock_busy')throw new SelectedSourceLockBusy()
-    if(code==='P0001'&&message==='source_metadata_scan_changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
-    throw error
-   }
-  }
+  await lockEpisodeSelections(client,metadataObservations)
   const current=await mode(client as Db,installationId,context.namespace==='memory')
   if(current.mode!==initialMode.mode||current.generation!==initialMode.generation)throw Error('source_reference_changed')
   for(const preparation of semanticPreparations)await preparation.assertCurrent(client,options?.forCommit===true)
@@ -160,6 +149,23 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
   if(fresh.length!==events.length||stamp(fresh)!==initial)throw Error('source_reference_changed')
   if(options?.forCommit)await lockSourceObservations(client,observations,false)
  }}
+}
+type EpisodeSelection={scope:SourceScope;root:SourceRoot;envelope:unknown}
+async function lockEpisodeSelections(client:Db,observations:readonly EpisodeSelection[]){
+  for(const observation of observations){
+   try{
+    const locked=(await client.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS locked',
+     [JSON.stringify(observation.scope),observation.root.kind,observation.root.key,JSON.stringify(observation.envelope)])).rows[0]?.locked
+    if(locked!==true)throw Error('source_reference_changed')
+   }catch(error){
+    const code=(error as {code?:string}).code,message=(error as Error).message
+    // A proven old-scan replacement is a distinct version wait, never a
+    // generic FALSE/busy conversion. The old proof produces no output.
+    if(code==='55P03'&&message==='source_metadata_lock_busy')throw new SelectedSourceLockBusy()
+    if(code==='P0001'&&message==='source_metadata_scan_changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+    throw error
+   }
+  }
 }
 export async function prepareTurnSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedSources>{
  const ids=(await pool.query('SELECT source_event_id::text FROM source_events WHERE installation_id=$1 AND turn_id=$2 ORDER BY source_event_id LIMIT 4097',[installationId,turnId])).rows.map(r=>r.source_event_id)
@@ -249,26 +255,91 @@ export async function prepareSourceAuthorities(pool:pg.Pool,installationId:strin
 const unavailableCodes=new Set(['source_preparation_required','source_reference_limit','source_reference_duplicate','source_mode_paused','source_mode_invalid','source_reference_missing','source_reference_reclaimed','source_reference_unproven','source_reference_scope_unavailable','source_reference_hash_mismatch','source_reference_byte_limit','source_reference_changed','source_artifact_changed'])
 export const preparedSourceUnavailable=(error:unknown):boolean=>error instanceof Error&&(error.name==='SourceUnavailableError'||unavailableCodes.has(error.message))
 
-export interface PreparedEpisodeProjectionSources extends PreparedSources {readonly sessionId:string;fenceMembership(client:pg.PoolClient):Promise<void>}
+type ExcludedEpisode = {excludedLifecycle: NonNullable<ReturnType<typeof prepareExcludedLifecycleTurn>>;assertCurrent: PreparedSources['assertCurrent']}
+type EpisodeFence = {readonly sessionId:string;fenceMembership(client:pg.PoolClient):Promise<void>}
+export type PreparedEpisodeProjectionSources = PreparedSources & EpisodeFence
+
+async function prepareExcludedEpisode(pool:pg.Pool,installationId:string,sessionId:string,turnId:string,ids:string[]):Promise<ExcludedEpisode|null>{
+ const rows=(await pool.query<LifecycleDigestEvent & {turn_id:string|null;canonical_key:string;row_version:string}>(`
+  SELECT source_event_id::text,turn_id,canonical_key,xmin::text AS row_version,event_type,occurred_at,
+   payload_hash,${snapshotProvenanceSql('s')} AS source_provenance FROM source_events s
+  WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) AND session_id=$3 AND canonical_session_key=$3
+   AND source_kind='relay_event' AND mapping_state='verified' AND body_reclaimed_at IS NULL AND content_hash=payload_hash
+   AND canonical_key ~ '^[1-9][0-9]{0,18}$' AND (length(canonical_key)<19 OR canonical_key COLLATE "C"<='9223372036854775807')
+  ORDER BY source_event_id`,[installationId,ids,sessionId])).rows
+ if(rows.length!==ids.length)return null
+ const turnEvents=rows.filter(row=>row.turn_id===turnId)
+ if(!turnEvents.length)return null
+ const excludedLifecycle=prepareExcludedLifecycleTurn({installationId,sessionId,turnId,events:turnEvents})
+ if(!excludedLifecycle)return null
+
+ // All selected references have the same canonical session. Bind its current
+ // personal scope once, then witness each row version and key in that scope.
+ const binding=(await pool.query('SELECT context FROM shared.memory_source_ref_context($1::uuid,$2::uuid[])',[installationId,[ids[0]]])).rows[0]?.context
+ if(binding?.scope?.ownerScopeKind!=='personal'||binding.root?.kind!=='relay_event')return null
+ const {scope,root}=binding
+ const seal=await prepareMetadataScope(pool,scope,root)
+ const observations:EpisodeSelection[]=[]
+ for(let i=0;i<rows.length;i+=256){
+  const batch=rows.slice(i,i+256).sort((a,b)=>BigInt(a.canonical_key)<BigInt(b.canonical_key)?-1:1)
+  await protectMetadataSourceBodies(pool,scope,root)
+  let view
+  try{
+   view=(await boundedSourceQuery(pool,'SELECT value FROM shared.read_memory_relay_sources($1::jsonb,$2,NULL,$3,$4::bigint[]) AS value',
+    [scope,root.key,batch.length,['-4',...batch.map(row=>row.canonical_key)]])).rows[0]?.value
+  }catch(error){
+   // Older contracts reject the header-only selector. Use full preparation.
+   const code=(error as {code?:string}).code,message=(error as Error).message
+   if(code==='P0001'){
+    if(message==='invalid_source_metadata_request')return null
+    if(message==='source_changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+    if(message==='source_revoked'||message==='source_deleted')throw new SourceUnavailableError(message.slice(7))
+    if(message==='source_metadata_proof_unavailable'||message==='source_input_start_unproven')throw new SourceUnavailableError(message)
+   }
+   if(code==='57014'||message==='source_query_deadline_exceeded')throw new SourceUnavailableError('source_store_timeout')
+   if(code==='55P03'||code==='40001'||code==='40P01')throw new SourceUnavailableError('source_store_busy')
+   throw error
+  }
+  if(view?.contract!=='personal-metadata-observation-v1'||view.rows?.length!==batch.length)return null
+  for(const [index,row] of batch.entries()){
+   const observed=view.rows[index]
+   if(observed.id!==row.canonical_key||observed.ref?.id!==row.source_event_id||observed.ref?.rowVersion!==row.row_version||
+    observed.contentHash!==row.payload_hash.toString('hex'))return null
+  }
+  observations.push({scope,root,envelope:personalMetadataEnvelope(pool,scope,root,{
+   observedVersion:view.version,inputFingerprint:view.inputFingerprint,nativeSessionFingerprint:view.nativeSessionFingerprint,rows:view.rows,cold:[],
+  },seal,'episode')})
+ }
+ return {excludedLifecycle,assertCurrent:client=>lockEpisodeSelections(client,observations)}
+}
 /** Internal deterministic compile entry. Public prepareEpisodeSources and all
  * generic model/API/evidence preparations remain whole-current and strict. */
-export async function prepareEpisodeProjectionSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedEpisodeProjectionSources|null>{
+export function prepareEpisodeProjectionSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedEpisodeProjectionSources|null>
+export function prepareEpisodeProjectionSources(pool:pg.Pool,installationId:string,turnId:string,checkExclusion:boolean):Promise<((PreparedSources|ExcludedEpisode)&EpisodeFence)|null>
+export async function prepareEpisodeProjectionSources(pool:pg.Pool,installationId:string,turnId:string,checkExclusion=false):Promise<((PreparedSources|ExcludedEpisode)&EpisodeFence)|null>{
  const execution=metadataSourceExecution(pool,installationId)
  const turnQuery=`SELECT to_jsonb(t)||jsonb_build_object('row_version',t.xmin::text) AS snapshot FROM source_turns t WHERE installation_id=$1 AND turn_id=$2`
  const turn=(await pool.query(turnQuery,[installationId,turnId])).rows[0]?.snapshot
  if(!turn?.terminal_at)throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
  const ids=(await pool.query(episodeMembershipQuery,[installationId,turnId])).rows.map(r=>r.source_event_id)
  if(!ids.length)return null
- const kinds=(await pool.query("SELECT 1 FROM source_events WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) AND source_kind IS DISTINCT FROM 'relay_event' LIMIT 1",[installationId,ids])).rowCount
- if(kinds)return null
- const prepared=await prepareSourceReferencesInternal(pool,installationId,ids,true)
+ // A plausible positive member routes directly to full preparation. This
+ // conservative test only chooses a reader. It never grants admission.
+ const checkHeaders=checkExclusion&&ids.length<=4096
+ const candidates=(await pool.query(`SELECT bool_or(source_kind IS DISTINCT FROM 'relay_event') AS other_kind
+   ${checkHeaders?`, bool_or(s.turn_id=$3 AND ${snapshotMemorySql('s')} @> '{"lineage_complete":true,"skill_state":"non_skill"}'::jsonb) AS possible_member`:''}
+   FROM source_events s WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[])`,
+  checkHeaders?[installationId,ids,turnId]:[installationId,ids])).rows[0]
+ if(candidates.other_kind)return null
+ const excluded=checkHeaders&&!candidates.possible_member?await prepareExcludedEpisode(pool,installationId,turn.session_id,turnId,ids):null
+ const prepared=excluded??await prepareSourceReferencesInternal(pool,installationId,ids,true)
  const sameTurn=async(client:Pick<pg.PoolClient,'query'>)=>{
   if(metadataSourceExecution(pool,installationId).token!==execution.token)throw Error('source_execution_scope_mismatch')
   const current=(await client.query(turnQuery,[installationId,turnId])).rows[0]?.snapshot
   const members=(await client.query(episodeMembershipQuery,[installationId,turnId])).rows.map(r=>r.source_event_id)
   if(canonicalJsonString(current)!==canonicalJsonString(turn)||canonicalJsonString(members)!==canonicalJsonString(ids))throw Error('source_reference_changed')
  }
- return {sessionId:turn.session_id,bodyBytes:prepared.bodyBytes,get events(){return prepared.events},async fenceMembership(client){
+ const fence:EpisodeFence={sessionId:turn.session_id,async fenceMembership(client){
   await guardSourceExecutionCommit(client,installationId)
   // Native locks precede local derived locks. Subsequent assertions always
   // revalidate; there is no savepoint/transaction-ID selected-fence cache.
@@ -282,5 +353,8 @@ export async function prepareEpisodeProjectionSources(pool:pg.Pool,installationI
   try{await client.query('SELECT 1 FROM source_turns WHERE installation_id=$1 AND turn_id=$2 FOR SHARE NOWAIT',[installationId,turnId])}
   catch(error){if((error as {code?:string}).code==='55P03')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000));throw error}
   await sameTurn(client)
- },async assertCurrent(client,options){await prepared.assertCurrent(client,options);await sameTurn(client)}}
+ }}
+ const assertCurrent:PreparedSources['assertCurrent']=async(client,options)=>{await prepared.assertCurrent(client,options);await sameTurn(client)}
+ if('excludedLifecycle' in prepared)return {...fence,excludedLifecycle:prepared.excludedLifecycle,assertCurrent}
+ return {...fence,bodyBytes:prepared.bodyBytes,get events(){return prepared.events},assertCurrent}
 }

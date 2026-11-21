@@ -44,25 +44,26 @@ export function createEpisodeRepository(
       // Check that cheap metadata before choosing any body preparation: NULL
       // selected preparation must never route an active turn through a generic
       // whole-root body pin while its native writer is still appending.
-      let prepareLifecycle=false
+      let prepareLifecycle=false,checkExclusion=false
       if(canonicalMetadata){
         const checkPolicy=options.lifecycleMode&&options.lifecycleMode!=='off'
-        const turn=(await pool.query(`SELECT terminal_at${checkPolicy?", EXISTS(SELECT 1 FROM memory_curation_policies WHERE installation_id=$1 AND mode<>'off') AS use_lifecycle":''}
+        const turn=(await pool.query(`SELECT terminal_at${checkPolicy?", (SELECT mode FROM memory_curation_policies WHERE installation_id=$1) AS lifecycle_mode":''}
           FROM source_turns WHERE installation_id=$1 AND turn_id=$2`,[installationId,turnId])).rows[0]
         if(!turn?.terminal_at)return
-        prepareLifecycle=turn.use_lifecycle===true
+        prepareLifecycle=turn.lifecycle_mode==='enabled'||turn.lifecycle_mode==='shadow'
+        checkExclusion=options.lifecycleMode==='enabled'&&turn.lifecycle_mode==='enabled'
       }
-      const selected=canonicalMetadata?await prepareEpisodeProjectionSources(pool,installationId,turnId):null
+      const selected=canonicalMetadata?await prepareEpisodeProjectionSources(pool,installationId,turnId,checkExclusion):null
       const prepared=selected??(sourcePoolContext(pool).namespace==='memory'?await prepareEpisodeSources(pool,installationId,turnId):undefined)
       // The getter returns a private deep copy. Materialize it once before
       // starting the selected transaction, then reuse it for every artifact.
-      const preparedEvents=prepared?.events
+      const preparedEvents=prepared&&'events' in prepared?prepared.events:undefined
       const preparedTurnEvents=preparedEvents?.filter(e=>e.turn_id===turnId)
       const lifecycle=prepareLifecycle&&selected&&preparedTurnEvents
         ?prepareLifecycleTurn({installationId,sessionId:selected.sessionId,turnId,events:preparedTurnEvents}):undefined
       const persist=async(client:pg.PoolClient,managed=false)=>{
         if(!managed)await client.query('BEGIN')
-        if(prepared&&!selected)attachPreparedSources(client,prepared)
+        if(prepared&&!selected&&'events' in prepared)attachPreparedSources(client,prepared)
         try {
           if(selected)await selected.fenceMembership(client)
           else if(options.lifecycleMode&&options.lifecycleMode!=='off')await lockCurationAuthority(client,installationId)
@@ -102,9 +103,18 @@ export function createEpisodeRepository(
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,row.session_id])
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
           if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {if(!managed)await client.query('COMMIT');return}
-          if(prepared)await prepared.assertCurrent(client)
+          // The membership fence already locked every receipt-only observation.
+          if(prepared&&'events' in prepared)await prepared.assertCurrent(client)
           const lifecyclePolicy = await readCurationPolicy(client,installationId,options.lifecycleMode??'off')
           if(lifecyclePolicy==='source_denied') { if(!managed)await client.query('COMMIT'); return }
+          if(selected&&'excludedLifecycle' in selected){
+            if(!lifecyclePolicy||lifecyclePolicy.mode!=='enabled')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+            if(fence)await assertJobFence(client,fence)
+            await stagePreparedLifecycleTurn(client,selected.excludedLifecycle,lifecyclePolicy)
+            await selected.assertCurrent(client,{forCommit:true})
+            await guardSourceExecutionCommit(client)
+            return
+          }
           const events = preparedTurnEvents?{rows:preparedTurnEvents}:await client.query<{
             source_event_id: string
             event_type: string

@@ -2,30 +2,13 @@ import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
 import {createMemoryLogger} from '../logging.js'
 import {preparedSourceEvents} from '../sources/prepared-sources.js'
 import type pg from 'pg'
-import {createHash} from 'node:crypto'
+import {prepareLifecycleTurn,lifecycleSourceDigest,type LifecycleInput} from './prepare-lifecycle-turn.js'
+export {prepareLifecycleTurn,lifecycleSourceDigest,type LifecycleDigestEvent} from './prepare-lifecycle-turn.js'
 import {admitLifecycleSources,LIFECYCLE_SOURCE_POLICY} from '../episodes/source-admission.js'
-import {computeSourceDigest,type PacketSourceEvent} from '../episodes/packet.js'
+import type {PacketSourceEvent} from '../episodes/packet.js'
 import type {CurationPolicy} from './policy.js'
 import {canonicalPayloadHash} from '../inbox/canonical-json.js'
 const admissionLogger=createMemoryLogger('info')
-type LifecycleInput = {installationId:string;sessionId:string;turnId:string;events:PacketSourceEvent[]}
-
-/** Pure calculation over a complete authenticated input. Keep only the facts
- * needed for publication. The writer still fences the input and policy. */
-export function prepareLifecycleTurn(input:LifecycleInput){
- const admission=admitLifecycleSources(input)
- const members=admission.events.map(event=>({
-  id:event.source_event_id,hash:event.payload_hash,sequence:(event.source_provenance!.memory as {sequence:string}).sequence,
- }))
- return {
-  installationId:input.installationId,sessionId:input.sessionId,turnId:input.turnId,
-  digest:lifecycleSourceDigest(input.installationId,input.events),members,
-  watermark:members.reduce((max,member)=>{const seq=BigInt(member.sequence);return seq>max?seq:max},0n).toString(),
-  excluded:input.events.length-members.length,diagnostics:admission.diagnostics,
-  unknown:admission.receipts.some(r=>!r.admission.allowed&&r.admission.reason==='provenance_unknown'),
- }
-}
-
 export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,input:LifecycleInput,policy:CurationPolicy){
  return stagePreparedLifecycleTurn(client,prepareLifecycleTurn(input),policy)
 }
@@ -54,13 +37,6 @@ export async function stagePreparedLifecycleTurn(client:Pick<pg.PoolClient,'quer
  await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
  VALUES(gen_random_uuid(),$1,'consolidate_task',$2,84,$3::jsonb) ON CONFLICT DO NOTHING`,[input.installationId,`consolidate:${changed.bundle_id}:${changed.revision}`,
  JSON.stringify({bundle_id:changed.bundle_id,bundle_revision:Number(changed.revision),mode:policy.mode,policy_revision:policy.revision,authorization_epoch:policy.authorizationEpoch})])
-}
-
-export type LifecycleDigestEvent=Pick<PacketSourceEvent,'source_event_id'|'payload_hash'|'event_type'|'occurred_at'|'source_provenance'>
-export function lifecycleSourceDigest(installationId:string,events:readonly LifecycleDigestEvent[]):Buffer{
- const ordered=[...events].sort((a,b)=>a.source_event_id.localeCompare(b.source_event_id))
- return createHash('sha256').update(computeSourceDigest({installationId:installationId,events:ordered,artifacts:[]}))
-  .update(JSON.stringify(ordered.map(e=>({provenance:e.source_provenance??{},event_type:e.event_type,occurred_at:new Date(e.occurred_at).toISOString()})))).digest()
 }
 
 /** Requires the caller's session/installation purge fence. Re-admit the whole

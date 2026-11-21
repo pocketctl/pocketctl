@@ -1,4 +1,4 @@
-import {snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
+import {snapshotProvenanceSql,snapshotMemorySql} from '../../sources/snapshot-provenance.js'
 import {reviewedNativeEventAuthoritySql,metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadataInputAdmission} from './personal-metadata-sql.js'
 // Scope usage is separate from canonical custody. Enumerating eligible input
 // must skip expired use before LIMIT; explicit keys remain denied references.
@@ -92,7 +92,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.read_memory_relay_sources(p_scope JSONB,p_root TEXT,p_after BIGINT,p_limit INT,p_ids BIGINT[])
   RETURNS SETOF JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE a RECORD;native JSONB;bounded_mode BOOLEAN;selected_mode BOOLEAN;keyed_mode BOOLEAN;metadata_only BOOLEAN;input_fingerprint TEXT;observation JSONB;reuse_session_authority BOOLEAN:=FALSE;BEGIN
    bounded_mode=COALESCE(p_ids[1]=-3,FALSE);
-   selected_mode=COALESCE(p_ids IS NOT NULL AND p_ids[1] IN(-1,-2,-3),FALSE);metadata_only=selected_mode AND p_ids[1]=-2;keyed_mode=selected_mode AND NOT bounded_mode AND cardinality(p_ids)>1;
+   selected_mode=COALESCE(p_ids IS NOT NULL AND p_ids[1] IN(-1,-2,-3,-4),FALSE);metadata_only=selected_mode AND p_ids[1] IN(-2,-4);keyed_mode=selected_mode AND NOT bounded_mode AND cardinality(p_ids)>1;
    IF p_ids IS NOT NULL AND NOT selected_mode AND EXISTS(SELECT 1 FROM unnest(p_ids) k WHERE k<0) THEN RAISE EXCEPTION 'invalid_source_metadata_request';END IF;
    IF selected_mode THEN
     IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 256 OR p_after IS NOT NULL AND p_after<0 OR array_ndims(p_ids)<>1 OR array_lower(p_ids,1)<>1 OR cardinality(p_ids)>257 OR array_position(p_ids,NULL) IS NOT NULL
@@ -118,7 +118,23 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       CROSS JOIN LATERAL(SELECT ${selectedEventAuthority('e')} AS value OFFSET 0) event_authority
       WHERE e.id=ANY(p_ids[2:]) AND e.session_id=native->>'sessionId' AND e.user_id=(p_scope->>'principalUserId')::int
        AND NOT e.owner_retired AND e.effect_status IN('none','completed') AND event_authority.value->>'state'='current'
-       AND NOT(${metadataUsageDenied()})),observed AS(SELECT id,value,admission FROM admitted WHERE admission<>'denied' ORDER BY id LIMIT p_limit)
+       AND NOT(${metadataUsageDenied()})
+       -- Receipt-only selection requires an independent matching native header.
+       AND (p_ids[1]<>-4 OR (
+        -- Cold inputs retain their existing archive manifest and chunk fences.
+        e.body_storage='hot' AND e.source_header_version=1 AND e.source_sequence>0 AND e.canonical_payload_hash=encode(r.payload_hash,'hex')
+        AND r.content_hash=r.payload_hash AND r.hash_version='canonical-json-sha256-v1'
+        AND r.canonical_session_key=e.logical_source_session_id AND r.session_id=e.logical_source_session_id
+        AND r.event_type=e.event_type AND r.classification=e.source_classification
+        AND (${snapshotMemorySql('r')}) IS NOT DISTINCT FROM e.source_classification->'memory_source'
+        AND (e.source_classification->'memory_source'->>'session_id' IS NULL OR e.source_classification->'memory_source'->>'session_id'=r.session_id)
+        AND (e.source_classification->'memory_source'->>'turn_id' IS NULL OR e.source_classification->'memory_source'->>'turn_id'=r.turn_id)
+        AND (r.source_sequence IS NULL OR r.source_sequence=e.source_sequence)
+        AND (e.source_classification->'memory_source'->>'sequence' IS NULL OR e.source_classification->'memory_source'->>'sequence'=e.source_sequence::text)
+        AND NOT EXISTS(SELECT 1 FROM public.extension_source_outbox j WHERE j.source_kind='canonical_event'
+         AND j.source_id='event:'||e.id::text AND j.owner_user_id=e.user_id AND j.session_id=e.logical_source_session_id
+         AND j.event_type=e.event_type AND j.source_seq<>e.source_sequence)
+       ))),observed AS(SELECT id,value,admission FROM admitted WHERE admission<>'denied' ORDER BY id LIMIT p_limit)
      SELECT jsonb_build_object('contract','personal-metadata-observation-v1','version',jsonb_build_object('content',a.content_revision,'authorization',a.authorization_revision,'storage',a.storage_revision),
       'inputFingerprint',input_fingerprint,'nativeSessionFingerprint',encode(sha256(convert_to(native::text,'UTF8')),'hex'),
       'upperId',COALESCE((SELECT boundary.id::text FROM public.events boundary WHERE boundary.session_id=native->>'sessionId' ORDER BY boundary.id DESC LIMIT 1),'0'),

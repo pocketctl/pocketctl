@@ -2,6 +2,8 @@ import {createSharedSourceScheduler} from '../../sources/shared-scheduler.js'
 import {createJobRepository} from '../../jobs/repository.js'
 import {createJobWorker} from '../../jobs/worker.js'
 import {createCanonicalProjectionHandler} from '../../sources/canonical-projection-worker.js'
+import {lifecycleSourceDigest} from '../../curation/prepare-lifecycle-turn.js'
+import {snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
 import {createEpisodeRepository} from '../../episodes/repository.js'
 import {randomUUID} from 'node:crypto'
 import type pg from 'pg'
@@ -127,26 +129,66 @@ suite('PG13 canonical page recovery',()=>{
   await expect(withSourceJobExecution(f.runtime,fence,()=>prepare())).rejects.toThrow()
   await createJobRepository(f.runtime).completeJob(fence)
  },30000)
- test('enabled lifecycle compilation publishes a complete prepared membership once across replay',async()=>{
+ test.each([true,false])('enabled lifecycle compilation is fenced and idempotent with complete lineage = %s',async(lineageComplete)=>{
   const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
   await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
   await f.runtime.query("INSERT INTO memory_curation_policies(installation_id,mode,consume_mode) VALUES($1,'enabled','enabled')",[installation])
-  const keys=[await f.event(source),await f.event(source,true)]
+  const keys=[await f.event(source,false,{lineageComplete}),await f.event(source,true,{lineageComplete})]
   const expected=(await f.pool.query('SELECT id::text AS canonical_key,source_sequence::text FROM public.events WHERE id=ANY($1::bigint[]) ORDER BY public.events.id',[keys])).rows
   const signal=new AbortController().signal,errors:unknown[]=[]
   const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'lifecycle-source',signal,onError:e=>errors.push(e)})
-  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'lifecycle-compile',signal,claimLimit:1,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'lifecycle-compile',signal,claimLimit:1,onError:(e,job)=>{if(!job||job.installation_id===installation)errors.push(e)}})
   const project=createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0,projectionScanInstallations:[installation]})
   queue.register('project_shared_source',async(job,abort,ctx)=>{
    if(job.installation_id===installation)await project(job,abort,ctx)
   },{branch:'canonical'})
-  let compiled=false
+  let compiled=false,compiling=false,changeReference=false,oldReader=false
+  const selectors:string[]=[]
+  const clients=new Map<pg.PoolClient,pg.PoolClient['query']>()
+  const recordSelector=(client:pg.PoolClient)=>{
+   if(clients.has(client))return
+   const original=client.query
+   clients.set(client,original)
+   client.query=(async function(...args:any[]){
+    const sql=typeof args[0]==='string'?args[0]:args[0]?.text??''
+    if(compiling&&sql.includes('shared.read_memory_relay_sources')){
+     const selector=String(args[1]?.at(-1)?.[0])
+     selectors.push(selector)
+     if(selector==='-4'&&oldReader)throw Object.assign(Error('invalid_source_metadata_request'),{code:'P0001'})
+     if(selector==='-4'&&changeReference){
+      changeReference=false
+      const observed=await (original as any).apply(client,args)
+      await f.pool.query('UPDATE memory.source_events SET canonical_projected_at=canonical_projected_at WHERE installation_id=$1',[installation])
+      return observed
+     }
+    }
+    return (original as any).apply(client,args)
+   }) as pg.PoolClient['query']
+  }
+  f.runtime.on('acquire',recordSelector)
   const episodes=createEpisodeRepository(f.runtime,{lifecycleMode:'enabled'})
   queue.register('compile_episode',async(job,abort,ctx)=>{
    if(job.installation_id!==installation)return
-   await episodes.handleCompileEpisode(job,abort,ctx)
-   await episodes.handleCompileEpisode(job,abort,ctx)
-   compiled=true
+   compiling=true
+   try{
+    if(!lineageComplete){
+     changeReference=true
+     await expect(episodes.handleCompileEpisode(job,abort,ctx)).rejects.toThrow()
+     expect(changeReference).toBe(false)
+     expect((await f.runtime.query('SELECT 1 FROM memory_source_processing_receipts WHERE installation_id=$1',[installation])).rowCount).toBe(0)
+     selectors.length=0
+    }
+    await episodes.handleCompileEpisode(job,abort,ctx)
+    await episodes.handleCompileEpisode(job,abort,ctx)
+    if(!lineageComplete){
+     expect(selectors).toEqual(['-4','-4'])
+     selectors.length=0
+     oldReader=true
+     await episodes.handleCompileEpisode(job,abort,ctx)
+     expect(selectors).toContain('-1')
+    }
+    compiled=true
+   }finally{compiling=false}
   })
   try{
    const deadline=Date.now()+20000
@@ -156,11 +198,23 @@ suite('PG13 canonical page recovery',()=>{
     if(!compiled)await new Promise(resolve=>setTimeout(resolve,30))
    }
    expect(compiled).toBe(true)
+   if(!lineageComplete){
+    const events=(await f.runtime.query(`SELECT source_event_id::text,payload_hash,event_type,occurred_at,
+     ${snapshotProvenanceSql('s')} AS source_provenance FROM source_events s WHERE installation_id=$1 AND turn_id=$2`,[installation,'direct-turn-'+source.session])).rows
+    const receipts=await f.runtime.query('SELECT disposition,complete,allowed_count,excluded_count,source_digest FROM memory_source_processing_receipts WHERE installation_id=$1',[installation])
+    expect(receipts.rows).toEqual([{disposition:'provenance_unknown',complete:false,allowed_count:0,excluded_count:2,source_digest:lifecycleSourceDigest(installation,events)}])
+    expect((await f.runtime.query('SELECT 1 FROM memory_task_bundles WHERE installation_id=$1',[installation])).rowCount).toBe(0)
+    return
+   }
    expect((await f.runtime.query(`SELECT s.canonical_key,m.source_sequence::text FROM memory_task_bundle_sources m
     JOIN source_events s USING(installation_id,source_event_id) WHERE m.installation_id=$1 ORDER BY s.canonical_key::bigint`,[installation])).rows).toEqual(expected)
    expect((await f.runtime.query("SELECT revision::int FROM memory_task_bundles WHERE installation_id=$1",[installation])).rows).toEqual([{revision:1}])
    expect((await f.runtime.query("SELECT job_id FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task'",[installation])).rowCount).toBe(1)
-  }finally{await queue.stop();await scheduler.stop()}
+  }finally{
+   f.runtime.removeListener('acquire',recordSelector)
+   for(const [client,original]of clients)client.query=original
+   await queue.stop();await scheduler.stop()
+  }
  },30000)
  test.each([
   {delayMs:0,code:'projection_read_page_timeout',rollback:false},

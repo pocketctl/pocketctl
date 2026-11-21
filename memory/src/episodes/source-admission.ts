@@ -13,9 +13,9 @@ export type AdmissionDiagnostic = 'missing_provenance'|'invalid_provenance'|'ide
  * Missing ancestors, cycles, ambiguous identities and unsupported producers
  * cannot confer non-skill authority. A later skill marker taints the entire
  * invocation, including earlier streaming fragments and final summaries. */
-export function admitLifecycleSources(input: {
-  sessionId: string; turnId: string; events: readonly PacketSourceEvent[]
-}): { events: PacketSourceEvent[]; receipts: SourceAdmissionReceipt[]; diagnostics:Partial<Record<AdmissionDiagnostic,number>> } {
+export function admitLifecycleSources<T extends Pick<PacketSourceEvent,'source_event_id'|'source_provenance'>>(input: {
+  sessionId: string; turnId: string; events: readonly T[]
+}): { events: T[]; receipts: SourceAdmissionReceipt[]; diagnostics:Partial<Record<AdmissionDiagnostic,number>> } {
   const explanations=new WeakMap<object,AdmissionDiagnostic>()
   const unknown=(diagnostic:AdmissionDiagnostic='incomplete_lineage'):SourceAdmission=>{
     const value:SourceAdmission={allowed:false,reason:'provenance_unknown'};explanations.set(value,diagnostic);return value

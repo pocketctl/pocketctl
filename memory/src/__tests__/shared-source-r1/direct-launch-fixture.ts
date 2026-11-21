@@ -41,10 +41,10 @@ export async function directLaunchFixture(url:string,options:{originalBinding?:b
   await runtime.query("INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[inst.installation_id])
   return {inst}
  }
- async function event(s:{owner:number;session:string},terminal=false,options:{unknownPublication?:boolean;status?:string}={}){
+ async function event(s:{owner:number;session:string},terminal=false,options:{unknownPublication?:boolean;status?:string;lineageComplete?:boolean}={}){
   const eventType=terminal?'turn_status':'agent_text'
   const turn='direct-turn-'+s.session
-  const payload={...(terminal?{turn_status:'completed'}:{text:'bounded direct launch synthetic body'}),...(options.status?{status:options.status}:{}),turn_id:turn,actor_scope:'assistant',memory_source:{version:1,producer:'codex',session_id:s.session,turn_id:turn,event_id:randomUUID(),sequence:terminal?'2':'1',invocation_id:'direct-launch',source_role:'assistant',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}}
+  const payload={...(terminal?{turn_status:'completed'}:{text:'bounded direct launch synthetic body'}),...(options.status?{status:options.status}:{}),turn_id:turn,actor_scope:'assistant',memory_source:{version:1,producer:'codex',session_id:s.session,turn_id:turn,event_id:randomUUID(),sequence:terminal?'2':'1',invocation_id:'direct-launch',source_role:'assistant',skill_state:'non_skill',lineage_complete:options.lineageComplete??true,derived_from_event_ids:[]}}
   // Owned negative fixture: an existing UNKNOWN sentinel must never acquire
   // an invented publication XID/order when a later real event is observed.
   const explicitId=options.unknownPublication?(await pool.query("SELECT nextval('public.events_id_seq')::text AS id")).rows[0].id:undefined
