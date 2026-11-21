@@ -150,12 +150,12 @@ describe('actual processing-pin module with unresponsive connected transport',()
 })
 
 describe('metadata-only protection uses the physical installation mutex',()=>{
- const authority={state:'current',content_revision:'7',authorization_revision:'3',storage_revision:'2'}
+ const authority={valid:true,version:{content:'7',authorization:'3',storage:'2'}}
  test('one execution includes an in-flight renewal serial wait in the invocation deadline',async()=>{
   let connections=0,acquisitions=0,destroyed=0,slow=false
   const pool={connect:async()=>{connections++;return {release:()=>{},connection:{stream:{destroy:()=>{destroyed++}}},query:async(sql:string)=>{
    if(sql.includes('memory_relay_source_authority')){if(slow)await new Promise(r=>setTimeout(r,1400));return {rows:[authority]}}
-   if(sql.includes('acquire_memory_source_processing_pin'))acquisitions++
+   if(sql==='COMMIT')acquisitions++
    return {rows:[{valid:true}]}
   }}}} as unknown as pg.Pool
   const pins=new SourceProcessingPins(pool,crypto.randomUUID());await pins.protectCurrent(scope,root);slow=true
@@ -169,7 +169,7 @@ describe('metadata-only protection uses the physical installation mutex',()=>{
   let slow=false,acquisitions=0,destroyed=0
   const pool={connect:async()=>({release:()=>{},connection:{stream:{destroy:()=>{destroyed++}}},query:async(sql:string)=>{
    if(sql.includes('memory_relay_source_authority')){if(slow)await new Promise(r=>setTimeout(r,1250));return {rows:[authority]}}
-   if(sql.includes('acquire_memory_source_processing_pin'))acquisitions++
+   if(sql==='COMMIT')acquisitions++
    return {rows:[{valid:true}]}
   }})} as unknown as pg.Pool
   const pins=new SourceProcessingPins(pool,crypto.randomUUID());await pins.protectCurrent(scope,root);await pins.protectCurrent(scope,{...root,key:'1:second'});slow=true
@@ -182,7 +182,7 @@ describe('metadata-only protection uses the physical installation mutex',()=>{
   const held=new Promise<void>(r=>{finish=r}),started=new Promise<void>(r=>{entered=r})
   const pool={connect:async()=>{connections++;return {release:()=>{},query:async(sql:string)=>{
    if(sql.includes('memory_relay_source_authority')){entered();await held;return {rows:[authority]}}
-   if(sql.includes('acquire_memory_source_processing_pin'))acquisitions++
+   if(sql==='COMMIT')acquisitions++
    return {rows:[{valid:true}]}
   }}}} as unknown as pg.Pool
   const pins=new SourceProcessingPins(pool,crypto.randomUUID()),first=pins.protectCurrent(scope,root).catch(e=>e)
@@ -193,8 +193,10 @@ describe('metadata-only protection uses the physical installation mutex',()=>{
   let active=0,peak=0
   const versions:string[]=[],pool={connect:async()=>({release:()=>{active--},query:async(sql:string,args:any[])=>{
    if(sql==='BEGIN'){active++;peak=Math.max(peak,active)}
-   if(sql.includes('memory_relay_source_authority')){await new Promise(r=>setTimeout(r,15));return {rows:[authority]}}
-   if(sql.includes('acquire_memory_source_processing_pin')){versions.push(args[3]);return {rows:[{valid:true}]}}
+   if(sql.includes('memory_relay_source_authority')){
+    expect(sql).toContain("shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,version,$4)")
+    versions.push(JSON.stringify(authority.version));await new Promise(r=>setTimeout(r,15));return {rows:[authority]}
+   }
    return {rows:[]}
   }})} as unknown as pg.Pool
   const wrappers=Array.from({length:8},()=>{const alias={connect:()=>pool.connect()} as pg.Pool;bindSourceConnectionAlias(alias,pool);return new SourceProcessingPins(alias,crypto.randomUUID())})

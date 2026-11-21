@@ -45,7 +45,21 @@ suite('bounded bootstrap after control changes without new source events',()=>{
   await expect(runtime.query('SELECT * FROM shared.memory_source_control_progress')).rejects.toMatchObject({code:'42501'})
   await expect(step()).rejects.toThrow('source_control_lease_lost')
  })
+ test('a new ordinary account does not enqueue a rescan of existing personal history',async()=>{
+  const db=await pool.connect()
+  try{
+   await db.query('BEGIN')
+   await db.query("INSERT INTO public.sessions(session_id,user_id,source) SELECT 'signup-history-'||n,1,'codex' FROM generate_series(1,272) n")
+   const {rows:[before]}=await db.query('SELECT shared.memory_source_control_snapshot() AS revision')
+   await db.query('SET LOCAL ROLE bootstrap_relay')
+   await db.query("INSERT INTO public.users(id,email,password_hash) VALUES(200,'signup@example.invalid','synthetic-only')")
+   await db.query('RESET ROLE')
+   expect((await db.query('SELECT shared.memory_source_control_snapshot() AS revision')).rows[0]).toEqual(before)
+   expect((await db.query("SELECT 1 FROM shared.memory_source_control_work WHERE control_kind='user' AND control_key='200'")).rowCount).toBe(0)
+  }finally{await db.query('ROLLBACK');db.release()}
+ })
  test('a missing-root storage insertion makes bootstrap retry without waiting behind the publisher',async()=>{
+  const previous=(await pool.query("SELECT revision::text FROM shared.memory_source_control_work WHERE control_kind='provider'")).rows[0].revision
   await pool.query("INSERT INTO public.sessions(session_id,user_id,source) VALUES('cold-root',1,'codex')")
   await pool.query("SELECT shared.mark_memory_control_dirty('provider','pocketctl-memory')")
   const claim=(await pool.query("SELECT control_kind,control_key,lease_token::text,claimed_revision::text FROM shared.claim_memory_control_work('storage-race',30,128)")).rows.find(r=>r.control_kind==='provider')!
@@ -58,7 +72,7 @@ suite('bounded bootstrap after control changes without new source events',()=>{
    await consumer.query('ROLLBACK')
    await publisher.query("SELECT shared.mark_memory_control_dirty('provider','pocketctl-memory')")
    await publisher.query('COMMIT')
-   expect((await pool.query("SELECT revision::text,processed_revision::text FROM shared.memory_source_control_work WHERE control_kind='provider'")).rows[0].processed_revision).toBe('3')
+   expect((await pool.query("SELECT revision::text,processed_revision::text FROM shared.memory_source_control_work WHERE control_kind='provider'")).rows[0].processed_revision).toBe(previous)
   }finally{await consumer.query('ROLLBACK');await publisher.query('ROLLBACK');consumer.release();publisher.release()}
  })
  test('control changes restart the scan and an expired physical commit rolls back root updates',async()=>{

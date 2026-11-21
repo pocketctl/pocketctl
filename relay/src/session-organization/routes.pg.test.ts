@@ -62,6 +62,49 @@ testWithDatabase('session projects, archive, and NEW PostgreSQL contract', () =>
     expect((await request('GET','/api/session-projects',tokenB)).json().projects).toEqual([])
   })
 
+  test('pull refresh limits each host across projects and reuses a successful scoped response for five seconds', async () => {
+    const host = `org-host-a-${suffix}`
+    const ids = Array.from({length: 5}, (_, n) => `pull-${n}-${suffix}`)
+    const project = (await request('GET','/api/session-projects',tokenA)).json().projects[0].id
+    try {
+      for (const [n, id] of ids.entries()) await pool.query(
+        `INSERT INTO sessions(session_id,daemon_id,user_id,title,project_id,last_activity_at)
+         VALUES($1::text,$2,$3,$1::text,$4,'2090-01-01'::date + $5::int)`, [id,host,userA,n % 2 ? project : null,n])
+      const url = '/api/session-list-refresh'
+      const all = (await request('GET',url,tokenA)).json()
+      expect(all.sessions.filter((s: any) => s.daemon_id === host).map((s: any) => s.session_id)).toEqual(ids.slice(-3).reverse())
+      expect(all.sessions.some((s: any) => s.daemon_id !== host)).toBe(true)
+      const scoped = url + '?daemon_id=' + host
+      // Subtract the connections used for per-request authorization. The
+      // concurrent cold burst should acquire just one extra snapshot client.
+      async function burst() {
+        let acquisitions = 0
+        const acquired = () => { acquisitions++ }
+        pool.on('acquire', acquired)
+        try {
+          const replies = await Promise.all(Array.from({ length: 4 }, () => request('GET', scoped, tokenA)))
+          const page = replies[0].json()
+          for (const response of replies) {
+            expect(response.statusCode).toBe(200)
+            expect(response.json()).toEqual(page)
+          }
+          return { acquisitions, page }
+        } finally { pool.off('acquire', acquired) }
+      }
+      const cold = await burst()
+      const hot = await burst()
+      expect(cold.acquisitions - hot.acquisitions).toBe(1)
+      const first = cold.page
+      expect(first.sessions).toHaveLength(3)
+      expect(first.counts.every((c: any) => c.daemon_id === host)).toBe(true)
+      await pool.query('UPDATE sessions SET title=$1 WHERE session_id=$2',['changed',ids[4]])
+      expect((await request('GET',scoped,tokenA)).json()).toEqual(first)
+      expect((await request('GET',scoped,tokenB)).json().sessions).toEqual([])
+      await new Promise(resolve => setTimeout(resolve, 5050))
+      expect((await request('GET',scoped,tokenA)).json().sessions[0].title).toBe('changed')
+    } finally { await pool.query('DELETE FROM sessions WHERE session_id=ANY($1)',[ids]) }
+  }, 15_000)
+
   test('project rename rejects stale revisions and hidden project IDs', async () => {
     const initial = (await request('GET','/api/session-projects',tokenA)).json().projects[0]
     const renamed = await request('PATCH',`/api/session-projects/${initial.id}`,tokenA,

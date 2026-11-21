@@ -19,6 +19,11 @@ function baseEnv(overrides: Record<string, string> = {}): Record<string, string>
 }
 
 describe('memory config', () => {
+  test('compile batching defaults to five minutes and accepts an explicit opt-out', () => {
+    expect(loadMemoryConfig(baseEnv()).compileBatchIntervalMs).toBe(300_000)
+    expect(loadMemoryConfig(baseEnv({MEMORY_COMPILE_BATCH_INTERVAL_MS:'0'})).compileBatchIntervalMs).toBe(0)
+    expect(() => loadMemoryConfig(baseEnv({MEMORY_COMPILE_BATCH_INTERVAL_MS:'-1'}))).toThrow('MEMORY_COMPILE_BATCH_INTERVAL_MS')
+  })
   test('lifecycle switches default off and reject unknown modes',()=>{
     expect(loadMemoryConfig(baseEnv()).lifecycleMode).toBe('off')
     expect(loadMemoryConfig(baseEnv({MEMORY_LIFECYCLE_MODE:'shadow'})).lifecycleMode).toBe('shadow')
@@ -86,6 +91,12 @@ describe('memory config', () => {
     expect(loadMemoryConfig(baseEnv({
       MEMORY_INSTALLATION_ALLOWLIST: `${first}, ${second}, ${first}`,
     })).installationAllowlist).toEqual([first.toLowerCase(), second])
+    expect(loadMemoryConfig(baseEnv()).compactSnapshotInstallations).toEqual([])
+    expect(loadMemoryConfig(baseEnv({MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS:first})).compactSnapshotInstallations).toEqual([first.toLowerCase()])
+    expect(() => loadMemoryConfig(baseEnv({MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS:'invalid'}))).toThrow(/MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS/)
+    expect(loadMemoryConfig(baseEnv()).pageDerivedWriteInstallations).toEqual([])
+    expect(loadMemoryConfig(baseEnv({MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS:first})).pageDerivedWriteInstallations).toEqual([first.toLowerCase()])
+    expect(() => loadMemoryConfig(baseEnv({MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS:'invalid'}))).toThrow(/MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS/)
     expect(() => loadMemoryConfig(baseEnv({ MEMORY_INSTALLATION_ALLOWLIST: 'not-a-uuid' })))
       .toThrow(/MEMORY_INSTALLATION_ALLOWLIST/)
   })

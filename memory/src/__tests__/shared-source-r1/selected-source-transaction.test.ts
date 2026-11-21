@@ -142,9 +142,9 @@ describe('selected physical source transactions share bounded metadata admission
   expect(f.clients[0].connection.stream.destroy).toHaveBeenCalledOnce();expect(f.clients[0].release).toHaveBeenCalledExactlyOnceWith(true)
   gate.resolve();await vi.advanceTimersByTimeAsync(0);expect(f.calls).not.toContain('SELECT forbidden_late');expect(f.calls).not.toContain('COMMIT')
  })
- test('lost COMMIT acknowledgement is unknown, with no claimed rollback and safe idempotent replay',async()=>{
+ test.each(['ECONNRESET','EPIPE','40003'])('lost COMMIT acknowledgement %s remains unknown, with no claimed rollback and safe idempotent replay',async code=>{
   let durable=0,first=true
-  const f=fixture(async sql=>{if(sql==='INSERT idempotent')durable=1;if(sql==='COMMIT'&&first){first=false;throw Object.assign(Error('Connection terminated unexpectedly'),{code:'ECONNRESET'})}return {rows:[]}})
+  const f=fixture(async sql=>{if(sql==='INSERT idempotent')durable=1;if(sql==='COMMIT'&&first){first=false;throw Object.assign(Error('Connection terminated unexpectedly'),{code})}return {rows:[]}})
   await expect(runSelectedSourceTransaction(f.pool,'a',undefined,async c=>{await c.query('INSERT idempotent')})).rejects.toMatchObject({commitOutcome:'unknown',code:'source_metadata_commit_outcome_unknown'})
   expect(durable).toBe(1);expect(f.calls).not.toContain('ROLLBACK');expect(f.clients[0].release).toHaveBeenCalledExactlyOnceWith(true)
   await runSelectedSourceTransaction(f.pool,'a',undefined,async c=>{await c.query('INSERT idempotent')});expect(durable).toBe(1)

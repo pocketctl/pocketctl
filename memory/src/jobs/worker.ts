@@ -1,3 +1,5 @@
+import {observeProjectionStep,ProjectionLockBusy} from '../sources/projection-diagnostics.js'
+import type {JobCapacity} from './scheduling.js'
 import {SourceUnavailableError} from '@pocketctl/session-source'
 import type pg from 'pg'
 import { workerErrorCode } from './worker-diagnostics.js'
@@ -29,6 +31,7 @@ export interface JobWorkerOptions {
   signal: AbortSignal
   pollIntervalMs?: number
   claimLimit?: number
+  capacity?: JobCapacity
   concurrencyLimits?: Partial<Record<JobType, number>>
   leaseMs?: number
   perInstallationLimit?: number
@@ -140,9 +143,11 @@ export function createJobWorker(options: JobWorkerOptions) {
           if(sourceJobs.has(claim.job_type)&&claim.installation_id)await withSourceJobExecution(options.pool,ctx.fence,runHandler,{branch:sourceBranches.get(claim.job_type)??'active',signal:controller.signal})
           else await runHandler()
           if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
-          const completed=await options.jobs.completeJob({
+          const acknowledge=()=>options.jobs.completeJob({
             jobId: claim.job_id, claimedBy: options.workerId, claimEpoch: claim.claim_epoch,
           })
+          const completed=claim.job_type==='project_shared_source'
+            ?await observeProjectionStep(options.pool,'ack',acknowledge):await acknowledge()
           outcome=completed?"completed":"lost"
         } catch (error) {
           if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
@@ -150,9 +155,12 @@ export function createJobWorker(options: JobWorkerOptions) {
           // Persisted source_wait_count bounds repeated deferral; model-bearing jobs retain
           // their accounting/recovery path and timeouts remain actionable failures.
           const waits=claim.payload.source_wait_count??0
-          if(error instanceof SourceUnavailableError&&error.code==='source_store_busy'
+          const mayDefer=Number.isSafeInteger(waits)&&Number(waits)>=0&&Number(waits)<60
+          if(mayDefer&&claim.job_type==='project_shared_source'&&error instanceof ProjectionLockBusy&&error.rollbackConfirmed){
+            error=error.defer(new Date(Date.now()+1000+Math.floor(Math.random()*1000)))
+          }else if(error instanceof SourceUnavailableError&&error.code==='source_store_busy'
             &&['project_shared_source','compile_episode'].includes(claim.job_type)
-            &&Number.isSafeInteger(waits)&&Number(waits)>=0&&Number(waits)<60){
+            &&mayDefer){
             error=new JobDeferredError('source_not_ready',new Date(Date.now()+1000+Math.floor(Math.random()*1000)))
           }
           if (error instanceof JobDeferredError) {
@@ -195,7 +203,7 @@ export function createJobWorker(options: JobWorkerOptions) {
       if(free<=0)return
       const claims=await options.jobs.claimJobs({workerId:options.workerId,limit:free,leaseMs,
         globalLimit:claimLimit,perInstallationLimit:options.perInstallationLimit??claimLimit,
-        typeLimits:options.concurrencyLimits})
+        typeLimits:options.concurrencyLimits,capacity:options.capacity})
       for(const claim of claims)options.onClaim?.(claim)
       // dispatch registers every claim synchronously before its first await.
       void runOutsideSourceJobExecution(()=>dispatch(claims)).catch(error=>options.onError?.(error))

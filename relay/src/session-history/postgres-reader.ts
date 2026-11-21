@@ -72,16 +72,32 @@ export async function hydratePostgresEventRows<T extends Record<string, any>>(db
   const currentOwner=(await db.query('SELECT user_id FROM sessions WHERE session_id=$1',[sessionId])).rows[0]?.user_id
   if(currentOwner===undefined&&rows.some(row=>row.user_id!=null))throw new Error('session history not accessible')
   rows=rows.filter(row=>!row.owner_retired&&(row.user_id==null||row.user_id===currentOwner))
-  const assertExactCurrent=async()=>{
-    if(!rows.length)return
-    const ids=rows.map(row=>String(row.id??row.event_id))
-    for(let n=0;n<ids.length;n+=256){
-      const selected=ids.slice(n,n+256)
-      const fresh=await db.query(`SELECT e.id::text FROM events e WHERE e.id=ANY($1::bigint[]) AND e.session_id=$3
-        AND NOT e.owner_retired AND ((e.user_id IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.session_id=$3
-          AND public.native_session_authority(s.session_id,s.user_id,s.daemon_id)->>'state'='current'))
-          OR public.native_event_authority(e.id,$2)->>'state'='current')`,[selected,currentOwner??null,sessionId])
-      if(fresh.rows.length!==new Set(selected).size)throw new Error('session history not accessible')
+  const assertExactCurrent = async () => {
+    const ids = rows.map(row => String(row.id ?? row.event_id))
+    for (let offset = 0; offset < ids.length; offset += 256) {
+      const selected = ids.slice(offset, offset + 256)
+      // Mirror native_event_authority's per-event checks. Materialize the expensive
+      // alias resolution once per distinct source, freshly on each side of body IO.
+      const fresh = await db.query(`WITH selected_events AS MATERIALIZED (
+          SELECT id, user_id, session_id, logical_source_session_id
+          FROM events
+          WHERE id = ANY($1::bigint[]) AND session_id = $3 AND NOT owner_retired
+        ), source_authorities AS MATERIALIZED (
+          SELECT logical_source_session_id,
+                 public.native_session_authority(logical_source_session_id, $2, NULL) AS authority
+          FROM (SELECT DISTINCT logical_source_session_id FROM selected_events WHERE user_id = $2) sources
+        )
+        SELECT e.id::text FROM selected_events e
+        JOIN source_authorities a USING (logical_source_session_id)
+        WHERE e.user_id = $2 AND a.authority->>'state' = 'current'
+          AND a.authority->>'sessionId' = e.session_id
+        UNION ALL
+        SELECT e.id::text FROM selected_events e
+        WHERE e.user_id IS NULL AND EXISTS (
+          SELECT 1 FROM sessions s WHERE s.session_id = $3
+            AND public.native_session_authority(s.session_id, s.user_id, s.daemon_id)->>'state' = 'current'
+        )`, [selected, currentOwner ?? null, sessionId])
+      if (fresh.rows.length !== new Set(selected).size) throw new Error('session history not accessible')
     }
   }
   await assertExactCurrent()

@@ -69,6 +69,7 @@ test('waiting only rotates through bounded distinct roots and cannot create a ze
 })
 test('exactly four live lease slots are bounded; fifth is discovered after ordinary completion frees one',async()=>{
  const f=fixture(5);f.scheduler.start();await vi.advanceTimersByTimeAsync(1500);expect(f.fresh).toHaveLength(4);expect(f.waiting).toHaveLength(1)
+ expect(io.claim.mock.calls.slice(0,4).map(call=>call[4])).toEqual([true,true,true,false])
  f.done.add('1:root-1');await vi.advanceTimersByTimeAsync(2000);expect(f.fresh).toHaveLength(5);expect(io.dispatch).toHaveBeenCalled();expect(io.fail).not.toHaveBeenCalled()
 })
 test('55P03 retains exact busy token while other roots advance at the original backoff',async()=>{

@@ -159,7 +159,7 @@ const hashMetadata=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$
  * ordinary PostgreSQL store and SharedSourceReader stay whole-root exact. */
 class PostgresPersonalMetadataStore extends PostgresRelaySourceStore implements PersonalMetadataStore {
  private readonly selections=new WeakMap<object,SelectedState>()
- private async observation(scope:SourceScope,root:SourceRoot,mode:-1|-2,keys:readonly string[]|undefined,after:string|undefined,limit:number){
+ private async observation(scope:SourceScope,root:SourceRoot,mode:-1|-2|-3,keys:readonly string[]|undefined,after:string|undefined,limit:number){
   const ids=[String(mode),...(keys?[...keys].sort((a,b)=>BigInt(a)<BigInt(b)?-1:1):[])]
   const result=(await this.query('SELECT value FROM shared.read_memory_relay_sources($1::jsonb,$2,$3::bigint,$4,$5::bigint[]) AS value',
    [JSON.stringify(scope),root.key,after??null,limit,ids])).rows
@@ -169,8 +169,9 @@ class PostgresPersonalMetadataStore extends PostgresRelaySourceStore implements 
    ||![value.version?.content,value.version?.authorization,value.version?.storage].every(decimalMetadata))throw new SourceUnavailableError('source_metadata_proof_unavailable')
   return value
  }
- async select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;limit:number}):Promise<PersonalMetadataView>{
-  const observed=await this.observation(scope,root,-1,request.keys,request.after,request.limit)
+ async select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;boundRange?:boolean;limit:number}):Promise<PersonalMetadataView>{
+  const bounded=request.boundRange===true && request.through!==undefined && !request.keys
+  const observed=await this.observation(scope,root,bounded?-3:-1,bounded?[request.through!]:request.keys,request.after,request.limit)
   const upper=request.through??observed.upperId
   if(observed.rows.some((row:any)=>!decimalMetadata(row?.id)||BigInt(row.id)>BigInt(observed.upperId)))throw new SourceUnavailableError('source_metadata_proof_unavailable')
   let rows=observed.rows.filter((row:any)=>decimalMetadata(row?.id)&&BigInt(row.id)<=BigInt(upper))

@@ -1,3 +1,5 @@
+// Memory's startup pins the append-capture v1 body digest. Update the consumer
+// contract and its producer/consumer test together when changing that body.
 /** Only scalar/header metadata enters statement capture. Targeting payload
  * conservatively advances a scalar marker, avoiding detoast/equality work.
  * An equal-body replay can dirty a root; downstream revision processing must
@@ -10,6 +12,7 @@ const metadata=(alias:string)=>`jsonb_build_object(${[
 ].map(name=>`'${name}',${alias}.${name}`).join(',')})`
 export const RELAY_SOURCE_CAPTURE_SQL=[
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS capture_version INT NOT NULL DEFAULT 0`,
+ `ALTER TABLE shared.memory_source_work ADD COLUMN IF NOT EXISTS event_append_revision BIGINT`,
  `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS owner_retired BOOLEAN NOT NULL DEFAULT FALSE`,
  `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS body_session_id VARCHAR(128)`,
  `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS source_body_change_revision BIGINT NOT NULL DEFAULT 0 CHECK(source_body_change_revision>=0)`,
@@ -40,12 +43,15 @@ export const RELAY_SOURCE_CAPTURE_SQL=[
     ON CONFLICT(source_kind,root_key) DO UPDATE SET storage_revision=memory_source_work.storage_revision+1,updated_at=clock_timestamp();
   END $$`,
  `CREATE OR REPLACE FUNCTION shared.capture_memory_relay_events() RETURNS TRIGGER
-  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE r RECORD;BEGIN
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE r RECORD;new_revision BIGINT;BEGIN
    IF TG_OP='INSERT' THEN
     FOR r IN SELECT DISTINCT (e.user_id::text||':'||e.session_id) COLLATE "C" AS root FROM capture_new e
       WHERE shared.memory_event_capture_eligible(${eligible('e')})
        AND NOT EXISTS(SELECT 1 FROM public.sessions s WHERE s.session_id=e.session_id AND s.source='app_review_demo') ORDER BY root
-     LOOP PERFORM shared.mark_memory_source_dirty('relay_event',r.root);END LOOP;
+     LOOP
+      new_revision=shared.mark_memory_source_dirty('relay_event',r.root);
+      UPDATE shared.memory_source_work SET event_append_revision=new_revision WHERE source_kind='relay_event' AND root_key=r.root;
+     END LOOP;
    ELSIF TG_OP='DELETE' THEN
     FOR r IN SELECT DISTINCT (e.user_id::text||':'||e.session_id) COLLATE "C" AS root FROM capture_old e
       WHERE shared.memory_event_capture_eligible(${eligible('e')})
@@ -60,20 +66,27 @@ export const RELAY_SOURCE_CAPTURE_SQL=[
        IS DISTINCT FROM (o->>'id',o->>'user_id',o->>'session_id',o->>'event_type',o->>'created_at',o->>'source_sequence',o->>'canonical_payload_hash',o->'source_classification',o->>'source_header_version',o->>'source_body_change_revision',o->>'owner_retired')
       OR shared.memory_event_capture_eligible(n) IS DISTINCT FROM shared.memory_event_capture_eligible(o)
     ), content_roots AS (
-     SELECT n->>'user_id'||':'||(n->>'session_id') AS root,n->>'session_id' AS session FROM changed WHERE shared.memory_event_capture_eligible(n)
-     UNION SELECT o->>'user_id'||':'||(o->>'session_id'),o->>'session_id' FROM changed WHERE shared.memory_event_capture_eligible(o)
+     SELECT n->>'user_id'||':'||(n->>'session_id') AS root,n->>'session_id' AS session,
+      COALESCE(o->>'effect_status'='pending' AND n->>'effect_status'='completed'
+       AND (n->>'id',n->>'user_id',n->>'session_id')=(o->>'id',o->>'user_id',o->>'session_id'),FALSE) AS append FROM changed WHERE shared.memory_event_capture_eligible(n)
+     UNION SELECT o->>'user_id'||':'||(o->>'session_id'),o->>'session_id',FALSE FROM changed WHERE shared.memory_event_capture_eligible(o)
     ), storage_roots AS (
      SELECT DISTINCT n->>'user_id'||':'||(n->>'session_id') AS root FROM pairs WHERE shared.memory_event_capture_eligible(n) AND shared.memory_event_capture_eligible(o)
       AND (n->>'user_id',n->>'session_id') IS NOT DISTINCT FROM (o->>'user_id',o->>'session_id')
       AND (n->>'body_session_id',n->>'body_storage',n->>'body_manifest_id',n->>'body_chunk_ordinal',n->>'body_activity_epoch',n->>'body_owner_user_id')
        IS DISTINCT FROM (o->>'body_session_id',o->>'body_storage',o->>'body_manifest_id',o->>'body_chunk_ordinal',o->>'body_activity_epoch',o->>'body_owner_user_id')
     ), changes AS (
-     SELECT root,TRUE AS dirty,FALSE AS storage FROM content_roots
+     SELECT root,TRUE AS dirty,FALSE AS storage,append FROM content_roots
       WHERE NOT EXISTS(SELECT 1 FROM public.sessions s WHERE s.session_id=content_roots.session AND s.source='app_review_demo')
-     UNION ALL SELECT root,FALSE,TRUE FROM storage_roots
-    ) SELECT root,bool_or(dirty) AS dirty,bool_or(storage) AS storage FROM changes GROUP BY root ORDER BY root COLLATE "C"
+     UNION ALL SELECT root,FALSE,TRUE,FALSE FROM storage_roots
+    ) SELECT root,bool_or(dirty) AS dirty,bool_or(storage) AS storage,bool_or(append) AS append FROM changes GROUP BY root ORDER BY root COLLATE "C"
      LOOP
-      IF r.dirty THEN PERFORM shared.mark_memory_source_dirty('relay_event',r.root);END IF;
+      IF r.dirty THEN
+       new_revision=shared.mark_memory_source_dirty('relay_event',r.root);
+       IF r.append THEN
+        UPDATE shared.memory_source_work SET event_append_revision=new_revision WHERE source_kind='relay_event' AND root_key=r.root;
+       END IF;
+      END IF;
       IF r.storage THEN PERFORM shared.mark_memory_source_storage_changed('relay_event',r.root);END IF;
      END LOOP;
    END IF;RETURN NULL;

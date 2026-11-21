@@ -3,8 +3,17 @@ export function contentStreamDisplayId(streamId: string): string {
   return streamId.replace(/^codex:[0-9]+:stream:(agent_text|agent_reasoning):([^:]+):([^:]+):(.+)$/, 'codex:stream:$1:$2:$3:$4')
 }
 
+// Codex finalToolResult starts a fresh stream when the final output differs
+// from the preview. Its ID carries the original identity plus an output digest.
+export function replacedCodexToolStreamId(streamId: string, callId: string): string | undefined {
+  const match = /^(codex:\d+:stream):tool_result-correction:([^:]+):([^:]+):(.+):[0-9a-f]{16}$/.exec(streamId)
+  if (!match || match[4] !== callId) return
+  return `${match[1]}:tool_result:${match[2]}:${match[3]}:${callId}`
+}
+
 export interface ContentStreamChunk {
   streamId: string
+  replacesStreamId?: string
   sequence: number
   byteOffset: number
   content: string
@@ -81,6 +90,11 @@ export class ContentStreamAssembler {
 
     let state = this.streams.get(chunk.streamId)
     if (!state) {
+      // Retire the preview before admission, even when replay delivers the
+      // correction first. A late preview must not reopen the stream.
+      if (chunk.replacesStreamId && chunk.replacesStreamId !== chunk.streamId) {
+        this.closeStream(chunk.replacesStreamId)
+      }
       if (this.streams.size >= this.limits.maxActiveStreams) return null
       state = {
         nextSequence: 0, chunks: new Map(), content: '',
@@ -199,19 +213,22 @@ export class ContentStreamAssembler {
       receivedBytes: state.receivedBytes,
     }
     if (completed) {
-      for (const pending of state.chunks.values()) {
-        this.bufferedBytes -= this.encoder.encode(pending.content).length
-      }
-      this.streams.delete(streamId)
-      this.rememberCompleted(streamId)
+      this.closeStream(streamId)
     } else {
       this.streams.set(streamId, state)
     }
     return update
   }
 
-  private rememberCompleted(streamId: string) {
-    if (this.limits.maxCompletedStreams === 0) return
+  private closeStream(streamId: string) {
+    const state = this.streams.get(streamId)
+    if (state) {
+      for (const pending of state.chunks.values()) {
+        this.bufferedBytes -= this.encoder.encode(pending.content).length
+      }
+      this.streams.delete(streamId)
+    }
+    if (this.limits.maxCompletedStreams === 0 || this.completedStreams.has(streamId)) return
     this.completedStreams.add(streamId)
     this.completedOrder.push(streamId)
     while (this.completedOrder.length > this.limits.maxCompletedStreams) {

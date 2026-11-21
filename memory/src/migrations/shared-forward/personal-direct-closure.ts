@@ -1,7 +1,7 @@
 import type pg from 'pg'
 import {createHash} from 'node:crypto'
 import type {RetainedClosure} from './source-maintenance-retained.js'
-import {retainedReferenceRoster,referenceChannelSql,SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS} from './source-reference-contract.js'
+import {retainedReferenceRoster,referenceChannelSql,referenceValueSql,SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS} from './source-reference-contract.js'
 import {hash,qi} from './source-maintenance-common.js'
 import {memoryForwardTableRoster} from './copy-schema-roster.js'
 export interface PersonalDirectClosureScope {personalInstallationId:string;organizationInstallationId:string}
@@ -73,7 +73,7 @@ export async function collectPersonalDirectClosure(c:pg.Client,scope:PersonalDir
   if(!pk.length)throw Error('personal_direct_metadata_primary_key_required')
   const key=`jsonb_build_array(${pk.map(k=>'t.'+qi(k.attname)+'::text').join(',')})`,order=pk.map(k=>'t.'+qi(k.attname)).join(','),selectedKeys=pk.map((k,n)=>'t.'+qi(k.attname)+' AS key_'+n).join(','),finalOrder=pk.map((_,n)=>'key_'+n).join(',')
   const after=pk.map((k,n)=>`($2::jsonb->>${n})::${k.type}`).join(',')
-  let metadata='t.'+qi(column),independent='false',filter='',typedInvalid='false'
+  let metadata=await referenceValueSql(c,table,column),independent='false',filter='',typedInvalid='false'
   if(table==='source_events')filter=" AND COALESCE(t.source_provenance,'{}'::jsonb)<>'{}'::jsonb"
   if(table==='source_artifacts'){
    metadata="jsonb_build_object('details',t.details,'typed',jsonb_build_object('source_event_id',t.source_event_id::text,'session_id',t.session_id))"

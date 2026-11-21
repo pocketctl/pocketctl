@@ -1745,6 +1745,41 @@ describe('SessionDetail processEvent integration', () => {
     expect(tools[0]).toMatchObject({ input: { path: 'b' }, output: 'done', status: 'completed' })
   })
 
+  test('renders live replies after repeated Codex tool corrections and ignores original chunks on replay', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    try {
+      const emit = (type: string, fields: Record<string, unknown>) =>
+        websocketMock.handlers.get(type)!({ type, session_id: 'ses_1', ...fields })
+      emit('session_list', { sessions: [{ session_id: 'ses_1', agent_type: 'codex', status: 'running' }] })
+      emit('replay_end', { has_more: false, status: 'running' })
+      const lateOriginals = []
+      for (let i = 0; i < 33; i++) {
+        const callId = `exec-${i}`
+        const frame = {
+          session_id: 'ses_1', call_id: callId, chunk_seq: 0, byte_offset: 0, streaming: true,
+          stream_id: `codex:10:stream:tool_result:ses_1:turn-1:${callId}`, output: 'partial',
+        }
+        emit('tool_call', { call_id: callId, tool: 'commandExecution' })
+        if (i !== 0) emit('tool_result', frame)
+        emit('tool_result', {
+          ...frame, stream_id: `codex:10:stream:tool_result-correction:ses_1:turn-1:${callId}:0123456789abcdef`,
+          output: 'done', final: true, total_bytes: 4,
+        })
+        lateOriginals.push({ type: 'tool_result', ...frame })
+      }
+      emit('agent_text', { stream_id: 'reply', chunk_seq: 0, byte_offset: 0, text: '完整回复', final: true, total_bytes: 12 })
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+      emit('replay_batch', { events: lateOriginals })
+      await wrapper.vm.$nextTick()
+      expect(wrapper.getComponent(MessageAgent).props('content')).toBe('完整回复')
+      const cards = (wrapper.vm as any).messages.filter((message: any) => message.type === 'tool_call')
+      expect(cards).toHaveLength(33)
+      expect(cards.every((card: any) => card.status === 'completed' && card.output === 'done')).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   test('assembles duplicate and out-of-order tool output chunks before final completion', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any

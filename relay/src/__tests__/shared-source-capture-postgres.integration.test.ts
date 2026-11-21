@@ -28,6 +28,9 @@ suite('low-level transactional body-free canonical capture',()=>{
    CREATE TABLE public.events(id bigint PRIMARY KEY,user_id int,session_id text,event_type text,payload jsonb,effect_status text,
     created_at timestamptz DEFAULT now(),effect_step int DEFAULT 0,body_storage text DEFAULT 'hot',body_manifest_id uuid,body_chunk_ordinal int,body_activity_epoch bigint,body_owner_user_id int);
    CREATE TABLE public.deleted_sessions(session_id text);
+   CREATE TABLE public.users(id integer PRIMARY KEY);
+   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_scope_kind text,
+     owner_scope_id text,owner_user_id integer,subscriptions text[],config_version bigint,status text,start_policy text);
    CREATE TABLE public.extension_source_outbox(source_seq bigserial PRIMARY KEY,source_kind text,source_id text,owner_user_id int,session_id text,event_type text,occurred_at timestamptz,payload jsonb,created_at timestamptz DEFAULT now(),UNIQUE(source_kind,source_id));`)
   const {beginFreshInputFixture,declareFreshInputFoundation}=await import(new URL('../../../memory/src/__tests__/shared-source-r1/input-start-fixture.ts',import.meta.url).href)
   const inputFoundation=await beginFreshInputFixture(pool)
@@ -42,6 +45,32 @@ suite('low-level transactional body-free canonical capture',()=>{
  })
  afterAll(async()=>{await pool?.end()})
  const work=async(root='1:s')=>(await pool.query("SELECT revision::text,storage_revision::text FROM shared.memory_source_work WHERE source_kind='relay_event' AND root_key=$1",[root])).rows[0]
+ test('Memory accepts the installed append producer and rejects a replaced capture v2 body or disabled trigger',async()=>{
+  const {assertRelayEventAppendCapture}=await import(new URL('../../../memory/src/migrations/shared-db/namespace.ts',import.meta.url).href)
+  const tx=await pool.connect()
+  try{
+   await tx.query('BEGIN')
+   await assertRelayEventAppendCapture(tx)
+   await tx.query('ALTER TABLE public.events DISABLE TRIGGER memory_source_capture_update')
+   await expect(assertRelayEventAppendCapture(tx)).rejects.toThrow('relay_event_append_capture_migration_required')
+   await tx.query('ALTER TABLE public.events ENABLE TRIGGER memory_source_capture_update')
+   await tx.query(`CREATE OR REPLACE FUNCTION shared.capture_memory_relay_events() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN RETURN NULL; END $$`)
+   await expect(assertRelayEventAppendCapture(tx)).rejects.toThrow('relay_event_append_capture_migration_required')
+  }finally{await tx.query('ROLLBACK');tx.release()}
+ })
+ test('a retained claim overload cannot hide a replaced distribution writer',async()=>{
+  const {assertMemorySchedulingContract}=await import(new URL('../../../memory/src/migrations/shared-db/namespace.ts',import.meta.url).href)
+  const signature='shared.dispatch_memory_source_distribution(text,text,uuid,text,bigint,uuid,text,integer)'
+  const tx=await pool.connect()
+  try{
+   await tx.query('BEGIN')
+   await assertMemorySchedulingContract(tx)
+   const saved=(await tx.query('SELECT pg_get_functiondef($1::regprocedure) AS ddl',[signature])).rows[0].ddl
+   await tx.query(saved.replace('projection_priority=51','projection_priority=52'))
+   await expect(assertMemorySchedulingContract(tx)).rejects.toThrow('shared_source_scheduling_migration_required')
+  }finally{await tx.query('ROLLBACK');tx.release()}
+ })
  test('pending/abandoned are excluded and trusted completion is atomic with the root revision',async()=>{
   await pool.query(`INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) VALUES(1,1,'s','agent_text','{"text":"private"}','pending')`)
   expect(await work()).toBeUndefined()
@@ -53,6 +82,23 @@ suite('low-level transactional body-free canonical capture',()=>{
   await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) VALUES(2,1,'s','agent_text','{}','abandoned'),(3,1,'app-review-demo-x','agent_text','{}','none'),(4,1,'pending-x','agent_text','{}','completed'),(5,NULL,'s','agent_text','{}','none')")
   expect((await pool.query('SELECT count(*)::int n FROM shared.memory_source_work')).rows[0].n).toBe(1)
   expect(JSON.stringify((await pool.query('SELECT * FROM shared.memory_source_work')).rows)).not.toContain('private')
+ })
+ test('tracks committed native insert and pending acceptance independently of later rescans and header edits',async()=>{
+  await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) VALUES(1,1,'s','agent_text','{}','none'),(2,2,'second','agent_text','{}','pending')")
+  const marker=async(root:string)=>(await pool.query("SELECT revision::int,event_append_revision::int FROM shared.memory_source_work WHERE root_key=$1",[root])).rows[0]
+  expect(await marker('1:s')).toEqual({revision:1,event_append_revision:1})
+  await pool.query("UPDATE public.events SET effect_status='completed' WHERE id=2")
+  expect(await marker('2:second')).toEqual({revision:1,event_append_revision:1})
+  await pool.query("UPDATE public.events SET payload='{}' WHERE id=1")
+  expect(await marker('1:s')).toEqual({revision:2,event_append_revision:1})
+  // Native append remains represented while its header settles. Once covered,
+  // an unrelated dirty pass for the same session uses the ordinary scan lane.
+  await pool.query("UPDATE shared.memory_source_work SET processed_revision=revision WHERE root_key='1:s'")
+  await pool.query("SELECT shared.mark_memory_source_dirty('relay_event','1:s')")
+  expect(await marker('1:s')).toEqual({revision:3,event_append_revision:1})
+  const pick=async(append:boolean)=>(await pool.query("SELECT root_key FROM shared.claim_memory_source_work('scheduler',30,1,$1)",[append])).rows[0].root_key
+  expect(await pick(true)).toBe('2:second')
+  expect(await pick(false)).toBe('1:s')
  })
  test('batch replay and owned SQL writes dirty once per root/statement; rename dirties both roots',async()=>{
   await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) SELECT n,1,'s','agent_text','{}','none' FROM generate_series(1,100) n")

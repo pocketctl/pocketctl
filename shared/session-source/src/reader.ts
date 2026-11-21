@@ -150,7 +150,7 @@ export interface PersonalMetadataView {
  readonly upperId:string;readonly nextAfter?:string;readonly exhausted:boolean
 }
 export interface PersonalMetadataStore {
- select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;limit:number}):Promise<PersonalMetadataView>
+ select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;boundRange?:boolean;limit:number}):Promise<PersonalMetadataView>
  resolve(token:object):Promise<ResolvedSourceBody[]>
  assert(token:object):Promise<void>
  proof(token:object):unknown
@@ -158,7 +158,7 @@ export interface PersonalMetadataStore {
 export class PersonalMetadataSourceReader {
  private readonly views=new WeakMap<object,{inner:object;heads:SourceHead[]}>()
  constructor(private readonly store:PersonalMetadataStore){}
- private async select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;limit:number}):Promise<PersonalMetadataView>{
+ private async select(scope:SourceScope,root:SourceRoot,request:{keys?:readonly string[];after?:string;through?:string;boundRange?:boolean;limit:number}):Promise<PersonalMetadataView>{
   validateScope(scope,root)
   if(root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')unavailable('source_scope_mismatch')
   if(!Number.isSafeInteger(request.limit)||request.limit<1||request.limit>256)unavailable('page_limit')
@@ -173,7 +173,7 @@ export class PersonalMetadataSourceReader {
   return Object.freeze({token,heads:structuredClone(heads),observedVersion:{...inner.observedVersion},upperId:inner.upperId,
    ...(inner.nextAfter?{nextAfter:inner.nextAfter}:{}),exhausted:inner.exhausted})
  }
- selectPage(scope:SourceScope,root:SourceRoot,request:{after?:string;through?:string;limit?:number}={}){return this.select(scope,root,{...request,limit:request.limit??64})}
+ selectPage(scope:SourceScope,root:SourceRoot,request:{after?:string;through?:string;boundRange?:boolean;limit?:number}={}){return this.select(scope,root,{...request,limit:request.limit??64})}
  selectKeys(scope:SourceScope,root:SourceRoot,keys:readonly string[]){return this.select(scope,root,{keys,limit:keys.length})}
  private state(view:PersonalMetadataView){const state=this.views.get(view.token);if(!state)throw new SourceUnavailableError('source_selection_invalid');return state}
  async resolve(view:PersonalMetadataView):Promise<ResolvedSourceBody[]>{

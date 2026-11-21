@@ -1,3 +1,5 @@
+import {APPEND_PROJECTION_PRIORITY} from '../jobs/scheduling.js'
+import {observeProjectionStep} from './projection-diagnostics.js'
 import {prepareTeamSemanticPublication,persistTeamSemanticPublication} from './team-semantic-publication.js'
 import type pg from 'pg'
 import {canonicalPayloadHash,canonicalJsonString,SourceUnavailableError,type SourceScope,type SourceRoot,type SourceVersion} from '@pocketctl/session-source'
@@ -14,10 +16,18 @@ import {prepareMetadataScope} from './source-projection-admission.js'
 /** Each durable page commits its cursor, refs and derived facts together.
  * Personal metadata may continue a small successful-page burst; generic,
  * Team and shadow work retain their existing single-page admission. */
-export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
- const pageSize=options.pageSize??64,deferMs=options.deferMs??1000
- if(!Number.isSafeInteger(pageSize)||pageSize<1||pageSize>256||!Number.isSafeInteger(deferMs)||deferMs<0||deferMs>60000)throw Error('canonical_projection_options_invalid')
+export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSnapshotInstallations?:readonly string[];pageDerivedWriteInstallations?:readonly string[];pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
+ const configuredSize=options.pageSize??64,deferMs=options.deferMs??1000
+ if(!Number.isSafeInteger(configuredSize)||configuredSize<1||configuredSize>256||!Number.isSafeInteger(deferMs)||deferMs<0||deferMs>60000)throw Error('canonical_projection_options_invalid')
  return async(job,signal)=>{
+  // The failed page was not acknowledged. Keep the same seal and durable
+  // cursor. Preserve the reduced size when a successful claim yields mid-scan.
+  const storedStep=job.payload.projection_budget_step
+  const previousBudgetFailure=job.last_error_code==='canonical_reference_budget_exceeded'||job.last_error_code==='canonical_reference_write_timeout'
+  const budgetStep=typeof storedStep==='number'&&Number.isInteger(storedStep)&&storedStep>=1&&storedStep<=6
+   ?storedStep:previousBudgetFailure?Math.min(6,Math.max(1,job.attempts-1)):0
+  const pageSize=Math.max(1,Math.ceil(configuredSize/2**budgetStep))
+  const historicalCompile=job.priority!==undefined&&job.priority!==APPEND_PROJECTION_PRIORITY
   const scope=structuredClone(job.payload.scope) as SourceScope|undefined,root=structuredClone(job.payload.root) as SourceRoot|undefined
   if(job.job_type!=='project_shared_source'||!scope||scope.installationId!==job.installation_id||!root||!['relay_event','team_collaboration','team_delivery'].includes(root.kind)
    ||typeof root.key!=='string'||root.key.length>1024)throw new JobTerminalError('invalid_source_scope')
@@ -47,9 +57,9 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
    return createCanonicalShadowHandler(pool,{pageSize:Math.min(pageSize,128),deferMs})(job,signal)
   }
   const purpose=repairVersion?'current-content':'personal-projection'
-  const contexts=await loadSourceContextSet(pool,scope.installationId,root,scan,purpose)
+  const contexts=await observeProjectionStep(pool,'read_seal',()=>loadSourceContextSet(pool,scope.installationId,root,scan,purpose))
   requireSourceContext(contexts,scope,cursor)
-  const currentContexts=await checkSourceContextSet(pool,root,contexts,purpose)
+  const currentContexts=await observeProjectionStep(pool,'verify_version',()=>checkSourceContextSet(pool,root,contexts,purpose))
   if(pagedRepair&&repairVersion&&!currentContexts.some(context=>context.cursorKey===cursor&&sameDerivedSourceVersion(context.version,repairVersion)))
    throw new JobTerminalError('source_context_set_changed')
   if(repairVersion&&!pagedRepair){
@@ -84,9 +94,10 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
    const excluded=await prepareTeamSemanticPublication(pool,scope.installationId,root,{metadataOnly:true})
    if(excluded){await persistTeamSemanticPublication(pool,excluded,options.stabilizationMs);return}
   }
-  const readProgress=async()=>(await pool.query(`SELECT next_cursor,state,source_version FROM memory_canonical_projection_progress
-   WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4`,[scope.installationId,root.kind,root.key,canonicalPayloadHash(scope).toString('hex')])).rows[0]
+  const readProgress=()=>observeProjectionStep(pool,'checkpoint',async()=>(await pool.query(`SELECT next_cursor,state,source_version${contexts.offlineBatch?',offline_basis':''} FROM memory_canonical_projection_progress
+   WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4`,[scope.installationId,root.kind,root.key,canonicalPayloadHash(scope).toString('hex')])).rows[0])
   const progress=await readProgress()
+  if(contexts.offlineBatch&&progress?.source_version?.offlineCovered===scan&&progress.offline_basis?.covered&&progress.offline_basis.scanId===scan)return
   if(progress?.state==='ready'||(!personal&&progress?.state==='raw_ready')){
    const current=await createObservedSourceReader(pool).checkCurrent(scope,root)
    if(current.state==='current'&&sameDerivedSourceVersion(current.version,progress.source_version)){
@@ -110,7 +121,7 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
    // Spend at most the existing one-second deferred interval on successful
    // fresh pages; this does not alter either periodic poll or error backoff.
    const burstStarted=performance.now(),burstBudgetMs=1000
-   const seal=await prepareMetadataScope(pool,scope,root,scan)
+   const seal=await observeProjectionStep(pool,'read_seal',()=>prepareMetadataScope(pool,scope,root,scan))
    if(seal.targetCursor!==cursor)throw new JobTerminalError('source_context_set_changed')
    let currentProgress=progress
    for(let page=0;page<4;page++){
@@ -120,15 +131,20 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
      // A typed invalidated read has produced no output. Yield this claim;
      // never retry the old body proof or replace its original scope/seal.
      if(error instanceof SourceUnavailableError&&error.code==='changed')throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
-     if(error instanceof SourceUnavailableError&&error.code==='source_metadata_proof_unavailable'){
+     // An older cold event can have neither a stored hash nor a hot body.
+     // The ordinary reader authenticates its archive and repeats the version fence.
+     if(error instanceof SourceUnavailableError&&(error.code==='source_metadata_proof_unavailable'||error.code==='body_hash_unavailable')){
       useOrdinary=true
       break
      }
      throw error
     }
     if(signal.aborted)throw Error('canonical_projection_aborted')
-    const result=await persistPersonalMetadataReferencePage(pool,selected,options.stabilizationMs,signal)
+    const batchDerived=options.pageDerivedWriteInstallations?.includes(scope.installationId)===true && !historicalCompile
+    const result=await persistPersonalMetadataReferencePage(pool,selected,options.stabilizationMs,signal,historicalCompile,batchDerived,
+     !historicalCompile && options.compactSnapshotInstallations?.includes(scope.installationId)===true)
     if(result.contextReady){options.onReady?.(root);return}
+    if(result.frozenComplete)return
     if(signal.aborted)throw Error('canonical_projection_aborted')
     if(page===3||performance.now()-burstStarted>=burstBudgetMs)break
     // Read the acknowledged durable cursor, never refresh an old body proof
@@ -145,7 +161,7 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
   // under an exact full-root version. Start it from the beginning when the
   // selected reader could not prove its page.
   const cursorForOrdinary=!personal||ordinaryContinuation?progress?.next_cursor??undefined:undefined
-  const readOrdinaryPage=(cursor?:string)=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor})
+  const readOrdinaryPage=(cursor?:string)=>observeProjectionStep(pool,'select_page',()=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor}))
   const page=await readOrdinaryPage(cursorForOrdinary).catch(error=>{
    // A newer source revision invalidates the old cursor. Restart enumeration
    // under the new authority snapshot; existing source UUIDs are reused.
@@ -164,7 +180,7 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{pageSize?
   // execution clock and source/root fences repeat this at physical COMMIT.
   requireSourceContext(await loadSourceContextSet(pool,scope.installationId,root,scan,purpose),scope,cursor)
   try{
-   await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs:options.stabilizationMs,
+   await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs:options.stabilizationMs,historicalCompile,
     reuseOriginalsAtVersion:pagedRepair?repairVersion:undefined})
   }catch(error){
    if(!pagedRepair||!repairVersion||!(error instanceof SourceUnavailableError)||error.code!=='changed'||signal.aborted)throw error

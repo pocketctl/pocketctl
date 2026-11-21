@@ -1,10 +1,11 @@
 import type pg from 'pg'
+import type {FrozenProjectionBatch} from './offline-projection.js'
 import {canonicalJsonString,type SourceScope,type SourceRoot,type SourceVersion} from '@pocketctl/session-source'
 import {JobDeferredError,JobTerminalError} from '../jobs/types.js'
 import {createObservedSourceReader} from './observed-reader.js'
 import {sameDerivedSourceVersion} from './derived-version.js'
 export interface SourceContext {cursorKey:string;scope:SourceScope;version:SourceVersion;mode:'shared-shadow'|'shared-active';state:string}
-export interface SourceContextSet {scanId:string;controlRevision:string;workRevision:string;contexts:SourceContext[]}
+export interface SourceContextSet {offlineBatch?:FrozenProjectionBatch;scanId:string;controlRevision:string;workRevision:string;contexts:SourceContext[]}
 type ContextPurpose='current-content'|'personal-projection'
 const notReady=()=>new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
 /** A seal covers every principal for the installation. Fetch metadata in
@@ -40,7 +41,7 @@ export async function loadSourceContextSet(pool:Pick<pg.Pool,'query'>,installati
  // adopt another scan/control revision or claim that its newest content is ready.
  const scopeSeal=(value:typeof seal)=>value&&projection?{...value,contentPending:undefined}:value
  if(BigInt(contexts.length)!==BigInt(seal.targetCount)||canonicalJsonString(scopeSeal(finalSeal))!==canonicalJsonString(scopeSeal(seal)))throw notReady()
- return {scanId:seal.scanId,controlRevision:seal.controlRevision,workRevision:seal.workRevision,contexts}
+ return {...(projection&&seal.offlineBatch?{offlineBatch:seal.offlineBatch}:{}),scanId:seal.scanId,controlRevision:seal.controlRevision,workRevision:seal.workRevision,contexts}
 }
 /** A metadata seal is not an authorization grant. Every retained context
  * crosses the same current authority reader before source/body work. */

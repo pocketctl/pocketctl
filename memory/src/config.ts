@@ -112,6 +112,7 @@ export interface MemoryConfig {
   pollIntervalMs: number
   httpTimeoutMs: number
   jobLeaseMs: number
+  compileBatchIntervalMs: number
   episodeStabilizationMs: number
   extractionDebounceMs: number
   extractionMaxRunsPerEpisode: number
@@ -129,6 +130,8 @@ export interface MemoryConfig {
   extractionMaxChars: number
   allowedOrigins: readonly string[]
   allowedHosts: readonly string[]
+  compactSnapshotInstallations: readonly string[]
+  pageDerivedWriteInstallations: readonly string[]
   installationAllowlist: readonly string[]
   tombstoneHmacKeys: readonly TombstoneHmacKey[]
 }
@@ -426,11 +429,11 @@ function parseAllowedHosts(raw: string | undefined): string[] {
   return [...new Set(items.map(item => item.toLowerCase()))]
 }
 
-function parseInstallationAllowlist(raw: string | undefined): string[] {
-  const items = parseStringList('MEMORY_INSTALLATION_ALLOWLIST', raw, 128)
+function parseInstallationAllowlist(raw: string | undefined, name = 'MEMORY_INSTALLATION_ALLOWLIST'): string[] {
+  const items = parseStringList(name, raw, 128)
   for (const item of items) {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item)) {
-      throw new ConfigError('MEMORY_INSTALLATION_ALLOWLIST entries must be UUIDs')
+      throw new ConfigError(name + ' entries must be UUIDs')
     }
   }
   return [...new Set(items.map(item => item.toLowerCase()))]
@@ -645,6 +648,9 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     pollIntervalMs: parseBoundedInteger('MEMORY_POLL_INTERVAL_MS', env.MEMORY_POLL_INTERVAL_MS, 1000, 100, 3_600_000),
     httpTimeoutMs: parseBoundedInteger('MEMORY_HTTP_TIMEOUT_MS', env.MEMORY_HTTP_TIMEOUT_MS, 10_000, 1000, 120_000),
     jobLeaseMs: parseBoundedInteger('MEMORY_JOB_LEASE_MS', env.MEMORY_JOB_LEASE_MS, 30_000, 1000, 600_000),
+    compileBatchIntervalMs: parseBoundedInteger(
+      'MEMORY_COMPILE_BATCH_INTERVAL_MS', env.MEMORY_COMPILE_BATCH_INTERVAL_MS, 300_000, 0, 3_600_000,
+    ),
     episodeStabilizationMs: parseBoundedInteger(
       'MEMORY_EPISODE_STABILIZATION_MS', env.MEMORY_EPISODE_STABILIZATION_MS, 30_000, 0, 3_600_000,
     ),
@@ -672,6 +678,8 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ),
     allowedOrigins: parseAllowedOrigins(env.MEMORY_ALLOWED_ORIGINS),
     allowedHosts: parseAllowedHosts(env.MEMORY_ALLOWED_HOSTS),
+    compactSnapshotInstallations: parseInstallationAllowlist(env.MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS, 'MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS'),
+    pageDerivedWriteInstallations: parseInstallationAllowlist(env.MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS, 'MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS'),
     installationAllowlist,
     tombstoneHmacKeys,
   }

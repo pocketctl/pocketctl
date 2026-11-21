@@ -1,5 +1,5 @@
 import type pg from 'pg'
-import {retainedReferenceRoster,referenceChannelSql,retainedScalarReferenceSql,retainedArrayExpansionSql} from './source-reference-contract.js'
+import {retainedReferenceRoster,referenceChannelSql,referenceValueSql,retainedScalarReferenceSql,retainedArrayExpansionSql} from './source-reference-contract.js'
 import {hash,qi} from './source-maintenance-common.js'
 export interface RetainedRoot {installationId:string;sessionId:string}
 export interface RetainedDelivery {installationId:string;teamId:string;teamSessionId:string;submissionId:string;decisionId:string;independent:boolean}
@@ -29,7 +29,7 @@ export async function collectRetainedClosure(c:pg.Client,ids:string[]):Promise<R
   const {from,owner:scope}=referenceChannelSql(table)
   const rowKey=`jsonb_build_object(${keyColumns.flatMap(key=>["'"+key+"'",'t.'+qi(key)+'::text']).join(',')})`
   const independent=table==='knowledge_evidence'?`t.evidence_kind='accepted_excerpt' AND EXISTS(SELECT 1 FROM memory.knowledge_evidence_capsules capsule WHERE capsule.installation_id=t.installation_id AND capsule.capsule_id=t.capsule_id AND capsule.version_id=t.version_id AND capsule.retention_basis='user_accepted')`:'false'
-  let metadata='t.'+qi(column)
+  let metadata=await referenceValueSql(c,table,column)
   if(table==='knowledge_evidence')metadata="jsonb_build_object('locator',t.locator,'typed',jsonb_strip_nulls(jsonb_build_object('source_event_id',t.source_event_id::text,'artifact_id',t.artifact_id::text,'episode_id',t.episode_id::text)))"
   if(table==='source_artifacts')metadata="jsonb_build_object('details',t.details,'typed',jsonb_strip_nulls(jsonb_build_object('source_event_id',t.source_event_id::text,'session_id',t.session_id)))"
   // Empty provenance carries no explicit retained references. Personal source

@@ -25,11 +25,12 @@ export async function bindPagedOriginalSources(c:pg.Client,records:PagedCleanupR
  // page may fit; a single oversized native projection precisely refuses.
  if(rows.length!==selected.length)throw Error('paged_source_capacity')
  for(const row of rows){
-  const proof=parseMemorySourceProvenance(row.source_provenance?.memory),nativeProof=row.native_classification?.memory_source
+  const provenance=row.snapshot_format===1 ? {...row.source_provenance,memory:row.classification.memory_source} : row.source_provenance
+  const proof=parseMemorySourceProvenance(provenance?.memory),nativeProof=row.native_classification?.memory_source
   if(!row.capture_eligible||row.mapping_state!=='verified'||row.source_kind!=='relay_event'||!row.canonical_key||row.canonical_session_key!==row.session_id||row.native_session!==row.session_id||row.native_logical!==row.session_id||row.owner_retired||row.native_owner!==row.installation_owner||row.session_owner!==row.installation_owner||row.daemon_owner!==row.installation_owner||row.native_header!=='1'||row.native_type!==row.event_type||!row.native_at||new Date(row.native_at).getTime()!==new Date(row.occurred_at).getTime()
    ||!proof||proof.session_id!==row.session_id||proof.turn_id!==row.turn_id||proof.sequence!==row.native_sequence||String(row.source_sequence)!==proof.sequence
-   ||canonicalJsonString(proof)!==canonicalJsonString(nativeProof)||canonicalJsonString(proof)!==canonicalJsonString(row.source_provenance.memory)
-   ||Object.keys(row.source_provenance).some(k=>!['state','memory'].includes(k))||row.source_provenance.state!==undefined&&row.source_provenance.state!=='known'
+   ||canonicalJsonString(proof)!==canonicalJsonString(nativeProof)||canonicalJsonString(proof)!==canonicalJsonString(provenance.memory)
+   ||Object.keys(provenance).some(k=>!['state','memory'].includes(k))||provenance.state!==undefined&&provenance.state!=='known'
    ||canonicalJsonString(row.classification)!==canonicalJsonString(row.native_classification)||!Buffer.isBuffer(row.content_hash)||row.content_hash.toString('hex')!==row.native_content_hash)throw Error('paged_original_source_unproved')
   if(row.payload!==null){if(!verifyOriginalSourceHash({origin:row.origin,originPosition:row.origin_position,eventType:row.event_type,occurredAt:row.occurred_at,payload:row.payload,payloadHash:row.payload_hash})||canonicalPayloadHash(row.payload).toString('hex')!==row.native_content_hash)throw Error('paged_original_source_hash_unproved')}
   else if(row.origin!=='canonical'||row.adapter_version!=='canonical-ref-v1'||!row.payload_hash.equals(row.content_hash))throw Error('paged_original_source_hash_unproved')

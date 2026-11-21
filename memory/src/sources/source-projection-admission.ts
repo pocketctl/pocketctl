@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import type {OfflineSeal} from './offline-projection.js'
 import {canonicalJsonString,canonicalPayloadHash,type SourceScope,type SourceRoot,type SourceVersion} from '@pocketctl/session-source'
 import {JobDeferredError,JobTerminalError} from '../jobs/types.js'
 import {loadSourceContextSet,checkSourceContextSet,requireSourceContext} from './source-context-set.js'
@@ -6,7 +7,7 @@ import {sameDerivedSourceVersion} from './derived-version.js'
 import {metadataSourceExecution} from './source-execution.js'
 export interface ProjectionObservation {scope:SourceScope;root:SourceRoot;version:SourceVersion}
 const notReady=()=>new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
-export interface MetadataScopeSeal {scanId:string;targetCursor:string;controlRevision:string}
+export interface MetadataScopeSeal {offline?:OfflineSeal;scanId:string;targetCursor:string;controlRevision:string}
 /** Scope metadata only. This never grants whole-root/model readiness. */
 export async function prepareMetadataScope(pool:pg.Pool,scope:SourceScope,root:SourceRoot,expectedScan?:string):Promise<MetadataScopeSeal>{
  if(root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')throw notReady()
@@ -14,7 +15,9 @@ export async function prepareMetadataScope(pool:pg.Pool,scope:SourceScope,root:S
  requireSourceContext(set,scope);await checkSourceContextSet(pool,root,set,'personal-projection')
  const context=set.contexts.find(c=>c.state==='current'&&canonicalJsonString(c.scope)===canonicalJsonString(scope))
  if(!context)throw notReady()
- return {scanId:set.scanId,targetCursor:context.cursorKey,controlRevision:set.controlRevision}
+ const offline=set.offlineBatch&&{scanId:set.scanId,controlRevision:set.controlRevision,batch:set.offlineBatch,
+  version:{...context.version,content:set.workRevision}}
+ return {...(offline?{offline}:{}),scanId:set.scanId,targetCursor:context.cursorKey,controlRevision:set.controlRevision}
 }
 export function personalMetadataEnvelope(pool:pg.Pool,scope:SourceScope,root:SourceRoot,proof:unknown,seal:MetadataScopeSeal,purpose:'reference'|'episode'){
  const execution=metadataSourceExecution(pool,scope.installationId)

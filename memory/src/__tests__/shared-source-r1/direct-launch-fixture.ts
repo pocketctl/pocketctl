@@ -53,6 +53,6 @@ export async function directLaunchFixture(url:string,options:{originalBinding?:b
   await journal.createPostgresExtensionJournalSink({sharedHeaders:true}).appendCanonicalEvent(publisher,{sourceEventId:id,ownerUserId:s.owner,sessionId:s.session,eventType,occurredAt:null,payload})
   return id as string
  }
- return {pool,runtime,publisher,source,install,event,root:(s:{owner:number;session:string})=>s.owner+':'+s.session,close:async()=>{await runtime.end();await publisher.end();await pool.end()}}
+ return {pool,runtime,publisher,source,install,event,renameSession:relay.renameOwnedDaemonSession,root:(s:{owner:number;session:string})=>s.owner+':'+s.session,close:async()=>{await runtime.end();await publisher.end();await pool.end()}}
 }
 export type DirectLaunchFixture=Awaited<ReturnType<typeof directLaunchFixture>>

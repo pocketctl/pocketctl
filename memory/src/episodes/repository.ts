@@ -1,3 +1,4 @@
+import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
 import {prepareEpisodeSources,prepareEpisodeProjectionSources,attachPreparedSources} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {runSelectedSourceTransaction} from '../sources/processing-pins.js'
@@ -101,7 +102,7 @@ export function createEpisodeRepository(
             source_provenance: Record<string, unknown>
           }>(`
             SELECT source_event_id::text, event_type, occurred_at, payload_hash,
-                   classification, payload, source_provenance
+                   classification, payload, ${snapshotProvenanceSql('source_events')} AS source_provenance
             FROM source_events
             WHERE installation_id = $1 AND turn_id = $2
             ORDER BY occurred_at, source_event_id

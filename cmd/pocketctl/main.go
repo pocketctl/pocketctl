@@ -3762,6 +3762,7 @@ func deliverUserMessage(
 	emitsReceipt := exists && agent != "" && cmd.MsgID != ""
 	defersReceipt := agent == adapter.AgentOpencode && sm.SessionControlMode(cmd.SessionID) == protocol.ControlManaged
 	err := sm.SendMessageWithInput(ctx, session.UserMessageInput{
+		TerminalSubmit:    cmd.TerminalSubmit,
 		QueueDispatch:     cmd.QueueDispatch,
 		MemoryContextHint: cmd.MemoryContextHint,
 		SessionID:         cmd.SessionID,

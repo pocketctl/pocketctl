@@ -1,3 +1,4 @@
+import {commitOutcomeUnknown,ProjectionLockBusy,recordProjectionRollback} from './projection-diagnostics.js'
 import {annotateSourceFailure,copySourceFailure} from './diagnostics.js'
 import type pg from 'pg'
 import {AsyncLocalStorage} from 'node:async_hooks'
@@ -55,14 +56,14 @@ async function currentProtectionSerial<T>(pool:pg.Pool,installationId:string,dea
 }
 /** Selected bodies are already prepared. The queue is local contention
  * avoidance only; the callback keeps every original SQL authority fence. */
-export function runSelectedSourceTransaction<T>(pool:pg.Pool,installationId:string,signal:AbortSignal|undefined,work:(client:pg.PoolClient)=>Promise<T>):Promise<T>{
+export function runSelectedSourceTransaction<T>(pool:pg.Pool,installationId:string,signal:AbortSignal|undefined,work:(client:pg.PoolClient,deadline:number)=>Promise<T>,writeDeadline?:()=>Error|undefined):Promise<T>{
  const deadline=performance.now()+5000
  return currentProtectionSerial(pool,installationId,deadline,()=>!signal?.aborted,
   async()=>{
    for(let attempt=0;;attempt++){
     if(signal?.aborted||performance.now()>=deadline)throw new SelectedSourceTransactionUnavailable()
     let retrySafe=false
-    try{return await metadata(pool,work,deadline,()=>!signal?.aborted,signal,true,()=>{retrySafe=true})}
+    try{return await metadata(pool,client=>work(client,deadline),deadline,()=>!signal?.aborted,signal,true,()=>{retrySafe=true},writeDeadline)}
     catch(error){
      if(!retrySafe||attempt>=3)throw error
      // The prior physical transaction is released. Repeat all authority
@@ -75,7 +76,7 @@ export function runSelectedSourceTransaction<T>(pool:pg.Pool,installationId:stri
 /** Bound the entire physical metadata operation, including transport response
  * waits and rollback. SQL timeouts are a second, independent server-side bound.
  * Destruction also prevents a late response from sending any subsequent SQL. */
-async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadline=performance.now()+2000,active=()=>true,signal?:AbortSignal,selected=false,onRetryableRollback?:()=>void):Promise<T>{
+async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadline=performance.now()+2000,active=()=>true,signal?:AbortSignal,selected=false,onRetryableRollback?:()=>void,writeDeadline?:()=>Error|undefined):Promise<T>{
  let expired=false,connectionExpired=false,released=false,client:pg.PoolClient|undefined,originalQuery:pg.PoolClient['query']|undefined
  let stage:SourceTimingStage='metadata_checkout',stageStarted=performance.now()
  const observe=sourcePoolContext(pool).observeDuration
@@ -89,7 +90,14 @@ async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadl
  let primaryFailure:unknown
  // Once a policy/predicate or authoritative server denial is known, cleanup
  // transport loss must not turn that failure into a successful-looking defer.
- const failure=()=>selected&&primaryFailureKnown?primaryFailure:annotateSourceFailure(selected?new SelectedSourceTransactionUnavailable(commitAcknowledged?'committed':commitSent?'unknown':'not-dispatched'):unavailable(),stage,signal?.aborted?'cancelled':'transport_deadline',{started:stageStarted,deadline})
+ const failure=()=>{
+  if(selected&&primaryFailureKnown)return primaryFailure
+  if(selected&&expired&&callbackActive&&!commitSent&&!signal?.aborted){
+   const writeFailure=writeDeadline?.()
+   if(writeFailure)return writeFailure
+  }
+  return annotateSourceFailure(selected?new SelectedSourceTransactionUnavailable(commitAcknowledged?'committed':commitSent?'unknown':'not-dispatched'):unavailable(),stage,signal?.aborted?'cancelled':'transport_deadline',{started:stageStarted,deadline})
+ }
  let totalTimer:ReturnType<typeof setTimeout>|undefined,connectTimer:ReturnType<typeof setTimeout>|undefined
  let abort:(()=>void)|undefined
  const discard=(c:pg.PoolClient)=>{
@@ -132,12 +140,13 @@ async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadl
   }catch(error){
    const code=(error as {code?:string}).code
    if(code==='57014'||code==='55P03')annotateSourceFailure(error,stage,code==='57014'?'statement_timeout':'lock_conflict',{started:stageStarted,deadline})
-   if(selected&&commitSent&&!commitAcknowledged&&(!code||!(/^[0-9A-Z]{5}$/.test(code))||code.startsWith('08')||code.startsWith('57'))){release(true);throw failure()}
+   if(selected&&commitSent&&!commitAcknowledged&&commitOutcomeUnknown(error)){release(true);throw failure()}
    // COMMIT uncertainty above takes precedence; only a known primary failure
    // reaches cleanup. Retain it across a hung rollback or cancellation.
    if(selected){primaryFailure=error;primaryFailureKnown=true}
    if(client&&!expired&&!released){try{
-    live();await client.query('ROLLBACK');live()
+    live();await client.query('ROLLBACK');recordProjectionRollback(error);live()
+    if(selected&&!commitSent&&error instanceof ProjectionLockBusy)error.rollbackConfirmed=true
     if(selected&&!commitSent&&(error instanceof SelectedSourceLockBusy||code==='55P03'&&(error as Error).message==='source_metadata_lock_busy')){
      release(false);onRetryableRollback?.()
     }
@@ -198,9 +207,19 @@ export class SourceProcessingPins {
      // the SAME original 2s checkout/query/COMMIT budget on every renewal.
      // Ordinary prepared-body pins never enter this branch.
      if(pin.currentProtection){
-      const current=(await c.query("SELECT * FROM shared.memory_relay_source_authority($1::jsonb,'relay_event',$2)",[JSON.stringify(pin.scope),pin.root.key])).rows[0]
-      if(current?.state!=='current')return false
-      protectedVersion={content:current.content_revision,authorization:current.authorization_revision,storage:current.storage_revision}
+      // Observe and submit the exact vector in one statement. The SQL pin
+      // function still independently locks and rechecks every authority.
+      const row=(await c.query(`WITH authority AS MATERIALIZED (
+        SELECT state,jsonb_build_object('content',content_revision,'authorization',authorization_revision,'storage',storage_revision) AS version
+        FROM shared.memory_relay_source_authority($2::jsonb,'relay_event',$3)
+       ), acquired AS MATERIALIZED (
+        SELECT version,CASE WHEN state='current' THEN shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,version,$4) ELSE FALSE END AS valid
+        FROM authority
+       ) SELECT version,valid,current_setting('pocketctl.processing_pin_reason',true) AS reason FROM acquired`,
+       [this.executionId,JSON.stringify(pin.scope),pin.root.key,renew])).rows[0]
+      if(row?.valid===true)protectedVersion=row.version
+      lastReason=typeof row?.reason==='string'?row.reason:'acquire_denied'
+      return row?.valid??false
      }
      this.assertUsable();if(performance.now()>=deadline)throw unavailable()
      const row=(await c.query(`WITH acquired AS MATERIALIZED (

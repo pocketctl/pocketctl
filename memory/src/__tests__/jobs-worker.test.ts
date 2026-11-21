@@ -1,3 +1,5 @@
+import {ProjectionLockBusy} from '../sources/projection-diagnostics.js'
+import {workerErrorFields} from '../jobs/worker-diagnostics.js'
 import {SourceUnavailableError} from '@pocketctl/session-source'
 import { describe, expect, test } from 'vitest'
 import { createJobWorker, type JobWorkerOptions } from '../jobs/worker.js'
@@ -301,4 +303,31 @@ test('persistent source contention exhausts its bounded deferral allowance',asyn
  jobs.rescheduleJob=async x=>{failures.push(x);return true}
  const worker=createJobWorker(workerOptions({jobs}));worker.register('compile_episode',async()=>{throw new SourceUnavailableError('source_store_busy')})
  await worker.tick();expect(failures).toHaveLength(1);expect(failures[0].errorCode).toBe('source_store_busy')
+})
+
+test('a lost projection queue acknowledgement retains only its boundary in diagnostics',async()=>{
+ const {jobs}=fakeJobs([claim({job_type:'project_shared_source'})])
+ jobs.completeJob=async()=>{throw Error('private socket and query detail')}
+ let code='',fields:Record<string,unknown>={}
+ jobs.rescheduleJob=async input=>{code=input.errorCode;return true}
+ const worker=createJobWorker(workerOptions({jobs,onError:error=>{fields=workerErrorFields(error)}}))
+ worker.register('project_shared_source',async()=>{})
+ await worker.tick()
+ expect(fields).toEqual({code:'projection_ack_failed',projection_stage:'ack',projection_stage_ms:expect.any(Number)})
+ expect(code).toBe('projection_ack_failed')
+})
+
+test.each([
+ [true,0,'project_shared_source',true],[false,0,'project_shared_source',false],
+ [true,60,'project_shared_source',false],[true,0,'compile_episode',false],
+] as const)('installation contention rollback=%s waits=%s type=%s defers=%s',async(confirmed,waits,jobType,expected)=>{
+ const {jobs}=fakeJobs([claim({job_type:jobType,payload:{source_wait_count:waits}})])
+ let deferred=0,failed=0
+ jobs.deferJob=async()=>{deferred++;return true}
+ jobs.rescheduleJob=async()=>{failed++;return true}
+ const worker=createJobWorker(workerOptions({jobs}))
+ const busy=new ProjectionLockBusy();busy.rollbackConfirmed=confirmed
+ worker.register(jobType,async()=>{throw busy})
+ await worker.tick()
+ expect([deferred,failed]).toEqual(expected?[1,0]:[0,1])
 })

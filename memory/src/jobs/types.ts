@@ -109,12 +109,14 @@ export class JobTerminalError extends Error {
 }
 
 export interface JobClaim {
+  priority?: number
   job_id: string
   installation_id: string | null
   job_type: JobType
   idempotency_key: string
   payload: Record<string, unknown>
   attempts: number
+  last_error_code?: string
   claim_epoch: number
 }
 

@@ -1,5 +1,5 @@
 import {independentlyAcceptedEvidenceOwnershipSql} from '../../claims/accepted-evidence-policy.js'
-import {SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS,declaredReferenceRoster,retainedReferenceRoster,referenceChannelSql,matchesSourceReferenceSql} from './source-reference-contract.js'
+import {SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS,declaredReferenceRoster,retainedReferenceRoster,referenceChannelSql,referenceValueSql,matchesSourceReferenceSql} from './source-reference-contract.js'
 import type pg from 'pg'
 import {hash,qi} from './source-maintenance-common.js'
 import {EPISODE_PACKET_COMPILER_VERSION} from '../../episodes/packet.js'
@@ -31,7 +31,7 @@ async function assertNoUnreviewedReferences(c:pg.Client,d:CleanupDependencies,ar
   if(table==='source_artifacts'){exclude='NOT(t.artifact_id=ANY($2::uuid[]))';ids=artifacts}
   if(table==='work_episodes'){exclude='NOT(t.episode_id=ANY($2::uuid[]))';ids=column==='evidence_manifest'?[...d.episodeIds,...episodes]:d.episodeIds}
   if(table==='memory_task_bundles'){exclude='NOT(t.bundle_id=ANY($2::uuid[]))';ids=d.bundleIds}
-  const match=matchesSourceReferenceSql('t.'+qi(column),'$1::jsonb',owner)
+  const match=matchesSourceReferenceSql(await referenceValueSql(c,table,column),'$1::jsonb',owner)
   if((await c.query(`SELECT 1 FROM ${from} WHERE ${exclude} AND ${match} LIMIT 1`,[variables,...(ids?[ids]:[])])).rowCount)throw Error(table==='memory_task_bundles'?'cleanup_exact_source_cross_session_bundle_requires_policy':'cleanup_exact_source_unknown_reference_metadata:'+path)
  }
 }

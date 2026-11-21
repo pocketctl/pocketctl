@@ -1,3 +1,4 @@
+import {snapshotMemorySql,snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
 /** One body-free native observation used by the selected reader and physical
  * fence. Never add payload or whole-event JSON here. No database function or
  * persisted ledger is created; these are static, reviewed SQL expressions. */
@@ -18,10 +19,10 @@ export const metadataInputAdmission=(e='e',r='r',explicit='TRUE',scope='p_scope'
  WHEN ${explicit} AND ${r}.source_event_id IS NOT NULL AND ${r}.installation_id=(${scope}->>'installationId')::uuid
   AND ${r}.source_kind='relay_event' AND ${r}.mapping_state='verified' AND ${r}.canonical_key=${e}.id::text
   AND ${r}.canonical_session_key=${e}.logical_source_session_id AND ${r}.session_id=${e}.logical_source_session_id AND ${r}.event_type=${e}.event_type
-  AND ${r}.hash_version='canonical-json-sha256-v1' AND ${r}.content_hash IS NOT NULL AND ${r}.source_provenance->'memory'->>'version'='1'
-  AND ${r}.source_provenance->'memory'->>'session_id'=${e}.logical_source_session_id
-  AND ${r}.classification->'memory_source'=${r}.source_provenance->'memory'
-  AND (${e}.source_header_version IS DISTINCT FROM 1 OR ${e}.source_classification->'memory_source'=${r}.source_provenance->'memory') THEN
+  AND ${r}.hash_version='canonical-json-sha256-v1' AND ${r}.content_hash IS NOT NULL AND ${snapshotMemorySql(r)}->>'version'='1'
+  AND ${snapshotMemorySql(r)}->>'session_id'=${e}.logical_source_session_id
+  AND (${r}.snapshot_format=1 OR ${r}.classification->'memory_source'=${r}.source_provenance->'memory')
+  AND (${e}.source_header_version IS DISTINCT FROM 1 OR ${e}.source_classification->'memory_source'=${snapshotMemorySql(r)}) THEN
    CASE WHEN encode(${r}.content_hash,'hex')=${e}.canonical_payload_hash THEN 'eligible'
     WHEN ${e}.canonical_payload_hash IS NULL AND ${e}.body_storage='cold' AND ${e}.body_owner_user_id=${e}.user_id AND ${e}.body_session_id IS NOT NULL
      AND EXISTS(SELECT 1 FROM public.session_archive_manifests manifest JOIN public.session_archive_chunks chunk USING(manifest_id)
@@ -49,13 +50,13 @@ export const metadataNativeFingerprint=(e='e',rowVersion=`${e}.xmin::text`,nativ
   THEN NULL::jsonb ELSE(SELECT jsonb_agg(j.source_seq::text ORDER BY j.source_seq) FROM public.extension_source_outbox j WHERE j.source_kind='canonical_event'
    AND j.source_id='event:'||${e}.id::text AND j.owner_user_id=${e}.user_id AND j.session_id=${e}.logical_source_session_id AND j.event_type=${e}.event_type)END)
  )::text,'UTF8')),'hex')`
-export const metadataRefObservation=(r='r')=>`CASE WHEN ${r}.source_event_id IS NULL THEN NULL ELSE jsonb_build_object(
+export const metadataRefObservation=(r='r',provenance=snapshotProvenanceSql(r))=>`CASE WHEN ${r}.source_event_id IS NULL THEN NULL ELSE jsonb_build_object(
  'id',${r}.source_event_id::text,'rowVersion',${r}.xmin::text,'fingerprint',encode(sha256(convert_to(jsonb_build_array('personal-ref-v1',
  ${r}.source_event_id::text,${r}.installation_id::text,${r}.origin,${r}.origin_position,${r}.session_id,${r}.turn_id,${r}.event_type,
- ${r}.occurred_at::text,${r}.classification,${r}.source_provenance,${r}.body_reclaimed_at::text,${r}.source_kind,${r}.canonical_key,
+ ${r}.occurred_at::text,${r}.classification,${provenance},${r}.body_reclaimed_at::text,${r}.source_kind,${r}.canonical_key,
  ${r}.canonical_session_key,${r}.source_version,${r}.source_sequence::text,encode(${r}.content_hash,'hex'),encode(${r}.payload_hash,'hex'),
  ${r}.mapping_state,${r}.hash_version,${r}.adapter_version,${r}.canonical_projected_at::text)::text,'UTF8')),'hex')) END`
-export const metadataRowLocator=(e='e',r='r',rowVersion=`${e}.xmin::text`,native='native',input='input_fingerprint',eventAuthority?:string)=>`jsonb_build_object(
+export const metadataRowLocator=(e='e',r='r',rowVersion=`${e}.xmin::text`,native='native',input='input_fingerprint',eventAuthority?:string,provenance=snapshotProvenanceSql(r))=>`jsonb_build_object(
  'id',${e}.id::text,'rowVersion',${rowVersion},'bodyChangeRevision',${e}.source_body_change_revision::text,
  'contentHash',COALESCE(${e}.canonical_payload_hash,encode(${r}.content_hash,'hex')),
- 'nativeFingerprint',${metadataNativeFingerprint(e,rowVersion,native,input,eventAuthority)},'ref',${metadataRefObservation(r)})`
+ 'nativeFingerprint',${metadataNativeFingerprint(e,rowVersion,native,input,eventAuthority)},'ref',${metadataRefObservation(r,provenance)})`

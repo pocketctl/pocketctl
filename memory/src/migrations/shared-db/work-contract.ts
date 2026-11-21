@@ -1,6 +1,7 @@
 /** No body columns or network calls. Only trusted Relay/Memory service roles
  * receive these functions; end-user authority remains the reader/job fence. */
 export const SHARED_SOURCE_WORK_FUNCTIONS=[
+ `ALTER TABLE shared.memory_source_work ADD COLUMN IF NOT EXISTS event_append_revision BIGINT`,
  `ALTER TABLE shared.memory_source_work ADD COLUMN IF NOT EXISTS dirty_since TIMESTAMPTZ`,
  `UPDATE shared.memory_source_work SET dirty_since=updated_at WHERE dirty_since IS NULL AND processed_revision<revision`,
  `ALTER TABLE shared.memory_source_work ALTER COLUMN dirty_since SET DEFAULT clock_timestamp()`,
@@ -39,7 +40,7 @@ export const SHARED_SOURCE_WORK_FUNCTIONS=[
       dead_at=CASE WHEN memory_source_work.last_error_code IN ('provider_result_unknown','budget_hold') THEN memory_source_work.dead_at ELSE NULL END,
       attempt=CASE WHEN memory_source_work.last_error_code IN ('provider_result_unknown','budget_hold') OR memory_source_work.lease_token IS NOT NULL THEN memory_source_work.attempt ELSE 0 END
     RETURNING revision INTO r; RETURN r; END $$`,
- `CREATE OR REPLACE FUNCTION shared.claim_memory_source_work(p_worker TEXT,p_seconds INTEGER,p_limit INTEGER)
+ `CREATE OR REPLACE FUNCTION shared.claim_memory_source_work(p_worker TEXT,p_seconds INTEGER,p_limit INTEGER,p_prefer_append BOOLEAN)
   RETURNS SETOF shared.memory_source_work LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
    IF p_worker IS NULL OR p_seconds IS NULL OR p_limit IS NULL OR length(p_worker) NOT BETWEEN 1 AND 128 OR p_seconds NOT BETWEEN 5 AND 300 OR p_limit NOT BETWEEN 1 AND 256
     THEN RAISE EXCEPTION 'invalid_source_claim'; END IF;
@@ -49,11 +50,24 @@ export const SHARED_SOURCE_WORK_FUNCTIONS=[
     FROM exhausted e WHERE w.source_kind=e.source_kind AND w.root_key=e.root_key;
    RETURN QUERY WITH candidates AS (SELECT source_kind,root_key FROM shared.memory_source_work WHERE dead_at IS NULL AND attempt<32
      AND processed_revision<revision AND available_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp())
-     ORDER BY available_at,updated_at,source_kind,root_key LIMIT p_limit FOR UPDATE SKIP LOCKED)
+     AND NOT EXISTS(SELECT 1 FROM shared.memory_projection_windows b WHERE b.root_key=memory_source_work.root_key
+       AND memory_source_work.source_kind='relay_event' AND b.last_revision=memory_source_work.revision
+       AND b.first_revision<=memory_source_work.processed_revision+1 AND b.due_at>statement_timestamp()
+       AND EXISTS(SELECT 1 FROM shared.memory_projection_policies p JOIN public.extension_installations i USING(installation_id)
+        WHERE i.owner_user_id=split_part(b.root_key,':',1)::int AND p.mode='active')
+       AND NOT EXISTS(SELECT 1 FROM public.extension_installations i JOIN shared.memory_source_modes m USING(installation_id)
+        WHERE i.owner_user_id=split_part(b.root_key,':',1)::int AND i.status='active' AND m.mode IN('shared-active','shared-shadow')
+         AND NOT EXISTS(SELECT 1 FROM shared.memory_projection_policies p WHERE p.installation_id=i.installation_id AND p.mode='active')))
+     ORDER BY CASE WHEN p_prefer_append IS NULL THEN 0
+       WHEN COALESCE(event_append_revision>processed_revision,FALSE)=p_prefer_append THEN 0 ELSE 1 END,
+       available_at,updated_at,source_kind,root_key LIMIT p_limit FOR UPDATE SKIP LOCKED)
     UPDATE shared.memory_source_work w SET lease_owner=p_worker,lease_token=gen_random_uuid(),lease_until=clock_timestamp()+make_interval(secs=>p_seconds),
      claimed_revision=w.revision,attempt=w.attempt+1,updated_at=clock_timestamp()
     FROM candidates c WHERE w.source_kind=c.source_kind AND w.root_key=c.root_key RETURNING w.*;
   END $$`,
+ `CREATE OR REPLACE FUNCTION shared.claim_memory_source_work(p_worker TEXT,p_seconds INTEGER,p_limit INTEGER)
+  RETURNS SETOF shared.memory_source_work LANGUAGE SQL SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
+   SELECT * FROM shared.claim_memory_source_work(p_worker,p_seconds,p_limit,NULL::boolean) $$`,
  `CREATE OR REPLACE FUNCTION shared.assert_memory_source_lease(p_kind TEXT,p_root TEXT,p_token UUID,p_worker TEXT,p_revision BIGINT)
   RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE found_work BOOLEAN; BEGIN
    SELECT TRUE INTO found_work FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root AND lease_token=p_token
@@ -85,7 +99,7 @@ export const SHARED_SOURCE_WORK_FUNCTIONS=[
    WHERE source_kind=p_kind AND root_key=p_root AND lease_token=p_token AND lease_owner=p_worker AND claimed_revision=p_revision
     AND lease_until>clock_timestamp() AND dead_at IS NULL;
    RETURN FOUND; END $$`,
- `REVOKE ALL ON FUNCTION shared.mark_memory_source_dirty(TEXT,TEXT),shared.claim_memory_source_work(TEXT,INTEGER,INTEGER),
+ `REVOKE ALL ON FUNCTION shared.mark_memory_source_dirty(TEXT,TEXT),shared.claim_memory_source_work(TEXT,INTEGER,INTEGER),shared.claim_memory_source_work(TEXT,INTEGER,INTEGER,BOOLEAN),
    shared.assert_memory_source_lease(TEXT,TEXT,UUID,TEXT,BIGINT),shared.ack_memory_source_work(TEXT,TEXT,UUID,TEXT,BIGINT),
    shared.fail_memory_source_work(TEXT,TEXT,UUID,TEXT,BIGINT,TEXT) FROM PUBLIC`,
  `REVOKE ALL ON FUNCTION shared.renew_memory_source_lease(TEXT,TEXT,UUID,TEXT,BIGINT,INT) FROM PUBLIC`,

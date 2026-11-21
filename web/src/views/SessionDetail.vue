@@ -835,7 +835,7 @@ import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
 import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
 import { canSendClaudeSession } from '../utils/claudeSessionControl'
 import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
-import { ContentStreamAssembler, contentStreamDisplayId } from '../utils/contentStream'
+import { ContentStreamAssembler, contentStreamDisplayId, replacedCodexToolStreamId } from '../utils/contentStream'
 import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
 import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../utils/replaySessionTrust'
 import CodexQuota from '../components/session/CodexQuota.vue'
@@ -4021,6 +4021,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
     if (streamId) {
       const update = contentStreams.accept({
         streamId,
+        replacesStreamId: replacedCodexToolStreamId(streamId, callId),
         sequence: Number(evt.chunk_seq ?? evt.payload?.chunk_seq),
         byteOffset: Number(evt.byte_offset ?? evt.payload?.byte_offset ?? 0),
         content: output ?? '',

@@ -29,8 +29,7 @@ func memoryInputProvenance(in UserMessageInput, turnID, agent string) *protocol.
 	if in.InvocationID != "" || in.RequestID == "" || in.MsgID == "" || turnID == "" || memoryProducer(agent) == "unknown" {
 		return nil
 	}
-	digest := sha256.Sum256([]byte(in.SessionID + "\x00" + in.RequestID + "\x00" + in.MsgID))
-	id := "input:" + hex.EncodeToString(digest[:])
+	id := protocol.MemoryInputEventID(in.SessionID, in.RequestID, in.MsgID)
 	return &protocol.MemorySourceProvenance{Version: 1, Producer: memoryProducer(agent), SessionID: in.SessionID, TurnID: turnID, EventID: id, Sequence: "1", InvocationID: id, SourceRole: "user", SkillState: "non_skill", LineageComplete: true, DerivedFromEventIDs: []string{}}
 }
 
@@ -109,9 +108,11 @@ func (sm *SessionManager) registerMemoryInput(in UserMessageInput, turnID, agent
 	l := sm.memoryLedger()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if p == nil {
+	// The attached native TUI can add input to this same turn without passing
+	// through the daemon. Its ACK proves this input, not later items' parents.
+	if p == nil || (agent == "codex" && nativeRoot == "") {
 		delete(l.bindings, in.SessionID)
-		return nil
+		return p
 	}
 	// Idempotent dispatch identity; do not reset a native graph on a duplicate ACK.
 	if old := l.bindings[in.SessionID]; old != nil && old.root.EventID == p.EventID && old.root.TurnID == turnID {

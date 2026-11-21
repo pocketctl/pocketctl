@@ -1,3 +1,4 @@
+import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
 import {createMemoryLogger} from '../logging.js'
 import {preparedSourceEvents} from '../sources/prepared-sources.js'
 import type pg from 'pg'
@@ -52,7 +53,7 @@ export function lifecycleSourceDigest(installationId:string,events:readonly Life
 export async function loadCurrentLifecycleSources(client:Pick<pg.PoolClient,'query'>,installationId:string,bundle:{bundle_id:string;session_id:string;task_key:string;source_digest:Buffer}){
  if(!bundle.task_key.startsWith('source:'))throw new Error('curation_source_changed')
  const turnId=bundle.task_key.slice(7)
- const events=preparedSourceEvents(client,installationId,turnId)??(await client.query<PacketSourceEvent & {body_reclaimed_at:Date|null}>(`SELECT source_event_id::text,event_type,occurred_at,payload_hash,payload,classification,source_provenance,body_reclaimed_at
+ const events=preparedSourceEvents(client,installationId,turnId)??(await client.query<PacketSourceEvent & {body_reclaimed_at:Date|null}>(`SELECT source_event_id::text,event_type,occurred_at,payload_hash,payload,classification,${snapshotProvenanceSql('source_events')} AS source_provenance,body_reclaimed_at
   FROM source_events WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY source_event_id FOR SHARE`,[installationId,bundle.session_id,turnId])).rows
  if(!events.length||events.some(e=>e.body_reclaimed_at||!canonicalPayloadHash(e.payload).equals(e.payload_hash))||!lifecycleSourceDigest(installationId,events).equals(bundle.source_digest))throw new Error('curation_source_changed')
  const admission=admitLifecycleSources({sessionId:bundle.session_id,turnId,events})

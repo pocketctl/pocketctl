@@ -37,7 +37,7 @@ export function createObservedPersonalMetadataReader(db:pg.Pool){
  const reader=createPostgresPersonalMetadataReader(queryDb,context.archive),scopes=new WeakMap<object,{scope:SourceScope;root:SourceRoot}>()
  const retain=(view:PersonalMetadataView,scope:SourceScope,root:SourceRoot)=>{scopes.set(view.token,{scope:structuredClone(scope),root:structuredClone(root)});return view}
  return {
-  async selectPage(scope:SourceScope,root:SourceRoot,request:{after?:string;through?:string;limit?:number}={}){
+  async selectPage(scope:SourceScope,root:SourceRoot,request:{after?:string;through?:string;boundRange?:boolean;limit?:number}={}){
    await protectMetadataSourceBodies(db,scope,root);return retain(await reader.selectPage(scope,root,request),scope,root)
   },
   async selectKeys(scope:SourceScope,root:SourceRoot,keys:readonly string[]){

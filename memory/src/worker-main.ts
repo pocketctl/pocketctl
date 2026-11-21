@@ -1,3 +1,4 @@
+import {SHARED_JOB_CAPACITY} from './jobs/scheduling.js'
 import {reconcileExpiredCurationRuns} from './curation/reconcile-expired.js'
 import {attachSourceMetrics} from './sources/metrics.js'
 import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
@@ -230,10 +231,11 @@ async function main(): Promise<void> {
 
     // Handlers for compile_episode/snapshot_reconcile/purge register in later
     // tasks; unknown job types reschedule with a bounded no_handler code.
-    const jobRepository = createJobRepository(pool)
+    const jobRepository = createJobRepository(pool, { compileBatchIntervalMs: config.compileBatchIntervalMs })
     jobWorker = createJobWorker({
       pool,
       jobs: jobRepository,
+      capacity: config.databaseNamespace==='memory' ? SHARED_JOB_CAPACITY : undefined,
       workerId: config.workerId,
       signal,
       leaseMs: config.jobLeaseMs,
@@ -249,7 +251,7 @@ async function main(): Promise<void> {
       },
       onDeferred:(error,job)=>{
         const fields=workerErrorFields(error,job)
-        if(fields.source_stage||String(fields.code).startsWith('source_metadata_'))logger.log('warn','source_job_deferred',fields)
+        if(fields.source_stage||fields.projection_reason||String(fields.code).startsWith('source_metadata_'))logger.log('warn','source_job_deferred',fields)
       },
       onError: loopError('jobs'),
     })
@@ -295,7 +297,15 @@ async function main(): Promise<void> {
       },
     })
     jobWorker.register('project_feed', projection.handleProjectFeed)
-    if(config.databaseNamespace==='memory')jobWorker.register('project_shared_source',createCanonicalProjectionHandler(pool,{stabilizationMs:config.episodeStabilizationMs,sourceProfile:config.sharedSourceProfile,installationAllowlist:config.installationAllowlist}),{branch:'canonical'})
+    if (config.databaseNamespace === 'memory') {
+      jobWorker.register('project_shared_source', createCanonicalProjectionHandler(pool, {
+        compactSnapshotInstallations: config.compactSnapshotInstallations,
+        pageDerivedWriteInstallations: config.pageDerivedWriteInstallations,
+        stabilizationMs: config.episodeStabilizationMs,
+        sourceProfile: config.sharedSourceProfile,
+        installationAllowlist: config.installationAllowlist,
+      }), {branch: 'canonical'})
+    }
     const episodes = createEpisodeRepository(pool, {
       lifecycleMode: config.lifecycleMode,
       stabilizationMs: config.episodeStabilizationMs,

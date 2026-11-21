@@ -61,7 +61,7 @@ suite('bounded episode source lookup',()=>{
   await pool.query('DELETE FROM memory_schema_migrations WHERE version=100')
   await applyMemorySchema(pool);await applyMemorySchema(pool)
   expect((await pool.query("SELECT 'source_events_installation_turn_event_idx'::regclass::oid AS oid")).rows[0].oid).toBe(before)
-  expect((await pool.query('SELECT max(version)::int AS schema_version FROM memory_schema_migrations')).rows[0].schema_version).toBe(100)
+  expect((await pool.query('SELECT 1 FROM memory_schema_migrations WHERE version=100')).rowCount).toBe(1)
  })
  test('membership equals the original query, preserving same-turn aliases, disjoint metadata and UUID order',async()=>{
   const {db,calls}=observe(),prepared=await prepareEpisodeSources(db,installation,'target-turn')

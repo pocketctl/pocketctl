@@ -14,7 +14,7 @@ import {randomUUID,createHash} from 'node:crypto'
 import {enableSessionColdBodies} from '../session-lifecycle/cold-schema.js'
 import {encodeArchiveChunk,decodeArchiveChunk} from '@pocketctl/session-source'
 import pg from 'pg'
-import {initDB,renameOwnedDaemonSession,ensureDaemonSessionIdentity,deleteSession,deleteUserAccount,getSessionAllEvents} from '../db.js'
+import {initDB,renameOwnedDaemonSession,ensureDaemonSessionIdentity,deleteSession,deleteUserAccount,getSessionAllEvents,getCompleteBackwardReplayPage} from '../db.js'
 import {EventMaterializer} from '../materialization/event-materializer.js'
 const connectionString=process.env.NATIVE_SESSION_ALIAS_TEST_DATABASE_URL
 const pool=new pg.Pool({connectionString,max:4,statement_timeout:10000,lock_timeout:1000})
@@ -29,6 +29,69 @@ test('known same-owner current target does not prove an arbitrary missing old id
 test('late allow-create identity helper cannot recreate a retired old route',async()=>{await rename();try{await ensureDaemonSessionIdentity(pool,'alias-old','alias-daemon',owner)}catch(error){assert.ok(['unknown_daemon_session','session_ownership_violation'].includes((error as any).code))}const rows=(await pool.query("SELECT session_id FROM sessions WHERE session_id IN('alias-old','alias-new') ORDER BY session_id")).rows;assert.deepEqual(rows,[{session_id:'alias-new'}])})
 test('real materializer retries the same exact rename after an ACK loss',async()=>{const m=new EventMaterializer({pool});const input={inboxId:101,userId:owner,daemonId:'alias-daemon',sessionId:'alias-new',eventType:'session_id_changed',payload:{type:'session_id_changed',session_id:'alias-new',old_session_id:'alias-old',event_id:'alias-exact-rename-1'},context:{hostname:'fixture'}};await m.materialize(input);const before=(await pool.query('SELECT count(*)::int AS rows FROM events')).rows[0];await m.materialize(input);assert.deepEqual((await pool.query('SELECT count(*)::int AS rows FROM events')).rows[0],before)})
 test('baseline current ownership still denies a different owner',async()=>{await assert.rejects(()=>renameOwnedDaemonSession(pool,{oldSessionId:'alias-old',newSessionId:'alias-new',daemonId:'alias-other-daemon',userId:other}),{code:'session_ownership_violation'});assert.equal((await pool.query("SELECT count(*)::int AS rows FROM sessions WHERE session_id='alias-old'")).rows[0].rows,1)})
+
+test('backward replay returns one complete long stream spanning a same-owner rename', async () => {
+  async function insertChunks(sessionId: string, first: number, last: number) {
+    const result = await pool.query(`INSERT INTO events(session_id, user_id, event_type, payload)
+      SELECT $1, $2, 'agent_text', jsonb_build_object(
+        'type', 'agent_text', 'stream_id', 'long-answer', 'chunk_seq', n, 'byte_offset', n,
+        'text', 'x', 'final', n = 1989
+      ) FROM generate_series($3::int, $4::int) n ORDER BY n RETURNING id`, [sessionId, owner, first, last])
+    return result.rows.map(row => row.id)
+  }
+
+  const before = await insertChunks('alias-old', 0, 1029)
+  await rename()
+  const after = await insertChunks('alias-new', 1030, 1989)
+  installPostgresHistoryBodyReader(pool, aliasStorage(), aliasLimits)
+  const page = await withSessionHistoryScope({ userId: owner }, () =>
+    getCompleteBackwardReplayPage(pool, 'alias-new', undefined, 1))
+  assert.deepEqual(page.events.map(row => row.id), [...before, ...after])
+  assert.equal(page.logicalCount, 1)
+  assert.equal(page.oldestId, before[0])
+  assert.equal(page.hasMore, false)
+})
+
+test.each([false, true])('adaptive replay reads an archived zero chunk with concurrent revocation=%s', async revoke => {
+  const storage = aliasStorage()
+  const zero = await publishAliasBody(pool, storage, owner, 'alias-old', 'event', {
+    type: 'agent_text', stream_id: 'mixed', chunk_seq: 0, byte_offset: 0, text: 'x',
+  })
+  await pool.query(`INSERT INTO events(session_id, user_id, event_type, payload)
+    SELECT 'alias-old', $1, 'agent_text', jsonb_build_object('type','agent_text','stream_id','mixed',
+      'chunk_seq',n,'byte_offset',n,'text','x','final',n=700)
+    FROM generate_series(1,700) n ORDER BY n`, [owner])
+  const read = storage.read.bind(storage)
+  let reads = 0
+  storage.read = async key => {
+    reads++
+    const body = await read(key)
+    if (revoke) await pool.query("INSERT INTO deleted_sessions(session_id) VALUES('alias-old')")
+    return body
+  }
+  installPostgresHistoryBodyReader(pool, storage, aliasLimits)
+  const page = withSessionHistoryScope({ userId: owner }, () =>
+    getCompleteBackwardReplayPage(pool, 'alias-old', undefined, 1))
+  if (revoke) {
+    await assert.rejects(page, /not accessible/)
+  } else {
+    const result = await page
+    assert.deepEqual(result.events.map(row => row.payload.chunk_seq), Array.from({ length: 701 }, (_, i) => i))
+    assert.equal(result.oldestId, zero.row.id)
+    assert.equal(result.hasMore, false)
+  }
+  assert.equal(reads, 1)
+})
+
+test('history rejects a current source that resolves to another session of the same owner', async () => {
+  await pool.query("INSERT INTO sessions(session_id, daemon_id, user_id) VALUES('unrelated', 'alias-daemon', $1)", [owner])
+  await pool.query(`INSERT INTO events(session_id, logical_source_session_id, user_id, event_type, payload)
+    VALUES ('alias-old', 'alias-old', $1, 'agent_text', '{}'),
+           ('alias-old', 'unrelated', $1, 'agent_text', '{}')`, [owner])
+  installPostgresHistoryBodyReader(pool, aliasStorage(), aliasLimits)
+  await assert.rejects(() => withSessionHistoryScope({ userId: owner }, () =>
+    getSessionAllEvents(pool, 'alias-old')), /session history not accessible/)
+})
 
 test('cold event rename preserves original exact manifest and codec binding',async()=>{
  await enableSessionColdBodies(pool)

@@ -10,7 +10,7 @@ import {pagedRelation} from './paged-cleanup-receipts.js'
 import type {PagedCatalog,PagedTable} from './paged-cleanup-catalog.js'
 import type {PagedRoot} from './paged-cleanup-authority.js'
 import {exactReferenceChannels} from './forward-exact-source.js'
-import {SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS,referenceChannelSql} from './source-reference-contract.js'
+import {SOURCE_REFERENCE_FIELDS,UNREVIEWED_SESSION_ARRAY_KEYS,referenceChannelSql,referenceValueSql} from './source-reference-contract.js'
 export const referenceContractHash=()=>pagedHash({channels:exactReferenceChannels(),fields:SOURCE_REFERENCE_FIELDS,unknownArrays:UNREVIEWED_SESSION_ARRAY_KEYS,version:'paged-v4-original-key-joins-typed-source-v1'})
 export function tableShape(catalog:PagedCatalog,table:string){const shape=catalog.tables.find(t=>t.table===table);if(!shape)throw Error('paged_table_unreviewed');return shape}
 export function keyProjection(shape:PagedTable,alias='t'){return `jsonb_build_object(${shape.pk.flatMap(k=>["'"+k+"'",alias+'.'+qi(k)+'::text']).join(',')})`}
@@ -150,7 +150,7 @@ async function assertPagedJsonEdges(c:pg.Client,catalog:PagedCatalog,header:Page
   // A MATERIALIZED boundary prevents the planner from rescanning JSON per ID.
   if((await c.query(`WITH declared AS MATERIALIZED(
    SELECT ${owner}::text AS owner_id,$3::jsonb->>field.key AS domain,field.value
-   FROM ${from} CROSS JOIN LATERAL jsonb_path_query(t.${qi(column)},'strict $.** ? (@.type() == "object")') object
+   FROM ${from} CROSS JOIN LATERAL jsonb_path_query(${await referenceValueSql(c,table,column)},'strict $.** ? (@.type() == "object")') object
    CROSS JOIN LATERAL jsonb_each(object) field
    WHERE $3::jsonb ? field.key AND NOT(${admitted}) ${independent}), handles AS MATERIALIZED(
    SELECT owner_id,domain,handle#>>'{}' AS value FROM declared CROSS JOIN LATERAL jsonb_path_query(declared.value,'strict $.**') handle)

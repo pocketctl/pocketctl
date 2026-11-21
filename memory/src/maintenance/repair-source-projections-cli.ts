@@ -8,7 +8,8 @@ if(args.length===0||args[0]==='--help')console.log(`Source projection repair onl
 MEMORY_SOURCE_REPAIR_URL: shared Memory database; schema memory. Exact 1..32 dead
 personal project_shared_source IDs. Plan freezes database identity, payload,
 claim epoch and current source authority. Apply refuses changed facts and retains
-checkpoints and dead-letter audit. Deploy/verify the cause fix FIRST. Compilation,
+checkpoints and dead-letter audit. Generic legacy failures additionally require a
+current seal, no checkpoint and a reproducible first page of unhashed cold records. Deploy/verify the cause fix FIRST. Compilation,
 provider_result_unknown, paid work and reference repairs require separate review.`)
 else{
  let client:pg.Client|undefined

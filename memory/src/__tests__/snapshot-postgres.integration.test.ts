@@ -743,12 +743,21 @@ describeWithDatabase('snapshot reconcile (PostgreSQL)', () => {
     `, [INSTALLATION])
     expect(episodes.rows.map(row => row.turn_id)).toEqual(['turn-1'])
 
-    const compileJobs = await pool.query<{ idempotency_key: string; state: string }>(`
-      SELECT idempotency_key, state FROM memory_jobs
+    const compileJobs = await pool.query<{ idempotency_key: string; state: string; priority:number }>(`
+      SELECT idempotency_key, state, priority FROM memory_jobs
       WHERE installation_id = $1 AND job_type = 'compile_episode' ORDER BY idempotency_key
     `, [INSTALLATION])
     expect(compileJobs.rows).toEqual([
-      { idempotency_key: 'compile_episode:turn-1', state: 'pending' },
+      { idempotency_key: 'compile_episode:turn-1', state: 'pending', priority:70 },
     ])
+    // Rebuilding the same snapshot requests another run without revoking
+    // a compiler already holding the current job's lease.
+    await pool.query(`UPDATE memory_jobs SET state='running',claimed_by='active-compiler',claim_epoch=7,
+      attempts=2,claim_expires_at=NOW()+interval '10 minutes' WHERE installation_id=$1 AND job_type='compile_episode'`,[INSTALLATION])
+    const next=await createSnapshotReconciler({pool,relay:makeRelay(script)}).reconcile(INSTALLATION)
+    expect(next.state).toBe('completed')
+    const running=await pool.query(`SELECT state,claimed_by,claim_epoch::int,attempts,claim_expires_at>NOW() AS active,last_error_code
+      FROM memory_jobs WHERE installation_id=$1 AND job_type='compile_episode'`,[INSTALLATION])
+    expect(running.rows).toEqual([{state:'running',claimed_by:'active-compiler',claim_epoch:7,attempts:2,active:true,last_error_code:'rerun_required'}])
   })
 })

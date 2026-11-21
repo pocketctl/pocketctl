@@ -72,6 +72,7 @@ export async function persistTeamSemanticPublication(pool:pg.Pool,page:TeamSeman
    if(!(await client.query("SELECT 1 FROM memory_installations WHERE installation_id=$1 AND relay_status='active' AND local_status NOT IN('purging','purged','integrity_error') FOR KEY SHARE NOWAIT",[installation])).rowCount)throw Error('team_semantic_publication_unavailable')
    if((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installation,session])).rowCount)throw Error('team_semantic_publication_unavailable')
    if(body){
+    const scheduledTurns=new Set<string>()
     for(const role of [...body.roles].sort((a,b)=>['goal','reply','outcome'].indexOf(a.identity.at(-1)!) - ['goal','reply','outcome'].indexOf(b.identity.at(-1)!))){
      const ref=refs.get(role.semanticKey)!
      const registered=(await client.query('SELECT semantic_ref_id,business_digest,registration_state FROM memory_team_semantic_groups WHERE installation_id=$1 AND semantic_key=$2 FOR UPDATE NOWAIT',[installation,role.semanticKey])).rows[0]
@@ -82,7 +83,7 @@ export async function persistTeamSemanticPublication(pool:pg.Pool,page:TeamSeman
       source_provenance,source_kind,canonical_key,canonical_session_key,source_version,content_hash,hash_version,mapping_state,adapter_version,canonical_projected_at)
       VALUES($1,$2,'canonical',$3,$4,$5,$6,$7::timestamptz,$8::jsonb,NULL,$9,$10::jsonb,'team_semantic',$11,$4,$12::jsonb,$9,'canonical-json-sha256-v1','verified','team-semantic-v1',clock_timestamp())`,
       [ref,installation,'team_semantic:'+role.semanticKey,session,turn,role.eventType,role.occurredAt,JSON.stringify(role.classification),Buffer.from(role.payloadHash,'hex'),JSON.stringify(role.provenance),role.semanticKey,JSON.stringify({normalization:'team-semantic-v1',businessDigest:role.businessDigest,originalSupportDigest:hash(roster)})])
-     if(page.disposition==='published')await projectCanonicalDerivedFact(client,installation,{sourceEventId:ref,sessionId:session,turnId:turn,eventType:role.eventType,occurredAt:role.occurredAt,payload:role.payload},stabilizationMs)
+     if(page.disposition==='published')await projectCanonicalDerivedFact(client,installation,{sourceEventId:ref,sessionId:session,turnId:turn,eventType:role.eventType,occurredAt:role.occurredAt,payload:role.payload},stabilizationMs,{scheduledTurns})
      await client.query("UPDATE memory_team_semantic_groups SET registration_state='published',semantic_payload_hash=$3 WHERE installation_id=$1 AND semantic_key=$2",[installation,role.semanticKey,Buffer.from(role.payloadHash,'hex')])
     }
    }
