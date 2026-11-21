@@ -300,6 +300,7 @@ async function main(): Promise<void> {
     if (config.databaseNamespace === 'memory') {
       jobWorker.register('project_shared_source', createCanonicalProjectionHandler(pool, {
         compactSnapshotInstallations: config.compactSnapshotInstallations,
+        projectionScanJobIds: config.projectionScanJobIds,
         projectionScanInstallations: config.projectionScanInstallations,
         pageDerivedWriteInstallations: config.pageDerivedWriteInstallations,
         stabilizationMs: config.episodeStabilizationMs,

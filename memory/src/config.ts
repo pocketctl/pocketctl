@@ -131,6 +131,7 @@ export interface MemoryConfig {
   allowedOrigins: readonly string[]
   allowedHosts: readonly string[]
   compactSnapshotInstallations: readonly string[]
+  projectionScanJobIds: readonly string[]
   projectionScanInstallations: readonly string[]
   pageDerivedWriteInstallations: readonly string[]
   installationAllowlist: readonly string[]
@@ -430,7 +431,7 @@ function parseAllowedHosts(raw: string | undefined): string[] {
   return [...new Set(items.map(item => item.toLowerCase()))]
 }
 
-function parseInstallationAllowlist(raw: string | undefined, name = 'MEMORY_INSTALLATION_ALLOWLIST'): string[] {
+function parseUuidAllowlist(raw: string | undefined, name: string): string[] {
   const items = parseStringList(name, raw, 128)
   for (const item of items) {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item)) {
@@ -479,7 +480,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
 
   const databaseUrl = env.MEMORY_DATABASE_URL ?? ''
   const databaseNamespace=parseEnum('MEMORY_DATABASE_NAMESPACE',env.MEMORY_DATABASE_NAMESPACE,['public','memory'] as const,'public')
-  const installationAllowlist=parseInstallationAllowlist(env.MEMORY_INSTALLATION_ALLOWLIST)
+  const installationAllowlist=parseUuidAllowlist(env.MEMORY_INSTALLATION_ALLOWLIST, 'MEMORY_INSTALLATION_ALLOWLIST')
   const sharedSourceProfile=env.MEMORY_SHARED_SOURCE_PROFILE
   if(sharedSourceProfile!==undefined && (sharedSourceProfile!=='personal-relay-only'||databaseNamespace!=='memory'||installationAllowlist.length<1||installationAllowlist.length>16))
     throw new ConfigError('MEMORY_SHARED_SOURCE_PROFILE requires personal-relay-only, memory namespace and 1..16 preserved installations')
@@ -679,9 +680,10 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
     ),
     allowedOrigins: parseAllowedOrigins(env.MEMORY_ALLOWED_ORIGINS),
     allowedHosts: parseAllowedHosts(env.MEMORY_ALLOWED_HOSTS),
-    compactSnapshotInstallations: parseInstallationAllowlist(env.MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS, 'MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS'),
-    projectionScanInstallations: parseInstallationAllowlist(env.MEMORY_PROJECTION_SCAN_INSTALLATIONS, 'MEMORY_PROJECTION_SCAN_INSTALLATIONS'),
-    pageDerivedWriteInstallations: parseInstallationAllowlist(env.MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS, 'MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS'),
+    compactSnapshotInstallations: parseUuidAllowlist(env.MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS, 'MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS'),
+    projectionScanJobIds: parseUuidAllowlist(env.MEMORY_PROJECTION_SCAN_JOB_IDS, 'MEMORY_PROJECTION_SCAN_JOB_IDS'),
+    projectionScanInstallations: parseUuidAllowlist(env.MEMORY_PROJECTION_SCAN_INSTALLATIONS, 'MEMORY_PROJECTION_SCAN_INSTALLATIONS'),
+    pageDerivedWriteInstallations: parseUuidAllowlist(env.MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS, 'MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS'),
     installationAllowlist,
     tombstoneHmacKeys,
   }

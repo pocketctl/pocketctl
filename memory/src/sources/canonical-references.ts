@@ -36,7 +36,7 @@ function requireExecution(pool:pg.Pool,installationId:string):void{
 }
 /** Authoritative heads are prepared before BEGIN. The opaque token prevents
  * a caller from substituting an invented hash, identity, timestamp or scope. */
-export async function prepareCanonicalReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,options:{keys?:readonly string[];cursor?:string;limit?:number;expectedVersion?:SourceVersion;scanCandidates?:boolean}={}):Promise<CanonicalReferencePage>{
+export async function prepareCanonicalReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,options:{keys?:readonly string[];cursor?:string;limit?:number;expectedVersion?:SourceVersion;scanCandidates?:boolean;candidateLimit?:number}={}):Promise<CanonicalReferencePage>{
  scope=structuredClone(scope);root=structuredClone(root);options=structuredClone(options)
  requireExecution(pool,scope.installationId)
  if(root.kind==='legacy_archive'||options.keys&&(options.cursor!==undefined||options.limit!==undefined))throw Error('canonical_reference_request_invalid')
@@ -48,7 +48,7 @@ export async function prepareCanonicalReferencePage(pool:pg.Pool,scope:SourceSco
   const current=await reader.checkCurrent(scope,root)
   if(current.state!=='current')throw new SourceUnavailableError(current.state)
   await protectSourceExecutionBodies(pool,scope,root,current.version)
-  const scan=await scanRelayProjectionPage(pool,scope,root,options.cursor,options.limit??64)
+  const scan=await scanRelayProjectionPage(pool,scope,root,options.cursor,options.limit??64,options.candidateLimit)
   if(canonicalJsonString(scan.version)!==canonicalJsonString(current.version))throw new SourceUnavailableError('changed')
   return prepareReferencePage(pool,scope,root,reader,{cursor:options.cursor,keys:scan.keys,scannedRange:scan})
  }

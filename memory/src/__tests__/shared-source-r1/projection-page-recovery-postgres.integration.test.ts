@@ -100,27 +100,37 @@ suite('PG13 canonical page recovery',()=>{
   const denied=[await f.event(source),await f.event(source)]
   const installation=(await f.install(source,'from_now')).inst.installation_id
   await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
-  const allowed=await f.event(source)
+  const allowed=[await f.event(source),await f.event(source)]
   const root={kind:'relay_event' as const,key:f.root(source)}
   const scope=(await f.runtime.query("SELECT source_scope FROM shared.enumerate_memory_source_targets('relay_event',$1,'',64)",[root.key])).rows[0].source_scope
   const fence={jobId:randomUUID(),claimedBy:'physical-page',claimEpoch:1}
   await f.runtime.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,claimed_by,claim_epoch,claim_expires_at,attempts)
    VALUES($1,$2,'project_shared_source','physical',52,'running',$3,1,now()+interval '5 minutes',10)`,[fence.jobId,installation,fence.claimedBy])
-  const prepare=(cursor?:string)=>prepareCanonicalReferencePage(f.runtime,scope,root,{limit:2,cursor,scanCandidates:true})
+  const prepare=(cursor?:string)=>prepareCanonicalReferencePage(f.runtime,scope,root,{limit:1,candidateLimit:2,cursor,scanCandidates:true})
   const progress=async()=>(await f.runtime.query("SELECT state,next_cursor FROM memory_canonical_projection_progress WHERE installation_id=$1",[installation])).rows[0]
   const first=await withSourceJobExecution(f.runtime,fence,async()=>{
    const page=await prepare()
    expect(page).toMatchObject({count:0,hasMore:true})
-   expect(JSON.parse(Buffer.from(page.nextCursor!,'base64url').toString())).toMatchObject({after:denied[1],through:allowed})
+   expect(JSON.parse(Buffer.from(page.nextCursor!,'base64url').toString())).toMatchObject({after:denied[1],through:allowed[1]})
    expect(await persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true,retryFence:fence})).toEqual([])
    return page.nextCursor!
   })
   expect(await progress()).toEqual({state:'scanning',next_cursor:first})
   expect((await f.runtime.query('SELECT attempts FROM memory_jobs WHERE job_id=$1',[fence.jobId])).rows[0].attempts).toBe(1)
-  await withSourceJobExecution(f.runtime,fence,async()=>{
+  const second=await withSourceJobExecution(f.runtime,fence,async()=>{
    const page=await prepare(first)
+   expect(page).toMatchObject({count:1,hasMore:true})
+   expect(JSON.parse(Buffer.from(page.nextCursor!,'base64url').toString())).toMatchObject({after:allowed[0],through:allowed[1],writeLimited:true})
+   expect((await persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true})).map(r=>r.canonicalKey)).toEqual([allowed[0]])
+   return page.nextCursor!
+  })
+  expect(await progress()).toEqual({state:'scanning',next_cursor:second})
+  await withSourceJobExecution(f.runtime,fence,async()=>{
+   expect(await prepare(second)).toMatchObject({count:1,hasMore:false})
+   // The regular reader must be able to take over a write-limited checkpoint.
+   const page=await prepareCanonicalReferencePage(f.runtime,scope,root,{limit:2,cursor:second})
    expect(page).toMatchObject({count:1,hasMore:false})
-   expect((await persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true})).map(r=>r.canonicalKey)).toEqual([allowed])
+   expect((await persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true})).map(r=>r.canonicalKey)).toEqual([allowed[1]])
   })
   expect(await progress()).toEqual({state:'ready',next_cursor:null})
   await f.event(source)

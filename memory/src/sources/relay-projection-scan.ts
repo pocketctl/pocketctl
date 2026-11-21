@@ -14,24 +14,30 @@ const decimal = (value: unknown): value is string => typeof value === 'string'
 
 /** The v1 cursor still names a fully inspected prefix. Older workers can
  * resume it with the ordinary reader under the same exact source version. */
-export async function scanRelayProjectionPage(pool: pg.Pool, scope: SourceScope, root: SourceRoot, cursor: string | undefined, limit: number) {
+export async function scanRelayProjectionPage(pool: pg.Pool, scope: SourceScope, root: SourceRoot, cursor: string | undefined, limit: number, candidateLimit = limit) {
+  if (!Number.isInteger(limit) || !Number.isInteger(candidateLimit) || limit < 1 || candidateLimit < limit || candidateLimit > 256) {
+    throw new SourceUnavailableError('source_metadata_conflict')
+  }
   const scopeHash = canonicalPayloadHash({scope, root}).toString('hex')
-  let prior: {after: string; version: SourceVersion; through?: string} | undefined
+  let prior: {after: string; version: SourceVersion; through?: string; writeLimited?: true} | undefined
   if (cursor !== undefined) {
     try {
       if (cursor.length > 8192) throw Error()
       const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
       if (decoded.v !== 1 || decoded.scope !== scopeHash || !decimal(decoded.after)
         || !['content','authorization','storage'].every(k => decimal(decoded.version?.[k]))
+        || (decoded.writeLimited !== undefined && decoded.writeLimited !== true)
         || (decoded.through !== undefined && (!decimal(decoded.through) || BigInt(decoded.after) > BigInt(decoded.through)))) throw Error()
       prior = decoded
     } catch { throw new SourceUnavailableError('cursor_scope_mismatch') }
   }
+  // On dense stretches, avoid repeatedly inspecting far beyond the write budget.
+  const window = prior?.writeLimited ? limit : candidateLimit
   let scan: Scan
   try {
     const result = await boundedSourceQuery(pool,
       'SELECT shared.scan_memory_relay_projection_page($1::jsonb,$2,$3::bigint,$4) AS scan',
-      [scope, root.key, prior?.after ?? null, limit])
+      [scope, root.key, prior?.after ?? null, window])
     scan = result.rows[0].scan
   } catch (error) {
     const code = (error as {code?: string}).code
@@ -43,7 +49,7 @@ export async function scanRelayProjectionPage(pool: pg.Pool, scope: SourceScope,
     throw new SourceUnavailableError('source_store_unavailable')
   }
   if (!scan?.version || ![scan.version.content, scan.version.authorization, scan.version.storage].every(decimal)
-    || !decimal(scan.through) || !Array.isArray(scan.keys) || scan.keys.length > limit) {
+    || !decimal(scan.through) || !Array.isArray(scan.keys) || scan.keys.length > window) {
     throw new SourceUnavailableError('source_metadata_conflict')
   }
   if (prior && (canonicalJsonString(scan.version) !== canonicalJsonString(prior.version)
@@ -63,8 +69,13 @@ export async function scanRelayProjectionPage(pool: pg.Pool, scope: SourceScope,
     if (!decimal(key) || BigInt(key) <= previous || BigInt(key) > last) throw new SourceUnavailableError('source_metadata_conflict')
     previous = BigInt(key)
   }
-  const nextCursor = last < upper
-    ? Buffer.from(canonicalJsonString({v:1, scope:scopeHash, after:scan.scannedThrough, through:scan.through, version:scan.version})).toString('base64url')
+  // When a physical window contains more admitted keys than the write budget,
+  // resume after the last key we will persist so the next claim sees the rest.
+  const keys = scan.keys.slice(0, limit)
+  const checkpoint = scan.keys.length > limit ? keys[keys.length - 1] : scan.scannedThrough
+  const writeLimited = candidateLimit > limit && (scan.keys.length > limit || (prior?.writeLimited && keys.length === limit))
+  const nextCursor = BigInt(checkpoint) < upper
+    ? Buffer.from(canonicalJsonString({v:1, scope:scopeHash, after:checkpoint, through:scan.through, version:scan.version, ...(writeLimited ? {writeLimited:true} : {})})).toString('base64url')
     : undefined
-  return {keys: scan.keys, version: scan.version, nextCursor}
+  return {keys, version: scan.version, nextCursor}
 }

@@ -172,3 +172,17 @@ test('only the selected installation enters candidate paging on ordinary fallbac
  }
  expect(io.genericPrepare.mock.calls.map(c=>c[3].scanCandidates)).toEqual([false,false,true])
 })
+
+test('a selected job scans a wider physical window while its write budget stays at one',async()=>{
+ const progress={state:'scanning',source_version:{content:'1'},next_cursor:'durable-cursor'}
+ for(const id of ['selected','other']){
+  const f=fixture([progress])
+  f.job.job_id=id
+  f.job.payload.projection_budget_step=8
+  await expect(createCanonicalProjectionHandler(f.pool,{projectionScanJobIds:['selected']})(f.job,f.controller.signal,{fence:{} as any})).rejects.toBeInstanceOf(JobDeferredError)
+ }
+ expect(io.genericPrepare.mock.calls.map(c=>c[3])).toEqual([
+  {cursor:'durable-cursor',limit:1,scanCandidates:true,candidateLimit:64},
+  {cursor:'durable-cursor',limit:1,scanCandidates:false},
+ ])
+})

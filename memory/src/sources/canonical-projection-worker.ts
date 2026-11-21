@@ -16,7 +16,7 @@ import {prepareMetadataScope} from './source-projection-admission.js'
 /** Each durable page commits its cursor, refs and derived facts together.
  * Personal metadata may continue a small successful-page burst; generic,
  * Team and shadow work retain their existing single-page admission. */
-export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectionScanInstallations?:readonly string[];compactSnapshotInstallations?:readonly string[];pageDerivedWriteInstallations?:readonly string[];pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
+export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectionScanJobIds?:readonly string[];projectionScanInstallations?:readonly string[];compactSnapshotInstallations?:readonly string[];pageDerivedWriteInstallations?:readonly string[];pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
  const configuredSize=options.pageSize??64,deferMs=options.deferMs??1000
  if(!Number.isSafeInteger(configuredSize)||configuredSize<1||configuredSize>256||!Number.isSafeInteger(deferMs)||deferMs<0||deferMs>60000)throw Error('canonical_projection_options_invalid')
  return async(job,signal,ctx)=>{
@@ -162,8 +162,10 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectio
   // under an exact full-root version. Start it from the beginning when the
   // selected reader could not prove its page.
   const cursorForOrdinary=!personal||ordinaryContinuation?progress?.next_cursor??undefined:undefined
-  const scanCandidates=personal&&options.projectionScanInstallations?.includes(scope.installationId)===true
-  const readOrdinaryPage=(cursor?:string)=>observeProjectionStep(pool,'select_page',()=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor,scanCandidates}),{size:pageSize,historical:historicalCompile})
+  const scanJob=personal && options.projectionScanJobIds?.includes(job.job_id)===true
+  const scanCandidates=scanJob || (personal && options.projectionScanInstallations?.includes(scope.installationId)===true)
+  const readOrdinaryPage=(cursor?:string)=>observeProjectionStep(pool,'select_page',()=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor,scanCandidates,
+   candidateLimit:scanJob?Math.max(64,pageSize):undefined}),{size:pageSize,historical:historicalCompile})
   const page=await readOrdinaryPage(cursorForOrdinary).catch(error=>{
    // A newer source revision invalidates the old cursor. Restart enumeration
    // under the new authority snapshot; existing source UUIDs are reused.
