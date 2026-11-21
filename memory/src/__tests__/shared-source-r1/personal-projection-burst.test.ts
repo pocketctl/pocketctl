@@ -139,7 +139,7 @@ test('a fresh claim reduces the page after a transaction budget overrun and reta
  const progress={state:'scanning',source_version:{content:'1'},next_cursor:'durable-cursor'}
  const f=fixture([progress]);f.job.last_error_code='canonical_reference_budget_exceeded';f.job.attempts=3
  await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
- expect(io.genericPrepare.mock.calls[0][3]).toEqual({limit:16,cursor:'durable-cursor'})
+ expect(io.genericPrepare.mock.calls[0][3]).toEqual({limit:16,cursor:'durable-cursor',scanCandidates:false})
  expect(io.load.mock.calls[0][3]).toBe(scan)
 })
 
@@ -148,7 +148,7 @@ test('missing page hash restarts through the version-locked ordinary reader', as
  io.prepare.mockRejectedValueOnce(new SourceUnavailableError('body_hash_unavailable'))
  io.genericPrepare.mockResolvedValueOnce({token:{}, count:1, hasMore:false})
  await f.run()
- expect(io.genericPrepare).toHaveBeenCalledWith(f.pool, scope, root, {limit:64, cursor:undefined})
+ expect(io.genericPrepare).toHaveBeenCalledWith(f.pool, scope, root, {limit:64, cursor:undefined,scanCandidates:false})
  expect(io.genericPersist).toHaveBeenCalledOnce()
  expect(io.persist).not.toHaveBeenCalled()
 })
@@ -161,4 +161,14 @@ test('an unavailable or corrupt archive cannot advance the projection checkpoint
  await expect(f.run()).rejects.toBe(denied)
  expect(io.genericPersist).not.toHaveBeenCalled()
  expect(io.persist).not.toHaveBeenCalled()
+})
+
+test('only the selected installation enters candidate paging on ordinary fallback',async()=>{
+ const f=fixture()
+ for(const allowlist of [[],[scan],[inst]]){
+  io.prepare.mockRejectedValueOnce(new SourceUnavailableError('source_metadata_proof_unavailable'))
+  io.genericPrepare.mockResolvedValueOnce({token:{},count:0,hasMore:false})
+  await createCanonicalProjectionHandler(f.pool,{projectionScanInstallations:allowlist})(f.job,f.controller.signal,{fence:{} as any})
+ }
+ expect(io.genericPrepare.mock.calls.map(c=>c[3].scanCandidates)).toEqual([false,false,true])
 })

@@ -8,33 +8,49 @@ import {computeSourceDigest,type PacketSourceEvent} from '../episodes/packet.js'
 import type {CurationPolicy} from './policy.js'
 import {canonicalPayloadHash} from '../inbox/canonical-json.js'
 const admissionLogger=createMemoryLogger('info')
-/** Stage an admitted, bounded source revision. No model or Claim write here.
- * Caller holds session/installation purge locks and the policy owner fence. */
-export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,input:{installationId:string;sessionId:string;turnId:string;events:PacketSourceEvent[]},policy:CurationPolicy){
- const admitted=admitLifecycleSources(input)
- // Evaluated counts, not committed output; no source identities or content.
- admissionLogger.log('info','source_admission_evaluated',{allowed:admitted.events.length,excluded:input.events.length-admitted.events.length,...admitted.diagnostics})
- const digest=lifecycleSourceDigest(input.installationId,input.events)
- const unknown=admitted.receipts.some(r=>!r.admission.allowed&&r.admission.reason==='provenance_unknown')
- if(!admitted.events.length){
+type LifecycleInput = {installationId:string;sessionId:string;turnId:string;events:PacketSourceEvent[]}
+
+/** Pure calculation over a complete authenticated input. Keep only the facts
+ * needed for publication. The writer still fences the input and policy. */
+export function prepareLifecycleTurn(input:LifecycleInput){
+ const admission=admitLifecycleSources(input)
+ const members=admission.events.map(event=>({
+  id:event.source_event_id,hash:event.payload_hash,sequence:(event.source_provenance!.memory as {sequence:string}).sequence,
+ }))
+ return {
+  installationId:input.installationId,sessionId:input.sessionId,turnId:input.turnId,
+  digest:lifecycleSourceDigest(input.installationId,input.events),members,
+  watermark:members.reduce((max,member)=>{const seq=BigInt(member.sequence);return seq>max?seq:max},0n).toString(),
+  excluded:input.events.length-members.length,diagnostics:admission.diagnostics,
+  unknown:admission.receipts.some(r=>!r.admission.allowed&&r.admission.reason==='provenance_unknown'),
+ }
+}
+
+export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,input:LifecycleInput,policy:CurationPolicy){
+ return stagePreparedLifecycleTurn(client,prepareLifecycleTurn(input),policy)
+}
+
+/** Caller holds session/installation purge locks and the current policy fence. */
+export async function stagePreparedLifecycleTurn(client:Pick<pg.PoolClient,'query'>,input:ReturnType<typeof prepareLifecycleTurn>,policy:CurationPolicy){
+ const {digest,members,unknown}=input
+ admissionLogger.log('info','source_admission_evaluated',{allowed:members.length,excluded:input.excluded,...input.diagnostics})
+ if(!members.length){
   await client.query(`INSERT INTO memory_source_processing_receipts(installation_id,session_id,turn_id,source_digest,policy_version,disposition,allowed_count,excluded_count,complete)
-   VALUES($1,$2,$3,$4,$5,$6,0,$7,$8) ON CONFLICT DO NOTHING`,[input.installationId,input.sessionId,input.turnId,digest,LIFECYCLE_SOURCE_POLICY,unknown?'provenance_unknown':'skipped_policy',input.events.length,!unknown])
+   VALUES($1,$2,$3,$4,$5,$6,0,$7,$8) ON CONFLICT DO NOTHING`,[input.installationId,input.sessionId,input.turnId,digest,LIFECYCLE_SOURCE_POLICY,unknown?'provenance_unknown':'skipped_policy',input.excluded,!unknown])
   return
  }
  const changed=(await client.query(`INSERT INTO memory_task_bundles(installation_id,session_id,task_key,source_digest,watermark)
  VALUES($1,$2,$3,$4,$5) ON CONFLICT(installation_id,session_id,task_key) DO UPDATE SET
  source_digest=EXCLUDED.source_digest,watermark=EXCLUDED.watermark,revision=memory_task_bundles.revision+1,state='pending',updated_at=clock_timestamp()
  WHERE memory_task_bundles.source_digest<>EXCLUDED.source_digest AND memory_task_bundles.body_state='present'
- RETURNING bundle_id::text,revision`,[input.installationId,input.sessionId,`source:${input.turnId}`,digest,
- admitted.events.reduce((m,e)=>{const n=BigInt((e.source_provenance!.memory as any).sequence);return n>m?n:m},0n).toString()])).rows[0]
+ RETURNING bundle_id::text,revision`,[input.installationId,input.sessionId,`source:${input.turnId}`,digest,input.watermark])).rows[0]
  if(!changed)return
  await client.query('DELETE FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[input.installationId,changed.bundle_id])
  // Store the complete admitted set in the caller's existing transaction.
  // Unnest avoids holding the source fence across a round trip per event.
  await client.query(`INSERT INTO memory_task_bundle_sources(installation_id,bundle_id,source_event_id,source_digest,source_sequence)
   SELECT $1,$2,member.id,member.digest,member.seq FROM unnest($3::uuid[],$4::bytea[],$5::bigint[]) AS member(id,digest,seq)`,
-  [input.installationId,changed.bundle_id,admitted.events.map(event=>event.source_event_id),
-   admitted.events.map(event=>event.payload_hash),admitted.events.map(event=>(event.source_provenance!.memory as {sequence:string}).sequence)])
+  [input.installationId,changed.bundle_id,members.map(m=>m.id),members.map(m=>m.hash),members.map(m=>m.sequence)])
  await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
  VALUES(gen_random_uuid(),$1,'consolidate_task',$2,84,$3::jsonb) ON CONFLICT DO NOTHING`,[input.installationId,`consolidate:${changed.bundle_id}:${changed.revision}`,
  JSON.stringify({bundle_id:changed.bundle_id,bundle_revision:Number(changed.revision),mode:policy.mode,policy_revision:policy.revision,authorization_epoch:policy.authorizationEpoch})])

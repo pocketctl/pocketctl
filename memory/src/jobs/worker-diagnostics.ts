@@ -8,14 +8,16 @@ const KNOWN_CODES = new Set(['projection_source_changed','inbox_body_unavailable
  'projection_commit_outcome_unknown','canonical_reference_budget_exceeded','canonical_reference_write_timeout','canonical_reference_unavailable','canonical_reference_wave_invalid','canonical_reference_metadata_limit',
  'canonical_reference_provenance_invalid','canonical_reference_timestamp_required','canonical_reference_payload_invalid','canonical_projection_aborted',
  'canonical_reference_mapping_required','canonical_reference_busy','canonical_reference_changed','canonical_reference_conflict','canonical_reference_cursor_changed',
+ 'source_reference_limit','source_reference_byte_limit','source_reference_missing','source_reference_unproven','source_reference_reclaimed','source_reference_scope_unavailable','source_reference_hash_mismatch','source_reference_changed',
  'source_execution_generation_changed','source_execution_required','source_shadow_provider_forbidden','source_execution_scope_mismatch','source_executions_not_drained','source_execution_requires_read_committed','source_provider_effect_unrecorded'])
 const COMMIT_CODES=new Set(['source_metadata_commit_outcome_unknown','source_metadata_commit_acknowledged','source_metadata_transaction_unavailable'])
-const SOURCE_CODES=new Set(['source_store_unavailable','source_store_timeout','source_store_busy','processing_pin_expired_or_unavailable','source_metadata_proof_unavailable','source_reference_unproven','body_hash_unavailable','archive_unconfigured','archive_binding_invalid','archive_namespace_mismatch','archive_io_limit','archive_unavailable','source_body_reclaimed','source_metadata_conflict','body_hash_mismatch','body_set_mismatch','changed','revoked','deleted'])
+const SOURCE_CODES=new Set(['source_store_unavailable','source_store_timeout','source_store_busy','processing_pin_expired_or_unavailable','source_metadata_proof_unavailable','source_reference_unproven','body_hash_unavailable','archive_unconfigured','archive_binding_invalid','archive_namespace_mismatch','archive_io_limit','archive_unavailable','source_body_reclaimed','source_metadata_conflict','body_hash_mismatch','body_set_mismatch','source_input_start_unproven','body_byte_limit','changed','revoked','deleted'])
 const ERROR_NAMES = new Set(['Error','TypeError','RangeError','SyntaxError','AbortError'])
 const SQLSTATES = new Set(['40001','40P01','55P03','57014','23502','23503','23505','23514','08001','08003','08006','53300','53400','57P01','42P01','42703'])
 
 /** Fixed diagnostic vocabulary only; arbitrary messages and database details never escape. */
 export function workerErrorCode(error: unknown): string {
+  if(error instanceof SourceUnavailableError&&error.code==='source_store_timeout'&&projectionErrorFields(error).projection_stage==='select_page')return 'projection_read_page_timeout'
   if(error instanceof SourceUnavailableError&&SOURCE_CODES.has(error.code))return error.code
   if (error instanceof RelayRequestError) return error.code
   if (error instanceof JobTerminalError) return /^[a-z][a-z0-9_]{0,48}$/.test(error.errorCode)

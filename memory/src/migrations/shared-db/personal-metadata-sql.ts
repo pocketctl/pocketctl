@@ -60,3 +60,11 @@ export const metadataRowLocator=(e='e',r='r',rowVersion=`${e}.xmin::text`,native
  'id',${e}.id::text,'rowVersion',${rowVersion},'bodyChangeRevision',${e}.source_body_change_revision::text,
  'contentHash',COALESCE(${e}.canonical_payload_hash,encode(${r}.content_hash,'hex')),
  'nativeFingerprint',${metadataNativeFingerprint(e,rowVersion,native,input,eventAuthority)},'ref',${metadataRefObservation(r,provenance)})`
+
+// Only the reviewed native implementation can be factored into its session
+// result and per-event fields. A Relay-only policy upgrade takes effect at once.
+export const reviewedNativeEventAuthoritySql = `SELECT l.lanname='plpgsql' AND NOT p.prosecdef AND NOT p.proisstrict AND p.provolatile='s'
+       AND p.proconfig=ARRAY['search_path=pg_catalog, public'] AND has_function_privilege(p.oid,'EXECUTE')
+       AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='946a586d8f9b86a194ff890ffff986b3061d543b621a93bcd2c5762db9e7ad67'
+       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+       WHERE p.oid='public.native_event_authority(bigint,integer)'::regprocedure`

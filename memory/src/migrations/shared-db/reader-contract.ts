@@ -1,5 +1,5 @@
 import {snapshotProvenanceSql} from '../../sources/snapshot-provenance.js'
-import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadataInputAdmission} from './personal-metadata-sql.js'
+import {reviewedNativeEventAuthoritySql,metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadataInputAdmission} from './personal-metadata-sql.js'
 // Scope usage is separate from canonical custody. Enumerating eligible input
 // must skip expired use before LIMIT; explicit keys remain denied references.
 const sourceTurn=(e:string,r:string)=>`COALESCE(${r}.turn_id,${e}.payload->>'turn_id',${e}.payload->>'source_turn_id',CASE WHEN to_jsonb(${e})->>'source_header_version'='1' THEN to_jsonb(${e})->'source_classification'->'memory_source'->>'turn_id' END)`
@@ -11,6 +11,14 @@ const usageDenied=relaySourceUsageDeniedSql
 const legacySelectionFallback=(e:string,r:string)=>`CASE WHEN ${e}.source_header_version IS NULL AND ${e}.body_storage='hot' AND ${e}.payload IS NOT NULL THEN
  CASE WHEN (${e}.canonical_payload_hash IS NULL AND ${r}.content_hash IS NULL) OR ${metadataUsageDenied(e,r)} THEN NOT(${usageDenied(e,r)}) ELSE FALSE END
  ELSE FALSE END`
+// For selected keys in exactly the root's logical session the native session
+// query has already run with identical arguments in this statement snapshot.
+const sameNativeSession=(e:string)=>`reuse_session_authority AND native->>'state'='current'
+ AND NOT ${e}.owner_retired AND ${e}.user_id=(p_scope->>'principalUserId')::int
+ AND ${e}.logical_source_session_id=substr(p_root,strpos(p_root,':')+1) AND ${e}.session_id=native->>'sessionId'`
+const selectedEventAuthority=(e:string)=>`CASE WHEN ${sameNativeSession(e)}
+ THEN native||jsonb_build_object('eventId',${e}.id::text,'logicalSessionId',${e}.logical_source_session_id,'ownerRetired',FALSE)
+ ELSE public.native_event_authority(${e}.id,${e}.user_id) END`
 const personalAuthority=(retained:boolean)=>`CREATE OR REPLACE FUNCTION shared.${retained?'memory_retained_relay_authority':'memory_relay_source_authority'}(p_scope JSONB,p_kind TEXT,p_root TEXT)
   RETURNS TABLE(state TEXT,content_revision TEXT,authorization_revision TEXT,storage_revision TEXT)
   LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE i RECORD;s RECORD;w RECORD;m RECORD;owner_id INT;session_key TEXT;session_found BOOLEAN;native JSONB;session_ids TEXT[];BEGIN
@@ -82,7 +90,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
  personalAuthority(true),
  `REVOKE ALL ON FUNCTION shared.memory_retained_relay_authority(JSONB,TEXT,TEXT) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.read_memory_relay_sources(p_scope JSONB,p_root TEXT,p_after BIGINT,p_limit INT,p_ids BIGINT[])
-  RETURNS SETOF JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE a RECORD;native JSONB;bounded_mode BOOLEAN;selected_mode BOOLEAN;keyed_mode BOOLEAN;metadata_only BOOLEAN;input_fingerprint TEXT;observation JSONB;BEGIN
+  RETURNS SETOF JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE a RECORD;native JSONB;bounded_mode BOOLEAN;selected_mode BOOLEAN;keyed_mode BOOLEAN;metadata_only BOOLEAN;input_fingerprint TEXT;observation JSONB;reuse_session_authority BOOLEAN:=FALSE;BEGIN
    bounded_mode=COALESCE(p_ids[1]=-3,FALSE);
    selected_mode=COALESCE(p_ids IS NOT NULL AND p_ids[1] IN(-1,-2,-3),FALSE);metadata_only=selected_mode AND p_ids[1]=-2;keyed_mode=selected_mode AND NOT bounded_mode AND cardinality(p_ids)>1;
    IF p_ids IS NOT NULL AND NOT selected_mode AND EXISTS(SELECT 1 FROM unnest(p_ids) k WHERE k<0) THEN RAISE EXCEPTION 'invalid_source_metadata_request';END IF;
@@ -98,6 +106,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
    SELECT * INTO a FROM shared.memory_relay_source_authority(p_scope,'relay_event',p_root);
    IF a.state<>'current' THEN RAISE EXCEPTION 'source_%',a.state;END IF;
    native=public.native_session_authority(substr(p_root,strpos(p_root,':')+1),(p_scope->>'principalUserId')::int,NULL);
+   IF keyed_mode OR NOT selected_mode AND p_ids IS NOT NULL THEN reuse_session_authority=(${reviewedNativeEventAuthoritySql});END IF;
    IF selected_mode THEN
     IF NOT EXISTS(SELECT 1 FROM shared.memory_source_contract WHERE capture_version=2 AND header_version=1) THEN RAISE EXCEPTION 'source_metadata_proof_unavailable';END IF;
     input_fingerprint=${metadataInputFingerprint()};
@@ -106,7 +115,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       SELECT e.id,${metadataRowLocator('e','r','e.xmin::text','native','input_fingerprint','event_authority.value')} AS value,${metadataInputAdmission()} AS admission FROM public.events e
       LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid AND r.source_kind='relay_event'
        AND r.canonical_key=e.id::text AND r.mapping_state='verified'
-      CROSS JOIN LATERAL(SELECT public.native_event_authority(e.id,e.user_id) AS value OFFSET 0) event_authority
+      CROSS JOIN LATERAL(SELECT ${selectedEventAuthority('e')} AS value OFFSET 0) event_authority
       WHERE e.id=ANY(p_ids[2:]) AND e.session_id=native->>'sessionId' AND e.user_id=(p_scope->>'principalUserId')::int
        AND NOT e.owner_retired AND e.effect_status IN('none','completed') AND event_authority.value->>'state'='current'
        AND NOT(${metadataUsageDenied()})),observed AS(SELECT id,value,admission FROM admitted WHERE admission<>'denied' ORDER BY id LIMIT p_limit)
@@ -128,7 +137,7 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       AND eligible_ref.source_kind='relay_event' AND eligible_ref.canonical_key=event_row.id::text AND eligible_ref.mapping_state='verified'
      CROSS JOIN LATERAL(SELECT ${metadataInputAdmission('event_row','eligible_ref','keyed_mode')} AS value OFFSET 0)input_admission
      CROSS JOIN LATERAL(SELECT CASE WHEN NOT keyed_mode THEN ${legacySelectionFallback('event_row','eligible_ref')} ELSE FALSE END AS required OFFSET 0)legacy_fallback
-     CROSS JOIN LATERAL(SELECT public.native_event_authority(event_row.id,event_row.user_id) AS value OFFSET 0) event_authority
+     CROSS JOIN LATERAL(SELECT ${selectedEventAuthority('event_row')} AS value OFFSET 0) event_authority
      WHERE NOT event_row.owner_retired AND event_row.user_id=(p_scope->>'principalUserId')::int
       AND event_authority.value->>'state'='current'
       AND event_row.effect_status IN('none','completed')
@@ -177,7 +186,8 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
       CROSS JOIN LATERAL(SELECT * FROM public.events WHERE id=ordered.id OFFSET 0)e
       LEFT JOIN memory.source_events eligible_ref ON eligible_ref.installation_id=(p_scope->>'installationId')::uuid
        AND eligible_ref.source_kind='relay_event' AND eligible_ref.canonical_key=e.id::text AND eligible_ref.mapping_state='verified'
-      WHERE NOT e.owner_retired AND public.native_event_authority(e.id,(p_scope->>'principalUserId')::int)->>'state'='current'
+      WHERE NOT e.owner_retired AND CASE WHEN ${sameNativeSession('e')} THEN TRUE
+       ELSE public.native_event_authority(e.id,(p_scope->>'principalUserId')::int)->>'state'='current' END
        AND e.user_id=(p_scope->>'principalUserId')::int AND e.session_id=native->>'sessionId'
        AND shared.memory_relay_input_admitted(p_scope,e.id,p_ids IS NOT NULL)
        AND e.effect_status IN('none','completed') AND (p_after IS NULL OR e.id>p_after) AND (p_ids IS NULL OR e.id=ANY(p_ids))
@@ -201,6 +211,34 @@ export const SHARED_SOURCE_READER_FUNCTIONS=[
     FROM page e LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified'
     ORDER BY e.id;
   END $$`,
+ `CREATE OR REPLACE FUNCTION shared.scan_memory_relay_projection_page(p_scope JSONB,p_root TEXT,p_after BIGINT,p_limit INT)
+  RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
+  DECLARE authority RECORD; native JSONB; upper_id BIGINT; observation JSONB;
+  BEGIN
+   IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 256 OR p_after < 0 THEN RAISE EXCEPTION 'source_page_limit';END IF;
+   SELECT * INTO authority FROM shared.memory_relay_source_authority(p_scope,'relay_event',p_root);
+   IF authority.state IS DISTINCT FROM 'current' THEN RAISE EXCEPTION 'source_%',authority.state;END IF;
+   native=public.native_session_authority(substr(p_root,strpos(p_root,':')+1),(p_scope->>'principalUserId')::int,NULL);
+   IF native->>'state' IS DISTINCT FROM 'current' THEN RAISE EXCEPTION 'source_changed';END IF;
+   SELECT COALESCE(max(id),0) INTO upper_id FROM public.events WHERE session_id=native->>'sessionId';
+   WITH candidates AS MATERIALIZED(
+    SELECT id FROM public.events WHERE session_id=native->>'sessionId' AND id>COALESCE(p_after,0) AND id<=upper_id
+    ORDER BY id LIMIT p_limit
+   ), eligible AS (
+    SELECT e.id FROM candidates c
+    CROSS JOIN LATERAL(SELECT id,user_id,session_id,logical_source_session_id,owner_retired,effect_status,payload,
+      source_header_version,source_classification FROM public.events WHERE id=c.id OFFSET 0)e
+    LEFT JOIN memory.source_events r ON r.installation_id=(p_scope->>'installationId')::uuid
+     AND r.source_kind='relay_event' AND r.canonical_key=e.id::text AND r.mapping_state='verified'
+    WHERE CASE WHEN NOT e.owner_retired AND e.user_id=(p_scope->>'principalUserId')::int AND e.effect_status IN('none','completed')
+     THEN shared.memory_relay_input_admitted(p_scope,e.id,FALSE) AND NOT(${usageDenied('e','r')})
+     ELSE FALSE END)
+   SELECT jsonb_build_object('version',jsonb_build_object('content',authority.content_revision,'authorization',authority.authorization_revision,'storage',authority.storage_revision),
+    'through',upper_id::text,'scannedThrough',(SELECT max(id)::text FROM candidates),
+    'keys',COALESCE((SELECT jsonb_agg(id::text ORDER BY id) FROM eligible),'[]'::jsonb)) INTO observation;
+   RETURN observation;
+  END $$`,
+ `REVOKE ALL ON FUNCTION shared.scan_memory_relay_projection_page(JSONB,TEXT,BIGINT,INT) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.read_memory_relay_archive(p_scope JSONB,p_root TEXT,p_manifest UUID,p_ordinal INT)
   RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE a RECORD;result JSONB;native JSONB;BEGIN
    SELECT * INTO a FROM shared.memory_relay_source_authority(p_scope,'relay_event',p_root);

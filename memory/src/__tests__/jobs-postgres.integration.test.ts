@@ -116,6 +116,18 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     expect((await claim('a')).map(job=>job.idempotency_key)).toEqual(['older'])
   })
 
+  test('a deterministic compile limit stops the same input but preserves a newer turn revision',async()=>{
+    await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:'oversized'})
+    const run=async(dirty:boolean)=>{
+      const [claim]=await jobs.claimJobs({workerId:'compiler',limit:1,leaseMs:60000})
+      if(dirty)await pool.query("UPDATE memory_jobs SET last_error_code='rerun_required' WHERE job_id=$1",[claim.job_id])
+      return jobs.rescheduleJob({jobId:claim.job_id,claimedBy:'compiler',claimEpoch:claim.claim_epoch,errorCode:'source_reference_limit'})
+    }
+    expect(await run(true)).toBe(false)
+    expect(await run(false)).toBe(true)
+    expect((await pool.query("SELECT attempts,error_code FROM memory_dead_letters")).rows).toEqual([{attempts:1,error_code:'source_reference_limit'}])
+  })
+
   test('budget deferral preserves failure attempts and gates the next claim', async () => {
     await jobs.enqueueJob({ installationId: INSTALLATION, jobType: 'extract_candidates', idempotencyKey: 'budget-wait' })
     await pool.query("UPDATE memory_jobs SET attempts=11 WHERE idempotency_key='budget-wait'")

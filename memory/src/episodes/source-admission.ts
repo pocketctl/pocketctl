@@ -36,7 +36,11 @@ export function admitLifecycleSources(input: {
   const sourceIds = new Map<string, number[]>()
   const invocations = new Map<string, number[]>()
   const sequences = new Map<string, number[]>()
-  const add = (map: Map<string, number[]>, key: string, index: number) => map.set(key, [...(map.get(key) ?? []), index])
+  const add = (map: Map<string, number[]>, key: string, index: number) => {
+    const group = map.get(key)
+    if (group) group.push(index)
+    else map.set(key, [index])
+  }
   metadata.forEach((p, i) => {
     add(sourceIds, events[i].source_event_id, i)
     if (!p) {

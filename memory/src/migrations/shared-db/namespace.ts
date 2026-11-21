@@ -91,7 +91,7 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
    GRANT EXECUTE ON FUNCTION shared.complete_memory_source_projection(UUID,JSONB,TEXT,TEXT,JSONB),shared.memory_source_scope_key(JSONB) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.lock_memory_legacy_input(UUID,BIGINT),shared.record_memory_source_dispatch(UUID,BIGINT,TEXT,TEXT,BIGINT,BIGINT,BIGINT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.capture_memory_job_source(UUID,TEXT,BIGINT,TEXT),shared.assert_memory_job_source(UUID,TEXT),shared.guard_memory_job_source_commit(UUID),shared.start_memory_source_provider(UUID,UUID,TEXT),shared.finish_memory_source_provider(UUID,UUID,TEXT) TO ${memory};
-   GRANT EXECUTE ON FUNCTION shared.memory_relay_source_authority(JSONB,TEXT,TEXT),shared.memory_retained_relay_authority(JSONB,TEXT,TEXT),shared.read_memory_relay_sources(JSONB,TEXT,BIGINT,INT,BIGINT[]),shared.read_memory_relay_archive(JSONB,TEXT,UUID,INT) TO ${memory};
+   GRANT EXECUTE ON FUNCTION shared.scan_memory_relay_projection_page(JSONB,TEXT,BIGINT,INT),shared.memory_relay_source_authority(JSONB,TEXT,TEXT),shared.memory_retained_relay_authority(JSONB,TEXT,TEXT),shared.read_memory_relay_sources(JSONB,TEXT,BIGINT,INT,BIGINT[]),shared.read_memory_relay_archive(JSONB,TEXT,UUID,INT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.lock_memory_delivery_commit(JSONB),shared.lock_memory_personal_source_commit(JSONB,TEXT,TEXT,JSONB,BOOLEAN),shared.lock_memory_team_source_commit(JSONB,TEXT,TEXT,JSONB,BOOLEAN) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.memory_delivery_withdrawal_page(UUID,BIGINT,INT),shared.memory_installation_inventory_page(UUID,INT,BIGINT),shared.memory_source_health(),shared.memory_source_pipeline_health(UUID),shared.memory_current_grant_states(UUID[],UUID[]),shared.lock_memory_grant_authority(UUID[],UUID[]) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.read_memory_legacy_sources(JSONB,TEXT,UUID,INT,UUID[],BOOLEAN),shared.memory_source_ref_context(UUID,UUID[]) TO ${memory};
@@ -198,6 +198,7 @@ export async function assertMemorySchedulingContract(db:Pick<pg.PoolClient,'quer
   if(capacityReady?.ready!==true)throw Error('shared_source_scheduling_migration_required')
 }
 const snapshotReaders=[
+ ['shared.scan_memory_relay_projection_page(jsonb,text,bigint,integer)',SHARED_SOURCE_READER_FUNCTIONS],
  ['shared.read_memory_relay_sources(jsonb,text,bigint,integer,bigint[])',SHARED_SOURCE_READER_FUNCTIONS],
  ['shared.lock_memory_personal_source_commit(jsonb,text,text,jsonb,boolean)',SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS],
  ['shared.memory_relay_input_admitted(jsonb,bigint,boolean)',SHARED_INPUT_START_FUNCTIONS],
@@ -256,6 +257,8 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
   if(relayTarget||launch.sharedSourceProfile)await assertRelayEventAppendCapture(client)
   await assertMemorySchedulingContract(client)
   await assertSnapshotReaderContract(client)
+  if(!(await client.query("SELECT has_function_privilege(current_user,'shared.scan_memory_relay_projection_page(jsonb,text,bigint,integer)','EXECUTE') AS ready")).rows[0]?.ready)
+    throw Error('relay_projection_scan_grant_required')
   const contract=(await client.query("SELECT version,to_jsonb(contract)->>'offline_projection_version' AS offline_projection_version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'consumer_version','0') AS consumer_version,COALESCE(to_jsonb(contract)->>'commit_fence_version','0') AS commit_fence_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'processing_read_version','0') AS processing_read_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version FROM shared.memory_source_contract contract")).rows
   if(contract.length!==1 || contract[0].version!==1)throw new Error('unsupported_shared_source_contract')
   if(contract[0].input_start_version!=='1')throw new Error('unsupported_shared_input_start_contract')

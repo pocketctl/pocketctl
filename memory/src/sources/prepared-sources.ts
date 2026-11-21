@@ -79,9 +79,10 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
     for(const row of semanticRows)row.payload=preparation.bodies.get(row.source_event_id)!
    }
    const contexts=rawRows.length?(await pool.query('SELECT * FROM shared.memory_source_ref_context($1::uuid,$2::uuid[])',[installationId,rawRows.map(r=>r.source_event_id)])).rows:[]
+   const bindings=new Map(contexts.map(c=>[c.source_event_id,c.context]))
    const reader=createObservedSourceReader(pool,context.archive),groups=new Map<string,{scope:SourceScope;root:SourceRoot;rows:PreparedEvent[]}>()
    for(const row of rawRows){
-    const binding=contexts.find(c=>c.source_event_id===row.source_event_id)?.context
+    const binding=bindings.get(row.source_event_id)
     if(!binding?.scope||!binding.root)throw Error('source_reference_scope_unavailable')
     const key=canonicalJsonString(binding),group=groups.get(key)??{...binding,rows:[]};group.rows.push(row);groups.set(key,group)
    }
@@ -248,7 +249,7 @@ export async function prepareSourceAuthorities(pool:pg.Pool,installationId:strin
 const unavailableCodes=new Set(['source_preparation_required','source_reference_limit','source_reference_duplicate','source_mode_paused','source_mode_invalid','source_reference_missing','source_reference_reclaimed','source_reference_unproven','source_reference_scope_unavailable','source_reference_hash_mismatch','source_reference_byte_limit','source_reference_changed','source_artifact_changed'])
 export const preparedSourceUnavailable=(error:unknown):boolean=>error instanceof Error&&(error.name==='SourceUnavailableError'||unavailableCodes.has(error.message))
 
-export interface PreparedEpisodeProjectionSources extends PreparedSources {fenceMembership(client:pg.PoolClient):Promise<void>}
+export interface PreparedEpisodeProjectionSources extends PreparedSources {readonly sessionId:string;fenceMembership(client:pg.PoolClient):Promise<void>}
 /** Internal deterministic compile entry. Public prepareEpisodeSources and all
  * generic model/API/evidence preparations remain whole-current and strict. */
 export async function prepareEpisodeProjectionSources(pool:pg.Pool,installationId:string,turnId:string):Promise<PreparedEpisodeProjectionSources|null>{
@@ -267,7 +268,7 @@ export async function prepareEpisodeProjectionSources(pool:pg.Pool,installationI
   const members=(await client.query(episodeMembershipQuery,[installationId,turnId])).rows.map(r=>r.source_event_id)
   if(canonicalJsonString(current)!==canonicalJsonString(turn)||canonicalJsonString(members)!==canonicalJsonString(ids))throw Error('source_reference_changed')
  }
- return {bodyBytes:prepared.bodyBytes,get events(){return prepared.events},async fenceMembership(client){
+ return {sessionId:turn.session_id,bodyBytes:prepared.bodyBytes,get events(){return prepared.events},async fenceMembership(client){
   await guardSourceExecutionCommit(client,installationId)
   // Native locks precede local derived locks. Subsequent assertions always
   // revalidate; there is no savepoint/transaction-ID selected-fence cache.

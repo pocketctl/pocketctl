@@ -90,9 +90,80 @@ suite('PG13 canonical page recovery',()=>{
   }finally{
    f.runtime.removeListener('acquire',acquire)
    for(const [client,original]of clients)client.query=original
+   await createJobRepository(f.runtime).completeJob({jobId:job,claimedBy,claimEpoch:1})
   }
  },70000)
+ test('a filtered physical page commits its scanned prefix and resumes with only admitted references',async()=>{
+  const source=await f.source()
+  const denied=[await f.event(source),await f.event(source)]
+  const installation=(await f.install(source,'from_now')).inst.installation_id
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  const allowed=await f.event(source)
+  const root={kind:'relay_event' as const,key:f.root(source)}
+  const scope=(await f.runtime.query("SELECT source_scope FROM shared.enumerate_memory_source_targets('relay_event',$1,'',64)",[root.key])).rows[0].source_scope
+  const fence={jobId:randomUUID(),claimedBy:'physical-page',claimEpoch:1}
+  await f.runtime.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,claimed_by,claim_epoch,claim_expires_at,attempts)
+   VALUES($1,$2,'project_shared_source','physical',52,'running',$3,1,now()+interval '5 minutes',10)`,[fence.jobId,installation,fence.claimedBy])
+  const prepare=(cursor?:string)=>prepareCanonicalReferencePage(f.runtime,scope,root,{limit:2,cursor,scanCandidates:true})
+  const progress=async()=>(await f.runtime.query("SELECT state,next_cursor FROM memory_canonical_projection_progress WHERE installation_id=$1",[installation])).rows[0]
+  const first=await withSourceJobExecution(f.runtime,fence,async()=>{
+   const page=await prepare()
+   expect(page).toMatchObject({count:0,hasMore:true})
+   expect(JSON.parse(Buffer.from(page.nextCursor!,'base64url').toString())).toMatchObject({after:denied[1],through:allowed})
+   expect(await persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true,retryFence:fence})).toEqual([])
+   return page.nextCursor!
+  })
+  expect(await progress()).toEqual({state:'scanning',next_cursor:first})
+  expect((await f.runtime.query('SELECT attempts FROM memory_jobs WHERE job_id=$1',[fence.jobId])).rows[0].attempts).toBe(1)
+  await withSourceJobExecution(f.runtime,fence,async()=>{
+   const page=await prepare(first)
+   expect(page).toMatchObject({count:1,hasMore:false})
+   expect((await persistCanonicalReferencePage(f.runtime,page,{project:true,checkpoint:true})).map(r=>r.canonicalKey)).toEqual([allowed])
+  })
+  expect(await progress()).toEqual({state:'ready',next_cursor:null})
+  await f.event(source)
+  await expect(withSourceJobExecution(f.runtime,fence,()=>prepare(first))).rejects.toMatchObject({code:'changed'})
+  await f.pool.query("UPDATE public.extension_installations SET status='revoked' WHERE installation_id=$1",[installation])
+  await expect(withSourceJobExecution(f.runtime,fence,()=>prepare())).rejects.toThrow()
+  await createJobRepository(f.runtime).completeJob(fence)
+ },30000)
+ test('enabled lifecycle compilation publishes a complete prepared membership once across replay',async()=>{
+  const source=await f.source(),installation=(await f.install(source,'retained_history')).inst.installation_id
+  await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installation])
+  await f.runtime.query("INSERT INTO memory_curation_policies(installation_id,mode,consume_mode) VALUES($1,'enabled','enabled')",[installation])
+  const keys=[await f.event(source),await f.event(source,true)]
+  const expected=(await f.pool.query('SELECT id::text AS canonical_key,source_sequence::text FROM public.events WHERE id=ANY($1::bigint[]) ORDER BY public.events.id',[keys])).rows
+  const signal=new AbortController().signal,errors:unknown[]=[]
+  const scheduler=createSharedSourceScheduler({pool:f.runtime,workerId:'lifecycle-source',signal,onError:e=>errors.push(e)})
+  const queue=createJobWorker({pool:f.runtime,jobs:createJobRepository(f.runtime),workerId:'lifecycle-compile',signal,claimLimit:1,onError:e=>errors.push(e)})
+  const project=createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0,projectionScanInstallations:[installation]})
+  queue.register('project_shared_source',async(job,abort,ctx)=>{
+   if(job.installation_id===installation)await project(job,abort,ctx)
+  },{branch:'canonical'})
+  let compiled=false
+  const episodes=createEpisodeRepository(f.runtime,{lifecycleMode:'enabled'})
+  queue.register('compile_episode',async(job,abort,ctx)=>{
+   if(job.installation_id!==installation)return
+   await episodes.handleCompileEpisode(job,abort,ctx)
+   await episodes.handleCompileEpisode(job,abort,ctx)
+   compiled=true
+  })
+  try{
+   const deadline=Date.now()+20000
+   while(!compiled&&Date.now()<deadline){
+    await scheduler.runOnce();await queue.tick()
+    if(errors.length)throw errors[0]
+    if(!compiled)await new Promise(resolve=>setTimeout(resolve,30))
+   }
+   expect(compiled).toBe(true)
+   expect((await f.runtime.query(`SELECT s.canonical_key,m.source_sequence::text FROM memory_task_bundle_sources m
+    JOIN source_events s USING(installation_id,source_event_id) WHERE m.installation_id=$1 ORDER BY s.canonical_key::bigint`,[installation])).rows).toEqual(expected)
+   expect((await f.runtime.query("SELECT revision::int FROM memory_task_bundles WHERE installation_id=$1",[installation])).rows).toEqual([{revision:1}])
+   expect((await f.runtime.query("SELECT job_id FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task'",[installation])).rowCount).toBe(1)
+  }finally{await queue.stop();await scheduler.stop()}
+ },30000)
  test.each([
+  {delayMs:0,code:'projection_read_page_timeout',rollback:false},
   {delayMs:4000,code:'canonical_reference_budget_exceeded',rollback:true},
   {delayMs:5400,code:'canonical_reference_write_timeout',rollback:false},
  ])('selected worker persists $code before COMMIT and resumes at a smaller page',async({delayMs,code,rollback})=>{
@@ -108,7 +179,7 @@ suite('PG13 canonical page recovery',()=>{
   }})
   const project=createCanonicalProjectionHandler(f.runtime,{stabilizationMs:0})
   const inserts:number[]=[]
-  let projectionActive=false
+  let projectionActive=false,timedOut=false
   queue.register('project_shared_source',async(job,abort,ctx)=>{
    if(job.installation_id!==installation)return
    projectionActive=true
@@ -121,6 +192,10 @@ suite('PG13 canonical page recovery',()=>{
    const original=c.query;clients.set(c,original)
    c.query=(async function(...args:any[]){
     const sql=typeof args[0]==='string'?args[0]:args[0]?.text??''
+    if(projectionActive&&code==='projection_read_page_timeout'&&!timedOut&&sql.includes('read_memory_relay_sources')){
+     timedOut=true
+     throw Object.assign(Error('canceling statement due to statement timeout'),{code:'57014'})
+    }
     const result=await (original as any).apply(c,args)
     if(projectionActive&&sql.includes('INSERT INTO source_events')){
      inserts.push(JSON.parse(args[1][3]).length)
@@ -135,7 +210,8 @@ suite('PG13 canonical page recovery',()=>{
   f.runtime.on('acquire',acquire)
   try{
    for(let n=0;n<128&&!errors.length;n++){await scheduler.runOnce();await queue.tick()}
-   expect(errors[0]).toMatchObject({code,projection_stage:'write_references',projection_page_size:64,projection_commit_sent:false})
+   if(timedOut)expect(errors[0]).toMatchObject({code,projection_stage:'select_page'})
+   else expect(errors[0]).toMatchObject({code,projection_stage:'write_references',projection_page_size:64,projection_commit_sent:false})
    expect(errors[0].projection_rollback_confirmed===true).toBe(rollback)
    const states=()=>f.runtime.query("SELECT state,attempts,last_error_code FROM memory_jobs WHERE installation_id=$1 AND job_type='project_shared_source'",[installation])
    expect((await states()).rows).toEqual([{state:'pending',attempts:1,last_error_code:code}])
@@ -145,7 +221,7 @@ suite('PG13 canonical page recovery',()=>{
     await queue.tick()
    }
    expect((await states()).rows[0].state).toBe('completed')
-   expect(inserts).toEqual([64,32,32,6])
+   expect(inserts).toEqual(timedOut?[32,32,6]:[64,32,32,6])
    expect((await f.runtime.query('SELECT count(DISTINCT canonical_key)::int AS count FROM source_events WHERE installation_id=$1',[installation])).rows[0].count).toBe(count)
   }finally{
    f.runtime.removeListener('acquire',acquire)

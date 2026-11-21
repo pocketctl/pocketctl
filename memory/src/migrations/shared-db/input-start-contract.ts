@@ -226,7 +226,7 @@ export const SHARED_INPUT_START_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.memory_relay_input_admitted(p_scope jsonb,p_event bigint,p_explicit boolean)
   RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE e record;state text;BEGIN
    SELECT * INTO e FROM public.events WHERE id=p_event AND user_id=(p_scope->>'principalUserId')::int AND NOT owner_retired;
-   IF NOT FOUND OR public.native_event_authority(e.id,e.user_id)->>'state'<>'current' THEN RETURN FALSE;END IF;
+   IF NOT FOUND OR public.native_event_authority(e.id,e.user_id)->>'state' IS DISTINCT FROM 'current' THEN RETURN FALSE;END IF;
    state=shared.memory_input_start_admission((p_scope->>'installationId')::uuid,'relay_event',e.id::text,e.user_id::text,e.logical_source_session_id);
    IF state='eligible' THEN RETURN TRUE;ELSIF state='denied' THEN RETURN FALSE;END IF;
    -- An exact already-owned UUID is a retained entitlement, never a discovery

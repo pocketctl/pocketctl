@@ -1,4 +1,4 @@
-import {metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadataInputAdmission} from './personal-metadata-sql.js'
+import {reviewedNativeEventAuthoritySql,metadataInputFingerprint,metadataRowLocator,metadataUsageDenied,metadataInputAdmission} from './personal-metadata-sql.js'
 /** Short nonblocking commit barriers. Initial/body preparation remains lock-free;
  * callers must use this at the final positive boundary, inside BEGIN. */
 export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
@@ -165,11 +165,7 @@ export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
       -- Relay can deploy a stricter per-event policy independently. Only the
       -- reviewed v3 body may be factored into session and event predicates.
       -- Any other definition retains the live native_event_authority call.
-      SELECT l.lanname='plpgsql' AND NOT p.prosecdef AND NOT p.proisstrict AND p.provolatile='s'
-       AND p.proconfig=ARRAY['search_path=pg_catalog, public'] AND has_function_privilege(p.oid,'EXECUTE')
-       AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='946a586d8f9b86a194ff890ffff986b3061d543b621a93bcd2c5762db9e7ad67'
-       INTO group_event_authority FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_language l ON l.oid=p.prolang
-       WHERE p.oid='public.native_event_authority(bigint,integer)'::regprocedure;
+      group_event_authority=(${reviewedNativeEventAuthoritySql});
       -- Selected events and their reference rows are already locked. Read membership
       -- once, keeping a missing reference or turn as a negative per-event fact.
       SELECT COALESCE(jsonb_object_agg(e.id::text,jsonb_build_array(e.logical_source_session_id,
