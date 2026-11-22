@@ -1,3 +1,4 @@
+import {compileDialogue} from './compile-dialogue.js'
 import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
 import {prepareEpisodeSources,prepareEpisodeProjectionSources,attachPreparedSources} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
@@ -323,7 +324,7 @@ export function createEpisodeRepository(
                correction_count, retry_count, tool_error_count, summary, compiler_version)
             VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     $11, $12, $13, $14::jsonb, $15)
-            ON CONFLICT (installation_id, turn_id) DO UPDATE SET
+            ON CONFLICT (installation_id, turn_id) WHERE compiler_version<>'relay-turn-v1' DO UPDATE SET
               state = EXCLUDED.state,
               outcome = EXCLUDED.outcome,
               terminal_at = EXCLUDED.terminal_at,
@@ -454,6 +455,11 @@ export function createEpisodeRepository(
     async handleCompileEpisode(job: JobClaim, signal: AbortSignal, ctx?:{fence:JobFence}): Promise<void> {
       if (!job.installation_id) return
       if (signal.aborted) throw new Error('compile_episode aborted')
+      if(job.idempotency_key.startsWith('dialogue:')){
+        const {dialogue_session:session,turn}=job.payload
+        if(typeof session!=='string'||typeof turn!=='string'||!session||!turn)throw Error('invalid_dialogue_job')
+        return compileDialogue(pool,job.installation_id,session,turn,options.lifecycleMode??'off',ctx?.fence)
+      }
       await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence,signal)
     },
   }

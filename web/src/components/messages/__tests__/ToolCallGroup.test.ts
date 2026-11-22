@@ -33,6 +33,15 @@ describe('ToolCallGroup', () => {
     expect(wrapper.findAll('[data-tool-detail-toggle]')).toHaveLength(2)
   })
 
+  test('restores an explicitly expanded completed group on return', async () => {
+    const messages = [completed('Read', 'read-1', 'src/App.vue')]
+    const wrapper = mount(ToolCallGroup, { props: { messages, expanded: true } })
+    expect(wrapper.get('.tool-group-trigger').attributes('aria-expanded')).toBe('true')
+    await wrapper.get('.tool-group-trigger').trigger('click')
+    expect(wrapper.emitted('change-expanded')).toEqual([[false]])
+    wrapper.unmount()
+  })
+
   test('shows one tool detail at a time and switches between input and output', async () => {
     const wrapper = mount(ToolCallGroup, {
       props: {

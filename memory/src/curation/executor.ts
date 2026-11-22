@@ -51,17 +51,17 @@ export function createCurationExecutor(input:{pool:pg.Pool;mode:CurationMode;tom
    const sources=loaded.events,allowed=new Set(loaded.admitted.map(e=>e.source_event_id)),spans=bundle.spans as Array<{event_id:string;start:number;end:number}>
    const childDigest=createHash('sha256').update(canonicalPacketJson({source:parent.source_digest.toString('hex'),spans,space:bundle.space_id})).digest()
    if(!childDigest.equals(bundle.source_digest))throw new Error('curation_task_digest_changed')
-   const members=(await c.query('SELECT source_event_id,source_digest FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[installationId,bundleId])).rows
+   const members=bundle.dialogue_members?bundle.dialogue_members.map((m:{id:string;digest:string})=>({source_event_id:m.id,source_digest:Buffer.from(m.digest,'hex')})) as {source_event_id:string;source_digest:Buffer}[]:(await c.query('SELECT source_event_id,source_digest FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[installationId,bundleId])).rows
    if(members.length!==new Set(spans.map(s=>s.event_id)).size||members.some(m=>!spans.some(s=>s.event_id===m.source_event_id)||!sources.find(s=>s.source_event_id===m.source_event_id)?.payload_hash.equals(m.source_digest)))throw new Error('curation_source_changed')
    const evidence:WriterEvidence[]=[]
    for(const span of spans){
     const source=sources.find(s=>s.source_event_id===span.event_id)
     if(!source||!allowed.has(span.event_id))throw new Error('curation_source_unavailable')
     const payload=source.payload as Record<string,unknown>
-    const rawText=sanitizeText(typeof payload.text==='string'?payload.text:'',4000).text
+    const rawText=sanitizeText(typeof payload.text==='string'?payload.text:'',bundle.dialogue_members?Infinity:4000).text
     if(!Number.isInteger(span.start)||!Number.isInteger(span.end)||span.start<0||span.end<=span.start||span.end>rawText.length)throw new Error('curation_source_span_changed')
     const proof=parseMemorySourceProvenance(source.source_provenance?.memory)!
-    evidence.push({id:span.event_id,text:rawText.slice(span.start,span.end),role:proof.source_role,verified:proof.source_role==='tool'&&source.event_type==='test_result'&&payload.status==='passed',occurredAt:new Date(source.occurred_at),digest:source.payload_hash})
+    evidence.push({locator:source.source_provenance?.dialogue,span:{start:span.start,end:span.end},id:span.event_id,text:rawText.slice(span.start,span.end),role:proof.source_role,verified:proof.source_role==='tool'&&source.event_type==='test_result'&&payload.status==='passed',occurredAt:new Date(source.occurred_at),digest:source.payload_hash})
    }
    const validation=validateConclusion(candidate.structured_content,evidence)
    if(!validation.ok)throw new Error('curation_conclusion_'+validation.reason)

@@ -1,3 +1,4 @@
+import {DialogueExcluded,prepareDialogue} from '../episodes/turn-dialogue.js'
 import {prepareExcludedLifecycleTurn,type LifecycleDigestEvent} from '../curation/prepare-lifecycle-turn.js'
 import {boundedSourceQuery} from './bounded-source-query.js'
 import {snapshotMemorySql,snapshotProvenanceSql} from './snapshot-provenance.js'
@@ -203,6 +204,21 @@ export async function prepareCurationSources(pool:pg.Pool,installationId:string,
  const catalog=(await pool.query(`SELECT p.task_key FROM memory_task_bundles b JOIN memory_task_bundles p ON p.installation_id=b.installation_id AND p.bundle_id=b.parent_bundle_id
   WHERE b.installation_id=$1 AND b.session_id=$2 AND b.bundle_kind='task' AND b.body_state='present' AND p.body_state='present' AND b.parent_revision=p.revision
   ORDER BY b.updated_at DESC,b.bundle_id LIMIT 64`,[installationId,current.session_id])).rows
+ if(current.task_key?.startsWith('dialogue:')){
+  const turns=new Set<string>([current,...catalog].filter(r=>r.task_key?.startsWith('dialogue:')).map(r=>r.task_key.slice('dialogue:'.length)))
+  const inputs:Awaited<ReturnType<typeof prepareDialogue>>[]=[]
+  for(const turn of turns){
+   try{inputs.push(await prepareDialogue(pool,installationId,current.session_id,turn))}
+   catch(error){
+    if(!(error instanceof DialogueExcluded))throw error
+    if(current.task_key==='dialogue:'+turn)return null
+    // Skip a withdrawn routing hint without blocking unrelated turns.
+   }
+  }
+  return {events:inputs.flatMap(i=>i.events),async assertCurrent(client,options){
+   for(const input of inputs)await input.assertCurrent(client,options)
+  }} satisfies PreparedSources
+ }
  const turns=[...new Set([current,...catalog].filter(r=>typeof r.task_key==='string'&&r.task_key.startsWith('source:')).map(r=>r.task_key.slice(7)))]
  const query='SELECT source_event_id::text FROM source_events WHERE installation_id=$1 AND session_id=$2 AND turn_id=ANY($3::text[]) ORDER BY source_event_id LIMIT 4097'
  const args=[installationId,current.session_id,turns],ids=(await pool.query(query,args)).rows.map(r=>r.source_event_id)

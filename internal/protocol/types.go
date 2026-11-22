@@ -259,7 +259,9 @@ type DaemonEvent struct {
 	ChangeSetID            string                     `json:"change_set_id,omitempty"`
 	OldSessionID           string                     `json:"old_session_id,omitempty"`
 	Text                   string                     `json:"text,omitempty"`
-	Snapshot               string                     `json:"snapshot,omitempty"` // full native text snapshot; Text may remain an append delta
+	DialogueMessageID      string                     `json:"dialogue_message_id,omitempty"`
+	MessagePhase           string                     `json:"message_phase,omitempty"` // native assistant message phase
+	Snapshot               string                     `json:"snapshot,omitempty"`      // full native text snapshot; Text may remain an append delta
 	StreamID               string                     `json:"stream_id,omitempty"`
 	ChunkSeq               *int                       `json:"chunk_seq,omitempty"`
 	ByteOffset             *int                       `json:"byte_offset,omitempty"`

@@ -431,6 +431,8 @@
           <ToolCallGroup
             v-else-if="toolGroupFor(msg)"
             :messages="toolGroupFor(msg) || [msg]"
+            :expanded="openToolGroups[msg.call_id]"
+            @change-expanded="(value: boolean) => { if (msg.call_id) openToolGroups[msg.call_id] = value }"
           />
           <ToolCallCard
             v-else-if="msg.type === 'tool_call'"
@@ -562,9 +564,10 @@
         <!-- Scroll-to-bottom: absolute child of chat-input-area, floats above
              its top edge. Doesn't take up flex space in chat-messages. -->
         <Transition name="scroll-btn">
-          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" :class="{ 'has-unread': hasUnreadReply }" :title="t('session.scroll_to_bottom')" @click="scrollToBottom">
+          <button v-if="messages.length > 0 && !autoScroll" class="scroll-to-bottom" :class="{ 'has-unread': hasUnreadReply }" :title="t(unreadApproval ? 'session.status.waiting_approval' : 'session.scroll_to_bottom')" @click="visitNewContent">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
-          <span v-if="hasUnreadReply">{{ t('session.reply_new_content') }}</span></button>
+          <span v-if="unreadApproval">{{ t('session.status.waiting_approval') }}</span>
+            <span v-else-if="hasUnreadReply">{{ t('session.reply_new_content') }}</span></button>
         </Transition>
         <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
         <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations"> {{ t('memory.git.refresh') }} </button></div>
@@ -1045,10 +1048,38 @@ const navigationFresh = ref(false)
 const navigationFailed = ref(false)
 const historyCacheReady = ref(false)
 let historyCacheRequest = 0
+let historyLoadStart: number | undefined
+let previewSource: 'memory' | 'disk' = 'disk'
 let navigationRequest = 0
 let historyCacheTimer: ReturnType<typeof setTimeout> | undefined
 const listedSessions = computed(() => navigationFresh.value ? allSessions.value : cachedSessions.value.length ? cachedSessions.value : allSessions.value)
 const showingCachedNavigation = computed(() => !navigationFresh.value && cachedSessions.value.length > 0 || !!cachedOrganization.value)
+// Only the mounted personal browser keeps these display-only snapshots. Use the
+// same grant and invalidation ticket as the encrypted disk preview.
+type PreviewTicket = ReturnType<typeof personalReadCache.ticket>
+type ReadingAnchor = { id: string; top: number }
+type RecentView = { ticket: PreviewTicket; rows: any[]; anchor?: ReadingAnchor; groups: Record<string, boolean> }
+const recentViews = new Map<string, RecentView>()
+const openToolGroups = ref<Record<string, boolean>>(Object.create(null))
+let previewOwner: { session: string; ticket: PreviewTicket } | undefined
+function rememberRecentView() {
+  if (!previewOwner || !historyCacheReady.value || cachePrivacyBlocked.value
+    || !personalReadCache.canShowMemoryPreview(previewOwner.ticket)) return
+  const { session, ticket } = previewOwner
+  if (!allSessions.value.some(s => s.session_id === session && !s.team_id && !s.share_id && !s.shared)) return
+  const anchor = autoScroll.value ? undefined : historyReadingAnchor()
+  const index = anchor ? messages.value.findIndex(row => row.id === anchor.id) : -1
+  // Include the paragraph on screen even if the user paged far into history.
+  const nearbyMessages = index >= 0
+    ? messages.value.slice(Math.max(0, index - 18), index + 36)
+    : messages.value.slice(-160)
+  const rows = historyPreview(nearbyMessages)
+  if (!rows.length) return
+  if (anchor && rows.some(row => row.id === 'cache-tools-' + anchor.id)) anchor.id = 'cache-tools-' + anchor.id
+  recentViews.delete(session)
+  recentViews.set(session, { ticket, rows, anchor, groups: openToolGroups.value })
+  if (recentViews.size > 3) recentViews.delete(recentViews.keys().next().value!)
+}
 const historyCacheName = () => 'history:' + JSON.stringify([sessionId.value, focusedSubAgentId.value || ''])
 function saveHistoryPreview() {
   if (cachedHistory.value.length || cachePrivacyBlocked.value || returnTeamSessionID.value || returnTeamID.value || !historyCacheReady.value || focusedSubAgentId.value || browseScope.value.type !== 'personal' || !allSessions.value.some(s => s.session_id === sessionId.value && !s.team_id && !s.share_id)) return
@@ -1061,24 +1092,49 @@ function scheduleHistoryPreview() {
 function hydrateHistoryPreview() {
   const request = ++historyCacheRequest, key = loadKey.value, ticket = personalReadCache.ticket()
   cachedHistory.value = []; historyCacheReady.value = false
+  previewOwner = undefined
+  previewSource = 'disk'
   // Focused agents and Team/shared surfaces need their own offline policy.
   if (focusedSubAgentId.value || returnTeamSessionID.value || returnTeamID.value || browseScope.value.type !== 'personal') return
+  previewOwner = { session: sessionId.value, ticket }
+  const recent = recentViews.get(sessionId.value)
+  if (recent && personalReadCache.canShowMemoryPreview(recent.ticket) && !messages.value.some(row => row.__msg_id && !row.__echo_reconciled)) {
+    previewSource = 'memory'
+    cachedHistory.value = recent.rows
+    openToolGroups.value = recent.groups
+    autoScroll.value = !recent.anchor
+    nextTick(() => {
+      if (request !== historyCacheRequest || key !== loadKey.value) return
+      if (recent.anchor) restoreHistoryReadingAnchor(recent.anchor)
+      else if (autoScroll.value) scrollToBottom()
+    })
+    return
+  }
   void personalReadCache.read<any[]>(historyCacheName(), ticket).then(rows => {
     if (rows && personalReadCache.valid(ticket) && request === historyCacheRequest && key === loadKey.value && !historyCacheReady.value && !messages.value.some(row => row.__msg_id && !row.__echo_reconciled)) {
       cachedHistory.value = historyPreview(rows)
-      nextTick(() => { if (autoScroll.value) scrollToBottom() })
+      nextTick(() => { if (key === loadKey.value && autoScroll.value) scrollToBottom() })
     }
   })
 }
+function replayMatch(preview: any) {
+  if (!preview) return
+  return preview.type === 'cached_tool_group'
+    ? sourceMessages.value.find(row => row.type === 'tool_call' && row.call_id && row.call_id === preview.call_id)
+    : sourceMessages.value.find(row => row.type === preview.type && row.role === preview.role
+      && row.turn_id === preview.turn_id && String(row.content ?? '').slice(0, 16000) === preview.content)
+}
 function publishHistoryPreview() {
-    const cacheAnchor = cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined
-    const cachedAnchorMessage = cachedHistory.value.find(row => String(row.id) === cacheAnchor?.id)
-    const cachedScrollTop = messagesEl.value?.scrollTop
-    cachedHistory.value = []; historyCacheReady.value = true; historyCacheRequest++
-    if (cacheAnchor) nextTick(() => {
-      const match = sourceMessages.value.find(row => row.type === cachedAnchorMessage?.type && row.role === cachedAnchorMessage?.role && row.content === cachedAnchorMessage?.content && row.call_id === cachedAnchorMessage?.call_id)
-      if (!restoreHistoryReadingAnchor({ ...cacheAnchor, id: String(match?.id || cacheAnchor.id) }) && messagesEl.value && cachedScrollTop !== undefined) messagesEl.value.scrollTop = cachedScrollTop
-    })
+  const cacheAnchor = cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined
+  const cachedAnchorMessage = cachedHistory.value.find(row => String(row.id) === cacheAnchor?.id)
+  const context = loadKey.value
+  const cachedScrollTop = messagesEl.value?.scrollTop
+  cachedHistory.value = []; historyCacheReady.value = true; historyCacheRequest++
+  if (cacheAnchor) nextTick(() => {
+    if (context !== loadKey.value) return
+    const match = replayMatch(cachedAnchorMessage)
+    if (!restoreHistoryReadingAnchor({ ...cacheAnchor, id: String(match?.id || cacheAnchor.id) }) && messagesEl.value && cachedScrollTop !== undefined) messagesEl.value.scrollTop = cachedScrollTop
+  })
 }
 async function hydrateNavigationPreview() {
   const ticket = personalReadCache.ticket()
@@ -1465,6 +1521,15 @@ const permissionCanChange = computed(() => !isReadOnlyObserverSession.value && p
 const exitedAt = ref('')
 const autoScroll = ref(true)
 const hasUnreadReply = ref(false)
+const unreadApprovalId = ref('')
+const unreadApproval = computed(() => unreadApprovalId.value && renderMessages.value.find(row =>
+  row.type === 'approval_request' && row.request_id === unreadApprovalId.value && row.status === 'pending'))
+function visitNewContent() {
+  const request = unreadApproval.value
+  unreadApprovalId.value = ''
+  if (request && messagesEl.value && scrollToRequest(messagesEl.value, request.request_id)) return
+  scrollToBottom()
+}
 const copied = ref(false)
 const messagesEl = ref<HTMLDivElement | null>(null)
 const composerEl = ref<HTMLElement | null>(null)
@@ -1967,7 +2032,9 @@ watch(() => {
   if (next.session !== previous?.session || next.agent !== previous?.agent || autoScroll.value) hasUnreadReply.value = false
   else if (previous?.id !== undefined && (next.id !== previous.id || next.content !== previous.content)) hasUnreadReply.value = true
 })
-watch(autoScroll, value => { if (value) hasUnreadReply.value = false })
+watch(autoScroll, value => {
+  if (value) { hasUnreadReply.value = false; unreadApprovalId.value = '' }
+})
 const latestPrompt = computed(() => focusedSubAgentId.value ? null : latestSentPrompt(sourceMessages.value, cleanContent))
 const promptReading = ref(false)
 function beginPromptReading() { promptReading.value = true; autoScroll.value = false }
@@ -2460,7 +2527,7 @@ function setComposerHeight(height: number) {
   const nextHeight = Math.max(0, Math.ceil(height))
   if (nextHeight === composerHeight.value) return
   composerHeight.value = nextHeight
-  if (autoScroll.value) nextTick(scrollToBottom)
+  if (autoScroll.value) nextTick(() => { if (autoScroll.value) scrollToBottom() })
 }
 
 // The composer overlays the message stream. Measure its live height so a
@@ -2574,6 +2641,7 @@ function settleReplayLocalMessage(message: any, target: any[]) {
 }
 
 function loadHistory() {
+  historyLoadStart = performance.now()
   resetLatest()
   hydrateHistoryPreview()
   clearTaskSnapshotTimer()
@@ -2686,12 +2754,15 @@ async function settleHistoryReplayPage(msg: any): Promise<void> {
 
   const element = messagesEl.value
   const replayCursor = normalizeReplayCursor(msg.last_seq)
+  const reading = cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined
+  const preview = reading && cachedHistory.value.find(row => row.id === reading.id)
+  const needsAnchor = preview && !replayMatch(preview)
   const decision = historyViewportFill.recordPage({
     viewportHeight: element?.clientHeight ?? 0,
     contentHeight: element?.scrollHeight ?? 0,
     hasMore: hasMore.value,
     cursor: replayCursor,
-    minimumVisibleMessages: cachedHistory.value.length ? Math.max(20, Math.ceil((element?.clientHeight || window.innerHeight) / 40) + 8) : undefined,
+    minimumVisibleMessages: needsAnchor ? Infinity : cachedHistory.value.length ? Math.max(20, Math.ceil((element?.clientHeight || window.innerHeight) / 40) + 8) : undefined,
     visibleMessages: (() => {
       const visible = sourceMessages.value.filter(message => showsMobileMessage(message, showToolCalls.value))
       const groups = buildToolCallGrouping(visible)
@@ -3453,6 +3524,8 @@ function startResize(e: MouseEvent) {
 }
 
 function onInputKeydown(e: KeyboardEvent) {
+  // Safari can report the candidate-confirmation key after compositionend.
+  if (e.isComposing || e.keyCode === 229) return
   // Alt/Option+Enter or Shift+Enter → insert newline (checked first, even
   // when popover is open, so /command<Alt+Enter> doesn't auto-apply).
   if (e.key === 'Enter' && (e.altKey || e.shiftKey)) {
@@ -4286,7 +4359,15 @@ function processImmediateLiveEvent(msg: any, options?: { scroll?: boolean }): vo
   scheduleHistoryPreview()
   flushLiveContent()
   applyLiveContent(msg)
-  if (options?.scroll && !promptReading.value) nextTick(() => { if (!promptReading.value) scrollToBottom() })
+  if (options?.scroll) {
+    if (autoScroll.value) {
+      const context = loadKey.value
+      nextTick(() => { if (context === loadKey.value && autoScroll.value) scrollToBottom() })
+    } else {
+      hasUnreadReply.value = true
+      if (msg.type === 'approval_request') unreadApprovalId.value = msg.request_id || msg.payload?.request_id || ''
+    }
+  }
 }
 
 // Exposed for focused integration tests of the actual event-consumer path.
@@ -4298,8 +4379,22 @@ defineExpose({ processEvent, messages, status, currentOpenCodeAgent })
 // state reset + history reload instead of one watcher per dimension.
 const loadKey = computed(() => sessionId.value + '::' + (route.query.subagent as string || ''))
 
+// Local DevTools timing from navigation to Vue committing the first visible rows.
+watch([loadKey, () => renderMessages.value.length > 0, () => isLoading.value], () => {
+  if (historyLoadStart === undefined || !renderMessages.value.length) return
+  const source = cachedHistory.value.length ? previewSource : 'replay'
+  const name = 'pocketctl.session.first-content.' + source
+  performance.clearMeasures?.(name)
+  performance.measure?.(name, { start: historyLoadStart, detail: { evictions: { ...personalReadCache.evictions } } })
+  historyLoadStart = undefined
+}, { flush: 'post' })
+
 // Watch for session switch / focus change — clear messages and replay new context
 watch(loadKey, (newKey, oldKey) => {
+  rememberRecentView()
+  unreadApprovalId.value = ''
+  openToolGroups.value = Object.create(null)
+  autoScroll.value = true
   sessionFullscreen.value = false
   if (newKey && newKey !== oldKey) {
     promptReading.value = false
@@ -4357,6 +4452,7 @@ onMounted(() => {
 	void refreshProjects()
   void hydrateNavigationPreview()
   cleanups.push(personalReadCache.onInvalidate(() => {
+    recentViews.clear(); openToolGroups.value = Object.create(null); previewOwner = undefined
     cachedSessions.value = []; cachedHosts.value = {}; cachedOrganization.value = null; cachedHistory.value = []
     historyCacheRequest++
     if (!personalReadCache.ticket().scope) {

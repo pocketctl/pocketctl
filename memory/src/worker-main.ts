@@ -152,6 +152,12 @@ async function main(): Promise<void> {
   let purgeWorker: ReturnType<typeof createPurgeWorker> | undefined
   let statusWorker: ReturnType<typeof createStatusWorker> | undefined
   let usageWorker: ReturnType<typeof createUsageWorker> | undefined
+  let dialogueTimer:ReturnType<typeof setInterval>|undefined
+  const dialoguePoller=createNonOverlappingPoller(async()=>{
+    const result=await pool.query('SELECT shared.dispatch_turn_dialogues() AS count')
+    if(result.rows[0]?.count)jobWorker?.wake()
+    await pool.query('SELECT shared.reclaim_turn_dialogues()')
+  })
   let feedTimer: ReturnType<typeof setInterval> | undefined
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
@@ -298,7 +304,7 @@ async function main(): Promise<void> {
     })
     jobWorker.register('project_feed', projection.handleProjectFeed)
     if (config.databaseNamespace === 'memory') {
-      jobWorker.register('project_shared_source', createCanonicalProjectionHandler(pool, {
+      const projectShared=createCanonicalProjectionHandler(pool, {
         compactSnapshotInstallations: config.compactSnapshotInstallations,
         projectionScanJobIds: config.projectionScanJobIds,
         projectionScanInstallations: config.projectionScanInstallations,
@@ -306,7 +312,12 @@ async function main(): Promise<void> {
         stabilizationMs: config.episodeStabilizationMs,
         sourceProfile: config.sharedSourceProfile,
         installationAllowlist: config.installationAllowlist,
-      }), {branch: 'canonical'})
+      })
+      jobWorker.register('project_shared_source',async(job,signal,ctx)=>{
+        const root=job.payload.root as {kind?:string}|undefined
+        if(root?.kind==='relay_event'&&(await pool.query('SELECT shared.uses_turn_dialogue($1) AS active',[job.installation_id])).rows[0]?.active)return
+        await projectShared(job,signal,ctx)
+      },{branch:'canonical'})
     }
     const episodes = createEpisodeRepository(pool, {
       lifecycleMode: config.lifecycleMode,
@@ -778,6 +789,9 @@ async function main(): Promise<void> {
       // Per-root fenced job completion hints wake pending source work.
       sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,onDispatch:()=>jobWorker?.wake(),refreshInstallations:()=>discovery!.discoverOnce(),refreshWithdrawals:()=>withdrawalConsumer.runOnce(),onError:loopError('shared_source_scheduler')})
       sharedSourceScheduler.start()
+      const tick=()=>void dialoguePoller.runOnce().catch(loopError('turn_dialogue_dispatch'))
+      dialogueTimer=setInterval(tick,Math.max(1000,config.compileBatchIntervalMs))
+      tick()
     }
     jobWorker.start()
 
@@ -834,9 +848,11 @@ async function main(): Promise<void> {
   if (feedTimer) clearInterval(feedTimer)
   if (maintenanceTimer) clearInterval(maintenanceTimer)
   if (budgetRecoveryTimer) clearInterval(budgetRecoveryTimer)
+  clearInterval(dialogueTimer)
   clearInterval(gaugeTimer)
 
   await Promise.all([
+    dialoguePoller.stop().catch(loopError('turn_dialogue_dispatch')),
     gaugePoller.stop().catch(loopError('metrics_gauges')),
     dailyMaintenance?.stop(),
     gitPolling?.stop(),

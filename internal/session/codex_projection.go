@@ -590,7 +590,11 @@ func (p *codexProjection) convertItem(method, threadID, turnID string, item code
 		if method != "item/completed" || item.Text == "" {
 			return protocol.DaemonEvent{}, false
 		}
-		return p.finalText(threadID, turnID, item.ID, "agent_text", item.Text), true
+		event := p.finalText(threadID, turnID, item.ID, "agent_text", item.Text)
+		if item.Phase == "final_answer" || item.Phase == "commentary" {
+			event.MessagePhase = item.Phase
+		}
+		return event, true
 
 	case "reasoning", "plan":
 		if method != "item/completed" {

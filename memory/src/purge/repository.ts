@@ -384,6 +384,11 @@ export function sessionPurgeVersionIdentities(claim:{scope_key:string;claim_type
   return {normalizedKeysV2:removedIdentityKeysV2,normalizedKeys:[...removedIdentities.map(identity=>identity.legacyKey),...versions.map(row=>normalizedClaimKey({claimType:claim.claim_type,scopeKey:claim.scope_key,statement:row.statement}))]}
 }
 
+// A dialogue excerpt is dependent on its original turn even after its task
+// package is collected. The installation equality always stays on the join.
+const episodeEvidenceMatch=`w.installation_id=e.installation_id AND (w.episode_id=e.episode_id OR
+ (e.locator->>'source_kind'='relay_turn_v1' AND w.compiler_version='relay-turn-v1'
+  AND w.session_id=e.locator#>>'{dialogue,session}' AND w.turn_id=e.locator#>>'{dialogue,turn}'))`
 async function purgeSessionRows(
   client: QueryClient,
   input: SessionPurgeInput,
@@ -405,7 +410,7 @@ async function purgeSessionRows(
     SELECT v.version_id::text FROM knowledge_versions v
     WHERE v.installation_id=$1 AND EXISTS(
       SELECT 1 FROM knowledge_versions affected JOIN knowledge_evidence e USING(installation_id,version_id)
-      JOIN work_episodes w USING(installation_id,episode_id)
+      JOIN work_episodes w ON ${episodeEvidenceMatch}
       WHERE affected.installation_id=v.installation_id AND affected.claim_id=v.claim_id AND w.session_id=$2)
     ORDER BY v.version_id`,[input.installationId,input.sessionId])
   await assertIndependentAcceptedEvidence(client,ownershipVersions.rows.map(row=>row.version_id))
@@ -439,12 +444,13 @@ async function purgeSessionRows(
         JOIN knowledge_evidence e
           ON e.installation_id = pe.installation_id AND e.evidence_id = pe.evidence_id
         JOIN work_episodes w
-          ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+          ON ${episodeEvidenceMatch}
         WHERE pe.pack_id = p.pack_id AND w.session_id = $2))
   `, [input.installationId, input.sessionId])
 
   const selectedEpisodes=await client.query<{episode_id:string}>('SELECT episode_id::text FROM work_episodes WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
   const invalidatedClaims=await invalidateEpisodeKnowledge(client,{installationId:input.installationId,episodeIds:selectedEpisodes.rows.map(r=>r.episode_id)},tombstoneHmacKeys)
+  await client.query("DELETE FROM knowledge_evidence WHERE installation_id=$1 AND locator->>'source_kind'='relay_turn_v1' AND locator#>>'{dialogue,session}'=$2",[input.installationId,input.sessionId])
   // Task prose and model results belong to the deleted session. Independent
   // accepted evidence has no Bundle FK and remains governed by knowledge delete.
   await client.query('DELETE FROM memory_task_bundles WHERE installation_id=$1 AND session_id=$2',[input.installationId,input.sessionId])
@@ -509,7 +515,7 @@ export async function invalidateEpisodeKnowledge(client:QueryClient,input:{insta
       JOIN knowledge_evidence e
         ON e.installation_id = v.installation_id AND e.version_id = v.version_id
       JOIN work_episodes w
-        ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+        ON ${episodeEvidenceMatch}
       WHERE c.installation_id = $1 AND w.episode_id = ANY($2::uuid[])
       ORDER BY c.claim_id::text
   `, [input.installationId, input.episodeIds])
@@ -530,14 +536,14 @@ export async function invalidateEpisodeKnowledge(client:QueryClient,input:{insta
         AND EXISTS (
           SELECT 1 FROM knowledge_evidence e
           JOIN work_episodes w
-            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+            ON ${episodeEvidenceMatch}
           WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
             AND w.episode_id = ANY($3::uuid[])
         )
         AND NOT EXISTS (
           SELECT 1 FROM knowledge_evidence e
           JOIN work_episodes w
-            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+            ON ${episodeEvidenceMatch}
           WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
             AND NOT(w.episode_id = ANY($3::uuid[]))
         )
@@ -570,7 +576,7 @@ export async function invalidateEpisodeKnowledge(client:QueryClient,input:{insta
         AND (EXISTS (
           SELECT 1 FROM knowledge_evidence e
           JOIN work_episodes w
-            ON w.installation_id = e.installation_id AND w.episode_id = e.episode_id
+            ON ${episodeEvidenceMatch}
           WHERE e.installation_id = v.installation_id AND e.version_id = v.version_id
             AND NOT(w.episode_id = ANY($4::uuid[]))
         ) OR ${independentlyAcceptedVersionSupportSql()})
@@ -645,12 +651,12 @@ export async function invalidateDerivedEpisodes(client:QueryClient,input:{instal
   const episodes=await client.query<{session_id:string}>(`SELECT DISTINCT session_id FROM work_episodes WHERE installation_id=$1 AND episode_id=ANY($2::uuid[]) ORDER BY session_id`,[input.installationId,input.episodeIds])
   for(const row of episodes.rows)await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))`,[input.installationId,row.session_id])
   await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))`,[input.installationId])
-  const ownership=await client.query<{version_id:string}>(`SELECT v.version_id::text FROM knowledge_versions v WHERE v.installation_id=$1 AND EXISTS(SELECT 1 FROM knowledge_versions a JOIN knowledge_evidence e USING(installation_id,version_id) WHERE a.installation_id=v.installation_id AND a.claim_id=v.claim_id AND e.episode_id=ANY($2::uuid[]))`,[input.installationId,input.episodeIds])
+  const ownership=await client.query<{version_id:string}>(`SELECT v.version_id::text FROM knowledge_versions v WHERE v.installation_id=$1 AND EXISTS(SELECT 1 FROM knowledge_versions a JOIN knowledge_evidence e USING(installation_id,version_id) WHERE a.installation_id=v.installation_id AND a.claim_id=v.claim_id AND EXISTS(SELECT 1 FROM work_episodes w WHERE ${episodeEvidenceMatch} AND w.episode_id=ANY($2::uuid[])))`,[input.installationId,input.episodeIds])
   await assertIndependentAcceptedEvidence(client,ownership.rows.map(r=>r.version_id))
-  await client.query(`DELETE FROM memory_context_packs p WHERE p.installation_id=$1 AND EXISTS(SELECT 1 FROM memory_context_pack_evidence pe JOIN knowledge_evidence e USING(installation_id,evidence_id) WHERE pe.pack_id=p.pack_id AND e.episode_id=ANY($2::uuid[]))`,[input.installationId,input.episodeIds])
+  await client.query(`DELETE FROM memory_context_packs p WHERE p.installation_id=$1 AND EXISTS(SELECT 1 FROM memory_context_pack_evidence pe JOIN knowledge_evidence e USING(installation_id,evidence_id) WHERE pe.pack_id=p.pack_id AND EXISTS(SELECT 1 FROM work_episodes w WHERE ${episodeEvidenceMatch} AND w.episode_id=ANY($2::uuid[])))`,[input.installationId,input.episodeIds])
   await minimizeEpisodeFeedback(client,input.installationId,input.episodeIds)
   const invalidated=await invalidateEpisodeKnowledge(client,input,tombstoneHmacKeys)
-  await client.query(`DELETE FROM knowledge_evidence WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])`,[input.installationId,input.episodeIds])
+  await client.query(`DELETE FROM knowledge_evidence e WHERE installation_id=$1 AND EXISTS(SELECT 1 FROM work_episodes w WHERE ${episodeEvidenceMatch} AND w.episode_id=ANY($2::uuid[]))`,[input.installationId,input.episodeIds])
   await client.query(`DELETE FROM memory_candidates WHERE installation_id=$1 AND episode_id=ANY($2::uuid[])`,[input.installationId,input.episodeIds])
   // Native state-change triggers invalidate Skill/Git outputs, cancel their
   // operational work, and retain original generation/unknown-budget linkage.

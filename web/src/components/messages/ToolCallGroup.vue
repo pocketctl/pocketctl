@@ -1,7 +1,7 @@
 <template>
   <div class="tool-call-group">
     <div class="tool-group-card">
-      <button type="button" class="tool-group-trigger" :aria-expanded="groupExpanded" :aria-controls="groupBodyId" @click="groupExpanded = !groupExpanded">
+      <button type="button" class="tool-group-trigger" :aria-expanded="groupExpanded" :aria-controls="groupBodyId" @click="toggleGroup">
         <svg class="tool-group-symbol" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="3"/><path d="m5 7 3 3-3 3m5 0h5"/></svg>
         <span class="tool-group-copy">
           <strong class="tool-group-title">{{ t('session.tool_group_heading') }} <span class="tool-group-count">{{ messages.length }}</span></strong>
@@ -84,10 +84,15 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useLocale } from '../../composables/useLocale'
 import { isShellTool, parseSimpleToolCommand, toolArgs, toolInputText } from '../../utils/toolDisplay'
 
-const props = defineProps<{ messages: any[] }>()
+const props = withDefaults(defineProps<{ messages: any[]; expanded?: boolean }>(), { expanded: undefined })
 const { t } = useLocale()
 const attentionStatuses = new Set(['running', 'timeout', 'unknown', 'error', 'failed'])
-const groupExpanded = ref(props.messages.some(message => attentionStatuses.has(message.status)))
+const emit = defineEmits<{ 'change-expanded': [expanded: boolean] }>()
+const groupExpanded = ref(props.expanded ?? props.messages.some(message => attentionStatuses.has(message.status)))
+function toggleGroup() {
+  groupExpanded.value = !groupExpanded.value
+  emit('change-expanded', groupExpanded.value)
+}
 const selectedKey = ref<string | null>(null)
 const activeTabs = reactive<Record<string, 'input' | 'output'>>({})
 const expandedOutputs = reactive<Record<string, boolean>>({})
@@ -123,6 +128,7 @@ const groupDuration = computed(() => {
 const footerLabel = computed(() => groupStatusClass.value === 'completed' ? t('session.tool_group_footer_completed') : groupStatusLabel.value)
 
 watch(() => props.messages.map(message => message.status).join('|'), () => {
+  if (props.expanded !== undefined) return
   if (props.messages.some(message => attentionStatuses.has(message.status))) {
     groupExpanded.value = true
     return

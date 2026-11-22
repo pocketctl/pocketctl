@@ -438,6 +438,16 @@ func (p *JSONLStreamParser) Parse(line string) (result []protocol.DaemonEvent, p
 			p.sawEndTurn = entry.Message.StopReason == "end_turn"
 		}
 		events, err := p.parseAssistant(entry, sid)
+		if entry.Message != nil && !entry.IsSidechain && entry.Message.Model != "<synthetic>" {
+			for i := range events {
+				if events[i].Type == "agent_text" && entry.Message.ID != "" {
+					events[i].DialogueMessageID = entry.Message.ID
+					if entry.Message.StopReason == "end_turn" {
+						events[i].MessagePhase = "final_answer"
+					}
+				}
+			}
+		}
 		p.stampTurns(events, entry.IsSidechain)
 		return events, err
 	case "user":

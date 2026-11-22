@@ -11,7 +11,7 @@ const id='10000000-0000-0000-0000-000000000001',scope={installationId:'installat
 function fixture(){
  const query=vi.fn(async(sql:string)=>{
   if(sql.startsWith('SELECT to_jsonb(t)'))return {rows:[{snapshot:{terminal_at:'2026-11-11'}}],rowCount:1}
-  if(sql.includes('source_kind IS DISTINCT'))return {rows:[],rowCount:0}
+  if(sql.includes('AS other_kind'))return {rows:[{other_kind:false}],rowCount:1}
   if(sql.includes('FROM shared.memory_source_modes'))return {rows:[{mode:'shared-active',generation:'3'}],rowCount:1}
   if(sql.includes('shared.memory_source_ref_context'))return {rows:[{source_event_id:id,context:{scope,root}}],rowCount:1}
   if(sql.includes('xmin::text AS row_version'))return {rows:[{source_event_id:id,mapping_state:'verified',source_kind:'relay_event',canonical_key:'1',body_reclaimed_at:null}],rowCount:1}

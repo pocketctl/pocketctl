@@ -16,7 +16,7 @@ export function historyPreview(rows: any[]): any[] {
     if (row.type === 'cached_tool_group') { projected.push(row); continue }
     if (row.type === 'tool_call' && row.tool !== 'AskUserQuestion') {
       const completed = (grouping.groups.get(row) || [row]).filter(item => item.status === 'completed')
-      if (completed.length) projected.push({ id: 'cache-tools-' + row.id, type: 'cached_tool_group', turn_id: row.turn_id,
+      if (completed.length) projected.push({ id: 'cache-tools-' + row.id, call_id: row.call_id, type: 'cached_tool_group', turn_id: row.turn_id,
         count: completed.length, tools: [...new Set(completed.map(item => String(item.tool)))].slice(0, 5) })
     } else if (row.role === 'user' || row.type === 'agent_text' || row.type === 'agent_reasoning') {
       projected.push({ ...pick(row, ['id', 'type', 'role', 'turn_id', 'retry_of_turn_id']),

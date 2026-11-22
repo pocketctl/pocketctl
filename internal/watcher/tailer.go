@@ -186,6 +186,7 @@ func NewCodexObserverJSONLTailerFromStart(filePath string) (*JSONLTailer, error)
 	// Equivalent relative/absolute spellings name one source. A move or rename
 	// intentionally changes this canonical path and therefore starts a new source.
 	tailer.eventSourceID = CodexReplaySourceID(filepath.Clean(absolutePath))
+	tailer.maxRecordBytes = 8 * 1024 * 1024
 	return tailer, nil
 }
 
@@ -323,8 +324,8 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 		return nil, nil, err
 	}
 
-	if t.claudeV2 {
-		return t.tailClaudeNewLinesLocked(info)
+	if t.maxRecordBytes > 0 {
+		return t.tailCompleteRecordsLocked(info)
 	}
 
 	if info.Size() <= t.offset {
@@ -393,7 +394,7 @@ func codexRecordBefore(line string, cutoff time.Time) bool {
 	return err == nil && recordedAt.Before(cutoff)
 }
 
-func (t *JSONLTailer) tailClaudeNewLinesLocked(info os.FileInfo) ([]protocol.DaemonEvent, []string, error) {
+func (t *JSONLTailer) tailCompleteRecordsLocked(info os.FileInfo) ([]protocol.DaemonEvent, []string, error) {
 	pathInfo, err := os.Stat(t.filePath)
 	if err != nil {
 		return nil, nil, err
@@ -471,19 +472,30 @@ func (t *JSONLTailer) tailClaudeNewLinesLocked(info os.FileInfo) ([]protocol.Dae
 		rawLines = append(rawLines, line)
 		events, parseErr := t.parser.Parse(line)
 		if parseErr != nil {
-			allEvents = append(allEvents, protocol.DaemonEvent{
-				Type:   "sync_warning",
-				Reason: "jsonl_parse_error",
-			})
+			if t.claudeV2 {
+				allEvents = append(allEvents, protocol.DaemonEvent{
+					Type:   "sync_warning",
+					Reason: "jsonl_parse_error",
+				})
+			}
 			recordStart = t.offset
 			continue
 		}
-		recordHash := sha256.Sum256(record)
-		for i := range events {
-			if events[i].EventID == "" {
-				identity := fmt.Sprintf("%s|%d|%x|%d", t.eventSourceID, recordStart, recordHash, i)
-				eventHash := sha256.Sum256([]byte(identity))
-				events[i].EventID = fmt.Sprintf("claude-jsonl:v1:%x", eventHash[:16])
+		if t.claudeV2 {
+			recordHash := sha256.Sum256(record)
+			for i := range events {
+				if events[i].EventID == "" {
+					identity := fmt.Sprintf("%s|%d|%x|%d", t.eventSourceID, recordStart, recordHash, i)
+					eventHash := sha256.Sum256([]byte(identity))
+					events[i].EventID = fmt.Sprintf("claude-jsonl:v1:%x", eventHash[:16])
+				}
+			}
+		} else {
+			// Preserve the original rollout/line/event identity across upgrades.
+			for i := range events {
+				if events[i].EventID == "" {
+					events[i].EventID = fmt.Sprintf("jsonl:%s:%d:%d", t.eventSourceID, t.lineIndex-1, i)
+				}
 			}
 		}
 		allEvents = append(allEvents, events...)

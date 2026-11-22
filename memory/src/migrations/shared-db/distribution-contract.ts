@@ -129,7 +129,7 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
    IF d.covers_event_append THEN projection_priority=${APPEND_PROJECTION_PRIORITY};END IF;
    FOR item IN SELECT * FROM shared.memory_source_distribution_targets t WHERE t.scan_id=p_scan
     AND t.cursor_key COLLATE "C">d.dispatch_cursor COLLATE "C" ORDER BY t.cursor_key COLLATE "C" LIMIT p_limit LOOP
-    IF item.state='current' THEN
+    IF item.state='current' AND NOT (p_kind='relay_event' AND item.target_mode='shared-active' AND EXISTS(SELECT 1 FROM shared.memory_dialogue_installations policy WHERE policy.installation_id=item.installation_id)) THEN
      INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
       VALUES(gen_random_uuid(),item.installation_id,'project_shared_source',
        'shared-source:'||p_scan::text||':'||encode(sha256(convert_to(item.cursor_key,'UTF8')),'hex'),projection_priority,

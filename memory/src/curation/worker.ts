@@ -15,6 +15,7 @@ import {assertJobFence,StaleJobFenceError} from '../generation/fence.js'
 import {recordCurationProviderUsage} from '../generation/provider-effect.js'
 import {lockCurationAuthority,readCurationPolicy} from './policy.js'
 import type {CurationMode} from './contracts.js'
+import {extractDialogueConclusions} from './dialogue-extraction.js'
 import {extractConclusions,CONCLUSION_PROMPT_VERSION} from './conclusion-extractor.js'
 import type {ConclusionEvidence} from './conclusion-validator.js'
 import {loadCurrentLifecycleSources,refreshLifecycleProcessingReceipt} from './task-repository.js'
@@ -64,10 +65,10 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
    const evidence:ConclusionEvidence[]=sources.map(s=>{
     const proof=parseMemorySourceProvenance(s.source_provenance?.memory)
     if(!proof||proof.skill_state!=='non_skill'||!proof.lineage_complete)throw new Error('curation_source_unavailable')
-    const text=sanitizeText(typeof s.payload.text==='string'?s.payload.text:'',4000).text
+    const text=sanitizeText(typeof s.payload.text==='string'?s.payload.text:'',bundle.dialogue_members?Infinity:4000).text
     return{id:s.source_event_id,text,role:proof.source_role,verified:proof.source_role==='tool'&&s.event_type==='test_result'&&s.payload.status==='passed'}
    }).filter(s=>s.text)
-   if(evidence.reduce((n,s)=>n+s.text.length,0)>64000)throw new Error('curation_input_limit')
+   if(!bundle.dialogue_members&&evidence.reduce((n,s)=>n+s.text.length,0)>64000)throw new Error('curation_input_limit')
    const spaces=(await c.query("SELECT space_id::text id,name,domain FROM memory_spaces WHERE installation_id=$1 AND state='active' ORDER BY space_id LIMIT 100",[installationId])).rows
    const tasks=await loadTaskCatalog(c,installationId,bundle.session_id)
    let inserted=(await c.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,claimed_by,claim_expires_at,authorization_epoch)
@@ -97,13 +98,14 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
     }
    }
    await c.query("UPDATE memory_task_bundles SET state='running',reason_code=NULL WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId])
-   return{runId:inserted.run_id,claimEpoch:Number(inserted.claim_epoch),revision:Number(bundle.revision),digest:bundle.source_digest as Buffer,policy,policyHash,evidence,spaces,tasks}
+   return{runId:inserted.run_id,claimEpoch:Number(inserted.claim_epoch),revision:Number(bundle.revision),digest:bundle.source_digest as Buffer,policy,policyHash,evidence,spaces,tasks,dialogue:Boolean(bundle.dialogue_members)}
   })
   if(!reservation)return
   const stopRenewal=fence?startCurationLeaseRenewal(input.pool,installationId,reservation.runId,reservation.claimEpoch,fence,signal):undefined
   try{
    let result:Awaited<ReturnType<typeof extractConclusions>>
-   try{result=input.textGenerator?await extractConclusions(input.textGenerator,{sources:reservation.evidence,spaces:reservation.spaces,tasks:reservation.tasks,requestKey:`curation:${reservation.runId}:${reservation.claimEpoch}`,signal,now:new Date()}):{ok:false as const,code:'budget_unavailable' as const,retryable:false}}
+   const extract=reservation.dialogue?extractDialogueConclusions:extractConclusions
+   try{result=input.textGenerator?await extract(input.textGenerator,{sources:reservation.evidence,spaces:reservation.spaces,tasks:reservation.tasks,requestKey:`curation:${reservation.runId}:${reservation.claimEpoch}`,signal,now:new Date()}):{ok:false as const,code:'budget_unavailable' as const,retryable:false}}
    catch{result={ok:false,code:'provider_result_unknown',retryable:false}}
    if('usage' in result&&result.usage)await recordCurationProviderUsage(input.pool,{installationId,runId:reservation.runId,
     inputTokens:result.usage.inputTokens,outputTokens:result.usage.outputTokens,model:result.usage.model,costMicros:result.usage.costMicros})
@@ -147,8 +149,14 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
       WHERE memory_task_bundles.session_id=EXCLUDED.session_id AND memory_task_bundles.space_id=EXCLUDED.space_id AND memory_task_bundles.body_state='present' AND memory_task_bundles.revision=$12 RETURNING revision`,
       [installationId,childId,bundle.session_id,`task:${childId}`,task.space_id,childDigest,bundle.watermark,bundleId,reservation.revision,JSON.stringify(task.spans),taskTopicDescriptor(task.spans,reservation.evidence),previous?.revision??0])).rows[0]
      if(!child)throw bindingConflict('write_conflict',previous?.revision)
-     await c.query('DELETE FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[installationId,childId])
-     await c.query(`INSERT INTO memory_task_bundle_sources SELECT installation_id,$3,source_event_id,source_digest,source_sequence FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2 AND source_event_id=ANY($4::uuid[])`,[installationId,bundleId,childId,[...new Set(task.spans.map(s=>s.event_id))]])
+     if(bundle.dialogue_members){
+      const selected=new Set(task.spans.map(s=>s.event_id))
+      const members=bundle.dialogue_members.filter((m:{id:string})=>selected.has(m.id))
+      await c.query('UPDATE memory_task_bundles SET dialogue_members=$3 WHERE installation_id=$1 AND bundle_id=$2',[installationId,childId,JSON.stringify(members)])
+     }else{
+      await c.query('DELETE FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2',[installationId,childId])
+      await c.query(`INSERT INTO memory_task_bundle_sources SELECT installation_id,$3,source_event_id,source_digest,source_sequence FROM memory_task_bundle_sources WHERE installation_id=$1 AND bundle_id=$2 AND source_event_id=ANY($4::uuid[])`,[installationId,bundleId,childId,[...new Set(task.spans.map(s=>s.event_id))]])
+     }
      const childRun=(await c.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,authorization_epoch,parent_run_id,completed_at)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,'completed',$9,$10,clock_timestamp()) RETURNING run_id::text`,[installationId,childId,child.revision,childDigest,policy.revision,reservation.policyHash,modelHash,policy.mode,policy.authorizationEpoch,reservation.runId])).rows[0].run_id
      for(const [ordinal,conclusion]of task.conclusions.entries()){

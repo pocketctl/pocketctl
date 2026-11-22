@@ -68,6 +68,7 @@ describe('encrypted personal previews', () => {
     activate()
     for (let i = 0; i < 25; i++) await cache.write('history:' + i, [i])
     expect((await rows()).filter(row => row.kind === 'history')).toHaveLength(20)
+    expect(cache.evictions.histories).toBe(5)
     await cache.write('huge', 'x'.repeat(2 * 1024 * 1024)); expect(await cache.read('huge')).toBeNull()
   })
   test('expired grant and stale cross-tab barrier block decryption', async () => {

@@ -42,8 +42,18 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
     CREATE OR REPLACE FUNCTION session_event_body_header(input JSONB) RETURNS JSONB
       LANGUAGE SQL IMMUTABLE STRICT AS $$
       SELECT COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(CASE WHEN jsonb_typeof(input)='object' THEN input ELSE '{}'::jsonb END)
-        WHERE key=ANY(ARRAY['agent','agent_id','event_id','message_id','part_id','revision','streaming','model','effort','turn_id'])
+        WHERE key=ANY(ARRAY['agent','agent_id','event_id','message_id','part_id','revision','streaming','model','effort','turn_id','actor_scope','dialogue_message_id','message_phase','turn_status','stream_id','chunk_seq','byte_offset','final','total_bytes','content_hash'])
           AND jsonb_typeof(value) IN ('string','number','boolean') AND pg_column_size(value)<=1024),'{}'::jsonb)
+        -- Keep only the operation category in the header. Commands, tool
+        -- arguments, MCP server names and results stay in the original body.
+        || CASE WHEN input->>'type' IN ('tool_call','tool_result') THEN
+          jsonb_strip_nulls(jsonb_build_object('dialogue_operation', CASE
+            WHEN input#>>'{call_meta,tool_kind}'='mcp'
+              OR input->>'tool' ~* '^mcp__[^_[:space:]]+.*__[^[:space:]]+' THEN 'mcp'
+            WHEN lower(input->>'tool')='skill' OR nullif(input#>>'{call_meta,skill_name}','') IS NOT NULL THEN 'skill'
+            WHEN input->>'type'='tool_call' AND lower(input->>'tool') IN('bash','shell','exec_command','functions.exec_command','commandexecution')
+              AND coalesce(input#>>'{input,command}',input#>>'{input,cmd}') ~ '^[[:space:]]*(git[[:space:]]+add[[:space:]]+[[:alnum:]_./* :+-]+(&&|;)[[:space:]]*)?git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)?(commit|merge)([[:space:]]|$)' THEN 'git'
+          END)) ELSE '{}'::jsonb END
         || CASE WHEN input ? 'usage' THEN jsonb_build_object('usage',COALESCE((SELECT jsonb_object_agg(key,value)
           FROM jsonb_each(CASE WHEN jsonb_typeof(input->'usage')='object' THEN input->'usage' ELSE '{}'::jsonb END)
           WHERE key=ANY(ARRAY['input_tokens','output_tokens','cache_read_tokens','cache_create_tokens','reasoning_tokens','total_tokens'])

@@ -396,6 +396,13 @@ func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 		}
 	}
 	events = p.turns.decorate(raw.Type, payload, events)
+	if payload.Phase == "final_answer" || payload.Phase == "commentary" {
+		for i := range events {
+			if events[i].Type == "agent_text" {
+				events[i].MessagePhase = payload.Phase
+			}
+		}
+	}
 
 	if raw.Type == "event_msg" && payload.Type == "agent_message" && len(events) == 1 && events[0].Type == "agent_text" {
 		p.pendingAgentMessageText = normalizeCodexAgentMessage(events[0].Text)
