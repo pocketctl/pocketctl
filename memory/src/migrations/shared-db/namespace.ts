@@ -1,4 +1,4 @@
-import {SHARED_SOURCE_READER_FUNCTIONS} from './reader-contract.js'
+import {DIALOGUE_SOURCE_READERS} from './dialogue-source-contract.js'
 import {SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS} from './commit-fence-contract.js'
 import {SHARED_INPUT_START_FUNCTIONS} from './input-start-contract.js'
 import {APPEND_CAPTURE_V1_SHA256} from './offline-projection-contract.js'
@@ -83,18 +83,18 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
    REVOKE ALL ON ALL SEQUENCES IN SCHEMA memory FROM PUBLIC,${relay};
    REVOKE ALL ON ALL FUNCTIONS IN SCHEMA memory FROM PUBLIC,${relay};
    GRANT EXECUTE ON FUNCTION shared.reclaim_turn_dialogues(),shared.uses_turn_dialogue(UUID),shared.dispatch_turn_dialogues(),shared.memory_dialogue_context(UUID,TEXT),shared.memory_dialogue_members(UUID,TEXT,TEXT) TO ${memory};
-   GRANT EXECUTE ON FUNCTION shared.memory_projection_runtime_ready() TO ${memory},${relay};
    GRANT EXECUTE ON FUNCTION shared.mark_memory_source_dirty(TEXT,TEXT),shared.memory_source_processing_blocks_purge(INT,TEXT[]) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.assert_session_transport_consumer_policy(),shared.session_transport_consumer_policy(BIGINT),shared.record_session_transport_body_gap(BIGINT) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.acquire_memory_source_processing_pin(UUID,JSONB,TEXT,JSONB,BOOLEAN),shared.release_memory_source_processing_pins(UUID),shared.guard_memory_source_processing_pins(UUID,INT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.claim_memory_source_work(TEXT,INTEGER,INTEGER),shared.claim_memory_source_work(TEXT,INTEGER,INTEGER,BOOLEAN),shared.assert_memory_source_lease(TEXT,TEXT,UUID,TEXT,BIGINT),
     shared.ack_memory_source_work(TEXT,TEXT,UUID,TEXT,BIGINT),shared.fail_memory_source_work(TEXT,TEXT,UUID,TEXT,BIGINT,TEXT) TO ${memory};
-   GRANT EXECUTE ON FUNCTION shared.complete_memory_source_projection(UUID,JSONB,TEXT,TEXT,JSONB),shared.memory_source_scope_key(JSONB) TO ${memory};
+   GRANT EXECUTE ON FUNCTION shared.complete_memory_team_publication(UUID,TEXT,JSONB),shared.memory_source_scope_key(JSONB) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.lock_memory_legacy_input(UUID,BIGINT),shared.record_memory_source_dispatch(UUID,BIGINT,TEXT,TEXT,BIGINT,BIGINT,BIGINT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.capture_memory_job_source(UUID,TEXT,BIGINT,TEXT),shared.assert_memory_job_source(UUID,TEXT),shared.guard_memory_job_source_commit(UUID),shared.start_memory_source_provider(UUID,UUID,TEXT),shared.finish_memory_source_provider(UUID,UUID,TEXT) TO ${memory};
-   GRANT EXECUTE ON FUNCTION shared.scan_memory_relay_projection_page(JSONB,TEXT,BIGINT,INT),shared.memory_relay_source_authority(JSONB,TEXT,TEXT),shared.memory_retained_relay_authority(JSONB,TEXT,TEXT),shared.read_memory_relay_sources(JSONB,TEXT,BIGINT,INT,BIGINT[]),shared.read_memory_relay_archive(JSONB,TEXT,UUID,INT) TO ${memory};
+   GRANT EXECUTE ON FUNCTION shared.memory_relay_source_authority(JSONB,TEXT,TEXT),shared.memory_retained_relay_authority(JSONB,TEXT,TEXT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.lock_memory_delivery_commit(JSONB),shared.lock_memory_personal_source_commit(JSONB,TEXT,TEXT,JSONB,BOOLEAN),shared.lock_memory_team_source_commit(JSONB,TEXT,TEXT,JSONB,BOOLEAN) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.memory_delivery_withdrawal_page(UUID,BIGINT,INT),shared.memory_installation_inventory_page(UUID,INT,BIGINT),shared.memory_source_health(),shared.memory_source_pipeline_health(UUID),shared.memory_current_grant_states(UUID[],UUID[]),shared.lock_memory_grant_authority(UUID[],UUID[]) TO ${memory};
+   GRANT EXECUTE ON FUNCTION shared.enroll_new_native_memory_installations(UUID[]),memory.memory_bundle_reclamation_allowed(UUID,UUID,TEXT,TEXT),shared.memory_native_consumers_ready(),shared.memory_personal_delivery_source(UUID,TEXT,TEXT),shared.memory_retained_bundle_member(UUID,UUID,UUID),shared.memory_session_reference_ids(UUID,TEXT),shared.memory_native_evidence_handle(UUID,UUID,UUID),shared.memory_team_reference_headers(UUID,UUID[]),shared.memory_archive_reference_headers(UUID,UUID[]),shared.read_memory_dialogue_sources(JSONB,TEXT,TEXT,BIGINT[]),shared.read_memory_dialogue_archive(JSONB,TEXT,TEXT,UUID,INT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.read_memory_legacy_sources(JSONB,TEXT,UUID,INT,UUID[],BOOLEAN),shared.memory_source_ref_context(UUID,UUID[]) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.memory_team_source_authority(JSONB,TEXT,TEXT),shared.read_memory_team_source(JSONB,TEXT,TEXT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.enumerate_memory_source_targets(TEXT,TEXT,TEXT,INT) TO ${memory};
@@ -105,8 +105,6 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
    GRANT EXECUTE ON FUNCTION shared.step_memory_control_bootstrap(TEXT,TEXT,UUID,TEXT,BIGINT,INT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.renew_memory_source_lease(TEXT,TEXT,UUID,TEXT,BIGINT,INT),shared.renew_memory_control_lease(TEXT,TEXT,UUID,TEXT,BIGINT,INT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.guard_memory_job_source_comparison(UUID) TO ${memory};
-   GRANT EXECUTE ON FUNCTION shared.memory_shadow_candidate_headers(UUID,TEXT,TEXT[],TEXT[]),shared.read_memory_source_shadow_progress(UUID,TEXT,TEXT,UUID,TEXT),
-    shared.write_memory_source_shadow_progress(UUID,JSONB,TEXT,TEXT,UUID,TEXT,JSONB) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.lock_memory_feed_source_mode(UUID) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.memory_source_control_snapshot(),shared.guard_memory_control_commit(BIGINT),shared.claim_memory_control_work(TEXT,INT,INT),
     shared.assert_memory_control_lease(TEXT,TEXT,UUID,TEXT,BIGINT),shared.ack_memory_control_work(TEXT,TEXT,UUID,TEXT,BIGINT),shared.fail_memory_control_work(TEXT,TEXT,UUID,TEXT,BIGINT,TEXT) TO ${memory};
@@ -199,8 +197,8 @@ export async function assertMemorySchedulingContract(db:Pick<pg.PoolClient,'quer
   if(capacityReady?.ready!==true)throw Error('shared_source_scheduling_migration_required')
 }
 const snapshotReaders=[
- ['shared.scan_memory_relay_projection_page(jsonb,text,bigint,integer)',SHARED_SOURCE_READER_FUNCTIONS],
- ['shared.read_memory_relay_sources(jsonb,text,bigint,integer,bigint[])',SHARED_SOURCE_READER_FUNCTIONS],
+ ['shared.read_memory_dialogue_sources(jsonb,text,text,bigint[])',DIALOGUE_SOURCE_READERS],
+ ['shared.read_memory_dialogue_archive(jsonb,text,text,uuid,integer)',DIALOGUE_SOURCE_READERS],
  ['shared.lock_memory_personal_source_commit(jsonb,text,text,jsonb,boolean)',SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS],
  ['shared.memory_relay_input_admitted(jsonb,bigint,boolean)',SHARED_INPUT_START_FUNCTIONS],
 ] as const
@@ -258,8 +256,6 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
   if(relayTarget||launch.sharedSourceProfile)await assertRelayEventAppendCapture(client)
   await assertMemorySchedulingContract(client)
   await assertSnapshotReaderContract(client)
-  if(!(await client.query("SELECT has_function_privilege(current_user,'shared.scan_memory_relay_projection_page(jsonb,text,bigint,integer)','EXECUTE') AS ready")).rows[0]?.ready)
-    throw Error('relay_projection_scan_grant_required')
   const contract=(await client.query("SELECT version,to_jsonb(contract)->>'offline_projection_version' AS offline_projection_version,COALESCE(to_jsonb(contract)->>'input_start_version','0') AS input_start_version,COALESCE(to_jsonb(contract)->>'consumer_version','0') AS consumer_version,COALESCE(to_jsonb(contract)->>'commit_fence_version','0') AS commit_fence_version,COALESCE(to_jsonb(contract)->>'execution_version','0') AS execution_version,COALESCE(to_jsonb(contract)->>'control_version','0') AS control_version,COALESCE(to_jsonb(contract)->>'distribution_version','0') AS distribution_version,COALESCE(to_jsonb(contract)->>'shadow_version','0') AS shadow_version,COALESCE(to_jsonb(contract)->>'processing_pin_version','0') AS processing_pin_version,COALESCE(to_jsonb(contract)->>'processing_read_version','0') AS processing_read_version,COALESCE(to_jsonb(contract)->>'mode_version','0') AS mode_version FROM shared.memory_source_contract contract")).rows
   if(contract.length!==1 || contract[0].version!==1)throw new Error('unsupported_shared_source_contract')
   if(contract[0].input_start_version!=='1')throw new Error('unsupported_shared_input_start_contract')
@@ -268,15 +264,14 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
   if(contract[0].commit_fence_version!=='1')throw new Error('unsupported_shared_commit_fence_contract')
   if(contract[0].execution_version!=='1')throw new Error('unsupported_shared_execution_contract')
   if(contract[0].control_version!=='1')throw new Error('unsupported_shared_control_contract')
-  if(contract[0].offline_projection_version==='1'&&(await client.query('SELECT shared.memory_projection_runtime_ready() AS ready')).rows[0]?.ready!==true)
-   throw Error('offline_projection_capture_migration_required')
+  if(contract[0].offline_projection_version!=='0'||contract[0].shadow_version!=='0')throw Error('native_source_upgrade_required')
   if(contract[0].distribution_version!=='1')throw new Error('unsupported_shared_distribution_contract')
-  if(contract[0].shadow_version!=='1')throw new Error('unsupported_shared_shadow_contract')
   if(contract[0].processing_pin_version!=='1')throw new Error('unsupported_shared_processing_pin_contract')
   if(contract[0].processing_read_version!=='1')throw new Error('unsupported_shared_processing_read_contract')
   if(contract[0].mode_version!=='1')throw new Error('unsupported_shared_mode_contract')
-  const required=['shared.memory_delivery_withdrawal_page(uuid,bigint,integer)','shared.memory_installation_inventory_page(uuid,integer,bigint)','shared.guard_memory_source_processing_pins(uuid,integer)','shared.acquire_memory_source_processing_pin(uuid,jsonb,text,jsonb,boolean)','shared.release_memory_source_processing_pins(uuid)','shared.complete_memory_source_projection(uuid,jsonb,text,text,jsonb)','shared.memory_source_scope_key(jsonb)','shared.guard_memory_job_source_comparison(uuid)','shared.memory_shadow_candidate_headers(uuid,text,text[],text[])','shared.read_memory_source_shadow_progress(uuid,text,text,uuid,text)','shared.write_memory_source_shadow_progress(uuid,jsonb,text,text,uuid,text,jsonb)','shared.step_memory_control_bootstrap(text,text,uuid,text,bigint,integer)','shared.renew_memory_source_lease(text,text,uuid,text,bigint,integer)','shared.renew_memory_control_lease(text,text,uuid,text,bigint,integer)','shared.step_memory_source_distribution(text,text,uuid,text,bigint,uuid,text,integer)','shared.dispatch_memory_source_distribution(text,text,uuid,text,bigint,uuid,text,integer)','shared.resume_memory_source_distribution(text,text,uuid,text,bigint)','shared.current_memory_source_distribution(text,text,uuid)','shared.read_memory_source_context_set(text,text,uuid,uuid,text,integer)','shared.memory_source_control_snapshot()','shared.guard_memory_control_commit(bigint)','shared.enumerate_memory_source_targets(text,text,text,integer)','shared.capture_memory_job_source(uuid,text,bigint,text)','shared.assert_memory_job_source(uuid,text)','shared.guard_memory_job_source_commit(uuid)','shared.start_memory_source_provider(uuid,uuid,text)','shared.finish_memory_source_provider(uuid,uuid,text)','shared.lock_memory_delivery_commit(jsonb)','shared.lock_memory_personal_source_commit(jsonb,text,text,jsonb,boolean)','shared.lock_memory_team_source_commit(jsonb,text,text,jsonb,boolean)','shared.lock_memory_legacy_input(uuid,bigint)','shared.read_memory_legacy_sources(jsonb,text,uuid,integer,uuid[],boolean)','shared.memory_source_health()','shared.memory_source_pipeline_health(uuid)','shared.memory_current_grant_states(uuid[],uuid[])','shared.lock_memory_grant_authority(uuid[],uuid[])','shared.memory_source_ref_context(uuid,uuid[])','shared.memory_retained_relay_authority(jsonb,text,text)']
-  required.push('shared.uses_turn_dialogue(uuid)','shared.dispatch_turn_dialogues()','shared.reclaim_turn_dialogues()',
+  const required=['shared.memory_delivery_withdrawal_page(uuid,bigint,integer)','shared.memory_installation_inventory_page(uuid,integer,bigint)','shared.guard_memory_source_processing_pins(uuid,integer)','shared.acquire_memory_source_processing_pin(uuid,jsonb,text,jsonb,boolean)','shared.release_memory_source_processing_pins(uuid)','shared.memory_source_scope_key(jsonb)','shared.guard_memory_job_source_comparison(uuid)','shared.step_memory_control_bootstrap(text,text,uuid,text,bigint,integer)','shared.renew_memory_source_lease(text,text,uuid,text,bigint,integer)','shared.renew_memory_control_lease(text,text,uuid,text,bigint,integer)','shared.step_memory_source_distribution(text,text,uuid,text,bigint,uuid,text,integer)','shared.dispatch_memory_source_distribution(text,text,uuid,text,bigint,uuid,text,integer)','shared.resume_memory_source_distribution(text,text,uuid,text,bigint)','shared.current_memory_source_distribution(text,text,uuid)','shared.read_memory_source_context_set(text,text,uuid,uuid,text,integer)','shared.memory_source_control_snapshot()','shared.guard_memory_control_commit(bigint)','shared.enumerate_memory_source_targets(text,text,text,integer)','shared.capture_memory_job_source(uuid,text,bigint,text)','shared.assert_memory_job_source(uuid,text)','shared.guard_memory_job_source_commit(uuid)','shared.start_memory_source_provider(uuid,uuid,text)','shared.finish_memory_source_provider(uuid,uuid,text)','shared.lock_memory_delivery_commit(jsonb)','shared.lock_memory_personal_source_commit(jsonb,text,text,jsonb,boolean)','shared.lock_memory_team_source_commit(jsonb,text,text,jsonb,boolean)','shared.lock_memory_legacy_input(uuid,bigint)','shared.read_memory_legacy_sources(jsonb,text,uuid,integer,uuid[],boolean)','shared.memory_source_health()','shared.memory_source_pipeline_health(uuid)','shared.memory_current_grant_states(uuid[],uuid[])','shared.lock_memory_grant_authority(uuid[],uuid[])','shared.memory_source_ref_context(uuid,uuid[])','shared.memory_retained_relay_authority(jsonb,text,text)']
+  required.push('shared.enroll_new_native_memory_installations(uuid[])','memory.memory_bundle_reclamation_allowed(uuid,uuid,text,text)','shared.memory_native_consumers_ready()','shared.memory_personal_delivery_source(uuid,text,text)','shared.memory_retained_bundle_member(uuid,uuid,uuid)','shared.memory_session_reference_ids(uuid,text)','shared.memory_native_evidence_handle(uuid,uuid,uuid)','shared.memory_team_reference_headers(uuid,uuid[])','shared.complete_memory_team_publication(uuid,text,jsonb)','shared.memory_archive_reference_headers(uuid,uuid[])','shared.uses_turn_dialogue(uuid)','shared.dispatch_turn_dialogues()','shared.reclaim_turn_dialogues()',
+   'shared.read_memory_dialogue_sources(jsonb,text,text,bigint[])','shared.read_memory_dialogue_archive(jsonb,text,text,uuid,integer)',
    'shared.memory_dialogue_context(uuid,text)','shared.memory_dialogue_members(uuid,text,text)')
   const functions=(await client.query(`SELECT NOT EXISTS(SELECT 1 FROM unnest($1::text[]) AS required(signature)
    WHERE to_regprocedure(signature) IS NULL OR NOT COALESCE(has_function_privilege(current_user,to_regprocedure(signature),'EXECUTE'),FALSE)) AS complete`,[required])).rows[0].complete
@@ -329,7 +324,10 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
    // organization control/legacy jobs remain available with unchanged consent.
    if(modes.some(m=>!ids.includes(m.installation_id)||!facts.some(f=>f.installation_id===m.installation_id&&f.state.owner_scope_kind==='personal')))
     throw Error('shared_source_launch_scope_mismatch')
-  }else if(modes.length)throw new Error('shared_source_consumers_not_ready')
+  }else if(modes.length){
+   const ready=(await client.query('SELECT shared.memory_native_consumers_ready() AS ready')).rows[0]?.ready
+   if(!ready)throw new Error('shared_source_consumers_not_ready')
+  }
   await assertTransportMetadataContract(client)
   await client.query('COMMIT')
  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}

@@ -50,7 +50,7 @@ function toClaim(row: JobRow): JobClaim {
  * lease expired (and whose job was reclaimed under a bumped epoch) can never
  * finalize work a new worker already owns.
  */
-export function createJobRepository(pool: pg.Pool, options: { compileBatchIntervalMs?: number } = {}) {
+export function createJobRepository(pool: pg.Pool, options: { compileBatchIntervalMs?: number; nativeSourcesOnly?:boolean } = {}) {
   const compileBatchMs = options.compileBatchIntervalMs ?? 0
   if (!Number.isSafeInteger(compileBatchMs) || compileBatchMs < 0 || compileBatchMs > 3_600_000) {
     throw new Error('invalid_compile_batch_interval')
@@ -123,6 +123,13 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
             COALESCE(($7::jsonb->>j.lane)::int,2147483647)-COALESCE(l.n,0) AS lane_room
           FROM (SELECT job_id,installation_id,job_type,priority,available_at,created_at,${capacityClass} AS lane
                 FROM memory_jobs CROSS JOIN batch WHERE state='pending' AND available_at<=statement_timestamp()
+                  ${options.nativeSourcesOnly?`AND job_type NOT IN('snapshot_reconcile','project_feed')
+                    AND (job_type<>'project_shared_source' OR payload#>>'{root,kind}' IN('team_collaboration','team_delivery'))
+                    AND (job_type NOT IN('consolidate_task','curate_conclusions') OR EXISTS(
+                     SELECT 1 FROM memory_task_bundles b WHERE b.installation_id=memory_jobs.installation_id
+                      AND b.bundle_id=CASE WHEN memory_jobs.payload->>'bundle_id' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                       THEN (memory_jobs.payload->>'bundle_id')::uuid END AND b.dialogue_members IS NOT NULL))
+                    AND (job_type<>'compile_episode' OR (idempotency_key LIKE 'dialogue:%' AND payload ?& ARRAY['dialogue_session','turn']))`:''}
                   AND (job_type<>'compile_episode' OR $8=0 OR (
                     available_at<=to_timestamp(batch.start_ms::double precision/1000)
                     AND (jsonb_typeof(payload->'compile_last_claim_ms') IS DISTINCT FROM 'number'

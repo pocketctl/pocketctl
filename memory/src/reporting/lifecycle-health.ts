@@ -1,3 +1,4 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 
 export type LifecycleMode='off'|'shadow'|'enabled'
@@ -53,6 +54,13 @@ export function summarizeLifecycleHealth(rows:LifecycleHealthRow[],configuredMod
  * historical GROUP BY, provider result JSON, or source digest computation. */
 export async function loadLifecycleHealth(pool:HealthPool,configuredMode:LifecycleMode='off'):Promise<LifecycleHealthRow[]> {
  const mode=['shadow','enabled'].includes(configuredMode)?configuredMode:'off'
+ const native=sourcePoolContext(pool).namespace==='memory'
+ const sample=native?`SELECT turn_id,session_id,dialogue_completion FROM work_episodes
+   WHERE installation_id=i.installation_id AND i.active AND compiler_version='relay-turn-v1' AND terminal_at IS NOT NULL
+   AND state='ready' AND compiled_at>=i.observation_window_start ORDER BY compiled_at DESC,turn_id,session_id`
+  :`SELECT turn_id,session_id,NULL::jsonb AS dialogue_completion FROM source_turns WHERE installation_id=i.installation_id AND i.active
+   AND state IN('completed','interrupted','failed','abandoned') AND updated_at>=i.observation_window_start
+   ORDER BY updated_at DESC,turn_id`
  const result=await queryHealth<LifecycleHealthRow>(pool,`
  WITH installations AS MATERIALIZED (
   SELECT i.installation_id,i.relay_status,i.local_status,COALESCE(s.owner_scope_kind,'unknown') owner_scope_kind,
@@ -71,14 +79,12 @@ export async function loadLifecycleHealth(pool:HealthPool,configuredMode:Lifecyc
   c.context_delivered,m.context_modes,(t.capped OR b.capped OR d.capped OR c.capped OR m.capped) counts_capped
  FROM installations i
  CROSS JOIN LATERAL (
-  SELECT count(*) FILTER(WHERE n<=1000)::int turns,count(disposition) FILTER(WHERE n<=1000)::int receipt_turns,
-   count(*) FILTER(WHERE n<=1000 AND complete)::int complete_turns,
-   count(*) FILTER(WHERE n<=1000 AND disposition='provenance_unknown')::int provenance_unknown_turns,
-   count(*) FILTER(WHERE n<=1000 AND disposition IS NULL)::int missing_receipt_turns,COALESCE(bool_or(n>1000),false) capped
-  FROM (SELECT turn_id,session_id,row_number() OVER() n FROM
-   (SELECT turn_id,session_id FROM source_turns WHERE installation_id=i.installation_id AND i.active
-    AND state IN('completed','interrupted','failed','abandoned') AND updated_at>=i.observation_window_start
-    ORDER BY updated_at DESC,turn_id LIMIT 1001) sample) turns
+  SELECT count(*) FILTER(WHERE n<=1000)::int turns,count(COALESCE(disposition,dialogue_completion->>'disposition',dialogue_completion->>'digest')) FILTER(WHERE n<=1000)::int receipt_turns,
+   count(*) FILTER(WHERE n<=1000 AND COALESCE(complete,dialogue_completion IS NOT NULL AND dialogue_completion->>'disposition' IS DISTINCT FROM 'provenance_unknown'))::int complete_turns,
+   count(*) FILTER(WHERE n<=1000 AND COALESCE(disposition,dialogue_completion->>'disposition')='provenance_unknown')::int provenance_unknown_turns,
+   count(*) FILTER(WHERE n<=1000 AND disposition IS NULL AND dialogue_completion IS NULL)::int missing_receipt_turns,COALESCE(bool_or(n>1000),false) capped
+  FROM (SELECT turn_id,session_id,dialogue_completion,row_number() OVER() n FROM
+   (${sample} LIMIT 1001) sample) turns
   LEFT JOIN LATERAL (SELECT disposition,complete FROM memory_source_processing_receipts r
    WHERE r.installation_id=i.installation_id AND r.turn_id=turns.turn_id AND r.session_id=turns.session_id
    ORDER BY created_at DESC,source_digest,policy_version LIMIT 1) receipt ON true

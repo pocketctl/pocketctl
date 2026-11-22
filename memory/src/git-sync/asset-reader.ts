@@ -60,10 +60,9 @@ export async function collectGitLifecycleSources(client: pg.PoolClient, installa
   ), evidence_rows AS (
     SELECT k.* FROM knowledge_evidence k WHERE k.installation_id=$1 AND (k.version_id IN(SELECT version_id FROM claim_versions) OR k.evidence_id=ANY($8::uuid[]))
   ) SELECT e.session_id,e.repository_id FROM evidence_rows k JOIN work_episodes e USING(installation_id,episode_id)
-    UNION SELECT se.session_id,NULL::uuid FROM evidence_rows k JOIN source_events se ON se.installation_id=k.installation_id AND se.source_event_id=k.source_event_id WHERE se.session_id IS NOT NULL
-    UNION SELECT a.session_id,NULL::uuid FROM evidence_rows k JOIN source_artifacts a ON a.installation_id=k.installation_id AND a.artifact_id=k.artifact_id
-    UNION SELECT se.session_id,NULL::uuid FROM evidence_rows k JOIN source_artifacts a ON a.installation_id=k.installation_id AND a.artifact_id=k.artifact_id
-      JOIN source_events se ON se.installation_id=a.installation_id AND se.source_event_id=a.source_event_id WHERE se.session_id IS NOT NULL
+    UNION SELECT r.session_id,NULL::uuid FROM evidence_rows k JOIN memory_evidence_source_sessions r USING(installation_id,evidence_id)
+    UNION SELECT k.locator#>>'{dialogue,session}',NULL::uuid FROM evidence_rows k WHERE k.locator->>'source_kind'='relay_turn_v1'
+      AND k.locator#>>'{dialogue,session}' IS NOT NULL
     UNION SELECT c.reference_id AS session_id,r.repository_id FROM memory_skill_replay_cases c
       JOIN memory_skill_replay_runs r USING(installation_id,run_id) JOIN skill_versions s ON s.version_id=r.version_id
       WHERE r.installation_id=$1 AND c.kind='historical_session'
@@ -108,7 +107,7 @@ async function readEvidence(client:pg.PoolClient,input:GitReaderInput,versionId:
   const installationId=input.connection.installationId
   const evidence=await rows(client,`SELECT k.*, e.session_id,e.repository_id AS episode_repository_id,e.state AS episode_state,
       e.source_digest AS episode_digest,e.updated_at AS episode_updated_at,
-      EXISTS(SELECT 1 FROM source_sessions s WHERE s.installation_id=e.installation_id AND s.session_id=e.session_id AND s.deleted_at IS NOT NULL) AS session_deleted,
+      NOT memory_session_available(e.installation_id,e.session_id,FALSE) AS session_deleted,
       EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id) AS tombstoned
     FROM knowledge_evidence k JOIN work_episodes e USING(installation_id,episode_id)
     WHERE k.installation_id=$1 AND k.version_id=$2 ORDER BY k.ordinal,k.evidence_id LIMIT 65 FOR SHARE OF k,e`,[installationId,versionId])
@@ -119,18 +118,13 @@ async function readEvidence(client:pg.PoolClient,input:GitReaderInput,versionId:
     if(e.episode_repository_id&&!input.lifecycle.repositoryIds.includes(e.episode_repository_id))stale()
     const currentSession=async(sessionId:string|null)=>{
       if(!sessionId||!input.lifecycle.sessionIds.includes(sessionId))stale()
-      await one(client,`SELECT 1 FROM source_sessions s WHERE installation_id=$1 AND session_id=$2 AND deleted_at IS NULL
-        AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=s.installation_id AND t.session_id=s.session_id) FOR SHARE`,[installationId,sessionId])
+      await one(client,`SELECT 1 WHERE memory_session_available($1,$2,TRUE)`,[installationId,sessionId])
     }
-    if(e.source_event_id) {
-      const event=await one(client,'SELECT session_id FROM source_events WHERE installation_id=$1 AND source_event_id=$2 FOR SHARE',[installationId,e.source_event_id])
-      await currentSession(event.session_id)
-    }
-    if(e.artifact_id) {
-      const artifact=await one(client,'SELECT session_id,source_event_id FROM source_artifacts WHERE installation_id=$1 AND artifact_id=$2 FOR SHARE',[installationId,e.artifact_id])
-      await currentSession(artifact.session_id)
-      const event=await one(client,'SELECT session_id FROM source_events WHERE installation_id=$1 AND source_event_id=$2 FOR SHARE',[installationId,artifact.source_event_id])
-      await currentSession(event.session_id)
+    if(e.source_event_id||e.artifact_id) {
+      const bindings=await rows(client,`SELECT session_id FROM memory_evidence_source_sessions
+        WHERE installation_id=$1 AND evidence_id=$2 ORDER BY session_id FOR SHARE`,[installationId,e.evidence_id])
+      if(!bindings.length)stale()
+      for(const binding of bindings)await currentSession(binding.session_id)
     }
   }
   try{await guardRetainedEvidence(client,installationId,evidence.map(e=>({evidence_id:e.evidence_id,version_id:e.version_id,source_event_id:e.source_event_id,artifact_id:e.artifact_id,episode_id:e.episode_id,evidence_kind:e.evidence_kind})))}
@@ -374,9 +368,9 @@ async function validateSavedSkill(client:pg.PoolClient,input:GitReaderInput,asse
       if(!actual||replayCaseHash(actual)!==c.input_hash||actual.installation_id!==installationId||actual.version_id!==asset.baseVersionId)stale()
       if(c.kind==='historical_session') {
         if(!input.lifecycle.sessionIds.includes(c.reference_id))stale()
-        await one(client,`SELECT 1 FROM source_sessions s JOIN work_episodes e USING(installation_id,session_id)
-          WHERE s.installation_id=$1 AND s.session_id=$2 AND s.deleted_at IS NULL AND e.repository_id=$3 AND e.repo_snapshot_id=$4 AND e.state='ready' AND e.outcome='completed'
-          AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=s.installation_id AND t.session_id=s.session_id) FOR SHARE OF s,e`,[installationId,c.reference_id,repositoryId,archive.repo_snapshot_id])
+        await one(client,`SELECT 1 FROM work_episodes e
+          WHERE e.installation_id=$1 AND e.session_id=$2 AND memory_session_available(e.installation_id,e.session_id,TRUE) AND e.repository_id=$3 AND e.repo_snapshot_id=$4 AND e.state='ready' AND e.outcome='completed'
+          AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id) FOR SHARE OF e`,[installationId,c.reference_id,repositoryId,archive.repo_snapshot_id])
       }
     }
   }

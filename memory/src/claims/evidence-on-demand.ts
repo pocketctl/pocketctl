@@ -89,15 +89,15 @@ export async function readBoundEvidence(pool:pg.Pool,input:EvidenceReadInput|Bou
   }
   const row=(await client.query<EvidenceRow>(`SELECT e.evidence_id::text,e.version_id::text,v.claim_id::text,e.excerpt,
    encode(e.excerpt_hash,'hex') AS excerpt_hash,e.evidence_kind,e.capsule_id::text,e.source_event_id::text,e.artifact_id::text,
-   event.origin AS source_origin,event.source_kind,
+   ${prepared?'NULL::text AS source_origin,NULL::text AS source_kind':'event.origin AS source_origin,event.source_kind'},
    ${prepared?'NULL::text AS source_text,FALSE AS source_text_overflow':`CASE WHEN event.origin='team' OR event.source_kind IN('team_collaboration','team_delivery','team_semantic') THEN NULL
      WHEN e.artifact_id IS NOT NULL THEN CASE WHEN jsonb_typeof(artifact.details->'text')='string' THEN left(artifact.details->>'text',64000) ELSE NULL END
      WHEN jsonb_typeof(event.payload->'text')='string' THEN left(event.payload->>'text',64000) ELSE NULL END AS source_text,
    (COALESCE(length(event.payload->>'text'),0)>64000 OR COALESCE(length(artifact.details->>'text'),0)>64000) AS source_text_overflow`}
    FROM knowledge_evidence e JOIN knowledge_versions v USING(installation_id,version_id)
-   LEFT JOIN source_artifacts artifact ON artifact.installation_id=e.installation_id AND artifact.artifact_id=e.artifact_id
+   ${prepared?'':`LEFT JOIN source_artifacts artifact ON artifact.installation_id=e.installation_id AND artifact.artifact_id=e.artifact_id
    LEFT JOIN source_events event ON event.installation_id=e.installation_id
-     AND event.source_event_id=CASE WHEN e.artifact_id IS NOT NULL THEN artifact.source_event_id ELSE e.source_event_id END
+     AND event.source_event_id=CASE WHEN e.artifact_id IS NOT NULL THEN artifact.source_event_id ELSE e.source_event_id END`}
    WHERE e.installation_id=$1 AND e.evidence_id=$2`,[input.installationId,input.evidenceId])).rows[0]
   if(!row||row.version_id!==observed.version_id||digest(row.excerpt)!==row.excerpt_hash)return deny()
   if(prepared){const material=prepared.material(input.evidenceId,row.version_id,row.source_event_id,row.artifact_id);row.source_text=material.sourceText;row.source_text_overflow=material.overflow;row.source_origin=material.origin;if(material.sourceKind)row.source_kind=material.sourceKind}

@@ -24,14 +24,32 @@ export interface PreparedEvidenceSources {
  assertCurrent(client:EvidenceClient,options?:SourceCommitOptions):Promise<void>
  lockForPack(client:EvidenceClient):Promise<LockedPackEvidence>
 }
-const boundQuery=(proof='')=>`SELECT e.episode_id::text,e.evidence_kind,e.evidence_id::text,e.version_id::text,e.capsule_id::text,e.source_event_id::text,e.artifact_id::text,a.source_event_id::text AS artifact_event_id,
- COALESCE(a.source_event_id,e.source_event_id)::text AS resolved_event_id,s.origin,s.source_kind,s.body_reclaimed_at,EXISTS(SELECT 1 FROM memory_source_retention_receipts receipt WHERE receipt.installation_id=s.installation_id AND(receipt.turn_id=s.turn_id OR(s.turn_id IS NULL AND receipt.session_id=s.session_id))) AS retention_denied,a.artifact_type,a.identity_key,a.path,a.status${proof}
- FROM knowledge_evidence e LEFT JOIN source_artifacts a ON a.installation_id=e.installation_id AND a.artifact_id=e.artifact_id
- LEFT JOIN source_events s ON s.installation_id=e.installation_id AND s.source_event_id=COALESCE(a.source_event_id,e.source_event_id)
+const boundQuery=()=>`SELECT e.episode_id::text,e.evidence_kind,e.evidence_id::text,e.version_id::text,e.capsule_id::text,
+ e.source_event_id::text,e.artifact_id::text,CASE WHEN e.artifact_id IS NOT NULL THEN h.source_event_id::text END AS artifact_event_id,
+ h.source_event_id::text AS resolved_event_id,h.origin,h.source_kind,h.body_reclaimed_at,h.retention_denied,h.artifact_type,h.identity_key,h.path,h.status
+ FROM knowledge_evidence e CROSS JOIN LATERAL shared.memory_native_evidence_handle(e.installation_id,e.source_event_id,e.artifact_id) h
  WHERE e.installation_id=$1 AND e.evidence_id=ANY($2::uuid[]) ORDER BY e.evidence_id`
+// Dialogue and capsule evidence have no projection handles. Inspect the
+// persisted binding before resolving any legacy source or artifact.
+const evidenceHeaders=(proof='')=>`SELECT e.episode_id::text,e.evidence_kind,e.evidence_id::text,e.version_id::text,
+ e.capsule_id::text,e.source_event_id::text,e.artifact_id::text,NULL::text AS artifact_event_id,NULL::text AS resolved_event_id,
+ NULL::text AS origin,NULL::text AS source_kind,NULL::timestamptz AS body_reclaimed_at,FALSE AS retention_denied,
+ NULL::text AS artifact_type,NULL::text AS identity_key,NULL::text AS path,NULL::text AS status${proof}
+ FROM knowledge_evidence e WHERE e.installation_id=$1 AND e.evidence_id=ANY($2::uuid[]) ORDER BY e.evidence_id`
+async function resolveEvidenceHandles(db:EvidenceClient,installation:string,headers:Binding[]){
+ const ids=headers.filter(h=>h.source_event_id||h.artifact_id).map(h=>h.evidence_id)
+ if(!ids.length)return headers
+ const current=new Map((await db.query<Binding>(boundQuery(),[installation,ids])).rows.map(row=>[row.evidence_id,row]))
+ return headers.map(h=>{
+  if(!h.source_event_id&&!h.artifact_id)return h
+  const row=current.get(h.evidence_id)
+  if(!row||row.version_id!==h.version_id||row.source_event_id!==h.source_event_id||row.artifact_id!==h.artifact_id)throw Error('source_reference_changed')
+  return row
+ })
+}
 async function evidenceBindings(db:Pick<pg.PoolClient,'query'>,installationId:string,ids:readonly string[]):Promise<Binding[]>{
  const rows:Binding[]=[]
- for(let n=0;n<ids.length;n+=256)rows.push(...(await db.query<Binding>(boundQuery(),[installationId,ids.slice(n,n+256)])).rows)
+ for(let n=0;n<ids.length;n+=256)rows.push(...await resolveEvidenceHandles(db,installationId,(await db.query<Binding>(evidenceHeaders(),[installationId,ids.slice(n,n+256)])).rows))
  return rows.sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
 }
 // Capsule-only packs can lock their exact bindings and read their mode in
@@ -39,7 +57,7 @@ async function evidenceBindings(db:Pick<pg.PoolClient,'query'>,installationId:st
 async function lockCapsuleEvidence(db:EvidenceClient,installationId:string,ids:readonly string[],forPack:boolean){
  const proof=forPack?",CASE WHEN e.excerpt_hash=sha256(convert_to(e.excerpt,'UTF8')) THEN encode(e.excerpt_hash,'hex') END AS verified_excerpt_hash":''
  const {rows}=await db.query(`
-  WITH bindings AS MATERIALIZED (${boundQuery(proof)} FOR SHARE OF e NOWAIT),
+  WITH bindings AS MATERIALIZED (${evidenceHeaders(proof)} FOR SHARE OF e NOWAIT),
   capsules AS MATERIALIZED (
    SELECT c.capsule_id::text,c.version_id::text,c.retention_basis
    FROM knowledge_evidence_capsules c WHERE c.installation_id=$1
@@ -90,7 +108,7 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
   const result=await pool.query<Binding&{source_mode:string;mode_generation:string}>(`
    SELECT binding.*,COALESCE(m.mode,'legacy-feed') AS source_mode,COALESCE(m.generation::text,'1') AS mode_generation
    FROM (VALUES (1)) seed
-   LEFT JOIN LATERAL (${boundQuery()}) binding ON TRUE
+   LEFT JOIN LATERAL (${evidenceHeaders()}) binding ON TRUE
    LEFT JOIN shared.memory_source_modes m ON m.installation_id=$1
   `,[installationId,ids])
   const [first]=result.rows
@@ -99,6 +117,7 @@ export async function prepareEvidenceSources(pool:pg.Pool,installationId:string,
    .filter(row=>row.evidence_id!==null)
    .map(({source_mode,mode_generation,...binding})=>binding)
    .sort((a,b)=>a.evidence_id.localeCompare(b.evidence_id))
+  rows=await resolveEvidenceHandles(pool,installationId,rows)
  }else{
   [rows,mode]=await Promise.all([
    evidenceBindings(pool,installationId,ids),

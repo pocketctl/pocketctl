@@ -93,11 +93,11 @@ export function createSkillReplayService(deps: { pool: pg.Pool; context: SkillSo
     prepared.originPolicyStamp=source.originPolicyStamp
     if (source.sourceDigest !== archive.source_digest || source.inputDigest !== archive.input_digest) fail('source_invalid')
     for (const sessionId of sessions) {
-      const history = await client.query(`SELECT 1 FROM source_sessions s JOIN work_episodes e USING(installation_id,session_id)
-        WHERE s.installation_id=$1 AND s.session_id=$2 AND s.deleted_at IS NULL
+      const history = await client.query(`SELECT 1 FROM work_episodes e
+        WHERE e.installation_id=$1 AND e.session_id=$2 AND memory_session_available(e.installation_id,e.session_id,TRUE)
           AND e.repository_id=$3 AND e.repo_snapshot_id=$4 AND e.state='ready' AND e.outcome='completed'
-          AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=s.installation_id AND t.session_id=s.session_id)
-        FOR SHARE OF s,e`, [identity.installationId,sessionId,archive.repository_id,archive.repo_snapshot_id])
+          AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
+        FOR SHARE OF e`, [identity.installationId,sessionId,archive.repository_id,archive.repo_snapshot_id])
       if (!history.rowCount) fail('source_invalid')
     }
     await client.query(`SELECT 1 FROM memory_skill_tasks WHERE installation_id=$1 AND task_id=$2 FOR UPDATE`, [identity.installationId,archive.task_id])

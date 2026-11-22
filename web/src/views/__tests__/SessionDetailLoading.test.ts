@@ -158,6 +158,24 @@ describe('SessionDetail history loading', () => {
     wrapper.unmount()
   })
 
+  test('reads the versioned encrypted preview after recreating the detail view', async () => {
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? {
+      version: 2,
+      rows: [{ id: 'anchor', type: 'agent_text', content: 'Previously visible paragraph' }],
+      anchor: { id: 'anchor', top: 27 },
+      groups: { previousCall: true },
+    } as any : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const vm = wrapper.vm as any
+    expect(vm.renderMessages[0].content).toBe('Previously visible paragraph')
+    expect(vm.autoScroll).toBe(false)
+    expect(vm.openToolGroups.previousCall).toBe(true)
+    expect(vm.canWriteWhenConnected).toBe(false)
+    wrapper.unmount()
+  })
+
   test('late cache cannot replace a completed replay or another route', async () => {
     vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
     let resolve!: (value:any)=>void

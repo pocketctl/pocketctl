@@ -308,6 +308,10 @@
           <button v-if="interruptPendingDraft" type="button" class="interrupt-pending-retry" @click="restoreInterruptPendingDraft">{{ t('common.retry') }}</button>
         </div>
 
+        <div v-if="Object.keys(recoveredReceipts).length" class="mobile-history-feedback" role="status">
+          <span v-for="(count, state) in recoveredReceiptCounts" v-show="count" :key="state">{{ t('session.recovered_' + state, { count }) }}</span>
+          <button v-if="recoveredReceiptCounts.unknown && connected" type="button" @click="recoverSendReceipts">{{ t('session.check_receipt') }}</button>
+        </div>
 <div v-if="cachedHistory.length" class="cache-preview-notice" role="status" data-testid="history-cache-preview">{{ t(historyReadFailed || isSlowLoading ? 'session.cache_failed' : 'session.cache_updating') }}</div>
         <!-- Timeline -->
         <div class="timeline" v-if="milestones.length > 0">
@@ -377,6 +381,10 @@
             :content="messageDisplayContent(msg)"
             :data-delivery-status="msg.deliveryStatus || undefined"
           />
+          <small v-if="msg.deliveryStatus" class="message-delivery" role="status">
+            {{ t('session.delivery_' + msg.deliveryStatus) }}
+            <button v-if="msg.deliveryStatus === 'unknown' && connected && receiptScope" type="button" class="btn-link" @click="recoverSendReceipts">{{ t('session.check_receipt') }}</button>
+          </small>
 
           </div></article>
           <!-- Agent text message -->
@@ -769,13 +777,15 @@
 
 <script setup lang="ts">
 import { personalReadCache } from '../services/personalReadCache'
+import { forgetReceipts, moveReceipts, pendingReceiptIds, rememberReceipt } from '../services/sessionReceiptJournal'
+import { getSessionMessageReceipts, type SessionReceiptStatus } from '../services/sessionOrganization'
 import { navigationSessions, historyPreview, cacheReadDenied } from '../services/sessionCacheProjection'
 import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
 import SessionFullscreenToggle from '../components/session/SessionFullscreenToggle.vue'
 import type { ComputedRef } from 'vue'
-import { ref, computed, onMounted, onUnmounted, nextTick, watch, provide } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, nextTick, watch, provide } from 'vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
 import ActionList from '../components/ActionList.vue'
 import RenameProjectAction from '../components/RenameProjectAction.vue'
@@ -1048,6 +1058,8 @@ const navigationFresh = ref(false)
 const navigationFailed = ref(false)
 const historyCacheReady = ref(false)
 let historyCacheRequest = 0
+let historyPreviewRead: Promise<void> | undefined
+let cachedReadingAnchor: ReadingAnchor | undefined
 let historyLoadStart: number | undefined
 let previewSource: 'memory' | 'disk' = 'disk'
 let navigationRequest = 0
@@ -1058,32 +1070,46 @@ const showingCachedNavigation = computed(() => !navigationFresh.value && cachedS
 // same grant and invalidation ticket as the encrypted disk preview.
 type PreviewTicket = ReturnType<typeof personalReadCache.ticket>
 type ReadingAnchor = { id: string; top: number }
-type RecentView = { ticket: PreviewTicket; rows: any[]; anchor?: ReadingAnchor; groups: Record<string, boolean> }
+type HistoryPreview = { version: 2; rows: any[]; anchor?: ReadingAnchor; groups: Record<string, boolean> }
+type RecentView = HistoryPreview & { ticket: PreviewTicket }
 const recentViews = new Map<string, RecentView>()
 const openToolGroups = ref<Record<string, boolean>>(Object.create(null))
 let previewOwner: { session: string; ticket: PreviewTicket } | undefined
-function rememberRecentView() {
-  if (!previewOwner || !historyCacheReady.value || cachePrivacyBlocked.value
-    || !personalReadCache.canShowMemoryPreview(previewOwner.ticket)) return
-  const { session, ticket } = previewOwner
-  if (!allSessions.value.some(s => s.session_id === session && !s.team_id && !s.share_id && !s.shared)) return
+function captureHistoryPreview(session: string): HistoryPreview | undefined {
+  if (cachedHistory.value.length || !historyCacheReady.value || cachePrivacyBlocked.value
+    || !allSessions.value.some(row => row.session_id === session && !row.team_id && !row.share_id && !row.shared)) return
   const anchor = autoScroll.value ? undefined : historyReadingAnchor()
   const index = anchor ? messages.value.findIndex(row => row.id === anchor.id) : -1
-  // Include the paragraph on screen even if the user paged far into history.
-  const nearbyMessages = index >= 0
+  const nearby = index >= 0
     ? messages.value.slice(Math.max(0, index - 18), index + 36)
-    : messages.value.slice(-160)
-  const rows = historyPreview(nearbyMessages)
+    : messages.value
+  const rows = historyPreview(nearby)
   if (!rows.length) return
   if (anchor && rows.some(row => row.id === 'cache-tools-' + anchor.id)) anchor.id = 'cache-tools-' + anchor.id
-  recentViews.delete(session)
-  recentViews.set(session, { ticket, rows, anchor, groups: openToolGroups.value })
-  if (recentViews.size > 3) recentViews.delete(recentViews.keys().next().value!)
+  const groups = Object.fromEntries(rows.filter(row => row.call_id && Object.prototype.hasOwnProperty.call(openToolGroups.value, row.call_id))
+    .map(row => [row.call_id, openToolGroups.value[row.call_id]]))
+  return { version: 2, rows, anchor: rows.some(row => row.id === anchor?.id) ? anchor : undefined, groups }
 }
-const historyCacheName = () => 'history:' + JSON.stringify([sessionId.value, focusedSubAgentId.value || ''])
+
+const historyCacheName = (session = sessionId.value) => 'history:' + JSON.stringify([session, ''])
+function rememberRecentView() {
+  if (!previewOwner) return
+  const { session } = previewOwner
+  const ticket = personalReadCache.ticket()
+  if (ticket.scope !== previewOwner.ticket.scope || !personalReadCache.canShowMemoryPreview(ticket)) return
+  const snapshot = captureHistoryPreview(session)
+  if (!snapshot) return
+  recentViews.delete(session)
+  recentViews.set(session, { ...snapshot, ticket })
+  if (recentViews.size > 3) recentViews.delete(recentViews.keys().next().value!)
+  void personalReadCache.write(historyCacheName(session), snapshot, ticket)
+}
+
 function saveHistoryPreview() {
-  if (cachedHistory.value.length || cachePrivacyBlocked.value || returnTeamSessionID.value || returnTeamID.value || !historyCacheReady.value || focusedSubAgentId.value || browseScope.value.type !== 'personal' || !allSessions.value.some(s => s.session_id === sessionId.value && !s.team_id && !s.share_id)) return
-  void personalReadCache.write(historyCacheName(), historyPreview(sourceMessages.value))
+  if (previewOwner?.session !== sessionId.value || returnTeamSessionID.value || returnTeamID.value
+    || focusedSubAgentId.value || browseScope.value.type !== 'personal') return
+  const snapshot = captureHistoryPreview(sessionId.value)
+  if (snapshot) void personalReadCache.write(historyCacheName(), snapshot)
 }
 function scheduleHistoryPreview() {
   if (historyCacheTimer) clearTimeout(historyCacheTimer)
@@ -1092,49 +1118,83 @@ function scheduleHistoryPreview() {
 function hydrateHistoryPreview() {
   const request = ++historyCacheRequest, key = loadKey.value, ticket = personalReadCache.ticket()
   cachedHistory.value = []; historyCacheReady.value = false
+  historyPreviewRead = undefined
+  cachedReadingAnchor = undefined
   previewOwner = undefined
   previewSource = 'disk'
   // Focused agents and Team/shared surfaces need their own offline policy.
   if (focusedSubAgentId.value || returnTeamSessionID.value || returnTeamID.value || browseScope.value.type !== 'personal') return
   previewOwner = { session: sessionId.value, ticket }
-  const recent = recentViews.get(sessionId.value)
-  if (recent && personalReadCache.canShowMemoryPreview(recent.ticket) && !messages.value.some(row => row.__msg_id && !row.__echo_reconciled)) {
-    previewSource = 'memory'
-    cachedHistory.value = recent.rows
-    openToolGroups.value = recent.groups
-    autoScroll.value = !recent.anchor
+  const showPreview = (snapshot: HistoryPreview) => {
+    cachedHistory.value = snapshot.rows
+    cachedReadingAnchor = snapshot.anchor
+    openToolGroups.value = Object.assign(Object.create(null), snapshot.groups)
+    autoScroll.value = !snapshot.anchor
     nextTick(() => {
       if (request !== historyCacheRequest || key !== loadKey.value) return
-      if (recent.anchor) restoreHistoryReadingAnchor(recent.anchor)
+      if (snapshot.anchor) restoreHistoryReadingAnchor(snapshot.anchor)
       else if (autoScroll.value) scrollToBottom()
     })
+  }
+  const recent = recentViews.get(sessionId.value)
+  if (recent && personalReadCache.canShowMemoryPreview(recent.ticket)) {
+    previewSource = 'memory'
+    showPreview(recent)
     return
   }
-  void personalReadCache.read<any[]>(historyCacheName(), ticket).then(rows => {
-    if (rows && personalReadCache.valid(ticket) && request === historyCacheRequest && key === loadKey.value && !historyCacheReady.value && !messages.value.some(row => row.__msg_id && !row.__echo_reconciled)) {
-      cachedHistory.value = historyPreview(rows)
-      nextTick(() => { if (key === loadKey.value && autoScroll.value) scrollToBottom() })
+  historyPreviewRead = personalReadCache.read<any[] | HistoryPreview>(historyCacheName(), ticket).then(snapshot => {
+    if (!snapshot || !personalReadCache.valid(ticket) || key !== loadKey.value) return
+    if (request !== historyCacheRequest || historyCacheReady.value) {
+      // Replay can finish before IndexedDB decrypts. Restore a matching anchor
+      // without replacing authoritative rows when this navigation still owns it.
+      if (!Array.isArray(snapshot) && snapshot.version === 2 && snapshot.anchor && historyCacheReady.value
+        && request + 1 === historyCacheRequest && autoScroll.value) {
+        const row = replayMatch(snapshot.rows.find(row => row.id === snapshot.anchor?.id))
+        if (row) {
+          openToolGroups.value = Object.assign(Object.create(null), snapshot.groups)
+          const anchor = { ...snapshot.anchor, id: String(row.id) }
+          autoScroll.value = false
+          nextTick(() => { if (key === loadKey.value) restoreHistoryReadingAnchor(anchor) })
+        }
+      }
+      return
     }
+    if (Array.isArray(snapshot)) showPreview({ version: 2, rows: historyPreview(snapshot), groups: {} })
+    else if (snapshot.version === 2 && Array.isArray(snapshot.rows)) showPreview(snapshot)
+  }).finally(() => {
+    if (key === loadKey.value && request === historyCacheRequest) historyPreviewRead = undefined
   })
 }
 function replayMatch(preview: any) {
   if (!preview) return
-  return preview.type === 'cached_tool_group'
-    ? sourceMessages.value.find(row => row.type === 'tool_call' && row.call_id && row.call_id === preview.call_id)
-    : sourceMessages.value.find(row => row.type === preview.type && row.role === preview.role
-      && row.turn_id === preview.turn_id && String(row.content ?? '').slice(0, 16000) === preview.content)
+  const history = sourceMessages.value
+  if (preview.type === 'cached_tool_group') {
+    return history.find(row => row.type === 'tool_call' && row.call_id && row.call_id === preview.call_id)
+  }
+  if (preview.reading_event_id) {
+    return history.find(row => row.reading_event_id === preview.reading_event_id && row.type === preview.type)
+  }
+  // Older previews may have no stable event identity. Skip ambiguous repeated text.
+  const matches = history.filter(row => row.type === preview.type && row.role === preview.role
+    && row.turn_id === preview.turn_id && String(row.content ?? '').slice(0, 16000) === preview.content)
+  return matches.length === 1 ? matches[0] : undefined
 }
 function publishHistoryPreview() {
-  const cacheAnchor = cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined
+  const cacheAnchor = cachedReadingAnchor ?? (cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined)
   const cachedAnchorMessage = cachedHistory.value.find(row => String(row.id) === cacheAnchor?.id)
   const context = loadKey.value
   const cachedScrollTop = messagesEl.value?.scrollTop
   cachedHistory.value = []; historyCacheReady.value = true; historyCacheRequest++
-  if (cacheAnchor) nextTick(() => {
-    if (context !== loadKey.value) return
-    const match = replayMatch(cachedAnchorMessage)
-    if (!restoreHistoryReadingAnchor({ ...cacheAnchor, id: String(match?.id || cacheAnchor.id) }) && messagesEl.value && cachedScrollTop !== undefined) messagesEl.value.scrollTop = cachedScrollTop
-  })
+  if (cacheAnchor) {
+    autoScroll.value = false
+    nextTick(() => {
+      if (context !== loadKey.value) return
+      const match = replayMatch(cachedAnchorMessage)
+      if (!restoreHistoryReadingAnchor({ ...cacheAnchor, id: String(match?.id || cacheAnchor.id) })
+        && messagesEl.value && cachedScrollTop !== undefined) messagesEl.value.scrollTop = cachedScrollTop
+      cachedReadingAnchor = undefined
+    })
+  }
 }
 async function hydrateNavigationPreview() {
   const ticket = personalReadCache.ticket()
@@ -1505,6 +1565,67 @@ const sendFailureKey = ref('')
 const interruptPendingDraft = ref('')
 // Relay forwarding is acknowledged per prompt. Managed Codex prompts carrying
 // message_acceptance_receipt then wait for a second, app-server acceptance event.
+type LocalSend = { session: string; message: any }
+const localSends = new Map<string, LocalSend>()
+const receiptScope = computed(() => user.value?.id == null ? '' : JSON.stringify([getRelayOrigin() || location.origin, user.value.id]))
+const recoveredReceipts = ref<Record<string, SessionReceiptStatus>>({})
+let receiptRequest = 0
+let receiptLookup: { key: string; controller: AbortController } | undefined
+
+function cancelReceiptLookup() {
+  receiptRequest++
+  receiptLookup?.controller.abort()
+  receiptLookup = undefined
+}
+
+function forgetStoredReceipt(id: string) {
+  if (receiptScope.value && id) forgetReceipts(receiptScope.value, new Set([id]))
+}
+
+async function recoverSendReceipts() {
+  const scope = receiptScope.value, session = sessionId.value
+  if (!scope || cachePrivacyBlocked.value || focusedSubAgentId.value || returnTeamID.value || returnTeamSessionID.value) return
+  const ids = pendingReceiptIds(scope, session)
+  if (!ids.length) return
+  // Show the unresolved submission even if talking to an older Relay.
+  for (const id of ids) if (!localSends.has(id)) recoveredReceipts.value[id] = 'unknown'
+  if (!connected.value) return
+  const key = JSON.stringify([scope, session, ids])
+  if (receiptLookup?.key === key) return
+  cancelReceiptLookup()
+  const controller = new AbortController()
+  receiptLookup = { key, controller }
+  const request = receiptRequest
+  const current = () => request === receiptRequest && scope === receiptScope.value && session === sessionId.value
+    && !focusedSubAgentId.value && !cachePrivacyBlocked.value
+  const settled = new Set<string>()
+  try {
+    for (let i = 0; i < ids.length; i += 20) {
+      const batch = ids.slice(i, i + 20)
+      const result = await getSessionMessageReceipts(session, batch, controller.signal)
+      if (!current()) return
+      for (const receipt of result.receipts || []) {
+        if (!batch.includes(receipt.request_id) || !['accepted', 'rejected'].includes(receipt.status)) continue
+        const local = localSends.get(receipt.request_id)
+        if (local?.session === session) applySendReceipt({
+          session_id: session, msg_id: receipt.request_id, status: receipt.status,
+        }, true)
+        else if (pendingReceiptIds(scope, session).includes(receipt.request_id)) {
+          recoveredReceipts.value[receipt.request_id] = receipt.status
+        }
+        settled.add(receipt.request_id)
+      }
+    }
+  } catch { /* A read failure keeps the result unconfirmed. */ }
+  finally { if (receiptLookup?.controller === controller) receiptLookup = undefined }
+  if (current() && settled.size) forgetReceipts(scope, settled)
+}
+
+const recoveredReceiptCounts = computed(() => {
+  const counts = { accepted: 0, rejected: 0, unknown: 0 }
+  for (const state of Object.values(recoveredReceipts.value)) counts[state]++
+  return counts
+})
 const pendingAckTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const exitReason = ref('')
 const currentPermission = ref<PermissionConfig>()
@@ -1981,7 +2102,7 @@ const focusedSubAgentTokenTotal = computed(() => {
 const sourceMessages = computed<any[]>(() =>
   associateReplyRetries(focusedSubAgentId.value ? (subagentMessages.value[focusedSubAgentId.value] || []) : messages.value),
 )
-const renderMessages = computed(() => (cachedHistory.value.length ? cachedHistory.value : sourceMessages.value).filter(message => showsMobileMessage(message, showToolCalls.value)))
+const renderMessages = computed(() => (cachedHistory.value.length ? [...cachedHistory.value, ...messages.value.filter(row => row.__msg_id && !row.__echo_reconciled)] : sourceMessages.value).filter(message => showsMobileMessage(message, showToolCalls.value)))
 const replyRows = computed(() => projectReplies(renderMessages.value))
 const lastQuestionForReply = computed(() => [...sourceMessages.value].reverse().find(m => m.role === 'user' && !m.retry_of_turn_id && (!m.deliveryStatus || m.deliveryStatus === 'accepted')))
 const replyAgentLabel = computed(() => agentReplyLabel(focusedSubAgentId.value ? focusedSubAgentInfo.value?.agentType : currentSessionAgent.value || listedSessions.value.find(s => s.session_id === sessionId.value)?.agent_type))
@@ -2518,6 +2639,7 @@ function exitReasonLabel(reason: string): string {
 function emitNewSession() { showNewSession.value = true }
 
 function scrollToBottom() {
+  cachedReadingAnchor = undefined
   promptReading.value = false
   if (messagesEl.value) { messagesEl.value.scrollTop = messagesEl.value.scrollHeight; autoScroll.value = true }
 }
@@ -2634,7 +2756,8 @@ watch(showNewSession, open => { if (!open && sessionId.value === 'default') reso
 
 // Local sends remain receipt-addressable while the authoritative page rebuilds.
 const replayLocalMessages = new Set<any>()
-function settleReplayLocalMessage(message: any, target: any[]) {
+function settleReplayLocalMessage(message: any, target: any[], canonicalEcho = true) {
+  if (canonicalEcho) acceptLocalSend(message)
   if (!replayLocalMessages.delete(message)) return
   const index = target.indexOf(message)
   if (index >= 0) target.push(...target.splice(index, 1))
@@ -2664,8 +2787,13 @@ function loadHistory() {
   contentStreams.reset()
   liveContentBatcher.reset(loadKey.value)
   replayLocalMessages.clear()
-  const localMessages = messages.value.filter((message: any) => message.__msg_id && !message.__echo_reconciled)
-  messages.value = localMessages
+  for (const row of messages.value) {
+    if (row.__msg_id && !row.__echo_reconciled && !localSends.has(row.__msg_id)) {
+      localSends.set(row.__msg_id, { session: sessionId.value, message: row })
+    }
+  }
+  const localMessages = [...localSends.values()].filter(item => item.session === sessionId.value && !item.message.__echo_reconciled)
+  messages.value = focusedSubAgentId.value ? [] : localMessages.map(item => item.message)
   for (const message of messages.value) replayLocalMessages.add(message)
   subagentMessages.value = {}
   childrenToken.value = {}
@@ -2754,7 +2882,7 @@ async function settleHistoryReplayPage(msg: any): Promise<void> {
 
   const element = messagesEl.value
   const replayCursor = normalizeReplayCursor(msg.last_seq)
-  const reading = cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined
+  const reading = cachedReadingAnchor ?? (cachedHistory.value.length && !autoScroll.value ? historyReadingAnchor() : undefined)
   const preview = reading && cachedHistory.value.find(row => row.id === reading.id)
   const needsAnchor = preview && !replayMatch(preview)
   const decision = historyViewportFill.recordPage({
@@ -2849,6 +2977,7 @@ function requestSessionMeta() {
 
 let historyTouchStartY: number | null = null
 function onHistoryWheel(event: WheelEvent) {
+  cachedReadingAnchor = undefined
   promptReading.value = false
   if (event.deltaY < 0 && !isLoadingBackward.value && !isLoading.value) {
     mobileHistoryNeedsGesture = false
@@ -2856,6 +2985,7 @@ function onHistoryWheel(event: WheelEvent) {
   }
 }
 function onHistoryTouchStart(event: TouchEvent) {
+  cachedReadingAnchor = undefined
   promptReading.value = false
   historyTouchStartY = event.touches[0]?.clientY ?? null
 }
@@ -2868,12 +2998,13 @@ function onHistoryTouchEnd(event: TouchEvent) {
   historyTouchStartY = null
 }
 function onMessagesScroll() {
-  if (!messagesEl.value) return
+  if (!messagesEl.value || cachedReadingAnchor) return
   // A resize can clamp scrollTop before its observer restores the reading position.
   if (historyViewportResizeObserver && sessionFullscreen.value && messagesEl.value.clientWidth !== historyViewportWidth) return
   const { scrollTop, scrollHeight, clientHeight } = messagesEl.value
   autoScroll.value = !promptReading.value && scrollHeight - scrollTop - clientHeight < 60
   rememberFullscreenReadingPosition()
+  if (!isLoading.value && !isLoadingBackward.value) scheduleHistoryPreview()
   if (isMobile.value && historyViewportFill.mode) return
   if (isMobile.value && mobileHistoryNeedsGesture) {
     if (scrollTop >= 60) mobileHistoryNeedsGesture = false
@@ -3273,21 +3404,20 @@ function sendPromptText(text: string, invocationID?: string, retryOfTurnID?: str
     __expects_receipt: supportsMessageAcceptanceReceipt.value,
     deliveryStatus: 'pending',
   })
+  localSends.set(msgId, { session: sessionId.value, message: messages.value.at(-1)! })
+  if (receiptScope.value && !returnTeamID.value && !returnTeamSessionID.value) rememberReceipt(receiptScope.value, sessionId.value, msgId)
   nextTick(scrollToBottom)
   const sent = sendUserMessage({ session_id: sessionId.value, content: text, msg_id: msgId, input_mode: retryOfTurnID ? 'new_turn' : 'auto', ...(retryOfTurnID ? {retry_of_turn_id: retryOfTurnID} : {}), ...(invocationID?{invocation_id:invocationID}:{}) })
   if (!sent) {
-    failOrRollbackOptimistic(msgId)  // L1: WebSocket not open
+    rollbackOptimistic(msgId)  // Transport refused synchronously; the composer keeps its draft
     return false
   }
   startTurnTimer()  // begin whole-turn timing, including approval/question waits
   awaitingStart.value = true  // A: show turn-bar until first running/agent_text
-  armAckTimeout(msgId)  // L2: roll back if relay doesn't ack within 3s
+  armAckTimeout(msgId)
   return true
 }
 
-// L1/L2 (web-post-send-feedback): remove the optimistic user bubble + reset
-// awaiting-start state + flash the send-failed banner. Used by the synchronous
-// send-failure path (ws not open), the relay nack, and the ack-timeout.
 function clearAckTimeout(msgId: string) {
   const timer = pendingAckTimers.get(msgId)
   if (timer) clearTimeout(timer)
@@ -3315,28 +3445,90 @@ function restoreInterruptPendingDraft() {
 }
 
 function rollbackOptimistic(msgId?: string) {
-  if (msgId) clearAckTimeout(msgId)
+  if (msgId) { clearAckTimeout(msgId); localSends.delete(msgId); forgetStoredReceipt(msgId) }
   const idx = msgId ? messages.value.findIndex((m: any) => m.__msg_id === msgId) : -1
   if (idx >= 0) messages.value.splice(idx, 1)
   showSendFailure()
 }
 
-function failOrRollbackOptimistic(msgId: string, reason = '') {
+function markSendUnconfirmed(msgId: string) {
   clearAckTimeout(msgId)
-  const message = messages.value.find((m: any) => m.__msg_id === msgId)
-  if (!message?.__expects_receipt) {
-    rollbackOptimistic(msgId)
-    return
-  }
-  message.deliveryStatus = 'failed'
-  message.deliveryReason = reason
-  showSendFailure()
+  const local = localSends.get(msgId)
+  if (!local || !['pending', 'forwarded'].includes(local.message.deliveryStatus)) return
+  local.message.deliveryStatus = 'unknown'
+  if (local.session === sessionId.value) awaitingStart.value = false
 }
 
-// L2: arm a 3s timeout per prompt so one ACK cannot settle another prompt.
 function armAckTimeout(msgId: string) {
   clearAckTimeout(msgId)
-  pendingAckTimers.set(msgId, setTimeout(() => failOrRollbackOptimistic(msgId), 3000))
+  pendingAckTimers.set(msgId, setTimeout(() => {
+    markSendUnconfirmed(msgId)
+    if (localSends.get(msgId)?.session === sessionId.value) void recoverSendReceipts()
+  }, 15_000))
+}
+
+function localSendForEvent(event: any) {
+  const { msgId, requestId } = eventCorrelation(event)
+  const local = localSends.get(msgId || requestId)
+    ?? (requestId && !msgId ? [...localSends.values()].find(item => messageCorrelation(item.message).requestId === requestId) : undefined)
+  if (!local || (event.session_id && event.session_id !== local.session)
+    || correlationsConflict({ msgId, requestId }, messageCorrelation(local.message))) return
+  return local
+}
+
+function acceptLocalSend(message: any) {
+  if (!message.__msg_id || message.deliveryStatus === 'failed') return
+  clearAckTimeout(message.__msg_id)
+  localSends.delete(message.__msg_id)
+  forgetStoredReceipt(message.__msg_id)
+  message.deliveryStatus = 'accepted'
+  message.deliveryReason = ''
+}
+
+function rejectLocalSend(local: LocalSend, reason: string, showFeedback: boolean) {
+  const message = local.message
+  if (message.deliveryStatus === 'accepted' || message.deliveryStatus === 'failed') return
+  clearAckTimeout(message.__msg_id)
+  forgetStoredReceipt(message.__msg_id)
+  message.deliveryStatus = 'failed'
+  message.deliveryReason = reason
+  if (showFeedback && local.session === sessionId.value) showSendFailure(userMessageFailureKey(reason))
+}
+
+function applySendReceipt(event: any, historical = false) {
+  if (event.agent_id || !['accepted', 'rejected'].includes(event.status)) return
+  const local = localSendForEvent(event)
+  if (!local) {
+    const { msgId, requestId } = eventCorrelation(event)
+    const id = msgId || requestId
+    if (event.session_id === sessionId.value && !focusedSubAgentId.value && id && receiptScope.value
+      && pendingReceiptIds(receiptScope.value, sessionId.value).includes(id)) {
+      recoveredReceipts.value[id] = event.status
+      forgetStoredReceipt(id)
+    }
+    return
+  }
+  const message = local.message
+  if (event.status === 'accepted') {
+    // Keep the accepted bubble until its authoritative text arrives.
+    clearAckTimeout(message.__msg_id)
+    forgetStoredReceipt(message.__msg_id)
+    if (message.deliveryStatus !== 'failed') message.deliveryStatus = 'accepted'
+    return
+  }
+  if (message.deliveryStatus === 'failed') return
+  if (!historical && local.session === sessionId.value && !focusedSubAgentId.value && event.retryable === true
+    && ['turn_interrupt_pending', 'session_busy'].includes(event.reason)) {
+    if (messageInput.value.trim()) interruptPendingDraft.value = message.content
+    else messageInput.value = message.content
+    localSends.delete(message.__msg_id)
+    forgetStoredReceipt(message.__msg_id)
+    clearAckTimeout(message.__msg_id)
+    messages.value = messages.value.filter(row => row !== message)
+    showSendFailure(event.reason === 'session_busy' ? 'session.session_busy' : '')
+    return
+  }
+  rejectLocalSend(local, event.reason || '', !historical)
 }
 
 // handleLocalCommand renders the user bubble + result locally (no daemon round
@@ -3722,6 +3914,8 @@ const turnMetadataKeys = ['retry_of_turn_id', 'turn_id', 'source_turn_id', 'turn
 function eventWithTurnMetadata(evt: any): Record<string, unknown> {
   const payload = evt.payload && typeof evt.payload === 'object' ? evt.payload : {}
   const metadata: Record<string, unknown> = {}
+  const eventId = evt.event_id ?? payload.event_id
+  if (typeof eventId === 'string' && eventId) metadata.reading_event_id = eventId
   for (const key of turnMetadataKeys) {
     const value = evt[key] ?? payload[key]
     if (value !== undefined) metadata[key] = value
@@ -3729,10 +3923,12 @@ function eventWithTurnMetadata(evt: any): Record<string, unknown> {
   return metadata
 }
 function preserveTurnMetadata(message: any, evt: any): void {
-  Object.assign(message, eventWithTurnMetadata(evt))
+  preserveTurnMetadataRecord(message, eventWithTurnMetadata(evt))
 }
 function preserveTurnMetadataRecord(message: any, metadata: Record<string, unknown>): void {
+  const anchor = message.reading_event_id
   Object.assign(message, metadata)
+  if (anchor) message.reading_event_id = anchor
 }
 
 function findAffectedFileChangeCard(target: any[], evt: any): any | undefined {
@@ -3750,6 +3946,10 @@ function findAffectedFileChangeCard(target: any[], evt: any): any | undefined {
 
 function processEvent(evt: any, target: any[] = messages.value, subagentOverride?: Record<string, any[]>, historical = false) {
   const type = evt.type || evt.event_type
+  if (type === 'user_message_receipt') {
+    applySendReceipt({ ...evt.payload, ...evt }, historical)
+    return
+  }
   if (isKnownNonTimelineControlEvent(type)) return
   if (type === 'agent_todo' && !evt.agent_id && !evt.payload?.agent_id) acceptAgentPlan(evt)
   if (type === 'agent_plan') {
@@ -3788,6 +3988,12 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
   } else if (type === 'user_text') {
     const text = evt.text || evt.content || evt.payload?.text || evt.payload?.content || ''
     if (!text) return
+    const eventID = eventCorrelation(evt).msgId || eventCorrelation(evt).requestId
+    if (!evt.agent_id && !evt.payload?.agent_id && evt.session_id === sessionId.value
+      && eventID && receiptScope.value && pendingReceiptIds(receiptScope.value, sessionId.value).includes(eventID)) {
+      delete recoveredReceipts.value[eventID]
+      forgetStoredReceipt(eventID)
+    }
     const identity = userMessageIdentity(evt)
     const retryTurn = evt.retry_of_turn_id || evt.payload?.retry_of_turn_id
     const echoTurn = evt.turn_id || evt.payload?.turn_id
@@ -3841,7 +4047,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
       latestUser.__echo_reconciled = true
       return
     }
-    if (latestUser?.__msg_id && !latestUser.__echo_reconciled
+    if (!historical && latestUser?.__msg_id && !latestUser.__echo_reconciled
       && latestUser.deliveryStatus !== 'failed'
       && latestUser.content === text
       && !userIdentitiesConflict(latestUser, identity)
@@ -4392,6 +4598,8 @@ watch([loadKey, () => renderMessages.value.length > 0, () => isLoading.value], (
 // Watch for session switch / focus change — clear messages and replay new context
 watch(loadKey, (newKey, oldKey) => {
   rememberRecentView()
+  cancelReceiptLookup()
+  recoveredReceipts.value = {}
   unreadApprovalId.value = ''
   openToolGroups.value = Object.create(null)
   autoScroll.value = true
@@ -4451,11 +4659,17 @@ onMounted(() => {
 	if (archivedView.value) void openArchived()
 	void refreshProjects()
   void hydrateNavigationPreview()
+  document.addEventListener('visibilitychange', saveReadingPositionOnHide)
+  cleanups.push(() => document.removeEventListener('visibilitychange', saveReadingPositionOnHide))
   cleanups.push(personalReadCache.onInvalidate(() => {
-    recentViews.clear(); openToolGroups.value = Object.create(null); previewOwner = undefined
+    recentViews.clear(); openToolGroups.value = Object.create(null); previewOwner = undefined; cachedReadingAnchor = undefined
     cachedSessions.value = []; cachedHosts.value = {}; cachedOrganization.value = null; cachedHistory.value = []
     historyCacheRequest++
     if (!personalReadCache.ticket().scope) {
+      cancelReceiptLookup()
+      recoveredReceipts.value = {}
+      for (const id of localSends.keys()) clearAckTimeout(id)
+      localSends.clear()
       resetLatest()
       cachePrivacyBlocked.value = true; navigationRequest++
       messages.value = []; subagentMessages.value = {}; allSessions.value = []; projects.value = []; sidebarBuckets.value = {}; daemons.value = {}
@@ -4472,6 +4686,7 @@ onMounted(() => {
 	cleanups.push(onEvent('session_discovered', () => { void refreshProjects() }))
 	cleanups.push(onEvent('session_created', () => { void refreshProjects() }))
 	cleanups.push(onEvent('connection_restored', () => {
+    rememberRecentView()
 		void refreshProjects()
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
@@ -4686,7 +4901,7 @@ onMounted(() => {
       }
     }
   }))
-  cleanups.push(onEvent('replay_end', (msg: any) => {
+  cleanups.push(onEvent('replay_end', async (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
       const next = normalizeReplayCursor(msg.newest_seq ?? msg.last_seq) ?? 0
@@ -4717,12 +4932,22 @@ onMounted(() => {
       else if (msg.task_snapshot_status === 'error') taskSnapshotError.value = true
     }
     if (msg.error) {
-      if (cacheReadDenied(msg.error)) { cachedHistory.value = []; historyCacheRequest++; void personalReadCache.remove(historyCacheName()) }
+      if (cacheReadDenied(msg.error)) { recentViews.delete(sessionId.value); cachedReadingAnchor = undefined; cachedHistory.value = []; historyCacheRequest++; void personalReadCache.remove(historyCacheName()) }
       resetReplayTrustBuffers()
       finishHistoryViewportFill()
       historyReadFailed.value = true
       historyFeedback.value = t('session.history_read_failed')
       return
+    }
+    // Give an authorized disk preview a short chance to supply the reading
+    // anchor. History already arrives progressively and remains readable.
+    if (historyPreviewRead && !historyCacheReady.value && !isLoadingBackward.value && personalReadCache.ticket().scope) {
+      const context = loadKey.value
+      const request = replayReqId.value
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([historyPreviewRead, new Promise<void>(resolve => { timeout = setTimeout(resolve, 120) })])
+      if (timeout) clearTimeout(timeout)
+      if (context !== loadKey.value || request !== replayReqId.value || cachePrivacyBlocked.value) return
     }
     if (!msg.has_more) publishHistoryPreview()
     const previousIDs = new Set(sourceMessages.value.map(message => message.id))
@@ -4739,9 +4964,10 @@ onMounted(() => {
     }
     for (const message of sourceMessages.value) if (!previousIDs.has(message.id)) loadedHistoryIDs.add(String(message.id))
     if (!wasLoadingBackward) {
+      void recoverSendReceipts()
       // Unacknowledged/failed local sends follow the replayed history. A later
       // canonical echo still reconciles them by request identity.
-      for (const message of [...replayLocalMessages]) settleReplayLocalMessage(message, messages.value)
+      for (const message of [...replayLocalMessages]) settleReplayLocalMessage(message, messages.value, false)
     }
     if (isMobile.value && renderMessages.value.length) isLoading.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
@@ -4790,46 +5016,22 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('user_message_ack', (msg: any) => {
-    if (!msg.msg_id) return
-    clearAckTimeout(msg.msg_id)
-    const message = messages.value.find((item: any) => item.__msg_id === msg.msg_id)
-    if (!message || message.deliveryStatus === 'accepted' || message.deliveryStatus === 'failed') return
-    // Managed native runtimes wait for their backend acceptance receipt. Sessions without the
-    // capability retain the legacy ACK-as-final behavior.
-    message.deliveryStatus = message.__expects_receipt ? 'forwarded' : 'accepted'
+    const local = localSendForEvent(msg)
+    if (!local || local.message.deliveryStatus !== 'pending') return
+    local.message.deliveryStatus = 'forwarded'
+    // Keep waiting for the native receipt or a correlated history echo.
   }))
   cleanups.push(onEvent('user_message_nack', (msg: any) => {
-    if (!msg.msg_id) return
-    if(finishNativeCommand(msg.msg_id,msg.reason||'调用被拒绝'))return
-    failOrRollbackOptimistic(msg.msg_id, msg.reason || '')
+    const id = msg.msg_id || msg.request_id
+    if (id && finishNativeCommand(id, msg.reason || '调用被拒绝')) return
+    const local = localSendForEvent(msg)
+    if (!local) return
+    if (msg.reason === 'timeout' || !msg.msg_id) markSendUnconfirmed(local.message.__msg_id)
+    else rejectLocalSend(local, msg.reason || '', true)
   }))
   cleanups.push(onEvent('user_message_receipt', (msg: any) => {
-    if(msg.session_id===sessionId.value && finishNativeCommand(msg.msg_id,msg.status==='accepted'?'':(msg.reason||'调用失败')))return
-    if (msg.session_id !== sessionId.value || (!msg.msg_id && !msg.request_id)) return
-    if (msg.msg_id) clearAckTimeout(msg.msg_id)
-      const message = findMessageByCorrelation(eventCorrelation(msg))
-    // An input received while interrupt confirmation is outstanding did not
-    // enter the old turn. Remove the optimistic echo and restore the draft so
-    // the user can retry after the terminal lifecycle event arrives.
-    if (msg.status === 'rejected' && ['turn_interrupt_pending', 'session_busy'].includes(msg.reason) && msg.retryable === true && message) {
-      const rejectedText = message.content || ''
-      if (messageInput.value.trim()) interruptPendingDraft.value = rejectedText
-      else messageInput.value = rejectedText
-      const index = messages.value.indexOf(message)
-      if (index >= 0) messages.value.splice(index, 1)
-      showSendFailure(msg.reason === 'session_busy' ? 'session.session_busy' : '')
-      return
-    }
-    if (!message) return
-    if (msg.status === 'accepted') {
-      if (message.deliveryStatus === 'failed') return
-      message.deliveryStatus = 'accepted'
-      message.deliveryReason = ''
-      return
-    }
-    message.deliveryStatus = 'failed'
-    message.deliveryReason = msg.reason || ''
-    showSendFailure(userMessageFailureKey(msg.reason || ''))
+    if (msg.session_id === sessionId.value && finishNativeCommand(msg.msg_id, msg.status === 'accepted' ? '' : (msg.reason || '调用失败'))) return
+    applySendReceipt(msg)
   }))
 
   cleanups.push(onEvent('user_text', (msg: any) => {
@@ -5008,6 +5210,12 @@ onMounted(() => {
 
   // 兜底：URL 仍是 pending 时，session_id_changed 到达则替换为真实 ID 并重新 replay
   cleanups.push(onEvent('session_id_changed', (msg: any) => {
+    if (msg.old_session_id && msg.session_id) {
+      if (receiptScope.value) moveReceipts(receiptScope.value, msg.old_session_id, msg.session_id)
+      for (const local of localSends.values()) {
+        if (local.session === msg.old_session_id) local.session = msg.session_id
+      }
+    }
     if (msg.old_session_id && msg.old_session_id === sessionId.value) {
       router.replace(`/session/${msg.session_id}`)
       // 清空旧消息，重新拉取真实 ID 的历史
@@ -5023,18 +5231,25 @@ onMounted(() => {
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
     if (cacheReadDenied(msg.code || msg.error)) {
+      recentViews.delete(sessionId.value)
+      cachedReadingAnchor = undefined
       resetLatest()
       cachedHistory.value = []; historyCacheRequest++; historyCacheReady.value = false
       void personalReadCache.remove(historyCacheName())
     }
     if (msg.operation === 'set_session_model' && msg.request_id === dshSettingsPending.value) { dshSettingsPending.value = ''; dshSettingsError.value = msg.error || t('session.dsh.failed'); requestSessionMeta(); return }
     if (msg.operation === 'user_message' && (msg.msg_id || msg.request_id)) {
-      const message = findMessageByCorrelation(eventCorrelation(msg))
+      const local = localSendForEvent(msg)
+      const message = local?.message ?? findMessageByCorrelation(eventCorrelation(msg))
       if (message) {
-        clearAckTimeout(message.__msg_id)
-        message.deliveryStatus = 'failed'
-        message.deliveryReason = msg.reason || ''
-        showSendFailure(userMessageFailureKey(msg.reason || ''))
+        if (msg.reason === 'timeout' || (msg.reason !== 'execution_failed' && !msg.msg_id)) markSendUnconfirmed(message.__msg_id)
+        else {
+          clearAckTimeout(message.__msg_id)
+          forgetStoredReceipt(message.__msg_id)
+          message.deliveryStatus = 'failed'
+          message.deliveryReason = msg.reason || ''
+          showSendFailure(userMessageFailureKey(msg.reason || ''))
+        }
         return
       }
     }
@@ -5083,11 +5298,18 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('session_deleted', (msg: any) => {
+    recentViews.delete(msg.session_id)
+    if (receiptScope.value) forgetReceipts(receiptScope.value, new Set(pendingReceiptIds(receiptScope.value, msg.session_id)))
+    for (const [id, local] of localSends) {
+      if (local.session !== msg.session_id) continue
+      clearAckTimeout(id)
+      localSends.delete(id)
+    }
     sessionDocumentState.sessionDeleted(msg.session_id)
     void personalReadCache.remove('history:' + JSON.stringify([msg.session_id, '']))
     void personalReadCache.remove('sessions')
     cachedSessions.value = cachedSessions.value.filter(s => s.session_id !== msg.session_id)
-    if (sessionId.value === msg.session_id) { cachedHistory.value = []; historyCacheRequest++ }
+    if (sessionId.value === msg.session_id) { cachedReadingAnchor = undefined; cachedHistory.value = []; historyCacheRequest++ }
     void refreshProjects()
     allSessions.value = allSessions.value.filter((s: any) => s.session_id !== msg.session_id)
     if (msg.session_id === sessionId.value) {
@@ -5123,6 +5345,7 @@ onMounted(() => {
   // runtime snapshot for the initial load.
   sessionSwitching = true
   loadHistory()
+  void recoverSendReceipts()
   void refreshSessionDocuments()
 })
 
@@ -5142,9 +5365,13 @@ function onPinned(sessionId: string, pinned: boolean) {
   if (s) (s as any).pinned = pinned
 }
 
+function saveReadingPositionOnHide() {
+  if (document.visibilityState === 'hidden') saveHistoryPreview()
+}
+onBeforeUnmount(() => rememberRecentView())
 onUnmounted(() => {
+  cancelReceiptLookup()
   resetLatest()
-  saveHistoryPreview()
   historyCacheRequest++; navigationRequest++
   if (historyCacheTimer) clearTimeout(historyCacheTimer)
   clearTaskSnapshotTimer()
@@ -5843,6 +6070,8 @@ onMounted(() => {
 </style>
 
 <style scoped>
+.message-delivery { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; text-align: end; }
+
 .session-timeline-entry { display: contents; }
 .tool-visibility-hint { display: block; margin-top: 4px; font-size: 11px; color: var(--fg-tertiary); }
 .tool-visibility-switch { flex-shrink: 0; width: 36px; height: 22px; border-radius: 12px; background: var(--border); padding: 3px; }

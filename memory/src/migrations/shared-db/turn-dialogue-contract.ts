@@ -1,6 +1,8 @@
 /** Enrollment belongs to the shared migrator. Runtime roles cannot select another
  * installation's sources by supplying their own owner or grant fields. */
 export const TURN_DIALOGUE_SCHEMA = [
+  `CREATE INDEX IF NOT EXISTS work_episodes_dialogue_health ON memory.work_episodes(installation_id,compiled_at DESC,turn_id,session_id)
+   WHERE compiler_version='relay-turn-v1' AND terminal_at IS NOT NULL AND state='ready'`,
   `CREATE UNIQUE INDEX IF NOT EXISTS work_episodes_session_turn ON memory.work_episodes(installation_id,session_id,turn_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS work_episodes_projected_turn ON memory.work_episodes(installation_id,turn_id)
    WHERE compiler_version<>'relay-turn-v1'`,
@@ -24,6 +26,18 @@ export const TURN_DIALOGUE_SCHEMA = [
   `CREATE TABLE IF NOT EXISTS memory.memory_dialogue_gaps(
    installation_id UUID REFERENCES memory.memory_installations ON DELETE CASCADE,session_id TEXT,turn_id TEXT,reason TEXT NOT NULL,
    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),PRIMARY KEY(installation_id,session_id,turn_id))`,
+  `CREATE OR REPLACE FUNCTION shared.memory_native_consumers_ready() RETURNS BOOLEAN
+ LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
+  SELECT EXISTS(SELECT 1 FROM shared.memory_source_contract c WHERE c.singleton AND c.target_profile='full' AND c.activation_ready)
+   AND NOT EXISTS(SELECT 1 FROM public.extension_installations i LEFT JOIN shared.memory_source_modes m USING(installation_id)
+    WHERE i.provider_id='pocketctl-memory' AND i.status='active' AND
+     (m.mode IS NULL AND NOT EXISTS(SELECT 1 FROM shared.memory_source_contract c WHERE c.singleton
+      AND c.projection_storage_retired AND i.created_at>=c.projection_retired_at)
+      OR m.mode NOT IN('paused','shared-active') OR
+      m.mode='shared-active' AND i.owner_scope_kind='personal' AND NOT EXISTS(
+       SELECT 1 FROM shared.memory_dialogue_installations d WHERE d.installation_id=i.installation_id)))
+ $$`,
+  `REVOKE ALL ON FUNCTION shared.memory_native_consumers_ready() FROM PUBLIC`,
   `CREATE TABLE IF NOT EXISTS shared.memory_dialogue_pending(
    installation_id UUID REFERENCES shared.memory_dialogue_installations ON DELETE CASCADE,
    session_id TEXT,turn_id TEXT,enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),touched_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -92,6 +106,8 @@ export const TURN_DIALOGUE_SCHEMA = [
    FROM chosen e WHERE e.user_id=owner_id AND e.logical_source_session_id=p_session AND NOT e.owner_retired
     AND e.effect_status IN('completed','none') AND public.native_event_authority(e.id,owner_id)->>'state'='current'
     AND shared.memory_input_start_admission(p_install,'relay_event',e.id::text,owner_id::text,p_session)='eligible'
+   AND NOT EXISTS(SELECT 1 FROM selected member JOIN shared.memory_reclaimed_relay_events d
+      ON d.installation_id=p_install AND d.canonical_key=member.id::text)
    ORDER BY e.id;
   -- Only the presence of an eligible root operation crosses the Relay boundary.
   RETURN QUERY SELECT e.id::text,'operation'::text,'{}'::jsonb,NULL::text,e.created_at,NULL::jsonb

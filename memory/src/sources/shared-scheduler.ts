@@ -1,7 +1,7 @@
 import type pg from 'pg'
 import type {SourceRoot,SourceWorkClaim} from '@pocketctl/session-source'
 import {claimSourceWork,failSourceWork} from './shared-work.js'
-import {advancePersonalSourceDistribution,resumeSourceDistribution,stepSourceDistribution,dispatchSourceDistribution,recoverSourceDistributionClaim,sourceDistributionTransportLost} from './source-distribution.js'
+import {resumeSourceDistribution,stepSourceDistribution,dispatchSourceDistribution,recoverSourceDistributionClaim,sourceDistributionTransportLost} from './source-distribution.js'
 import {sourceConnectionKey,sourcePoolContext} from './pool-context.js'
 import {createNonOverlappingPoller} from '../non-overlapping-poller.js'
 import {runOutsideSourceJobExecution} from './source-execution.js'
@@ -93,6 +93,12 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
    await nextSource()
    if(!active())return 'yield'
    if(!source)return 'idle'
+   if(source.kind==='legacy_archive'||source.kind==='relay_event'){
+    // Dialogue capture queues terminal turns directly. The source lease
+    // CAS retains a newer concurrent dirty revision for another pass.
+    if(!(await query('SELECT shared.ack_memory_source_work($1,$2,$3,$4,$5) AS valid',[source.kind,source.rootKey,source.token,source.workerId,source.claimedRevision])).rows[0].valid)throw Error('source_lease_lost')
+    confirmedFrontiers.delete(source.token);source=undefined;return 'progress'
+   }
    // Reconcile a new token or an unknown page reply BEFORE strict renewal.
    // A positively acknowledged page already supplied its exact durable
    // frontier; repeating its recovery-only transaction adds no authority.
@@ -102,27 +108,9 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
     confirmedFrontiers.add(source.token)
    }
    if(!active())return 'yield'
-   if(source.kind==='relay_event'){
-    const result=await advancePersonalSourceDistribution(pool,source,pageSize,active)
-    if(!active())return 'yield'
-    if(!result.valid){confirmedFrontiers.delete(source.token);source=undefined;return 'yield'}
-    if('step'in result){
-     if('waiting'in result.step){source={...source,claimedRevision:result.step.claimedRevision};park(true);return 'rotate'}
-    }else{
-     if(result.dispatched.complete){confirmedFrontiers.delete(source.token);source=undefined}
-     if(result.dispatched.pageCount>0)options.onDispatch?.()
-    }
-    park();return 'progress'
-   }
    const valid=(await query('SELECT shared.renew_memory_source_lease($1,$2,$3,$4,$5,30) AS valid',[source.kind,source.rootKey,source.token,source.workerId,source.claimedRevision])).rows[0].valid
    if(!active())return 'yield'
    if(!valid){confirmedFrontiers.delete(source.token);source=undefined;return 'yield'}
-   if(source.kind==='legacy_archive'){
-    // Acknowledge this immutable-custody notification only. The existing lease
-    // CAS retains a newer concurrent dirty revision for another pass.
-    if(!(await query('SELECT shared.ack_memory_source_work($1,$2,$3,$4,$5) AS valid',[source.kind,source.rootKey,source.token,source.workerId,source.claimedRevision])).rows[0].valid)throw Error('source_lease_lost')
-    confirmedFrontiers.delete(source.token);source=undefined;return 'progress'
-   }
    const checkpoint=await resumeSourceDistribution(pool,source)
    if(!active())return 'yield'
    if(!checkpoint||checkpoint.state==='scanning'){
@@ -207,7 +195,7 @@ export function createSharedSourceScheduler(options:{pool:pg.Pool;workerId:strin
   // A durable personal projection may finish after normal source ACK released
   // its claim. Hint only a fresh ordinary pass; SQL grants all new authority.
   wake(root:SourceRoot){
-   if(!started||!active()||root.kind!=='relay_event'||typeof root.key!=='string'||!root.key||root.key.length>1024)return
+   if(!started||!active()||!['team_collaboration','team_delivery'].includes(root.kind)||typeof root.key!=='string'||!root.key||root.key.length>1024)return
    const rootKey=root.kind+'\0'+root.key
    deferredRoots.delete(rootKey)
    requestWake()

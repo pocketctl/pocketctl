@@ -93,6 +93,9 @@ function toggleGroup() {
   groupExpanded.value = !groupExpanded.value
   emit('change-expanded', groupExpanded.value)
 }
+watch(() => props.expanded, expanded => {
+  if (expanded !== undefined) groupExpanded.value = expanded
+})
 const selectedKey = ref<string | null>(null)
 const activeTabs = reactive<Record<string, 'input' | 'output'>>({})
 const expandedOutputs = reactive<Record<string, boolean>>({})

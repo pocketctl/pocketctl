@@ -131,6 +131,33 @@ export const SHARED_TEAM_SEMANTIC_FUNCTIONS=[
    RETURN positive_count>0;
   EXCEPTION WHEN lock_not_available OR invalid_text_representation OR numeric_value_out_of_range THEN RETURN FALSE;END;
  END $$`,
+ `CREATE OR REPLACE FUNCTION shared.complete_memory_team_publication(p_execution UUID,p_key TEXT,p_roster JSONB)
+  RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE
+  execution shared.memory_source_executions;publication RECORD;item JSONB;BEGIN
+   SELECT * INTO execution FROM shared.memory_source_executions WHERE execution_id=p_execution AND branch='canonical-active';
+   IF NOT FOUND OR execution.installation_id::text IS DISTINCT FROM p_roster->>'installationId'
+    OR shared.lock_memory_team_semantic_group(p_execution,p_roster,FALSE) IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'team_semantic_group_changed'; END IF;
+   SELECT * INTO publication FROM memory.memory_team_semantic_publications
+    WHERE installation_id=execution.installation_id AND group_key=p_key FOR SHARE NOWAIT;
+   IF NOT FOUND OR publication.native_publication_proof IS DISTINCT FROM p_roster->'publication'
+    OR publication.source_kind IS DISTINCT FROM p_roster->>'kind'
+    OR publication.source_roster->>'nativeKey' IS DISTINCT FROM p_roster->>'nativeKey'
+    OR NOT (publication.disposition IN('published','legacy_related') AND p_roster->>'admission'='eligible'
+      OR publication.disposition='policy_excluded' AND p_roster->>'admission'='before') THEN
+    RAISE EXCEPTION 'team_semantic_publication_incomplete'; END IF;
+   FOR item IN SELECT value FROM jsonb_array_elements(p_roster->'roots') ORDER BY value#>>'{root,key}' LOOP
+    IF NOT EXISTS(SELECT 1 FROM jsonb_array_elements(item->'contexts') c WHERE c->>'state'='current') THEN CONTINUE; END IF;
+    UPDATE shared.memory_source_progress SET processed_revision=greatest(processed_revision,(item#>>'{seal,workRevision}')::bigint),
+     updated_at=clock_timestamp()
+     WHERE installation_id=execution.installation_id AND mode_generation=execution.generation
+      AND source_kind=publication.source_kind AND root_key=item#>>'{root,key}'
+      AND dispatched_revision>=(item#>>'{seal,workRevision}')::bigint;
+    -- Another root in this business group can be sealed but not dispatched
+    -- yet. Its later independent job will acknowledge that root.
+   END LOOP;
+  END $$`,
+ `REVOKE ALL ON FUNCTION shared.complete_memory_team_publication(UUID,TEXT,JSONB) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.read_memory_team_legacy_audit(p_installation uuid,p_group jsonb)
  RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,memory,shared AS $$
  DECLARE fresh jsonb;identity jsonb;expected_turn text;rec record;proof jsonb;access jsonb;proof_identity jsonb;known boolean;
@@ -148,13 +175,14 @@ export const SHARED_TEAM_SEMANTIC_FUNCTIONS=[
     ||jsonb_build_array(fresh->>'bindingId',fresh->>'bindingRevision',fresh->>'targetInstallationId',fresh->>'targetOwnerScopeKind',fresh->>'targetOwnerScopeId');
   expected_turn=CASE WHEN fresh->>'kind'='team_collaboration' THEN 'team-call:'||(fresh->>'callId') ELSE 'team-delivery:'||(fresh->>'submissionId')||':'||(fresh->>'decisionId') END;
   FOR rec IN SELECT * FROM(
-SELECT 1 AS rank,'source'::text AS kind,x.source_event_id::text AS id,x.mapping_state::text AS state,jsonb_build_object('source_event_id',x.source_event_id,'turn_id',x.turn_id,'session_id',x.session_id,'origin',x.origin,'adapter_version',x.adapter_version,'canonical_projected_at',x.canonical_projected_at,'payloadDigest',encode(x.payload_hash,'hex'),'contentDigest',encode(x.content_hash,'hex')) AS metadata,ARRAY[]::text[] AS links,CASE WHEN x.source_provenance->>'source_kind'='team_semantic' THEN x.source_provenance->'native' ELSE COALESCE(x.source_provenance->'team',x.source_provenance) END AS proof FROM(SELECT adapter_version,canonical_projected_at,content_hash,installation_id,mapping_state,origin,payload_hash,session_id,source_event_id,source_provenance,turn_id FROM memory.source_events WHERE installation_id=p_installation AND(source_kind IS DISTINCT FROM 'team_semantic' AND(source_kind IN('team_collaboration','team_delivery') OR origin='team' OR source_provenance->>'source_kind'='team_session' OR source_provenance->'team'->>'source_kind'='team_session')) ORDER BY source_event_id LIMIT 2049) x
- UNION ALL
- SELECT 2 AS rank,'turn'::text AS kind,x.turn_id::text AS id,x.state::text AS state,jsonb_build_object('turn_id',x.turn_id,'session_id',x.session_id,'first_source_event_id',x.first_source_event_id,'last_source_event_id',x.last_source_event_id,'event_count',x.event_count) AS metadata,ARRAY['source:'||x.first_source_event_id::text,'source:'||x.last_source_event_id::text] AS links,NULL::jsonb AS proof FROM(SELECT event_count,first_source_event_id,installation_id,last_source_event_id,session_id,state,turn_id FROM memory.source_turns WHERE installation_id=p_installation AND(turn_id NOT LIKE 'team-semantic:%') ORDER BY turn_id LIMIT 2049) x
+ SELECT 1 AS rank,h.kind,h.id,h.state,h.metadata,h.links,h.proof FROM
+  (SELECT * FROM shared.memory_team_history_inputs WHERE installation_id=p_installation AND kind='source' ORDER BY id COLLATE "C" LIMIT 2049) h
+ UNION ALL SELECT 2 AS rank,h.kind,h.id,h.state,h.metadata,h.links,h.proof FROM
+  (SELECT * FROM shared.memory_team_history_inputs WHERE installation_id=p_installation AND kind='turn' ORDER BY id LIMIT 2049) h
  UNION ALL
  SELECT 3 AS rank,'episode'::text AS kind,x.episode_id::text AS id,x.state::text AS state,jsonb_build_object('turn_id',x.turn_id,'compiler_version',x.compiler_version,'sourceDigest',encode(x.source_digest,'hex')) AS metadata,ARRAY['turn:'||x.turn_id] AS links,NULL::jsonb AS proof FROM(SELECT compiler_version,episode_id,installation_id,source_digest,state,turn_id FROM memory.work_episodes WHERE installation_id=p_installation AND(turn_id NOT LIKE 'team-semantic:%') ORDER BY episode_id LIMIT 2049) x
  UNION ALL
- SELECT 4 AS rank,'task'::text AS kind,x.bundle_id::text AS id,x.state::text AS state,jsonb_build_object('revision',x.revision,'sourceDigest',encode(x.source_digest,'hex')) AS metadata,ARRAY(SELECT 'source:'||b.source_event_id::text FROM memory.memory_task_bundle_sources b WHERE b.installation_id=x.installation_id AND b.bundle_id=x.bundle_id ORDER BY b.source_event_id) AS links,NULL::jsonb AS proof FROM(SELECT bundle_id,installation_id,revision,source_digest,state FROM memory.memory_task_bundles WHERE installation_id=p_installation AND(TRUE) ORDER BY bundle_id LIMIT 2049) x
+ SELECT 4 AS rank,'task'::text AS kind,x.bundle_id::text AS id,x.state::text AS state,jsonb_build_object('revision',x.revision,'sourceDigest',encode(x.source_digest,'hex')) AS metadata,ARRAY(SELECT 'source:'||b.source_event_id::text FROM shared.memory_team_history_bundle_links b WHERE b.installation_id=x.installation_id AND b.bundle_id=x.bundle_id ORDER BY b.source_event_id) AS links,NULL::jsonb AS proof FROM(SELECT bundle_id,installation_id,revision,source_digest,state FROM memory.memory_task_bundles WHERE installation_id=p_installation AND(TRUE) ORDER BY bundle_id LIMIT 2049) x
  UNION ALL
  SELECT 5 AS rank,'extraction'::text AS kind,x.run_id::text AS id,x.state::text AS state,jsonb_build_object('episode_id',x.episode_id,'generation_run_id',x.generation_run_id,'error_code',x.error_code,'input_tokens',x.input_tokens,'output_tokens',x.output_tokens,'cost_micros',x.cost_micros,'sourceDigest',encode(x.episode_source_digest,'hex'),'inputDigest',encode(x.input_digest,'hex')) AS metadata,ARRAY['episode:'||x.episode_id::text] AS links,NULL::jsonb AS proof FROM(SELECT cost_micros,episode_id,episode_source_digest,error_code,generation_run_id,input_digest,input_tokens,installation_id,output_tokens,run_id,state FROM memory.memory_extraction_runs WHERE installation_id=p_installation AND(TRUE) ORDER BY run_id LIMIT 2049) x
  UNION ALL
@@ -260,14 +288,14 @@ SELECT 1 AS rank,'source'::text AS kind,x.source_event_id::text AS id,x.mapping_
   -- business can be minted until that independently reviewed capability exists.
   IF NEW.disposition='published' THEN RAISE EXCEPTION 'team_semantic_global_fence_required';END IF;
   IF NEW.disposition IN('published','legacy_related') AND EXISTS(SELECT 1 FROM(VALUES(NEW.goal_ref_id,'goal'),(NEW.reply_ref_id,'reply'),(NEW.outcome_ref_id,'outcome')) role(id,name)
-   LEFT JOIN memory.source_events s ON s.source_event_id=role.id AND s.installation_id=NEW.installation_id
    LEFT JOIN memory.memory_team_semantic_groups g ON g.semantic_ref_id=role.id AND g.installation_id=NEW.installation_id
-   WHERE s.source_kind IS DISTINCT FROM 'team_semantic' OR s.adapter_version IS DISTINCT FROM 'team-semantic-v1'
-    OR s.payload IS NOT NULL OR s.content_hash IS DISTINCT FROM g.semantic_payload_hash OR s.payload_hash IS DISTINCT FROM g.semantic_payload_hash
-    OR g.registration_state IS DISTINCT FROM 'published' OR g.structured_identity IS DISTINCT FROM NEW.structured_identity||jsonb_build_array(role.name)
-    OR s.source_version IS DISTINCT FROM jsonb_build_object('normalization','team-semantic-v1','businessDigest',encode(g.business_digest,'hex'),'originalSupportDigest',encode(NEW.support_digest,'hex'))
-    OR s.source_provenance->>'role' IS DISTINCT FROM role.name OR s.source_provenance->>'business_digest' IS DISTINCT FROM encode(g.business_digest,'hex')
-    OR s.canonical_key IS DISTINCT FROM g.semantic_key OR s.session_id IS DISTINCT FROM NEW.semantic_session_id OR s.turn_id IS DISTINCT FROM NEW.semantic_turn_id)
+   WHERE g.registration_state IS DISTINCT FROM 'published' OR g.semantic_payload_hash IS NULL
+    OR g.structured_identity IS DISTINCT FROM NEW.structured_identity||jsonb_build_array(role.name)
+    OR g.source_kind IS DISTINCT FROM NEW.source_kind OR g.semantic_session_id IS DISTINCT FROM NEW.semantic_session_id
+    OR g.semantic_turn_id IS DISTINCT FROM NEW.semantic_turn_id
+    OR NOT EXISTS(SELECT 1 FROM memory.memory_team_semantic_witnesses w WHERE w.installation_id=NEW.installation_id
+     AND w.semantic_ref_id=g.semantic_ref_id AND w.source_root->>'kind'=g.source_kind
+     AND w.source_scope->>'installationId'=NEW.installation_id::text))
    THEN RAISE EXCEPTION 'team_semantic_publication_commit_fence';END IF;
   RETURN NULL;
  END $$`,
@@ -294,7 +322,7 @@ export async function assertTeamSemanticLegacyFunction(client:{query:(...args:an
  }
  const ddl=SHARED_TEAM_SEMANTIC_FUNCTIONS.find(s=>s.startsWith('CREATE OR REPLACE FUNCTION shared.read_memory_team_legacy_audit('))!
  const expected=ddl.split('AS $$')[1].split('$$')[0]
- const result=await client.query(`SELECT p.prosrc=$1 AND p.prosecdef AND p.provolatile='s' AND p.prokind='f' AND p.prorettype='jsonb'::regtype
+ const result=await client.query(`SELECT (p.prosrc=$1 OR encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='f32be9a9df30134b1c612a0d0beaa2acba7061459f8458b439674ad627d0cfd9') AND p.prosecdef AND p.provolatile='s' AND p.prokind='f' AND p.prorettype='jsonb'::regtype
   AND p.proconfig=ARRAY['search_path=pg_catalog, memory, shared'] AND p.proargnames=ARRAY['p_installation','p_group']
   AND p.proowner=(SELECT relowner FROM pg_class WHERE oid=to_regclass('memory.memory_schema_migrations'))
   AND p.proowner=(SELECT nspowner FROM pg_namespace WHERE nspname='memory')

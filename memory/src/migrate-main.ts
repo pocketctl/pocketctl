@@ -10,7 +10,7 @@ import {MEMORY_WRITER_STARTUP_OPTIONS} from './migrations/governance-v2/compatib
 import {normalizeTargetInstallations} from './migrations/shared-db/target-contract.js'
 export async function migrateMain(args=process.argv.slice(2)):Promise<number>{
  const [command,namespace,expectedDatabase]=args
- if(command!=='apply' || !['public','memory'].includes(namespace) || !expectedDatabase || args.length!==3){process.stderr.write('usage: migrate-main apply public|memory EXPECTED_DATABASE\n');return 2}
+ if(command!=='apply' || namespace!=='memory' || !expectedDatabase || args.length!==3){process.stderr.write('usage: migrate-main apply memory EXPECTED_DATABASE\n');return 2}
  const url=process.env.MEMORY_MIGRATION_DATABASE_URL
  if(!url){process.stderr.write('dedicated_migration_database_url_required\n');return 2}
  const pool=new pg.Pool({connectionString:url,max:1,options:MEMORY_WRITER_STARTUP_OPTIONS,application_name:'pocketctl-memory-migrator'})

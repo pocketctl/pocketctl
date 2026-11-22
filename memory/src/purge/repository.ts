@@ -1,4 +1,4 @@
-import {legacyTransportRetired} from '../sources/transport-state.js'
+import {legacyTransportRetired,projectionStorageRetired} from '../sources/transport-state.js'
 import {assertIndependentAcceptedEvidence,independentlyAcceptedVersionSupportSql} from '../claims/accepted-evidence-policy.js'
 import {rollupFeedbackBeforeInstallationPurge,minimizeSessionFeedback,minimizeEpisodeFeedback} from '../claims/feedback-policy.js'
 import {purgeStatistics} from '../platform-statistics/service.js'
@@ -467,8 +467,9 @@ async function purgeSessionRows(
     )
   `, [input.installationId, input.sessionId])
 
+  const projectionRetired=await projectionStorageRetired(client)
   for (const table of [
-    'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
+    'work_episodes', ...(projectionRetired?[]:['source_artifacts','source_turns','source_events']),
     ...((await legacyTransportRetired(client))?[]:['memory_snapshot_events']), 'memory_source_retention_receipts',
   ]) {
     await client.query(
@@ -480,7 +481,7 @@ async function purgeSessionRows(
     `DELETE FROM memory_source_delivery_facts WHERE installation_id = $1 AND session_id = $2`,
     [input.installationId, input.sessionId],
   )
-  await client.query(`
+  if(!projectionRetired)await client.query(`
     UPDATE source_sessions SET
       agent_type = NULL, daemon_id = NULL, status = NULL, cwd_observation = NULL,
       worktree_path = NULL, worktree_branch = NULL, deleted_at = NOW(),
@@ -802,6 +803,7 @@ async function purgeInstallationRows(
       [input.installationId],
     )
   }
+  const projectionRetired=await projectionStorageRetired(client)
   const invalidated = await client.query<{ count: string }>(`
     SELECT COUNT(*)::text AS count FROM knowledge_claims WHERE installation_id = $1
   `, [input.installationId])
@@ -816,8 +818,8 @@ async function purgeInstallationRows(
     'memory_extraction_runs', 'knowledge_versions', 'knowledge_claims','memory_logical_tombstones',
     'memory_entity_aliases','memory_entities','memory_space_bindings','memory_spaces',
     'memory_feature_settings',
-    'work_episodes', 'source_artifacts', 'source_turns', 'source_events',
-    'memory_source_retention_receipts', 'repo_snapshots', 'repositories', 'source_sessions',
+    'work_episodes', ...(projectionRetired?[]:['source_artifacts','source_turns','source_events','source_sessions']),
+    'memory_source_retention_receipts', 'repo_snapshots', 'repositories',
     'memory_retrieval_candidates',
     'memory_retrieval_trajectories',
     'memory_generation_runs',

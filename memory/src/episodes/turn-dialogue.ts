@@ -35,7 +35,7 @@ export type DialogueRef = {
   textSha256?: string
   partCount?: number
 }
-class DialogueReadDisposition extends Error {
+export class DialogueReadDisposition extends Error {
   assertCurrent?: (db: Db) => Promise<void>
   constructor(readonly reason: string) {
     super(reason)
@@ -187,7 +187,7 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
   const { rows, signature } = await metadata(pool, install, session, turn)
   try {
     if (rows.some((r) => r.kind === 'operation')) throw new DialogueExcluded()
-    const reader = createObservedSourceReader(pool, sourcePoolContext(pool).archive)
+    const reader = createObservedSourceReader(pool, sourcePoolContext(pool).archive, turn)
     const bodies = new Map<string, Header>()
     async function loadBodies(parts: Member[]) {
       for (let start = 0; start < parts.length; start += 256) {

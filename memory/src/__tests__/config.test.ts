@@ -111,7 +111,8 @@ describe('memory config', () => {
     const chosen={MEMORY_DATABASE_NAMESPACE:'memory',MEMORY_SHARED_SOURCE_PROFILE:'personal-relay-only',MEMORY_INSTALLATION_ALLOWLIST:personal+','+organization}
     expect(loadMemoryConfig(baseEnv(chosen)).sharedSourceProfile).toBe('personal-relay-only')
     expect(loadMemoryConfig(baseEnv()).sharedSourceProfile).toBeUndefined()
-    for(const overrides of [{...chosen,MEMORY_DATABASE_NAMESPACE:'public'},{...chosen,MEMORY_INSTALLATION_ALLOWLIST:''},{...chosen,MEMORY_SHARED_SOURCE_PROFILE:'all'}])
+    expect(()=>loadMemoryConfig(baseEnv({...chosen,MEMORY_DATABASE_NAMESPACE:'public'}))).toThrow(/MEMORY_DATABASE_NAMESPACE/)
+    for(const overrides of [{...chosen,MEMORY_INSTALLATION_ALLOWLIST:''},{...chosen,MEMORY_SHARED_SOURCE_PROFILE:'all'}])
       expect(()=>loadMemoryConfig(baseEnv(overrides))).toThrow(/MEMORY_SHARED_SOURCE_PROFILE/)
   })
 

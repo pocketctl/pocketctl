@@ -479,7 +479,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
   const wikiMode = wikiModeFromEnv(env)
 
   const databaseUrl = env.MEMORY_DATABASE_URL ?? ''
-  const databaseNamespace=parseEnum('MEMORY_DATABASE_NAMESPACE',env.MEMORY_DATABASE_NAMESPACE,['public','memory'] as const,'public')
+  const databaseNamespace=parseEnum('MEMORY_DATABASE_NAMESPACE',env.MEMORY_DATABASE_NAMESPACE,['memory'] as const,'memory')
   const installationAllowlist=parseUuidAllowlist(env.MEMORY_INSTALLATION_ALLOWLIST, 'MEMORY_INSTALLATION_ALLOWLIST')
   const sharedSourceProfile=env.MEMORY_SHARED_SOURCE_PROFILE
   if(sharedSourceProfile!==undefined && (sharedSourceProfile!=='personal-relay-only'||databaseNamespace!=='memory'||installationAllowlist.length<1||installationAllowlist.length>16))

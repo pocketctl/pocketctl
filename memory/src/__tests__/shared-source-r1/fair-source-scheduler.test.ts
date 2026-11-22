@@ -11,20 +11,14 @@ let cleanups:(()=>Promise<void>)[]=[]
 beforeEach(()=>{vi.useFakeTimers({toFake:['setTimeout','clearTimeout','performance']});Object.values(io).forEach(f=>f.mockReset());io.listener.mockReturnValue({start:async()=>{},stop:async()=>{}});cleanups=[]})
 afterEach(async()=>{for(const stop of cleanups)await stop();vi.useRealTimers()})
 function fixture(count=4,extra:Record<string,unknown>={}){
- const waiting=Array.from({length:count},(_,n)=>({kind:'relay_event',rootKey:'1:root-'+n,token:'token-'+n,workerId:'fair-worker',claimedRevision:'1'})),fresh:any[]=[],steps:any[]=[],errors:unknown[]=[],queries:any[]=[],done=new Set<string>(),durable=new Map(waiting.map(c=>[c.rootKey,'2']))
+ const waiting=Array.from({length:count},(_,n)=>({kind:'team_collaboration',rootKey:'1:root-'+n,token:'token-'+n,workerId:'fair-worker',claimedRevision:'1'})),fresh:any[]=[],steps:any[]=[],errors:unknown[]=[],queries:any[]=[],done=new Set<string>(),durable=new Map(waiting.map(c=>[c.rootKey,'2']))
  io.claim.mockImplementation(async()=>{const claim=waiting.shift();if(claim)fresh.push({...claim,at:performance.now()});return claim?[claim]:[]})
  io.recover.mockImplementation(async(_p,c)=>({claimedRevision:durable.get(c.rootKey)}))
  io.resume.mockImplementation(async(_p,c)=>done.has(c.rootKey)?{scanId:'scan-'+c.rootKey,state:'sealed',dispatchCursor:'',dispatchComplete:false}:null)
  io.step.mockImplementation(async(_p,c)=>{steps.push({...c,at:performance.now()});return {waiting:true,scanId:'scan-'+c.rootKey,workRevision:'1',claimedRevision:durable.get(c.rootKey)}})
  io.dispatch.mockResolvedValue({complete:true});io.fail.mockResolvedValue(undefined)
- const client={query:vi.fn(async(sql:string,args:any[])=>{queries.push({sql,args,at:performance.now()});return {rows:sql.includes('activation_ready')?[{activation_ready:true}]:sql.includes('renew_memory_source_lease')?[{valid:true}]:[]}}),release:vi.fn()}
+ const client={query:vi.fn(async(sql:string,args:any[])=>{queries.push({sql,args,at:performance.now()});return {rows:sql.includes('activation_ready')?[{activation_ready:true}]:(sql.includes('renew_memory_source_lease')||sql.includes('ack_memory_source_work'))?[{valid:true}]:[]}}),release:vi.fn()}
  const pool={connect:vi.fn(async()=>client)} as unknown as pg.Pool;bindSourcePool(pool,{namespace:'memory'})
- io.advance.mockImplementation(async(p,c,limit)=>{
-  const valid=(await client.query('SELECT shared.renew_memory_source_lease($1,$2,$3,$4,$5,30) AS valid',[c.kind,c.rootKey,c.token,c.workerId,c.claimedRevision])).rows[0] as {valid?:boolean}
-  if(!valid.valid)return {valid:false}
-  const checkpoint=await io.resume(p,c)
-  return !checkpoint||checkpoint.state==='scanning'?{valid:true,step:await io.step(p,c,checkpoint??undefined,limit)}:{valid:true,dispatched:await io.dispatch(p,c,checkpoint,{cursor:checkpoint.dispatchCursor},limit)}
- })
  const controller=new AbortController(),scheduler=createSharedSourceScheduler({pool,workerId:'fair-worker',signal:controller.signal,onError:e=>errors.push(e),...extra})
  cleanups.push(scheduler.stop)
  return {scheduler,controller,pool,client,fresh,steps,errors,queries,done,durable,waiting}
@@ -94,7 +88,7 @@ test('stop and abort close admission without late lease recovery or queries',asy
 
 test('ordinary reacquisition of an expired queued root replaces its stale cached token without duplicating a slot',async()=>{
  const f=fixture(3);await f.scheduler.runOnce();await f.scheduler.runOnce();await f.scheduler.runOnce();
- io.claim.mockResolvedValueOnce([{kind:'relay_event',rootKey:'1:root-0',token:'replacement-0',workerId:'fair-worker',claimedRevision:'2'}]);
+ io.claim.mockResolvedValueOnce([{kind:'team_collaboration',rootKey:'1:root-0',token:'replacement-0',workerId:'fair-worker',claimedRevision:'2'}]);
  await f.scheduler.runOnce();const boundary=f.steps.length;
  for(let n=0;n<6;n++)await f.scheduler.runOnce();
  expect(f.steps.slice(boundary).filter(c=>c.rootKey==='1:root-0').length).toBeGreaterThan(0);
@@ -103,13 +97,13 @@ test('ordinary reacquisition of an expired queued root replaces its stale cached
 
 test('durable ready hint wakes only a currently held root before its idle timer',async()=>{
  const f=fixture(1);f.scheduler.start();await vi.advanceTimersByTimeAsync(10);const visits=f.steps.length
- f.done.add('1:root-0');(f.scheduler as any).wake({kind:'relay_event',key:'1:root-0'});await vi.advanceTimersByTimeAsync(10)
+ f.done.add('1:root-0');(f.scheduler as any).wake({kind:'team_collaboration',key:'1:root-0'});await vi.advanceTimersByTimeAsync(10)
  expect(io.dispatch).toHaveBeenCalledOnce();expect(f.steps).toHaveLength(visits);expect(performance.now()).toBeLessThan(1000)
 })
-test('invalid personal root hints and stopped scheduler cannot create source SQL',async()=>{
+test('non-Team root hints and stopped scheduler cannot create source SQL',async()=>{
  const f=fixture(1);f.scheduler.start();await vi.advanceTimersByTimeAsync(10);const before=f.queries.length
- for(let n=0;n<30;n++)(f.scheduler as any).wake({kind:'team_collaboration',key:'1:unknown'});await vi.advanceTimersByTimeAsync(10);expect(f.queries).toHaveLength(before)
- await f.scheduler.stop();(f.scheduler as any).wake({kind:'relay_event',key:'1:root-0'});await vi.advanceTimersByTimeAsync(10);expect(f.queries).toHaveLength(before)
+ for(let n=0;n<30;n++)(f.scheduler as any).wake({kind:'relay_event',key:'1:unknown'});await vi.advanceTimersByTimeAsync(10);expect(f.queries).toHaveLength(before)
+ await f.scheduler.stop();(f.scheduler as any).wake({kind:'team_collaboration',key:'1:root-0'});await vi.advanceTimersByTimeAsync(10);expect(f.queries).toHaveLength(before)
 })
 test('only acknowledged positive dispatch pages hint the job consumer',async()=>{
  const dispatched=vi.fn(),f=fixture(1,{onDispatch:dispatched});f.done.add('1:root-0');io.dispatch.mockResolvedValueOnce({complete:true,pageCount:1})
@@ -120,20 +114,20 @@ test('only acknowledged positive dispatch pages hint the job consumer',async()=>
 
 test('a hint arriving during a source pass requests one fresh pass without overlapping SQL',async()=>{
  const f=fixture(1);let release!:(x:any)=>void;io.recover.mockImplementationOnce(()=>new Promise(r=>{release=r}));f.scheduler.start();await vi.advanceTimersByTimeAsync(0)
- expect(release).toBeTypeOf('function');for(let n=0;n<50;n++)(f.scheduler as any).wake({kind:'relay_event',key:'1:root-0'});expect(io.recover).toHaveBeenCalledOnce()
+ expect(release).toBeTypeOf('function');for(let n=0;n<50;n++)(f.scheduler as any).wake({kind:'team_collaboration',key:'1:root-0'});expect(io.recover).toHaveBeenCalledOnce()
  f.done.add('1:root-0');release({claimedRevision:'2'});await vi.advanceTimersByTimeAsync(10)
  expect(io.dispatch).toHaveBeenCalledOnce();expect(f.queries.filter(q=>q.sql.includes('activation_ready'))).toHaveLength(2);expect(f.errors).toEqual([])
 })
 
 test('a durable ready hint after normal source ACK probes new dirty work with a fresh SQL token',async()=>{
  const f=fixture(1);f.done.add('1:root-0');f.scheduler.start();await vi.advanceTimersByTimeAsync(10);expect(io.dispatch).toHaveBeenCalledOnce();expect(f.fresh).toHaveLength(1)
- f.waiting.push({kind:'relay_event',rootKey:'1:root-0',token:'fresh-after-ack',workerId:'fair-worker',claimedRevision:'3'});f.done.delete('1:root-0');f.durable.set('1:root-0','3')
- for(let n=0;n<50;n++)f.scheduler.wake({kind:'relay_event',key:'1:root-0'});await vi.advanceTimersByTimeAsync(10)
+ f.waiting.push({kind:'team_collaboration',rootKey:'1:root-0',token:'fresh-after-ack',workerId:'fair-worker',claimedRevision:'3'});f.done.delete('1:root-0');f.durable.set('1:root-0','3')
+ for(let n=0;n<50;n++)f.scheduler.wake({kind:'team_collaboration',key:'1:root-0'});await vi.advanceTimersByTimeAsync(10)
  expect(f.fresh).toHaveLength(2);expect(f.steps.at(-1)).toMatchObject({rootKey:'1:root-0',token:'fresh-after-ack',claimedRevision:'3'});expect(f.errors).toEqual([]);expect(performance.now()).toBeLessThan(1000)
 })
 test('wake storms coalesce to at most one new burst per 100ms without changing idle polling',async()=>{
  const f=fixture(0);f.scheduler.start();await vi.advanceTimersByTimeAsync(1)
- for(let n=0;n<20;n++){f.scheduler.wake({kind:'relay_event',key:'valid-internal-hint'});await vi.advanceTimersByTimeAsync(1)}
+ for(let n=0;n<20;n++){f.scheduler.wake({kind:'team_collaboration',key:'valid-internal-hint'});await vi.advanceTimersByTimeAsync(1)}
  await vi.advanceTimersByTimeAsync(200)
  expect(f.queries.filter(q=>q.sql.includes('activation_ready')).length).toBeLessThanOrEqual(3);expect(f.errors).toEqual([])
 })
@@ -149,7 +143,7 @@ test('unrelated Relay notifications retain each waiting root until its one-secon
 test('only a durable root-ready hint releases that waiting root before fallback and admits the next root',async()=>{
  const f=fixture(5,{listenForRelay:true});f.scheduler.start();await vi.advanceTimersByTimeAsync(10)
  const notify=io.listener.mock.calls[0][0].wake;notify();await vi.advanceTimersByTimeAsync(100)
- f.done.add('1:root-0');f.scheduler.wake({kind:'relay_event',key:'1:root-0'});await vi.advanceTimersByTimeAsync(100)
+ f.done.add('1:root-0');f.scheduler.wake({kind:'team_collaboration',key:'1:root-0'});await vi.advanceTimersByTimeAsync(100)
  expect(io.dispatch).toHaveBeenCalledOnce();expect(f.fresh).toHaveLength(5)
  for(const root of ['1:root-1','1:root-2','1:root-3'])expect(f.steps.filter(s=>s.rootKey===root)).toHaveLength(1)
  expect(f.steps.find(s=>s.rootKey==='1:root-4')).toBeDefined();expect(f.errors).toEqual([])
@@ -186,7 +180,16 @@ test('a known receipt cannot admit an expired lease and a replacement token rece
  const f=fixture(1);await f.scheduler.runOnce();const query=f.client.query.getMockImplementation()!
  f.client.query.mockImplementation(async(sql:string,args:any[])=>sql.includes('renew_memory_source_lease')&&args[2]==='token-0'?{rows:[{valid:false}]}:query(sql,args))
  await f.scheduler.runOnce();expect(f.steps).toHaveLength(1)
- f.durable.set('1:root-0','3');io.claim.mockResolvedValueOnce([{kind:'relay_event',rootKey:'1:root-0',token:'replacement',workerId:'fair-worker',claimedRevision:'3'}])
+ f.durable.set('1:root-0','3');io.claim.mockResolvedValueOnce([{kind:'team_collaboration',rootKey:'1:root-0',token:'replacement',workerId:'fair-worker',claimedRevision:'3'}])
  await f.scheduler.runOnce();expect(io.recover).toHaveBeenCalledTimes(2)
  expect(io.recover.mock.calls[1][1]).toMatchObject({token:'replacement',claimedRevision:'3'});expect(f.steps.at(-1)).toMatchObject({token:'replacement',claimedRevision:'3'})
+})
+
+test.each(['relay_event','legacy_archive'])('acknowledges %s revisions without scheduling projection',async kind=>{
+ const f=fixture(0)
+ io.claim.mockResolvedValueOnce([{kind,rootKey:'1:session',token:'token',workerId:'fair-worker',claimedRevision:'4'}])
+ await f.scheduler.runOnce()
+ expect(f.queries.find(q=>q.sql.includes('ack_memory_source_work'))?.args).toEqual([kind,'1:session','token','fair-worker','4'])
+ expect(io.advance).not.toHaveBeenCalled();expect(io.recover).not.toHaveBeenCalled();expect(io.dispatch).not.toHaveBeenCalled()
+ expect(f.errors).toEqual([])
 })

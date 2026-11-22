@@ -8,7 +8,7 @@ import { lockCurationAuthority, readCurationPolicy } from '../curation/policy.js
 import { prepareLifecycleTurn, stageLifecycleTurn, stagePreparedLifecycleTurn } from '../curation/task-repository.js'
 import type { CurationMode } from '../curation/contracts.js'
 import {assertJobFence} from '../generation/fence.js'
-import {JobDeferredError,type JobFence} from '../jobs/types.js'
+import {JobDeferredError,JobTerminalError,type JobFence} from '../jobs/types.js'
 import type pg from 'pg'
 import {guardSourceExecutionCommit,sourceExecutionBranchFor} from '../sources/source-execution.js'
 import type { JobClaim } from '../jobs/types.js'
@@ -40,6 +40,7 @@ export function createEpisodeRepository(
 
   const repository = {
     async compileTurn(installationId: string, turnId: string, fence?:JobFence, signal?:AbortSignal): Promise<void> {
+      if(sourcePoolContext(pool).namespace==='memory')throw new JobTerminalError('legacy_projection_retired')
       const canonicalMetadata=fence&&sourceExecutionBranchFor(pool,installationId)==='canonical-active'
       // The existing compiler produces no output for a nonterminal turn.
       // Check that cheap metadata before choosing any body preparation: NULL

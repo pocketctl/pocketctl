@@ -11,7 +11,7 @@ import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
 import {sourceExecutionBranchFor,metadataSourceExecution,protectMetadataSourceBodies,guardSourceExecutionCommit} from './source-execution.js'
 import {JobDeferredError} from '../jobs/types.js'
 import {SelectedSourceLockBusy} from './processing-pins.js'
-import {prepareSourceProjectionAdmission,prepareMetadataScope,personalMetadataEnvelope} from './source-projection-admission.js'
+import {prepareMetadataScope,personalMetadataEnvelope} from './source-projection-admission.js'
 type Db=Pick<pg.Pool,'query'>
 export interface SourceCommitOptions {forCommit?:boolean}
 type SourceObservation={scope:SourceScope;root:SourceRoot;version:SourceVersion}
@@ -34,6 +34,41 @@ export interface PreparedEvent {
 }
 const metadata=`source_event_id::text,installation_id::text,session_id,turn_id,origin,origin_position,event_type,occurred_at,payload_hash,classification,${snapshotProvenanceSql('s')} AS source_provenance,body_reclaimed_at,xmin::text AS row_version,
  s.source_version,s.source_kind,s.canonical_key,s.mapping_state,s.content_hash`
+// New archive identities are resolved independently, including the commit
+// reread. The archive root fence serializes archive mutation with commit.
+async function referenceHeaders(db:Pick<pg.Pool,'query'>,installation:string,ids:readonly string[],shared:boolean,lock=false,historicalProjection=false){
+ const archives=shared?(await db.query<PreparedEvent>('SELECT * FROM shared.memory_archive_reference_headers($1,$2::uuid[])',[installation,ids])).rows:[]
+ const archived=new Set(archives.map(r=>r.source_event_id))
+ const other=ids.filter(id=>!archived.has(id))
+ if(!other.length)return archives
+ const semantic=shared?(await db.query<PreparedEvent>(`SELECT g.semantic_ref_id AS source_event_id,g.installation_id,
+  g.semantic_session_id AS session_id,g.semantic_turn_id AS turn_id,'canonical' AS origin,'team_semantic:'||g.semantic_key AS origin_position,
+  g.event_type,g.occurred_at,g.semantic_payload_hash AS payload_hash,g.classification,NULL::timestamptz AS body_reclaimed_at,
+  g.xmin::text||':'||p.xmin::text AS row_version,'team_semantic' AS source_kind,g.semantic_key AS canonical_key,'verified' AS mapping_state,
+  g.semantic_payload_hash AS content_hash,jsonb_build_object('normalization','team-semantic-v1','businessDigest',encode(g.business_digest,'hex'),
+   'originalSupportDigest',encode(p.support_digest,'hex')) AS source_version,
+  jsonb_build_object('source_kind','team_semantic','source_version',1,'normalization_version','team-semantic-v1','native_kind',g.source_kind,
+   'structured_identity',g.structured_identity,'receiving_installation_id',g.installation_id::text,'owner_scope_kind',g.owner_scope_kind,
+   'owner_scope_id',g.owner_scope_id,'binding_id',g.binding_id,'binding_revision',g.binding_revision,
+   'semantic_session_id',g.semantic_session_id,'semantic_turn_id',g.semantic_turn_id,'role',g.structured_identity->>-1,
+   'business_digest',encode(g.business_digest,'hex'),'native',g.semantic_provenance->'team') AS source_provenance
+  FROM memory_team_semantic_groups g JOIN memory_team_semantic_publications p ON p.installation_id=g.installation_id
+    AND p.semantic_turn_id=g.semantic_turn_id AND g.semantic_ref_id IN(p.goal_ref_id,p.reply_ref_id,p.outcome_ref_id)
+  WHERE g.installation_id=$1 AND g.semantic_ref_id=ANY($2::uuid[]) AND g.registration_state='published'
+   AND p.disposition IN('published','legacy_related') ORDER BY g.semantic_ref_id ${lock?'FOR SHARE OF g,p NOWAIT':''}`,[installation,other])).rows:[]
+ const native=[...archives,...semantic]
+ const resolved=new Set(semantic.map(r=>r.source_event_id))
+ const pending=other.filter(id=>!resolved.has(id))
+ if(!pending.length)return native
+ if(shared&&!historicalProjection){
+  const team=(await db.query<PreparedEvent>('SELECT * FROM shared.memory_team_reference_headers($1,$2::uuid[])',[installation,pending])).rows
+  return [...native,...team].sort((a,b)=>a.source_event_id.localeCompare(b.source_event_id))
+ }
+ const rows=(await db.query<PreparedEvent>(`SELECT ${metadata}${shared||lock?'':',payload'} FROM source_events s
+  WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) ${shared?"AND source_kind IS DISTINCT FROM 'legacy_archive' AND source_kind IS DISTINCT FROM 'team_semantic'":''}
+  ORDER BY source_event_id ${lock?'FOR SHARE NOWAIT':''}`,[installation,pending])).rows
+ return [...native,...rows].sort((a,b)=>a.source_event_id.localeCompare(b.source_event_id))
+}
 const clone=(row:PreparedEvent):PreparedEvent=>({...row,payload:structuredClone(row.payload),payload_hash:Buffer.from(row.payload_hash),...(row.content_hash?{content_hash:Buffer.from(row.content_hash)}:{}),classification:structuredClone(row.classification),source_provenance:structuredClone(row.source_provenance)})
 const stamp=(rows:PreparedEvent[])=>canonicalJsonString(rows.map(r=>({id:r.source_event_id,installation:r.installation_id,session:r.session_id,turn:r.turn_id,origin:r.origin,position:r.origin_position,type:r.event_type,at:new Date(r.occurred_at).toISOString(),hash:r.payload_hash.toString('hex'),contentHash:r.content_hash?.toString('hex'),classification:r.classification,provenance:r.source_provenance,reclaimed:r.body_reclaimed_at?String(r.body_reclaimed_at):null,row:r.row_version,descriptor:r.source_version,kind:r.source_kind,key:r.canonical_key,mapping:r.mapping_state})).sort((a,b)=>a.id.localeCompare(b.id)))
 async function mode(db:Db,installationId:string,shared:boolean){
@@ -62,15 +97,14 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
  if(deferred)return deferred
  const context=sourcePoolContext(pool),initialMode=await mode(pool,installationId,context.namespace==='memory')
  if(initialMode.mode==='paused')throw Error('source_mode_paused')
- if(!['legacy-feed','shared-shadow','shared-active'].includes(initialMode.mode))throw Error('source_mode_invalid')
- const shared=initialMode.mode==='shared-active'||(initialMode.mode==='shared-shadow'&&sourceExecutionBranchFor(pool,installationId)!=='legacy-active'),events:PreparedEvent[]=[],observations:{scope:SourceScope;root:SourceRoot;version:SourceVersion}[]=[]
+ if(context.namespace==='memory' && initialMode.mode!=='shared-active')throw Error('source_reference_unavailable')
+ const shared=initialMode.mode==='shared-active',events:PreparedEvent[]=[],observations:{scope:SourceScope;root:SourceRoot;version:SourceVersion}[]=[]
  const semanticPreparations:Awaited<ReturnType<typeof prepareTeamSemanticReferences>>[]=[]
- const admissions=new Map<string,Awaited<ReturnType<typeof prepareSourceProjectionAdmission>>>()
  const metadataObservations:{scope:SourceScope;root:SourceRoot;envelope:unknown}[]=[]
  let bytes=0
  for(let n=0;n<ids.length;n+=256){
   const batch=ids.slice(n,n+256)
-  const rows=(await pool.query<PreparedEvent>(`SELECT ${metadata}${shared?'':',payload'} FROM source_events s WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) ORDER BY source_event_id`,[installationId,batch])).rows
+  const rows=await referenceHeaders(pool,installationId,batch,shared,false,selectedEpisode)
   if(rows.length!==batch.length)throw Error('source_reference_missing')
   for(const row of rows)if(row.body_reclaimed_at)throw Error('source_reference_reclaimed')
   if(shared){
@@ -108,12 +142,9 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
      metadataObservations.push({scope:group.scope,root:group.root,envelope:personalMetadataEnvelope(pool,group.scope,group.root,metadataReader.proof(view),seal,'episode')})
     }else page=await reader.getHeads(group.scope,group.root,group.rows.map(r=>r.canonical_key!))
     if(!selected&&sourceExecutionBranchFor(pool,installationId)==='canonical-active'&&group.root.kind!=='legacy_archive'){
-     const key=canonicalJsonString(group.root)
-     if(!admissions.has(key)){
-      const admission=await prepareSourceProjectionAdmission(pool,group.scope,group.root)
-      admissions.set(key,admission);observations.push(...admission.observations)
-     }
-     admissions.get(key)!.requireScope(group.scope)
+     // Raw Team and historical per-event handles are evidence only. Model
+     // inputs require either a native dialogue or a semantic publication.
+     throw Error('source_reference_unavailable')
     }
     bodies??=await reader.resolveBodies(group.scope,group.root,[...page.heads],page.version)
     for(let i=0;i<group.rows.length;i++){
@@ -138,7 +169,6 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
   const current=await mode(client as Db,installationId,context.namespace==='memory')
   if(current.mode!==initialMode.mode||current.generation!==initialMode.generation)throw Error('source_reference_changed')
   for(const preparation of semanticPreparations)await preparation.assertCurrent(client,options?.forCommit===true)
-  for(const admission of admissions.values())await admission.assertCurrent(client as Db)
   // No archive/storage IO may occur while the caller holds a transaction.
   const reader=createObservedSourceReader(client as unknown as pg.Pool)
   for(const o of [...observations].sort((a,b)=>canonicalJsonString(a.root).localeCompare(canonicalJsonString(b.root)))){
@@ -146,7 +176,7 @@ async function prepareSourceReferencesInternal(pool:pg.Pool,installationId:strin
    if(state.state!=='current')throw Error('source_reference_changed')
   }
   const fresh:PreparedEvent[]=[]
-  for(let n=0;n<ids.length;n+=256)fresh.push(...(await client.query<PreparedEvent>(`SELECT ${metadata} FROM source_events s WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) ORDER BY source_event_id FOR SHARE NOWAIT`,[installationId,ids.slice(n,n+256)])).rows)
+  for(let n=0;n<ids.length;n+=256)fresh.push(...await referenceHeaders(client,installationId,ids.slice(n,n+256),shared,true,selectedEpisode))
   if(fresh.length!==events.length||stamp(fresh)!==initial)throw Error('source_reference_changed')
   if(options?.forCommit)await lockSourceObservations(client,observations,false)
  }}
@@ -219,6 +249,7 @@ export async function prepareCurationSources(pool:pg.Pool,installationId:string,
    for(const input of inputs)await input.assertCurrent(client,options)
   }} satisfies PreparedSources
  }
+ if(sourcePoolContext(pool).namespace==='memory')throw Error('source_reference_unavailable')
  const turns=[...new Set([current,...catalog].filter(r=>typeof r.task_key==='string'&&r.task_key.startsWith('source:')).map(r=>r.task_key.slice(7)))]
  const query='SELECT source_event_id::text FROM source_events WHERE installation_id=$1 AND session_id=$2 AND turn_id=ANY($3::text[]) ORDER BY source_event_id LIMIT 4097'
  const args=[installationId,current.session_id,turns],ids=(await pool.query(query,args)).rows.map(r=>r.source_event_id)
@@ -234,10 +265,10 @@ export async function prepareCurationSources(pool:pg.Pool,installationId:string,
 export async function prepareSourceAuthorities(pool:pg.Pool,installationId:string,ids:readonly string[]):Promise<{assertCurrent(client:Pick<pg.PoolClient,'query'>,options?:SourceCommitOptions):Promise<void>}>{
  if(ids.length>4096||new Set(ids).size!==ids.length)throw Error('source_reference_limit')
  const context=sourcePoolContext(pool),initialMode=await mode(pool,installationId,context.namespace==='memory'),rows:PreparedEvent[]=[],observations:{scope:SourceScope;root:SourceRoot;version:SourceVersion}[]=[]
- if(!['shared-shadow','shared-active'].includes(initialMode.mode))throw Error('source_mode_invalid')
+ if(initialMode.mode!=='shared-active')throw Error('source_mode_invalid')
  const reader=createObservedSourceReader(pool),observedBindings=new Set<string>(),semanticPreparations:Awaited<ReturnType<typeof prepareTeamSemanticReferences>>[]=[]
  for(let n=0;n<ids.length;n+=256){
-  const batch=ids.slice(n,n+256),metadataRows=(await pool.query<PreparedEvent>(`SELECT ${metadata} FROM source_events s WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) ORDER BY source_event_id`,[installationId,batch])).rows
+  const batch=ids.slice(n,n+256),metadataRows=await referenceHeaders(pool,installationId,batch,true)
   if(metadataRows.length!==batch.length)throw Error('source_reference_missing')
   const semanticRows=metadataRows.filter(r=>r.source_kind==='team_semantic'),rawRows=metadataRows.filter(r=>r.source_kind!=='team_semantic')
   if(semanticRows.length)semanticPreparations.push(await prepareTeamSemanticReferences(pool,installationId,semanticRows,true))
@@ -262,7 +293,7 @@ export async function prepareSourceAuthorities(pool:pg.Pool,installationId:strin
   const currentReader=createObservedSourceReader(client as unknown as pg.Pool)
   for(const bound of observations)if((await currentReader.checkAuthority(bound.scope,bound.root,bound.version)).state!=='current')throw Error('source_reference_changed')
   const fresh:PreparedEvent[]=[]
-  for(let n=0;n<ids.length;n+=256)fresh.push(...(await client.query<PreparedEvent>(`SELECT ${metadata} FROM source_events s WHERE installation_id=$1 AND source_event_id=ANY($2::uuid[]) ORDER BY source_event_id FOR SHARE NOWAIT`,[installationId,ids.slice(n,n+256)])).rows)
+  for(let n=0;n<ids.length;n+=256)fresh.push(...await referenceHeaders(client,installationId,ids.slice(n,n+256),true,true))
   if(fresh.length!==rows.length||stamp(fresh)!==initial)throw Error('source_reference_changed')
   if(options?.forCommit)await lockSourceObservations(client,observations,true)
  }}

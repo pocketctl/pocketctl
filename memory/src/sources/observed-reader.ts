@@ -5,9 +5,9 @@ import {isPhysicalSourcePool,sourcePoolContext} from './pool-context.js'
 import {boundedSourceQuery} from './bounded-source-query.js'
 const observed=new Set(['listHeads','getHeads','resolveBodies','checkCurrent','checkAuthority'])
 /** Instrument the Memory adapter only; the shared package stays independent. */
-export function createObservedSourceReader(db:pg.Pool,archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits}){
+export function createObservedSourceReader(db:pg.Pool,archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits},dialogueTurn?:string){
  const queryDb=isPhysicalSourcePool(db)?{query:(sql:string,args?:any[])=>boundedSourceQuery(db,sql,args),connect:db.connect.bind(db)}:db
- const reader=createPostgresSharedSourceReader(queryDb,archive),observer=sourcePoolContext(db).readerObserver
+ const reader=createPostgresSharedSourceReader(queryDb,archive,dialogueTurn),observer=sourcePoolContext(db).readerObserver
  return new Proxy(reader,{get(target,key){
   const value=Reflect.get(target,key,target)
   if(typeof value!=='function')return value

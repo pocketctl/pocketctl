@@ -1,8 +1,9 @@
 import type pg from 'pg'
+import {sourcePoolContext} from './pool-context.js'
 import { canonicalJsonString } from '@pocketctl/session-source'
 import { prepareSourceReferences, preparedSourceUnavailable } from './prepared-sources.js'
 
-const references = `SELECT source_event_id::text FROM source_events
+const legacyReferences = `SELECT source_event_id::text FROM source_events
   WHERE installation_id=$1 AND session_id=$2
   ORDER BY occurred_at DESC,source_event_id DESC LIMIT 4097`
 const repositoryPrefixSize = 48
@@ -10,6 +11,17 @@ const repositoryPrefixSize = 48
 /** Applicability discovery, never a grant. Resolve exact stored source UUIDs
  * before BEGIN and fail closed when a bounded current observation is unprovable. */
 export async function sharedSessionRepository(pool: pg.Pool, installationId: string, sessionId: string): Promise<string | null> {
+  const native=sourcePoolContext(pool).namespace==='memory'
+  const references=native?'SELECT source_event_id::text FROM shared.memory_session_reference_ids($1,$2)':legacyReferences
+  if (native) {
+    const {rows}=await pool.query<{repository_id:string|null}>(`SELECT e.repository_id::text
+      FROM work_episodes e JOIN repositories r USING(installation_id,repository_id)
+      WHERE e.installation_id=$1 AND e.session_id=$2 AND e.state='ready'
+       AND memory_session_available(e.installation_id,e.session_id,FALSE)
+       AND NOT EXISTS(SELECT 1 FROM memory_repository_tombstones t WHERE t.installation_id=r.installation_id AND t.repository_id=r.repository_id)
+      ORDER BY e.terminal_at DESC NULLS LAST,e.episode_id DESC LIMIT 1`,[installationId,sessionId])
+    if(rows[0]?.repository_id)return rows[0].repository_id
+  }
   const ids = (await pool.query(references, [installationId, sessionId])).rows.map(row => row.source_event_id as string)
   if (!ids.length || ids.length > 4096) return null
   try {
@@ -17,9 +29,9 @@ export async function sharedSessionRepository(pool: pg.Pool, installationId: str
     // regardless of event type. Preserve the full lookup when no prefix fact
     // maps to a registered repository.
     const prefix = ids.slice(0, repositoryPrefixSize)
-    const match = await resolveRepository(pool, installationId, sessionId, ids, prefix)
+    const match = await resolveRepository(pool, installationId, sessionId, ids, prefix,references)
     if (match || prefix.length === ids.length) return match
-    return await resolveRepository(pool, installationId, sessionId, ids, ids)
+    return await resolveRepository(pool, installationId, sessionId, ids, ids,references)
   } catch (error) {
     if (preparedSourceUnavailable(error)) return null
     throw error
@@ -27,7 +39,7 @@ export async function sharedSessionRepository(pool: pg.Pool, installationId: str
 }
 
 async function resolveRepository(
-  pool: pg.Pool, installationId: string, sessionId: string, orderedIds: string[], selectedIds: string[],
+  pool: pg.Pool, installationId: string, sessionId: string, orderedIds: string[], selectedIds: string[], references: string,
 ): Promise<string | null> {
   const prepared = await prepareSourceReferences(pool, installationId, selectedIds)
   const byId = new Map(prepared.events.map(event => [event.source_event_id, event]))

@@ -1,3 +1,4 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {assertRetainedSourceGuards} from '../sources/retained-authority.js'
 import {randomUUID} from 'node:crypto'
 import {z} from 'zod'
@@ -53,7 +54,9 @@ export function createAutomationAcceptanceService(deps:{pool:pg.Pool;mode:'off'|
    for(const e of evidence){
     // Only explicit current native-personal origin proof can enter the write path.
     if(e.manifest.kind!=='event'||!e.manifest.source_event_id)throw new Error('native_origin_unproven')
-    const event=(await c.query(`SELECT origin,source_provenance FROM source_events WHERE installation_id=$1 AND source_event_id=$2 FOR SHARE`,[input.installationId,e.manifest.source_event_id])).rows[0]
+    const event=(await c.query(sourcePoolContext(c).namespace==='memory'
+     ?`SELECT origin,source_provenance FROM shared.memory_native_evidence_handle($1,$2,NULL) WHERE body_reclaimed_at IS NULL AND NOT retention_denied`
+     :`SELECT origin,source_provenance FROM source_events WHERE installation_id=$1 AND source_event_id=$2 FOR SHARE`,[input.installationId,e.manifest.source_event_id])).rows[0]
     if(event?.origin!=='feed'||!z.object({source_class:z.literal('native_personal')}).strict().safeParse(event.source_provenance).success)throw new Error('native_origin_unproven')
    }
    const fact=factSchema.safeParse(candidate.structured_content);if(!fact.success)throw new Error('outside_exact_whitelist')

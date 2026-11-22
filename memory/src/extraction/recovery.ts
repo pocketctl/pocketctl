@@ -10,8 +10,7 @@ const ZERO = '00000000-0000-0000-0000-000000000000'
 export const UNRESOLVED_EXTRACTION_SOURCE = `
  FROM memory_extraction_runs r
  JOIN work_episodes e ON e.installation_id=r.installation_id AND e.episode_id=r.episode_id AND e.source_digest=r.episode_source_digest
- JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
- WHERE r.installation_id=$1 AND r.state IN('failed','quarantined') AND s.deleted_at IS NULL
+ WHERE r.installation_id=$1 AND r.state IN('failed','quarantined') AND memory_session_available(e.installation_id,e.session_id,FALSE)
  AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
  AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs done WHERE done.installation_id=r.installation_id
    AND done.episode_id=r.episode_id AND done.episode_source_digest=r.episode_source_digest
@@ -67,7 +66,7 @@ export async function listExtractionIssues(pool:Pick<pg.Pool,'query'>,installati
 /** Caller owns session -> installation authority locks and the receipt transaction. */
 export async function scheduleExtractionRetry(client:pg.PoolClient,input:{installationId:string;runId:string;consentFingerprint?:string}) {
  const row=(await client.query(`SELECT r.run_id,r.episode_id,encode(r.episode_source_digest,'hex') digest,e.turn_id
- ${UNRESOLVED_EXTRACTION_SOURCE} AND r.run_id=$2::uuid FOR SHARE OF r,e,s`,[input.installationId,input.runId])).rows[0]
+ ${UNRESOLVED_EXTRACTION_SOURCE} AND r.run_id=$2::uuid AND memory_session_available(e.installation_id,e.session_id,TRUE) FOR SHARE OF r,e`,[input.installationId,input.runId])).rows[0]
  if(!row)throw new MemoryApiError('not_found','extraction issue unavailable')
  const currentSource=async()=>{
   try{

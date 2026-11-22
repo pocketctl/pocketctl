@@ -14,7 +14,6 @@
     "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
     "eval": "tsx src/eval/run.ts",
-    "source:repair-projections": "tsx src/maintenance/repair-source-projections-cli.ts",
     "usage:repair": "tsx src/reporting/usage-repair-cli.ts",
     "retention:plan": "tsx src/retention/cli.ts plan",
     "retention:apply": "tsx src/retention/cli.ts apply",

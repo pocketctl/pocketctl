@@ -53,9 +53,14 @@ test('abort after a committed page forbids the next progress read and body IO',a
  const f=fixture();io.persist.mockImplementation(async()=>{f.controller.abort();return{contextReady:false}})
  await expect(f.run()).rejects.toThrow('canonical_projection_aborted');expect(io.prepare).toHaveBeenCalledOnce();expect(f.pool.query).toHaveBeenCalledOnce()
 })
-test('generic Team and shadow execution retain their existing single-page handlers',async()=>{
- const f=fixture();f.job.payload.root={kind:'team_collaboration',key:'team:1'};await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
- expect(io.prepare).not.toHaveBeenCalled();expect(io.genericPrepare).toHaveBeenCalledOnce();expect(io.genericPersist).toHaveBeenCalledOnce()
+test('Team publishes from its native group and shadow keeps its single-page handler',async()=>{
+ const f=fixture();f.job.payload.root={kind:'team_collaboration',key:'team:1'}
+ await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
+ expect(io.team).toHaveBeenCalledOnce();expect(io.teamPersist).not.toHaveBeenCalled()
+ const publication={disposition:'legacy_related'}
+ io.team.mockResolvedValue(publication);await f.run()
+ expect(io.teamPersist).toHaveBeenCalledWith(f.pool,publication,undefined)
+ expect(io.genericPrepare).not.toHaveBeenCalled();expect(io.genericPersist).not.toHaveBeenCalled()
  const g=fixture();io.branch.mockReturnValue('canonical-shadow');await g.run();expect(io.shadow).toHaveBeenCalledOnce();expect(io.prepare).not.toHaveBeenCalled()
 })
 

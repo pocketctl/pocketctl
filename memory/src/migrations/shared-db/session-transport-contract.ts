@@ -61,9 +61,11 @@ export const SHARED_SESSION_TRANSPORT_RETIREMENT_FUNCTIONS=[
    IF NOT EXISTS(SELECT 1 FROM memory.memory_installations local JOIN memory.memory_native_control_observations observed USING(installation_id)
      WHERE local.installation_id=p_installation AND local.local_status='ready' AND NOT local.snapshot_required
       AND local.config_version=p_config AND observed.control_revision=shared.memory_source_control_snapshot()::bigint)
-    OR NOT EXISTS(SELECT 1 FROM memory.source_events s WHERE s.installation_id=p_installation AND s.origin='canonical'
-      AND s.adapter_version='canonical-ref-v1' AND s.mapping_state='verified' AND s.payload IS NULL)
-    OR NOT EXISTS(SELECT 1 FROM shared.memory_source_executions e WHERE e.installation_id=p_installation AND e.branch='canonical-active' AND e.last_guarded_at IS NOT NULL)
+    OR NOT EXISTS(SELECT 1 FROM memory.work_episodes e WHERE e.installation_id=p_installation
+      AND e.compiler_version='relay-turn-v1' AND e.state='ready' AND e.terminal_at IS NOT NULL
+      AND e.evidence_manifest->'dialogue'->>'kind'='relay_turn_v1'
+      AND e.evidence_manifest->'dialogue'->>'members'=encode(e.source_digest,'hex')
+      AND shared.memory_dialogue_context(e.installation_id,e.session_id) IS NOT NULL)
     THEN RAISE EXCEPTION 'session_transport_retirement_not_ready';END IF;
    removed=ARRAY(SELECT topic FROM unnest(i.subscriptions) WITH ORDINALITY input(topic,position) WHERE topic=ANY(${sessionTopics}) ORDER BY position);
    INSERT INTO shared.memory_session_transport_retirements(installation_id,mode_generation,retired_config_version,removed_topics)

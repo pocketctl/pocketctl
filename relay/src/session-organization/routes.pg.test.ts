@@ -46,6 +46,32 @@ testWithDatabase('session projects, archive, and NEW PostgreSQL contract', () =>
   }, 30_000)
   afterAll(async () => { await app?.close(); await pool?.end() })
 
+  test('receipt lookup reports only durable evidence for the requested owner and session', async () => {
+    const sessionId = `org-session-1-${suffix}`
+    const otherId = `org-session-2-${suffix}`
+    const events = [
+      [sessionId, 'user_message_receipt', { request_id: 'accepted-1', status: 'accepted', text: 'private prompt' }],
+      [sessionId, 'user_message_receipt', { msg_id: 'rejected-1', status: 'rejected' }],
+      [sessionId, 'user_text', { msg_id: 'echo-1', text: 'confirmed by the canonical echo' }],
+      [sessionId, 'user_text', { msg_id: 'child-1', agent_id: 'child', text: 'different actor' }],
+      [otherId, 'user_message_receipt', { msg_id: 'other-1', status: 'accepted' }],
+    ]
+    for (const [id, type, event] of events) {
+      await pool.query('INSERT INTO events(session_id,event_type,payload) VALUES($1,$2,$3)', [id,type,event])
+    }
+    const path = `/api/sessions/${sessionId}/message-receipts?ids=accepted-1,rejected-1,echo-1,child-1,other-1,missing-1`
+    const response = await request('GET', path, tokenA)
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['cache-control']).toBe('no-store')
+    expect(Object.fromEntries(response.json().receipts.map((r: any) => [r.request_id, r.status]))).toEqual({
+      'accepted-1': 'accepted', 'rejected-1': 'rejected', 'echo-1': 'accepted',
+      'child-1': 'unknown', 'other-1': 'unknown', 'missing-1': 'unknown',
+    })
+    expect(response.body).not.toContain('private prompt')
+    expect((await request('GET', path, tokenB)).statusCode).toBe(404)
+    expect((await request('GET', path.replace(/ids=.*/, 'ids=a%20b'), tokenA)).statusCode).toBe(400)
+  })
+
   test('account-wide projects and host-filtered counts, with tenant isolation', async () => {
     const created = await request('POST','/api/session-projects',tokenA,{ name: 'Work' })
     expect(created.statusCode).toBe(201)

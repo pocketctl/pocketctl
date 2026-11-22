@@ -59,7 +59,9 @@ export async function loadCurrentLifecycleSources(client:Pick<pg.PoolClient,'que
  const dialogue=bundle.task_key.startsWith('dialogue:')
  if(!dialogue&&!bundle.task_key.startsWith('source:'))throw new Error('curation_source_changed')
  const turnId=bundle.task_key.slice((dialogue?'dialogue:':'source:').length)
- const events=preparedSourceEvents(client,installationId,turnId)??(await client.query<PacketSourceEvent & {body_reclaimed_at:Date|null}>(`SELECT source_event_id::text,event_type,occurred_at,payload_hash,payload,classification,${snapshotProvenanceSql('source_events')} AS source_provenance,body_reclaimed_at
+ const prepared=preparedSourceEvents(client,installationId,turnId)
+ if(dialogue&&!prepared)throw new Error('curation_source_changed')
+ const events=prepared??(await client.query<PacketSourceEvent & {body_reclaimed_at:Date|null}>(`SELECT source_event_id::text,event_type,occurred_at,payload_hash,payload,classification,${snapshotProvenanceSql('source_events')} AS source_provenance,body_reclaimed_at
   FROM source_events WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY source_event_id FOR SHARE`,[installationId,bundle.session_id,turnId])).rows
  if(!events.length||events.some(e=>e.body_reclaimed_at||!canonicalPayloadHash(e.payload).equals(e.payload_hash))||!lifecycleSourceDigest(installationId,events).equals(bundle.source_digest))throw new Error('curation_source_changed')
  const admission=admitLifecycleSources({sessionId:bundle.session_id,turnId,events})

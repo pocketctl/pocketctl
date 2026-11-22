@@ -49,6 +49,7 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
   WHERE installation_id=$1 AND evidence_id=ANY($2::uuid[]) AND locator->>'source_kind'='relay_turn_v1'
    AND excerpt_hash=sha256(convert_to(excerpt,'UTF8')) FOR SHARE NOWAIT`,[installationId,automated])).rows
  direct.push(...relay.map(r=>r.ref))
+ if(relay.length===automated.length)return []
  const proved=(await client.query(`
   WITH locators AS (
    SELECT e.evidence_id,e.installation_id,e.version_id,e.locator->>'source_digest' AS digest,
@@ -62,9 +63,8 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
   SELECT l.source_event_id::text
   FROM locators l
   JOIN knowledge_versions v USING(installation_id,version_id)
-  JOIN memory_task_bundle_sources member USING(installation_id,bundle_id,source_event_id)
   JOIN memory_task_bundles b USING(installation_id,bundle_id)
-  JOIN source_events s USING(installation_id,source_event_id)
+  CROSS JOIN LATERAL shared.memory_retained_bundle_member(l.installation_id,l.bundle_id,l.source_event_id) s
   JOIN LATERAL (
    SELECT 1 FROM memory_curation_runs r JOIN memory_curation_decisions d USING(installation_id,run_id)
    WHERE r.installation_id=l.installation_id AND r.bundle_id=l.bundle_id AND r.mode='enabled' AND r.state='completed'
@@ -74,8 +74,8 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
    LIMIT 1 FOR SHARE OF r,d NOWAIT
   ) decision ON TRUE
   WHERE v.authority IN('machine_concluded','automation_accepted') AND b.bundle_kind='task' AND b.session_id=s.session_id
-    AND member.source_digest=s.payload_hash AND l.digest=encode(s.payload_hash,'hex')
-  ORDER BY l.evidence_id FOR SHARE OF v,member,b,s NOWAIT`,[installationId,automated,uuidPattern])).rows
+    AND l.digest=encode(s.payload_hash,'hex')
+  ORDER BY l.evidence_id FOR SHARE OF v,b NOWAIT`,[installationId,automated,uuidPattern])).rows
  if(proved.length+relay.length!==automated.length)throw Error('source_reference_changed')
  return proved.map(row=>row.source_event_id)
 }
@@ -92,7 +92,7 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
  let state=installations.get(installationId)
  const {expectedMode,locked}=options
  const mode=locked?.mode??await currentRetainedSourceMode(client,installationId)
- if(!['legacy-feed','shared-shadow','shared-active'].includes(mode.mode)
+ if(mode.mode!=='shared-active'
   ||expectedMode&&(mode.mode!==expectedMode.mode||mode.generation!==expectedMode.generation))throw Error('source_reference_changed')
  if(state&&(state.mode!==mode.mode||state.generation!==mode.generation))throw Error('source_reference_changed')
  if(!state){
@@ -102,7 +102,6 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
  const ids=new Set(evidence.flatMap(row=>row.source_event_id?[row.source_event_id]:[]))
  const direct:DialogueRef[]=[]
  const machineSources=await machineExcerptSources(client,installationId,evidence,locked?.capsules,direct)
- if(machineSources.length&&mode.mode==='legacy-feed')throw Error('source_reference_unproven')
  for(const id of machineSources)ids.add(id)
  const artifactSet=new Set(evidence.flatMap(row=>row.artifact_id?[row.artifact_id]:[]))
  const governed=await governedRetainedEvidence(client,installationId,evidence)
@@ -143,13 +142,13 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
  }
  const artifactIds=[...artifactSet].sort()
  if(artifactIds.length){
-  const artifacts=(await client.query('SELECT artifact_id::text,source_event_id::text FROM source_artifacts WHERE installation_id=$1 AND artifact_id=ANY($2::uuid[]) ORDER BY artifact_id FOR SHARE',[installationId,artifactIds])).rows
+  const artifacts=(await client.query('SELECT h.artifact_id::text,h.source_event_id::text FROM unnest($2::uuid[]) k CROSS JOIN LATERAL shared.memory_native_evidence_handle($1,NULL,k) h ORDER BY h.artifact_id',[installationId,artifactIds])).rows
   if(artifacts.length!==artifactIds.length||artifacts.some(row=>!row.source_event_id))throw Error('source_reference_missing')
   for(const row of artifacts)ids.add(row.source_event_id)
  }
  if([...installations.values()].reduce((sum,entry)=>sum+entry.ids.size,0)+[...ids].filter(id=>!state!.ids.has(id)).length>4096)throw Error('source_reference_limit')
  const added=[...ids].filter(id=>!state.ids.has(id)).sort()
- if(added.length&&mode.mode!=='legacy-feed'){
+ if(added.length){
   // prepareSourceAuthorities uses only controlled current facts and UUID
   // metadata. It does not resolve bodies or require raw collection rights.
   const guard=await prepareSourceAuthorities(client as pg.Pool,installationId,added)

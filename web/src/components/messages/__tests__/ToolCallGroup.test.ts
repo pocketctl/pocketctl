@@ -42,6 +42,14 @@ describe('ToolCallGroup', () => {
     wrapper.unmount()
   })
 
+  test('applies an expanded state restored after the tool has rendered', async () => {
+    const wrapper = mount(ToolCallGroup, { props: { messages: [completed('Read', 'read-1', 'src/App.vue')] } })
+    expect(wrapper.get('.tool-group-trigger').attributes('aria-expanded')).toBe('false')
+    await wrapper.setProps({ expanded: true })
+    expect(wrapper.get('.tool-group-trigger').attributes('aria-expanded')).toBe('true')
+    wrapper.unmount()
+  })
+
   test('shows one tool detail at a time and switches between input and output', async () => {
     const wrapper = mount(ToolCallGroup, {
       props: {

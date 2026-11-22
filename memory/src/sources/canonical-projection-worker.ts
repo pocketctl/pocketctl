@@ -86,15 +86,14 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectio
    options.onReady?.(root)
    return
   }
-  const team=root.kind==='team_collaboration'||root.kind==='team_delivery',personal=!team&&scope.ownerScopeKind==='personal'
-  const publishTeam=async()=>{
-   const prepared=await prepareTeamSemanticPublication(pool,scope.installationId,root)
-   if(prepared)await persistTeamSemanticPublication(pool,prepared,options.stabilizationMs)
+  if(root.kind==='team_collaboration'||root.kind==='team_delivery'){
+   const publication=await prepareTeamSemanticPublication(pool,scope.installationId,root)
+   if(!publication)throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+   if(signal.aborted)throw Error('canonical_projection_aborted')
+   await persistTeamSemanticPublication(pool,publication,options.stabilizationMs)
+   return
   }
-  if(team){
-   const excluded=await prepareTeamSemanticPublication(pool,scope.installationId,root,{metadataOnly:true})
-   if(excluded){await persistTeamSemanticPublication(pool,excluded,options.stabilizationMs);return}
-  }
+  const personal=scope.ownerScopeKind==='personal'
   const readProgress=()=>observeProjectionStep(pool,'checkpoint',async()=>(await pool.query(`SELECT next_cursor,state,source_version${contexts.offlineBatch?',offline_basis':''} FROM memory_canonical_projection_progress
    WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4`,[scope.installationId,root.kind,root.key,canonicalPayloadHash(scope).toString('hex')])).rows[0])
   const progress=await readProgress()
@@ -103,7 +102,6 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectio
    const current=await createObservedSourceReader(pool).checkCurrent(scope,root)
    if(current.state==='current'&&sameDerivedSourceVersion(current.version,progress.source_version)){
     if(signal.aborted)throw Error('canonical_projection_aborted')
-    if(team){await publishTeam();return}
     // A current per-context checkpoint can skip body IO only after SQL
     // confirms the sealed installation watermark under the current authority.
     const completed=await completeReadyCanonicalProjection(pool,scope,root,current.version,personal?{deferMs}:undefined)
@@ -192,7 +190,6 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectio
    if(fresh.state!=='current'||!sameDerivedSourceVersion(fresh.version,repairVersion))throw new JobTerminalError('source_context_set_changed')
    throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
   }
-  if(team&&!page.hasMore)await publishTeam()
   if(page.hasMore)throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
   if(personal)options.onReady?.(root)
  }

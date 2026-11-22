@@ -33,10 +33,7 @@ export function createScopeResolver(pool: pg.Pool) {
         session_known: boolean; repository_id: string | null; generation: string
         local_status?:string|null; authority?:Parameters<typeof currentPersonalInstallation>[0]
       }>(`
-        SELECT EXISTS (
-          SELECT 1 FROM source_sessions
-          WHERE installation_id = $1 AND session_id = $2 AND deleted_at IS NULL
-        ) AS session_known, (
+        SELECT memory_session_available($1,$2,FALSE) AS session_known, (
           SELECT repository_id::text FROM repositories
           WHERE installation_id = $1 AND (repository_id = $3::uuid OR repository_key = $4)
           ORDER BY (repository_id = $3::uuid) DESC NULLS LAST

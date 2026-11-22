@@ -123,9 +123,9 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   if(!request.allowHistoricalVersion&&latest.head_revision!==String(request.expectedRevision))publicationFailure('replay_failed')
   if(!['historical_session','golden_task'].every(k=>caseRows.some(c=>c.kind===k))||caseRows.some(c=>c.state!=='passed'))publicationFailure('replay_failed')
   for(const sessionId of history){
-    const valid=await client.query(`SELECT 1 FROM source_sessions s JOIN work_episodes e USING(installation_id,session_id)
-      WHERE s.installation_id=$1 AND s.session_id=$2 AND s.deleted_at IS NULL AND e.repository_id=$3 AND e.repo_snapshot_id=$4 AND e.state='ready' AND e.outcome='completed'
-      AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=s.installation_id AND t.session_id=s.session_id) FOR SHARE OF s,e`,[identity.installationId,sessionId,archive.repository_id,archive.repo_snapshot_id])
+    const valid=await client.query(`SELECT 1 FROM work_episodes e
+      WHERE e.installation_id=$1 AND e.session_id=$2 AND memory_session_available(e.installation_id,e.session_id,TRUE) AND e.repository_id=$3 AND e.repo_snapshot_id=$4 AND e.state='ready' AND e.outcome='completed'
+      AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id) FOR SHARE OF e`,[identity.installationId,sessionId,archive.repository_id,archive.repo_snapshot_id])
     if(!valid.rowCount)publicationFailure('source_invalid')
   }
   const raw=await deps.cases.loadCases({installationId:identity.installationId,repositoryId:archive.repository_id,repoSnapshotId:archive.repo_snapshot_id,versionId:request.versionId,documentHash:observed.document_hash,policyHash:policy.hash,caseIds:caseRows.map(c=>c.case_id)})
@@ -136,8 +136,8 @@ export async function validateSkillPublicationTarget(client:pg.PoolClient,identi
   const inputHash=replayTextHash(canonicalJsonString({skillId:request.skillId,versionId:request.versionId,expectedRevision:Number(latest.head_revision),sourceDigest:source.sourceDigest,policyHash:policy.hash,runnerVersion:SKILL_REPLAY_RUNNER_VERSION,cases:cases.map(c=>[c.case_id,replayCaseHash(c)])}))
   if(inputHash!==latest.input_hash)publicationFailure('case_invalid')
   // Natural facts only from exact archive source lineage, never from Replay cases or caller labels.
-  const natural=(await client.query<{session_id:string;episode_id:string;evidence_manifest:unknown}>(`SELECT DISTINCT e.session_id,e.episode_id,e.evidence_manifest FROM work_episodes e JOIN source_sessions s USING(installation_id,session_id)
-    WHERE e.installation_id=$1 AND e.state='ready' AND e.outcome='completed' AND s.deleted_at IS NULL
+  const natural=(await client.query<{session_id:string;episode_id:string;evidence_manifest:unknown}>(`SELECT DISTINCT e.session_id,e.episode_id,e.evidence_manifest FROM work_episodes e
+    WHERE e.installation_id=$1 AND e.state='ready' AND e.outcome='completed' AND memory_session_available(e.installation_id,e.session_id,FALSE)
       AND e.repository_id=$2 AND e.repo_snapshot_id=$3 AND e.source_digest IS NOT NULL AND e.compiled_at IS NOT NULL
       AND e.compiler_version=$6 AND e.document_compiler_version=$7 AND e.session_id<>'shared-governance'
       AND (e.episode_id=$4 OR EXISTS(SELECT 1 FROM knowledge_evidence k JOIN memory_skill_archive_sources a ON a.installation_id=k.installation_id AND a.evidence_id=k.evidence_id
