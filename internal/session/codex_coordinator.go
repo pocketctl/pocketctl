@@ -66,6 +66,7 @@ type codexCoordinator struct {
 	skillsMu         sync.Mutex
 	titleMu          sync.Mutex
 	titleTurns       map[string]codexTitleTurn
+	dialogueInputs   map[string]codexDialogueInput // protected by mu
 	sm               *SessionManager
 
 	startPrivateProject codexRuntimeStarter
@@ -932,6 +933,14 @@ func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message cod
 		c.invalidateQuota(message.Method == "account/updated")
 		return
 	}
+	// Read the terminal inventory before taking the projection lock.
+	var dialogueProof *protocol.MemorySourceProvenance
+	if message.Method == "turn/completed" {
+		dialogueProof = c.completedDialogueProof(projector.generation, id, message.Params)
+		if !c.admissionGenerationCurrent(projector.generation) || !c.admissionAllowed(id) {
+			return
+		}
+	}
 	c.projectionMu.Lock()
 	defer c.projectionMu.Unlock()
 	c.observeTurnNotification(message)
@@ -944,6 +953,14 @@ func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message cod
 		c.reconcileActiveTurnStatus(threadID, status)
 	}
 	events := projector.Project(message)
+	if dialogueProof != nil {
+		for i := range events {
+			e := &events[i]
+			if e.Type == protocol.EventTypeTurnStatus && e.TurnStatus == protocol.TurnStateCompleted && e.SessionID == dialogueProof.SessionID && e.TurnID == dialogueProof.TurnID {
+				e.MemorySource = dialogueProof
+			}
+		}
+	}
 	if threadID, status, ok := codexThreadStatusNotification(message); ok && status == "notLoaded" && c.threadDetached(threadID) {
 		for i := range events {
 			if events[i].Type == "session_status" {

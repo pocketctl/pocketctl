@@ -570,6 +570,9 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 			if runtime != nil && runtime.PrivateStdio && runtime.Endpoint == "" && runtime.RemoteURI == "" && b.generation == b.coord.generation {
 				causalRoot = response.Turn.ID
 			}
+			if runtime != nil && runtime.Client == b.client && b.generation == b.coord.generation {
+				b.coord.rememberDialogueInputLocked(input, response.Turn.ID, turnID, content)
+			}
 			b.coord.mu.Unlock()
 			b.sm.outputCh <- protocol.DaemonEvent{
 				Type: "user_text", SessionID: threadID, MsgID: input.MsgID, RequestID: input.RequestID, Text: content,

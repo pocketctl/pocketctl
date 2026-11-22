@@ -1,5 +1,7 @@
 import {updateSourceGauges} from './sources/metrics.js'
 import type pg from 'pg'
+import {bindSourceConnectionAlias} from './sources/pool-context.js'
+import {JOB_TYPES} from './jobs/types.js'
 import { updateFeedLagGauge, updatePhase4Gauges, updatePhase5Gauges, updateBusinessHealthGauges, updateJobSchedulingGauges, updateRetrievalIndexGauges, type MemoryMetrics } from './metrics.js'
 
 /** Inbox history is large and immutable enough to sample slowly. Active
@@ -37,7 +39,9 @@ export function createWorkerGaugeCollector(pool:pg.Pool,metrics:MemoryMetrics,en
       await updateSourceGauges(client,metrics.source)
       // Pass a query-only adapter: nested health collectors share this timeout
       // and transaction rather than acquiring another pooled connection.
-      await updateGauges({query:client.query.bind(client)},metrics,updateInbox,enabled,lifecycleMode)
+      const db = {query: client.query.bind(client)}
+      bindSourceConnectionAlias(db, client)
+      await updateGauges(db,metrics,updateInbox,enabled,lifecycleMode)
       await client.query('COMMIT')
     }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}
     finally{client.release()}
@@ -46,17 +50,6 @@ export function createWorkerGaugeCollector(pool:pg.Pool,metrics:MemoryMetrics,en
 
 const LOCAL_INSTALLATION_STATES = [
   'discovering', 'syncing', 'ready', 'degraded', 'purging', 'purged', 'integrity_error',
-] as const
-const JOB_TYPES = [
-  'git_ingest', 'git_export', 'git_reconcile',
-  'project_feed', 'compile_episode', 'snapshot_reconcile', 'session_purge',
-  'installation_purge', 'report_status', 'report_usage',
-  'extract_candidates', 'index_claim_version', 'rebuild_claim_index', 'expire_claims',
-	'index_shared_claim',
-	'recompile_extraction_policy', 'compile_context_shadow',
-	'record_context_delivery', 'invalidate_context_packs',
-	'parse_code_snapshot', 'build_wiki',
-	'extract_skill_candidate',
 ] as const
 const JOB_STATES = ['pending', 'running', 'completed', 'dead'] as const
 

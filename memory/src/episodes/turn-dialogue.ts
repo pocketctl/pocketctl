@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type pg from 'pg'
 import {
   canonicalPayloadHash,
+  parseMemorySourceProvenance,
   canonicalJsonString,
   type SourceScope,
   type SourceVersion,
@@ -181,6 +182,57 @@ export function readDialogueText(anchor: Member, parts: Member[], bodies: Map<st
     throw gap('message_incomplete')
   return text
 }
+// The terminal producer certifies the inventory of one completed native turn.
+// Relay independently authenticates the accepted dispatch and stamps its sequence.
+// Bind both identities and reassembled bytes before using the terminal as evidence.
+export function certifiedCodexDialogue(
+  terminal: Member,
+  messages: Member[],
+  texts: ReadonlyMap<string, string>,
+  unsafe: ReadonlySet<unknown>,
+  session: string,
+  turn: string,
+) {
+  const cert = parseMemorySourceProvenance(terminal.proof)
+  if (
+    !cert || cert.producer !== 'codex' || cert.source_role !== 'system' ||
+    cert.session_id !== session || cert.turn_id !== turn || terminal.header.turn_status !== 'completed' ||
+    !cert.event_id.startsWith('codex-dialogue-v1:') || !/^dialogue:[a-f0-9]{64}$/.test(cert.invocation_id) ||
+    !cert.lineage_complete || cert.skill_state !== 'non_skill' || cert.skill_invocation_id ||
+    cert.derived_from_event_ids.length !== 1 || unsafe.has(cert.invocation_id)
+  ) return
+
+  const prompts = messages.filter(m => m.kind === 'user_text')
+  const answers = messages.filter(m => m.kind === 'agent_text')
+  const roots = prompts.filter(m => m.proof?.event_id === cert.derived_from_event_ids[0])
+  if (roots.length !== 1 || prompts.length > 2 || answers.length !== 1) return
+  const prompt = roots[0]
+  const answer = answers[0]
+  const root = parseMemorySourceProvenance(prompt.proof)
+  if (
+    !root || root.producer !== 'codex' || root.session_id !== session || root.turn_id !== turn ||
+    !/^input:[a-f0-9]{64}$/.test(root.event_id) || root.invocation_id !== root.event_id ||
+    root.source_role !== 'user' || root.skill_state !== 'non_skill' || !root.lineage_complete ||
+    root.skill_invocation_id || root.parent_invocation_id || root.derived_from_event_ids.length ||
+    unsafe.has(root.invocation_id) || cert.parent_invocation_id !== root.invocation_id ||
+    BigInt(cert.sequence) <= BigInt(root.sequence)
+  ) return
+  const promptText = texts.get(prompt.id)
+  const answerText = texts.get(answer.id)
+  if (!promptText || !answerText || typeof answer.header.part_id !== 'string' ||
+      answer.header.message_phase !== 'final_answer') return
+  const fingerprint = digest([
+    session, turn, root.event_id, cert.invocation_id, digest(promptText), digest(answer.header.part_id), digest(answerText),
+  ].join('\0'))
+  if (cert.event_id !== 'codex-dialogue-v1:' + fingerprint) return
+  const echo = prompts.find(m => m !== prompt)
+  if (echo && (typeof echo.header.part_id !== 'string' ||
+      'dialogue:' + digest(echo.header.part_id) !== cert.invocation_id || texts.get(echo.id) !== promptText)) return
+  // The raw answer locator still identifies the content. The terminal sequence
+  // identifies the later producer observation which established its lineage.
+  return {echo: echo?.id, answer: answer.id, proof: {...cert, source_role: 'assistant' as const}}
+}
+
 export async function prepareDialogue(pool: pg.Pool, install: string, session: string, turn: string) {
   const ctx = await context(pool, install, session),
     root = { kind: 'relay_event' as const, key: ctx.root }
@@ -234,7 +286,8 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
     const unsafeInvocations = new Set(
       rows.filter((r) => r.kind === 'control').map((r) => r.proof?.invocation_id),
     )
-    const events: PreparedEvent[] = groups.map(({ anchor, parts }) => {
+    const certified = certifiedCodexDialogue(terminal, groups.map(g => g.anchor), texts, unsafeInvocations, session, turn)
+    const events: PreparedEvent[] = groups.filter(g => g.anchor.id !== certified?.echo).map(({ anchor, parts }) => {
       const text = texts.get(anchor.id)!,
         payload = { text },
         ref: DialogueRef = {
@@ -252,13 +305,18 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
         'a' + hex.slice(17, 20),
         hex.slice(20, 32),
       ].join('-')
-      const native = anchor.proof
+      const native = certified?.answer === anchor.id ? certified.proof : anchor.proof
       const valid =
         native &&
         !unsafeInvocations.has(native.invocation_id) &&
         (anchor.kind === 'user_text'
           ? native.source_role === 'user'
           : ['assistant', 'summary'].includes(String(native.source_role)))
+      // Keep an existing negative producer proof and its invocation identity.
+      // Null loses the distinction between absent evidence and an unsafe sibling.
+      const memory = valid || !native ? native : {
+        ...native, lineage_complete: false, skill_state: native.skill_state === 'skill' ? 'skill' : 'unknown',
+      }
       return {
         source_event_id: id,
         installation_id: install,
@@ -270,7 +328,7 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
         occurred_at: new Date(anchor.at),
         payload_hash: canonicalPayloadHash(payload),
         classification: {},
-        source_provenance: { memory: valid ? native : null, dialogue: ref },
+        source_provenance: { memory, dialogue: ref },
         body_reclaimed_at: null,
         row_version: signature,
         payload,

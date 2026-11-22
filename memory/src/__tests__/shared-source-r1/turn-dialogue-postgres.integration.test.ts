@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { directLaunchFixture, type DirectLaunchFixture } from './direct-launch-fixture.js'
@@ -83,7 +83,7 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
       await import(pathToFileURL(resolve('../relay/dist/extensions/journal.js')).href)
     ).createPostgresExtensionJournalSink({ sharedHeaders: true })
     let seq = 0
-    const emit = async (kind: string, fields: Record<string, unknown>, skillState = 'non_skill') => {
+    const emit = async (kind: string, fields: Record<string, unknown>, skillState = 'non_skill', proofFields: Record<string,unknown> = {}) => {
       const id = randomUUID(),
         payload = {
           type: kind,
@@ -104,6 +104,7 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
             skill_state: skillState,
             lineage_complete: true,
             derived_from_event_ids: [],
+            ...proofFields,
           },
         }
       const row = (
@@ -123,19 +124,25 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
       })
       return row.id
     }
-    const prompt = await emit('user_text', { text: 'I prefer rail for personal travel.' })
+    const hash = (value:string) => createHash('sha256').update(value).digest('hex')
+    const rootId = 'input:' + hash(randomUUID()), invocation = 'dialogue:' + hash('native-user')
+    const promptText = 'I prefer rail for personal travel.'
+    const prompt = await emit('user_text', {text:promptText},'non_skill',{event_id:rootId,invocation_id:rootId})
+    await emit('user_text', {text:promptText,part_id:'native-user'},'unknown',{lineage_complete:false})
     await emit('tool_result', { text: 'tool output' })
     await emit('agent_text', { message_phase: 'commentary', text: '正在检查' })
     await emit('tool_call', { actor_scope: 'subagent', tool: 'mcp__test__lookup' })
     const longAnswer = '说明。'.repeat(2200) + '已选择五分钟。'
-    const answer = await emit('agent_text', { message_phase: 'final_answer', text: longAnswer })
+    const answer = await emit('agent_text', {part_id:'native-answer', message_phase:'final_answer',text:longAnswer},'unknown',{lineage_complete:false})
     const jobs = () =>
       f.runtime.query("SELECT * FROM memory_jobs WHERE installation_id=$1 AND payload->>'turn'=$2", [
         install,
         turn,
       ])
     expect((await jobs()).rows).toHaveLength(0)
-    await emit('turn_status', { turn_status: 'completed' })
+    const witness = hash([s.session,turn,rootId,invocation,hash(promptText),hash('native-answer'),hash(longAnswer)].join('\0'))
+    await emit('turn_status',{turn_status:'completed'},'non_skill',{source_role:'system',event_id:'codex-dialogue-v1:'+witness,
+      parent_invocation_id:rootId,invocation_id:invocation,derived_from_event_ids:[rootId]})
     await f.runtime.query('SELECT shared.dispatch_turn_dialogues()')
     expect((await jobs()).rows).toHaveLength(1)
     const errors: unknown[] = []
@@ -216,6 +223,11 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
     await applySharedSourceContract(f.pool)
     await provisionSharedDatabase(f.pool,{memoryRole:'direct_launch_memory',relayRole:'direct_launch_relay',migratorRole:'direct_launch_definer'})
     await verifyMemoryStartup(f.runtime)
+    const {createWorkerGaugeCollector} = await import('../../worker-gauges.js')
+    const {createMemoryMetrics} = await import('../../metrics.js')
+    const metrics = createMemoryMetrics()
+    await createWorkerGaugeCollector(f.runtime,metrics,true,'enabled')()
+    expect((await metrics.jobs.get()).values.some(row=>row.labels.type==='consolidate_task')).toBe(true)
     {
       await compileDialogue(f.runtime, install, s.session, turn, 'off')
       const availability=await f.runtime.query('SELECT memory_session_available($1,$2,TRUE) AS allowed,memory_session_first_recorded_at($1,$2) AS started',[install,s.session])

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { isOperationalDialogueText } from '../episodes/dialogue-operation.js'
-import { readDialogueText, selectDialogue, type Member } from '../episodes/turn-dialogue.js'
+import { certifiedCodexDialogue, readDialogueText, selectDialogue, type Member } from '../episodes/turn-dialogue.js'
 
 function row(id: string, kind: string, header: Member['header'] = {}): Member {
   return { id, kind, header, hash: id, at: new Date(0), proof: null }
@@ -132,4 +132,25 @@ describe('operational turn admission', () => {
     expect(isOperationalDialogueText('已将功能分支合并到 develop。', 'assistant')).toBe(true)
     expect(isOperationalDialogueText('工具调用中的 MCP 类型用于计量。', 'assistant')).toBe(false)
   })
+})
+
+it('binds the native terminal witness to the accepted input, exact final bytes and native echo', () => {
+  const rootId = 'input:dc1d565f06ec7b27ba8178083fc75bce48a07e666eafff436de626302577c64f'
+  const rootProof = {version:1,producer:'codex',session_id:'session',turn_id:'turn',sequence:'1',
+    event_id:rootId,invocation_id:rootId,source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}
+  const root = {...row('1','user_text',{}),proof:rootProof}
+  const echo = row('2','user_text',{part_id:'native-user'})
+  const answer = row('3','agent_text',{part_id:'answer',message_phase:'final_answer'})
+  const end = {...terminal,proof:{...rootProof,sequence:'4',source_role:'system',parent_invocation_id:rootId,
+    invocation_id:'dialogue:'+createHash('sha256').update('native-user').digest('hex'),derived_from_event_ids:[rootId],
+    event_id:'codex-dialogue-v1:2911fdb3e1e9780213edb8d94c01114588ee30fe0a806b4887fc874fdbe3e4d7'}}
+  const messages = [root,echo,answer], texts = new Map([['1','问题'],['2','问题'],['3','回复']])
+  const check = () => certifiedCodexDialogue(end,messages,texts,new Set(),'session','turn')
+  expect(check()).toMatchObject({echo:'2',answer:'3',proof:{source_role:'assistant',derived_from_event_ids:[rootId]}})
+  expect(certifiedCodexDialogue(end,messages,texts,new Set([rootId]),'session','turn')).toBeUndefined()
+  expect(certifiedCodexDialogue(end,messages,texts,new Set(),'session','other')).toBeUndefined()
+  texts.set('3','tampered')
+  expect(check()).toBeUndefined()
+  texts.set('3','回复'); echo.header.part_id='different'
+  expect(check()).toBeUndefined()
 })
