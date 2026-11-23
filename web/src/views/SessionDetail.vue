@@ -524,7 +524,7 @@
           </template>
         </div>
 
-          <ReplyFooter v-if="reply.kind === 'reply'" :status="statusForReply(reply)" :content="replyDisplayContent(reply)"
+          <ReplyFooter v-if="reply.kind === 'reply'" :live="isLatestReply(reply) && showExecutionMark && !focusedSubAgentId" :status="statusForReply(reply)" :content="replyDisplayContent(reply)"
             :duration="isLatestReply(reply) ? (isTurnWorking && turnStartTime !== null ? fmtDuration(turnElapsed) : lastTurnDuration !== null ? fmtDuration(lastTurnDuration) : undefined) : undefined"
             :ended-at="isLatestReply(reply) && completedBarVisible && completedTurnEndedAt ? t('session.ended_at', { time: formatDateTime(completedTurnEndedAt) }) : undefined"
             :usage="isLatestReply(reply) && lastAgentUsage?.output_tokens ? t('session.output_tokens', { n: fmtTokens(lastAgentUsage.output_tokens) }) : undefined"
@@ -535,7 +535,8 @@
              shows total duration + output tokens + a copy button. -->
         <div v-if="!focusedSubAgentId && ((isTurnWorking && !replyRows.some(row => row.kind === 'reply' && isLatestReply(row))) || (completedBarVisible && !replyRows.some(row => row.kind === 'reply')))" class="turn-status-bar" :class="{ done: completedBarVisible }">
           <template v-if="isTurnWorking">
-            <span class="status-dot working"></span>
+            <ExecutionMark v-if="showExecutionMark" />
+            <span v-else class="status-dot working"></span>
             <span class="status-text">{{ t('session.creating') }}</span>
             <span v-if="turnStartTime !== null" class="status-timer">{{ fmtDuration(turnElapsed) }}</span>
           </template>
@@ -809,6 +810,7 @@ import CommandHelpModal from '../components/CommandHelpModal.vue'
 import MessageUser from '../components/messages/MessageUser.vue'
 import SessionPromptAnchor from '../components/messages/SessionPromptAnchor.vue'
 import { latestSentPrompt } from '../utils/sessionPrompt'
+import ExecutionMark from '../components/messages/ExecutionMark'
 import ReplyFooter from '../components/messages/ReplyFooter.vue'
 import { associateReplyRetries, projectReplies, replyText, replyStatus, type ReplyGroup } from '../utils/replyProjection'
 import { agentReplyLabel } from '../utils/agentDisplay'
@@ -2312,6 +2314,8 @@ function isTurnActiveStatus(value: unknown): boolean {
 const isTurnActive = computed(() => runtimeSnapshotReady.value && statusReady.value && isTurnActiveStatus(status.value))
 const isExecuting = computed(() => runtimeSnapshotReady.value && statusReady.value && isExecutingStatus(status.value))
 const isTurnWorking = computed(() => runtimeSnapshotReady.value && !isDisconnected.value && (isTurnActive.value || awaitingStart.value))
+
+const showExecutionMark = computed(() => isTurnWorking.value && (isExecuting.value || awaitingStart.value))
 
 // --- Turn timer (status bar above the input area) ---
 // Fresh sends start the timer optimistically. Restored sessions start only from
