@@ -738,6 +738,7 @@
   "session.status.retry": "重试中",
   "session.actions.refresh_latest": "刷新最新消息",
   "session.refreshing_latest": "正在刷新最新消息…",
+  "session.latest_current": "已是最新",
   "session.latest_synced": "消息已同步",
   "session.actions.copy_id": "复制会话 ID",
   "session.actions.pin": "固定到顶部",

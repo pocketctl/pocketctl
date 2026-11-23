@@ -219,7 +219,7 @@
         <div v-if="toolbarOverflowOpen" class="toolbar-overflow-menu" role="menu">
           <button v-if="!focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="share" role="menuitem" @click="toolbarOverflowOpen=false; showShareManager=true">{{ t('sharing.share') }}</button>
           <button type="button" class="toolbar-overflow-item" data-toolbar-action="refresh-latest" role="menuitem"
-            :disabled="!connected || latestCursor === undefined || latestRequest !== null" @click="refreshLatestMessages">
+            :disabled="!connected || latestRequest !== null || (latestCursor === undefined && isLoading)" @click="refreshLatestMessages">
             <span>{{ t('session.actions.refresh_latest') }}</span><span aria-hidden="true">↻</span>
           </button>
           <button v-if="currentSessionAgent==='codex' && currentSession?.control_mode==='managed' && !focusedSubAgentId" type="button" class="toolbar-overflow-item" data-toolbar-action="codex-quota" role="menuitem" @click="openCodexQuota"><span>{{ codexQuota?.title || t('codex_quota.title') }}<small class="tool-visibility-hint">{{ codexQuota?.summary }}</small></span></button>
@@ -614,7 +614,7 @@
             ></textarea>
 
             <!-- Bottom control row -->
-            <div class="input-controls">
+            <div class="input-controls" :inert="cachedHistory.length > 0">
               <!-- Left: permission mode dropdown -->
               <div class="perm-dropdown" ref="permDropdownEl">
                 <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :disabled="!permissionCanChange" :title="t(currentPermLabel)">
@@ -1330,6 +1330,7 @@ const latestCursor = ref<number>()
 const latestRequest = ref<number | null>(null)
 let latestSequence = 0
 const latestEvents = new ReplaySessionTrustBuffer<any>()
+let latestHadUpdates = false
 const latestNotice = ref('')
 let latestTimer: ReturnType<typeof setTimeout> | undefined
 const liveOverlap = new Set<string>()
@@ -1363,8 +1364,13 @@ function requestLatestPage() {
 }
 
 function refreshLatestMessages() {
-  if (!connected.value || latestCursor.value === undefined || latestRequest.value !== null) return
+  if (!connected.value || latestRequest.value !== null) return
   toolbarOverflowOpen.value = false
+  if (latestCursor.value === undefined) {
+    if (!isLoading.value) loadHistory()
+    return
+  }
+  latestHadUpdates = false
   requestLatestPage()
 }
 
@@ -2239,7 +2245,7 @@ watch(
   { immediate: true },
 )
 const canWriteWhenConnected = computed(() => {
-  if (cachedHistory.value.length || cachePrivacyBlocked.value) return false
+  if (cachePrivacyBlocked.value || (cachedHistory.value.length && !currentSessionAgent.value)) return false
   // Fail-closed agent gate: permanent observer sessions can NEVER be written
   // to, regardless of status, source, control_mode, or capabilities. This check
   // takes precedence over every other writeability rule.
@@ -2280,7 +2286,7 @@ const canWriteWhenConnected = computed(() => {
 })
 const composerState = computed(() => resolveSessionComposerState(
   canWriteWhenConnected.value,
-  interactionConnectivity.value,
+  cachedHistory.value.length ? 'syncing' : interactionConnectivity.value,
 ))
 // An explicit daemon-offline signal applies to every session on that host.
 // Keep any draft in memory, but replace the composer with a persistent notice
@@ -2845,7 +2851,12 @@ function retryHistory() {
   loadHistory()
 }
 
-function finishHistoryViewportFill(mode = historyViewportFill.mode): void {
+function finishHistoryViewportFill(mode = historyViewportFill.mode, publishAcceptedPage = isLoadingBackward.value): void {
+  // A failed or timed-out older page cannot invalidate an accepted newest page.
+  if (publishAcceptedPage && !historyCacheReady.value && !cachePrivacyBlocked.value) {
+    publishHistoryPreview()
+    saveHistoryPreview()
+  }
   if (historyPageTimer) clearTimeout(historyPageTimer)
   if (isMobile.value) mobileHistoryNeedsGesture = true
   historyViewportFill.cancel()
@@ -2915,13 +2926,12 @@ async function settleHistoryReplayPage(msg: any): Promise<void> {
     requestOlderHistoryPage(decision.cursor)
     return
   }
-  if (['target_reached', 'no_more'].includes(decision.reason)) { publishHistoryPreview(); saveHistoryPreview() }
   if (['page_limit_reached', 'time_limit_reached'].includes(decision.reason)) {
     historyFeedback.value = t('session.history_continue')
   } else if (['invalid_cursor', 'cursor_did_not_advance'].includes(decision.reason)) {
     historyFeedback.value = t('session.history_partial_failure')
   }
-  finishHistoryViewportFill(mode)
+  finishHistoryViewportFill(mode, true)
 }
 
 watch(messagesEl, (element) => {
@@ -4928,14 +4938,20 @@ onMounted(() => {
         const key = overlapKey(event)
         if (key && liveOverlap.delete(key)) continue
         if (key) replayOverlap.add(key)
+        latestHadUpdates = true
         processEvent(event, messages.value, undefined, true)
       }
       latestCursor.value = Math.max(latestCursor.value ?? 0, next)
       if (autoScroll.value) nextTick(() => { if (autoScroll.value) scrollToBottom() })
+      if (!historyCacheReady.value) {
+        // Manual refresh can finish while older pages are still locating the reading anchor.
+        latestHadUpdates ||= cachedHistory.value.length > 0
+        publishHistoryPreview()
+      }
       if (msg.has_more) requestLatestPage()
       else {
         saveHistoryPreview()
-        finishLatest('session.latest_synced')
+        finishLatest(latestHadUpdates ? 'session.latest_synced' : 'session.latest_current')
       }
       return
     }
@@ -4946,9 +4962,17 @@ onMounted(() => {
       else if (msg.task_snapshot_status === 'error') taskSnapshotError.value = true
     }
     if (msg.error) {
-      if (cacheReadDenied(msg.error)) { recentViews.delete(sessionId.value); cachedReadingAnchor = undefined; cachedHistory.value = []; historyCacheRequest++; void personalReadCache.remove(historyCacheName()) }
+      const denied = cacheReadDenied(msg.error)
+      if (denied) {
+        resetLatest()
+        recentViews.delete(sessionId.value)
+        cachedReadingAnchor = undefined
+        cachedHistory.value = []
+        historyCacheRequest++
+        void personalReadCache.remove(historyCacheName())
+      }
       resetReplayTrustBuffers()
-      finishHistoryViewportFill()
+      finishHistoryViewportFill(historyViewportFill.mode, !denied && isLoadingBackward.value)
       historyReadFailed.value = true
       historyFeedback.value = t('session.history_read_failed')
       return
@@ -4963,7 +4987,6 @@ onMounted(() => {
       if (timeout) clearTimeout(timeout)
       if (context !== loadKey.value || request !== replayReqId.value || cachePrivacyBlocked.value) return
     }
-    if (!msg.has_more) publishHistoryPreview()
     const previousIDs = new Set(sourceMessages.value.map(message => message.id))
     if (!isLoadingBackward.value && (msg.newest_seq === 0 || normalizeReplayCursor(msg.newest_seq) !== undefined)) {
       latestCursor.value = Number(msg.newest_seq)
@@ -4982,6 +5005,13 @@ onMounted(() => {
       // Unacknowledged/failed local sends follow the replayed history. A later
       // canonical echo still reconciles them by request identity.
       for (const message of [...replayLocalMessages]) settleReplayLocalMessage(message, messages.value, false)
+    }
+    // At the live edge the newest readable page can replace the preview now.
+    // A saved reading anchor may still need an older page before handover.
+    if (cachedHistory.value.length && !cachedReadingAnchor && autoScroll.value &&
+        sourceMessages.value.some(row => loadedHistoryIDs.has(String(row.id)) &&
+          (row.type === 'agent_text' || row.type === 'user_text') && row.content)) {
+      publishHistoryPreview()
     }
     if (isMobile.value && renderMessages.value.length) isLoading.value = false
     if (msg.has_more !== undefined) hasMore.value = !!msg.has_more
@@ -5026,7 +5056,7 @@ onMounted(() => {
     reconcileVisibleUnresolvedTools(status.value)
     saveHistoryPreview()
     if (hasMore.value) void settleHistoryReplayPage(msg)
-    else finishHistoryViewportFill(historyViewportFill.mode)
+    else finishHistoryViewportFill(historyViewportFill.mode, true)
   }))
 
   cleanups.push(onEvent('user_message_ack', (msg: any) => {

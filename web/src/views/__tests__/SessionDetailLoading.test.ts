@@ -251,6 +251,84 @@ describe('SessionDetail history loading', () => {
     wrapper.unmount()
   })
 
+  test('a bounded history fill releases the cached preview and the managed composer', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name =>
+      name.startsWith('history:') ? { version: 2, rows: [{ id: 'old', type: 'agent_text', content: 'Old preview' }],
+        anchor: { id: 'old', top: 0 }, groups: {} } as any : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const sid = 'session-http-lan'
+    const emit = (type: string, data: Record<string, unknown>) =>
+      websocketMock.handlers.get(type)?.({ session_id: sid, ...data })
+    emit('session_list', { sessions: [{ session_id: sid, daemon_id: 'd1', daemon_online: true,
+      source: 'terminal', agent_type: 'codex', control_mode: 'managed', capabilities: ['message_acceptance_receipt'] }] })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.chat-textarea').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.unmanaged-readonly-notice').exists()).toBe(false)
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 9000)
+    emit('replay_batch', { req_id: 1, direction: 'backward', events: [
+      { type: 'user_text', text: 'Latest from Relay', session_id: sid, event_id: 'current' }] })
+    emit('replay_end', { req_id: 1, newest_seq: 150, last_seq: 100, has_more: true, status: 'idle' })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(false)
+    expect((wrapper.vm as any).renderMessages.map((row: any) => row.content)).toEqual(['Latest from Relay'])
+    expect(wrapper.get('.chat-textarea').attributes('disabled')).toBeUndefined()
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+    await wrapper.get('[data-toolbar-action="refresh-latest"]').trigger('click')
+    const request = websocketMock.send.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ direction: 'forward', last_seq: 150 })
+    emit('replay_end', { req_id: request.req_id, newest_seq: 150, has_more: false })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.latest-refresh-feedback').text()).toBe('session.latest_current')
+    wrapper.unmount()
+  })
+
+  test('manual refresh publishes the accepted page while older history is locating the cached anchor', async () => {
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? {
+      version: 2, rows: [{ id: 'anchor', type: 'agent_text', content: 'Earlier reading position' }],
+      anchor: { id: 'anchor', top: 0 }, groups: {},
+    } as any : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const sid = 'session-http-lan'
+    const emit = (type: string, data: Record<string, unknown>) =>
+      websocketMock.handlers.get(type)?.({ session_id: sid, ...data })
+    emit('replay_batch', { req_id: 1, direction: 'backward', events: [
+      { type: 'user_text', text: 'Already fetched', session_id: sid, event_id: 'latest' }] })
+    emit('replay_end', { req_id: 1, newest_seq: 150, last_seq: 100, has_more: true })
+    await flushPromises()
+    expect((wrapper.vm as any).isLoadingBackward).toBe(true)
+    expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(true)
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+    await wrapper.get('[data-toolbar-action="refresh-latest"]').trigger('click')
+    const request = websocketMock.send.mock.calls.at(-1)![0]
+    expect(request).toMatchObject({ direction: 'forward', last_seq: 150 })
+    emit('replay_end', { req_id: request.req_id, newest_seq: 150, has_more: false })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(false)
+    expect((wrapper.vm as any).renderMessages.map((row: any) => row.content)).toEqual(['Already fetched'])
+    wrapper.unmount()
+  })
+
+  test('manual refresh retries the newest page after the first read fails without a cursor', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const sid = 'session-http-lan'
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: sid, daemon_id: 'd1' }] })
+    websocketMock.handlers.get('replay_end')?.({ session_id: sid, req_id: 1, error: 'history_unavailable' })
+    await flushPromises()
+    await wrapper.get('.toolbar-more-btn').trigger('click')
+    await wrapper.get('[data-toolbar-action="refresh-latest"]').trigger('click')
+    const requests = websocketMock.send.mock.calls.map(([message]) => message).filter(message => message.type === 'replay')
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toMatchObject({ session_id: sid, direction: 'backward', req_id: 2 })
+    expect(requests[1].last_seq).toBeUndefined()
+    wrapper.unmount()
+  })
+
   test('tool-dense initial pages keep the cached viewport until enough authoritative content is available', async () => {
     vi.stubGlobal('requestAnimationFrame',(callback:FrameRequestCallback)=>{callback(0);return 1})
     vi.spyOn(personalReadCache,'valid').mockReturnValue(true)

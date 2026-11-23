@@ -738,6 +738,7 @@
   "session.status.retry": "Retrying",
   "session.actions.refresh_latest": "Refresh latest messages",
   "session.refreshing_latest": "Refreshing latest messages…",
+  "session.latest_current": "Already up to date",
   "session.latest_synced": "Messages synced",
   "session.actions.copy_id": "Copy Session ID",
   "session.actions.pin": "Pin to top",
