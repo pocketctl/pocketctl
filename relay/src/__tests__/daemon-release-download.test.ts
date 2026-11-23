@@ -51,3 +51,42 @@ it('does not disclose credential errors or a download location when signing fail
     await app.close();
   }
 });
+
+it.each([
+  ['fixture-id', 'fixture-secret', 302],
+  ['fixture-id', '', 404],
+  ['', 'fixture-secret', 404],
+  ['', '', 404],
+] as const)('selects the configured release credentials (case %#)', async (id, secret, status) => {
+  vi.stubEnv('POCKETCTL_RELEASE_OSS_READ_ROLE', '');
+  vi.stubEnv('POCKETCTL_RELEASE_OSS_ACCESS_KEY_ID', id);
+  vi.stubEnv('POCKETCTL_RELEASE_OSS_ACCESS_KEY_SECRET', secret);
+  const app = Fastify();
+  try {
+    registerDaemonReleaseDownloads(app);
+    for (const method of ['GET', 'HEAD'] as const) {
+      const response = await app.inject({ method, url: path });
+      expect(response.statusCode).toBe(status);
+      if (status === 302) {
+        const url = new URL(String(response.headers.location));
+        expect(url.origin).toBe('https://pocketctl-daemon.oss-cn-beijing.aliyuncs.com');
+        expect(url.pathname).toBe(path);
+        expect(url.searchParams.has('x-oss-security-token')).toBe(false);
+        expect(url.searchParams.get('x-oss-credential')).toMatch(/^fixture-id\//);
+        expect(url.searchParams.get('x-oss-signature')).toMatch(/^[a-f0-9]{64}$/);
+      } else {
+        expect(response.headers.location).toBeUndefined();
+      }
+    }
+  } finally {
+    vi.unstubAllEnvs();
+    await app.close();
+  }
+});
+
+it('requires a session token for role credentials', async () => {
+  const sign = createReleaseSigner({ getCredentials: async () => ({
+    accessKeyId: 'fixture-id', accessKeySecret: 'fixture-secret', securityToken: '', providerName: 'fixture',
+  }) });
+  await expect(sign('GET', path.slice(1))).rejects.toThrow('Missing release reader session token');
+});
