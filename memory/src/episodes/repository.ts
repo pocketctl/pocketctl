@@ -459,7 +459,9 @@ export function createEpisodeRepository(
       if(job.idempotency_key.startsWith('dialogue:')){
         const {dialogue_session:session,turn}=job.payload
         if(typeof session!=='string'||typeof turn!=='string'||!session||!turn)throw Error('invalid_dialogue_job')
-        return compileDialogue(pool,job.installation_id,session,turn,options.lifecycleMode??'off',ctx?.fence)
+        return compileDialogue(pool,job.installation_id,session,turn,options.lifecycleMode??'off',ctx?.fence, {
+          previous: job.payload.dialogue_gap_probe_v1, stabilizationMs,
+        })
       }
       await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence,signal)
     },

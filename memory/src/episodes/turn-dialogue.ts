@@ -42,7 +42,13 @@ export class DialogueReadDisposition extends Error {
     super(reason)
   }
 }
-export class DialogueInputGap extends DialogueReadDisposition {}
+export interface DialogueGapProbe { previous: unknown; stabilizationMs: number }
+export class DialogueInputGap extends DialogueReadDisposition {
+  // Saved only by a fenced compile job. "inspect" requests one bounded
+  // fallback; a reason and digest identify a previously confirmed gap.
+  probeResult?: string
+  inspectAt?: Date
+}
 export class DialogueExcluded extends DialogueReadDisposition {
   constructor() {
     super('operational_turn')
@@ -153,6 +159,21 @@ export function selectDialogue(rows: Member[]) {
     throw gap('final_message_unconfirmed')
   return { terminal, groups }
 }
+function selectDialogueHeaders(rows: Member[]) {
+  try {
+    const selection = selectDialogue(rows)
+    // The final sequence is zero-indexed: an incomplete inventory cannot
+    // produce a valid answer. The reader still checks offsets, bytes and hash.
+    const missingParts = selection.groups.some(({ anchor, parts }) =>
+      anchor.kind === 'agent_text' && anchor.header.stream_id &&
+      typeof anchor.header.chunk_seq === 'number' && anchor.header.chunk_seq + 1 !== parts.length)
+    return missingParts ? gap('message_incomplete') : selection
+  } catch (error) {
+    if (error instanceof DialogueInputGap) return error
+    throw error
+  }
+}
+
 export function readDialogueText(anchor: Member, parts: Member[], bodies: Map<string, Header>) {
   const body = bodies.get(anchor.id)
   if (!body) throw gap('message_incomplete')
@@ -233,12 +254,36 @@ export function certifiedCodexDialogue(
   return {echo: echo?.id, answer: answer.id, proof: {...cert, source_role: 'assistant' as const}}
 }
 
-export async function prepareDialogue(pool: pg.Pool, install: string, session: string, turn: string) {
+export async function prepareDialogue(pool: pg.Pool, install: string, session: string, turn: string,
+  gapProbe?: DialogueGapProbe,
+) {
   const ctx = await context(pool, install, session),
     root = { kind: 'relay_event' as const, key: ctx.root }
   const { rows, signature } = await metadata(pool, install, session, turn)
   try {
     if (rows.some((r) => r.kind === 'operation')) throw new DialogueExcluded()
+    const selection = selectDialogueHeaders(rows)
+    if (gapProbe) {
+      // A previous fenced fallback checked the exact same authenticated members.
+      // A changed prompt, reply, stream or control marker changes the signature.
+      if (typeof gapProbe.previous === 'string' && gapProbe.previous.startsWith(signature + ':')) {
+        const reason = gapProbe.previous.slice(signature.length + 1)
+        if (['message_incomplete', 'final_message_unconfirmed', 'prompt_unavailable', 'terminal_unavailable'].includes(reason))
+          throw gap(reason)
+      }
+      if (selection instanceof DialogueInputGap && gapProbe.previous !== 'inspect' &&
+          rows.some(r => r.kind === 'user_text') &&
+          (selection.reason === 'final_message_unconfirmed' || selection.reason === 'message_incomplete')) {
+        const now = Date.now()
+        const latest = rows.reduce((last, row) => Math.max(last, new Date(row.at).getTime()), 0)
+        const due = Math.min(latest, now) + gapProbe.stabilizationMs
+        if (due > now) {
+          selection.probeResult = 'inspect'
+          selection.inspectAt = new Date(due)
+          throw selection
+        }
+      }
+    }
     const reader = createObservedSourceReader(pool, sourcePoolContext(pool).archive, turn)
     const bodies = new Map<string, Header>()
     async function loadBodies(parts: Member[]) {
@@ -257,9 +302,11 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
         }
       }
     }
-    // Read prompts first: a control request needs neither an answer nor a gap
-    // retry, including when its final reply hasn't arrived yet.
-    const prompts = messageGroups(rows.filter((r) => r.kind === 'user_text'))
+    // In a complete turn (or the single fallback), classify prompts before
+    // reading any answer. Text-only operational requests never become gaps.
+    const prompts = selection instanceof DialogueInputGap
+      ? messageGroups(rows.filter(r => r.kind === 'user_text'))
+      : selection.groups.filter(g => g.anchor.kind === 'user_text')
     await loadBodies(prompts.flatMap((group) => group.parts))
     const texts = new Map<string, string>()
     for (const { anchor, parts } of prompts) {
@@ -267,7 +314,8 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
       if (isOperationalDialogueText(text, 'user')) throw new DialogueExcluded()
       texts.set(anchor.id, text)
     }
-    const { terminal, groups } = selectDialogue(rows)
+    if (selection instanceof DialogueInputGap) throw selection
+    const { terminal, groups } = selection
     const answers = groups.filter((group) => group.anchor.kind === 'agent_text')
     await loadBodies(answers.flatMap((group) => group.parts))
     for (const { anchor, parts } of answers) {
@@ -343,6 +391,10 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
         checkDialogueRef(db, install, ref, options?.forCommit === true),
     }
   } catch (error) {
+    if (error instanceof DialogueInputGap && gapProbe && !error.probeResult) {
+      const checked = signature + ':' + error.reason
+      if (gapProbe.previous !== checked) error.probeResult = checked
+    }
     if (error instanceof DialogueReadDisposition)
       error.assertCurrent = async (db) => {
         const current = await metadata(db, install, session, turn)

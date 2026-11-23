@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
@@ -17,6 +17,9 @@ import { createCurationExecutor } from '../../curation/executor.js'
 import { createCurationWorker, curationTransaction } from '../../curation/worker.js'
 import { loadCurrentLifecycleSources } from '../../curation/task-repository.js'
 import { compileDialogue } from '../../episodes/compile-dialogue.js'
+import { SharedSourceReader } from '@pocketctl/session-source'
+import { withSourceJobExecution } from '../../sources/source-execution.js'
+import { JobDeferredError } from '../../jobs/types.js'
 import { checkDialogueRef } from '../../episodes/turn-dialogue.js'
 
 const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
@@ -69,6 +72,116 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
       await expect(reader.getHeads(binding.scope,binding.root,[first])).rejects.toMatchObject({code:'deleted'})
     }finally{await f.pool.query('ALTER TABLE memory.retired_archive_fixture RENAME TO source_events')}
   })
+  test('bounds gap inspection across worker restarts and reopens only changed input', async () => {
+    const source = await f.source()
+    const { inst } = await f.install(source, 'retained_history')
+    const install = inst.installation_id
+    await f.pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+    await f.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')", [install])
+    await f.pool.query('INSERT INTO shared.memory_dialogue_installations VALUES($1,now()) ON CONFLICT DO NOTHING', [install])
+    // Include already settled turns inside the installation's enrolled window.
+    await f.pool.query("UPDATE shared.memory_dialogue_installations SET enabled_at=now()-interval '5 minutes' WHERE installation_id=$1",[install])
+    const { createPostgresExtensionJournalSink } = await import(pathToFileURL(resolve('../relay/dist/extensions/journal.js')).href)
+    const journal = createPostgresExtensionJournalSink({ sharedHeaders: true })
+    let turn = randomUUID()
+    let settled = false
+    async function emit(type: string, fields: Record<string, unknown>) {
+      const id = randomUUID()
+      const payload = { type, event_id: id, turn_id: turn, actor_scope: 'root', ...fields }
+      const row = (await f.publisher.query(`INSERT INTO public.events(session_id,user_id,event_type,payload,event_hash,effect_status,created_at)
+        VALUES($1,$2,$3,$4,$5,'completed',now()-$6::interval) RETURNING id::text`,
+      [source.session,source.owner,type,payload,id.replaceAll('-',''),settled ? '1 minute' : '0 seconds'])).rows[0]
+      await journal.appendCanonicalEvent(f.publisher, {sourceEventId:row.id,ownerUserId:source.owner,
+        sessionId:source.session,eventType:type,occurredAt:null,payload})
+    }
+    const jobs = createJobRepository(f.runtime, {nativeSourcesOnly:true})
+    async function runClaim() {
+      const worker = randomUUID()
+      const [job] = await jobs.claimJobs({workerId:worker,limit:1,leaseMs:30000})
+      expect(job?.payload.turn).toBe(turn)
+      const fence = {jobId:job.job_id,claimedBy:worker,claimEpoch:job.claim_epoch}
+      try {
+        await withSourceJobExecution(f.runtime,fence,() => createEpisodeRepository(f.runtime)
+          .handleCompileEpisode(job,new AbortController().signal,{fence}))
+      } catch (error) {
+        if (!(error instanceof JobDeferredError)) throw error
+        expect(await jobs.deferJob({...fence,reason:error.reason,availableAt:error.availableAt})).toBe(true)
+        return 'deferred'
+      }
+      expect(await jobs.completeJob(fence)).toBe(true)
+      return 'completed'
+    }
+    const dispatch = () => f.runtime.query('SELECT shared.dispatch_turn_dialogues()')
+    const gap = async () => (await f.runtime.query(
+      'SELECT reason FROM memory_dialogue_gaps WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3',
+      [install,source.session,turn])).rows
+    const episode = async () => (await f.runtime.query(
+      'SELECT document FROM work_episodes WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3',
+      [install,source.session,turn])).rows
+    const reads = vi.spyOn(SharedSourceReader.prototype, 'resolveBodies')
+    try {
+      const question = '为什么？'.repeat(8192)
+      for (const scenario of ['late','permanent','operation','missing-chunk'] as const) {
+        turn = randomUUID()
+        await emit('user_text',{text:scenario === 'operation' ? '查询进度' : question})
+        if (scenario === 'missing-chunk') {
+          await emit('agent_text',{part_id:'stream',stream_id:'s',chunk_seq:1,byte_offset:6,text:'',
+            total_bytes:6,content_hash:createHash('sha256').update('答复').digest('hex'),final:true,message_phase:'final_answer'})
+        }
+        await emit('turn_status',{turn_status:'completed'})
+        await dispatch()
+        reads.mockClear()
+        expect(await runClaim()).toBe('deferred')
+        expect(reads).not.toHaveBeenCalled()
+        expect(await gap()).toEqual([])
+        if (scenario === 'late') {
+          await emit('agent_text',{message_phase:'final_answer',text:'结论'})
+          await dispatch()
+        } else if (scenario === 'missing-chunk') {
+          await emit('agent_text',{part_id:'stream',stream_id:'s',chunk_seq:0,byte_offset:0,text:'答复'})
+          await dispatch()
+        } else {
+          // Advance only the owned test job's due time; no new source event wakes it.
+          await f.runtime.query("UPDATE memory_jobs SET available_at=now() WHERE installation_id=$1 AND payload->>'turn'=$2", [install,turn])
+        }
+        expect(await runClaim()).toBe('completed')
+        const repaired = scenario === 'late' || scenario === 'missing-chunk'
+        expect(reads).toHaveBeenCalledTimes(repaired ? 2 : 1)
+        if (repaired) {
+          const answerText = scenario === 'late' ? '结论' : '答复'
+          expect(await episode()).toMatchObject([{document:{messages:[{text:question},{text:answerText}]}}])
+        } else {
+          expect(await episode()).toEqual([])
+        }
+        if (scenario !== 'permanent') {
+          expect(await gap()).toEqual([])
+          continue
+        }
+        expect(await gap()).toEqual([{reason:'final_message_unconfirmed'}])
+        // Re-delivery of an unchanged inventory reuses the fenced gap digest.
+        await f.runtime.query("UPDATE memory_jobs SET state='pending',available_at=now() WHERE installation_id=$1 AND payload->>'turn'=$2",[install,turn])
+        reads.mockClear()
+        expect(await runClaim()).toBe('completed')
+        expect(reads).not.toHaveBeenCalled()
+        await emit('agent_text',{message_phase:'final_answer',text:'补到'})
+        await dispatch()
+        expect(await runClaim()).toBe('completed')
+        expect(reads).toHaveBeenCalledTimes(2)
+        expect(await gap()).toEqual([])
+      }
+      turn = randomUUID()
+      settled = true
+      await emit('user_text',{text:question})
+      await emit('turn_status',{turn_status:'completed'})
+      await dispatch()
+      reads.mockClear()
+      expect(await runClaim()).toBe('completed')
+      expect(reads).toHaveBeenCalledTimes(1)
+      expect(await gap()).toEqual([{reason:'final_message_unconfirmed'}])
+    } finally {
+      reads.mockRestore()
+    }
+  }, 60000)
   test('coalesces the closed turn, reads only selected text and rechecks raw evidence', async () => {
     const s = await f.source(),
       { inst } = await f.install(s, 'retained_history'),
