@@ -12,7 +12,7 @@ import {sealGovernanceMigration,abandonGovernanceMigration,previewMigrationReten
 const url=process.env.MEMORY_TEST_DATABASE_URL,suite=url&&process.env.RUN_MEMORY_POSTGRES_INTEGRATION==='1'?describe:describe.skip
 suite('migration lifecycle retention (PostgreSQL)',()=>{
  let pool:pg.Pool,a:string,b:string
- beforeAll(async()=>{pool=createMemoryPool({databaseUrl:url!,dbPoolMax:6});await assertMemoryTestDatabase(pool,url!);await applyMemorySchema(pool)},60000)
+ beforeAll(async()=>{pool=createMemoryPool({databaseUrl:url!,dbPoolMax:6,databaseNamespace:'public'});await assertMemoryTestDatabase(pool,url!);await applyMemorySchema(pool)},60000)
  afterAll(async()=>{await pool?.end()})
  beforeEach(async()=>{
   await pool.query('TRUNCATE memory_purge_receipts,memory_session_tombstones,memory_installations CASCADE')
