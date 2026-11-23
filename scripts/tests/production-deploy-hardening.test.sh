@@ -84,6 +84,12 @@ http_block=$(awk '/listen 80;/{flag=1} flag{print} flag && /^}/{exit}' <(sed -n 
   || fail "official script's port-80 vhost must redirect to HTTPS"
 grep -q 'listen 443 ssl' "$official" || fail "official script must serve HTTPS"
 
+release_location=$(sed -n '/location ^~ \/releases\/ {/,/^[[:space:]]*}/p' "$official")
+grep -Fq 'proxy_pass http://127.0.0.1:${RELAY_PORT};' <<< "$release_location" \
+  || fail "generated Nginx configuration must send versioned release requests to Relay"
+grep -Fq 'proxy_redirect off;' <<< "$release_location" \
+  || fail "generated Nginx configuration must preserve signed download redirects"
+
 # --- systemd units keep the non-root hardened baseline ------------------------
 
 for unit in "$repo_root/deploy/systemd/pocketctl-relay.service" \

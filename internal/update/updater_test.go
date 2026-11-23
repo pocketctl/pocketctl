@@ -123,18 +123,19 @@ func (f *mirrorFixture) install(t *testing.T) {
 		f.mirror.Close()
 	})
 
-	restoreAPI, restoreDL, restoreProxies, restoreAPIClient, restoreDownloadClient := githubAPIBase, githubDLBase, proxyPrefixes, apiClient, downloadClient
+	restoreRelease := releaseDownloadBase
+	restoreAPI, restoreDL, restoreAPIClient, restoreDownloadClient := githubAPIBase, githubDLBase, apiClient, downloadClient
 	t.Cleanup(func() {
+		releaseDownloadBase = restoreRelease
 		githubAPIBase = restoreAPI
 		githubDLBase = restoreDL
-		proxyPrefixes = restoreProxies
 		apiClient = restoreAPIClient
 		downloadClient = restoreDownloadClient
 	})
 
+	releaseDownloadBase = f.mirror.URL + "/releases"
 	githubAPIBase = f.officialAPI.URL + "/repos/pocketctl/pocketctl/releases"
 	githubDLBase = f.officialDL.URL + "/pocketctl/pocketctl/releases/download"
-	proxyPrefixes = []string{f.mirror.URL + "/"}
 	apiClient = &http.Client{Timeout: testHTTPTimeout}
 	downloadClient = &http.Client{Timeout: testHTTPTimeout}
 }
@@ -160,8 +161,11 @@ func TestResolveBinaryTrustingOfficialDigestOverMirrorSidecar(t *testing.T) {
 	if info.SHA != f.goodSHA {
 		t.Fatalf("SHA must come from the official API digest, got %q", info.SHA)
 	}
-	if len(info.FallbackURLs) == 0 {
-		t.Fatal("mirror must remain available as a binary candidate")
+	if info.URL != f.mirror.URL+"/releases/v1.0.0/"+testAssetName() {
+		t.Fatalf("unexpected primary download URL: %s", info.URL)
+	}
+	if !reflect.DeepEqual(info.FallbackURLs, []string{githubDLBase + "/v1.0.0/" + testAssetName()}) {
+		t.Fatalf("unexpected fallback URLs: %v", info.FallbackURLs)
 	}
 }
 

@@ -147,6 +147,7 @@ import { registerUsageRoutes } from './extensions/usage-routes.js';
 import { registerPurgeRoutes } from './extensions/purge-routes.js';
 import { createExtensionRateLimiterSet } from './extensions/rate-limit.js';
 import { resolveExtensionRateLimitConfig } from './runtime-config.js';
+import { registerDaemonReleaseDownloads } from './daemon-release-download.js';
 import { registerSessionShareRoutes } from './session-share-routes.js';
 import { registerSessionOrganizationRoutes } from './session-organization/routes.js';
 import { createSessionHistoryReadBroker } from './session-history-read.js';
@@ -1358,6 +1359,7 @@ async function main() {
   await app.register(fastifyWebsocket, {
     options: { maxPayload: runtimeConfig.maxEventBytes },
   });
+  registerDaemonReleaseDownloads(app);
   registerSessionShareRoutes(app, { pool, publicIssuer });
   registerTeamAccessGuard(app, {
     verifyAccessToken: token => verifyAccessTokenWithRevocation(token, pool),

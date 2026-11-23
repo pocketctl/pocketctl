@@ -32,29 +32,15 @@ const (
 	maxChecksumBodySize = 1 << 10
 )
 
-// Base URLs and mirror prefixes are package variables so tests can point them
+// Base URLs are package variables so tests can point them
 // at local fixtures. Only these holders are mutable — the trust rule is not:
 // digests are accepted exclusively from the official GitHub API or the
 // official GitHub-direct .sha256 sidecar; mirror sidecars are never trusted.
 var (
-	githubAPIBase = githubAPI
-	githubDLBase  = githubDL
-	proxyPrefixes = ghProxies
+	releaseDownloadBase = "https://pocketctl.me/releases"
+	githubAPIBase       = githubAPI
+	githubDLBase        = githubDL
 )
-
-// ghProxies is the ordered list of public GitHub acceleration proxies for
-// users in mainland China. They mirror the full GitHub URL as a prefix.
-//
-// These are community-run and untrusted: they may serve arbitrary bytes for
-// both the binary and any .sha256 sidecar, so they are only ever used as
-// download candidates whose bytes are checked against the official digest.
-// Last health check: 2026-06-26 (gh-proxy.com, ghfast.top, ghproxy.net OK;
-// mirror.ghproxy.com and github.moeyy.xyz deprecated/removed).
-var ghProxies = []string{
-	"https://gh-proxy.com/",
-	"https://ghfast.top/",
-	"https://ghproxy.net/",
-}
 
 // apiClient has a short timeout so version checks won't hang when GitHub
 // is unreachable.
@@ -249,17 +235,11 @@ func ResolveBinary(tag string) (*BinaryInfo, error) {
 		return nil, err
 	}
 
-	candidates := make([]string, 0, len(proxyPrefixes)+1)
-	for _, p := range proxyPrefixes {
-		candidates = append(candidates, p+ghURL)
-	}
-	candidates = append(candidates, ghURL)
-
 	return &BinaryInfo{
 		OS:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
-		URL:          candidates[0],
-		FallbackURLs: candidates[1:],
+		URL:          fmt.Sprintf("%s/%s/%s", releaseDownloadBase, tag, name),
+		FallbackURLs: []string{ghURL},
 		SHA:          sha,
 		Size:         size,
 		Name:         name,

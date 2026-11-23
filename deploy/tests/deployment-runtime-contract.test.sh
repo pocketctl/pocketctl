@@ -24,7 +24,7 @@ postgres_mutation_line=$(grep -n '^# ---------- 5\. 配置 PostgreSQL' "$deploy_
 [[ -n "$extension_validation_line" && -n "$postgres_mutation_line" \
   && "$extension_validation_line" -lt "$postgres_mutation_line" ]] \
   || fail "Relay runtime Extension validation must precede every PostgreSQL mutation"
-for persisted in EXTENSION_PROVIDER_JWT_SECRET EXTENSION_CURSOR_SECRET \
+for persisted in POCKETCTL_RELEASE_OSS_READ_ROLE EXTENSION_PROVIDER_JWT_SECRET EXTENSION_CURSOR_SECRET \
   EXTENSION_GRANT_PRIVATE_KEY_B64 EXTENSION_GRANT_PUBLIC_KEY_B64 \
   RELAY_EXTENSION_PROJECTOR_BATCH RELAY_EXTENSION_FEED_RETENTION_DAYS \
   RELAY_EXTENSION_LEASE_TTL_SECONDS RELAY_EXTENSION_RATE_LIMIT_FEED; do
@@ -96,6 +96,7 @@ fi
 # Render the exact production EnvironmentFile consumed by systemd, then parse
 # its DATABASE_URL with Node's WHATWG URL implementation (the Relay boundary).
 env_file="$fixture/relay.env"
+POCKETCTL_RELEASE_OSS_READ_ROLE=pocketctl-release-reader
 DOMAIN=relay.contract.test
 RELAY_PORT=8080
 POSTGRES_APP_PASSWORD='safe-Database_Password.0123456789~'
@@ -131,6 +132,7 @@ pocketctl_write_relay_production_env "$env_file"
 [[ $(stat -c '%a' "$env_file" 2>/dev/null || stat -f '%Lp' "$env_file") == 600 ]] \
   || fail "production env file must be mode 0600"
 for expected in \
+  'POCKETCTL_RELEASE_OSS_READ_ROLE=pocketctl-release-reader' \
   'NODE_ENV=production' \
   'POCKETCTL_MODE=self-hosted' \
   'ALLOWED_ORIGINS=https://relay.contract.test' \

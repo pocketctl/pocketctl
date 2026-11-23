@@ -140,6 +140,7 @@ pocketctl_write_relay_production_env() {
   }
   [[ "$RELAY_PORT" =~ ^[0-9]+$ ]] || return 1
   [[ "$QUOTA_ENFORCEMENT" =~ ^(enforce|observe|off)$ ]] || return 1
+  [[ ${POCKETCTL_RELEASE_OSS_READ_ROLE:-} =~ ^[a-zA-Z0-9-]{0,64}$ ]] || return 1
   # ADR-0003: the extension platform ships off; operators flip it explicitly
   # after the schema deploy and shadow validation described in the runbook.
   RELAY_EXTENSIONS_VALUE=${RELAY_EXTENSIONS:-off}
@@ -212,6 +213,7 @@ pocketctl_write_relay_production_env() {
     printf 'NODE_ENV=production\n'
     printf 'POCKETCTL_MODE=self-hosted\n'
     printf 'QUOTA_ENFORCEMENT=%s\n' "$QUOTA_ENFORCEMENT"
+    printf 'POCKETCTL_RELEASE_OSS_READ_ROLE=%s\n' "${POCKETCTL_RELEASE_OSS_READ_ROLE:-}"
     printf 'RELAY_EXTENSIONS=%s\n' "$RELAY_EXTENSIONS_VALUE"
     printf 'RELAY_EXTENSION_V2=%s\n' "$RELAY_EXTENSION_V2_VALUE"
     printf 'EXTENSION_PROVIDER_JWT_SECRET=%s\n' "$EXTENSION_PROVIDER_JWT_SECRET_VALUE"

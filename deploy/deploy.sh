@@ -174,6 +174,7 @@ AUTH_CODE_PEPPER_VALUE="$(relay_env_value AUTH_CODE_PEPPER)"
 # Preserve the complete Extension Platform contract across redeploys. Explicit
 # operator environment values win; otherwise the last root-owned EnvironmentFile
 # is carried forward atomically instead of silently reverting enabled to off.
+load_relay_env_value POCKETCTL_RELEASE_OSS_READ_ROLE POCKETCTL_RELEASE_OSS_READ_ROLE POCKETCTL_RELEASE_OSS_READ_ROLE
 load_relay_env_value RELAY_EXTENSIONS RELAY_EXTENSIONS RELAY_EXTENSIONS
 RELAY_EXTENSIONS=${RELAY_EXTENSIONS:-off}
 load_relay_env_value RELAY_EXTENSION_V2 RELAY_EXTENSION_V2 RELAY_EXTENSION_V2
@@ -454,6 +455,11 @@ server {
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         access_log off;
+    }
+
+    location ^~ /releases/ {
+        proxy_pass http://127.0.0.1:${RELAY_PORT};
+        proxy_redirect off;
     }
 
     # Daemon 安装脚本（精确匹配，避免被 SPA fallback 吞掉）

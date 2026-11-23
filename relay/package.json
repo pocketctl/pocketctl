@@ -18,10 +18,12 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@alicloud/credentials": "^2.4.7",
     "@aws-sdk/client-s3": "^3.1149.0",
     "@fastify/cors": "^10.0.0",
     "@fastify/websocket": "^11.0.0",
     "@pocketctl/session-source": "file:packages/session-source-0.1.0.tgz",
+    "ali-oss": "^6.23.0",
     "bcryptjs": "^3.0.3",
     "fastify": "^5.3.0",
     "jsonwebtoken": "^9.0.3",
@@ -38,6 +40,7 @@
     "fast-uri": "^3.1.4"
   },
   "devDependencies": {
+    "@types/ali-oss": "^6.23.4",
     "@types/bcryptjs": "^2.4.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/markdown-it": "14.1.2",
