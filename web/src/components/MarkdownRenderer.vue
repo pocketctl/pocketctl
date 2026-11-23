@@ -7,7 +7,8 @@
   <div class="markdown-content" ref="rootEl">
     <div v-for="(segment, idx) in segments" :key="idx" class="md-segment">
       <!-- Block code: rendered standalone with header (lang + copy) -->
-      <div v-if="segment.type === 'code'" class="md-code-block">
+      <SessionDiagram v-if="segment.type === 'diagram'" :source="segment.content" />
+      <div v-else-if="segment.type === 'code'" class="md-code-block">
         <div class="code-header">
           <span class="code-lang">{{ segment.language || 'text' }}</span>
           <button class="code-copy" @click="copyCode(segment.content)">
@@ -32,11 +33,13 @@ import { computed, ref, inject, watch, onUnmounted } from 'vue'
 import { parseMarkdownSegments } from '../utils/markdownRenderer'
 import { sessionDocumentLinkKey, rewriteSessionDocumentLinks } from '../utils/sessionDocumentLinks'
 
-const props = defineProps<{ content: string }>()
+import SessionDiagram from './messages/SessionDiagram.vue'
+
+const props = defineProps<{ content: string; diagrams?: boolean }>()
 
 const resolveDocumentLink = inject(sessionDocumentLinkKey, undefined)
-const segments = computed(() => parseMarkdownSegments(props.content).map(segment =>
-  resolveDocumentLink && segment.type !== 'code'
+const segments = computed(() => parseMarkdownSegments(props.content, props.diagrams).map(segment =>
+  resolveDocumentLink && segment.type === 'prose'
     ? { ...segment, html: rewriteSessionDocumentLinks(segment.html, resolveDocumentLink) } : segment))
 
 const expanded = ref(new Set<number>())

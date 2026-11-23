@@ -12,7 +12,7 @@
         <MarkdownRenderer v-for="(block, index) in preview.blocks" :key="index" :content="block" class="streaming-paragraph" />
         <div class="streaming-text">{{ preview.tail }}</div>
       </template>
-      <MarkdownRenderer v-else :content="content" />
+      <MarkdownRenderer v-else :content="content" diagrams />
       <span v-if="streaming" class="blink-cursor"></span>
     </div>
   </div>

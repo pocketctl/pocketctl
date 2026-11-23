@@ -436,7 +436,7 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' ${EXTENSION_PROVIDER_CONNECT_SOURCES}wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' ${EXTENSION_PROVIDER_CONNECT_SOURCES}wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
 
     # Web 静态文件
     root /var/www/pocketctl;

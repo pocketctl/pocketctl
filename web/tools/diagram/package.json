@@ -1,0 +1,10 @@
+{
+  "name": "pocketctl-diagram-runtime",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@mermaid-js/tiny": "12.3.0"
+  }
+}
