@@ -1861,47 +1861,7 @@ func cmdDaemonStart(args []string) {
 				}
 			}
 		}
-		if evt.Type == "session_model_changed" && evt.Model != "" && evt.SessionID != "" {
-			current, _ := sm.GetSessionModel(evt.SessionID)
-			if evt.PreviousModel == "" && current != evt.Model {
-				evt.PreviousModel = current
-			}
-			if evt.Model == current {
-				// Explicit remote switches update the in-memory selection before
-				// publishing the confirmation event. Keep that correlated event.
-				if evt.Reason == protocol.TurnReasonUserRequested {
-					return []protocol.DaemonEvent{evt}
-				}
-				return nil
-			}
-			sm.SetSessionModel(evt.SessionID, evt.Model)
-			if current == "" {
-				// This is first discovery, not an explicit user model switch. Keep
-				// it durable for the session list while clients suppress the stream
-				// notice and only update their model badge.
-				evt.Reason = "initial_model"
-				return []protocol.DaemonEvent{evt}
-			}
-			logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
-			return []protocol.DaemonEvent{evt}
-		}
-		if evt.Type != "agent_text" || evt.Model == "" || evt.SessionID == "" {
-			return []protocol.DaemonEvent{evt}
-		}
-		current, _ := sm.GetSessionModel(evt.SessionID)
-		if evt.Model == current {
-			return []protocol.DaemonEvent{evt}
-		}
-		sm.SetSessionModel(evt.SessionID, evt.Model)
-		logger.Info("session model changed", "session", evt.SessionID, "model", evt.Model, "prev", current)
-		// Older agents report only on agent_text. New Codex turn_context records
-		// are handled above and therefore reach clients before this reply.
-		return []protocol.DaemonEvent{evt, {
-			Type:          "session_model_changed",
-			SessionID:     evt.SessionID,
-			Model:         evt.Model,
-			PreviousModel: current,
-		}}
+		return sm.ProjectSessionModel(evt, logger)
 	}
 
 	// Wire terminal notifications
@@ -3258,6 +3218,16 @@ func cmdDoctor() {
 // and registers/tails them under the given agentType.
 func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent, agentType string, sm *session.SessionManager, pm *watcher.ProcessMonitor, outputCh chan protocol.DaemonEvent, logger *slog.Logger, stateDirty *atomic.Bool) {
 	codexTitles := watcher.NewCodexTitleIndex()
+	var notifications *rolloutNotifications
+	if agentType == adapter.AgentCodex {
+		var err error
+		notifications, err = newRolloutNotifications()
+		if err != nil {
+			logger.Debug("rollout notifications unavailable; using periodic reads", "error", err)
+		} else {
+			defer notifications.watcher.Close()
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -3488,86 +3458,101 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 					// Tail loop: send parsed events with session_id stamped
 					ticker := time.NewTicker(1 * time.Second)
 					defer ticker.Stop()
+					var writes <-chan struct{}
+					if publishedAgent == adapter.AgentCodexDesktop && notifications != nil {
+						var unsubscribe func()
+						writes, unsubscribe = notifications.subscribe(jsonlPath)
+						defer unsubscribe()
+					}
+					titlePending := false
 					hydrating := true
 					var lastNativeTitle watcher.CodexTitle
 					var lastNativeTitleSent time.Time
 					for {
+						periodic := false
 						select {
 						case <-ctx.Done():
 							return
+						case <-writes:
 						case <-ticker.C:
-							if tailer.IsPaused() {
-								continue // D2: paused during sendToIdleTerminal, skip forwarding
-							}
-							events, rawLines, err := tailer.TailNewLines()
-							if err != nil {
-								continue
-							}
-							initialHydration := hydrating && (len(events) > 0 || len(rawLines) > 0)
-							if initialHydration {
-								if publishedAgent == adapter.AgentCodexDesktop {
-									events = codexObserverHydrationEvents(sm, events, sessionSnapshot.SessionID, sessionSnapshot.Status)
-									stateDirty.Store(true)
-								} else {
-									events = terminalHydrationEvents(events, sessionSnapshot.SessionID, terminalHydrationStatus(
-										publishedAgent, sm.SessionControlMode(sessionSnapshot.SessionID), sessionSnapshot.Status,
-									))
-								}
-								hydrating = false
-							}
-							for i := range events {
-								if events[i].SessionID == "" {
-									events[i].SessionID = sessionSnapshot.SessionID
-								}
-								if events[i].Type == "session_status" && !events[i].Resync {
-									if !observeJSONLLifecycle(sm, events[i]) {
-										continue
-									}
-									stateDirty.Store(true)
-								}
-								protocol.FinalizeAgentPlanEvent(&events[i])
-								if parserAgent == adapter.AgentClaude && events[i].Type == "sync_warning" {
-									_ = agentcontrol.RecordClaudeJSONLWarning(events[i].Reason)
-								}
-								sm.ObservePermissionEvent(events[i])
-								outputCh <- events[i]
-							}
-							// Check for title generation trigger (user + assistant messages
-							// ready). GenerateTitle queues the first usable pair; the maintenance
-							// loop retries without new lines and Relay skips existing titles.
-							hasNativeTitle := false
+							periodic = true
+						}
+						if tailer.IsPaused() {
+							continue // D2: paused during sendToIdleTerminal, skip forwarding
+						}
+						events, rawLines, err := tailer.TailNewLines()
+						if err != nil {
+							continue
+						}
+						initialHydration := hydrating && (len(events) > 0 || len(rawLines) > 0)
+						if initialHydration {
 							if publishedAgent == adapter.AgentCodexDesktop {
-								if title, ok := codexTitles.Lookup(sessionSnapshot.SessionID); ok {
-									hasNativeTitle = true
-									// Retry ephemeral delivery after registration races/reconnects,
-									// even when the idle rollout receives no new content.
-									if title != lastNativeTitle || time.Since(lastNativeTitleSent) >= 30*time.Second {
-										outputCh <- protocol.DaemonEvent{
-											Type: "session_title_update", SessionID: sessionSnapshot.SessionID,
-											Title: title.Name, TitleSource: "codex-desktop",
-											TitleUpdatedAt: title.UpdatedAt.UTC().Format(time.RFC3339Nano),
-										}
-										lastNativeTitle, lastNativeTitleSent = title, time.Now()
-									}
-								}
+								events = codexObserverHydrationEvents(sm, events, sessionSnapshot.SessionID, sessionSnapshot.Status)
+								stateDirty.Store(true)
+							} else {
+								events = terminalHydrationEvents(events, sessionSnapshot.SessionID, terminalHydrationStatus(
+									publishedAgent, sm.SessionControlMode(sessionSnapshot.SessionID), sessionSnapshot.Status,
+								))
 							}
-							if len(rawLines) > 0 && !hasNativeTitle {
-								// title 提取需 user+assistant 都有。增量 rawLines 常把两者拆到不同
-								// tick(codex discovered 早时 user_message 在一增量、agent_message 在另一
-								// 增量),ExtractFirst(当前增量)永远凑不齐 → 永不触发 GenerateTitle。
-								// 直接读全量 JSONL 提取首条 user+assistant 确保凑齐。本地 IO 不增 token
-								// (ExtractFirst 只取首条截断 200;GenerateTitle 有 MaxTitleAttempts + relay
-								// hasDefaultTitle 防重复调 DeepSeek)。
-								if jsonlPath, perr := adapter.ResolveJSONLPathFor(parserAgent, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
-									allLines := readJSONLLines(jsonlPath, 500)
-									userMsg := adapter.ExtractFirstUserMessageFor(allLines, 200, parserAgent)
-									assistantMsg := adapter.ExtractFirstAssistantMessageFor(allLines, 200, parserAgent)
-									if userMsg != "" && assistantMsg != "" {
-										sm.GenerateTitle(sessionSnapshot.SessionID, userMsg, assistantMsg)
+							hydrating = false
+						}
+						for i := range events {
+							if events[i].SessionID == "" {
+								events[i].SessionID = sessionSnapshot.SessionID
+							}
+							if events[i].Type == "session_status" && !events[i].Resync {
+								if !observeJSONLLifecycle(sm, events[i]) {
+									continue
+								}
+								stateDirty.Store(true)
+							}
+							protocol.FinalizeAgentPlanEvent(&events[i])
+							if parserAgent == adapter.AgentClaude && events[i].Type == "sync_warning" {
+								_ = agentcontrol.RecordClaudeJSONLWarning(events[i].Reason)
+							}
+							sm.ObservePermissionEvent(events[i])
+							outputCh <- events[i]
+						}
+						titlePending = titlePending || len(rawLines) > 0
+						if !periodic {
+							continue
+						}
+						// Check for title generation trigger (user + assistant messages
+						// ready). GenerateTitle queues the first usable pair; the maintenance
+						// loop retries without new lines and Relay skips existing titles.
+						hasNativeTitle := false
+						if publishedAgent == adapter.AgentCodexDesktop {
+							if title, ok := codexTitles.Lookup(sessionSnapshot.SessionID); ok {
+								hasNativeTitle = true
+								// Retry ephemeral delivery after registration races/reconnects,
+								// even when the idle rollout receives no new content.
+								if title != lastNativeTitle || time.Since(lastNativeTitleSent) >= 30*time.Second {
+									outputCh <- protocol.DaemonEvent{
+										Type: "session_title_update", SessionID: sessionSnapshot.SessionID,
+										Title: title.Name, TitleSource: "codex-desktop",
+										TitleUpdatedAt: title.UpdatedAt.UTC().Format(time.RFC3339Nano),
 									}
+									lastNativeTitle, lastNativeTitleSent = title, time.Now()
 								}
 							}
 						}
+						if titlePending && !hasNativeTitle {
+							// title 提取需 user+assistant 都有。增量 rawLines 常把两者拆到不同
+							// tick(codex discovered 早时 user_message 在一增量、agent_message 在另一
+							// 增量),ExtractFirst(当前增量)永远凑不齐 → 永不触发 GenerateTitle。
+							// 直接读全量 JSONL 提取首条 user+assistant 确保凑齐。本地 IO 不增 token
+							// (ExtractFirst 只取首条截断 200;GenerateTitle 有 MaxTitleAttempts + relay
+							// hasDefaultTitle 防重复调 DeepSeek)。
+							if jsonlPath, perr := adapter.ResolveJSONLPathFor(parserAgent, evt.Session.SessionID, evt.Session.Cwd); perr == nil {
+								allLines := readJSONLLines(jsonlPath, 500)
+								userMsg := adapter.ExtractFirstUserMessageFor(allLines, 200, parserAgent)
+								assistantMsg := adapter.ExtractFirstAssistantMessageFor(allLines, 200, parserAgent)
+								if userMsg != "" && assistantMsg != "" {
+									sm.GenerateTitle(sessionSnapshot.SessionID, userMsg, assistantMsg)
+								}
+							}
+						}
+						titlePending = false
 					}
 				})
 

@@ -305,6 +305,46 @@ export function registerSessionOrganizationRoutes(app: FastifyInstance, options:
       WHERE s.user_id=$1 AND s.session_id=$2`, [userId,id])).rows[0];
     if (!row) missing(); return (await addChildren(pool,[row]))[0];
   }));
+  // Read-only recovery for client-generated request IDs. Absence of a durable
+  // result is unknown because the original delivery could still be in flight.
+  app.get('/api/sessions/:id/message-receipts', (req, reply) => run(req, reply, async userId => {
+    reply.header('Cache-Control', 'no-store');
+    const { id } = req.params as { id: string };
+    const ids = (req.query as { ids?: unknown }).ids;
+    if (id.length > 64 || typeof ids !== 'string' || ids.length > 20 * 129) return bad('invalid receipt lookup');
+    const requestIds = [...new Set(ids.split(','))];
+    if (requestIds.length > 20 || requestIds.some(value => !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value))) bad('invalid receipt lookup');
+    const result = await pool.query(`
+      WITH owned AS (
+        SELECT session_id,user_id FROM sessions
+        WHERE user_id=$1 AND session_id=$2 AND COALESCE(is_subagent,false)=false
+      ), matched_events AS MATERIALIZED (
+        SELECT e.id, e.event_type, e.payload->>'request_id' AS request_id,
+          e.payload->>'msg_id' AS msg_id,
+          CASE WHEN e.event_type='user_text' THEN 'accepted' ELSE e.payload->>'status' END AS status
+        FROM events e JOIN owned s ON s.session_id=e.session_id
+        WHERE (e.payload->>'request_id'=ANY($3::text[]) OR e.payload->>'msg_id'=ANY($3::text[]))
+          AND COALESCE(e.payload->>'agent_id','')=''
+          AND (e.event_type='user_text' OR
+            (e.event_type='user_message_receipt' AND e.payload->>'status' IN ('accepted','rejected')))
+      )
+      SELECT requested.request_id, COALESCE(event.status,
+        CASE WHEN admission.outcome IN ('accepted','rejected') THEN admission.outcome END,
+        'unknown') AS status
+      FROM owned s
+      CROSS JOIN unnest($3::text[]) requested(request_id)
+      LEFT JOIN session_message_admissions admission ON admission.user_id=s.user_id
+        AND admission.request_id=requested.request_id
+        AND COALESCE(admission.canonical_session_id,admission.session_id)=s.session_id
+      LEFT JOIN LATERAL (
+        SELECT e.status FROM matched_events e
+        WHERE e.request_id=requested.request_id OR e.msg_id=requested.request_id
+        ORDER BY (e.event_type='user_message_receipt') DESC,e.id DESC LIMIT 1
+      ) event ON true
+    `, [userId,id,requestIds]);
+    if (!result.rows.length) missing();
+    return { receipts: result.rows };
+  }));
   app.put('/api/sessions/:id/project', (req, reply) => run(req, reply, async userId => {
     const id = (req.params as any).id; const target = (req.body as any)?.project_id;
     if (target !== null && !validProject(target)) bad('invalid project_id');

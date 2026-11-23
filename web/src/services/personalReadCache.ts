@@ -11,6 +11,7 @@ const enc = new TextEncoder()
 const digest = async (value: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(value))), n => n.toString(16).padStart(2, '0')).join('')
 
 export class PersonalReadCache {
+  readonly evictions = { bytes: 0, histories: 0, records: 0, expired: 0 }
   private coordinationAvailable = true
   private generation = 0
   private revision = 0
@@ -48,6 +49,9 @@ export class PersonalReadCache {
   onInvalidate(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   ticket(): CacheTicket { return { revision: this.revision, generation: this.generation, scope: this.scope, barrier: this.barrier } }
   valid(ticket: CacheTicket) { return ticket.revision === this.revision && this.authorized(ticket) }
+  canShowMemoryPreview(ticket: CacheTicket) {
+    return this.valid(ticket) && !!this.key && this.expires > Date.now()
+  }
   private authorized(ticket: CacheTicket) {
     let current = false
     try { current = this.scopeCurrent() } catch {}
@@ -162,6 +166,7 @@ export class PersonalReadCache {
       await new Promise<void>((resolve, reject) => {
         const tx = db.transaction('snapshots', 'readwrite'), store = tx.objectStore('snapshots')
         // One serialized IDB transaction enforces global bounds across tabs.
+        const discarded = { bytes: 0, histories: 0, records: 0, expired: 0 }
         const all = store.getAll()
         all.onsuccess = () => {
           if (context.revision !== this.revision || !this.valid(ticket)) { tx.abort(); return }
@@ -170,11 +175,24 @@ export class PersonalReadCache {
           let size = 0, count = 0, history = 0
           for (const item of rows) {
             size += item.body.byteLength; count++; if (item.kind === 'history') history++
-            if (item.scope !== row.scope || item.keyId !== row.keyId || Date.now() - item.at > TTL || size > MAX_BYTES || count > 128 || (item.kind === 'history' && history > 20)) store.delete(item.id)
-            else if (item.id === row.id) store.put(row)
+            if (item.scope !== row.scope || item.keyId !== row.keyId) {
+              store.delete(item.id)
+              continue
+            }
+            const reason = Date.now() - item.at > TTL ? 'expired'
+              : size > MAX_BYTES ? 'bytes' : count > 128 ? 'records'
+              : item.kind === 'history' && history > 20 ? 'histories' : undefined
+            if (reason) {
+              discarded[reason]++
+              store.delete(item.id)
+            } else if (item.id === row.id) store.put(row)
           }
         }
-        tx.oncomplete = () => resolve(); tx.onabort = tx.onerror = () => reject(tx.error)
+        tx.oncomplete = () => {
+          for (const key of Object.keys(discarded) as (keyof typeof discarded)[]) this.evictions[key] += discarded[key]
+          resolve()
+        }
+        tx.onabort = tx.onerror = () => reject(tx.error)
       })
     } catch { /* Storage/crypto is optional; never write plaintext as fallback. */ }
   }

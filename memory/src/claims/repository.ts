@@ -460,9 +460,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
             const provenance = evidence.evidenceKind === 'event'
               ? await client.query(`
                   SELECT 1 FROM work_episodes e
-                  JOIN source_events s
-                    ON s.installation_id = e.installation_id
-                   AND s.source_event_id = $3
+                  JOIN LATERAL shared.memory_native_evidence_handle(e.installation_id,$3,NULL) s ON TRUE
                    AND s.session_id = e.session_id
                    AND s.turn_id = e.turn_id
                   WHERE e.installation_id = $1 AND e.episode_id = $2
@@ -470,9 +468,7 @@ export function createClaimRepository(pool: pg.Pool, options: { tombstoneHmacKey
               : evidence.evidenceKind === 'artifact'
                 ? await client.query(`
                     SELECT 1 FROM work_episodes e
-                    JOIN source_artifacts a
-                      ON a.installation_id = e.installation_id
-                     AND a.artifact_id = $3
+                    JOIN LATERAL shared.memory_native_evidence_handle(e.installation_id,NULL,$3) a ON TRUE
                      AND a.session_id = e.session_id
                      AND a.turn_id = e.turn_id
                     WHERE e.installation_id = $1 AND e.episode_id = $2
@@ -769,16 +765,14 @@ async function insertEvidenceForVersion(
     let occurredAt = episode.terminal_at ?? episode.updated_at
     if (evidence.manifest.kind === 'event' && evidence.manifest.source_event_id) {
       const source = await client.query<{ occurred_at: Date }>(`
-        SELECT occurred_at FROM source_events
-        WHERE installation_id = $1 AND source_event_id = $2
+        SELECT occurred_at FROM shared.memory_native_evidence_handle($1,$2,NULL)
       `, [input.installationId, evidence.manifest.source_event_id])
       if (!source.rows[0]) return 0
       occurredAt = source.rows[0].occurred_at
     }
     if (evidence.manifest.kind === 'artifact' && evidence.manifest.artifact_id) {
       const artifact = await client.query<{ occurred_at: Date }>(`
-        SELECT occurred_at FROM source_artifacts
-        WHERE installation_id = $1 AND artifact_id = $2
+        SELECT occurred_at FROM shared.memory_native_evidence_handle($1,NULL,$2)
       `, [input.installationId, evidence.manifest.artifact_id])
       if (!artifact.rows[0]) return 0
       occurredAt = artifact.rows[0].occurred_at

@@ -7,7 +7,7 @@ import {loadSourceContextSet,requireSourceContext} from '../sources/source-conte
 
 type DB=Pick<pg.PoolClient,'query'>
 const digest=(value:unknown)=>canonicalPayloadHash(value).toString('hex')
-const eligibleErrors=new Set(['processing_pin_expired_or_unavailable','source_store_timeout','source_store_unavailable'])
+const eligibleErrors=new Set(['processing_pin_expired_or_unavailable','source_store_timeout','projection_read_page_timeout','source_store_unavailable'])
 interface Entry {jobId:string;installationId:string;payloadHash:string;claimEpoch:string;attempts:number;error:string;sourceHash:string}
 export interface SourceProjectionRepair {version:1;kind:'memory-source-projection-repair';database:Record<string,unknown>;entries:Entry[]}
 const identity=async(db:DB)=>(await db.query('SELECT current_database() AS database,current_user AS role,inet_server_addr()::text AS address,inet_server_port() AS port')).rows[0]
@@ -37,7 +37,8 @@ async function currentSource(db:DB,row:any){
  // Reference repair, shadow, compilation and every model job stay out of scope.
  if(row.job_type!=='project_shared_source'||root?.kind!=='relay_event'||scope?.ownerScopeKind!=='personal'||scope.installationId!==row.installation_id
   ||typeof root.key!=='string'||typeof scan!=='string'||typeof cursor!=='string'
-  ||Object.keys(row.payload).some(k=>!['scope','root','distribution_scan','target_cursor','source_wait_count'].includes(k)))throw Error('source_repair_unsupported_job')
+  ||('projection_budget_step' in row.payload&&(!Number.isInteger(row.payload.projection_budget_step)||row.payload.projection_budget_step<1||row.payload.projection_budget_step>8))
+  ||Object.keys(row.payload).some(k=>!['scope','root','distribution_scan','target_cursor','source_wait_count','projection_budget_step'].includes(k)))throw Error('source_repair_unsupported_job')
  const contexts=await loadSourceContextSet(db,row.installation_id,root,scan,'personal-projection')
  requireSourceContext(contexts,scope,cursor)
  if(!contexts.contexts.some(c=>c.cursorKey===cursor&&c.mode==='shared-active'))throw Error('source_repair_mode_changed')

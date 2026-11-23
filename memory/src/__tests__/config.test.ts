@@ -94,6 +94,11 @@ describe('memory config', () => {
     expect(loadMemoryConfig(baseEnv()).compactSnapshotInstallations).toEqual([])
     expect(loadMemoryConfig(baseEnv({MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS:first})).compactSnapshotInstallations).toEqual([first.toLowerCase()])
     expect(() => loadMemoryConfig(baseEnv({MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS:'invalid'}))).toThrow(/MEMORY_COMPACT_SNAPSHOT_INSTALLATIONS/)
+    expect(loadMemoryConfig(baseEnv()).projectionScanJobIds).toEqual([])
+    expect(loadMemoryConfig(baseEnv({MEMORY_PROJECTION_SCAN_JOB_IDS:first})).projectionScanJobIds).toEqual([first.toLowerCase()])
+    expect(() => loadMemoryConfig(baseEnv({MEMORY_PROJECTION_SCAN_JOB_IDS:'invalid'}))).toThrow(/MEMORY_PROJECTION_SCAN_JOB_IDS/)
+    expect(loadMemoryConfig(baseEnv()).projectionScanInstallations).toEqual([])
+    expect(loadMemoryConfig(baseEnv({MEMORY_PROJECTION_SCAN_INSTALLATIONS:first})).projectionScanInstallations).toEqual([first.toLowerCase()])
     expect(loadMemoryConfig(baseEnv()).pageDerivedWriteInstallations).toEqual([])
     expect(loadMemoryConfig(baseEnv({MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS:first})).pageDerivedWriteInstallations).toEqual([first.toLowerCase()])
     expect(() => loadMemoryConfig(baseEnv({MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS:'invalid'}))).toThrow(/MEMORY_PAGE_DERIVED_WRITE_INSTALLATIONS/)
@@ -106,7 +111,8 @@ describe('memory config', () => {
     const chosen={MEMORY_DATABASE_NAMESPACE:'memory',MEMORY_SHARED_SOURCE_PROFILE:'personal-relay-only',MEMORY_INSTALLATION_ALLOWLIST:personal+','+organization}
     expect(loadMemoryConfig(baseEnv(chosen)).sharedSourceProfile).toBe('personal-relay-only')
     expect(loadMemoryConfig(baseEnv()).sharedSourceProfile).toBeUndefined()
-    for(const overrides of [{...chosen,MEMORY_DATABASE_NAMESPACE:'public'},{...chosen,MEMORY_INSTALLATION_ALLOWLIST:''},{...chosen,MEMORY_SHARED_SOURCE_PROFILE:'all'}])
+    expect(()=>loadMemoryConfig(baseEnv({...chosen,MEMORY_DATABASE_NAMESPACE:'public'}))).toThrow(/MEMORY_DATABASE_NAMESPACE/)
+    for(const overrides of [{...chosen,MEMORY_INSTALLATION_ALLOWLIST:''},{...chosen,MEMORY_SHARED_SOURCE_PROFILE:'all'}])
       expect(()=>loadMemoryConfig(baseEnv(overrides))).toThrow(/MEMORY_SHARED_SOURCE_PROFILE/)
   })
 

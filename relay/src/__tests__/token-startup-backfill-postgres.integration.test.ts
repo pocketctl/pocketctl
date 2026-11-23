@@ -28,6 +28,16 @@ suite('startup backfill on PostgreSQL', () => {
     expect(await backfillSessionTokens(pool)).toBe(1)
     expect((await pool.query("SELECT total_tokens,tok_input,tok_output FROM sessions WHERE session_id='token-test'")).rows[0]).toEqual({total_tokens:'9',tok_input:'7',tok_output:'2'})
   })
+  test('only root output supplies missing session model and effort', async () => {
+    await pool.query(`INSERT INTO events(session_id,event_type,payload,created_at) VALUES
+      ('token-test','agent_text','{"model":"astra"}','2026-11-20'),
+      ('token-test','agent_text','{"model":"glm","agent_id":"sdk-child"}','2026-11-21'),
+      ('token-test','session_meta','{"model":"glm","effort":"high","is_subagent":true}','2026-11-21'),
+      ('token-test','session_model_changed','{"model":"glm","actor_scope":"subagent"}','2026-11-21')`)
+    expect(await backfillSessionModel(pool)).toBe(1)
+    expect((await pool.query("SELECT model, effort FROM sessions WHERE session_id='token-test'")).rows[0])
+      .toEqual({ model: 'astra', effort: null })
+  })
   test('repairs multiple pages, preserves source priority and newer effort, and never overwrites populated metadata', async () => {
     await pool.query(`INSERT INTO sessions(session_id,daemon_id) SELECT 'meta-'||lpad(i::text,3,'0'),'backfill-test' FROM generate_series(1,55) i`)
     await pool.query(`INSERT INTO events(session_id,event_type,payload,created_at)

@@ -1,3 +1,5 @@
+import {SESSION_AUTHORITY_MIGRATION} from './migrations/shared-db/session-authority-contract.js'
+import {EVIDENCE_SESSION_MIGRATION} from './migrations/shared-db/evidence-session-migration.js'
 import {SNAPSHOT_PROVENANCE_MIGRATION} from './migrations/shared-db/snapshot-provenance-migration.js'
 import {REVIEWER_WINDOW_MIGRATION} from './governance/reviewer-window-migration.js'
 import {TRANSPORT_METADATA_MIGRATION} from './sources/transport-metadata-migration.js'
@@ -2314,6 +2316,23 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   // Commit ADD COLUMN before the validation scan so normal reads and writes
   // can continue. An interrupted scan resumes at this migration.
   {version:105, statements:['ALTER TABLE source_events VALIDATE CONSTRAINT source_events_snapshot_format']},
+  // A historical UUID is optional audit metadata. New Team witnesses bind to
+  // the native source root, participant scope and immutable business key.
+  {version:106, statements:[
+    `ALTER TABLE memory_team_semantic_witnesses
+      DROP CONSTRAINT memory_team_semantic_witnesses_source_event_id_fkey,
+      ALTER COLUMN source_event_id DROP NOT NULL`,
+    // Keep each role's FK to its semantic group. Remove only the duplicate
+    // reference into the retired transport, irrespective of PG-generated names.
+    `DO $$ DECLARE r RECORD; BEGIN
+      FOR r IN SELECT conname FROM pg_constraint WHERE conrelid='memory_team_semantic_publications'::regclass
+       AND contype='f' AND confrelid='source_events'::regclass LOOP
+       EXECUTE format('ALTER TABLE memory_team_semantic_publications DROP CONSTRAINT %I',r.conname);
+      END LOOP;
+     END $$`,
+  ]},
+  EVIDENCE_SESSION_MIGRATION,
+  SESSION_AUTHORITY_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
@@ -2350,7 +2369,7 @@ export async function applyMemorySchema(pool: pg.Pool,options:{namespace?:Memory
           }
           // This replacement pins its own search path. Leave unrelated
           // shared-contract functions at their existing narrower settings.
-          if(namespace==='memory'&&![CURATION_NATIVE_AUTHORITY_MIGRATION.version,CONTEXT_NATIVE_RECEIPT_MIGRATION.version,SNAPSHOT_PROVENANCE_MIGRATION.version,105].includes(migration.version))await pinMemoryFunctions(client)
+          if(namespace==='memory'&&![CURATION_NATIVE_AUTHORITY_MIGRATION.version,CONTEXT_NATIVE_RECEIPT_MIGRATION.version,SNAPSHOT_PROVENANCE_MIGRATION.version,105,106].includes(migration.version))await pinMemoryFunctions(client)
           await client.query(
             'INSERT INTO memory_schema_migrations (version) VALUES ($1)',
             [migration.version],

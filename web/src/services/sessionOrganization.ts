@@ -60,3 +60,9 @@ export const archiveSession = (id: string, archived: boolean) => organizationReq
 export const markSessionSeen = (id: string) => organizationRequest<{ seen: boolean }>(`/api/sessions/${encodeURIComponent(id)}/seen`, { method: 'PUT' })
 export const getSessionSummary = (id: string) => organizationRequest<any>(`/api/sessions/${encodeURIComponent(id)}/summary`)
 export const reorderSession = (bucket: string, sessionId: string, beforeId: string | null, expectedRevision: number) => organizationRequest<{ revision: number }>('/api/session-order', { method: 'PUT', body: JSON.stringify({ bucket, session_id: sessionId, before_id: beforeId, expected_revision: expectedRevision }) })
+
+export type SessionReceiptStatus = 'accepted' | 'rejected' | 'unknown'
+export const getSessionMessageReceipts = (session: string, ids: string[], signal?: AbortSignal) =>
+  organizationRequest<{ receipts: { request_id: string; status: SessionReceiptStatus }[] }>(
+    `/api/sessions/${encodeURIComponent(session)}/message-receipts?${new URLSearchParams({ ids: ids.join(',') })}`, { signal },
+  )

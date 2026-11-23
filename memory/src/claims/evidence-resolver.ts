@@ -87,9 +87,9 @@ export async function captureEvidenceReferences(
      WHEN e.artifact_id IS NOT NULL THEN CASE WHEN jsonb_typeof(artifact.details->'text')='string' THEN left(artifact.details->>'text',64000) ELSE NULL END
      WHEN jsonb_typeof(event.payload->'text')='string' THEN left(event.payload->>'text',64000) ELSE NULL END AS source_text`}
    FROM knowledge_evidence e
-   LEFT JOIN source_artifacts artifact ON artifact.installation_id=e.installation_id AND artifact.artifact_id=e.artifact_id
+   ${prepared?'':`LEFT JOIN source_artifacts artifact ON artifact.installation_id=e.installation_id AND artifact.artifact_id=e.artifact_id
    LEFT JOIN source_events event ON event.installation_id=e.installation_id
-     AND event.source_event_id=CASE WHEN e.artifact_id IS NOT NULL THEN artifact.source_event_id ELSE e.source_event_id END
+     AND event.source_event_id=CASE WHEN e.artifact_id IS NOT NULL THEN artifact.source_event_id ELSE e.source_event_id END`}
    WHERE e.installation_id=$1 AND e.evidence_id=ANY($2::uuid[])
    ORDER BY e.evidence_id FOR SHARE OF e`,[installationId,evidence.map(ref=>ref.evidenceId)])).rows
  const byId=new Map(rows.map(row=>[row.evidence_id,row]))

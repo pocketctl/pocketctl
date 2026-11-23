@@ -129,7 +129,7 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
    IF d.covers_event_append THEN projection_priority=${APPEND_PROJECTION_PRIORITY};END IF;
    FOR item IN SELECT * FROM shared.memory_source_distribution_targets t WHERE t.scan_id=p_scan
     AND t.cursor_key COLLATE "C">d.dispatch_cursor COLLATE "C" ORDER BY t.cursor_key COLLATE "C" LIMIT p_limit LOOP
-    IF item.state='current' THEN
+    IF item.state='current' AND item.target_mode='shared-active' AND p_kind IN('team_collaboration','team_delivery') THEN
      INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
       VALUES(gen_random_uuid(),item.installation_id,'project_shared_source',
        'shared-source:'||p_scan::text||':'||encode(sha256(convert_to(item.cursor_key,'UTF8')),'hex'),projection_priority,
@@ -182,9 +182,6 @@ export const SHARED_SOURCE_DISTRIBUTION_FUNCTIONS=[
   LANGUAGE SQL STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
    SELECT jsonb_build_object('scanId',d.scan_id,'controlRevision',d.control_revision::text,'workRevision',d.work_revision::text,
     'contentPending',d.work_revision<>w.revision,
-    'offlineBatch',(SELECT t.offline_batch FROM shared.memory_source_distribution_targets t JOIN shared.memory_projection_policies p USING(installation_id)
-      WHERE d.source_kind='relay_event' AND t.scan_id=d.scan_id AND t.installation_id=p_installation
-       AND t.offline_batch->>'mode'=p.mode LIMIT 1),
     'targetCount',(SELECT count(*)::text FROM shared.memory_source_distribution_targets t WHERE t.scan_id=d.scan_id AND t.installation_id=p_installation))
    FROM shared.memory_source_distributions d JOIN shared.memory_source_work w USING(source_kind,root_key)
    -- Scope enumeration and content completion are different proofs. Personal

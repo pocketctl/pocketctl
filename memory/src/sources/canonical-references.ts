@@ -1,13 +1,14 @@
+import {scanRelayProjectionPage} from './relay-projection-scan.js'
 import {compactSnapshotFields,snapshotProvenanceSql} from './snapshot-provenance.js'
 import {planOfflinePage,type OfflineSeal,type OfflineBasis} from './offline-projection.js'
 import {ProjectionTiming,observeProjectionStep,commitOutcomeUnknown,ProjectionLockBusy,recordProjectionRollback} from './projection-diagnostics.js'
 import type pg from 'pg'
-import {JobDeferredError,JobTerminalError} from '../jobs/types.js'
+import {JobDeferredError,JobTerminalError,type JobFence} from '../jobs/types.js'
 import {runSelectedSourceTransaction,SelectedSourceLockBusy,SelectedSourceTransactionUnavailable} from './processing-pins.js'
 import {canonicalJsonString,canonicalPayloadHash,createPostgresSharedSourceReader,SourceUnavailableError,teamReaderProjectionKey,type SourceHead,type SourceRoot,type SourceScope,type SourceVersion} from '@pocketctl/session-source'
 import {createObservedSourceReader} from './observed-reader.js'
 import {sourceConnectionKey,sourcePoolContext} from './pool-context.js'
-import {sourceExecutionBranchFor,sourceExecutionTokenFor,guardSourceExecutionCommit,completeSourceProjection} from './source-execution.js'
+import {sourceExecutionBranchFor,sourceExecutionTokenFor,protectSourceExecutionBodies,guardSourceExecutionCommit,completeSourceProjection} from './source-execution.js'
 import {createObservedPersonalMetadataReader} from './observed-reader.js'
 import {personalMetadataEnvelope,type MetadataScopeSeal} from './source-projection-admission.js'
 import {bindHistoricalOriginals} from './historical-originals.js'
@@ -35,15 +36,26 @@ function requireExecution(pool:pg.Pool,installationId:string):void{
 }
 /** Authoritative heads are prepared before BEGIN. The opaque token prevents
  * a caller from substituting an invented hash, identity, timestamp or scope. */
-export async function prepareCanonicalReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,options:{keys?:readonly string[];cursor?:string;limit?:number;expectedVersion?:SourceVersion}={}):Promise<CanonicalReferencePage>{
+export async function prepareCanonicalReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,options:{keys?:readonly string[];cursor?:string;limit?:number;expectedVersion?:SourceVersion;scanCandidates?:boolean;candidateLimit?:number}={}):Promise<CanonicalReferencePage>{
  scope=structuredClone(scope);root=structuredClone(root);options=structuredClone(options)
  requireExecution(pool,scope.installationId)
  if(root.kind==='legacy_archive'||options.keys&&(options.cursor!==undefined||options.limit!==undefined))throw Error('canonical_reference_request_invalid')
  const reader=createObservedSourceReader(pool,options.expectedVersion?undefined:sourcePoolContext(pool).archive)
+ if(options.scanCandidates){
+  if(root.kind!=='relay_event'||scope.ownerScopeKind!=='personal'||options.keys||options.expectedVersion)throw Error('canonical_reference_request_invalid')
+  // Retention checks can inspect a legacy hot header. Acquire the same
+  // ordinary processing pin before enumeration, even for an all-denied page.
+  const current=await reader.checkCurrent(scope,root)
+  if(current.state!=='current')throw new SourceUnavailableError(current.state)
+  await protectSourceExecutionBodies(pool,scope,root,current.version)
+  const scan=await scanRelayProjectionPage(pool,scope,root,options.cursor,options.limit??64,options.candidateLimit)
+  if(canonicalJsonString(scan.version)!==canonicalJsonString(current.version))throw new SourceUnavailableError('changed')
+  return prepareReferencePage(pool,scope,root,reader,{cursor:options.cursor,keys:scan.keys,scannedRange:scan})
+ }
  return prepareReferencePage(pool,scope,root,reader,options)
 }
 
-async function prepareReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,reader:ReturnType<typeof createPostgresSharedSourceReader>,options:{keys?:readonly string[];cursor?:string;limit?:number;expectedVersion?:SourceVersion;historicalRange?:{version:SourceVersion;nextCursor?:string}}):Promise<CanonicalReferencePage>{
+async function prepareReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRoot,reader:ReturnType<typeof createPostgresSharedSourceReader>,options:{keys?:readonly string[];cursor?:string;limit?:number;expectedVersion?:SourceVersion;scannedRange?:{version:SourceVersion;nextCursor?:string}}):Promise<CanonicalReferencePage>{
  if(options.expectedVersion){
   if(!options.keys)throw Error('canonical_reference_request_invalid')
   const current=await reader.checkCurrent(scope,root,options.expectedVersion)
@@ -52,11 +64,12 @@ async function prepareReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRo
  const repair=options.expectedVersion
  if(repair&&(!options.keys?.length||options.keys.length>ORIGINAL_REPAIR_MAX_ROWS||new Set(options.keys).size!==options.keys.length))
   throw Error('canonical_reference_request_invalid')
- const page=options.historicalRange
-  ? { ...(options.keys?.length?await reader.getHeads(scope,root,options.keys):{heads:[],version:options.historicalRange.version}),
-   nextCursor:options.historicalRange.nextCursor }
+ const page=options.scannedRange
+  ? { ...(options.keys?.length?await reader.getHeads(scope,root,options.keys):{heads:[],version:options.scannedRange.version}),
+   nextCursor:options.scannedRange.nextCursor }
   :options.keys?await reader.getHeads(scope,root,repair?options.keys.slice(0,ORIGINAL_REPAIR_PAGE_SIZE):options.keys)
   :await reader.listHeads(scope,root,{cursor:options.cursor,limit:options.limit??64})
+ if(options.scannedRange&&canonicalJsonString(page.version)!==canonicalJsonString(options.scannedRange.version))throw new SourceUnavailableError('changed')
  const heads:SourceHead[]=[],payloads:Record<string,unknown>[]=[]
  const readPage=async(current:{heads:SourceHead[];version:SourceVersion})=>{
   if(repair&&canonicalJsonString(current.version)!==canonicalJsonString(repair))throw new SourceUnavailableError('changed')
@@ -91,7 +104,7 @@ async function prepareReferencePage(pool:pg.Pool,scope:SourceScope,root:SourceRo
  }
  const token=Object.freeze({})
  const nextCursor='nextCursor'in page&&typeof page.nextCursor==='string'?page.nextCursor:undefined
- pages.set(token,{pool,execution:sourceExecutionTokenFor(pool,scope.installationId),scope:structuredClone(scope),root:structuredClone(root),heads,version:structuredClone(page.version),payloads,cursor:options.cursor,nextCursor,enumerated:!options.keys||!!options.historicalRange})
+ pages.set(token,{pool,execution:sourceExecutionTokenFor(pool,scope.installationId),scope:structuredClone(scope),root:structuredClone(root),heads,version:structuredClone(page.version),payloads,cursor:options.cursor,nextCursor,enumerated:!options.keys||!!options.scannedRange})
  return Object.freeze({token,count:heads.length,...(nextCursor?{nextCursor}:{}),hasMore:nextCursor!==undefined})
 }
 
@@ -148,9 +161,9 @@ export async function preparePersonalMetadataReferencePage(pool:pg.Pool,scope:So
  return Object.freeze({token,count:heads.length,...(view.nextAfter?{nextCursor:view.nextAfter}:{}),hasMore:!view.exhausted})
 }
 
-export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false,batchDerived=false,compactSnapshot=false){
+export async function persistPersonalMetadataReferencePage(pool:pg.Pool,page:CanonicalReferencePage,stabilizationMs?:number,signal?:AbortSignal,historicalCompile=false,batchDerived=false,compactSnapshot=false,retryFence?:JobFence){
  const p=pages.get(page.token);if(!p?.metadata)throw Error('canonical_reference_token_invalid')
- const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile,batchDerived,compactSnapshot})
+ const references=await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs,signal,historicalCompile,batchDerived,compactSnapshot,retryFence})
  return {references,contextReady:p.metadata.contextReady===true,frozenComplete:p.metadata.frozenComplete===true}
 }
 
@@ -189,7 +202,7 @@ export async function completeReadyCanonicalProjection(pool:pg.Pool,scope:Source
 
 /** Bounded metadata-only physical transaction. It neither copies a body nor
  * rewrites an existing UUID, origin, original digest or provenance. */
-type PersistOptions={compactSnapshot?:boolean;batchDerived?:boolean;historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
+type PersistOptions={retryFence?:JobFence;compactSnapshot?:boolean;batchDerived?:boolean;historicalCompile?:boolean;project?:boolean;stabilizationMs?:number;checkpoint?:boolean;signal?:AbortSignal;repair?:{version:SourceVersion;originalIds:ReadonlyMap<string,string>};reuseOriginalsAtVersion?:SourceVersion}
 export async function persistCanonicalReferencePage(pool:pg.Pool,page:CanonicalReferencePage,options:PersistOptions={}):Promise<CanonicalReference[]>{
  return persistReferencePage(pool,page,options)
 }
@@ -273,6 +286,7 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
   }
   const contextKey=canonicalPayloadHash(scope).toString('hex')
   let checkpointDuplicate=false
+ let advancesRetryCursor=false
   if(options.checkpoint){
    timing.enter('checkpoint')
    const current=(await selectedLockQuery(`SELECT source_version,next_cursor,state${prepared.metadata?.prior&&Object.hasOwn(prepared.metadata.prior as object,'offline_basis')?',offline_basis':''} FROM memory_canonical_projection_progress
@@ -283,6 +297,17 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
     if(canonicalJsonString(current??null)!==canonicalJsonString(prepared.metadata.prior))throw Error('canonical_reference_cursor_changed')
    }
    const same=current&&canonicalJsonString(current.source_version)===canonicalJsonString(version)
+   // Only a committed forward step in the same scan clears failures. A
+   // version restart, replay or an empty tail cannot renew the retry budget.
+   const m=prepared.metadata
+   if(m){
+    const priorWave=current?.source_version?.metadataWave
+    advancesRetryCursor=!m.offline&&!m.exhausted&&m.wave.phase==='scanning'&&!!m.nextAfter
+     &&(!current||priorWave?.phase==='scanning'&&priorWave.through===m.wave.through
+       &&priorWave.scopeHash===m.wave.scopeHash&&priorWave.controlRevision===m.wave.controlRevision
+       &&canonicalJsonString(priorWave.startVersion)===canonicalJsonString(m.wave.startVersion))
+     &&BigInt(m.nextAfter!)>BigInt(priorWave?.after??0)
+   }else advancesRetryCursor=!!prepared.nextCursor&&(!current||same&&prepared.cursor===current.next_cursor)
    // Metadata derives its final finite-wave state only after the current
    // authority read below. An old ready vector can require a new scanning
    // checkpoint, even when it equals this page's selected version.
@@ -456,6 +481,12 @@ async function persistReferencePage(pool:pg.Pool,page:CanonicalReferencePage,opt
     DO UPDATE SET ${offlineBasis?'offline_basis=EXCLUDED.offline_basis,':''}source_version=EXCLUDED.source_version,next_cursor=EXCLUDED.next_cursor,state=EXCLUDED.state,updated_at=clock_timestamp()`,
     [scope.installationId,root.kind,root.key,contextKey,JSON.stringify(finalVersion),finalCursor,finalState,...(offlineBasis?[JSON.stringify(offlineBasis)]:[])])
   }
+  if(options.retryFence&&advancesRetryCursor&&!checkpointDuplicate){
+   const fence=options.retryFence
+   await query(`UPDATE memory_jobs SET attempts=1 WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3
+    AND installation_id=$4 AND job_type='project_shared_source' AND state='running' AND attempts>1
+    AND claim_expires_at>clock_timestamp()`,[fence.jobId,fence.claimedBy,fence.claimEpoch,scope.installationId])
+  }
   if(options.checkpoint&&!team&&(prepared.metadata?prepared.metadata.contextReady:!prepared.nextCursor)){
    timing.enter('complete_watermark')
    if(historical)await historical.complete(version)
@@ -575,7 +606,7 @@ export async function projectHistoricalPersonalPage(pool:pg.Pool,input:Historica
   const cursorScope=canonicalPayloadHash({scope,root}).toString('hex')
   const boundary=raw.find(row=>!row.eligible)?.id??(keys.length===pageSize?keys.at(-1):undefined)
   const physicalCursor=boundary?Buffer.from(canonicalJsonString({v:1,scope:cursorScope,after:boundary,version})).toString('base64url'):undefined
-  const page=ready?undefined:await prepareReferencePage(pool,scope,root,reader,{cursor,keys,historicalRange:{version,nextCursor:physicalCursor}}).catch(error=>{
+  const page=ready?undefined:await prepareReferencePage(pool,scope,root,reader,{cursor,keys,scannedRange:{version,nextCursor:physicalCursor}}).catch(error=>{
    if(error instanceof SourceUnavailableError&&error.code==='source_store_unavailable'&&sourceSqlState)
     throw new SourceUnavailableError('source_store_'+sourceSqlState)
    throw error

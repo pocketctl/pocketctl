@@ -53,9 +53,14 @@ test('abort after a committed page forbids the next progress read and body IO',a
  const f=fixture();io.persist.mockImplementation(async()=>{f.controller.abort();return{contextReady:false}})
  await expect(f.run()).rejects.toThrow('canonical_projection_aborted');expect(io.prepare).toHaveBeenCalledOnce();expect(f.pool.query).toHaveBeenCalledOnce()
 })
-test('generic Team and shadow execution retain their existing single-page handlers',async()=>{
- const f=fixture();f.job.payload.root={kind:'team_collaboration',key:'team:1'};await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
- expect(io.prepare).not.toHaveBeenCalled();expect(io.genericPrepare).toHaveBeenCalledOnce();expect(io.genericPersist).toHaveBeenCalledOnce()
+test('Team publishes from its native group and shadow keeps its single-page handler',async()=>{
+ const f=fixture();f.job.payload.root={kind:'team_collaboration',key:'team:1'}
+ await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
+ expect(io.team).toHaveBeenCalledOnce();expect(io.teamPersist).not.toHaveBeenCalled()
+ const publication={disposition:'legacy_related'}
+ io.team.mockResolvedValue(publication);await f.run()
+ expect(io.teamPersist).toHaveBeenCalledWith(f.pool,publication,undefined)
+ expect(io.genericPrepare).not.toHaveBeenCalled();expect(io.genericPersist).not.toHaveBeenCalled()
  const g=fixture();io.branch.mockReturnValue('canonical-shadow');await g.run();expect(io.shadow).toHaveBeenCalledOnce();expect(io.prepare).not.toHaveBeenCalled()
 })
 
@@ -139,7 +144,7 @@ test('a fresh claim reduces the page after a transaction budget overrun and reta
  const progress={state:'scanning',source_version:{content:'1'},next_cursor:'durable-cursor'}
  const f=fixture([progress]);f.job.last_error_code='canonical_reference_budget_exceeded';f.job.attempts=3
  await expect(f.run()).rejects.toBeInstanceOf(JobDeferredError)
- expect(io.genericPrepare.mock.calls[0][3]).toEqual({limit:16,cursor:'durable-cursor'})
+ expect(io.genericPrepare.mock.calls[0][3]).toEqual({limit:16,cursor:'durable-cursor',scanCandidates:false})
  expect(io.load.mock.calls[0][3]).toBe(scan)
 })
 
@@ -148,7 +153,7 @@ test('missing page hash restarts through the version-locked ordinary reader', as
  io.prepare.mockRejectedValueOnce(new SourceUnavailableError('body_hash_unavailable'))
  io.genericPrepare.mockResolvedValueOnce({token:{}, count:1, hasMore:false})
  await f.run()
- expect(io.genericPrepare).toHaveBeenCalledWith(f.pool, scope, root, {limit:64, cursor:undefined})
+ expect(io.genericPrepare).toHaveBeenCalledWith(f.pool, scope, root, {limit:64, cursor:undefined,scanCandidates:false})
  expect(io.genericPersist).toHaveBeenCalledOnce()
  expect(io.persist).not.toHaveBeenCalled()
 })
@@ -161,4 +166,28 @@ test('an unavailable or corrupt archive cannot advance the projection checkpoint
  await expect(f.run()).rejects.toBe(denied)
  expect(io.genericPersist).not.toHaveBeenCalled()
  expect(io.persist).not.toHaveBeenCalled()
+})
+
+test('only the selected installation enters candidate paging on ordinary fallback',async()=>{
+ const f=fixture()
+ for(const allowlist of [[],[scan],[inst]]){
+  io.prepare.mockRejectedValueOnce(new SourceUnavailableError('source_metadata_proof_unavailable'))
+  io.genericPrepare.mockResolvedValueOnce({token:{},count:0,hasMore:false})
+  await createCanonicalProjectionHandler(f.pool,{projectionScanInstallations:allowlist})(f.job,f.controller.signal,{fence:{} as any})
+ }
+ expect(io.genericPrepare.mock.calls.map(c=>c[3].scanCandidates)).toEqual([false,false,true])
+})
+
+test('a selected job scans a wider physical window while its write budget stays at one',async()=>{
+ const progress={state:'scanning',source_version:{content:'1'},next_cursor:'durable-cursor'}
+ for(const id of ['selected','other']){
+  const f=fixture([progress])
+  f.job.job_id=id
+  f.job.payload.projection_budget_step=8
+  await expect(createCanonicalProjectionHandler(f.pool,{projectionScanJobIds:['selected']})(f.job,f.controller.signal,{fence:{} as any})).rejects.toBeInstanceOf(JobDeferredError)
+ }
+ expect(io.genericPrepare.mock.calls.map(c=>c[3])).toEqual([
+  {cursor:'durable-cursor',limit:1,scanCandidates:true,candidateLimit:64},
+  {cursor:'durable-cursor',limit:1,scanCandidates:false},
+ ])
 })

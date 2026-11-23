@@ -34,8 +34,6 @@ export async function assertRelaySchemaContract(pool:pg.Pool):Promise<void>{
   if(sessionTransportConsumerPolicyEnabled())await assertSessionTransportConsumerPolicy(c)
   if(await relaySharedTarget(c as unknown as pg.Pool)){
    const start=(await c.query("SELECT to_jsonb(contract)->>'input_start_version' AS input_start_version,to_jsonb(contract)->>'offline_projection_version' AS offline_projection_version FROM shared.memory_source_contract contract")).rows
-   if(start[0]?.offline_projection_version==='1'&&(await c.query('SELECT shared.memory_projection_runtime_ready() AS ready')).rows[0]?.ready!==true)
-    throw Error('offline_projection_capture_migration_required')
    if(start.length!==1||start[0].input_start_version!=='1')throw Error('relay_shared_input_start_contract_required')
   }
   if(sharedSourceHeadersEnabled()){

@@ -50,14 +50,6 @@ export const SHARED_SOURCE_WORK_FUNCTIONS=[
     FROM exhausted e WHERE w.source_kind=e.source_kind AND w.root_key=e.root_key;
    RETURN QUERY WITH candidates AS (SELECT source_kind,root_key FROM shared.memory_source_work WHERE dead_at IS NULL AND attempt<32
      AND processed_revision<revision AND available_at<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp())
-     AND NOT EXISTS(SELECT 1 FROM shared.memory_projection_windows b WHERE b.root_key=memory_source_work.root_key
-       AND memory_source_work.source_kind='relay_event' AND b.last_revision=memory_source_work.revision
-       AND b.first_revision<=memory_source_work.processed_revision+1 AND b.due_at>statement_timestamp()
-       AND EXISTS(SELECT 1 FROM shared.memory_projection_policies p JOIN public.extension_installations i USING(installation_id)
-        WHERE i.owner_user_id=split_part(b.root_key,':',1)::int AND p.mode='active')
-       AND NOT EXISTS(SELECT 1 FROM public.extension_installations i JOIN shared.memory_source_modes m USING(installation_id)
-        WHERE i.owner_user_id=split_part(b.root_key,':',1)::int AND i.status='active' AND m.mode IN('shared-active','shared-shadow')
-         AND NOT EXISTS(SELECT 1 FROM shared.memory_projection_policies p WHERE p.installation_id=i.installation_id AND p.mode='active')))
      ORDER BY CASE WHEN p_prefer_append IS NULL THEN 0
        WHEN COALESCE(event_append_revision>processed_revision,FALSE)=p_prefer_append THEN 0 ELSE 1 END,
        available_at,updated_at,source_kind,root_key LIMIT p_limit FOR UPDATE SKIP LOCKED)

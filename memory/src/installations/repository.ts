@@ -195,7 +195,7 @@ export function createInstallationRegistry(pool: pg.Pool) {
               [seen,input.sourceControlRevision])
             await client.query(`UPDATE memory_installations i SET local_status='ready',last_error_code=NULL,updated_at=NOW()
               FROM memory_owner_scopes o WHERE i.installation_id=o.installation_id AND i.installation_id=ANY($1::uuid[])
-                AND o.owner_scope_kind IN('team','organization') AND o.state='active'
+                AND (o.owner_scope_kind IN('team','organization') OR shared.uses_turn_dialogue(i.installation_id)) AND o.state='active'
                 AND i.relay_status='active' AND NOT i.snapshot_required AND i.local_status IN('discovering','syncing')`,[seen])
           }
 

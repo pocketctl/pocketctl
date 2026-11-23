@@ -50,7 +50,7 @@ function toClaim(row: JobRow): JobClaim {
  * lease expired (and whose job was reclaimed under a bumped epoch) can never
  * finalize work a new worker already owns.
  */
-export function createJobRepository(pool: pg.Pool, options: { compileBatchIntervalMs?: number } = {}) {
+export function createJobRepository(pool: pg.Pool, options: { compileBatchIntervalMs?: number; nativeSourcesOnly?:boolean } = {}) {
   const compileBatchMs = options.compileBatchIntervalMs ?? 0
   if (!Number.isSafeInteger(compileBatchMs) || compileBatchMs < 0 || compileBatchMs > 3_600_000) {
     throw new Error('invalid_compile_batch_interval')
@@ -123,6 +123,13 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
             COALESCE(($7::jsonb->>j.lane)::int,2147483647)-COALESCE(l.n,0) AS lane_room
           FROM (SELECT job_id,installation_id,job_type,priority,available_at,created_at,${capacityClass} AS lane
                 FROM memory_jobs CROSS JOIN batch WHERE state='pending' AND available_at<=statement_timestamp()
+                  ${options.nativeSourcesOnly?`AND job_type NOT IN('snapshot_reconcile','project_feed')
+                    AND (job_type<>'project_shared_source' OR payload#>>'{root,kind}' IN('team_collaboration','team_delivery'))
+                    AND (job_type NOT IN('consolidate_task','curate_conclusions') OR EXISTS(
+                     SELECT 1 FROM memory_task_bundles b WHERE b.installation_id=memory_jobs.installation_id
+                      AND b.bundle_id=CASE WHEN memory_jobs.payload->>'bundle_id' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                       THEN (memory_jobs.payload->>'bundle_id')::uuid END AND b.dialogue_members IS NOT NULL))
+                    AND (job_type<>'compile_episode' OR (idempotency_key LIKE 'dialogue:%' AND payload ?& ARRAY['dialogue_session','turn']))`:''}
                   AND (job_type<>'compile_episode' OR $8=0 OR (
                     available_at<=to_timestamp(batch.start_ms::double precision/1000)
                     AND (jsonb_typeof(payload->'compile_last_claim_ms') IS DISTINCT FROM 'number'
@@ -269,8 +276,8 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
             await client.query(`SELECT 1 FROM memory_skill_task_runs WHERE installation_id=$1 AND task_id::text=$2 AND generation::text=$3 FOR UPDATE`,
               [skillJob.installation_id, skillJob.payload.task_id, String(skillJob.payload.generation)])
           }
-          const claimed = await client.query<{ attempts: number; last_error_code: string | null }>(`
-            SELECT attempts, last_error_code FROM memory_jobs
+          const claimed = await client.query<{ attempts: number; last_error_code: string | null; job_type: JobType }>(`
+            SELECT attempts, last_error_code, job_type FROM memory_jobs
             WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running'
             FOR UPDATE
           `, [input.jobId, input.claimedBy, input.claimEpoch])
@@ -294,7 +301,11 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
             await client.query('COMMIT')
             return false
           }
-          if (input.terminal || attempts >= JOB_DEAD_LETTER_ATTEMPTS) {
+          // A compile over a hard preparation limit cannot advance on this
+          // input. A concurrently dirtied turn takes the rerun branch above.
+          const exceedsCompileLimit = row.job_type === 'compile_episode'
+            && ['source_reference_limit','source_reference_byte_limit'].includes(input.errorCode)
+          if (input.terminal || exceedsCompileLimit || attempts >= JOB_DEAD_LETTER_ATTEMPTS) {
             const job = await client.query<{
               installation_id: string | null
               job_type: JobType
@@ -367,10 +378,10 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
                 claim_expires_at = NULL,
                 last_error_code = $3,
                 payload = CASE WHEN job_type='project_shared_source'
-                    AND $3 IN ('canonical_reference_budget_exceeded','canonical_reference_write_timeout')
+                    AND $3 IN ('canonical_reference_budget_exceeded','canonical_reference_write_timeout','projection_read_page_timeout')
                   THEN jsonb_set(payload,'{projection_budget_step}',to_jsonb(CASE
-                    WHEN payload->>'projection_budget_step' ~ '^[1-6]$'
-                    THEN LEAST(6,(payload->>'projection_budget_step')::int+1) ELSE 1 END))
+                    WHEN payload->>'projection_budget_step' ~ '^[1-8]$'
+                    THEN LEAST(8,(payload->>'projection_budget_step')::int+1) ELSE 1 END))
                   ELSE payload END
             WHERE job_id = $1
           `, [input.jobId, delayMs, input.errorCode])

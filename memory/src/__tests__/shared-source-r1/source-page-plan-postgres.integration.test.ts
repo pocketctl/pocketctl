@@ -22,7 +22,7 @@ suite('controlled source page selection plan',()=>{
    CREATE TABLE public.daemons(daemon_id text,user_id int); INSERT INTO public.daemons VALUES('daemon',1);
    CREATE TABLE public.sessions(session_id text,user_id int,daemon_id text,source text,content_state text,agent_type text,activity_epoch bigint NOT NULL DEFAULT 0,last_business_activity_at timestamptz DEFAULT '2026-11-06T00:00:00Z'); INSERT INTO public.sessions VALUES('session',1,'daemon','codex','cold','codex');
    CREATE TABLE public.extension_providers(provider_id text,status text); INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0,subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
+   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0,subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT clock_timestamp(),updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    CREATE TABLE public.extension_organizations(organization_id uuid PRIMARY KEY,state text,authorization_epoch bigint DEFAULT 1);
    CREATE TABLE public.extension_teams(team_id uuid PRIMARY KEY,organization_id uuid,state text,authorization_epoch bigint DEFAULT 1);
    CREATE TABLE public.extension_scope_memberships(membership_id uuid PRIMARY KEY,scope_kind text,scope_id uuid,user_id int,roles text[],state text,membership_revision bigint DEFAULT 1);
@@ -61,7 +61,7 @@ suite('controlled source page selection plan',()=>{
   const start=fn.indexOf('RETURN QUERY WITH selected AS'),end=fn.indexOf('ORDER BY e.id;',start)
   expect(start).toBeGreaterThan(-1);expect(end).toBeGreaterThan(start)
   let sql=fn.slice(start+'RETURN QUERY '.length,end+'ORDER BY e.id;'.length).replace(/;$/,'')
-  for(const [k,v]of Object.entries({p_scope:'$1',p_root:'$2',p_after:'$3',p_limit:'$4',p_ids:'$5',native:'$6'}))sql=sql.replace(new RegExp('\\b'+k+'\\b','g'),v)
+  for(const [k,v]of Object.entries({p_scope:'$1',p_root:'$2',p_after:'$3',p_limit:'$4',p_ids:'$5',native:'$6',reuse_session_authority:'FALSE'}))sql=sql.replace(new RegExp('\\b'+k+'\\b','g'),v)
   const c=await pool.connect()
   try{
    await c.query('BEGIN');await c.query('SET LOCAL plan_cache_mode=force_generic_plan')

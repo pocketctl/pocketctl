@@ -1,4 +1,12 @@
-import {OFFLINE_PROJECTION_SCHEMA,OFFLINE_PROJECTION_DISTRIBUTION} from './offline-projection-contract.js'
+import {SHARED_SESSION_AUTHORITY} from './session-authority-contract.js'
+import {DIALOGUE_DENIAL_SCHEMA,DIALOGUE_SOURCE_READERS} from './dialogue-source-contract.js'
+import {ARCHIVE_CUSTODY_SCHEMA} from './archive-custody-contract.js'
+import {TURN_DIALOGUE_SCHEMA} from './turn-dialogue-contract.js'
+import {NATIVE_RETENTION_GUARD} from './native-retention-guard.js'
+import {NATIVE_EVIDENCE_INTEGRITY} from './native-evidence-integrity.js'
+import {NATIVE_EVIDENCE_HANDLES} from './retained-evidence-handles.js'
+import {TEAM_PROJECTION_HISTORY} from './team-history-cutover.js'
+import {RETIRE_PROJECTION_SCHEDULING} from './retire-projection-scheduling.js'
 import {SHARED_SESSION_CONSUMER_FUNCTIONS} from './session-consumer-contract.js'
 import {SHARED_SESSION_TRANSPORT_RETIREMENT_FUNCTIONS} from './session-transport-contract.js'
 import {SHARED_NATIVE_WITHDRAWAL_FUNCTIONS} from './withdrawal-contract.js'
@@ -12,7 +20,6 @@ import {SHARED_DELIVERY_FENCE_FUNCTIONS} from './delivery-fence-contract.js'
 import {sharedSourceTargetFunctions,assertPersonalRelayTargetProfile,normalizeTargetInstallations,type SharedSourceTargetProfile} from './target-contract.js'
 import {SHARED_SOURCE_DISTRIBUTION_FUNCTIONS} from './distribution-contract.js'
 import {SHARED_SOURCE_BOOTSTRAP_FUNCTIONS} from './bootstrap-contract.js'
-import {SHARED_SOURCE_SHADOW_FUNCTIONS} from './shadow-contract.js'
 import {SHARED_SOURCE_CONTROL_FUNCTIONS} from './control-contract.js'
 import {SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS} from './commit-fence-contract.js'
 import {SHARED_LOCAL_RIGHTS_FUNCTIONS} from './local-rights-contract.js'
@@ -31,6 +38,8 @@ const statements=[
  `CREATE TABLE IF NOT EXISTS shared.memory_source_contract(singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),version INTEGER NOT NULL,
    installed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp())`,
  `INSERT INTO shared.memory_source_contract(singleton,version) VALUES(TRUE,1) ON CONFLICT(singleton) DO NOTHING`,
+ `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS projection_storage_retired BOOLEAN NOT NULL DEFAULT FALSE,
+   ADD COLUMN IF NOT EXISTS projection_retired_at TIMESTAMPTZ`,
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS legacy_transport_retired BOOLEAN NOT NULL DEFAULT FALSE`,
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS consumer_version INT NOT NULL DEFAULT 0`,
  `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS commit_fence_version INT NOT NULL DEFAULT 0`,
@@ -99,17 +108,30 @@ export async function applySharedSourceContract(pool:pg.Pool,options:{targetProf
   if((targetProfile!==installedProfile||JSON.stringify(targetIds)!==JSON.stringify(installedIds??null))&&(await c.query("SELECT to_regclass('shared.memory_source_modes') IS NOT NULL AS present")).rows[0].present
    &&(await c.query("SELECT 1 FROM shared.memory_source_modes WHERE mode IN('shared-active','shared-shadow') LIMIT 1")).rowCount)
    throw Error('shared_source_profile_change_requires_drain')
-  for(const sql of [...statements.slice(1),...SHARED_SOURCE_CONTROL_FUNCTIONS,...SHARED_NATIVE_WITHDRAWAL_FUNCTIONS,...SHARED_NATIVE_INVENTORY_FUNCTIONS,...OFFLINE_PROJECTION_SCHEMA,...SHARED_SOURCE_WORK_FUNCTIONS,...SHARED_SOURCE_EXECUTION_FUNCTIONS,...SHARED_SOURCE_MODE_FUNCTIONS,...SHARED_LOCAL_RIGHTS_FUNCTIONS,...SHARED_INPUT_START_FUNCTIONS,...SHARED_SOURCE_READER_FUNCTIONS,...SHARED_LEGACY_ARCHIVE_FUNCTIONS,...SHARED_TEAM_READER_FUNCTIONS,...SHARED_SOURCE_REF_FUNCTIONS,...SHARED_GRANT_FUNCTIONS,...SHARED_SOURCE_HEALTH_FUNCTIONS,...SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS,...SHARED_DELIVERY_FENCE_FUNCTIONS])await c.query(sql)
+  for(const sql of [...statements.slice(1),...SHARED_SOURCE_CONTROL_FUNCTIONS,...SHARED_NATIVE_WITHDRAWAL_FUNCTIONS,...SHARED_NATIVE_INVENTORY_FUNCTIONS,...SHARED_SOURCE_WORK_FUNCTIONS,...SHARED_SOURCE_EXECUTION_FUNCTIONS,...SHARED_SOURCE_MODE_FUNCTIONS,...SHARED_LOCAL_RIGHTS_FUNCTIONS,...SHARED_INPUT_START_FUNCTIONS,...ARCHIVE_CUSTODY_SCHEMA,...SHARED_SOURCE_READER_FUNCTIONS,...DIALOGUE_DENIAL_SCHEMA,...TURN_DIALOGUE_SCHEMA,...DIALOGUE_SOURCE_READERS,...SHARED_LEGACY_ARCHIVE_FUNCTIONS,...SHARED_TEAM_READER_FUNCTIONS,...SHARED_SOURCE_REF_FUNCTIONS,...SHARED_GRANT_FUNCTIONS,...SHARED_SOURCE_HEALTH_FUNCTIONS,...SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS,...SHARED_DELIVERY_FENCE_FUNCTIONS])await c.query(sql)
   for(const sql of sharedSourceTargetFunctions(targetProfile,targetIds??undefined))await c.query(sql)
   await c.query('UPDATE shared.memory_source_contract SET target_profile=$1,target_installations=$2::uuid[] WHERE singleton',[targetProfile,targetIds])
-  for(const sql of [...SHARED_SOURCE_DISTRIBUTION_FUNCTIONS,...OFFLINE_PROJECTION_DISTRIBUTION])await c.query(sql)
+  for(const sql of SHARED_SOURCE_DISTRIBUTION_FUNCTIONS)await c.query(sql)
   for(const sql of SHARED_SOURCE_BOOTSTRAP_FUNCTIONS)await c.query(sql)
-  for(const sql of SHARED_SOURCE_SHADOW_FUNCTIONS)await c.query(sql)
+  for(const sql of RETIRE_PROJECTION_SCHEDULING)await c.query(sql)
   for(const sql of SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS)await c.query(sql)
   for(const sql of SHARED_SOURCE_PROJECTION_COMPLETION_FUNCTIONS)await c.query(sql)
-  for(const sql of SHARED_TEAM_SEMANTIC_FUNCTIONS)await c.query(sql)
+  for(const sql of [...TEAM_PROJECTION_HISTORY,...SHARED_TEAM_SEMANTIC_FUNCTIONS,...SHARED_SESSION_AUTHORITY,...NATIVE_EVIDENCE_HANDLES,...NATIVE_EVIDENCE_INTEGRITY,...NATIVE_RETENTION_GUARD])await c.query(sql)
   for(const sql of SHARED_SESSION_TRANSPORT_RETIREMENT_FUNCTIONS)await c.query(sql)
   for(const sql of SHARED_SESSION_CONSUMER_FUNCTIONS)await c.query(sql)
+  // Existing native installations already passed input-start admission. Keep
+  // their mode generation and scopes when switching their future turns on.
+  await c.query(`INSERT INTO shared.memory_dialogue_installations(installation_id)
+    SELECT i.installation_id FROM public.extension_installations i
+    JOIN public.extension_providers p USING(provider_id)
+    JOIN shared.memory_source_modes m USING(installation_id)
+    JOIN shared.memory_source_contract contract ON contract.singleton AND contract.activation_ready
+    WHERE i.provider_id='pocketctl-memory' AND p.status='enabled' AND i.status='active'
+      AND i.owner_scope_kind='personal' AND m.mode='shared-active'
+      AND (contract.target_profile='full' OR i.installation_id=ANY(contract.target_installations))
+      AND NOT EXISTS(SELECT 1 FROM shared.memory_dialogue_installations d WHERE d.installation_id=i.installation_id)
+      AND shared.memory_installation_input_ready(i.installation_id)
+    ORDER BY i.installation_id ON CONFLICT DO NOTHING`)
   await c.query('UPDATE shared.memory_source_contract SET consumer_version=1,commit_fence_version=1,execution_version=1 WHERE singleton')
   await c.query('COMMIT')
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}

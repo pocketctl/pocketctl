@@ -23,10 +23,10 @@ export function createMemoryPool(
     min: Math.min(config.dbPoolMax, options.retainIdleConnections ?? 0),
     // Startup packet applies to every connection before its first query;
     // an asynchronous pool connect listener would race the first mutation.
-    options: MEMORY_WRITER_STARTUP_OPTIONS+(config.databaseNamespace==='memory'?' -c search_path=pg_catalog,memory,shared':' -c search_path=pg_catalog,public'),
+    options: MEMORY_WRITER_STARTUP_OPTIONS+(config.databaseNamespace!=='public'?' -c search_path=pg_catalog,memory,shared':' -c search_path=pg_catalog,public'),
   })
   registerPhysicalSourcePool(pool)
-  bindSourcePool(pool,{namespace:config.databaseNamespace??'public',...(config.sourceArchive?{archive:{storage:createSourceArchiveReader(config.sourceArchive.directory,config.sourceArchive.namespace),limits:{maxRawBytes:32*1024*1024,maxCompressedBytes:16*1024*1024,maxRecords:10000}}}:{})})
+  bindSourcePool(pool,{namespace:config.databaseNamespace??'memory',...(config.sourceArchive?{archive:{storage:createSourceArchiveReader(config.sourceArchive.directory,config.sourceArchive.namespace),limits:{maxRawBytes:32*1024*1024,maxCompressedBytes:16*1024*1024,maxRecords:10000}}}:{})})
   pool.on('acquire',client=>{detachPreparedSources(client);detachPreparedEvidence(client);detachRetainedSourceGuards(client);inheritSourcePool(client,pool)})
   pool.on('release',(_error,client)=>{detachPreparedSources(client);detachPreparedEvidence(client);detachRetainedSourceGuards(client)})
   return pool

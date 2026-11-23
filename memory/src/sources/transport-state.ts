@@ -10,6 +10,13 @@ export async function legacyTransportRetired(db:Pick<pg.Pool,'query'>,sharedMain
  return rows[0].retired
 }
 
+export async function projectionStorageRetired(db:Pick<pg.Pool,'query'>):Promise<boolean>{
+ if(sourcePoolContext(db).namespace!=='memory')return false
+ const {rows}=await db.query('SELECT projection_storage_retired AS retired FROM shared.memory_source_contract WHERE singleton')
+ if(rows.length!==1||typeof rows[0].retired!=='boolean')throw Error('projection_retirement_contract_unavailable')
+ return rows[0].retired
+}
+
 /** Startup pins exact unfiltered projections; an empty replacement view must
  * never hide an oversized gap. Missing raw tables require the explicit admin
  * retirement marker and real metadata tables with stable primary keys. */

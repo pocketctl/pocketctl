@@ -1,4 +1,4 @@
-import {OFFLINE_PROJECTION_CAPTURE} from './offline-projection-capture.js'
+import {TURN_DIALOGUE_CAPTURE,TURN_DIALOGUE_INDEXES} from './turn-dialogue-capture.js'
 import {assertNativeInputStartCompatible} from './input-start.js'
 import {RELAY_SESSION_CAPTURE_SQL} from './session-capture.js'
 import type pg from 'pg'
@@ -31,9 +31,20 @@ export async function applyRelaySourceCapture(pool:pg.Pool):Promise<void>{
   await c.query("SELECT pg_advisory_xact_lock(hashtextextended('shared-source-contract-v1',0))")
   await assertRelayCaptureMigrationCompatible(c as unknown as pg.Pool)
   for(const sql of [...RELAY_SOURCE_HEADER_SQL,...RELAY_SOURCE_CAPTURE_SQL,...RELAY_SESSION_CAPTURE_SQL])await c.query(sql)
-  if((await c.query("SELECT to_regclass('shared.memory_projection_windows') IS NOT NULL AS ready")).rows[0]?.ready)
-   for(const sql of OFFLINE_PROJECTION_CAPTURE)await c.query(sql)
+  await c.query(`DROP TRIGGER IF EXISTS memory_window_capture_insert ON public.events;
+   DROP TRIGGER IF EXISTS memory_window_capture_update ON public.events;
+   DROP FUNCTION IF EXISTS shared.capture_memory_projection_window() RESTRICT`)
+  const dialogue=(await c.query("SELECT to_regclass('shared.memory_dialogue_installations') IS NOT NULL AS ready")).rows[0]?.ready
+  if(dialogue)
+   for(const sql of TURN_DIALOGUE_CAPTURE)await c.query(sql)
   await c.query('COMMIT')
+  if(dialogue){
+   for(const sql of TURN_DIALOGUE_INDEXES)await c.query(sql)
+   for(const name of ['events_dialogue_turn','events_dialogue_control','events_dialogue_operation','events_dialogue_message','events_dialogue_stream']){
+    const invalid=(await c.query("SELECT NOT indisvalid AS invalid FROM pg_index WHERE indexrelid=to_regclass($1)",['public.'+name])).rows[0]
+    if(invalid?.invalid)await c.query('REINDEX INDEX CONCURRENTLY public.'+name)
+   }
+  }
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }
 export async function bootstrapRelaySourceRoots(pool:pg.Pool,options:{afterSessionRowId:string;limit:number}):Promise<{roots:{rootKey:string;revision:string}[];nextAfterSessionRowId:string}>{

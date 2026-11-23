@@ -1,4 +1,6 @@
-import {legacyTransportRetired} from '../sources/transport-state.js'
+import {checkDialogueRef} from '../episodes/turn-dialogue.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
+import {legacyTransportRetired,projectionStorageRetired} from '../sources/transport-state.js'
 import type pg from 'pg'
 import { retentionTransaction,readRetentionPlan } from './transaction.js'
 import {lifecycleSourceRetentionProof,reclaimSettledTaskState,taskSourceProtectedSql} from './task-state.js'
@@ -27,21 +29,27 @@ export const MIGRATION_PROTECTS_SCOPE_SQL = `EXISTS(SELECT 1 FROM memory_governa
     AND (cardinality(m.scope_ids)=0 OR e.installation_id=ANY(m.scope_ids)))`
 
 /** One row per current episode; LATERAL aggregates cannot multiply source rows. */
-const eligibilityFrom = `FROM work_episodes e
-  JOIN source_turns t ON t.installation_id=e.installation_id AND t.turn_id=e.turn_id
+function eligibilityFrom(native:boolean):string {
+ return `FROM work_episodes e
+  ${native?'':'JOIN source_turns t ON t.installation_id=e.installation_id AND t.turn_id=e.turn_id'}
   JOIN memory_installations i ON i.installation_id=e.installation_id
   JOIN memory_feature_settings f ON f.installation_id=e.installation_id
   JOIN LATERAL(SELECT max(r.completed_at) completed_at FROM memory_extraction_runs r
     WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id
       AND r.episode_source_digest=e.source_digest AND r.state='succeeded') success ON success.completed_at IS NOT NULL
   WHERE e.state='ready' AND e.body_reclaimed_at IS NULL AND e.compiled_at<=success.completed_at
-    AND t.terminal_at IS NOT NULL AND t.state IN('completed','interrupted','failed','abandoned') AND t.updated_at<=success.completed_at
+    AND ${native?`e.compiler_version='relay-turn-v1' AND e.terminal_at IS NOT NULL
+     AND e.evidence_manifest->'dialogue'->>'members'=encode(e.source_digest,'hex')
+     AND NOT EXISTS(SELECT 1 FROM work_episodes other WHERE other.installation_id=e.installation_id
+       AND other.turn_id=e.turn_id AND other.session_id<>e.session_id)`
+     :`t.terminal_at IS NOT NULL AND t.state IN('completed','interrupted','failed','abandoned') AND t.updated_at<=success.completed_at`}
     AND i.local_status='ready' AND i.relay_status='active' AND NOT i.snapshot_required
     AND f.extraction_mode IN('enabled','shadow')
     AND success.completed_at<=statement_timestamp()-($1::int*INTERVAL '24 hours')
     AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts a WHERE a.installation_id=e.installation_id AND a.turn_id=e.turn_id)
     AND NOT ${MIGRATION_PROTECTS_SCOPE_SQL}
-    AND NOT ${taskSourceProtectedSql()}
+    AND NOT ${native?`EXISTS(SELECT 1 FROM memory_task_bundles b WHERE b.installation_id=e.installation_id
+      AND b.session_id=e.session_id AND b.body_state='present')`:taskSourceProtectedSql()}
     AND NOT EXISTS(SELECT 1 FROM memory_source_snapshot_facts r WHERE r.installation_id=e.installation_id
       AND (r.state='running' OR(r.state='completed' AND r.relay_acked_at IS NULL)))
     AND NOT EXISTS(SELECT 1 FROM memory_extraction_runs r WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id
@@ -51,8 +59,9 @@ const eligibilityFrom = `FROM work_episodes e
           AND resolved.state='succeeded' AND (resolved.started_at,resolved.run_id)>(r.started_at,r.run_id)))))
     AND NOT EXISTS(SELECT 1 FROM memory_candidates c WHERE c.installation_id=e.installation_id AND c.episode_id=e.episode_id
       AND c.review_expires_at>clock_timestamp())
-    AND NOT EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id
-      AND s.created_at>success.completed_at)
+    AND NOT ${native?`EXISTS(SELECT 1 FROM memory_jobs j WHERE j.installation_id=e.installation_id AND j.state IN('pending','running')
+      AND j.payload->>'dialogue_session'=e.session_id AND j.payload->>'turn'=e.turn_id)`:
+      `EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id AND s.created_at>success.completed_at)`}
     AND NOT EXISTS(SELECT 1 FROM memory_source_delivery_facts g WHERE g.installation_id=e.installation_id AND g.session_id=e.session_id
       AND (g.turn_id IS NULL OR g.turn_id=e.turn_id) AND(g.projection_state='pending'
         OR(g.projection_state='quarantined' AND g.error_code='oversized_content')))
@@ -61,16 +70,19 @@ const eligibilityFrom = `FROM work_episodes e
         AND(j.payload->>'turn_id'=e.turn_id OR j.payload->>'episode_id'=e.episode_id::text
           OR j.idempotency_key='compile_episode:'||e.turn_id)) OR j.job_type='snapshot_reconcile'))
     AND NOT EXISTS(SELECT 1 FROM knowledge_evidence k WHERE k.installation_id=e.installation_id AND
-      (k.episode_id=e.episode_id OR EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id
+      (k.episode_id=e.episode_id OR ${native?`(k.locator->>'source_kind'='relay_turn_v1' AND k.locator#>>'{dialogue,session}'=e.session_id
+        AND k.locator#>>'{dialogue,turn}'=e.turn_id)`:`EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id
         AND s.turn_id=e.turn_id AND s.source_event_id=k.source_event_id)
        OR EXISTS(SELECT 1 FROM source_artifacts a WHERE a.installation_id=e.installation_id
-        AND a.turn_id=e.turn_id AND a.artifact_id=k.artifact_id)))
+        AND a.turn_id=e.turn_id AND a.artifact_id=k.artifact_id)`}))
     AND NOT EXISTS(SELECT 1 FROM memory_skill_archives a WHERE a.installation_id=e.installation_id AND a.episode_id=e.episode_id)
     AND NOT EXISTS(SELECT 1 FROM memory_skill_task_runs r WHERE r.installation_id=e.installation_id AND r.episode_id=e.episode_id
       AND r.state NOT IN('cancelled','stale_generation'))
     AND NOT EXISTS(SELECT 1 FROM memory_skill_archive_sources k WHERE k.installation_id=e.installation_id AND
-      (EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id AND s.source_event_id=k.source_event_id)
-       OR EXISTS(SELECT 1 FROM source_artifacts a WHERE a.installation_id=e.installation_id AND a.turn_id=e.turn_id AND a.artifact_id=k.artifact_id)))`
+      (${native?`EXISTS(SELECT 1 FROM shared.memory_native_evidence_handle(k.installation_id,k.source_event_id,k.artifact_id) h
+        WHERE h.session_id=e.session_id AND (h.turn_id IS NULL OR h.turn_id=e.turn_id))`:`EXISTS(SELECT 1 FROM source_events s WHERE s.installation_id=e.installation_id AND s.turn_id=e.turn_id AND s.source_event_id=k.source_event_id)
+       OR EXISTS(SELECT 1 FROM source_artifacts a WHERE a.installation_id=e.installation_id AND a.turn_id=e.turn_id AND a.artifact_id=k.artifact_id)`}))`
+}
 
 export interface RetentionPreviewCursor {installationId?:string;eligibleEpisodeId?:string;receiptInstallationId?:string;receiptTurnId?:string}
 export async function previewSourceRetention(pool: pg.Pool, bodyDays = 14, limit = 20, cursor:RetentionPreviewCursor={}) {
@@ -78,7 +90,7 @@ export async function previewSourceRetention(pool: pg.Pool, bodyDays = 14, limit
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('invalid_retention_preview_limit')
   return readRetentionPlan(pool,async client=>{
   const result = await client.query(`SELECT e.installation_id,e.session_id,e.turn_id,e.episode_id,
-      success.completed_at AS extraction_completed_at ${eligibilityFrom}
+      success.completed_at AS extraction_completed_at ${eligibilityFrom(sourcePoolContext(pool).namespace==='memory')}
     AND ($4::uuid IS NULL OR e.installation_id=$4::uuid) AND ($3::uuid IS NULL OR e.episode_id>$3::uuid) ORDER BY e.episode_id LIMIT $2`, [bodyDays, limit, cursor.eligibleEpisodeId??null,cursor.installationId??null])
   const pending = await client.query(`SELECT installation_id,session_id,turn_id,episode_id
     FROM memory_source_retention_receipts WHERE state='reclaiming' AND ($4::uuid IS NULL OR installation_id=$4::uuid)
@@ -121,6 +133,7 @@ export async function reclaimSourceTurn(pool: pg.Pool, key: SourceRetentionKey, 
     if (!receipt) {
       if(key.episodeId===null){
         if(settings.lifecycleMode!=='enabled')return {...result,skipped:'lifecycle_disabled'}
+        if(await projectionStorageRetired(client))return {...result,skipped:'source_discovery_changed'}
         const proof=await lifecycleSourceRetentionProof(client,{...key,bodyDays:settings.bodyDays})
         if(!proof)return {...result,skipped:'not_eligible'}
         receipt=(await client.query<SourceRetentionReceipt>(`INSERT INTO memory_source_retention_receipts
@@ -129,10 +142,15 @@ export async function reclaimSourceTurn(pool: pg.Pool, key: SourceRetentionKey, 
           [key.installationId,key.sessionId,key.turnId,proof.source_digest,proof.created_at])).rows[0]
       }else{
       const episode = (await client.query(`SELECT e.installation_id,e.session_id,e.turn_id,e.episode_id,
-          e.source_digest,e.document_compiler_version,success.completed_at ${eligibilityFrom}
+          e.source_digest,e.evidence_manifest,e.document_compiler_version,success.completed_at ${eligibilityFrom(sourcePoolContext(pool).namespace==='memory')}
         AND e.installation_id=$2 AND e.episode_id=$3 AND e.turn_id=$4`,
       [settings.bodyDays, key.installationId, key.episodeId, key.turnId])).rows[0]
       if (!episode || episode.session_id !== key.sessionId) return { ...result, skipped: 'not_eligible' }
+      if(episode.document_compiler_version==='relay-turn-v1'){
+        const ref=episode.evidence_manifest?.dialogue
+        if(ref?.kind!=='relay_turn_v1'||ref.session!==key.sessionId||ref.turn!==key.turnId)return {...result,skipped:'source_discovery_changed'}
+        await checkDialogueRef(client,key.installationId,ref,true)
+      }
       receipt = (await client.query<SourceRetentionReceipt>(`INSERT INTO memory_source_retention_receipts
           (installation_id,session_id,turn_id,episode_id,source_digest,compiler_version,extraction_completed_at,state)
         VALUES($1,$2,$3,$4,$5,$6,$7,'reclaiming') RETURNING *`,
@@ -148,6 +166,8 @@ export async function reclaimSourceTurn(pool: pg.Pool, key: SourceRetentionKey, 
 /** Also used by restore-watermark replay before any consumer may run. */
 export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: SourceRetentionReceipt, batchSize: number): Promise<SourceRetentionResult> {
   const result = emptyResult(), args = [receipt.installation_id, receipt.turn_id, batchSize, receipt.reclaimed_at]
+  const dialogue=receipt.compiler_version==='relay-turn-v1'||await projectionStorageRetired(client)
+  if(!dialogue){
   result.events = (await client.query(`WITH due AS MATERIALIZED(
     SELECT source_event_id FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
       AND source_kind IS DISTINCT FROM 'legacy_archive'
@@ -158,7 +178,8 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     SELECT artifact_id FROM source_artifacts WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
     ORDER BY artifact_id LIMIT $3 FOR UPDATE SKIP LOCKED)
     UPDATE source_artifacts a SET details='{}',body_reclaimed_at=$4 FROM due WHERE a.artifact_id=due.artifact_id`, args)).rowCount ?? 0
-  const transportRetired=await legacyTransportRetired(client)
+  }
+  const transportRetired=dialogue||await legacyTransportRetired(client)
   result.snapshots = transportRetired?0:(await client.query(`WITH due AS MATERIALIZED(
     SELECT relay_event_id,session_id FROM memory_snapshot_events WHERE installation_id=$1 AND
       COALESCE(NULLIF(payload->>'turn_id',''),NULLIF(payload->>'source_turn_id',''))=$2 AND body_reclaimed_at IS NULL
@@ -177,15 +198,15 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
     FROM due WHERE c.candidate_id=due.candidate_id`,
   [receipt.installation_id, receipt.episode_id, batchSize, receipt.reclaimed_at])).rowCount ?? 0
   const outstanding = (await client.query(`SELECT
-    EXISTS(SELECT 1 FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
+    ${dialogue?'($2::text IS NULL)':`EXISTS(SELECT 1 FROM source_events WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL
       AND source_kind IS DISTINCT FROM 'legacy_archive')
-    OR EXISTS(SELECT 1 FROM source_artifacts WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL)
+    OR EXISTS(SELECT 1 FROM source_artifacts WHERE installation_id=$1 AND turn_id=$2 AND body_reclaimed_at IS NULL)`}
     ${transportRetired?'':`OR EXISTS(SELECT 1 FROM memory_snapshot_events WHERE installation_id=$1 AND
       COALESCE(NULLIF(payload->>'turn_id',''),NULLIF(payload->>'source_turn_id',''))=$2 AND body_reclaimed_at IS NULL)`}
     OR EXISTS(SELECT 1 FROM memory_candidates WHERE installation_id=$1 AND episode_id=$3 AND body_reclaimed_at IS NULL) pending`,
   [receipt.installation_id, receipt.turn_id, receipt.episode_id])).rows[0].pending
   if (!outstanding) {
-    await reclaimSettledTaskState(client,receipt.installation_id,receipt.turn_id)
+    if(!dialogue)await reclaimSettledTaskState(client,receipt.installation_id,receipt.turn_id)
     result.episodes = (await client.query(`UPDATE work_episodes SET
       retained_content_hash=encode(sha256(convert_to(jsonb_build_object('document',document,'manifest',evidence_manifest,'summary',summary)::text,'UTF8')),'hex'),
       document='{}',evidence_manifest='{}',summary=jsonb_strip_nulls(jsonb_build_object('references',summary->'references',
@@ -201,7 +222,7 @@ export async function reclaimReceiptBatch(client: pg.PoolClient, receipt: Source
 
 /** Bounded discovery; each mutation recomputes complete coverage under locks. */
 export async function previewLifecycleSourceRetention(pool:pg.Pool,settings:SourceRetentionSettings,installationId?:string,afterTurnId?:string){
- if(settings.mode!=='enabled'||settings.lifecycleMode!=='enabled')return []
+ if(settings.mode!=='enabled'||settings.lifecycleMode!=='enabled'||await projectionStorageRetired(pool))return []
  return (await pool.query(`SELECT DISTINCT ON(r.installation_id,r.turn_id) r.installation_id,r.session_id,r.turn_id,NULL::uuid AS episode_id
   FROM memory_source_processing_receipts r JOIN memory_curation_policies p USING(installation_id)
   WHERE r.complete AND p.mode='enabled' AND p.reclaim_mode='enabled' AND r.created_at<=clock_timestamp()-($1::int*interval '24 hours') AND($2::uuid IS NULL OR r.installation_id=$2)

@@ -4710,6 +4710,10 @@ export async function backfillSessionTokens(pool: pg.Pool): Promise<number> {
 export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
   // Keyset only sessions with missing metadata, then use the existing
   // (session_id, id) event index. Never sort the entire event history at startup.
+  // Child events share the parent session_id, including assistant usage frames.
+  const rootEvent = `COALESCE(COALESCE(payload,body_header)->>'agent_id', '') = ''
+    AND COALESCE(COALESCE(payload,body_header)->>'is_subagent', 'false') <> 'true'
+    AND COALESCE(COALESCE(payload,body_header)->>'actor_scope', '') <> 'subagent'`;
   let cursor = '';
   let updated = 0;
   for (;;) {
@@ -4729,7 +4733,7 @@ export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
       WITH latest AS (
         SELECT DISTINCT ON (session_id) session_id, COALESCE(payload,body_header)->>'effort' AS effort
         FROM events WHERE session_id = ANY($1::text[]) AND event_type = 'session_meta'
-          AND NULLIF(BTRIM(COALESCE(payload,body_header)->>'effort'), '') IS NOT NULL
+          AND ${rootEvent} AND NULLIF(BTRIM(COALESCE(payload,body_header)->>'effort'), '') IS NOT NULL
         ORDER BY session_id, id DESC
       )
       UPDATE sessions s SET effort = latest.effort FROM latest
@@ -4753,7 +4757,7 @@ export async function backfillSessionModel(pool: pg.Pool): Promise<number> {
           SELECT session_id, COALESCE(payload,body_header)->>'model' AS model, event_type AS source, created_at
           FROM events
           WHERE session_id = ANY($1::text[]) AND event_type IN ('session_created', 'session_model_changed', 'session_meta', 'agent_text')
-            AND COALESCE(payload,body_header) ? 'model' AND COALESCE(payload,body_header)->>'model' <> ''
+            AND ${rootEvent} AND COALESCE(payload,body_header) ? 'model' AND COALESCE(payload,body_header)->>'model' <> ''
         ) e
       )
       UPDATE sessions s SET model = c.model

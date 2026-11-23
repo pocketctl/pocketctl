@@ -28,7 +28,7 @@ export async function loadTaskCatalog(c:Pick<pg.PoolClient,'query'>,installation
   try{
    const source=await loadCurrentLifecycleSources(c,installationId,{bundle_id:row.parent_id,session_id:row.session_id,task_key:row.task_key,source_digest:row.parent_digest})
    const spans=row.spans as TaskPartition['spans']
-   const sources=source.admitted.map(event=>({id:event.source_event_id,text:sanitizeText(typeof event.payload.text==='string'?event.payload.text:'',4000).text}))
+   const sources=source.admitted.map(event=>({id:event.source_event_id,text:sanitizeText(typeof event.payload.text==='string'?event.payload.text:'',row.task_key.startsWith('dialogue:')?Infinity:4000).text}))
    if(!spans.length||spans.some(span=>{const item=sources.find(s=>s.id===span.event_id);return !item||!Number.isInteger(span.start)||!Number.isInteger(span.end)||span.start<0||span.end<=span.start||span.end>item.text.length}))continue
    const digest=createHash('sha256').update(canonicalPacketJson({source:row.parent_digest.toString('hex'),spans,space:row.space_id})).digest()
    const topic=taskTopicDescriptor(spans,sources)

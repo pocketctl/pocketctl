@@ -26,13 +26,9 @@ export const SHARED_SOURCE_EXECUTION_FUNCTIONS=[
    IF NOT FOUND OR j.installation_id IS NULL THEN RAISE EXCEPTION 'source_execution_job_unavailable';END IF;
    INSERT INTO shared.memory_source_modes(installation_id) SELECT j.installation_id WHERE NOT EXISTS(SELECT 1 FROM shared.memory_source_modes WHERE installation_id=j.installation_id) ON CONFLICT DO NOTHING;
    SELECT mode,generation INTO m FROM shared.memory_source_modes WHERE installation_id=j.installation_id FOR SHARE NOWAIT;
-   IF p_branch='active' THEN p_branch=CASE WHEN m.mode='shared-active' THEN 'canonical-active' ELSE 'legacy-active' END;END IF;
-   IF p_branch='canonical' THEN
-    IF m.mode NOT IN('shared-shadow','shared-active') THEN RAISE EXCEPTION 'source_execution_generation_changed';END IF;
-    p_branch=CASE WHEN m.mode='shared-active' THEN 'canonical-active' ELSE 'canonical-shadow' END;
-   END IF;
-   IF NOT((p_branch='legacy-active' AND m.mode IN('legacy-feed','shared-shadow')) OR(p_branch='canonical-active' AND m.mode='shared-active')
-     OR(p_branch='canonical-shadow' AND m.mode='shared-shadow')) THEN RAISE EXCEPTION 'source_execution_generation_changed';END IF;
+   IF m.mode<>'shared-active' OR p_branch NOT IN('active','canonical','canonical-active') THEN
+    RAISE EXCEPTION 'source_execution_generation_changed';END IF;
+   p_branch='canonical-active';
    PERFORM 1 FROM memory.memory_jobs WHERE job_id=p_job AND installation_id=j.installation_id AND claimed_by=p_worker
     AND claim_epoch=p_epoch AND state='running' AND claim_expires_at>clock_timestamp() FOR SHARE NOWAIT;
    IF NOT FOUND THEN RAISE EXCEPTION 'source_execution_job_unavailable';END IF;

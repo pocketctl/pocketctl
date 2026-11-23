@@ -6,11 +6,7 @@ import {guardSourceExecutionCommit} from './source-execution.js'
  * HTTP, and never recapture this generation from the returned batch. */
 export async function readLegacySourceInputGeneration(pool:pg.Pool,installationId:string):Promise<string|null|undefined>{
  if(sourcePoolContext(pool).namespace==='public')return undefined
- if(await legacyTransportRetired(pool))return null
- const row=(await pool.query('SELECT mode,generation::text FROM shared.memory_source_modes WHERE installation_id=$1',[installationId])).rows[0]
- if(!row)return '1'
- if(!['legacy-feed','shared-shadow'].includes(row.mode))return null
- return row.generation
+ return null
 }
 /** Must be called inside the transaction, before any Memory lifecycle locks.
  * The shared mode row stays locked through commit; transition waits for it.

@@ -1,13 +1,14 @@
+import {compileDialogue} from './compile-dialogue.js'
 import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
 import {prepareEpisodeSources,prepareEpisodeProjectionSources,attachPreparedSources} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {runSelectedSourceTransaction} from '../sources/processing-pins.js'
 import {classifyArtifact} from '../projection/artifact-classifier.js'
 import { lockCurationAuthority, readCurationPolicy } from '../curation/policy.js'
-import { stageLifecycleTurn } from '../curation/task-repository.js'
+import { prepareLifecycleTurn, stageLifecycleTurn, stagePreparedLifecycleTurn } from '../curation/task-repository.js'
 import type { CurationMode } from '../curation/contracts.js'
 import {assertJobFence} from '../generation/fence.js'
-import {JobDeferredError,type JobFence} from '../jobs/types.js'
+import {JobDeferredError,JobTerminalError,type JobFence} from '../jobs/types.js'
 import type pg from 'pg'
 import {guardSourceExecutionCommit,sourceExecutionBranchFor} from '../sources/source-execution.js'
 import type { JobClaim } from '../jobs/types.js'
@@ -39,17 +40,32 @@ export function createEpisodeRepository(
 
   const repository = {
     async compileTurn(installationId: string, turnId: string, fence?:JobFence, signal?:AbortSignal): Promise<void> {
+      if(sourcePoolContext(pool).namespace==='memory')throw new JobTerminalError('legacy_projection_retired')
       const canonicalMetadata=fence&&sourceExecutionBranchFor(pool,installationId)==='canonical-active'
       // The existing compiler produces no output for a nonterminal turn.
       // Check that cheap metadata before choosing any body preparation: NULL
       // selected preparation must never route an active turn through a generic
       // whole-root body pin while its native writer is still appending.
-      if(canonicalMetadata&&!(await pool.query('SELECT terminal_at FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[installationId,turnId])).rows[0]?.terminal_at)return
-      const selected=canonicalMetadata?await prepareEpisodeProjectionSources(pool,installationId,turnId):null
+      let prepareLifecycle=false,checkExclusion=false
+      if(canonicalMetadata){
+        const checkPolicy=options.lifecycleMode&&options.lifecycleMode!=='off'
+        const turn=(await pool.query(`SELECT terminal_at${checkPolicy?", (SELECT mode FROM memory_curation_policies WHERE installation_id=$1) AS lifecycle_mode":''}
+          FROM source_turns WHERE installation_id=$1 AND turn_id=$2`,[installationId,turnId])).rows[0]
+        if(!turn?.terminal_at)return
+        prepareLifecycle=turn.lifecycle_mode==='enabled'||turn.lifecycle_mode==='shadow'
+        checkExclusion=options.lifecycleMode==='enabled'&&turn.lifecycle_mode==='enabled'
+      }
+      const selected=canonicalMetadata?await prepareEpisodeProjectionSources(pool,installationId,turnId,checkExclusion):null
       const prepared=selected??(sourcePoolContext(pool).namespace==='memory'?await prepareEpisodeSources(pool,installationId,turnId):undefined)
+      // The getter returns a private deep copy. Materialize it once before
+      // starting the selected transaction, then reuse it for every artifact.
+      const preparedEvents=prepared&&'events' in prepared?prepared.events:undefined
+      const preparedTurnEvents=preparedEvents?.filter(e=>e.turn_id===turnId)
+      const lifecycle=prepareLifecycle&&selected&&preparedTurnEvents
+        ?prepareLifecycleTurn({installationId,sessionId:selected.sessionId,turnId,events:preparedTurnEvents}):undefined
       const persist=async(client:pg.PoolClient,managed=false)=>{
         if(!managed)await client.query('BEGIN')
-        if(prepared&&!selected)attachPreparedSources(client,prepared)
+        if(prepared&&!selected&&'events' in prepared)attachPreparedSources(client,prepared)
         try {
           if(selected)await selected.fenceMembership(client)
           else if(options.lifecycleMode&&options.lifecycleMode!=='off')await lockCurationAuthority(client,installationId)
@@ -89,10 +105,19 @@ export function createEpisodeRepository(
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:session:' || $1 || ':' || $2,0))`,[installationId,row.session_id])
           await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('purge:installation:' || $1,0))`,[installationId])
           if ((await client.query('SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=$2',[installationId,row.session_id])).rowCount) {if(!managed)await client.query('COMMIT');return}
-          if(prepared)await prepared.assertCurrent(client)
+          // The membership fence already locked every receipt-only observation.
+          if(prepared&&'events' in prepared)await prepared.assertCurrent(client)
           const lifecyclePolicy = await readCurationPolicy(client,installationId,options.lifecycleMode??'off')
           if(lifecyclePolicy==='source_denied') { if(!managed)await client.query('COMMIT'); return }
-          const events = prepared?{rows:prepared.events.filter(e=>e.turn_id===turnId)}:await client.query<{
+          if(selected&&'excludedLifecycle' in selected){
+            if(!lifecyclePolicy||lifecyclePolicy.mode!=='enabled')throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+            if(fence)await assertJobFence(client,fence)
+            await stagePreparedLifecycleTurn(client,selected.excludedLifecycle,lifecyclePolicy)
+            await selected.assertCurrent(client,{forCommit:true})
+            await guardSourceExecutionCommit(client)
+            return
+          }
+          const events = preparedTurnEvents?{rows:preparedTurnEvents}:await client.query<{
             source_event_id: string
             event_type: string
             occurred_at: Date
@@ -109,7 +134,8 @@ export function createEpisodeRepository(
           `, [installationId, turnId])
           if(lifecyclePolicy){
             if(fence)await assertJobFence(client,fence)
-            await stageLifecycleTurn(client,{installationId,sessionId:row.session_id,turnId,events:events.rows},lifecyclePolicy)
+            if(lifecycle)await stagePreparedLifecycleTurn(client,lifecycle,lifecyclePolicy)
+            else await stageLifecycleTurn(client,{installationId,sessionId:row.session_id,turnId,events:events.rows},lifecyclePolicy)
             if(lifecyclePolicy.mode==='enabled'){if(prepared)await prepared.assertCurrent(client,{forCommit:true});await guardSourceExecutionCommit(client);if(!managed)await client.query('COMMIT');return}
           }
           const counts = summarizeEvents(events.rows.map(eventRow => ({
@@ -132,11 +158,14 @@ export function createEpisodeRepository(
             FROM source_artifacts
             WHERE installation_id = $1 AND turn_id = $2
           `, [installationId, turnId])
-          if(prepared)for(const artifact of artifacts.rows){
-            const source=prepared.events.find(e=>e.source_event_id===artifact.source_event_id)
+          if(preparedEvents&&artifacts.rows.length){
+           const bySourceId=new Map(preparedEvents.map(event=>[event.source_event_id,event]))
+           for(const artifact of artifacts.rows){
+            const source=bySourceId.get(artifact.source_event_id)
             const canonical=source?classifyArtifact(source.event_type,source.payload):null
             if(!canonical||canonical.artifact_type!==artifact.artifact_type||canonical.identity_key!==artifact.identity_key||canonical.path!==artifact.path||canonical.status!==artifact.status)throw Error('source_artifact_changed')
             artifact.details=canonical.details
+           }
           }
           const artifactCounts: Record<string, number> = {}
           let artifactTotal = 0
@@ -168,7 +197,7 @@ export function createEpisodeRepository(
           // cwd or absolute-path guesses. A turn-scoped observation wins;
           // managed sessions otherwise inherit the latest trusted lifecycle
           // observation for the same session that predates the terminal turn.
-          const observation=prepared?.events.filter(e=>typeof e.payload.repository_id==='string'&&(e.turn_id===turnId||(e.turn_id===null&&['session_created','session_discovered'].includes(e.event_type)&&new Date(e.occurred_at)<=row.terminal_at!)))
+          const observation=preparedEvents?.filter(e=>typeof e.payload.repository_id==='string'&&(e.turn_id===turnId||(e.turn_id===null&&['session_created','session_discovered'].includes(e.event_type)&&new Date(e.occurred_at)<=row.terminal_at!)))
             .sort((a,b)=>Number(b.turn_id===turnId)-Number(a.turn_id===turnId)||new Date(b.occurred_at).getTime()-new Date(a.occurred_at).getTime()||b.source_event_id.localeCompare(a.source_event_id))[0]
           const repositoryFact = prepared?await client.query<{repository_id:string;repo_snapshot_id:string|null;commit_sha:string|null;branch:string|null;worktree_identity:string|null}>(`
             SELECT r.repository_id::text,rs.repo_snapshot_id::text,rs.commit_sha,rs.branch,rs.worktree_identity
@@ -296,7 +325,7 @@ export function createEpisodeRepository(
                correction_count, retry_count, tool_error_count, summary, compiler_version)
             VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     $11, $12, $13, $14::jsonb, $15)
-            ON CONFLICT (installation_id, turn_id) DO UPDATE SET
+            ON CONFLICT (installation_id, turn_id) WHERE compiler_version<>'relay-turn-v1' DO UPDATE SET
               state = EXCLUDED.state,
               outcome = EXCLUDED.outcome,
               terminal_at = EXCLUDED.terminal_at,
@@ -427,6 +456,11 @@ export function createEpisodeRepository(
     async handleCompileEpisode(job: JobClaim, signal: AbortSignal, ctx?:{fence:JobFence}): Promise<void> {
       if (!job.installation_id) return
       if (signal.aborted) throw new Error('compile_episode aborted')
+      if(job.idempotency_key.startsWith('dialogue:')){
+        const {dialogue_session:session,turn}=job.payload
+        if(typeof session!=='string'||typeof turn!=='string'||!session||!turn)throw Error('invalid_dialogue_job')
+        return compileDialogue(pool,job.installation_id,session,turn,options.lifecycleMode??'off',ctx?.fence)
+      }
       await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence,signal)
     },
   }

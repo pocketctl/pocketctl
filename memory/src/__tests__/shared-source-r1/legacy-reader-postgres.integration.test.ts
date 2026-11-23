@@ -23,9 +23,10 @@ suite('explicit proven historical source archive',()=>{
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY);INSERT INTO public.users VALUES(1),(2);
    CREATE TABLE public.daemons(daemon_id text,user_id int);
    CREATE TABLE public.sessions(session_id text,user_id int,daemon_id text,source text,content_state text,agent_type text);
+   CREATE TABLE public.events(id BIGINT PRIMARY KEY,session_id TEXT,user_id INT,event_type TEXT,payload JSONB,effect_status TEXT DEFAULT 'completed');
    CREATE TABLE public.deleted_sessions(session_id text);
    CREATE TABLE public.extension_providers(provider_id text,status text);INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT now(),start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT now(),start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
    CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,ack_feed_id bigint NOT NULL DEFAULT 0,snapshot_required_at timestamptz,lease_epoch bigint NOT NULL DEFAULT 0,lease_token_hash bytea,lease_expires_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp());
    DO $$ BEGIN
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_legacy_memory') THEN CREATE ROLE shared_legacy_memory LOGIN PASSWORD 'only-test';END IF;

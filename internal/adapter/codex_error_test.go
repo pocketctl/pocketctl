@@ -26,6 +26,18 @@ func TestProjectCodexErrorUsageLimitShapes(t *testing.T) {
 	}
 }
 
+func TestProjectCodexModelNotFoundUsesFixedMessage(t *testing.T) {
+	for _, raw := range []string{
+		`{"codexErrorInfo":"modelNotFound","message":"private provider detail"}`,
+		`{"codex_error_info":"model_not_found","message":"unknown model"}`,
+	} {
+		got := ProjectCodexError(json.RawMessage(raw))
+		if !got.Present || got.Code != CodexModelNotFoundCode || got.Message != CodexModelNotFoundMessage {
+			t.Fatalf("unexpected model error: %+v", got)
+		}
+	}
+}
+
 func TestProjectCodexErrorFailsClosed(t *testing.T) {
 	tests := []struct {
 		name    string

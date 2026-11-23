@@ -1,3 +1,4 @@
+import {sourcePoolContext} from '../sources/pool-context.js'
 import type pg from 'pg'
 import { candidateDeliverySource } from './review-service.js'
 import { currentClaimVersionSql } from './version-selection.js'
@@ -10,6 +11,9 @@ export async function deliverySourceStatus(pool: Pick<pg.Pool, 'query'>, input: 
 }) {
   const identity = JSON.stringify({ source_kind: 'team_session', source_version: 2,
     accepted_delivery: { submission_id: input.submissionId, decision_id: input.decisionId } })
+  const ownedSources=sourcePoolContext(pool).namespace==='memory'
+    ?`SELECT source_provenance FROM shared.memory_personal_delivery_source($1,$2::jsonb#>>'{accepted_delivery,submission_id}',$2::jsonb#>>'{accepted_delivery,decision_id}')`
+    :`SELECT source_provenance FROM source_events WHERE installation_id=$1 AND EXISTS(SELECT 1 FROM personal) AND source_provenance @> $2::jsonb`
   const result = await pool.query(`WITH
     personal AS (SELECT 1 FROM memory_owner_scopes WHERE installation_id=$1 AND owner_scope_kind='personal'),
     episodes AS (
@@ -23,8 +27,7 @@ export async function deliverySourceStatus(pool: Pick<pg.Pool, 'query'>, input: 
     provenance AS (
       SELECT summary->'references'->'source' AS source FROM episodes
       UNION ALL SELECT locator->'source_provenance' FROM evidence
-      UNION ALL SELECT source_provenance FROM source_events
-        WHERE installation_id=$1 AND EXISTS(SELECT 1 FROM personal) AND source_provenance @> $2::jsonb
+      UNION ALL ${ownedSources}
     ),
     candidates AS (
       SELECT c.status, c.review_expires_at>clock_timestamp() AS reviewable, (r.episode_source_digest=e.source_digest AND NOT EXISTS(

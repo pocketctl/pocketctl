@@ -2,7 +2,7 @@ import {beginFreshInputFixture} from './input-start-fixture.js'
 import {installRetainedInputStartFixture} from './input-start-fixture.js'
 import pg from 'pg'
 import {randomUUID} from 'node:crypto'
-import {afterAll,beforeAll,describe,expect,test} from 'vitest'
+import {afterAll,beforeAll,describe,expect,test,vi} from 'vitest'
 import {applyMemorySchema} from '../../schema.js'
 import {applySharedSourceContract} from '../../migrations/shared-db/contract.js'
 import {provisionSharedDatabase} from '../../migrations/shared-db/namespace.js'
@@ -23,10 +23,12 @@ suite('preparatory Team semantic registration',()=>{
   if(!url||!/(^|_)test$/.test(new URL(url).pathname.slice(1)))throw Error('isolated_test_required')
   pool=new pg.Pool({connectionString:url});await pool.query('DROP SCHEMA IF EXISTS memory CASCADE; DROP SCHEMA IF EXISTS shared CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public')
   const inputFoundation=await beginFreshInputFixture(pool)
-  await applyMemorySchema(pool,{namespace:'memory'});await applySharedSourceContract(pool)
+  await applyMemorySchema(pool,{namespace:'memory'})
   await pool.query(`CREATE TABLE public.users(id int PRIMARY KEY,team_enabled boolean); INSERT INTO public.users VALUES(1,true),(2,true);
    CREATE TABLE public.extension_providers(provider_id text,status text); INSERT INTO public.extension_providers VALUES('pocketctl-memory','enabled');
-   CREATE TABLE public.extension_installations(installation_id uuid,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
+   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_user_id int,owner_scope_kind text,owner_scope_id uuid,status text,authorization_epoch bigint,config_version bigint,granted_scopes text[],enabled_services text[],event_filter jsonb DEFAULT '{}',start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0,subscriptions text[] NOT NULL DEFAULT '{}',created_at timestamptz NOT NULL DEFAULT now());
+   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,ack_feed_id bigint DEFAULT 0,snapshot_required_at timestamptz,lease_epoch bigint DEFAULT 0,lease_token_hash bytea,lease_expires_at timestamptz,updated_at timestamptz DEFAULT now());
+   CREATE TABLE public.events(id bigint PRIMARY KEY,session_id text);
    CREATE TABLE public.extension_scope_memberships(scope_kind text,scope_id uuid,user_id int,state text,roles text[],membership_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),membership_revision bigint DEFAULT 1);
    CREATE TABLE public.extension_teams(team_id uuid,organization_id uuid,state text,authorization_epoch bigint DEFAULT 1);
    CREATE TABLE public.extension_organizations(organization_id uuid,state text,authorization_epoch bigint DEFAULT 1);
@@ -51,6 +53,7 @@ suite('preparatory Team semantic registration',()=>{
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='semantic_registration_relay') THEN CREATE ROLE semantic_registration_relay NOLOGIN;END IF;
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='semantic_registration_migrator') THEN CREATE ROLE semantic_registration_migrator NOLOGIN;END IF;
    END $$;`)
+  await applySharedSourceContract(pool)
   await pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
   await pool.query("INSERT INTO public.extension_installations VALUES($1,'pocketctl-memory',1,'team',$2,'active',1,1,ARRAY['session:events:read'],ARRAY['memory.manage'],'{}');",[inst,teamScope])
   await pool.query("INSERT INTO memory.memory_installations(installation_id,provider_id,relay_status,local_status,config_version) VALUES($1,'pocketctl-memory','active','ready',1)",[inst])
@@ -135,16 +138,17 @@ suite('preparatory Team semantic registration',()=>{
   expect(await a.persistTeamSemanticRegistration(runtime,page)).toEqual(result)
   expect((await runtime.query('SELECT source_event_id::text,canonical_key,content_hash,source_provenance,source_version,canonical_session_key,session_id,turn_id,event_type,classification,occurred_at,payload_hash FROM source_events ORDER BY source_event_id')).rows).toEqual(original)
   expect(await counts()).toEqual({...before,groups:3,witnesses:6})
-  expect((await runtime.query('SELECT raw_canonical_key FROM memory_team_semantic_witnesses WHERE source_event_id=$1',[alias.source_event_id])).rows).toEqual([{raw_canonical_key:wire}])
+  expect((await runtime.query('SELECT source_event_id,raw_canonical_key=canonical_key AS native FROM memory_team_semantic_witnesses WHERE wire_key=$1',[wire])).rows).toEqual([{source_event_id:null,native:true}])
   const stored=(await runtime.query('SELECT row_to_json(g) AS meta FROM memory_team_semantic_groups g')).rows
   expect(JSON.stringify(stored)).not.toMatch(/private reply|private accepted summary|private native goal/)
   expect(stored.every(r=>r.meta.provenance_state==='provenance_unknown'&&r.meta.registration_state==='preparatory')).toBe(true)
  }))
- test('fresh r+1 registers original raw audit versions on repeat; stale preparation stays fenced',async()=>execution(async()=>{
+ test('replays preserve first-observed native versions and reject stale authority',async()=>execution(async()=>{
   const a=await api(),contexts=[{scope,root},{scope:otherScope,root}]
   await raw(contexts)
   await a.persistTeamSemanticRegistration(runtime,await a.prepareTeamSemanticRegistration(runtime,contexts))
   const original=(await runtime.query('SELECT row_to_json(s) AS metadata FROM source_events s ORDER BY source_event_id')).rows
+  const nativeAudit=(await runtime.query('SELECT witness_key,source_version FROM memory_team_semantic_witnesses ORDER BY witness_key')).rows
   const previousIds=(await runtime.query('SELECT semantic_ref_id::text FROM memory_team_semantic_groups ORDER BY semantic_ref_id')).rows.map(r=>r.semantic_ref_id)
   const stale=await a.prepareTeamSemanticRegistration(runtime,contexts),before=await counts()
   await pool.query("SELECT shared.mark_memory_source_dirty('team_collaboration','call')")
@@ -154,13 +158,13 @@ suite('preparatory Team semantic registration',()=>{
   const first=await a.persistTeamSemanticRegistration(runtime,await a.prepareTeamSemanticRegistration(runtime,contexts))
   expect(first).toHaveLength(3);expect(first.every(r=>!r.publishReady)).toBe(true)
   expect(first.map(r=>r.semanticRefId).sort()).toEqual(previousIds)
-  const audit=(await runtime.query('SELECT source_event_id::text,source_version FROM memory_team_semantic_witnesses ORDER BY source_event_id')).rows
-  expect(audit).toEqual(original.map(r=>({source_event_id:r.metadata.source_event_id,source_version:r.metadata.source_version})))
+  const audit=(await runtime.query('SELECT witness_key,source_version FROM memory_team_semantic_witnesses ORDER BY witness_key')).rows
+  expect(audit).toEqual(nativeAudit)
   const secondStale=await a.prepareTeamSemanticRegistration(runtime,contexts)
   await pool.query("SELECT shared.mark_memory_source_dirty('team_collaboration','call')")
   await expect(a.persistTeamSemanticRegistration(runtime,secondStale)).rejects.toThrow()
   expect(await a.persistTeamSemanticRegistration(runtime,await a.prepareTeamSemanticRegistration(runtime,contexts))).toEqual(first)
-  expect((await runtime.query('SELECT source_event_id::text,source_version FROM memory_team_semantic_witnesses ORDER BY source_event_id')).rows).toEqual(audit)
+  expect((await runtime.query('SELECT witness_key,source_version FROM memory_team_semantic_witnesses ORDER BY witness_key')).rows).toEqual(audit)
   expect((await runtime.query('SELECT row_to_json(s) AS metadata FROM source_events s ORDER BY source_event_id')).rows).toEqual(original)
   expect(await counts()).toEqual(before)
  }))
@@ -171,50 +175,26 @@ suite('preparatory Team semantic registration',()=>{
   await expect(a.persistTeamSemanticRegistration(runtime,{...page,token:{}})).rejects.toThrow('team_semantic_registration_token_invalid')
   expect(await counts()).toEqual(before)
  }))
- test('concurrent edits to original raw identity/proof/audit version cannot support any group',async()=>execution(async()=>{
-  const a=await api(),page=await a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}]),before=await counts()
-  const original=(await runtime.query("SELECT source_event_id::text,source_provenance,content_hash,session_id,turn_id,canonical_key,classification,source_version,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS occurred_at FROM source_events ORDER BY source_event_id LIMIT 1")).rows[0]
-  // A well-formed older raw audit version is legitimate. Replacing that exact
-  // original metadata after an opaque preparation is a distinct tamper case.
-  for(const [column,value] of [['source_provenance',{}],['content_hash',Buffer.alloc(32)],['session_id','wrong'],['turn_id','wrong'],['canonical_key','wrong'],['classification',{unexpected:'changed'}],['source_version',{content:'999999',authorization:'1',storage:'1'}],['occurred_at','2026-11-01T00:00:00.000001Z']] as const){
-   await pool.query(`UPDATE memory.source_events SET ${column}=$2${column==='content_hash'?',payload_hash=$2':''} WHERE source_event_id=$1`,[original.source_event_id,value])
-   try{await expect(a.persistTeamSemanticRegistration(runtime,page)).rejects.toThrow('team_semantic_raw_reference_invalid');expect(await counts()).toEqual(before)}
-   finally{await pool.query(`UPDATE memory.source_events SET ${column}=$2${column==='content_hash'?',payload_hash=$2':''} WHERE source_event_id=$1`,[original.source_event_id,original[column]])}
-  }
- }))
- test('malformed or injected original audit version metadata is rejected even before preparation',async()=>execution(async()=>{
-  const a=await api(),original=(await runtime.query('SELECT source_event_id::text,source_version FROM source_events ORDER BY source_event_id LIMIT 1')).rows[0],before=await counts()
-  for(const value of [{content:'01',authorization:'1',storage:'0'},{content:1,authorization:'1',storage:'0'},{content:'1',authorization:'1',storage:'-1'},{content:'9223372036854775808',authorization:'1',storage:'0'},{content:'1',authorization:'1'}, {content:'1',authorization:'1',storage:'0',body:{secret:'injection-sentinel'}}]){
-   if(!('storage' in value)||typeof value.content!=='string'||value.content==='01'||value.storage==='-1'||value.content==='9223372036854775808'){
-    await expect(pool.query('UPDATE memory.source_events SET source_version=$2 WHERE source_event_id=$1',[original.source_event_id,value])).rejects.toMatchObject({code:'23514'});expect(await counts()).toEqual(before);continue
-   }
-   await pool.query('UPDATE memory.source_events SET source_version=$2 WHERE source_event_id=$1',[original.source_event_id,value])
-   try{await expect((async()=>a.persistTeamSemanticRegistration(runtime,await a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}])))()).rejects.toThrow('team_semantic_raw_reference_invalid');expect(await counts()).toEqual(before)}
-   finally{await pool.query('UPDATE memory.source_events SET source_version=$2 WHERE source_event_id=$1',[original.source_event_id,original.source_version])}
-  }
- }))
- test('audit snapshot withholds injected nested and oversized raw version values inside PostgreSQL',async()=>execution(async()=>{
-  const a=await api();await raw()
-  const original=(await runtime.query('SELECT source_event_id::text,source_version FROM source_events ORDER BY source_event_id LIMIT 1')).rows[0],before=await counts()
-  const originalQuery=runtime.query.bind(runtime),exports:unknown[][]=[]
-  runtime.query=(async(...args:unknown[])=>{
-   const result=await Reflect.apply(originalQuery,runtime,args)
-   if(/team_semantic_raw_version_snapshot|SELECT source_event_id::text,source_version FROM source_events/.test(String(args[0])))exports.push(result.rows)
-   return result
-  }) as typeof runtime.query
+ test('registration and replay resolve both participants with the projection table unavailable',async()=>execution(async()=>{
+  const a=await api(),before=await counts()
+  await pool.query('ALTER TABLE memory.source_events RENAME TO obsolete_team_rows')
   try{
-   for(const injected of [{...original.source_version,body:{secret:'audit-injection-sentinel'}},{...original.source_version,body:{secret:'audit-injection-sentinel'+ 'x'.repeat(8192)}}]){
-    // Historical schema accepts extra keys. The preparation query must export
-    // NULL, never that untrusted JSON, before application-side DTO validation.
-    await pool.query('UPDATE memory.source_events SET source_version=$2 WHERE source_event_id=$1',[original.source_event_id,injected])
-    await expect(a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}])).rejects.toThrow('team_semantic_raw_reference_invalid')
-    expect(exports.length).toBeGreaterThan(0)
-    const exported=exports.at(-1) as any[]
-    expect(exported.find(r=>r.source_event_id===original.source_event_id)?.source_version).toBeNull()
-    expect(JSON.stringify(exported)).not.toContain('audit-injection-sentinel')
-    expect(await counts()).toEqual(before)
-   }
-  }finally{runtime.query=originalQuery as typeof runtime.query;await pool.query('UPDATE memory.source_events SET source_version=$2 WHERE source_event_id=$1',[original.source_event_id,original.source_version])}
+   const page=await a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}])
+   const result=await a.persistTeamSemanticRegistration(runtime,page)
+   expect(result).toHaveLength(3)
+   expect(result.every(r=>r.witnessCount===2)).toBe(true)
+   expect(await a.persistTeamSemanticRegistration(runtime,page)).toEqual(result)
+   expect(await counts()).toEqual(before)
+  }finally{await pool.query('ALTER TABLE memory.obsolete_team_rows RENAME TO source_events')}
+ }))
+ test('stored witness digest or proof changes cannot authenticate the native body',async()=>execution(async()=>{
+  const a=await api(),page=await a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}])
+  const previous=(await pool.query('SELECT * FROM memory.memory_team_semantic_witnesses ORDER BY witness_key LIMIT 1')).rows[0]
+  for(const [column,value] of [['raw_content_hash',Buffer.alloc(32)],['original_provenance',{invalid:'altered'}]] as const){
+   await pool.query(`UPDATE memory.memory_team_semantic_witnesses SET ${column}=$1 WHERE witness_key=$2`,[value,previous.witness_key])
+   try{await expect(a.persistTeamSemanticRegistration(runtime,page)).rejects.toThrow('team_semantic_registration_conflict')}
+   finally{await pool.query(`UPDATE memory.memory_team_semantic_witnesses SET ${column}=$1 WHERE witness_key=$2`,[previous[column],previous.witness_key])}
+  }
  }))
  test('immutable business digest conflict rolls back earlier new metadata in the same batch',async()=>execution(async()=>{
   const a=await api(),page=await a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}])
@@ -229,12 +209,12 @@ suite('preparatory Team semantic registration',()=>{
    await a.persistTeamSemanticRegistration(runtime,page)
   }
  }))
- test('root/native and raw metadata locks fail NOWAIT without partial metadata',async()=>execution(async()=>{
+ test('native root and witness locks fail NOWAIT without partial metadata',async()=>execution(async()=>{
   const a=await api(),page=await a.prepareTeamSemanticRegistration(runtime,[{scope,root},{scope:otherScope,root}]),before=await counts(),blocker=await pool.connect()
   try{
    await blocker.query('BEGIN');await blocker.query('SELECT 1 FROM public.team_memory_bindings FOR UPDATE')
    await expect(a.persistTeamSemanticRegistration(runtime,page)).rejects.toThrow();expect(await counts()).toEqual(before)
-   await blocker.query('ROLLBACK');await blocker.query('BEGIN');await blocker.query('SELECT 1 FROM memory.source_events FOR UPDATE')
+   await blocker.query('ROLLBACK');await blocker.query('BEGIN');await blocker.query('SELECT 1 FROM memory.memory_team_semantic_witnesses FOR UPDATE')
    await expect(a.persistTeamSemanticRegistration(runtime,page)).rejects.toMatchObject({code:'55P03'});expect(await counts()).toEqual(before)
   }finally{await blocker.query('ROLLBACK');blocker.release()}
  }))
@@ -273,13 +253,14 @@ suite('preparatory Team semantic registration',()=>{
   })
  })
  test('canonical shadow metadata registration stays closed',async()=>{
-  const a=await api(),job=randomUUID()
+  const job=randomUUID()
   await pool.query('UPDATE shared.memory_source_modes SET mode=$2 WHERE installation_id=$1',[inst,'shared-shadow'])
   try{
    await runtime.query("INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,claimed_by,claim_epoch,claim_expires_at) VALUES($1::uuid,$2,'project_shared_source',($1::uuid)::text,52,'running','shadow-fixture',1,clock_timestamp()+interval '5 minutes')",[job,inst])
-   await withSourceJobExecution(runtime,{jobId:job,claimedBy:'shadow-fixture',claimEpoch:1},async()=>{
-    await expect(a.prepareTeamSemanticRegistration(runtime,[{scope,root}])).rejects.toThrow('team_semantic_registration_execution_required')
-   },{branch:'canonical-shadow'})
+   const run=vi.fn()
+   await expect(withSourceJobExecution(runtime,{jobId:job,claimedBy:'shadow-fixture',claimEpoch:1},run,{branch:'canonical-shadow'}))
+    .rejects.toThrow('source_execution_generation_changed')
+   expect(run).not.toHaveBeenCalled()
   }finally{await pool.query("UPDATE shared.memory_source_modes SET mode='shared-active' WHERE installation_id=$1",[inst])}
  })
  test('accepted-delivery registration is separately typed and preserves original decision provenance',async()=>execution(async()=>{
@@ -338,10 +319,10 @@ suite('preparatory Team semantic registration',()=>{
   expect(retried.every(r=>r.publishReady===false&&committed.some(g=>g.semantic_ref_id===r.semanticRefId&&g.semantic_key===r.semanticKey))).toBe(true)
   expect(await a.persistTeamSemanticRegistration(runtime,page)).toEqual(retried)
  }),20000)
- test('privacy deletion cascades only witness metadata and never retargets original UUIDs',async()=>{
+ test('deleting a retired projection leaves the independently authorized native witnesses intact',async()=>{
   const original=(await runtime.query('SELECT source_event_id::text FROM source_events ORDER BY source_event_id LIMIT 1')).rows[0]
   await pool.query('DELETE FROM memory.source_events WHERE source_event_id=$1',[original.source_event_id])
-  expect((await counts()).witnesses).toBe(8);expect((await counts()).groups).toBe(6)
+  expect((await counts()).witnesses).toBe(9);expect((await counts()).groups).toBe(6)
   expect((await runtime.query('SELECT count(*)::int AS n FROM memory_team_semantic_witnesses WHERE source_event_id=$1',[original.source_event_id])).rows[0].n).toBe(0)
  })
  test.each(['team_collaboration','team_delivery'] as const)('personal B and C register native %s for binding target A without merging receiving installations',async kind=>{

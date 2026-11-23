@@ -1,9 +1,8 @@
 import {SHARED_JOB_CAPACITY} from './jobs/scheduling.js'
 import {reconcileExpiredCurationRuns} from './curation/reconcile-expired.js'
 import {attachSourceMetrics} from './sources/metrics.js'
-import {createCanonicalProjectionHandler} from './sources/canonical-projection-worker.js'
+import {createNativeTeamJobHandler} from './sources/team-semantic-job.js'
 import {createSharedSourceScheduler} from './sources/shared-scheduler.js'
-import {wakeCompletedPersonalProjection} from './sources/projection-job-handoff.js'
 import {createNativeInstallationDiscovery} from './installations/native-discovery.js'
 import {initializePlatformStatistics} from './platform-statistics/schema.js'
 import {createObservationScheduler} from './claims/lifecycle-observation-scheduler.js'
@@ -14,7 +13,6 @@ import {createCurationExecutor} from './curation/executor.js'
 import {createCurationWorker} from './curation/worker.js'
 import {reclaimClaimHistory,reclaimColdClaimBody} from './retention/claim-history.js'
 import {createDailyMaintenanceWorker} from './maintenance/worker.js'
-import { createDeliveryWithdrawalClient } from './relay/delivery-withdrawal-client.js'
 import { createDeliveryWithdrawalConsumer } from './inbox/delivery-withdrawal-consumer.js'
 import {createPublicationExecutor} from './governance/publication-executor.js'
 import {createAutomationRepository} from './governance/automation-repository.js'
@@ -31,18 +29,12 @@ import { createShutdownSignal } from './shutdown.js'
 import {ProviderDrain,drainTextProvider,drainEmbeddingProvider} from './model/provider-drain.js'
 import { createRelayHttpClient, type RelayHttpClient } from './relay/http-client.js'
 import { createProviderTokenClient } from './relay/token-client.js'
-import { createInstallationsClient } from './relay/installations.js'
-import { createFeedClient } from './relay/feed-client.js'
-import { createSnapshotClient } from './relay/snapshot-client.js'
-import { createSnapshotReconciler } from './snapshot/reconcile-worker.js'
 import { createPurgeClient } from './relay/purge-client.js'
 import { createReportingClient } from './relay/reporting-client.js'
 import { createStatusWorker } from './reporting/status-worker.js'
 import { createUsageWorker } from './reporting/usage-worker.js'
 import { createPurgeRepository } from './purge/repository.js'
 import { createPurgeWorker } from './purge/worker.js'
-import { createFeedConsumer } from './inbox/feed-worker.js'
-import { createProjectionHandler } from './projection/repository.js'
 import { createEpisodeRepository } from './episodes/repository.js'
 import { createCodeGraphBuildService } from './codegraph/build-service.js'
 import { createWikiBuildService } from './wiki/build-service.js'
@@ -66,8 +58,6 @@ import {
   withEmbeddingProviderBudget,
   withTextProviderBudget,
 } from './model/provider-budget.js'
-import { createInstallationRegistry } from './installations/repository.js'
-import { createDiscoveryWorker } from './installations/discovery-worker.js'
 import { createJobRepository } from './jobs/repository.js'
 import { createJobWorker } from './jobs/worker.js'
 import { createGitSyncWorker } from './git-sync/worker.js'
@@ -90,7 +80,7 @@ import type { JobClaim } from './jobs/types.js'
 const GAUGE_INTERVAL_MS = 30_000
 /**
  * memory-worker entry point. This process runs the background loops
- * (discovery, purge, feed, snapshot, projection, episodes, reporting),
+ * (discovery, purge, Team publication, turn compilation and reporting),
  * observes them through the bounded metrics registry and redacting logger,
  * and listens on no public port besides the optional /metrics listener.
  */
@@ -147,17 +137,21 @@ async function main(): Promise<void> {
 
   // Scheduled cleanup is owned by one durable daily maintenance loop.
   let dailyMaintenance: ReturnType<typeof createDailyMaintenanceWorker> | undefined
-  let discovery: ReturnType<typeof createDiscoveryWorker> | undefined
+  let discovery: ReturnType<typeof createNativeInstallationDiscovery> | undefined
   let jobWorker: ReturnType<typeof createJobWorker> | undefined
   let purgeWorker: ReturnType<typeof createPurgeWorker> | undefined
   let statusWorker: ReturnType<typeof createStatusWorker> | undefined
   let usageWorker: ReturnType<typeof createUsageWorker> | undefined
-  let feedTimer: ReturnType<typeof setInterval> | undefined
+  let dialogueTimer:ReturnType<typeof setInterval>|undefined
+  const dialoguePoller=createNonOverlappingPoller(async()=>{
+    const result=await pool.query('SELECT shared.dispatch_turn_dialogues() AS count')
+    if(result.rows[0]?.count)jobWorker?.wake()
+    await pool.query('SELECT shared.reclaim_turn_dialogues()')
+  })
   let maintenanceTimer: ReturnType<typeof setInterval> | undefined
   let budgetRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let gitPolling: ReturnType<typeof createGitPollingScheduler> | undefined
   let sharedSourceScheduler: ReturnType<typeof createSharedSourceScheduler> | undefined
-  const feedInFlight = new Set<Promise<void>>()
   if (config.mode !== 'off') {
     const http: RelayHttpClient = createRelayHttpClient({
       baseUrl: config.relayUrl,
@@ -165,8 +159,6 @@ async function main(): Promise<void> {
       observe: ({ operation, result, code, durationMs }) => {
         metrics.relayRequests.inc({ operation, result })
         metrics.relayDuration.observe({ operation }, durationMs / 1000)
-        if (operation === 'pull_feed') metrics.feedPulls.inc({ result })
-        if (operation === 'ack_feed') metrics.feedAcks.inc({ result })
         if (result === 'error' && code === 'rate_limited') {
           logger.log('warn', 'relay_rate_limited', { operation })
         }
@@ -178,60 +170,11 @@ async function main(): Promise<void> {
       clientSecret: config.providerClientSecret,
       http,
     })
-    const feedClient = createFeedClient({ http, tokens })
-    const withdrawalConsumer = config.databaseNamespace==='memory'
-      ? createDeliveryWithdrawalConsumer({pool,signal,transport:'native'})
-      : createDeliveryWithdrawalConsumer({pool,signal,...createDeliveryWithdrawalClient({http,tokens})})
-    const snapshotClient = createSnapshotClient({ http, tokens })
-    const snapshotReconciler = createSnapshotReconciler({
-      pool,
-      relay: {
-        listSessions: (installationId, cursor) => snapshotClient.listSessions(installationId, cursor),
-        getSnapshot: (installationId, sessionId, cursor) =>
-          snapshotClient.getSnapshot(installationId, sessionId, cursor),
-        acknowledgeReconcile: installationId => snapshotClient.acknowledgeReconcile(installationId),
-      },
-      onSnapshotResult: result => {
-        metrics.snapshot.inc({ result })
-      },
-    })
-    discovery = config.databaseNamespace==='memory'?createNativeInstallationDiscovery({pool,signal,installationAllowlist:new Set(config.installationAllowlist)}):createDiscoveryWorker({
-      installations: createInstallationsClient({ http, tokens }),
-      registry: createInstallationRegistry(pool),
-      signal,
-      intervalMs: 30_000,
-      installationAllowlist: new Set(config.installationAllowlist),
-      onError: loopError('discovery'),
-    })
+    const withdrawalConsumer=createDeliveryWithdrawalConsumer({pool,signal,transport:'native'})
+    discovery=createNativeInstallationDiscovery({pool,signal,installationAllowlist:new Set(config.installationAllowlist)})
     discovery.start()
 
-    const feedConsumer = createFeedConsumer({
-      pool,
-      pullFeed: (installationId, limit) => feedClient.pullFeed(installationId, limit),
-      ackFeed: input => feedClient.ackFeed(input),
-      workerId: config.workerId,
-      signal,
-      pollLeaseMs: 10_000,
-      onError: loopError('feed_installation'),
-      onScopeInvalidated: metrics.phase5.observeRevocationLag,
-      ...(config.databaseNamespace!=='memory' && config.sharedScopesMode !== 'off' ? {
-        pullScopeControlFeed: (installationId: string, limit: number) =>
-          feedClient.pullScopeControlFeed(installationId, limit),
-        ackScopeControlFeed: (input: { installation_id: string; cursor: string; lease_token: string }) =>
-          feedClient.ackScopeControlFeed(input),
-      } : {}),
-    })
-    feedTimer = setInterval(() => {
-      const run = (config.databaseNamespace==='memory'?Promise.resolve():withdrawalConsumer.runOnce()).catch(loopError('delivery_withdrawals'))
-        .then(() => feedConsumer.runOnce()).then(() => undefined, loopError('feed'))
-      feedInFlight.add(run)
-      void run.finally(() => feedInFlight.delete(run))
-    }, config.pollIntervalMs)
-    feedTimer.unref?.()
-
-    // Handlers for compile_episode/snapshot_reconcile/purge register in later
-    // tasks; unknown job types reschedule with a bounded no_handler code.
-    const jobRepository = createJobRepository(pool, { compileBatchIntervalMs: config.compileBatchIntervalMs })
+    const jobRepository = createJobRepository(pool, { compileBatchIntervalMs: config.compileBatchIntervalMs,nativeSourcesOnly:true })
     jobWorker = createJobWorker({
       pool,
       jobs: jobRepository,
@@ -247,7 +190,6 @@ async function main(): Promise<void> {
       onClaim:job=>{if(job.claim_epoch>1)metrics.jobRepeatClaims.inc({type:job.job_type})},
       onExecution:(job,result,seconds)=>{
         metrics.jobRuntime.observe({type:job.job_type,result},seconds)
-        wakeCompletedPersonalProjection(job,result,root=>sharedSourceScheduler?.wake(root))
       },
       onDeferred:(error,job)=>{
         const fields=workerErrorFields(error,job)
@@ -283,29 +225,7 @@ async function main(): Promise<void> {
     })
     purgeWorker.start()
 
-    const projection = createProjectionHandler(pool, {
-      stabilizationMs: config.episodeStabilizationMs,
-      purge: purgeRepository,
-      onInvalidated: (scope, count) => {
-        metrics.phase1.purgeInvalidations.inc({ scope }, count)
-      },
-      onProjected: count => {
-        if (count > 0) metrics.projection.inc({ result: 'success' }, count)
-      },
-      onProjectionError: () => {
-        metrics.projection.inc({ result: 'error' })
-      },
-    })
-    jobWorker.register('project_feed', projection.handleProjectFeed)
-    if (config.databaseNamespace === 'memory') {
-      jobWorker.register('project_shared_source', createCanonicalProjectionHandler(pool, {
-        compactSnapshotInstallations: config.compactSnapshotInstallations,
-        pageDerivedWriteInstallations: config.pageDerivedWriteInstallations,
-        stabilizationMs: config.episodeStabilizationMs,
-        sourceProfile: config.sharedSourceProfile,
-        installationAllowlist: config.installationAllowlist,
-      }), {branch: 'canonical'})
-    }
+    jobWorker.register('project_shared_source',createNativeTeamJobHandler(pool,config.episodeStabilizationMs,config.sharedSourceProfile,root=>sharedSourceScheduler?.wake(root)),{branch:'canonical'})
     const episodes = createEpisodeRepository(pool, {
       lifecycleMode: config.lifecycleMode,
       stabilizationMs: config.episodeStabilizationMs,
@@ -313,7 +233,6 @@ async function main(): Promise<void> {
       extractionDebounceMs: config.extractionDebounceMs,
     })
     jobWorker.register('compile_episode', episodes.handleCompileEpisode)
-    jobWorker.register('snapshot_reconcile', snapshotReconciler.handleSnapshotReconcile)
     const codeGraphBuild = createCodeGraphBuildService({
       pool,
       metrics: metrics.phase4,
@@ -776,6 +695,9 @@ async function main(): Promise<void> {
       // Per-root fenced job completion hints wake pending source work.
       sharedSourceScheduler=createSharedSourceScheduler({pool,workerId:config.workerId,signal,onDispatch:()=>jobWorker?.wake(),refreshInstallations:()=>discovery!.discoverOnce(),refreshWithdrawals:()=>withdrawalConsumer.runOnce(),onError:loopError('shared_source_scheduler')})
       sharedSourceScheduler.start()
+      const tick=()=>void dialoguePoller.runOnce().catch(loopError('turn_dialogue_dispatch'))
+      dialogueTimer=setInterval(tick,Math.max(1000,config.compileBatchIntervalMs))
+      tick()
     }
     jobWorker.start()
 
@@ -829,12 +751,13 @@ async function main(): Promise<void> {
   // Stop every timer first so no new cycle can start while draining; then
   // wait for the in-flight passes so pool.end() never yanks the connection
   // out from under a relay ack or feed commit.
-  if (feedTimer) clearInterval(feedTimer)
   if (maintenanceTimer) clearInterval(maintenanceTimer)
   if (budgetRecoveryTimer) clearInterval(budgetRecoveryTimer)
+  clearInterval(dialogueTimer)
   clearInterval(gaugeTimer)
 
   await Promise.all([
+    dialoguePoller.stop().catch(loopError('turn_dialogue_dispatch')),
     gaugePoller.stop().catch(loopError('metrics_gauges')),
     dailyMaintenance?.stop(),
     gitPolling?.stop(),
@@ -845,15 +768,6 @@ async function main(): Promise<void> {
     sharedSourceScheduler?.stop({releaseOwnedClaims:true}),
   ])
   const jobOutcome = await jobWorker?.stop()
-  let feedDrainTimer:ReturnType<typeof setTimeout>|undefined
-  let feedDrained:boolean
-  try{
-    feedDrained=await Promise.race([
-      Promise.allSettled([...feedInFlight]).then(()=>true),
-      new Promise<boolean>(resolve=>{feedDrainTimer=setTimeout(()=>resolve(false),10_000)}),
-    ])
-  }finally{if(feedDrainTimer)clearTimeout(feedDrainTimer)}
-  if(!feedDrained)logger.log('error','feed_drain_deadline',{active:feedInFlight.size})
   const providerOutcome=await providerDrain.wait(10_000)
   if(!providerOutcome.drained)logger.log('error','provider_drain_deadline',providerOutcome)
   // Idle keep-alive scrapers would otherwise hold close() open indefinitely.
@@ -861,8 +775,8 @@ async function main(): Promise<void> {
   await new Promise<void>(resolve => metricsServer.close(() => resolve()))
   stopStatistics()
   await pool.end()
-  logger.log('info', 'worker_stopped', { job_outcome: jobOutcome ?? 'off',feed_drained:feedDrained,provider_drained:providerOutcome.drained })
-  process.exit(jobOutcome === 'deadline'||!feedDrained||!providerOutcome.drained ? 1 : 0)
+  logger.log('info', 'worker_stopped', { job_outcome: jobOutcome ?? 'off',provider_drained:providerOutcome.drained })
+  process.exit(jobOutcome === 'deadline'||!providerOutcome.drained ? 1 : 0)
 }
 
 main().catch(error => {

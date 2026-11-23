@@ -403,6 +403,9 @@ func (s *OpencodeSync) DiffWithNativeStatus(msgs []OpencodeMessageWithParts, nat
 			if part.Type == "text" || part.Type == "reasoning" {
 				isFinal := !strings.EqualFold(role, "assistant") || m.Info.Time.Completed > 0
 				if ev, ok := s.diffTextPart(part, role, model, isFinal); ok {
+					if ev.Type == "agent_text" && isFinal && m.Info.Finish == "stop" && len(m.Info.Error) == 0 {
+						ev.MessagePhase = "final_answer"
+					}
 					if ev.Type != "user_text" || s.emitUser {
 						ev.SessionID = s.sessionID
 						stampOpencodeTurn(&ev, s.sessionID, anchor, 0)

@@ -74,8 +74,8 @@ export class ProjectionTiming {
   }
 }
 
-export async function observeProjectionStep<T>(pool: object, stage: ProjectionStage, work: () => Promise<T>): Promise<T> {
-  const timing = new ProjectionTiming(pool, stage)
+export async function observeProjectionStep<T>(pool: object, stage: ProjectionStage, work: () => Promise<T>, page?: {size:number;historical:boolean}): Promise<T> {
+  const timing = new ProjectionTiming(pool, stage, page)
   try {
     const result = await work()
     timing.finish()

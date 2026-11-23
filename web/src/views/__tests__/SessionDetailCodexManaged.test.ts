@@ -503,6 +503,29 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(deliveryStatus(wrapper, 'second prompt')).toBe('forwarded')
   })
 
+  test('a lost ACK retains the original bubble until a late native receipt, without another send', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountSession()
+      setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+      await nextTick()
+      const id = await sendPrompt(wrapper, 'Slow original')
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(deliveryStatus(wrapper, 'Slow original')).toBe('unknown')
+      websocketMock.handlers.get('user_message_nack')?.({ request_id: id, reason: 'timeout' })
+      websocketMock.handlers.get('user_message_receipt')?.({ session_id: 'foreign', msg_id: id, status: 'accepted' })
+      await nextTick()
+      expect(deliveryStatus(wrapper, 'Slow original')).toBe('unknown')
+      websocketMock.handlers.get('user_message_receipt')?.({ session_id: 'thr_1', msg_id: id, status: 'accepted' })
+      await nextTick()
+      expect(deliveryStatus(wrapper, 'Slow original')).toBe('accepted')
+      expect(websocketMock.send.mock.calls.filter(([value]) => value.type === 'user_message')).toHaveLength(1)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('does not reuse transport message ids after the session component remounts', async () => {
     const firstWrapper = mountSession()
     setTerminalSession({
@@ -650,7 +673,7 @@ describe('SessionDetail managed Codex terminal control', () => {
     const rows = (wrapper.vm as any).messages.filter((item: any) => item.content === 'same prompt')
     expect(rows).toHaveLength(2)
     expect(rows.find((item: any) => item.__msg_id === msgA)).toMatchObject({ request_id: 'req-a', msg_id: msgA, deliveryStatus: 'failed' })
-    expect(rows.find((item: any) => item.__msg_id === msgB)).toMatchObject({ request_id: 'req-b', msg_id: msgB, deliveryStatus: 'pending' })
+    expect(rows.find((item: any) => item.__msg_id === msgB)).toMatchObject({ request_id: 'req-b', msg_id: msgB, deliveryStatus: 'accepted' })
   })
 
   test('shows recovery and read-only receipt failures for prompts without receipt capability', async () => {

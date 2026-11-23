@@ -216,6 +216,7 @@ func (mp *Mapper) MapPart(wireSessionID, wireMessageID, nativePartID string, par
 			return protocol.DaemonEvent{}, "skip"
 		}
 		base.Type = "agent_text"
+		base.DialogueMessageID = wireMessageID
 		if model == "" {
 			// user text if the message role is user is handled by MapUserText;
 			// bare text parts default to agent_text with the resolved model.

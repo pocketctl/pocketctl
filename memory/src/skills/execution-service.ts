@@ -57,10 +57,10 @@ export function createSkillExecutionService(deps:{pool:pg.Pool;context:SkillSour
         const actorKind=binding.owner_scope_kind==='personal'?'personal':'membership',actorId=actorKind==='personal'?binding.owner_scope_id:binding.membership_id!
         const bucket=skillAssignmentBucket(identity.installationId,binding.owner_scope_id,actorId,validated.archive.repository_id,request.skillId)
         if (bucket>=rollout.basis_points) throw new SkillExecutionError('not_assigned')
-        const session=await client.query(`SELECT 1 FROM source_sessions s JOIN work_episodes e USING(installation_id,session_id)
-          WHERE s.installation_id=$1 AND s.session_id=$2 AND s.deleted_at IS NULL AND e.repository_id=$3 AND e.repo_snapshot_id=$4
-            AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=s.installation_id AND t.session_id=s.session_id)
-          FOR SHARE OF s,e`,[identity.installationId,request.sessionId,validated.archive.repository_id,validated.archive.repo_snapshot_id])
+        const session=await client.query(`SELECT 1 FROM work_episodes e
+          WHERE e.installation_id=$1 AND e.session_id=$2 AND memory_session_available(e.installation_id,e.session_id,TRUE) AND e.repository_id=$3 AND e.repo_snapshot_id=$4
+            AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
+          FOR SHARE OF e`,[identity.installationId,request.sessionId,validated.archive.repository_id,validated.archive.repo_snapshot_id])
         if (!session.rowCount) throw new SkillExecutionError('source_invalid')
         const hash=replayTextHash(canonicalJsonString(request))
         // The validated Skill task lock serializes idempotency for this version; cross-Skill key reuse is fenced by a scoped actor lock.

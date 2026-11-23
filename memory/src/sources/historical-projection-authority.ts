@@ -45,7 +45,8 @@ export async function readHistoricalProjectionSeal(db:Pick<pg.Pool,'query'>,root
    AND t.source_scope->>'modeGeneration'=m.generation::text
    AND (NOT (j.payload?'source_wait_count') OR (jsonb_typeof(j.payload->'source_wait_count')='number'
     AND j.payload->>'source_wait_count' ~ '^[1-9][0-9]{0,8}$'))
-   AND (j.payload-'source_wait_count')=jsonb_build_object('scope',t.source_scope,'root',jsonb_build_object('kind',p.source_kind,'key',p.root_key),
+   AND (NOT (j.payload?'projection_budget_step') OR (jsonb_typeof(j.payload->'projection_budget_step')='number' AND j.payload->>'projection_budget_step' ~ '^[1-8]$'))
+   AND (j.payload-'source_wait_count'-'projection_budget_step')=jsonb_build_object('scope',t.source_scope,'root',jsonb_build_object('kind',p.source_kind,'key',p.root_key),
     'distribution_scan',d.scan_id::text,'target_cursor',t.cursor_key)
    AND (SELECT count(*) FROM shared.memory_source_distribution_targets x WHERE x.scan_id=d.scan_id AND x.installation_id=p.installation_id)=1
    ${lock?'FOR SHARE OF w,d,m,t,j NOWAIT':''}`,[root.installationId,root.rootKey,root.scanId,root.workRevision])).rows[0]

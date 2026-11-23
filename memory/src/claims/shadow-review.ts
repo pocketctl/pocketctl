@@ -1,7 +1,8 @@
 import {lockCurrentRelayAuthority} from '../sources/current-grant.js'
 import {requireCurrentScopePermission,requireCurrentInstallationAuthority,assertCurrentGrantClock,TargetBindingError,type V2GrantFacts} from '../governance/authorization.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
-import {prepareSourceReferences,preparedSourceUnavailable} from '../sources/prepared-sources.js'
+import {prepareDialogue,DialogueReadDisposition} from '../episodes/turn-dialogue.js'
+import {preparedSourceUnavailable} from '../sources/prepared-sources.js'
 import {canonicalJsonString} from '@pocketctl/session-source'
 import type pg from 'pg'
 import {createHash} from 'node:crypto'
@@ -19,7 +20,7 @@ export async function shadowReviewQueue(pool:pg.Pool,input:ShadowReviewInput){
  const result=await pool.query(`WITH eligible AS(
   SELECT c.candidate_id::text,c.claim_type,c.statement,c.structured_content,c.scope_kind,c.scope_key,
    c.confidence::text,c.freshness_at,c.status,c.revision::text,c.created_at,c.source_kind,
-   c.curation_run_id::text,c.bundle_id::text,b.spans,b.session_id AS _session_id,
+   c.curation_run_id::text,c.bundle_id::text,b.spans,b.session_id AS _session_id,b.dialogue_members AS _members,parent.task_key AS _parent_key,
    c.xmin::text AS _candidate_stamp,b.xmin::text AS _bundle_stamp,parent.xmin::text AS _parent_stamp,r.xmin::text AS _run_stamp,owner.xmin::text AS _owner_stamp
   FROM memory_candidates c JOIN memory_task_bundles b USING(installation_id,bundle_id)
   JOIN memory_task_bundles parent ON parent.installation_id=b.installation_id AND parent.bundle_id=b.parent_bundle_id
@@ -35,15 +36,35 @@ export async function shadowReviewQueue(pool:pg.Pool,input:ShadowReviewInput){
   ORDER BY created_at DESC,candidate_id::uuid LIMIT $2)
  SELECT totals.total_count,page.* FROM(SELECT count(*)::int total_count FROM eligible)totals LEFT JOIN page ON true ORDER BY created_at DESC,candidate_id::uuid`,[input.installationId,limit+1,input.cursor??null])
  const rows=result.rows.filter(r=>r.candidate_id),page=rows.slice(0,limit),ids=[...new Set(page.flatMap(r=>(r.spans as Array<{event_id:string}>).map(s=>s.event_id)))]
- const bindings=ids.length?(await pool.query(`SELECT s.source_event_id::text,${shared?'':'s.payload,'}s.payload_hash,s.body_reclaimed_at,s.session_id,m.bundle_id::text,m.source_digest
-  FROM source_events s JOIN memory_task_bundle_sources m USING(installation_id,source_event_id)
-  WHERE s.installation_id=$1 AND s.source_event_id=ANY($2::uuid[]) AND m.bundle_id=ANY($3::uuid[])`,[input.installationId,ids,page.map(r=>r.bundle_id)])).rows:[]
- let prepared:Awaited<ReturnType<typeof prepareSourceReferences>>|undefined
- if(shared){try{prepared=await prepareSourceReferences(pool,input.installationId,[...new Set(bindings.filter(r=>!r.body_reclaimed_at).map(r=>r.source_event_id))])}catch(error){if(preparedSourceUnavailable(error))return unavailable();throw error}}
- const canonical=new Map(prepared?.events.map(e=>[e.source_event_id,e.payload])??[])
- const sources=bindings.map(r=>({...r,payload:shared?canonical.get(r.source_event_id):r.payload}))
+ const dialogues=new Map<string,Awaited<ReturnType<typeof prepareDialogue>>>()
+ const sources: Array<{source_event_id:string;bundle_id:string;session_id:string;payload:Record<string,unknown>|null;
+  source_digest:Buffer;payload_hash:Buffer;body_reclaimed_at:Date|null}>=[]
+ if(shared){
+  try{
+   for(const row of page){
+    if(!row._parent_key?.startsWith('dialogue:')||!Array.isArray(row._members))continue
+    const turn=row._parent_key.slice('dialogue:'.length),key=JSON.stringify([row._session_id,turn])
+    let dialogue=dialogues.get(key)
+    if(!dialogue){
+     dialogue=await prepareDialogue(pool,input.installationId,row._session_id,turn)
+     dialogues.set(key,dialogue)
+    }
+    for(const member of row._members){
+     const event=dialogue.events.find(e=>e.source_event_id===member.id)
+     if(event&&typeof member.digest==='string'&&member.digest===event.payload_hash.toString('hex')){
+      sources.push({...event,bundle_id:row.bundle_id,session_id:row._session_id,source_digest:event.payload_hash})
+     }
+    }
+   }
+  }catch(error){if(error instanceof DialogueReadDisposition||preparedSourceUnavailable(error))return unavailable();throw error}
+ }else if(ids.length){
+  const legacy=await pool.query(`SELECT s.source_event_id::text,s.payload,s.payload_hash,s.body_reclaimed_at,s.session_id,m.bundle_id::text,m.source_digest
+   FROM source_events s JOIN memory_task_bundle_sources m USING(installation_id,source_event_id)
+   WHERE s.installation_id=$1 AND s.source_event_id=ANY($2::uuid[]) AND m.bundle_id=ANY($3::uuid[])`,[input.installationId,ids,page.map(r=>r.bundle_id)])
+  sources.push(...legacy.rows)
+ }
  const response={total_count:result.rows[0]?.total_count??0,next_cursor:rows.length>limit?page.at(-1)!.candidate_id:null,
-  candidates:page.map(({spans,_session_id,_candidate_stamp,_bundle_stamp,_parent_stamp,_run_stamp,_owner_stamp,...row})=>{
+  candidates:page.map(({spans,_session_id,_members,_parent_key,_candidate_stamp,_bundle_stamp,_parent_stamp,_run_stamp,_owner_stamp,...row})=>{
    let available=true
    const evidence=(spans as Array<{event_id:string;start:number;end:number}>).flatMap(span=>{
     const s=sources.find(s=>s.source_event_id===span.event_id&&s.bundle_id===row.bundle_id)
@@ -53,7 +74,7 @@ export async function shadowReviewQueue(pool:pg.Pool,input:ShadowReviewInput){
    })
    return {...row,read_only:true,evidence_state:available?'available':'unavailable',evidence:available?evidence:[],repository_id:null,repo_snapshot_id:null,branch:null,episode_id:null,duplicate_of_claim_id:null}
   })}
- if(!prepared)return response
+ if(!shared)return response
  const client=await pool.connect()
  try{
   await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'")
@@ -63,7 +84,7 @@ export async function shadowReviewQueue(pool:pg.Pool,input:ShadowReviewInput){
   for(const session of [...new Set(page.map(r=>r._session_id))].sort())await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:session:'||$1||':'||$2,0))",[input.installationId,session])
   if('scopeBindings' in grant)await requireCurrentScopePermission({client,grant,targetInstallationId:input.installationId,permission:'read'})
   else{if(grant.installationId!==input.installationId)throw new TargetBindingError('installation authority mismatch');await requireCurrentInstallationAuthority(client,grant,{readOnly:true})}
-  await prepared.assertCurrent(client)
+  for(const dialogue of dialogues.values())await dialogue.assertCurrent(client)
   const current=(await client.query(`SELECT c.candidate_id::text,c.xmin::text AS _candidate_stamp,b.xmin::text AS _bundle_stamp,parent.xmin::text AS _parent_stamp,r.xmin::text AS _run_stamp,owner.xmin::text AS _owner_stamp
    FROM memory_candidates c JOIN memory_task_bundles b USING(installation_id,bundle_id)
    JOIN memory_task_bundles parent ON parent.installation_id=b.installation_id AND parent.bundle_id=b.parent_bundle_id
@@ -72,7 +93,7 @@ export async function shadowReviewQueue(pool:pg.Pool,input:ShadowReviewInput){
    WHERE c.installation_id=$1 AND c.candidate_id=ANY($2::uuid[]) ORDER BY c.candidate_id FOR SHARE OF c,b,parent,r,owner NOWAIT`,[input.installationId,page.map(r=>r.candidate_id)])).rows
   const witness=(r:any)=>[r.candidate_id,r._candidate_stamp,r._bundle_stamp,r._parent_stamp,r._run_stamp,r._owner_stamp]
   if(canonicalJsonString(current.map(witness))!==canonicalJsonString([...page].sort((a,b)=>a.candidate_id.localeCompare(b.candidate_id)).map(witness)))throw Error('source_reference_changed')
-  await prepared.assertCurrent(client,{forCommit:true})
+  for(const dialogue of dialogues.values())await dialogue.assertCurrent(client,{forCommit:true})
   await assertCurrentGrantClock(client,grant,[input.installationId])
   await client.query('COMMIT');return response
  }catch(error){await client.query('ROLLBACK').catch(()=>undefined);if(error instanceof TargetBindingError||preparedSourceUnavailable(error)||(error as {code?:string}).code==='55P03')return unavailable();throw error}finally{client.release()}

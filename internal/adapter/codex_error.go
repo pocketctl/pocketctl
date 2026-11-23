@@ -11,6 +11,8 @@ import (
 
 const (
 	CodexUsageLimitExceededCode = "codex_usage_limit_exceeded"
+	CodexModelNotFoundCode      = "codex_model_not_found"
+	CodexModelNotFoundMessage   = "This model is unavailable for this account. Choose another model and try again."
 	CodexTurnFailedCode         = "codex_turn_failed"
 	CodexTurnFailedMessage      = "Codex turn failed"
 
@@ -34,7 +36,7 @@ type codexNativeError struct {
 
 // ProjectCodexError normalizes both app-server and persisted rollout error
 // shapes. Only the structured usage-limit category may expose the native
-// user-facing message; all other diagnostics fail closed to a generic error.
+// user-facing message. Other mapped categories use fixed client-safe text.
 func ProjectCodexError(raw json.RawMessage) CodexProjectedError {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
@@ -54,14 +56,15 @@ func ProjectCodexError(raw json.RawMessage) CodexProjectedError {
 	if len(info) == 0 || string(info) == "null" {
 		info = native.LegacyCodexErrorInfo
 	}
-	if codexErrorInfoName(info) != "usagelimitexceeded" {
-		return projected
-	}
-
-	projected.Code = CodexUsageLimitExceededCode
-	projected.Message = sanitizeCodexErrorMessage(native.Message)
-	if projected.Message == "" {
-		projected.Message = codexUsageLimitFallbackMessage
+	switch codexErrorInfoName(info) {
+	case "modelnotfound":
+		return CodexProjectedError{Present: true, Code: CodexModelNotFoundCode, Message: CodexModelNotFoundMessage}
+	case "usagelimitexceeded":
+		projected.Code = CodexUsageLimitExceededCode
+		projected.Message = sanitizeCodexErrorMessage(native.Message)
+		if projected.Message == "" {
+			projected.Message = codexUsageLimitFallbackMessage
+		}
 	}
 	return projected
 }

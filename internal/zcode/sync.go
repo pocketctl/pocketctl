@@ -354,6 +354,8 @@ func (z *ZcodeSync) PreviewMessage(nativeMessageID, wireMessageID string, data Z
 		switch data.Finish {
 		case "stop", "completed":
 			if ended, turnCommit := z.endTurn(protocol.TurnStateCompleted, "assistant_finish"); ended != nil {
+				ended.DialogueMessageID = wireMessageID
+				ended.MessagePhase = "final_answer"
 				return DiffBatch{
 					Events:     []protocol.DaemonEvent{*ended},
 					Commit:     SyncCommit{Turn: turnCommit, LastEventID: ended.EventID},

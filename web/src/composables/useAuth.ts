@@ -1,3 +1,4 @@
+import { clearReceiptJournals } from '../services/sessionReceiptJournal'
 import { personalReadCache } from '../services/personalReadCache'
 import { ref, computed } from 'vue'
 import { teamDeliveryCache } from '../services/teamDeliveryCache'
@@ -337,6 +338,7 @@ async function refreshAuthToken(): Promise<boolean> {
 
 function clearAuthState() {
   personalReadCache.invalidate()
+  clearReceiptJournals()
   authGeneration++
   offlineIdentity.value = false
   localStorage.removeItem(OFFLINE_IDENTITY)
@@ -370,6 +372,7 @@ if (typeof window !== 'undefined') window.addEventListener('storage', event => {
   if (!invalidate) return
   // Another tab owns the new identity. Never remove its profile or rebroadcast a logout.
   personalReadCache.invalidate(false)
+  clearReceiptJournals()
   authGeneration++
   accessToken.value = ''; user.value = null; offlineIdentity.value = false
 })

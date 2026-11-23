@@ -13,9 +13,9 @@ export type AdmissionDiagnostic = 'missing_provenance'|'invalid_provenance'|'ide
  * Missing ancestors, cycles, ambiguous identities and unsupported producers
  * cannot confer non-skill authority. A later skill marker taints the entire
  * invocation, including earlier streaming fragments and final summaries. */
-export function admitLifecycleSources(input: {
-  sessionId: string; turnId: string; events: readonly PacketSourceEvent[]
-}): { events: PacketSourceEvent[]; receipts: SourceAdmissionReceipt[]; diagnostics:Partial<Record<AdmissionDiagnostic,number>> } {
+export function admitLifecycleSources<T extends Pick<PacketSourceEvent,'source_event_id'|'source_provenance'>>(input: {
+  sessionId: string; turnId: string; events: readonly T[]
+}): { events: T[]; receipts: SourceAdmissionReceipt[]; diagnostics:Partial<Record<AdmissionDiagnostic,number>> } {
   const explanations=new WeakMap<object,AdmissionDiagnostic>()
   const unknown=(diagnostic:AdmissionDiagnostic='incomplete_lineage'):SourceAdmission=>{
     const value:SourceAdmission={allowed:false,reason:'provenance_unknown'};explanations.set(value,diagnostic);return value
@@ -36,7 +36,11 @@ export function admitLifecycleSources(input: {
   const sourceIds = new Map<string, number[]>()
   const invocations = new Map<string, number[]>()
   const sequences = new Map<string, number[]>()
-  const add = (map: Map<string, number[]>, key: string, index: number) => map.set(key, [...(map.get(key) ?? []), index])
+  const add = (map: Map<string, number[]>, key: string, index: number) => {
+    const group = map.get(key)
+    if (group) group.push(index)
+    else map.set(key, [index])
+  }
   metadata.forEach((p, i) => {
     add(sourceIds, events[i].source_event_id, i)
     if (!p) {

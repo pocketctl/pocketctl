@@ -7,7 +7,7 @@ import {resolveClaimApplicability,projectClaimIdentity,assertIdentityNotTombston
 import {activateRevisionInterval} from '../claims/version-selection.js'
 import type {Conclusion,ConclusionEvidence} from './conclusion-validator.js'
 import type {RelationDecision} from './relation-evaluator.js'
-export interface WriterEvidence extends ConclusionEvidence {occurredAt:Date;digest:Buffer}
+export interface WriterEvidence extends ConclusionEvidence {locator?:unknown;span?:{start:number;end:number};occurredAt:Date;digest:Buffer}
 export interface WriterTarget {claim_id:string;current_version_id:string;revision:string;version_number:number;structured_content:Record<string,unknown>;statement:string;valid_from:Date|null;valid_until:Date|null}
 export interface WriteConclusionInput {installationId:string;candidateId:string;runId:string;bundleId:string;candidateRevision:number;conclusion:Conclusion;identity:LogicalIdentity;logicalKey:string;relation:RelationDecision;target:WriterTarget|null;evidence:WriterEvidence[];tombstoneKeys:readonly TombstoneHmacKey[]}
 export interface CurationWriteResult {action:string;reason:string;claimId:string|null;versionId:string|null;decisionId:string}
@@ -62,7 +62,7 @@ export async function writeLifecycleConclusion(c:pg.PoolClient,input:WriteConclu
   for(const e of input.evidence){
    const hash=digest({id:e.id,digest:e.digest.toString('hex')});if(seen.has(hash)||ordinal>63)continue
    await c.query(`INSERT INTO knowledge_evidence(evidence_id,installation_id,version_id,capsule_id,evidence_kind,locator,excerpt,excerpt_hash,source_evidence_hash,occurred_at,ordinal)
-    VALUES(gen_random_uuid(),$1,$2,$3,'accepted_excerpt',$4::jsonb,$5,sha256(convert_to($5,'utf8')),$6,$7,$8)`,[installationId,versionId,capsule,JSON.stringify({source_kind:'task_bundle',bundle_id:input.bundleId,source_event_id:e.id,source_digest:e.digest.toString('hex')}),e.text,hash,e.occurredAt,ordinal++]);seen.add(hash)
+    VALUES(gen_random_uuid(),$1,$2,$3,'accepted_excerpt',$4::jsonb,$5,sha256(convert_to($5,'utf8')),$6,$7,$8)`,[installationId,versionId,capsule,JSON.stringify(e.locator?{source_kind:'relay_turn_v1',dialogue:e.locator,span:e.span,coordinate_system:'sanitized_utf16',source_digest:e.digest.toString('hex')}:{source_kind:'task_bundle',bundle_id:input.bundleId,source_event_id:e.id,source_digest:e.digest.toString('hex')}),e.text,hash,e.occurredAt,ordinal++]);seen.add(hash)
   }
   await c.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload) VALUES(gen_random_uuid(),$1,'index_claim_version',$2,90,$3::jsonb) ON CONFLICT DO NOTHING`,[installationId,`index:${versionId}`,JSON.stringify({version_id:versionId})])
   await c.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload) VALUES(gen_random_uuid(),$1,'invalidate_context_packs',$2,10,$3::jsonb) ON CONFLICT DO NOTHING`,[installationId,`curation-invalidate:${candidateId}`,JSON.stringify({claim_id:claimId})])

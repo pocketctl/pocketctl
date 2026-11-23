@@ -335,7 +335,7 @@ func TestCodexProjectionAgentDeltaAndAuthoritativeCompletion(t *testing.T) {
 		t.Fatalf("completed=%+v", completed)
 	}
 	assertCodexTextEvent(t, completed[0], "Hello", "Hello", 3, true)
-	if completed[0].StreamID != streamID || completed[0].TotalBytes != len("Hello") ||
+	if completed[0].MessagePhase != "final_answer" || completed[0].StreamID != streamID || completed[0].TotalBytes != len("Hello") ||
 		completed[0].ContentHash == "" {
 		t.Fatalf("agent completion did not converge the stream: %+v", completed[0])
 	}

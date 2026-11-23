@@ -53,7 +53,7 @@ services:
       - "8080:8080"
     environment:
       <<: *relay-extension-environment
-      DATABASE_URL: postgresql://pocketctl:pocketctl@postgres:5432/pocketctl
+      DATABASE_URL: "${RELAY_DATABASE_URL:-postgresql://pocketctl:pocketctl@postgres:5432/pocketctl}"
       DB_CONTROL_POOL_MAX: "${DB_CONTROL_POOL_MAX:-4}"
       DB_INGEST_POOL_MAX: "${DB_INGEST_POOL_MAX:-8}"
       DB_QUERY_POOL_MAX: "${DB_QUERY_POOL_MAX:-8}"
@@ -135,7 +135,7 @@ services:
     restart: always
     environment:
       <<: *relay-extension-environment
-      DATABASE_URL: postgresql://pocketctl:pocketctl@postgres:5432/pocketctl
+      DATABASE_URL: "${RELAY_DATABASE_URL:-postgresql://pocketctl:pocketctl@postgres:5432/pocketctl}"
       DB_WORKER_POOL_MAX: "${DB_WORKER_POOL_MAX:-8}"
       RELAY_MATERIALIZATION_MODE: worker
       RELAY_DURABLE_INGRESS: "${RELAY_DURABLE_INGRESS:-off}"
@@ -195,23 +195,7 @@ services:
       - web
       - relay
 
-  # ---- PocketCtl Memory (independent Phase 0 deployment) ----
-
-  memory-postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: memory
-      POSTGRES_PASSWORD: memory
-      POSTGRES_DB: memory
-    ports:
-      - "127.0.0.1:5433:5432"
-    volumes:
-      - memory_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U memory"]
-      interval: 2s
-      timeout: 3s
-      retries: 10
+  # ---- PocketCtl Memory (shared Relay database) ----
 
   memory-api:
     image: pocketctl-memory:${RELEASE_VERSION:-local}
@@ -262,9 +246,9 @@ services:
       MEMORY_WIKI_MAX_SOURCE_CHARS: "${MEMORY_WIKI_MAX_SOURCE_CHARS:-200000}"
       MEMORY_CODE_SNAPSHOT_RETENTION_DAYS: "${MEMORY_CODE_SNAPSHOT_RETENTION_DAYS:-30}"
       MEMORY_PORT: "8090"
-      MEMORY_DATABASE_URL: "${MEMORY_DATABASE_URL:-postgresql://memory:memory@memory-postgres:5432/memory}"
-      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-public}"
-      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-auto}"
+      MEMORY_DATABASE_URL: "${MEMORY_SHARED_DATABASE_URL:-${MEMORY_DATABASE_URL:-}}"
+      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-memory}"
+      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-verify}"
       MEMORY_DB_POOL_MAX: "4"
       MEMORY_RELAY_URL: "${MEMORY_RELAY_URL:-http://relay:8080}"
       MEMORY_RELAY_ISSUER: "${MEMORY_RELAY_ISSUER:-http://localhost:8080}"
@@ -319,7 +303,7 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
-      memory-postgres:
+      postgres:
         condition: service_healthy
 
   memory-worker:
@@ -368,9 +352,9 @@ services:
       MEMORY_WIKI_MAX_SECTIONS: "${MEMORY_WIKI_MAX_SECTIONS:-256}"
       MEMORY_WIKI_MAX_SOURCE_CHARS: "${MEMORY_WIKI_MAX_SOURCE_CHARS:-200000}"
       MEMORY_CODE_SNAPSHOT_RETENTION_DAYS: "${MEMORY_CODE_SNAPSHOT_RETENTION_DAYS:-30}"
-      MEMORY_DATABASE_URL: "${MEMORY_DATABASE_URL:-postgresql://memory:memory@memory-postgres:5432/memory}"
-      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-public}"
-      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-auto}"
+      MEMORY_DATABASE_URL: "${MEMORY_SHARED_DATABASE_URL:-${MEMORY_DATABASE_URL:-}}"
+      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-memory}"
+      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-verify}"
       MEMORY_DB_POOL_MAX: "4"
       MEMORY_RELAY_URL: "${MEMORY_RELAY_URL:-http://relay:8080}"
       MEMORY_RELAY_ISSUER: "${MEMORY_RELAY_ISSUER:-http://localhost:8080}"
@@ -428,9 +412,8 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
-      memory-postgres:
+      postgres:
         condition: service_healthy
 
 volumes:
   pgdata:
-  memory_pgdata:

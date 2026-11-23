@@ -77,9 +77,9 @@ suite('shared runtime without physical legacy transport tables',()=>{
   expect(health.copies.filter((x:any)=>['memory_feed_inbox','memory_snapshot_events'].includes(x.table)).every((x:any)=>x.bytes==='0')).toBe(true)
  })
  test('a missing necessary source table is still an error after transport retirement',async()=>{
-  await f.pool.query('ALTER TABLE memory.source_events RENAME TO transport_test_sources')
+  await f.pool.query('ALTER TABLE shared.memory_archive_records RENAME TO transport_test_archives')
   try{await expect(f.runtime.query('SELECT shared.memory_source_health()')).rejects.toThrow('source_health_relation_missing')}
-  finally{await f.pool.query('ALTER TABLE memory.transport_test_sources RENAME TO source_events')}
+  finally{await f.pool.query('ALTER TABLE shared.transport_test_archives RENAME TO memory_archive_records')}
  })
  test('worker metadata gauges work without an Inbox',async()=>{
   const values=new Map<string,number>();await createInboxGaugeUpdater({set:({state}:any,value:number)=>{values.set(state,value)}} as any)(f.runtime)

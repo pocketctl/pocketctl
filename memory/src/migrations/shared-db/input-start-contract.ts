@@ -1,4 +1,3 @@
-import {snapshotMemorySql} from '../../sources/snapshot-provenance.js'
 import type pg from 'pg'
 /** Independent semantic compatibility check: no Relay implementation import or
  * private readiness function can replace this pre-DDL catalog/ACL audit. */
@@ -226,28 +225,9 @@ export const SHARED_INPUT_START_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.memory_relay_input_admitted(p_scope jsonb,p_event bigint,p_explicit boolean)
   RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE e record;state text;BEGIN
    SELECT * INTO e FROM public.events WHERE id=p_event AND user_id=(p_scope->>'principalUserId')::int AND NOT owner_retired;
-   IF NOT FOUND OR public.native_event_authority(e.id,e.user_id)->>'state'<>'current' THEN RETURN FALSE;END IF;
+   IF NOT FOUND OR public.native_event_authority(e.id,e.user_id)->>'state' IS DISTINCT FROM 'current' THEN RETURN FALSE;END IF;
    state=shared.memory_input_start_admission((p_scope->>'installationId')::uuid,'relay_event',e.id::text,e.user_id::text,e.logical_source_session_id);
    IF state='eligible' THEN RETURN TRUE;ELSIF state='denied' THEN RETURN FALSE;END IF;
-   -- An exact already-owned UUID is a retained entitlement, never a discovery
-   -- watermark. The original typed identity/hash/provenance must still agree.
-   IF p_explicit AND EXISTS(SELECT 1 FROM memory.source_events r WHERE r.installation_id=(p_scope->>'installationId')::uuid
-    AND r.source_kind='relay_event' AND r.mapping_state='verified' AND r.canonical_key=e.id::text
-    AND r.canonical_session_key=e.logical_source_session_id AND r.session_id=e.logical_source_session_id AND r.event_type=e.event_type
-    AND r.hash_version='canonical-json-sha256-v1' AND r.content_hash IS NOT NULL AND ${snapshotMemorySql('r')}->>'version'='1'
-    AND ${snapshotMemorySql('r')}->>'session_id'=e.logical_source_session_id
-    AND (r.snapshot_format=1 OR r.classification->'memory_source'=r.source_provenance->'memory')
-    AND ((to_jsonb(e)->>'source_header_version') IS DISTINCT FROM '1' OR to_jsonb(e)->'source_classification'->'memory_source'=${snapshotMemorySql('r')})
-    AND (encode(r.content_hash,'hex')=(to_jsonb(e)->>'canonical_payload_hash') OR((to_jsonb(e)->>'canonical_payload_hash') IS NULL AND(
-     r.payload=e.payload AND r.content_hash=r.payload_hash
-     -- Historical cold refs supply the expected canonical hash. The trusted
-     -- decoder must verify actual bytes; no body/hash is reconstructed here.
-     OR e.body_storage='cold' AND e.body_owner_user_id=e.user_id AND e.body_session_id IS NOT NULL
-      AND EXISTS(SELECT 1 FROM public.session_archive_manifests m JOIN public.session_archive_chunks c USING(manifest_id)
-       WHERE m.manifest_id=e.body_manifest_id AND c.ordinal=e.body_chunk_ordinal AND m.state='published'
-        AND m.user_id=e.user_id AND m.session_id=e.body_session_id AND m.activity_epoch=e.body_activity_epoch
-        AND e.id BETWEEN c.first_event_id AND c.last_event_id)))))
-    THEN RETURN TRUE;END IF;
    IF state='unproven' THEN RAISE EXCEPTION 'source_input_start_unproven';END IF;
    RETURN FALSE;
   END $$`,

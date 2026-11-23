@@ -41,7 +41,7 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
     const installation = await client.query(`SELECT 1 FROM memory_installations WHERE installation_id=$1 AND relay_status='active' AND local_status IN('ready','degraded') AND NOT snapshot_required FOR SHARE`, [input.installationId])
     if (!installation.rowCount) throw new Error('recovery_installation_unavailable')
     if ((await client.query(`SELECT 1 FROM memory_session_tombstones WHERE installation_id=$1 AND session_id=ANY($2::text[])`,[input.installationId,sessions])).rowCount) throw new Error('recovery_source_purged')
-    if ((await client.query(`SELECT 1 FROM source_sessions WHERE installation_id=$1 AND session_id=ANY($2::text[]) AND deleted_at IS NOT NULL`,[input.installationId,sessions])).rowCount) throw new Error('recovery_source_deleted')
+    if ((await client.query(`SELECT 1 FROM unnest($2::text[]) session_id WHERE NOT memory_session_available($1,session_id,TRUE)`,[input.installationId,sessions])).rowCount) throw new Error('recovery_source_deleted')
     const reclassified: string[] = []
     const alreadyClassified: string[] = []
     for (const envelope of envelopes) {
@@ -69,11 +69,11 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
     const changedScopes = envelopes.filter(e=>reclassified.includes(e.feed_id)).map(e=>({session_id:e.subject.session_id!,turn_id:e.subject.turn_id??null}))
     const episodes = changedScopes.length ? (await client.query<{episode_id:string;turn_id:string;digest:string}>(`
       SELECT e.episode_id::text,e.turn_id,encode(e.source_digest,'hex') digest FROM work_episodes e
-      JOIN source_sessions s USING(installation_id,session_id)
+
       WHERE e.installation_id=$1 AND EXISTS(SELECT 1 FROM jsonb_to_recordset($2::jsonb) AS affected(session_id text,turn_id text)
           WHERE affected.session_id=e.session_id AND (affected.turn_id IS NULL OR affected.turn_id=e.turn_id)) AND e.compiled_at IS NOT NULL AND e.source_digest IS NOT NULL
-        AND s.deleted_at IS NULL
-      ORDER BY e.episode_id LIMIT 501 FOR SHARE OF e,s`,[input.installationId,JSON.stringify(changedScopes)])).rows : []
+        AND memory_session_available(e.installation_id,e.session_id,TRUE)
+      ORDER BY e.episode_id LIMIT 501 FOR SHARE OF e`,[input.installationId,JSON.stringify(changedScopes)])).rows : []
     if (episodes.length > 500) throw new Error('recovery_episode_limit_exceeded')
     const targets = [...episodes.map(e=>({...e,key:`recovery:discovery:${e.episode_id}:${e.digest}`})),...failed.map(e=>({...e,key:`recovery:provider:${e.run_id}`}))]
     const currentSources=async()=>{
@@ -87,12 +87,12 @@ export async function recoverRuntime(pool: pg.Pool, input: RuntimeRecoveryInput)
     for (const target of targets) {
       const result=await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
         SELECT gen_random_uuid(),e.installation_id,'extract_candidates',$3,20,
-          jsonb_build_object('turn_id',e.turn_id,'expected_source_digest',encode(e.source_digest,'hex')) ||
+          jsonb_build_object('turn_id',e.turn_id,'episode_id',e.episode_id,'expected_source_digest',encode(e.source_digest,'hex')) ||
           CASE WHEN $5::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('retry_failed_run_id',$5::text) END
-        FROM work_episodes e JOIN source_sessions s USING(installation_id,session_id)
+        FROM work_episodes e
         JOIN memory_feature_settings f USING(installation_id)
         WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=decode($4,'hex')
-          AND s.deleted_at IS NULL AND f.extraction_mode IN('enabled','shadow')
+          AND memory_session_available(e.installation_id,e.session_id,TRUE) AND f.extraction_mode IN('enabled','shadow')
           AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
           AND NOT EXISTS(SELECT 1 FROM memory_source_delivery_facts gap WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined' AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))

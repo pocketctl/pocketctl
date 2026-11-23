@@ -54,6 +54,63 @@ vi.mock('../../services/sessionOrganization', () => ({
 }))
 
 describe('SessionDetail history loading', () => {
+  test('a tool or approval arriving while reading keeps the viewport and offers an explicit jump', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const vm = wrapper.vm as any
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan', daemon_id: 'd1' }] })
+    await flushPromises()
+    const pane = wrapper.get('.chat-messages').element as HTMLElement
+    Object.defineProperty(pane, 'scrollHeight', { configurable: true, value: 2000 })
+    pane.scrollTop = 300
+    vm.autoScroll = false
+    for (const type of ['tool_call', 'approval_request']) {
+      websocketMock.handlers.get(type)?.({ type, session_id: 'session-http-lan', tool: 'Read', call_id: 'tool-1', request_id: 'approve-1' })
+    }
+    await flushPromises()
+    expect(pane.scrollTop).toBe(300)
+    expect(wrapper.get('.scroll-to-bottom').text()).toContain('session.status.waiting_approval')
+    wrapper.unmount()
+  })
+
+  test('candidate-confirmation keys reach the input method', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    for (const key of ['Enter', 'ArrowDown', 'Escape']) {
+      for (const ime of [{ isComposing: true }, { keyCode: 229 }]) {
+        const preventDefault = vi.fn()
+        vm.onInputKeydown({ key, ...ime, preventDefault })
+        expect(preventDefault).not.toHaveBeenCalled()
+      }
+    }
+    wrapper.unmount()
+  })
+
+  test('recent private view appears before replay and requires the original valid lease', async () => {
+    const lease = vi.spyOn(personalReadCache, 'canShowMemoryPreview').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockResolvedValue(null)
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const sid = 'session-http-lan'
+    websocketMock.handlers.get('session_list')?.({sessions:[{ session_id: sid }, { session_id: 'another' }]})
+    websocketMock.handlers.get('replay_batch')?.({session_id:sid,req_id:1,direction:'backward',events:[{type:'user_text',text:'Remember this',session_id:sid}]})
+    websocketMock.handlers.get('replay_end')?.({session_id:sid,req_id:1,has_more:false})
+    await flushPromises()
+    routeMock.current.params.id = 'another'
+    await flushPromises()
+    routeMock.current.params.id = sid
+    await flushPromises()
+    expect(vm.renderMessages[0].content).toBe('Remember this')
+    expect(vm.canWriteWhenConnected).toBe(false)
+    lease.mockReturnValue(false)
+    routeMock.current.params.id = 'another'
+    await flushPromises()
+    routeMock.current.params.id = sid
+    await flushPromises()
+    expect(vm.renderMessages).toHaveLength(0)
+    wrapper.unmount()
+  })
+
   test('refresh action follows the forward cursor, keeps history and ignores live overlap and late pages', async () => {
     const wrapper = shallowMount(SessionDetail)
     await flushPromises()
@@ -98,6 +155,24 @@ describe('SessionDetail history loading', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(false)
     expect(vm.renderMessages.map((m:any)=>m.content)).toEqual(['Current question','Current answer','Live update'])
+    wrapper.unmount()
+  })
+
+  test('reads the versioned encrypted preview after recreating the detail view', async () => {
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? {
+      version: 2,
+      rows: [{ id: 'anchor', type: 'agent_text', content: 'Previously visible paragraph' }],
+      anchor: { id: 'anchor', top: 27 },
+      groups: { previousCall: true },
+    } as any : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const vm = wrapper.vm as any
+    expect(vm.renderMessages[0].content).toBe('Previously visible paragraph')
+    expect(vm.autoScroll).toBe(false)
+    expect(vm.openToolGroups.previousCall).toBe(true)
+    expect(vm.canWriteWhenConnected).toBe(false)
     wrapper.unmount()
   })
 

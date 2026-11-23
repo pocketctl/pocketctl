@@ -468,7 +468,7 @@ suite('controlled personal Relay source reader',()=>{
    const health=(await c.query('SELECT shared.memory_source_health() AS health')).rows[0].health
    expect(health.ready).toBe(false);expect(health.modes).toContainEqual({mode:'shared-shadow',count:'1'})
    expect(health.roots.some((r:any)=>r.kind==='relay_event'&&r.state==='pending')).toBe(true)
-   expect(health.copies.some((r:any)=>r.table==='source_events'&&BigInt(r.bytes)>0n)).toBe(true)
+   expect(health.copies.some((r:any)=>r.table==='memory_archive_records'&&BigInt(r.bytes)>0n)).toBe(true)
    expect(JSON.stringify(health)).not.toMatch(/private hot|session|10000000-0000/)
    await c.query('COMMIT')
   }finally{await c.query('ROLLBACK');c.release()}

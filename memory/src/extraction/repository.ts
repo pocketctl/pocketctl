@@ -106,10 +106,9 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
                    AND previous.state = 'succeeded'
                ) AS has_prior_run_on_old_digest
         FROM work_episodes e
-        JOIN source_sessions s
-          ON s.installation_id = e.installation_id AND s.session_id = e.session_id
+        CROSS JOIN LATERAL (SELECT memory_session_first_recorded_at(e.installation_id,e.session_id) AS first_recorded_at) s
         LEFT JOIN memory_feature_settings f ON f.installation_id = e.installation_id
-        WHERE e.installation_id = $1 AND e.turn_id = $2
+        WHERE e.installation_id = $1 AND e.turn_id = $2 AND s.first_recorded_at IS NOT NULL
           AND NOT($3::text='enabled' AND EXISTS(SELECT 1 FROM memory_curation_policies p WHERE p.installation_id=e.installation_id AND p.mode='enabled')) AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
@@ -177,26 +176,26 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
           ])
           if(input.fence)await assertJobFence(client,input.fence)
           const current=await client.query(`SELECT 1 FROM work_episodes e
-            JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
+
             JOIN memory_feature_settings f ON f.installation_id=e.installation_id
             JOIN memory_installations i ON i.installation_id=e.installation_id
             WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3
               AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND memory_session_available(e.installation_id,e.session_id,TRUE) AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
               AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id) AND f.extraction_mode IN('shadow','enabled')
               AND i.relay_status='active' AND i.local_status='ready'
               AND ($4::text IS NULL OR f.extraction_consent_fingerprint=$4)
-            FOR SHARE OF e,s,f,i`,[input.installationId,input.episodeId,input.sourceDigest,input.expectedConsentFingerprint??null])
+            FOR SHARE OF e,f,i`,[input.installationId,input.episodeId,input.sourceDigest,input.expectedConsentFingerprint??null])
           if(!current.rowCount){
             const waiting=await client.query(`SELECT 1 FROM work_episodes e
-              JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
+
               JOIN memory_feature_settings f ON f.installation_id=e.installation_id
               JOIN memory_installations i ON i.installation_id=e.installation_id
               WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.source_digest=$3 AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
-          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND s.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
+          AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id) AND memory_session_available(e.installation_id,e.session_id,FALSE) AND NOT EXISTS (SELECT 1 FROM memory_source_delivery_facts gap
           WHERE gap.installation_id=e.installation_id AND gap.session_id=e.session_id
             AND gap.error_code='oversized_content' AND gap.projection_state='quarantined'
             AND (gap.turn_id IS NULL OR gap.turn_id=e.turn_id))
@@ -328,10 +327,10 @@ export function createExtractionRepository(pool: pg.Pool, observeWork?: (result:
       const result=await pool.query(`WITH missing AS (
         SELECT DISTINCT ON(e.installation_id,e.episode_id) e.installation_id,e.turn_id,e.source_digest,r.run_id
         FROM memory_extraction_runs r JOIN work_episodes e ON e.installation_id=r.installation_id AND e.episode_id=r.episode_id
-        JOIN source_sessions s ON s.installation_id=e.installation_id AND s.session_id=e.session_id
+
         JOIN memory_feature_settings f ON f.installation_id=e.installation_id
         JOIN memory_installations i ON i.installation_id=e.installation_id
-        WHERE r.state='failed' AND r.error_code IN('budget_exceeded','budget_unavailable')
+        WHERE memory_session_available(e.installation_id,e.session_id,FALSE) AND r.state='failed' AND r.error_code IN('budget_exceeded','budget_unavailable')
           AND r.episode_source_digest=e.source_digest AND e.compiled_at IS NOT NULL AND e.body_reclaimed_at IS NULL
           AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts retained WHERE retained.installation_id=e.installation_id AND retained.turn_id=e.turn_id)
           AND f.extraction_mode IN('shadow','enabled') AND f.extraction_consent_fingerprint=$1

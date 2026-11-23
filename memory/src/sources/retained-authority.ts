@@ -1,3 +1,4 @@
+import {checkDialogueRef,type DialogueRef} from '../episodes/turn-dialogue.js'
 import type {SourceCommitOptions} from './prepared-sources.js'
 import type pg from 'pg'
 import {sourcePoolContext,sourceConnectionKey} from './pool-context.js'
@@ -30,7 +31,7 @@ const uuidPattern='^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}
 /** Human capsules carry independent retention authority. Machine capsules
  * instead cite the exact original member of a committed curation decision.
  * The returned UUIDs still need the current native source commit fence. */
-async function machineExcerptSources(client:Db,installationId:string,evidence:readonly RetainedEvidenceBinding[],locked?:readonly LockedCapsule[]):Promise<string[]>{
+async function machineExcerptSources(client:Db,installationId:string,evidence:readonly RetainedEvidenceBinding[],locked?:readonly LockedCapsule[],direct:DialogueRef[]=[]):Promise<string[]>{
  const excerpts=evidence.filter(row=>row.evidence_kind==='accepted_excerpt')
  if(!excerpts.length)return []
  if(excerpts.some(row=>!row.evidence_id||!row.version_id))throw Error('source_reference_unproven')
@@ -44,6 +45,11 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
   ||!['user_accepted','automation_conclusion'].includes(row.retention_basis)))throw Error('source_reference_changed')
  const automated=capsules.filter(row=>row.retention_basis==='automation_conclusion').map(row=>row.evidence_id)
  if(!automated.length)return []
+ const relay=(await client.query(`SELECT locator->'dialogue' AS ref FROM knowledge_evidence
+  WHERE installation_id=$1 AND evidence_id=ANY($2::uuid[]) AND locator->>'source_kind'='relay_turn_v1'
+   AND excerpt_hash=sha256(convert_to(excerpt,'UTF8')) FOR SHARE NOWAIT`,[installationId,automated])).rows
+ direct.push(...relay.map(r=>r.ref))
+ if(relay.length===automated.length)return []
  const proved=(await client.query(`
   WITH locators AS (
    SELECT e.evidence_id,e.installation_id,e.version_id,e.locator->>'source_digest' AS digest,
@@ -57,9 +63,8 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
   SELECT l.source_event_id::text
   FROM locators l
   JOIN knowledge_versions v USING(installation_id,version_id)
-  JOIN memory_task_bundle_sources member USING(installation_id,bundle_id,source_event_id)
   JOIN memory_task_bundles b USING(installation_id,bundle_id)
-  JOIN source_events s USING(installation_id,source_event_id)
+  CROSS JOIN LATERAL shared.memory_retained_bundle_member(l.installation_id,l.bundle_id,l.source_event_id) s
   JOIN LATERAL (
    SELECT 1 FROM memory_curation_runs r JOIN memory_curation_decisions d USING(installation_id,run_id)
    WHERE r.installation_id=l.installation_id AND r.bundle_id=l.bundle_id AND r.mode='enabled' AND r.state='completed'
@@ -69,9 +74,9 @@ async function machineExcerptSources(client:Db,installationId:string,evidence:re
    LIMIT 1 FOR SHARE OF r,d NOWAIT
   ) decision ON TRUE
   WHERE v.authority IN('machine_concluded','automation_accepted') AND b.bundle_kind='task' AND b.session_id=s.session_id
-    AND member.source_digest=s.payload_hash AND l.digest=encode(s.payload_hash,'hex')
-  ORDER BY l.evidence_id FOR SHARE OF v,member,b,s NOWAIT`,[installationId,automated,uuidPattern])).rows
- if(proved.length!==automated.length)throw Error('source_reference_changed')
+    AND l.digest=encode(s.payload_hash,'hex')
+  ORDER BY l.evidence_id FOR SHARE OF v,b NOWAIT`,[installationId,automated,uuidPattern])).rows
+ if(proved.length+relay.length!==automated.length)throw Error('source_reference_changed')
  return proved.map(row=>row.source_event_id)
 }
 
@@ -87,7 +92,7 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
  let state=installations.get(installationId)
  const {expectedMode,locked}=options
  const mode=locked?.mode??await currentRetainedSourceMode(client,installationId)
- if(!['legacy-feed','shared-shadow','shared-active'].includes(mode.mode)
+ if(mode.mode!=='shared-active'
   ||expectedMode&&(mode.mode!==expectedMode.mode||mode.generation!==expectedMode.generation))throw Error('source_reference_changed')
  if(state&&(state.mode!==mode.mode||state.generation!==mode.generation))throw Error('source_reference_changed')
  if(!state){
@@ -95,8 +100,8 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
   state={installationId,...mode,ids:new Set<string>(),governedIds:new Set<string>(),guards:[]};installations.set(installationId,state);attached.set(sourceConnectionKey(client),installations)
  }
  const ids=new Set(evidence.flatMap(row=>row.source_event_id?[row.source_event_id]:[]))
- const machineSources=await machineExcerptSources(client,installationId,evidence,locked?.capsules)
- if(machineSources.length&&mode.mode==='legacy-feed')throw Error('source_reference_unproven')
+ const direct:DialogueRef[]=[]
+ const machineSources=await machineExcerptSources(client,installationId,evidence,locked?.capsules,direct)
  for(const id of machineSources)ids.add(id)
  const artifactSet=new Set(evidence.flatMap(row=>row.artifact_id?[row.artifact_id]:[]))
  const governed=await governedRetainedEvidence(client,installationId,evidence)
@@ -118,6 +123,7 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
   const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
   for(const row of episodes){
    if(!row.evidence_manifest||typeof row.evidence_manifest!=='object'||Array.isArray(row.evidence_manifest))throw Error('source_reference_unproven')
+   if(row.evidence_manifest.dialogue?.kind==='relay_turn_v1'){direct.push(row.evidence_manifest.dialogue);continue}
    let proved=false
    for(const entry of Object.values(row.evidence_manifest) as any[]){
     if(!entry||typeof entry!=='object'||entry.omitted===true)continue
@@ -129,15 +135,20 @@ export async function guardRetainedEvidence(client:Db,installationId:string,evid
    if(!proved)throw Error('source_reference_unproven')
   }
  }
+ for(const ref of direct){
+  if(ref?.kind!=='relay_turn_v1')throw Error('source_reference_unproven')
+  await checkDialogueRef(client,installationId,ref,false)
+  state.guards.push({assertCurrent:(db,options)=>checkDialogueRef(db,installationId,ref,options?.forCommit===true)})
+ }
  const artifactIds=[...artifactSet].sort()
  if(artifactIds.length){
-  const artifacts=(await client.query('SELECT artifact_id::text,source_event_id::text FROM source_artifacts WHERE installation_id=$1 AND artifact_id=ANY($2::uuid[]) ORDER BY artifact_id FOR SHARE',[installationId,artifactIds])).rows
+  const artifacts=(await client.query('SELECT h.artifact_id::text,h.source_event_id::text FROM unnest($2::uuid[]) k CROSS JOIN LATERAL shared.memory_native_evidence_handle($1,NULL,k) h ORDER BY h.artifact_id',[installationId,artifactIds])).rows
   if(artifacts.length!==artifactIds.length||artifacts.some(row=>!row.source_event_id))throw Error('source_reference_missing')
   for(const row of artifacts)ids.add(row.source_event_id)
  }
  if([...installations.values()].reduce((sum,entry)=>sum+entry.ids.size,0)+[...ids].filter(id=>!state!.ids.has(id)).length>4096)throw Error('source_reference_limit')
  const added=[...ids].filter(id=>!state.ids.has(id)).sort()
- if(added.length&&mode.mode!=='legacy-feed'){
+ if(added.length){
   // prepareSourceAuthorities uses only controlled current facts and UUID
   // metadata. It does not resolve bodies or require raw collection rights.
   const guard=await prepareSourceAuthorities(client as pg.Pool,installationId,added)

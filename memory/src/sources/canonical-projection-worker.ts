@@ -16,16 +16,17 @@ import {prepareMetadataScope} from './source-projection-admission.js'
 /** Each durable page commits its cursor, refs and derived facts together.
  * Personal metadata may continue a small successful-page burst; generic,
  * Team and shadow work retain their existing single-page admission. */
-export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSnapshotInstallations?:readonly string[];pageDerivedWriteInstallations?:readonly string[];pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
+export function createCanonicalProjectionHandler(pool:pg.Pool,options:{projectionScanJobIds?:readonly string[];projectionScanInstallations?:readonly string[];compactSnapshotInstallations?:readonly string[];pageDerivedWriteInstallations?:readonly string[];pageSize?:number;deferMs?:number;stabilizationMs?:number;sourceProfile?:'personal-relay-only';installationAllowlist?:readonly string[];onReady?:(root:SourceRoot)=>void}={}):JobHandler{
  const configuredSize=options.pageSize??64,deferMs=options.deferMs??1000
  if(!Number.isSafeInteger(configuredSize)||configuredSize<1||configuredSize>256||!Number.isSafeInteger(deferMs)||deferMs<0||deferMs>60000)throw Error('canonical_projection_options_invalid')
- return async(job,signal)=>{
+ return async(job,signal,ctx)=>{
+  const retryFence=job.attempts>1?ctx?.fence:undefined
   // The failed page was not acknowledged. Keep the same seal and durable
   // cursor. Preserve the reduced size when a successful claim yields mid-scan.
   const storedStep=job.payload.projection_budget_step
-  const previousBudgetFailure=job.last_error_code==='canonical_reference_budget_exceeded'||job.last_error_code==='canonical_reference_write_timeout'
-  const budgetStep=typeof storedStep==='number'&&Number.isInteger(storedStep)&&storedStep>=1&&storedStep<=6
-   ?storedStep:previousBudgetFailure?Math.min(6,Math.max(1,job.attempts-1)):0
+  const previousBudgetFailure=job.last_error_code==='canonical_reference_budget_exceeded'||job.last_error_code==='canonical_reference_write_timeout'||job.last_error_code==='projection_read_page_timeout'
+  const budgetStep=typeof storedStep==='number'&&Number.isInteger(storedStep)&&storedStep>=1&&storedStep<=8
+   ?storedStep:previousBudgetFailure?Math.min(8,Math.max(1,job.attempts-1)):0
   const pageSize=Math.max(1,Math.ceil(configuredSize/2**budgetStep))
   const historicalCompile=job.priority!==undefined&&job.priority!==APPEND_PROJECTION_PRIORITY
   const scope=structuredClone(job.payload.scope) as SourceScope|undefined,root=structuredClone(job.payload.root) as SourceRoot|undefined
@@ -85,15 +86,14 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSn
    options.onReady?.(root)
    return
   }
-  const team=root.kind==='team_collaboration'||root.kind==='team_delivery',personal=!team&&scope.ownerScopeKind==='personal'
-  const publishTeam=async()=>{
-   const prepared=await prepareTeamSemanticPublication(pool,scope.installationId,root)
-   if(prepared)await persistTeamSemanticPublication(pool,prepared,options.stabilizationMs)
+  if(root.kind==='team_collaboration'||root.kind==='team_delivery'){
+   const publication=await prepareTeamSemanticPublication(pool,scope.installationId,root)
+   if(!publication)throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
+   if(signal.aborted)throw Error('canonical_projection_aborted')
+   await persistTeamSemanticPublication(pool,publication,options.stabilizationMs)
+   return
   }
-  if(team){
-   const excluded=await prepareTeamSemanticPublication(pool,scope.installationId,root,{metadataOnly:true})
-   if(excluded){await persistTeamSemanticPublication(pool,excluded,options.stabilizationMs);return}
-  }
+  const personal=scope.ownerScopeKind==='personal'
   const readProgress=()=>observeProjectionStep(pool,'checkpoint',async()=>(await pool.query(`SELECT next_cursor,state,source_version${contexts.offlineBatch?',offline_basis':''} FROM memory_canonical_projection_progress
    WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=$4`,[scope.installationId,root.kind,root.key,canonicalPayloadHash(scope).toString('hex')])).rows[0])
   const progress=await readProgress()
@@ -102,7 +102,6 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSn
    const current=await createObservedSourceReader(pool).checkCurrent(scope,root)
    if(current.state==='current'&&sameDerivedSourceVersion(current.version,progress.source_version)){
     if(signal.aborted)throw Error('canonical_projection_aborted')
-    if(team){await publishTeam();return}
     // A current per-context checkpoint can skip body IO only after SQL
     // confirms the sealed installation watermark under the current authority.
     const completed=await completeReadyCanonicalProjection(pool,scope,root,current.version,personal?{deferMs}:undefined)
@@ -142,7 +141,7 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSn
     if(signal.aborted)throw Error('canonical_projection_aborted')
     const batchDerived=options.pageDerivedWriteInstallations?.includes(scope.installationId)===true && !historicalCompile
     const result=await persistPersonalMetadataReferencePage(pool,selected,options.stabilizationMs,signal,historicalCompile,batchDerived,
-     !historicalCompile && options.compactSnapshotInstallations?.includes(scope.installationId)===true)
+     !historicalCompile && options.compactSnapshotInstallations?.includes(scope.installationId)===true,retryFence)
     if(result.contextReady){options.onReady?.(root);return}
     if(result.frozenComplete)return
     if(signal.aborted)throw Error('canonical_projection_aborted')
@@ -161,7 +160,10 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSn
   // under an exact full-root version. Start it from the beginning when the
   // selected reader could not prove its page.
   const cursorForOrdinary=!personal||ordinaryContinuation?progress?.next_cursor??undefined:undefined
-  const readOrdinaryPage=(cursor?:string)=>observeProjectionStep(pool,'select_page',()=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor}))
+  const scanJob=personal && options.projectionScanJobIds?.includes(job.job_id)===true
+  const scanCandidates=scanJob || (personal && options.projectionScanInstallations?.includes(scope.installationId)===true)
+  const readOrdinaryPage=(cursor?:string)=>observeProjectionStep(pool,'select_page',()=>prepareCanonicalReferencePage(pool,scope,root,{limit:pageSize,cursor,scanCandidates,
+   candidateLimit:scanJob?Math.max(64,pageSize):undefined}),{size:pageSize,historical:historicalCompile})
   const page=await readOrdinaryPage(cursorForOrdinary).catch(error=>{
    // A newer source revision invalidates the old cursor. Restart enumeration
    // under the new authority snapshot; existing source UUIDs are reused.
@@ -181,14 +183,13 @@ export function createCanonicalProjectionHandler(pool:pg.Pool,options:{compactSn
   requireSourceContext(await loadSourceContextSet(pool,scope.installationId,root,scan,purpose),scope,cursor)
   try{
    await persistCanonicalReferencePage(pool,page,{project:true,checkpoint:true,stabilizationMs:options.stabilizationMs,historicalCompile,
-    reuseOriginalsAtVersion:pagedRepair?repairVersion:undefined})
+    retryFence,reuseOriginalsAtVersion:pagedRepair?repairVersion:undefined})
   }catch(error){
    if(!pagedRepair||!repairVersion||!(error instanceof SourceUnavailableError)||error.code!=='changed'||signal.aborted)throw error
    const fresh=await createObservedSourceReader(pool).checkCurrent(scope,root)
    if(fresh.state!=='current'||!sameDerivedSourceVersion(fresh.version,repairVersion))throw new JobTerminalError('source_context_set_changed')
    throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
   }
-  if(team&&!page.hasMore)await publishTeam()
   if(page.hasMore)throw new JobDeferredError('source_not_ready',new Date(Date.now()+deferMs))
   if(personal)options.onReady?.(root)
  }

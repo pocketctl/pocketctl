@@ -36,6 +36,9 @@ export function createNativeInstallationDiscovery(options:{pool:pg.Pool;signal:A
   if(!complete||!revision)throw Error('native_inventory_incomplete')
   if(stopped||signal.aborted)throw Error('native_inventory_aborted')
   await registry.applyDiscovery({generation:await registry.currentGeneration()+1,items,sourceControlRevision:revision})
+  for(let start=0;start<items.length;start+=128){
+   await pool.query('SELECT shared.enroll_new_native_memory_installations($1::uuid[])',[items.slice(start,start+128).map(item=>item.installation_id)])
+  }
   return items.length
  }
  return {

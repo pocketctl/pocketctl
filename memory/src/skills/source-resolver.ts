@@ -108,14 +108,14 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       session_id: string; repository_id: string; repo_snapshot_id: string; document: Record<string, unknown>
       evidence_manifest: Record<string, Record<string, unknown>>; source_digest: Buffer
     }>(`SELECT e.session_id, e.repository_id, e.repo_snapshot_id, e.document, e.evidence_manifest, e.source_digest
-      FROM work_episodes e JOIN source_sessions s USING (installation_id,session_id)
+      FROM work_episodes e
       WHERE e.installation_id=$1 AND e.episode_id=$2 AND e.state='ready' AND e.outcome='completed'
         AND e.body_reclaimed_at IS NULL AND NOT EXISTS(SELECT 1 FROM memory_source_retention_receipts r WHERE r.installation_id=e.installation_id AND r.turn_id=e.turn_id)
-        AND e.compiled_at IS NOT NULL AND e.ready_at <= NOW() AND s.deleted_at IS NULL
+        AND e.compiled_at IS NOT NULL AND e.ready_at <= NOW() AND memory_session_available(e.installation_id,e.session_id,TRUE)
         AND e.repository_id IS NOT NULL AND e.repo_snapshot_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM memory_session_tombstones t
           WHERE t.installation_id=e.installation_id AND t.session_id=e.session_id)
-      FOR SHARE OF e,s`, [input.installationId, source.episodeId])
+      FOR SHARE OF e`, [input.installationId, source.episodeId])
     const row = rows.rows[0]
     if (!row || row.source_digest?.length !== 32) throw new SkillWorkError('skill_source_invalid')
     if (row.session_id !== sessionId || !sessionIds.includes(row.session_id)) throw new SkillWorkError('skill_source_invalid')
@@ -193,22 +193,20 @@ export async function resolveSkillSource(client: pg.PoolClient, input: {
       ? `SELECT k.episode_id,k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
         FROM knowledge_evidence k
         LEFT JOIN work_episodes e USING(installation_id,episode_id)
-        LEFT JOIN source_sessions s USING(installation_id,session_id)
         LEFT JOIN knowledge_evidence_capsules capsule
           ON capsule.installation_id=k.installation_id AND capsule.capsule_id=k.capsule_id
         WHERE k.installation_id=$1 AND k.version_id=$2 AND k.visibility=$3
           AND ((k.evidence_kind='accepted_excerpt' AND capsule.version_id=k.version_id
                 AND capsule.retention_basis='user_accepted')
             OR (k.evidence_kind<>'accepted_excerpt'
-                AND ($3='shared' OR (s.session_id IS NOT NULL AND s.deleted_at IS NULL))
+                AND ($3='shared' OR memory_session_available(e.installation_id,e.session_id,FALSE))
                 AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t
                   WHERE t.installation_id=k.installation_id AND t.session_id=e.session_id)))
         ORDER BY k.ordinal FOR SHARE OF k`
       : `SELECT k.episode_id,k.evidence_id,k.evidence_kind,k.excerpt,k.excerpt_hash,k.source_event_id,k.artifact_id,e.session_id
         FROM knowledge_evidence k JOIN work_episodes e USING(installation_id,episode_id)
-        LEFT JOIN source_sessions s USING(installation_id,session_id)
         WHERE k.installation_id=$1 AND k.version_id=$2 AND k.visibility=$3
-          AND ($3='shared' OR (s.session_id IS NOT NULL AND s.deleted_at IS NULL))
+          AND ($3='shared' OR memory_session_available(e.installation_id,e.session_id,FALSE))
           AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t
             WHERE t.installation_id=k.installation_id AND t.session_id=e.session_id)
         ORDER BY k.ordinal FOR SHARE OF k,e`,

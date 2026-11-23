@@ -424,6 +424,14 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    }
   })
   try{
+   // Current projection schedules only terminal turns. Exercise the queued
+   // nonterminal job an upgrade or explicit rerun can still deliver.
+   for(let n=0;n<128;n++){
+    await scheduler.runOnce();await initial.tick()
+    if(errors.length)throw errors[0]
+    if((await f.runtime.query('SELECT 1 FROM source_turns WHERE installation_id=$1 AND turn_id=$2',[installation,turn])).rowCount)break
+   }
+   await jobs.enqueueJob({installationId:installation,jobType:'compile_episode',idempotencyKey:'compile_episode:'+turn})
    for(let n=0;n<128&&!early;n++){
     await scheduler.runOnce();const tick=initial.tick()
     if(ordering==='before-ack'){
@@ -723,7 +731,7 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    expect(commitBody).not.toMatch(/memory_relay_input_admitted|\be\.payload\b|to_jsonb\(e\)/)
    expect(commitBody.match(/memory_input_start_admission\(/g)).toHaveLength(1)
    // The physical selected fence observes native authority once per requested ID.
-   expect(commitBody.match(/public\.native_event_authority\(/g)).toHaveLength(1)
+   expect(commitBody.match(/public\.native_event_authority\(e\.id/g)).toHaveLength(1)
    for(const name of ['memory_input_start_admission','native_event_authority'])expect(bodies.find(r=>r.proname===name).prosrc).not.toMatch(/payload|to_jsonb\(e\)/)
    const envelope=personalMetadataEnvelope(f.runtime,scope,root,reader.proof(view),seal,'reference')
    const lock=async(c:any,proof:unknown=envelope)=>(await c.query('SELECT shared.lock_memory_personal_source_commit($1::jsonb,$2,$3,$4::jsonb,FALSE) AS valid',[JSON.stringify(scope),root.kind,root.key,JSON.stringify(proof)])).rows[0].valid
@@ -1074,7 +1082,7 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    expect(observed).toBe(true)
   }finally{await scheduler.stop();await queue.stop()}
  },15000)
- test('selected reads evaluate native event authority once per returned event with identical metadata',async()=>{
+ test('selected reads reuse reviewed session authority and honor a stricter live event function',async()=>{
   const source=await f.source()
   await f.install(source,'retained_history')
   const ids=[await f.event(source),await f.event(source)]
@@ -1097,7 +1105,20 @@ suite('continuous personal canonical content uses current scope seal',()=>{
    const body=await read(-1),metadata=await read(-2)
    expect(body.map((row:{id:string})=>row.id)).toEqual(ids)
    expect(metadata).toEqual(body.map((row:{metadata:unknown})=>row.metadata))
-   expect(counts).toEqual([ids.length,ids.length])
+   expect(counts).toEqual([0,0])
+   // A Relay upgrade can tighten per-event authorization independently of
+   // Memory. The same metadata and body reads must honor it immediately.
+   await client.query('RESET ROLE')
+   const definition=(await client.query("SELECT pg_get_functiondef('public.native_event_authority(bigint,integer)'::regprocedure) AS body")).rows[0].body
+   const stricter=definition.replace('SELECT id,user_id,session_id,logical_source_session_id',`IF p_id=${BigInt(ids[0])} THEN RETURN jsonb_build_object('state','revoked');END IF;
+    SELECT id,user_id,session_id,logical_source_session_id`)
+   expect(stricter).not.toBe(definition)
+   await client.query(stricter)
+   await client.query('SET LOCAL ROLE direct_launch_memory')
+   const strictBody=await read(-1), strictMetadata=await read(-2)
+   expect(strictBody.map((row:{id:string})=>row.id)).toEqual([ids[1]])
+   expect(strictMetadata).toEqual(strictBody.map((row:{metadata:unknown})=>row.metadata))
+   expect(counts.slice(2)).toEqual([ids.length,ids.length])
   }finally{await client.query('ROLLBACK');client.release()}
  })
 

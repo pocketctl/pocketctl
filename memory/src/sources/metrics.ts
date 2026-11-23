@@ -2,9 +2,9 @@ import {Counter,Gauge,Histogram,type Registry} from 'prom-client'
 import type pg from 'pg'
 import {bindSourcePool,sourcePoolContext,type SourceTimingStage} from './pool-context.js'
 const kinds=['relay_event','team_collaboration','team_delivery','legacy_archive'] as const
-const modes=['legacy-feed','shared-shadow','shared-active','paused'] as const
+const modes=['unconfigured','legacy-feed','shared-shadow','shared-active','paused'] as const
 const states=['pending','leased','dead'] as const
-const copies=['source_events','source_artifacts','memory_feed_inbox','memory_snapshot_events'] as const
+const copies=['memory_archive_records','memory_retained_artifact_refs','source_events','source_artifacts','memory_feed_inbox','memory_snapshot_events'] as const
 const operations=['listHeads','getHeads','resolveBodies','checkCurrent','checkAuthority'] as const
 const reasons=['revoked','deleted','changed','archive_unavailable','archive_binding_invalid','archive_namespace_mismatch','hash_mismatch','source_body_reclaimed','source_store_unavailable','source_store_timeout','source_store_busy','body_byte_limit','source_metadata_conflict','other'] as const
 const bounded=(value:string,values:readonly string[])=>values.includes(value)?value:'other'

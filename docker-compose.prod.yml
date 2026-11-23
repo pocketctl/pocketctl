@@ -238,25 +238,7 @@ services:
     depends_on:
       - relay
 
-  # ---- PocketCtl Memory (independent Phase 0 deployment) ----
-
-  memory-postgres:
-    image: postgres:17-alpine
-    restart: always
-    environment:
-      POSTGRES_USER: memory
-      POSTGRES_PASSWORD: ${MEMORY_POSTGRES_PASSWORD:?MEMORY_POSTGRES_PASSWORD is required}
-      POSTGRES_DB: memory
-    volumes:
-      - memory_pgdata:/var/lib/postgresql/data
-    networks:
-      - pocketctl-internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U memory"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    # Never exposed to the host.
+  # ---- PocketCtl Memory (shared Relay database) ----
 
   memory-api:
     image: pocketctl-memory:${RELEASE_VERSION:-latest}
@@ -306,9 +288,9 @@ services:
       MEMORY_WIKI_MAX_SOURCE_CHARS: "${MEMORY_WIKI_MAX_SOURCE_CHARS:-200000}"
       MEMORY_CODE_SNAPSHOT_RETENTION_DAYS: "${MEMORY_CODE_SNAPSHOT_RETENTION_DAYS:-30}"
       MEMORY_PORT: "8090"
-      MEMORY_DATABASE_URL: postgresql://memory:${MEMORY_POSTGRES_PASSWORD:?MEMORY_POSTGRES_PASSWORD is required}@memory-postgres:5432/memory
-      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-public}"
-      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-auto}"
+      MEMORY_DATABASE_URL: "${MEMORY_SHARED_DATABASE_URL:-${MEMORY_DATABASE_URL:-}}"
+      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-memory}"
+      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-verify}"
       MEMORY_DB_POOL_MAX: ${MEMORY_DB_POOL_MAX:-8}
       MEMORY_RELAY_URL: ${MEMORY_RELAY_URL:?MEMORY_RELAY_URL is required}
       MEMORY_RELAY_ISSUER: ${MEMORY_RELAY_ISSUER:?MEMORY_RELAY_ISSUER is required}
@@ -369,7 +351,7 @@ services:
     networks:
       - pocketctl-internal
     depends_on:
-      memory-postgres:
+      postgres:
         condition: service_healthy
 
   memory-worker:
@@ -419,9 +401,9 @@ services:
       MEMORY_WIKI_MAX_SECTIONS: "${MEMORY_WIKI_MAX_SECTIONS:-256}"
       MEMORY_WIKI_MAX_SOURCE_CHARS: "${MEMORY_WIKI_MAX_SOURCE_CHARS:-200000}"
       MEMORY_CODE_SNAPSHOT_RETENTION_DAYS: "${MEMORY_CODE_SNAPSHOT_RETENTION_DAYS:-30}"
-      MEMORY_DATABASE_URL: postgresql://memory:${MEMORY_POSTGRES_PASSWORD:?MEMORY_POSTGRES_PASSWORD is required}@memory-postgres:5432/memory
-      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-public}"
-      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-auto}"
+      MEMORY_DATABASE_URL: "${MEMORY_SHARED_DATABASE_URL:-${MEMORY_DATABASE_URL:-}}"
+      MEMORY_DATABASE_NAMESPACE: "${MEMORY_DATABASE_NAMESPACE:-memory}"
+      MEMORY_SCHEMA_STARTUP: "${MEMORY_SCHEMA_STARTUP:-verify}"
       MEMORY_DB_POOL_MAX: ${MEMORY_DB_POOL_MAX:-8}
       MEMORY_RELAY_URL: ${MEMORY_RELAY_URL:?MEMORY_RELAY_URL is required}
       MEMORY_RELAY_ISSUER: ${MEMORY_RELAY_ISSUER:?MEMORY_RELAY_ISSUER is required}
@@ -480,7 +462,7 @@ services:
     networks:
       - pocketctl-internal
     depends_on:
-      memory-postgres:
+      postgres:
         condition: service_healthy
 
 networks:
@@ -492,4 +474,3 @@ networks:
 
 volumes:
   pgdata:
-  memory_pgdata:

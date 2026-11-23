@@ -84,7 +84,7 @@ export function registerSkillRoutes(app:FastifyInstance,deps:SkillRouteDeps) {
   route('GET','/:skillId/replay-cases',async(id,r)=>{noQuery(r);const d=await reads.get(id,skill(r));if(!d.permissions.can_replay)throw new SkillReadError('forbidden')
     const recorded=await cases.listCases({installationId:id.installationId,repositoryId:d.repository_id,repoSnapshotId:d.repo_snapshot_id,versionId:d.version_id,documentHash:d.document_hash,policyHash:d.policy_hash})
     const available=[]
-    for(const c of recorded){if(c.kind==='historical_session'){const alive=await deps.pool.query(`SELECT 1 FROM source_sessions s WHERE installation_id=$1 AND session_id=$2 AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=s.installation_id AND t.session_id=s.session_id)`,[id.installationId,c.reference_id]);if(!alive.rowCount)continue}available.push({case_id:c.case_id,kind:c.kind,provenance:c.provenance})}
+    for(const c of recorded){if(c.kind==='historical_session'){const alive=await deps.pool.query(`SELECT 1 WHERE memory_session_available($1,$2,FALSE)`,[id.installationId,c.reference_id]);if(!alive.rowCount)continue}available.push({case_id:c.case_id,kind:c.kind,provenance:c.provenance})}
     return {items:available}
   })
   route('POST','/:skillId/edit',async(id,r)=>{noQuery(r);const b=parse(Edit,r.body);return review.execute(id,{action:'edit',skillId:skill(r),expectedRevision:b.expected_revision,document:b.document})})

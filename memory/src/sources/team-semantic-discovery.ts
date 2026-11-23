@@ -14,12 +14,3 @@ export async function discoverTeamSemanticGroup(pool:Pick<pg.Pool,'query'>,insta
   ||Buffer.byteLength(canonicalJsonString(roster))>2*1024*1024)throw Error('team_semantic_group_unproven')
  return roster
 }
-export async function teamSemanticRawReady(pool:Pick<pg.Pool,'query'>,roster:TeamSemanticRoster):Promise<boolean>{
- const contexts=roster.roots.flatMap(r=>r.contexts.filter(c=>c.state==='current').map(c=>({kind:r.root.kind,key:r.root.key,scope:c.scope,version:c.version})))
- if(!contexts.length||roster.roots.some(r=>r.contexts.some(c=>!['current','revoked','deleted'].includes(c.state))))return false
- for(const c of contexts){
-  const row=(await pool.query(`SELECT state,source_version FROM memory_canonical_projection_progress WHERE installation_id=$1 AND source_kind=$2 AND root_key=$3 AND context_key=shared.memory_source_scope_key($4::jsonb)`,[roster.installationId,c.kind,c.key,JSON.stringify(c.scope)])).rows[0]
-  if(!row||!['raw_ready','ready'].includes(row.state)||canonicalJsonString(row.source_version)!==canonicalJsonString(c.version))return false
- }
- return true
-}
