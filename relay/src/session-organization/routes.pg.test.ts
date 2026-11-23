@@ -49,7 +49,7 @@ testWithDatabase('session projects, archive, and NEW PostgreSQL contract', () =>
   test('receipt lookup reports only durable evidence for the requested owner and session', async () => {
     const sessionId = `org-session-1-${suffix}`
     const otherId = `org-session-2-${suffix}`
-    const events = [
+    const events: Array<[string, string, Record<string, unknown>]> = [
       [sessionId, 'user_message_receipt', { request_id: 'accepted-1', status: 'accepted', text: 'private prompt' }],
       [sessionId, 'user_message_receipt', { msg_id: 'rejected-1', status: 'rejected' }],
       [sessionId, 'user_text', { msg_id: 'echo-1', text: 'confirmed by the canonical echo' }],
