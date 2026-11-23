@@ -61,6 +61,7 @@ services:
       # Keep total Relay connections below PostgreSQL max_connections.
       DB_POOL_SINGLE_MAX: "${DB_POOL_SINGLE_MAX:-16}"
       DB_POOL_TOTAL_MAX: "${DB_POOL_TOTAL_MAX:-28}"
+      POCKETCTL_RELEASE_OSS_READ_ROLE: "${POCKETCTL_RELEASE_OSS_READ_ROLE:-}"
       RELAY_DURABLE_INGRESS: "${RELAY_DURABLE_INGRESS:-off}"
       RELAY_DURABLE_INGRESS_DAEMONS: "${RELAY_DURABLE_INGRESS_DAEMONS:-}"
       RELAY_DURABLE_INGRESS_WINDOW: "${RELAY_DURABLE_INGRESS_WINDOW:-128}"
@@ -188,6 +189,8 @@ services:
   landing:
     build:
       context: ./landing
+      additional_contexts:
+        installer: ./nginx/html
       dockerfile: Dockerfile
     ports:
       - "80:80"

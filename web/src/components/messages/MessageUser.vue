@@ -2,7 +2,7 @@
   <!-- User message: right-aligned bubble. Preserves whitespace/newlines from
        the textarea input. Long messages collapse with a "展开" toggle. -->
   <div class="msg msg-user" :class="{ collapsed: isCollapsed }">
-    <div ref="textEl" class="msg-text">{{ content }}</div>
+    <div ref="textEl" class="msg-text" @copy="copySelection">{{ content }}</div>
     <button v-if="isCollapsible" class="msg-toggle" @click="toggleExpand">
       {{ expanded ? '收起' : '展开全部' }}
     </button>
@@ -27,6 +27,17 @@ onMounted(async () => {
   await nextTick()
   checkHeight()
 })
+
+// A browser's rendered selection can omit the final newline of a pre-wrapped
+// block. Copy from the selected text nodes, including partial selections.
+function copySelection(event: ClipboardEvent) {
+  const selection = window.getSelection()
+  if (!event.clipboardData || !selection || selection.rangeCount !== 1 || selection.isCollapsed) return
+  const range = selection.getRangeAt(0)
+  if (!textEl.value?.contains(range.commonAncestorContainer)) return
+  event.clipboardData.setData('text/plain', range.toString())
+  event.preventDefault()
+}
 
 function checkHeight() {
   if (!textEl.value) return

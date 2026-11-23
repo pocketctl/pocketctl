@@ -11,7 +11,6 @@ set -euo pipefail
 # ============================================
 
 GITHUB_REPO="pocketctl/pocketctl"
-GITEE_REPO="muwb123/pocketctl"
 INSTALL_DIR="${POCKETCTL_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="pocketctl"
 PROD_RELAY="${POCKETCTL_PROD_RELAY_URL:-}"
@@ -117,28 +116,27 @@ download_file() {
   fi
   if command -v curl &>/dev/null; then
     if [[ -n "$show_progress" ]]; then
-      curl -fL --progress-bar -o "$destination" "$url"
+      curl --connect-timeout 8 --max-time 120 -fL --progress-bar -o "$destination" "$url"
     else
-      curl -fsSL -o "$destination" "$url" 2>/dev/null
+      curl --connect-timeout 8 --max-time 120 -fsSL -o "$destination" "$url" 2>/dev/null
     fi
   elif command -v wget &>/dev/null; then
     if [[ -n "$show_progress" ]]; then
       # bar:force keeps the bar even when wget thinks it's not on a TTY
-      wget --show-progress --progress=bar:force -O "$destination" "$url"
+      wget --timeout=8 --tries=1 --show-progress --progress=bar:force -O "$destination" "$url"
     else
-      wget -q -O "$destination" "$url" 2>/dev/null
+      wget --timeout=8 --tries=1 -q -O "$destination" "$url" 2>/dev/null
     fi
   else
     error "需要 curl 或 wget"
   fi
 }
 
-# Try GitHub releases first, then Gitee. H-5: the checksum is established
+# Try the first-party release redirect, then GitHub. H-5: the checksum is established
 # ONLY from the official GitHub-direct sidecar before anything is downloaded;
 # both binary sources are then verified against that same official digest —
-# a mirror/Gitee sidecar can never become the trust root.
+# a mirror sidecar can never become the trust root.
 GITHUB_URL="https://github.com/${GITHUB_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
-GITEE_URL="https://gitee.com/${GITEE_REPO}/releases/download/${LATEST_VERSION}/${BINARY_FILENAME}"
 
 if ! download_file "${GITHUB_URL}.sha256" "$SHA_FILE"; then
   error "无法建立可信校验链：GitHub 官方校验文件不可达（镜像校验不作为信任来源）"
@@ -166,7 +164,7 @@ verify_official() {
 }
 
 DOWNLOADED=0
-for url in "$GITHUB_URL" "$GITEE_URL"; do
+for url in "https://pocketctl.me/releases/${LATEST_VERSION}/${BINARY_FILENAME}" "$GITHUB_URL"; do
   if download_file "$url" "$TEMP_FILE" && verify_official; then
     DOWNLOADED=1
     break

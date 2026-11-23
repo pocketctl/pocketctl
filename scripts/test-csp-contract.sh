@@ -42,6 +42,8 @@ fi
 # script-src (no unsafe-inline / unsafe-eval). nginx/nginx.conf itself does
 # not serve the SPA but keeps the same baseline per the plan.
 configs=(
+  web/nginx.conf
+  deploy/deploy.sh
   landing/nginx.conf
   landing/nginx-online.conf
   landing/nginx-docker.conf
@@ -56,7 +58,7 @@ for conf in "${configs[@]}"; do
     fail "$conf: script-src contains unsafe-inline/unsafe-eval"
   fi
   # Required baseline directives per the plan.
-  for directive in "default-src 'self'" "script-src 'self'" "object-src 'none'" "base-uri 'self'" "frame-ancestors 'none'"; do
+  for directive in "img-src 'self' data:;" "default-src 'self'" "script-src 'self'" "object-src 'none'" "base-uri 'self'" "frame-ancestors 'none'"; do
     grep -q -- "$directive" "$conf" || fail "$conf: CSP missing '$directive'"
   done
 done

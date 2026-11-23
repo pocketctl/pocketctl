@@ -91,6 +91,20 @@ describe('SessionDetail processEvent integration', () => {
     } finally { replace.mockRestore(); wrapper.unmount() }
   }, 30000)
 
+  test('keeps literal user input and removes actual provider metadata', () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const display = (content: string) => vm.messageDisplayContent({ content, role: 'user' })
+    const pasted = '  示例\r\n```mermaid\r\nflowchart TD\r\n A["<b>文字</b>"] --> B  \r\n```\r\n'
+    expect(display(pasted)).toBe(pasted)
+    expect(display('flowchart LR\n A["<command-name>literal</command-name>"]')).toBe('flowchart LR\n A["<command-name>literal</command-name>"]')
+    expect(display(' 前后保留  <unknown>\n')).toBe(' 前后保留  <unknown>\n')
+    expect(display('<local-command-caveat>internal</local-command-caveat>hello <opaque>')).toBe('hello <opaque>')
+    expect(display('<command-name>/model</command-name>\n<command-args>internal</command-args>')).toBe('/model')
+    expect(display('正文\n<oai-mem-citation>internal</oai-mem-citation>')).toBe('正文')
+    wrapper.unmount()
+  })
+
   test('cached display text follows snapshots, terminal copies, prepend and selected bucket', async () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any

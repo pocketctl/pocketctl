@@ -53,7 +53,7 @@ registerLanguage('diff', diff)
 registerLanguage('plaintext', plaintext)
 
 export interface MarkdownSegment {
-  type: 'code' | 'prose'
+  type: 'code' | 'prose' | 'diagram'
   content: string
   language?: string
   html: string
@@ -159,11 +159,79 @@ function sanitizeHtml(raw: string): string {
 // ---- Segment splitting: extract fenced code blocks so they can be rendered
 // with a custom header (language label + copy button). Non-code segments are
 // rendered as normal markdown prose. ----
-export function parseMarkdownSegments(text: string): MarkdownSegment[] {
+// Keep CRLF, indentation and blank lines in copied diagram source. markdown-it
+// normalizes all three in token.content, so use the original line offsets.
+function lineOffsets(text: string): number[] {
+  const offsets = [0]
+  for (const lineBreak of text.matchAll(/\r\n|\r|\n/g)) offsets.push(lineBreak.index! + lineBreak[0].length)
+  return offsets
+}
+
+function rawDiagram(text: string): boolean {
+  return /^\s*(?:flowchart|graph)[ \t]+(?:TD|TB|BT|LR|RL)\b[ \t]*(?:;|%%|\r|\n|$)/.test(text)
+}
+
+function mayHaveDiagramFence(text: string): boolean {
+  return /^ {0,3}(?:`{3,}|~{3,})[ \t]*mermaid(?:[ \t]|\r?$)/im.test(text)
+}
+
+type FenceToken = { type: string; level: number; map: [number, number] | null; markup: string; info: string }
+
+function diagramRange(text: string, offsets: number[], token: FenceToken) {
+  if (token.type !== 'fence' || token.level !== 0 || !token.map ||
+      token.info.trim().split(/\s+/)[0]?.toLowerCase() !== 'mermaid') return
+  const [first, end] = token.map
+  if (end < first + 2) return
+  const closingLine = text.slice(offsets[end - 1], offsets[end] ?? text.length)
+  const closing = /^ {0,3}(`+|~+)[ \t]*(?:\r\n?|\n)?$/.exec(closingLine)?.[1]
+  if (!closing || closing.length < token.markup.length || closing[0] !== token.markup[0]) return
+  return {
+    start: offsets[first], end: offsets[end] ?? text.length,
+    source: text.slice(offsets[first + 1], offsets[end - 1]).replace(/(?:\r\n|\r|\n)$/, ''),
+  }
+}
+
+function sessionDiagramRanges(text: string) {
+  if (text.length > 512000 || !mayHaveDiagramFence(text)) return []
+  const offsets = lineOffsets(text)
+  const ranges = []
+  for (const token of md.parse(text, {})) {
+    const range = diagramRange(text, offsets, token)
+    if (range) ranges.push(range)
+  }
+  return ranges
+}
+
+// SessionDetail removes transport XML and trims prose before rendering. Keep
+// markup inside diagrams literal while retaining that cleanup across the rest
+// of the message (including metadata that may span an entire fenced block).
+export function cleanWithSessionDiagrams(text: string, clean: (value: string) => string): string {
+  if (rawDiagram(text)) return text
+  if (!text.includes('<')) return clean(text)
+  const ranges = sessionDiagramRanges(text)
+  if (!ranges.length) return clean(text)
+  // Escape existing NULs before using NUL-delimited indices. The XML cleanup
+  // can remove text between ordinary characters, but cannot create this marker.
+  const escapeMarkers = (value: string) => value.replace(/\0/g, '\0:')
+  let start = 0, masked = ''
+  ranges.forEach((range, index) => {
+    masked += escapeMarkers(text.slice(start, range.start)) + '\0' + index + ';'
+    start = range.end
+  })
+  return clean(masked + escapeMarkers(text.slice(start))).replace(/\0(?::|(\d+);)/g, (_, index) => {
+    if (index === undefined) return '\0'
+    const range = ranges[Number(index)]
+    return text.slice(range.start, range.end)
+  })
+}
+
+export function parseMarkdownSegments(text: string, diagrams = false): MarkdownSegment[] {
+  if (diagrams && rawDiagram(text)) return [{ type: 'diagram', content: text, html: '' }]
   if (text.length > 512000) return [{ type: 'prose', content: text, html: '<pre>' + escapeHtml(text) + '</pre>' }]
   const sanitized = text.includes('```') || text.includes('~~~') ? text : sanitizeCommandTags(text)
   const env = {}
   const tokens = md.parse(sanitized, env)
+  const offsets = diagrams && mayHaveDiagramFence(text) ? lineOffsets(text) : undefined
   const segments: MarkdownSegment[] = []
   let start = 0
   function prose(end: number) {
@@ -174,7 +242,9 @@ export function parseMarkdownSegments(text: string): MarkdownSegment[] {
     prose(index)
     const code = token.content.endsWith('\n') ? token.content.slice(0, -1) : token.content
     const language = token.info.trim().split(/\s+/)[0] || undefined
-    segments.push({ type: 'code', content: code, language, html: highlightToHtml(code, language) })
+    const diagram = offsets && diagramRange(text, offsets, token)
+    segments.push(diagram ? { type: 'diagram', content: diagram.source, html: '' }
+      : { type: 'code', content: code, language, html: highlightToHtml(code, language) })
     start = index + 1
   })
   prose(tokens.length)

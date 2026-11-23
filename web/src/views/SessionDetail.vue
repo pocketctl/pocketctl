@@ -812,6 +812,7 @@ import { latestSentPrompt } from '../utils/sessionPrompt'
 import ReplyFooter from '../components/messages/ReplyFooter.vue'
 import { associateReplyRetries, projectReplies, replyText, replyStatus, type ReplyGroup } from '../utils/replyProjection'
 import { agentReplyLabel } from '../utils/agentDisplay'
+import { cleanWithSessionDiagrams } from '../utils/markdownRenderer'
 import MessageAgent from '../components/messages/MessageAgent.vue'
 import MessageError from '../components/messages/MessageError.vue'
 import { useLocale } from '../composables/useLocale'
@@ -2123,7 +2124,11 @@ const replyDisplayCache = new WeakMap<ReplyGroup, ComputedRef<string>>()
 function messageDisplayContent(message: any): string {
   let content = messageDisplayCache.get(message)
   if (!content) {
-    content = computed(() => cleanContent(message.content))
+    content = computed(() => {
+      if (message.role === 'user') return cleanContent(message.content, true)
+      if (message.streaming) return cleanContent(message.content)
+      return cleanWithSessionDiagrams(message.content || '', cleanContent)
+    })
     messageDisplayCache.set(message, content)
   }
   return content.value
@@ -2598,8 +2603,14 @@ function formatTime(ts: string): string {
   return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0')
 }
 
-function cleanContent(text: string): string {
+function cleanContent(text: string, literalUser = false): string {
   if (!text) return ''
+  if (literalUser) {
+    // Keep ordinary input byte-for-byte, including whitespace, angle brackets
+    // and Markdown. Claude command envelopes begin with a provider tag.
+    text = text.replace(/(?:^|\r\n|\r|\n)<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>\s*$/, '')
+    if (!/^\s*<(?:command-(?:name|message|args)|local-command-(?:caveat|stdout|stderr))>/.test(text)) return text
+  }
   text = text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>\s*/g, '')
 
   // Slash command: Claude Code records the command as <command-name>/<command-message>/
@@ -2619,16 +2630,15 @@ function cleanContent(text: string): string {
     }
   }
 
-  // Plain message: strip command/local-command tags, keep the body text.
-  return text
+  // Strip command/local-command tags and keep their visible body.
+  text = text
     .replace(/<command-name>.*?<\/command-name>\s*/gs, '')
     .replace(/<command-message>.*?<\/command-message>\s*/gs, '')
     .replace(/<command-args>.*?<\/command-args>\s*/gs, '')
     .replace(/<local-command-caveat>.*?<\/local-command-caveat>\s*/gs, '')
     .replace(/<local-command-stdout>(.*?)<\/local-command-stdout>/gs, '$1')
     .replace(/<local-command-stderr>(.*?)<\/local-command-stderr>/gs, '$1')
-    .replace(/<[^>]+>/g, '')
-    .trim()
+  return literalUser ? text : text.replace(/<[^>]+>/g, '').trim()
 }
 
 function exitReasonLabel(reason: string): string {

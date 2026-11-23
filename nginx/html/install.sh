@@ -9,17 +9,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# GitHub 下载地址（国内自动走多个加速代理轮询，全部不可用时降级直连）
+# GitHub 官方下载与校验入口
 REPO="pocketctl/pocketctl"
 GH_DL="https://github.com/${REPO}/releases/latest/download"
-
-# 国内加速代理（公益镜像，按顺序尝试；任一可用即可，避免单点故障）
-# 与 internal/update/updater.go 的 ghProxies 保持一致。
-GH_PROXIES=(
-    "https://gh-proxy.com/"
-    "https://ghfast.top/"
-    "https://ghproxy.net/"
-)
 
 echo -e "${GREEN}╔══════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     pocketctl Daemon 安装程序        ║${NC}"
@@ -65,7 +57,7 @@ is_tty() {
 }
 
 # 下载函数：curl 优先，wget 兜底
-# 连接超时 8s，整体 60s —— 快速失败后立即切换下一个源，不让坏代理拖住整个安装。
+# 连接超时 8s，整体 60s —— 快速失败后立即切换下一个源，避免单个下载源阻塞安装。
 # 在交互式终端显示进度条，非交互（如管道）保持静默，避免日志噪音。
 download() {
     local url="$1"
@@ -86,12 +78,18 @@ download() {
     return 1
 }
 
-# 按优先级依次尝试：各公益代理 → GitHub 直连
+# 优先下载已发布版本的 OSS 镜像，保留旧版本与网络故障的回退路径。
 GH_URL="${GH_DL}/${BINARY}"
 SOURCES=()
-for p in "${GH_PROXIES[@]}"; do
-    SOURCES+=("${p}${GH_URL}")
-done
+# Pin the mirror URL and official checksum to the same tag when metadata is available.
+if download "https://api.github.com/repos/${REPO}/releases/latest" "$SHA_FILE"; then
+    tag_pattern='"tag_name"[[:space:]]*:[[:space:]]*"(v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?)"'
+    if [[ $(<"$SHA_FILE") =~ $tag_pattern ]]; then
+        tag="${BASH_REMATCH[1]}"
+        SOURCES+=("https://pocketctl.me/releases/${tag}/${BINARY}")
+        GH_URL="https://github.com/${REPO}/releases/download/${tag}/${BINARY}"
+    fi
+fi
 SOURCES+=("${GH_URL}")
 
 # H-5: 镜像只承载字节，不承载信任。校验值必须先从 GitHub 官方直连取得；

@@ -89,6 +89,7 @@ services:
       DB_POOL_TOTAL_MAX: ${DB_POOL_TOTAL_MAX:-28}
       # Safe rollout defaults. Production canary/on requires an explicit env
       # override after the durable-ingress release gate has passed.
+      POCKETCTL_RELEASE_OSS_READ_ROLE: "${POCKETCTL_RELEASE_OSS_READ_ROLE:-}"
       RELAY_DURABLE_INGRESS: ${RELAY_DURABLE_INGRESS:-off}
       RELAY_DURABLE_INGRESS_DAEMONS: ${RELAY_DURABLE_INGRESS_DAEMONS:-}
       RELAY_DURABLE_INGRESS_WINDOW: ${RELAY_DURABLE_INGRESS_WINDOW:-128}

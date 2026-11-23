@@ -174,6 +174,7 @@ AUTH_CODE_PEPPER_VALUE="$(relay_env_value AUTH_CODE_PEPPER)"
 # Preserve the complete Extension Platform contract across redeploys. Explicit
 # operator environment values win; otherwise the last root-owned EnvironmentFile
 # is carried forward atomically instead of silently reverting enabled to off.
+load_relay_env_value POCKETCTL_RELEASE_OSS_READ_ROLE POCKETCTL_RELEASE_OSS_READ_ROLE POCKETCTL_RELEASE_OSS_READ_ROLE
 load_relay_env_value RELAY_EXTENSIONS RELAY_EXTENSIONS RELAY_EXTENSIONS
 RELAY_EXTENSIONS=${RELAY_EXTENSIONS:-off}
 load_relay_env_value RELAY_EXTENSION_V2 RELAY_EXTENSION_V2 RELAY_EXTENSION_V2
@@ -436,7 +437,7 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' ${EXTENSION_PROVIDER_CONNECT_SOURCES}wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
+    add_header Content-Security-Policy "default-src 'self'; connect-src 'self' ${EXTENSION_PROVIDER_CONNECT_SOURCES}wss:; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'" always;
 
     # Web 静态文件
     root /var/www/pocketctl;
@@ -454,6 +455,11 @@ server {
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         access_log off;
+    }
+
+    location ^~ /releases/ {
+        proxy_pass http://127.0.0.1:${RELAY_PORT};
+        proxy_redirect off;
     }
 
     # Daemon 安装脚本（精确匹配，避免被 SPA fallback 吞掉）
