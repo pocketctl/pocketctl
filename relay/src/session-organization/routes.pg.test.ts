@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
 process.env.JWT_SECRET ||= 'session-organization-test-secret'
 
-const { initDB, listSessionsWithChildren, setSessionPin, upsertSession } = await import('../db.js')
+const { initDB, insertEvent, listSessionsWithChildren, setSessionPin, upsertSession } = await import('../db.js')
 const { signAccessToken } = await import('../auth.js')
 const { registerSessionOrganizationRoutes } = await import('./routes.js')
 const { reserveConcurrentSession } = await import('../quota.js')
@@ -57,7 +57,7 @@ testWithDatabase('session projects, archive, and NEW PostgreSQL contract', () =>
       [otherId, 'user_message_receipt', { msg_id: 'other-1', status: 'accepted' }],
     ]
     for (const [id, type, event] of events) {
-      await pool.query('INSERT INTO events(session_id,event_type,payload) VALUES($1,$2,$3)', [id,type,event])
+      await insertEvent(pool, id, type, event)
     }
     const path = `/api/sessions/${sessionId}/message-receipts?ids=accepted-1,rejected-1,echo-1,child-1,other-1,missing-1`
     const response = await request('GET', path, tokenA)
