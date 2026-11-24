@@ -1,0 +1,99 @@
+name: Mirror daemon release to OSS
+run-name: Mirror ${{ inputs.version }} to OSS
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      prune_history:
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing GitHub Release tag to mirror
+        required: true
+        type: string
+      prune_history:
+        description: Apply release retention after verifying this release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: daemon-oss-releases
+  queue: max
+
+jobs:
+  mirror:
+    if: github.repository == 'pocketctl/pocketctl' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download and verify published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/release-contract.sh
+          require_release_version "$VERSION"
+          # checkout may materialize the triggering annotated tag as a lightweight ref.
+          git fetch --force origin "refs/tags/$VERSION:refs/tags/$VERSION"
+          public_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")
+          git tag -l --format='%(contents)' "$VERSION" > "$RUNNER_TEMP/annotation"
+          run_id=$(require_release_candidate_tag_annotation "$RUNNER_TEMP/annotation" "$VERSION" "$public_sha")
+          gh release view "$VERSION" --json isDraft,assets > "$RUNNER_TEMP/release.json"
+          jq -e '.isDraft == false' "$RUNNER_TEMP/release.json" >/dev/null
+          jq -r '.assets[].name' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/names"
+          require_promoted_release_assets "$RUNNER_TEMP/names"
+          gh release download "$VERSION" --dir bundle
+          bash scripts/verify-release-candidate.sh --input bundle --version "$VERSION" --sha "$public_sha" --repository "$GITHUB_REPOSITORY" --run-id "$run_id"
+          jq -er '.assets[] | (.digest | capture("^sha256:(?<hex>[a-f0-9]{64})$").hex) + "  " + .name' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/checksums"
+          test "$(wc -l < "$RUNNER_TEMP/checksums")" -eq 9
+          (cd bundle && sha256sum --check "$RUNNER_TEMP/checksums")
+
+      - name: Install OSS SDK
+        run: |
+          python3 -m venv "$RUNNER_TEMP/oss-sdk"
+          "$RUNNER_TEMP/oss-sdk/bin/pip" install --disable-pip-version-check 'oss2==2.19.1'
+
+      - name: Check OIDC configuration
+        env:
+          PROVIDER: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          ROLE: ${{ vars.ALIYUN_OSS_ROLE_ARN }}
+        run: |
+          : "${PROVIDER:?Missing ALIYUN_OIDC_PROVIDER_ARN}" "${ROLE:?Missing ALIYUN_OSS_ROLE_ARN}"
+
+      - name: Assume release publisher role
+        uses: aliyun/configure-aliyun-credentials-action@1e5248c8d5d93a8781ac344a68e19a43341e79e6 # v1
+        id: credentials
+        with:
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          role-to-assume: ${{ vars.ALIYUN_OSS_ROLE_ARN }}
+          audience: sts.aliyuncs.com
+
+      - name: Mirror and read back nine assets
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.credentials.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.credentials.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.credentials.outputs.aliyun-security-token }}
+        run: '"$RUNNER_TEMP/oss-sdk/bin/python" scripts/mirror-release-oss.py "$VERSION" bundle'
+
+      - name: Prune historical OSS releases
+        if: inputs.prune_history
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.credentials.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.credentials.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.credentials.outputs.aliyun-security-token }}
+        run: '"$RUNNER_TEMP/oss-sdk/bin/python" scripts/mirror-release-oss.py "$VERSION" bundle --prune-history'

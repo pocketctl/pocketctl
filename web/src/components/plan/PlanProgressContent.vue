@@ -2,7 +2,7 @@
   <section class="plan-progress-content" :data-complete="allCompleted || undefined">
     <div class="plan-heading-row">
       <div>
-        <h2 class="plan-heading">{{ plan.title?.startsWith('OpenSpec') ? plan.title : t('plan.title') }}</h2>
+        <h2 v-if="showHeading !== false" class="plan-heading">{{ plan.title?.startsWith('OpenSpec') ? plan.title : t('plan.title') }}</h2>
         <div class="plan-count">{{ t('plan.progress_count', { completed, total: plan.items.length }) }}</div>
       </div>
       <slot name="actions" />
@@ -46,7 +46,7 @@ import { computed } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { completedPlanItemCount, type AgentPlanSnapshot, type AgentPlanStatus } from '../../utils/agentPlanMerge'
 
-const props = defineProps<{ plan: AgentPlanSnapshot; connected: boolean }>()
+const props = defineProps<{ plan: AgentPlanSnapshot; connected: boolean; showHeading?: boolean }>()
 const { t } = useLocale()
 const completed = computed(() => completedPlanItemCount(props.plan))
 const allCompleted = computed(() => completed.value === props.plan.items.length)

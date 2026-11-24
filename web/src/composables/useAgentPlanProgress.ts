@@ -21,7 +21,15 @@ export function useAgentPlanProgress() {
     })
   }
 
-  return { acceptAgentPlan, planForSession }
+  function todoForSession(sessionId: MaybeRefOrGetter<string>) {
+    return computed(() => {
+      const id = toValue(sessionId)
+      const snapshot = plans[JSON.stringify([id, `todo:${id}`])]
+      return snapshot?.items.length ? snapshot : undefined
+    })
+  }
+
+  return { acceptAgentPlan, planForSession, todoForSession }
 }
 
 export function resetAgentPlanProgressForTests(): void {

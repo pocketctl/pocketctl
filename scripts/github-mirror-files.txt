@@ -45,6 +45,7 @@ scripts/secret-scan.sh
 scripts/deploy.sh
 scripts/package-release-candidate.sh
 scripts/verify-release-candidate.sh
+scripts/mirror-release-oss.py
 scripts/github-mirror-files.txt
 scripts/lib/github-sync-retry.sh
 scripts/lib/github-mirror-copy.sh

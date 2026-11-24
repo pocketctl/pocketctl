@@ -578,6 +578,10 @@
           <span v-if="unreadApproval">{{ t('session.status.waiting_approval') }}</span>
             <span v-else-if="hasUnreadReply">{{ t('session.reply_new_content') }}</span></button>
         </Transition>
+        <ZcodeTaskProgress
+          v-if="currentSessionAgent === 'zcode' && !isSubagent && !focusedSubAgentId && zcodeTodo"
+          :key="sessionId" :plan="zcodeTodo" :connected="connected && !isDisconnected"
+        />
         <InvocationDialog :value="invocationDialog" @close="invocationDialog=null" @choose="chooseInvocation" />
         <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations"> {{ t('memory.git.refresh') }} </button></div>
         <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button :aria-label="t('workspace.clear_selection')" @click="invocationSelection=null">×</button></div>
@@ -857,6 +861,7 @@ import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../uti
 import CodexQuota from '../components/session/CodexQuota.vue'
 import ZcodeQuota from '../components/session/ZcodeQuota.vue'
 import { useAgentPlanProgress } from '../composables/useAgentPlanProgress'
+import ZcodeTaskProgress from '../components/plan/ZcodeTaskProgress.vue'
 import PlanSidePanel from '../components/plan/PlanSidePanel.vue'
 import { completedPlanItemCount } from '../utils/agentPlanMerge'
 import { createAgentFileChangeReducer, summarizeFileChanges, type AgentFileChangeMessage } from '../utils/agentFileChange'
@@ -946,7 +951,8 @@ async function downloadSessionDocument(document: SessionDocumentMetadata): Promi
     // Keep the already verified preview readable if a download request fails.
   }
 }
-const { acceptAgentPlan, planForSession } = useAgentPlanProgress()
+const { acceptAgentPlan, planForSession, todoForSession } = useAgentPlanProgress()
+const zcodeTodo = todoForSession(sessionId)
 const currentPlan = planForSession(sessionId)
 const planPanelOpen = ref(localStorage.getItem('pocketctl_plan_panel_open') === 'true')
 const sessionFullscreen = ref(false)
@@ -5714,6 +5720,7 @@ onMounted(() => {
    still scroll above the composer. */
 .chat-input-area { position: absolute; z-index: 4; right: 0; bottom: 0; left: 0; padding: 0 var(--session-content-gutter) 20px; background: transparent; pointer-events: none; }
 .chat-input-area.ended { display: flex; align-items: center; justify-content: center; padding: 0 var(--session-content-gutter) 20px; }
+.chat-input-area.ended:has(.zcode-task-progress) { flex-direction: column; gap: 4px; }
 .ended-text { color: var(--fg-tertiary); font-size: 13px; }
 .readonly-hint { color: var(--fg-tertiary); font-size: 13px; font-style: italic; }
 .host-offline-notice { width: min(760px, 100%); min-height: 52px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border)); border-radius: var(--radius-lg); color: var(--warning); background: color-mix(in srgb, var(--surface) 94%, transparent); box-shadow: var(--shadow-md), inset 3px 0 0 color-mix(in srgb, var(--warning) 72%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); font-size: 13px; font-weight: 600; text-align: center; pointer-events: auto; animation: bar-in .18s ease-out; }

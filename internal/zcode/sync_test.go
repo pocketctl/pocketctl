@@ -129,6 +129,34 @@ func TestZcodeSync_DiffTodosClearEmits(t *testing.T) {
 	}
 }
 
+func TestZcodeSync_TodoRestoreIsNewButRetryIsStable(t *testing.T) {
+	z := NewZcodeSync(testSourceID, "zcode-wire1")
+	todos := []TodoRow{{Content: "Review", Status: "pending"}}
+	seen := map[string]bool{}
+	previous := ""
+	for i, rows := range [][]TodoRow{todos, nil, todos, nil} {
+		batch, err := z.PreviewTodo(rows)
+		if err != nil || len(batch.Events) != 1 {
+			t.Fatalf("transition %d: events=%d err=%v", i, len(batch.Events), err)
+		}
+		event := batch.Events[0]
+		if seen[event.EventID] || event.PreviousEventID != previous {
+			t.Fatalf("invalid todo successor at %d: %+v", i, event)
+		}
+		retry, _ := z.PreviewTodo(rows)
+		if len(retry.Events) != 1 || retry.Events[0].EventID != event.EventID {
+			t.Fatal("unacknowledged snapshot changed identity")
+		}
+		batch.Commit.CommitOrder = uint64(i + 1)
+		if err := z.ApplyAccepted(batch.Commit); err != nil {
+			t.Fatal(err)
+		}
+		previous = event.EventID
+		seen[previous] = true
+		z.state.lastEventID = "unrelated-timeline-event"
+	}
+}
+
 func TestZcodeSync_DoesNotImportOpencode(t *testing.T) {
 	// This is a compile-time guard: internal/zcode must not import the OpenCode
 	// differ/mapper. The real guard is the absence of the import (verified by
