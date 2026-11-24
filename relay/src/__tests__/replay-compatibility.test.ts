@@ -33,3 +33,12 @@ test.each([{producer:'claude'},{lineage_complete:true},{sequence:'2'},{extra:tru
  const canonical={...legacy,memory_source:change===null?null:{...legacy.memory_source,...change}}
  expect(()=>assertReplayCompatible(canonical,{...legacy,memory_source:observed},'codex')).toThrow('replay_provenance_conflict')
 })
+
+test('a live terminal witness may be absent on replay without changing canonical content',()=>{
+ const echo={type:'user_text',session_id:'s',event_id:'e',text:'original'}
+ const live={...echo,local_submit_id:'codex-tui:'+'a'.repeat(64)}
+ expect(()=>assertReplayCompatible(live,echo)).not.toThrow()
+ expect(()=>assertReplayCompatible(echo,live)).not.toThrow()
+ expect(()=>assertReplayCompatible(live,{...echo,text:'changed'})).toThrow('replay_payload_conflict')
+ expect(()=>assertReplayCompatible(live,{...live,local_submit_id:'different'})).toThrow('replay_payload_conflict')
+})

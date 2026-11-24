@@ -231,7 +231,7 @@ const navigationItems = computed(() => {
     { id: 'hosts', to: '/hosts', label: 'nav.hosts', icon: 'hosts' },
     { id: 'settings', to: '/settings', label: 'nav.settings', icon: 'settings' },
   ].filter(item => item.id !== 'teams' || teamAccess.enabled.value)
-  if (platformStatisticsAccess.allowed.value) items.push({ id: 'statistics', to: '/admin/statistics', label: 'stats.title', icon: 'tokens' })
+  if (platformStatisticsAccess.allowed.value) items.push({ id: 'statistics', to: '/admin/statistics', label: 'stats.title', icon: 'statistics' })
   if (canReadOfflineTeams?.value) return [{ id: 'teams', to: '/teams', label: 'team.title', icon: 'teams', section: 'nav.manage' }]
   if (!showMobileShell.value) return items
   return [

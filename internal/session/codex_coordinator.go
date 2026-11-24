@@ -953,6 +953,12 @@ func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message cod
 		c.reconcileActiveTurnStatus(threadID, status)
 	}
 	events := projector.Project(message)
+	for i := range events {
+		e := &events[i]
+		if e.Type == "user_text" && message.Method == "item/completed" {
+			e.LocalSubmitID = adapter.CodexTUISubmitID(c.codexHome, e.SessionID, e.Text, received)
+		}
+	}
 	if dialogueProof != nil {
 		for i := range events {
 			e := &events[i]

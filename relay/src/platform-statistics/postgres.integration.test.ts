@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import pg from 'pg'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { ensurePlatformStatisticsSchema } from './schema.js'
 import { recordHumanDecision, recordMaterializedActivity, recordRegistration } from './facts.js'
 import { platformStatisticsConfig } from './config.js'
@@ -27,8 +27,8 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
     Object.assign(process.env, env)
     await admin.query(`CREATE SCHEMA ${schema}`)
     await pool.query(`CREATE TABLE users(id INTEGER PRIMARY KEY,email TEXT);
-      CREATE TABLE sessions(session_id TEXT PRIMARY KEY,user_id INTEGER,parent_session_id TEXT,is_subagent BOOLEAN DEFAULT false);
-      CREATE TABLE event_inbox(received_at TIMESTAMPTZ,status SMALLINT,event_type TEXT,user_id INTEGER,payload JSONB);
+      CREATE TABLE sessions(session_id TEXT PRIMARY KEY,user_id INTEGER,parent_session_id TEXT,is_subagent BOOLEAN DEFAULT false,agent_type TEXT DEFAULT 'codex');
+      CREATE TABLE event_inbox(received_at TIMESTAMPTZ,status SMALLINT,event_type TEXT,user_id INTEGER,payload JSONB, materialization_context JSONB);
       CREATE TABLE extension_installations(installation_id UUID PRIMARY KEY,owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
         owner_scope_kind TEXT NOT NULL DEFAULT 'personal',owner_scope_id UUID);
       CREATE TABLE extension_scope_memberships(membership_id UUID PRIMARY KEY,scope_kind TEXT,scope_id UUID,user_id INTEGER REFERENCES users(id) ON DELETE SET NULL)`)
@@ -36,6 +36,7 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
   })
   beforeEach(async () => {
     await pool.query('TRUNCATE platform_statistics_facts,platform_statistics_gaps,extension_installations,extension_scope_memberships,event_inbox,sessions,users CASCADE')
+    await pool.query("INSERT INTO platform_statistics_coverage(metric) VALUES('localInputV2') ON CONFLICT DO NOTHING")
     await pool.query("UPDATE platform_statistics_coverage SET starts_at='2026-10-01T00:00:00Z'")
     await pool.query("INSERT INTO platform_statistics_collectors VALUES('relay',$1),('materializer',$1) ON CONFLICT(channel) DO UPDATE SET last_seen=EXCLUDED.last_seen", [now])
     await pool.query("INSERT INTO users(id,email) VALUES(1,'james_2001_2001@163.com'),(2,'other@example.test'),(3,'excluded@example.test'); INSERT INTO sessions(session_id,user_id) VALUES('main',1),('other',2); INSERT INTO sessions VALUES('child',1,'main',true)")
@@ -142,6 +143,40 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
     await recordMaterializedActivity(pool, output({ sessionId: 'child',payload: { text: 'child output',is_subagent: true } }), 6)
     expect((await pool.query('SELECT session_id FROM platform_statistics_facts')).rows).toEqual([{ session_id: 'main' }])
   })
+  it('counts independently witnessed root inputs once and rejects ordinary echoes', async () => {
+    const input = { actor_scope:'root',flow_scope:'main',content_class:'dialogue',text:'same text',
+      local_submit_id:'codex-tui:'+'a'.repeat(64) }
+    const event = output({ eventType:'user_text',payload:input })
+    for (const rejected of [{local_submit_id:''},{resync:true},{actor_scope:'subagent'},{flow_scope:'background'},{agent_id:'child'},{text:' '}]) {
+      await recordMaterializedActivity(pool,{...event,payload:{...input,...rejected}},1)
+    }
+    await recordMaterializedActivity(pool,{...event,sessionId:'child'},2)
+    await recordMaterializedActivity(pool,{...event,userId:2},3)
+    expect((await pool.query('SELECT kind FROM platform_statistics_facts')).rows).toEqual([])
+    await recordMaterializedActivity(pool,event,4)
+    await recordMaterializedActivity(pool,{...event,receivedAt:new Date('2026-11-02T03:00Z')},5)
+    const digest='input:'+createHash('sha256').update(['other','request','message'].join('\0')).digest('hex')
+    const native = {...input,local_submit_id:undefined,request_id:'request',msg_id:'message',event_id:'native-input:message',
+      source_turn_id:'native',turn_id:'turn',memory_source:{version:1,producer:'codex',session_id:'other',turn_id:'turn',
+        sequence:'1',event_id:digest,invocation_id:digest,source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}}
+    for (const proof of [{session_id:'main'},{lineage_complete:false},{derived_from_event_ids:['skill']},{event_id:'wrong'}]) {
+      await recordMaterializedActivity(pool,{...event,userId:2,sessionId:'other',payload:{...native,memory_source:{...native.memory_source,...proof}}},6)
+    }
+    expect((await pool.query("SELECT count(*)::int AS n FROM platform_statistics_facts WHERE kind='human'")).rows[0].n).toBe(1)
+    await recordMaterializedActivity(pool,{...event,userId:2,sessionId:'other',payload:native},7)
+    const result=await readPlatformStatistics(pool,config,range,async()=>memory(),now)
+    expect(result.metrics.activeUsers.value).toBe(2)
+    expect(result.daily.map(d=>d.activeUsers.value)).toEqual([2,0])
+  })
+
+  it('retains observed v1 facts as partial before the upgraded collector starts',async()=>{
+    await pool.query("UPDATE platform_statistics_coverage SET starts_at='2026-11-02T00:00:00+08' WHERE metric='localInputV2'")
+    await recordHumanDecision(pool,{userId:1,sessionId:'main',requestId:'first',type:'approval_response'},new Date('2026-11-01T03:00Z'))
+    const result=await readPlatformStatistics(pool,config,range,async()=>memory(),now)
+    expect(result.daily[0].activeUsers).toMatchObject({value:1,status:'partial'})
+    expect(result.daily[1].activeUsers).toMatchObject({value:0,status:'complete'})
+  })
+
   it('preserves facts on ordinary session deletion, clears identifying facts and invalidates account history', async () => {
     await recordRegistration(pool, 1, '2026-11-01T03:00:00Z')
     await recordMaterializedActivity(pool, output(), 1)
@@ -214,7 +249,13 @@ describe.skipIf(!dsn)('platform statistics PostgreSQL durable facts', () => {
     await pool.query("INSERT INTO event_inbox VALUES('2026-11-01T03:00:00Z',0,'agent_text',1,'{}')")
     const result = await readPlatformStatistics(pool, config, range, async () => memory(), now)
     expect(result.metrics.sessions).toMatchObject({ value: 0,status: 'partial',reason: 'source_cutoff_incomplete' })
-    expect(result.metrics.activeUsers.status).toBe('partial')
+    expect(result.metrics.activeUsers).toMatchObject({value:0,status:'complete'})
+    expect(result.daily[1].sessions.status).toBe('complete')
+    expect(result.generatedAt).toBe(now.toISOString())
+    expect(result.dataThroughByMetric).toMatchObject({activeUsers:now.toISOString(),sessions:'2026-11-01T03:00:00.000Z'})
+    await pool.query("INSERT INTO event_inbox VALUES('2026-11-02T03:00:00Z',3,'user_text',1,$1)",[{local_submit_id:'codex-tui:'+'a'.repeat(64),actor_scope:'root',flow_scope:'main',content_class:'dialogue'}])
+    const withInput = await readPlatformStatistics(pool,config,range,async()=>memory(),now)
+    expect(withInput.daily.map(d=>d.activeUsers.status)).toEqual(['complete','partial'])
     expect(result.metrics.newUsers).toMatchObject({ value: 0,status: 'complete' })
     await pool.query('UPDATE event_inbox SET status=2')
     const caughtUp = await readPlatformStatistics(pool, config, range, async () => memory(), now)

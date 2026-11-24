@@ -11,6 +11,11 @@ export async function heartbeatPlatformStatisticsCollector(pool: Pool, channel: 
     await client.query('BEGIN')
     await client.query("SELECT pg_advisory_xact_lock(hashtext('platform-statistics-collector:' || $1))", [channel])
     const row = (await client.query<{ last_seen: Date }>('SELECT last_seen FROM platform_statistics_collectors WHERE channel=$1 FOR UPDATE', [channel])).rows[0]
+    if (channel === 'materializer') {
+      // The first upgraded materializer establishes the forward-only v2 boundary.
+      await client.query(`INSERT INTO platform_statistics_coverage(metric,starts_at)
+        VALUES ('localInputV2',$1) ON CONFLICT DO NOTHING`, [now])
+    }
     if (!row) {
       // Until every required process has started, no complete zero is claimed.
       await client.query('UPDATE platform_statistics_coverage SET starts_at=GREATEST(starts_at,$1) WHERE metric=ANY($2::text[])', [now, [...COLLECTOR_METRICS[channel]]])

@@ -45,6 +45,8 @@ export async function ensurePlatformStatisticsSchema(pool: Pick<Pool, 'query'> &
     CREATE INDEX IF NOT EXISTS platform_statistics_facts_user ON platform_statistics_facts(user_id);
     CREATE INDEX IF NOT EXISTS platform_statistics_inbox_unresolved_time ON event_inbox(received_at)
       WHERE status IN (0,1,3) AND event_type IN ('session_created','session_status','user_message_receipt','agent_text');
+    CREATE INDEX IF NOT EXISTS platform_statistics_pending_local_submit ON event_inbox(received_at)
+      WHERE status IN (0,1,3) AND event_type='user_text' AND (payload ? 'local_submit_id' OR payload->>'event_id' LIKE 'native-input:%');
     CREATE TABLE IF NOT EXISTS platform_statistics_gaps (
       metric TEXT NOT NULL, starts_at TIMESTAMPTZ NOT NULL, ends_at TIMESTAMPTZ NOT NULL,
       reason TEXT NOT NULL, CHECK (starts_at < ends_at)

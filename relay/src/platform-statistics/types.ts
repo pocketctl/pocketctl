@@ -3,7 +3,7 @@ export interface Metric { value: number | null; status: 'complete' | 'partial' |
 export type Metrics = Record<MetricKey, Metric>
 export interface DailyMetrics { date: string; newUsers: Metric; activeUsers: Metric; sessions: Metric; memory: Metric }
 export interface StatisticsResponse {
-  definitionVersion: 'platform-statistics-v1'; timezone: 'Asia/Shanghai'; dataThrough: string
+  definitionVersion: 'platform-statistics-v2'; generatedAt: string; dataThroughByMetric: Record<MetricKey, string | null>; timezone: 'Asia/Shanghai'; dataThrough: string
   range: { from: string; to: string }; previousRange: { from: string; to: string }; comparisonAvailable: boolean
   metrics: Metrics; previous: Metrics; daily: DailyMetrics[]; previousDaily: DailyMetrics[]
   memorySources: { automatic: Metric; manual: Metric; unclassified: Metric }

@@ -4,7 +4,7 @@ export type StatisticsCoreMetricKey='newUsers'|'activeUsers'|'sessions'|'memory'
 export interface StatisticsRange {from:string;to:string}
 export type StatisticsDaily={date:string}&Record<StatisticsCoreMetricKey,StatisticsMetric>
 export interface PlatformStatistics {
- definitionVersion:string;timezone:string;dataThrough:string;range:StatisticsRange;previousRange:StatisticsRange;comparisonAvailable:boolean
+ definitionVersion:string;timezone:string;generatedAt?:string;dataThroughByMetric?:Record<StatisticsMetricKey,string|null>;dataThrough:string;range:StatisticsRange;previousRange:StatisticsRange;comparisonAvailable:boolean
  metrics:Record<StatisticsMetricKey,StatisticsMetric>;previous:Record<StatisticsMetricKey,StatisticsMetric>;daily:StatisticsDaily[];previousDaily:StatisticsDaily[]
  memorySources:Record<'automatic'|'manual'|'unclassified',StatisticsMetric>;actualUse:{value:null;status:'unconfirmed'};exclusions:string[];warnings:string[]
 }
