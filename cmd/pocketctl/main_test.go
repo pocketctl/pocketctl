@@ -498,7 +498,7 @@ func TestHandleUpgradeAgentRejectsObserversInsideHandler(t *testing.T) {
 	for _, agent := range []string{adapter.AgentCodexDesktop, adapter.AgentZcode} {
 		t.Run(agent, func(t *testing.T) {
 			sender := &recordingDaemonMessageSender{}
-			handleUpgradeAgent(sender, logger, agent)
+			handleUpgradeAgent(context.Background(), sender, logger, agent, nil)
 			if len(sender.messages) != 1 {
 				t.Fatalf("observer upgrade messages=%+v, want one rejection", sender.messages)
 			}

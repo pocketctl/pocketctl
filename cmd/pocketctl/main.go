@@ -2036,6 +2036,9 @@ func cmdDaemonStart(args []string) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if err := agentcontrol.RefreshClaudeIdentity(); err != nil {
+					logger.Debug("Claude launcher identity refresh", "error", err)
+				}
 				if client.SetAgentInventory(discovery.DiscoverLocalAgents()) {
 					client.ResendRegister()
 				}
@@ -3960,6 +3963,30 @@ func deliverDeferredInitialPrompt(
 }
 
 func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionManager, logger *slog.Logger, stateDirty *atomic.Bool, memoryMcpBroker *memorymcp.WsBroker, memoryContextGrants *memorycontext.GrantClient, documentRecordPump *sessiondocument.RecordPump) {
+	refreshProjects := make(chan struct{}, 1)
+	refreshCtx, stopRefresh := context.WithCancel(ctx)
+	defer stopRefresh()
+	daemon.RunLoop(refreshCtx, "refresh-codex-projects", logger, func() {
+		var retry <-chan time.Time
+		for {
+			select {
+			case <-refreshCtx.Done():
+				return
+			case <-refreshProjects:
+			case <-retry:
+			}
+			pass, cancel := context.WithTimeout(refreshCtx, 5*time.Minute)
+			pending, err := sm.CodexRuntimeProvider().RefreshIdleProjects(pass)
+			cancel()
+			if err != nil {
+				logger.Warn("Codex project refresh incomplete", "error", err)
+			}
+			retry = nil
+			if pending {
+				retry = time.After(time.Minute)
+			}
+		}
+	})
 	quotaGrants := session.NewQuotaGrantValidator()
 	documentSlots := make(chan struct{}, 2)
 	directorySlots := make(chan struct{}, 2)
@@ -4524,7 +4551,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 				})
 
 			case "upgrade_agent":
-				daemon.Go("upgrade-agent", logger, func() { handleUpgradeAgent(client, logger, cmd.Agent) })
+				daemon.Go("upgrade-agent", logger, func() { handleUpgradeAgent(ctx, client, logger, cmd.Agent, refreshProjects) })
 
 			case "approval_response":
 				// Client answered a tool-use approval request (Yes/No). Resolves
@@ -4728,14 +4755,24 @@ func replaceEnv(base []string, key, value string) []string {
 // binary path, otherwise falls back to `npm install -g <package>@latest`
 // (used for codex and any agent without a native updater). Returns combined
 // stdout+stderr.
-func runAgentUpgrade(ctx context.Context, binPath, updateCmd, pkg string) ([]byte, error) {
+func runAgentUpgrade(ctx context.Context, binPath, updateCmd, pkg, npmPrefix string) ([]byte, error) {
+	var cmd *exec.Cmd
 	if updateCmd != "" {
-		// updateCmd 形如 "claude update"；用解析出的绝对二进制替换裸名，保留子命令。
 		parts := strings.Fields(updateCmd)
-		args := parts[1:]
-		return exec.CommandContext(ctx, binPath, args...).CombinedOutput()
+		cmd = exec.CommandContext(ctx, binPath, parts[1:]...)
+	} else {
+		args := []string{"install", "-g"}
+		if npmPrefix != "" {
+			args = append(args, "--prefix", npmPrefix)
+		}
+		cmd = exec.CommandContext(ctx, "npm", append(args, pkg+"@latest")...)
 	}
-	return exec.CommandContext(ctx, "npm", "install", "-g", pkg+"@latest").CombinedOutput()
+	cmd.WaitDelay = 3 * time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() != nil {
+		return out, ctx.Err()
+	}
+	return out, err
 }
 
 // isPermissionDenied reports whether an upgrade failure is a write-permission
@@ -4780,7 +4817,9 @@ type daemonMessageSender interface {
 	ResendRegister()
 }
 
-func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent string) {
+var agentUpgrades sync.Map // CLI name -> upgrade in progress
+
+func handleUpgradeAgent(parent context.Context, client daemonMessageSender, logger *slog.Logger, agent string, refreshProjects chan<- struct{}) {
 	agentName := agent
 	if agentName == "" {
 		agentName = "claude-code"
@@ -4794,7 +4833,42 @@ func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent s
 		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
 		return
 	}
-	path, manageable, found := discovery.ResolveAgent(cli)
+	// All callers observe the same daemon upgrade_result broadcast.
+	if _, busy := agentUpgrades.LoadOrStore(cli, struct{}{}); busy {
+		return
+	}
+	defer agentUpgrades.Delete(cli)
+	fail := func(err error) {
+		logger.Error("agent upgrade failed", "agent", agentName, "error", err)
+		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
+	}
+	resolve := agentcontrol.NewBinaryResolver().ResolveAgent
+	path, manageable, found := resolve(cli)
+	var npmPrefix string
+	_, statErr := os.Stat(path)
+	if agentName == adapter.AgentCodex && runtime.GOOS != "windows" && (manageable || !found || errors.Is(statErr, os.ErrNotExist)) {
+		npmPrefix, err = discovery.CodexNPMPrefix(parent)
+		if err != nil {
+			fail(err)
+			return
+		}
+		link := filepath.Join(npmPrefix, "bin", "codex")
+		if found && path != link {
+			active, e1 := os.Stat(path)
+			npm, e2 := os.Stat(link)
+			if e1 != nil || e2 != nil || !os.SameFile(active, npm) {
+				fail(fmt.Errorf("active Codex at %s is outside the selected npm installation %s", path, link))
+				return
+			}
+		}
+		if restored, err := discovery.RecoverCodexNPM(npmPrefix); err != nil {
+			fail(err)
+			return
+		} else if restored {
+			logger.Info("restored previous Codex npm installation", "prefix", npmPrefix)
+			path, manageable, found = resolve(cli)
+		}
+	}
 	if proceed, status, reason, errMsg := upgradeGateDecision(found, manageable, agentName, path); !proceed {
 		if !found {
 			// not installed — no extra log
@@ -4805,24 +4879,45 @@ func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent s
 		return
 	}
 
+	if npmPrefix != "" {
+		if err := discovery.VerifyCodexNPMTarget(npmPrefix, path); err != nil {
+			fail(err)
+			return
+		}
+	}
 	updateCmd, pkg, err := discovery.AgentUpgradeInfo(agentName)
 	if err != nil {
 		client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "failed", Error: err.Error()})
 		return
 	}
 	oldVer := ""
-	for _, a := range discovery.DiscoverAgents() {
+	for _, a := range discovery.DiscoverLocalAgents() {
 		if a.Type == agentName {
 			oldVer = a.Version
 		}
 	}
 	logger.Info("agent upgrade start", "agent", agentName, "old_version", oldVer, "path", path, "cmd", updateCmd)
 
-	upCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	budget := 2 * time.Minute
+	if agentName == adapter.AgentCodex {
+		budget = 20 * time.Minute
+	}
+	upCtx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
-	out, err := runAgentUpgrade(upCtx, path, updateCmd, pkg)
+	out, err := runAgentUpgrade(upCtx, path, updateCmd, pkg, npmPrefix)
 	if err != nil {
 		reason := ""
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("%s upgrade timed out after %s", agentName, budget)
+			reason = "timeout"
+		}
+		if npmPrefix != "" {
+			if restored, repairErr := discovery.RecoverCodexNPM(npmPrefix); repairErr != nil {
+				err = errors.Join(err, repairErr)
+			} else if restored {
+				err = fmt.Errorf("%w (previous Codex installation restored)", err)
+			}
+		}
 		if isPermissionDenied(string(out)) {
 			reason = protocol.ReasonPermissionDenied
 		}
@@ -4840,6 +4935,23 @@ func handleUpgradeAgent(client daemonMessageSender, logger *slog.Logger, agent s
 	}
 	client.SetAgentInventory(agents)
 	client.ResendRegister()
+	if npmPrefix != "" {
+		newVer, err = discovery.VerifyCodexNPMVersion(npmPrefix, path)
+		if err != nil {
+			fail(err)
+			return
+		}
+	}
+	if newVer == "" {
+		fail(fmt.Errorf("%s updater exited successfully but CLI version verification failed", agentName))
+		return
+	}
+	if agentName == adapter.AgentCodex {
+		select {
+		case refreshProjects <- struct{}{}:
+		default:
+		}
+	}
 	client.SendMsg(protocol.DaemonEvent{Type: "upgrade_result", Agent: agentName, Status: "success", Message: newVer})
 	logger.Info("agent upgrade done", "agent", agentName, "old", oldVer, "new", newVer)
 }

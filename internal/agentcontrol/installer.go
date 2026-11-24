@@ -285,7 +285,7 @@ func (i Installer) StatusAgent(ctx context.Context, agent string) Status {
 	if detectErr == nil {
 		status.Detected = true
 		status.Version = version
-		if status.RealBinary == "" {
+		if status.RealBinary == "" || agent == AgentClaudeCode && !sameResolvedPath(status.RealBinary, path) {
 			status.RealBinary = path
 		}
 		if compatibilityErr := i.checkCompatibility(ctx, agent, path, version); compatibilityErr != nil {

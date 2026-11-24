@@ -176,6 +176,22 @@ func logCodexManagedFallback(binary, version string, err error) {
 	slog.Default().Warn("Codex managed backend unavailable; using compatibility backend", attrs...)
 }
 
+// Hold this generation across creation and turn submission, including the
+// interval before the native server acknowledges that work is active.
+func (b *CodexAppServerBackend) reserveGeneration() (func(), error) {
+	b.coord.mu.Lock()
+	defer b.coord.mu.Unlock()
+	if b.coord.shuttingDown || (b.coord.runtime != nil && b.coord.generation != b.generation) {
+		return nil, errors.New("Codex runtime changed before request")
+	}
+	b.coord.pendingStarts++
+	return func() {
+		b.coord.mu.Lock()
+		b.coord.pendingStarts--
+		b.coord.mu.Unlock()
+	}, nil
+}
+
 func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.SessionConfig) (string, error) {
 	params := map[string]any{"cwd": config.Cwd}
 	if config.Model != "" {
@@ -220,6 +236,11 @@ func (b *CodexAppServerBackend) Start(ctx context.Context, config protocol.Sessi
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	releaseGeneration, err := b.reserveGeneration()
+	if err != nil {
+		return "", err
+	}
+	defer releaseGeneration()
 	if err := b.client.Call(ctx, method, params, &response); err != nil {
 		createErr := fmt.Errorf("Codex thread/start: %w", err)
 		if !codexCreateRejected(err) {
@@ -530,7 +551,12 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 	correlationForMemory := userMessageCorrelationFrom(ctx)
 	finishMemoryDispatch := b.sm.beginMemoryCodexDispatch(UserMessageInput{SessionID: threadID, RequestID: correlationForMemory.RequestID, MsgID: correlationForMemory.MsgID, InvocationID: codexInvocationFrom(ctx)})
 	defer finishMemoryDispatch(false)
-	err := call(ctx, turnMethod, params, &response)
+	releaseGeneration, err := b.reserveGeneration()
+	if err != nil {
+		return false, err
+	}
+	defer releaseGeneration()
+	err = call(ctx, turnMethod, params, &response)
 	busy := turnMethod == idleTurnMethod && codexIdleTurnRejected(err)
 	if busy && (correlation.InputMode == protocol.InputModeNewTurn || correlation.RequireContext) {
 		return false, ErrQueuedSessionBusy
