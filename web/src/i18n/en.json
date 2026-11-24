@@ -2371,6 +2371,7 @@
   "zcode_quota.failed_old": "Refresh failed · Current usage unknown; showing last record",
   "zcode_quota.stale": "Usage data is outdated · Refresh to check availability",
   "zcode_quota.not_connected": "No Coding Plan connected. Connect your BigModel plan in ZCode on this host, then refresh.",
+  "zcode_quota.bind_key": "On the daemon host, run pocketctl agent zcode quota bind and enter the personal Coding Plan API key for the current ZCode account.",
   "zcode_quota.unsupported": "Usage queries are unavailable for this plan connection.",
   "zcode_quota.unavailable": "Official usage limits unavailable. Try refreshing later.",
   "zcode_quota.partial": "Some limits are unavailable. Missing windows remain unknown.",

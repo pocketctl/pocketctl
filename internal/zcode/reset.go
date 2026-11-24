@@ -50,6 +50,9 @@ func (r *QuotaReader) resetAuth(c quotaCredential) (string, string, error) {
 	return z, m, e
 }
 func (r *QuotaReader) resetAuthSnapshot(c quotaCredential) (string, string, string, error) {
+	if c.binding != "" {
+		return "", "", "", errors.New("quota_authentication_required")
+	}
 	stamp, e := r.resetCredentialStamp()
 	if e != nil {
 		return "", "", "", e

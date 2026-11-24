@@ -2371,6 +2371,7 @@
   "zcode_quota.failed_old": "刷新失败 · 当前额度未知，显示上次记录",
   "zcode_quota.stale": "数据已过期 · 请刷新确认当前额度",
   "zcode_quota.not_connected": "尚未连接 Coding Plan，请在这台主机的 ZCode 中连接智谱套餐后刷新。",
+  "zcode_quota.bind_key": "请在运行 daemon 的主机执行 pocketctl agent zcode quota bind，绑定当前账号的个人 Coding Plan API Key。",
   "zcode_quota.unsupported": "当前套餐连接方式暂不支持额度读取。",
   "zcode_quota.unavailable": "暂时无法获取官方额度，请稍后刷新重试。",
   "zcode_quota.partial": "部分额度暂未取得，缺失窗口保持未知。",

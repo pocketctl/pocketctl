@@ -23,6 +23,7 @@ const zcodeAgentType = "zcode"
 func runZcodeSyncCommand(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(stdout, i18n.T("agent.zcode_sync_help"))
+		fmt.Fprintln(stdout, zcodeQuotaHelp)
 		return nil
 	}
 	if args[0] != "sync" {

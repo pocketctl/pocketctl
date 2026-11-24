@@ -5,7 +5,7 @@ import { getRelayWs } from './useEnv'
 
 export interface ZcodeQuotaWindow { id:'five_hour'|'week'; remaining_percent:number|null; resets_at:number|null }
 export interface ZcodeResetCard {reset_type:'FIVE_HOUR'|'WEEK';available_count:number;expires_at:number[]}
-export interface ZcodeQuotaSnapshot { reset_supported?:boolean;reset_cards?:{status:'ok'|'unavailable'|'authentication_required';cards:ZcodeResetCard[]|null}; kind:'zcode_quota'; scope_id:string; observed_at:string; status:'ok'|'not_configured'|'unsupported'; level:string; windows:ZcodeQuotaWindow[] }
+export interface ZcodeQuotaSnapshot { binding_required?:boolean; reset_supported?:boolean;reset_cards?:{status:'ok'|'unavailable'|'authentication_required';cards:ZcodeResetCard[]|null}; kind:'zcode_quota'; scope_id:string; observed_at:string; status:'ok'|'not_configured'|'unsupported'; level:string; windows:ZcodeQuotaWindow[] }
 export function parseZcodeQuota(value:any):ZcodeQuotaSnapshot|null {
   if(value?.kind!=='zcode_quota'||typeof value.scope_id!=='string'||!Number.isFinite(Date.parse(value.observed_at))||!['ok','not_configured','unsupported'].includes(value.status)||!['','lite','pro','max'].includes(value.level)||!Array.isArray(value.windows)||value.windows.length!==2)return null
   const ids=new Set<string>()
@@ -16,7 +16,7 @@ export function parseZcodeQuota(value:any):ZcodeQuotaSnapshot|null {
   }
   const r=value.reset_cards
   if(r!=null&&(!['ok','unavailable','authentication_required'].includes(r.status)||(r.status==='ok'&&(!Array.isArray(r.cards)||r.cards.length!==2||new Set(r.cards.map((c:any)=>c.reset_type)).size!==2||!r.cards.every((c:any)=>['FIVE_HOUR','WEEK'].includes(c.reset_type)&&Number.isSafeInteger(c.available_count)&&c.available_count>=0&&c.available_count<=10000&&Array.isArray(c.expires_at)&&c.expires_at.length<=64&&c.expires_at.length<=c.available_count&&c.expires_at.every((n:any)=>Number.isSafeInteger(n)&&n>0&&n<=253402300799))))))return null
-  return {reset_supported:value.reset_supported===true,reset_cards:r==null?undefined:{status:r.status,cards:r.status==='ok'?r.cards.map((c:any)=>({reset_type:c.reset_type,available_count:c.available_count,expires_at:[...c.expires_at]})):null},kind:'zcode_quota',scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,level:value.level,windows:value.windows.map((w:ZcodeQuotaWindow)=>({id:w.id,remaining_percent:w.remaining_percent,resets_at:w.resets_at}))}
+  return {binding_required:value.status==='unsupported' && value.binding_required===true,reset_supported:value.reset_supported===true,reset_cards:r==null?undefined:{status:r.status,cards:r.status==='ok'?r.cards.map((c:any)=>({reset_type:c.reset_type,available_count:c.available_count,expires_at:[...c.expires_at]})):null},kind:'zcode_quota',scope_id:value.scope_id,observed_at:value.observed_at,status:value.status,level:value.level,windows:value.windows.map((w:ZcodeQuotaWindow)=>({id:w.id,remaining_percent:w.remaining_percent,resets_at:w.resets_at}))}
 }
 
 export function useZcodeQuota(options:Ref<{daemonId:string;online?:boolean}>) {

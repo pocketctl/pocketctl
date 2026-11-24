@@ -51,6 +51,7 @@ const notice=computed(()=>{
   if(!online.value)return t('codex_quota.offline')
   if(loading.value&&!snapshot.value)return t('codex_quota.loading')
   if(snapshot.value?.status==='not_configured')return t('zcode_quota.not_connected')
+  if(snapshot.value?.binding_required)return t('zcode_quota.bind_key')
   if(snapshot.value?.status==='unsupported')return t('zcode_quota.unsupported')
   if(failed.value||!snapshot.value)return t('zcode_quota.unavailable')
   if(windows.value.some(w=>w.remaining_percent===null))return t('zcode_quota.partial')

@@ -30,16 +30,17 @@ type QuotaWindow struct {
 	ResetsAt         *int64   `json:"resets_at"` // Unix seconds, unlike the upstream milliseconds.
 }
 type QuotaSnapshot struct {
-	ResetCards     *ResetCards   `json:"reset_cards,omitempty"`
-	ResetSupported bool          `json:"reset_supported"`
-	Kind           string        `json:"kind"`
-	ScopeID        string        `json:"scope_id"`
-	ObservedAt     string        `json:"observed_at"`
-	Status         string        `json:"status"`
-	Level          string        `json:"level"`
-	Windows        []QuotaWindow `json:"windows"`
+	BindingRequired bool          `json:"binding_required,omitempty"`
+	ResetCards      *ResetCards   `json:"reset_cards,omitempty"`
+	ResetSupported  bool          `json:"reset_supported"`
+	Kind            string        `json:"kind"`
+	ScopeID         string        `json:"scope_id"`
+	ObservedAt      string        `json:"observed_at"`
+	Status          string        `json:"status"`
+	Level           string        `json:"level"`
+	Windows         []QuotaWindow `json:"windows"`
 }
-type quotaCredential struct{ key, scope, status string }
+type quotaCredential struct{ key, scope, status, binding string }
 type quotaFlight struct {
 	done   chan struct{}
 	result *QuotaSnapshot
@@ -50,6 +51,7 @@ type quotaFlight struct {
 // It never reads session content, refreshes OAuth tokens, or redeems resets.
 type QuotaReader struct {
 	root, secret, endpoint string
+	bindingPath            string
 	resetEndpoint          string
 	resetRevision          uint64
 	client                 *http.Client
@@ -76,7 +78,7 @@ func NewQuotaReader() *QuotaReader {
 		}
 		secret = "zcode-credential-fallback:" + runtime.GOOS + ":" + home + ":" + name
 	}
-	return &QuotaReader{root: filepath.Join(base, ".zcode", "v2"), secret: secret, client: quotaHTTPClient(), endpoint: quotaEndpoint}
+	return &QuotaReader{root: filepath.Join(base, ".zcode", "v2"), bindingPath: filepath.Join(home, ".pocketctl", "zcode-quota.json"), secret: secret, client: quotaHTTPClient(), endpoint: quotaEndpoint}
 }
 
 func quotaJSON(path string, target any) error {
@@ -94,6 +96,9 @@ func quotaJSON(path string, target any) error {
 
 func (r *QuotaReader) decrypt(value string) (string, error) {
 	if !strings.HasPrefix(value, "enc:v1:") {
+		if strings.HasPrefix(value, "enc:") {
+			return "", errors.New("quota_credentials_unavailable")
+		}
 		return value, nil
 	}
 	parts := strings.Split(strings.TrimPrefix(value, "enc:v1:"), ".")
@@ -145,6 +150,9 @@ func (r *QuotaReader) credential() (quotaCredential, error) {
 		}
 		return c, errors.New("quota_credentials_unavailable")
 	}
+	if strings.HasPrefix(credentials["oauth:active_provider"], "enc:v2:") {
+		return r.boundCredential(credentials)
+	}
 	active, err := r.decrypt(credentials["oauth:active_provider"])
 	if err != nil {
 		return c, err
@@ -184,7 +192,9 @@ func (r *QuotaReader) Read(ctx context.Context) (*QuotaSnapshot, error) {
 		return nil, err
 	}
 	if c.status != "ok" {
-		return emptyQuota(c.scope, c.status), nil
+		snapshot := emptyQuota(c.scope, c.status)
+		snapshot.BindingRequired = c.binding != ""
+		return snapshot, nil
 	}
 	r.mu.Lock()
 	if r.cached != nil && r.cached.ScopeID == c.scope {
@@ -212,7 +222,7 @@ func (r *QuotaReader) Read(ctx context.Context) (*QuotaSnapshot, error) {
 	r.flights[c.scope] = f
 	r.mu.Unlock()
 	result, readErr := r.fetch(ctx, c)
-	if readErr == nil {
+	if readErr == nil && c.binding == "" {
 		result.ResetCards = r.readResetCards(ctx, c)
 		result.ResetSupported = result.ResetCards.Status == "ok"
 	}

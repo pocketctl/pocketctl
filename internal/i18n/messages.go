@@ -413,6 +413,10 @@ var messages = map[string]msg{
 	"agent.no":                {"no", "否"},
 
 	// ---- agent.zcode.* (read-only session content sync) -----------------
+	"agent.zcode_quota_key_prompt":    {"Current ZCode account’s personal BigModel Coding Plan API key (hidden): ", "当前 ZCode 账号的智谱个人 Coding Plan API Key（输入隐藏）："},
+	"agent.zcode_quota_bound":         {"Coding Plan quota key verified and bound to this ZCode login.", "已验证额度 Key，并绑定到当前 ZCode 登录。"},
+	"agent.zcode_quota_unbound":       {"Coding Plan quota key removed.", "已移除本机保存的额度 Key。"},
+	"agent.zcode_quota_bind_required": {"Run pocketctl agent zcode quota bind for the current ZCode account.", "请执行 pocketctl agent zcode quota bind 绑定当前 ZCode 账号的额度 Key。"},
 	"agent.zcode_help": {
 		"usage: pocketctl agent zcode sync <enable|disable|status|help>",
 		"用法: pocketctl agent zcode sync <enable|disable|status|help>",
