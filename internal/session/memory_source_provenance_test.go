@@ -529,6 +529,11 @@ func TestMemorySourceProvenanceRejectedDispatchCannotBindNativeOutput(t *testing
 	if err := sm.SendMessageWithInput(context.Background(), UserMessageInput{SessionID: "turn-sess", RequestID: "r", MsgID: "m", Content: "input"}); err == nil {
 		t.Fatal("fixture dispatch was not rejected")
 	}
+	for _, echo := range findEvents(drainEvents(sm.outputCh), "user_text") {
+		if echo.MemorySource != nil && echo.MemorySource.LineageComplete {
+			t.Fatal("failed PTY write published an accepted input")
+		}
+	}
 	parser := adapter.NewJSONLStreamParser()
 	found := false
 	for _, line := range []string{
@@ -785,5 +790,49 @@ func TestMemorySourceCodexDispatchTimeoutFlushesUnknownOnce(t *testing.T) {
 	finish(true)
 	if len(drainEvents(sm.outputCh)) != 0 {
 		t.Fatal("late ACK duplicated timed out event")
+	}
+}
+
+func TestMemorySourceBindingCapacity(t *testing.T) {
+	sm, _ := newTurnTestManager(t)
+	for i := 0; i < 512; i++ {
+		sm.registerMemoryInput(UserMessageInput{SessionID: strconv.Itoa(i), RequestID: "req", MsgID: "msg"}, "turn", "claude", "")
+	}
+	ledger := sm.memoryLedger()
+	ledger.bindings["0"].started = time.Unix(0, 0)
+	retained := ledger.bindings["1"]
+	sm.registerMemoryInput(UserMessageInput{SessionID: "511", RequestID: "next", MsgID: "next"}, "next", "claude", "")
+	if len(ledger.bindings) != 512 || ledger.bindings["1"] != retained {
+		t.Fatal("replacing an existing turn discarded unrelated bindings")
+	}
+	sm.registerMemoryInput(UserMessageInput{SessionID: "new", RequestID: "req", MsgID: "msg"}, "turn", "claude", "")
+	if len(ledger.bindings) != 512 || ledger.bindings["0"] != nil || ledger.bindings["1"] != retained || ledger.bindings["new"] == nil {
+		t.Fatal("capacity evicted more than the oldest binding")
+	}
+}
+
+func TestMemorySourceDispatchGapReasons(t *testing.T) {
+	sm, _ := newTurnTestManager(t)
+	ev := protocol.DaemonEvent{Type: "agent_text", SessionID: "turn-sess", TurnID: "turn", MemoryNative: &protocol.MemoryNativeEvent{Producer: "claude", RecordID: "record", RootID: "native"}}
+	if reason := sm.stampNativeMemorySource(&ev); reason != "no_live_dispatch_binding" || ev.MemorySource != nil {
+		t.Fatalf("unbound observation: reason=%q proof=%v", reason, ev.MemorySource)
+	}
+	in := UserMessageInput{SessionID: "turn-sess", RequestID: "req", MsgID: "msg"}
+	p := sm.trackMemoryInput(in, "turn", "claude", "native", true)
+	ev.MemoryNative.DirectRoot = true
+	ev.MemoryNative.Skill = true
+	if reason := sm.stampNativeMemorySource(&ev); reason != "dispatch_pending" || ev.MemorySource != nil {
+		t.Fatalf("unconfirmed write: reason=%q proof=%v", reason, ev.MemorySource)
+	}
+	sm.acceptMemoryInput(p)
+	ev.MemoryNative.Skill = false
+	ev.MemoryNative.DirectRoot = false
+	ev.MemoryNative.ParentRecordID = "absent"
+	if reason := sm.stampNativeMemorySource(&ev); reason != "native_parent_missing" || ev.MemorySource != nil {
+		t.Fatalf("missing parent: reason=%q proof=%v", reason, ev.MemorySource)
+	}
+	ev.MemoryNative.DirectRoot = true
+	if reason := sm.stampNativeMemorySource(&ev); reason != "" || ev.MemorySource == nil || ev.MemorySource.SkillState != "skill" {
+		t.Fatalf("early skill evidence lost: reason=%q proof=%v", reason, ev.MemorySource)
 	}
 }

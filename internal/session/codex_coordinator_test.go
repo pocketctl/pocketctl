@@ -1467,3 +1467,67 @@ func TestCodexRecoveryReservesNativeHistoryBeforeAsyncSubscription(t *testing.T)
 		t.Fatal("watcher changed recovered lifecycle")
 	}
 }
+
+func TestCodexRefreshIdleProjectsDefersBusyGenerations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := agentcontrol.DefaultConfig()
+	cfg.Codex.State = agentcontrol.StateEnabled
+	if err := agentcontrol.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	caps := agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "new"}
+	p := &CodexRuntimeProvider{projects: map[string]*codexCoordinator{}, resolve: func() (string, string, error) { return "/opt/codex", "0.172.0", nil }, probe: func(context.Context, string, string) (agentcontrol.CodexCapabilities, error) { return caps, nil }}
+	for _, name := range []string{"local-active", "native-active", "starting", "idle"} {
+		c := newVerifiedTestCodexCoordinator(nil)
+		c.statePath = filepath.Join(t.TempDir(), "state")
+		c.projectCwd = t.TempDir()
+		rpc := newFakeCodexRuntimeClient()
+		rpc.results["thread/loaded/list"] = json.RawMessage(`{"data":[]}`)
+		c.runtime = &codexAppServerRuntime{PID: 1, Client: rpc, Stop: func() error { return nil }}
+		c.binary, c.version, c.schemaHash, c.generation = "/opt/codex", "0.171.0", "old", 1
+		c.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+		c.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+			return &codexAppServerRuntime{PID: 2, Endpoint: "/tmp/new", RemoteURI: "unix:///tmp/new", Client: newFakeCodexRuntimeClient()}, nil
+		}
+		switch name {
+		case "local-active":
+			c.setActiveTurn("thread", "turn")
+		case "starting":
+			c.pendingStarts = 1
+		case "native-active":
+			rpc.results["thread/loaded/list"] = json.RawMessage(`{"data":["thread"]}`)
+			rpc.results["thread/read"] = json.RawMessage(`{"thread":{"status":{"type":"active"}}}`)
+		}
+		p.projects[name] = c
+	}
+	p.projects["unused"] = newVerifiedTestCodexCoordinator(nil)
+	if pending, err := p.RefreshIdleProjects(context.Background()); err != nil || !pending {
+		t.Fatalf("busy pass pending=%v error=%v", pending, err)
+	}
+	for name, c := range p.projects {
+		if name == "unused" {
+			if c.runtime != nil {
+				t.Fatal("started unused runtime")
+			}
+			continue
+		}
+		want := uint64(1)
+		if name == "idle" {
+			want = 2
+		}
+		if c.generation != want {
+			t.Fatalf("%s generation=%d", name, c.generation)
+		}
+		c.setActiveTurn("thread", "")
+		c.pendingStarts = 0
+		c.runtime.Client.(*fakeCodexRuntimeClient).results["thread/loaded/list"] = json.RawMessage(`{"data":[]}`)
+	}
+	if pending, err := p.RefreshIdleProjects(context.Background()); err != nil || pending {
+		t.Fatalf("idle pass pending=%v error=%v", pending, err)
+	}
+	for name, c := range p.projects {
+		if name != "unused" && c.generation != 2 {
+			t.Fatalf("%s failed to rotate after completion", name)
+		}
+	}
+}

@@ -27,8 +27,12 @@ export function assertReplayCompatible(canonical: Record<string, unknown>, raw: 
   const incoming = sanitizeJSONBPayload(raw)
   const stable = typeof canonical.event_id === 'string' && canonical.event_id.length > 0
     || typeof canonical.request_id === 'string' && canonical.request_id.length > 0
+  // The local TUI witness exists only during live collection. Re-reading the
+  // same source record after restart cannot reproduce (or upgrade) it.
+  const omitLocalWitness = canonical.type === 'user_text' && incoming.type === 'user_text'
+    && (canonical.local_submit_id === undefined || incoming.local_submit_id === undefined)
   const strip = (p: Record<string, unknown>) => Object.fromEntries(Object.entries(p).filter(([k]) =>
-    k !== 'memory_source' && !(stable && (k === 'seq' || k === 'resync'))))
+    k !== 'memory_source' && !(omitLocalWitness && k === 'local_submit_id') && !(stable && (k === 'seq' || k === 'resync'))))
   if (!isDeepStrictEqual(strip(canonical), strip(incoming))) throw new ReplayConflictError('replay_payload_conflict')
   if (isDeepStrictEqual(canonical.memory_source, incoming.memory_source)) return
   // Older producers may omit an already-established proof. It stays canonical.

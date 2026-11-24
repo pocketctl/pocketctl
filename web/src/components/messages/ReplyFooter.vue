@@ -1,6 +1,6 @@
 <template>
   <footer class="reply-footer" :data-reply-status="status">
-    <span class="reply-state" role="status"><i :class="status" />{{ label }}<span v-if="duration" class="status-timer"> · {{ duration }}</span><span v-if="usage"> · {{ usage }}</span></span>
+    <span class="reply-state" role="status"><ExecutionMark v-if="live && status === 'streaming'" /><i v-else :class="status" />{{ label }}<span v-if="duration" class="status-timer"> · {{ duration }}</span><span v-if="usage"> · {{ usage }}</span></span>
     <div class="reply-actions">
       <button v-if="content" type="button" @click="copy" :aria-label="t(status === 'completed' ? 'session.reply_copy' : 'session.reply_copy_partial')">{{ copied ? t('common.copied') : t(status === 'completed' ? 'session.reply_copy' : 'session.reply_copy_partial') }}</button>
       <button v-if="canRetry" type="button" @click="$emit('retry')">{{ t('common.retry') }}</button>
@@ -9,9 +9,10 @@
   </footer>
 </template>
 <script setup lang="ts">
+import ExecutionMark from './ExecutionMark'
 import { computed, ref, onBeforeUnmount } from 'vue'
 import { useLocale } from '../../composables/useLocale'
-const props = defineProps<{status: string; content: string; duration?: string; endedAt?: string; usage?: string; canRetry?: boolean}>()
+const props = defineProps<{live?: boolean; status: string; content: string; duration?: string; endedAt?: string; usage?: string; canRetry?: boolean}>()
 defineEmits<{retry: []}>()
 const { t } = useLocale()
 const copied = ref(false)

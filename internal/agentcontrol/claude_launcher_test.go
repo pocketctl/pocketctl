@@ -630,3 +630,44 @@ func TestResolveLauncherClaudeRejectsOwnedShimHint(t *testing.T) {
 		t.Fatalf("resolver path=%q, want filtered discovery to select %q", got, f.real)
 	}
 }
+
+func TestRefreshClaudeIdentityAfterNativeUpdate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Unix installer")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	versions := filepath.Join(home, ".local", "share", "claude", "versions")
+	link := filepath.Join(home, ".local", "bin", "claude")
+	for _, dir := range []string{versions, filepath.Dir(link)} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual := filepath.Join(versions, "2.1.330")
+	if err := os.WriteFile(actual, []byte("#!/bin/sh\necho 2.1.330\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actual, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Claude = AgentConfig{State: StateEnabled, RealBinary: filepath.Join(versions, "2.1.227"), DecisionSource: SourceCommand}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshClaudeIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadConfig()
+	if err != nil || got.Claude.RealBinary != resolved || got.Claude.DecisionSource != SourceCommand {
+		t.Fatalf("identity=%+v err=%v", got.Claude, err)
+	}
+	if v, ok := cachedClaudeChannelVersion(resolved); !ok || v != "2.1.330" {
+		t.Fatalf("cache=(%q,%v)", v, ok)
+	}
+}

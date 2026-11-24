@@ -77,24 +77,35 @@ func SubAgentJSONLPath(parentJSONLPath string, agentID string) string {
 // The file handle and scanner buffer are reused across calls to minimize
 // allocations. The parser is agent-specific (Claude vs Codex schema).
 type JSONLTailer struct {
-	mu             sync.Mutex
-	filePath       string
-	offset         int64
-	file           *os.File
-	scanBuf        []byte              // reusable 1MB scanner buffer
-	paused         atomic.Bool         // D2: paused during sendToIdleTerminal to avoid double-forward
-	parser         adapter.JSONLParser // agent-specific stateful parser
-	stableEventIDs bool
-	eventSourceID  string
-	lineIndex      int64
-	notBefore      time.Time
-	replayUntil    int64
-	claudeV2       bool
-	maxRecordBytes int
+	mu              sync.Mutex
+	filePath        string
+	offset          int64
+	file            *os.File
+	scanBuf         []byte              // reusable 1MB scanner buffer
+	paused          atomic.Bool         // D2: paused during sendToIdleTerminal to avoid double-forward
+	parser          adapter.JSONLParser // agent-specific stateful parser
+	stableEventIDs  bool
+	eventSourceID   string
+	lineIndex       int64
+	notBefore       time.Time
+	localInputStart int64 // existing bytes when opened are history
+	codexHome       string
+	replayUntil     int64
+	claudeV2        bool
+	maxRecordBytes  int
 }
 
 type codexSessionSeedable interface {
 	SetSessionID(string)
+}
+
+func rolloutHome(path, agent string) string {
+	if agent == adapter.AgentCodex {
+		if profile, ok := adapter.CodexHomeProfileForPath(path); ok {
+			return profile.Home
+		}
+	}
+	return ""
 }
 
 func seedCodexTailerSession(parser adapter.JSONLParser, agentType, filePath string) {
@@ -154,11 +165,13 @@ func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 		}
 	}
 	return &JSONLTailer{
-		filePath: filePath,
-		offset:   info.Size(), // Start from end
-		file:     f,
-		scanBuf:  make([]byte, 1024*1024),
-		parser:   parser,
+		filePath:        filePath,
+		codexHome:       rolloutHome(filePath, agentType),
+		localInputStart: info.Size(),
+		offset:          info.Size(), // Start from end
+		file:            f,
+		scanBuf:         make([]byte, 1024*1024),
+		parser:          parser,
 	}, nil
 }
 
@@ -222,7 +235,8 @@ func newJSONLTailerFromStart(filePath, agentType string, stableEventIDs bool) (*
 }
 
 func newJSONLTailerFromLine(filePath, agentType string, stableEventIDs bool, startLine int64) (*JSONLTailer, error) {
-	if _, err := os.Stat(filePath); err != nil {
+	info, err := os.Stat(filePath)
+	if err != nil {
 		return nil, fmt.Errorf("stat jsonl file: %w", err)
 	}
 	f, err := os.Open(filePath)
@@ -244,14 +258,16 @@ func newJSONLTailerFromLine(filePath, agentType string, stableEventIDs bool, sta
 		return nil, fmt.Errorf("seek jsonl replay cursor: %w", err)
 	}
 	return &JSONLTailer{
-		filePath:       filePath,
-		offset:         offset,
-		file:           f,
-		scanBuf:        make([]byte, 1024*1024),
-		parser:         parser,
-		stableEventIDs: stableEventIDs,
-		eventSourceID:  CodexReplaySourceID(filePath),
-		lineIndex:      lineIndex,
+		filePath:        filePath,
+		codexHome:       rolloutHome(filePath, agentType),
+		localInputStart: info.Size(),
+		offset:          offset,
+		file:            f,
+		scanBuf:         make([]byte, 1024*1024),
+		parser:          parser,
+		stableEventIDs:  stableEventIDs,
+		eventSourceID:   CodexReplaySourceID(filePath),
+		lineIndex:       lineIndex,
 	}, nil
 }
 
@@ -362,6 +378,9 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 			t.lineIndex++
 			continue // Skip unparseable lines
 		}
+		if t.offset >= t.localInputStart && !replaying {
+			t.markLocalSubmit(line, events)
+		}
 		if t.stableEventIDs {
 			for i := range events {
 				if events[i].EventID == "" {
@@ -381,6 +400,23 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	t.offset = newOffset
 
 	return allEvents, rawLines, nil
+}
+
+// Only a native user_message can corroborate an interactive-history submission.
+func (t *JSONLTailer) markLocalSubmit(line string, events []protocol.DaemonEvent) {
+	if t.codexHome == "" || len(events) != 1 || events[0].Type != "user_text" {
+		return
+	}
+	var record struct {
+		Type      string
+		Timestamp time.Time
+		Payload   struct{ Type string }
+	}
+	if json.Unmarshal([]byte(line), &record) != nil || record.Type != "event_msg" || record.Payload.Type != "user_message" {
+		return
+	}
+	e := &events[0]
+	e.LocalSubmitID = adapter.CodexTUISubmitID(t.codexHome, e.SessionID, e.Text, record.Timestamp)
 }
 
 func codexRecordBefore(line string, cutoff time.Time) bool {
@@ -480,6 +516,9 @@ func (t *JSONLTailer) tailCompleteRecordsLocked(info os.FileInfo) ([]protocol.Da
 			}
 			recordStart = t.offset
 			continue
+		}
+		if recordStart >= t.localInputStart {
+			t.markLocalSubmit(line, events)
 		}
 		if t.claudeV2 {
 			recordHash := sha256.Sum256(record)

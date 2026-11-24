@@ -85,6 +85,7 @@ type codexCoordinator struct {
 	pumpCancel         context.CancelFunc
 	projectionMu       sync.Mutex
 	turnMu             sync.RWMutex
+	pendingStarts      int // guarded by mu; thread creation and turn submission in flight
 	activeTurn         map[string]string
 	turnRevision       map[string]uint64
 	subscribeMu        sync.Mutex
@@ -114,7 +115,7 @@ type codexCoordinator struct {
 	admissionProbe      func(string) bool // deterministic persistence seam for tests
 }
 
-var errCodexRuntimeUpgradeDeferred = errors.New("Codex managed runtime upgrade is deferred while an active terminal lease uses the current generation")
+var errCodexRuntimeUpgradeDeferred = errors.New("Codex managed runtime upgrade is deferred while the current generation is in use")
 
 type codexTitleTurn struct {
 	user      string
@@ -167,11 +168,22 @@ func (c *codexCoordinator) ensureStartedLocked(ctx context.Context, binary, vers
 			c.setHiddenContextProofLocked(binary, version, capabilities)
 			return c.snapshotLocked(), nil
 		}
-		if probeErr == nil && activeLease {
+		turnInUse := c.pendingStarts > 0 || c.hasActiveNativeTurn()
+		if !compatible && probeErr != nil && c.runtime.Client != nil && !disconnected {
+			return c.snapshotLocked(), fmt.Errorf("cannot verify idle Codex runtime before upgrade: %w", probeErr)
+		}
+		if !compatible && !activeLease && !turnInUse && probeErr == nil && c.runtime.Client != nil {
+			var err error
+			turnInUse, err = codexRuntimeHasLoadedWork(ctx, c.runtime.Client)
+			if err != nil {
+				return c.snapshotLocked(), err
+			}
+		}
+		if (!compatible && turnInUse) || (probeErr == nil && activeLease) {
 			c.hiddenContextProof = codexRuntimeSnapshot{}
 			return c.snapshotLocked(), errCodexRuntimeUpgradeDeferred
 		}
-		if probeErr == nil && compatible && privateProject && !private && c.hasActiveNativeTurn() {
+		if probeErr == nil && compatible && privateProject && !private && turnInUse {
 			c.setHiddenContextProofLocked(binary, version, capabilities)
 			return c.snapshotLocked(), nil
 		}
@@ -225,7 +237,23 @@ func (c *codexCoordinator) ensureStartedLocked(ctx context.Context, binary, vers
 			if err := ctx.Err(); err != nil {
 				return codexRuntimeSnapshot{}, err
 			}
-			if !activeLease && (!compatible || privateProject) {
+			activeHandoff := activeLease
+			if !activeHandoff && (!compatible || privateProject) {
+				// A restarted daemon has no native turn map. Ask the previous
+				// listener before retiring its verified process.
+				if _, verified := codexHandoffProcessIdentity(state); verified {
+					previous, err := c.adopt(ctx, state)
+					if err != nil {
+						return codexRuntimeSnapshot{}, fmt.Errorf("inspect previous Codex runtime: %w", err)
+					}
+					activeHandoff, err = codexRuntimeHasLoadedWork(ctx, previous.Client)
+					_ = previous.Client.Close()
+					if err != nil {
+						return codexRuntimeSnapshot{}, err
+					}
+				}
+			}
+			if !activeHandoff && (!compatible || privateProject) {
 				identity := ""
 				if privateProject {
 					// Refuse to resume the same rollouts until the old listener has
@@ -250,8 +278,8 @@ func (c *codexCoordinator) ensureStartedLocked(ctx context.Context, binary, vers
 					if ctx.Err() != nil {
 						return codexRuntimeSnapshot{}, ctx.Err()
 					}
-					if activeLease {
-						return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while a managed terminal is active: %w", err)
+					if activeHandoff {
+						return codexRuntimeSnapshot{}, fmt.Errorf("Codex app-server endpoint is unavailable while in use: %w", err)
 					}
 					if stopErr := stopPersistedCodexAppServer(state); stopErr != nil {
 						return codexRuntimeSnapshot{}, fmt.Errorf("stop unavailable persisted Codex app-server: %w", stopErr)
@@ -364,6 +392,54 @@ func probeCodexAppServer(ctx context.Context, runtime *codexAppServerRuntime) er
 	defer client.Close()
 	var initialized map[string]any
 	return client.Initialize(ctx, codexInitializeParams(), &initialized)
+}
+
+// Only runs during replacement. Include every loaded thread because a live
+// server can be ahead of the local notification stream or a daemon handoff.
+func codexRuntimeHasLoadedWork(parent context.Context, client codexRuntimeClient) (bool, error) {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		var page struct {
+			Data       []string
+			NextCursor string
+		}
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		if err := client.Call(ctx, "thread/loaded/list", params, &page); err != nil {
+			return false, fmt.Errorf("check loaded Codex threads: %w", err)
+		}
+		if page.Data == nil {
+			return false, errors.New("Codex returned no loaded thread inventory")
+		}
+		for _, id := range page.Data {
+			var result struct {
+				Thread struct{ Status struct{ Type string } }
+			}
+			if err := client.Call(ctx, "thread/read", map[string]any{"threadId": id, "includeTurns": false}, &result); err != nil {
+				return false, fmt.Errorf("check loaded Codex thread %s: %w", id, err)
+			}
+			switch result.Thread.Status.Type {
+			case "idle", "notLoaded", "systemError": // Native terminal states, including a failed turn.
+			case "active":
+				return true, nil
+			default:
+				return false, fmt.Errorf("unknown Codex thread status %q", result.Thread.Status.Type)
+			}
+		}
+		cursor = page.NextCursor
+		if cursor == "" {
+			return false, nil
+		}
+		if seen[cursor] {
+			return false, errors.New("cyclic Codex loaded thread inventory")
+		}
+		seen[cursor] = true
+	}
 }
 
 func hasActiveCodexLease(snapshot map[string]agentcontrol.Lease, generation uint64) bool {
@@ -953,6 +1029,12 @@ func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message cod
 		c.reconcileActiveTurnStatus(threadID, status)
 	}
 	events := projector.Project(message)
+	for i := range events {
+		e := &events[i]
+		if e.Type == "user_text" && message.Method == "item/completed" {
+			e.LocalSubmitID = adapter.CodexTUISubmitID(c.codexHome, e.SessionID, e.Text, received)
+		}
+	}
 	if dialogueProof != nil {
 		for i := range events {
 			e := &events[i]

@@ -14,7 +14,8 @@ interface Dependencies {
 }
 function csvCell(value: unknown): string { return `"${String(value ?? '').replaceAll('"', '""')}"` }
 export function statisticsCsv(value: StatisticsResponse): string {
-  const rows: unknown[][] = [['definitionVersion', value.definitionVersion], ['timezone', value.timezone], ['dataThrough', value.dataThrough],
+  const rows: unknown[][] = [['definitionVersion', value.definitionVersion], ['timezone', value.timezone], ['generatedAt', value.generatedAt], ['dataThrough', value.dataThrough],
+    ...Object.entries(value.dataThroughByMetric).map(([key, time]) => ['dataThroughByMetric', key, time]),
     ['range', value.range.from, value.range.to], ['previousRange', value.previousRange.from, value.previousRange.to],
     ['comparisonAvailable', value.comparisonAvailable], ['actualUse', 'unconfirmed'],
     ...value.exclusions.map(rule => ['exclusion', rule]), ...value.warnings.map(warning => ['warning', warning]),

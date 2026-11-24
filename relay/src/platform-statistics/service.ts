@@ -100,14 +100,36 @@ export async function readPlatformStatistics(pool: Pool, config: StatisticsConfi
     await client.query("SET LOCAL statement_timeout='5000ms'")
     const coverageRows = (await client.query<Coverage>('SELECT metric,starts_at FROM platform_statistics_coverage')).rows
     const coverage = new Map(coverageRows.map(row => [row.metric, new Date(row.starts_at).toISOString()]))
-    const unresolved = (await client.query<{ cutoff: Date | null }>(`SELECT min(received_at) AS cutoff FROM event_inbox
-      WHERE status IN (0,1,3) AND event_type IN ('session_created','session_status','user_message_receipt','agent_text')
-      AND received_at >= $1 AND received_at < $2 AND user_id IS NOT NULL AND NOT user_id=ANY($3::int[])
-      AND COALESCE(payload->>'resync','false')<>'true'`,
-    [new Date(Math.max(Date.parse(range.previousStart),Date.parse(coverage.get('sessions') ?? range.previousStart))).toISOString(),range.end,config.excludedUserIds])).rows[0]?.cutoff
-    const materializerThrough = new Date(Math.min(now.getTime(),unresolved?.getTime() ?? now.getTime())).toISOString()
-    if (unresolved) warnings.push('materialization_pending')
+    // Each affected day keeps its own watermark. A failed output cannot
+    // invalidate human activity or a later fully processed calendar day.
+    const pending = (await client.query<{ session_cutoff: Date; human_cutoff: Date | null }>(`
+      SELECT min(received_at) AS session_cutoff,
+        min(received_at) FILTER (WHERE event_type IN ('session_created','session_status')
+          AND (NULLIF(payload->>'request_id','') IS NOT NULL OR NULLIF(materialization_context->>'requestId','') IS NOT NULL)
+          OR event_type='user_message_receipt' AND payload->>'status'='accepted'
+          OR event_type='user_text' AND payload->>'actor_scope'='root' AND payload->>'flow_scope'='main'
+            AND payload->>'content_class'='dialogue') AS human_cutoff
+      FROM event_inbox WHERE status IN (0,1,3) AND (
+        event_type IN ('session_created','session_status','user_message_receipt','agent_text')
+        OR (event_type='user_text' AND (payload ? 'local_submit_id' OR payload->>'event_id' LIKE 'native-input:%')))
+        AND received_at >= $1 AND received_at < $2 AND user_id IS NOT NULL AND NOT user_id=ANY($3::int[])
+        AND COALESCE(payload->>'resync','false')<>'true'
+      GROUP BY (received_at AT TIME ZONE 'Asia/Shanghai')::date`,
+    [new Date(Math.max(Date.parse(range.previousStart),Date.parse(coverage.get('sessions') ?? range.previousStart))).toISOString(),range.end,config.excludedUserIds])).rows
+    function through(start: string, end: string, key: 'session_cutoff' | 'human_cutoff', limit: number): string {
+      const from = Date.parse(start), to = Date.parse(end)
+      for (const row of pending) {
+        const time = row[key]?.getTime()
+        if (time !== undefined && time >= from && time < to) limit = Math.min(limit, time)
+      }
+      return new Date(limit).toISOString()
+    }
+    if (pending.length) warnings.push('materialization_pending')
     const gaps = (await client.query<Gap>('SELECT metric,starts_at,ends_at FROM platform_statistics_gaps WHERE starts_at<$2 AND ends_at>$1', [range.previousStart, range.end])).rows
+    for (const key of ['activeUsers','sessions']) {
+      const first = coverage.get(key), localStart = coverage.get('localInputV2') ?? now.toISOString()
+      if (first && first < localStart) gaps.push({ metric: key, starts_at: first, ends_at: localStart })
+    }
     const collectors = (await client.query<{ channel: CollectorChannel; last_seen: Date }>('SELECT channel,last_seen FROM platform_statistics_collectors')).rows
     for (const channel of ['relay','materializer'] as const) {
       const lastSeen = collectors.find(row => row.channel === channel)?.last_seen
@@ -145,7 +167,15 @@ export async function readPlatformStatistics(pool: Pool, config: StatisticsConfi
     const byStart = (a: Gap, b: Gap) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime()
     gaps.sort(byStart)
     const allGaps = [...gaps, ...memoryGaps].sort(byStart)
-    const dataThrough = new Date(Math.min(Date.parse(materializerThrough),memory ? Date.parse(memory.dataThrough) : now.getTime())).toISOString()
+    const observedAt = now.getTime()
+    const memoryAt = memory ? Math.min(observedAt, Date.parse(memory.dataThrough)) : observedAt
+    const dataThrough = through(range.start, range.end, 'session_cutoff', memoryAt)
+    const memoryThrough = memory ? new Date(memoryAt).toISOString() : null
+    const dataThroughByMetric = {
+      newUsers: now.toISOString(), sessions: through(range.start, range.end, 'session_cutoff', observedAt),
+      activeUsers: memory ? through(range.start, range.end, 'human_cutoff', memoryAt) : null,
+      memory: memoryThrough, memoryUsers: memoryThrough, readRequests: memoryThrough,
+    }
     const bins = [{ start: range.start,end: range.end,humanIds: memory ? humanIds(memory.periods.current.actors) : [] },
       { start: range.previousStart,end: range.previousEnd,humanIds: memory ? humanIds(memory.periods.previous.actors) : [] }]
     for (const [from, end, source] of [[range.from,range.end,memory?.periods.current],[range.previousFrom,range.previousEnd,memory?.periods.previous]] as const) {
@@ -159,9 +189,9 @@ export async function readPlatformStatistics(pool: Pool, config: StatisticsConfi
     async function period(start: string, end: string, source: MemoryPeriod | undefined): Promise<Metrics> {
       const counts = countsByRange.get(`${start}/${end}`)!
       const result = Object.fromEntries(KEYS.map(key => [key, unavailable('memory_source_unavailable')])) as Metrics
-      for (const key of ['newUsers', 'sessions'] as const) result[key] = metric(counts[key], coverage.get(key) ?? null, start, end, gaps, key, key === 'sessions' ? materializerThrough : now.toISOString())
+      for (const key of ['newUsers', 'sessions'] as const) result[key] = metric(counts[key], coverage.get(key) ?? null, start, end, gaps, key, key === 'sessions' ? through(start, end, 'session_cutoff', observedAt) : now.toISOString())
       result.activeUsers = metric(counts.activeUsers, memory ? latest(coverage.get('activeUsers') ?? null, memory.coverageStart) : coverage.get('activeUsers') ?? null,
-        start, end, allGaps, 'activeUsers', dataThrough, source ? usageReason(source.actors) : 'memory_human_source_unavailable')
+        start, end, allGaps, 'activeUsers', through(start, end, 'human_cutoff', memoryAt), source ? usageReason(source.actors.filter(actor => actor.humanActivity)) : 'memory_human_source_unavailable')
       if (memory && source) {
         result.memory = metric(source.memory, memory.coverageStart, start, end, allGaps, 'memory', memory.dataThrough)
         const actors = source.actors.filter(allowed)
@@ -191,12 +221,12 @@ export async function readPlatformStatistics(pool: Pool, config: StatisticsConfi
       memory ? metric(memory.periods.current[key as 'automatic'], memory.coverageStart, range.start, range.end, allGaps, 'memory', memory.dataThrough) : unavailable('memory_source_unavailable')])) as StatisticsResponse['memorySources']
     await client.query('COMMIT')
     return {
-      definitionVersion: 'platform-statistics-v1', timezone: 'Asia/Shanghai', dataThrough,
+      definitionVersion: 'platform-statistics-v2', generatedAt: now.toISOString(), dataThroughByMetric, timezone: 'Asia/Shanghai', dataThrough,
       range: { from: range.from, to: range.to }, previousRange: { from: range.previousFrom, to: range.previousTo },
       comparisonAvailable: KEYS.some(key => metrics[key].status === 'complete' && previous[key].status === 'complete'),
       metrics, previous, daily: dailyRows, previousDaily, memorySources,
       actualUse: { value: null, status: 'unconfirmed' },
-      exclusions: ['configured_test_service_users', 'configured_memory_installation_scopes', 'shared_creation_owner_not_inferred', 'active_users_v1_explicit_business_whitelist', 'exclude_login_page_open_heartbeat_sync_replay', 'exclude_candidate_shadow_projection_migration'], warnings: [...new Set(warnings)],
+      exclusions: ['configured_test_service_users', 'configured_memory_installation_scopes', 'shared_creation_owner_not_inferred', 'active_users_v2_explicit_business_whitelist', 'exclude_login_page_open_heartbeat_sync_replay', 'exclude_candidate_shadow_projection_migration'], warnings: [...new Set(warnings)],
     }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined)

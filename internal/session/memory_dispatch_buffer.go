@@ -55,10 +55,13 @@ func (sm *SessionManager) beginMemoryCodexDispatch(in UserMessageInput) func(boo
 			events := pending.events
 			ledger.mu.Unlock()
 			for _, event := range events {
+				reason := "dispatch_unconfirmed"
 				if trusted {
-					sm.stampNativeMemorySourceForInput(&event, pending.expectedInput)
+					reason = sm.stampNativeMemorySourceForInput(&event, pending.expectedInput)
+				} else if accepted {
+					reason = "accepted_input_without_output_binding"
 				}
-				stampUnknownMemorySource(&event, "codex")
+				recordUnknownMemorySource(&event, "codex", reason)
 				sm.outputCh <- event
 			}
 		})
@@ -97,7 +100,7 @@ func (sm *SessionManager) bufferMemoryCodexEvent(event protocol.DaemonEvent) boo
 	events := append(pending.events, event)
 	ledger.mu.Unlock()
 	for _, queued := range events {
-		stampUnknownMemorySource(&queued, "codex")
+		recordUnknownMemorySource(&queued, "codex", "dispatch_buffer_overflow")
 		sm.outputCh <- queued
 	}
 	return true

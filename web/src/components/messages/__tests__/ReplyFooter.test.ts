@@ -4,6 +4,17 @@ import ReplyFooter from '../ReplyFooter.vue'
 vi.mock('../../../composables/useLocale', () => ({ useLocale: () => ({ t: (key: string) => key }) }))
 afterEach(() => vi.restoreAllMocks())
 describe('whole reply footer', () => {
+  test('animates only a live streaming reply', async () => {
+    const wrapper = mount(ReplyFooter, { props: { content: '', status: 'streaming' } })
+    expect(wrapper.find('pt-execution-mark').exists()).toBe(false)
+    await wrapper.setProps({ live: true })
+    expect(wrapper.get('pt-execution-mark').attributes('aria-hidden')).toBe('true')
+    for (const status of ['waiting', 'failed', 'interrupted', 'completed']) {
+      await wrapper.setProps({ status })
+      expect(wrapper.find('pt-execution-mark').exists()).toBe(false)
+    }
+    wrapper.unmount()
+  })
   test('copies all supplied Markdown and acknowledges success', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.spyOn(navigator, 'clipboard', 'get').mockReturnValue({ writeText } as any)

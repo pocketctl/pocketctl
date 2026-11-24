@@ -133,7 +133,7 @@ func (p *CodexRuntimeProvider) recoverProjects(ctx context.Context) error {
 		if err == nil {
 			_, err = coord.ensureStarted(ctx, binary, version, caps)
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, errCodexRuntimeUpgradeDeferred) {
 			recoveryErrors = append(recoveryErrors, fmt.Errorf("project %s: %w", filepath.Base(file), err))
 		}
 	}
@@ -278,4 +278,50 @@ func (c *codexCoordinator) configureProjectSkills(ctx context.Context, client co
 		roots = []string{}
 	}
 	return client.Call(ctx, "skills/extraRoots/set", map[string]any{"extraRoots": roots}, nil)
+}
+
+// RefreshIdleProjects upgrades existing project processes one at a time. Busy
+// projects retain their generation and request another pass.
+func (p *CodexRuntimeProvider) RefreshIdleProjects(ctx context.Context) (pending bool, err error) {
+	p.projectsMu.Lock()
+	coords := make([]*codexCoordinator, 0, len(p.projects))
+	for _, c := range p.projects {
+		coords = append(coords, c)
+	}
+	p.projectsMu.Unlock()
+	if len(coords) == 0 {
+		return false, nil
+	}
+	cfg, err := agentcontrol.LoadConfig()
+	if err != nil || cfg.Codex.State != agentcontrol.StateEnabled {
+		return false, err
+	}
+	binary, version, err := p.resolve()
+	if err != nil {
+		return false, err
+	}
+	caps, err := p.probe(ctx, binary, version)
+	if err != nil {
+		return false, err
+	}
+	if !caps.Managed() {
+		return false, errors.New("upgraded Codex lacks managed runtime capabilities")
+	}
+	var failures []error
+	for _, coord := range coords {
+		if err := ctx.Err(); err != nil {
+			return true, errors.Join(append(failures, err)...)
+		}
+		coord.mu.Lock()
+		if coord.runtime != nil && coord.runtime.Client != nil && !codexRuntimeCompatible(coord.binary, coord.version, coord.schemaHash, binary, version, caps.SchemaHash) {
+			_, err := coord.ensureStartedLocked(ctx, binary, version, caps, false)
+			if errors.Is(err, errCodexRuntimeUpgradeDeferred) {
+				pending = true
+			} else if err != nil {
+				failures = append(failures, fmt.Errorf("Codex project %s: %w", coord.projectCwd, err))
+			}
+		}
+		coord.mu.Unlock()
+	}
+	return pending, errors.Join(failures...)
 }

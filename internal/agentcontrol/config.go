@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appconfig "github.com/pocketctl/pocketctl/internal/config"
+	"github.com/pocketctl/pocketctl/internal/platform"
 )
 
 // ConfigVersion deliberately remains v1. JSON readers used by older
@@ -112,7 +113,32 @@ func LoadConfig() (Config, error) {
 	return cfg, nil
 }
 
+func lockLauncherConfig() (platform.Lock, error) {
+	path, err := ConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	locker := platform.NewLogicalLocker("agent-launchers")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		lock, err := locker.Acquire(path + ".lock")
+		if !errors.Is(err, platform.ErrInstanceLockHeld) || time.Now().After(deadline) {
+			return lock, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func SaveConfig(cfg Config) error {
+	lock, err := lockLauncherConfig()
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return saveConfigLocked(cfg)
+}
+
+func saveConfigLocked(cfg Config) error {
 	if cfg.Version != ConfigVersion {
 		return fmt.Errorf("%w: %d", ErrConfigVersion, cfg.Version)
 	}

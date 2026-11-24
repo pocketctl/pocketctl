@@ -7,6 +7,7 @@ import (
 	"github.com/pocketctl/pocketctl/internal/adapter"
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,18 @@ func stampUnknownMemorySource(ev *protocol.DaemonEvent, producer string) {
 	ev.MemorySource = &protocol.MemorySourceProvenance{Version: 1, Producer: producer, SessionID: ev.SessionID, TurnID: ev.TurnID, EventID: eventID, Sequence: "1", InvocationID: ev.TurnID, SourceRole: role, SkillState: "unknown", LineageComplete: false, DerivedFromEventIDs: []string{}}
 }
 
+// Emit one diagnostic per newly classified dialogue event. Native metadata and
+// message bodies stay out of logs; repeated enrichment keeps the original proof.
+func recordUnknownMemorySource(ev *protocol.DaemonEvent, producer, reason string) {
+	if ev.MemorySource != nil || ev.SessionID == "" || ev.TurnID == "" {
+		return
+	}
+	stampUnknownMemorySource(ev, producer)
+	if !ev.Resync && (ev.Type == "user_text" || ev.Type == "agent_text" && ev.MessagePhase == "final_answer" || ev.Type == "turn_status" && ev.TurnStatus == "completed") {
+		slog.Info("memory lineage unavailable", "producer", producer, "session_id", ev.SessionID, "turn_id", ev.TurnID, "event_type", ev.Type, "reason", reason)
+	}
+}
+
 // Registered session metadata is authoritative. Event prose and presentation
 // fields cannot select a producer, and missing sessions never default to Claude.
 func (sm *SessionManager) memoryEventProducer(ev *protocol.DaemonEvent) string {
@@ -82,13 +95,14 @@ type memorySourceLedger struct {
 	pending  map[string]*memoryDispatchBuffer
 }
 type memorySourceBinding struct {
-	root       *protocol.MemorySourceProvenance
-	started    time.Time
-	nativeRoot string
-	records    map[string]*protocol.MemorySourceProvenance
-	calls      map[string]*protocol.MemorySourceProvenance
-	skill      bool
-	unknown    bool
+	awaitingDispatch bool
+	root             *protocol.MemorySourceProvenance
+	started          time.Time
+	nativeRoot       string
+	records          map[string]*protocol.MemorySourceProvenance
+	calls            map[string]*protocol.MemorySourceProvenance
+	skill            bool
+	unknown          bool
 }
 
 func codexInvocationFrom(ctx context.Context) string {
@@ -104,6 +118,12 @@ func (sm *SessionManager) memoryLedger() *memorySourceLedger {
 	return sm.memorySources
 }
 func (sm *SessionManager) registerMemoryInput(in UserMessageInput, turnID, agent, nativeRoot string) *protocol.MemorySourceProvenance {
+	return sm.trackMemoryInput(in, turnID, agent, nativeRoot, false)
+}
+
+// Non-Codex transports may reserve native identities before Send returns.
+// Only a successful transport write can make the reserved graph usable.
+func (sm *SessionManager) trackMemoryInput(in UserMessageInput, turnID, agent, nativeRoot string, awaitingDispatch bool) *protocol.MemorySourceProvenance {
 	p := memoryInputProvenance(in, turnID, agent)
 	l := sm.memoryLedger()
 	l.mu.Lock()
@@ -118,11 +138,32 @@ func (sm *SessionManager) registerMemoryInput(in UserMessageInput, turnID, agent
 	if old := l.bindings[in.SessionID]; old != nil && old.root.EventID == p.EventID && old.root.TurnID == turnID {
 		return old.root
 	}
-	if len(l.bindings) >= 512 {
-		l.bindings = map[string]*memorySourceBinding{}
+	if l.bindings[in.SessionID] == nil && len(l.bindings) >= 512 {
+		oldest := ""
+		for id, binding := range l.bindings {
+			if oldest == "" || binding.started.Before(l.bindings[oldest].started) {
+				oldest = id
+			}
+		}
+		delete(l.bindings, oldest)
 	}
-	l.bindings[in.SessionID] = &memorySourceBinding{root: p, started: time.Now(), nativeRoot: nativeRoot, records: map[string]*protocol.MemorySourceProvenance{}, calls: map[string]*protocol.MemorySourceProvenance{}}
+	l.bindings[in.SessionID] = &memorySourceBinding{root: p, awaitingDispatch: awaitingDispatch, started: time.Now(), nativeRoot: nativeRoot, records: map[string]*protocol.MemorySourceProvenance{}, calls: map[string]*protocol.MemorySourceProvenance{}}
 	return p
+}
+
+func (sm *SessionManager) acceptMemoryInput(p *protocol.MemorySourceProvenance) {
+	if p == nil {
+		return
+	}
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	b := l.bindings[p.SessionID]
+	bound := b != nil && b.root == p
+	if bound {
+		b.awaitingDispatch = false
+	}
+	l.mu.Unlock()
+	slog.Info("memory input dispatched", "producer", p.Producer, "session_id", p.SessionID, "turn_id", p.TurnID, "input_event_id", p.EventID, "has_output_binding", bound)
 }
 
 // A failed transport write cannot remain a live source of causal authority.
@@ -136,38 +177,62 @@ func (sm *SessionManager) discardMemoryInput(sessionID, turnID string) {
 	}
 }
 
-func (sm *SessionManager) stampNativeMemorySource(ev *protocol.DaemonEvent) {
-	sm.stampNativeMemorySourceForInput(ev, "")
+func (sm *SessionManager) stampNativeMemorySource(ev *protocol.DaemonEvent) string {
+	return sm.stampNativeMemorySourceForInput(ev, "")
 }
-func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEvent, expectedInput string) {
-	if ev == nil || ev.MemorySource != nil || ev.MemoryNative == nil || ev.Resync || ev.SessionID == "" || ev.TurnID == "" {
-		return
+func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEvent, expectedInput string) string {
+	if ev == nil || ev.MemorySource != nil || ev.SessionID == "" || ev.TurnID == "" {
+		return ""
+	}
+	if ev.Resync {
+		return "historical_replay"
+	}
+	if ev.MemoryNative == nil {
+		return "native_metadata_unavailable"
 	}
 	n := ev.MemoryNative
 	l := sm.memoryLedger()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b := l.bindings[ev.SessionID]
-	if b == nil || (expectedInput != "" && b.root.EventID != expectedInput) || b.root.Producer != n.Producer || n.Sidechain || n.RecordID == "" || len(b.records) > 4096 {
-		return
+	switch {
+	case b == nil:
+		return "no_live_dispatch_binding"
+	case expectedInput != "" && b.root.EventID != expectedInput || b.root.Producer != n.Producer:
+		return "dispatch_mismatch"
+	case n.Sidechain:
+		return "sidechain"
+	case n.RecordID == "":
+		return "native_record_missing"
+	case len(b.records) > 4096:
+		return "record_limit"
+	}
+	if b.awaitingDispatch {
+		// A concurrent observation cannot establish a native root before the
+		// write succeeds. Preserve the gap for outputs from the same turn.
+		if ev.TurnID == b.root.TurnID || (b.nativeRoot != "" && n.RootID == b.nativeRoot) {
+			b.unknown = true
+			b.skill = b.skill || n.Skill
+		}
+		return "dispatch_pending"
 	}
 	// Claude's PTY does not accept a client message UUID. Bind only the native
 	// user root written after this command, then demand actual parent UUIDs.
 	if b.nativeRoot == "" {
 		at, err := time.Parse(time.RFC3339Nano, n.OccurredAt)
 		if n.Producer != "claude" || !n.UserRoot || n.RootID != n.RecordID || err != nil || at.Before(b.started) {
-			return
+			return "native_user_root_unconfirmed"
 		}
 		b.nativeRoot = n.RootID
 	}
 	if n.RootID != b.nativeRoot {
-		return
+		return "native_root_mismatch"
 	}
 	// Queued native content may leave after the registry terminalized its
 	// command turn. Only the exact bound Claude source root can bridge its
 	// native logical turn back to this live dispatch; no nearest-turn lookup.
 	if b.root.TurnID != ev.TurnID && !(n.Producer == "claude" && b.nativeRoot != "" && ev.SourceTurnID == b.nativeRoot && ev.TurnID == turn.LogicalTurnID(adapter.AgentClaude, ev.SessionID, "", "source_message", b.nativeRoot)) {
-		return
+		return "turn_mismatch"
 	}
 	var parent *protocol.MemorySourceProvenance
 	if n.Producer == "codex" || n.DirectRoot {
@@ -184,7 +249,7 @@ func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEve
 		}
 	}
 	if parent == nil {
-		return
+		return "native_parent_missing"
 	}
 	b.skill = b.skill || n.Skill
 	b.unknown = b.unknown || n.UnknownChild
@@ -217,6 +282,7 @@ func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEve
 	if ev.Type == "tool_call" && ev.CallID != "" {
 		b.calls[ev.CallID] = p
 	}
+	return ""
 }
 
 // A source id may be reserved only by the live owned transport. Readers and

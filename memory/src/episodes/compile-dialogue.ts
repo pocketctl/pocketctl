@@ -1,12 +1,12 @@
 import type pg from 'pg'
 import { assertJobFence } from '../generation/fence.js'
-import type { JobFence } from '../jobs/types.js'
+import { JobDeferredError, type JobFence } from '../jobs/types.js'
 import { guardSourceExecutionCommit } from '../sources/source-execution.js'
 import { lockCurationAuthority, readCurationPolicy } from '../curation/policy.js'
 import type { CurationMode } from '../curation/contracts.js'
 import { prepareLifecycleTurn } from '../curation/prepare-lifecycle-turn.js'
 import { stagePreparedLifecycleTurn } from '../curation/task-repository.js'
-import { DialogueExcluded, DialogueInputGap, prepareDialogue } from './turn-dialogue.js'
+import { DialogueExcluded, DialogueInputGap, type DialogueGapProbe, prepareDialogue } from './turn-dialogue.js'
 import { sanitizeText } from './content-policy.js'
 
 export async function compileDialogue(
@@ -16,12 +16,15 @@ export async function compileDialogue(
   turn: string,
   mode: CurationMode,
   fence?: JobFence,
+  gapProbe?: DialogueGapProbe,
 ) {
   let input: Awaited<ReturnType<typeof prepareDialogue>>
   try {
-    input = await prepareDialogue(pool, install, session, turn)
+    input = await prepareDialogue(pool, install, session, turn, fence ? gapProbe : undefined)
   } catch (error) {
     if (!(error instanceof DialogueInputGap || error instanceof DialogueExcluded)) throw error
+    const probe = error instanceof DialogueInputGap ? error.probeResult : undefined
+    const inspectAt = error instanceof DialogueInputGap ? error.inspectAt : undefined
     const db = await pool.connect()
     try {
       await db.query('BEGIN')
@@ -39,10 +42,11 @@ export async function compileDialogue(
           "DELETE FROM memory_task_bundles WHERE installation_id=$1 AND session_id=$2 AND task_key=$3 AND bundle_kind='intake'",
           [install, session, 'dialogue:' + turn],
         )
-      } else {
+      } else if (!inspectAt) {
         await db.query(
           `INSERT INTO memory_dialogue_gaps(installation_id,session_id,turn_id,reason) SELECT $1::uuid,$2,$3,$4 WHERE shared.memory_dialogue_context($1,$2) IS NOT NULL
-    ON CONFLICT(installation_id,session_id,turn_id) DO UPDATE SET reason=excluded.reason`,
+    ON CONFLICT(installation_id,session_id,turn_id) DO UPDATE SET reason=excluded.reason
+    WHERE memory_dialogue_gaps.reason IS DISTINCT FROM excluded.reason`,
           [install, session, turn, error.reason],
         )
       }
@@ -54,6 +58,12 @@ export async function compileDialogue(
           [install, session, turn],
         )
       }
+      if (fence && probe) {
+        await db.query(`UPDATE memory_jobs SET payload=jsonb_set(payload,'{dialogue_gap_probe_v1}',to_jsonb($2::text))
+          WHERE job_id=$1`, [fence.jobId, probe])
+      }
+      if (fence && gapProbe?.previous !== undefined && error instanceof DialogueExcluded)
+        await db.query("UPDATE memory_jobs SET payload=payload-'dialogue_gap_probe_v1' WHERE job_id=$1", [fence.jobId])
       await guardSourceExecutionCommit(db)
       await db.query('COMMIT')
     } catch (err) {
@@ -62,6 +72,9 @@ export async function compileDialogue(
     } finally {
       db.release()
     }
+    // A crash between commit and defer is safe: lease recovery sees the
+    // durable inspect marker. A late answer takes the normal path immediately.
+    if (inspectAt) throw new JobDeferredError('source_not_ready', inspectAt)
     return
   }
   const c = await pool.connect()
@@ -122,6 +135,8 @@ export async function compileDialogue(
       'DELETE FROM memory_dialogue_gaps WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3',
       [install, session, turn],
     )
+    if (fence && gapProbe?.previous !== undefined)
+      await c.query("UPDATE memory_jobs SET payload=payload-'dialogue_gap_probe_v1' WHERE job_id=$1", [fence.jobId])
     await guardSourceExecutionCommit(c)
     await c.query('COMMIT')
   } catch (error) {

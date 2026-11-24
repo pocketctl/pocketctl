@@ -1049,7 +1049,9 @@ export class EventMaterializer {
     // key is stable across ledger replay and adds no effect-step ordinal.
     // Canonical content may predate the transport replay marker. Preserve
     // the incoming suppression so historical recovery is not fresh activity.
-    if (transportPayload.resync !== true) await recordMaterializedActivity(this.options.pool, input, event.rowID)
+    if (transportPayload.resync !== true && (input.eventType !== 'user_text' || event.inserted)) {
+      await recordMaterializedActivity(this.options.pool, input, event.rowID)
+    }
     const result: MaterializationResult = {
       eventId: event.rowID,
       inserted: event.inserted,

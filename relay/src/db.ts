@@ -1825,7 +1825,7 @@ export async function updateHeartbeat(pool: pg.Pool, daemonId: string): Promise<
 const TURN_ENRICHMENT_FIELDS = new Set([
   'turn_id', 'source_turn_id', 'turn_status', 'turn_reason', 'turn_origin',
   'turn_confidence', 'previous_turn_id', 'continuation_reason',
-  'actor_scope', 'flow_scope', 'content_class', 'classifier_version',
+  'actor_scope', 'flow_scope', 'content_class', 'classifier_version', 'local_submit_id',
 ]);
 
 function stripTurnEnrichment(payload: any): any {

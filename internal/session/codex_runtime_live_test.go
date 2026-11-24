@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -206,4 +207,100 @@ func TestInstalledCodexRuntimeAcquireAndSecondClient(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Exercise the native activity check without a terminal lease, credentials, or
+// a remote model. Both generations run the installed binary in a temporary HOME.
+func TestInstalledCodexUpgradeProtectsRunningTurn(t *testing.T) {
+	if os.Getenv("POCKETCTL_CODEX_SMOKE") != "1" {
+		t.Skip("opt-in native smoke")
+	}
+	binary, err := exec.LookPath("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", home)
+	t.Setenv("POCKETCTL_CODEX_RUNTIME_DIR", shortCodexRuntimeDir(t))
+	requested := make(chan struct{}, 1)
+	release := make(chan struct{})
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case requested <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		item := map[string]any{"type": "message", "id": "msg_fixture", "role": "assistant", "status": "completed", "content": []any{map[string]string{"type": "output_text", "text": "done"}}}
+		for _, event := range []map[string]any{
+			{"type": "response.created", "response": map[string]any{"id": "resp_fixture", "status": "in_progress"}},
+			{"type": "response.output_item.done", "output_index": 0, "item": item},
+			{"type": "response.completed", "response": map[string]any{"id": "resp_fixture", "status": "completed", "output": []any{item}}},
+		} {
+			payload, _ := json.Marshal(event)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], payload)
+		}
+	}))
+	defer model.Close()
+	settings := fmt.Sprintf("model_provider = %q\nmodel = %q\n[model_providers.smoke]\nname = %q\nbase_url = %q\nwire_api = %q\nrequest_max_retries = 0\nstream_max_retries = 0\n", "smoke", "fixture", "Loopback", model.URL, "responses")
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte(settings), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	c := newCodexCoordinator(nil)
+	c.statePath = filepath.Join(t.TempDir(), "state")
+	c.projectCwd = t.TempDir()
+	c.startPrivateProject = codexPrivateProjectStarter(home)
+	caps := agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, IdleOnlyContext: true, SchemaHash: "fixture"}
+	old, err := c.ensureStarted(ctx, binary, "old", caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.shutdown()
+	client := c.runtime.Client
+	var started struct{ Thread struct{ ID string } }
+	if err := client.Call(ctx, "thread/start", map[string]any{"cwd": c.projectCwd, "modelProvider": "smoke", "model": "fixture"}, &started); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(ctx, "turn/start", map[string]any{"threadId": started.Thread.ID, "input": []map[string]string{{"type": "text", "text": "fixture"}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-requested:
+	case <-ctx.Done():
+		t.Fatal("loopback model was not reached")
+	}
+	busy, err := c.ensureStarted(ctx, binary, "new", caps)
+	if !errors.Is(err, errCodexRuntimeUpgradeDeferred) || busy.PID != old.PID {
+		t.Fatalf("busy=%+v err=%v", busy, err)
+	}
+	close(release)
+	for {
+		select {
+		case msg := <-client.Events():
+			if msg.Method != "turn/completed" {
+				continue
+			}
+			var params struct {
+				ThreadID string
+				Turn     struct{ Status string }
+			}
+			if json.Unmarshal(msg.Params, &params) != nil || params.ThreadID != started.Thread.ID || params.Turn.Status != "completed" {
+				t.Fatalf("unexpected turn completion: %s", msg.Params)
+			}
+		case <-ctx.Done():
+			t.Fatal("old runtime did not complete turn")
+		}
+		break
+	}
+	next, err := c.ensureStarted(ctx, binary, "new", caps)
+	if err != nil || next.PID == old.PID || next.Generation != old.Generation+1 {
+		t.Fatalf("replacement=%+v err=%v", next, err)
+	}
+	t.Logf("protected PID %d through turn completion, replaced with PID %d", old.PID, next.PID)
 }
