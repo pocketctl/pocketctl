@@ -574,9 +574,11 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 				b.coord.rememberDialogueInputLocked(input, response.Turn.ID, turnID, content)
 			}
 			b.coord.mu.Unlock()
+			proof := b.sm.registerMemoryInput(input, turnID, adapter.AgentCodex, causalRoot)
+			b.sm.acceptMemoryInput(proof)
 			b.sm.outputCh <- protocol.DaemonEvent{
 				Type: "user_text", SessionID: threadID, MsgID: input.MsgID, RequestID: input.RequestID, Text: content,
-				MemorySource: b.sm.registerMemoryInput(input, turnID, adapter.AgentCodex, causalRoot),
+				MemorySource: proof,
 				TurnID:       turnID, SourceTurnID: response.Turn.ID,
 				RetryOfTurnID: correlation.RetryOfTurnID,
 				EventID:       "native-input:" + correlation.MsgID}

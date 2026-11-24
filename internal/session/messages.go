@@ -226,27 +226,26 @@ func (sm *SessionManager) dispatchUserMessageWithContextReceipt(ctx context.Cont
 		src := ps.Source
 		agent := ps.Agent
 		sm.mu.Unlock()
-		// Echo the user's message for instant feedback only for owned sessions:
-		// the SSE demux skips the user echo, so we supply it here. Terminal
-		// sessions get their user_text from DirWatch (storage), so echoing here
-		// would duplicate.
+		var sendErr error
+		if codex, ok := ps.Backend.(*CodexAppServerBackend); hidden != nil && ok && delivered != nil {
+			*delivered, sendErr = codex.sendWithContextResult(ctx, sessionID, content, hidden)
+		} else if aware, ok := ps.Backend.(interface {
+			SendWithContext(context.Context, string, string, *memorycontext.PreparedContext) error
+		}); hidden != nil && ok {
+			sendErr = aware.SendWithContext(ctx, sessionID, content, hidden)
+		} else {
+			sendErr = ps.Backend.Send(ctx, sessionID, content)
+		}
+		if sendErr != nil {
+			return sendErr
+		}
+		sm.acceptMemoryInput(correlation.MemorySource)
+		// Terminal sessions receive the native user event through DirWatch.
 		if src != "terminal" && agent != adapter.AgentCodex && agent != adapter.AgentDSH {
 			sm.outputCh <- protocol.DaemonEvent{Type: "user_text", SessionID: sessionID, Text: content,
 				MemorySource: correlation.MemorySource, RequestID: correlation.RequestID, MsgID: correlation.MsgID, TurnID: correlation.TurnID, RetryOfTurnID: correlation.RetryOfTurnID}
 		}
-		if hidden != nil {
-			if codex, ok := ps.Backend.(*CodexAppServerBackend); ok && delivered != nil {
-				var err error
-				*delivered, err = codex.sendWithContextResult(ctx, sessionID, content, hidden)
-				return err
-			}
-			if aware, ok := ps.Backend.(interface {
-				SendWithContext(ctx context.Context, sessionID, content string, hidden *memorycontext.PreparedContext) error
-			}); ok {
-				return aware.SendWithContext(ctx, sessionID, content, hidden)
-			}
-		}
-		return ps.Backend.Send(ctx, sessionID, content)
+		return nil
 	}
 
 	// ps is non-nil here — safe to read fields.
@@ -301,17 +300,6 @@ func (sm *SessionManager) dispatchUserMessageWithContextReceipt(ctx context.Cont
 		} else if !isProcessAlive(pid) {
 			return fmt.Errorf("daemon session interactive pty unavailable (process exited)")
 		} else {
-			// Emit user_text for UI (the tailer also forwards claude's own records).
-			sm.outputCh <- protocol.DaemonEvent{
-				Type:          "user_text",
-				SessionID:     ps.SessionID,
-				Text:          content,
-				MemorySource:  correlation.MemorySource,
-				RequestID:     correlation.RequestID,
-				MsgID:         correlation.MsgID,
-				RetryOfTurnID: correlation.RetryOfTurnID,
-				TurnID:        correlation.TurnID,
-			}
 			sm.mu.Lock()
 			ps.Status = protocol.StatusRunning
 			ps.LastActivityAt = time.Now()
@@ -336,6 +324,17 @@ func (sm *SessionManager) dispatchUserMessageWithContextReceipt(ctx context.Cont
 					Status:    protocol.StatusError,
 				}
 				return fmt.Errorf("pty stdin write: %w", err)
+			}
+			sm.acceptMemoryInput(correlation.MemorySource)
+			sm.outputCh <- protocol.DaemonEvent{
+				Type:          "user_text",
+				SessionID:     ps.SessionID,
+				Text:          content,
+				MemorySource:  correlation.MemorySource,
+				RequestID:     correlation.RequestID,
+				MsgID:         correlation.MsgID,
+				RetryOfTurnID: correlation.RetryOfTurnID,
+				TurnID:        correlation.TurnID,
 			}
 			// Record the slash command (if any) so the tailer's JSONLStreamParser
 			// can attach it to the next command_receipt (e.g. /compact, /clear).
@@ -422,6 +421,7 @@ func (sm *SessionManager) dispatchUserMessageWithContextReceipt(ctx context.Cont
 		return errResumeShuttingDown
 	}
 
+	sm.acceptMemoryInput(correlation.MemorySource)
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	sm.mu.Lock()
 	ps.Cmd = resumeProcessCmd(proc)
@@ -554,6 +554,7 @@ func (sm *SessionManager) sendToIdleTerminal(ctx context.Context, ps *ProcessSta
 		return errResumeShuttingDown
 	}
 
+	sm.acceptMemoryInput(correlation.MemorySource)
 	adp := sm.newStreamAdapter(ps, agentType, content)
 	now := time.Now()
 	sm.mu.Lock()
