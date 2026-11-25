@@ -177,9 +177,14 @@ func (o *Observer) pollOnce(ctx context.Context) pollResult {
 func (o *Observer) emitResyncDiscovery(ctx context.Context, wireID string, sr SessionRow) bool {
 	mp := NewMapper(o.cfg.SourceID)
 	status := deriveSessionStatus(o.store.QueryLastAssistantFinish(ctx, sr.ID), o.store.QueryLastToolStatus(ctx, sr.ID), sr.TimeUpdated)
-	ev := mp.SessionDiscovered(wireID, sr.Title, sr.Directory, "", status)
+	model, err := o.store.latestAssistantModel(ctx, sr.ID)
+	if err != nil {
+		o.log.Warn("zcode resync: read session model", "error", err)
+		return false
+	}
+	ev := mp.SessionDiscovered(wireID, sr.Title, sr.Directory, model, status)
 	ev.Resync = true
-	ev.EventID = mp.sessionEventID(wireID, "resync-v2:"+semanticHash(sr.Title+"\x00"+sr.Directory+"\x00"+sr.ParentID+"\x00"+status))
+	ev.EventID = mp.sessionEventID(wireID, "resync-v2:"+semanticHash(sr.Title+"\x00"+sr.Directory+"\x00"+sr.ParentID+"\x00"+status+"\x00"+model))
 	return o.emitEvent(ev)
 }
 
@@ -215,7 +220,7 @@ func (o *Observer) emitResyncSession(ctx context.Context, wireID string, sr Sess
 func (o *Observer) scanSession(ctx context.Context, wireID string, sr SessionRow) streamStats {
 	var total streamStats
 	plan, st := o.runPage(ctx, wireID, PositionMetadata, func(sess SessionCursor) (pagePlan, error) {
-		return o.planMetaPage(wireID, sess, sr)
+		return o.planMetaPage(ctx, wireID, sess, sr)
 	})
 	total.merge(st, plan.scanned)
 	// A recovery-blocked session stops mid-poll: no stream may create new
@@ -712,7 +717,7 @@ func (o *Observer) planPartPage(ctx context.Context, wireID, nativeSessionID str
 		if err := walk.applyUpTo(noOrderLimit); err != nil {
 			return plan, err
 		}
-		batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
+		batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, p.Model, p.Msg)
 		if err != nil {
 			return plan, err
 		}
@@ -728,7 +733,7 @@ func (o *Observer) planPartPage(ctx context.Context, wireID, nativeSessionID str
 // planMetaPage prepares the session_discovered / title / model page. Pending
 // metadata entries are regenerated from the projection state immediately
 // preceding their commit so unacked events are re-emitted with stable ids.
-func (o *Observer) planMetaPage(wireID string, sess SessionCursor, sr SessionRow) (pagePlan, error) {
+func (o *Observer) planMetaPage(ctx context.Context, wireID string, sess SessionCursor, sr SessionRow) (pagePlan, error) {
 	var plan pagePlan
 	pos := SourcePosition{Kind: PositionMetadata, NativeIDHash: hashID(wireID)}
 	walk := newTimelineWalk(o.cfg.SourceID, wireID, sess)
@@ -762,7 +767,11 @@ func (o *Observer) planMetaPage(wireID string, sess SessionCursor, sr SessionRow
 	if err := walk.applyUpTo(noOrderLimit); err != nil {
 		return plan, err
 	}
-	batch, err := walk.scratch.PreviewSessionMeta(sr.Title, "", initialStatus)
+	model, err := o.store.latestAssistantModel(ctx, sr.ID)
+	if err != nil {
+		return plan, err
+	}
+	batch, err := walk.scratch.PreviewSessionMeta(sr.Title, model, initialStatus)
 	if err != nil {
 		return plan, err
 	}
@@ -1351,7 +1360,7 @@ func (o *Observer) planPartMutationPage(ctx context.Context, wireID, nativeSessi
 				if err := walk.applyUpTo(noOrderLimit); err != nil {
 					return plan, err
 				}
-				batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
+				batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, p.Model, p.Msg)
 				if err != nil {
 					return plan, err
 				}
@@ -1382,7 +1391,7 @@ func (o *Observer) planPartMutationPage(ctx context.Context, wireID, nativeSessi
 		if err := walk.applyUpTo(noOrderLimit); err != nil {
 			return plan, err
 		}
-		batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, "", p.Msg)
+		batch, err := walk.scratch.PreviewPart(p.ID, p.MessageID, WireMessageID(o.cfg.SourceID, p.MessageID), part, p.Model, p.Msg)
 		if err != nil {
 			return plan, err
 		}

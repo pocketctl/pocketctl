@@ -316,8 +316,16 @@ type PartRow struct {
 	MessageSequence int64
 	TimeUpdated     int64
 	DataJSON        string
+	Model           string // model of the owning assistant message
 	Msg             MessageScope
 }
+
+// SQLite JSON paths are case-sensitive. Desktop writes both Id and ID
+// spellings. Keep the per-part SELECT small even for long assistant messages.
+const messageModelJSON = `CASE WHEN m.data ->> '$.role' = 'assistant' THEN json_object(
+	'providerID', COALESCE(m.data ->> '$.providerID', m.data ->> '$.providerId'),
+	'modelID', COALESCE(m.data ->> '$.modelID', m.data ->> '$.modelId'),
+	'model', m.data -> '$.model') ELSE '' END`
 
 // MessageScope is the whitelisted content-filter projection of the message a
 // part belongs to (same fields MessageVisible evaluates, extracted via SQL so
@@ -526,7 +534,7 @@ func (s *Store) ListParts(ctx context.Context, sessionID string, after *PartCurs
 		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
 		defer cancel()
 	}
-	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data` + messageScopeColumns + `
+	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data, ` + messageModelJSON + messageScopeColumns + `
 		FROM part p JOIN message m ON p.message_id = m.id
 		WHERE p.session_id = ?`
 	args := []any{sessionID}
@@ -547,13 +555,10 @@ func (s *Store) ListParts(ctx context.Context, sessionID string, after *PartCurs
 	defer rows.Close()
 	var page PartPage
 	for rows.Next() {
-		var r PartRow
-		var role, synthetic, system, hidden, internal, visibility sql.NullString
-		if err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON,
-			&role, &synthetic, &system, &hidden, &internal, &visibility); err != nil {
+		r, err := scanPartRow(rows)
+		if err != nil {
 			return PartPage{}, classifyQueryErr(err)
 		}
-		r.Msg = scanPartScope(role, synthetic, system, hidden, internal, visibility)
 		page.Parts = append(page.Parts, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -565,6 +570,24 @@ func (s *Store) ListParts(ctx context.Context, sessionID string, after *PartCurs
 		page.Parts = page.Parts[:limit]
 	}
 	return page, nil
+}
+
+func scanPartRow(rows *sql.Rows) (PartRow, error) {
+	var r PartRow
+	var modelJSON string
+	var role, synthetic, system, hidden, internal, visibility sql.NullString
+	err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON,
+		&modelJSON, &role, &synthetic, &system, &hidden, &internal, &visibility)
+	if err != nil {
+		return r, err
+	}
+	r.Msg = scanPartScope(role, synthetic, system, hidden, internal, visibility)
+	if r.Msg.Role == "assistant" {
+		if data, ok := DecodeMessageData(modelJSON); ok {
+			r.Model = data.ResolveModel()
+		}
+	}
+	return r, nil
 }
 
 // ListChangedMessages returns messages updated after the mutation cursor
@@ -615,7 +638,7 @@ func (s *Store) ListChangedParts(ctx context.Context, sessionID string, after Mu
 		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
 		defer cancel()
 	}
-	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data` + messageScopeColumns + `
+	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data, ` + messageModelJSON + messageScopeColumns + `
 		FROM part p JOIN message m ON p.message_id = m.id
 		WHERE p.session_id = ? AND (p.time_updated > ? OR (p.time_updated = ? AND p.id > ?))
 		ORDER BY p.time_updated ASC, p.id ASC LIMIT ?`
@@ -626,13 +649,10 @@ func (s *Store) ListChangedParts(ctx context.Context, sessionID string, after Mu
 	defer rows.Close()
 	var page PartPage
 	for rows.Next() {
-		var r PartRow
-		var role, synthetic, system, hidden, internal, visibility sql.NullString
-		if err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON,
-			&role, &synthetic, &system, &hidden, &internal, &visibility); err != nil {
+		r, err := scanPartRow(rows)
+		if err != nil {
 			return PartPage{}, classifyQueryErr(err)
 		}
-		r.Msg = scanPartScope(role, synthetic, system, hidden, internal, visibility)
 		page.Parts = append(page.Parts, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -738,6 +758,32 @@ func (s *Store) ListTodos(ctx context.Context, sessionID string) ([]TodoRow, err
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// latestAssistantModel also runs for previously acknowledged sessions so an
+// upgrade can repair their metadata without rewinding the content cursors.
+func (s *Store) latestAssistantModel(ctx context.Context, sessionID string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.queryTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `SELECT data FROM message
+		WHERE session_id = ? AND json_valid(data) AND data ->> '$.role' = 'assistant'
+		ORDER BY sequence DESC, time_created DESC, id DESC`, sessionID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return "", err
+		}
+		if data, ok := DecodeMessageData(raw); ok && MessageVisible(data) {
+			if model := data.ResolveModel(); model != "" {
+				return model, nil
+			}
+		}
+	}
+	return "", rows.Err()
 }
 
 // QueryLastAssistantFinish returns the finish value of the most recent assistant

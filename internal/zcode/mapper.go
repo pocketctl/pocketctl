@@ -108,7 +108,7 @@ func (mp *Mapper) ModelChanged(wireSessionID, model, prevEventID string) protoco
 		SessionID:       wireSessionID,
 		Model:           model,
 		PreviousEventID: prevEventID,
-		EventID:         mp.modelEventID(wireSessionID, model),
+		EventID:         mp.modelEventID(wireSessionID, model, prevEventID),
 	}
 }
 
@@ -447,8 +447,8 @@ func (mp *Mapper) titleEventID(wireSessionID, title string) string {
 	return fmt.Sprintf("zcode:%s:title:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(title))
 }
 
-func (mp *Mapper) modelEventID(wireSessionID, model string) string {
-	return fmt.Sprintf("zcode:%s:model:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(model))
+func (mp *Mapper) modelEventID(wireSessionID, model, prevEventID string) string {
+	return fmt.Sprintf("zcode:%s:model:%s:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(model), semanticHash(prevEventID))
 }
 
 func (mp *Mapper) statusEventID(wireSessionID, status, prevEventID string) string {
