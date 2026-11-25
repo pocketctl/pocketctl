@@ -13,11 +13,7 @@ const hostSources=[
 
 // Each source has an index beginning with (owner, daemon). Step to the next
 // daemon instead of reading every accounting row to enumerate a few hosts.
-function historicalHostsSQL(history: boolean) {
- if(!history)return {
-  prefix:'',
-  rows:hostSources.map(([table,owner])=>`SELECT DISTINCT daemon_id,'历史主机' AS label,FALSE AS current_host FROM ${table} WHERE ${owner}=$1`),
- }
+function historicalHostsSQL() {
  const prefix=hostSources.map(([table,owner],index)=>`historical_${index} AS (
   (SELECT daemon_id FROM ${table} WHERE ${owner}=$1 ORDER BY daemon_id LIMIT 1)
   UNION ALL
@@ -31,8 +27,8 @@ function historicalHostsSQL(history: boolean) {
   rows:hostSources.map((_source,index)=>`SELECT daemon_id,'历史主机' AS label,FALSE AS current_host FROM historical_${index}`),
  }
 }
-export async function resolvePersonalUsageScope(db:Pick<pg.Pool,'query'>,owner:number,daemon:string,w:Window,history=false):Promise<AuthorizedUsageScope>{
- const hosts=historicalHostsSQL(history)
+export async function resolvePersonalUsageScope(db:Pick<pg.Pool,'query'>,owner:number,daemon:string,w:Window):Promise<AuthorizedUsageScope>{
+ const hosts=historicalHostsSQL()
  const rows=(await db.query(`${hosts.prefix}
  SELECT daemon_id,COALESCE(MAX(label) FILTER(WHERE current_host),'历史主机') AS label,bool_or(current_host) AS current_host FROM (
   SELECT daemon_id,COALESCE(NULLIF(alias,''),hostname,daemon_id) AS label,TRUE AS current_host FROM daemons WHERE user_id=$1

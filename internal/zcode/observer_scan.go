@@ -688,7 +688,7 @@ func (o *Observer) planPartPage(ctx context.Context, wireID, nativeSessionID str
 			PartSequence:   p.Sequence,
 			NativeIDHash:   hashID(p.ID),
 		}
-		part, ok := DecodePartData(p.DataJSON)
+		part, ok := p.decodeData()
 		if !ok {
 			plan.addSkipRecord(wireID, sess, pos, "bad_json")
 			continue
@@ -1342,7 +1342,7 @@ func (o *Observer) planPartMutationPage(ctx context.Context, wireID, nativeSessi
 			MutationTime:   p.TimeUpdated,
 			NativeIDHash:   hashID(p.ID),
 		}
-		part, ok := DecodePartData(p.DataJSON)
+		part, ok := p.decodeData()
 		if !ok {
 			if p.TimeUpdated < sess.AckPartMutationTime {
 				continue

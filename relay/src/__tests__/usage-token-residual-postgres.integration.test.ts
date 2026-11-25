@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it } from 'vitest'
 import pg from 'pg'
 import { initDB } from '../db.js'
+import { resolvePersonalUsageScope } from '../usage-analytics/scope.js'
 import { readTokenRows, type TokenRow } from '../usage-analytics/token-repository.js'
 import type { AuthorizedUsageScope, Window } from '../usage-analytics/contracts.js'
 
@@ -129,4 +130,25 @@ test('large legacy dashboard stays within a bounded database read-work budget', 
   console.info(JSON.stringify({ benchmark: 'legacy-residual-120k', executionMs: plan['Execution Time'], buffers }))
   expect(buffers).toBeLessThan(100000)
   expect(sum(await readTokenRows(db, scope(), window, { aggregate: true }))).toBe(120000n)
+
+  // Host switching still returns the complete list of hosts. Its cost should
+  // depend on the host count, even when the selected host has 120k facts.
+  type PlanNode = {
+    'Relation Name'?: string
+    'Actual Rows': number
+    'Actual Loops': number
+    Plans?: PlanNode[]
+  }
+  function factRows(node: PlanNode): number {
+    const own = node['Relation Name'] === 'token_usage_facts' ? node['Actual Rows'] * node['Actual Loops'] : 0
+    return own + (node.Plans ?? []).reduce((sum, child) => sum + factRows(child), 0)
+  }
+  let hostPlan: PlanNode | undefined
+  const tracedScope = { query: async (sql: string, args: unknown[]) => {
+    if (!hostPlan) hostPlan = (await db.query('EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ' + sql, args)).rows[0]['QUERY PLAN'][0].Plan
+    return db.query(sql, args)
+  } } as Pick<pg.Pool, 'query'>
+  const selected = await resolvePersonalUsageScope(tracedScope, owner, 'residual-a', window)
+  expect(selected.windows).toEqual(scope().windows)
+  expect(factRows(hostPlan!)).toBeLessThan(10)
 }, 60000)

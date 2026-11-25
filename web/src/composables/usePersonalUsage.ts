@@ -1,7 +1,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { useAuth } from './useAuth'
 import { getRelayWs } from './useEnv'
-import type { UsageDashboard, UsageRange } from '../types/usage'
+import type { UsageDashboard, UsageMeta, UsageRange } from '../types/usage'
 
 type RequestKind = 'dashboard' | 'section' | 'detail'
 type PendingRequest = {
@@ -28,16 +28,21 @@ export function usePersonalUsage(initialDaemon = 'all') {
   const search = ref('')
   const association = ref<Record<string, string>>({})
   const dashboard = ref<UsageDashboard | null>(null)
+  const hosts = ref<UsageDashboard['hosts'] | null>(null)
+  const summary = ref<Pick<UsageDashboard, 'overview' | 'heatmap'> | null>(null)
+  const meta = ref<UsageMeta | null>(null)
   const calls = ref<any>(null)
   const sessions = ref<any>(null)
   const loading = ref(false)
   const error = ref('')
 
   const pending: Partial<Record<RequestKind, PendingRequest>> = {}
-  let dashboardScope = ''
-  let loadOperation: { scope: string; promise: Promise<void> } | undefined
+  let snapshotScope = ''
+  let summaryScope = ''
+  let loadOperation: { key: string; promise: Promise<void> } | undefined
   const identity = () => user.value?.id
-  const scopeKey = () => JSON.stringify([getRelayWs(), identity(), accessToken.value, daemon.value, range.value])
+  const hostKey = () => JSON.stringify([getRelayWs(), identity(), accessToken.value, daemon.value])
+  const scopeKey = () => JSON.stringify([hostKey(), range.value])
   const params = () => new URLSearchParams({ contract: 'personal-v1', daemon: daemon.value, range: range.value })
 
   function sectionQuery() {
@@ -64,16 +69,24 @@ export function usePersonalUsage(initialDaemon = 'all') {
     delete pending[kind]
   }
 
-  function clearData() {
+  function clearRange() {
     abort('dashboard')
     abort('section')
     cancelDetail()
-    dashboardScope = ''
+    snapshotScope = ''
+    meta.value = null
     dashboard.value = null
     calls.value = null
     sessions.value = null
     loadOperation = undefined
     loading.value = false
+  }
+
+  function clearData() {
+    clearRange()
+    summaryScope = ''
+    hosts.value = null
+    summary.value = null
   }
 
   function isCurrent(kind: RequestKind, request: PendingRequest) {
@@ -109,32 +122,43 @@ export function usePersonalUsage(initialDaemon = 'all') {
     ensureCurrent(kind, request)
     if (!response.ok) {
       const code = response.data?.error ?? 'request_failed'
-      if (['authorization_changed', 'snapshot_authorization_changed', 'snapshot_invalid'].includes(code)) {
+      if (response.status === 401 || response.status === 403 ||
+          ['daemon_not_found', 'authorization_changed', 'snapshot_authorization_changed', 'snapshot_invalid', 'personal_usage_not_enabled'].includes(code)) {
         clearData()
         error.value = code
       }
       throw new UsageRequestError(code, response.status)
     }
-    if (response.data?.meta?.contract !== 'personal-v1') throw new Error('upgrade_required')
+    if (response.data?.meta?.contract !== 'personal-v1') {
+      clearData()
+      error.value = 'upgrade_required'
+      throw new Error('upgrade_required')
+    }
     return response.data
   }
 
-  function fetchDashboard() {
+  function fetchDashboard(snapshot?: string) {
     const query = params()
+    if (snapshot) query.set('snapshot_token', snapshot)
     return start('dashboard', String(query), async request => {
       const data: UsageDashboard = await get('dashboard', request, '/api/tokens/dashboard', query)
       ensureCurrent('dashboard', request)
-      calls.value = null
-      sessions.value = null
-      dashboardScope = request.scope
+      if (currentSnapshot() !== data.meta.snapshot_token) {
+        calls.value = null
+        sessions.value = null
+      }
+      snapshotScope = request.scope
+      meta.value = data.meta
       dashboard.value = data
-      void loadSection()
+      hosts.value = data.hosts
+      summaryScope = hostKey()
+      summary.value = { overview: data.overview, heatmap: data.heatmap }
       return data
     })
   }
 
   function currentSnapshot() {
-    return dashboardScope === scopeKey() ? dashboard.value?.meta.snapshot_token : undefined
+    return snapshotScope === scopeKey() ? meta.value?.snapshot_token : undefined
   }
 
   async function snapshotWhenReady(request: PendingRequest) {
@@ -157,7 +181,10 @@ export function usePersonalUsage(initialDaemon = 'all') {
       ensureCurrent(kind, request)
       if (!(cause instanceof UsageRequestError) || cause.status !== 409 ||
         (cause.message !== 'snapshot_changed' && cause.message !== 'snapshot_expired')) throw cause
-      if (originalSnapshot === currentSnapshot()) await fetchDashboard()
+      if (originalSnapshot === currentSnapshot()) {
+        await fetchDashboard()
+        if (kind === 'detail') void loadSection()
+      }
     }
     const snapshot = await snapshotWhenReady(request)
     return { data: await send(snapshot), snapshot }
@@ -165,21 +192,19 @@ export function usePersonalUsage(initialDaemon = 'all') {
 
   function load() {
     const scope = scopeKey()
-    if (loadOperation?.scope === scope) return loadOperation.promise
-    if (!pending.dashboard || pending.dashboard.scope !== scope) clearData()
-    loading.value = true
+    const key = JSON.stringify([scope, tab.value])
+    if (loadOperation?.key === key) return loadOperation.promise
     error.value = ''
+    loading.value = true
 
     const operation = {
-      scope,
-      promise: fetchDashboard().then(async () => {
-        if (loadOperation === operation && scope === scopeKey()) await loadSection()
-      }).catch(cause => {
+      key,
+      promise: loadCurrent().catch(cause => {
         if (loadOperation === operation && scope === scopeKey()) error.value = (cause as Error).message
       }).finally(() => {
         if (loadOperation === operation) {
           loadOperation = undefined
-          if (scope === scopeKey()) loading.value = false
+          loading.value = false
         }
       }),
     }
@@ -187,17 +212,38 @@ export function usePersonalUsage(initialDaemon = 'all') {
     return operation.promise
   }
 
+  async function loadCurrent() {
+    // Any personal-v1 endpoint can issue a snapshot. With the host summary already
+    // visible, a new range on calls or sessions only needs that section's request.
+    if (!summary.value || summaryScope !== hostKey() || tab.value === 'tokens') {
+      const snapshot = currentSnapshot()
+      try {
+        await fetchDashboard(snapshot)
+      } catch (cause) {
+        if (!snapshot || !(cause instanceof UsageRequestError) || cause.status !== 409 ||
+          (cause.message !== 'snapshot_changed' && cause.message !== 'snapshot_expired')) throw cause
+        await fetchDashboard()
+      }
+    }
+    await loadSection()
+  }
+
   function loadSection() {
     const section = sectionQuery()
-    if (!section || dashboardScope !== scopeKey()) {
+    if (!section || !summary.value || summaryScope !== hostKey()) {
       abort('section')
       return Promise.resolve()
     }
     return start('section', sectionKey(), async request => {
+      if (section.path === '/api/usage/calls') calls.value = null
+      else sessions.value = null
+      error.value = ''
       try {
         const { data, snapshot } = await getWithSnapshot('section', request, section.path, section.query)
         ensureCurrent('section', request)
         if (snapshot !== currentSnapshot()) return
+        snapshotScope = request.scope
+        if (!snapshot) meta.value = data.meta
         if (section.path === '/api/usage/calls') calls.value = data
         else sessions.value = data
       } catch (cause) {
@@ -233,17 +279,24 @@ export function usePersonalUsage(initialDaemon = 'all') {
       page.value = 1
       association.value = {}
     }
-    if (token) void load()
+    if (token !== previous[2] || identityChanged) clearData()
     else {
-      clearData()
-      error.value = 'auth_expired'
+      clearRange()
+      if (host !== previous[0]) {
+        summaryScope = ''
+        summary.value = null
+      }
     }
+    if (token) void load()
+    else error.value = 'auth_expired'
   })
   watch(sectionKey, key => {
+    if (summary.value) error.value = ''
     if (pending.detail && pending.detail.section !== key) cancelDetail()
     void loadSection()
+    if (tab.value === 'tokens' && summary.value && !dashboard.value) void load()
   })
   onBeforeUnmount(clearData)
 
-  return { daemon, range, tab, category, page, search, association, dashboard, calls, sessions, loading, error, load, loadSection, detail, cancelDetail }
+  return { daemon, range, tab, category, page, search, association, dashboard, hosts, summary, meta, calls, sessions, loading, error, load, loadSection, detail, cancelDetail }
 }

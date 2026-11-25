@@ -297,7 +297,8 @@ type codexPayload struct {
 	Status           string                      `json:"status,omitempty"`
 	Changes          map[string]codexPatchChange `json:"changes,omitempty"`
 	Info             struct {
-		LastTokenUsage *codexTokenUsage `json:"last_token_usage,omitempty"`
+		LastTokenUsage  *codexTokenUsage `json:"last_token_usage,omitempty"`
+		TotalTokenUsage *codexTokenUsage `json:"total_token_usage,omitempty"`
 	} `json:"info,omitempty"` // token_count in Codex exec/rollout v0.143+
 	// session_meta
 	ID             string          `json:"id,omitempty"`
@@ -315,6 +316,7 @@ type codexPayload struct {
 type codexTokenUsage struct {
 	InputTokens           int `json:"input_tokens,omitempty"`
 	CachedInputTokens     int `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int `json:"cache_write_input_tokens,omitempty"`
 	OutputTokens          int `json:"output_tokens,omitempty"`
 	ReasoningOutputTokens int `json:"reasoning_output_tokens,omitempty"`
 	TotalTokens           int `json:"total_tokens,omitempty"`
@@ -395,7 +397,7 @@ func (p *CodexJSONLParser) Parse(line string) ([]protocol.DaemonEvent, error) {
 			events[i].UsageMeta.Model = p.usageModel
 		}
 	}
-	events = p.turns.decorate(raw.Type, payload, events)
+	events = p.turns.decorate(raw, payload, events)
 	if payload.Phase == "final_answer" || payload.Phase == "commentary" {
 		for i := range events {
 			if events[i].Type == "agent_text" {
@@ -439,7 +441,7 @@ func decorateCodexTurnEvents(line string, turns *codexTurnTracker, events []prot
 	if json.Unmarshal([]byte(line), &raw) != nil || json.Unmarshal(raw.Payload, &payload) != nil {
 		return events
 	}
-	return turns.decorate(raw.Type, payload, events)
+	return turns.decorate(raw, payload, events)
 }
 
 func normalizeCodexAgentMessage(text string) string {

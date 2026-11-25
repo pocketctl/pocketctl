@@ -121,6 +121,12 @@ export async function initHistorySchema(db: Pick<pg.Pool, 'query'>): Promise<voi
       retry_at TIMESTAMPTZ NOT NULL DEFAULT '-infinity',
       PRIMARY KEY (owner_user_id, daemon_id, day)
     );
+    -- Written only by builders that separate complete and incomplete token
+    -- splits. An older worker can publish a day during a rolling upgrade.
+    ALTER TABLE public.usage_history_days ADD COLUMN IF NOT EXISTS token_composition_revision BIGINT;
+    CREATE INDEX IF NOT EXISTS usage_history_pending_composition
+      ON public.usage_history_days(day DESC,owner_user_id,daemon_id)
+      WHERE tokens<>'[]'::jsonb AND token_composition_revision IS DISTINCT FROM revision;
     ALTER TABLE public.usage_scope_changes ADD COLUMN IF NOT EXISTS legacy_day BOOLEAN NOT NULL DEFAULT FALSE;
 
     -- Scratch rows are private to the writing transaction. On commit the
@@ -190,7 +196,9 @@ export async function initHistorySchema(db: Pick<pg.Pool, 'query'>): Promise<voi
 export async function assertHistorySchema(db: Pick<pg.Pool, 'query'>, options: { write?: boolean } = {}): Promise<void> {
   const privileges = options.write ? ['SELECT', 'UPDATE', 'DELETE'] : ['SELECT']
   const result = await db.query<{ ready: boolean }>(`
-    SELECT COALESCE(bool_and(has_table_privilege(current_user,
+    SELECT ${options.write?`EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.usage_history_days')
+        AND attname='token_composition_revision' AND NOT attisdropped) AND`:''}
+      COALESCE(bool_and(has_table_privilege(current_user,
       to_regclass('public.usage_history_days'), privilege)), FALSE)
       AND COALESCE(has_table_privilege(current_user,
         to_regclass('public.usage_history_owners'), 'SELECT'), FALSE) AS ready

@@ -44,7 +44,7 @@ async function queueInTransaction(
     from: `${start}T00:00:00.000Z`,
     toExclusive: `${today}T00:00:00.000Z`,
     days,
-  }, true)
+  })
   const daemons = scope.windows.map(window => window.daemonId)
   const params = [owner, daemons, today, days]
   const keys = `

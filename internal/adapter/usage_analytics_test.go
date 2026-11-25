@@ -2,7 +2,11 @@ package adapter
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/pocketctl/pocketctl/internal/protocol"
 )
 
 func TestPersonalUsageClaudeMessageOnceAndNativeSkill(t *testing.T) {
@@ -108,5 +112,67 @@ func TestPersonalUsageNativeErrorWithoutBody(t *testing.T) {
 		if len(events) != 1 || events[0].CallMeta.Outcome != "failure" {
 			t.Fatalf("explicit native failure lost: %+v", events)
 		}
+	}
+}
+
+func TestCodexReceiptEnrichesOnlyTheMatchingTokenCount(t *testing.T) {
+	const last = `{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}`
+	const total = `{"input_tokens":800,"cached_input_tokens":280,"cache_write_input_tokens":0,"output_tokens":55,"reasoning_output_tokens":15,"total_tokens":855}`
+	receipt := fmt.Sprintf(`{"type":"token_usage_record","payload":{"thread_id":"thread","turn_id":"turn","response_id":"native-response-id","usage":%s,"thread_token_usage":%s}}`, last, total)
+	count := fmt.Sprintf(`{"type":"event_msg","timestamp":"2026-11-25T10:00:01Z","payload":{"type":"token_count","info":{"last_token_usage":%s,"total_token_usage":%s}}}`, last, total)
+	for _, entry := range []string{"rollout", "stream"} {
+		t.Run(entry, func(t *testing.T) {
+			parse := NewCodexJSONLParser().Parse
+			if entry == "stream" {
+				parse = NewCodexAdapter().ParseStreamLine
+			}
+			for _, raw := range []string{
+				`{"type":"session_meta","payload":{"id":"thread"}}`,
+				`{"type":"turn_context","payload":{"model":"source-model"}}`,
+				`{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}`,
+			} {
+				if _, err := parse(raw); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, tc := range []struct{ receipt, count, wantID string }{
+				{receipt, count, "native-response-id"},
+				{"", strings.Replace(count, "10:00:01Z", "10:20:01Z", 1), "native-response-id"},
+				{"", strings.Replace(count, `"total_tokens":855`, `"total_tokens":859`, 1), ""},
+				{"", count, ""}, // A mismatched cumulative counter invalidated the receipt.
+				{strings.Replace(receipt, `"thread_id":"thread"`, `"thread_id":"foreign"`, 1), count, ""},
+				{strings.Replace(receipt, `"turn_id":"turn"`, `"turn_id":"old"`, 1), count, ""},
+				{strings.ReplaceAll(receipt, `"cache_write_input_tokens":0`, `"cache_write_input_tokens":10`), strings.ReplaceAll(count, `"cache_write_input_tokens":0`, `"cache_write_input_tokens":10`), ""},
+				{strings.Replace(receipt, `"total_tokens":855`, `"total_tokens":856`, 1), count, ""},
+				{strings.Replace(receipt, `"reasoning_output_tokens":5`, `"reasoning_output_tokens":6`, 1), count, ""},
+			} {
+				if tc.receipt != "" {
+					extra, err := parse(tc.receipt)
+					if err != nil || len(extra) != 0 {
+						t.Fatalf("receipt separately emitted: %+v, %v", extra, err)
+					}
+				}
+				ev, err := parse(tc.count)
+				if err != nil || len(ev) != 1 || ev[0].Usage == nil || ev[0].UsageMeta == nil {
+					t.Fatalf("count lost: %+v, %v", ev, err)
+				}
+				want := protocol.ContextUsage{InputTokens: 100, CacheRead: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 120}
+				if *ev[0].Usage != want {
+					t.Fatalf("wrong counters: %+v", ev[0].Usage)
+				}
+				m := ev[0].UsageMeta
+				if m.SourceUsageID != tc.wantID || m.RequestID != "" || m.Model != "source-model" || m.InputSemantics != "includes_cache" || m.OccurredAt != "2026-11-25T10:00:01Z" {
+					t.Fatalf("wrong identity or scope: %+v", m)
+				}
+			}
+			for _, raw := range []string{receipt, count, `{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}`, `{"type":"event_msg","payload":{"type":"task_started","turn_id":"next-turn"}}`} {
+				if _, err := parse(raw); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if ev, err := parse(count); err != nil || len(ev) != 1 || ev[0].UsageMeta.SourceUsageID != "" {
+				t.Fatalf("carried a receipt across turns: %+v, %v", ev, err)
+			}
+		})
 	}
 }

@@ -26,7 +26,7 @@ export async function buildHistoryDay(
     sum(total) AS total,bool_and(quality='normalized' AND time_basis='source') AS verified
   FROM usage_token_projection p JOIN live_windows w ON p.owner_user_id=w.owner AND p.daemon_id=w.daemon
     AND p.occurred_at>=w.start_at AND p.occurred_at<w.end_at
-  GROUP BY ${tokenSourceColumns}
+  GROUP BY ${tokenSourceColumns},(input IS NOT NULL AND output IS NOT NULL AND cache_read IS NOT NULL AND cache_create IS NOT NULL)
  ),
  call_rows AS (
   SELECT ${callSourceColumns},count(*) AS n FROM (${callSourceSQL('calls',false)}) f
