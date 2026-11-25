@@ -20,7 +20,7 @@ export async function shadowReviewQueue(pool:pg.Pool,input:ShadowReviewInput){
  const result=await pool.query(`WITH eligible AS(
   SELECT c.candidate_id::text,c.claim_type,c.statement,c.structured_content,c.scope_kind,c.scope_key,
    c.confidence::text,c.freshness_at,c.status,c.revision::text,c.created_at,c.source_kind,
-   c.curation_run_id::text,c.bundle_id::text,b.spans,b.session_id AS _session_id,b.dialogue_members AS _members,parent.task_key AS _parent_key,
+   c.curation_run_id::text,c.bundle_id::text,b.spans,b.session_id AS _session_id,${shared?'b.dialogue_members':'NULL::jsonb'} AS _members,parent.task_key AS _parent_key,
    c.xmin::text AS _candidate_stamp,b.xmin::text AS _bundle_stamp,parent.xmin::text AS _parent_stamp,r.xmin::text AS _run_stamp,owner.xmin::text AS _owner_stamp
   FROM memory_candidates c JOIN memory_task_bundles b USING(installation_id,bundle_id)
   JOIN memory_task_bundles parent ON parent.installation_id=b.installation_id AND parent.bundle_id=b.parent_bundle_id

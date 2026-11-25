@@ -95,3 +95,4 @@ jobs:
     uses: ./.github/workflows/mirror-release-oss.yml
     with:
       version: ${{ github.ref_name }}
+      prune_history: true

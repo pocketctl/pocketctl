@@ -22,16 +22,18 @@ const readingPositionStore = new Map<string, number>()
 export function useScopedSessionDraft(
   scope: Readonly<Ref<SessionScope>>,
   sessionId: Readonly<Ref<string>>,
-): { draft: Ref<string>; clearDraft(): void } {
+  owner: Readonly<Ref<string>> = ref(''),
+): { draft: Ref<string>; clearDraft(session?: string): void } {
   const draft = ref('')
   let activeKey = ''
 
-  watch([scope, sessionId], ([nextScope, nextSessionId]) => {
+  const key = (id: string) => JSON.stringify([owner.value, scopedSessionStateKey(scope.value, id, 'draft')])
+  watch([scope, sessionId, owner], ([, nextSessionId]) => {
     if (activeKey) {
       if (draft.value) draftStore.set(activeKey, draft.value)
       else draftStore.delete(activeKey)
     }
-    activeKey = scopedSessionStateKey(nextScope, nextSessionId, 'draft')
+    activeKey = key(nextSessionId)
     draft.value = draftStore.get(activeKey) ?? ''
   }, { immediate: true })
 
@@ -43,9 +45,9 @@ export function useScopedSessionDraft(
 
   return {
     draft,
-    clearDraft(): void {
-      draft.value = ''
-      if (activeKey) draftStore.delete(activeKey)
+    clearDraft(id = sessionId.value): void {
+      if (key(id) === activeKey) draft.value = ''
+      draftStore.delete(key(id))
     },
   }
 }

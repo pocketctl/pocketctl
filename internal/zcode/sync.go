@@ -652,7 +652,7 @@ func (z *ZcodeSync) PreviewTodo(todos []TodoRow) (DiffBatch, error) {
 	if len(items) == 0 && z.state.todoEventID == "" {
 		return DiffBatch{}, nil
 	}
-	ev := z.mapper.MapTodo(z.wireID, todos, z.state.lastEventID)
+	ev := z.mapper.MapTodo(z.wireID, todos, z.state.todoEventID)
 	return DiffBatch{
 		Events: []protocol.DaemonEvent{ev},
 		Commit: SyncCommit{Todo: &NamedCommit{EventID: ev.EventID, Hash: h}, LastEventID: ev.EventID},
@@ -670,7 +670,7 @@ func (z *ZcodeSync) DiffTodos(todos []TodoRow) []protocol.DaemonEvent {
 	if h == z.state.todoHash && z.state.todoEventID != "" {
 		return nil
 	}
-	ev := z.mapper.MapTodo(z.wireID, todos, z.state.lastEventID)
+	ev := z.mapper.MapTodo(z.wireID, todos, z.state.todoEventID)
 	z.state.todoHash = h
 	z.state.todoEventID = ev.EventID
 	z.state.lastEventID = ev.EventID

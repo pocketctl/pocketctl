@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'vitest'
+import {admitLifecycleSources} from '../episodes/source-admission.js'
+import {parseMemorySourceProvenance} from '../episodes/skill-provenance.js'
 import { buildEpisodePacket, canonicalPacketJson, type PacketSourceEvent } from '../episodes/packet.js'
 
 import { lifecyclePacketInput as base, lifecycleSourceEvent as event } from '../testing/lifecycle-fixture.js'
@@ -136,4 +138,18 @@ describe('lifecycle source admission', () => {
     delete source.source_provenance
     expect(wire(buildEpisodePacket({ ...base, events: [source], sourcePolicy: undefined } as Parameters<typeof buildEpisodePacket>[0]))).toContain('Legacy still readable')
   })
+})
+
+test('an accepted input locator diagnoses an unverified output without admitting its body',()=>{
+  const link='input:'+'a'.repeat(64)
+  const diagnostics={source_path:'managed_dispatch',source_gap_reason:'codex_final_unconfirmed',accepted_input_event_id:link}
+  const output=event('e2','PRIVATE',{...diagnostics,skill_state:'unknown',lineage_complete:false})
+  expect(parseMemorySourceProvenance(output.source_provenance!.memory)).toMatchObject(diagnostics)
+  expect(admitLifecycleSources({...base,events:[output]})).toMatchObject({
+    events:[],diagnostics:{codex_final_unconfirmed:1},receipts:[{admission:{allowed:false,reason:'provenance_unknown'}}],
+  })
+  const proof=output.source_provenance!.memory as Record<string,unknown>
+  for(const bad of [{source_gap_reason:'free text'},{source_path:'readonly_observation'},{accepted_input_event_id:'e1'},{lineage_complete:true}]){
+    expect(parseMemorySourceProvenance({...proof,...bad})).toBeNull()
+  }
 })

@@ -19,6 +19,72 @@ import (
 
 const ptyOutputTailMax = 32 * 1024
 
+// CodexAppServerOwnsInput checks the current backend at forwarding time. The
+// JSONL watcher may already be running when a terminal thread is attached.
+func (sm *SessionManager) CodexAppServerOwnsInput(sessionID string) bool {
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	if ps == nil || ps.Agent != adapter.AgentCodex || ps.ControlMode != protocol.ControlManaged {
+		sm.mu.RUnlock()
+		return false
+	}
+	backend, _ := ps.Backend.(*CodexAppServerBackend)
+	sm.mu.RUnlock()
+	if backend == nil || backend.coord == nil {
+		return false
+	}
+	// A backend handle survives idle unsubscribe and can outlive its connection.
+	// Never suppress the watcher on the strength of that handle alone.
+	c := backend.coord
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runtime == nil || c.runtime.Client != backend.client || c.generation != backend.generation {
+		return false
+	}
+	c.subscribeMu.Lock()
+	defer c.subscribeMu.Unlock()
+	_, subscribed := c.subscribed[sessionID]
+	return subscribed && !c.detachedThreads[sessionID]
+}
+
+// The rollout and subscribed app-server can publish the same final answer
+// and completion. A rollout completion claiming the shared lifecycle ID first
+// would discard the app-server's terminal certificate in the outgoing deduper.
+func (sm *SessionManager) CodexAppServerOwnsRolloutEvent(ev protocol.DaemonEvent) bool {
+	switch ev.Type {
+	case "user_text":
+		return sm.CodexAppServerOwnsInput(ev.SessionID)
+	case "agent_text":
+		if ev.MessagePhase != "final_answer" {
+			return false
+		}
+	case protocol.EventTypeTurnStatus:
+		if ev.TurnStatus != protocol.TurnStateCompleted {
+			return false
+		}
+	case "session_status":
+		if ev.Resync || ev.Status != protocol.StatusIdle {
+			return false
+		}
+	default:
+		return false
+	}
+	if ev.Resync {
+		// Historical completion is otherwise available only from the rollout.
+		// Retain it except for the exact acknowledged, live turn.
+		l := sm.memoryLedger()
+		l.mu.Lock()
+		b := l.bindings[ev.SessionID]
+		accepted := b != nil && !b.awaitingDispatch && b.root.Producer == "codex" && ev.SourceTurnID != "" &&
+			ev.TurnID == b.root.TurnID && ev.TurnID == logicalCodexTurnID(ev.SessionID, ev.SourceTurnID)
+		l.mu.Unlock()
+		if !accepted {
+			return false
+		}
+	}
+	return sm.CodexAppServerOwnsInput(ev.SessionID)
+}
+
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
 func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
 	sm.mu.Lock()

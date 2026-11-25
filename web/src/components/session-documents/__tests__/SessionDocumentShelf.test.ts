@@ -12,6 +12,19 @@ const available = {
 }
 
 describe('SessionDocumentShelf', () => {
+  test('an empty lookup never inserts a shelf, while refreshing visible documents keeps their rows', async () => {
+    const wrapper = mount(SessionDocumentShelf, { props: { documents: [], listStatus: 'loading' } })
+    for (const listStatus of ['loading', 'ready', 'loading'] as const) {
+      await wrapper.setProps({ listStatus })
+      expect(wrapper.find('.session-document-shelf').exists()).toBe(false)
+    }
+    await wrapper.setProps({ documents: [available], listStatus: 'ready' })
+    const row = wrapper.get('.session-document-row').element
+    await wrapper.setProps({ listStatus: 'loading' })
+    expect(wrapper.get('.session-document-row').element).toBe(row)
+    wrapper.unmount()
+  })
+
   test('keeps keyboard focus in the dialog when the final page disables Next', async () => {
     const documents = Array.from({ length: 23 }, (_, i) => ({ ...available, documentId: `focus-${i}` }))
     const wrapper = mount(SessionDocumentShelf, { attachTo: document.body,

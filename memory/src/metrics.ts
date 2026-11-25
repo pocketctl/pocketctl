@@ -41,7 +41,7 @@ export function createMemoryMetrics() {
 
   const lifecycleAlerts=new Gauge({name:'pocketctl_memory_lifecycle_alerts',help:'Active lifecycle execution or coverage limitations; separate from infrastructure readiness and legacy extraction',labelNames:['reason'] as const,registers:[registry]})
   const lifecycleExecution=new Gauge({name:'pocketctl_memory_lifecycle_execution',help:'Lifecycle installations by current execution status, including disabled and idle',labelNames:['state'] as const,registers:[registry]})
-  const lifecycleCoverage=new Gauge({name:'pocketctl_memory_lifecycle_coverage',help:'Bounded latest-recorded per-turn lifecycle coverage and cap indicator',labelNames:['kind'] as const,registers:[registry]})
+  const lifecycleCoverage=new Gauge({name:'pocketctl_memory_lifecycle_coverage',help:'Bounded input provenance, per-turn processing receipts and current intake state',labelNames:['kind'] as const,registers:[registry]})
   const lifecycleModes=new Gauge({name:'pocketctl_memory_lifecycle_modes',help:'Effective lifecycle capability modes and separately configured Context setting modes',labelNames:['stage','mode'] as const,registers:[registry]})
   const businessAlerts = new Gauge({name:'pocketctl_memory_business_alerts',help:'Installations with active bounded business health alerts',labelNames:['reason'] as const,registers:[registry]})
   const budgetUncertainty = new Gauge({name:'pocketctl_memory_text_budget_uncertainty',help:'Current Shanghai-day provider-pool reservations older than five minutes, including successful fallback runs',labelNames:['kind'] as const,registers:[registry]})
@@ -820,7 +820,8 @@ export async function updateBusinessHealthGauges(pool:Pick<pg.Pool,'query'>,metr
   const report=summarizeLifecycleHealth(lifecycleRows,configuredMode)
   for(const reason of LIFECYCLE_HEALTH_REASONS) metrics.lifecycleAlerts.set({reason},reason==='counts_capped'?Number(report.coverage.counts_capped&&report.execution.status!=='disabled'):lifecycle.filter(row=>row.reasons.includes(reason)).length)
   for(const state of ['disabled','idle','healthy','degraded']) metrics.lifecycleExecution.set({state},lifecycle.filter(row=>row.execution===state).length)
-  for(const kind of ['turns','receipt_turns','complete_turns','provenance_unknown_turns','missing_receipt_turns','counts_capped'] as const) metrics.lifecycleCoverage.set({kind},Number(report.coverage[kind]))
+  for(const kind of ['turns','receipt_turns','complete_turns','provenance_unknown_turns','missing_receipt_turns','blocked_turns','counts_capped'] as const) metrics.lifecycleCoverage.set({kind},Number(report.coverage[kind]))
+  for(const [kind,count] of Object.entries(report.input_coverage))metrics.lifecycleCoverage.set({kind:'input_'+kind},count)
   const stages={curation:report.modes,consume:report.consume_modes,cold:report.cold_modes,reclaim:report.reclaim_modes,context_setting:report.context.setting_modes}
   for(const [stage,modes] of Object.entries(stages))for(const mode of ['off','shadow','enabled'])metrics.lifecycleModes.set({stage,mode},modes[mode]??0)
 }

@@ -39,6 +39,22 @@ describe('useSessionDocuments', () => {
     state.dispose()
   })
 
+  test('a retry keeps its error visible until a newer list arrives and ignores a late empty response', async () => {
+    const state = useSessionDocuments(ref('session-1'), { accessToken: ref('token') })
+    vi.mocked(listSessionDocuments).mockRejectedValueOnce(new Error('unavailable'))
+    await state.refresh()
+    let resolveOld!: (value: Awaited<ReturnType<typeof listSessionDocuments>>) => void
+    vi.mocked(listSessionDocuments).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
+    const retry = state.refresh()
+    expect(state.listStatus.value).toBe('unavailable')
+    await state.refresh()
+    resolveOld({ htmlRendering: false, documents: [] })
+    await retry
+    expect(state.listStatus.value).toBe('ready')
+    expect(state.documents.value).toEqual([metadata])
+    state.dispose()
+  })
+
   test('debounces body-free notifications for only the current session', async () => {
     const state = useSessionDocuments(ref('session-1'), { accessToken: ref('token'), debounceMs: 200 })
     state.notify({ session_id: 'other' })

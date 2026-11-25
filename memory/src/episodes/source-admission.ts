@@ -1,3 +1,4 @@
+import type {SourceGapReason} from '@pocketctl/session-source'
 import type { PacketSourceEvent } from './packet.js'
 import { parseMemorySourceProvenance } from './skill-provenance.js'
 
@@ -6,7 +7,7 @@ export type SourceAdmission =
   | { allowed: true; proof: 'trusted_non_skill' }
   | { allowed: false; reason: 'skill_derived' | 'provenance_unknown' | 'source_unavailable' }
 export interface SourceAdmissionReceipt { source_event_id: string; admission: SourceAdmission }
-export type AdmissionDiagnostic = 'missing_provenance'|'invalid_provenance'|'identity_mismatch'|'incomplete_lineage'|'unknown_skill_state'|'missing_ancestor'|'identity_conflict'|'sequence_invalid'|'lineage_cycle'|'source_limit'|'skill_derived'
+export type AdmissionDiagnostic = SourceGapReason|'missing_provenance'|'invalid_provenance'|'identity_mismatch'|'incomplete_lineage'|'unknown_skill_state'|'missing_ancestor'|'identity_conflict'|'sequence_invalid'|'lineage_cycle'|'source_limit'|'skill_derived'
 
 
 /** Resolve the complete supplied lineage before reading ANY event body.
@@ -27,7 +28,7 @@ export function admitLifecycleSources<T extends Pick<PacketSourceEvent,'source_e
     if(!p)return unknown(events[i].source_provenance?.memory?'invalid_provenance':'missing_provenance')
     if(p.session_id!==input.sessionId||p.turn_id!==input.turnId)return unknown('identity_mismatch')
     if (p.skill_state === 'skill' || p.skill_invocation_id) return { allowed: false, reason: 'skill_derived' }
-    if(!p.lineage_complete)return unknown('incomplete_lineage')
+    if(!p.lineage_complete)return unknown(p.source_gap_reason??'incomplete_lineage')
     if(p.skill_state!=='non_skill')return unknown('unknown_skill_state')
     if(p.source_role==='summary'&&!p.derived_from_event_ids.length)return unknown('missing_ancestor')
     return { allowed: true, proof: 'trusted_non_skill' }

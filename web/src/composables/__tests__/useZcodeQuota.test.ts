@@ -13,7 +13,7 @@ const options=ref({daemonId:'d',online:true})
 const payload=()=>({kind:'zcode_quota',scope_id:'account-a',observed_at:new Date().toISOString(),status:'ok',level:'max',windows:[{id:'five_hour',remaining_percent:15,resets_at:null},{id:'week',remaining_percent:52,resets_at:null}]})
 function start(){wrapper=mount(defineComponent({setup(){state=useZcodeQuota(options);return()=>null}}))}
 function emit(e:any){for(const fn of wire.handlers)fn(e)}
-function reply(value=payload()){const req=wire.send.mock.calls.at(-1)![0];emit({type:'invocation_result',daemon_id:req.daemon_id,request_id:req.request_id,invocation:value})}
+function reply(value:unknown=payload()){const req=wire.send.mock.calls.at(-1)![0];emit({type:'invocation_result',daemon_id:req.daemon_id,request_id:req.request_id,invocation:value})}
 beforeEach(()=>{vi.useFakeTimers();wire.handlers.clear();wire.connected=ref(true);wire.daemons=ref(new Map());wire.user=ref({id:7});wire.send.mockReset().mockReturnValue(true);options.value={daemonId:'d',online:true};Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});useLocale().setLocale('zh')})
 afterEach(()=>{wrapper?.unmount();vi.useRealTimers()})
 test('queries a host without session and preserves separate real windows',async()=>{start();expect(wire.send.mock.calls[0][0]).toMatchObject({type:'read_zcode_quota',daemon_id:'d'});expect(wire.send.mock.calls[0][0].session_id).toBeUndefined();reply();expect(state.snapshot.value.windows.map((w:any)=>w.remaining_percent)).toEqual([15,52]);await vi.advanceTimersByTimeAsync(60000);expect(wire.send).toHaveBeenCalledTimes(2)})
@@ -34,4 +34,15 @@ test('locks old card counts during the forced post-redemption reread',async()=>{
  expect(wire.send.mock.calls.at(-1)![0].type).toBe('read_zcode_quota');expect(document.querySelector<HTMLButtonElement>('.reset-use')!.disabled).toBe(true)
  p.reset_cards.cards[1].available_count=2;p.reset_cards.cards[1].expires_at=[1797955199,1797955199];reply(p);await nextTick()
  expect(document.querySelector<HTMLButtonElement>('.reset-use')!.disabled).toBe(false);expect(document.querySelector('.reset-total')!.textContent).toContain('2')
+})
+
+test('distinguishes a protected login awaiting a key from other unsupported plans', async () => {
+  wrapper = mount(ZcodeQuota, {attachTo:document.body, props:{daemonId:'d', hostname:'Mac', variant:'agent'}})
+  const pending = {...payload(), status:'unsupported', binding_required:true, level:'', windows:[
+    {id:'five_hour',remaining_percent:null,resets_at:null}, {id:'week',remaining_percent:null,resets_at:null}
+  ]}
+  reply(pending)
+  await nextTick()
+  expect(wrapper.text()).toContain('pocketctl agent zcode quota bind')
+  expect(parseZcodeQuota({...pending, binding_required:false})?.binding_required).toBe(false)
 })

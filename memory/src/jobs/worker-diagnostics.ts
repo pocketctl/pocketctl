@@ -4,7 +4,7 @@ import {SourceUnavailableError} from '@pocketctl/session-source'
 import { RelayRequestError } from '../relay/errors.js'
 import { JOB_TYPES, JobDeferredError, JobTerminalError, type JobClaim } from './types.js'
 
-const KNOWN_CODES = new Set(['projection_source_changed','inbox_body_unavailable','job_aborted_before_dispatch','git_poll_failed','extraction_unconfigured',
+const KNOWN_CODES = new Set(['curation_commit_outcome_unknown','projection_source_changed','inbox_body_unavailable','job_aborted_before_dispatch','git_poll_failed','extraction_unconfigured',
  'projection_commit_outcome_unknown','canonical_reference_budget_exceeded','canonical_reference_write_timeout','canonical_reference_unavailable','canonical_reference_wave_invalid','canonical_reference_metadata_limit',
  'canonical_reference_provenance_invalid','canonical_reference_timestamp_required','canonical_reference_payload_invalid','canonical_projection_aborted',
  'canonical_reference_mapping_required','canonical_reference_busy','canonical_reference_changed','canonical_reference_conflict','canonical_reference_cursor_changed',
@@ -12,6 +12,7 @@ const KNOWN_CODES = new Set(['projection_source_changed','inbox_body_unavailable
  'source_execution_generation_changed','source_execution_required','source_shadow_provider_forbidden','source_execution_scope_mismatch','source_executions_not_drained','source_execution_requires_read_committed','source_provider_effect_unrecorded'])
 const COMMIT_CODES=new Set(['source_metadata_commit_outcome_unknown','source_metadata_commit_acknowledged','source_metadata_transaction_unavailable'])
 const SOURCE_CODES=new Set(['source_store_unavailable','source_store_timeout','source_store_busy','processing_pin_expired_or_unavailable','source_metadata_proof_unavailable','source_reference_unproven','body_hash_unavailable','archive_unconfigured','archive_binding_invalid','archive_namespace_mismatch','archive_io_limit','archive_unavailable','source_body_reclaimed','source_metadata_conflict','body_hash_mismatch','body_set_mismatch','source_input_start_unproven','body_byte_limit','changed','revoked','deleted'])
+export function isKnownSourceUnavailableCode(code:string):boolean {return SOURCE_CODES.has(code)}
 const ERROR_NAMES = new Set(['Error','TypeError','RangeError','SyntaxError','AbortError'])
 const SQLSTATES = new Set(['40001','40P01','55P03','57014','23502','23503','23505','23514','08001','08003','08006','53300','53400','57P01','42P01','42703'])
 

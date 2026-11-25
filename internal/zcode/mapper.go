@@ -108,7 +108,7 @@ func (mp *Mapper) ModelChanged(wireSessionID, model, prevEventID string) protoco
 		SessionID:       wireSessionID,
 		Model:           model,
 		PreviousEventID: prevEventID,
-		EventID:         mp.modelEventID(wireSessionID, model),
+		EventID:         mp.modelEventID(wireSessionID, model, prevEventID),
 	}
 }
 
@@ -396,7 +396,7 @@ func (mp *Mapper) MapTodo(wireSessionID string, todos []TodoRow, prevEventID str
 		SessionID:       wireSessionID,
 		Todos:           items,
 		PreviousEventID: prevEventID,
-		EventID:         mp.todoEventID(wireSessionID, items),
+		EventID:         mp.todoEventID(wireSessionID, items, prevEventID),
 	}
 }
 
@@ -447,8 +447,8 @@ func (mp *Mapper) titleEventID(wireSessionID, title string) string {
 	return fmt.Sprintf("zcode:%s:title:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(title))
 }
 
-func (mp *Mapper) modelEventID(wireSessionID, model string) string {
-	return fmt.Sprintf("zcode:%s:model:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(model))
+func (mp *Mapper) modelEventID(wireSessionID, model, prevEventID string) string {
+	return fmt.Sprintf("zcode:%s:model:%s:%s:%s", mp.sourceIDHex, hashID(wireSessionID), semanticHash(model), semanticHash(prevEventID))
 }
 
 func (mp *Mapper) statusEventID(wireSessionID, status, prevEventID string) string {
@@ -467,8 +467,14 @@ func (mp *Mapper) userTextEventID(nativeMessageID, text string) string {
 	return fmt.Sprintf("zcode:%s:user:%s:%s", mp.sourceIDHex, hashID(nativeMessageID), semanticHash(text))
 }
 
-func (mp *Mapper) todoEventID(wireSessionID string, todos []protocol.TodoItem) string {
-	return fmt.Sprintf("zcode:%s:todo:%s:%s", mp.sourceIDHex, hashID(wireSessionID), shortHash(string(canonicalJSON(todos))))
+func (mp *Mapper) todoEventID(wireSessionID string, todos []protocol.TodoItem, previous string) string {
+	id := fmt.Sprintf("zcode:%s:todo:%s:%s", mp.sourceIDHex, hashID(wireSessionID), shortHash(string(canonicalJSON(todos))))
+	// Keep the first snapshot compatible with existing cursors. A later return
+	// to identical content is a new transition, while retries keep the same ID.
+	if previous != "" {
+		id += ":" + semanticHash(previous)
+	}
+	return id
 }
 
 func (mp *Mapper) errorEventID(nativeMessageID, message string) string {

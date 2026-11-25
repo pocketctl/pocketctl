@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
+	"github.com/pocketctl/pocketctl/internal/turn"
 )
 
 // A shared app-server ACK authenticates one input. Its native clientId and a
@@ -19,6 +21,7 @@ type codexDialogueInput struct {
 	root                             *protocol.MemorySourceProvenance
 	nativeTurn, clientID, promptHash string
 	generation                       uint64
+	ambiguous                        bool
 }
 
 // Decode only metadata and the two dialogue messages. Tool output and file diffs
@@ -58,26 +61,36 @@ func dialogueSHA(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
 }
+
+type codexDialogueKey struct{ thread, turn string }
+
 func (c *codexCoordinator) rememberDialogueInputLocked(in UserMessageInput, nativeTurn, logicalTurn, prompt string) {
 	if c.dialogueInputs == nil {
-		c.dialogueInputs = make(map[string]codexDialogueInput)
+		c.dialogueInputs = make(map[codexDialogueKey]codexDialogueInput)
 	}
-	delete(c.dialogueInputs, in.SessionID)
+	key := codexDialogueKey{thread: in.SessionID, turn: nativeTurn}
 	root := memoryInputProvenance(in, logicalTurn, "codex")
+	if previous, ok := c.dialogueInputs[key]; ok && previous.generation == c.generation {
+		if root == nil || previous.root.EventID != root.EventID {
+			previous.ambiguous = true
+			c.dialogueInputs[key] = previous
+		}
+		return
+	}
 	if root == nil {
 		return
 	}
 	if len(c.dialogueInputs) >= 512 {
 		// Abandoned sessions may never publish a terminal notification.
-		oldest := ""
+		var oldest codexDialogueKey
 		for id, entry := range c.dialogueInputs {
-			if oldest == "" || entry.recorded.Before(c.dialogueInputs[oldest].recorded) {
+			if oldest.thread == "" || entry.recorded.Before(c.dialogueInputs[oldest].recorded) {
 				oldest = id
 			}
 		}
 		delete(c.dialogueInputs, oldest)
 	}
-	c.dialogueInputs[in.SessionID] = codexDialogueInput{recorded: time.Now(), root: root, nativeTurn: nativeTurn, clientID: in.MsgID, promptHash: dialogueSHA(prompt), generation: c.generation}
+	c.dialogueInputs[key] = codexDialogueInput{recorded: time.Now(), root: root, nativeTurn: nativeTurn, clientID: in.MsgID, promptHash: dialogueSHA(prompt), generation: c.generation}
 }
 
 // Accept simple native inspections only. A parsed subcommand cannot vouch
@@ -101,26 +114,26 @@ func dialogueInspection(item *codexDialogueItem) bool {
 	return a.Type == "read" || a.Type == "listFiles" || a.Type == "search"
 }
 
-func (in codexDialogueInput) proof(t codexDialogueTurn) *protocol.MemorySourceProvenance {
+func (in codexDialogueInput) certify(t codexDialogueTurn) (*protocol.MemorySourceProvenance, string) {
 	if t.ID != in.nativeTurn || t.Status != "completed" || t.View != "full" || len(t.Items) < 2 || len(t.Items) > 4096 {
-		return nil
+		return nil, "codex_inventory_incomplete"
 	}
 	var user, answer *codexDialogueItem
 	seen := make(map[string]bool, len(t.Items))
 	for i := range t.Items {
 		item := &t.Items[i]
 		if item.ID == "" || seen[item.ID] {
-			return nil
+			return nil, "codex_inventory_incomplete"
 		}
 		seen[item.ID] = true
 		switch item.Type {
 		case "userMessage":
 			if i != 0 || item.ClientID != in.clientID {
-				return nil
+				return nil, "codex_input_unconfirmed"
 			}
 			var parts []codexUserInput
 			if json.Unmarshal(item.Content, &parts) != nil || len(parts) != 1 || parts[0].Type != "text" || parts[0].Role != "" || parts[0].Tag != "" || dialogueSHA(parts[0].Text) != in.promptHash {
-				return nil
+				return nil, "codex_input_unconfirmed"
 			}
 			user = item
 		case "agentMessage":
@@ -128,87 +141,89 @@ func (in codexDialogueInput) proof(t codexDialogueTurn) *protocol.MemorySourcePr
 				continue
 			}
 			if item.Phase != "final_answer" || i != len(t.Items)-1 || item.Text == "" {
-				return nil
+				return nil, "codex_final_unconfirmed"
 			}
 			answer = item
 		case "commandExecution":
 			if !dialogueInspection(item) {
-				return nil
+				return nil, "codex_operation_unverified"
 			}
 		case "fileChange":
 			if len(item.Changes) == 0 || item.PluginID != "" {
-				return nil
+				return nil, "codex_operation_unverified"
 			}
 			for _, change := range item.Changes {
 				if change.Kind.Type != "add" && change.Kind.Type != "update" && change.Kind.Type != "delete" {
-					return nil
+					return nil, "codex_operation_unverified"
 				}
 				if change.Path == "" || skillFile.MatchString(change.Path) || skillFile.MatchString(change.MovePath) || skillFile.MatchString(change.Kind.MovePath) {
-					return nil
+					return nil, "codex_operation_unverified"
 				}
 			}
 		case "reasoning", "plan":
 		default:
 			// Delegation, other tools, compaction, and future item types
 			// need their own causal evidence. The text-only proof cannot cover them.
-			return nil
+			return nil, "codex_operation_unverified"
 		}
 	}
-	if user == nil || answer == nil || answer.ID == user.ID {
-		return nil
+	if user == nil || in.ambiguous {
+		return nil, "codex_input_unconfirmed"
+	}
+	if answer == nil || answer.ID == user.ID {
+		return nil, "codex_final_unconfirmed"
 	}
 	root := in.root
 	invocation := "dialogue:" + dialogueSHA(user.ID)
 	identity := dialogueSHA(strings.Join([]string{root.SessionID, root.TurnID, root.EventID, invocation, in.promptHash, dialogueSHA(answer.ID), dialogueSHA(answer.Text)}, "\x00"))
 	return &protocol.MemorySourceProvenance{
+		SourcePath: "managed_dispatch", AcceptedInputEventID: root.EventID,
 		Version: 1, Producer: "codex", SessionID: root.SessionID, TurnID: root.TurnID,
 		EventID: "codex-dialogue-v1:" + identity, Sequence: "1", InvocationID: invocation,
 		ParentInvocationID: root.InvocationID, SourceRole: "system", SkillState: "non_skill",
 		LineageComplete: true, DerivedFromEventIDs: []string{root.EventID},
-	}
+	}, ""
 }
 
-func (c *codexCoordinator) completedDialogueProof(generation uint64, thread string, raw json.RawMessage) *protocol.MemorySourceProvenance {
-	c.mu.Lock()
-	input, pending := c.dialogueInputs[thread]
-	c.mu.Unlock()
-	if !pending || input.generation != generation {
-		return nil
-	}
-
+func (c *codexCoordinator) completedDialogueReceipt(generation uint64, thread string, raw json.RawMessage) *protocol.MemorySourceProvenance {
 	var params struct {
-		Turn codexDialogueTurn `json:"turn"`
+		ThreadID string `json:"threadId"`
+		Turn     struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"turn"`
 	}
-	if json.Unmarshal(raw, &params) != nil {
+	if json.Unmarshal(raw, &params) != nil || params.ThreadID != thread || params.Turn.ID == "" {
 		return nil
 	}
+	var unconfirmed string
+	if c.sm != nil {
+		unconfirmed = c.sm.waitMemoryCodexDispatch(thread)
+	}
+	key := codexDialogueKey{thread: thread, turn: params.Turn.ID}
 	c.mu.Lock()
-	in, ok := c.dialogueInputs[thread]
-	if !ok || in.root != input.root || in.nativeTurn != params.Turn.ID || in.generation != generation || c.generation != generation || c.runtime == nil {
+	in, ok := c.dialogueInputs[key]
+	if !ok || in.generation != generation || c.generation != generation || c.runtime == nil {
 		c.mu.Unlock()
 		return nil
 	}
-	delete(c.dialogueInputs, thread)
+	delete(c.dialogueInputs, key)
 	client := c.runtime.Client
 	c.mu.Unlock()
-	if params.Turn.Status != "completed" {
+	if params.Turn.Status != "completed" || in.root.EventID == unconfirmed {
 		return nil
 	}
-	if params.Turn.View == "full" && len(params.Turn.Items) > 0 {
-		return in.proof(params.Turn)
+	// No inventory is decoded for observer-only completions.
+	var full struct {
+		Turn codexDialogueTurn `json:"turn"`
 	}
-	if client == nil {
-		return nil
+	if json.Unmarshal(raw, &full) != nil {
+		full.Turn = codexDialogueTurn{ID: params.Turn.ID}
 	}
-	// Live terminal notifications may omit items. Only the exact finished turn
-	// in a full response is eligible, even if a successor already exists.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	var page struct {
-		Data []codexDialogueTurn `json:"data"`
-	}
-	if client.Call(ctx, "thread/turns/list", map[string]any{"threadId": thread, "itemsView": "full", "sortDirection": "desc", "limit": 1}, &page) != nil || len(page.Data) != 1 {
-		return nil
+	t := full.Turn
+	reason := ""
+	if t.View != "full" || len(t.Items) == 0 {
+		t, reason = readCompletedDialogueTurn(client, thread, t.ID)
 	}
 	c.mu.Lock()
 	current := c.generation == generation && c.runtime != nil && c.runtime.Client == client
@@ -216,5 +231,61 @@ func (c *codexCoordinator) completedDialogueProof(generation uint64, thread stri
 	if !current {
 		return nil
 	}
-	return in.proof(page.Data[0])
+	if reason == "" {
+		var proof *protocol.MemorySourceProvenance
+		proof, reason = in.certify(t)
+		if proof != nil {
+			return proof
+		}
+	}
+	ev := protocol.DaemonEvent{Type: protocol.EventTypeTurnStatus, SessionID: thread, TurnID: in.root.TurnID,
+		EventID: turn.StatusEventID(in.root.TurnID, protocol.TurnStateCompleted)}
+	stampUnknownMemorySource(&ev, "codex")
+	p := ev.MemorySource
+	p.SourcePath = "managed_dispatch"
+	if !in.ambiguous {
+		p.AcceptedInputEventID = in.root.EventID
+	}
+	p.SourceGapReason = reason
+	slog.Info("Codex dialogue certificate unavailable", "session_id", thread, "turn_id", p.TurnID, "accepted_input_event_id", p.AcceptedInputEventID, "reason", reason)
+	return p
+}
+
+// Only a full inventory of the exact native turn is eligible. A successor
+// may be the newest history entry when the completion notification is read.
+func readCompletedDialogueTurn(client codexRuntimeClient, thread, nativeTurn string) (codexDialogueTurn, string) {
+	if client == nil {
+		return codexDialogueTurn{}, "codex_history_unavailable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	params := map[string]any{"threadId": thread, "itemsView": "full", "sortDirection": "desc", "limit": 4}
+	seen := map[string]bool{}
+	for pageIndex := 0; pageIndex < 4; pageIndex++ {
+		var page struct {
+			Data       []codexDialogueTurn `json:"data"`
+			NextCursor string              `json:"nextCursor"`
+		}
+		if err := client.Call(ctx, "thread/turns/list", params, &page); err != nil {
+			return codexDialogueTurn{}, "codex_history_unavailable"
+		}
+		var found *codexDialogueTurn
+		for i := range page.Data {
+			if page.Data[i].ID == nativeTurn {
+				if found != nil {
+					return codexDialogueTurn{}, "codex_inventory_incomplete"
+				}
+				found = &page.Data[i]
+			}
+		}
+		if found != nil {
+			return *found, ""
+		}
+		if page.NextCursor == "" || seen[page.NextCursor] {
+			break
+		}
+		seen[page.NextCursor] = true
+		params["cursor"] = page.NextCursor
+	}
+	return codexDialogueTurn{}, "codex_history_unavailable"
 }

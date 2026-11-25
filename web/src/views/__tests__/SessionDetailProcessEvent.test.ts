@@ -50,6 +50,11 @@ vi.mock('../../composables/useSessionRename', () => ({
 }))
 vi.mock('../../composables/useResponsiveLayout', () => ({ useResponsiveLayout: () => responsiveMock }))
 
+function confirmPromptControl(agent = 'claude-code') {
+  websocketMock.handlers.get('session_list')!({ sessions: [{ session_id: 'ses_1', daemon_id: 'd1', daemon_online: true,
+    agent_type: agent, source: 'daemon', control_mode: 'managed', capabilities: ['message_acceptance_receipt'] }] })
+}
+
 async function openToolbarOverflow(wrapper: ReturnType<typeof shallowMount>) {
   if (!wrapper.find('.toolbar-overflow-menu').exists()) {
     await wrapper.get('.toolbar-more-btn').trigger('click')
@@ -294,7 +299,7 @@ describe('SessionDetail processEvent integration', () => {
     websocketMock.handlers.get('session_model_changed')!({session_id:'ses_1', model:'p/native', effort:'off', request_id:request})
     expect(vm.currentEffort).toBe('off')
     expect(vm.dshSettingsPending).toBe('')
-    websocketMock.handlers.get('session_meta')!({...meta, effort:undefined})
+    websocketMock.handlers.get('session_meta')!({...meta, effort:''})
     expect(vm.currentEffort).toBe('')
     vm.changeDSHModel('p/native', 'high')
     websocketMock.handlers.get('error')!({session_id:'ses_1', operation:'set_session_model', request_id:vm.dshSettingsPending, error:'native unavailable'})
@@ -1218,6 +1223,7 @@ describe('SessionDetail processEvent integration', () => {
     responsiveMock.isMobile.value = mobile
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
+    confirmPromptControl()
     vm.sendPromptText('1+1？')
     vm.processEvent({ type: 'turn_status', turn_id: 'turn-live', turn_status: 'running' })
     vm.processEvent({ type: 'user_text', text: '1+1？', turn_id: 'turn-live', flow_scope: 'main' })
@@ -1235,7 +1241,7 @@ describe('SessionDetail processEvent integration', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
     const text = '不对，项目已经迁移到外接磁盘上'
-    if (mode === 'live') vm.sendPromptText(text)
+    if (mode === 'live') { confirmPromptControl('codex'); vm.sendPromptText(text) }
     const msgId = mode === 'live' ? vm.messages.at(-1).__msg_id : 'send-1'
     const common = { type: 'user_text', session_id: 'ses_1', turn_id: 'turn:v1:codex:t1', source_turn_id: 't1', text }
     const admitted = { ...common, msg_id: msgId, request_id: msgId, event_id: 'native-input:' + msgId }
@@ -1264,10 +1270,37 @@ describe('SessionDetail processEvent integration', () => {
     wrapper.unmount()
   })
 
+  test.each(['app-server first', 'rollout first', 'older page'])('pairs Codex JSONL and app-server inputs once (%s)', mode => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const common = { type: 'user_text', session_id: 'ses_1', turn_id: 'turn:v1:codex:t1', source_turn_id: 't1', text: '提交代码' }
+    const native = { ...common, part_id: 'p1', event_id: 'codex:33:user:ses_1:t1:p1:hash' }
+    const rollout = { ...common, event_id: 'jsonl:file:404:0' }
+    vm.processEvent(mode === 'rollout first' ? rollout : native)
+    if (mode === 'older page') {
+      vm.isLoadingBackward = true
+      websocketMock.handlers.get('replay_batch')!({ session_id: 'ses_1', direction: 'backward', events: [rollout] })
+      websocketMock.handlers.get('replay_end')!({ session_id: 'ses_1', has_more: false })
+    } else {
+      vm.processEvent(mode === 'rollout first' ? native : rollout)
+    }
+    vm.processEvent({ ...common, msg_id: 'send-1', event_id: 'native-input:send-1' })
+    vm.processEvent(rollout)
+    vm.processEvent(native)
+    const inputs = () => vm.messages.filter((m: any) => m.type === 'user_text')
+    expect(inputs()).toHaveLength(1)
+    vm.processEvent({ ...rollout, event_id: 'jsonl:file:408:0' })
+    vm.processEvent({ ...native, part_id: 'p2', event_id: 'codex:33:user:ses_1:t1:p2:hash' })
+    expect(inputs()).toHaveLength(2)
+    vm.processEvent({ ...rollout, turn_id: 'turn:v1:codex:t2', source_turn_id: 't2', event_id: 'jsonl:file:505:0' })
+    expect(inputs()).toHaveLength(3)
+    wrapper.unmount()
+  })
+
   test.each([false, true])('merges Claude admitted and native echoes across lifecycle rows (local=%s)', (local) => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
-    if (local) vm.sendPromptText('one command')
+    if (local) { confirmPromptControl(); vm.sendPromptText('one command') }
     const msgID = local ? vm.messages.at(-1).__msg_id : 'remote-message'
     const turn = 'turn:v1:claude-code:cu-turn'
     vm.processEvent({ type:'user_text', text:'one command', msg_id:msgID, request_id:msgID, turn_id:turn })
@@ -1309,6 +1342,7 @@ describe('SessionDetail processEvent integration', () => {
   test('binds durable identity to an optimistic echo before non-adjacent replay', () => {
     const wrapper = shallowMount(SessionDetail)
     const vm = wrapper.vm as any
+    confirmPromptControl()
     vm.sendPromptText('继续')
     const event = { type: 'user_text', event_id: 'original', text: '继续' }
     vm.processEvent(event)

@@ -6,20 +6,27 @@ on:
       version:
         required: true
         type: string
+      prune_history:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       version:
         description: Existing GitHub Release tag to mirror
         required: true
         type: string
+      prune_history:
+        description: Apply release retention after verifying this release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: daemon-oss-${{ inputs.version }}
-  cancel-in-progress: false
+  group: daemon-oss-releases
+  queue: max
 
 jobs:
   mirror:
@@ -82,3 +89,11 @@ jobs:
           OSS_ACCESS_KEY_SECRET: ${{ steps.credentials.outputs.aliyun-access-key-secret }}
           OSS_SESSION_TOKEN: ${{ steps.credentials.outputs.aliyun-security-token }}
         run: '"$RUNNER_TEMP/oss-sdk/bin/python" scripts/mirror-release-oss.py "$VERSION" bundle'
+
+      - name: Prune historical OSS releases
+        if: inputs.prune_history
+        env:
+          OSS_ACCESS_KEY_ID: ${{ steps.credentials.outputs.aliyun-access-key-id }}
+          OSS_ACCESS_KEY_SECRET: ${{ steps.credentials.outputs.aliyun-access-key-secret }}
+          OSS_SESSION_TOKEN: ${{ steps.credentials.outputs.aliyun-security-token }}
+        run: '"$RUNNER_TEMP/oss-sdk/bin/python" scripts/mirror-release-oss.py "$VERSION" bundle --prune-history'

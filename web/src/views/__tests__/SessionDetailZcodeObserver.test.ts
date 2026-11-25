@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, test, expect, vi } from 'vitest'
 import { observerCanWrite, isReadOnlyObserverAgent } from '../../utils/observerSession'
 import { buildResumeCommand } from '../../utils/resumeCommand'
 import SessionDetail from '../SessionDetail.vue'
+import ZcodeTaskProgress from '../../components/plan/ZcodeTaskProgress.vue'
+import { resetAgentPlanProgressForTests } from '../../composables/useAgentPlanProgress'
 import SessionActions from '../../components/SessionActions.vue'
 import ApprovalCard from '../../components/messages/ApprovalCard.vue'
 import OpenCodeQuestionCard from '../../components/messages/OpenCodeQuestionCard.vue'
@@ -49,6 +51,7 @@ const mounted: Array<ReturnType<typeof shallowMount>> = []
 
 beforeEach(() => {
   routeMock.current = reactive({ params: { id: 'desktop-1' }, query: {} as Record<string, string> })
+  resetAgentPlanProgressForTests()
   websocketMock.handlers.clear()
   websocketMock.send.mockClear()
 })
@@ -84,6 +87,28 @@ async function mountObserver(agentType: 'zcode' | 'codex-desktop' = 'codex-deskt
 }
 
 describe('read-only observer session fail-closed gate', () => {
+  test('ZCode shows its own checklist across updates and clears', async () => {
+    const wrapper = await mountObserver('zcode')
+    const vm = wrapper.vm as any
+    const chip = () => wrapper.findComponent(ZcodeTaskProgress)
+    const snapshot = async (seq: number, statuses: string[]) => {
+      vm.processEvent({ type: 'agent_todo', session_id: 'desktop-1', event_id: 'todo-' + seq, seq,
+        todos: statuses.map((status, index) => ({ content: 'Task ' + index, status })) })
+      await nextTick()
+    }
+    vm.processEvent({ type: 'agent_plan', session_id: 'desktop-1', event_id: 'project', part_id: 'openspec:1',
+      revision: 1, plan: [{ step: 'Independent project plan', status: 'pending' }] })
+    await nextTick()
+    expect(chip().exists()).toBe(false)
+    await snapshot(1, ['completed', 'completed', 'completed', 'in_progress', 'pending'])
+    expect(chip().props('plan').items).toHaveLength(5)
+    await snapshot(2, ['completed', 'completed', 'completed', 'completed', 'in_progress'])
+    expect(chip().props('plan').items.filter((item: any) => item.status === 'completed')).toHaveLength(4)
+    await snapshot(3, [])
+    expect(chip().exists()).toBe(false)
+    expect(vm.currentPlan.items).toHaveLength(1)
+  })
+
   test('isReadOnlyObserverAgent recognizes only permanent observer agents', () => {
     expect(isReadOnlyObserverAgent('zcode')).toBe(true)
     expect(isReadOnlyObserverAgent('codex-desktop')).toBe(true)

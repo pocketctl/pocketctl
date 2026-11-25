@@ -47,3 +47,16 @@ test('unknown provider results expose accounting reconciliation without a paid r
  const result=await lifecycleStatus({query} as unknown as pg.Pool,'installation','enabled')
  expect(result.records[0]).toMatchObject({waiting_for:'provider_reconciliation',automatic_model_retry:false,next_evaluate_at:expect.any(Date)})
 })
+
+test('stored source details keep the closed source vocabulary at the management boundary',async()=>{
+ const query=vi.fn(async(sql:string)=>({rows:sql.includes('SELECT b.bundle_id')?[
+  {state:'blocked',run_state:'failed',run_reason:'processing_pin_expired_or_unavailable/pin_renew/private-source-value'},
+  {state:'blocked',run_state:'failed',run_reason:'processing_pin_expired_or_unavailable/pin_renew/content_version_changed/private-source-value'},
+  {state:'blocked',run_state:'failed',run_reason:'processing_pin_expired_or_unavailable/pin_renew/content_version_changed'},
+ ]:[]}))
+ const status=await lifecycleStatus({query} as unknown as pg.Pool,'installation','enabled')
+ expect(JSON.stringify(status)).not.toContain('private-source-value')
+ expect(status.records.map(r=>[r.run_reason,r.source_stage,r.source_reason])).toEqual([
+  ['unknown',null,null],['unknown',null,null],['processing_pin_expired_or_unavailable','pin_renew','content_version_changed'],
+ ])
+})

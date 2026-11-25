@@ -118,6 +118,9 @@ func runAgentCommand(args []string, stdout, stderr io.Writer, manager any) error
 	// its own `sync` subcommand and must NOT be routed through the opencode/codex
 	// launcher manager. Dispatch it before the managed-agent gate below.
 	if agent == zcodeAgentType {
+		if len(args) > 1 && args[1] == "quota" {
+			return runZcodeQuotaCommand(args[2:], os.Stdin, stdout, stderr)
+		}
 		return runZcodeSyncCommand(args[1:], stdout, stderr)
 	}
 	if agent != agentcontrol.AgentOpenCode && agent != agentcontrol.AgentCodex && agent != agentcontrol.AgentClaudeCode {

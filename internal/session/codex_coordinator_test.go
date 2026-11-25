@@ -1447,6 +1447,55 @@ func TestCodexCoordinatorCanceledHealthProbePreservesRuntime(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerOwnsInputAfterWatcherDiscovery(t *testing.T) {
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
+	const id = "terminal-first"
+	if !sm.RegisterTerminalSession(id, "/work", 0, "", protocol.StatusIdle, adapter.AgentCodex) {
+		t.Fatal("expected terminal history watcher to start")
+	}
+	ps := sm.sessions[id]
+	ps.ControlMode = protocol.ControlManaged
+	if sm.CodexAppServerOwnsInput(id) {
+		t.Fatal("managed metadata alone must not discard the only prompt")
+	}
+	c := newVerifiedTestCodexCoordinator(sm)
+	client := newFakeCodexRuntimeClient()
+	c.runtime = &codexAppServerRuntime{Client: client}
+	c.subscribed[id] = struct{}{}
+	ps.Backend = newCodexAppServerBackend(sm, c, client, c.generation)
+	if !sm.CodexAppServerOwnsInput(id) {
+		t.Fatal("subscribed app-server and watcher would both publish the prompt")
+	}
+	live := []protocol.DaemonEvent{
+		{SessionID: id, Type: "agent_text", MessagePhase: "final_answer"},
+		{SessionID: id, Type: protocol.EventTypeTurnStatus, TurnStatus: protocol.TurnStateCompleted},
+		{SessionID: id, Type: "session_status", Status: protocol.StatusIdle},
+	}
+	for _, ev := range live {
+		if !sm.CodexAppServerOwnsRolloutEvent(ev) {
+			t.Errorf("watcher can preempt a subscribed %s", ev.Type)
+		}
+		ev.Resync = true
+		if sm.CodexAppServerOwnsRolloutEvent(ev) {
+			t.Errorf("unassociated historical %s discarded", ev.Type)
+		}
+	}
+	c.detachedThreads = map[string]bool{id: true}
+	for _, ev := range live {
+		if sm.CodexAppServerOwnsRolloutEvent(ev) {
+			t.Errorf("lost detached fallback for %s", ev.Type)
+		}
+	}
+	if sm.CodexAppServerOwnsInput(id) {
+		t.Fatal("detached backend must allow watcher input")
+	}
+	delete(c.detachedThreads, id)
+	c.generation++
+	if sm.CodexAppServerOwnsInput(id) {
+		t.Fatal("stale backend must allow watcher input")
+	}
+}
+
 func TestCodexRecoveryReservesNativeHistoryBeforeAsyncSubscription(t *testing.T) {
 	sm := NewSessionManager(make(chan protocol.DaemonEvent, 16))
 	sm.sessions["recovering"] = &ProcessState{SessionID: "recovering", Agent: adapter.AgentCodex, Source: "terminal", Status: protocol.StatusIdle}

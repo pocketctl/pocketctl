@@ -16,18 +16,22 @@ export async function stageLifecycleTurn(client:Pick<pg.PoolClient,'query'>,inpu
 /** Caller holds session/installation purge locks and the current policy fence. */
 export async function stagePreparedLifecycleTurn(client:Pick<pg.PoolClient,'query'>,input:ReturnType<typeof prepareLifecycleTurn>,policy:CurationPolicy,dialogue=false){
  const {digest,members,unknown}=input
- if(dialogue&&(await client.query(`SELECT 1 FROM work_episodes WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3
-    AND dialogue_completion @> $4::jsonb`,[input.installationId,input.sessionId,input.turnId,{digest:digest.toString('hex'),policy:policy.revision}])).rowCount)return
+ const disposition=!members.length?(unknown?'provenance_unknown':'skipped_policy'):null
+ if(dialogue&&(!members.length||!unknown)&&(await client.query(`SELECT 1 FROM work_episodes WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3
+    AND compiler_version='relay-turn-v1' AND dialogue_completion @> $4::jsonb
+    AND (dialogue_completion->'disposition') IS NOT DISTINCT FROM to_jsonb($5::text)
+    AND COALESCE(dialogue_completion->'source_policy','"memory-source-admission-v1"'::jsonb)=to_jsonb($6::text)`,
+    [input.installationId,input.sessionId,input.turnId,{digest:digest.toString('hex'),policy:policy.revision},disposition,LIFECYCLE_SOURCE_POLICY])).rowCount)return
  admissionLogger.log('info','source_admission_evaluated',{allowed:members.length,excluded:input.excluded,...input.diagnostics})
  if(!members.length){
   if(dialogue){
    await client.query(`UPDATE work_episodes SET dialogue_completion=$4::jsonb WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3
     AND compiler_version='relay-turn-v1'`,[input.installationId,input.sessionId,input.turnId,{digest:digest.toString('hex'),policy:policy.revision,
-     disposition:unknown?'provenance_unknown':'skipped_policy'}])
+     source_policy:LIFECYCLE_SOURCE_POLICY,disposition}])
    return
   }
   await client.query(`INSERT INTO memory_source_processing_receipts(installation_id,session_id,turn_id,source_digest,policy_version,disposition,allowed_count,excluded_count,complete)
-   VALUES($1,$2,$3,$4,$5,$6,0,$7,$8) ON CONFLICT DO NOTHING`,[input.installationId,input.sessionId,input.turnId,digest,LIFECYCLE_SOURCE_POLICY,unknown?'provenance_unknown':'skipped_policy',input.excluded,!unknown])
+   VALUES($1,$2,$3,$4,$5,$6,0,$7,$8) ON CONFLICT DO NOTHING`,[input.installationId,input.sessionId,input.turnId,digest,LIFECYCLE_SOURCE_POLICY,disposition,input.excluded,!unknown])
   return
  }
  const changed=(await client.query(`INSERT INTO memory_task_bundles(installation_id,session_id,task_key,source_digest,watermark)
@@ -93,9 +97,9 @@ export async function refreshLifecycleProcessingReceipt(client:Pick<pg.PoolClien
    disposition=EXCLUDED.disposition,allowed_count=EXCLUDED.allowed_count,excluded_count=EXCLUDED.excluded_count,complete=EXCLUDED.complete,created_at=clock_timestamp()`,
  [input.installationId,parent.session_id,source.turnId,parent.source_digest,LIFECYCLE_SOURCE_POLICY,disposition,source.admitted.length,source.events.length-source.admitted.length,complete])
  if(complete&&parent.dialogue_members){
-  await client.query(`UPDATE work_episodes e SET dialogue_completion=jsonb_build_object('digest',encode($4::bytea,'hex'),'policy',p.revision)
+  await client.query(`UPDATE work_episodes e SET dialogue_completion=jsonb_build_object('digest',encode($4::bytea,'hex'),'policy',p.revision,'source_policy',$5::text)
    FROM memory_curation_policies p WHERE e.installation_id=p.installation_id AND e.installation_id=$1 AND e.session_id=$2
-    AND e.turn_id=$3 AND e.compiler_version='relay-turn-v1'`,[input.installationId,parent.session_id,source.turnId,parent.source_digest])
+    AND e.turn_id=$3 AND e.compiler_version='relay-turn-v1'`,[input.installationId,parent.session_id,source.turnId,parent.source_digest,LIFECYCLE_SOURCE_POLICY])
  }
 
 }

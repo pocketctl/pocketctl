@@ -1056,6 +1056,11 @@ func (sm *SessionManager) EnrichOutgoingEvent(ev *protocol.DaemonEvent) {
 			// may bind only when it matches the reserved outbound source identity;
 			// bare daemon-originated content remains eligible.
 			canStamp := true
+			if sm.agentForTurn(rec) == adapter.AgentCodex {
+				// JSONL recovery and a late native final can arrive while a
+				// successor is running. Preserve their own native identity.
+				canStamp = !ev.Resync && (ev.TurnID == "" || ev.TurnID == rec.TurnID)
+			}
 			if sm.agentForTurn(rec) == adapter.AgentDSH && ev.SourceTurnID != "" {
 				canStamp = rec.SourceTurnID == ev.SourceTurnID
 			}
@@ -1090,7 +1095,7 @@ func (sm *SessionManager) EnrichOutgoingEvent(ev *protocol.DaemonEvent) {
 	}
 	reason := sm.stampNativeMemorySource(ev)
 	if ev.MemorySource == nil {
-		recordUnknownMemorySource(ev, sm.memoryEventProducer(ev), reason)
+		sm.recordUnknownMemorySource(ev, sm.memoryEventProducer(ev), reason)
 	}
 	if ev.ClassifierVersion == "" {
 		turn.Apply(ev, turn.Classify(ev, sm.turnMetrics))

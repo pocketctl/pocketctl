@@ -20,6 +20,8 @@ suite('business health PostgreSQL',()=>{
   const personal='dddddddd-dddd-4ddd-8ddd-dddddddddddd',organization='eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
   await pool.query('CREATE SCHEMA shared;CREATE TABLE shared.memory_source_modes(installation_id uuid PRIMARY KEY,mode text NOT NULL)')
   await pool.query("CREATE FUNCTION shared.memory_source_control_snapshot() RETURNS text LANGUAGE sql AS $$SELECT '1'::text$$")
+  await pool.query(`CREATE FUNCTION shared.memory_source_pipeline_health(uuid) RETURNS TABLE(failed_jobs text,stalled_roots text)
+   LANGUAGE sql STABLE AS $$ SELECT '0'::text,'0'::text $$`)
   await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version,created_at,last_ack_at,last_pull_at)
    SELECT id,'pocketctl-memory','active','ready',1,NOW()-interval '2 hours',NOW()-interval '301 seconds',NOW()-interval '2 hours' FROM unnest($1::uuid[]) id`,[[personal,organization]])
   await pool.query("INSERT INTO shared.memory_source_modes VALUES($1,'shared-active'),($2,'legacy-feed')",[personal,organization])
@@ -45,7 +47,7 @@ suite('business health PostgreSQL',()=>{
   }finally{
    bindSourcePool(pool,{namespace:'public'})
    await pool.query('DELETE FROM memory_installations WHERE installation_id=ANY($1::uuid[])',[[personal,organization]])
-   await pool.query('DROP FUNCTION shared.memory_source_control_snapshot();DROP TABLE shared.memory_source_modes;DROP SCHEMA shared')
+   await pool.query('DROP FUNCTION shared.memory_source_pipeline_health(uuid),shared.memory_source_control_snapshot();DROP TABLE shared.memory_source_modes;DROP SCHEMA shared')
   }
  })
  test('shared empty control ACK refreshes health; failed ACK still reports stalled',async()=>{

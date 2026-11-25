@@ -42,3 +42,21 @@ test('a live terminal witness may be absent on replay without changing canonical
  expect(()=>assertReplayCompatible(live,{...echo,text:'changed'})).toThrow('replay_payload_conflict')
  expect(()=>assertReplayCompatible(live,{...live,local_submit_id:'different'})).toThrow('replay_payload_conflict')
 })
+
+test.each(['unknown','codex'])('history diagnostics preserve an older %s observation',producer=>{
+ const saved={...legacy,memory_source:{...observed,producer}}
+ const history={...observed,source_path:'historical_resync',source_gap_reason:'historical_replay'}
+ expect(()=>assertReplayCompatible(saved,{...legacy,resync:true,memory_source:history},'codex')).not.toThrow()
+ expect(()=>assertReplayCompatible(saved,{...legacy,resync:true,memory_source:{...history,lineage_complete:true}},'codex')).toThrow('replay_provenance_conflict')
+ expect(saved.memory_source).toEqual({...observed,producer})
+})
+
+test('resync keeps the first observation path and its diagnostic',()=>{
+ const saved={...legacy,memory_source:{...observed,source_path:'readonly_observation',source_gap_reason:'no_live_dispatch_binding'}}
+ const replay={...legacy,resync:true,memory_source:{...observed,source_path:'historical_resync',source_gap_reason:'historical_replay'}}
+ expect(()=>assertReplayCompatible(saved,replay,'codex')).not.toThrow()
+ expect(()=>assertReplayCompatible(saved,{...replay,memory_source:observed},'codex')).not.toThrow()
+ const malformed={...saved,memory_source:{...saved.memory_source,source_gap_reason:'invalid diagnostic'}}
+ expect(()=>assertReplayCompatible(malformed,replay,'codex')).toThrow('replay_provenance_conflict')
+ expect(()=>assertReplayCompatible(saved,{...replay,memory_source:{...replay.memory_source,sequence:'2'}},'codex')).toThrow('replay_provenance_conflict')
+})

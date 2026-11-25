@@ -37,7 +37,9 @@ export const SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS=[
     OR e.generation::text IS DISTINCT FROM p_scope->>'modeGeneration'
     OR NOT shared.assert_memory_job_source(p_execution,CASE WHEN e.branch='canonical-shadow' THEN 'compare' ELSE 'provider' END) THEN PERFORM set_config('pocketctl.processing_pin_reason','execution_invalid',TRUE); RETURN FALSE;END IF;
    -- All later locks are try/NOWAIT: never wait for Relay while holding a job.
-   IF NOT shared.lock_memory_personal_source_commit(p_scope,'relay_event',p_root,p_version,FALSE) THEN PERFORM set_config('pocketctl.processing_pin_reason','authority_or_version_changed',TRUE); RETURN FALSE;END IF;
+   IF NOT shared.lock_memory_personal_source_commit(p_scope,'relay_event',p_root,p_version,FALSE) THEN
+    PERFORM set_config('pocketctl.processing_pin_reason',current_setting('pocketctl.personal_commit_reason'),TRUE); RETURN FALSE;
+   END IF;
    owner_id=(p_scope->>'principalUserId')::int;session_key=substr(p_root,strpos(p_root,':')+1);
    native=public.native_session_authority(session_key,owner_id,NULL);
    IF native->>'state' IS DISTINCT FROM 'current' THEN PERFORM set_config('pocketctl.processing_pin_reason','native_unavailable',TRUE); RETURN FALSE;END IF;

@@ -35,6 +35,13 @@ describe('SessionDetail floating composer layout', () => {
     expect(composer).toContain('var(--session-content-gutter)')
   })
 
+  test('reserves the narrow metadata row and keeps the same textarea height while connecting', () => {
+    const narrowControls = cssRule('.input-controls', source.slice(source.indexOf('@container (max-width: 620px)')))
+    expect(narrowControls).toContain('grid-template-rows: minmax(25px, auto) auto')
+    expect(source).not.toMatch(/\.composer-pending\s+\.chat-textarea\s*\{[^}]*height:/)
+    expect(cssRule('.waiting-for-control .input-meta')).toContain('visibility: hidden')
+  })
+
   test('anchors the mobile composer to the panned visual viewport bottom', () => {
     const mobileStyles = source.slice(source.indexOf('@media (max-width: 768px)'))
     const sessionLayout = cssRule('.session-layout', mobileStyles)

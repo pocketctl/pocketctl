@@ -209,7 +209,7 @@ describe('SessionDetail managed Codex terminal control', () => {
     const reply = 'Only the adapter and clients changed.'
 
     await nextTick()
-    setTerminalSession({})
+    setTerminalSession({ control_mode: null, capabilities: [] })
     await nextTick()
 
     websocketMock.handlers.get('agent_text')?.({ type: 'agent_text', session_id: 'thr_1', text: reply })
@@ -226,12 +226,13 @@ describe('SessionDetail managed Codex terminal control', () => {
     expect(wrapper.findAll('message-agent-stub')).toHaveLength(1)
   })
 
-  test('native Codex TUI session remains read-only even if a stale control mode says managed', async () => {
+  test('a managed hint without capabilities keeps the composer pending', async () => {
     const wrapper = mountSession()
     setTerminalSession({ control_mode: 'managed' })
     await nextTick()
 
-    expect(wrapper.find('.chat-input-container').exists()).toBe(false)
+    expect(wrapper.get('.chat-textarea').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeDefined()
   })
 
   test('labels an unmanaged Codex terminal session as locally controlled instead of ended', async () => {
@@ -400,7 +401,7 @@ describe('SessionDetail managed Codex terminal control', () => {
 
   test('unmanaged Codex stays read-only after a terminal status', async () => {
     const wrapper = mountSession()
-    setTerminalSession({})
+    setTerminalSession({ control_mode: null, capabilities: [] })
     await nextTick()
 
     expect(wrapper.find('.chat-input-container').exists()).toBe(false)
@@ -442,11 +443,15 @@ describe('SessionDetail managed Codex terminal control', () => {
     await nextTick()
     expect((wrapper.get('.chat-textarea').element as HTMLTextAreaElement).value).toBe('preserved draft')
     expect(wrapper.find('.host-offline-notice').exists()).toBe(false)
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeDefined()
+    setTerminalSession({ control_mode: 'managed', capabilities: ['message_acceptance_receipt'] })
+    await nextTick()
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeUndefined()
   })
 
   test('host-offline notice also replaces a read-only session state', async () => {
     const wrapper = mountSession()
-    setTerminalSession({})
+    setTerminalSession({ control_mode: null, capabilities: [] })
     await nextTick()
     expect(wrapper.find('.unmanaged-readonly-notice').exists()).toBe(true)
 

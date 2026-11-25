@@ -1,6 +1,6 @@
 import {expect,test} from 'vitest'
 import {evaluateLifecycleHealth,summarizeLifecycleHealth,type LifecycleHealthRow} from '../reporting/lifecycle-health.js'
-const row:LifecycleHealthRow={installation_id:'private-id',relay_status:'active',local_status:'ready',owner_scope_kind:'personal',owner_state:'active',policy_mode:'shadow',consume_mode:'off',cold_mode:'off',reclaim_mode:'off',turns:226,receipt_turns:226,complete_turns:0,provenance_unknown_turns:226,missing_receipt_turns:0,consolidation_completed:3,consolidation_failed:0,consolidation_stalled:0,committed_decisions:0,proposed_decisions:0,context_delivered:0,context_modes:['off'],counts_capped:false}
+const row:LifecycleHealthRow={installation_id:'private-id',coverage_basis:'current_native_input',recorded_projection_turns:0,recorded_projection_complete_turns:0,recorded_projection_unknown_turns:0,with_trusted_input_turns:0,partially_trusted_turns:0,trusted_input_turns:0,unknown_input_turns:226,policy_skipped_input_turns:0,blocked_turns:0,relay_status:'active',local_status:'ready',owner_scope_kind:'personal',owner_state:'active',policy_mode:'shadow',consume_mode:'off',cold_mode:'off',reclaim_mode:'off',turns:226,receipt_turns:226,complete_turns:0,provenance_unknown_turns:226,missing_receipt_turns:0,consolidation_completed:3,consolidation_failed:0,consolidation_stalled:0,committed_decisions:0,proposed_decisions:0,context_delivered:0,context_modes:['off'],counts_capped:false}
 test('shadow unknown-source coverage is limited without asserting formal writes or delivery',()=>{
  expect(evaluateLifecycleHealth(row,'shadow')).toMatchObject({mode:'shadow',execution:'healthy',coverage:'limited',formal_writes_enabled:false,reasons:['source_provenance_unknown'],consume_mode:'off'})
  const report=summarizeLifecycleHealth([row],'shadow')
@@ -14,13 +14,13 @@ test('disabled, paused and nonpersonal owners do not alert on retained failures 
  }
 })
 test('enabled idle lifecycle does not infer a failure from zero decisions or deliveries',()=>{
- expect(evaluateLifecycleHealth({...row,policy_mode:'enabled',turns:0,receipt_turns:0,provenance_unknown_turns:0,consolidation_completed:0},'enabled')).toMatchObject({execution:'idle',coverage:'idle',reasons:[],formal_writes_enabled:true})
+ expect(evaluateLifecycleHealth({...row,policy_mode:'enabled',turns:0,receipt_turns:0,provenance_unknown_turns:0,unknown_input_turns:0,consolidation_completed:0},'enabled')).toMatchObject({execution:'idle',coverage:'idle',reasons:[],formal_writes_enabled:true})
 })
 test('current consolidation failures and due stale work degrade execution separately from coverage',()=>{
- expect(evaluateLifecycleHealth({...row,policy_mode:'enabled',consolidation_failed:1,consolidation_stalled:2,provenance_unknown_turns:0,complete_turns:225,missing_receipt_turns:1},'enabled')).toMatchObject({execution:'degraded',coverage:'limited',reasons:['consolidation_failed','consolidation_stalled','coverage_incomplete']})
+ expect(evaluateLifecycleHealth({...row,policy_mode:'enabled',consolidation_failed:1,consolidation_stalled:2,provenance_unknown_turns:0,unknown_input_turns:0,complete_turns:225,missing_receipt_turns:1},'enabled')).toMatchObject({execution:'degraded',coverage:'limited',reasons:['consolidation_failed','consolidation_stalled','coverage_incomplete']})
 })
 test('global shadow bounds every lifecycle capability and caps prevent full coverage claims',()=>{
- const value={...row,policy_mode:'enabled',consume_mode:'enabled',cold_mode:'enabled',reclaim_mode:'shadow',complete_turns:226,provenance_unknown_turns:0,counts_capped:true}
+ const value={...row,policy_mode:'enabled',consume_mode:'enabled',cold_mode:'enabled',reclaim_mode:'shadow',complete_turns:226,provenance_unknown_turns:0,unknown_input_turns:0,counts_capped:true}
  expect(evaluateLifecycleHealth(value,'shadow')).toMatchObject({mode:'shadow',consume_mode:'shadow',cold_mode:'shadow',reclaim_mode:'shadow',formal_writes_enabled:false,coverage:'limited',reasons:['counts_capped']})
  expect(summarizeLifecycleHealth([value],'enabled')).toMatchObject({coverage:{status:'limited',counts_capped:true}})
 })

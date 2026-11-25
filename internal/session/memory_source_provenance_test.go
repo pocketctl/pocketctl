@@ -665,6 +665,9 @@ func TestMemorySourceCodexOutputBeforeAcceptedReply(t *testing.T) {
 		b.coord.publishProjected(p.Project(codexNotification("item/completed", `{"threadId":"thread","turnId":"native","item":{"id":"a1","type":"agentMessage","text":"early native result"}}`)))
 		drain()
 	}}
+	b.coord.mu.Lock()
+	b.coord.runtime.Client = b.client
+	b.coord.mu.Unlock()
 	ctx := withUserMessageCorrelation(context.Background(), userMessageCorrelation{RequestID: "request", MsgID: "message"})
 	if err := b.startTurn(ctx, "thread", "input", protocol.SessionConfig{}); err != nil {
 		t.Fatal(err)
@@ -764,8 +767,8 @@ func TestMemorySourceCodexDispatchDoesNotBorrowSuccessorRoot(t *testing.T) {
 	sm.registerMemoryInput(UserMessageInput{SessionID: "thread", RequestID: "next", MsgID: "next"}, logicalCodexTurnID("thread", "native"), "codex", "native")
 	finish(true)
 	for _, event := range drainEvents(sm.outputCh) {
-		if event.MemorySource == nil || event.MemorySource.LineageComplete {
-			t.Fatal("borrowed successor authority")
+		if event.MemorySource == nil || event.MemorySource.LineageComplete || event.MemorySource.AcceptedInputEventID != "" {
+			t.Fatal("borrowed successor identity or authority")
 		}
 	}
 }
@@ -830,6 +833,12 @@ func TestMemorySourceDispatchGapReasons(t *testing.T) {
 	ev.MemoryNative.ParentRecordID = "absent"
 	if reason := sm.stampNativeMemorySource(&ev); reason != "native_parent_missing" || ev.MemorySource != nil {
 		t.Fatalf("missing parent: reason=%q proof=%v", reason, ev.MemorySource)
+	}
+	missing := ev
+	sm.EnrichOutgoingEvent(&missing)
+	if gap := missing.MemorySource; gap == nil || gap.LineageComplete || gap.SourcePath != "managed_dispatch" ||
+		gap.AcceptedInputEventID != p.EventID || gap.SourceGapReason != "native_parent_missing" {
+		t.Fatalf("lost exact accepted root on an unproven native branch: %+v", gap)
 	}
 	ev.MemoryNative.DirectRoot = true
 	if reason := sm.stampNativeMemorySource(&ev); reason != "" || ev.MemorySource == nil || ev.MemorySource.SkillState != "skill" {

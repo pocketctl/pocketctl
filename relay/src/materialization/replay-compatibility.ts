@@ -46,7 +46,19 @@ export function assertReplayCompatible(canonical: Record<string, unknown>, raw: 
   // Historical producers also persisted the same unknown observation with an
   // unknown producer. Compare every field, including the exact field set;
   // this is replay tolerance, never validation or upgrading of that old proof.
-  const legacyPlaceholder = proof && isDeepStrictEqual(canonical.memory_source, {...proof,producer:'unknown'})
+  // A newer history reader can describe why the same negative observation
+  // lacks provenance. Compare the original proof fields and keep the first
+  // persisted observation, including its producer and diagnostics.
+  const historical = incoming.resync === true && (proof?.source_path === undefined ||
+    proof.source_path === 'historical_resync' && proof.source_gap_reason === 'historical_replay')
+  const coreFields = (p: Record<string, unknown>) => Object.fromEntries(Object.entries(p).filter(([key]) =>
+    !['source_path','source_gap_reason','accepted_input_event_id'].includes(key)))
+  const saved = canonical.memory_source
+  const comparable = historical && parseMemorySourceProvenance(saved)
+    ? coreFields(saved as Record<string,unknown>) : saved
+  const originalShape = historical && proof ? coreFields({...proof}) : proof
+  const legacyPlaceholder = originalShape && (isDeepStrictEqual(comparable, {...originalShape,producer:'unknown'})
+    || historical && isDeepStrictEqual(comparable, originalShape))
   if ((canonical.memory_source !== undefined && !legacyPlaceholder) || !proof
     || !isDeepStrictEqual(proof, incoming.memory_source)
     || proof.sequence !== '1' || proof.invocation_id !== proof.turn_id

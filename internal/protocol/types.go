@@ -234,19 +234,20 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
-	MemoryNative   *MemoryNativeEvent          `json:"-"`
-	LocalSubmitID  string                      `json:"local_submit_id,omitempty"` // native interactive submission witnessed by the daemon
-	MemorySource   *MemorySourceProvenance     `json:"memory_source,omitempty"`
-	RetryOfTurnID  string                      `json:"retry_of_turn_id,omitempty"`
-	AppliedConfig  *TeamRuntimeConfig          `json:"applied_config,omitempty"`
-	ConfigRevision int64                       `json:"config_revision,omitempty"`
-	ConfigHash     string                      `json:"config_hash,omitempty"`
-	Choice         string                      `json:"choice,omitempty"` // owner-selected PTY option on interaction_result
-	Invocation     map[string]any              `json:"invocation,omitempty"`
-	Directory      *DirectoryResult            `json:"directory,omitempty"`
-	Type           string                      `json:"type"`
-	Collaboration  *CollaborationAuthorization `json:"collaboration,omitempty"`
-	TeamContext    *CollaborationContext       `json:"team_context,omitempty"`
+	MemoryObservationID string                      `json:"-"` // physical JSONL locator only, never causal evidence
+	MemoryNative        *MemoryNativeEvent          `json:"-"`
+	LocalSubmitID       string                      `json:"local_submit_id,omitempty"` // native interactive submission witnessed by the daemon
+	MemorySource        *MemorySourceProvenance     `json:"memory_source,omitempty"`
+	RetryOfTurnID       string                      `json:"retry_of_turn_id,omitempty"`
+	AppliedConfig       *TeamRuntimeConfig          `json:"applied_config,omitempty"`
+	ConfigRevision      int64                       `json:"config_revision,omitempty"`
+	ConfigHash          string                      `json:"config_hash,omitempty"`
+	Choice              string                      `json:"choice,omitempty"` // owner-selected PTY option on interaction_result
+	Invocation          map[string]any              `json:"invocation,omitempty"`
+	Directory           *DirectoryResult            `json:"directory,omitempty"`
+	Type                string                      `json:"type"`
+	Collaboration       *CollaborationAuthorization `json:"collaboration,omitempty"`
+	TeamContext         *CollaborationContext       `json:"team_context,omitempty"`
 	// Seq is a monotonically increasing per-connection sequence number stamped
 	// by the ws.Client just before the event is sent to the relay. It enables
 	// at-least-once delivery: the relay dedups by (daemon_id, seq) and acks the

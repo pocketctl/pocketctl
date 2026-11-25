@@ -213,9 +213,9 @@ export class SourceProcessingPins {
         SELECT state,jsonb_build_object('content',content_revision,'authorization',authorization_revision,'storage',storage_revision) AS version
         FROM shared.memory_relay_source_authority($2::jsonb,'relay_event',$3)
        ), acquired AS MATERIALIZED (
-        SELECT version,CASE WHEN state='current' THEN shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,version,$4) ELSE FALSE END AS valid
+        SELECT version,state,CASE WHEN state='current' THEN shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,version,$4) ELSE FALSE END AS valid
         FROM authority
-       ) SELECT version,valid,current_setting('pocketctl.processing_pin_reason',true) AS reason FROM acquired`,
+       ) SELECT version,valid,CASE WHEN state='current' THEN current_setting('pocketctl.processing_pin_reason',true) ELSE 'authority_changed' END AS reason FROM acquired`,
        [this.executionId,JSON.stringify(pin.scope),pin.root.key,renew])).rows[0]
       if(row?.valid===true)protectedVersion=row.version
       lastReason=typeof row?.reason==='string'?row.reason:'acquire_denied'
@@ -248,7 +248,7 @@ export class SourceProcessingPins {
     // metadata has COMMITted and returned its physical client before backoff.
     await new Promise(resolve=>setTimeout(resolve,delay))
    }
-   if(lastBusy)throw new SourceUnavailableError('source_store_busy')
+   if(lastBusy)throw annotateSourceFailure(new SourceUnavailableError('source_store_busy'),renew?'pin_renew':'pin_acquire','lock_conflict')
    throw annotateSourceFailure(unavailable(),renew?'pin_renew':'pin_acquire',lastReason)
   }catch(error){this.fail(error);throw error}
  }

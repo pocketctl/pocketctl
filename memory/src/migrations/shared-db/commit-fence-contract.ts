@@ -3,28 +3,30 @@
 export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
  `CREATE OR REPLACE FUNCTION shared.lock_memory_personal_source_commit(p_scope JSONB,p_kind TEXT,p_root TEXT,p_expected JSONB,p_retained BOOLEAN)
   RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
-  DECLARE a RECORD;owner_id INT;installation UUID;session_key TEXT;native JSONB;fresh_native JSONB;session_ids TEXT[];sid TEXT;BEGIN
+  DECLARE a RECORD;owner_id INT;installation UUID;session_key TEXT;native JSONB;fresh_native JSONB;session_ids TEXT[];sid TEXT;denial TEXT := 'authority_changed';BEGIN
    IF p_scope IS NULL OR p_expected IS NULL OR p_retained IS NULL OR p_kind IS NULL OR p_kind NOT IN('relay_event','legacy_archive')
     OR jsonb_typeof(p_scope)<>'object' OR jsonb_typeof(p_expected)<>'object' OR octet_length(p_scope::text)>32768
-    OR octet_length(p_expected::text)>1024 OR p_root IS NULL OR length(p_root) NOT BETWEEN 1 AND 1024 THEN RETURN FALSE;END IF;
+    OR octet_length(p_expected::text)>1024 OR p_root IS NULL OR length(p_root) NOT BETWEEN 1 AND 1024 THEN PERFORM set_config('pocketctl.personal_commit_reason','invalid_input',TRUE); RETURN FALSE;END IF;
    IF p_expected-ARRAY['content','authorization','storage']<>'{}'::jsonb OR NOT(p_expected?&ARRAY['content','authorization','storage'])
     OR EXISTS(SELECT 1 FROM jsonb_each(p_expected) x WHERE jsonb_typeof(x.value)<>'string' OR x.value#>>'{}' !~ '^(0|[1-9][0-9]{0,18})$')
-    THEN RETURN FALSE;END IF;
+    THEN PERFORM set_config('pocketctl.personal_commit_reason','invalid_input',TRUE); RETURN FALSE;END IF;
    BEGIN
     owner_id=(p_scope->>'principalUserId')::int;installation=(p_scope->>'installationId')::uuid;
     session_key=substr(p_root,strpos(p_root,':')+1);
     IF owner_id IS NULL OR owner_id<=0 OR installation IS NULL OR p_scope->>'ownerScopeKind' IS DISTINCT FROM 'personal'
-     OR split_part(p_root,':',1) IS DISTINCT FROM owner_id::text OR session_key='' THEN RAISE lock_not_available;END IF;
+     OR split_part(p_root,':',1) IS DISTINCT FROM owner_id::text OR session_key='' THEN denial='invalid_input'; RAISE SQLSTATE 'P1001';END IF;
     -- The established Relay maintenance/owner fence precedes Session/root.
     IF NOT pg_try_advisory_xact_lock_shared(owner_id::bigint) THEN RAISE lock_not_available;END IF;
-    IF NOT shared.lock_memory_grant_authority(ARRAY[installation],ARRAY[]::uuid[]) THEN RAISE lock_not_available;END IF;
+    IF NOT shared.lock_memory_grant_authority(ARRAY[installation],ARRAY[]::uuid[]) THEN
+     denial=current_setting('pocketctl.grant_lock_reason'); RAISE SQLSTATE 'P1001';
+    END IF;
     PERFORM installation_id FROM shared.memory_source_modes WHERE installation_id=installation
      AND generation::text=p_scope->>'modeGeneration' AND mode='shared-active' FOR SHARE NOWAIT;
-    IF NOT FOUND THEN RAISE lock_not_available;END IF;
+    IF NOT FOUND THEN RAISE SQLSTATE 'P1001';END IF;
     session_ids=ARRAY[session_key];
     IF p_kind='relay_event' THEN
      native=public.native_session_authority(session_key,owner_id,NULL);
-     IF native->>'state' IS DISTINCT FROM 'current' THEN RAISE lock_not_available;END IF;
+     IF native->>'state' IS DISTINCT FROM 'current' THEN RAISE SQLSTATE 'P1001';END IF;
      SELECT array_agg(value ORDER BY value COLLATE "C") INTO session_ids FROM jsonb_array_elements_text(native->'sessionIds');
     END IF;
     -- Complete alias component is private observed authority, fenced to COMMIT.
@@ -35,23 +37,28 @@ export const SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS=[
     END LOOP;
     IF p_kind='relay_event' THEN
      fresh_native=public.native_session_authority(session_key,owner_id,NULL);
-     IF fresh_native IS DISTINCT FROM native THEN RAISE lock_not_available;END IF;
+     IF fresh_native IS DISTINCT FROM native THEN RAISE SQLSTATE 'P1001';END IF;
       PERFORM old_session_id FROM public.session_aliases WHERE old_session_id=ANY(session_ids) ORDER BY old_session_id FOR SHARE NOWAIT;
     END IF;
     PERFORM session_id FROM public.sessions WHERE session_id=ANY(session_ids) ORDER BY session_id FOR SHARE NOWAIT;
     -- Existing Memory purge/retention writers use the exclusive counterpart.
     IF NOT pg_try_advisory_xact_lock_shared(hashtextextended('purge:installation:'||installation::text,0)) THEN RAISE lock_not_available;END IF;
     PERFORM root_key FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key IN(SELECT owner_id::text||':'||id FROM unnest(session_ids) id) ORDER BY root_key FOR SHARE NOWAIT;
-    IF NOT FOUND THEN RAISE lock_not_available;END IF;
+    IF NOT FOUND THEN RAISE SQLSTATE 'P1001';END IF;
     IF p_retained THEN SELECT * INTO a FROM shared.memory_retained_relay_authority(p_scope,p_kind,p_root);
     ELSE SELECT * INTO a FROM shared.memory_relay_source_authority(p_scope,p_kind,p_root);END IF;
-    IF a.state IS DISTINCT FROM 'current' OR a.content_revision IS DISTINCT FROM p_expected->>'content'
-     OR a.authorization_revision IS DISTINCT FROM p_expected->>'authorization'
-     OR NOT p_retained AND a.storage_revision IS DISTINCT FROM p_expected->>'storage' THEN RAISE lock_not_available;END IF;
-    RETURN TRUE;
-   EXCEPTION WHEN lock_not_available THEN RETURN FALSE;
-   WHEN invalid_text_representation OR numeric_value_out_of_range THEN RETURN FALSE;
+    IF a.state IS DISTINCT FROM 'current' THEN RAISE SQLSTATE 'P1001';END IF;
+    IF a.content_revision IS DISTINCT FROM p_expected->>'content' THEN denial='content_version_changed';
+    ELSIF a.authorization_revision IS DISTINCT FROM p_expected->>'authorization' THEN denial='authorization_version_changed';
+    ELSIF NOT p_retained AND a.storage_revision IS DISTINCT FROM p_expected->>'storage' THEN denial='storage_version_changed';
+    ELSE RETURN TRUE;END IF;
+    RAISE SQLSTATE 'P1001';
+   EXCEPTION WHEN lock_not_available THEN denial='lock_conflict';
+   WHEN invalid_text_representation OR numeric_value_out_of_range THEN denial='invalid_input';
+   WHEN SQLSTATE 'P1001' THEN NULL;
    END;
+   -- Record the cause after rolling back every partial lock.
+   PERFORM set_config('pocketctl.personal_commit_reason',denial,TRUE); RETURN FALSE;
   END $$`,
  `REVOKE ALL ON FUNCTION shared.lock_memory_personal_source_commit(JSONB,TEXT,TEXT,JSONB,BOOLEAN) FROM PUBLIC`,
  `CREATE OR REPLACE FUNCTION shared.lock_memory_team_source_commit(p_scope JSONB,p_kind TEXT,p_root TEXT,p_expected JSONB,p_retained BOOLEAN)
