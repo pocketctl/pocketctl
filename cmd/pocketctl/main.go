@@ -3503,8 +3503,7 @@ func handleWatcherEvents(ctx context.Context, events <-chan watcher.SessionEvent
 							if events[i].SessionID == "" {
 								events[i].SessionID = sessionSnapshot.SessionID
 							}
-							if publishedAgent == adapter.AgentCodex && events[i].Type == "user_text" &&
-								sm.CodexAppServerOwnsInput(events[i].SessionID) {
+							if publishedAgent == adapter.AgentCodex && sm.CodexAppServerOwnsRolloutEvent(events[i]) {
 								continue
 							}
 							if events[i].Type == "session_status" && !events[i].Resync {

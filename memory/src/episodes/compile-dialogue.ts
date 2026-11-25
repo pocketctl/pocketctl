@@ -7,6 +7,8 @@ import type { CurationMode } from '../curation/contracts.js'
 import { prepareLifecycleTurn } from '../curation/prepare-lifecycle-turn.js'
 import { stagePreparedLifecycleTurn } from '../curation/task-repository.js'
 import { DialogueExcluded, DialogueInputGap, type DialogueGapProbe, prepareDialogue } from './turn-dialogue.js'
+import { parseMemorySourceProvenance } from './skill-provenance.js'
+import { LIFECYCLE_SOURCE_POLICY } from './source-admission.js'
 import { sanitizeText } from './content-policy.js'
 
 export async function compileDialogue(
@@ -99,15 +101,42 @@ export async function compileDialogue(
       length: text.length,
       truncated: text.length > 4000,
     }))
+    const lifecycle = policy && prepareLifecycleTurn({
+      installationId: install, sessionId: session, turnId: turn, events: input.events,
+    })
+    // The terminal is outside the admitted message set. Its diagnostics describe
+    // the producer's observation without granting lineage to a message.
+    const terminal = parseMemorySourceProvenance(input.terminal.proof)
+    const terminalGap = terminal?.source_gap_reason && terminal.session_id === session
+      && terminal.turn_id === turn && terminal.source_role === 'system'
+      ? {source_path: terminal.source_path, source_gap_reason: terminal.source_gap_reason}
+      : undefined
+    // Bind the Relay inventory and the lifecycle digest under the source fence.
+    const admission = lifecycle && {
+      episode_digest: input.ref.members,
+      digest: lifecycle.digest.toString('hex'),
+      source_policy: LIFECYCLE_SOURCE_POLICY,
+      provenance: lifecycle.unknown ? 'unknown' : lifecycle.members.length ? 'trusted' : 'skipped_policy',
+      allowed_count: lifecycle.members.length,
+      excluded_count: lifecycle.excluded,
+      diagnostics: lifecycle.diagnostics,
+      ...(terminalGap && {terminal_gap: terminalGap}),
+    }
+    const manifest = {dialogue: input.ref, ...(admission && {lifecycle_admission: admission})}
     await c.query(
       `INSERT INTO work_episodes(installation_id,episode_id,session_id,turn_id,state,outcome,terminal_at,
    ready_at,event_count,summary,compiler_version,evidence_manifest,compiled_at,source_digest,document_compiler_version,document)
    VALUES($1,gen_random_uuid(),$2,$3,'ready',$4,$5,now(),$6,$7,'relay-turn-v1',$8,now(),decode($9,'hex'),'relay-turn-v1',$10)
    ON CONFLICT(installation_id,session_id,turn_id) DO UPDATE SET outcome=excluded.outcome,state='ready',terminal_at=excluded.terminal_at,
     ready_at=now(),event_count=excluded.event_count,summary=excluded.summary,compiler_version=excluded.compiler_version,
-    dialogue_completion=NULL,document=excluded.document,compiled_at=excluded.compiled_at,source_digest=excluded.source_digest,document_compiler_version=excluded.document_compiler_version,
+    dialogue_completion=CASE WHEN work_episodes.evidence_manifest->'dialogue'=excluded.evidence_manifest->'dialogue'
+      AND work_episodes.dialogue_completion->>'digest'=excluded.evidence_manifest#>>'{lifecycle_admission,digest}'
+      THEN work_episodes.dialogue_completion END,
+    document=excluded.document,compiled_at=excluded.compiled_at,source_digest=excluded.source_digest,document_compiler_version=excluded.document_compiler_version,
     evidence_manifest=excluded.evidence_manifest WHERE work_episodes.session_id=excluded.session_id
-    AND work_episodes.evidence_manifest IS DISTINCT FROM excluded.evidence_manifest`,
+    AND (work_episodes.evidence_manifest->'dialogue' IS DISTINCT FROM excluded.evidence_manifest->'dialogue'
+      OR (excluded.evidence_manifest ? 'lifecycle_admission' AND work_episodes.evidence_manifest->'lifecycle_admission'
+       IS DISTINCT FROM excluded.evidence_manifest->'lifecycle_admission'))`,
       [
         install,
         session,
@@ -116,20 +145,12 @@ export async function compileDialogue(
         input.terminal.at,
         summary.length,
         JSON.stringify({ messages: summary }),
-        { dialogue: input.ref },
+        manifest,
         input.ref.members,
         JSON.stringify({ messages }),
       ],
     )
-    if (policy) {
-      const lifecycle = prepareLifecycleTurn({
-        installationId: install,
-        sessionId: session,
-        turnId: turn,
-        events: input.events,
-      })
-      await stagePreparedLifecycleTurn(c, lifecycle, policy, true)
-    }
+    if (policy && lifecycle) await stagePreparedLifecycleTurn(c, lifecycle, policy, true)
     await input.assertCurrent(c, { forCommit: true })
     await c.query(
       'DELETE FROM memory_dialogue_gaps WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3',

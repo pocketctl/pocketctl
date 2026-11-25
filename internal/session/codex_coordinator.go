@@ -66,7 +66,7 @@ type codexCoordinator struct {
 	skillsMu         sync.Mutex
 	titleMu          sync.Mutex
 	titleTurns       map[string]codexTitleTurn
-	dialogueInputs   map[string]codexDialogueInput // protected by mu
+	dialogueInputs   map[codexDialogueKey]codexDialogueInput // protected by mu
 	sm               *SessionManager
 
 	startPrivateProject codexRuntimeStarter
@@ -1012,7 +1012,7 @@ func (c *codexCoordinator) projectLiveAt(projector *codexProjection, message cod
 	// Read the terminal inventory before taking the projection lock.
 	var dialogueProof *protocol.MemorySourceProvenance
 	if message.Method == "turn/completed" {
-		dialogueProof = c.completedDialogueProof(projector.generation, id, message.Params)
+		dialogueProof = c.completedDialogueReceipt(projector.generation, id, message.Params)
 		if !c.admissionGenerationCurrent(projector.generation) || !c.admissionAllowed(id) {
 			return
 		}

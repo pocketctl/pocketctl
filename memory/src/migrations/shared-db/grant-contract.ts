@@ -48,7 +48,7 @@ export const SHARED_GRANT_FUNCTIONS=[
     PERFORM i.installation_id FROM public.extension_installations i WHERE i.installation_id=ANY(p_installations) AND i.provider_id='pocketctl-memory'
      ORDER BY i.installation_id FOR SHARE OF i NOWAIT;
     IF (SELECT count(DISTINCT i.installation_id) FROM public.extension_installations i WHERE i.installation_id=ANY(p_installations) AND i.provider_id='pocketctl-memory')
-      <> (SELECT count(DISTINCT id) FROM unnest(p_installations) id) THEN RAISE lock_not_available;END IF;
+      <> (SELECT count(DISTINCT id) FROM unnest(p_installations) id) THEN RAISE SQLSTATE 'P1001';END IF;
     PERFORM t.team_id FROM public.extension_teams t WHERE t.team_id IN(SELECT i.owner_scope_id FROM public.extension_installations i WHERE i.installation_id=ANY(p_installations) AND i.owner_scope_kind='team')
      ORDER BY t.team_id FOR SHARE OF t NOWAIT;
     PERFORM o.organization_id FROM public.extension_organizations o WHERE o.organization_id IN(
@@ -64,7 +64,10 @@ export const SHARED_GRANT_FUNCTIONS=[
        SELECT 1 FROM public.extension_installations i WHERE i.installation_id=ANY(p_installations) AND i.owner_scope_kind=m.scope_kind AND i.owner_scope_id=m.scope_id))
      ORDER BY u.id FOR SHARE OF u NOWAIT;
     PERFORM p.provider_id FROM public.extension_providers p WHERE p.provider_id='pocketctl-memory' FOR SHARE OF p NOWAIT;
-   EXCEPTION WHEN lock_not_available THEN RETURN FALSE;
+   EXCEPTION WHEN lock_not_available THEN
+    PERFORM set_config('pocketctl.grant_lock_reason','lock_conflict',TRUE); RETURN FALSE;
+   WHEN SQLSTATE 'P1001' THEN
+    PERFORM set_config('pocketctl.grant_lock_reason','authority_changed',TRUE); RETURN FALSE;
    END;
    RETURN TRUE;
   END $$`,

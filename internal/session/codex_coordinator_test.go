@@ -1466,7 +1466,26 @@ func TestCodexAppServerOwnsInputAfterWatcherDiscovery(t *testing.T) {
 	if !sm.CodexAppServerOwnsInput(id) {
 		t.Fatal("subscribed app-server and watcher would both publish the prompt")
 	}
+	live := []protocol.DaemonEvent{
+		{SessionID: id, Type: "agent_text", MessagePhase: "final_answer"},
+		{SessionID: id, Type: protocol.EventTypeTurnStatus, TurnStatus: protocol.TurnStateCompleted},
+		{SessionID: id, Type: "session_status", Status: protocol.StatusIdle},
+	}
+	for _, ev := range live {
+		if !sm.CodexAppServerOwnsRolloutEvent(ev) {
+			t.Errorf("watcher can preempt a subscribed %s", ev.Type)
+		}
+		ev.Resync = true
+		if sm.CodexAppServerOwnsRolloutEvent(ev) {
+			t.Errorf("unassociated historical %s discarded", ev.Type)
+		}
+	}
 	c.detachedThreads = map[string]bool{id: true}
+	for _, ev := range live {
+		if sm.CodexAppServerOwnsRolloutEvent(ev) {
+			t.Errorf("lost detached fallback for %s", ev.Type)
+		}
+	}
 	if sm.CodexAppServerOwnsInput(id) {
 		t.Fatal("detached backend must allow watcher input")
 	}

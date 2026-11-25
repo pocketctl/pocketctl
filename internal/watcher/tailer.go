@@ -168,6 +168,7 @@ func NewJSONLTailer(filePath, agentType string) (*JSONLTailer, error) {
 		filePath:        filePath,
 		codexHome:       rolloutHome(filePath, agentType),
 		localInputStart: info.Size(),
+		eventSourceID:   CodexReplaySourceID(filePath),
 		offset:          info.Size(), // Start from end
 		file:            f,
 		scanBuf:         make([]byte, 1024*1024),
@@ -363,6 +364,15 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 	// Reuse the pre-allocated 1MB buffer instead of allocating a new one each call
 	scanner := bufio.NewScanner(t.file)
 	scanner.Buffer(t.scanBuf, cap(t.scanBuf))
+	// The scanner reads ahead. Count actual consumed bytes (including CRLF)
+	// to retain the physical position of records lacking native identifiers.
+	nextOffset, recordStart := t.offset, t.offset
+	scanner.Split(func(data []byte, eof bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, eof)
+		recordStart = nextOffset
+		nextOffset += int64(advance)
+		return advance, token, err
+	})
 	replaying := t.replayUntil > 0 && t.offset < t.replayUntil
 
 	for scanner.Scan() {
@@ -380,6 +390,14 @@ func (t *JSONLTailer) TailNewLines() ([]protocol.DaemonEvent, []string, error) {
 		}
 		if t.offset >= t.localInputStart && !replaying {
 			t.markLocalSubmit(line, events)
+		}
+		if !t.stableEventIDs {
+			for i := range events {
+				ev := &events[i]
+				if ev.EventID == "" && ev.MemoryNative == nil && (ev.Type == "user_text" || ev.Type == "agent_text" && ev.Text != "") {
+					ev.MemoryObservationID = fmt.Sprintf("observed:jsonl:%s:%d:%d", t.eventSourceID, recordStart, i)
+				}
+			}
 		}
 		if t.stableEventIDs {
 			for i := range events {

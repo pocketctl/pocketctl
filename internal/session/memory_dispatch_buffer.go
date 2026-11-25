@@ -16,6 +16,8 @@ type memoryDispatchBuffer struct {
 	events        []protocol.DaemonEvent
 	bytes         int
 	timer         *time.Timer
+	settled       chan struct{}
+	accepted      bool
 }
 
 func (sm *SessionManager) beginMemoryCodexDispatch(in UserMessageInput) func(bool) {
@@ -35,7 +37,7 @@ func (sm *SessionManager) beginMemoryCodexDispatch(in UserMessageInput) func(boo
 		ledger.mu.Unlock()
 		return func(bool) {}
 	}
-	pending := &memoryDispatchBuffer{expectedInput: expected.EventID}
+	pending := &memoryDispatchBuffer{expectedInput: expected.EventID, settled: make(chan struct{})}
 	ledger.pending[in.SessionID] = pending
 	ledger.mu.Unlock()
 	var once sync.Once
@@ -46,6 +48,8 @@ func (sm *SessionManager) beginMemoryCodexDispatch(in UserMessageInput) func(boo
 				ledger.mu.Unlock()
 				return
 			}
+			pending.accepted = accepted
+			close(pending.settled)
 			delete(ledger.pending, in.SessionID)
 			if pending.timer != nil {
 				pending.timer.Stop()
@@ -58,10 +62,12 @@ func (sm *SessionManager) beginMemoryCodexDispatch(in UserMessageInput) func(boo
 				reason := "dispatch_unconfirmed"
 				if trusted {
 					reason = sm.stampNativeMemorySourceForInput(&event, pending.expectedInput)
+				} else if accepted && binding != nil {
+					reason = "dispatch_mismatch"
 				} else if accepted {
 					reason = "accepted_input_without_output_binding"
 				}
-				recordUnknownMemorySource(&event, "codex", reason)
+				sm.recordUnknownMemorySource(&event, "codex", reason)
 				sm.outputCh <- event
 			}
 		})
@@ -93,6 +99,7 @@ func (sm *SessionManager) bufferMemoryCodexEvent(event protocol.DaemonEvent) boo
 	}
 	// Overflow preserves every event, but denies provenance for this buffered
 	// prefix. Never let a late ACK retroactively upgrade already emitted events.
+	close(pending.settled)
 	delete(ledger.pending, event.SessionID)
 	if pending.timer != nil {
 		pending.timer.Stop()
@@ -100,8 +107,25 @@ func (sm *SessionManager) bufferMemoryCodexEvent(event protocol.DaemonEvent) boo
 	events := append(pending.events, event)
 	ledger.mu.Unlock()
 	for _, queued := range events {
-		recordUnknownMemorySource(&queued, "codex", "dispatch_buffer_overflow")
+		sm.recordUnknownMemorySource(&queued, "codex", "dispatch_buffer_overflow")
 		sm.outputCh <- queued
 	}
 	return true
+}
+
+// A native completion may arrive on the reader before turn/start returns on
+// the independent RPC response channel. Keep completion and its certificate
+// ordered behind the accepted input. The buffer's timer bounds this wait.
+func (sm *SessionManager) waitMemoryCodexDispatch(sessionID string) (unconfirmedInput string) {
+	l := sm.memoryLedger()
+	l.mu.Lock()
+	p := l.pending[sessionID]
+	l.mu.Unlock()
+	if p != nil {
+		<-p.settled
+		if !p.accepted {
+			return p.expectedInput
+		}
+	}
+	return ""
 }

@@ -421,8 +421,21 @@ func (b *CodexAppServerBackend) send(ctx context.Context, sessionID, content str
 			return ErrQueuedSessionBusy
 		}
 		params := map[string]any{"threadId": sessionID, "expectedTurnId": turnID, "input": input}
-		if err := b.client.Call(ctx, "turn/steer", params, nil); err != nil {
+		correlation := userMessageCorrelationFrom(ctx)
+		if correlation.MsgID != "" {
+			params["clientUserMessageId"] = correlation.MsgID
+		}
+		// A second writer can reach Core before the RPC reply. The original
+		// input can no longer independently authenticate subsequent output.
+		b.fenceSteeredOutput(sessionID, turnID)
+		var result struct {
+			TurnID string `json:"turnId"`
+		}
+		if err := b.client.Call(ctx, "turn/steer", params, &result); err != nil {
 			return fmt.Errorf("Codex turn/steer: %w", err)
+		}
+		if result.TurnID == turnID {
+			b.emitAcceptedCodexInput(ctx, sessionID, turnID, content, true)
 		}
 		// Steering binds to the running turn — never a new turn.
 		if b.sm != nil && b.sm.turnEnabled() {
@@ -583,36 +596,62 @@ func (b *CodexAppServerBackend) startTurnWithContextResult(ctx context.Context, 
 	if response.Turn.ID != "" {
 		b.coord.setActiveTurn(threadID, response.Turn.ID)
 		b.reserveNativeTurn(threadID, response.Turn.ID)
-		// Persist accepted input identity as an authoritative echo. Native user items
-		// can arrive before the RPC reply; clients reconcile by this exact turn.
-		if correlation := userMessageCorrelationFrom(ctx); correlation.MsgID != "" {
-			input := UserMessageInput{SessionID: threadID, RequestID: correlation.RequestID, MsgID: correlation.MsgID, InvocationID: codexInvocationFrom(ctx)}
-			turnID := logicalCodexTurnID(threadID, response.Turn.ID)
-			// A terminal-accessible app-server accepts other writers into the same
-			// native turn. Its ACK identifies our input, not subsequent output.
-			causalRoot := ""
-			b.coord.mu.Lock()
-			runtime := b.coord.runtime
-			if runtime != nil && runtime.PrivateStdio && runtime.Endpoint == "" && runtime.RemoteURI == "" && b.generation == b.coord.generation {
-				causalRoot = response.Turn.ID
-			}
-			if runtime != nil && runtime.Client == b.client && b.generation == b.coord.generation {
-				b.coord.rememberDialogueInputLocked(input, response.Turn.ID, turnID, content)
-			}
-			b.coord.mu.Unlock()
-			proof := b.sm.registerMemoryInput(input, turnID, adapter.AgentCodex, causalRoot)
-			b.sm.acceptMemoryInput(proof)
-			b.sm.outputCh <- protocol.DaemonEvent{
-				Type: "user_text", SessionID: threadID, MsgID: input.MsgID, RequestID: input.RequestID, Text: content,
-				MemorySource: proof,
-				TurnID:       turnID, SourceTurnID: response.Turn.ID,
-				RetryOfTurnID: correlation.RetryOfTurnID,
-				EventID:       "native-input:" + correlation.MsgID}
-		}
-
+		b.emitAcceptedCodexInput(ctx, threadID, response.Turn.ID, content, false)
 	}
 	finishMemoryDispatch(true)
 	return evidenceSent, nil
+}
+
+// A native ACK authenticates this input only. Shared runtimes require the
+// full terminal inventory before any output can be certified. A steer adds
+// another input to the turn, so no individual input can prove the final.
+func (b *CodexAppServerBackend) emitAcceptedCodexInput(ctx context.Context, threadID, nativeTurn, content string, steer bool) {
+	correlation := userMessageCorrelationFrom(ctx)
+	if correlation.MsgID == "" || b.sm == nil {
+		return
+	}
+	input := UserMessageInput{SessionID: threadID, RequestID: correlation.RequestID, MsgID: correlation.MsgID, InvocationID: codexInvocationFrom(ctx)}
+	turnID := logicalCodexTurnID(threadID, nativeTurn)
+	causalRoot := ""
+	b.coord.mu.Lock()
+	runtime := b.coord.runtime
+	if runtime != nil && runtime.Client == b.client && b.generation == b.coord.generation {
+		if steer {
+			key := codexDialogueKey{thread: threadID, turn: nativeTurn}
+			if entry, ok := b.coord.dialogueInputs[key]; ok && entry.generation == b.generation {
+				entry.ambiguous = true
+				b.coord.dialogueInputs[key] = entry
+			}
+		} else {
+			if runtime.PrivateStdio && runtime.Endpoint == "" && runtime.RemoteURI == "" {
+				causalRoot = nativeTurn
+			}
+			b.coord.rememberDialogueInputLocked(input, nativeTurn, turnID, content)
+		}
+	}
+	b.coord.mu.Unlock()
+	proof := b.sm.registerMemoryInput(input, turnID, adapter.AgentCodex, causalRoot)
+	if steer {
+		b.fenceSteeredOutput(threadID, nativeTurn)
+	}
+	b.sm.acceptMemoryInput(proof)
+	b.sm.outputCh <- protocol.DaemonEvent{
+		Type: "user_text", SessionID: threadID, MsgID: input.MsgID, RequestID: input.RequestID, Text: content,
+		MemorySource: proof, TurnID: turnID, SourceTurnID: nativeTurn,
+		RetryOfTurnID: correlation.RetryOfTurnID, EventID: "native-input:" + correlation.MsgID,
+	}
+}
+
+func (b *CodexAppServerBackend) fenceSteeredOutput(thread, nativeTurn string) {
+	if b.sm == nil {
+		return
+	}
+	l := b.sm.memoryLedger()
+	l.mu.Lock()
+	if entry := l.bindings[thread]; entry != nil && entry.root.TurnID == logicalCodexTurnID(thread, nativeTurn) {
+		entry.ambiguousInput = true
+	}
+	l.mu.Unlock()
 }
 
 func codexIdleTurnRejected(err error) bool {

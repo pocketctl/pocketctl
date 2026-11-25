@@ -1,9 +1,14 @@
+import {SourceUnavailableError} from '@pocketctl/session-source'
+import {sourceFailureFields} from '../sources/diagnostics.js'
+import {commitOutcomeUnknown} from '../sources/projection-diagnostics.js'
+import {isKnownSourceUnavailableCode} from '../jobs/worker-diagnostics.js'
+import {blockCurationBundle,expireCurationRun} from './reconcile-expired.js'
 import {createMemoryLogger} from '../logging.js'
 import {withTransaction} from '../db.js'
 import {startCurationLeaseRenewal} from './run-lease.js'
 import {prepareCurationSources,attachPreparedSources} from '../sources/prepared-sources.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
-import {assertSourceProviderExecution,guardSourceExecutionCommit} from '../sources/source-execution.js'
+import {assertSourceProviderExecution,guardSourceExecutionCommit,SourceExecutionError} from '../sources/source-execution.js'
 import pg from 'pg'
 import {createHash,randomUUID} from 'node:crypto'
 import {canonicalPacketJson} from '../episodes/packet.js'
@@ -26,11 +31,29 @@ function bindingConflict(reason:'unknown_task'|'catalog_changed'|'write_conflict
  return new Error('task_binding_changed')
 }
 const hash=(v:unknown)=>createHash('sha256').update(canonicalPacketJson(v)).digest('hex')
+class CurationCommitUnknown extends Error {
+ constructor(cause:unknown){super('curation_commit_outcome_unknown',{cause})}
+}
+
+function publicationFailure(error:unknown):string{
+ if(error instanceof StaleJobFenceError||error instanceof Error&&error.message==='stale_job_fence')return 'curation_lease_lost'
+ const {source_stage,source_reason}=sourceFailureFields(error)
+ if(error instanceof SourceUnavailableError||source_stage&&source_reason){
+  const code=error instanceof SourceUnavailableError&&isKnownSourceUnavailableCode(error.code)?error.code:'source_unavailable'
+  return source_stage&&source_reason?`${code}/${source_stage}/${source_reason}`:code
+ }
+ if(error instanceof SourceExecutionError)return error.code
+ if(error instanceof Error&&['curation_source_changed','curation_source_unavailable','curation_lease_lost','scene_changed','task_binding_changed',
+   'source_reference_changed','source_processing_pin_unavailable','source_execution_generation_changed','lease_expired'].includes(error.message))return error.message
+ return 'curation_finalize_failed'
+}
+
 export async function curationTransaction<T>(pool:pg.Pool,installationId:string,bundleId:string,fn:(client:pg.PoolClient,bundle:any)=>Promise<T>,options:{sourceCommit?:boolean}={}):Promise<T|null>{
  const shared=sourcePoolContext(pool).namespace==='memory'
  const prepared=shared?await prepareCurationSources(pool,installationId,bundleId):null
  if(shared&&!prepared)return null
  const c=await pool.connect()
+ let discard=false
  try{await c.query('BEGIN');await c.query("SET LOCAL pocketctl.writer_capability='identity_v2'; SET LOCAL pocketctl.writer_identity_generation='adaptive'");const source=(await c.query('SELECT session_id FROM memory_task_bundles WHERE installation_id=$1 AND bundle_id=$2',[installationId,bundleId])).rows[0]
   if(!source){await c.query('COMMIT');return null}
   if(shared)await lockCurationAuthority(c,installationId)
@@ -40,8 +63,11 @@ export async function curationTransaction<T>(pool:pg.Pool,installationId:string,
    WHERE b.installation_id=$1 AND b.bundle_id=$2 AND b.body_state='present' AND ($3::boolean OR i.relay_status='active') AND i.local_status NOT IN('purging','purged','integrity_error')
    AND NOT EXISTS(SELECT 1 FROM memory_session_tombstones t WHERE t.installation_id=b.installation_id AND t.session_id=b.session_id) FOR UPDATE OF b`,[installationId,bundleId,shared])).rows[0]
   if(!bundle){await c.query('COMMIT');return null}
-  const result=await fn(c,bundle);if(prepared)await prepared.assertCurrent(c,{forCommit:true});if(options.sourceCommit!==false)await guardSourceExecutionCommit(c);await c.query('COMMIT');return result
- }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+  const result=await fn(c,bundle);if(prepared)await prepared.assertCurrent(c,{forCommit:true});if(options.sourceCommit!==false)await guardSourceExecutionCommit(c)
+  try{await c.query('COMMIT')}
+  catch(error){if(commitOutcomeUnknown(error)){discard=true;throw new CurationCommitUnknown(error)}throw error}
+  return result
+ }catch(e){if(!discard)await c.query('ROLLBACK').catch(()=>{discard=true});throw e}finally{c.release(discard)}
 }
 export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textGenerator?:TextGenerator;modelFingerprint:string}){
  const modelHash=hash({model:input.modelFingerprint,prompt:CONCLUSION_PROMPT_VERSION})
@@ -71,17 +97,26 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
    if(!bundle.dialogue_members&&evidence.reduce((n,s)=>n+s.text.length,0)>64000)throw new Error('curation_input_limit')
    const spaces=(await c.query("SELECT space_id::text id,name,domain FROM memory_spaces WHERE installation_id=$1 AND state='active' ORDER BY space_id LIMIT 100",[installationId])).rows
    const tasks=await loadTaskCatalog(c,installationId,bundle.session_id)
-   let inserted=(await c.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,claimed_by,claim_expires_at,authorization_epoch)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,clock_timestamp()+interval '5 minutes',$10) ON CONFLICT DO NOTHING RETURNING run_id::text,claim_epoch`,
-    [installationId,bundleId,bundle.revision,bundle.source_digest,policy.revision,policyHash,modelHash,policy.mode,job.job_id,policy.authorizationEpoch])).rows[0]
-   if(!inserted){
-    const old=(await c.query(`SELECT *,claim_expires_at<=clock_timestamp() AS lease_expired FROM memory_curation_runs WHERE installation_id=$1 AND bundle_id=$2 AND bundle_revision=$3 AND policy_hash=$4 AND model_config_hash=$5 AND mode=$6 FOR UPDATE`,[installationId,bundleId,bundle.revision,policyHash,modelHash,policy.mode])).rows[0]
-    if(old?.state==='running'){
+   // The locked intake bundle serializes reservation. Keep the same queue
+   // job bound to its paid/uncertain attempt across worker config changes.
+   const old=(await c.query(`SELECT r.*,claim_expires_at<=clock_timestamp() AS lease_expired
+    FROM memory_curation_runs r WHERE installation_id=$1 AND bundle_id=$2 AND bundle_revision=$3 AND
+     ((policy_hash=$4 AND model_config_hash=$5 AND mode=$6) OR (claimed_by=$7 AND
+       (state<>'blocked' OR error_code NOT IN('budget_exceeded','budget_unavailable') OR input_tokens>0 OR output_tokens>0 OR
+        EXISTS(SELECT 1 FROM memory_usage_outbox u WHERE u.installation_id=r.installation_id AND u.usage_id='curation:'||r.run_id::text))))
+    ORDER BY CASE WHEN state='blocked' AND error_code IN('budget_exceeded','budget_unavailable') THEN 1 ELSE 0 END,started_at DESC,run_id DESC
+    LIMIT 1 FOR UPDATE OF r`,[installationId,bundleId,bundle.revision,policyHash,modelHash,policy.mode,job.job_id])).rows[0]
+   let inserted
+   if(!old){
+    inserted=(await c.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,claimed_by,claim_expires_at,authorization_epoch)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,clock_timestamp()+interval '5 minutes',$10) RETURNING run_id::text,claim_epoch`,
+     [installationId,bundleId,bundle.revision,bundle.source_digest,policy.revision,policyHash,modelHash,policy.mode,job.job_id,policy.authorizationEpoch])).rows[0]
+   }else{
+    if(old.state==='running'){
      if(!old.lease_expired)throw new JobDeferredError('source_not_ready',new Date(Date.now()+300000))
-     await c.query("UPDATE memory_curation_runs SET state='provider_result_unknown',error_code='lease_expired',completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2",[installationId,old.run_id])
-     await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code='provider_result_unknown' WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId]);return null
+     await expireCurationRun(c,installationId,bundleId,Number(bundle.revision),old.run_id);return null
     }
-    if(old?.state==='blocked'&&['budget_exceeded','budget_unavailable'].includes(old.error_code)){
+    if(old.state==='blocked'&&['budget_exceeded','budget_unavailable'].includes(old.error_code)){
      if(new Date(bundle.next_evaluate_at).getTime()>Date.now())throw new JobDeferredError('source_not_ready',new Date(bundle.next_evaluate_at))
      // A definite budget refusal can take a new claim under current authority.
      // Prior usage and uncertain or running attempts cannot enter this retry.
@@ -107,8 +142,12 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
    const extract=reservation.dialogue?extractDialogueConclusions:extractConclusions
    try{result=input.textGenerator?await extract(input.textGenerator,{sources:reservation.evidence,spaces:reservation.spaces,tasks:reservation.tasks,requestKey:`curation:${reservation.runId}:${reservation.claimEpoch}`,signal,now:new Date()}):{ok:false as const,code:'budget_unavailable' as const,retryable:false}}
    catch{result={ok:false,code:'provider_result_unknown',retryable:false}}
+   const uncertain=!result.ok&&(Boolean('billingUncertain' in result&&result.billingUncertain)
+    ||Boolean('timeoutFallback' in result&&result.timeoutFallback&&(result.code==='budget_exceeded'||result.code==='budget_unavailable')))
+   const unknown=!result.ok&&(uncertain||['provider_result_unknown','http_error','aborted'].includes(result.code))
    if('usage' in result&&result.usage)await recordCurationProviderUsage(input.pool,{installationId,runId:reservation.runId,
-    inputTokens:result.usage.inputTokens,outputTokens:result.usage.outputTokens,model:result.usage.model,costMicros:result.usage.costMicros})
+    inputTokens:result.usage.inputTokens,outputTokens:result.usage.outputTokens,model:result.usage.model,costMicros:result.usage.costMicros,
+    responseClaim:{jobId:job.job_id,epoch:reservation.claimEpoch,uncertain:unknown}})
    const outcome=await curationTransaction(input.pool,installationId,bundleId,async(c,bundle)=>{
     if(fence)await assertJobFence(c,fence)
     const policy=await readCurationPolicy(c,installationId,input.mode)
@@ -117,18 +156,17 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
     const lease=(await c.query(`SELECT claim_expires_at>clock_timestamp() AS live FROM memory_curation_runs WHERE installation_id=$1 AND run_id=$2 AND claimed_by=$3 AND state='running' AND claim_epoch=$4 FOR UPDATE`,[installationId,reservation.runId,job.job_id,reservation.claimEpoch])).rows[0]
     if(!lease)throw new Error('curation_lease_lost')
     if(!lease.live){
-     await c.query("UPDATE memory_curation_runs SET state='provider_result_unknown',error_code='lease_expired',completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2",[installationId,reservation.runId])
-     await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code='provider_result_unknown' WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId]);return
+     const state=unknown?'provider_result_unknown':'failed'
+     await c.query("UPDATE memory_curation_runs SET state=$3,error_code=$4,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2",[installationId,reservation.runId,state,unknown?'provider_uncertain_at_expiry':'lease_expired'])
+     await blockCurationBundle(c,installationId,bundleId,reservation.revision,reservation.runId,unknown?state:'lease_expired');return
     }
     if(!result.ok){
-     const uncertain=('billingUncertain' in result&&result.billingUncertain)||Boolean('timeoutFallback' in result&&result.timeoutFallback&&(result.code==='budget_exceeded'||result.code==='budget_unavailable'))
      const code=uncertain?'provider_result_unknown':result.code
-     const unknown=code==='provider_result_unknown'||code==='http_error'||code==='aborted'
      await c.query('UPDATE memory_curation_runs SET state=$3,error_code=$4,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2',[installationId,reservation.runId,unknown?'provider_result_unknown':'blocked',code])
      const retryAt='retryAt' in result&&result.retryAt&&Number.isFinite(Date.parse(result.retryAt))?new Date(result.retryAt):new Date(Date.now()+300000)
      await c.query("UPDATE memory_task_bundles SET state='blocked',reason_code=$3,next_evaluate_at=$4 WHERE installation_id=$1 AND bundle_id=$2",[installationId,bundleId,code,retryAt]);return ['budget_exceeded','budget_unavailable'].includes(code)?retryAt:undefined
     }
-    await c.query(`UPDATE memory_curation_runs SET state='completed',result=$3::jsonb,input_tokens=$4,output_tokens=$5,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2`,[installationId,reservation.runId,JSON.stringify(result.tasks),result.usage.inputTokens,result.usage.outputTokens])
+    await c.query(`UPDATE memory_curation_runs SET state='completed',error_code=NULL,result=$3::jsonb,input_tokens=$4,output_tokens=$5,completed_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2`,[installationId,reservation.runId,JSON.stringify(result.tasks),result.usage.inputTokens,result.usage.outputTokens])
     const selectedIds=new Set(result.tasks.flatMap(task=>task.task_id?[task.task_id]:[]))
     const currentTasks=selectedIds.size?await loadTaskCatalog(c,installationId,bundle.session_id,selectedIds):[]
     let unresolved=result.tasks.some(task=>task.rejections.length>0)
@@ -173,22 +211,17 @@ export function createCurationWorker(input:{pool:pg.Pool;mode:CurationMode;textG
     if(outcome===null)throw new Error('curation_source_unavailable')
     return outcome
    }).catch(async(error)=>{
-    // A known provider response that loses its input/fence must not leave a
-    // permanent running lease or a success receipt. No response prose survives.
-    const reason=error instanceof StaleJobFenceError?'curation_lease_lost':error instanceof Error&&['curation_source_changed','curation_source_unavailable','curation_lease_lost','scene_changed','task_binding_changed'].includes(error.message)?error.message:null
-    // A transport/commit error may have an unknown database outcome. Only an
-    // explicit rejected fence proves this known response was not applied.
-    if(!reason)throw error
+    // If COMMIT lost its acknowledgment, the server may already have
+    // published the response. Leave the durable witnesses for reconciliation.
+    if(error instanceof CurationCommitUnknown)throw error
+    const reason=publicationFailure(error)
     await withTransaction(input.pool,async client=>{
-     // Use the result transaction's bundle-before-run lock order. A late
-     // response cannot block the bundle now owned by a replacement claim.
      await client.query('SELECT 1 FROM memory_task_bundles WHERE installation_id=$1 AND bundle_id=$2 FOR UPDATE',[installationId,bundleId])
-     const failed=await client.query(`UPDATE memory_curation_runs SET state='failed',error_code=$5,completed_at=clock_timestamp()
-      WHERE installation_id=$1 AND run_id=$2 AND claimed_by=$3 AND claim_epoch=$4 AND state='running'`,[installationId,reservation.runId,job.job_id,reservation.claimEpoch,reason])
-     if(failed.rowCount)await client.query(`UPDATE memory_task_bundles SET state='blocked',reason_code=$4
-      WHERE installation_id=$1 AND bundle_id=$2 AND revision=$3 AND state='running'
-       AND NOT EXISTS(SELECT 1 FROM memory_curation_runs WHERE installation_id=$1 AND bundle_id=$2 AND bundle_revision=$3 AND state IN('running','completed'))`,
-      [installationId,bundleId,reservation.revision,reason])
+     const failed=await client.query(`UPDATE memory_curation_runs SET state=$6,error_code=$5,completed_at=clock_timestamp()
+      WHERE installation_id=$1 AND run_id=$2 AND claimed_by=$3 AND claim_epoch=$4 AND
+       (state='running' OR (state='provider_result_unknown' AND error_code IN('lease_expired','provider_uncertain_at_expiry')) OR (state='failed' AND error_code='publication_interrupted'))`,
+      [installationId,reservation.runId,job.job_id,reservation.claimEpoch,reason,unknown?'provider_result_unknown':'failed'])
+     if(failed.rowCount)await blockCurationBundle(client,installationId,bundleId,reservation.revision,reservation.runId,reason.split('/')[0])
     })
     throw error
    })

@@ -235,6 +235,8 @@ export function certifiedCodexDialogue(
     !/^input:[a-f0-9]{64}$/.test(root.event_id) || root.invocation_id !== root.event_id ||
     root.source_role !== 'user' || root.skill_state !== 'non_skill' || !root.lineage_complete ||
     root.skill_invocation_id || root.parent_invocation_id || root.derived_from_event_ids.length ||
+    (root.accepted_input_event_id !== undefined && root.accepted_input_event_id !== root.event_id) ||
+    (cert.accepted_input_event_id !== undefined && cert.accepted_input_event_id !== root.event_id) ||
     unsafe.has(root.invocation_id) || cert.parent_invocation_id !== root.invocation_id ||
     BigInt(cert.sequence) <= BigInt(root.sequence)
   ) return

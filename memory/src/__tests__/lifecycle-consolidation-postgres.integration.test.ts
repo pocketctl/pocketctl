@@ -6,6 +6,12 @@ import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {governanceFixture} from '../testing/governance-fixture.js'
 import {createReviewService} from '../claims/review-service.js'
 import {createClaimRepository} from '../claims/repository.js'
+import {SourceUnavailableError} from '@pocketctl/session-source'
+import * as execution from '../sources/source-execution.js'
+import {annotateSourceFailure} from '../sources/diagnostics.js'
+import {reconcileExpiredCurationRuns} from '../curation/reconcile-expired.js'
+import {lifecycleStatus} from '../curation/status.js'
+import {createCurationExecutor} from '../curation/executor.js'
 import {createCurationWorker} from '../curation/worker.js'
 import {createSourceProjector} from '../projection/source-projector.js'
 import {stageLifecycleTurn} from '../curation/task-repository.js'
@@ -57,6 +63,7 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   expect((await pool.query('SELECT state,mode FROM memory_curation_runs WHERE installation_id=$1',[f.personal])).rows).toEqual([{state:'completed',mode:'shadow'}])
   expect((await pool.query('SELECT disposition,complete,allowed_count FROM memory_source_processing_receipts WHERE installation_id=$1',[f.personal])).rows).toEqual([{disposition:'no_durable_conclusion',complete:false,allowed_count:1}])
   expect((await pool.query('SELECT count(*)::int n FROM memory_candidates WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+  expect((await lifecycleStatus(pool,f.personal,'shadow')).records[0]).toMatchObject({run_result_state:'committed',publication_state:'not_published'})
   expect(await snapshot()).toBe(before)
  })
  test('nonempty shadow conclusion is visible read-only with exact evidence and scope fences',async()=>{
@@ -70,6 +77,8 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   const review=createReviewService(pool,createClaimRepository(pool))
   const page=await review.shadowQueuePage({installationId:f.personal})
   expect(page.total_count).toBe(1);expect(page.candidates[0]).toMatchObject({status:'shadow',statement:f.payload.text,evidence:[{excerpt:f.payload.text}],source_kind:'task_bundle',read_only:true})
+  const status=await lifecycleStatus(pool,f.personal,'shadow')
+  expect(status.records.map(r=>r.publication_state)).toEqual(['not_published','not_published'])
   expect((await review.reviewQueuePage({installationId:f.personal})).total_count).toBe(0)
   expect((await review.shadowQueuePage({installationId:f.team})).total_count).toBe(0)
   await expect(review.shadowQueuePage({installationId:f.team,cursor:page.candidates[0].candidate_id})).rejects.toThrow('invalid_cursor')
@@ -92,6 +101,7 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   const f=await fixture(),generate=vi.fn(async()=>success())
   await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())
   expect((await pool.query('SELECT disposition,complete,allowed_count FROM memory_source_processing_receipts')).rows).toEqual([{disposition:'no_durable_conclusion',complete:true,allowed_count:1}])
+  expect((await lifecycleStatus(pool,f.personal,'enabled')).records[0]).toMatchObject({run_result_state:'committed',publication_state:'not_published'})
   expect((await pool.query('SELECT count(*)::int n FROM memory_candidates')).rows[0].n).toBe(0)
   await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())
   expect(generate).toHaveBeenCalledTimes(1)
@@ -176,8 +186,8 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   vi.useFakeTimers({toFake:['setInterval','clearInterval']})
   try{await expect(worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal(),fence)).rejects.toThrow('curation_lease_lost')}
   finally{vi.useRealTimers()}
-  const run=(await pool.query('SELECT state,claim_expires_at::text FROM memory_curation_runs')).rows[0]
-  expect(run).toEqual({state:'running',claim_expires_at:deadline})
+  const run=(await pool.query('SELECT state,error_code,claim_expires_at::text FROM memory_curation_runs')).rows[0]
+  expect(run).toEqual({state:'running',error_code:null,claim_expires_at:deadline})
   expect((await pool.query('SELECT state FROM memory_task_bundles WHERE bundle_id=$1',[f.bundleId])).rows[0].state).toBe('running')
  })
  test.each(['expired_run','reclaimed_job'])('heartbeat cannot revive %s',async scenario=>{
@@ -199,16 +209,80 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
    else await work
   }finally{vi.useRealTimers()}
   const run=(await pool.query('SELECT state,claim_expires_at::text,result FROM memory_curation_runs')).rows[0]
-  expect(run).toEqual({state:scenario==='expired_run'?'provider_result_unknown':'failed',claim_expires_at:deadline,result:null})
+  expect(run).toEqual({state:'failed',claim_expires_at:deadline,result:null})
   expect(generate).toHaveBeenCalledTimes(1)
  })
- test('AC-15 expired provider lease becomes unknown and never repeats the provider call',async()=>{
+ test('AC-15 expired publication lease preserves the returned charge and never repeats the provider call',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{await pool.query("UPDATE memory_curation_runs SET claim_expires_at=clock_timestamp()-interval '1 second'");return success()})
   const w=worker({generateJson:generate} as TextGenerator)
   await w.consolidate(f.job,signal());await w.consolidate(f.job,signal())
   expect(generate).toHaveBeenCalledTimes(1)
-  expect((await pool.query('SELECT state FROM memory_curation_runs')).rows[0].state).toBe('provider_result_unknown')
+  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]).toEqual({state:'failed',error_code:'lease_expired'})
   expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(0)
+ })
+ test('a returned charge survives pin renewal denial, with the original publication diagnosis and no second call',async()=>{
+  const f=await fixture(), guard=vi.spyOn(execution,'guardSourceExecutionCommit')
+  const generate=vi.fn(async()=>{
+   guard.mockRejectedValueOnce(annotateSourceFailure(new SourceUnavailableError('processing_pin_expired_or_unavailable'),'pin_renew','authority_or_version_changed'))
+   return {...success(),usage:{inputTokens:2007,outputTokens:273,model:'synthetic'}}
+  })
+  const w=worker({generateJson:generate} as TextGenerator)
+  try{
+   await expect(w.consolidate(f.job,signal())).rejects.toThrow('processing_pin_expired_or_unavailable')
+   const status=await lifecycleStatus(pool,f.personal,'enabled')
+   expect(status.records.find(r=>r.bundle_id===f.bundleId)).toMatchObject({state:'blocked',run_state:'failed',
+    run_reason:'processing_pin_expired_or_unavailable',source_stage:'pin_renew',source_reason:'authority_or_version_changed',
+    accounting_state:'recorded',publication_state:'not_published',automatic_model_retry:false,input_tokens:2007,output_tokens:273})
+   await w.consolidate(f.job,signal())
+   // A software/config refresh between claims must not mint a paid retry.
+   await createCurationWorker({pool,mode:'enabled',textGenerator:{generateJson:generate} as TextGenerator,modelFingerprint:'updated'}).consolidate(f.job,signal())
+   expect(generate).toHaveBeenCalledTimes(1)
+   expect((await pool.query("SELECT count(*)::int n FROM memory_usage_outbox WHERE operation='curation'")).rows[0].n).toBe(1)
+   expect((await pool.query('SELECT result FROM memory_curation_runs')).rows).toEqual([{result:null}])
+   expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(0)
+  }finally{guard.mockRestore()}
+ })
+ test('a late known response refines only its own previously expired claim',async()=>{
+  const f=await fixture()
+  const generate=vi.fn(async()=>{
+   await pool.query("UPDATE memory_jobs SET state='dead' WHERE job_id=$1",[f.job.job_id])
+   await pool.query("UPDATE memory_curation_runs SET claim_expires_at=now()-interval '1 second'")
+   expect(await reconcileExpiredCurationRuns(pool)).toBe(1)
+   return success()
+  })
+  const w=worker({generateJson:generate} as TextGenerator)
+  await expect(w.consolidate(f.job,signal())).rejects.toThrow('curation_lease_lost')
+  expect((await pool.query('SELECT state,error_code,result FROM memory_curation_runs')).rows).toEqual([{state:'failed',error_code:'curation_lease_lost',result:null}])
+  expect((await pool.query('SELECT state,reason_code FROM memory_task_bundles WHERE bundle_id=$1',[f.bundleId])).rows[0]).toEqual({state:'blocked',reason_code:'curation_lease_lost'})
+  await w.consolidate(f.job,signal())
+  expect(generate).toHaveBeenCalledTimes(1)
+ })
+ test.each([true,false])('lost publication COMMIT acknowledgment with server commit=%s follows its durable outcome',async(committed)=>{
+  const f=await fixture(),generate=vi.fn(async()=>success()),w=worker({generateJson:generate} as TextGenerator)
+  const original=pg.Client.prototype.query
+  let publication:pg.Client|undefined
+  // Drop the acknowledgment only for the actual publication transaction.
+  const query=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:unknown[]){
+   const sql=args[0]
+   if(typeof sql==='string'&&sql.includes("UPDATE memory_curation_runs SET state='completed'"))publication=this
+   if(sql==='COMMIT'&&this===publication){
+    publication=undefined
+    return this.query(committed?'COMMIT':'ROLLBACK').then(()=>{throw Object.assign(Error('connection closed'),{code:'ECONNRESET'})})
+   }
+   return Reflect.apply(original,this,args)
+  } as typeof original)
+  try{await expect(w.consolidate(f.job,signal())).rejects.toThrow('curation_commit_outcome_unknown')}
+  finally{query.mockRestore()}
+  const initial=(await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]
+  expect(initial).toEqual(committed?{state:'completed',error_code:null}:{state:'running',error_code:'provider_response_received'})
+  expect((await lifecycleStatus(pool,f.personal,'enabled')).records[0]).toMatchObject({
+   accounting_state:'recorded',run_result_state:committed?'committed':'pending',publication_state:'not_published',automatic_model_retry:false})
+
+  await pool.query("UPDATE memory_curation_runs SET claim_expires_at=now()-interval '1 second'")
+  await w.consolidate(f.job,signal())
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]).toEqual(committed?initial:{state:'failed',error_code:'publication_interrupted'})
+  expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(committed?1:0)
  })
  test('AC-16 source change during provider call cannot commit old output',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{const payload={text:'changed body'};await pool.query('UPDATE source_events SET payload=$2,payload_hash=$3 WHERE source_event_id=$1',[f.id,payload,canonicalPayloadHash(payload)]);return success()})
@@ -257,7 +331,12 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())
   expect((await pool.query("SELECT source_kind,status,statement FROM memory_candidates WHERE source_kind='task_bundle'")).rows).toEqual([{source_kind:'task_bundle',status:'validated',statement:f.payload.text}])
   expect((await pool.query('SELECT disposition,complete FROM memory_source_processing_receipts')).rows).toEqual([{disposition:'concluded',complete:false}])
-  expect((await pool.query("SELECT count(*)::int n FROM memory_jobs WHERE job_type='curate_conclusions'")).rows[0].n).toBe(1)
+  const publication=async()=>(await lifecycleStatus(pool,f.personal,'enabled')).records.map(r=>r.publication_state)
+  expect(await publication()).toEqual(['not_published','not_published'])
+  const jobs=(await pool.query("SELECT * FROM memory_jobs WHERE installation_id=$1 AND job_type='curate_conclusions'",[f.personal])).rows
+  expect(jobs).toHaveLength(1)
+  expect(await createCurationExecutor({pool,mode:'enabled',tombstoneKeys:[]}).curate(jobs[0],signal())).toMatchObject({action:'create'})
+  expect(await publication()).toEqual(['published','published'])
  })
  test.each([false,true])('AC-15 rejected conclusions defer coverage with valid subset %s and close only at semantic deadline',async(validSubset)=>{
   const f=await fixture(),space=randomUUID()

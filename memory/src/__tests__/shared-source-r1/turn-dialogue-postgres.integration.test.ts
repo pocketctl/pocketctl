@@ -16,6 +16,7 @@ import { createEpisodeRepository } from '../../episodes/repository.js'
 import { createCurationExecutor } from '../../curation/executor.js'
 import { createCurationWorker, curationTransaction } from '../../curation/worker.js'
 import { loadCurrentLifecycleSources } from '../../curation/task-repository.js'
+import { loadLifecycleHealth } from '../../reporting/lifecycle-health.js'
 import { compileDialogue } from '../../episodes/compile-dialogue.js'
 import { SharedSourceReader } from '@pocketctl/session-source'
 import { withSourceJobExecution } from '../../sources/source-execution.js'
@@ -347,7 +348,6 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
       expect(availability.rows[0]).toMatchObject({allowed:true,started:expect.any(Date)})
       const {previewSourceRetention}=await import('../../retention/source.js')
       expect((await previewSourceRetention(f.runtime,14,1,{installationId:install})).eligible).toEqual([])
-      const {loadLifecycleHealth}=await import('../../reporting/lifecycle-health.js')
       expect((await loadLifecycleHealth(f.runtime,'enabled')).some(r=>r.installation_id===install)).toBe(true)
       const health = await f.runtime.query('SELECT * FROM shared.memory_source_pipeline_health($1)', [install])
       expect(health.rows[0]).toEqual({failed_jobs:'0',stalled_roots:'0'})
@@ -410,6 +410,8 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
       "INSERT INTO memory_spaces(installation_id,space_id,domain,name,destinations) VALUES($1,$2,'life','Personal travel',ARRAY['personal'])",
       [install, scene],
     )
+    const healthForTurn = async () => (await loadLifecycleHealth(f.runtime,'enabled')).find(row=>row.installation_id===install)
+    expect(await healthForTurn()).toMatchObject({turns:1,trusted_input_turns:1,receipt_turns:0,complete_turns:0})
     const id = bundle.dialogue_members[0].id
     const agent = bundle.dialogue_members[1].id
     const curator = createCurationWorker({
@@ -489,6 +491,7 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
       (await f.runtime.query('SELECT 1 FROM memory_task_bundles WHERE installation_id=$1', [install]))
         .rowCount,
     ).toBe(0)
+    expect(await healthForTurn()).toMatchObject({turns:1,trusted_input_turns:1,receipt_turns:1,complete_turns:1})
     await checkDialogueRef(f.runtime, install, proof, false)
     const client = await f.runtime.connect()
     try {
@@ -518,7 +521,8 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
     const priorTurn = turn
     turn = 'late-' + randomUUID()
     await emit('user_text', { text: '另一个问题' })
-    await emit('turn_status', { turn_status: 'completed' })
+    await emit('turn_status', {turn_status:'completed'}, 'unknown', {source_role:'system', lineage_complete:false,
+      source_path:'managed_dispatch',source_gap_reason:'codex_inventory_incomplete'})
     await compileDialogue(f.runtime, install, s.session, turn, 'off')
     expect(
       (
@@ -528,7 +532,8 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
         )
       ).rows,
     ).toEqual([{ reason: 'final_message_unconfirmed' }])
-    await emit('agent_text', { part_id: 'answer', message_phase: 'final_answer', text: '迟到的结论' })
+    await emit('agent_text', {part_id:'answer', message_phase:'final_answer', text:'迟到的结论'}, 'unknown',
+      {lineage_complete:false,source_path:'managed_dispatch',source_gap_reason:'codex_final_unconfirmed'})
     await compileDialogue(f.runtime, install, s.session, turn, 'off')
     expect(
       (
@@ -547,6 +552,12 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
         [install, 'dialogue:' + turn],
       )
     ).rows[0]
+    const admission = (await f.runtime.query(`SELECT evidence_manifest->'lifecycle_admission' AS admission
+      FROM work_episodes WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3`,[install,s.session,turn])).rows[0].admission
+    expect(admission).toMatchObject({provenance:'unknown',allowed_count:1,excluded_count:1,
+      diagnostics:{codex_final_unconfirmed:1},terminal_gap:{source_path:'managed_dispatch',source_gap_reason:'codex_inventory_incomplete'}})
+    expect(await healthForTurn()).toMatchObject({turns:2,trusted_input_turns:1,unknown_input_turns:1,
+      with_trusted_input_turns:2,partially_trusted_turns:1,complete_turns:1})
     expect(lateBundle).toBeDefined()
     await f.runtime.query('SELECT shared.dispatch_turn_dialogues()')
     const call = await emit('tool_call', {

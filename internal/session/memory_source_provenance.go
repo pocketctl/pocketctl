@@ -31,7 +31,7 @@ func memoryInputProvenance(in UserMessageInput, turnID, agent string) *protocol.
 		return nil
 	}
 	id := protocol.MemoryInputEventID(in.SessionID, in.RequestID, in.MsgID)
-	return &protocol.MemorySourceProvenance{Version: 1, Producer: memoryProducer(agent), SessionID: in.SessionID, TurnID: turnID, EventID: id, Sequence: "1", InvocationID: id, SourceRole: "user", SkillState: "non_skill", LineageComplete: true, DerivedFromEventIDs: []string{}}
+	return &protocol.MemorySourceProvenance{SourcePath: "managed_dispatch", AcceptedInputEventID: id, Version: 1, Producer: memoryProducer(agent), SessionID: in.SessionID, TurnID: turnID, EventID: id, Sequence: "1", InvocationID: id, SourceRole: "user", SkillState: "non_skill", LineageComplete: true, DerivedFromEventIDs: []string{}}
 }
 
 // Existing native adapters lack a complete skill lineage. Preserve that gap
@@ -56,18 +56,48 @@ func stampUnknownMemorySource(ev *protocol.DaemonEvent, producer string) {
 		digest := sha256.Sum256([]byte(producer + "\x00" + ev.SessionID + "\x00" + ev.TurnID + "\x00" + n.RecordID + "\x00" + ev.Type + "\x00" + ev.CallID + "\x00" + strconv.Itoa(n.Ordinal)))
 		eventID = "observed:" + hex.EncodeToString(digest[:])
 	}
-	ev.MemorySource = &protocol.MemorySourceProvenance{Version: 1, Producer: producer, SessionID: ev.SessionID, TurnID: ev.TurnID, EventID: eventID, Sequence: "1", InvocationID: ev.TurnID, SourceRole: role, SkillState: "unknown", LineageComplete: false, DerivedFromEventIDs: []string{}}
+	if eventID == "" {
+		eventID = ev.MemoryObservationID
+	}
+	path := "readonly_observation"
+	if ev.Resync {
+		path = "historical_resync"
+	}
+	ev.MemorySource = &protocol.MemorySourceProvenance{SourcePath: path, Version: 1, Producer: producer, SessionID: ev.SessionID, TurnID: ev.TurnID, EventID: eventID, Sequence: "1", InvocationID: ev.TurnID, SourceRole: role, SkillState: "unknown", LineageComplete: false, DerivedFromEventIDs: []string{}}
 }
 
 // Emit one diagnostic per newly classified dialogue event. Native metadata and
 // message bodies stay out of logs; repeated enrichment keeps the original proof.
-func recordUnknownMemorySource(ev *protocol.DaemonEvent, producer, reason string) {
+func (sm *SessionManager) recordUnknownMemorySource(ev *protocol.DaemonEvent, producer, reason string) {
 	if ev.MemorySource != nil || ev.SessionID == "" || ev.TurnID == "" {
 		return
 	}
 	stampUnknownMemorySource(ev, producer)
+	p := ev.MemorySource
+	p.SourceGapReason = reason
+	// The ACK identifies one input in this native turn. On a shared runtime
+	// it does not identify the author of other inputs or prove output lineage.
+	if !ev.Resync && ev.Type != "user_text" && reason != "dispatch_unconfirmed" && reason != "dispatch_buffer_overflow" && reason != "dispatch_mismatch" {
+		l := sm.memoryLedger()
+		l.mu.Lock()
+		b := l.bindings[ev.SessionID]
+		if b != nil && !b.awaitingDispatch && b.root.Producer == producer && b.root.TurnID == ev.TurnID {
+			n := ev.MemoryNative
+			matches := n != nil && !n.Sidechain && n.Producer == producer && b.nativeRoot != "" && n.RootID == b.nativeRoot
+			if producer == "codex" && ev.SourceTurnID != "" {
+				matches = ev.TurnID == logicalCodexTurnID(ev.SessionID, ev.SourceTurnID) && (n == nil || n.RootID == ev.SourceTurnID)
+			}
+			if matches {
+				p.SourcePath = "managed_dispatch"
+				if !b.ambiguousInput {
+					p.AcceptedInputEventID = b.root.EventID
+				}
+			}
+		}
+		l.mu.Unlock()
+	}
 	if !ev.Resync && (ev.Type == "user_text" || ev.Type == "agent_text" && ev.MessagePhase == "final_answer" || ev.Type == "turn_status" && ev.TurnStatus == "completed") {
-		slog.Info("memory lineage unavailable", "producer", producer, "session_id", ev.SessionID, "turn_id", ev.TurnID, "event_type", ev.Type, "reason", reason)
+		slog.Info("memory lineage unavailable", "producer", producer, "session_id", ev.SessionID, "turn_id", ev.TurnID, "event_type", ev.Type, "source_path", p.SourcePath, "accepted_input_event_id", p.AcceptedInputEventID, "reason", reason)
 	}
 }
 
@@ -96,6 +126,7 @@ type memorySourceLedger struct {
 }
 type memorySourceBinding struct {
 	awaitingDispatch bool
+	ambiguousInput   bool
 	root             *protocol.MemorySourceProvenance
 	started          time.Time
 	nativeRoot       string
@@ -130,13 +161,19 @@ func (sm *SessionManager) trackMemoryInput(in UserMessageInput, turnID, agent, n
 	defer l.mu.Unlock()
 	// The attached native TUI can add input to this same turn without passing
 	// through the daemon. Its ACK proves this input, not later items' parents.
-	if p == nil || (agent == "codex" && nativeRoot == "") {
+	if p == nil {
 		delete(l.bindings, in.SessionID)
 		return p
 	}
 	// Idempotent dispatch identity; do not reset a native graph on a duplicate ACK.
-	if old := l.bindings[in.SessionID]; old != nil && old.root.EventID == p.EventID && old.root.TurnID == turnID {
-		return old.root
+	if old := l.bindings[in.SessionID]; old != nil && old.root.TurnID == turnID {
+		if old.root.EventID == p.EventID {
+			return old.root
+		}
+		if agent == "codex" {
+			old.ambiguousInput = true
+			return p
+		}
 	}
 	if l.bindings[in.SessionID] == nil && len(l.bindings) >= 512 {
 		oldest := ""
@@ -161,6 +198,7 @@ func (sm *SessionManager) acceptMemoryInput(p *protocol.MemorySourceProvenance) 
 	bound := b != nil && b.root == p
 	if bound {
 		b.awaitingDispatch = false
+		bound = !b.ambiguousInput && (p.Producer != "codex" || b.nativeRoot != "")
 	}
 	l.mu.Unlock()
 	slog.Info("memory input dispatched", "producer", p.Producer, "session_id", p.SessionID, "turn_id", p.TurnID, "input_event_id", p.EventID, "has_output_binding", bound)
@@ -200,6 +238,8 @@ func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEve
 		return "no_live_dispatch_binding"
 	case expectedInput != "" && b.root.EventID != expectedInput || b.root.Producer != n.Producer:
 		return "dispatch_mismatch"
+	case b.ambiguousInput && b.root.TurnID == ev.TurnID:
+		return "codex_input_unconfirmed"
 	case n.Sidechain:
 		return "sidechain"
 	case n.RecordID == "":
@@ -219,6 +259,12 @@ func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEve
 	// Claude's PTY does not accept a client message UUID. Bind only the native
 	// user root written after this command, then demand actual parent UUIDs.
 	if b.nativeRoot == "" {
+		if n.Producer == "codex" {
+			if logicalCodexTurnID(ev.SessionID, n.RootID) != b.root.TurnID {
+				return "native_root_mismatch"
+			}
+			return "accepted_input_without_output_binding"
+		}
 		at, err := time.Parse(time.RFC3339Nano, n.OccurredAt)
 		if n.Producer != "claude" || !n.UserRoot || n.RootID != n.RecordID || err != nil || at.Before(b.started) {
 			return "native_user_root_unconfirmed"
@@ -272,7 +318,10 @@ func (sm *SessionManager) stampNativeMemorySourceForInput(ev *protocol.DaemonEve
 		state = "unknown"
 		complete = false
 	}
-	p := &protocol.MemorySourceProvenance{Version: 1, Producer: n.Producer, SessionID: ev.SessionID, TurnID: b.root.TurnID, EventID: eventID, Sequence: "1", InvocationID: invocation, ParentInvocationID: b.root.InvocationID, SourceRole: role, SkillState: state, LineageComplete: complete, DerivedFromEventIDs: []string{parent.EventID}}
+	p := &protocol.MemorySourceProvenance{SourcePath: "managed_dispatch", AcceptedInputEventID: b.root.EventID, Version: 1, Producer: n.Producer, SessionID: ev.SessionID, TurnID: b.root.TurnID, EventID: eventID, Sequence: "1", InvocationID: invocation, ParentInvocationID: b.root.InvocationID, SourceRole: role, SkillState: state, LineageComplete: complete, DerivedFromEventIDs: []string{parent.EventID}}
+	if !complete {
+		p.SourceGapReason = "native_lineage_incomplete"
+	}
 	if b.skill {
 		p.SkillInvocationID = invocation
 	}

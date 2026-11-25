@@ -60,13 +60,25 @@ suite('bounded durable native personal processing pins',()=>{
  })
  const pin=async(id=execution,s=scope,v=version,renew=false)=>(await runtime.query('SELECT shared.acquire_memory_source_processing_pin($1,$2,$3,$4,$5) AS ok',[id,s,root.key,v,renew])).rows[0].ok
  const blocks=async()=>(await relay.query("SELECT shared.memory_source_processing_blocks_purge(1,ARRAY['session']) AS blocked")).rows[0].blocked
- test('reports a finite denial reason in the same statement without altering boolean compatibility',async()=>{
-  const row=(await runtime.query(`WITH acquired AS MATERIALIZED (
-   SELECT shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,$4::jsonb,FALSE) AS valid)
+ const pinResult=async(v=version,renew=false)=>(await runtime.query(`WITH acquired AS MATERIALIZED (
+   SELECT shared.acquire_memory_source_processing_pin($1,$2::jsonb,$3,$4::jsonb,$5) AS valid)
    SELECT valid,current_setting('pocketctl.processing_pin_reason',true) AS reason FROM acquired`,
-   [execution,JSON.stringify(scope),root.key,JSON.stringify({...version,content:'999'})])).rows[0]
-  expect(row).toEqual({valid:false,reason:'authority_or_version_changed'})
+   [execution,scope,root.key,v,renew])).rows[0]
+ test.each(['content','authorization','storage'] as const)('renewal identifies changed %s version',async dimension=>{
   expect(await pin()).toBe(true)
+  expect(await pinResult({...version,[dimension]:'999'},true)).toEqual({valid:false,reason:dimension+'_version_changed'})
+  expect(await pinResult(version,true)).toEqual({valid:true,reason:'acquired'})
+ })
+ test('separates nonblocking lock contention from withdrawn authority',async()=>{
+  expect(await pin()).toBe(true)
+  const writer=await pool.connect()
+  try{
+   await writer.query('BEGIN')
+   await writer.query('SELECT installation_id FROM public.extension_installations WHERE installation_id=$1 FOR UPDATE',[inst])
+   expect(await pinResult(version,true)).toEqual({valid:false,reason:'lock_conflict'})
+  }finally{await writer.query('ROLLBACK');writer.release()}
+  await pool.query("INSERT INTO public.deleted_sessions VALUES('session')")
+  expect(await pinResult(version,true)).toEqual({valid:false,reason:'authority_changed'})
  })
  test('metadata lease is short and protects ordinary purge; cooling and expiry remain allowed',async()=>{
   expect(await pin()).toBe(true);expect(await blocks()).toBe(true)
@@ -261,23 +273,16 @@ suite('bounded durable native personal processing pins',()=>{
   expect(await blocks()).toBe(false)
  },15000)
 
- test('canonical shadow protects source IO but cannot charge; legacy and Team branches add no pins',async()=>{
+ test('retired shadow and legacy branches cannot acquire pins or charge',async()=>{
   await pool.query("UPDATE shared.memory_source_modes SET mode='shared-shadow' WHERE installation_id=$1",[inst])
-  await pool.query('UPDATE memory.memory_jobs SET claim_epoch=claim_epoch+1 WHERE job_id=$1',[job])
-  let epoch=(await pool.query('SELECT claim_epoch::text FROM memory.memory_jobs WHERE job_id=$1',[job])).rows[0].claim_epoch
-  await withSourceJobExecution(runtime,{jobId:job,claimedBy:'worker',claimEpoch:epoch},async()=>{
-   await protectSourceExecutionBodies(runtime,scope,root,version);expect(await blocks()).toBe(true)
-   await expect(assertSourceProviderExecution()).rejects.toThrow('source_shadow_provider_forbidden')
-   expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_provider_attempts')).rows[0].n).toBe(0)
-  },{branch:'canonical-shadow'})
+  const epoch=(await pool.query('UPDATE memory.memory_jobs SET claim_epoch=claim_epoch+1 WHERE job_id=$1 RETURNING claim_epoch::text',[job])).rows[0].claim_epoch
+  for(const branch of ['canonical-shadow','legacy-active'] as const){
+   await expect(withSourceJobExecution(runtime,{jobId:job,claimedBy:'worker',claimEpoch:epoch},async()=>{
+    throw Error('retired execution reached worker')
+   },{branch})).rejects.toThrow('source_execution_generation_changed')
+  }
   expect(await blocks()).toBe(false)
-  await pool.query('UPDATE memory.memory_jobs SET claim_epoch=claim_epoch+1 WHERE job_id=$1',[job])
-  epoch=(await pool.query('SELECT claim_epoch::text FROM memory.memory_jobs WHERE job_id=$1',[job])).rows[0].claim_epoch
-  await withSourceJobExecution(runtime,{jobId:job,claimedBy:'worker',claimEpoch:epoch},async()=>{
-   await protectSourceExecutionBodies(runtime,scope,root,version)
-   await protectSourceExecutionBodies(runtime,{...scope,ownerScopeKind:'team' as any},{kind:'team_collaboration',key:'team'},version)
-   expect(await blocks()).toBe(false)
-  },{branch:'legacy-active'})
+  expect((await pool.query('SELECT count(*)::int AS n FROM shared.memory_source_provider_attempts')).rows[0].n).toBe(0)
  })
  test('failed best-effort release is bounded and leaves only a short durable lease',async()=>{
   const epoch=(await pool.query('SELECT claim_epoch::text FROM memory.memory_jobs WHERE job_id=$1',[job])).rows[0].claim_epoch,locker=await pool.connect()
@@ -415,7 +420,7 @@ suite('bounded durable native personal processing pins',()=>{
   finally{await pool.query('UPDATE shared.memory_source_contract SET processing_read_version=1')}
  })
 
- test('pipeline health reports current failed/stalled dispatch and clears superseded or revoked targets',async()=>{
+ test('pipeline health reports current failed/stalled Team dispatch and clears superseded or revoked targets',async()=>{
   const scan='30000000-0000-0000-0000-000000000083',projection='40000000-0000-0000-0000-000000000083'
   const health=async()=>(await runtime.query('SELECT * FROM shared.memory_source_pipeline_health($1)',[inst])).rows[0]
   // Seed diagnostic states as fixture admin; no processing capability is run
@@ -425,13 +430,13 @@ suite('bounded durable native personal processing pins',()=>{
    try{await c.query('BEGIN;SET LOCAL session_replication_role=replica');await c.query(sql,args);await c.query('COMMIT')}
    catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
   }
+  await pool.query("SELECT shared.mark_memory_source_dirty('team_collaboration','team-health-test')")
   try{
-   await seedDistribution("INSERT INTO shared.memory_source_distributions(source_kind,root_key,scan_id,work_revision,control_revision,state) VALUES('relay_event','1:session',$1,1,shared.memory_source_control_snapshot()::bigint,'sealed')",[scan])
+   await seedDistribution("INSERT INTO shared.memory_source_distributions(source_kind,root_key,scan_id,work_revision,control_revision,state) VALUES('team_collaboration','team-health-test',$1,1,shared.memory_source_control_snapshot()::bigint,'sealed')",[scan])
    await pool.query("INSERT INTO shared.memory_source_distribution_targets(scan_id,cursor_key,installation_id,source_scope,source_version,target_mode,state) VALUES($1,'target',$2,$3,$4,'shared-active','current')",[scan,inst,scope,version])
-   await pool.query("INSERT INTO shared.memory_source_progress(installation_id,source_kind,root_key,mode_generation,binding_revision,authorization_revision,dispatched_revision,processed_revision,bootstrap_state,updated_at) VALUES($1,'relay_event','1:session',2,1,1,1,0,'ready',clock_timestamp()-interval '10 minutes')",[inst])
-   await pool.query("INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,attempts,created_at,completed_at,payload) VALUES($1,$2,'project_shared_source','shared-source:'||$3||':'||encode(sha256(convert_to('target','UTF8')),'hex'),90,'dead',12,clock_timestamp()-interval '10 minutes',clock_timestamp(),$4)",[projection,inst,scan,{scope,root,distribution_scan:scan,target_cursor:'target'}])
+   await pool.query("INSERT INTO shared.memory_source_progress(installation_id,source_kind,root_key,mode_generation,binding_revision,authorization_revision,dispatched_revision,processed_revision,bootstrap_state,updated_at) VALUES($1,'team_collaboration','team-health-test',2,1,1,1,0,'ready',clock_timestamp()-interval '10 minutes')",[inst])
+   await pool.query("INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,state,attempts,created_at,completed_at,payload) VALUES($1,$2,'project_shared_source','shared-source:'||$3||':'||encode(sha256(convert_to('target','UTF8')),'hex'),90,'dead',12,clock_timestamp()-interval '10 minutes',clock_timestamp(),$4)",[projection,inst,scan,{scope,root:{kind:'team_collaboration',key:'team-health-test'},distribution_scan:scan,target_cursor:'target'}])
    expect(await health()).toMatchObject({failed_jobs:'1',stalled_roots:'1'})
-   await pool.query("INSERT INTO memory.memory_canonical_projection_progress(installation_id,source_kind,root_key,context_key,source_version,state,updated_at) VALUES($1,'relay_event','1:session',shared.memory_source_scope_key($2),$3,'ready',clock_timestamp()-interval '1 day')",[inst,scope,version])
    await pool.query("UPDATE memory.memory_jobs SET state='pending',created_at=clock_timestamp() WHERE job_id=$1",[projection])
    expect(await health()).toMatchObject({failed_jobs:'0',stalled_roots:'0'})
    await pool.query("UPDATE memory.memory_jobs SET state='dead',created_at=clock_timestamp()-interval '10 minutes' WHERE job_id=$1",[projection])
@@ -447,7 +452,6 @@ suite('bounded durable native personal processing pins',()=>{
   }finally{
    await pool.query('DELETE FROM shared.memory_source_distribution_targets;DELETE FROM shared.memory_source_distributions;DELETE FROM shared.memory_source_progress')
    await pool.query('DELETE FROM memory.memory_jobs WHERE job_id=$1',[projection])
-   await pool.query('DELETE FROM memory.memory_canonical_projection_progress WHERE installation_id=$1',[inst])
   }
  })
 

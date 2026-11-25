@@ -1,4 +1,6 @@
 import {DIALOGUE_SOURCE_READERS} from './dialogue-source-contract.js'
+import {SHARED_GRANT_FUNCTIONS} from './grant-contract.js'
+import {SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS} from './processing-pin-contract.js'
 import {SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS} from './commit-fence-contract.js'
 import {SHARED_INPUT_START_FUNCTIONS} from './input-start-contract.js'
 import {APPEND_CAPTURE_V1_SHA256} from './offline-projection-contract.js'
@@ -199,7 +201,9 @@ export async function assertMemorySchedulingContract(db:Pick<pg.PoolClient,'quer
 const snapshotReaders=[
  ['shared.read_memory_dialogue_sources(jsonb,text,text,bigint[])',DIALOGUE_SOURCE_READERS],
  ['shared.read_memory_dialogue_archive(jsonb,text,text,uuid,integer)',DIALOGUE_SOURCE_READERS],
+ ['shared.lock_memory_grant_authority(uuid[],uuid[])',SHARED_GRANT_FUNCTIONS],
  ['shared.lock_memory_personal_source_commit(jsonb,text,text,jsonb,boolean)',SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS],
+ ['shared.acquire_memory_source_processing_pin(uuid,jsonb,text,jsonb,boolean)',SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS],
  ['shared.memory_relay_input_admitted(jsonb,bigint,boolean)',SHARED_INPUT_START_FUNCTIONS],
 ] as const
 const snapshotReaderBodies=snapshotReaders.map(([signature,definitions])=>{

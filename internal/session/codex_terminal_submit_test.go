@@ -98,7 +98,7 @@ func TestCodexTerminalSubmitAcknowledgesOnlyItsInputDuringConcurrentNativeStart(
 		if err != nil || len(echoes) != 1 || echoes[0].SourceTurnID != "racing-native" || echoes[0].MemorySource.EventID != protocol.MemoryInputEventID("thread", "req", "msg") {
 			t.Fatalf("lost native accepted input: %v %+v", err, echoes)
 		}
-		if b.sm.memoryLedger().bindings["thread"] != nil {
+		if binding := b.sm.memoryLedger().bindings["thread"]; binding == nil || binding.nativeRoot != "" {
 			t.Fatal("multi-writer turn retained output binding")
 		}
 	}
