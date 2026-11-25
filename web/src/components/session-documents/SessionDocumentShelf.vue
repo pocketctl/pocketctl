@@ -1,6 +1,6 @@
 <template>
   <section
-    v-if="documents.length || listStatus === 'loading' || listStatus === 'offline' || listStatus === 'unavailable'"
+    v-if="documents.length || listStatus === 'offline' || listStatus === 'unavailable'"
     class="session-document-shelf"
     aria-labelledby="session-document-shelf-title"
   >
@@ -10,10 +10,7 @@
       <span class="document-count">{{ documents.length }}</span>
       <span class="snapshot-label">{{ t('session.documents.snapshot') }}</span>
     </header>
-    <div v-if="listStatus === 'loading' && !documents.length" class="document-shelf-status" role="status">
-      {{ t('session.documents.loading') }}
-    </div>
-    <div v-else class="session-document-list">
+    <div v-if="documents.length" class="session-document-list">
       <button
         v-for="document in documents.slice(0, 3)"
         :key="`${document.documentId}:${document.versionId}`"
@@ -176,7 +173,7 @@ function openDocument(document: SessionDocumentMetadata, event: MouseEvent): voi
 .document-pagination{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);flex-shrink:0}
 .document-pagination button:disabled{opacity:.4;cursor:default}
 
-.session-document-shelf{flex-shrink:0;position:relative;overflow:hidden;border:1px solid var(--border-light);border-radius:12px;background:var(--surface);box-shadow:0 8px 28px #0000001f;animation:document-shelf-in .32s cubic-bezier(.2,.8,.2,1) both}
+.session-document-shelf{flex-shrink:0;position:relative;overflow:hidden;border:1px solid var(--border-light);border-radius:12px;background:var(--surface);box-shadow:0 8px 28px #0000001f}
 .session-document-shelf::before{content:"";position:absolute;inset:0 auto 0 0;width:2px;background:linear-gradient(#58a6ff,#e07a4f)}
 .document-shelf-header{min-height:46px;display:flex;align-items:center;gap:9px;padding:0 14px;border-bottom:1px solid var(--border)}
 .document-shelf-header svg{width:16px;height:16px;fill:none;stroke:var(--accent);stroke-width:1.8}
@@ -191,7 +188,6 @@ function openDocument(document: SessionDocumentMetadata, event: MouseEvent): voi
 .document-icon{position:relative;width:32px;height:38px;display:grid;place-items:center;border:1px solid var(--border-light);border-radius:5px;background:var(--bg);font:700 10px var(--font-mono);box-shadow:0 3px 9px #00000029}
 .document-icon.markdown{color:#58a6ff}.document-icon.html{color:#e07a4f}
 .document-copy{min-width:0}.document-copy strong{display:block;overflow:hidden;font:11px/1.4 var(--font-mono);text-overflow:ellipsis;white-space:nowrap}.document-copy small{display:flex;align-items:center;gap:5px;margin-top:4px;color:var(--fg-tertiary);font-size:10px}.verified{color:var(--success)}
-.document-open{color:var(--fg-tertiary);font-size:20px}.document-shelf-status,.document-shelf-note{margin:10px;padding:9px 10px;border-radius:7px;color:var(--accent);background:var(--accent-subtle);font-size:10px;line-height:1.5}.document-shelf-note.warning{color:var(--warning);background:var(--warning-bg)}
-@keyframes document-shelf-in{from{opacity:0;transform:translateY(8px)}}
+.document-open{color:var(--fg-tertiary);font-size:20px}.document-shelf-note{margin:10px;padding:9px 10px;border-radius:7px;color:var(--accent);background:var(--accent-subtle);font-size:10px;line-height:1.5}.document-shelf-note.warning{color:var(--warning);background:var(--warning-bg)}
 @media(max-width:768px){.session-document-shelf{overflow:visible;border:0;border-radius:0;background:transparent;box-shadow:none}.session-document-shelf::before,.document-shelf-header>svg{display:none}.document-shelf-header{min-height:34px;padding:0 2px;border:0}.document-shelf-header strong{color:var(--fg-secondary);font-size:11px}.document-count{padding:0;color:var(--fg-tertiary);background:transparent}.document-count::before{content:"· "}.snapshot-label{display:none}.session-document-list{overflow:hidden;padding:0;border:1px solid var(--border);border-radius:12px;background:var(--surface)}.session-document-row{min-height:58px;grid-template-columns:32px minmax(0,1fr) 18px;padding:8px 11px;border-radius:0}.session-document-row+.session-document-row{border-top:1px solid var(--border)}.session-document-row:hover{transform:none}.document-icon{width:28px;height:34px;box-shadow:none}.document-shelf-note{margin:8px 0 0}}
 </style>

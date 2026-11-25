@@ -67,13 +67,14 @@
           </button>
         </div>
       </div>
-      <div v-if="!hasNoSessions" class="session-panel-presence">
-        <span :class="['status-dot', { online: scopedOnlineHostCount > 0 }]"></span>
-        <span class="session-panel-presence-copy">{{ showingCachedNavigation ? t('session.cache_status_unknown') : t('session.host_filter_presence', { online: scopedOnlineHostCount, total: scopedHostCount }) }}</span>
-        <button type="button" class="session-search-toggle" :aria-label="t('workspace.search_sessions')" :aria-expanded="sessionSearchOpen" @click="sessionSearchOpen = !sessionSearchOpen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg></button>
+      <div class="session-panel-presence">
+        <template v-if="!hasNoSessions || showingCachedNavigation">
+          <span :class="['status-dot', { online: !showingCachedNavigation && scopedOnlineHostCount > 0 }]" aria-hidden="true"></span>
+          <span class="session-panel-presence-copy" role="status" :title="sidebarPresenceDetail">{{ sidebarPresenceLabel }}</span>
+        </template>
+        <button v-if="!hasNoSessions" type="button" class="session-search-toggle" :aria-label="t('workspace.search_sessions')" :aria-expanded="sessionSearchOpen" @click="sessionSearchOpen = !sessionSearchOpen"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg></button>
       </div>
       <div v-if="sessionSearchOpen" class="session-browser-search"><input v-model="sessionSearch" type="search" :aria-label="t('workspace.search_session_titles')" :placeholder="t('workspace.search_sessions_placeholder')" /></div>
-      <div v-if="showingCachedNavigation" class="cache-preview-notice" role="status">{{ t(navigationFailed ? 'session.cache_failed' : 'session.cache_updating') }}</div>
       <div class="session-list">
         <button v-if="archivedView" type="button" class="archive-back" @click="leaveArchived">‹ <span> {{ t('mobile.back_to_sessions') }} </span></button>
         <div v-else class="project-section-label">
@@ -1074,7 +1075,6 @@ let previewSource: 'memory' | 'disk' = 'disk'
 let navigationRequest = 0
 let historyCacheTimer: ReturnType<typeof setTimeout> | undefined
 const listedSessions = computed(() => navigationFresh.value ? allSessions.value : cachedSessions.value.length ? cachedSessions.value : allSessions.value)
-const showingCachedNavigation = computed(() => !navigationFresh.value && cachedSessions.value.length > 0 || !!cachedOrganization.value)
 // Only the mounted personal browser keeps these display-only snapshots. Use the
 // same grant and invalidation ticket as the encrypted disk preview.
 type PreviewTicket = ReturnType<typeof personalReadCache.ticket>
@@ -1806,6 +1806,15 @@ const archivedCursor = ref<string | null>(null)
 const sidebarBuckets = ref<Record<string, any[]>>({})
 const sidebarCursors = ref<Record<string, string | null>>({})
 const organizationLoaded = ref(false)
+// A same-host refresh keeps the loaded rows until the replacement arrives.
+const organizationPreview = computed(() => !organizationLoaded.value || navigationFailed.value ? cachedOrganization.value : null)
+const showingCachedNavigation = computed(() => (!navigationFresh.value && cachedSessions.value.length > 0) || !!organizationPreview.value)
+const sidebarPresenceLabel = computed(() => showingCachedNavigation.value
+  ? t(navigationFailed.value ? 'session.cache_failed' : 'session.cache_updating')
+  : t('session.host_filter_presence', { online: scopedOnlineHostCount.value, total: scopedHostCount.value }))
+const sidebarPresenceDetail = computed(() => showingCachedNavigation.value
+  ? t('session.cache_status_unknown') + ' · ' + sidebarPresenceLabel.value
+  : sidebarPresenceLabel.value)
 const projectMenuId = ref<string | null>(null)
 const editingProject = ref<SessionProject | null>(null)
 const newSessionProjectId = ref<string | null>(null)
@@ -1878,8 +1887,8 @@ function sortBucket(sessions: any[], mode: string) {
         - Math.max(new Date(a.last_activity_at || 0).getTime(),new Date(a.membership_changed_at || 0).getTime(),new Date(a.created_at || 0).getTime())))
 }
 const sidebarEntries = computed<any[]>(() => {
-  if (!archivedView.value && cachedOrganization.value) {
-    const snapshot = cachedOrganization.value
+  if (!archivedView.value && organizationPreview.value) {
+    const snapshot = organizationPreview.value
     const rows = (id: string) => (snapshot.buckets?.[id] || []).filter((s: any) => matchesSessionSearch(s) && (selectedAgentType.value === 'all' || normalizedAgentType(s) === selectedAgentType.value)).map((s: any) => ({ ...s, kind: 'session', __cached: true }))
     return [...snapshot.projects.flatMap((p: any) => [{ ...p, kind: 'project', __cached: true }, ...(collapsedProjects.value[p.id] ? [] : rows(p.id))]), { kind: 'ungrouped', id: 'ungrouped', count: snapshot.ungrouped_count }, ...rows('ungrouped')]
   }
@@ -5521,7 +5530,7 @@ onMounted(() => {
 .agent-filter-option[aria-checked="true"] .agent-filter-check { opacity: 1; }
 .agent-filter-option-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-filter-count { min-width: 20px; color: var(--fg-tertiary); font: 10.5px/1 var(--font-mono); text-align: right; }
-.session-panel-presence { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 7px 14px 5px; }
+.session-panel-presence { display: flex; align-items: center; gap: 7px; box-sizing: border-box; flex: 0 0 36px; padding: 0 14px; }
 .session-panel-presence .status-dot { width: 6px; height: 6px; flex: 0 0 auto; }
 .session-panel-presence-copy { min-width: 0; overflow: hidden; color: var(--fg-tertiary); font-size: 11px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .session-list { flex: 1; overflow-y: auto; padding: 6px 8px 16px; scrollbar-gutter: stable; }
@@ -6132,7 +6141,7 @@ onMounted(() => {
 .mobile-history-feedback { display: flex; justify-content: center; gap: 8px; align-items: center; font-size: 11px; color: var(--fg-tertiary); }
 .mobile-history-feedback button { color: var(--accent); background: none; border: 0; min-height: 36px; cursor: pointer; }
 
-.session-search-toggle { margin-left:auto; padding:4px; border:0; background:none; color:var(--fg-tertiary); cursor:pointer; }
+.session-search-toggle { flex:0 0 auto; margin-left:auto; padding:4px; border:0; background:none; color:var(--fg-tertiary); cursor:pointer; }
 .session-search-toggle svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.5; }
 .session-browser-search { padding:4px 10px 8px; }
 .session-browser-search input { width:100%; padding:9px; border:1px solid var(--border-light); border-radius:6px; background:var(--bg); color:var(--fg); font:12px var(--font-body); }

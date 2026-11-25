@@ -67,7 +67,7 @@ window.fetch=async(input:any)=>{
   if(path==='/api/session-projects')return Response.json({projects:[],ungrouped_count:1,archived_count:0,project_order_revision:0,ungrouped_revision:0,ungrouped_order_mode:'activity'})
   if(path==='/api/organized-sessions')return Response.json({sessions:[session],has_more:false,next_cursor:null,revision:0,order_mode:'activity'})
   if(path.endsWith('/summary'))return Response.json({session})
-  if(path.endsWith('/documents'))return Response.json({documents:[],has_more:false})
+  if(path.endsWith('/documents'))return Response.json({schema_version:1,html_rendering:false,documents:[]})
   return Response.json({seen:true})
 }
 // Foreground-only observations on the real SessionDetail component. The header

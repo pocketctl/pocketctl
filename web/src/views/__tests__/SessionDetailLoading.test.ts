@@ -196,6 +196,35 @@ describe('SessionDetail history loading', () => {
     wrapper.unmount()
   })
 
+  test('sidebar refresh keeps its status row and does not replace loaded projects with a disk preview', async () => {
+    const disk = { projects: [{ id: 'old', name: 'Old project', count: 0 }], buckets: {}, ungrouped_count: 0 }
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async key => key.startsWith('organization:') ? disk as any : null)
+    let finish!: () => void
+    const delayBucket = () => vi.mocked(organization.listOrganizedSessions).mockImplementationOnce(
+      () => new Promise(resolve => { finish = () => resolve({ sessions: [], next_cursor: null, has_more: false, revision: 1, order_mode: 'activity' }) }),
+    )
+    delayBucket()
+    const wrapper = shallowMount(SessionDetail)
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan' }] })
+    await flushPromises()
+    const status = wrapper.get('.session-panel-presence [role="status"]')
+    expect(status.text()).toBe('session.cache_updating')
+    expect(wrapper.get('.session-list').text()).toContain('Old project')
+    finish()
+    await flushPromises()
+    expect(status.text()).toBe('session.host_filter_presence')
+    delayBucket()
+    websocketMock.handlers.get('session_discovered')?.({})
+    await flushPromises()
+    expect(wrapper.get('.session-panel-presence [role="status"]').element).toBe(status.element)
+    expect(status.text()).toBe('session.host_filter_presence')
+    expect(wrapper.get('.session-list').text()).not.toContain('Old project')
+    finish()
+    await flushPromises()
+    wrapper.unmount()
+  })
+
   test('cache denial removes preview while transient replay errors keep it marked stale', async () => {
     vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
     vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? [{id:'old',type:'agent_text',content:'cached'}] : null)

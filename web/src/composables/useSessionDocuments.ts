@@ -48,6 +48,7 @@ export function useSessionDocuments(sessionId: Readonly<Ref<string>>, options: S
   const listStatus = ref<SessionDocumentListStatus>('idle')
   const viewer = ref<SessionDocumentViewerState>(emptyViewer())
   let notificationTimer: ReturnType<typeof setTimeout> | null = null
+  let listRequest = 0
   let generation = 0
 
   function close(): void {
@@ -56,6 +57,7 @@ export function useSessionDocuments(sessionId: Readonly<Ref<string>>, options: S
   }
 
   function clear(): void {
+    listRequest++
     close()
     documents.value = []
     htmlRendering.value = false
@@ -70,10 +72,11 @@ export function useSessionDocuments(sessionId: Readonly<Ref<string>>, options: S
       return
     }
     const requestedSession = sessionId.value
-    listStatus.value = documents.value.length ? listStatus.value : 'loading'
+    const request = ++listRequest
+    if (listStatus.value === 'idle') listStatus.value = 'loading'
     try {
       const result = await listSessionDocuments(requestedSession)
-      if (requestedSession !== sessionId.value) return
+      if (request !== listRequest || requestedSession !== sessionId.value) return
       documents.value = result.documents
       htmlRendering.value = result.htmlRendering
       listStatus.value = 'ready'
@@ -82,7 +85,7 @@ export function useSessionDocuments(sessionId: Readonly<Ref<string>>, options: S
         item.documentId === selected.documentId && item.versionId === selected.versionId)) close()
       else if (viewer.value.status === 'ready') viewer.value = { ...viewer.value, offlineSnapshot: false }
     } catch (error) {
-      if (requestedSession !== sessionId.value) return
+      if (request !== listRequest || requestedSession !== sessionId.value) return
       if (error instanceof SessionDocumentApiError && error.code === 'ownership_failure') {
         clear()
         listStatus.value = 'unavailable'
