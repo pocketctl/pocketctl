@@ -19,6 +19,34 @@ import (
 
 const ptyOutputTailMax = 32 * 1024
 
+// CodexAppServerOwnsInput checks the current backend at forwarding time. The
+// JSONL watcher may already be running when a terminal thread is attached.
+func (sm *SessionManager) CodexAppServerOwnsInput(sessionID string) bool {
+	sm.mu.RLock()
+	ps := sm.sessions[sessionID]
+	if ps == nil || ps.Agent != adapter.AgentCodex || ps.ControlMode != protocol.ControlManaged {
+		sm.mu.RUnlock()
+		return false
+	}
+	backend, _ := ps.Backend.(*CodexAppServerBackend)
+	sm.mu.RUnlock()
+	if backend == nil || backend.coord == nil {
+		return false
+	}
+	// A backend handle survives idle unsubscribe and can outlive its connection.
+	// Never suppress the watcher on the strength of that handle alone.
+	c := backend.coord
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runtime == nil || c.runtime.Client != backend.client || c.generation != backend.generation {
+		return false
+	}
+	c.subscribeMu.Lock()
+	defer c.subscribeMu.Unlock()
+	_, subscribed := c.subscribed[sessionID]
+	return subscribed && !c.detachedThreads[sessionID]
+}
+
 // SetTailer associates a JSONL tailer with a session (so sendToIdleTerminal can pause/resume it).
 func (sm *SessionManager) SetTailer(sessionID string, t *watcher.JSONLTailer) {
 	sm.mu.Lock()

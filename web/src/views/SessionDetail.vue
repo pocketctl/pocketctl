@@ -158,6 +158,7 @@
       </div>
 
       <!-- Full-area empty state when no sessions exist at all -->
+      <div v-else-if="accessDenied" class="session-history-loading" role="alert">{{ t('session.access_unavailable') }}</div>
       <div v-else-if="hasNoSessions && historyReadFailed" class="session-history-loading" role="alert" data-testid="session-history-error">
         <p>{{ historyFeedback }}</p>
         <button type="button" class="session-history-retry" @click="retryHistory">{{ t('common.retry') }}</button>
@@ -587,7 +588,7 @@
         <div v-if="invocationError" class="invocation-hint" role="status">{{ invocationError }} <button v-if="invocationErrorCode !== 'invocations_unsupported'" @click="requestInvocations"> {{ t('memory.git.refresh') }} </button></div>
         <div v-if="invocationSelection" class="invocation-hint">/{{ invocationSelection.name }} · {{ invocationSelection.display_path || invocationSelection.source }} <button :aria-label="t('workspace.clear_selection')" @click="invocationSelection=null">×</button></div>
         <template v-if="isComposerVisible">
-          <div class="chat-input-container" :class="{ focused: isInputFocused }" @transitionend.self="handleComposerTransitionEnd">
+          <div class="chat-input-container" :class="{ focused: isInputFocused, 'composer-pending': composerAccess === 'pending' }" @transitionend.self="handleComposerTransitionEnd">
             <!-- Slash command popover -->
             <CommandPopover
               v-if="showPopover"
@@ -609,7 +610,7 @@
               class="chat-textarea"
               :aria-label="t(isMobile ? 'session.input_send_mobile' : 'session.input_send')"
               :style="{ height: composerTextareaHeight + 'px' }"
-              :placeholder="isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t(isMobile ? 'session.input_send_mobile' : 'session.input_send'))"
+              :placeholder="composerAccess === 'pending' ? '' : isPendingSession ? t('session.input_creating') : (isDaemonSession && isTerminalStatus ? t('session.input_resume') : t(isMobile ? 'session.input_send_mobile' : 'session.input_send'))"
               @keydown="onInputKeydown"
               @focus="handleComposerFocus"
               @blur="handleComposerBlur"
@@ -619,9 +620,13 @@
             ></textarea>
 
             <!-- Bottom control row -->
-            <div class="input-controls" :inert="cachedHistory.length > 0">
+            <div class="input-controls" :class="{ 'waiting-for-control': waitingForComposer }">
+              <div v-if="waitingForComposer" class="composer-wait">
+                <span role="status" aria-live="polite" aria-atomic="true">{{ composerWaitStage === 'quiet' ? '' : t(composerWaitStage === 'retry' ? 'session.composer_still_connecting' : 'session.composer_connecting') }}</span>
+                <button v-if="composerWaitStage === 'retry'" type="button" @pointerdown="preserveComposerFocus" @click="retryComposerConnection">{{ t('session.composer_retry') }}</button>
+              </div>
               <!-- Left: permission mode dropdown -->
-              <div class="perm-dropdown" ref="permDropdownEl">
+              <div :inert="waitingForComposer" class="perm-dropdown" ref="permDropdownEl">
                 <button class="perm-trigger" @click="showPermMenu = !showPermMenu" :disabled="!permissionCanChange" :title="t(currentPermLabel)">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                   <span class="perm-label">{{ pendingPermission ? t('session.permission.pending') : t(currentPermLabel) }}</span>
@@ -641,7 +646,7 @@
               </div>
 
               <!-- Session metadata: model + context usage -->
-              <div class="input-meta">
+              <div :inert="waitingForComposer" class="input-meta">
                 <SessionAgentPicker
                   v-if="showSessionAgentPicker"
                   :agents="sessionAgents"
@@ -672,7 +677,7 @@
 
               <div class="input-actions">
                 <!-- Send button (idle) -->
-                <button v-if="!isTurnActive || (isManagedOpenCode && messageInput.trim())" class="action-btn send-btn"
+                <button v-if="!composerState.sendEnabled || !composerTurnActive || (isManagedOpenCode && messageInput.trim())" class="action-btn send-btn"
                   @pointerdown="preserveComposerFocus"
                   @click="sendMessage"
                   :aria-label="t(isMobile ? 'session.send_mobile' : 'session.send_enter')"
@@ -785,7 +790,7 @@
 import { personalReadCache } from '../services/personalReadCache'
 import { forgetReceipts, moveReceipts, pendingReceiptIds, rememberReceipt } from '../services/sessionReceiptJournal'
 import { getSessionMessageReceipts, type SessionReceiptStatus } from '../services/sessionOrganization'
-import { navigationSessions, historyPreview, cacheReadDenied } from '../services/sessionCacheProjection'
+import { navigationSessions, historyPreview, restoreCodexPreviewRows, cacheReadDenied } from '../services/sessionCacheProjection'
 import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
@@ -854,8 +859,7 @@ import { useResponsiveLayout } from '../composables/useResponsiveLayout'
 import { useSessionHeader } from '../composables/useSessionHeader'
 import { normalizeRequestId, scrollToRequest } from '../utils/requestDeepLink'
 import { resolveInteractionReadiness, type InteractionConnectivity } from '../composables/useInteractionReadiness'
-import { canSendClaudeSession } from '../utils/claudeSessionControl'
-import { resolveSessionComposerState } from '../utils/sessionComposerPolicy'
+import { sessionComposerAccess, takeComposerSelection } from '../utils/sessionComposerPolicy'
 import { ContentStreamAssembler, contentStreamDisplayId, replacedCodexToolStreamId } from '../utils/contentStream'
 import { createLiveSessionEventBatcher } from '../utils/liveSessionEventBatcher'
 import { ReplaySessionTrustBuffer, type ReplaySessionTrustContext } from '../utils/replaySessionTrust'
@@ -1058,6 +1062,44 @@ const explicitlyRoutedLiveEventTypes = new Set<string>([
   'session_status', 'session_title_update', 'session_deleted', 'session_pinned',
   'session_id_changed', 'session_documents_changed',
 ])
+const listSelection = takeComposerSelection(user.value?.id, sessionId.value)
+const deniedSessions = ref(new Set<string>())
+const accessDenied = computed(() => deniedSessions.value.has(sessionId.value))
+const pendingControl = ref(new Map<string, Record<string, unknown>>())
+function mergePendingControl(row: any) {
+  const patch = pendingControl.value.get(row.session_id)
+  pendingControl.value.delete(row.session_id)
+  if (!patch || sessionComposerAccess(row) === 'readonly') return row
+  return { ...row, ...patch }
+}
+// Catch-up events can arrive as standalone WebSocket frames as well as in a
+// replay batch. Only live discovery and metadata update current routing facts.
+function applyLiveControlFields(msg: any): boolean {
+  if (!msg.session_id || msg.resync === true || msg.payload?.resync === true
+    || deniedSessions.value.has(msg.session_id) || cachePrivacyBlocked.value) return false
+  const patch: Record<string, unknown> = {}
+  for (const key of ['agent_type', 'source', 'control_mode', 'is_subagent']) {
+    if (msg[key] !== undefined) patch[key] = msg[key]
+  }
+  if (!patch.agent_type && typeof msg.agent === 'string') patch.agent_type = msg.agent
+  if (Array.isArray(msg.capabilities)) patch.capabilities = msg.capabilities
+  if (Object.keys(patch).length) {
+    const row = allSessions.value.find(row => row.session_id === msg.session_id)
+    if (row) Object.assign(row, patch)
+    else if (msg.session_id === sessionId.value) pendingControl.value.set(msg.session_id, { ...pendingControl.value.get(msg.session_id), ...patch })
+  }
+  return true
+}
+const freshSessionIds = ref(new Set<string>())
+const freshHostIds = ref(new Set<string>())
+let controlGeneration = 0
+function invalidateConnectionFacts() {
+  pendingControl.value.clear()
+  controlGeneration++
+  freshSessionIds.value = new Set()
+  freshHostIds.value = new Set()
+}
+watch(connected, online => { if (!online) invalidateConnectionFacts() }, { flush: 'sync' })
 const allSessions = ref<any[]>([])
 const cachePrivacyBlocked = ref(false)
 const cachedSessions = ref<any[]>([])
@@ -1079,13 +1121,13 @@ const listedSessions = computed(() => navigationFresh.value ? allSessions.value 
 // same grant and invalidation ticket as the encrypted disk preview.
 type PreviewTicket = ReturnType<typeof personalReadCache.ticket>
 type ReadingAnchor = { id: string; top: number }
-type HistoryPreview = { version: 2; rows: any[]; anchor?: ReadingAnchor; groups: Record<string, boolean> }
+type HistoryPreview = { version: 2; codexInputsPaired?: boolean; rows: any[]; anchor?: ReadingAnchor; groups: Record<string, boolean> }
 type RecentView = HistoryPreview & { ticket: PreviewTicket }
 const recentViews = new Map<string, RecentView>()
 const openToolGroups = ref<Record<string, boolean>>(Object.create(null))
 let previewOwner: { session: string; ticket: PreviewTicket } | undefined
 function captureHistoryPreview(session: string): HistoryPreview | undefined {
-  if (cachedHistory.value.length || !historyCacheReady.value || cachePrivacyBlocked.value
+  if (accessDenied.value || cachedHistory.value.length || !historyCacheReady.value || cachePrivacyBlocked.value
     || !allSessions.value.some(row => row.session_id === session && !row.team_id && !row.share_id && !row.shared)) return
   const anchor = autoScroll.value ? undefined : historyReadingAnchor()
   const index = anchor ? messages.value.findIndex(row => row.id === anchor.id) : -1
@@ -1097,7 +1139,7 @@ function captureHistoryPreview(session: string): HistoryPreview | undefined {
   if (anchor && rows.some(row => row.id === 'cache-tools-' + anchor.id)) anchor.id = 'cache-tools-' + anchor.id
   const groups = Object.fromEntries(rows.filter(row => row.call_id && Object.prototype.hasOwnProperty.call(openToolGroups.value, row.call_id))
     .map(row => [row.call_id, openToolGroups.value[row.call_id]]))
-  return { version: 2, rows, anchor: rows.some(row => row.id === anchor?.id) ? anchor : undefined, groups }
+  return { version: 2, codexInputsPaired: true, rows, anchor: rows.some(row => row.id === anchor?.id) ? anchor : undefined, groups }
 }
 
 const historyCacheName = (session = sessionId.value) => 'history:' + JSON.stringify([session, ''])
@@ -1135,7 +1177,7 @@ function hydrateHistoryPreview() {
   if (focusedSubAgentId.value || returnTeamSessionID.value || returnTeamID.value || browseScope.value.type !== 'personal') return
   previewOwner = { session: sessionId.value, ticket }
   const showPreview = (snapshot: HistoryPreview) => {
-    cachedHistory.value = snapshot.rows
+    cachedHistory.value = snapshot.codexInputsPaired ? snapshot.rows : restoreCodexPreviewRows(snapshot.rows, snapshot.anchor?.id)
     cachedReadingAnchor = snapshot.anchor
     openToolGroups.value = Object.assign(Object.create(null), snapshot.groups)
     autoScroll.value = !snapshot.anchor
@@ -1240,7 +1282,7 @@ function requestInvocations() {
   send({type:'list_invocations',session_id:sessionId.value,request_id:invocationCatalogRequest})
 }
 function invokeDraft(text: string, id?: string) {
-  if (invocationRequest) return
+  if (invocationRequest || !composerState.value.sendEnabled) return
   invocationDraft = text; invocationName = text.slice(1).split(/\s/)[0]; invocationError.value = ''; invocationErrorCode.value = ''
   invocationRequest = crypto.randomUUID()
   if (!send({type:'invoke_command',session_id:sessionId.value,request_id:invocationRequest,content:text,invocation_id:id})) { invocationRequest='';invocationError.value='连接不可用，草稿已保留';return }
@@ -1258,6 +1300,7 @@ function handleInvocationResult(msg: any) {
   if (!invocationRequest || msg.request_id!==invocationRequest) return
   clearTimeout(invocationTimer);invocationRequest=''
   if(msg.error){ if(msg.code==='invocations_unsupported') return; invocationError.value=msg.error;invocationErrorCode.value=msg.code||'';return}
+  if (!composerState.value.sendEnabled) return
   const result=msg.invocation||{}
   if(result.kind==='skill'||result.kind==='turn_command') { if(messageInput.value!==invocationDraft){invocationError.value='草稿已修改，请重新发送';return};if(sendPromptText(invocationDraft,result.entry_id)){messageInput.value='';invocationSelection.value=null};return }
   if(result.kind==='skills'){invocationFilter.value='skill';commandsCache.value=result.commands||[];messageInput.value='/'+(result.query||'');popoverDismissed.value=false;invocationSelection.value=null;return}
@@ -1280,7 +1323,8 @@ function handleInvocationResult(msg: any) {
   if(!['choose','input'].includes(result.kind)&&messageInput.value===invocationDraft) {messageInput.value='';invocationSelection.value=null}
 }
 watch(sessionId,()=>{for(const pending of nativeCommandMessages.values())clearTimeout(pending.timer);nativeCommandMessages.clear();invocationEnabled.value=false;invocationFilter.value='all';invocationSelection.value=null;invocationDialog.value=null;invocationRequest='';invocationError.value='';clearTimeout(invocationTimer)})
-const { draft: messageInput } = useScopedSessionDraft(sessionScope, sessionId)
+const draftOwner = computed(() => String(user.value?.id ?? ''))
+const { draft: messageInput, clearDraft } = useScopedSessionDraft(sessionScope, sessionId, draftOwner)
 const commandsCache = ref<CommandItem[]>([])
 const currentModel = ref('')            // resolved model name from session_meta event
 const currentEffort = ref('')           // thinking-effort level from session_meta (low/medium/high/xhigh/max/ultracode)
@@ -1315,7 +1359,7 @@ function changeDSHModel(model: string, effort?: string) {
   }, 16000)
 }
 
-const interactionCapabilities = ref<string[]>([])
+const interactionCapabilities = computed<string[]>(() => currentSession.value?.capabilities || [])
 const sessionAgents = ref<SessionAgentOption[]>([])
 const currentOpenCodeAgent = ref('')
 const sessionAgentsLoading = ref(false)
@@ -1530,12 +1574,9 @@ const resumeCopied = ref(false)  // session-resume-command: 复制恢复命令�
 const showNewSession = ref(false)
 const daemonList = computed(() => Object.values(daemons.value))
 const currentSession = computed(() => allSessions.value.find((x: any) => x.session_id === sessionId.value))
-const isManagedSession = computed(() => currentSession.value?.control_mode === 'managed')
 const currentSessionAgent = computed(() => { const s: any = currentSession.value; return s?.agent_type || s?.agent || '' })
 watch(currentSessionAgent, agent => { if(agent==='codex') requestInvocations() })
-const currentSessionCapabilities = computed(() => interactionCapabilities.value.length > 0
-  ? interactionCapabilities.value
-  : (Array.isArray(currentSession.value?.capabilities) ? currentSession.value.capabilities : []))
+const currentSessionCapabilities = interactionCapabilities
 const supportsMessageAcceptanceReceipt = computed(() =>
   currentSessionCapabilities.value.includes('message_acceptance_receipt'))
 const isManagedOpenCode = computed(() => isManagedOpenCodeSession(
@@ -1548,7 +1589,8 @@ const isLegacyOpenCodeSession = computed(() => currentSessionAgent.value === 'op
 // can be viewed but never driven: no composer, no stop/approval/permission, no
 // resume command (see buildResumeCommand). Used as a fail-closed gate for
 // canWriteWhenConnected and the read-only banner.
-const isReadOnlyObserverSession = computed(() => isReadOnlyObserverAgent(currentSessionAgent.value))
+const isReadOnlyObserverSession = computed(() => isReadOnlyObserverAgent(currentSessionAgent.value)
+  || currentSession.value?.source === 'observer')
 const interactionCardsDisabled = computed(() => !!cachedHistory.value.length || cachePrivacyBlocked.value || isReadOnlyObserverSession.value || isDisconnected.value || (
   interactionConnectivity.value !== 'ready' || (
   currentSessionAgent.value === 'opencode'
@@ -1691,7 +1733,14 @@ const daemons = ref<Record<string, any>>({})
 
 function setDaemonConnectivity(daemonId: string, online: boolean, update: any = {}) {
   if (!daemonId) return
+  freshHostIds.value.add(daemonId)
   const previous = daemons.value[daemonId] || {}
+  const restored = online && (previous.online === false || allSessions.value.some(row => row.daemon_id === daemonId && row.daemon_online === false))
+  if (restored) {
+    for (const session of allSessions.value) if (session.daemon_id === daemonId) freshSessionIds.value.delete(session.session_id)
+    send({ type: 'list_sessions' })
+    if (currentHostId.value === daemonId) requestSessionMeta()
+  }
   daemons.value[daemonId] = {
     ...previous,
     daemon_id: daemonId,
@@ -2052,7 +2101,10 @@ const isDaemonOnline = computed(() => {
   return s?.daemon_online ?? true
 })
 
-const isDisconnected = computed(() => !isDaemonOnline.value)
+const isDisconnected = computed(() => {
+  if (freshHostIds.value.has(currentHostId.value)) return daemons.value[currentHostId.value]?.online === false
+  return freshSessionIds.value.has(sessionId.value) && currentSession.value?.daemon_online === false
+})
 const interactionConnectivity = computed<InteractionConnectivity>(() => {
   if (isDisconnected.value) return 'offline'
   if (!connected.value) return reconnecting.value ? 'connecting' : 'offline'
@@ -2071,7 +2123,7 @@ function interactionDisabledReason(message: any): string {
 }
 // True when there are zero sessions at all — the whole chat area should show
 // a welcoming empty state instead of "unknown host" / error messages.
-const hasNoSessions = computed(() => listedSessions.value.length === 0 && !cachedHistory.value.length)
+const hasNoSessions = computed(() => sessionId.value === 'default' && listedSessions.value.length === 0 && !cachedHistory.value.length)
 
 // Empty state copy — adapts to whether a host is connected and sessions exist.
 const chatEmptyTitle = computed(() => {
@@ -2092,7 +2144,10 @@ const isDaemonSession = computed(() => {
   return s?.source === 'daemon'
 })
 // Sub-agent sessions are read-only (no input box — continue in the parent session)
-const isSubagent = computed(() => !!allSessions.value.find((s: any) => s.session_id === sessionId.value)?.is_subagent)
+const selectedComposerHint = computed(() => listSelection?.session === sessionId.value && listSelection.owner === user.value?.id
+  ? listSelection : undefined)
+const cachedComposerRow = computed(() => cachedSessions.value.find(row => row.session_id === sessionId.value))
+const isSubagent = computed(() => !!(currentSession.value?.is_subagent ?? selectedComposerHint.value?.isSubagent ?? cachedComposerRow.value?.is_subagent))
 
 // Focused sub-agent detail view (?subagent=<agentId>): read-only full-screen
 // replay of one sub-agent's conversation. The agent_id comes from the URL
@@ -2259,60 +2314,50 @@ watch(
   },
   { immediate: true },
 )
-const canWriteWhenConnected = computed(() => {
-  if (cachePrivacyBlocked.value || (cachedHistory.value.length && !currentSessionAgent.value)) return false
-  // Fail-closed agent gate: permanent observer sessions can NEVER be written
-  // to, regardless of status, source, control_mode, or capabilities. This check
-  // takes precedence over every other writeability rule.
-  if (isReadOnlyObserverSession.value) {
-    return false
-  }
-  if (currentSessionAgent.value === 'claude-code') {
-    return !focusedSubAgentId.value && canSendClaudeSession({
-      status: status.value,
-      source: currentSession.value?.source || '',
-      daemonOnline: true,
-      isSubagent: isSubagent.value,
-      isManagedSession: isManagedSession.value,
-      capabilities: currentSessionCapabilities.value,
-    })
-  }
-  // A Codex rollout seen by the native JSONL watcher is observational only:
-  // its `control_mode` can be stale or ambiguous, but it has no PocketCtl
-  // app-server backend that can accept a prompt from another device. The
-  // acceptance receipt is emitted only by the shim-managed backend, so require
-  // it before rendering a multi-device composer for Codex.
-  if (currentSessionAgent.value === 'codex') {
-    return isManagedSession.value
-      && supportsMessageAcceptanceReceipt.value
-      && !isSubagent.value
-      && !focusedSubAgentId.value
-  }
-  if (currentSessionAgent.value === 'zcode-managed') {
-    return isManagedSession.value
-      && supportsMessageAcceptanceReceipt.value
-      && !isSubagent.value
-      && !focusedSubAgentId.value
-  }
-  return (!isTerminalStatus.value || isDaemonSession.value || isManagedSession.value)
-    && !isSubagent.value
-    && !focusedSubAgentId.value
-    && (currentSessionAgent.value !== 'opencode' || isManagedOpenCode.value)
+const composerAccess = computed(() => {
+  if (accessDenied.value || cachePrivacyBlocked.value || focusedSubAgentId.value) return 'readonly'
+  const access = sessionComposerAccess(currentSession.value)
+  if (access !== 'pending') return access
+  const early = pendingControl.value.get(sessionId.value)
+  if (early && sessionComposerAccess(early) !== 'pending') return sessionComposerAccess(early)
+  if (selectedComposerHint.value) return selectedComposerHint.value.access
+  const cached = cachedComposerRow.value
+  const listed = Object.values(sidebarBuckets.value).flat().find(row => row.session_id === sessionId.value)
+  return listed ? sessionComposerAccess(listed) : cached?.composer_hint || sessionComposerAccess(cached)
 })
-const composerState = computed(() => resolveSessionComposerState(
-  canWriteWhenConnected.value,
-  cachedHistory.value.length ? 'syncing' : interactionConnectivity.value,
-))
-// An explicit daemon-offline signal applies to every session on that host.
-// Keep any draft in memory, but replace the composer with a persistent notice
-// until the host reconnects.
-const isComposerVisible = computed(() => composerState.value.visible && !isDisconnected.value)
-const isUnmanagedReadOnlySession = computed(() => !!currentSession.value
-  && (isReadOnlyObserverSession.value || currentSession.value?.source !== 'daemon')
-  && !canWriteWhenConnected.value
-  && !isSubagent.value
-  && !focusedSubAgentId.value)
-const unmanagedReadOnlyAgent = computed(() => agentDisplayName(normalizedAgentType(currentSession.value)))
+const canWriteWhenConnected = computed(() => composerAccess.value === 'writable')
+const confirmedHostOnline = computed(() => {
+  const host = currentHostId.value
+  if (host && freshHostIds.value.has(host)) return daemons.value[host]?.online === true
+  return freshSessionIds.value.has(sessionId.value) && currentSession.value?.daemon_online === true
+})
+const composerState = computed(() => ({
+  editable: canWriteWhenConnected.value,
+  sendEnabled: canWriteWhenConnected.value && connected.value && confirmedHostOnline.value
+    && freshSessionIds.value.has(sessionId.value) && sessionComposerAccess(currentSession.value) === 'writable'
+    && !isDisconnected.value && !isPendingSession.value,
+}))
+const isComposerVisible = computed(() => composerAccess.value !== 'readonly' && !isDisconnected.value)
+const isUnmanagedReadOnlySession = computed(() => composerAccess.value === 'readonly' && !accessDenied.value
+  && !isSubagent.value && !focusedSubAgentId.value)
+const unmanagedReadOnlyAgent = computed(() => agentDisplayName(currentSessionAgent.value || selectedComposerHint.value?.agent || cachedComposerRow.value?.agent_type || ''))
+const waitingForComposer = computed(() => isComposerVisible.value && !isPendingSession.value && !composerState.value.sendEnabled)
+const composerWaitStage = ref<'quiet' | 'connecting' | 'retry'>('quiet')
+const composerAttempt = ref(0)
+watch([waitingForComposer, sessionId, composerAttempt], ([waiting], _, cleanup) => {
+  composerWaitStage.value = 'quiet'
+  if (!waiting) return
+  const notice = setTimeout(() => { composerWaitStage.value = 'connecting' }, 300)
+  const retry = setTimeout(() => { composerWaitStage.value = 'retry' }, 5000)
+  cleanup(() => { clearTimeout(notice); clearTimeout(retry) })
+}, { immediate: true })
+function retryComposerConnection() {
+  composerAttempt.value++
+  if (!connected.value) void connect()
+  send({ type: 'list_sessions' })
+  send({ type: 'list_daemons' })
+  requestSessionMeta()
+}
 const unmanagedReadOnlyDescription = computed(() => {
   if (isLegacyOpenCodeSession.value) return t('session.opencode_legacy_readonly')
   if (currentSessionAgent.value === 'zcode') return t('session.zcode_observer_readonly')
@@ -2333,6 +2378,8 @@ function isTurnActiveStatus(value: unknown): boolean {
   return isExecutingStatus(value) || value === 'waiting_approval' || value === 'waiting_question'
 }
 const isTurnActive = computed(() => runtimeSnapshotReady.value && statusReady.value && isTurnActiveStatus(status.value))
+const composerTurnActive = computed(() => runtimeSnapshotReady.value ? isTurnActive.value
+  : isTurnActiveStatus(sessionRuntimeStatus(currentSession.value)))
 const isExecuting = computed(() => runtimeSnapshotReady.value && statusReady.value && isExecutingStatus(status.value))
 const isTurnWorking = computed(() => runtimeSnapshotReady.value && !isDisconnected.value && (isTurnActive.value || awaitingStart.value))
 
@@ -3095,7 +3142,7 @@ const stopError = ref('')
 let stopErrorTimer: ReturnType<typeof setTimeout> | null = null
 let stopResetTimer: ReturnType<typeof setTimeout> | null = null
 function interruptSession() {
-  if (isReadOnlyObserverSession.value) return
+  if (!composerState.value.sendEnabled) return
   // Defensive guard: the stop button is :disabled while disconnected, but a
   // stale "running" status (relay restart, missed session_status) could leave
   // it clickable briefly. Bail instead of firing an unroutable interrupt that
@@ -3417,6 +3464,7 @@ function sendMessage() {
 }
 
 function sendPromptText(text: string, invocationID?: string, retryOfTurnID?: string): boolean {
+  if (!composerState.value.sendEnabled) return false
   if (invocationID?.startsWith('command:')) {
     const msgId=crypto.randomUUID()
     const sent=sendUserMessage({session_id:sessionId.value,content:text,msg_id:msgId,invocation_id:invocationID})
@@ -3895,9 +3943,12 @@ function userMessageIdentity(evt: any) {
   const turn = value('turn_id')
   const admitted = value('msg_id') && eventId === 'native-input:' + value('msg_id')
   const native = value('part_id') && /^codex:[^:]+:user:/.test(eventId)
+  const rollout = Boolean(value('source_turn_id')) && /^jsonl:[^:]+:\d+:\d+$/.test(eventId)
+    && String(turn).startsWith('turn:v1:codex:')
   return {
     userEventKey,
-    codexTurnKey: String(turn).startsWith('turn:v1:codex:') && (admitted || native) ? JSON.stringify([...scope, turn]) : '',
+    rolloutEventKey: rollout ? userEventKey : '',
+    codexTurnKey: String(turn).startsWith('turn:v1:codex:') && (admitted || native || rollout) ? JSON.stringify([...scope, turn]) : '',
     admissionEventKey: admitted ? userEventKey : '',
     userPartKey: value('part_id') ? JSON.stringify([...scope, value('source_turn_id') || value('turn_id'), value('part_id')]) : '',
     // Claude source_turn_id identifies its native user record even without part_id.
@@ -3909,6 +3960,7 @@ function userMessageIdentity(evt: any) {
 function sameUserMessage(left: any, right: any): boolean {
   return Boolean(
     (left.userEventKey && left.userEventKey === right.userEventKey)
+    || (left.rolloutEventKey && left.rolloutEventKey === right.rolloutEventKey)
     || (left.admissionEventKey && left.admissionEventKey === right.admissionEventKey)
     || (left.userPartKey && left.userPartKey === right.userPartKey)
     || (left.userNativeKey && left.userNativeKey === right.userNativeKey),
@@ -3921,6 +3973,7 @@ function userIdentitiesConflict(left: any, right: any): boolean {
 }
 
 function preserveUserIdentity(message: any, identity: ReturnType<typeof userMessageIdentity>) {
+  if (identity.rolloutEventKey) message.rolloutEventKey = identity.rolloutEventKey
   if (identity.codexTurnKey) message.codexTurnKey = identity.codexTurnKey
   if (identity.admissionEventKey) message.admissionEventKey = identity.admissionEventKey
   if (identity.userEventKey) message.userEventKey = identity.userEventKey
@@ -3928,13 +3981,15 @@ function preserveUserIdentity(message: any, identity: ReturnType<typeof userMess
   if (identity.userNativeKey) message.userNativeKey = identity.userNativeKey
 }
 
-// A Codex turn may contain several inputs. Pair only complementary halves,
-// retaining both identities so replay cannot consume another native item.
+// Each input can have one admission, one app-server item and one rollout line.
+// Only join complementary sources so repeated text in a turn retains its count.
 function findCodexInputEcho(target: any[], identity: ReturnType<typeof userMessageIdentity>, text: string, correlation: ReturnType<typeof eventCorrelation>) {
-  if (!identity.codexTurnKey || (identity.admissionEventKey && identity.userPartKey)) return
+  if (!identity.codexTurnKey) return
   return target.find(row => row.codexTurnKey === identity.codexTurnKey && row.content === text
     && row.deliveryStatus !== 'failed' && !correlationsConflict(messageCorrelation(row), correlation)
-    && (identity.admissionEventKey ? row.userPartKey && !row.admissionEventKey : row.admissionEventKey && !row.userPartKey))
+    && !(identity.rolloutEventKey && row.rolloutEventKey)
+    && !(identity.admissionEventKey && row.admissionEventKey)
+    && !(identity.userPartKey && row.userPartKey))
 }
 
 function withoutExistingUserMessages(page: any[], existing: any[]): any[] {
@@ -4560,6 +4615,7 @@ function processEvent(evt: any, target: any[] = messages.value, subagentOverride
 // background tabs); every other live event flushes pending content first so
 // control events never reorder ahead of it.
 function applyLiveContent(event: any) {
+  if (accessDenied.value || cachePrivacyBlocked.value) return
   const key = overlapKey(event)
   if (key && replayOverlap.delete(key)) return
   if (key) liveOverlap.add(key)
@@ -4623,6 +4679,10 @@ defineExpose({ processEvent, messages, status, currentOpenCodeAgent })
 // sub-agent view, and switching between sub-agents — so a single watcher drives
 // state reset + history reload instead of one watcher per dimension.
 const loadKey = computed(() => sessionId.value + '::' + (route.query.subagent as string || ''))
+watch(loadKey, () => {
+  freshSessionIds.value.delete(sessionId.value)
+  if (sessionId.value !== 'default' && !focusedSubAgentId.value) send({ type: 'list_sessions' })
+}, { flush: 'sync' })
 
 // Local DevTools timing from navigation to Vue committing the first visible rows.
 watch([loadKey, () => renderMessages.value.length > 0, () => isLoading.value], () => {
@@ -4679,7 +4739,13 @@ watch(loadKey, (newKey, oldKey) => {
     currentModel.value = nextSession?.model || '' // immediate persisted fallback; refreshed by get_session_meta below
     dshModels.value = []; dshSettingsPending.value = ''; dshSettingsError.value = ''
     currentEffort.value = '' // clear; refilled by authoritative get_session_meta
-    interactionCapabilities.value = []
+    inputEl.value?.blur()
+    isInputFocused.value = false
+    currentPermission.value = undefined
+    permissionMutable.value = false
+    permissionMutableModes.value = []
+    pendingPermission.value = undefined
+    if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
     sessionAgents.value = []
     currentOpenCodeAgent.value = ''
     sessionAgentsLoading.value = false
@@ -4705,6 +4771,7 @@ onMounted(() => {
     cachedSessions.value = []; cachedHosts.value = {}; cachedOrganization.value = null; cachedHistory.value = []
     historyCacheRequest++
     if (!personalReadCache.ticket().scope) {
+      invalidateConnectionFacts()
       cancelReceiptLookup()
       recoveredReceipts.value = {}
       for (const id of localSends.keys()) clearAckTimeout(id)
@@ -4722,21 +4789,35 @@ onMounted(() => {
 		if (archivedView.value) void openArchived()
 		send({ type: 'list_sessions' })
 	}))
-	cleanups.push(onEvent('session_discovered', () => { void refreshProjects() }))
+	cleanups.push(onEvent('session_discovered', (msg: any) => {
+    applyLiveControlFields(msg)
+    void refreshProjects()
+  }))
 	cleanups.push(onEvent('session_created', () => { void refreshProjects() }))
 	cleanups.push(onEvent('connection_restored', () => {
+    invalidateConnectionFacts()
     rememberRecentView()
 		void refreshProjects()
 		send({ type: 'list_sessions' })
 		send({ type: 'list_daemons' })
-		sessionSwitching = true
-		replayStatusResolved = false
-		runtimeSnapshotReady.value = false
-		status.value = 'unknown'
-		statusReady.value = false
-		awaitingStart.value = false
-		discardTurnTimer()
-		loadHistory()
+    replayStatusResolved = false
+    if (!autoScroll.value && latestCursor.value !== undefined && !isLoading.value && !isLoadingBackward.value) {
+      // Keep the visible historical DOM and load only the gap since its newest
+      // cursor. A fresh session_list supplies the current lifecycle and access.
+      refreshLatestMessages()
+      requestSessionMeta()
+      retryTaskSnapshot()
+      send({ type: 'list_commands', session_id: sessionId.value })
+      requestInvocations()
+    } else {
+      sessionSwitching = true
+      runtimeSnapshotReady.value = false
+      status.value = 'unknown'
+      statusReady.value = false
+      awaitingStart.value = false
+      discardTurnTimer()
+      loadHistory()
+    }
 		void refreshSessionDocuments()
 	}))
 
@@ -4746,19 +4827,24 @@ onMounted(() => {
 
 	cleanups.push(onEvent('session_list', (msg: any) => {
     navigationFresh.value = true; cachedSessions.value = []
-    allSessions.value = msg.sessions || []
+    allSessions.value = (msg.sessions || []).filter((row: any) => !deniedSessions.value.has(row.session_id)).map(mergePendingControl)
+    freshSessionIds.value = new Set(allSessions.value.map(row => row.session_id))
     void personalReadCache.write('sessions', navigationSessions(allSessions.value))
-    if (sessionId.value !== 'default' && !allSessions.value.some((s:any) => s.session_id === sessionId.value)) {
-      void getSessionSummary(sessionId.value).then(summary => {
-        if (sessionId.value === summary.session_id && !allSessions.value.some((s:any) => s.session_id === summary.session_id)) allSessions.value.push(summary)
-      }).catch(() => {})
+    if (!accessDenied.value && sessionId.value !== 'default' && !allSessions.value.some((s:any) => s.session_id === sessionId.value)) {
+      const requested = sessionId.value, generation = controlGeneration, context = loadKey.value
+      void getSessionSummary(requested).then(summary => {
+        if (context !== loadKey.value || generation !== controlGeneration || accessDenied.value || cachePrivacyBlocked.value) return
+        if (sessionId.value === summary.session_id && !allSessions.value.some((s:any) => s.session_id === summary.session_id)) {
+          allSessions.value.push(mergePendingControl(summary))
+          freshSessionIds.value.add(summary.session_id)
+        }
+      }).catch(error => {
+        if (requested === sessionId.value && generation === controlGeneration && !currentSession.value && cacheReadDenied(error)) denySessionAccess()
+      })
     }
     // P1a: populate childrenToken from current session's children
     const cur = msg.sessions?.find((s: any) => s.session_id === sessionId.value)
     if (cur && !replayStatusResolved) applySessionRuntime(cur)
-    if (cur && interactionCapabilities.value.length === 0 && Array.isArray(cur.capabilities)) {
-      interactionCapabilities.value = cur.capabilities
-    }
     // The relay persists the model with the session. Use it immediately as a
     // fallback while the daemon's authoritative get_session_meta response is
     // still in flight (or unavailable for an offline terminal session).
@@ -4799,7 +4885,7 @@ onMounted(() => {
       allSessions.value.unshift({
         session_id: sid,
         status: 'running',
-        agent: 'claude-code',
+        agent: msg.agent_type || msg.agent || '',
         source: 'daemon',
         title: msg.title || '',
         cwd: '',
@@ -4812,7 +4898,7 @@ onMounted(() => {
         pinned: false,
         daemon_online: true,
         control_mode: msg.control_mode,
-        capabilities: Array.isArray(msg.capabilities) ? msg.capabilities : [],
+        capabilities: Array.isArray(msg.capabilities) ? msg.capabilities : undefined,
       })
     }
     // session_created carries the daemon-resolved model (for the /model command).
@@ -4827,9 +4913,10 @@ onMounted(() => {
       // for an offline host. Keep explicit false authoritative over fallbacks.
       map[d.daemon_id] = {
         ...d,
-        online: d.daemon_online ?? d.online ?? (d.status === 'online'),
+        online: d.daemon_online ?? d.online ?? (typeof d.status === 'string' ? d.status === 'online' : undefined),
       }
     }
+    freshHostIds.value = new Set(Object.keys(map).filter(id => typeof map[id].online === 'boolean'))
     hostsFresh = true
     daemons.value = map
     cachedHosts.value = {}
@@ -4869,24 +4956,20 @@ onMounted(() => {
   // session_meta: authoritative model name, in response to get_session_meta.
   // (session_created also carries model as an optimistic early fill below.)
   cleanups.push(onEvent('session_meta', (msg: any) => {
+    if (!applyLiveControlFields(msg)) return
     if (msg.session_id !== sessionId.value) return
-    if (msg.model) currentModel.value = msg.model
-    if (currentSessionAgent.value === 'dsh') {
-      currentEffort.value = msg.effort || ''
-      dshModels.value = msg.models || []
-    } else if (msg.effort) currentEffort.value = msg.effort
-    interactionCapabilities.value = Array.isArray(msg.capabilities) ? msg.capabilities : []
-    const session = allSessions.value.find((item: any) => item.session_id === msg.session_id)
-    if (session) {
-      if (msg.control_mode !== undefined) session.control_mode = msg.control_mode
-      session.capabilities = interactionCapabilities.value
+    if (accessDenied.value || cachePrivacyBlocked.value) return
+    if (typeof msg.model === 'string') currentModel.value = msg.model
+    if (typeof msg.effort === 'string') currentEffort.value = msg.effort
+    if (Array.isArray(msg.models)) dshModels.value = msg.models
+    if (typeof msg.current_agent === 'string') currentOpenCodeAgent.value = msg.current_agent
+    if (msg.permission !== undefined) {
+      currentPermission.value = msg.permission
+      pendingPermission.value = undefined
+      if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
     }
-    if (msg.current_agent) currentOpenCodeAgent.value = msg.current_agent
-    currentPermission.value = msg.permission
-    permissionMutable.value = !!msg.permission_mutable
-    permissionMutableModes.value = msg.permission_mutable_modes || []
-    pendingPermission.value = undefined
-    if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
+    if (typeof msg.permission_mutable === 'boolean') permissionMutable.value = msg.permission_mutable
+    if (Array.isArray(msg.permission_mutable_modes)) permissionMutableModes.value = msg.permission_mutable_modes
     if (showSessionAgentPicker.value && sessionAgents.value.length === 0) requestSessionAgents()
   }))
 
@@ -4895,18 +4978,18 @@ onMounted(() => {
   cleanups.push(onEvent('session_model_changed', (msg: any) => {
     if (msg.session_id !== sessionId.value) return
     if (typeof msg.effort === 'string') currentEffort.value = msg.effort
-    if (currentSessionAgent.value === 'dsh') { currentEffort.value = msg.effort || ''; if (msg.request_id === dshSettingsPending.value) dshSettingsPending.value = '' }
+    if (currentSessionAgent.value === 'dsh' && msg.request_id === dshSettingsPending.value) dshSettingsPending.value = ''
     if (msg.model) currentModel.value = msg.model
     processImmediateLiveEvent(msg, { scroll: true })
   }))
 
   cleanups.push(onEvent('replay_batch', (msg: any) => {
-    if (msg.session_id !== sessionId.value) return
+    if (msg.session_id !== sessionId.value || accessDenied.value) return
     if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
       latestEvents.append(replaySessionTrustContext(), Array.isArray(msg.events) ? msg.events : [])
       return
     }
-    if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return // D4: stale batch
+    if (accessDenied.value || (msg.req_id !== undefined && msg.req_id !== replayReqId.value)) return // D4: stale batch
     const isBackward = msg.direction === 'backward'
     // Relay sends every replay batch in id ASC order. Keeping this order across
     // batch boundaries lets stream assemblers receive chunk zero before later chunks.
@@ -4941,9 +5024,10 @@ onMounted(() => {
     }
   }))
   cleanups.push(onEvent('replay_end', async (msg: any) => {
-    if (msg.session_id !== sessionId.value) return
+    if (msg.session_id !== sessionId.value || accessDenied.value) return
     if (latestRequest.value !== null && msg.req_id === latestRequest.value) {
       const next = normalizeReplayCursor(msg.newest_seq ?? msg.last_seq) ?? 0
+      if (msg.error && cacheReadDenied(msg.error)) { denySessionAccess(); return }
       if (msg.error || (msg.has_more && next <= (latestCursor.value ?? 0))) {
         finishLatest('session.history_read_failed')
         return
@@ -4970,7 +5054,7 @@ onMounted(() => {
       }
       return
     }
-    if (msg.req_id !== undefined && msg.req_id !== replayReqId.value) return
+    if (accessDenied.value || (msg.req_id !== undefined && msg.req_id !== replayReqId.value)) return
     if (historyPageTimer) clearTimeout(historyPageTimer)
     if (msg.req_id === taskSnapshotReqId) {
       if (msg.task_snapshot_status === 'pending') armTaskSnapshotDeadline()
@@ -4978,14 +5062,7 @@ onMounted(() => {
     }
     if (msg.error) {
       const denied = cacheReadDenied(msg.error)
-      if (denied) {
-        resetLatest()
-        recentViews.delete(sessionId.value)
-        cachedReadingAnchor = undefined
-        cachedHistory.value = []
-        historyCacheRequest++
-        void personalReadCache.remove(historyCacheName())
-      }
+      if (denied) denySessionAccess()
       resetReplayTrustBuffers()
       finishHistoryViewportFill(historyViewportFill.mode, !denied && isLoadingBackward.value)
       historyReadFailed.value = true
@@ -5239,7 +5316,7 @@ onMounted(() => {
     // switch (timer stuck/from zero). Update it on every status event.
     const sourceActivityAt = msg.last_activity_at || msg.payload?.last_activity_at
     const lastActivityAt = sourceActivityAt || (msg.resync === true ? ls?.last_activity_at || '' : new Date().toISOString())
-    if (ls) {
+    if (ls && msg.resync !== true && msg.payload?.resync !== true) {
       ls.status = msg.status
       ls.statusEffective = msg.status
       if (lastActivityAt) ls.last_activity_at = lastActivityAt
@@ -5260,7 +5337,7 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('permission_config_changed', (msg: any) => {
-    if (msg.session_id !== sessionId.value) return
+    if (msg.session_id !== sessionId.value || msg.resync === true || msg.payload?.resync === true) return
     currentPermission.value = msg.permission
     pendingPermission.value = undefined
     if (permissionTimer) { clearTimeout(permissionTimer); permissionTimer = null }
@@ -5290,6 +5367,7 @@ onMounted(() => {
   cleanups.push(onEvent('error', (msg: any) => {
     if (msg.session_id && msg.session_id !== sessionId.value) return
     if (cacheReadDenied(msg.code || msg.error)) {
+      if (msg.session_id === sessionId.value && (!msg.operation || ['replay', 'get_session_meta'].includes(msg.operation))) denySessionAccess()
       recentViews.delete(sessionId.value)
       cachedReadingAnchor = undefined
       resetLatest()
@@ -5357,6 +5435,9 @@ onMounted(() => {
   }))
 
   cleanups.push(onEvent('session_deleted', (msg: any) => {
+    deniedSessions.value.add(msg.session_id)
+    if (msg.session_id === sessionId.value) denySessionAccess()
+    else clearDraft(msg.session_id)
     recentViews.delete(msg.session_id)
     if (receiptScope.value) forgetReceipts(receiptScope.value, new Set(pendingReceiptIds(receiptScope.value, msg.session_id)))
     for (const [id, local] of localSends) {
@@ -5422,6 +5503,25 @@ function onDeleted(_sessionId: string) { /* handled by session_deleted WS event 
 function onPinned(sessionId: string, pinned: boolean) {
   const s = allSessions.value.find((x: any) => x.session_id === sessionId)
   if (s) (s as any).pinned = pinned
+}
+
+function denySessionAccess() {
+  deniedSessions.value.add(sessionId.value)
+  allSessions.value = allSessions.value.filter(row => row.session_id !== sessionId.value)
+  cachedSessions.value = cachedSessions.value.filter(row => row.session_id !== sessionId.value)
+  void personalReadCache.evict('navigation')
+  freshSessionIds.value.delete(sessionId.value)
+  previewOwner = undefined
+  pendingControl.value.delete(sessionId.value)
+  clearDraft()
+  recentViews.delete(sessionId.value)
+  cachedReadingAnchor = undefined
+  cachedHistory.value = []
+  historyCacheRequest++
+  messages.value = []
+  subagentMessages.value = {}
+  resetLatest()
+  void personalReadCache.remove(historyCacheName())
 }
 
 function saveReadingPositionOnHide() {
@@ -5759,6 +5859,14 @@ onMounted(() => {
 /* Bottom control row */
 .input-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; padding: 7px 9px 9px 12px; gap: 8px; }
 
+.input-controls.waiting-for-control { position: relative; }
+.waiting-for-control .perm-dropdown, .waiting-for-control .input-meta { visibility: hidden; }
+.composer-wait { position: absolute; left: 12px; right: 52px; bottom: 9px; min-height: 32px; min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--fg-secondary); font-size: 12px; }
+.composer-wait button { color: var(--accent); font: inherit; background: none; border: 0; padding: 4px; cursor: pointer; }
+.composer-pending .textarea-resize-handle { visibility: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .chat-input-area .chat-input-container, .chat-input-area .input-actions .action-btn > svg { animation: none; transition: none; }
+}
 /* Permission dropdown (left) */
 .perm-dropdown { position: relative; }
 .perm-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: none; border: none; color: var(--fg-secondary); font-size: 12px; cursor: pointer; border-radius: var(--radius-sm); transition: color 0.15s, background 0.15s; font-family: var(--font-body); }
@@ -5792,7 +5900,7 @@ onMounted(() => {
 .action-btn { width: 32px; height: 32px; border-radius: 50%; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s, opacity 0.15s; }
 
 @container (max-width: 620px) {
-  .input-controls { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+  .input-controls { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(25px, auto) auto; row-gap: 4px; }
   .input-meta { grid-column: 1 / -1; grid-row: 1; justify-content: flex-start; }
   .perm-dropdown { grid-column: 1; grid-row: 2; }
   .input-actions { grid-column: 2; grid-row: 2; }
@@ -5943,6 +6051,7 @@ onMounted(() => {
   .chat-input-area {
     padding: 4px 0 calc(4px + env(safe-area-inset-bottom));
   }
+  .composer-wait { position: static; grid-column: 2 / 4; grid-row: 1; justify-content: center; min-height: 44px; }
   .chat-input-area.composer-focused { padding-bottom: 4px; }
   .unmanaged-readonly-notice { grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding: 10px; border-radius: var(--radius-md); }
   .unmanaged-readonly-icon { width: 34px; height: 34px; border-radius: 10px; }

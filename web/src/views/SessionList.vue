@@ -282,6 +282,7 @@ import AgentBadge from '../components/AgentBadge.vue'
 import MobileSessionCard from '../components/MobileSessionCard.vue'
 import WorkspaceIcon from '../components/WorkspaceIcon.vue'
 import RenameProjectAction from '../components/RenameProjectAction.vue'
+import { rememberComposerSelection, sessionComposerAccess } from '../utils/sessionComposerPolicy'
 import { agentDisplayName } from '../utils/agentDisplay'
 import SessionPinBadge from '../components/SessionPinBadge.vue'
 import CreateProjectControl from '../components/CreateProjectControl.vue'
@@ -608,8 +609,9 @@ async function loadMoreOrganization(id: string) {
   try { await loadBucket(id,bucketCursors.value[id] || undefined) }
   catch (error) { lastError.value = String(error) }
 }
-async function openSession(s: any) {
-  try { await markSessionSeen(s.session_id); s.new_badge_pending = false } catch {}
+function openSession(s: any) {
+  void markSessionSeen(s.session_id).then(() => { s.new_badge_pending = false }).catch(() => {})
+  rememberComposerSelection(user.value?.id, s)
   $router.push(`/session/${s.session_id}`)
 }
 function onMoved(_id: string, _projectId: string | null) { void refreshOrganization() }
@@ -918,6 +920,7 @@ onMounted(() => {
           session_id: s.session_id,
           status: s.status,
           agent: s.agent_type || 'claude-code',
+          composer_hint: sessionComposerAccess(s),
           started_at: new Date(s.created_at),
           last_activity_at: s.last_activity_at ? new Date(s.last_activity_at) : undefined,
           cwd: s.cwd,
@@ -938,6 +941,7 @@ onMounted(() => {
           project_id: s.project_id, archived_at: s.archived_at, new_badge_pending: s.new_badge_pending, effort: s.effort,
           parentSessionId: s.parent_session_id ?? null,
           isSubagent: !!s.is_subagent,
+          is_subagent: s.is_subagent,
           children: s.children ?? [],
         }))
       if (hostId.value) {

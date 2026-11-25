@@ -54,6 +54,163 @@ vi.mock('../../services/sessionOrganization', () => ({
 }))
 
 describe('SessionDetail history loading', () => {
+  test('cold deep link reserves the editor and retries only readiness at the wait thresholds', async () => {
+    vi.useFakeTimers()
+    const wrapper = shallowMount(SessionDetail)
+    const input = wrapper.get<HTMLTextAreaElement>('.chat-textarea').element
+    expect(input.disabled).toBe(true)
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.ended-text').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(299)
+    expect(wrapper.get('.composer-wait').text()).toBe('')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(wrapper.get('.composer-wait').text()).toContain('session.composer_connecting')
+    await vi.advanceTimersByTimeAsync(4699)
+    expect(wrapper.find('.composer-wait button').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    websocketMock.send.mockClear()
+    await wrapper.get('.composer-wait button').trigger('click')
+    expect(websocketMock.send.mock.calls.map(([msg]) => msg.type)).toEqual(['list_sessions', 'list_daemons', 'get_session_meta'])
+    expect(wrapper.get('.chat-textarea').element).toBe(input)
+    expect(wrapper.get('.composer-wait').text()).toBe('')
+    wrapper.unmount()
+  })
+
+  test('reconnect, partial metadata, revocation, replay and navigation isolate a focused draft', async () => {
+    const wrapper = shallowMount(SessionDetail, { attachTo: document.body })
+    const vm = wrapper.vm as any
+    const sid = 'session-http-lan'
+    const emit = (type: string, data: Record<string, unknown>) =>
+      websocketMock.handlers.get(type)?.({ session_id: sid, ...data })
+    const row = { session_id: sid, daemon_id: 'host', agent_type: 'codex', source: 'terminal',
+      control_mode: 'managed', capabilities: ['message_acceptance_receipt'], daemon_online: true }
+    const list = { sessions: [row, { ...row, session_id: 'other' }] }
+    emit('session_list', list)
+    await wrapper.vm.$nextTick()
+    const input = wrapper.get<HTMLTextAreaElement>('.chat-textarea')
+    await input.setValue('这一份草稿')
+    input.element.focus()
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeUndefined()
+    vm.connected = false
+    expect(vm.sendPromptText('unauthorized', 'command:compact')).toBe(false)
+    vm.connected = true
+    emit('connection_restored', {})
+    emit('session_meta', { effort: 'high' })
+    emit('replay_end', { status: 'idle' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.chat-textarea').element).toBe(input.element)
+    expect(input.element.disabled).toBe(false)
+    expect(document.activeElement).toBe(input.element)
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeDefined()
+    emit('session_list', list)
+    emit('session_meta', { permission_mutable: true, permission_mutable_modes: ['managed'] })
+    emit('session_meta', { effort: 'low' })
+    expect(vm.permissionMutable).toBe(true)
+    expect(vm.permissionMutableModes).toEqual(['managed'])
+    expect(vm.composerState.sendEnabled).toBe(true)
+    emit('session_meta', { capabilities: [] })
+    expect(vm.sendPromptText('revoked')).toBe(false)
+    emit('session_meta', { ...row, resync: true, permission_mutable: false })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    expect(vm.permissionMutable).toBe(true)
+    emit('replay_batch', { direction: 'backward', events: [
+      { ...row, type: 'session_meta' }, { session_id: sid, type: 'session_status', status: 'idle' }] })
+    emit('replay_end', { status: 'idle' })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    expect(vm.messageInput).toBe('这一份草稿')
+    emit('session_meta', { capabilities: ['message_acceptance_receipt'], agent_type: 'codex-desktop' })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    routeMock.current.params.id = 'other'
+    await wrapper.vm.$nextTick()
+    expect(vm.composerState.editable).toBe(true)
+    expect(vm.composerState.sendEnabled).toBe(false)
+    expect(vm.messageInput).not.toBe('这一份草稿')
+    expect(document.activeElement).not.toBe(wrapper.get('.chat-textarea').element)
+    routeMock.current.params.id = sid
+    await wrapper.vm.$nextTick()
+    expect(vm.messageInput).toBe('这一份草稿')
+    emit('error', { code: 'access_revoked', operation: 'get_session_meta' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.chat-textarea').exists()).toBe(false)
+    expect(wrapper.text()).toContain('session.access_unavailable')
+    expect(vm.messageInput).toBe('')
+    wrapper.unmount()
+  })
+
+  test('a cached writable hint enables drafting with a missing host but never authorizes sending', async () => {
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name === 'sessions'
+      ? [{ session_id: 'session-http-lan', agent_type: 'codex', __cached: true, composer_hint: 'writable' }] as any : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    const input = wrapper.get<HTMLTextAreaElement>('.chat-textarea')
+    expect(input.element.disabled).toBe(false)
+    await input.setValue('local edit')
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeDefined()
+    websocketMock.handlers.get('session_list')?.({ sessions: [{ session_id: 'session-http-lan',
+      daemon_id: 'host', agent_type: 'codex', control_mode: 'managed', capabilities: ['message_acceptance_receipt'] }] })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeDefined()
+    websocketMock.handlers.get('daemon_status')?.({ daemon_id: 'host', status: 'online' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.chat-textarea').element).toBe(input.element)
+    expect(wrapper.get('.send-btn').attributes('disabled')).toBeUndefined()
+    await input.setValue('')
+    wrapper.unmount()
+  })
+
+  test('live discovery reclassifies a managed session immediately while historical discovery cannot grant or revoke control', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const sid = 'session-http-lan'
+    const emit = (type: string, data: object) => websocketMock.handlers.get(type)?.({ session_id: sid, ...data })
+    const writable = { agent: 'codex', source: 'terminal', control_mode: 'managed', capabilities: ['message_acceptance_receipt'] }
+    const observer = { agent: 'codex-desktop', source: 'observer', control_mode: 'legacy_read_only' }
+    emit('session_list', { sessions: [{ ...writable, session_id: sid, daemon_online: true }] })
+    emit('session_discovered', { ...observer, resync: true })
+    expect(vm.composerState.sendEnabled).toBe(true)
+    emit('session_discovered', observer)
+    expect(vm.sendPromptText('blocked')).toBe(false)
+    emit('session_discovered', { ...writable, resync: true })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    emit('session_discovered', writable)
+    expect(vm.composerState.sendEnabled).toBe(true)
+    emit('session_discovered', { control_mode: null })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    emit('session_discovered', { control_mode: 'managed', is_subagent: true })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.readonly-hint').text()).toBe('session.subagent_readonly')
+    emit('session_discovered', { is_subagent: false, capabilities: [] })
+    expect(vm.composerState.sendEnabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  test('reconnecting while reading preserves historical rows and fetches just the forward gap', async () => {
+    const wrapper = shallowMount(SessionDetail)
+    const vm = wrapper.vm as any
+    const sid = 'session-http-lan'
+    const emit = (type: string, data: object) => websocketMock.handlers.get(type)?.({ session_id: sid, ...data })
+    emit('session_list', { sessions: [{ session_id: sid, daemon_id: 'host', agent_type: 'codex',
+      control_mode: 'managed', capabilities: ['message_acceptance_receipt'], daemon_online: true }] })
+    emit('replay_batch', { req_id: 1, direction: 'backward', events: [
+      { type: 'user_text', text: 'Older question', session_id: sid, event_id: 'first' }] })
+    emit('replay_end', { req_id: 1, has_more: false, newest_seq: 20 })
+    await flushPromises()
+    const pane = wrapper.get('.chat-messages').element
+    const message = wrapper.get('[data-history-message-id]').element
+    vm.autoScroll = false
+    pane.scrollTop = 200
+    websocketMock.send.mockClear()
+    emit('connection_restored', {})
+    await wrapper.vm.$nextTick()
+    expect(websocketMock.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'replay', direction: 'forward', last_seq: 20 }))
+    expect(wrapper.get('[data-history-message-id]').element).toBe(message)
+    expect(pane.scrollTop).toBe(200)
+    expect(vm.composerState.sendEnabled).toBe(false)
+    wrapper.unmount()
+  })
+
   test('a tool or approval arriving while reading keeps the viewport and offers an explicit jump', async () => {
     const wrapper = shallowMount(SessionDetail)
     await flushPromises()
@@ -155,6 +312,22 @@ describe('SessionDetail history loading', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="history-cache-preview"]').exists()).toBe(false)
     expect(vm.renderMessages.map((m:any)=>m.content)).toEqual(['Current question','Current answer','Live update'])
+    wrapper.unmount()
+  })
+
+  test('repairs paired Codex rows in an older display preview and retains its anchor', async () => {
+    const row = { type: 'user_text', role: 'user', turn_id: 'turn:v1:codex:t', content: '提交代码' }
+    vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
+    vi.spyOn(personalReadCache, 'read').mockImplementation(async name => name.startsWith('history:') ? {
+      version: 2, groups: {}, anchor: { id: 'anchor', top: 20 }, rows: [
+        { ...row, id: 'native', reading_event_id: 'codex:33:user:s:t:item:hash' },
+        { ...row, id: 'anchor', reading_event_id: 'jsonl:file:404:0' },
+        { ...row, id: 'second', reading_event_id: 'jsonl:file:405:0' },
+      ],
+    } as any : null)
+    const wrapper = shallowMount(SessionDetail)
+    await flushPromises()
+    expect((wrapper.vm as any).renderMessages.map((m: any) => m.id)).toEqual(['anchor', 'second'])
     wrapper.unmount()
   })
 
@@ -280,7 +453,7 @@ describe('SessionDetail history loading', () => {
     wrapper.unmount()
   })
 
-  test('a bounded history fill releases the cached preview and the managed composer', async () => {
+  test('a bounded history fill releases the cached preview independently of the managed composer', async () => {
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
     vi.spyOn(personalReadCache, 'valid').mockReturnValue(true)
     vi.spyOn(personalReadCache, 'read').mockImplementation(async name =>
@@ -294,7 +467,7 @@ describe('SessionDetail history loading', () => {
     emit('session_list', { sessions: [{ session_id: sid, daemon_id: 'd1', daemon_online: true,
       source: 'terminal', agent_type: 'codex', control_mode: 'managed', capabilities: ['message_acceptance_receipt'] }] })
     await wrapper.vm.$nextTick()
-    expect(wrapper.get('.chat-textarea').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.chat-textarea').attributes('disabled')).toBeUndefined()
     expect(wrapper.find('.unmanaged-readonly-notice').exists()).toBe(false)
     vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 9000)
     emit('replay_batch', { req_id: 1, direction: 'backward', events: [

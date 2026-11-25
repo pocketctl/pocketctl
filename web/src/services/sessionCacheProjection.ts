@@ -1,11 +1,17 @@
+import { sessionComposerAccess } from '../utils/sessionComposerPolicy'
 import { buildToolCallGrouping } from '../utils/toolGrouping'
 /** Allowlisted display fields; deliberately exclude runtime, grants, approvals and local sends. */
 const pick = (row: any, fields: string[]) => Object.fromEntries(fields.filter(key => row?.[key] !== undefined).map(key => [key, row[key]]))
 export function navigationSessions(rows: any[]): any[] {
   return rows.filter(row => row?.session_id && !row.team_id && !row.share_id && !row.shared).slice(0, 500).map(row => ({
-    ...pick(row, ['session_id', 'title', 'daemon_id', 'hostname', 'daemon_alias', 'agent_type', 'project_id', 'created_at', 'last_activity_at', 'archived_at', 'pinned', 'pinned_at', 'manual_rank']),
+    ...pick(row, ['session_id', 'title', 'daemon_id', 'hostname', 'daemon_alias', 'agent_type', 'agent', 'is_subagent', 'project_id', 'created_at', 'last_activity_at', 'archived_at', 'pinned', 'pinned_at', 'manual_rank']),
+    ...composerDisplayHint(row),
     status: 'unknown', daemon_online: false, __cached: true,
   }))
+}
+function composerDisplayHint(row: any) {
+  const hint = row.__cached ? row.composer_hint : sessionComposerAccess(row)
+  return hint === 'writable' || hint === 'readonly' ? { composer_hint: hint } : {}
 }
 /** Budget visible text separately from collapsed tools: hundreds of calls must not evict the conversation. */
 export function historyPreview(rows: any[]): any[] {
@@ -36,6 +42,30 @@ export function historyPreview(rows: any[]): any[] {
   }
   return kept.reverse()
 }
+// Older display snapshots retain the canonical turn and reading event ID, but
+// omit part IDs. Pair one row from each producer, preserving the reading anchor.
+export function restoreCodexPreviewRows(rows: any[], anchorId?: string): any[] {
+  const unmatched = new Map<string, { source: string; row: any }[]>()
+  const hidden = new Set<any>()
+  for (const row of rows) {
+    if (row.type !== 'user_text' || !String(row.turn_id).startsWith('turn:v1:codex:')
+      || typeof row.content !== 'string' || row.content.length >= 16000) continue
+    const event = String(row.reading_event_id || '')
+    const source = /^codex:[^:]+:user:/.test(event) ? 'native' : /^jsonl:[^:]+:\d+:\d+$/.test(event) ? 'rollout' : ''
+    if (!source) continue
+    const key = JSON.stringify([row.turn_id, row.content])
+    const pending = unmatched.get(key) || []
+    if (pending.length && pending[0].source !== source) {
+      const other = pending.shift()!.row
+      hidden.add(row.id === anchorId ? other : row)
+    } else {
+      pending.push({ source, row })
+      unmatched.set(key, pending)
+    }
+  }
+  return hidden.size ? rows.filter(row => !hidden.has(row)) : rows
+}
+
 export function cacheReadDenied(error: any): boolean {
-  return [401, 403, 404].includes(error?.status) || /unauthorized|forbidden|not.found|access.denied|permission.denied|session.deleted/i.test(String(error?.code || error?.message || error || ''))
+  return [401, 403, 404].includes(error?.status) || /unauthorized|forbidden|not.found|access.denied|access.revoked|permission.denied|session.deleted/i.test(String(error?.code || error?.message || error || ''))
 }
