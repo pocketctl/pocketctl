@@ -573,6 +573,7 @@ export class Router {
     this.durableIngressEventWindow = options.durableIngress?.eventWindow ?? 128;
     this.durableInbox = options.durableIngress?.repository ?? new InboxRepository(this.ingestPool);
     this.durableIngress = options.durableIngress?.controller ?? new IngressController({
+      chunkFlushDelayMs: Number(process.env.RELAY_LIVE_CHUNK_FLUSH_MS),
       repository: this.durableInbox,
       sendAck: (daemonId, checkpoint, window) => this.sendDurableAck(daemonId, checkpoint, window),
       sendFlowControl: (target, state) => this.sendDurableFlowControl(target, state),

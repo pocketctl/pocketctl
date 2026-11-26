@@ -52,22 +52,12 @@ describeWithDatabase('inbox claim performance PostgreSQL regression', () => {
       FROM generate_series(1,160000) g`)
     await pool.query('ANALYZE event_inbox')
     const client = await pool.connect()
-    let statement = ''
-    let parameters: unknown[] = []
     try {
       await client.query('BEGIN')
-      const repository = new InboxRepository({
-        query: async (sql: string, values: unknown[]) => {
-          statement = sql
-          parameters = values
-          return client.query(sql, values)
-        },
-      } as never)
+      const repository = new InboxRepository({ query: client.query.bind(client) } as never)
       const claimed = await repository.claimBatch({ workerId: 'bounded', limit: 32, shardCount: 1, shardIndex: 0 })
       expect(claimed.map(row => [row.daemonId, row.seq])).toEqual([['deep-a', 1], ['deep-b', 40001]])
       await client.query('ROLLBACK')
-      await client.query('BEGIN')
-      const result = await client.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`, parameters)
       type Plan = { 'Relation Name'?: string; 'Actual Rows'?: number; 'Actual Loops'?: number;
         'Rows Removed by Filter'?: number; Plans?: Plan[] }
       const examined = (node: Plan): number =>
@@ -76,7 +66,15 @@ describeWithDatabase('inbox claim performance PostgreSQL regression', () => {
           : 0) + (node.Plans ?? []).reduce((sum, child) => sum + examined(child), 0)
       // A generous resource budget independent of CPU speed, cache warmth or
       // exact planner node names. Full-table and full-pending scans violate it.
-      expect(examined(result.rows[0]['QUERY PLAN'][0].Plan)).toBeLessThan(1000)
+      for (const mode of ['force_custom_plan', 'force_generic_plan']) {
+        await client.query('BEGIN')
+        await client.query(`SET LOCAL plan_cache_mode = ${mode}`)
+        const result = await client.query(
+          "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE pocketctl_inbox_claim_v1('bounded', 1, 0, 32)",
+        )
+        expect(examined(result.rows[0]['QUERY PLAN'][0].Plan)).toBeLessThan(1000)
+        await client.query('ROLLBACK')
+      }
     } finally {
       await client.query('ROLLBACK')
       client.release()

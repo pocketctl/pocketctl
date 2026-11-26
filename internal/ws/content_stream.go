@@ -1,11 +1,11 @@
 package ws
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -19,7 +19,7 @@ const (
 type outboundContentStream struct {
 	nextChunk  int
 	byteOffset int
-	content    string
+	content    []byte
 }
 
 type preparedOutbound struct {
@@ -125,7 +125,7 @@ func (c *Client) prepareLogicalStream(
 		switch {
 		case state.byteOffset+len([]byte(content)) == event.TotalBytes:
 			// The projector already supplied only the unsent suffix.
-		case len([]byte(content)) == event.TotalBytes && strings.HasPrefix(content, state.content):
+		case len([]byte(content)) == event.TotalBytes && bytes.HasPrefix([]byte(content), state.content):
 			payload = content[len(state.content):]
 		default:
 			// A source correction must use a fresh stream so byte offsets never
@@ -144,7 +144,9 @@ func (c *Client) prepareLogicalStream(
 		}
 		return c.prepareDeliveryError(event, raw, startSeq)
 	}
-	next.content += payload
+	if !event.Final {
+		next.content = append(next.content, payload...)
+	}
 	return preparedOutbound{
 		frames:       frames,
 		streamID:     streamID,
@@ -160,6 +162,21 @@ func (c *Client) frameStreamContent(
 	state outboundContentStream,
 	startSeq int64,
 ) ([]bufferedEvent, outboundContentStream, error) {
+	// Most live deltas (and the empty completion marker) fit in one frame.
+	// Marshal that exact wire frame once, including completion metadata. Only
+	// oversized frames need the UTF-8 boundary search below.
+	if (content != "" || base.Final) && len(content) <= min(c.maxChunkBytes, contentChunkTargetBytes) {
+		frame := streamFrame(base, content, state, startSeq, true)
+		raw, err := json.Marshal(frame)
+		if err != nil {
+			return nil, state, err
+		}
+		if len(raw) <= c.maxEventBytes {
+			state.nextChunk++
+			state.byteOffset += len(content)
+			return []bufferedEvent{{seq: startSeq, data: raw}}, state, nil
+		}
+	}
 	remaining := content
 	frames := make([]bufferedEvent, 0, 1)
 	for len(remaining) > 0 || (len(frames) == 0 && base.Final) {

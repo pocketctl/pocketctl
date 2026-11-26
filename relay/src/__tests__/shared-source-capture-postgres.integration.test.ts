@@ -24,13 +24,14 @@ suite('low-level transactional body-free canonical capture',()=>{
   pool=new pg.Pool({connectionString:url,max:4})
   await assertCaptureFixture(pool)
   await pool.query(`DROP SCHEMA IF EXISTS memory CASCADE; DROP SCHEMA IF EXISTS shared CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public;
-   CREATE TABLE public.sessions(id bigserial PRIMARY KEY,session_id text UNIQUE,user_id int,source text,content_state text DEFAULT 'hot');
+   CREATE TABLE public.sessions(id bigserial PRIMARY KEY,session_id text UNIQUE,user_id int,source text,is_subagent boolean DEFAULT false,content_state text DEFAULT 'hot');
    CREATE TABLE public.events(id bigint PRIMARY KEY,user_id int,session_id text,event_type text,payload jsonb,effect_status text,
-    created_at timestamptz DEFAULT now(),effect_step int DEFAULT 0,body_storage text DEFAULT 'hot',body_manifest_id uuid,body_chunk_ordinal int,body_activity_epoch bigint,body_owner_user_id int);
+    created_at timestamptz DEFAULT now(),effect_step int DEFAULT 0,body_header jsonb DEFAULT '{}',body_storage text DEFAULT 'hot',body_manifest_id uuid,body_chunk_ordinal int,body_activity_epoch bigint,body_owner_user_id int);
    CREATE TABLE public.deleted_sessions(session_id text);
    CREATE TABLE public.users(id integer PRIMARY KEY);
+   CREATE TABLE public.extension_providers(provider_id text PRIMARY KEY,status text);
    CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,owner_scope_kind text,
-     owner_scope_id text,owner_user_id integer,subscriptions text[],config_version bigint,status text,start_policy text);
+     owner_scope_id text,owner_user_id integer,subscriptions text[],config_version bigint,status text,start_policy text,created_at timestamptz DEFAULT now());
    CREATE TABLE public.extension_source_outbox(source_seq bigserial PRIMARY KEY,source_kind text,source_id text,owner_user_id int,session_id text,event_type text,occurred_at timestamptz,payload jsonb,created_at timestamptz DEFAULT now(),UNIQUE(source_kind,source_id));`)
   const {beginFreshInputFixture,declareFreshInputFoundation}=await import(new URL('../../../memory/src/__tests__/shared-source-r1/input-start-fixture.ts',import.meta.url).href)
   const inputFoundation=await beginFreshInputFixture(pool)
