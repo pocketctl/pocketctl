@@ -51,6 +51,7 @@ type codexProjection struct {
 	completedTurn  map[string]struct{}
 	threadStatus   map[string]string
 	threadCwd      map[string]string
+	usageRollouts  map[string]*codexUsageRollout
 	threadRevision map[string]uint64
 	parts          map[string]codexProjectedPart
 	turnDiff       map[string]string
@@ -116,6 +117,7 @@ func newCodexProjection(generation uint64) *codexProjection {
 		completedTurn:  make(map[string]struct{}),
 		threadStatus:   make(map[string]string),
 		threadCwd:      make(map[string]string),
+		usageRollouts:  make(map[string]*codexUsageRollout),
 		threadRevision: make(map[string]uint64),
 		parts:          make(map[string]codexProjectedPart),
 		turnDiff:       make(map[string]string),
@@ -198,12 +200,18 @@ func (p *codexProjection) projectThreadStarted(raw json.RawMessage) []protocol.D
 		Thread struct {
 			ID     string            `json:"id"`
 			Cwd    string            `json:"cwd"`
+			Path   string            `json:"path"`
 			Name   *string           `json:"name"`
 			Status codexThreadStatus `json:"status"`
 		} `json:"thread"`
 	}
 	if json.Unmarshal(raw, &params) != nil || params.Thread.ID == "" {
 		return nil
+	}
+	if path := params.Thread.Path; path != "" {
+		if prior := p.usageRollouts[params.Thread.ID]; prior == nil || prior.path != path {
+			p.usageRollouts[params.Thread.ID] = &codexUsageRollout{path: path}
+		}
 	}
 	if params.Thread.Cwd != "" {
 		p.threadCwd[params.Thread.ID] = params.Thread.Cwd
@@ -759,7 +767,8 @@ func (p *codexProjection) projectUsage(raw json.RawMessage) []protocol.DaemonEve
 			TotalTokens:     params.TokenUsage.Last.TotalTokens,
 		},
 	}
-	usageEvent.UsageMeta = usageanalytics.Metadata("codex-managed", "", "", "", "", "includes_cache", 0)
+	model := p.usageRollouts[params.ThreadID].modelForTurn(params.ThreadID, params.TurnID)
+	usageEvent.UsageMeta = usageanalytics.Metadata("codex-managed", "", "", "", model, "includes_cache", 0)
 	stampTurnIdentity(&usageEvent, params.ThreadID, params.TurnID, "")
 	return []protocol.DaemonEvent{usageEvent}
 }
