@@ -188,6 +188,22 @@ func (b *CodexAppServerBackend) beginThreadOperation(ctx context.Context, id str
 	_, subscribed := b.coord.subscribed[id]
 	needsResume := b.coord.detachedThreads[id] || (known && !subscribed)
 	b.coord.subscribeMu.Unlock()
+	if _, adopted := b.coord.adoptedThreads.Load(id); adopted && resume && needsResume {
+		// An idle unload loses the native writer proof. Reacquire with the same
+		// origin and permissions checks before submitting any caller input.
+		unlock()
+		if err := b.resumeAdoptedCodex(ctx, id); err != nil {
+			return nil, nil, err
+		}
+		lock.Lock()
+		client, generation, ok := b.coord.backendClient()
+		if !ok || !b.sm.codexAdoptionBound(id, b.coord.codexHomeID) {
+			unlock()
+			return nil, nil, fmt.Errorf("Codex adoption changed during resume")
+		}
+		current.client, current.generation = client, generation
+		needsResume = false
+	}
 	if resume && needsResume {
 		var resumed codexNativeConfigFields
 		params, permission := b.coord.teamResumeParams(id)
@@ -233,6 +249,12 @@ func (c *codexCoordinator) reapIdleThreads(ctx context.Context, now time.Time) {
 		}
 		func() {
 			defer lock.Unlock()
+			// Explicit adoption transfers the native writer even while the user is
+			// reading. Silence is not consent to release it. Close and disconnect
+			// still follow the ordinary lifecycle and strict reacquisition checks.
+			if _, adopted := c.adoptedThreads.Load(id); adopted {
+				return
+			}
 			c.subscribeMu.Lock()
 			_, subscribing := c.subscribing[id]
 			_, subscribed := c.subscribed[id]

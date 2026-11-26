@@ -267,6 +267,8 @@ func cmdDaemon(args []string) {
 		cmdDoctor()
 	case "diagnose":
 		cmdDaemonDiagnose(args[1:])
+	case "adopt":
+		os.Exit(runDaemonAdopt(args[1:], os.Stdout, os.Stderr, agentcontrol.NewAgentClient("", agentcontrol.AgentCodex).AdoptSession))
 	case "update":
 		cmdDaemonUpdate(args[1:])
 	case "service":
@@ -1370,6 +1372,7 @@ func cmdDaemonStart(args []string) {
 
 	// Create session manager
 	sm := session.NewSessionManagerWithTrustedActionPolicy(outputCh, effectiveTrustedActionPolicyValue)
+	sm.SetCodexAdoptionOwner(accountID, id)
 	// Turn lifecycle journal (stage 2): persists only active-turn identity
 	// (no content). Corruption is logged and startup continues (fail-open).
 	if journalDir, err := config.ConfigDir(); err == nil {
@@ -1480,6 +1483,10 @@ func cmdDaemonStart(args []string) {
 	// A terminal launcher can therefore acquire the shared OpenCode runtime even
 	// while the relay is offline; remote synchronization catches up separately.
 	agentControlServer := agentcontrol.NewServer(config.AgentControlSocketPath(), daemonRuntimeProviders(sm))
+	var adoptionRelayConnected atomic.Bool
+	agentControlServer.Adoption = func(ctx context.Context, method string, req protocol.AdoptionRequest) (protocol.AdoptionReceipt, error) {
+		return dispatchCodexAdoption(ctx, sm, method, req, adoptionRelayConnected.Load())
+	}
 	if err := agentControlServer.Start(); err != nil {
 		logger.Warn("agent control server disabled", "error", err)
 	} else {
@@ -1798,6 +1805,7 @@ func cmdDaemonStart(args []string) {
 
 	// Connection state tracking
 	client.OnStateChange = func(connected bool) {
+		adoptionRelayConnected.Store(connected)
 		stateDirty.Store(true)
 		if connected {
 			logger.Info("connected to relay")
@@ -3998,6 +4006,7 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 	zcodeQuotaReader := zcode.NewQuotaReader()
 	resetHome, _ := os.UserHomeDir()
 	resetStore := quotareset.New(filepath.Join(resetHome, ".pocketctl", "quota-resets"))
+	adoptionSlots := make(chan struct{}, 4)
 	var directoryRequests sync.Map
 	for {
 		select {
@@ -4441,6 +4450,21 @@ func handleCommands(ctx context.Context, client *ws.Client, sm *session.SessionM
 					client.SendMsg(controlCommandErrorEvent("set_session_model", cmd.SessionID, cmd.RequestID, err))
 				}
 
+			case agentcontrol.MethodAdopt, agentcontrol.MethodAdoptStatus, agentcontrol.MethodAdoptCancel:
+				if cmd.ReplyAdoption == nil {
+					continue
+				}
+				// A cold historical lookup must not stall approvals or interrupts.
+				select {
+				case adoptionSlots <- struct{}{}:
+					request := cmd
+					daemon.Go("session-adoption", logger, func() {
+						defer func() { <-adoptionSlots }()
+						request.ReplyAdoption(adoptionCommandResult(ctx, sm, request))
+					})
+				default:
+					cmd.ReplyAdoption(protocol.DaemonEvent{Type: "session_adoption_result", SessionID: cmd.SessionID, RequestID: cmd.RequestID, Error: "unverified", Reason: "unverified"})
+				}
 			case "get_session_meta":
 				// Web client queries a session's resolved model (for the /model
 				// command). Unlike session_created (one-shot, fired before the web

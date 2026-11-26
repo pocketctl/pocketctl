@@ -37,6 +37,8 @@ type acquireCacheEntry struct {
 }
 
 type Server struct {
+	// Adoption is the local daemon-owned operation endpoint, configured before Start.
+	Adoption  AdoptionHandler
 	path      string
 	providers map[string]RuntimeProvider
 
@@ -157,6 +159,13 @@ func (s *Server) handle(conn net.Conn) {
 }
 
 func (s *Server) dispatch(ctx context.Context, req Request) (any, error) {
+	switch req.Method {
+	case MethodAdopt, MethodAdoptStatus, MethodAdoptCancel:
+		if s.Adoption == nil {
+			return nil, protocolError(ErrRuntimeUnavailable, "session adoption is unavailable")
+		}
+		return dispatchLocalAdoption(ctx, s.Adoption, req)
+	}
 	provider := s.providers[req.Agent]
 	if provider == nil {
 		return nil, protocolError(ErrRuntimeUnavailable, "agent runtime provider is unavailable")

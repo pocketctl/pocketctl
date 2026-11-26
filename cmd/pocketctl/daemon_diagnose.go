@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/adapter"
+	"github.com/pocketctl/pocketctl/internal/agentcontrol"
 	"github.com/pocketctl/pocketctl/internal/daemon"
 	"github.com/pocketctl/pocketctl/internal/i18n"
 	"github.com/pocketctl/pocketctl/internal/protocol"
@@ -210,5 +213,22 @@ func cmdDaemonDiagnose(args []string) {
 		renderUnavailableSessionDiagnosis(os.Stdout, sessionID, "diagnose.reason_state_uncertain", verifyErr)
 		return
 	}
-	renderSessionDiagnosis(os.Stdout, *state, diagnoseSession(*state, sessionID))
+	diagnosis := diagnoseSession(*state, sessionID)
+	if diagnosis.agent == adapter.AgentCodex && diagnosis.proxy != sessionProxyYes {
+		// Read-only preflight also distinguishes legacy daemons (unknown IPC method).
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		r, err := agentcontrol.NewAgentClient("", agentcontrol.AgentCodex).AdoptSession(ctx, agentcontrol.MethodAdoptStatus, protocol.AdoptionRequest{SessionID: sessionID})
+		if err == nil && r.SessionID == sessionID && r.Phase != "" {
+			diagnosis.suggestions = nil
+			if r.LocalManaged {
+				diagnosis.proxy = sessionProxyYes
+				diagnosis.reasonKey = "diagnose.reason_managed"
+			}
+			renderSessionDiagnosis(os.Stdout, *state, diagnosis)
+			renderAdoption(os.Stdout, r)
+			return
+		}
+	}
+	renderSessionDiagnosis(os.Stdout, *state, diagnosis)
 }

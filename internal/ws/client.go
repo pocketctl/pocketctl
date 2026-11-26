@@ -832,6 +832,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<- error) {
 	defer close(done)
+	adoptionSupported, registrationSeen := false, false
 	report := func(err error) {
 		select {
 		case readErr <- err:
@@ -918,6 +919,10 @@ func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<
 		case "register_ack":
 			var ack protocol.RegisterAckMessage
 			if json.Unmarshal(msg, &ack) == nil {
+				if !registrationSeen {
+					registrationSeen = true
+					adoptionSupported = ack.Status == "ok" && containsCapability(ack.Capabilities, protocol.CodexSessionAdoptionCapability)
+				}
 				c.onRegisterAck(ack)
 			}
 			continue
@@ -971,6 +976,18 @@ func (c *Client) readPump(ctx context.Context, done chan struct{}, readErr chan<
 		var cmdMsg protocol.ClientMessage
 		if err := json.Unmarshal(msg, &cmdMsg); err != nil {
 			continue
+		}
+		switch cmdMsg.Type {
+		case "session_adopt", "session_adopt_status", "session_adopt_cancel":
+			if !adoptionSupported {
+				continue
+			}
+			cmdMsg.ReplyAdoption = func(event protocol.DaemonEvent) {
+				data, err := json.Marshal(event)
+				if err == nil {
+					_ = c.writeMessageTo(ctx, conn, data)
+				}
+			}
 		}
 		if c.OnControlMessage != nil && c.OnControlMessage(cmdMsg) {
 			continue

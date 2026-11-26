@@ -37,6 +37,7 @@ Commands:
   daemon logs    Show daemon logs
   daemon doctor  Diagnose connection and configuration issues
   daemon diagnose <session-id>  Diagnose whether a session is remotely controlled
+  daemon adopt [options] <session-id>  Manage a native Codex CLI session under its original ID
   daemon update  Update daemon to the latest version
   daemon service Install/remove a native auto-restart service (launchd/systemd)
   daemon keep-awake on|off|status   Prevent system sleep while agents run (auto-disables on battery)
@@ -202,6 +203,7 @@ const helpZh = `pocketctl - 远程 AI 编程代理控制
   daemon logs    查看 daemon 日志
   daemon doctor  诊断连接和配置问题
   daemon diagnose <会话ID>  诊断会话是否已代理及远程控制状态
+  daemon adopt [选项] <会话ID>  按原 ID 托管原生 Codex CLI 会话
   daemon update  更新到最新版本
   daemon service 安装/卸载原生自动重启服务（launchd/systemd）
   daemon keep-awake on|off|status   阻止系统休眠（电池供电时自动关闭）
@@ -518,8 +520,8 @@ var messages = map[string]msg{
 		"Daemon 运行中 (PID %d)，状态不可用",
 	},
 	"daemon.usage_sub": {
-		"usage: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake|task-tools>",
-		"用法: pocketctl daemon <start|stop|status|logs|doctor|diagnose|update|service|keep-awake|task-tools>",
+		"usage: pocketctl daemon <start|stop|status|logs|doctor|diagnose|adopt|update|service|keep-awake|task-tools>",
+		"用法: pocketctl daemon <start|stop|status|logs|doctor|diagnose|adopt|update|service|keep-awake|task-tools>",
 	},
 	"daemon.unknown_sub":     {"unknown daemon subcommand: %s", "未知的 daemon 子命令: %s"},
 	"daemon.already_running": {"daemon already running (PID %d)", "守护进程已在运行 (PID %d)"},
@@ -656,7 +658,35 @@ var messages = map[string]msg{
 	"status.session_row":        {"  %s  %-10s  %s", "  %s  %-10s  %s"},
 
 	// ---- diagnose.* (single-session proxy/control diagnosis) ------------
-	"diagnose.usage": {"usage: pocketctl daemon diagnose <session-id>", "用法: pocketctl daemon diagnose <会话ID>"},
+	"adopt.cwd_not_authorized":      {"The original working directory is outside the host’s allowed roots.", "原工作目录不在主机允许的路径范围内。"},
+	"adopt.permission_denied":       {"Check the original Codex sandbox, approval policy and host permissions before retrying.", "请核对原会话的 Codex 沙箱、审批策略和当前主机的权限设置后重试。"},
+	"adopt.usage":                   {"Usage: pocketctl daemon adopt [--wait=2m] [--unarchive] [--json] <session-id> | --status [--operation=<id>] [--json] <session-id> | --cancel --operation=<id> [--json] <session-id>", "用法：pocketctl daemon adopt [--wait=2m] [--unarchive] [--json] <会话ID> | --status [--operation=<操作ID>] [--json] <会话ID> | --cancel --operation=<操作ID> [--json] <会话ID>"},
+	"adopt.operation":               {"Operation: %s", "操作编号：%s"},
+	"adopt.progress":                {"Operation %s: %s", "操作 %s：%s"},
+	"adopt.result":                  {"Adoption: %s (%s)", "托管状态：%s（%s）"},
+	"adopt.archive_changed":         {"The original Codex session has been unarchived.", "原会话已在 Codex 取消归档。"},
+	"adopt.eligible":                {"Ready to try adopting this native CLI session.", "可尝试按原 ID 托管此原生 CLI 会话。"},
+	"adopt.managed":                 {"Managed on this host.", "本机已托管。"},
+	"adopt.active_writer":           {"The original session still has a writer. Finish the turn and release all clients using this thread.", "原会话仍被占用。请在原端完成本轮，并退出打开该会话的客户端。"},
+	"adopt.archived":                {"The session is archived in Codex. Unarchiving changes the native archive even if adoption later fails.", "此会话已在 Codex 归档。取消归档后，即使托管失败，原会话仍保留在未归档列表。"},
+	"adopt.source_missing":          {"Check the original host, Codex account and rollout file.", "找不到可恢复的原始记录。请核对原主机、Codex 环境及 rollout 文件。"},
+	"adopt.unsupported_source":      {"This source does not support native CLI adoption.", "此来源不支持原生 CLI 托管。"},
+	"adopt.subsession":              {"Open the parent session.", "子会话仅供查看，请前往所属主会话。"},
+	"adopt.environment_mismatch":    {"Use the original Codex account and data directory.", "切回原会话的 Codex 账号和数据目录。"},
+	"adopt.provider_mismatch":       {"Restore the original model provider configuration.", "请恢复原会话的模型提供方配置。"},
+	"adopt.managed_disabled":        {"Enable Codex management with pocketctl agent codex enable.", "请先在原主机运行 pocketctl agent codex enable。"},
+	"adopt.cli_missing":             {"Install Codex CLI on the original host, then retry.", "请在原主机安装 Codex CLI 后重试。"},
+	"adopt.cli_unsupported":         {"Update Codex CLI and retry.", "请更新原主机的 Codex CLI 后重试。"},
+	"adopt.runtime_busy":            {"Wait for existing managed work to finish, then retry.", "主机运行时正在使用中，请等待现有任务完成后重试。"},
+	"adopt.probe_timeout":           {"The CLI capability check timed out. Check Codex CLI and retry.", "Codex 能力探测超时，请检查原主机的 CLI 后重试。"},
+	"adopt.cancelled":               {"The wait was cancelled.", "已取消等待，原回合保持原状。"},
+	"adopt.deadline_exceeded":       {"Wait expired. Check the original client and retry.", "等待已结束，请检查占用原会话的客户端后重试。"},
+	"adopt.unverified":              {"Result unverified. Query the operation before retrying.", "托管结果尚未确认，请先查询本次操作。"},
+	"adopt.daemon_unavailable":      {"Cannot contact the local daemon.", "无法连接本机 daemon。"},
+	"adopt.invalid_request":         {"Invalid session adoption request.", "会话托管参数无效。"},
+	"adopt.daemon_upgrade_required": {"Update the original host daemon to support session adoption.", "请升级原主机 daemon 以支持会话托管。"},
+	"adopt.operation_not_found":     {"The requested operation was not found for this session.", "未找到此会话的指定操作。"},
+	"diagnose.usage":                {"usage: pocketctl daemon diagnose <session-id>", "用法: pocketctl daemon diagnose <会话ID>"},
 	"diagnose.help": {`Diagnose whether a session is proxied and remotely controllable.
 
 Usage:

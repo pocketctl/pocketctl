@@ -79,6 +79,7 @@ services:
         condition: service_healthy
     environment:
       <<: *relay-extension-environment
+      RELAY_CODEX_SESSION_ADOPTION_START: "${RELAY_CODEX_SESSION_ADOPTION_START:-on}"
       DATABASE_URL: postgresql://pocketctl_app:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}@postgres:5432/pocketctl
       DB_CONTROL_POOL_MAX: ${DB_CONTROL_POOL_MAX:-4}
       DB_INGEST_POOL_MAX: ${DB_INGEST_POOL_MAX:-8}

@@ -314,6 +314,9 @@ func (b *CodexAppServerBackend) Resume(ctx context.Context, threadID string) err
 	if threadID == "" {
 		return fmt.Errorf("Codex thread id is required")
 	}
+	if _, adopted := b.coord.adoptedThreads.Load(threadID); adopted {
+		return b.resumeAdoptedCodex(ctx, threadID)
+	}
 	current, release, err := b.beginThreadOperation(ctx, threadID, false)
 	if err != nil {
 		return err

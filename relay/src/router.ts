@@ -1,3 +1,4 @@
+import { adoptionCommands, adoptionTarget, publicAdoption, validAdoptionCommand } from './session-adoption.js';
 import { MessageQueueService } from './session-message-queue/service.js';
 import { recordHumanDecision } from './platform-statistics/facts.js';
 import { platformStatisticsConfig } from './platform-statistics/config.js';
@@ -92,7 +93,7 @@ function daemonAgentInventory(msg: any): { agents: any[]; collaborationCapabilit
     return { agents, collaborationCapabilities };
 }
 
-interface DaemonConnection { supportsDocumentResolve?: boolean; supportsDirectoryBrowse?: boolean; collaborationCapabilities: string[]; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
+interface DaemonConnection { supportsSessionAdoption?: boolean; supportsDocumentResolve?: boolean; supportsDirectoryBrowse?: boolean; collaborationCapabilities: string[]; ws: WebSocket; daemonId: string; hostname: string; agents: any[]; userId: number | null; os?: string; ip?: string; port?: string; arch?: string; version?: string; startedAt?: number; registrationId: string; tokenJti?: string; lastHeartbeatAt: number }
 interface ClientConnection { ws: WebSocket; subscribedSessions: Set<string>; subscribedTeamSessions: Set<string>; userId: number | null; locale: string }
 interface OpenCodeRuntimeTelemetry { fallbackReasons: Record<string, number>; healthOK: number; healthFailed: number }
 interface DaemonMetrics { cpuPct: number; memPct: number; diskPct: number; updatedAt: number; openCodeRuntime?: OpenCodeRuntimeTelemetry }
@@ -337,6 +338,10 @@ export class Router {
   private sessionToDaemon = new Map<string, string>();
   private invocationRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; fingerprint: string; hostQuotaKind?: 'zcode'|'codex'|'reset'; reply?: any; timer: ReturnType<typeof setTimeout> }>();
   private documentResolveLimiter = new SessionDocumentReadLimiter(20, 10);
+  // Rollback stops remote acquisition only. Host-local CLI and inspection of
+  // existing operations (including cancel) remain available.
+  private readonly adoptionStartsEnabled = process.env.RELAY_CODEX_SESSION_ADOPTION_START !== 'off';
+  private adoptionRequests = new Map<string, { client: WebSocket; userId: number; daemonId: string; daemonWs: WebSocket; sessionId: string; operationId?: string; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private documentRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; sessionId: string; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private directoryRequests = new Map<string, { client: WebSocket; daemonId: string; daemonWs: WebSocket; requestId: string; timer: ReturnType<typeof setTimeout> }>();
   private pendingSessionCreate = new Map<string, WebSocket>();
@@ -1378,7 +1383,8 @@ export class Router {
     if (previousDaemon && previousDaemon.ws !== ws) {
       this.cancelDaemonRevocationGate(previousDaemon.registrationId);
     }
-    this.daemons.set(daemonId, { supportsDocumentResolve: msg.supports_document_resolve === true, supportsDirectoryBrowse: msg.supports_directory_browse === true, collaborationCapabilities, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
+    const supportsSessionAdoption = Array.isArray(msg.capabilities) && msg.capabilities.includes('codex_session_adoption_v1');
+    this.daemons.set(daemonId, { supportsSessionAdoption, supportsDocumentResolve: msg.supports_document_resolve === true, supportsDirectoryBrowse: msg.supports_directory_browse === true, collaborationCapabilities, ws, daemonId, hostname, agents, userId, os: daemonOS, ip: daemonIP, port: daemonPort, arch: daemonArch, version: daemonVersion, startedAt: daemonStartedAt, registrationId, tokenJti, lastHeartbeatAt: Date.now() });
     if (tokenJti) this.authLeases.confirm(registrationId);
     console.log('[ws] daemon registered', daemonId, 'agents:', JSON.stringify(agents), 'userId:', userId);
     if (previousDaemon && previousDaemon.ws !== ws) {
@@ -1397,17 +1403,18 @@ export class Router {
     const documentCapabilities = this.sessionDocumentsMode !== 'off' && durableIngressEnabled
       ? ['session_document_snapshot_v1']
       : [];
+    const adoptionCapabilities = supportsSessionAdoption ? ['codex_session_adoption_v1'] : [];
     this.send(ws, durableIngressEnabled
       ? {
         type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true,
-        capabilities: ['durable_inbox', 'ack_watermark', 'flow_control', 'tool_output_stream_v1', ...documentCapabilities],
+        capabilities: ['durable_inbox', 'ack_watermark', 'flow_control', 'tool_output_stream_v1', ...documentCapabilities, ...adoptionCapabilities],
         event_window: this.durableIngressEventWindow,
         daemon_generation: Math.max(0, Number(daemonStartedAt) || 0),
         ...streamTransport,
       }
       : {
         type: 'register_ack', status: 'ok', connection_id: daemonId, supports_event_ack: true,
-        capabilities: ['tool_output_stream_v1', ...documentCapabilities],
+        capabilities: ['tool_output_stream_v1', ...documentCapabilities, ...adoptionCapabilities],
         ...streamTransport,
       });
     if (userId) this.broadcastQuotaStatus(userId).catch(console.error);
@@ -1689,6 +1696,9 @@ export class Router {
   }
   unregisterClient(ws: WebSocket): void {
     this.clients.delete(ws);
+    for (const [id, pending] of this.adoptionRequests) {
+      if (pending.client === ws) { clearTimeout(pending.timer); this.adoptionRequests.delete(id); }
+    }
     for (const [id, pending] of this.documentRequests) { if (pending.client === ws) { clearTimeout(pending.timer); this.documentRequests.delete(id); } }
     for (const [id,pending] of this.invocationRequests) { if(pending.client === ws) {clearTimeout(pending.timer);this.invocationRequests.delete(id);} }
     for (const [id, pending] of this.directoryRequests) {
@@ -2453,6 +2463,11 @@ export class Router {
       if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
       return;
     }
+    if (msg.type === 'session_adoption_result') {
+      void this.deliverAdoptionResult(daemonId, msg);
+      if (!durableIngressOwnsAck) this.markPersisted(daemonId, msg.seq);
+      return;
+    }
     if (msg.type === 'session_document_resolved') {
       const pending = this.documentRequests.get(msg.request_id);
       const daemon = this.daemons.get(daemonId);
@@ -2516,6 +2531,60 @@ export class Router {
     this.persistAndAck(daemonId, msg.seq, sessionId, msg.type, msg, messageState, receivedAt);
   }
 
+  private async routeAdoption(client: WebSocket, userId: number | null, msg: any): Promise<void> {
+    const base = { type: 'session_adoption_result', session_id: msg.session_id, request_id: msg.request_id };
+    const reject = (error: string) => this.send(client, { ...base, error });
+    if (!userId) return reject('forbidden');
+    if (!validAdoptionCommand(msg)) return reject('invalid_request');
+    try {
+      await db.withSessionMaterializationFence(this.controlPool, msg.session_id, async sql => {
+        const target = await adoptionTarget(sql, userId, msg.session_id);
+        if (!target.daemonId) return reject(target.error || 'forbidden');
+        const daemonId = target.daemonId;
+        const daemon = this.daemons.get(daemonId);
+        if (this.clients.get(client)?.userId !== userId) return;
+        if (!daemon || daemon.ws.readyState !== 1 || daemon.userId !== userId) return reject('daemon_offline');
+        if (daemon.tokenJti && !this.authLeases.isUsable(daemon.registrationId)) return reject('forbidden');
+        if (!daemon.supportsSessionAdoption) return reject('daemon_upgrade_required');
+        if (!this.adoptionStartsEnabled && msg.type === 'session_adopt') return reject('remote_start_paused');
+        if (this.adoptionRequests.size >= 512 || [...this.adoptionRequests.values()].filter(p => p.client === client).length >= 4) return reject('busy');
+        const id = randomUUID();
+        const timer = setTimeout(() => {
+          this.adoptionRequests.delete(id);
+          if (this.clients.get(client)?.userId === userId) reject('unverified');
+        }, 15000);
+        timer.unref?.();
+        this.adoptionRequests.set(id, { client, userId, daemonId, daemonWs: daemon.ws, sessionId:msg.session_id,
+          operationId: msg.operation_id, requestId:msg.request_id, timer });
+        this.send(daemon.ws, { ...msg, request_id: id, ...(msg.type === 'session_adopt' ? { adoption_request_id:msg.request_id } : {}) });
+      });
+    } catch { reject('unverified'); }
+  }
+
+  private async deliverAdoptionResult(daemonId: string, msg: any): Promise<void> {
+    const pending = this.adoptionRequests.get(msg.request_id);
+    if (!pending || pending.daemonId !== daemonId || this.daemons.get(daemonId)?.ws !== pending.daemonWs
+      || msg.session_id !== pending.sessionId) return;
+    clearTimeout(pending.timer);
+    this.adoptionRequests.delete(msg.request_id);
+    const deliver = (body: Record<string, unknown>) => {
+      if (this.clients.get(pending.client)?.userId === pending.userId && this.daemons.get(daemonId)?.ws === pending.daemonWs)
+        this.send(pending.client, {type:'session_adoption_result', request_id:pending.requestId, session_id:pending.sessionId, ...body});
+    };
+    try {
+      await db.withSessionMaterializationFence(this.controlPool, pending.sessionId, async sql => {
+        const target = await adoptionTarget(sql, pending.userId, pending.sessionId);
+        if (target.daemonId !== daemonId) return deliver({error:'forbidden'});
+        const adoption = publicAdoption(msg.adoption, pending.sessionId);
+        if (!adoption || (pending.operationId && pending.operationId !== adoption.operation_id))
+          return deliver({error:msg.error === 'invalid_request' ? 'invalid_request' : 'unverified'});
+        if (this.adoptionStartsEnabled) deliver({adoption});
+        else deliver({adoption:{...adoption, start_enabled:false,
+          allowed_actions:adoption.allowed_actions.filter(action => action === 'cancel')}});
+      });
+    } catch { deliver({error:'unverified'}); }
+  }
+
   async handleClientMessage(clientWs: WebSocket, msg: any): Promise<void> {
     if (msg?.type === 'user_message') {
       return this.messageRequestLog.run(clientWs, this.clients.get(clientWs)?.userId ?? null, msg,
@@ -2527,6 +2596,8 @@ export class Router {
   private async handleClientMessageLogged(clientWs: WebSocket, msg: any): Promise<void> {
     const client = this.clients.get(clientWs);
     if (!client) return;
+    if (adoptionCommands.has(msg.type)) return this.routeAdoption(clientWs, client.userId, msg);
+    if (msg.type === 'session_adoption_result') return;
     if (['read_zcode_quota','read_codex_host_rate_limits','consume_codex_reset_credit','consume_zcode_reset_credit','read_quota_reset_result'].includes(msg.type)) {
  const resetCommand=['consume_codex_reset_credit','consume_zcode_reset_credit','read_quota_reset_result'].includes(msg.type);
  const codexCommand=['read_codex_host_rate_limits','consume_codex_reset_credit'].includes(msg.type);
