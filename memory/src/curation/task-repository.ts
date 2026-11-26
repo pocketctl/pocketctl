@@ -1,4 +1,5 @@
 import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
+import {closeSupersededConsolidationJobs} from './superseded-jobs.js'
 import {createMemoryLogger} from '../logging.js'
 import {preparedSourceEvents} from '../sources/prepared-sources.js'
 import type pg from 'pg'
@@ -40,6 +41,9 @@ export async function stagePreparedLifecycleTurn(client:Pick<pg.PoolClient,'quer
  WHERE memory_task_bundles.source_digest<>EXCLUDED.source_digest AND memory_task_bundles.body_state='present'
  RETURNING bundle_id::text,revision`,[input.installationId,input.sessionId,dialogue?`dialogue:${input.turnId}`:`source:${input.turnId}`,digest,input.watermark])).rows[0]
  if(!changed)return
+ if(Number(changed.revision)>1){
+  await closeSupersededConsolidationJobs(client,{installationId:input.installationId,bundleId:changed.bundle_id})
+ }
  if(dialogue){
   await client.query('UPDATE memory_task_bundles SET dialogue_members=$3 WHERE installation_id=$1 AND bundle_id=$2',
    [input.installationId,changed.bundle_id,JSON.stringify(members.map(m=>({id:m.id,digest:m.hash.toString('hex')})))])

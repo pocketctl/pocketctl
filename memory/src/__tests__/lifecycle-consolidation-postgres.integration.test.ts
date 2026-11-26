@@ -41,6 +41,29 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   const job=(await pool.query("SELECT * FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task'",[f.personal])).rows[0] as JobClaim
   return {...f,id,payload,job,bundleId:String(job.payload.bundle_id)}
  }
+ test('a bundle revision closes its old pending job atomically with staging the successor',async()=>{
+  const f=await fixture()
+  const c=await pool.connect()
+  try{
+   const events=(await c.query('SELECT * FROM source_events WHERE installation_id=$1',[f.personal])).rows
+   const newPayload={text:'Updated preference.'}
+   events[0]={...events[0],payload:newPayload,payload_hash:canonicalPayloadHash(newPayload)}
+   const stage=()=>stageLifecycleTurn(c,{installationId:f.personal,sessionId:'consolidation-session',turnId:'consolidation-turn',events},
+    {mode:'enabled',revision:1,authorizationEpoch:'1',version:'memory-lifecycle-v1'})
+   const jobs=async()=>(await c.query(`SELECT state,last_error_code,completed_at IS NOT NULL AS finished
+    FROM memory_jobs WHERE installation_id=$1 AND job_type='consolidate_task' ORDER BY payload->>'bundle_revision'`,[f.personal])).rows
+   await c.query('BEGIN')
+   await stage()
+   await c.query('ROLLBACK')
+   const pending={state:'pending',last_error_code:null,finished:false}
+   expect(await jobs()).toEqual([pending])
+   await c.query('BEGIN')
+   await stage()
+   await stage()
+   await c.query('COMMIT')
+   expect(await jobs()).toEqual([{state:'completed',last_error_code:'bundle_revision_superseded',finished:true},pending])
+  }finally{await c.query('ROLLBACK');c.release()}
+ })
  const worker=(generator:TextGenerator)=>createCurationWorker({pool,mode:'enabled',textGenerator:generator,modelFingerprint:'synthetic-v1'})
  const signal=()=>new AbortController().signal
  test('fresh canonical feed source reaches shadow once and preserves formal content',async()=>{

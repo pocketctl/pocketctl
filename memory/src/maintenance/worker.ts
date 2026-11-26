@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import {createTransactionBoundPool} from '../api/transaction-bound-pool.js'
+import {closeSupersededConsolidationJobs} from '../curation/superseded-jobs.js'
 import {expirePendingCandidates} from '../claims/candidate-expiry.js'
 import {retainInboxInstallation,type InboxRetentionSettings} from '../inbox/retention.js'
 import {previewSourceRetention,previewLifecycleSourceRetention,reclaimSourceTurn,type SourceRetentionSettings,type RetentionPreviewCursor} from '../retention/source.js'
@@ -102,6 +103,7 @@ export function createDailyMaintenanceWorker(options:{
        // Keep failure/uncertainty audit identities until explicit reconciliation;
        // their age or a plain http_error/aborted code cannot authorize deletion.
        delta.extraction_runs=0
+       delta.superseded_consolidation_jobs=await closeSupersededConsolidationJobs(client)
        // Persistent expiry truth remains checked by readers/writers at use time.
        for(const [name,sql] of Object.entries({
         jobs:`DELETE FROM memory_jobs WHERE job_id IN(SELECT job_id FROM memory_jobs WHERE (state='completed' AND completed_at<NOW()-INTERVAL '24 hours') OR (state='dead' AND completed_at<NOW()-INTERVAL '7 days') LIMIT 500)`,
