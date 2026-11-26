@@ -44,16 +44,16 @@ export async function personalUsageQuery(
  try{
   await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
   await client.query("SET LOCAL statement_timeout='5s'")
-  const {historyWatermark}=await measure('readiness',()=>readUsageAnalyticsSchemaCapabilities(client)).catch(error=>{
+  const {historyWatermark,historyComponents}=await measure('readiness',()=>readUsageAnalyticsSchemaCapabilities(client)).catch(error=>{
    if((error as {code?:string}).code==='57014')throw error
    throw new UsageError('usage_schema_not_ready',503)
   })
-  const history=historyWatermark&&endpoint!=='coverage'&&historyEnabled(actor)&&await measure('readiness',async()=>(
+  const history=historyWatermark&&(historyComponents||endpoint==='calls'||endpoint==='object')&&endpoint!=='coverage'&&historyEnabled(actor)&&await measure('readiness',async()=>(
    await client.query('SELECT 1 FROM usage_history_owners WHERE owner_user_id=$1',[actor])
   ).rowCount===1)
   if(timing)timing.history=history
   const w=rangeWindow(range,asOf)
-  const scope=await measure('authorization',()=>resolvePersonalUsageScope(client,actor,daemon,rangeWindow('all',asOf),history))
+  const scope=await measure('authorization',()=>resolvePersonalUsageScope(client,actor,daemon,rangeWindow('all',asOf)))
   if(snapshot&&snapshot.authorization_revision!==scope.authorizationRevision)throw new UsageError('snapshot_authorization_changed',409)
   // The ledger only appends until account deletion. SUM detects late commits
   // with lower allocated sequence values as well as newly allocated ones.

@@ -45,16 +45,18 @@ type ZcodeError struct {
 // ZcodePartData is the whitelisted projection of part.data JSON. Only the part
 // types in the allowed set are mapped; step-start participates in status only.
 type ZcodePartData struct {
-	Type      string          `json:"type"`      // text|reasoning|tool|step-start|step-finish|file|...
-	Text      string          `json:"text"`      // text/reasoning content
-	Reasoning string          `json:"reasoning"` // reasoning content (alternate key)
-	Tool      string          `json:"tool"`      // tool name (tool parts)
-	CallID    string          `json:"callID"`    // tool call identity
-	State     *ZcodeToolState `json:"state"`     // tool lifecycle state
-	File      *ZcodeFile      `json:"file"`      // file part (basename + mime only)
-	Usage     *ZcodeUsage     `json:"usage"`     // step-finish token usage
+	Type      string              `json:"type"`      // text|reasoning|tool|step-start|step-finish|file|...
+	Text      string              `json:"text"`      // text/reasoning content
+	Reasoning string              `json:"reasoning"` // reasoning content (alternate key)
+	Tool      string              `json:"tool"`      // tool name (tool parts)
+	CallID    string              `json:"callID"`    // tool call identity
+	State     *ZcodeToolState     `json:"state"`     // tool lifecycle state
+	File      *ZcodeFile          `json:"file"`      // file part (basename + mime only)
+	Usage     *ZcodeUsage         `json:"usage"`     // legacy step-finish token usage
+	Tokens    *zcodeDesktopTokens `json:"tokens"`    // Desktop step-finish token usage
 	// StepStart/StepFinish markers carry no user content.
-	Step *ZcodeStep `json:"step"`
+	Step      *ZcodeStep `json:"step"`
+	createdAt int64      // Native SQLite creation time in milliseconds.
 }
 
 // ZcodeToolState is the whitelisted tool lifecycle state.
@@ -80,6 +82,19 @@ type ZcodeUsage struct {
 	OutputTokens    int64 `json:"output"`
 	ReasoningTokens int64 `json:"reasoning"`
 	TotalTokens     int64 `json:"total"`
+}
+
+// Desktop reports inclusive input. The total and cache breakdown distinguish
+// the supported representation from incomplete or inconsistent source records.
+type zcodeDesktopTokens struct {
+	Input     *int `json:"input"`
+	Output    *int `json:"output"`
+	Total     *int `json:"total"`
+	Reasoning int  `json:"reasoning"`
+	Cache     *struct {
+		Read  int `json:"read"`
+		Write int `json:"write"`
+	} `json:"cache"`
 }
 
 // ZcodeStep marks step-start/step-finish (no user content).

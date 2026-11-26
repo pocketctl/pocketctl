@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -71,6 +72,7 @@ type codexCoordinator struct {
 
 	startPrivateProject codexRuntimeStarter
 	runtimeCapabilities agentcontrol.CodexCapabilities
+	adoptionBinary      adoptionBinaryIdentity
 
 	mu                 sync.Mutex
 	runtime            *codexAppServerRuntime
@@ -94,6 +96,8 @@ type codexCoordinator struct {
 	managedThreads     map[string]struct{}
 	detachedThreads    map[string]bool
 	idleThreads        map[string]time.Time
+	adopting           sync.Map
+	adoptedThreads     sync.Map
 	threadOperations   sync.Map
 	threadStateVersion uint64
 	threadStateSaved   uint64
@@ -468,6 +472,9 @@ func (c *codexCoordinator) snapshotLocked() codexRuntimeSnapshot {
 func (c *codexCoordinator) setHiddenContextProofLocked(binary, version string, capabilities agentcontrol.CodexCapabilities) {
 	c.hiddenContextProof = codexRuntimeSnapshot{}
 	c.runtimeCapabilities = capabilities
+	if c.runtime != nil {
+		c.adoptionBinary = captureAdoptionBinary(binary, c.runtime.ProcessExecutable)
+	}
 	if c.runtime == nil || !capabilities.Managed() || !capabilities.HiddenContext || !capabilities.IdleOnlyContext || capabilities.SchemaHash == "" || capabilities.Version != version ||
 		!codexRuntimeCompatible(c.binary, c.version, c.schemaHash, binary, version, capabilities.SchemaHash) {
 		return
@@ -502,6 +509,12 @@ func (c *codexCoordinator) persistOwnerLocked(ownerPID int) error {
 		}
 	}
 	threads, detached, revision := c.threadStateSnapshot()
+	// Account-scoped adoptions must recover through their scoped operation, where
+	// source, config and writer proof are verified again. The ordinary terminal
+	// handoff has no PocketCtl account identity.
+	omitAdopted := func(id string) bool { _, ok := c.adoptedThreads.Load(id); return ok }
+	threads = slices.DeleteFunc(threads, omitAdopted)
+	detached = slices.DeleteFunc(detached, omitAdopted)
 	err := daemon.WriteCodexAppServerStateAt(c.runtimeStatePath(), &daemon.CodexAppServerState{
 		Cwd: c.projectCwd, CodexHomeID: c.codexHomeID, CodexHome: c.codexHome,
 		PID: c.runtime.PID, OwnerPID: ownerPID, Endpoint: c.runtime.Endpoint,
@@ -615,6 +628,12 @@ func (c *codexCoordinator) startEventPumpLocked() {
 	c.pumpWG.Add(1)
 	go func() { defer c.pumpWG.Done(); c.reapThreads(ctx) }()
 	for _, threadID := range c.managedThreadSnapshot() {
+		if _, strict := c.adoptedThreads.Load(threadID); strict {
+			c.adopting.Store(threadID, true)
+			c.subscriptionWG.Add(1)
+			go func(id string) { defer c.subscriptionWG.Done(); c.sm.recheckCodexAdoption(ctx, id) }(threadID)
+			continue
+		}
 		c.reserveRecoveredThread(threadID)
 		if c.beginSubscription(threadID) {
 			c.startTerminalThreadSubscription(ctx, client, generation, threadID, projector)
@@ -708,6 +727,12 @@ func (c *codexCoordinator) reconnectClient(generation uint64) {
 	c.reconnectCancel = cancelReconnect
 	c.reconnectDone = done
 	c.mu.Unlock()
+	c.adoptedThreads.Range(func(key, _ any) bool {
+		id := key.(string)
+		c.adopting.Store(id, true)
+		c.sm.revokeCodexAdoption(reconnectCtx, c, id, generation)
+		return true
+	})
 	defer func() {
 		cancelReconnect()
 		c.mu.Lock()
@@ -1150,6 +1175,9 @@ func (c *codexCoordinator) maybeSubscribeTerminalThread(parent context.Context, 
 		ThreadID string `json:"threadId"`
 	}
 	if json.Unmarshal(message.Params, &params) != nil || params.ThreadID == "" {
+		return
+	}
+	if _, strict := c.adoptedThreads.Load(params.ThreadID); strict {
 		return
 	}
 	if !c.admissionAllowed(params.ThreadID) {

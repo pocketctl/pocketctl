@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
@@ -196,9 +197,10 @@ func (mp *Mapper) SubagentDiscovered(wireParentID, wireChildID, agentType, title
 // means no event and the part type should be counted; "step-start" means no
 // content event (status-only).
 func (mp *Mapper) MapPart(wireSessionID, wireMessageID, nativePartID string, part ZcodePartData, model, prevEventID string, revision int) (mapped protocol.DaemonEvent, reason string) {
+	inputSemantics, occurredAt := "unknown", ""
 	defer func() {
 		events := []protocol.DaemonEvent{mapped}
-		usageanalytics.Enrich(events, "zcode", nativePartID, "", model, "unknown", int64(revision), true)
+		usageanalytics.Enrich(events, "zcode", nativePartID, occurredAt, model, inputSemantics, int64(revision), true)
 		mapped = events[0]
 	}()
 
@@ -253,7 +255,19 @@ func (mp *Mapper) MapPart(wireSessionID, wireMessageID, nativePartID string, par
 		return mp.mapFile(base, nativePartID, part), ""
 	case "step-finish":
 		if part.Usage == nil {
-			return protocol.DaemonEvent{}, "skip"
+			u := part.Tokens.usage()
+			if u == nil {
+				return protocol.DaemonEvent{}, "skip"
+			}
+			inputSemantics = "excludes_cache"
+			if part.createdAt > 0 {
+				occurredAt = time.UnixMilli(part.createdAt).UTC().Format(time.RFC3339Nano)
+			}
+			base.Type = "agent_text"
+			base.Usage = u
+			base.EventID = mp.partEventID(nativePartID, "usage", fmt.Sprintf("desktop-%d-%d-%d-%d-%d-%d",
+				u.InputTokens, u.OutputTokens, u.ReasoningTokens, u.TotalTokens, u.CacheRead, u.CacheCreate))
+			return base, ""
 		}
 		// usage-only agent_text: no visible text, just token accounting.
 		base.Type = "agent_text"
@@ -270,6 +284,24 @@ func (mp *Mapper) MapPart(wireSessionID, wireMessageID, nativePartID string, par
 	default:
 		// timeline and any unknown type: never upload raw JSON; caller counts.
 		return protocol.DaemonEvent{}, "unknown"
+	}
+}
+
+// usage splits inclusive input into the disjoint counters used by the relay
+// and session totals. Subtraction after bounds checks avoids overflow.
+func (t *zcodeDesktopTokens) usage() *protocol.ContextUsage {
+	if t == nil || t.Input == nil || t.Output == nil || t.Total == nil || t.Cache == nil {
+		return nil
+	}
+	input, output, total := *t.Input, *t.Output, *t.Total
+	read, write := t.Cache.Read, t.Cache.Write
+	if input < 0 || output < 0 || total < input || total-input != output || t.Reasoning < 0 ||
+		read < 0 || write < 0 || read > input || write > input-read {
+		return nil
+	}
+	return &protocol.ContextUsage{
+		InputTokens: input - read - write, OutputTokens: output, TotalTokens: total,
+		ReasoningTokens: t.Reasoning, CacheRead: read, CacheCreate: write,
 	}
 }
 

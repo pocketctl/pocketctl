@@ -47,7 +47,7 @@ suite('existing history consumers with real PostgreSQL and MinIO', () => {
   },30_000)
   beforeEach(async()=>{
     await pool.query('TRUNCATE users,daemons,sessions,deleted_sessions RESTART IDENTITY CASCADE')
-    await pool.query('TRUNCATE token_usage_accounting_state,token_daily_closures,token_daily_stats,token_session_daily_stats,token_usage_facts')
+    await pool.query('TRUNCATE token_usage_accounting_state,token_daily_closures,token_daily_stats,token_session_daily_stats,team_external_usage_facts,token_usage_facts')
     const users=await pool.query("INSERT INTO users(email,password_hash) VALUES('cold@test.invalid','x'),('other@test.invalid','x') RETURNING id")
     userId=users.rows[0].id;otherId=users.rows[1].id
     await pool.query("INSERT INTO daemons(daemon_id,user_id) VALUES('cold-host',$1)",[userId])
@@ -70,7 +70,7 @@ suite('existing history consumers with real PostgreSQL and MinIO', () => {
       {type:'agent_text',text:'Mixed hot continuation',streaming:false},
     ]
     const rows=[]
-    for(const payload of payloads) rows.push((await pool.query("INSERT INTO events(session_id,event_type,payload) VALUES('cold-session',$1,$2::jsonb) RETURNING id::text,event_type,payload",[payload.type,JSON.stringify(payload)])).rows[0])
+    for(const payload of payloads) rows.push((await pool.query("INSERT INTO events(session_id,event_type,payload,user_id) VALUES('cold-session',$1,$2::jsonb,$3) RETURNING id::text,event_type,payload",[payload.type,JSON.stringify(payload),userId])).rows[0])
     return rows
   }
   async function publish(rows:Record<string,any>[]) {

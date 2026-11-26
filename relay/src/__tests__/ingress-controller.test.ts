@@ -171,3 +171,26 @@ test('isolates sendAck exceptions after commit without requeueing or blocking pe
   ])
   error.mockRestore()
 })
+
+test('groups tiny midstream arrivals until the first deadline and expedites a boundary', async () => {
+  vi.useFakeTimers()
+  try {
+    const persistBatch = vi.fn(async (batch: IngressEnvelope[]) => checkpoint(batch.at(-1)!.seq))
+    const controller = new IngressController({ repository: { persistBatch }, sendAck: vi.fn(), disconnectRetryable: vi.fn(), chunkFlushDelayMs: 100 })
+    const chunk = (seq: number) => ({ ...payload(seq), type: 'agent_text', stream_id:'stream', text:'猫', streaming:true, chunk_seq:seq-1,byte_offset:3*(seq-1) })
+    controller.accept(connection, chunk(1))
+    await vi.advanceTimersByTimeAsync(5)
+    expect(persistBatch).toHaveBeenCalledTimes(1)
+    controller.accept(connection, chunk(2))
+    await vi.advanceTimersByTimeAsync(40)
+    controller.accept(connection, chunk(3))
+    await vi.advanceTimersByTimeAsync(59)
+    expect(persistBatch).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(persistBatch.mock.calls[1][0].map(e=>e.payload)).toEqual([chunk(2),chunk(3)])
+    controller.accept(connection, chunk(4))
+    controller.accept(connection, { ...chunk(5), final:true })
+    await vi.advanceTimersByTimeAsync(5)
+    expect(persistBatch.mock.calls[2][0].map(e=>e.seq)).toEqual([4,5])
+  } finally { vi.useRealTimers() }
+})

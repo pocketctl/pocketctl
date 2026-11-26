@@ -417,6 +417,9 @@ func TestCodexProjectionUserCommandFileAndUsage(t *testing.T) {
 	if len(usage) != 1 || usage[0].Type != "agent_text" || usage[0].Usage == nil || usage[0].Usage.InputTokens != 10 || usage[0].Usage.OutputTokens != 3 || usage[0].Usage.CacheRead != 4 || usage[0].Usage.ReasoningTokens != 2 || usage[0].Usage.TotalTokens != 13 {
 		t.Fatalf("usage=%+v", usage)
 	}
+	if meta := usage[0].UsageMeta; meta == nil || meta.InputSemantics != "includes_cache" || meta.SourceUsageID != "" || meta.RequestID != "" {
+		t.Fatalf("unexpected managed source metadata: %+v", meta)
+	}
 }
 
 func TestCodexProjectionThreadStatusAndGenerationIsolation(t *testing.T) {

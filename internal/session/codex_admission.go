@@ -78,6 +78,9 @@ func (c *codexCoordinator) admissionAllowed(id string) bool {
 	if id == "" {
 		return true
 	}
+	if _, fenced := c.adopting.Load(id); fenced {
+		return false
+	}
 	// Retirement overrides cached admission: an owned empty thread's rollout
 	// is durable history, but must not resurrect a failed collaboration create.
 	if c.sm != nil && c.sm.isRetiredCollaborationSession(id, adapter.AgentCodex, "") {
@@ -115,6 +118,20 @@ func (c *codexCoordinator) handleAdmissionMessage(ctx context.Context, message c
 		return
 	}
 	id, ephemeral := codexAdmissionIdentity(message)
+	if value, binding := c.adopting.Load(id); binding {
+		// Native may replay approval/question requests before returning resume.
+		// Retain them for verified binding. An unsuccessful candidate must never
+		// answer a request belonging to the original client.
+		if message.ID != nil {
+			if pending, ok := value.(*codexAdoptionFence); ok && pending.hold(message, interactions) {
+				return
+			}
+			if _, stillBlocked := c.adopting.Load(id); !stillBlocked && interactions != nil {
+				interactions.Handle(message)
+			}
+		}
+		return
+	}
 	c.admissionMu.Lock()
 	if p.generation < c.admissionGeneration {
 		c.admissionMu.Unlock()

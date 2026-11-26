@@ -66,6 +66,7 @@ type ProcessState struct {
 	ControlMode             string              // managed | unmanaged_active | legacy_read_only
 	CodexPlanState          *adapter.CodexPlanState
 	CodexHomeID             string
+	CodexNativePermission   *protocol.PermissionConfig // exact display metadata; native turn defaults remain authoritative
 	CodexHomeLabel          string
 	ClaudeChannelInstanceID string
 }
@@ -111,6 +112,9 @@ var (
 )
 
 type SessionManager struct {
+	adoptionOwner           string
+	adoptionSources         sync.Map
+	adoptions               *codexAdoptionService
 	memorySources           *memorySourceLedger
 	opencodeDocumentCapture func(adapter.OpencodeDocumentCandidate) bool
 

@@ -46,7 +46,7 @@ func (c *Client) SetAgentInventory(inventory []discovery.AgentInfo) bool {
 func (c *Client) agentRegisterMessage() protocol.RegisterMessage {
 	c.agentMu.RLock()
 	defer c.agentMu.RUnlock()
-	capabilities := []string{protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1, protocol.CapabilityTeamPrivateInteractionsV2}
+	capabilities := []string{protocol.CodexSessionAdoptionCapability, protocol.CapabilityTeamDispatchV1, protocol.CapabilityTeamContextV1, protocol.CapabilityTeamReconcileV1, protocol.CapabilityTeamPrivateInteractionsV2}
 	if c.teamDeliveryEnabled {
 		capabilities = append(capabilities, protocol.CapabilityTeamDeliveryV1)
 		if c.teamStepsEnabled {

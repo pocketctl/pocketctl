@@ -477,6 +477,14 @@ func (z *ZcodeSync) PreviewPart(nativePartID, nativeMessageID, wireMessageID str
 		revision = prev.revision + 1
 	}
 	ev.Revision = revision
+	if ev.UsageMeta != nil {
+		ev.UsageMeta.Revision = int64(revision)
+		if seen && part.Usage == nil && part.Tokens != nil {
+			// A correction can restore an earlier cache split. Its counters
+			// match that earlier event, but its revision must still be applied.
+			ev.EventID = fmt.Sprintf("%s:r%d", ev.EventID, revision)
+		}
+	}
 	if seen {
 		ev.PreviousEventID = prev.eventID
 	}

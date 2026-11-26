@@ -1,5 +1,7 @@
 import type { MaterializationContext } from '../materialization/types.js';
 
+export const INBOX_MAX_ATTEMPTS = 12;
+
 export type PriorityClass = 'control' | 'live' | 'replay' | 'aggregate';
 
 export interface IngressEnvelope {

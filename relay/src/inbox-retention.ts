@@ -1,7 +1,10 @@
 import type pg from 'pg'
+import { INBOX_MAX_ATTEMPTS } from './ingress/types.js'
+import { disposableFailedInbox } from './ingress/failed-inbox-retention.js'
 import { sessionDocumentUploadsExpired } from './metrics.js'
 
 const DELETE_BATCH_LIMIT = 1_000
+const FAILED_SCAN_LIMIT = 250
 const EXPIRED = "NOW() - INTERVAL '6 hours'"
 // Team recovery uses Inbox payloads and transport receipt order after a
 // disconnect. ACK alone does not retire that business evidence.
@@ -23,9 +26,10 @@ const recentReceipt = `EXISTS (SELECT 1 FROM event_inbox_receipt r WHERE r.inbox
 const deliveryProtected = `EXISTS (SELECT 1 FROM realtime_outbox o WHERE o.inbox_id = i.inbox_id
   AND (o.delivered_at IS NULL OR o.delivered_at >= ${EXPIRED}))`
 
-export type RetentionStage = 'outbox' | 'receipts' | 'inbox' | 'uploads' | 'inspection'
+export type RetentionStage = 'outbox' | 'receipts' | 'inbox' | 'failed_inbox' | 'uploads' | 'inspection'
 export interface RetentionStats {
   deletedCompleted: number;
+  deletedFailed: number;
   deletedOutbox: number;
   deletedReceipts: number;
   deletedUploads: number;
@@ -55,11 +59,13 @@ async function beginBoundedTransaction(client: pg.PoolClient): Promise<void> {
  * No failure, pending work, unacknowledged transport or unsealed usage is
  * declared useless merely because it is old. */
 export class InboxRetention {
+  // Advance only after commit. Restarting revisits the oldest page safely.
+  private failedCursor = { received: '-infinity', id: '0' }
   private readonly retries = new Map<RetentionStage, { at: number; failure: RetentionStats['failures'][number] }>()
   constructor(private readonly pool: pg.Pool) {}
 
   async runOnce(): Promise<RetentionStats> {
-    const result: RetentionStats = { deletedCompleted: 0, deletedOutbox: 0, deletedReceipts: 0,
+    const result: RetentionStats = { deletedCompleted: 0, deletedFailed: 0, deletedOutbox: 0, deletedReceipts: 0,
       deletedUploads: 0, blockedUndelivered: 0, inspected: {}, failures: [], moreWork: false }
     const stage = async (name: RetentionStage, work: (client: pg.PoolClient) => Promise<{ deleted: number; detail?: Record<string, number> }>) => {
       const retry = this.retries.get(name)
@@ -118,29 +124,59 @@ export class InboxRetention {
 
     result.deletedReceipts = (await stage('receipts', async client => {
       const deleted = await client.query(`WITH expired AS (
-        SELECT r.receipt_id FROM event_inbox_receipt r
+        SELECT r.receipt_id, i.status, r.inbox_id FROM event_inbox_receipt r
         JOIN daemon_ack_checkpoint c ON c.daemon_id=r.daemon_id AND c.daemon_generation=r.daemon_generation
         LEFT JOIN event_inbox i ON i.inbox_id=r.inbox_id
         WHERE c.ack_seq >= r.seq AND r.received_at < ${EXPIRED}
-          AND (r.inbox_id IS NULL OR (i.status = 2 AND NOT ${teamProtected('i')}))
+          AND (r.inbox_id IS NULL OR (i.status IN (2, 3) AND NOT ${teamProtected('i')}))
         ORDER BY r.received_at,r.receipt_id LIMIT $1 FOR UPDATE OF r SKIP LOCKED
-      ) DELETE FROM event_inbox_receipt r USING expired e WHERE r.receipt_id=e.receipt_id`, [DELETE_BATCH_LIMIT])
+      ) DELETE FROM event_inbox_receipt r USING expired e WHERE r.receipt_id=e.receipt_id
+        AND (e.status IS DISTINCT FROM 3 OR EXISTS (
+          -- Lock only failed parents in this batch. Recovery may be requeuing them.
+          SELECT 1 FROM event_inbox i WHERE i.inbox_id=e.inbox_id AND i.status=3
+          FOR SHARE OF i SKIP LOCKED
+        ))`, [DELETE_BATCH_LIMIT])
       return { deleted: deleted.rowCount ?? 0 }
     })).deleted
 
+    const safeTransport = `NOT ${deliveryProtected} AND NOT ${unacknowledged}
+      AND NOT ${recentReceipt} AND NOT ${teamProtected('i')}`
+    let nextCursor = this.failedCursor
+    const failedInbox = await stage('failed_inbox', async client => {
+      // The status/received_at/inbox_id index bounds work even when thousands
+      // of older failures still need recovery. Keep PostgreSQL timestamp precision.
+      const page = await client.query<{inbox_id: string; received: string}>(`SELECT inbox_id,received_at::text AS received
+        FROM event_inbox WHERE status=3 AND received_at < ${EXPIRED}
+          AND (received_at,inbox_id)>($1::timestamptz,$2::bigint)
+        ORDER BY received_at,inbox_id LIMIT $3 FOR UPDATE SKIP LOCKED`,
+      [this.failedCursor.received,this.failedCursor.id,FAILED_SCAN_LIMIT])
+      const last = page.rows[FAILED_SCAN_LIMIT-1]
+      nextCursor = last ? {received:last.received,id:last.inbox_id} : {received:'-infinity',id:'0'}
+
+      let failed = 0
+      if (page.rows.length) {
+        const retired = await client.query(`DELETE FROM event_inbox i WHERE i.inbox_id=ANY($1::bigint[])
+          AND i.completed_at < ${EXPIRED} AND ${disposableFailedInbox} AND ${safeTransport}`,
+        [page.rows.map(row => row.inbox_id)])
+        failed = retired.rowCount ?? 0
+      }
+      return {deleted:failed,detail:{scanned:page.rows.length}}
+    })
+    if (failedInbox.detail) this.failedCursor = nextCursor
+    result.deletedFailed = failedInbox.deleted
+
     result.deletedCompleted = (await stage('inbox', async client => {
       const eligible = `i.status = 2 AND i.completed_at < ${EXPIRED}
-        AND NOT (${accountingProtected}) AND NOT ${deliveryProtected}
-        AND NOT ${unacknowledged} AND NOT ${recentReceipt} AND NOT ${teamProtected('i')}`
+        AND NOT (${accountingProtected}) AND ${safeTransport}`
       const candidates = await client.query<{inbox_id: string}>(`SELECT i.inbox_id FROM event_inbox i
-        WHERE ${eligible} ORDER BY i.completed_at,i.inbox_id LIMIT $1 FOR UPDATE OF i SKIP LOCKED`, [DELETE_BATCH_LIMIT])
+        WHERE ${eligible} ORDER BY i.completed_at,i.inbox_id LIMIT $1 FOR UPDATE OF i SKIP LOCKED`,
+      [DELETE_BATCH_LIMIT])
       if (!candidates.rows.length) return {deleted: 0}
-      // New statement snapshot AFTER parent locks: a receipt committed between
-      // discovery and locking must be rechecked before ON DELETE CASCADE.
-      // These locks prevent further FK inserts until this transaction commits.
+      // Recheck in a fresh snapshot after locking the parent, including any
+      // child rows whose concurrent insertion committed before that lock.
       const deleted = await client.query(`DELETE FROM event_inbox i WHERE i.inbox_id=ANY($1::bigint[])
         AND ${eligible}`, [candidates.rows.map(row => row.inbox_id)])
-      return { deleted: deleted.rowCount ?? 0 }
+      return {deleted: deleted.rowCount ?? 0}
     })).deleted
 
     result.deletedUploads = (await stage('uploads', async client => {
@@ -160,6 +196,10 @@ export class InboxRetention {
           ORDER BY received_at,inbox_id LIMIT $1) i
       ) SELECT reason,count(*)::int count FROM (
         SELECT CASE WHEN i.status=0 THEN 'pending' WHEN i.status=1 THEN 'processing'
+          WHEN i.status=3 AND i.completed_at < ${EXPIRED} THEN CASE
+            WHEN i.last_error='unknown_daemon_session' THEN 'failed_session_unresolved'
+            WHEN i.attempts>=${INBOX_MAX_ATTEMPTS} THEN 'failed_retries_exhausted'
+            ELSE 'failed_requires_review' END
           WHEN i.status=3 THEN 'failed_requires_review'
           WHEN i.completed_at IS NULL THEN 'missing_completion_time'
           WHEN i.completed_at >= ${EXPIRED} THEN 'within_retention'
@@ -176,7 +216,7 @@ export class InboxRetention {
     result.inspected = inspection.detail ?? {}
     result.blockedUndelivered = result.inspected.undelivered ?? 0
     result.moreWork = [result.deletedCompleted,result.deletedOutbox,result.deletedReceipts,result.deletedUploads]
-      .some(count => count === DELETE_BATCH_LIMIT)
+      .some(count => count === DELETE_BATCH_LIMIT) || result.deletedFailed === FAILED_SCAN_LIMIT
     return result
   }
 }

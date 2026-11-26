@@ -18,6 +18,10 @@ const (
 	AgentOpenCode = "opencode"
 	AgentCodex    = "codex"
 
+	MethodAdopt       = "session_adopt"
+	MethodAdoptStatus = "session_adopt_status"
+	MethodAdoptCancel = "session_adopt_cancel"
+
 	MethodRuntimeAcquire   = "agent.runtime.acquire"
 	MethodRuntimeLeaseBind = "agent.runtime.lease_bind"
 	MethodRuntimeStatus    = "agent.runtime.status"
@@ -146,6 +150,10 @@ func ValidateRequest(req Request) error {
 		return invalid("request id is required and must be at most %d bytes", maxIDLength)
 	}
 	switch req.Method {
+	case MethodAdopt, MethodAdoptStatus, MethodAdoptCancel:
+		if req.Agent != AgentCodex {
+			return invalid("session adoption requires Codex CLI")
+		}
 	case MethodRuntimeAcquire, MethodRuntimeLeaseBind, MethodRuntimeStatus, MethodRuntimeRelease:
 	default:
 		return invalid("unknown method %q", req.Method)

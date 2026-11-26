@@ -10,7 +10,7 @@ export const scopeWindowsSQL = `scope_windows AS MATERIALIZED (
  WHERE w."from" < $3::timestamptz AND w."toExclusive" > $2::timestamptz
 )`
 
-export const historyWindowsSQL = scopeWindowsSQL + `,
+export function historyWindowQuery(tokens=false) { return scopeWindowsSQL + `,
  history_days AS MATERIALIZED (
   SELECT DISTINCT h.owner_user_id, h.daemon_id, h.day
   FROM scope_windows w
@@ -18,6 +18,7 @@ export const historyWindowsSQL = scopeWindowsSQL + `,
    AND h.day >= (w.start_at AT TIME ZONE 'UTC')::date
    AND h.day < (w.end_at AT TIME ZONE 'UTC')::date
   WHERE h.built_revision=h.revision
+   ${tokens?"AND (h.tokens='[]'::jsonb OR h.token_composition_revision=h.revision)":''}
    AND (h.day::timestamp AT TIME ZONE 'UTC') >= w.start_at
  ),
  live_windows AS MATERIALIZED (
@@ -35,7 +36,8 @@ export const historyWindowsSQL = scopeWindowsSQL + `,
       AND (h.day+1)::timestamp AT TIME ZONE 'UTC' <= w.end_at
    ) edges
   ) gaps WHERE gaps.start_at<gaps.end_at
- )`
+ )` }
+export const historyWindowsSQL=historyWindowQuery()
 
 // These columns are needed after historical and live rows have been combined.
 // In particular, request_id is the stable source ID, never a SQL dense_rank

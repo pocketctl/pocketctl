@@ -29,6 +29,7 @@ type CodexRuntimeProvider struct {
 	coordinatorFactory func(adapter.CodexHomeProfile) *codexCoordinator
 	resolve            func() (string, string, error)
 	probe              func(context.Context, string, string) (agentcontrol.CodexCapabilities, error)
+	adoptionProbe      func(context.Context, string, string) (agentcontrol.CodexCapabilities, error)
 }
 
 func codexHomeRuntimeStateDir() string {
@@ -43,7 +44,8 @@ func (p *CodexRuntimeProvider) Recover(ctx context.Context) error {
 	defer p.recovering.Add(-1)
 	projectErr := p.recoverProjects(ctx)
 	homeErr := p.recoverHomes(ctx)
-	return errors.Join(projectErr, homeErr, p.recoverLegacy(ctx))
+	legacyErr := p.recoverLegacy(ctx)
+	return errors.Join(projectErr, homeErr, legacyErr, p.sm.adoptionService().recover())
 }
 
 func (p *CodexRuntimeProvider) recoverHomes(ctx context.Context) error {
@@ -126,8 +128,9 @@ func (p *CodexRuntimeProvider) recoverLegacy(ctx context.Context) error {
 
 func newCodexRuntimeProvider(sm *SessionManager) *CodexRuntimeProvider {
 	p := &CodexRuntimeProvider{
-		sm:      sm,
-		resolve: agentcontrol.ResolveConfiguredCodex,
+		sm:            sm,
+		resolve:       agentcontrol.ResolveConfiguredCodex,
+		adoptionProbe: (agentcontrol.CodexProbe{Timeout: 20 * time.Second}).Probe,
 		probe: func(ctx context.Context, binary, version string) (agentcontrol.CodexCapabilities, error) {
 			return (agentcontrol.CodexProbe{}).Probe(ctx, binary, version)
 		},
@@ -351,7 +354,11 @@ func (p *CodexRuntimeProvider) Status(ctx context.Context, _ agentcontrol.Runtim
 func (sm *SessionManager) ShutdownCodex() error {
 	sm.mu.Lock()
 	provider := sm.codexProvider
+	adoptions := sm.adoptions
 	sm.mu.Unlock()
+	if adoptions != nil {
+		adoptions.stop()
+	}
 	if provider == nil {
 		return nil
 	}

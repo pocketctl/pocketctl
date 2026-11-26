@@ -11,8 +11,8 @@ import type { RealtimeOutboxWriter } from './materialization/realtime-outbox.js'
 import { isSessionDocumentArtifactEvent } from './session-documents/materializer.js'
 import { observeInboxOldest, workerBacklog, workerBatchSize, workerClaimedRows, workerDrainPasses, workerRetries } from './metrics.js'
 import { isSideEffectFreeReplay } from './materialization/replay-batch-policy.js'
+import { INBOX_MAX_ATTEMPTS } from './ingress/types.js'
 
-const MAX_ATTEMPTS = 12
 const STALE_CLAIM_LEASE_MS = 300_000
 const STALE_CLAIM_SWEEP_LIMIT = 1_000
 const STALE_CLAIM_SWEEP_INTERVAL_MS = 60_000
@@ -157,7 +157,7 @@ export function createInboxWorker(deps: InboxWorkerDeps) {
     } catch (error) {
       if (error instanceof LostClaimError) return
       const errorCode = safeMaterializationError(error)
-      if (isPermanentMaterializationError(error) || row.attempts >= MAX_ATTEMPTS) {
+      if (isPermanentMaterializationError(error) || row.attempts >= INBOX_MAX_ATTEMPTS) {
         try {
           await deps.repository.deadLetter(row.inboxId, row.attempts, errorCode, deps.workerId)
         } catch (writeError) {

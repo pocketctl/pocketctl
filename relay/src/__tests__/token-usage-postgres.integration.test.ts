@@ -55,6 +55,7 @@ describeWithDatabase('token usage Task 2 PostgreSQL contracts', () => {
       // The newer projection function has the table's composite type in its
       // signature; it did not exist in the pre-accounting fixture either.
       await upgradePool.query(`DROP FUNCTION usage_project_token_fact(token_usage_facts)`)
+      await upgradePool.query(`DROP FUNCTION usage_codex_fact_shape_v1(token_usage_facts,jsonb)`)
       await upgradePool.query(`DROP TABLE token_usage_facts`)
       await upgradePool.query(`
         CREATE TABLE token_usage_facts (

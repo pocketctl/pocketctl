@@ -6,6 +6,9 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
   await db.query(`
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_storage TEXT NOT NULL DEFAULT 'hot';
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_header JSONB NOT NULL DEFAULT '{}'::jsonb;
+    -- NULL marks pre-migration headers (including nonempty, older projections).
+    -- Upgrade them lazily on the next write instead of rewriting the event table.
+    ALTER TABLE events ADD COLUMN IF NOT EXISTS body_header_version SMALLINT;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_manifest_id UUID;
     ALTER TABLE events ADD COLUMN IF NOT EXISTS body_chunk_ordinal INT;
     -- FK checks and object GC query references without a body_storage predicate.
@@ -76,14 +79,24 @@ export async function initSessionHistoryBodySchema(db: Pick<pg.Pool, 'query'>): 
             JOIN session_archive_manifests m USING(manifest_id) WHERE c.manifest_id=NEW.body_manifest_id AND c.ordinal=NEW.body_chunk_ordinal
               AND q.storage_namespace=m.storage_namespace) THEN RAISE EXCEPTION 'cold object is being collected'; END IF;
         END IF;
-        IF NEW.body_storage='hot' THEN NEW.body_header=session_event_body_header(NEW.payload);
+        IF NEW.body_storage='hot' THEN
+          NEW.body_header=session_event_body_header(NEW.payload);
+          NEW.body_header_version=1;
         ELSIF TG_OP='UPDATE' AND OLD.body_storage='hot' THEN NEW.body_header=session_event_body_header(OLD.payload);
         END IF;
         RETURN NEW;
       END $$;
     DROP TRIGGER IF EXISTS events_body_header ON events;
-    CREATE TRIGGER events_body_header BEFORE INSERT OR UPDATE ON events
+    CREATE TRIGGER events_body_header BEFORE INSERT OR UPDATE OF
+      payload,body_header,body_header_version,body_storage,body_session_id,
+      body_manifest_id,body_chunk_ordinal,body_owner_user_id,body_activity_epoch ON events
       FOR EACH ROW EXECUTE FUNCTION maintain_session_event_body_header();
+    -- BEFORE triggers run by name. If the first one already rebuilt the header,
+    -- its NEW version also skips this legacy repair on the same statement.
+    DROP TRIGGER IF EXISTS events_body_header_legacy ON events;
+    CREATE TRIGGER events_body_header_legacy BEFORE UPDATE ON events
+      FOR EACH ROW WHEN (NEW.body_storage='hot' AND NEW.body_header_version IS DISTINCT FROM 1)
+      EXECUTE FUNCTION maintain_session_event_body_header();
     CREATE INDEX IF NOT EXISTS idx_events_body_agent_id_desc ON events(session_id,((COALESCE(payload,body_header)->>'agent_id')),id DESC)
       WHERE COALESCE(payload,body_header)?'agent_id';
   `)

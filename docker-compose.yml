@@ -53,6 +53,7 @@ services:
       - "8080:8080"
     environment:
       <<: *relay-extension-environment
+      RELAY_CODEX_SESSION_ADOPTION_START: "${RELAY_CODEX_SESSION_ADOPTION_START:-on}"
       DATABASE_URL: "${RELAY_DATABASE_URL:-postgresql://pocketctl:pocketctl@postgres:5432/pocketctl}"
       DB_CONTROL_POOL_MAX: "${DB_CONTROL_POOL_MAX:-4}"
       DB_INGEST_POOL_MAX: "${DB_INGEST_POOL_MAX:-8}"

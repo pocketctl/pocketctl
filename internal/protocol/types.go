@@ -98,6 +98,12 @@ type MemoryContextHint struct {
 
 // Client → Daemon commands
 type ClientMessage struct {
+	// ReplyAdoption writes only to the negotiated connection that issued this request.
+	ReplyAdoption     func(DaemonEvent)           `json:"-"`
+	AdoptionRequestID string                      `json:"adoption_request_id,omitempty"`
+	OperationID       string                      `json:"operation_id,omitempty"`
+	WaitMS            int64                       `json:"wait_ms,omitempty"`
+	Unarchive         bool                        `json:"unarchive,omitempty"`
 	TerminalSubmit    bool                        `json:"terminal_submit,omitempty"`
 	QueueDispatch     bool                        `json:"queue_dispatch,omitempty"`
 	MemoryContextHint *MemoryContextHint          `json:"memory_context_hint,omitempty"`
@@ -234,6 +240,7 @@ type ApprovalSecurityContext struct {
 
 // Daemon → Client events
 type DaemonEvent struct {
+	Adoption            *AdoptionReceipt            `json:"adoption,omitempty"`
 	MemoryObservationID string                      `json:"-"` // physical JSONL locator only, never causal evidence
 	MemoryNative        *MemoryNativeEvent          `json:"-"`
 	LocalSubmitID       string                      `json:"local_submit_id,omitempty"` // native interactive submission witnessed by the daemon

@@ -50,10 +50,11 @@ var requiredColumns = map[string][]string{
 // single sql.DB connection configured mode=ro + query_only, and never writes.
 // All queries carry a per-call context deadline (default 2s).
 type Store struct {
-	db           *sql.DB
-	storageDir   string
-	fingerprint  string // canonical schema fingerprint (sorted table→columns)
-	queryTimeout time.Duration
+	db              *sql.DB
+	storageDir      string
+	fingerprint     string // canonical schema fingerprint (sorted table→columns)
+	queryTimeout    time.Duration
+	partCreatedExpr string // Optional native timestamp column, selected after schema probe.
 }
 
 // Option configures a Store (mainly for tests to inject shorter timeouts).
@@ -107,9 +108,10 @@ func Open(storageDir string, opts ...Option) (*Store, error) {
 	db.SetConnMaxLifetime(0)
 
 	s := &Store{
-		db:           db,
-		storageDir:   abs,
-		queryTimeout: queryTimeout,
+		db:              db,
+		storageDir:      abs,
+		queryTimeout:    queryTimeout,
+		partCreatedExpr: "0",
 	}
 	for _, o := range opts {
 		o(s)
@@ -163,6 +165,12 @@ func (s *Store) Probe(ctx context.Context) error {
 		for _, want := range requiredColumns[table] {
 			if !have[want] {
 				return fmt.Errorf("%w: table %s missing column %s", ErrSchemaIncompatible, table, want)
+			}
+		}
+		if table == "part" {
+			s.partCreatedExpr = "0"
+			if have["time_created"] {
+				s.partCreatedExpr = "COALESCE(p.time_created, 0)"
 			}
 		}
 		parts = append(parts, table+"("+strings.Join(cols, ",")+")")
@@ -314,10 +322,17 @@ type PartRow struct {
 	SessionID       string
 	Sequence        int64
 	MessageSequence int64
+	TimeCreated     int64
 	TimeUpdated     int64
 	DataJSON        string
 	Model           string // model of the owning assistant message
 	Msg             MessageScope
+}
+
+func (r PartRow) decodeData() (ZcodePartData, bool) {
+	part, ok := DecodePartData(r.DataJSON)
+	part.createdAt = r.TimeCreated
+	return part, ok
 }
 
 // SQLite JSON paths are case-sensitive. Desktop writes both Id and ID
@@ -534,7 +549,7 @@ func (s *Store) ListParts(ctx context.Context, sessionID string, after *PartCurs
 		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
 		defer cancel()
 	}
-	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data, ` + messageModelJSON + messageScopeColumns + `
+	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, ` + s.partCreatedExpr + `, p.time_updated, p.data, ` + messageModelJSON + messageScopeColumns + `
 		FROM part p JOIN message m ON p.message_id = m.id
 		WHERE p.session_id = ?`
 	args := []any{sessionID}
@@ -576,7 +591,7 @@ func scanPartRow(rows *sql.Rows) (PartRow, error) {
 	var r PartRow
 	var modelJSON string
 	var role, synthetic, system, hidden, internal, visibility sql.NullString
-	err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeUpdated, &r.DataJSON,
+	err := rows.Scan(&r.ID, &r.MessageID, &r.SessionID, &r.Sequence, &r.MessageSequence, &r.TimeCreated, &r.TimeUpdated, &r.DataJSON,
 		&modelJSON, &role, &synthetic, &system, &hidden, &internal, &visibility)
 	if err != nil {
 		return r, err
@@ -638,7 +653,7 @@ func (s *Store) ListChangedParts(ctx context.Context, sessionID string, after Mu
 		ctx, cancel = context.WithTimeout(ctx, s.queryTimeout)
 		defer cancel()
 	}
-	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, p.time_updated, p.data, ` + messageModelJSON + messageScopeColumns + `
+	query := `SELECT p.id, p.message_id, p.session_id, p.sequence, m.sequence, ` + s.partCreatedExpr + `, p.time_updated, p.data, ` + messageModelJSON + messageScopeColumns + `
 		FROM part p JOIN message m ON p.message_id = m.id
 		WHERE p.session_id = ? AND (p.time_updated > ? OR (p.time_updated = ? AND p.id > ?))
 		ORDER BY p.time_updated ASC, p.id ASC LIMIT ?`

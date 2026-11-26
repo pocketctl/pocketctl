@@ -160,6 +160,18 @@ test('external executor capabilities survive registration and inventory refresh 
   expect(await router.refreshDaemonAgents(ws, message, 1)).toBe(true)
 })
 
+test.each([false, true])('session adoption handshake acknowledges only advertised support (%s)', async supported => {
+  const router = new Router(createMockPool(), { durableIngress: { mode: 'off' } })
+  const ws = createMockWs()
+  expect(await router.registerDaemon(ws, {
+    type:'register', daemon_id:'adoption-host', hostname:'fixture', agents:[], started_at:17,
+    capabilities:supported ? ['codex_session_adoption_v1'] : [],
+  },1)).toBe(true)
+  const ack = ws._sent.find((entry:any) => entry.type === 'register_ack')
+  expect(ack.status).toBe('ok')
+  expect(ack.capabilities.includes('codex_session_adoption_v1')).toBe(supported)
+})
+
 test('registration broadcasts metadata needed to hydrate a sparse reconnect snapshot', async () => {
   const router = new Router(createMockPool())
   const client = createMockWs()

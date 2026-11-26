@@ -16,3 +16,18 @@ it('labels the padded opening month once and paints unknown days with stripes',(
  expect(w.findAll('.heat-months span').map(e=>e.text()).filter(Boolean)).toEqual(['2026-08'])
  expect(w.find('.calendar button').attributes('style')).toContain('repeating-linear-gradient')
 })
+
+it('renders a total-only trend bar for partial components, separate from missing totals and confirmed zeros', () => {
+  const series = [
+    { total: '100', input: '20', output: null, cache_read: '0', cache_create: null },
+    { total: null, input: null, output: null, cache_read: null, cache_create: null },
+    { total: '0', input: '0', output: '0', cache_read: '0', cache_create: '0' },
+  ].map((amounts, i) => ({ ...amounts, bucket_start: '2026-11-' + (10+i), end_exclusive: '2026-11-' + (11+i) }))
+  const w = mount(UsageTrend, { props: { series } })
+  const days = w.findAll('.pu-day')
+  expect(days[0]!.findAll('.pu-bar')).toHaveLength(1)
+  expect(days[0]!.find('.pu-bar').attributes('style')).toContain('height: 100%')
+  expect(days[1]!.text()).toBe('—')
+  expect(days[2]!.find('.pu-bar').exists()).toBe(false)
+  expect(days[2]!.attributes('aria-label')).toContain(': 0')
+})

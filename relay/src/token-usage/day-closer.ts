@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import { accountedDeadLetter, nonAccountingDeadLetter } from './dead-letter-policy.js'
 
 export type TokenDayCloseResult =
   | { date: string; status: 'already_sealed' }
@@ -82,19 +83,13 @@ export async function closeTokenUsageDay(
     }
 
     const dead = await client.query(
-      `SELECT COUNT(*) FILTER (WHERE NOT non_accounting) AS count,
-              COUNT(*) FILTER (WHERE non_accounting) AS non_accounting_count
+      `SELECT COUNT(*) FILTER (WHERE NOT non_accounting AND NOT accounted) AS count,
+              COUNT(*) FILTER (WHERE non_accounting) AS non_accounting_count,
+              COUNT(*) FILTER (WHERE accounted) AS accounted_count
        FROM (
-         SELECT (
-           event_type = 'subagent_usage'
-           OR (NOT (payload ? 'usage') AND event_type IN (
-             'agent_text', 'tool_call', 'tool_result', 'user_text', 'turn_status',
-             'session_meta', 'session_model_changed', 'subagent_discovered',
-             'session_discovered', 'session_document_begin',
-             'session_document_chunk', 'session_document_commit'
-           ))
-         ) AS non_accounting
-         FROM event_inbox
+         SELECT ${nonAccountingDeadLetter} AS non_accounting,
+                (${accountedDeadLetter}) IS TRUE AS accounted
+         FROM event_inbox i
          WHERE received_at >= ($1::date::timestamp AT TIME ZONE 'UTC')
            AND received_at < (($1::date + 1)::timestamp AT TIME ZONE 'UTC')
            AND status = 3
@@ -237,6 +232,11 @@ export async function closeTokenUsageDay(
       [date, factCountExact.toString(), sourceRequestCount.toString(),
        sessionSourceRequestCount.toString(), sourceTotal.toString(), sessionSourceTotal.toString()],
     )
+    const accounted = Number(dead.rows[0]?.accounted_count ?? 0)
+    if (accounted > 0) {
+      await client.query(`INSERT INTO audit_log(action,details) VALUES ('token_day_accounted_replay',$1::jsonb)`,
+        [{ date, count: accounted }])
+    }
     if (nonAccountingDeadLetterRows > 0) {
       await client.query(
         `INSERT INTO audit_log(action,details) VALUES ('token_day_non_accounting', $1::jsonb)`,

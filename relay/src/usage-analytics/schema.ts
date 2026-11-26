@@ -1,6 +1,9 @@
 import type pg from 'pg'
+import {codexFactShapeSQL} from './codex-components.js'
 export async function initUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){await db.query(`
  CREATE TABLE IF NOT EXISTS usage_analytics_state(singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),version INT NOT NULL,revision BIGINT NOT NULL DEFAULT 0,write_enabled BOOLEAN NOT NULL DEFAULT FALSE);
+ ALTER TABLE usage_analytics_state ADD COLUMN IF NOT EXISTS codex_components_version INT NOT NULL DEFAULT 0;
+ ALTER TABLE usage_analytics_state ADD COLUMN IF NOT EXISTS codex_components_cursor TEXT;
  INSERT INTO usage_analytics_state(singleton,version) VALUES(TRUE,1) ON CONFLICT DO NOTHING;
  CREATE TABLE IF NOT EXISTS usage_owner_revisions(owner_user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,revision BIGINT NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS usage_source_metadata(
@@ -60,13 +63,17 @@ export async function initUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){await d
  ALTER TABLE usage_call_facts ADD COLUMN IF NOT EXISTS original_daemon_id TEXT;ALTER TABLE usage_call_facts ADD COLUMN IF NOT EXISTS original_daemon_basis TEXT;UPDATE usage_call_facts SET original_daemon_id=daemon_id,original_daemon_basis='observed_baseline' WHERE original_daemon_id IS NULL;DROP TRIGGER IF EXISTS usage_source_daemon_provenance ON usage_call_facts;CREATE TRIGGER usage_source_daemon_provenance BEFORE INSERT OR UPDATE ON usage_call_facts FOR EACH ROW EXECUTE FUNCTION usage_source_daemon_provenance();
  ALTER TABLE usage_skill_facts ADD COLUMN IF NOT EXISTS original_daemon_id TEXT;ALTER TABLE usage_skill_facts ADD COLUMN IF NOT EXISTS original_daemon_basis TEXT;UPDATE usage_skill_facts SET original_daemon_id=daemon_id,original_daemon_basis='observed_baseline' WHERE original_daemon_id IS NULL;DROP TRIGGER IF EXISTS usage_source_daemon_provenance ON usage_skill_facts;CREATE TRIGGER usage_source_daemon_provenance BEFORE INSERT OR UPDATE ON usage_skill_facts FOR EACH ROW EXECUTE FUNCTION usage_source_daemon_provenance();
  ALTER TABLE usage_call_event_metadata ADD COLUMN IF NOT EXISTS original_daemon_id TEXT;ALTER TABLE usage_call_event_metadata ADD COLUMN IF NOT EXISTS original_daemon_basis TEXT;UPDATE usage_call_event_metadata SET original_daemon_id=daemon_id,original_daemon_basis='observed_baseline' WHERE original_daemon_id IS NULL;DROP TRIGGER IF EXISTS usage_source_daemon_provenance ON usage_call_event_metadata;CREATE TRIGGER usage_source_daemon_provenance BEFORE INSERT OR UPDATE ON usage_call_event_metadata FOR EACH ROW EXECUTE FUNCTION usage_source_daemon_provenance();
+ ${codexFactShapeSQL}
  CREATE OR REPLACE FUNCTION usage_project_token_fact(f token_usage_facts) RETURNS VOID LANGUAGE plpgsql AS $usage$
- DECLARE source_identity TEXT; m JSONB; metadata_known BOOLEAN:=FALSE; envelope JSONB; event_identity TEXT; previous_identity TEXT; identity TEXT; occurred TIMESTAMPTZ; basis TEXT:='receipt_fallback'; qual TEXT:='legacy_unverified'; inp BIGINT; outp BIGINT; cr BIGINT; cc BIGINT; req BIGINT; total_value BIGINT; prior usage_token_projection; rev BIGINT:=0;
+ DECLARE source_identity TEXT; m JSONB; saved_shape TEXT; codex_shape TEXT; matching_event BOOLEAN; envelope JSONB; event_identity TEXT; previous_identity TEXT; identity TEXT; occurred TIMESTAMPTZ; basis TEXT:='receipt_fallback'; qual TEXT:='legacy_unverified'; inp BIGINT; outp BIGINT; cr BIGINT; cc BIGINT; req BIGINT; total_value BIGINT; prior usage_token_projection; rev BIGINT:=0;
  BEGIN
  IF NOT EXISTS(SELECT 1 FROM usage_analytics_state WHERE write_enabled) THEN RETURN;END IF;
  source_identity:=COALESCE((SELECT a->>'originSessionId' FROM (SELECT native_session_authority(f.session_id,f.user_id,f.daemon_id) AS a) q WHERE a->>'state'='current'),f.session_id);
- SELECT metadata INTO m FROM usage_source_metadata WHERE fact_key=f.fact_key;metadata_known:=FOUND;
- SELECT COALESCE(payload,body_header) INTO envelope FROM events WHERE id=f.source_event_id;
+ SELECT metadata,CASE WHEN owner_user_id=f.user_id AND daemon_id=f.daemon_id AND source_session=source_identity
+     AND logical_usage_id=f.fact_key THEN metadata->>'codex_fact_shape_v1' END
+   INTO m,saved_shape FROM usage_source_metadata WHERE fact_key=f.fact_key;
+ SELECT COALESCE(payload,body_header),user_id=f.user_id AND session_id=f.session_id AND event_type='agent_text' AND NOT owner_retired
+   INTO envelope,matching_event FROM events WHERE id=f.source_event_id;
  IF m IS NULL THEN m:=envelope->'usage_meta';END IF;
  event_identity:=COALESCE(NULLIF(m->>'event_identity',''),left(envelope->>'event_id',300));previous_identity:=COALESCE(NULLIF(m->>'previous_event_identity',''),left(envelope->>'previous_event_id',300));
  inp:=f.input;outp:=f.output;cr:=f.cache_read;cc:=f.cache_create;total_value:=inp+outp+cr+cc;occurred:=f.recorded_at;
@@ -82,9 +89,23 @@ export async function initUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>){await d
   IF length(m->>'request_id') BETWEEN 1 AND 200 THEN req:=1;END IF;
  ELSE inp:=NULL;outp:=NULL;cr:=NULL;cc:=NULL;END IF;
  IF qual<>'normalized' THEN inp:=NULL;outp:=NULL;cr:=NULL;cc:=NULL;req:=NULL;total_value:=f.input+f.output+f.cache_read+f.cache_create;END IF;
- INSERT INTO usage_source_metadata(fact_key,owner_user_id,daemon_id,logical_usage_id,metadata,received_at,source_session) VALUES(f.fact_key,f.user_id,f.daemon_id,identity,jsonb_build_object('event_identity',event_identity,'previous_event_identity',previous_identity,'version',CASE WHEN qual IN('normalized','unknown_cache_semantics','invalid_inclusive_cache') THEN 1 ELSE 0 END,'provider',left(m->>'provider',100),'source_usage_id',CASE WHEN qual IN('normalized','unknown_cache_semantics','invalid_inclusive_cache') THEN identity END,'request_id',CASE WHEN req IS NOT NULL THEN left(m->>'request_id',200) END,'revision',rev,'mode',left(m->>'mode',20),'occurred_at',left(m->>'occurred_at',80),'model',left(m->>'model',200),'agent_type',left(m->>'agent_type',100),'input_semantics',left(m->>'input_semantics',30),'parent_session_id',CASE WHEN EXISTS(SELECT 1 FROM sessions s WHERE s.session_id=m->>'parent_session_id' AND s.user_id=f.user_id AND s.daemon_id=f.daemon_id) THEN left(m->>'parent_session_id',100) END,'child_agent_id',COALESCE(left(m->>'child_agent_id',100),CASE WHEN envelope->>'is_subagent'='true' THEN left(envelope->>'agent_id',100) END)),f.recorded_at,source_identity) ON CONFLICT DO NOTHING;
+ -- The logical identity stays the original fact. Source counters can be
+ -- proved independently of the identity needed to count requests.
+ IF qual='legacy_unverified' AND identity=f.fact_key THEN
+   codex_shape:=COALESCE(saved_shape,CASE WHEN matching_event THEN usage_codex_fact_shape_v1(f,envelope) END);
+   IF codex_shape IN ('components','total_only') THEN
+     qual:='codex_fact_'||codex_shape;total_value:=f.reported_total;
+     IF codex_shape='components' THEN inp:=f.input-f.cache_read;outp:=f.output;cr:=f.cache_read;cc:=f.cache_create;END IF;
+   END IF;
+ END IF;
+ INSERT INTO usage_source_metadata(fact_key,owner_user_id,daemon_id,logical_usage_id,metadata,received_at,source_session) VALUES(f.fact_key,f.user_id,f.daemon_id,identity,(CASE WHEN codex_shape IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('codex_fact_shape_v1',codex_shape) END)||jsonb_build_object('event_identity',event_identity,'previous_event_identity',previous_identity,'version',CASE WHEN qual IN('normalized','unknown_cache_semantics','invalid_inclusive_cache') THEN 1 ELSE 0 END,'provider',left(m->>'provider',100),'source_usage_id',CASE WHEN qual IN('normalized','unknown_cache_semantics','invalid_inclusive_cache') THEN identity END,'request_id',CASE WHEN req IS NOT NULL THEN left(m->>'request_id',200) END,'revision',rev,'mode',left(m->>'mode',20),'occurred_at',left(m->>'occurred_at',80),'model',left(m->>'model',200),'agent_type',left(m->>'agent_type',100),'input_semantics',left(m->>'input_semantics',30),'parent_session_id',CASE WHEN EXISTS(SELECT 1 FROM sessions s WHERE s.session_id=m->>'parent_session_id' AND s.user_id=f.user_id AND s.daemon_id=f.daemon_id) THEN left(m->>'parent_session_id',100) END,'child_agent_id',COALESCE(left(m->>'child_agent_id',100),CASE WHEN envelope->>'is_subagent'='true' THEN left(envelope->>'agent_id',100) END)),f.recorded_at,source_identity) ON CONFLICT DO NOTHING;
  SELECT * INTO prior FROM usage_token_projection WHERE owner_user_id=f.user_id AND daemon_id=f.daemon_id AND source_session=source_identity AND logical_usage_id=identity AND accounting_version='normalized-v1' FOR UPDATE;
  IF FOUND THEN
+  -- Replaying the same immutable fact can precede the explicit migration.
+  -- A newly recognized component shape is not an ambiguous provider revision.
+  IF prior.source_fact_key=f.fact_key AND prior.logical_usage_id=f.fact_key AND
+     (prior.quality IN ('codex_fact_components','codex_fact_total_only') OR
+      (prior.quality='legacy_unverified' AND codex_shape IS NOT NULL)) THEN RETURN;END IF;
   IF usage_revision_precedes(f.user_id,f.daemon_id,source_identity,identity,event_identity,prior.source_revision_identity) THEN RETURN;END IF;
   IF event_identity IS NOT NULL AND event_identity=prior.source_revision_identity THEN RETURN;END IF;
   IF rev<=prior.revision THEN
@@ -144,7 +165,10 @@ export async function readUsageAnalyticsSchemaCapabilities(db:Pick<pg.Pool,'quer
   SELECT to_regclass('public.usage_analytics_state') IS NOT NULL AS ready,
    EXISTS (SELECT 1 FROM pg_attribute
     WHERE attrelid=to_regclass('public.usage_scope_changes') AND attname='legacy_day'
-      AND attnum>0 AND NOT attisdropped) AS history_watermark
+      AND attnum>0 AND NOT attisdropped) AS history_watermark,
+   EXISTS (SELECT 1 FROM pg_attribute
+    WHERE attrelid=to_regclass('public.usage_history_days') AND attname='token_composition_revision'
+      AND attnum>0 AND NOT attisdropped) AS history_components
  `)
  if(!r.rows[0]?.ready)throw Error('usage_schema_migrator_required')
  const v=await db.query('SELECT version,write_enabled FROM usage_analytics_state')
@@ -155,7 +179,7 @@ export async function readUsageAnalyticsSchemaCapabilities(db:Pick<pg.Pool,'quer
   const capability=await db.query("SELECT COALESCE(has_sequence_privilege(current_user,to_regclass('public.usage_change_revision'),'USAGE'),FALSE) AS ready")
   if(!capability.rows[0]?.ready)throw Error('usage_change_sequence_usage_required')
  }
- return {historyWatermark:r.rows[0].history_watermark===true}
+ return {historyWatermark:r.rows[0].history_watermark===true,historyComponents:r.rows[0].history_components===true}
 }
 
 export async function assertUsageAnalyticsSchema(db:Pick<pg.Pool,'query'>):Promise<void>{

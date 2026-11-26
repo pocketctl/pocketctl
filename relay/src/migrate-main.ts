@@ -3,6 +3,7 @@ import pg from 'pg'
 import {resolve} from 'node:path'
 import {pathToFileURL} from 'node:url'
 import {initDB} from './db.js'
+import {repairCodexUsageComponents} from './usage-analytics/codex-components.js'
 import {assertRelaySharedContract,relaySharedTarget} from './schema-runtime.js'
 import {applyRelaySourceCapture,assertRelayCaptureMigrationCompatible} from './shared-source/capture.js'
 import {applyRelayTeamSourceCapture} from './shared-source/team-capture.js'
@@ -16,6 +17,7 @@ export async function migrateRelay(args=process.argv.slice(2)):Promise<number>{
   await assertRelaySharedContract(pool)
   if(await relaySharedTarget(pool))await assertRelayCaptureMigrationCompatible(pool)
   await initDB(pool)
+  await repairCodexUsageComponents(pool)
   await ensurePlatformStatisticsSchema(pool,process.env,{migrate:true})
   if(await relaySharedTarget(pool)){
    await applyRelaySourceCapture(pool)

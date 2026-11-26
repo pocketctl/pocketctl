@@ -250,3 +250,111 @@ it('uses the refreshed snapshot only for the new section after navigation during
   expect(usage.calls.value).toBeTruthy()
   expect(usage.sessions.value).toBeNull()
 })
+
+it.each(['calls', 'sessions'])('issues only the selected %s query when its range changes and reuses its snapshot for tokens', async tab => {
+  const requests: URL[] = []
+  const payload = tab === 'calls' ? fixture.calls : fixture.sessions
+  apiGetAuth.mockImplementation(path => {
+    const request = url(path)
+    requests.push(request)
+    const snapshot = request.searchParams.get('snapshot_token') ?? request.searchParams.get('range')!
+    if (request.pathname === '/api/tokens/dashboard') return ok(dashboard(snapshot))
+    return ok({ ...payload, meta: { ...payload.meta, snapshot_token: snapshot } })
+  })
+  const usage = openUsage()
+  await usage.load()
+  usage.tab.value = tab
+  await flushPromises()
+  requests.length = 0
+  const summary = usage.summary.value
+  usage.range.value = '7d'
+  await flushPromises()
+  expect(requests.map(r => [r.pathname, r.searchParams.get('range'), r.searchParams.get('snapshot_token')]))
+    .toEqual([[tab === 'calls' ? '/api/usage/calls' : '/api/tokens/sessions', '7d', null]])
+  expect(usage.summary.value).toBe(summary)
+  expect(usage.dashboard.value).toBeNull()
+  expect(usage.meta.value?.snapshot_token).toBe('7d')
+  usage.tab.value = 'tokens'
+  await flushPromises()
+  expect(requests[1]?.pathname).toBe('/api/tokens/dashboard')
+  expect(requests[1]?.searchParams.get('snapshot_token')).toBe('7d')
+  expect(usage.dashboard.value?.meta.snapshot_token).toBe('7d')
+})
+
+it('supersedes an in-flight range section when the user switches back to tokens', async () => {
+  const old = defer<ReturnType<typeof ok>>()
+  apiGetAuth.mockImplementation(path => {
+    const request = url(path)
+    if (request.pathname === '/api/tokens/dashboard') return ok(dashboard(request.searchParams.get('range')!))
+    return request.searchParams.get('range') === 'today' ? old.promise : ok(fixture.calls)
+  })
+  const usage = openUsage()
+  await usage.load()
+  usage.tab.value = 'calls'
+  await flushPromises()
+  usage.range.value = 'today'
+  await flushPromises()
+  usage.tab.value = 'tokens'
+  await flushPromises()
+  expect(usage.dashboard.value?.meta.snapshot_token).toBe('today')
+  expect(apiGetAuth.mock.calls.find(([path]) => path.includes('/api/usage/calls') && path.includes('range=today'))![1].signal.aborted).toBe(true)
+  old.resolve(failed('snapshot_authorization_changed'))
+  await flushPromises()
+  expect(usage.error.value).toBe('')
+  expect(usage.calls.value).toBeNull()
+})
+
+it('hides old host totals during a host switch, preserves the selector, and clears all protected data on denial', async () => {
+  const next = defer<ReturnType<typeof ok>>()
+  apiGetAuth.mockImplementation(path =>
+    url(path).searchParams.get('daemon') === 'all' ? ok(dashboard('first')) : next.promise)
+  const usage = openUsage()
+  await usage.load()
+  usage.daemon.value = 'second'
+  await flushPromises()
+  expect(usage.summary.value).toBeNull()
+  expect(usage.hosts.value).toEqual(fixture.dashboard.hosts)
+  next.resolve(failed('authorization_required', 403))
+  await flushPromises()
+  expect(usage.hosts.value).toBeNull()
+  expect(usage.summary.value).toBeNull()
+  expect(usage.dashboard.value).toBeNull()
+  expect(usage.error.value).toBe('authorization_required')
+})
+
+it('discards late success and authorization results after a rapid range round-trip', async () => {
+  const older = defer<ReturnType<typeof ok>>()
+  const middle = defer<ReturnType<typeof ok>>()
+  let weekReads = 0
+  apiGetAuth.mockImplementation(path => {
+    switch (url(path).searchParams.get('range')) {
+      case '7d': return ++weekReads === 1 ? older.promise : ok(dashboard('latest-week'))
+      case 'today': return middle.promise
+      default: return ok(dashboard('initial'))
+    }
+  })
+  const usage = openUsage()
+  await usage.load()
+  for (const period of ['7d', 'today', '7d'] as const) {
+    usage.range.value = period
+    await flushPromises()
+  }
+  older.resolve(ok(dashboard('old-week')))
+  middle.resolve(failed('snapshot_authorization_changed'))
+  await flushPromises()
+  expect(usage.dashboard.value?.meta.snapshot_token).toBe('latest-week')
+  expect(usage.summary.value).toBeTruthy()
+  expect(usage.error.value).toBe('')
+})
+
+it('drops retained host summaries if a range request loses the personal-v1 contract', async () => {
+  apiGetAuth.mockImplementation(path => url(path).searchParams.get('range') === 'today'
+    ? ok({ summary: {} }) : ok(dashboard('initial')))
+  const usage = openUsage()
+  await usage.load()
+  usage.range.value = 'today'
+  await flushPromises()
+  expect(usage.summary.value).toBeNull()
+  expect(usage.hosts.value).toBeNull()
+  expect(usage.error.value).toBe('upgrade_required')
+})

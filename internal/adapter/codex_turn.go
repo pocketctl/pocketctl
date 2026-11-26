@@ -1,17 +1,28 @@
 package adapter
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/pocketctl/pocketctl/internal/protocol"
 	"github.com/pocketctl/pocketctl/internal/turn"
 )
 
+type codexUsageReceipt struct {
+	ThreadID    string           `json:"thread_id"`
+	TurnID      string           `json:"turn_id"`
+	ResponseID  string           `json:"response_id"`
+	Usage       *codexTokenUsage `json:"usage"`
+	ThreadUsage *codexTokenUsage `json:"thread_token_usage"`
+	matchedMeta protocol.UsageMetadata
+}
+
 // codexTurnTracker preserves the native turn anchor emitted by persisted
 // Codex task_started/task_complete records. It deliberately stays unassigned
 // when either the session or the native turn id is unavailable: source order
 // alone is not identity evidence.
 type codexTurnTracker struct {
+	receipt       *codexUsageReceipt
 	sessionID     string
 	activeLogical string
 	activeSource  string
@@ -19,6 +30,9 @@ type codexTurnTracker struct {
 
 func (t *codexTurnTracker) setSessionID(sessionID string) {
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+		if t.sessionID != sessionID {
+			t.receipt = nil
+		}
 		t.sessionID = sessionID
 	}
 }
@@ -96,21 +110,59 @@ func (t *codexTurnTracker) stamp(events []protocol.DaemonEvent) {
 // decorate converts task lifecycle evidence into turn_status events and
 // attributes only intervening content to the active native turn. The legacy
 // session_status values emitted by convertCodexEventMsg are kept unchanged.
-func (t *codexTurnTracker) decorate(topType string, payload codexPayload, events []protocol.DaemonEvent) []protocol.DaemonEvent {
-	if topType == "session_meta" {
+func (t *codexTurnTracker) decorate(raw codexLine, payload codexPayload, events []protocol.DaemonEvent) []protocol.DaemonEvent {
+	if raw.Type == "token_usage_record" {
+		t.receipt = nil
+		var receipt codexUsageReceipt
+		if json.Unmarshal(raw.Payload, &receipt) == nil && t.sessionID != "" && receipt.ThreadID == t.sessionID &&
+			t.activeSource != "" && receipt.TurnID == t.activeSource && strings.TrimSpace(receipt.ResponseID) != "" &&
+			len(receipt.ResponseID) <= 200 && receipt.Usage != nil && receipt.Usage.CacheWriteInputTokens == 0 &&
+			receipt.ThreadUsage != nil && receipt.ThreadUsage.TotalTokens > 0 {
+			t.receipt = &receipt
+		}
+		return events
+	}
+	if raw.Type == "session_meta" {
+		t.receipt = nil
 		t.setSessionID(payload.ID)
 		return events
 	}
-	if topType != "event_msg" {
+	if raw.Type != "event_msg" {
+		if raw.Type == "turn_context" && payload.TurnID != "" && t.receipt != nil && payload.TurnID != t.receipt.TurnID {
+			t.receipt = nil
+		}
 		t.stamp(events)
 		return events
 	}
 	switch payload.Type {
+	case "token_count":
+		r := t.receipt
+		if r != nil && (payload.TurnID == "" || payload.TurnID == r.TurnID) &&
+			payload.Info.LastTokenUsage != nil && payload.Info.TotalTokenUsage != nil &&
+			(payload.LastTokenUsage == nil || *payload.LastTokenUsage == *r.Usage) &&
+			*payload.Info.LastTokenUsage == *r.Usage && *payload.Info.TotalTokenUsage == *r.ThreadUsage {
+			for i := range events {
+				if meta := events[i].UsageMeta; meta != nil {
+					// Rate-limit refreshes can repeat both snapshots with a later
+					// timestamp. They still describe the same upstream response.
+					if r.matchedMeta.SourceUsageID == "" {
+						r.matchedMeta = *meta
+						r.matchedMeta.SourceUsageID = r.ResponseID
+					}
+					*meta = r.matchedMeta
+				}
+			}
+		} else {
+			t.receipt = nil
+		}
+		t.stamp(events)
 	case "task_started":
+		t.receipt = nil
 		if started, ok := t.begin(payload.TurnID); ok {
 			return append([]protocol.DaemonEvent{started}, events...)
 		}
 	case "task_complete":
+		t.receipt = nil
 		// Stamp the terminal diagnostic before end clears the active identity.
 		t.stamp(events)
 		state, reason := protocol.TurnStateCompleted, "task_complete_event"

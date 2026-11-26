@@ -66,6 +66,30 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
     )
   })
 
+  test('concurrent first receipt preserves the registration watermark and leaves a gap pending', async () => {
+    const registration = await pool.connect()
+    let pending: ReturnType<InboxRepository['persistBatch']> | undefined
+    try {
+      await registration.query('BEGIN')
+      await registration.query("INSERT INTO daemon_ack_checkpoint(daemon_id,daemon_generation,ack_seq) VALUES('d1',17,5)")
+      pending = repo.persistBatch([event(7)])
+      // The registering transaction is deliberately invisible to the writer's
+      // first lookup. Release it only after observing the unique-key wait.
+      await vi.waitFor(async () => {
+        const { rows } = await pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+          AND wait_event_type='Lock' AND query LIKE 'INSERT INTO daemon_ack_checkpoint%'`)
+        expect(rows).toHaveLength(1)
+      }, { timeout: 5000, interval: 20 })
+      await registration.query('COMMIT')
+      expect(checkpoint(await pending)).toBe(5)
+      expect(checkpoint(await repo.persistBatch([event(6)]))).toBe(7)
+    } finally {
+      await registration.query('ROLLBACK')
+      registration.release()
+      await pending?.catch(() => undefined)
+    }
+  })
+
   test('advances only across contiguous receipts and restores seeded checkpoints', async () => {
     expect(checkpoint(await repo.persistBatch([event(1), event(3)]))).toBe(1)
     expect(checkpoint(await repo.persistBatch([event(2)]))).toBe(3)
@@ -152,10 +176,10 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
       materializationContext: { hostname: 'must-not-replace' },
     })
 
-    const [firstAck, replayAck] = await Promise.all([
-      new InboxRepository(pool).persistBatch([first]),
-      new InboxRepository(pool).persistBatch([replay]),
-    ])
+    // Across generations either concurrent writer can win the unique key.
+    // Establish which payload was retained before checking a later replay.
+    const firstAck = await new InboxRepository(pool).persistBatch([first])
+    const replayAck = await new InboxRepository(pool).persistBatch([replay])
     expect(checkpoint(firstAck)).toBe(1)
     expect(checkpoint(replayAck, 'd1', 18)).toBe(0)
 

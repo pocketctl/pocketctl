@@ -6,7 +6,7 @@ const retrySeconds = 60
 const batchSize = 8
 const retentionBatchSize = 64
 const utcToday = "(statement_timestamp() AT TIME ZONE 'UTC')::date"
-const dirty = 'built_revision IS DISTINCT FROM revision'
+const dirty = "(built_revision IS DISTINCT FROM revision OR (tokens<>'[]'::jsonb AND token_composition_revision IS DISTINCT FROM revision))"
 const key = 'owner_user_id=$1 AND daemon_id=$2 AND day=$3::date'
 
 export interface HistoryDayKey {
@@ -51,7 +51,7 @@ export async function refreshHistoryDay(pool: pg.Pool, day: HistoryDayKey): Prom
     const data = await buildHistoryDay(client, day.owner_user_id, day.daemon_id, day.day)
     const update = await client.query(`
       UPDATE public.usage_history_days
-      SET built_revision=revision, tokens=$5::jsonb, residual=$6::jsonb, calls=$7::jsonb, skills=$8::jsonb,
+      SET built_revision=revision, token_composition_revision=revision, tokens=$5::jsonb, residual=$6::jsonb, calls=$7::jsonb, skills=$8::jsonb,
         retry_at='-infinity'
       WHERE ${key} AND revision=$4::bigint AND ${dirty}
     `, [...values, revision, data.tokens, data.residual, data.calls, data.skills])

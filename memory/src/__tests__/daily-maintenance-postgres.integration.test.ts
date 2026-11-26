@@ -35,6 +35,33 @@ suite('durable daily maintenance PostgreSQL',()=>{
   await step();expect((await pool.query('SELECT count(*)::int n FROM memory_maintenance_runs')).rows[0].n).toBe(2)
   expect(reports.some(r=>r.state==='completed'&&r.counts.inbox_body===5)).toBe(true)
  })
+ test('global maintenance closes old pending revisions in batches and skips leased or locked jobs',async()=>{
+  vi.mocked(daily.dailyMaintenanceSlot).mockReturnValue(null)
+  await pool.query("INSERT INTO memory_maintenance_runs(scheduled_at,scope_key,stage) VALUES($1,'global',3)",[slot])
+  const bundle=(await pool.query(`INSERT INTO memory_task_bundles(installation_id,session_id,task_key,revision,source_digest,watermark)
+   VALUES($1,'session','dialogue:test',2,sha256('input'),1) RETURNING bundle_id`,[id])).rows[0].bundle_id
+  await pool.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,payload,state,available_at)
+   SELECT gen_random_uuid(),$1,'consolidate_task',n::text,jsonb_build_object('bundle_id',$2::text,
+    'bundle_revision',CASE n WHEN 504 THEN '2' WHEN 505 THEN '3' WHEN 506 THEN 'invalid' ELSE '1' END),
+    CASE WHEN n=503 THEN 'running' ELSE 'pending' END,now()+interval '7 days'
+   FROM generate_series(1,506) n`,[id,bundle])
+  const lock=await pool.connect()
+  try{
+   await lock.query('BEGIN')
+   await lock.query("SELECT job_id FROM memory_jobs WHERE installation_id=$1 AND idempotency_key='1' FOR UPDATE",[id])
+   await step()
+   const status=async()=>(await pool.query("SELECT state,counts FROM memory_maintenance_runs WHERE scope_key='global'")).rows[0]
+   expect(await status()).toMatchObject({state:'running',counts:{superseded_consolidation_jobs:500}})
+   await lock.query('COMMIT')
+   await step()
+   expect(await status()).toMatchObject({state:'completed',counts:{superseded_consolidation_jobs:502}})
+   expect((await pool.query(`SELECT idempotency_key,state FROM memory_jobs WHERE installation_id=$1
+    AND completed_at IS NULL ORDER BY idempotency_key`,[id])).rows).toEqual([
+    {idempotency_key:'503',state:'running'},{idempotency_key:'504',state:'pending'},
+    {idempotency_key:'505',state:'pending'},{idempotency_key:'506',state:'pending'}])
+   expect(errors).toEqual([])
+  }finally{await lock.query('ROLLBACK');lock.release()}
+ })
  test('before 03:00 no new cycle starts, but an unfinished old cycle resumes',async()=>{
   vi.mocked(daily.dailyMaintenanceSlot).mockReturnValue(null)
   await step();expect((await pool.query('SELECT count(*)::int n FROM memory_maintenance_runs')).rows[0].n).toBe(0)

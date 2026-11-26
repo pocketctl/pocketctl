@@ -46,6 +46,42 @@ suite('token day dead-letter boundaries on PostgreSQL', () => {
     await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({ status:'failed', deadLetterRows:1 })
     expect((await pool.query('SELECT count(*)::int n FROM token_daily_stats')).rows[0].n).toBe(0)
   })
+  test('known usage-free metadata can seal, but unexpected usage on it still blocks', async () => {
+    for (const type of ['session_status','agent_reasoning','agent_plan','agent_file_change','error']) await dead(type,{})
+    await pool.query("UPDATE event_inbox SET payload=jsonb_build_object('usage',NULL) WHERE event_type='session_status'")
+    await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({status:'failed',deadLetterRows:1})
+    await pool.query("UPDATE event_inbox SET payload='{}' WHERE event_type='session_status'")
+    await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({status:'sealed',nonAccountingDeadLetterRows:5})
+  })
+
+  test('seals only with an identity-bound matching fact; keeps the conflicting event for review', async () => {
+    await pool.query("INSERT INTO daemons(daemon_id,user_id) VALUES('dead-daemon',$1)", [userId])
+    await pool.query("INSERT INTO sessions(session_id,daemon_id,user_id) VALUES('dead-session','dead-daemon',$1)", [userId])
+    const payload = {type:'agent_text',session_id:'dead-session',event_id:'stable-id',text:'canonical',usage:{input_tokens:7}}
+    await new EventMaterializer({pool,writeTokenUsageFacts:true,extensionJournalSink:null}).materialize({
+      inboxId:9999,userId,daemonId:'dead-daemon',sessionId:'dead-session',eventType:'agent_text',payload,
+      receivedAt:new Date(date+'T12:00:00Z'),
+    })
+    const replay = {...payload, resync:true, text:'different'}
+    await dead('agent_text',replay)
+    await pool.query("UPDATE event_inbox SET last_error='replay_payload_conflict'")
+    for (const changed of [
+      {...replay,event_id:'other'}, {...replay,session_id:'other'}, {...replay,usage:{input_tokens:8}},
+      {...replay,usage:{input_tokens:'7'}}, {...replay,usage:{input_tokens:7,unrecognized:1}}, {...replay,usage:null},
+    ]) {
+      await pool.query('UPDATE event_inbox SET payload=$1',[changed])
+      await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({status:'failed',deadLetterRows:1})
+    }
+    await pool.query("UPDATE event_inbox SET payload=$1,daemon_id='other'",[replay])
+    await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({status:'failed',deadLetterRows:1})
+    await pool.query("UPDATE event_inbox SET daemon_id='dead-daemon'")
+    await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({status:'sealed',factCount:1,total:7})
+    expect((await pool.query('SELECT status FROM event_inbox')).rows).toEqual([{status:3}])
+    expect((await pool.query("SELECT details FROM audit_log WHERE action='token_day_accounted_replay'")).rows)
+      .toEqual([{details:{date,count:1}}])
+    await expect(closeTokenUsageDay(pool,date)).resolves.toMatchObject({status:'already_sealed'})
+  })
+
   test('explicit owned usage recovery is dry-run by default, audited, and materializes exactly once', async () => {
     await pool.query("INSERT INTO daemons(daemon_id,user_id) VALUES('dead-daemon',$1)", [userId])
     await pool.query("INSERT INTO sessions(session_id,daemon_id,user_id) VALUES('dead-session','dead-daemon',$1)", [userId])

@@ -36,6 +36,40 @@ describeWithDatabase('durable ingress PostgreSQL failure release gate', () => {
     await resetDurableIngressTestDatabase(pool, databaseUrl!)
   })
 
+  test('completion reuses a verified event header and repairs legacy headers once', async () => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const event = (await client.query(`
+        INSERT INTO events(session_id,event_type,payload,effect_status)
+        VALUES('header-test','agent_text','{"turn_id":"t1","text":"hello"}','pending') RETURNING id
+      `)).rows[0]
+      // Count actual extraction calls, including any from other triggers, without
+      // making the assertion depend on the spelling of the trigger definition.
+      await client.query(`
+        ALTER FUNCTION session_event_body_header(jsonb) RENAME TO original_event_header;
+        CREATE TEMP SEQUENCE header_calls MINVALUE 0 START WITH 0;
+        CREATE FUNCTION session_event_body_header(input jsonb) RETURNS jsonb LANGUAGE plpgsql AS $$
+        BEGIN PERFORM nextval('pg_temp.header_calls'); RETURN original_event_header(input); END $$;
+        DISCARD PLANS
+      `)
+      const update = async (assignment: string) => (await client.query(
+        `UPDATE events SET ${assignment} WHERE id=$1 RETURNING body_header`, [event.id])).rows[0].body_header
+      expect(await update("effect_status='completed'")).toEqual({turn_id:'t1'})
+      expect((await client.query('SELECT is_called FROM header_calls')).rows[0].is_called).toBe(false)
+      expect(await update(`payload='{"turn_id":"t2"}'`)).toEqual({turn_id:'t2'})
+      expect(await update(`body_header='{"turn_id":"forged"}'`)).toEqual({turn_id:'t2'})
+      // Simulate a retained row created before the schema installed header versioning.
+      await client.query('ALTER TABLE events DISABLE TRIGGER USER')
+      await update("body_header='{}',body_header_version=NULL")
+      await client.query('ALTER TABLE events ENABLE TRIGGER USER')
+      expect(await update("effect_status='pending'")).toEqual({turn_id:'t2'})
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+  })
+
   test.each([10_000, 60_000])(
     'models a %dms sustained real PostgreSQL connection refusal before recovery and durable ACK',
     async (outageMs) => {

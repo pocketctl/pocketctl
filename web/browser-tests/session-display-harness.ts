@@ -7,6 +7,13 @@ import '../src/assets/action-select.css'
 // Only this dev harness replaces transport; no real account or Relay is accessed.
 const id = 'local-unified-reply-demo'
 const session = {session_id:id,daemon_id:'local-host',hostname:'本地预览',agent:'codex',agent_type:'codex',control_mode:'managed',daemon_online:true,status:'idle',title:'优化会话列表加载体验',cwd:'/demo/pocketctl',source:'daemon',model:'gpt-5.4',capabilities:['user_message','message_acceptance_receipt']}
+const adoptionScenario = new URLSearchParams(location.search).get('adoption')
+let adoptionPhase = 'available', adoptionReason = 'eligible', adoptionActions = ['adopt'], revision = 0, archiveChanged = false
+const adoptionCommands: any[] = []
+if (adoptionScenario) {
+  Object.assign(session,{control_mode:'legacy_read_only',source:'terminal',capabilities:['history_sync']})
+  Object.assign(window,{adoptionCommands,adoptionProofReady:false})
+}
 let socket: LocalSocket
 const performanceRows = Math.min(1000, Number(new URLSearchParams(location.search).get('performance')) || 0)
 const olderFixture = new URLSearchParams(location.search).has('older')
@@ -27,6 +34,39 @@ class LocalSocket {
   close(){this.readyState=3}
   emit(message:object){this.onmessage?.({data:JSON.stringify(message)})}
   send(raw:string){const message=JSON.parse(raw);later(()=>{
+    if (adoptionScenario && message.type.startsWith('session_adopt')) {
+      adoptionCommands.push(message)
+      if (adoptionScenario === 'unknown' && revision === 0 && message.type === 'session_adopt') {
+        revision++
+        this.emit({type:'session_adoption_result',session_id:id,request_id:message.request_id,error:'unverified'})
+        return
+      }
+      if (adoptionScenario === 'unknown' && revision > 0 && message.type === 'session_adopt_status') {
+        adoptionPhase='managed';adoptionReason='managed';adoptionActions=[]
+        Object.assign(session,{control_mode:'managed',capabilities:['message_acceptance_receipt','user_message']})
+      }
+      if (adoptionScenario === 'expired' && adoptionPhase === 'waiting' && message.type === 'session_adopt_status') {
+        revision++;adoptionPhase='expired';adoptionReason='deadline_exceeded';adoptionActions=['adopt']
+      }
+      if (message.type === 'session_adopt_cancel') {
+        adoptionPhase='cancelled';adoptionReason='cancelled';adoptionActions=['adopt'];revision++
+      } else if (message.type === 'session_adopt') {
+        revision++
+        if (adoptionScenario === 'writer' || adoptionScenario === 'expired') {
+          adoptionPhase=message.wait_ms ? 'waiting' : 'blocked';adoptionReason='active_writer';adoptionActions=message.wait_ms ? ['cancel'] : ['wait']
+        } else if (adoptionScenario === 'archive') {
+          archiveChanged=message.unarchive===true
+          adoptionPhase='blocked';adoptionReason=archiveChanged ? 'provider_mismatch' : 'archived';adoptionActions=archiveChanged ? [] : ['unarchive']
+        } else {
+          adoptionPhase='managed';adoptionReason='managed';adoptionActions=[]
+          Object.assign(session,{control_mode:'managed',capabilities:['message_acceptance_receipt','user_message']})
+          if (adoptionScenario === 'metadata-first') this.emit({type:'session_list',sessions:[session]})
+        }
+      }
+      this.emit({type:'session_adoption_result',session_id:id,request_id:message.request_id,
+        adoption:{version:1,session_id:id,operation_id:revision ? 'test-operation' : '',revision,phase:adoptionPhase,reason:adoptionReason,local_managed:adoptionPhase==='managed',remote_ready:adoptionPhase==='managed' && (adoptionScenario!=='metadata-first' || (window as any).adoptionProofReady===true),allowed_actions:adoptionActions,archive_changed:archiveChanged}})
+      return
+    }
     if(message.type==='list_sessions')this.emit({type:'session_list',sessions:[session]})
     if(message.type==='list_daemons')this.emit({type:'daemon_list',daemons:[{daemon_id:'local-host',hostname:'本地预览',status:'online'}]})
     if(message.type==='replay' && message.direction==='forward'){
@@ -50,7 +90,7 @@ class LocalSocket {
         {type:'user_text',session_id:id,text:question,msg_id:'latest',seq:3},reply(1), {type:'tool_call',session_id:id,call_id:'display-tool',tool:'Read',input:{file_path:'/demo/src/session.ts'},seq:10}, {type:'tool_result',session_id:id,call_id:'display-tool',output:'export const cached = true;\n// synthetic output',seq:11}]})
       this.emit({type:'replay_end',session_id:id,req_id:message.req_id,last_seq:sequence,newest_seq:sequence,has_more:olderFixture,status:'idle'})
     }
-    if(message.type==='get_session_meta')this.emit({type:'session_meta',session_id:id,agent:'codex',model:'gpt-5.4',control_mode:'managed',status:'idle',capabilities:performanceRows ? session.capabilities : ['user_message']})
+    if(message.type==='get_session_meta')this.emit({type:'session_meta',session_id:id,agent:'codex',model:'gpt-5.4',control_mode:session.control_mode,status:'idle',capabilities:adoptionScenario || performanceRows ? session.capabilities : ['user_message']})
     if(message.type==='user_message'){
       this.emit({type:'user_message_ack',session_id:id,msg_id:message.msg_id})
       this.emit({type:'user_message_receipt',session_id:id,msg_id:message.msg_id,status:'accepted'})

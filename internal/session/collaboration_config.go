@@ -371,11 +371,17 @@ func (sm *SessionManager) RememberTeamConfigCapability(agent, revision string) {
 
 // Settings returned by the native protocol, independent from Team intent.
 type codexNativeConfigFields struct {
-	Model           string          `json:"model"`
-	ReasoningEffort *string         `json:"reasoningEffort"`
-	ApprovalPolicy  json.RawMessage `json:"approvalPolicy"`
-	Sandbox         struct {
-		Type string `json:"type"`
+	ApprovalsReviewer string          `json:"approvalsReviewer"`
+	Model             string          `json:"model"`
+	ReasoningEffort   *string         `json:"reasoningEffort"`
+	ApprovalPolicy    json.RawMessage `json:"approvalPolicy"`
+	Sandbox           struct {
+		Type                string          `json:"type"`
+		WritableRoots       []string        `json:"writableRoots"`
+		NetworkAccess       bool            `json:"networkAccess"`
+		ExcludeTmpdirEnvVar bool            `json:"excludeTmpdirEnvVar"`
+		ExcludeSlashTmp     bool            `json:"excludeSlashTmp"`
+		Access              json.RawMessage `json:"access"`
 	} `json:"sandbox"`
 }
 

@@ -160,8 +160,8 @@ test('emits deterministic receipt lock and canonical insert order', async () => 
 test('claims by bigint-safe daemon hash expression', async () => {
   let claimSql = ''
   const repo = new InboxRepository({
-    query: vi.fn(async (sql: string) => {
-      claimSql = sql
+    query: vi.fn(async (sql: { text: string }) => {
+      claimSql = sql.text
       return { rows: [], rowCount: 0 }
     }),
   } as never)
@@ -196,6 +196,31 @@ test('keeps claim validation unchanged for limit zero and invalid shards', async
     shardCount: 2,
     shardIndex: 2,
   })).rejects.toThrow('invalid inbox shard')
+})
+
+test.each([
+  { code: '26000' },
+  { code: '42P05' },
+  { code: '0A000', routine: 'RevalidateCachedQuery' },
+])('falls back to unnamed claims after a plan-cache rejection: %j', async (error) => {
+  const query = vi.fn().mockRejectedValueOnce(error).mockResolvedValue({ rows: [] })
+  const repo = new InboxRepository({ query } as never)
+  const options = { workerId: 'worker', limit: 10, shardCount: 2, shardIndex: 1 }
+  await repo.claimBatch(options)
+  await repo.claimBatch(options)
+  const first = query.mock.calls[0][0]
+  expect(first.name).toBe('pocketctl_inbox_claim_v1')
+  expect(query.mock.calls[1]).toEqual([first.text, first.values])
+  expect(query.mock.calls[2][0]).toEqual({ ...first, name: undefined })
+})
+
+test('propagates an uncertain claim result without issuing a second UPDATE', async () => {
+  const error = Object.assign(new Error('connection lost'), { code: 'ECONNRESET' })
+  const query = vi.fn().mockRejectedValueOnce(error)
+  const repo = new InboxRepository({ query } as never)
+  await expect(repo.claimBatch({ workerId: 'worker', limit: 1, shardCount: 1, shardIndex: 0 }))
+    .rejects.toBe(error)
+  expect(query).toHaveBeenCalledTimes(1)
 })
 
 test('rejects a stale completion fence instead of overwriting the new owner', async () => {

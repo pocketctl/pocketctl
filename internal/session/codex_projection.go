@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,7 @@ type codexProjection struct {
 	completedTurn  map[string]struct{}
 	threadStatus   map[string]string
 	threadCwd      map[string]string
+	usageRollouts  map[string]*codexUsageRollout
 	threadRevision map[string]uint64
 	parts          map[string]codexProjectedPart
 	turnDiff       map[string]string
@@ -62,7 +64,15 @@ type codexProjection struct {
 	memoryUnknownOverflow bool
 }
 
+// The builder is never copied. Strings already published as snapshots keep their
+// original length and the incremental digest matches hashing the full snapshot.
+type codexTextPrefix struct {
+	text   strings.Builder
+	digest hash.Hash
+}
+
 type codexProjectedPart struct {
+	prefix    *codexTextPrefix
 	text      string
 	revision  int
 	eventID   string
@@ -116,6 +126,7 @@ func newCodexProjection(generation uint64) *codexProjection {
 		completedTurn:  make(map[string]struct{}),
 		threadStatus:   make(map[string]string),
 		threadCwd:      make(map[string]string),
+		usageRollouts:  make(map[string]*codexUsageRollout),
 		threadRevision: make(map[string]uint64),
 		parts:          make(map[string]codexProjectedPart),
 		turnDiff:       make(map[string]string),
@@ -198,12 +209,18 @@ func (p *codexProjection) projectThreadStarted(raw json.RawMessage) []protocol.D
 		Thread struct {
 			ID     string            `json:"id"`
 			Cwd    string            `json:"cwd"`
+			Path   string            `json:"path"`
 			Name   *string           `json:"name"`
 			Status codexThreadStatus `json:"status"`
 		} `json:"thread"`
 	}
 	if json.Unmarshal(raw, &params) != nil || params.Thread.ID == "" {
 		return nil
+	}
+	if path := params.Thread.Path; path != "" {
+		if prior := p.usageRollouts[params.Thread.ID]; prior == nil || prior.path != path {
+			p.usageRollouts[params.Thread.ID] = &codexUsageRollout{path: path}
+		}
 	}
 	if params.Thread.Cwd != "" {
 		p.threadCwd[params.Thread.ID] = params.Thread.Cwd
@@ -431,11 +448,20 @@ func (p *codexProjection) projectTextDelta(method, eventType string, raw json.Ra
 	partKey := p.partKey(params.ThreadID, params.TurnID, params.ItemID, eventType)
 	state := p.parts[partKey]
 	state.revision++
-	state.text += params.Delta
+	if state.prefix == nil {
+		state.prefix = &codexTextPrefix{digest: sha256.New()}
+		state.prefix.text.WriteString(state.text)
+		state.prefix.digest.Write([]byte(state.text))
+	}
+	state.prefix.text.WriteString(params.Delta)
+	state.prefix.digest.Write([]byte(params.Delta))
+	state.text = state.prefix.text.String()
 	if state.streamID == "" {
 		state.streamID = p.contentStreamID(eventType, params.ThreadID, params.TurnID, params.ItemID)
 	}
-	eventID := p.key("part", digest([]byte(partKey)), fmt.Sprint(state.revision), digest([]byte(state.text)))
+	var sum [sha256.Size]byte
+	state.prefix.digest.Sum(sum[:0])
+	eventID := p.key("part", digest([]byte(partKey)), fmt.Sprint(state.revision), hex.EncodeToString(sum[:8]))
 	deltaEvent := protocol.DaemonEvent{
 		Type: eventType, SessionID: params.ThreadID, PartID: params.ItemID,
 		Text: params.Delta, Snapshot: state.text,
@@ -698,6 +724,7 @@ func (p *codexProjection) finalText(threadID, turnID, itemID, eventType, text st
 		Revision: state.revision, Replace: state.revision > 1,
 		EventID: eventID, PreviousEventID: state.eventID,
 	}
+	state.prefix = nil
 	state.text, state.eventID, state.finalized = text, eventID, true
 	p.parts[partKey] = state
 	return event
@@ -759,7 +786,8 @@ func (p *codexProjection) projectUsage(raw json.RawMessage) []protocol.DaemonEve
 			TotalTokens:     params.TokenUsage.Last.TotalTokens,
 		},
 	}
-	usageEvent.UsageMeta = usageanalytics.Metadata("codex-managed", "", "", "", "", "includes_cache", 0)
+	model := p.usageRollouts[params.ThreadID].modelForTurn(params.ThreadID, params.TurnID)
+	usageEvent.UsageMeta = usageanalytics.Metadata("codex-managed", "", "", "", model, "includes_cache", 0)
 	stampTurnIdentity(&usageEvent, params.ThreadID, params.TurnID, "")
 	return []protocol.DaemonEvent{usageEvent}
 }

@@ -277,7 +277,8 @@
         :daemon-id="currentSession.daemon_id" :hostname="currentSession.daemon_alias || currentSession.hostname" :daemon-online="currentSession.daemon_online" />
       <!-- Messages -->
       <div class="chat-message-viewport">
-      <div v-if="latestNotice" class="latest-refresh-feedback" role="status">{{ t(latestNotice) }}</div>
+      <div v-if="adoptionNotice" class="latest-refresh-feedback" role="status">{{ t('adoption.success') }}</div>
+      <div v-else-if="latestNotice" class="latest-refresh-feedback" role="status">{{ t(latestNotice) }}</div>
       <SessionPromptAnchor :message="latestPrompt" :container="messagesEl" :context="loadKey" @navigate="beginPromptReading" />
       <div
         ref="messagesEl"
@@ -713,6 +714,9 @@
           <span>{{ t('session.host_offline_notice') }}</span>
         </div>
         <div v-else-if="isSubagent || focusedSubAgentId" class="readonly-hint">{{ t('session.subagent_readonly') }}</div>
+        <SessionAdoptionNotice v-else-if="adoptionScope && !adoptionDenied"
+          :state="adoptionState" :actions="adoptionActions" :archive-changed="adoptionReceipt?.archive_changed"
+          :start-paused="adoptionReceipt?.start_enabled === false" :confirming="adoptionConfirm" @confirm="adoptionConfirm=$event" @act="issueAdoption" @focus-history="focusAdoptedHistory" />
         <div v-else-if="isUnmanagedReadOnlySession" class="unmanaged-readonly-notice" role="note">
           <span class="unmanaged-readonly-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>
@@ -794,6 +798,8 @@ import { navigationSessions, historyPreview, restoreCodexPreviewRows, cacheReadD
 import ShareLinkDialog from '../components/sharing/ShareLinkDialog.vue'
 import InvocationDialog from '../components/InvocationDialog.vue'
 import { searchInvocations, completeInvocation } from '../utils/invocations'
+import SessionAdoptionNotice from '../components/session/SessionAdoptionNotice.vue'
+import { useSessionAdoption } from '../composables/useSessionAdoption'
 import SessionFullscreenToggle from '../components/session/SessionFullscreenToggle.vue'
 import type { ComputedRef } from 'vue'
 import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, nextTick, watch, provide } from 'vue'
@@ -880,7 +886,7 @@ import SessionDocumentViewer from '../components/session-documents/SessionDocume
 import { sessionDocumentLinkKey } from '../utils/sessionDocumentLinks'
 import { useSessionDocuments } from '../composables/useSessionDocuments'
 import { useAuth } from '../composables/useAuth'
-import { getRelayOrigin } from '../composables/useEnv'
+import { getRelayOrigin, getRelayWs } from '../composables/useEnv'
 import SessionScopeSwitcher from '../components/session/SessionScopeSwitcher.vue'
 import TeamSessionBrowser from '../components/session/TeamSessionBrowser.vue'
 import { listTeams } from '../services/teamClient'
@@ -1049,7 +1055,7 @@ function isOpenCodeStructuredType(type: string): type is OpenCodeStructuredType 
 const explicitlyRoutedLiveEventTypes = new Set<string>([
   ...knownNonTimelineControlEventTypes,
   'connection_restored', 'session_list', 'session_created', 'daemon_list',
-  'daemon_status', 'invocation_result', 'command_list', 'session_agent_list', 'session_agent_changed',
+  'daemon_status', 'session_adoption_result', 'invocation_result', 'command_list', 'session_agent_list', 'session_agent_changed',
   'session_meta', 'session_model_changed', 'replay_batch', 'replay_end',
   'user_message_ack', 'user_message_nack', 'user_message_receipt',
   'user_text', 'agent_text', 'agent_plan', 'agent_reasoning', 'agent_retry',
@@ -2332,13 +2338,32 @@ const confirmedHostOnline = computed(() => {
   return freshSessionIds.value.has(sessionId.value) && currentSession.value?.daemon_online === true
 })
 const composerState = computed(() => ({
-  editable: canWriteWhenConnected.value,
-  sendEnabled: canWriteWhenConnected.value && connected.value && confirmedHostOnline.value
+  editable: canWriteWhenConnected.value && !adoptionBlocksComposer.value,
+  sendEnabled: canWriteWhenConnected.value && !adoptionBlocksComposer.value && connected.value && confirmedHostOnline.value
     && freshSessionIds.value.has(sessionId.value) && sessionComposerAccess(currentSession.value) === 'writable'
     && !isDisconnected.value && !isPendingSession.value,
 }))
-const isComposerVisible = computed(() => composerAccess.value !== 'readonly' && !isDisconnected.value)
-const isUnmanagedReadOnlySession = computed(() => composerAccess.value === 'readonly' && !accessDenied.value
+const adoptionScope = computed(() => {
+  const row = currentSession.value
+  if (!row || !user.value?.id || !currentHostId.value
+    || cachePrivacyBlocked.value || accessDenied.value || focusedSubAgentId.value || isSubagent.value
+    || returnTeamSessionID.value || returnTeamID.value || row.parent_session_id
+    || currentSessionAgent.value !== 'codex' || (row.source && row.source !== 'terminal')) return ''
+  const endpoint = new URL(getRelayWs(), location.href)
+  return JSON.stringify([endpoint.origin + endpoint.pathname, user.value.id, currentHostId.value, sessionId.value])
+})
+const { state:adoptionState, actions:adoptionActions, confirmed:adoptionConfirm, receipt:adoptionReceipt,
+  blocksComposer:adoptionBlocksComposer, denied:adoptionDenied, notice:adoptionNotice, issue:issueAdoption } = useSessionAdoption(
+  adoptionScope, sessionId, computed(() => sessionComposerAccess(currentSession.value) === 'writable'), () => {
+    send({type:'list_sessions'}); requestSessionMeta()
+  }, computed(() => freshSessionIds.value.has(sessionId.value) && confirmedHostOnline.value))
+function focusAdoptedHistory() {
+  if (!adoptionScope.value || !messagesEl.value || sessionComposerAccess(currentSession.value) !== 'writable') return
+  messagesEl.value.tabIndex = -1
+  messagesEl.value.focus({preventScroll:true})
+}
+const isComposerVisible = computed(() => !adoptionBlocksComposer.value && (!adoptionScope.value || sessionComposerAccess(currentSession.value) === 'writable') && composerAccess.value !== 'readonly' && !isDisconnected.value)
+const isUnmanagedReadOnlySession = computed(() => (adoptionBlocksComposer.value || composerAccess.value === 'readonly') && !accessDenied.value
   && !isSubagent.value && !focusedSubAgentId.value)
 const unmanagedReadOnlyAgent = computed(() => agentDisplayName(currentSessionAgent.value || selectedComposerHint.value?.agent || cachedComposerRow.value?.agent_type || ''))
 const waitingForComposer = computed(() => isComposerVisible.value && !isPendingSession.value && !composerState.value.sendEnabled)
@@ -2365,7 +2390,7 @@ const unmanagedReadOnlyDescription = computed(() => {
 })
 const messageBottomClearance = computed(() => isComposerVisible.value
   ? composerFloatClearance.value
-  : (isDisconnected.value || isUnmanagedReadOnlySession.value ? (isMobile.value ? 128 : 96) : 52))
+  : (isDisconnected.value || isUnmanagedReadOnlySession.value ? (Math.max(composerHeight.value + 12, isMobile.value ? 128 : 96)) : 52))
 const canInput = computed(() => composerState.value.sendEnabled)
 // Agent is actively generating (send button → stop button)
 // Agent is actively working — includes 'waiting' (tool execution in progress),

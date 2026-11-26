@@ -253,17 +253,21 @@ func (sm *SessionManager) GetPermissionMeta(sessionID string) (*protocol.Permiss
 	if !ok {
 		return nil, false, nil, false
 	}
+	current := ps.Permission
+	if current == nil && ps.Agent == adapter.AgentCodex {
+		current = ps.CodexNativePermission
+	}
 	idle := ps.Status != protocol.StatusRunning && ps.Status != protocol.StatusWaitingApproval
 	if !idle {
-		return clonePermission(ps.Permission), false, nil, true
+		return clonePermission(current), false, nil, true
 	}
 	if ps.Agent == adapter.AgentClaude {
 		if ps.Source == "daemon" && ps.PTY != nil {
-			return clonePermission(ps.Permission), true, append([]string(nil), claudeRuntimePermissionModes...), true
+			return clonePermission(current), true, append([]string(nil), claudeRuntimePermissionModes...), true
 		}
-		return clonePermission(ps.Permission), true, append([]string(nil), claudeNextTurnPermissionModes...), true
+		return clonePermission(current), true, append([]string(nil), claudeNextTurnPermissionModes...), true
 	}
-	return clonePermission(ps.Permission), ps.Agent == adapter.AgentCodex, nil, true
+	return clonePermission(current), ps.Agent == adapter.AgentCodex, nil, true
 }
 
 func indexString(values []string, target string) int {

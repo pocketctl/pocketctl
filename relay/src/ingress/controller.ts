@@ -26,7 +26,17 @@ export interface IngressControllerDependencies {
   setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
   flushDelayMs?: number;
+  chunkFlushDelayMs?: number;
   retryDelayMs?: number;
+}
+
+function isTinyContinuation(payload: Record<string, unknown>): boolean {
+  return payload.type === 'agent_text' && payload.streaming === true
+    && typeof payload.stream_id === 'string' && payload.stream_id.length > 0
+    && typeof payload.chunk_seq === 'number' && payload.chunk_seq > 0
+    && typeof payload.byte_offset === 'number' && payload.byte_offset > 0
+    && typeof payload.text === 'string' && payload.text.length > 0 && Buffer.byteLength(payload.text) <= 256
+    && !payload.final && !payload.replace && !payload.resync && !payload.usage && !payload.message_phase;
 }
 
 export function checkpointKey(daemonId: string, daemonGeneration: number): string {
@@ -44,6 +54,8 @@ export class IngressController {
   private readonly setTimer: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   private readonly clearTimer: (timer: ReturnType<typeof setTimeout>) => void;
   private readonly flushDelayMs: number;
+  private readonly chunkFlushDelayMs: number;
+  private waitingForChunks = false;
   private readonly retryDelayMs: number;
   private timer?: ReturnType<typeof setTimeout>;
   private flushing?: Promise<void>;
@@ -58,6 +70,9 @@ export class IngressController {
     this.setTimer = dependencies.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.clearTimer = dependencies.clearTimer ?? ((timer) => clearTimeout(timer));
     this.flushDelayMs = Math.max(5, Math.min(10, dependencies.flushDelayMs ?? 5));
+    const window = dependencies.chunkFlushDelayMs;
+    this.chunkFlushDelayMs = window !== undefined && Number.isFinite(window)
+      ? Math.max(this.flushDelayMs, Math.min(200, Math.trunc(window))) : this.flushDelayMs;
     this.retryDelayMs = Math.max(1, dependencies.retryDelayMs ?? 25);
   }
 
@@ -91,7 +106,19 @@ export class IngressController {
     const result = this.queue.enqueue(envelope);
     ingressEvents.inc({ priority: policy.priority, result: result.kind })
     ingressQueueDepth.set(this.queue.size)
-    if (result.kind === 'accepted') this.scheduleFlush(this.flushDelayMs);
+    if (result.kind === 'accepted') {
+      const waitForChunks = this.chunkFlushDelayMs > this.flushDelayMs && this.queue.size < 32
+        && isTinyContinuation(payload);
+      if (this.waitingForChunks && !waitForChunks) {
+        // Flush the partial group promptly when any boundary or control arrives.
+        // Leave database retry timers alone.
+        this.clearScheduledFlush();
+        this.scheduleFlush(0);
+      } else if (!this.timer && !this.flushing) {
+        this.waitingForChunks = waitForChunks;
+        this.scheduleFlush(waitForChunks ? this.chunkFlushDelayMs : this.flushDelayMs);
+      }
+    }
     return result;
   }
 
@@ -178,11 +205,13 @@ export class IngressController {
     if (!this.accepting || this.timer || this.flushing || this.queue.size === 0) return;
     this.timer = this.setTimer(() => {
       this.timer = undefined;
+      this.waitingForChunks = false;
       void this.flushNow();
     }, delayMs);
   }
 
   private clearScheduledFlush(): void {
+    this.waitingForChunks = false;
     if (!this.timer) return;
     this.clearTimer(this.timer);
     this.timer = undefined;

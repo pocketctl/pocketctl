@@ -157,20 +157,21 @@ async function lockCheckpoint(
   daemonId: string,
   daemonGeneration: number,
 ): Promise<AckCheckpoint> {
-  await client.query(
+  const key = [daemonId, daemonGeneration]
+  const selectForUpdate = `SELECT daemon_id, daemon_generation, ack_seq
+    FROM daemon_ack_checkpoint WHERE daemon_id=$1 AND daemon_generation=$2 FOR UPDATE`
+  const existing = await client.query<CheckpointRow>(selectForUpdate, key)
+  if (existing.rows[0]) return toCheckpoint(existing.rows[0])
+
+  // Registration normally creates the checkpoint. Concurrent first writers
+  // can both miss the SELECT. Only the winner owns the inserted row; the
+  // loser locks the winner's committed value using a fresh statement snapshot.
+  const inserted = await client.query<CheckpointRow>(
     `INSERT INTO daemon_ack_checkpoint (daemon_id, daemon_generation, ack_seq)
-     VALUES ($1, $2, 0)
-     ON CONFLICT (daemon_id, daemon_generation) DO NOTHING`,
-    [daemonId, daemonGeneration],
+     VALUES ($1, $2, 0) ON CONFLICT (daemon_id, daemon_generation) DO NOTHING
+     RETURNING daemon_id, daemon_generation, ack_seq`, key,
   )
-  const result = await client.query<CheckpointRow>(
-    `SELECT daemon_id, daemon_generation, ack_seq
-     FROM daemon_ack_checkpoint
-     WHERE daemon_id = $1 AND daemon_generation = $2
-     FOR UPDATE`,
-    [daemonId, daemonGeneration],
-  )
-  const row = result.rows[0]
+  const row = inserted.rows[0] ?? (await client.query<CheckpointRow>(selectForUpdate, key)).rows[0]
   if (!row) throw new Error('checkpoint row unavailable after initialization')
   return toCheckpoint(row)
 }
@@ -327,22 +328,20 @@ async function advanceContiguousCheckpoint(
         AND receipt.daemon_generation = $2
         AND receipt.seq = contiguous.seq + 1
      )
-     SELECT MAX(seq)::text AS ack_seq FROM contiguous`,
+     UPDATE daemon_ack_checkpoint AS checkpoint
+     SET ack_seq = prefix.high, updated_at = NOW()
+     FROM (SELECT MAX(seq) AS high FROM contiguous) prefix
+     WHERE checkpoint.daemon_id = $1 AND checkpoint.daemon_generation = $2
+       AND checkpoint.ack_seq < prefix.high
+     RETURNING checkpoint.ack_seq::text AS ack_seq`,
     [checkpoint.daemonId, checkpoint.daemonGeneration, checkpoint.ackSeq],
   )
-  const ackSeq = Number(contiguous.rows[0]?.ack_seq ?? checkpoint.ackSeq)
-  if (ackSeq !== checkpoint.ackSeq) {
-    await client.query(
-      `UPDATE daemon_ack_checkpoint
-       SET ack_seq = $3, updated_at = NOW()
-       WHERE daemon_id = $1 AND daemon_generation = $2`,
-      [checkpoint.daemonId, checkpoint.daemonGeneration, ackSeq],
-    )
-  }
-  return { ...checkpoint, ackSeq }
+  return { ...checkpoint, ackSeq: Number(contiguous.rows[0]?.ack_seq ?? checkpoint.ackSeq) }
 }
 
 export class InboxRepository {
+  private claimStatementName: string | undefined = 'pocketctl_inbox_claim_v1'
+
   constructor(private readonly pool: pg.Pool) {}
 
   async persistBatch(events: IngressEnvelope[]): Promise<Map<string, AckCheckpoint>> {
@@ -428,8 +427,8 @@ export class InboxRepository {
       // row on every claim (or scans/sorts the whole table as visibility drifts).
       // Include claimed and retry-delayed heads here: filtering them before
       // choosing the head would let a successor overtake its ordering fence.
-      const result = await this.pool.query<ClaimedRow>(
-      `WITH RECURSIVE stream_heads AS (
+      const name = this.claimStatementName
+      const text = `WITH RECURSIVE stream_heads AS (
          (SELECT daemon_id, daemon_generation, inbox_id
           FROM event_inbox
           WHERE status IN (0, 1)
@@ -475,9 +474,18 @@ export class InboxRepository {
        RETURNING inbox.*
        )
        SELECT * FROM claimed
-       ORDER BY priority_class ASC, received_at ASC, inbox_id ASC`,
-        [options.workerId, shardCount, shardIndex, limit],
-      )
+       ORDER BY priority_class ASC, received_at ASC, inbox_id ASC`
+      const values = [options.workerId, shardCount, shardIndex, limit]
+      const result = await this.pool.query<ClaimedRow>({ name, text, values }).catch((error) => {
+        // A multiplexed connection can lose its named plan. An online schema
+        // change can invalidate its result descriptor. Both fail before the
+        // UPDATE executes. Never repeat a claim after an ambiguous I/O error.
+        const invalidPlan = error?.code === '26000' || error?.code === '42P05' ||
+          (error?.code === '0A000' && error?.routine === 'RevalidateCachedQuery')
+        if (!name || !invalidPlan) throw error
+        this.claimStatementName = undefined
+        return this.pool.query<ClaimedRow>(text, values)
+      })
       return result.rows.map(toInboxRow)
     } finally {
       inboxClaimSeconds.observe(Math.max(0, (performance.now() - claimStartedAt) / 1000))
