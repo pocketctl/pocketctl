@@ -210,7 +210,8 @@ export async function assertDurableIngressSchema(pool: Pick<pg.Pool, 'query'>): 
       AND to_regclass('daemon_ack_checkpoint') IS NOT NULL
       AND to_regclass('realtime_outbox') IS NOT NULL
       AND to_regclass('request_push_effect') IS NOT NULL
-      AND to_regclass('ingress_retention_status') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('ingress_retention_status')
+        AND conname='ingress_retention_status_stage_v2' AND convalidated)
       AND (SELECT count(*) = 4 FROM pg_index WHERE indisvalid AND indisready
         AND indexrelid IN (to_regclass('idx_event_inbox_receipt_inbox_id'),
           to_regclass('idx_event_inbox_receipt_retention'),

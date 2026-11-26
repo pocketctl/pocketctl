@@ -75,7 +75,7 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
 
     -- One bounded receipt per stage; no business identifiers or payloads.
     CREATE TABLE IF NOT EXISTS ingress_retention_status (
-      stage TEXT PRIMARY KEY CHECK(stage IN ('outbox','receipts','inbox','uploads','inspection')),
+      stage TEXT PRIMARY KEY CONSTRAINT ingress_retention_status_stage_v2 CHECK(stage IN ('outbox','receipts','inbox','failed_inbox','uploads','inspection')),
       last_attempt_at TIMESTAMPTZ NOT NULL,
       last_success_at TIMESTAMPTZ,
       last_deleted INT NOT NULL DEFAULT 0,
@@ -84,6 +84,19 @@ export async function initDurableIngressSchema(pool: pg.Pool): Promise<void> {
       duration_ms INT NOT NULL DEFAULT 0,
       detail JSONB NOT NULL DEFAULT '{}'::jsonb
     );
+
+    -- Upgrade existing five-stage workers' receipts in place. The table has
+    -- one row per stage, so validation never scans event or payload data.
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid='ingress_retention_status'::regclass AND conname='ingress_retention_status_stage_v2') THEN
+        ALTER TABLE ingress_retention_status
+          DROP CONSTRAINT IF EXISTS ingress_retention_status_stage_check,
+          DROP CONSTRAINT IF EXISTS ingress_retention_status_stage_v2,
+          ADD CONSTRAINT ingress_retention_status_stage_v2
+          CHECK(stage IN ('outbox','receipts','inbox','failed_inbox','uploads','inspection'));
+      END IF;
+    END $$;
 
     CREATE TABLE IF NOT EXISTS daemon_ack_checkpoint (
       daemon_id VARCHAR(64) NOT NULL,
