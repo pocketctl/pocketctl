@@ -8,7 +8,7 @@
         </button>
       </div>
       <div class="modal-body">
-        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年10月30日' : 'Updated: October 30, 2026' }}</div>
+        <div class="update-date">{{ locale === 'zh' ? '更新日期：2026年11月27日' : 'Updated: November 27, 2026' }}</div>
 
         <!-- Chinese version -->
         <template v-if="locale === 'zh'">
@@ -60,9 +60,9 @@
             <li>基础设施日志、第三方日志和备份按照隐私政策所述的独立周期清理。</li>
           </ol>
           <ol>
-            <li>个人会话按最后有效业务活动计算保留期限：连续严格超过 30 天无有效业务活动时自动归档并转为私有冷存储，严格超过 60 天时清除云端会话数据。有效活动、保护条件、删除范围及 Team 排除范围见隐私政策；有新增活动或有效在途操作的会话受到保护，遗留运行或待处理标记按隐私政策所述的无新增数据条件判断。</li>
-            <li>本版会话生命周期规则于 2026 年 10 月 30 日正式公示后生效，适用于生效前已有及生效后新增的个人会话，不另设历史数据清除过渡期。会话是否归档或清除，按已验证的最后有效业务活动时间及下述条件判断；未达到条件的会话不会仅因本规则生效而被处理。具体公示及生效时间见官方网站正式公告。</li>
-            <li>生命周期维护由服务端按有效活动和保护条件自动执行，无需您对每次归档或清除另行批准。系统维护通知与 Agent 工具审批是不同功能；通知是否已读不控制维护执行，阅读历史、置顶、改标题和手工归档也不延长保留期限。</li>
+            <li>连续超过 7 天没有有效业务活动的个人会话会自动归档，历史正文迁入私有冷存储。云端会话数据自实际归档起保留 3 天，超过 3 天且通过保护检查后彻底删除。延迟归档的会话从实际归档时刻计时。 有效活动、保护条件、删除范围和 Team 排除范围见隐私政策。</li>
+            <li>本规则适用于已有和新增的个人会话。已归档会话沿用实际归档时间。规则生效且适用的历史过渡期结束后，已满足条件的会话可在下一次维护中清除。具体时间以官方网站公告为准。</li>
+            <li>生命周期维护由服务端按有效活动和保护条件自动执行，无需您对每次归档或清除另行批准。系统维护通知与 Agent 工具审批是不同功能；通知是否已读不控制维护执行，阅读历史、置顶、改标题也不延长保留期限。</li>
             <li>归档后的历史和文档在清除前仍可按原有权限读取。已清除会话只能查看必要的操作摘要，正文不能通过通知恢复；分阶段清除的完成情况以系统结果为准。请在清除前使用产品支持的方式导出或另行保存需要长期保留的内容。服务端冷存储不替代您对重要项目文件和资料的独立备份。</li>
           </ol>
         </section>
@@ -122,9 +122,9 @@
             <li>Infrastructure logs, third-party logs, and backups are cleared on the separate cycles described in the Privacy Policy.</li>
           </ol>
           <ol>
-            <li>Personal-session retention is calculated from the last valid business activity: sessions are automatically archived into private cold storage after strictly more than 30 consecutive days without valid business activity, and their cloud session data is purged after strictly more than 60 days. Valid activity, protection conditions, deletion scope, and Team exclusions are described in the Privacy Policy. Sessions with new activity or valid in-flight operations remain protected; stale running or pending flags are assessed against the no-new-data conditions in the Privacy Policy.</li>
-            <li>This session lifecycle policy takes effect upon formal publication on October 30, 2026. It applies to both existing and newly created personal sessions, without an additional historical purge transition period. Archiving and purge depend on verified last valid business activity and the conditions below; sessions that do not qualify are not processed merely because the policy takes effect. The official website notice states the publication and effective times.</li>
-            <li>The server performs lifecycle maintenance automatically according to valid activity and protection conditions, without separate approval for each archive or purge. System maintenance notices and Agent tool approvals are different functions. Notice read status does not control maintenance, and reading history, pinning, editing titles, or manual archiving does not renew retention.</li>
+            <li>Personal sessions are automatically archived after more than 7 consecutive days without valid business activity. Archived history moves to private cold storage. Cloud session data is retained for 3 days from the actual time of archiving and permanently deleted after that period once protection checks pass. A delayed archive receives the full 3 days. See the Privacy Policy for qualifying activity, protection checks, deletion scope and Team exclusions.</li>
+            <li>This policy applies to existing and new personal sessions. Previously archived sessions keep their original archive time. Once the policy is effective and any applicable transition period has passed, eligible sessions may be purged in the next maintenance batch. The official website notice specifies the dates.</li>
+            <li>The server performs lifecycle maintenance automatically according to valid activity and protection conditions, without separate approval for each archive or purge. System maintenance notices and Agent tool approvals are different functions. Notice read status does not control maintenance, and reading history, pinning, or editing titles does not renew retention.</li>
             <li>Archived history and documents remain readable under the existing permissions until purge. Purged sessions expose only necessary operation summaries; notices cannot restore conversation bodies. Completion of staged purge is determined by system results. Before purge, use supported export features or separately save content you need to retain longer. Server-side cold storage does not replace independent backups of important project files and materials.</li>
           </ol>
         </section>

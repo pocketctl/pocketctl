@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { sessionLifecycleConfig } from '../session-lifecycle/config.js'
+import { sessionLifecycleReadiness } from '../session-lifecycle/readiness.js'
 import { releaseFixture } from './session-lifecycle-release-fixture.js'
 
 describe('versioned release-file configuration', () => {
@@ -13,6 +14,12 @@ describe('versioned release-file configuration', () => {
   test('policy dates come from the published release when not separately configured', () => {
     writeFileSync(file, JSON.stringify(releaseFixture('namespace')), { mode: 0o600 })
     expect(load()).toMatchObject({ effectiveAt: '2026-01-01T00:00:00Z', transitionDeadline: '2026-02-01T00:00:00Z' })
+  })
+  test('v2 publication evidence cannot activate the shorter v3 policy', () => {
+    writeFileSync(file, JSON.stringify(releaseFixture('namespace', {policyVersion:'session-lifecycle-v2'})), {mode:0o600})
+    const status = sessionLifecycleReadiness(load(), {namespace:'namespace'})
+    expect(status.release_blockers).toContain('release_policy_mismatch')
+    expect(status.production_release_ready).toBe(false)
   })
   test.each(['{', JSON.stringify({ schemaVersion: 2 }), JSON.stringify({ schemaVersion: 1, effectiveAt: 'tomorrow' }), 'x'.repeat(65_537)])
     ('malformed, unsupported and oversized release records fail without leaking contents', content => {

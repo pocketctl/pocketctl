@@ -25,7 +25,8 @@ export class SessionLifecycleScanner {
     if(!this.config.effectiveAt)report.readiness.push('policy_unpublished')
     if(this.config.storageDriver==='filesystem'?!this.config.archiveDirectory:(!this.config.objectBucket||!this.config.objectRegion))report.readiness.push('object_store_unconfigured')
     const rows=(await this.db.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND (last_activity_at IS NULL
-      OR last_activity_at<$2::timestamptz-($3::int*interval '1 day')) ORDER BY id LIMIT $4`,[input.afterRowId??0,clock,this.config.archiveDays,input.limit+1])).rows
+      OR last_activity_at<$2::timestamptz-($3::int*interval '24 hours')
+      OR archived_at<$2::timestamptz-($5::int*interval '24 hours')) ORDER BY id LIMIT $4`,[input.afterRowId??0,clock,this.config.archiveDays,input.limit+1,this.config.purgeDays])).rows
     for(const row of rows.slice(0,input.limit)){
       const inspection=await inspectLifecycleEligibility(this.db,row.session_id,this.config,{now:clock,includeStatistics:input.includeStatistics===true}),root=inspection.root
       if(root&&inspection.members.every(member=>Number(member.id)>=row.id)){

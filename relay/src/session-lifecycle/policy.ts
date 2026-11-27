@@ -80,16 +80,22 @@ export function evaluateLifecycle(
   }
   if (activity !== null) {
     const archive = activity + BigInt(config.archiveDays) * DAY_US
-    let purge = activity + BigInt(config.purgeDays) * DAY_US
-    if (input.historical && config.transitionDeadline) {
-      const transition = timestampMicros(config.transitionDeadline)
-      if (transition > purge) purge = transition
-    }
     result.activityAt = microsTimestamp(activity)
     result.archiveAt = microsTimestamp(archive)
-    result.purgeAt = microsTimestamp(purge)
+    let purge: bigint | null = null
+    if (input.archiveReason && input.archivedAt) {
+      const archived = timestampMicros(input.archivedAt)
+      // Manual archives stay archived on new business activity. Give that
+      // activity the full retention period as well.
+      purge = (archived > activity ? archived : activity) + BigInt(config.purgeDays) * DAY_US
+      if (input.historical && config.transitionDeadline) {
+        const transition = timestampMicros(config.transitionDeadline)
+        if (transition > purge) purge = transition
+      }
+      result.purgeAt = microsTimestamp(purge)
+    }
     if (reasons.size === 0) {
-      if (current > purge) {
+      if (purge !== null && current > purge) {
         result.action = 'purge'
         result.dueAt = result.purgeAt
       } else if (current > archive) {

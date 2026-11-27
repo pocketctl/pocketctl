@@ -5,9 +5,9 @@ describe('session lifecycle config', () => {
   test('defaults are versioned and enabled', () => {
     expect(sessionLifecycleConfig({})).toMatchObject({
       mode: 'enforce',
-      archiveDays: 30,
-      purgeDays: 60,
-      policyVersion: 'session-lifecycle-v2',
+      archiveDays: 7,
+      purgeDays: 3,
+      policyVersion: 'session-lifecycle-v3',
       notificationRetentionDays: 90,
       scanIntervalMs: 3_600_000,
       continuationDelayMs: 5_000,

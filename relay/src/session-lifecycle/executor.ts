@@ -88,18 +88,22 @@ export class SessionLifecycleExecutor {
   async execute(lease:LifecycleJob,deleteOptions:NonNullable<Parameters<typeof deleteSessionInTransaction>[2]>={}):Promise<'succeeded'|'partial'|'cancelled'>{
     const readiness = sessionLifecycleReadiness(this.config, this.storage)
     if (!readiness.execution_ready) throw new Error(`lifecycle execution blocked: ${readiness.blockers.join(',')}`)
+    if(lease.policyVersion!==this.config.policyVersion)throw new Error('lifecycle job policy mismatch')
     if(lease.action==='purge')return this.purge(lease,deleteOptions)
     if(!['archive','cool'].includes(lease.action))throw new Error('unsupported archive executor action')
     let snapshot:LifecycleEligibility|undefined,manifestId:string|undefined,archived=false
     try{
       snapshot=await this.transaction(async db=>{
-        const current=await this.fenced(db,lease)
+        let current=await this.fenced(db,lease)
         await this.settleStale(db,lease,current)
         if(lease.action==='archive'){
           await db.query(`UPDATE sessions SET archived_at=COALESCE(archived_at,NOW()),archive_reason=COALESCE(archive_reason,'inactivity'),
             organization_revision=organization_revision+1,updated_at=NOW() WHERE session_id=$1`,[lease.sessionId])
           archived=true
-          await this.record(db,lease,current,'running','inactivity_30_days',{archive:'succeeded',cool:'pending'})
+          // The first notice and any transfer retry use the committed archive
+          // clock, including a later archive in the same dependency component.
+          current=await inspectLifecycleEligibility(db,lease.sessionId,this.config)
+          await this.record(db,lease,current,'running','inactivity_7_days',{archive:'succeeded',cool:'pending'})
         }
         await db.query("UPDATE sessions SET content_state='cooling',cooling_operation_id=$2 WHERE session_id=$1",[lease.sessionId,lease.operationId])
         return current
@@ -192,8 +196,8 @@ export class SessionLifecycleExecutor {
         // Retained originals keep their physical hot custody. They are not
         // current-owner work and must not cause a permanent partial retry.
         await db.query("UPDATE sessions SET content_state=$2,cooling_operation_id=NULL,updated_at=NOW() WHERE session_id=$1",[lease.sessionId,remaining.physical?'mixed':'cold'])
-        await this.record(db,lease,current,hot?'partial':'succeeded',hot?'transfer_budget_reached':'inactivity_30_days',{archive:archived?'succeeded':'not_applicable',cool:hot?'pending':'succeeded'})
-        if(!await new LifecycleJobRepository(db).finish(lease,hot?'partial':'succeeded',{reason:hot?'transfer_budget_reached':'inactivity_30_days',chunks:chunks.length,bytes:bytesTransferred}))throw new Superseded()
+        await this.record(db,lease,current,hot?'partial':'succeeded',hot?'transfer_budget_reached':'inactivity_7_days',{archive:archived?'succeeded':'not_applicable',cool:hot?'pending':'succeeded'})
+        if(!await new LifecycleJobRepository(db).finish(lease,hot?'partial':'succeeded',{reason:hot?'transfer_budget_reached':'inactivity_7_days',chunks:chunks.length,bytes:bytesTransferred}))throw new Superseded()
       })
       return publishedPartial?'partial':'succeeded'
     }catch(error){
@@ -234,7 +238,7 @@ export class SessionLifecycleExecutor {
           await deleteSessionInTransaction(db,member.session_id,options)
           await db.query('UPDATE session_lifecycle_deletions SET operation_id=$2 WHERE session_id=$1',[member.session_id,operation.operationId])
           const stages={database:'succeeded',objects:'pending',memory:'pending'} as const
-          await this.record(db,operation,{...current,root:member},'partial','inactivity_60_days',stages,notificationId)
+          await this.record(db,operation,{...current,root:member},'partial','archived_3_days',stages,notificationId)
           if(operation.operationId===lease.operationId){
             if(!await new LifecycleJobRepository(db).finish(lease,'partial',{reason:'external_cleanup_pending'},86400000))throw new Superseded()
           }else await db.query(`UPDATE session_lifecycle_jobs SET state='partial',result='{"reason":"external_cleanup_pending"}',

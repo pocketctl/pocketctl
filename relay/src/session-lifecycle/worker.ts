@@ -23,7 +23,8 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
   const collector=storage?new ArchiveObjectCollector(pool,storage):undefined
   const notices=new AttentionNotificationRepository(pool,secret)
   async function reconcile(){
-    const rows=(await pool.query(`SELECT r.*,d.objects_completed_at,d.extensions_completed_at FROM session_lifecycle_deletions d
+    const rows=(await pool.query(`SELECT r.*,
+      to_char(r.effective_purge_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS purge_time,d.objects_completed_at,d.extensions_completed_at FROM session_lifecycle_deletions d
       JOIN session_lifecycle_results r ON r.operation_id=d.operation_id WHERE r.action='purge' AND r.state='partial' ORDER BY d.database_deleted_at LIMIT 100`)).rows
     for(const row of rows){
       const stages={database:'succeeded',objects:row.objects_completed_at?'succeeded':'pending',memory:row.extensions_completed_at?'succeeded':'pending'} as const
@@ -36,7 +37,7 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
         if(visible){
           await notices.recordResultInTransaction(db,{operationId:row.operation_id,notificationId:row.notification_id??randomUUID(),userId:row.user_id,sessionId:row.session_id,
             daemonId:row.daemon_id,titleSnapshot:row.title_snapshot,daemonNameSnapshot:row.daemon_name_snapshot,action:'purge',state,
-            activityAt:new Date(row.activity_at).toISOString(),effectivePurgeAt:row.effective_purge_at?new Date(row.effective_purge_at).toISOString():null,
+            activityAt:new Date(row.activity_at).toISOString(),effectivePurgeAt:row.purge_time,
             reasonCode:state==='succeeded'?'cloud_cleanup_completed':'external_cleanup_pending',retentionDays:config.notificationRetentionDays,stages})
         }else await db.query(`UPDATE session_lifecycle_results SET state=$2,stages=$3::jsonb,executed_at=NOW(),updated_at=NOW(),
           title_snapshot='',daemon_name_snapshot='' WHERE operation_id=$1 AND state='partial'`,[row.operation_id,state,JSON.stringify(stages)])
@@ -75,8 +76,10 @@ export function createSessionLifecycleWorker(pool:pg.Pool,config:SessionLifecycl
     let afterRowId=run.afterRowId,scanComplete=run.scanComplete,completed=false,continuationWakeAt:number|null=null
     try{
       if(!scanComplete){
-        const rows=(await pool.query(`SELECT id,session_id FROM sessions WHERE id>$1
-          AND (last_activity_at IS NULL OR last_activity_at<NOW()-($2::int*interval '1 day'))
+        const due=run.action==='purge'
+          ? "archived_at<NOW()-($2::int*interval '24 hours')"
+          : "(last_activity_at IS NULL OR last_activity_at<NOW()-($2::int*interval '24 hours'))"
+        const rows=(await pool.query(`SELECT id,session_id FROM sessions WHERE id>$1 AND ${due}
           ORDER BY id LIMIT $3`,[afterRowId,run.action==='purge'?config.purgeDays:config.archiveDays,config.batchSessions+1])).rows
         let inspected=0
         for(const row of rows.slice(0,config.batchSessions)){

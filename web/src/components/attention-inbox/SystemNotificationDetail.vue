@@ -53,7 +53,10 @@ function formatDate(value: string | null) { return value ? new Date(value).toLoc
 function reasonLabel(subject: LifecycleNotificationSubject) {
   if (subject.reason_code.startsWith('test_fixture')) return t('attention.notification.reason.fixture')
   switch (subject.reason_code) {
-    case 'inactivity_30_days': case 'transfer_budget_reached': case 'cold_transfer_failed':
+    case 'inactivity_7_days': return t('attention.notification.reason.inactivity7')
+    case 'archived_3_days': return t('attention.notification.reason.archived3')
+    case 'transfer_budget_reached': case 'cold_transfer_failed': return t('attention.notification.reason.transfer')
+    case 'inactivity_30_days':
       return t('attention.notification.reason.archive')
     case 'inactivity_60_days': return t('attention.notification.reason.legacy60')
     case 'inactivity_90_days': return t('attention.notification.reason.legacy90')

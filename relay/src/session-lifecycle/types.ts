@@ -74,6 +74,8 @@ export interface LifecycleInput {
   status: string | null
   turnActive?: boolean
   staleSnapshot?: boolean
+  /** Latest actual archive timestamp in the component, null while any member is unarchived. */
+  archivedAt: string | null
   archiveReason: 'manual' | 'inactivity' | null
   contentState: ContentState
   historical?: boolean

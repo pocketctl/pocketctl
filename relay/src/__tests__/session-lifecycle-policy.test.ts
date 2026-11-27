@@ -10,6 +10,7 @@ const session: LifecycleInput = {
   activityVerified: true,
   activityAt: '2026-01-01T00:00:00.000000Z',
   status: 'exited',
+  archivedAt: null,
   archiveReason: null,
   contentState: 'hot',
   blockers: [],
@@ -24,28 +25,19 @@ describe('session lifecycle policy', () => {
       .toMatchObject({ action: null, archiveAt: null, purgeAt: null, blockedReasons: ['demo_excluded'] })
   })
   test.each([
-    ['2026-01-31T00:00:00.000000Z', null],
-    ['2026-01-31T00:00:00.000001Z', 'archive'],
-    ['2026-03-02T00:00:00.000000Z', 'archive'],
-    ['2026-03-02T00:00:00.000001Z', 'purge'],
-  ])('strict microsecond threshold %s', (now, action) => {
-    expect(evaluateLifecycle(session, now, config).action).toBe(action)
+    ['2026-01-08T00:00:00.000000Z', null],
+    ['2026-01-08T00:00:00.000001Z', 'archive'],
+    ['2026-06-01T00:00:00.000000Z', 'archive'],
+  ])('only archive is due after seven full days at %s', (now, action) => {
+    expect(evaluateLifecycle(session, now, config)).toMatchObject({action, purgeAt: null})
   })
-  test('manual archive and pin do not extend retention or change archive intent', () => {
-    expect(
-      evaluateLifecycle(
-        { ...session, archiveReason: 'manual', pinned: true },
-        '2026-01-31T00:00:00.000001Z',
-        config,
-      ).action,
-    ).toBe('cool')
-    expect(
-      evaluateLifecycle(
-        { ...session, archiveReason: 'manual', pinned: true },
-        '2026-03-02T00:00:00.000001Z',
-        config,
-      ).action,
-    ).toBe('purge')
+  test.each(['manual','inactivity'] as const)('three full days after actual %s archive', archiveReason => {
+    const archived = {...session, archiveReason, archivedAt:'2026-03-12T06:00:00.123456Z', contentState:'cold' as const, pinned:true}
+    expect(evaluateLifecycle(archived,'2026-03-15T06:00:00.123456Z',config).action).toBeNull()
+    expect(evaluateLifecycle(archived,'2026-03-15T06:00:00.123457Z',config)).toMatchObject({
+      action:'purge',purgeAt:'2026-03-15T06:00:00.123456Z'})
+    expect(evaluateLifecycle({...archived, archivedAt:null},'2026-06-01T00:00:00Z',config).purgeAt).toBeNull()
+    expect(evaluateLifecycle({...archived, activityAt:'2026-03-14T06:00:00Z'},'2026-03-16T06:00:00Z',config).action).toBeNull()
   })
   test('cold archived history is stable; mixed history resumes remaining hot bodies', () => {
     for (const contentState of ['cold', 'mixed'] as const) {
@@ -116,17 +108,17 @@ describe('session lifecycle policy', () => {
     })
     expect(
       evaluateLifecycle(
-        { ...session, historical: true },
+        { ...session, historical: true, archiveReason: 'manual', archivedAt:'2026-04-02T00:00:00Z', contentState:'cold' },
         '2026-05-01T00:00:00Z',
         policy,
       ),
     ).toMatchObject({
-      action: 'archive',
+      action: null,
       purgeAt: '2026-05-01T00:00:00.000000Z',
     })
     expect(
       evaluateLifecycle(
-        { ...session, historical: true },
+        { ...session, historical: true, archiveReason: 'manual', archivedAt:'2026-04-02T00:00:00Z', contentState:'cold' },
         '2026-05-01T00:00:00.000001Z',
         policy,
       ).action,

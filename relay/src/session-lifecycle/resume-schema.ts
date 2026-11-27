@@ -32,11 +32,11 @@ export async function initLifecycleResumeSchema(db:Pick<pg.Pool,'query'>):Promis
           AND r.action IN ('archive','cool') AND n.user_id=NEW.user_id AND n.expires_at>NOW()
         ORDER BY r.created_at DESC,r.operation_id DESC LIMIT 1;
       INSERT INTO session_lifecycle_jobs(operation_id,user_id,session_id,action,policy_version,activity_epoch,state,result)
-        VALUES(operation,NEW.user_id,NEW.session_id,'resume','session-lifecycle-v2',NEW.activity_epoch,'succeeded','{"reason":"business_activity"}');
+        VALUES(operation,NEW.user_id,NEW.session_id,'resume','session-lifecycle-v3',NEW.activity_epoch,'succeeded','{"reason":"business_activity"}');
       INSERT INTO session_lifecycle_results(operation_id,user_id,session_id,daemon_id,title_snapshot,daemon_name_snapshot,action,state,activity_at,
         executed_at,effective_purge_at,reason_code,stages,notification_id,notification_revision)
         VALUES(operation,NEW.user_id,NEW.session_id,NEW.daemon_id,left(COALESCE(NEW.title,''),512),left(host_name,255),'resume','succeeded',NEW.last_activity_at,
-          NOW(),NEW.last_activity_at+interval '60 days','business_activity','{"resume":"succeeded","cold_history":"succeeded"}',notification,notice_revision);
+          NOW(),NULL,'business_activity','{"resume":"succeeded","cold_history":"succeeded"}',notification,notice_revision);
       IF notification IS NOT NULL THEN
       UPDATE attention_notifications SET revision=revision+1,updated_at=NOW() WHERE notification_id=notification RETURNING revision INTO notice_revision;
       UPDATE session_lifecycle_results SET notification_revision=notice_revision WHERE operation_id=operation;

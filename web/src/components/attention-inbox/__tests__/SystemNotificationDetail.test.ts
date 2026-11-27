@@ -50,6 +50,8 @@ test.each([
   ['user_requested_zombie_cleanup', 'zombie'],
   ['unknown_manual_cleanup', 'unknown'],
   ['cloud_cleanup_completed', 'purge'],
+  ['inactivity_7_days', 'inactivity7'],
+  ['archived_3_days', 'archived3'],
 ])('uses the recorded reason for %s rather than guessing from purge', async (reason_code, label) => {
   api.listNotificationSubjects.mockResolvedValue({ subjects: [{ ...subject, action: 'purge', reason_code }], subject_count: 1, next_cursor: null })
   const { wrapper } = await render()

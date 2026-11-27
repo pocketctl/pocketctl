@@ -132,6 +132,17 @@ suite('final fenced lifecycle eligibility PostgreSQL',()=>{
     expect(exact.eventCount).toBe('6000')
     expect(BigInt(exact.hotEventBytes!)).toBeGreaterThan(600000n)
   })
+  test('purge waits for the last archived dependency and protects restored members',async()=>{
+    await add();await add('child','root')
+    const inspectAt=(now:string)=>inspectLifecycleEligibility(pool,'root',config,{now})
+    await pool.query("UPDATE sessions SET archived_at='2026-02-01',archive_reason='manual' WHERE session_id='root'")
+    expect((await inspectAt('2026-03-10T00:00:00Z')).prediction.purgeAt).toBeNull()
+    await pool.query("UPDATE sessions SET archived_at='2026-03-09 12:00:00.123456Z',archive_reason='manual' WHERE session_id='child'")
+    expect((await inspectAt('2026-03-12T12:00:00.123456Z')).prediction.action).not.toBe('purge')
+    expect((await inspectAt('2026-03-12T12:00:00.123457Z')).prediction.action).toBe('purge')
+    await pool.query("UPDATE sessions SET archived_at=NULL,archive_reason=NULL WHERE session_id='child'")
+    expect((await inspectAt('2026-03-20T00:00:00Z')).prediction.purgeAt).toBeNull()
+  })
   test('latest activity ignores null timestamps and metadata, and includes meaningful data from any member',async()=>{
     await add();await add('child','root')
     await pool.query(`INSERT INTO events(session_id,event_type,payload,created_at) VALUES
@@ -152,7 +163,7 @@ suite('final fenced lifecycle eligibility PostgreSQL',()=>{
       VALUES('host',1,1,'reconnect-meta','session_meta',0,'root','{}')`)
     expect((await inspect()).prediction.action).toBe('archive')
     const purge=await inspectLifecycleEligibility(pool,'root',config,{now:'2026-04-01T00:00:00Z'})
-    expect(purge.prediction.action).toBe('purge')
+    expect(purge.prediction).toMatchObject({action:'archive',purgeAt:null})
     await pool.query("INSERT INTO events(session_id,event_type,payload,effect_status,created_at) VALUES('root','agent_text','{}','completed','2026-02-09')")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
     expect((await inspect()).prediction.action).toBeNull()

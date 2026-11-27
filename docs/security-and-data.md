@@ -9,9 +9,9 @@ The retention details below describe an experimental implementation and local ac
 PocketCtl keeps repositories and agent processes on the development host, but
 that does **not** mean session content stays local.
 
-The experimental personal-session lifecycle has passed local Docker acceptance:
-eligible sessions archive and move to private cold storage after more than 60
-days of verified inactivity, and purge after more than 90 days. Business activity
+Eligible personal sessions archive after more than 7 days of verified inactivity.
+Archived history moves to private cold storage. Cloud session data is permanently
+deleted after more than 3 days from actual archiving, subject to protection checks. Business activity
 restores an inactivity archive; reading a session does not renew its lifetime.
 Lifecycle and system-notification configuration defaults are enabled, but new
 automatic lifecycle actions remain blocked in production pending the storage,

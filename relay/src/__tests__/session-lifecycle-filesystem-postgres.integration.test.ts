@@ -33,8 +33,8 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     await pool.query("INSERT INTO daemons(daemon_id,user_id,alias) VALUES('host',$1,'Disk fixture host')", [userId])
     await pool.query(`INSERT INTO sessions(session_id,user_id,daemon_id,status,title,last_activity_at,last_business_activity_at,activity_verified)
       VALUES('root',$1,'host','idle','Production disk fixture',NOW()-interval '40 days',NOW()-interval '40 days',true)`, [userId])
-    await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status) VALUES
-      ('root','user_text','{"text":"exact original 中文"}','completed'),('root','agent_text','{"text":"exact original response"}','completed')`)
+    await pool.query(`INSERT INTO events(user_id,session_id,event_type,payload,effect_status) VALUES
+      ($1,'root','user_text','{"text":"exact original 中文"}','completed'),($1,'root','agent_text','{"text":"exact original response"}','completed')`,[userId])
     await pool.query("UPDATE events SET created_at=NOW()-interval '40 days'")
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
   })
@@ -84,10 +84,10 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     expect(rows.map(row => row.payload.text)).toEqual(['exact original 中文', 'exact original response'])
   })
   test('budget-limited cold transfer continues after restart in the same daily batch and notification', async () => {
-    await pool.query("INSERT INTO session_lifecycle_daily_runs(policy_version,action,scheduled_at,completed_at) VALUES('session-lifecycle-v2','purge',$1,NOW())", [maintenanceSlot('purge', new Date())])
-    await pool.query(`INSERT INTO events(session_id,event_type,payload,effect_status,created_at)
-      SELECT 'root','agent_text',jsonb_build_object('text',repeat('x',100),'sequence',i),'completed',NOW()-interval '40 days'
-      FROM generate_series(1,100) i`)
+    await pool.query("INSERT INTO session_lifecycle_daily_runs(policy_version,action,scheduled_at,completed_at) VALUES('session-lifecycle-v3','purge',$1,NOW())", [maintenanceSlot('purge', new Date())])
+    await pool.query(`INSERT INTO events(user_id,session_id,event_type,payload,effect_status,created_at)
+      SELECT $1,'root','agent_text',jsonb_build_object('text',repeat('x',100),'sequence',i),'completed',NOW()-interval '40 days'
+      FROM generate_series(1,100) i`,[userId])
     await pool.query('UPDATE attention_projection_cursor SET last_event_id=(SELECT max(id) FROM events)')
     const expected = (await pool.query('SELECT payload FROM events ORDER BY id')).rows.map(r => r.payload)
     const config = { ...releasedConfig(storage.namespace!, {}, env), batchBytes: 8192, maxChunkBytes: 4096 }
@@ -108,11 +108,29 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     expect((await withSessionHistoryScope({ userId }, () => getSessionAllEvents(pool, 'root'))).map(r => r.payload)).toEqual(expected)
     expect(await run(config)).not.toHaveProperty('scheduledAction')
   })
+  test('an overdue active-list session survives the purge batch immediately after its first archive', async () => {
+    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
+    expect(await run()).toMatchObject({scheduledAction:'archive',executed:1})
+    expect(await run()).toMatchObject({scheduledAction:'purge',executed:0})
+    const result = (await pool.query(`SELECT archived_at, effective_purge_at=archived_at+interval '72 hours' AS full_period
+      FROM sessions JOIN session_lifecycle_results USING(session_id) WHERE session_id='root'`)).rows
+    expect(result).toHaveLength(1)
+    expect(result[0].full_period).toBe(true)
+    expect(await withSessionHistoryScope({userId},()=>getSessionAllEvents(pool,'root'))).toHaveLength(2)
+  })
+  test('manual archive uses its own clock even before seven days of inactivity', async () => {
+    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '5 days',last_business_activity_at=NOW()-interval '5 days'")
+    await pool.query("UPDATE sessions SET archived_at=NOW()-interval '4 days',archive_reason='manual'")
+    expect(await run()).toMatchObject({scheduledAction:'archive',executed:0})
+    expect(await run()).toMatchObject({scheduledAction:'purge',executed:1})
+    expect((await pool.query("SELECT session_id FROM session_lifecycle_deletions")).rows).toEqual([{session_id:'root'}])
+  })
   test('production purge commits deletion and disk compensation completes with enforcement off', async () => {
     await run()
     const keys = (await pool.query('SELECT object_key FROM session_archive_chunks')).rows.map(row => row.object_key)
     expect(keys.length).toBeGreaterThan(0)
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET archived_at=NOW()-interval '4 days',last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
     await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     expect(await run()).toMatchObject({ executed: 1 })
     expect((await pool.query("SELECT count(*)::int AS n FROM sessions WHERE session_id='root'")).rows[0].n).toBe(0)
@@ -130,7 +148,7 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
   })
   test('executor independently rejects missing release evidence before mutating a session', async () => {
     const executor = new SessionLifecycleExecutor(pool, sessionLifecycleConfig(env), storage, 'disk-test-secret')
-    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v2' })
+    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v3' })
     const lease = (await executor.jobs.claim('direct-fixture', 300_000))!
     await expect(executor.execute(lease)).rejects.toThrow('production_release_not_ready')
     expect((await pool.query("SELECT archive_reason,content_state FROM sessions WHERE session_id='root'")).rows[0])
@@ -142,7 +160,7 @@ suite('production lifecycle with actual private disk and dedicated PostgreSQL', 
     expect(await run(config)).toMatchObject({ executed: 0, readinessBlockers: ['policy_not_effective'] })
     expect((await pool.query('SELECT count(*)::int AS n FROM session_lifecycle_jobs')).rows[0].n).toBe(0)
     const executor = new SessionLifecycleExecutor(pool, config, storage, 'disk-test-secret')
-    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v2' })
+    await executor.jobs.enqueue({ userId, sessionId: 'root', activityEpoch: '0', action: 'archive', policyVersion: 'session-lifecycle-v3' })
     await expect(executor.execute((await executor.jobs.claim('future-direct', 300_000))!)).rejects.toThrow('policy_not_effective')
   })
   test('a historical session past 90 days is not purged before the transition deadline', async () => {

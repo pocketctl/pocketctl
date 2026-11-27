@@ -215,7 +215,9 @@ export class AttentionNotificationRepository {
       title_snapshot,daemon_name_snapshot,action,state,activity_at,executed_at,effective_purge_at,reason_code,stages)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,CASE WHEN $8='running' THEN NULL ELSE NOW() END,$10,$11,$12::jsonb)
       ON CONFLICT(operation_id) DO UPDATE SET state=EXCLUDED.state,reason_code=EXCLUDED.reason_code,
-        executed_at=EXCLUDED.executed_at,stages=EXCLUDED.stages,revision=session_lifecycle_results.revision+1,updated_at=NOW()`,
+        executed_at=EXCLUDED.executed_at,
+        effective_purge_at=COALESCE(EXCLUDED.effective_purge_at,session_lifecycle_results.effective_purge_at),
+        stages=EXCLUDED.stages,revision=session_lifecycle_results.revision+1,updated_at=NOW()`,
       [
         input.operationId,
         input.userId,

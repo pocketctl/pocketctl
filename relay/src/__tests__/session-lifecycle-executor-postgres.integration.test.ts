@@ -129,9 +129,9 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
     expect((await pool.query('SELECT content_state FROM sessions')).rows[0].content_state).toBe('cold')
     expect((await withSessionHistoryScope({userId},()=>getSessionAllEvents(pool,'root'))).map(row=>row.payload.index)).toEqual([0,1,2,3,4,5,6,7])
   })
-  test('60-day purge commits durable tombstone, removes every body and completes only after object compensation',async()=>{
+  test('post-archive purge commits durable tombstone, removes every body and completes only after object compensation',async()=>{
     expect(await executor.execute(await lease())).toBe('succeeded')
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET archived_at=NOW()-interval '4 days',last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
     await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     const purging=await lease('purge')
     expect(await executor.execute(purging,{extensionMode:'enabled'})).toBe('partial')
@@ -152,7 +152,7 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
     const archivedId = 'renamed'
     await renameOwnedDaemonSession(pool,{oldSessionId:'root',newSessionId:archivedId,daemonId:'host',userId})
     expect(await executor.execute(await lease('archive',archivedId))).toBe('succeeded')
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET archived_at=NOW()-interval '4 days',last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
     await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     await pool.query("INSERT INTO sessions(session_id,user_id,daemon_id,status) VALUES('neighbor',$1,'host','idle')",[userId])
     const otherOwner = (await pool.query("INSERT INTO users(email,password_hash) VALUES('other@test.invalid','x') RETURNING id")).rows[0].id
@@ -215,7 +215,7 @@ suite('actual archive, cooling and business resume PostgreSQL + private objects'
   })
   test('remote deletion failure remains pending; expired notices never resurrect when cleanup later completes',async()=>{
     expect(await executor.execute(await lease())).toBe('succeeded')
-    await pool.query("UPDATE sessions SET last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
+    await pool.query("UPDATE sessions SET archived_at=NOW()-interval '4 days',last_activity_at=NOW()-interval '100 days',last_business_activity_at=NOW()-interval '100 days'")
     await pool.query("UPDATE events SET created_at=NOW()-interval '100 days'")
     const purging=await lease('purge')
     expect(await executor.execute(purging,{extensionMode:'enabled'})).toBe('partial')

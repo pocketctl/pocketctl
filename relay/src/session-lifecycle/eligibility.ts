@@ -1,7 +1,7 @@
 import type pg from 'pg'
 import { isAppReviewDemoDaemon, isAppReviewDemoSession } from '../config/app-review-demo.js'
 import { evaluateLifecycle } from './policy.js'
-import { timestampMicros, microsTimestamp } from './time.js'
+import { DAY_US, timestampMicros, microsTimestamp } from './time.js'
 import type { LifecycleBlocker, LifecycleEvaluation, LifecycleInput, SessionLifecycleConfig } from './types.js'
 
 type Database=Pick<pg.Pool,'query'>
@@ -40,7 +40,8 @@ export async function inspectLifecycleEligibility(db:Database,sessionId:string,c
     for(const id of frontier) seen.add(id)
     if(seen.size>1000){overflow=true;break}
     const result=await db.query(`SELECT s.*,s.activity_epoch::text AS epoch,
-      to_char(s.last_activity_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS activity_time,d.user_id AS daemon_owner,
+      to_char(s.last_activity_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS activity_time,
+      to_char(s.archived_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS archive_time,d.user_id AS daemon_owner,
       COALESCE(d.alias,d.hostname,s.daemon_id) AS daemon_name,
       CASE WHEN EXISTS(SELECT 1 FROM session_aliases a WHERE a.next_session_id=s.session_id)
         THEN public.native_session_authority(s.session_id,s.user_id,s.daemon_id)->'sessionIds' END AS owned_names,
@@ -141,9 +142,8 @@ export async function inspectLifecycleEligibility(db:Database,sessionId:string,c
   for(const row of rows)if(!row.activity_time||!row.activity_verified)activitySources.push(row.created_at)
   const times=activitySources.filter(Boolean).map(value=>timestampMicros(value))
   const latestMicros=times.length?times.reduce((a,b)=>a>b?a:b):null
-  const latest=latestMicros===null?NaN:Number(latestMicros/1000n)
   const latestAt=latestMicros===null?null:microsTimestamp(latestMicros)
-  const stale=Number.isFinite(latest)&&new Date(clock).getTime()-latest>config.archiveDays*86400000
+  const stale=latestMicros!==null && timestampMicros(clock)-latestMicros>BigInt(config.archiveDays)*DAY_US
     && !overflow && !!root && rows.every(row=>row.user_id===root.user_id&&row.daemon_owner===root.user_id)
     && rows.every(row=>inactive.has(row.status)||active.has(row.status)||['unknown','disconnected','shell'].includes(row.status))
     && [...bucketRows.values()].every(row=>buckets.has(row.kind)&&(inactive.has(row.status)||active.has(row.status)))
@@ -167,8 +167,12 @@ export async function inspectLifecycleEligibility(db:Database,sessionId:string,c
   // Exclude the whole dependency component so a real root cannot indirectly
   // archive or purge a demo member. Legacy fixtures may lack their source tag.
   const demo=rows.some(row=>row.source==='app_review_demo'||isAppReviewDemoSession(row.session_id)||isAppReviewDemoDaemon(row.daemon_id))
+  // Purge removes the whole dependency component. Every member gets its own
+  // full archive window, including children discovered after the root archived.
+  const archivedAt=rows.length && rows.every(row=>row.archive_reason && row.archive_time)
+    ? rows.map(row=>row.archive_time as string).sort().at(-1)! : null
   const input:LifecycleInput={ownerUserId:root?.user_id??null,scope:demo?'demo':(p.historical_team||rows.some(row=>row.team_bound))?'team':'personal',activityAt:latestAt??root?.activity_time??null,
-    activityVerified:stale||(root?.activity_verified??false),staleSnapshot:stale,status:root?.status??null,turnActive:!!root?.turn_started_at,archiveReason:root?.archive_reason??null,
+    activityVerified:stale||(root?.activity_verified??false),staleSnapshot:stale,status:root?.status??null,turnActive:!!root?.turn_started_at,archivedAt,archiveReason:root?.archive_reason??null,
     contentState:coolingOwned?'hot':root?.content_state??'hot',dependencyActivityAt:stale?[]:rows.map(row=>row.activity_time??null),
     historical:!!config.effectiveAt&&rows.some(row=>row.activity_time&&timestampMicros(row.activity_time)<timestampMicros(config.effectiveAt!)),blockers:[...blocked]}
   return {root,members:rows,sessionIds:ids,evaluatedAt:clock,prediction:evaluateLifecycle(input,clock,config),eventCount:statistics?.event_count??null,hotEventBytes:statistics?.event_bytes??null,hotDocumentBytes:statistics?.document_bytes??null,staleEvidence:stale?{activityAt:latestAt!,pendingEffects:p.pending_effects,pendingInbox:p.pending_inbox,states:Object.fromEntries([...rows.map(row=>[row.session_id,row.status]),...[...bucketRows.values()].map(row=>[`${row.parent_session_id}:${row.agent_id}`,row.status])])}:undefined}

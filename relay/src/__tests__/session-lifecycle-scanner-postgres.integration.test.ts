@@ -75,12 +75,12 @@ suite('session lifecycle read-only observe scanner PostgreSQL', () => {
     const before = (await pool.query('SELECT * FROM sessions ORDER BY id')).rows
     const atBoundary = await scanner.scanPage({
       limit: 20,
-      now: '2026-01-31T00:00:00.000000Z',
+      now: '2026-01-08T00:00:00.000000Z',
     })
     expect(atBoundary.candidates.map((c) => c.sessionId)).toEqual(['unknown'])
     const overdue = await scanner.scanPage({
       limit: 20,
-      now: '2026-01-31T00:00:00.000001Z',
+      now: '2026-01-08T00:00:00.000001Z',
     })
     expect(
       overdue.candidates.find((c) => c.sessionId === 'exact')?.prediction
