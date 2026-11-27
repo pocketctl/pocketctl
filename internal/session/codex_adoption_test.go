@@ -79,9 +79,41 @@ func (f *adoptionTest) writeMeta(origin, source, parent string) {
 	}
 }
 
+// adoptionResumeResult scripts the thread/resume answer of the fake app-server.
+func adoptionResumeResult(client *fakeCodexRuntimeClient, cwd, id, path, approval, sandbox string) {
+	raw, _ := json.Marshal(map[string]any{"thread": map[string]any{"id": id, "path": path}, "cwd": cwd, "model": "fixture", "approvalPolicy": approval, "sandbox": map[string]any{"type": sandbox}})
+	client.results["thread/resume"] = raw
+}
+
 func (f *adoptionTest) resumeResult(id, path, approval, sandbox string) {
-	raw, _ := json.Marshal(map[string]any{"thread": map[string]any{"id": id, "path": path}, "cwd": f.cwd, "model": "fixture", "approvalPolicy": approval, "sandbox": map[string]any{"type": sandbox}})
-	f.client.results["thread/resume"] = raw
+	adoptionResumeResult(f.client, f.cwd, id, path, approval, sandbox)
+}
+
+// restart recovers the adoption journal in a new manager, as after a daemon
+// restart, with the same runtime stubs as the original manager.
+func (f *adoptionTest) restart() *SessionManager {
+	f.t.Helper()
+	// A buffered output channel lets an acquired thread publish its discovery event.
+	sm := NewSessionManager(make(chan protocol.DaemonEvent, 1024))
+	sm.SetCodexAdoptionOwner("account", "host")
+	allowCwdForTest(f.t, sm)
+	client := newFakeCodexRuntimeClient()
+	adoptionResumeResult(client, f.cwd, f.id, f.path, "on-request", "readOnly")
+	p := sm.CodexRuntimeProvider()
+	p.resolve = func() (string, string, error) { return "/fake/codex", "0.172.0", nil }
+	p.adoptionProbe = func(context.Context, string, string) (agentcontrol.CodexCapabilities, error) {
+		return agentcontrol.CodexCapabilities{Core: true, TerminalRemote: true, SchemaHash: "adoption"}, nil
+	}
+	p.coordinator.start = func(context.Context, string, string, uint64) (*codexAppServerRuntime, error) {
+		return &codexAppServerRuntime{Client: client, Endpoint: "/tmp/fixture", RemoteURI: "unix:///tmp/fixture", PID: os.Getpid()}, nil
+	}
+	p.coordinator.probe = func(context.Context, *codexAppServerRuntime) error { return nil }
+	f.t.Cleanup(func() {
+		if err := sm.ShutdownCodex(); err != nil {
+			f.t.Error(err)
+		}
+	})
+	return sm
 }
 
 func (f *adoptionTest) start(request string, wait time.Duration) protocol.AdoptionReceipt {
@@ -234,6 +266,115 @@ func TestCodexAdoptionWaitJoinCancelRestart(t *testing.T) {
 	}
 	if _, err := restarted.CancelCodexAdoption(context.Background(), uuid.NewString(), one.OperationID); err == nil {
 		t.Fatal("wrong session could cancel")
+	}
+}
+
+// A retry of a waiting operation keeps the waiting receipt, and a cancel that
+// arrives while the retry is in flight is final when it does not acquire.
+func TestCodexAdoptionCancelDuringRetryAttempt(t *testing.T) {
+	f := newAdoptionTest(t)
+	f.sm.adoptionService().attempt = func(context.Context, adoptionOperation, func(bool) error) string {
+		return "active_writer"
+	}
+	one := f.start("wait", 5*time.Second)
+	awaitAdoption(t, f.sm, f.id, one.OperationID, "waiting")
+	f.sm.adoptionService().stop()
+
+	restarted := f.restart()
+	s := restarted.adoptionService()
+	var calls atomic.Int32
+	inRetry := make(chan struct{})
+	release := make(chan struct{})
+	var entered, unblock sync.Once
+	// Release the held retry before stop waits for its worker, also when an
+	// assertion fails earlier.
+	defer func() {
+		unblock.Do(func() { close(release) })
+		s.stop()
+	}()
+	s.attempt = func(context.Context, adoptionOperation, func(bool) error) string {
+		calls.Add(1)
+		entered.Do(func() { close(inRetry) })
+		<-release
+		return "active_writer"
+	}
+	if err := s.recover(); err != nil {
+		t.Fatal(err)
+	}
+	<-inRetry
+	got, err := restarted.CodexAdoptionStatus(context.Background(), f.id, one.OperationID)
+	if err != nil || got.Phase != "waiting" || got.Reason != "active_writer" || !slices.Contains(got.AllowedActions, "cancel") {
+		t.Fatalf("retry must keep the waiting receipt: %+v %v", got, err)
+	}
+	got, err = restarted.CancelCodexAdoption(context.Background(), f.id, one.OperationID)
+	if err != nil || got.Phase != "cancelled" {
+		t.Fatalf("cancel during retry: %+v %v", got, err)
+	}
+	unblock.Do(func() { close(release) })
+	awaitAdoptionWorker(t, s)
+	final, err := restarted.CodexAdoptionStatus(context.Background(), f.id, one.OperationID)
+	if err != nil || final.Phase != "cancelled" || final.Revision != got.Revision || calls.Load() != 1 {
+		t.Fatalf("cancel must be final: %+v %v attempts=%d", final, err, calls.Load())
+	}
+}
+
+// awaitAdoptionWorker waits until every adoption worker of the service has exited,
+// so a test reads the receipt after the settled attempt instead of racing it.
+func awaitAdoptionWorker(t *testing.T, s *codexAdoptionService) {
+	t.Helper()
+	stopped := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("adoption worker did not stop")
+	}
+}
+
+// When the retry that was in flight during the cancel does acquire the thread,
+// the acquisition wins and the managed receipt supersedes the cancel.
+func TestCodexAdoptionAcquireWinsCancelDuringRetry(t *testing.T) {
+	f := newAdoptionTest(t)
+	f.sm.adoptionService().attempt = func(context.Context, adoptionOperation, func(bool) error) string {
+		return "active_writer"
+	}
+	one := f.start("wait", 5*time.Second)
+	awaitAdoption(t, f.sm, f.id, one.OperationID, "waiting")
+	f.sm.adoptionService().stop()
+
+	restarted := f.restart()
+	s := restarted.adoptionService()
+	native := s.attempt
+	inRetry := make(chan struct{})
+	release := make(chan struct{})
+	var entered, unblock sync.Once
+	// Release the held retry before stop waits for its worker, also when an
+	// assertion fails earlier.
+	defer func() {
+		unblock.Do(func() { close(release) })
+		s.stop()
+	}()
+	s.attempt = func(ctx context.Context, op adoptionOperation, archive func(bool) error) string {
+		entered.Do(func() { close(inRetry) })
+		<-release
+		return native(ctx, op, archive)
+	}
+	if err := s.recover(); err != nil {
+		t.Fatal(err)
+	}
+	<-inRetry
+	cancelled, err := restarted.CancelCodexAdoption(context.Background(), f.id, one.OperationID)
+	if err != nil || cancelled.Phase != "cancelled" {
+		t.Fatalf("cancel during retry: %+v %v", cancelled, err)
+	}
+	unblock.Do(func() { close(release) })
+	awaitAdoptionWorker(t, s)
+	final, err := restarted.CodexAdoptionStatus(context.Background(), f.id, one.OperationID)
+	if err != nil || final.Phase != "managed" || final.Revision <= cancelled.Revision || !final.LocalManaged || final.RemoteReady {
+		t.Fatalf("acquisition must supersede the cancel: %+v %v", final, err)
 	}
 }
 
