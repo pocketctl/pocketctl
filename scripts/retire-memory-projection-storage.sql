@@ -41,6 +41,11 @@ BEGIN
  END LOOP;
  ALTER TABLE memory.memory_source_delivery_receipts ADD PRIMARY KEY(installation_id,feed_id);
  ALTER TABLE memory.memory_source_snapshot_receipts ADD PRIMARY KEY(run_id);
+ -- The replacement table is still private to this transaction. Existing
+ -- installations build this index concurrently via the dedicated migrator.
+ CREATE INDEX memory_source_delivery_receipts_active_state_installation
+  ON memory.memory_source_delivery_receipts(projection_state,installation_id)
+  WHERE projection_state IN ('pending','quarantined');
  CREATE INDEX memory_delivery_receipts_session ON memory.memory_source_delivery_receipts(installation_id,session_id,turn_id);
  CREATE INDEX memory_snapshot_receipts_installation ON memory.memory_source_snapshot_receipts(installation_id,state);
  FOREACH rel IN ARRAY ARRAY['delivery','snapshot'] LOOP

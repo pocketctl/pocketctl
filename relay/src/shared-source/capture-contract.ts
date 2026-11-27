@@ -1,4 +1,5 @@
-// Memory's startup pins the append-capture v1 body digest. Update the consumer
+import {SKIP_UNPUBLISHED_STATEMENT} from './published-transition.js'
+// Memory startup pins the reviewed append-capture body digests. Update the consumer
 // contract and its producer/consumer test together when changing that body.
 /** Only scalar/header metadata enters statement capture. Targeting payload
  * conservatively advances a scalar marker, avoiding detoast/equality work.
@@ -10,40 +11,9 @@ const metadata=(alias:string)=>`jsonb_build_object(${[
  'source_classification','source_header_version','source_body_change_revision','body_storage',
  'body_session_id','body_manifest_id','body_chunk_ordinal','body_activity_epoch','body_owner_user_id',
 ].map(name=>`'${name}',${alias}.${name}`).join(',')})`
-export const RELAY_SOURCE_CAPTURE_SQL=[
- `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS capture_version INT NOT NULL DEFAULT 0`,
- `ALTER TABLE shared.memory_source_work ADD COLUMN IF NOT EXISTS event_append_revision BIGINT`,
- `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS owner_retired BOOLEAN NOT NULL DEFAULT FALSE`,
- `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS body_session_id VARCHAR(128)`,
- `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS source_body_change_revision BIGINT NOT NULL DEFAULT 0 CHECK(source_body_change_revision>=0)`,
- `CREATE OR REPLACE FUNCTION shared.mark_memory_event_body_write() RETURNS TRIGGER
-  LANGUAGE plpgsql SET search_path=pg_catalog AS $$ BEGIN
-   -- The SQL target list, rather than payload comparison, proves a possible
-   -- body write. IS NULL reads the null bit; it does not serialize the body.
-   IF OLD.body_storage='hot' AND NEW.body_storage='cold' AND NEW.payload IS NULL THEN
-    NEW.source_body_change_revision=OLD.source_body_change_revision;
-   ELSE NEW.source_body_change_revision=OLD.source_body_change_revision+1;END IF;
-   RETURN NEW;
-  END $$`,
- `DROP TRIGGER IF EXISTS memory_source_capture_body_marker ON public.events;
-  CREATE TRIGGER memory_source_capture_body_marker BEFORE UPDATE OF payload ON public.events
-    FOR EACH ROW EXECUTE FUNCTION shared.mark_memory_event_body_write()`,
- `CREATE OR REPLACE FUNCTION shared.memory_event_capture_eligible(p JSONB) RETURNS BOOLEAN
-  LANGUAGE SQL IMMUTABLE SET search_path=pg_catalog AS $$ SELECT
-   COALESCE(p->>'effect_status' IN ('none','completed'),FALSE)
-   AND COALESCE(p->>'user_id' ~ '^[1-9][0-9]*$',FALSE)
-   AND COALESCE(length(p->>'session_id') BETWEEN 1 AND 512,FALSE)
-   AND p->>'session_id' NOT LIKE 'pending-%' AND p->>'session_id' NOT LIKE 'app-review-demo-%' $$`,
- `CREATE OR REPLACE FUNCTION shared.mark_memory_source_storage_changed(p_kind TEXT,p_root TEXT) RETURNS VOID
-  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
-   IF NOT pg_try_advisory_xact_lock(hashtextextended('memory-source-dirty:'||p_kind||':'||p_root,0)) THEN
-    RAISE EXCEPTION 'source_dirty_busy' USING ERRCODE='55P03';END IF;
-   PERFORM 1 FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root FOR UPDATE NOWAIT;
-   INSERT INTO shared.memory_source_work(source_kind,root_key,revision,storage_revision) VALUES(p_kind,p_root,1,1)
-    ON CONFLICT(source_kind,root_key) DO UPDATE SET storage_revision=memory_source_work.storage_revision+1,updated_at=clock_timestamp();
-  END $$`,
- `CREATE OR REPLACE FUNCTION shared.capture_memory_relay_events() RETURNS TRIGGER
+export const RELAY_EVENT_CAPTURE_FUNCTION = `CREATE OR REPLACE FUNCTION shared.capture_memory_relay_events() RETURNS TRIGGER
   LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ DECLARE r RECORD;new_revision BIGINT;BEGIN
+   ${SKIP_UNPUBLISHED_STATEMENT}
    IF TG_OP='INSERT' THEN
     FOR r IN SELECT DISTINCT (e.user_id::text||':'||e.session_id) COLLATE "C" AS root FROM capture_new e
       WHERE shared.memory_event_capture_eligible(${eligible('e')})
@@ -90,7 +60,41 @@ export const RELAY_SOURCE_CAPTURE_SQL=[
       IF r.storage THEN PERFORM shared.mark_memory_source_storage_changed('relay_event',r.root);END IF;
      END LOOP;
    END IF;RETURN NULL;
+  END $$`
+
+export const RELAY_SOURCE_CAPTURE_SQL=[
+ `ALTER TABLE shared.memory_source_contract ADD COLUMN IF NOT EXISTS capture_version INT NOT NULL DEFAULT 0`,
+ `ALTER TABLE shared.memory_source_work ADD COLUMN IF NOT EXISTS event_append_revision BIGINT`,
+ `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS owner_retired BOOLEAN NOT NULL DEFAULT FALSE`,
+ `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS body_session_id VARCHAR(128)`,
+ `ALTER TABLE public.events ADD COLUMN IF NOT EXISTS source_body_change_revision BIGINT NOT NULL DEFAULT 0 CHECK(source_body_change_revision>=0)`,
+ `CREATE OR REPLACE FUNCTION shared.mark_memory_event_body_write() RETURNS TRIGGER
+  LANGUAGE plpgsql SET search_path=pg_catalog AS $$ BEGIN
+   -- The SQL target list, rather than payload comparison, proves a possible
+   -- body write. IS NULL reads the null bit; it does not serialize the body.
+   IF OLD.body_storage='hot' AND NEW.body_storage='cold' AND NEW.payload IS NULL THEN
+    NEW.source_body_change_revision=OLD.source_body_change_revision;
+   ELSE NEW.source_body_change_revision=OLD.source_body_change_revision+1;END IF;
+   RETURN NEW;
   END $$`,
+ `DROP TRIGGER IF EXISTS memory_source_capture_body_marker ON public.events;
+  CREATE TRIGGER memory_source_capture_body_marker BEFORE UPDATE OF payload ON public.events
+    FOR EACH ROW EXECUTE FUNCTION shared.mark_memory_event_body_write()`,
+ `CREATE OR REPLACE FUNCTION shared.memory_event_capture_eligible(p JSONB) RETURNS BOOLEAN
+  LANGUAGE SQL IMMUTABLE SET search_path=pg_catalog AS $$ SELECT
+   COALESCE(p->>'effect_status' IN ('none','completed'),FALSE)
+   AND COALESCE(p->>'user_id' ~ '^[1-9][0-9]*$',FALSE)
+   AND COALESCE(length(p->>'session_id') BETWEEN 1 AND 512,FALSE)
+   AND p->>'session_id' NOT LIKE 'pending-%' AND p->>'session_id' NOT LIKE 'app-review-demo-%' $$`,
+ `CREATE OR REPLACE FUNCTION shared.mark_memory_source_storage_changed(p_kind TEXT,p_root TEXT) RETURNS VOID
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN
+   IF NOT pg_try_advisory_xact_lock(hashtextextended('memory-source-dirty:'||p_kind||':'||p_root,0)) THEN
+    RAISE EXCEPTION 'source_dirty_busy' USING ERRCODE='55P03';END IF;
+   PERFORM 1 FROM shared.memory_source_work WHERE source_kind=p_kind AND root_key=p_root FOR UPDATE NOWAIT;
+   INSERT INTO shared.memory_source_work(source_kind,root_key,revision,storage_revision) VALUES(p_kind,p_root,1,1)
+    ON CONFLICT(source_kind,root_key) DO UPDATE SET storage_revision=memory_source_work.storage_revision+1,updated_at=clock_timestamp();
+  END $$`,
+ RELAY_EVENT_CAPTURE_FUNCTION,
  `DROP TRIGGER IF EXISTS memory_source_capture_insert ON public.events;
   CREATE TRIGGER memory_source_capture_insert AFTER INSERT ON public.events REFERENCING NEW TABLE AS capture_new FOR EACH STATEMENT EXECUTE FUNCTION shared.capture_memory_relay_events();
   DROP TRIGGER IF EXISTS memory_source_capture_update ON public.events;

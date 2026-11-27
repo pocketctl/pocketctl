@@ -4,11 +4,12 @@ import { initDB } from '../db.js'
 import { EventMaterializer } from '../materialization/event-materializer.js'
 import type { MaterializationInput } from '../materialization/types.js'
 import {
+  createExtensionJournalSinkFromEnv,
   createPostgresExtensionJournalSink,
   CANONICAL_EVENT_SOURCE_KIND,
 } from '../extensions/journal.js'
 import { ensureAppReviewDemoData } from '../config/app-review-demo.js'
-import { persistOwnedClientEvent, ClientEventOwnershipError } from '../db.js'
+import { persistOwnedClientEvent, persistOwnedLocalCommandPair, ClientEventOwnershipError } from '../db.js'
 import {
   assertDurableIngressTestDatabase,
   resetDurableIngressTestDatabase,
@@ -217,7 +218,7 @@ describeWithDatabase('extension source journal atomicity (PostgreSQL)', () => {
     const {applyRelaySourceCapture}=await import('../shared-source/capture.js')
     await applyMemorySchema(pool,{namespace:'memory'})
     await applySharedSourceContract(pool);await applyRelaySourceCapture(pool)
-    const sink=createPostgresExtensionJournalSink({sharedHeaders:true}),materializer=new EventMaterializer({pool,extensionJournalSink:sink})
+    const sink=createPostgresExtensionJournalSink({sharedHeaders:true,prepareCanonicalHeader:true}),materializer=new EventMaterializer({pool,extensionJournalSink:sink})
     const input=ownedInput({payload:{type:'agent_text',text:'actual materializer',turn_id:'trusted-turn',event_id:'trusted-materialized',
       memory_source:{version:1,producer:'codex',session_id:'journal-session',turn_id:'trusted-turn',event_id:'trusted-materialized',sequence:'7',invocation_id:'trusted-invocation',source_role:'assistant',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}}})
     await materializer.materialize(input)
@@ -227,6 +228,29 @@ describeWithDatabase('extension source journal atomicity (PostgreSQL)', () => {
     const publishedRevision=await rootRevision();expect(BigInt(publishedRevision)).toBeGreaterThan(0n)
     expect(first.source_classification.memory_source.sequence).toBe(first.source_sequence)
     expect(first.canonical_payload_hash).toMatch(/^[a-f0-9]{64}$/)
+    // Simulate a pooled connection whose server has lost its named statement.
+    const client = await pool.connect()
+    const replay = { sourceEventId: first.id, ownerUserId: userId, sessionId: 'journal-session',
+      eventType: input.eventType, occurredAt: null, payload: input.payload }
+    try {
+      for (const mode of ['force_custom_plan', 'force_generic_plan']) {
+        await client.query('BEGIN')
+        await client.query(`SET LOCAL plan_cache_mode = ${mode}`)
+        await sink.appendCanonicalEvent(client, replay)
+        await expect(sink.appendCanonicalEvent(client, {...replay, ownerUserId: userId + 1})).rejects.toThrow('canonical_source_header_mismatch')
+        await client.query('COMMIT')
+      }
+      await client.query('DEALLOCATE pocketctl_canonical_header_v1')
+      await client.query('BEGIN')
+      await expect(sink.appendCanonicalEvent(client, replay)).rejects.toMatchObject({code:'26000'})
+      await client.query('ROLLBACK')
+      await client.query('BEGIN')
+      await sink.appendCanonicalEvent(client, replay)
+      await client.query('COMMIT')
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
     const {projectFeedBatch}=await import('../extensions/feed-projector.js')
     expect((await projectFeedBatch(pool,{batchSize:50})).projected).toBe(1)
     const feed=(await pool.query("SELECT payload FROM extension_feed WHERE source_id=$1",['event:'+first.id])).rows[0]
@@ -234,9 +258,25 @@ describeWithDatabase('extension source journal atomicity (PostgreSQL)', () => {
     await materializer.materialize(input)
     expect((await pool.query("SELECT source_seq::text FROM extension_source_outbox WHERE source_id=$1",['event:'+first.id])).rows[0].source_seq).toBe(first.source_sequence)
     const replayRevision=await rootRevision();expect(BigInt(replayRevision)).toBeGreaterThanOrEqual(BigInt(publishedRevision))
-    await persistOwnedClientEvent(pool,userId,'journal-session','user_text',{type:'user_text',text:'before\u0000after'},sink)
-    const owned=(await pool.query("SELECT payload,source_header_version,source_sequence::text FROM events WHERE event_type='user_text'")).rows[0]
-    expect(owned.payload.text).toBe('before\uFFFDafter');expect(owned.source_header_version).toBe(1);expect(owned.source_sequence).toBeTruthy()
+    // The router cannot replay synchronous writes. A name already taken on its
+    // physical connection must not prevent either transaction from committing.
+    const syncPool = new pg.Pool({ connectionString: databaseUrl, max: 1 })
+    const syncSink = createExtensionJournalSinkFromEnv({RELAY_EXTENSIONS:'enabled', RELAY_SHARED_SOURCE_HEADERS:'enabled'})
+    try {
+      await syncPool.query('PREPARE pocketctl_canonical_header_v1 AS SELECT 1')
+      const single = await persistOwnedClientEvent(syncPool,userId,'journal-session','user_text',{type:'user_text',text:'before\u0000after'},syncSink)
+      const pair = await persistOwnedLocalCommandPair(syncPool,userId,'journal-session',
+        {type:'user_text',text:'/status'}, {type:'command_receipt',command:'status'},syncSink)
+      const ids = [single.eventId,pair.userText.eventId,pair.commandReceipt.eventId]
+      const owned = (await syncPool.query(`SELECT e.id,e.payload,e.source_header_version,e.source_sequence::text
+        FROM events e JOIN extension_source_outbox o ON o.source_id='event:'||e.id AND o.source_seq=e.source_sequence
+        WHERE e.id=ANY($1::bigint[]) ORDER BY e.id`,[ids])).rows
+      expect(owned).toHaveLength(3)
+      expect(owned[0].payload.text).toBe('before\uFFFDafter')
+      expect(owned.every(row=>row.source_header_version===1)).toBe(true)
+    } finally {
+      await syncPool.end()
+    }
     expect(BigInt(await rootRevision())).toBeGreaterThan(BigInt(replayRevision))
   })
 

@@ -491,6 +491,41 @@ describeWithDatabase('InboxRepository PostgreSQL integration', () => {
     expect(released[0].attempts).toBe(2)
   })
 
+  test('a head claimed after the snapshot does not consume the last candidate slot', async () => {
+    await repo.persistBatch([
+      event(1, {daemonId: 'a', dedupKey: 'a-1'}),
+      event(1, {daemonId: 'b', dedupKey: 'b-1'}),
+    ])
+    const blocker = await pool.connect()
+    const reader = await pool.connect()
+    const lock = 9201126
+    const {pid} = (await reader.query('SELECT pg_backend_pid() AS pid')).rows[0]
+    let pending: ReturnType<InboxRepository['claimBatch']> | undefined
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query('SELECT pg_advisory_xact_lock($1)', [lock])
+      // Pause after acquiring the claim statement snapshot. The first head's
+      // new version must be rejected by EvalPlanQual before counting LIMIT 1.
+      const gated = new InboxRepository({
+        query: (config: pg.QueryConfig) => reader.query({...config, name: undefined,
+          text: config.text.replace('WHERE status IN (0, 1)',
+            `WHERE (SELECT true FROM pg_advisory_xact_lock(${lock})) AND status IN (0, 1)`)}),
+      } as never)
+      pending = gated.claimBatch({workerId: 'reader', shardIndex: 0, shardCount: 1, limit: 1})
+      const deadline = Date.now() + 5000
+      while (!(await pool.query('SELECT 1 FROM pg_locks WHERE pid=$1 AND NOT granted', [pid])).rowCount) {
+        if (Date.now() >= deadline) throw Error('claim snapshot barrier timed out')
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      await blocker.query("UPDATE event_inbox SET status=1,claimed_by='racer',claimed_at=NOW() WHERE daemon_id='a'")
+      await blocker.query('COMMIT')
+      expect((await pending).map(row => row.daemonId)).toEqual(['b'])
+    } finally {
+      await blocker.query('ROLLBACK')
+      try { await pending } finally { reader.release(); blocker.release() }
+    }
+  })
+
   test('does not substitute the next row of a stream whose head another worker locked', async () => {
     await repo.persistBatch([event(1), event(2)])
     const workerOneClient = await pool.connect()

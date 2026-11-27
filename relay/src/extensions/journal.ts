@@ -79,13 +79,32 @@ export class ExtensionJournalOwnerMissingError extends Error {
   }
 }
 
+const unnamedCanonicalHeaderClients = new WeakSet<Pick<pg.PoolClient, 'query'>>()
+const canonicalHeaderForUpdate = `SELECT id::text,session_id,event_type,${EVENT_BODY_COLUMNS},source_header_version,source_sequence::text,canonical_payload_hash,source_classification FROM public.events
+  WHERE id=$1::bigint AND NOT owner_retired AND user_id=$2 AND logical_source_session_id=$3 AND event_type=$4
+   AND (payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND
+     ((source_header_version=1 AND canonical_payload_hash=$6) OR
+      (source_header_version IS NULL AND source_sequence IS NULL AND canonical_payload_hash IS NULL AND source_classification IS NULL))))
+   AND ((session_id=$3 AND NOT EXISTS(SELECT 1 FROM public.session_aliases a WHERE a.old_session_id=$3)
+     AND NOT EXISTS(SELECT 1 FROM public.deleted_sessions d WHERE d.session_id=$3)
+     AND (NOT EXISTS(SELECT 1 FROM public.sessions s WHERE s.session_id=$3)
+       OR public.native_session_authority($3,$2,NULL)->>'state'='current'))
+    OR(public.native_session_authority($3,$2,NULL)->>'state'='current'
+      AND public.native_session_authority($3,$2,NULL)->>'sessionId'=events.session_id))
+   AND effect_status IN ('none','pending','completed') FOR UPDATE`
+
+interface JournalPlanOptions {
+  /** Enable only for materialization with durable transaction retry. */
+  prepareCanonicalHeader?: boolean
+}
+
 /**
  * Legacy mode retains its single-statement append. Shared headers use a bounded
  * number of scalar SQL operations on the caller transaction, with no fan-out.
  * Replays retain the original identity/sequence, and JSONB normalization matches
  * the canonical events row. A failure must propagate to the transaction owner.
  */
-export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boolean;consumerPolicy?:boolean}={}): ExtensionJournalSink {
+export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boolean;consumerPolicy?:boolean} & JournalPlanOptions={}): ExtensionJournalSink {
   if(options.consumerPolicy&&!options.sharedHeaders)throw Error('shared_session_transport_headers_required')
   return {
     async appendCanonicalEvent(client, input) {
@@ -119,19 +138,22 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
       let authenticatedLegacyCold = false
       let publishedHeader: { hash: unknown; classification: unknown } | undefined
       if(options.sharedHeaders){
-        const canonical=(await client.query(`SELECT id::text,session_id,event_type,${EVENT_BODY_COLUMNS},source_header_version,source_sequence::text,canonical_payload_hash,source_classification FROM public.events
-          WHERE id=$1::bigint AND NOT owner_retired AND user_id=$2 AND logical_source_session_id=$3 AND event_type=$4
-           AND (payload=$5::jsonb OR(body_storage='cold' AND payload IS NULL AND
-             ((source_header_version=1 AND canonical_payload_hash=$6) OR
-              (source_header_version IS NULL AND source_sequence IS NULL AND canonical_payload_hash IS NULL AND source_classification IS NULL))))
-           AND ((session_id=$3 AND NOT EXISTS(SELECT 1 FROM public.session_aliases a WHERE a.old_session_id=$3)
-             AND NOT EXISTS(SELECT 1 FROM public.deleted_sessions d WHERE d.session_id=$3)
-             AND (NOT EXISTS(SELECT 1 FROM public.sessions s WHERE s.session_id=$3)
-               OR public.native_session_authority($3,$2,NULL)->>'state'='current'))
-            OR(public.native_session_authority($3,$2,NULL)->>'state'='current'
-              AND public.native_session_authority($3,$2,NULL)->>'sessionId'=events.session_id))
-           AND effect_status IN ('none','pending','completed') FOR UPDATE`,
-          [String(input.sourceEventId),input.ownerUserId,input.sessionId,input.eventType,JSON.stringify(payload),payloadHash])).rows
+        const name = options.prepareCanonicalHeader && !unnamedCanonicalHeaderClients.has(client)
+          ? 'pocketctl_canonical_header_v1' : undefined
+        const canonical = (await client.query({
+          name,
+          text: canonicalHeaderForUpdate,
+          values: [String(input.sourceEventId), input.ownerUserId, input.sessionId,
+            input.eventType, JSON.stringify(payload), payloadHash],
+        }).catch(error => {
+          // The surrounding transaction owns the row lock. Let it roll back;
+          // its next attempt on this connection can use the unnamed statement.
+          if (name && (error.code === '26000' || error.code === '42P05' ||
+              (error.code === '0A000' && error.routine === 'RevalidateCachedQuery'))) {
+            unnamedCanonicalHeaderClients.add(client)
+          }
+          throw error
+        })).rows
         if(canonical.length!==1)throw Error('canonical_source_header_mismatch')
         const row=canonical[0]
         // Pre-header events may already be archived. Authenticate the original
@@ -218,9 +240,10 @@ export function createPostgresExtensionJournalSink(options:{sharedHeaders?:boole
 /** off injects no sink; shadow/enabled inject the PostgreSQL sink. */
 export function createExtensionJournalSinkFromEnv(
   env: Record<string, string | undefined> = process.env,
+  plan: JournalPlanOptions = {},
 ): ExtensionJournalSink | null {
   const headers=sharedSourceHeadersEnabled(env),consumerPolicy=sessionTransportConsumerPolicyEnabled(env)
   const mode=extensionModeFromEnv(env)
   if(headers&&mode==='off')throw Error('shared_source_headers_require_journal')
-  return mode==='off'?null:createPostgresExtensionJournalSink({sharedHeaders:headers,consumerPolicy})
+  return mode==='off'?null:createPostgresExtensionJournalSink({sharedHeaders:headers,consumerPolicy,...plan})
 }

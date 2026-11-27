@@ -6,6 +6,8 @@ import {afterAll,beforeAll,beforeEach,describe,expect,test} from 'vitest'
 import {createExtensionJournalSinkFromEnv} from '../extensions/journal.js'
 import {buildStoredFeedPayload} from '../extensions/envelope.js'
 import {canonicalPayloadHash} from '@pocketctl/session-source'
+import {upgradeEventCapture} from '../shared-source/upgrade-event-capture.js'
+import {SKIP_UNPUBLISHED_STATEMENT} from '../shared-source/published-transition.js'
 import {applyRelaySourceCapture,bootstrapRelaySourceRoots} from '../shared-source/capture.js'
 const url=process.env.RELAY_CAPTURE_TEST_DATABASE_URL,suite=url?describe:describe.skip
 async function assertCaptureFixture(pool:pg.Pool):Promise<void>{
@@ -52,6 +54,13 @@ suite('low-level transactional body-free canonical capture',()=>{
   try{
    await tx.query('BEGIN')
    await assertRelayEventAppendCapture(tx)
+   const current=(await tx.query("SELECT pg_get_functiondef('shared.capture_memory_relay_events()'::regprocedure) AS ddl")).rows[0].ddl
+   // The preceding release differs only by the statement gate. Both exact bodies must pass.
+   const previous=current.replace('\n   '+SKIP_UNPUBLISHED_STATEMENT,'')
+   expect(previous).not.toBe(current)
+   await tx.query(previous)
+   await assertRelayEventAppendCapture(tx)
+   await tx.query(current)
    await tx.query('ALTER TABLE public.events DISABLE TRIGGER memory_source_capture_update')
    await expect(assertRelayEventAppendCapture(tx)).rejects.toThrow('relay_event_append_capture_migration_required')
    await tx.query('ALTER TABLE public.events ENABLE TRIGGER memory_source_capture_update')
@@ -59,6 +68,27 @@ suite('low-level transactional body-free canonical capture',()=>{
     LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN RETURN NULL; END $$`)
    await expect(assertRelayEventAppendCapture(tx)).rejects.toThrow('relay_event_append_capture_migration_required')
   }finally{await tx.query('ROLLBACK');tx.release()}
+ })
+ test('upgrades the two reviewed producers atomically and preserves their identity on retry',async()=>{
+  const installed=async()=>(await pool.query(`SELECT p.oid,p.proowner,p.proacl::text,p.xmin::text,pg_get_functiondef(p.oid) AS ddl
+   FROM pg_proc p WHERE p.oid IN ('shared.capture_memory_relay_events()'::regprocedure,'shared.capture_turn_dialogue()'::regprocedure)
+   ORDER BY p.proname`)).rows
+  const current=await installed()
+  const previous=current.map(row=>row.ddl.replace('\n   '+SKIP_UNPUBLISHED_STATEMENT,''))
+  try{
+   await pool.query(previous[0])
+   await pool.query("CREATE OR REPLACE FUNCTION shared.capture_turn_dialogue() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$ BEGIN RETURN NULL; END $$")
+   await expect(upgradeEventCapture(pool)).rejects.toThrow('unrecognized_event_capture_producer')
+   expect((await installed())[0].ddl).toBe(previous[0])
+   await pool.query(previous[1])
+   await upgradeEventCapture(pool)
+   const upgraded=await installed()
+   for(const [i,row] of upgraded.entries()){
+    expect(row).toMatchObject({oid:current[i].oid,proowner:current[i].proowner,proacl:current[i].proacl,ddl:current[i].ddl})
+   }
+   await upgradeEventCapture(pool)
+   expect(await installed()).toEqual(upgraded)
+  }finally{for(const row of current)await pool.query(row.ddl)}
  })
  test('a retained claim overload cannot hide a replaced distribution writer',async()=>{
   const {assertMemorySchedulingContract}=await import(new URL('../../../memory/src/migrations/shared-db/namespace.ts',import.meta.url).href)
@@ -83,6 +113,23 @@ suite('low-level transactional body-free canonical capture',()=>{
   await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) VALUES(2,1,'s','agent_text','{}','abandoned'),(3,1,'app-review-demo-x','agent_text','{}','none'),(4,1,'pending-x','agent_text','{}','completed'),(5,NULL,'s','agent_text','{}','none')")
   expect((await pool.query('SELECT count(*)::int n FROM shared.memory_source_work')).rows[0].n).toBe(1)
   expect(JSON.stringify((await pool.query('SELECT * FROM shared.memory_source_work')).rows)).not.toContain('private')
+ })
+ test('an old published row in a mixed update still schedules its withdrawal',async()=>{
+  await pool.query(`INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status)
+   VALUES(1,1,'s','agent_text','{}','completed'),(2,2,'second','agent_text','{}','pending')`)
+  await pool.query("UPDATE public.events SET effect_status='abandoned'")
+  expect(await work()).toMatchObject({revision:'2'})
+  expect(await work('2:second')).toBeUndefined()
+ })
+ test('pending statements skip dialogue enrollment lookup before publication',async()=>{
+  const tx=await pool.connect()
+  try{
+   await tx.query('BEGIN')
+   await tx.query('ALTER TABLE shared.memory_dialogue_installations RENAME TO hidden_dialogue_installations')
+   await tx.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) VALUES(1,1,'s','agent_text','{}','pending')")
+   await tx.query('UPDATE public.events SET effect_step=1 WHERE id=1')
+   await expect(tx.query("UPDATE public.events SET effect_status='completed' WHERE id=1")).rejects.toMatchObject({code:'42P01'})
+  }finally{await tx.query('ROLLBACK');tx.release()}
  })
  test('tracks committed native insert and pending acceptance independently of later rescans and header edits',async()=>{
   await pool.query("INSERT INTO public.events(id,user_id,session_id,event_type,payload,effect_status) VALUES(1,1,'s','agent_text','{}','none'),(2,2,'second','agent_text','{}','pending')")
