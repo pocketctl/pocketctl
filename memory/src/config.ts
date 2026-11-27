@@ -1,3 +1,4 @@
+import {failureRetentionSettings,type FailureRetentionSettings} from './maintenance/dead-letters.js'
 import {isAbsolute} from 'node:path'
 import {dailyMaintenanceSchedule} from './maintenance/daily.js'
 /**
@@ -73,6 +74,7 @@ export interface MemoryConfig {
   lifecycleMode?: 'off'|'shadow'|'enabled'
   /** Optional only for historical explicit fixtures. Always populated by the loader. */
   maintenanceSchedule?: typeof dailyMaintenanceSchedule
+  failureRetention?: FailureRetentionSettings
   dataRetention?: SourceRetentionSettings
   inboxRetention?: InboxRetentionSettings
   delegatedPublishMode?: 'off'|'enabled'
@@ -602,6 +604,7 @@ export function loadMemoryConfig(env: Record<string, string | undefined> = proce
 
   return {
     maintenanceSchedule: dailyMaintenanceSchedule,
+    failureRetention: failureRetentionSettings(env),
     sourceArchive:archiveDirectory&&archiveNamespace?{directory:archiveDirectory,namespace:archiveNamespace}:undefined,
     databaseNamespace,
     sharedSourceProfile,

@@ -16,6 +16,7 @@ export type RelayErrorCode =
   | 'installation_revoked'
   | 'not_found'
   | 'invalid_request'
+  | 'revision_conflict'
   | 'forbidden'
   | 'feature_disabled'
   | 'relay_error'
@@ -26,6 +27,7 @@ const BODY_CODES = new Set([
   'forbidden',
   'not_found',
   'invalid_request',
+  'revision_conflict',
   'stale_lease',
   'cursor_expired',
   'installation_paused',

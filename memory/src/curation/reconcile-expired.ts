@@ -1,3 +1,4 @@
+import {recoverDueCurationCheckpoints} from './recover-checkpoints.js'
 import type pg from 'pg'
 
 // Caller owns the bundle lock before the run lock. A newer revision, a
@@ -14,6 +15,22 @@ export async function blockCurationBundle(client:pg.PoolClient,installationId:st
 export async function expireCurationRun(client:pg.PoolClient,installationId:string,bundleId:string,revision:number,runId:string){
  // Only the worker that witnessed a known response writes this marker. A
  // partial charge may also exist for a multi-window or uncertain request.
+ const interrupted=await client.query(`UPDATE memory_curation_runs r SET state='failed',error_code='publication_interrupted',
+   recovery_at=clock_timestamp(),completed_at=clock_timestamp() WHERE r.installation_id=$1 AND r.run_id=$2
+   AND r.state='running' AND r.claim_expires_at<=clock_timestamp() AND r.checkpoint_protocol=1
+   AND NOT EXISTS(SELECT 1 FROM memory_curation_calls c WHERE c.installation_id=r.installation_id AND c.run_id=r.run_id
+     AND c.state IN ('possible','unknown','conflict','withdrawn'))`,[installationId,runId])
+ if(interrupted.rowCount){
+  await blockCurationBundle(client,installationId,bundleId,revision,runId,'publication_interrupted');return
+ }
+ const uncertain=await client.query(`UPDATE memory_curation_runs r SET state='provider_result_unknown',error_code='provider_uncertain_at_expiry',
+    completed_at=clock_timestamp(),recovery_at=NULL WHERE r.installation_id=$1 AND r.run_id=$2 AND r.checkpoint_protocol=1
+    AND r.state='running' AND r.claim_expires_at<=clock_timestamp()`,[installationId,runId])
+ if(uncertain.rowCount){
+  await client.query("UPDATE memory_curation_calls SET state='unknown',updated_at=clock_timestamp() WHERE installation_id=$1 AND run_id=$2 AND state='possible'",[installationId,runId])
+  await blockCurationBundle(client,installationId,bundleId,revision,runId,'provider_result_unknown')
+  return
+ }
  const row=(await client.query(`UPDATE memory_curation_runs SET
    state=CASE WHEN error_code='provider_response_received' THEN 'failed' ELSE 'provider_result_unknown' END,
    error_code=CASE error_code WHEN 'provider_response_received' THEN 'publication_interrupted'
@@ -28,6 +45,7 @@ export async function expireCurationRun(client:pg.PoolClient,installationId:stri
  * or block a newer bundle revision. Locks serialize with revival and completion. */
 export async function reconcileExpiredCurationRuns(pool:pg.Pool):Promise<number>{
  const client=await pool.connect()
+ let expired=0
  try{
   await client.query('BEGIN')
   await client.query("SET LOCAL lock_timeout='500ms'; SET LOCAL statement_timeout='3s'")
@@ -41,6 +59,8 @@ export async function reconcileExpiredCurationRuns(pool:pg.Pool):Promise<number>
   for(const r of rows){
    await expireCurationRun(client,r.installation_id,r.bundle_id,r.bundle_revision,r.run_id)
   }
-  await client.query('COMMIT');return rows.length
+  await client.query('COMMIT');expired=rows.length
  }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
+ const queued=await recoverDueCurationCheckpoints(pool)
+ return expired+queued
 }

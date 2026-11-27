@@ -1,3 +1,5 @@
+import {DIALOGUE_GENERATIONS} from './dialogue-generations.js'
+
 /** Enrollment belongs to the shared migrator. Runtime roles cannot select another
  * installation's sources by supplying their own owner or grant fields. */
 export const TURN_DIALOGUE_SCHEMA = [
@@ -43,19 +45,7 @@ export const TURN_DIALOGUE_SCHEMA = [
    session_id TEXT,turn_id TEXT,enqueued_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),touched_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
    PRIMARY KEY(installation_id,session_id,turn_id))`,
   `CREATE INDEX IF NOT EXISTS memory_dialogue_pending_age ON shared.memory_dialogue_pending(enqueued_at)`,
-  `CREATE OR REPLACE FUNCTION shared.dispatch_turn_dialogues() RETURNS INT LANGUAGE plpgsql
- SECURITY DEFINER SET search_path=pg_catalog,memory,shared AS $$ DECLARE count_jobs INT;BEGIN
-  WITH batch AS MATERIALIZED(SELECT * FROM shared.memory_dialogue_pending ORDER BY enqueued_at LIMIT 64 FOR UPDATE SKIP LOCKED),
-  sent AS (INSERT INTO memory.memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
-   SELECT gen_random_uuid(),installation_id,'compile_episode','dialogue:'||encode(sha256(convert_to(jsonb_build_array(session_id,turn_id)::text,'UTF8')),'hex'),80,jsonb_build_object('dialogue_session',session_id,'turn',turn_id)
-   FROM batch ORDER BY installation_id,turn_id
-   ON CONFLICT(installation_id,job_type,idempotency_key) DO UPDATE SET
-    state=CASE WHEN memory_jobs.state='running' THEN 'running' ELSE 'pending' END,
-    attempts=CASE WHEN memory_jobs.state='running' THEN memory_jobs.attempts ELSE 0 END,available_at=now(),
-    last_error_code=CASE WHEN memory_jobs.state='running' THEN 'rerun_required' END,completed_at=NULL)
-  DELETE FROM shared.memory_dialogue_pending p USING batch b WHERE (p.installation_id,p.session_id,p.turn_id)=(b.installation_id,b.session_id,b.turn_id);
-  GET DIAGNOSTICS count_jobs=ROW_COUNT; RETURN count_jobs;
- END $$`,
+  ...DIALOGUE_GENERATIONS,
   `CREATE OR REPLACE FUNCTION shared.uses_turn_dialogue(p_install UUID) RETURNS BOOLEAN LANGUAGE SQL STABLE SECURITY DEFINER
    SET search_path=pg_catalog,shared AS $$ SELECT EXISTS(SELECT 1 FROM shared.memory_dialogue_installations p
     JOIN shared.memory_source_modes m USING(installation_id) WHERE installation_id=p_install AND m.mode='shared-active') $$`,
@@ -153,6 +143,7 @@ export const TURN_DIALOGUE_SCHEMA = [
   `CREATE OR REPLACE FUNCTION shared.clear_deleted_dialogue_work() RETURNS TRIGGER
  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,memory,shared AS $$ BEGIN
   DELETE FROM shared.memory_dialogue_pending WHERE installation_id=NEW.installation_id AND session_id=NEW.session_id;
+  DELETE FROM memory.memory_dialogue_turns WHERE installation_id=NEW.installation_id AND session_id=NEW.session_id;
   DELETE FROM memory.memory_dialogue_gaps WHERE installation_id=NEW.installation_id AND session_id=NEW.session_id;
   RETURN NULL;
  END $$`,

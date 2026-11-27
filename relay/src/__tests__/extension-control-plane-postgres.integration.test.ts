@@ -146,7 +146,11 @@ describeWithDatabase('extension control plane (PostgreSQL)', () => {
       payload: { installation_id: installationId, facts: [fact] },
     })
     expect(duplicate.statusCode).toBe(200)
-    expect(duplicate.json().ingested).toBe(0)
+    expect(duplicate.json()).toMatchObject({ingested:0,acknowledged_usage_ids:[fact.usage_id]})
+    const changed=await usageApp.inject({method:'POST',url:'/api/extensions/v1/usage/batch',
+      headers:{authorization:`Bearer ${providerToken()}`},payload:{installation_id:installationId,facts:[{...fact,cost_micros:fact.cost_micros+1}]}})
+    expect(changed.statusCode).toBe(409)
+    expect(changed.json().acknowledged_usage_ids).toBeUndefined()
 
     const stored = await pool.query(`SELECT COUNT(*)::int AS c FROM extension_provider_usage_facts`)
     expect(stored.rows[0].c).toBe(1)

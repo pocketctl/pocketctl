@@ -14,8 +14,8 @@ describe('usage worker isolation and retry accounting', () => {
         { ...FACT, installation_id: '11111111-1111-4111-8111-111111111111' },
         { ...FACT, usage_id: 'u2', installation_id: '22222222-2222-4222-8222-222222222222' },
       ] }
-      if (sql.includes('RETURNING attempts')) return { rows: [{ attempts: 1 }] }
-      return { rows: [] }
+      if (sql.includes('last_error_code=$4')) return { rows: [{ attempts: 1 }] }
+      return { rows: [], rowCount:1 }
     })
     const reportUsage = vi.fn(async (installationId: string) => {
       if (installationId.startsWith('1')) throw Object.assign(new Error('no'), { code: 'relay_unavailable' })
@@ -28,26 +28,26 @@ describe('usage worker isolation and retry accounting', () => {
     expect(query.mock.calls.some(([sql]) => String(sql).includes('reported_at = NOW()'))).toBe(true)
   })
 
-  test('the tenth failed attempt moves a fact to the content-free dead letter state', async () => {
+  test('an exhausted transient failure is deferred for a probe using its original ID', async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes('SELECT installation_id')) return { rows: [
         { ...FACT, attempts: 9, installation_id: '11111111-1111-4111-8111-111111111111' },
       ] }
-      if (sql.includes('RETURNING attempts')) return { rows: [{ attempts: 10 }] }
-      return { rows: [] }
+      if (sql.includes('last_error_code=$4')) return { rows: [{ attempts: 10 }] }
+      return { rows: [], rowCount:1 }
     })
     const worker = createUsageWorker({
       pool: { query } as never,
       reportUsage: vi.fn(async () => { throw new Error('still failing') }),
     })
     expect(await worker.runOnce()).toBe(0)
-    expect(query.mock.calls.some(([sql]) => String(sql).includes('dead_lettered_at = NOW()'))).toBe(true)
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("WHEN attempts>=9 THEN 'probe'"))).toBe(true)
   })
   test('isolates a rejected fact without charging valid siblings a failed attempt', async () => {
     const updates: Array<{sql:string; args:unknown[]}> = []
     const query = vi.fn(async (sql:string,args:unknown[] = []) => {
       if(sql.includes('SELECT installation_id'))return {rows:['bad','good'].map(usage_id=>({...FACT,usage_id,installation_id:'11111111-1111-4111-8111-111111111111'}))}
-      updates.push({sql,args});return {rows:[{attempts:10}]}
+      updates.push({sql,args});return {rows:[],rowCount:1}
     })
     const reportUsage = vi.fn(async (_id:string,facts:Array<Record<string,unknown>>) => {
       if(facts.some(f=>f.usage_id==='bad'))throw Object.assign(new Error('rejected'),{code:'invalid_request',status:400})
@@ -55,7 +55,7 @@ describe('usage worker isolation and retry accounting', () => {
     })
     const worker=createUsageWorker({pool:{query} as never,reportUsage})
     expect(await worker.runOnce()).toBe(1)
-    expect(updates.filter(u=>u.sql.includes('last_error_code')).map(u=>u.args[1])).toEqual(['bad'])
+    expect(updates.filter(u=>u.sql.includes('last_error_code=$4')).map(u=>u.args[1])).toEqual(['bad'])
     expect(updates.filter(u=>u.sql.includes('reported_at = NOW()')).map(u=>u.args[1])).toEqual(['good'])
   })
   test('does not split rate limits even when their code is invalid_request', async () => {
@@ -72,7 +72,7 @@ describe('usage worker isolation and retry accounting', () => {
     const reportUsage=vi.fn(async()=>{throw Object.assign(new Error('bad fact'),{code:'invalid_request',status:400})})
     await createUsageWorker({pool:{query} as never,reportUsage}).runOnce()
     expect(reportUsage).toHaveBeenCalledTimes(15)
-    const attempts=query.mock.calls.filter(([sql])=>sql.includes('RETURNING attempts')).length
+    const attempts=query.mock.calls.filter(([sql])=>sql.includes('last_error_code=$4')).length
     expect(attempts).toBeGreaterThan(0);expect(attempts).toBeLessThan(15)
     expect(query.mock.calls.some(([sql])=>sql.includes('dead_lettered_at = NOW()'))).toBe(false)
   })

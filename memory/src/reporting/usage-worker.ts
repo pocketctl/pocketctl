@@ -1,4 +1,6 @@
+import {randomUUID} from 'node:crypto'
 import type pg from 'pg'
+import {MEMORY_USAGE_OPERATIONS} from './memory-usage-contract.js'
 import { createUsageOutbox } from './usage-outbox.js'
 
 export interface UsageWorkerOptions {
@@ -9,7 +11,6 @@ export interface UsageWorkerOptions {
 }
 
 const DEFAULT_INTERVAL_MS = 30_000
-const MAX_ATTEMPTS = 10
 
 /**
  * Drains the usage outbox to Relay. Only real, durable records are sent —
@@ -25,7 +26,8 @@ export function createUsageWorker(options: UsageWorkerOptions) {
     if (current) return 0
     const pass = (async () => {
       try {
-        const batch = await outbox.nextBatch()
+        const claim = randomUUID()
+        const batch = await outbox.nextBatch(claim)
         if (batch.length === 0) return 0
         const byInstallation = new Map<string, typeof batch>()
         for (const fact of batch) {
@@ -34,8 +36,25 @@ export function createUsageWorker(options: UsageWorkerOptions) {
           byInstallation.set(fact.installationId, list)
         }
         let sent = 0
-        for (const [installationId, sourceFacts] of byInstallation) {
-          const facts = sourceFacts.map(fact => ({
+        async function deliverInstallation(installationId:string,sourceFacts:typeof batch) {
+          const wireFacts=[]
+          for(const fact of sourceFacts) {
+            const counters=[fact.inputTokens,fact.outputTokens,fact.embeddingTokens,fact.cachedTokens,fact.costMicros]
+            if(!fact.usageId || fact.usageId.length>128 || (fact.model?.length??0)>128
+              || !(MEMORY_USAGE_OPERATIONS as readonly string[]).includes(fact.operation)
+              || !(fact.occurredAt instanceof Date) || !Number.isFinite(fact.occurredAt.getTime())
+              || counters.some(value=>!Number.isSafeInteger(value)||Number(value)<0)) {
+              await outbox.markAttempt(installationId,fact.usageId,claim,'invalid_request',true)
+              continue
+            }
+            const clockLead=fact.occurredAt.getTime()-Date.now()
+            if(clockLead>300_000) {
+              await outbox.markAttempt(installationId,fact.usageId,claim,'usage_clock_ahead',false,clockLead)
+              continue
+            }
+            wireFacts.push(fact)
+          }
+          const facts = wireFacts.map(fact => ({
             usage_id: fact.usageId,
             operation: fact.operation,
             ...(fact.model ? { model: fact.model } : {}),
@@ -48,7 +67,7 @@ export function createUsageWorker(options: UsageWorkerOptions) {
           }))
           // A deterministic payload rejection must not spend the attempts of
           // valid siblings. Bound extra calls; untouched sub-batches stay pending.
-          let callsRemaining = 15
+          let callsRemaining = Math.min(15,Math.floor(32/byInstallation.size))
           const deliver = async (batch: typeof facts): Promise<void> => {
             if (callsRemaining <= 0) return
             callsRemaining--
@@ -57,26 +76,35 @@ export function createUsageWorker(options: UsageWorkerOptions) {
             } catch (error) {
               const errorCode = boundedErrorCode(error)
               const status = error && typeof error === 'object' && 'status' in error ? error.status : undefined
-              if (errorCode === 'invalid_request' && status === 400 && batch.length > 1) {
+              const rejected=(errorCode==='invalid_request' && status===400) || (errorCode==='revision_conflict' && status===409)
+              if (rejected && batch.length > 1) {
                 const middle = Math.ceil(batch.length / 2)
                 await deliver(batch.slice(0, middle))
                 await deliver(batch.slice(middle))
                 return
               }
               for (const fact of batch) {
-                const attempts = await outbox.markAttempt(installationId, String(fact.usage_id), errorCode)
-                if (attempts >= MAX_ATTEMPTS) await outbox.markDeadLetter(installationId, String(fact.usage_id))
+                const retryAfter=Number((error as {retryAfterMs?:number}|null)?.retryAfterMs??0)
+                await outbox.markAttempt(installationId,String(fact.usage_id),claim,errorCode,rejected,retryAfter)
               }
               options.onError?.(error)
               return
             }
             for (const fact of batch) {
-              await outbox.markReported(installationId, String(fact.usage_id))
-              sent++
+              if(await outbox.markReported(installationId,String(fact.usage_id),claim)) sent++
             }
           }
-          await deliver(facts)
+          if(facts.length) await deliver(facts)
         }
+        // Bounded tenant concurrency prevents one slow Relay request from
+        // holding all other installations' delivery leases.
+        const groups=[...byInstallation]
+        let failed:PromiseRejectedResult|undefined
+        for(let offset=0;offset<groups.length;offset+=4) {
+          const results=await Promise.allSettled(groups.slice(offset,offset+4).map(([id,rows])=>deliverInstallation(id,rows)))
+          failed??=results.find((r):r is PromiseRejectedResult=>r.status==='rejected')
+        }
+        if(failed) throw failed.reason
         return sent
       } finally {
         current = undefined

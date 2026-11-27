@@ -16,6 +16,8 @@ suite('native Context receipt coverage',()=>{
   fixture=await directLaunchFixture(url!,{captureRelayControls:true})
   const owner=await fixture.source()
   installationId=(await fixture.install(owner,'retained_history')).inst.installation_id
+  await fixture.pool.query('UPDATE shared.memory_source_contract SET activation_ready=TRUE')
+  await fixture.pool.query("SELECT shared.transition_memory_source_mode($1,2,'shared-active')",[installationId])
   await fixture.pool.query("UPDATE public.extension_installations SET enabled_services=ARRAY['memory.manage','memory.context'] WHERE installation_id=$1",[installationId])
   await fixture.runtime.query("INSERT INTO memory_curation_policies(installation_id,mode,consume_mode) VALUES($1,'enabled','enabled')",[installationId])
   await fixture.runtime.query(`INSERT INTO repositories(repository_id,installation_id,repository_key,first_observed_at,last_observed_at)

@@ -71,9 +71,10 @@ export function createSkillWorker(deps: {
   }
   async function deadLetter(client: pg.PoolClient, claim: JobClaim, code: string) {
     await client.query(`UPDATE memory_jobs SET state='dead',last_error_code=$2,completed_at=NOW(),claim_expires_at=NULL WHERE job_id=$1`, [claim.job_id, code])
-    await client.query(`INSERT INTO memory_dead_letters(job_id,installation_id,job_type,attempts,error_code,payload_hash)
-      SELECT job_id,installation_id,job_type,attempts,$2,$3 FROM memory_jobs WHERE job_id=$1
-      ON CONFLICT(job_id) DO NOTHING`, [claim.job_id, code, createHash('sha256').update(JSON.stringify(claim.payload)).digest()])
+    await client.query(`INSERT INTO memory_dead_letters(job_id,installation_id,job_type,attempts,error_code,payload_hash,claim_epoch)
+      SELECT job_id,installation_id,job_type,attempts,$2,$3,claim_epoch FROM memory_jobs WHERE job_id=$1
+      ON CONFLICT(job_id) DO UPDATE SET attempts=EXCLUDED.attempts,error_code=EXCLUDED.error_code,
+        payload_hash=EXCLUDED.payload_hash,claim_epoch=EXCLUDED.claim_epoch,dead_at=EXCLUDED.dead_at`, [claim.job_id, code, createHash('sha256').update(JSON.stringify(claim.payload)).digest()])
   }
   async function finishWithoutProvider(claim: JobClaim, fence: JobFence, state: 'cancelled' | 'failed' | 'stale_generation', code: string) {
     const client = await deps.pool.connect()

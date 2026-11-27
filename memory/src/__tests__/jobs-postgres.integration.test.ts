@@ -54,6 +54,23 @@ describeWithDatabase('fenced background jobs (PostgreSQL)', () => {
     `, [INSTALLATION])
   })
 
+  test('reserves a repair turn after four foreground admissions across worker restarts',async()=>{
+    await pool.query("UPDATE memory_job_dispatch_fairness SET fresh_claims=0")
+    for(let i=0;i<8;i++)await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',
+      idempotencyKey:'new-'+i,payload:{turn:'new-'+i},priority:80})
+    await jobs.enqueueJob({installationId:INSTALLATION,jobType:'compile_episode',idempotencyKey:'repair',
+      payload:{turn:'repair',failure_recovery:true},priority:81})
+    const turns=[]
+    for(let i=0;i<6;i++){
+      const repo=createJobRepository(pool)
+      const [job]=await repo.claimJobs({workerId:'fair',limit:1,leaseMs:10000})
+      turns.push(job.payload.turn)
+      await repo.completeJob({jobId:job.job_id,claimEpoch:job.claim_epoch,claimedBy:'fair'})
+    }
+    expect(turns.indexOf('repair')).toBe(4)
+    expect(turns[5]).toMatch(/^new-/)
+  })
+
   // Task13 contract: budget waits use pending/available_at and do not spend
   // the ordinary failure retry allowance.
   async function deferBudget(input: {

@@ -5,7 +5,11 @@ import {AsyncLocalStorage} from 'node:async_hooks'
 import {JobDeferredError} from '../jobs/types.js'
 import {canonicalJsonString,SourceUnavailableError,type SourceRoot,type SourceScope,type SourceVersion} from '@pocketctl/session-source'
 import {sourceConnectionKey,sourcePoolContext,type SourceTimingStage} from './pool-context.js'
-interface Pin {scope:SourceScope;root:SourceRoot;version:SourceVersion;currentProtection?:true}
+export type DialogueProtection={turn:string;generation:string;storage:string;authorization:string}
+interface Pin {scope:SourceScope;root:SourceRoot;version:SourceVersion;currentProtection?:true;dialogue?:DialogueProtection}
+const confirmedLocks=new WeakSet<object>()
+export const confirmedDialogueLock=(error:unknown)=>typeof error==='object'&&error!==null&&confirmedLocks.has(error)
+export function markConfirmedDialogueLock(error:Error){confirmedLocks.add(error);return error}
 const unavailable=()=>new SourceUnavailableError('processing_pin_expired_or_unavailable')
 const protectionQueues=new WeakMap<object,Map<string,Promise<void>>>()
 const protectionOwner=new AsyncLocalStorage<{identity:object;installationId:string;active:boolean}>()
@@ -146,6 +150,7 @@ async function metadata<T>(pool:pg.Pool,work:(c:pg.PoolClient)=>Promise<T>,deadl
    if(selected){primaryFailure=error;primaryFailureKnown=true}
    if(client&&!expired&&!released){try{
     live();await client.query('ROLLBACK');recordProjectionRollback(error);live()
+    if(!commitSent&&code==='55P03'&&error instanceof Error)markConfirmedDialogueLock(error)
     if(selected&&!commitSent&&error instanceof ProjectionLockBusy)error.rollbackConfirmed=true
     if(selected&&!commitSent&&(error instanceof SelectedSourceLockBusy||code==='55P03'&&(error as Error).message==='source_metadata_lock_busy')){
      release(false);onRetryableRollback?.()
@@ -217,7 +222,23 @@ export class SourceProcessingPins {
         FROM authority
        ) SELECT version,valid,CASE WHEN state='current' THEN current_setting('pocketctl.processing_pin_reason',true) ELSE 'authority_changed' END AS reason FROM acquired`,
        [this.executionId,JSON.stringify(pin.scope),pin.root.key,renew])).rows[0]
-      if(row?.valid===true)protectedVersion=row.version
+      if(row?.valid===true){
+       protectedVersion=row.version
+       if(pin.dialogue){
+        // Source authority is now locked by the ordinary acquisition. Share
+        // the writer's turn lock, then verify this generation and the original
+        // rights/storage inside the same transaction, including on renewal.
+        const session=pin.root.key.slice(pin.root.key.indexOf(':')+1)
+        const held=await c.query("SELECT pg_try_advisory_xact_lock(hashtextextended('turn-dialogue:'||$1::text||':'||$2||':'||$3,0)) AS ok",
+          [pin.scope.installationId,session,pin.dialogue.turn])
+        if(!held.rows[0]?.ok)throw Object.assign(new Error('source_processing_pin_busy'),{code:'55P03'})
+        const checked=(await c.query('SELECT * FROM shared.memory_dialogue_version($1::jsonb,$2,$3)',
+          [pin.scope,pin.root.key,pin.dialogue.turn])).rows[0]
+        if(checked?.state!=='current'||checked.content_revision!==pin.dialogue.generation||
+          checked.storage_revision!==pin.dialogue.storage||checked.authorization_revision!==pin.dialogue.authorization)
+          throw new SourceUnavailableError('changed')
+       }
+      }
       lastReason=typeof row?.reason==='string'?row.reason:'acquire_denied'
       return row?.valid??false
      }
@@ -232,7 +253,7 @@ export class SourceProcessingPins {
      deadline,()=>!this.closed&&!this.failed&&!signal?.aborted,signal).catch(error=>{
       // Only the explicit SQL mutex refusal is retryable. FALSE still covers
       // permanent policy/version denial and must never become a busy success.
-      if(error?.code!=='55P03'||error?.message!=='source_processing_pin_busy')throw error
+      if(error?.code!=='55P03'||error?.message!=='source_processing_pin_busy'||!confirmedDialogueLock(error))throw error
       lastBusy=true;return false
      })
     this.assertUsable()
@@ -248,7 +269,10 @@ export class SourceProcessingPins {
     // metadata has COMMITted and returned its physical client before backoff.
     await new Promise(resolve=>setTimeout(resolve,delay))
    }
-   if(lastBusy)throw annotateSourceFailure(new SourceUnavailableError('source_store_busy'),renew?'pin_renew':'pin_acquire','lock_conflict')
+   if(lastBusy||pin.dialogue&&lastReason==='lock_conflict'){
+     const error=annotateSourceFailure(new SourceUnavailableError('source_store_busy'),renew?'pin_renew':'pin_acquire','lock_conflict')
+     throw markConfirmedDialogueLock(error)
+   }
    throw annotateSourceFailure(unavailable(),renew?'pin_renew':'pin_acquire',lastReason)
   }catch(error){this.fail(error);throw error}
  }
@@ -263,9 +287,9 @@ export class SourceProcessingPins {
  }
  /** Internal metadata protection only; content proofs are held separately by
   * the opaque selected reader and its physical selected-source commit fence. */
- async protectCurrent(scope:SourceScope,root:SourceRoot):Promise<void>{
+ async protectCurrent(scope:SourceScope,root:SourceRoot,dialogue?:DialogueProtection):Promise<void>{
   const deadline=performance.now()+2000,controller=new AbortController()
-  const pin:Pin={scope:structuredClone(scope),root:{...root},version:{content:'0',authorization:'0',storage:'0'},currentProtection:true},key=this.key(pin)
+  const pin:Pin={scope:structuredClone(scope),root:{...root},version:{content:'0',authorization:'0',storage:'0'},currentProtection:true,dialogue},key=this.key(pin)
   try{await withinProtectionDeadline(this.serial(async()=>{await this.acquire(pin,this.pins.has(key),deadline,controller.signal);this.pins.set(key,pin)}),deadline,()=>controller.abort());this.schedule()}catch(error){this.fail(error);throw error}
  }
  private schedule(){

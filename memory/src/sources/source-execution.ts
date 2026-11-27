@@ -1,4 +1,4 @@
-import {SourceProcessingPins} from './processing-pins.js'
+import {SourceProcessingPins,type DialogueProtection} from './processing-pins.js'
 import type {SourceScope,SourceRoot,SourceVersion} from '@pocketctl/session-source'
 import {AsyncLocalStorage} from 'node:async_hooks'
 import {createHash} from 'node:crypto'
@@ -89,11 +89,11 @@ export async function protectSourceExecutionBodies(pool:pg.Pool,scope:SourceScop
 }
 /** Fixed selected metadata content and current purge protection are separate.
  * SQL still acquires/renews only an independently current ordinary vector. */
-export async function protectMetadataSourceBodies(pool:pg.Pool,scope:SourceScope,root:SourceRoot):Promise<void>{
+export async function protectMetadataSourceBodies(pool:pg.Pool,scope:SourceScope,root:SourceRoot,dialogue?:DialogueProtection):Promise<void>{
  const execution=executions.getStore()
  if(!execution||execution.pool!==pool||execution.installationId!==scope.installationId||execution.branch!=='canonical-active'
   ||root.kind!=='relay_event'||scope.ownerScopeKind!=='personal')throw new SourceExecutionError('source_execution_scope_mismatch')
- await execution.pins.protectCurrent(scope,root)
+ await execution.pins.protectCurrent(scope,root,dialogue)
 }
 /** A locator only. The selected SQL fence independently validates the actual
  * original running job/type/root/turn/claim; no GUC can confer this authority. */

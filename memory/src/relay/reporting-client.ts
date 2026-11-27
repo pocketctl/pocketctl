@@ -32,8 +32,16 @@ export function createReportingClient(options: ReportingClientOptions) {
           operation: 'report_usage',
           token,
           body: { installation_id: installationId, facts },
-        })) as { ingested?: unknown } | null
-      return Number(body?.ingested ?? facts.length)
+        })) as { installation_id?:unknown;ingested?:unknown;acknowledged_usage_ids?:unknown } | null
+      const ids=new Set(facts.map(f=>f.usage_id)),count=body?.ingested,ack=body?.acknowledged_usage_ids
+      const exact=Array.isArray(ack) && ack.length===facts.length && new Set(ack).size===ids.size && ack.every(id=>ids.has(id))
+      // Older Relays can prove a wholly new batch by its insert count. Their
+      // duplicate-only/partial count cannot prove that the prior fees match.
+      if(ids.size!==facts.length || body?.installation_id!==installationId || typeof count!=='number' || !Number.isSafeInteger(count)
+        || count<0 || count>facts.length || (!exact && !(ack===undefined && count===facts.length))) {
+        throw Object.assign(new Error('usage_receipt_unverified'),{code:'usage_receipt_unverified'})
+      }
+      return count
     },
   }
 }

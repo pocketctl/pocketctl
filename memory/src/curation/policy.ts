@@ -1,12 +1,16 @@
 import type pg from 'pg'
 import type {CurationMode} from './contracts.js'
-import {JobDeferredError} from '../jobs/types.js'
+import {JobDeferredError,GrantLockDeferred} from '../jobs/types.js'
 import {lockCurrentRelayAuthority} from '../sources/current-grant.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 export interface CurationPolicy {mode:CurationMode;revision:number;authorizationEpoch:string;version:string}
 /** Acquire current Relay authority before taking local curation locks. */
 export async function lockCurationAuthority(client:Pick<pg.PoolClient,'query'>,installationId:string):Promise<void>{
- if(!await lockCurrentRelayAuthority(client,[installationId]))throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+ if(!await lockCurrentRelayAuthority(client,[installationId])){
+  const detail=(await client.query("SELECT current_setting('pocketctl.grant_lock_reason',true) AS reason")).rows[0]?.reason
+  if(detail==='lock_conflict')throw new GrantLockDeferred()
+  throw new JobDeferredError('source_not_ready',new Date(Date.now()+1000))
+ }
 }
 /** The installation is the owner boundary. Personal automation never inherits
  * a team publication capability, even when the same user owns both scopes.

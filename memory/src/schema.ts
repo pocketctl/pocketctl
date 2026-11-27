@@ -1,3 +1,10 @@
+import {STAGE_RECOVERY_MIGRATION} from './jobs/stage-recovery-schema.js'
+import {INDEX_CALL_MIGRATION} from './retrieval/index-call-migration.js'
+import {USAGE_DELIVERY_ISOLATION_STATEMENTS} from './reporting/usage-delivery-migration.js'
+import {JOB_ADMISSION_MIGRATION} from './jobs/fair-admission.js'
+import {CURATION_CHECKPOINT_MIGRATION} from './curation/checkpoint-migration.js'
+import {DEAD_LETTER_RETENTION_STATEMENTS} from './maintenance/dead-letter-schema.js'
+import {INTAKE_PROGRESS_MIGRATION} from './reporting/stage-progress.js'
 import {ensureDeliveryActiveIndex} from './sources/delivery-active-index.js'
 import {SESSION_AUTHORITY_MIGRATION} from './migrations/shared-db/session-authority-contract.js'
 import {EVIDENCE_SESSION_MIGRATION} from './migrations/shared-db/evidence-session-migration.js'
@@ -2334,6 +2341,13 @@ export const MEMORY_MIGRATIONS: readonly Migration[] = [
   ]},
   EVIDENCE_SESSION_MIGRATION,
   SESSION_AUTHORITY_MIGRATION,
+  INTAKE_PROGRESS_MIGRATION,
+  CURATION_CHECKPOINT_MIGRATION,
+  {version:111,statements:DEAD_LETTER_RETENTION_STATEMENTS},
+  JOB_ADMISSION_MIGRATION,
+  {version:113,statements:USAGE_DELIVERY_ISOLATION_STATEMENTS},
+  STAGE_RECOVERY_MIGRATION,
+  INDEX_CALL_MIGRATION,
 ]
 
 /** Apply every pending migration exactly once under a startup lock. */
@@ -2343,7 +2357,11 @@ export async function applyMemorySchema(pool: pg.Pool,options:{namespace?:Memory
   const client = await pool.connect()
   let previousPath:string|undefined
   try {
-    await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK_KEY])
+    // CREATE INDEX CONCURRENTLY waits for other snapshots. Blocking inside a
+    // SELECT for this same session lock would retain such a snapshot and deadlock.
+    while (!(await client.query('SELECT pg_try_advisory_lock($1) acquired', [MIGRATION_LOCK_KEY])).rows[0].acquired) {
+      await new Promise(resolve=>setTimeout(resolve,200))
+    }
     try {
       await assertTeamSemanticLegacySchema(client,namespace)
       await assertMemoryNamespace(client as unknown as pg.Pool,namespace)

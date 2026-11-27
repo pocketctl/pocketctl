@@ -1,3 +1,4 @@
+import {SHARED_CLAIM_PROTOCOL} from '../../jobs/fair-admission.js'
 import {SHARED_SESSION_AUTHORITY} from './session-authority-contract.js'
 import {DIALOGUE_DENIAL_SCHEMA,DIALOGUE_SOURCE_READERS} from './dialogue-source-contract.js'
 import {ARCHIVE_CUSTODY_SCHEMA} from './archive-custody-contract.js'
@@ -108,7 +109,7 @@ export async function applySharedSourceContract(pool:pg.Pool,options:{targetProf
   if((targetProfile!==installedProfile||JSON.stringify(targetIds)!==JSON.stringify(installedIds??null))&&(await c.query("SELECT to_regclass('shared.memory_source_modes') IS NOT NULL AS present")).rows[0].present
    &&(await c.query("SELECT 1 FROM shared.memory_source_modes WHERE mode IN('shared-active','shared-shadow') LIMIT 1")).rowCount)
    throw Error('shared_source_profile_change_requires_drain')
-  for(const sql of [...statements.slice(1),...SHARED_SOURCE_CONTROL_FUNCTIONS,...SHARED_NATIVE_WITHDRAWAL_FUNCTIONS,...SHARED_NATIVE_INVENTORY_FUNCTIONS,...SHARED_SOURCE_WORK_FUNCTIONS,...SHARED_SOURCE_EXECUTION_FUNCTIONS,...SHARED_SOURCE_MODE_FUNCTIONS,...SHARED_LOCAL_RIGHTS_FUNCTIONS,...SHARED_INPUT_START_FUNCTIONS,...ARCHIVE_CUSTODY_SCHEMA,...SHARED_SOURCE_READER_FUNCTIONS,...DIALOGUE_DENIAL_SCHEMA,...TURN_DIALOGUE_SCHEMA,...DIALOGUE_SOURCE_READERS,...SHARED_LEGACY_ARCHIVE_FUNCTIONS,...SHARED_TEAM_READER_FUNCTIONS,...SHARED_SOURCE_REF_FUNCTIONS,...SHARED_GRANT_FUNCTIONS,...SHARED_SOURCE_HEALTH_FUNCTIONS,...SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS,...SHARED_DELIVERY_FENCE_FUNCTIONS])await c.query(sql)
+  for(const sql of [...statements.slice(1),...SHARED_SOURCE_CONTROL_FUNCTIONS,...SHARED_NATIVE_WITHDRAWAL_FUNCTIONS,...SHARED_NATIVE_INVENTORY_FUNCTIONS,...SHARED_SOURCE_WORK_FUNCTIONS,...SHARED_SOURCE_EXECUTION_FUNCTIONS,...SHARED_SOURCE_MODE_FUNCTIONS,...SHARED_LOCAL_RIGHTS_FUNCTIONS,...SHARED_INPUT_START_FUNCTIONS,...ARCHIVE_CUSTODY_SCHEMA,...SHARED_SOURCE_READER_FUNCTIONS,...DIALOGUE_DENIAL_SCHEMA,...TURN_DIALOGUE_SCHEMA,...SHARED_CLAIM_PROTOCOL,...DIALOGUE_SOURCE_READERS,...SHARED_LEGACY_ARCHIVE_FUNCTIONS,...SHARED_TEAM_READER_FUNCTIONS,...SHARED_SOURCE_REF_FUNCTIONS,...SHARED_GRANT_FUNCTIONS,...SHARED_SOURCE_HEALTH_FUNCTIONS,...SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS,...SHARED_DELIVERY_FENCE_FUNCTIONS])await c.query(sql)
   for(const sql of sharedSourceTargetFunctions(targetProfile,targetIds??undefined))await c.query(sql)
   await c.query('UPDATE shared.memory_source_contract SET target_profile=$1,target_installations=$2::uuid[] WHERE singleton',[targetProfile,targetIds])
   for(const sql of SHARED_SOURCE_DISTRIBUTION_FUNCTIONS)await c.query(sql)

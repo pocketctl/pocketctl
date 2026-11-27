@@ -7,15 +7,15 @@ import {applySharedSourceContract} from '../../migrations/shared-db/contract.js'
 import {provisionSharedDatabase} from '../../migrations/shared-db/namespace.js'
 import {createMemoryPool} from '../../db.js'
 /** Fresh, explicitly named database only. Never connects to old private fixtures. */
-export async function directLaunchFixture(url:string,options:{originalBinding?:boolean;necessaryOriginal?:boolean;personalClosure?:boolean;captureRelayControls?:boolean}={}){
- const u=new URL(url),adminUrl=process.env.DIRECT_LAUNCH_FIXTURE_ADMIN_DATABASE_URL,database=options.personalClosure?'shared_personal_closure_test':options.necessaryOriginal?'shared_necessary_original_test':options.originalBinding?'shared_original_binding_test':'shared_direct_launch_memory_test'
+export async function directLaunchFixture(url:string,options:{originalBinding?:boolean;necessaryOriginal?:boolean;personalClosure?:boolean;captureRelayControls?:boolean;failureIsolation?:boolean}={}){
+ const u=new URL(url),adminUrl=process.env.DIRECT_LAUNCH_FIXTURE_ADMIN_DATABASE_URL,database=options.failureIsolation?'shared_failure_isolation_test':options.personalClosure?'shared_personal_closure_test':options.necessaryOriginal?'shared_necessary_original_test':options.originalBinding?'shared_original_binding_test':'shared_direct_launch_memory_test'
  if(!adminUrl||u.search||u.hash||u.pathname!=='/'+database||u.username!==database||!['127.0.0.1','localhost'].includes(u.hostname))throw Error('dedicated_direct_launch_fixture_required')
  const au=new URL(adminUrl)
  if(au.host!==u.host||au.pathname!==u.pathname||au.username!=='postgres'||au.search||au.hash)throw Error('dedicated_direct_launch_fixture_required')
  const pool=new pg.Pool({connectionString:adminUrl,max:4})
  const identity=(await pool.query("SELECT current_database() AS database_name,current_user AS role_name,to_regclass('public.users') IS NULL AS fresh")).rows[0]
  if(identity.database_name!==database||identity.role_name!=='postgres'||!identity.fresh)throw Error('fresh_direct_launch_fixture_required')
- const prefix=options.personalClosure?'personal_closure':options.necessaryOriginal?'necessary_original':options.originalBinding?'original_binding':'direct_launch',memoryRole=prefix+'_memory',relayRole=prefix+'_relay',migratorRole=prefix+'_definer'
+ const prefix=options.failureIsolation?'failure_isolation':options.personalClosure?'personal_closure':options.necessaryOriginal?'necessary_original':options.originalBinding?'original_binding':'direct_launch',memoryRole=prefix+'_memory',relayRole=prefix+'_relay',migratorRole=prefix+'_definer'
  await pool.query(`CREATE ROLE ${memoryRole} LOGIN PASSWORD 'synthetic-only' NOSUPERUSER;CREATE ROLE ${relayRole} LOGIN PASSWORD 'synthetic-only' NOSUPERUSER;CREATE ROLE ${migratorRole} NOLOGIN NOSUPERUSER`)
  const load=(name:string)=>import(pathToFileURL(resolve('../relay/dist/'+name+'.js')).href)
  const relay=await load('db'),capture=await load('shared-source/capture'),team=await load('shared-source/team-capture'),repository=await load('extensions/installation-repository'),journal=await load('extensions/journal')

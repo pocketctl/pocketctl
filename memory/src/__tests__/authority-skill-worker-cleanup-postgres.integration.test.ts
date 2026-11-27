@@ -79,6 +79,8 @@ db('Skill worker restrictive cleanup joins installation purge',()=>{
   await createSkillWorker({pool,context}).handle(claim,new AbortController().signal,{fence})
   expect((await pool.query('SELECT state FROM memory_skill_tasks WHERE installation_id=$1',[f.installationId])).rows).toEqual([{state:'dead'}])
   expect((await pool.query('SELECT state,last_error_code FROM memory_jobs WHERE job_id=$1',[claim.job_id])).rows).toEqual([{state:'dead',last_error_code:'skill_provider_unavailable'}])
+  expect((await pool.query('SELECT claim_epoch::int,input_generation,error_code FROM memory_job_failures WHERE job_id=$1',[claim.job_id])).rows)
+    .toEqual([{claim_epoch:claim.claim_epoch,input_generation:String(claim.payload.generation),error_code:'skill_provider_unavailable'}])
   expect((await pool.query('SELECT error_code FROM memory_dead_letters WHERE job_id=$1',[claim.job_id])).rows).toEqual([{error_code:'skill_provider_unavailable'}])
  })
 })

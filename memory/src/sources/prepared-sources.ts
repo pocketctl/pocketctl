@@ -226,14 +226,14 @@ export async function prepareEpisodeSources(pool:pg.Pool,installationId:string,t
   if(canonicalJsonString(current)!==canonicalJsonString(ids))throw Error('source_reference_changed')
  }}
 }
-export async function prepareCurationSources(pool:pg.Pool,installationId:string,bundleId:string):Promise<PreparedSources|null>{
+export async function prepareCurationSources(pool:pg.Pool,installationId:string,bundleId:string,catalogIds?:readonly string[]):Promise<(PreparedSources & {intake?:PreparedSources})|null>{
  const current=(await pool.query(`SELECT b.session_id,COALESCE(p.task_key,b.task_key) AS task_key FROM memory_task_bundles b
   LEFT JOIN memory_task_bundles p ON p.installation_id=b.installation_id AND p.bundle_id=b.parent_bundle_id
   WHERE b.installation_id=$1 AND b.bundle_id=$2`,[installationId,bundleId])).rows[0]
  if(!current)return null
- const catalog=(await pool.query(`SELECT p.task_key FROM memory_task_bundles b JOIN memory_task_bundles p ON p.installation_id=b.installation_id AND p.bundle_id=b.parent_bundle_id
+ const catalog=catalogIds?.length===0?[]:(await pool.query(`SELECT p.task_key FROM memory_task_bundles b JOIN memory_task_bundles p ON p.installation_id=b.installation_id AND p.bundle_id=b.parent_bundle_id
   WHERE b.installation_id=$1 AND b.session_id=$2 AND b.bundle_kind='task' AND b.body_state='present' AND p.body_state='present' AND b.parent_revision=p.revision
-  ORDER BY b.updated_at DESC,b.bundle_id LIMIT 64`,[installationId,current.session_id])).rows
+  AND ($3::uuid[] IS NULL OR b.bundle_id=ANY($3::uuid[])) ORDER BY b.updated_at DESC,b.bundle_id LIMIT 64`,[installationId,current.session_id,catalogIds??null])).rows
  if(current.task_key?.startsWith('dialogue:')){
   const turns=new Set<string>([current,...catalog].filter(r=>r.task_key?.startsWith('dialogue:')).map(r=>r.task_key.slice('dialogue:'.length)))
   const inputs:Awaited<ReturnType<typeof prepareDialogue>>[]=[]
@@ -245,9 +245,9 @@ export async function prepareCurationSources(pool:pg.Pool,installationId:string,
     // Skip a withdrawn routing hint without blocking unrelated turns.
    }
   }
-  return {events:inputs.flatMap(i=>i.events),async assertCurrent(client,options){
+  return {intake:inputs[0],events:inputs.flatMap(i=>i.events),async assertCurrent(client,options){
    for(const input of inputs)await input.assertCurrent(client,options)
-  }} satisfies PreparedSources
+  }} satisfies PreparedSources & {intake?:PreparedSources}
  }
  if(sourcePoolContext(pool).namespace==='memory')throw Error('source_reference_unavailable')
  const turns=[...new Set([current,...catalog].filter(r=>typeof r.task_key==='string'&&r.task_key.startsWith('source:')).map(r=>r.task_key.slice(7)))]

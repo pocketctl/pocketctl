@@ -27,12 +27,25 @@ export const SHARED_SOURCE_HEALTH_FUNCTIONS=[
    IF dialogue THEN
     SELECT count(*) INTO turn_failures FROM (SELECT 1 FROM memory.memory_jobs j
      WHERE j.installation_id=p_installation AND j.job_type='compile_episode' AND j.state='dead'
-      AND j.payload ?& ARRAY['dialogue_session','turn'] LIMIT 1001) f;
-    SELECT count(*) INTO turn_stalls FROM (SELECT session_id FROM shared.memory_dialogue_pending
-      WHERE installation_id=p_installation AND enqueued_at<clock_timestamp()-interval '5 minutes'
+      AND j.payload ?& ARRAY['dialogue_session','turn']
+      AND NOT EXISTS (SELECT 1 FROM memory.memory_dialogue_compile_receipts r WHERE r.installation_id=j.installation_id
+        AND r.session_id=j.payload->>'dialogue_session' AND r.turn_id=j.payload->>'turn' AND r.job_id=j.job_id
+        AND r.claim_epoch=j.claim_epoch AND r.status IN ('published','not_admitted','failed','input_gap')) LIMIT 1001) f;
+    SELECT count(*) INTO turn_stalls FROM (SELECT p.session_id FROM shared.memory_dialogue_pending p
+      WHERE p.installation_id=p_installation AND p.enqueued_at<clock_timestamp()-interval '5 minutes'
+       AND NOT EXISTS(SELECT 1 FROM memory.memory_dialogue_turns t WHERE t.installation_id=p.installation_id
+         AND t.session_id=p.session_id AND t.turn_id=p.turn_id)
      UNION SELECT j.payload->>'dialogue_session' FROM memory.memory_jobs j
       WHERE j.installation_id=p_installation AND j.job_type='compile_episode' AND j.payload ?& ARRAY['dialogue_session','turn']
-       AND j.state='pending' AND j.available_at<clock_timestamp()-interval '5 minutes' LIMIT 1001) s;
+       AND j.state='pending' AND j.available_at<clock_timestamp()-interval '5 minutes'
+       AND NOT EXISTS(SELECT 1 FROM memory.memory_dialogue_turns t WHERE t.installation_id=j.installation_id
+        AND t.session_id=j.payload->>'dialogue_session' AND t.turn_id=j.payload->>'turn') LIMIT 1001) s;
+    -- One coalesced turn cannot degrade an installation. A stuck dispatcher
+    -- still surfaces even before it creates any memory_jobs row.
+    SELECT turn_stalls+CASE WHEN count(*)>=3 THEN count(*) ELSE 0 END INTO turn_stalls FROM (
+      SELECT 1 FROM shared.memory_dialogue_pending p JOIN memory.memory_dialogue_turns t
+       USING(installation_id,session_id,turn_id) WHERE p.installation_id=p_installation
+       AND p.enqueued_at<clock_timestamp()-interval '10 minutes' LIMIT 1001) overdue;
    END IF;
     RETURN QUERY WITH outstanding AS (
      SELECT d.source_kind,d.root_key,j.job_id,j.state,GREATEST(j.created_at,p.updated_at) AS changed_at
@@ -50,7 +63,8 @@ export const SHARED_SOURCE_HEALTH_FUNCTIONS=[
        AND t.source_scope->>'authorizationRevision'=i.authorization_epoch::text
     ) SELECT least(1001,turn_failures+(SELECT count(*) FROM (SELECT DISTINCT job_id FROM outstanding WHERE state='dead' LIMIT 1001) f))::text,
      least(1001,turn_stalls+(SELECT count(*) FROM (SELECT DISTINCT source_kind,root_key FROM outstanding
-      WHERE changed_at<clock_timestamp()-interval '5 minutes' LIMIT 1001) s))::text;
+      WHERE changed_at<clock_timestamp()-interval '5 minutes'
+        AND NOT EXISTS (SELECT 1 FROM memory.memory_stage_dispositions d WHERE d.job_id=outstanding.job_id AND d.status<>'resolved') LIMIT 1001) s))::text;
   END $$`,
  `REVOKE ALL ON FUNCTION shared.memory_source_pipeline_health(UUID) FROM PUBLIC`,
 ] as const

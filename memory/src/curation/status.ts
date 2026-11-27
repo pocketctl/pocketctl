@@ -4,7 +4,7 @@ import {isKnownSourceUnavailableCode} from '../jobs/worker-diagnostics.js'
 
 /** Public diagnostics are a closed vocabulary. Never serialize provider errors,
  * source paths, task keys, session IDs, prompts or model output into this view. */
-export const LIFECYCLE_REASONS = ['new_logical_identity','target_unavailable','independent_conditions','plan_not_current_fact','protected_target','equivalent_value_independent_evidence','late_historical_fact','same_condition_conflict','updated_plan','confirmed_change','insufficient_change_evidence','legacy_identity_unproven','semantic_deadline','scene_unknown','lease_expired','budget_exceeded','budget_unavailable','invalid_json','empty_content','invalid_usage','http_error','aborted','curation_source_changed','curation_source_unavailable','curation_lease_lost','scene_changed','task_binding_changed','curation_finalize_failed','conclusion_invalid','predicate_unresolved','not_confirmed','future_not_observed','invalid_fact_interval','evidence_unavailable','verification_unavailable','user_authority_unavailable','observation_unavailable','time_unsupported','value_unsupported','subject_unsupported','condition_unsupported','statement_unsupported',
+export const LIFECYCLE_REASONS = ['provider_circuit_open','local_recovery_exhausted','external_result_unconfirmed','new_logical_identity','target_unavailable','independent_conditions','plan_not_current_fact','protected_target','equivalent_value_independent_evidence','late_historical_fact','same_condition_conflict','updated_plan','confirmed_change','insufficient_change_evidence','legacy_identity_unproven','semantic_deadline','scene_unknown','lease_expired','budget_exceeded','budget_unavailable','invalid_json','empty_content','invalid_usage','http_error','aborted','curation_source_changed','curation_source_unavailable','curation_lease_lost','scene_changed','task_binding_changed','curation_finalize_failed','conclusion_invalid','predicate_unresolved','not_confirmed','future_not_observed','invalid_fact_interval','evidence_unavailable','verification_unavailable','user_authority_unavailable','observation_unavailable','time_unsupported','value_unsupported','subject_unsupported','condition_unsupported','statement_unsupported',
   'provider_response_received','provider_response_uncertain','provider_uncertain_at_expiry','publication_interrupted','source_reference_changed','source_execution_generation_changed','source_execution_scope_mismatch',
   'source_shadow_provider_forbidden','source_execution_required','source_processing_pin_unavailable','source_not_sent',
   'none', 'unknown', 'skill_provenance_unknown', 'skill_excluded', 'late_source_event', 'evidence_already_linked', 'predicate_unsupported',
@@ -94,13 +94,22 @@ export async function lifecycleStatus(db: Pick<pg.Pool, 'query'>, installationId
   const records = (await db.query(`WITH page AS MATERIALIZED (
     SELECT b.bundle_id,b.state,b.reason_code,b.updated_at,b.next_evaluate_at,b.semantic_deadline,
      r.run_id,r.state AS run_state,r.error_code AS run_reason,r.mode AS run_mode,r.policy_revision AS run_policy_revision,
-     r.parent_run_id,r.input_tokens,r.output_tokens,u.usage_id,u.input_tokens AS usage_input_tokens,u.output_tokens AS usage_output_tokens,
+     r.parent_run_id,r.input_tokens,r.output_tokens,windows.saved_windows,windows.uncertain_windows,items.published_items,items.binding_gaps,u.usage_id,u.input_tokens AS usage_input_tokens,u.output_tokens AS usage_output_tokens,
      u.reported_at AS usage_reported_at,u.dead_lettered_at AS usage_dead_lettered_at,d.action,d.state AS decision_state,d.reason_code AS decision_reason
     FROM (SELECT installation_id,bundle_id,revision,source_digest,state,reason_code,updated_at,next_evaluate_at,semantic_deadline
      FROM memory_task_bundles WHERE installation_id=$1 ORDER BY updated_at DESC,bundle_id DESC LIMIT 51) b
     LEFT JOIN LATERAL(SELECT run_id,state,error_code,mode,policy_revision,parent_run_id,input_tokens,output_tokens FROM memory_curation_runs r WHERE r.installation_id=b.installation_id AND r.bundle_id=b.bundle_id
      AND r.bundle_revision=b.revision AND r.source_digest=b.source_digest ORDER BY started_at DESC,run_id DESC LIMIT 1)r ON true
-    LEFT JOIN memory_usage_outbox u ON u.installation_id=b.installation_id AND u.operation='curation' AND u.usage_id='curation:'||r.run_id::text
+    LEFT JOIN LATERAL(SELECT count(*) FILTER(WHERE state='saved')::int saved_windows,
+      count(*) FILTER(WHERE state IN('unknown','possible','conflict'))::int uncertain_windows
+      FROM memory_curation_calls WHERE installation_id=b.installation_id AND run_id=r.run_id) windows ON true
+    LEFT JOIN LATERAL(SELECT count(*) FILTER(WHERE state='published')::int published_items,
+      count(*) FILTER(WHERE state='binding_pending')::int binding_gaps FROM memory_curation_items WHERE installation_id=b.installation_id AND run_id=r.run_id) items ON true
+    LEFT JOIN LATERAL(SELECT max(usage_id) usage_id,sum(u.input_tokens) input_tokens,sum(u.output_tokens) output_tokens,
+      CASE WHEN count(*)=count(u.reported_at) THEN max(u.reported_at) END reported_at,max(u.dead_lettered_at) dead_lettered_at
+      FROM memory_usage_outbox u WHERE u.installation_id=b.installation_id AND u.operation='curation' AND u.usage_id IN (
+        SELECT 'curation:'||r.run_id::text UNION ALL SELECT 'curation:'||r.run_id::text||':window:'||mc.window_index
+        FROM memory_curation_calls mc WHERE mc.installation_id=b.installation_id AND mc.run_id=r.run_id AND mc.window_index>0 AND mc.usage IS NOT NULL)) u ON true
     LEFT JOIN LATERAL(SELECT action,state,reason_code FROM memory_curation_decisions d WHERE d.installation_id=b.installation_id AND d.run_id=r.run_id ORDER BY created_at DESC,decision_id DESC LIMIT 1)d ON true
    ), published AS (
     SELECT DISTINCT unnest(ARRAY[writer.run_id,writer.parent_run_id]) AS run_id
@@ -127,6 +136,7 @@ export async function lifecycleStatus(db: Pick<pg.Pool, 'query'>, installationId
       run_state:r.run_state,run_mode:r.run_mode,run_policy_revision:r.run_policy_revision?Number(r.run_policy_revision):null,
       run_matches_current_policy:r.run_id?Number(r.run_policy_revision)===Number(policy?.revision)&&r.run_mode===effective(policy?.mode):null,
       ...runDiagnostics(r),
+      saved_windows:r.saved_windows,uncertain_windows:r.uncertain_windows,published_items:r.published_items,binding_gaps:r.binding_gaps,
       action: r.action, decision_state: r.decision_state, decision_reason: lifecycleReason(r.decision_reason)})), has_more: records.length > 50,
   }
 }

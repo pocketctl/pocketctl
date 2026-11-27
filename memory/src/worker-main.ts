@@ -1,3 +1,4 @@
+import {recoverDueStageJobs} from './jobs/stage-recovery.js'
 import {SHARED_JOB_CAPACITY} from './jobs/scheduling.js'
 import {reconcileExpiredCurationRuns} from './curation/reconcile-expired.js'
 import {attachSourceMetrics} from './sources/metrics.js'
@@ -471,7 +472,7 @@ async function main(): Promise<void> {
     const observation=createLifecycleObservationService({pool,mode:config.lifecycleMode??'off'})
     const observationScheduler=createObservationScheduler(observation,{onError:loopError('lifecycle_observation')})
     const lifecycle = createLifecycleService(pool, claimRepository,{lifecycleMode:config.lifecycleMode})
-    const curation=createCurationWorker({pool,mode:config.lifecycleMode??'off',textGenerator,modelFingerprint:extractionTextRoute?.fingerprint??'unconfigured'})
+    const curation=createCurationWorker({pool,mode:config.lifecycleMode??'off',textGenerator:config.databaseNamespace==='memory'&&!textBudgetOptions?undefined:textGenerator,modelFingerprint:extractionTextRoute?.fingerprint??'unconfigured'})
     const curationExecutor=createCurationExecutor({pool,mode:config.lifecycleMode??'off',tombstoneKeys:config.tombstoneHmacKeys})
     jobWorker.register('curate_conclusions',async(job,jobSignal,ctx)=>{await curationExecutor.curate(job,jobSignal,ctx?.fence)})
     jobWorker.register('consolidate_task',async(job,jobSignal,ctx)=>{await curation.consolidate(job,jobSignal,ctx?.fence)})
@@ -610,7 +611,12 @@ async function main(): Promise<void> {
         ORDER BY l.next_evaluate_at,l.claim_id LIMIT 100`)).rows
       for(const r of rows)await jobRepository.enqueueJob({installationId:r.installation_id,jobType:'reclaim_claim_history',idempotencyKey:`history:${r.claim_id}:${Math.floor(Date.now()/3600000)}`,payload:{claim_id:r.claim_id}})
     }
+    const sweepStageGaps=async()=>{
+      const result=await recoverDueStageJobs(pool)
+      if(result.probed)logger.log('info','stage_recovery',{...result})
+    }
     await observationScheduler.runOnce(signal)
+    await sweepStageGaps().catch(loopError('stage_recovery'))
     await enqueueLifecycleSweep()
     await enqueueExpirySweep()
     await enqueuePromotionExpiry()
@@ -618,6 +624,7 @@ async function main(): Promise<void> {
     await enqueueDelegatedPublication()
     maintenanceTimer = setInterval(() => {
       void observationScheduler.runOnce(signal).catch(loopError('lifecycle_observation'))
+      void sweepStageGaps().catch(loopError('stage_recovery'))
       void enqueueLifecycleSweep().catch(loopError('lifecycle_schedule'))
       void enqueueExpirySweep().catch(loopError('expire_schedule'))
       void enqueuePromotionExpiry().catch(loopError('promotion_expire_schedule'))
@@ -633,7 +640,7 @@ async function main(): Promise<void> {
           dimensions: config.embeddingModel.dimensions,
           timeoutMs: config.modelTimeoutMs,
           inputCostMicrosPerMillionTokens: config.embeddingModel.inputCostMicrosPerMillionTokens,
-          maxAttempts: config.providerBudget ? 1 : undefined,
+          maxAttempts: 1,
         })
       : undefined
     const budgetedWorkerEmbeddingProvider = rawWorkerEmbeddingProvider && config.providerBudget && providerBudgetStore
@@ -643,7 +650,7 @@ async function main(): Promise<void> {
           maxTokens: config.providerBudget.embeddingMaxTokens,
         })
       : rawWorkerEmbeddingProvider
-    const workerEmbeddingProvider=drainEmbeddingProvider(budgetedWorkerEmbeddingProvider,providerDrain)
+    const workerEmbeddingProvider=drainEmbeddingProvider(config.databaseNamespace==='memory'&&!config.providerBudget?undefined:budgetedWorkerEmbeddingProvider,providerDrain)
     const claimIndexer = createClaimIndexer({
       pool,
       ...(config.embeddingModel && workerEmbeddingProvider ? {
@@ -703,7 +710,7 @@ async function main(): Promise<void> {
 
     const reportingClient = createReportingClient({ http, tokens })
     if(config.inboxRetention&&config.dataRetention){
-      dailyMaintenance=createDailyMaintenanceWorker({pool,signal,inbox:config.inboxRetention,data:{...config.dataRetention,lifecycleMode:config.lifecycleMode},
+      dailyMaintenance=createDailyMaintenanceWorker({pool,signal,failures:config.failureRetention,inbox:config.inboxRetention,data:{...config.dataRetention,lifecycleMode:config.lifecycleMode},
         report:input=>reportingClient.reportMaintenance(input),
         onResult:result=>{
           const counts=result.counts as Record<string,number>

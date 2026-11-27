@@ -1,9 +1,10 @@
+import {generationForJob,settleDialogueFailure} from '../episodes/dialogue-generation.js'
 import {observeProjectionStep,ProjectionLockBusy} from '../sources/projection-diagnostics.js'
 import type {JobCapacity} from './scheduling.js'
 import {SourceUnavailableError} from '@pocketctl/session-source'
 import type pg from 'pg'
 import { workerErrorCode } from './worker-diagnostics.js'
-import { JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
+import { GrantLockDeferred,JobDeferredError, JobTerminalError, type JobClaim, type JobFence, type JobType } from './types.js'
 import type { JobRepository } from './repository.js'
 import {withSourceJobExecution,runOutsideSourceJobExecution,type SourceExecutionSelection} from '../sources/source-execution.js'
 
@@ -151,6 +152,12 @@ export function createJobWorker(options: JobWorkerOptions) {
           outcome=completed?"completed":"lost"
         } catch (error) {
           if(entry.lostOwnership||controller.signal.aborted){outcome="lost";return}
+          const dialogue=generationForJob(claim,ctx.fence)
+          if(dialogue && !(error instanceof JobDeferredError && claim.payload.dialogue_gap_probe_v1!=='inspect' &&
+            (error as {dialogueInspection?:boolean}).dialogueInspection)){
+            outcome=await settleDialogueFailure(options.pool,dialogue,error)
+            return
+          }
           // Only deterministic source projection may defer a positively classified lock conflict.
           // Persisted source_wait_count bounds repeated deferral; model-bearing jobs retain
           // their accounting/recovery path and timeouts remain actionable failures.
@@ -165,7 +172,8 @@ export function createJobWorker(options: JobWorkerOptions) {
           }
           if (error instanceof JobDeferredError) {
             const deferred=await options.jobs.deferJob({ jobId:claim.job_id,claimedBy:options.workerId,
-              claimEpoch:claim.claim_epoch,reason:error.reason,availableAt:error.availableAt })
+              claimEpoch:claim.claim_epoch,reason:error.reason,availableAt:error.availableAt,
+              ...(error instanceof GrantLockDeferred?{verifiedGrantLock:true}:{}), })
             outcome=deferred?"deferred":"lost"
             if(deferred)options.onDeferred?.(error,claim)
             return

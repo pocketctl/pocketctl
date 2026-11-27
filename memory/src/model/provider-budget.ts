@@ -15,7 +15,7 @@ export type ProviderBudgetDimension =
 
 export type ProviderBudgetReservation =
   | { ok: true; reservationId: string }
-  | { ok: false; dimension: ProviderBudgetDimension; retryAt?: Date | null; reason?: 'provider_result_unknown';reservationId?:string }
+  | { ok: false; dimension: ProviderBudgetDimension; retryAt?: Date | null; reason?: 'provider_result_unknown';reservationId?:string;reusableReserve?:boolean }
 
 export interface ProviderBudgetStore {
   /** Shared background text execution must carry its captured generation. */
@@ -51,10 +51,6 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
         await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [input.key])
         const digest = input.requestKey ? createHash('sha256').update(JSON.stringify([input.key,input.kind,input.requestKey])).digest('hex').slice(0,32) : null
         const reservationId = digest ? `${digest.slice(0,8)}-${digest.slice(8,12)}-${digest.slice(12,16)}-${digest.slice(16,20)}-${digest.slice(20)}` : randomUUID()
-        if (digest && (await client.query('SELECT 1 FROM memory_provider_budget_reservations WHERE reservation_id=$1',[reservationId])).rowCount) {
-          await client.query('COMMIT')
-          return {ok:false,dimension:input.kind==='text'?'text_requests':'embedding_requests',reason:'provider_result_unknown',reservationId}
-        }
         const reservationTime = (await client.query<{ reserved_at: Date }>(
           'SELECT clock_timestamp() AS reserved_at',
         )).rows[0].reserved_at
@@ -63,6 +59,16 @@ export function createProviderBudgetStore(pool: pg.Pool): ProviderBudgetStore {
           ? new Date(Math.floor((reservationTime.getTime() + dayOffsetMs) / 86_400_000) * 86_400_000 - dayOffsetMs)
           : null
         const dayEnd = dayStart ? new Date(dayStart.getTime() + 86_400_000) : null
+        if(digest){
+          const existing=(await client.query(`SELECT state='reserved' AND reserved_input_tokens>=$2 AND reserved_output_tokens>=$3
+            AND ($4::timestamptz IS NULL OR (created_at>=$4 AND created_at<$5)) AS reusable
+            FROM memory_provider_budget_reservations WHERE reservation_id=$1`,[reservationId,input.inputTokens,input.outputTokens,dayStart,dayEnd])).rows[0]
+          if(existing){
+            await client.query('COMMIT')
+            return {ok:false,dimension:input.kind==='text'?'text_requests':'embedding_requests',reason:'provider_result_unknown',
+              reservationId,reusableReserve:existing.reusable===true}
+          }
+        }
         const windowClause = dayStart ? 'AND created_at >= $3 AND created_at < $4' : ''
         const totals = await client.query<{
           requests: string
@@ -134,6 +140,7 @@ export function withTextProviderBudget(
   },
 ): TextGenerator {
   const wrapped:TextGenerator={
+    budgetedDispatch:true,
     async generateJson<T>(input: Parameters<TextGenerator['generateJson']>[0]): Promise<ModelJsonResult<T>> {
       if(input.receipt)assertProviderReceiptBudgetInput(input.receipt,input.operation,input.requestKey)
       await assertSourceProviderExecution(store.sourceExecutionRequired===true)
@@ -159,13 +166,22 @@ export function withTextProviderBudget(
       } catch {
         return { ok: false, code: 'budget_unavailable', retryable: true, detail: 'reservation_failed' }
       }
+      if (!reservation.ok && reservation.reason==='provider_result_unknown' && reservation.reservationId && reservation.reusableReserve
+        && input.singleAttempt && input.authorizeDispatch && await input.resumeUnsentReservation?.(reservation.reservationId)) {
+        // The persisted per-call send transition below still has to win.
+        reservation={ok:true,reservationId:reservation.reservationId}
+      }
       if (!reservation.ok) {
         if (reservation.reason==='provider_result_unknown')return {ok:false,code:'provider_result_unknown',retryable:false,detail:'request_already_reserved',budgetReservationId:reservation.reservationId}
         return { ok: false, code: 'budget_exceeded', retryable: false, detail: reservation.dimension,
           ...(reservation.retryAt ? {retryAt:reservation.retryAt.toISOString()}: {}) }
       }
+      // Curation owns an independent durable send fence. Leave no native
+      // in-flight attempt while that window is still provably unsent.
+      if(input.singleAttempt&&input.authorizeDispatch&&!await input.authorizeDispatch(reservation.reservationId))
+        return {ok:false,code:'source_not_sent',retryable:true,budgetReservationId:reservation.reservationId}
       const attempt=await startSourceProviderAttempt(reservation.reservationId,input.requestKey)
-      if(input.authorizeDispatch&&!await input.authorizeDispatch().catch(()=>false)){
+      if(!input.singleAttempt&&input.authorizeDispatch&&!await input.authorizeDispatch(reservation.reservationId).catch(()=>false)){
         try{await finishSourceProviderAttempt(attempt,'not-sent')}
         catch{
           blockUnrecordedSourceEffect()
@@ -209,18 +225,30 @@ export function withTextProviderBudget(
   return wrapped
 }
 
+// These guards run before calling the embedding adapter. A lost effect receipt
+// or a provider error after dispatch must never be classified this way.
+export class EmbeddingReservationUnknownError extends Error {
+  constructor(){super('provider_result_unknown')}
+}
+export class EmbeddingNotDispatchedError extends Error {
+  constructor(readonly original:unknown){super('embedding_not_dispatched')}
+}
+
 export function withEmbeddingProviderBudget(
   provider: EmbeddingProvider,
   store: ProviderBudgetStore,
   limits: { key: string; maxRequests: number; maxTokens: number },
 ): EmbeddingProvider {
   return {
+    budgetedDispatch:true,
     dimensions: provider.dimensions,
     async embed(input) {
-      await assertSourceProviderExecution(store.sourceExecutionRequired===true&&input.operation==='claim_index')
-      const requestKey=sourceProviderRequestKey(input.operation,input.texts)
+      try {
+        await assertSourceProviderExecution(store.sourceExecutionRequired===true&&input.operation==='claim_index')
+      } catch(error) { throw new EmbeddingNotDispatchedError(error) }
+      const requestKey=input.requestKey??sourceProviderRequestKey(input.operation,input.texts)
       const inputTokens = input.texts.reduce((sum, text) => sum + Buffer.byteLength(text, 'utf8'), 0)
-      const reservation = await store.reserve({
+      let reservation = await store.reserve({
         key: limits.key,
         requestKey,
         kind: 'embedding',
@@ -230,11 +258,29 @@ export function withEmbeddingProviderBudget(
         maxInputTokens: limits.maxTokens,
         maxOutputTokens: 0,
       })
+      // The checkpoint grants only one sender. A matching held reservation can
+      // be reused only when that original call still has a provably unsent window.
+      if(!reservation.ok && input.claimDispatch && input.requestKey && reservation.reusableReserve && reservation.reservationId){
+        reservation={ok:true,reservationId:reservation.reservationId}
+      }
       if (!reservation.ok) {
-        if(reservation.reason==='provider_result_unknown')throw new Error('provider_result_unknown')
+        if(reservation.reason==='provider_result_unknown')throw new EmbeddingReservationUnknownError()
         throw new ProviderBudgetExceededError(reservation.dimension)
       }
-      const attempt=await startSourceProviderAttempt(reservation.reservationId,requestKey)
+      if(input.claimDispatch && !await input.claimDispatch(reservation.reservationId)){
+        throw new EmbeddingNotDispatchedError(new Error('embedding_dispatch_ineligible'))
+      }
+      let attempt:object|undefined
+      try { attempt=await startSourceProviderAttempt(reservation.reservationId,requestKey) }
+      catch(error){throw new EmbeddingNotDispatchedError(error)}
+      if(input.confirmDispatch){
+        try{
+          if(!await input.confirmDispatch())throw Error('embedding_dispatch_ineligible')
+        }catch(error){
+          try{await finishSourceProviderAttempt(attempt,'not-sent')}catch{blockUnrecordedSourceEffect()}
+          throw new EmbeddingNotDispatchedError(error)
+        }
+      }
       let effect:'accounted'|'uncertain'='uncertain'
       let result:Awaited<ReturnType<EmbeddingProvider['embed']>>
       try{

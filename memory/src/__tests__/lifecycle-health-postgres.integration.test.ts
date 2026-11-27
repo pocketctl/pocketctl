@@ -28,6 +28,15 @@ suite('bounded lifecycle health PostgreSQL',()=>{
   await pool.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state)
    SELECT installation_id,bundle_id,revision,source_digest,1,repeat('a',64),repeat('b',64),$2,'completed' FROM memory_task_bundles WHERE installation_id=$1`,[id,mode])
  }
+ test('counts each original window once and preserves uncertainty about missing amounts',async()=>{
+  await completedProjection(1,'enabled')
+  const run=(await pool.query("UPDATE memory_curation_runs SET state='provider_result_unknown',checkpoint_protocol=1 WHERE installation_id=$1 RETURNING run_id",[id])).rows[0].run_id
+  await pool.query(`INSERT INTO memory_curation_calls(installation_id,run_id,window_index,input_digest,state,usage)
+    VALUES($1,$2,0,'a','unknown','{"costMicros":17}'),($1,$2,1,'b','unknown',NULL),
+    ($1,$2,2,'c','possible',NULL)`,[id,run])
+  const health=summarizeLifecycleHealth(await loadLifecycleHealth(pool,'enabled'),'enabled')
+  expect(health.consolidation.external_uncertainty).toEqual({calls:2,calls_without_recorded_price:1,recorded_cost_micros:'17',capped:false})
+ })
  test('historical projected receipts remain visible without proving current input',async()=>{
   await turns(2);await receipt(1,'provenance_unknown',false,'2 hours');await receipt(2,'no_durable_conclusion',true,'1 hour')
   const result=summarizeLifecycleHealth(await loadLifecycleHealth(pool,'enabled'),'enabled')
@@ -44,8 +53,10 @@ suite('bounded lifecycle health PostgreSQL',()=>{
   try{
    await client.query('BEGIN')
    // The native columns also exist after the projection relations have been retired.
-   await client.query(`CREATE TEMP TABLE work_episodes (LIKE public.work_episodes INCLUDING ALL) ON COMMIT DROP;
-    ALTER TABLE work_episodes ADD COLUMN dialogue_completion jsonb;
+   await client.query(`CREATE TEMP TABLE memory_dialogue_turns(installation_id uuid,session_id text,turn_id text,requested_generation bigint,requested_at timestamptz) ON COMMIT DROP;
+    CREATE TEMP TABLE memory_dialogue_compile_receipts(installation_id uuid,session_id text,turn_id text,generation bigint,status text,reason text) ON COMMIT DROP;
+    CREATE TEMP TABLE work_episodes (LIKE public.work_episodes INCLUDING ALL) ON COMMIT DROP;
+    ALTER TABLE work_episodes ADD COLUMN dialogue_completion jsonb, ADD COLUMN dialogue_generation bigint;
     CREATE TEMP TABLE memory_task_bundles (LIKE public.memory_task_bundles INCLUDING ALL) ON COMMIT DROP;
     ALTER TABLE memory_task_bundles ADD COLUMN dialogue_members jsonb;
     CREATE TEMP TABLE memory_curation_runs (LIKE public.memory_curation_runs INCLUDING ALL) ON COMMIT DROP`)
@@ -67,6 +78,11 @@ suite('bounded lifecycle health PostgreSQL',()=>{
    const report=async()=>summarizeLifecycleHealth(await loadLifecycleHealth(db,'enabled'),'enabled')
    expect(await report()).toMatchObject({input_coverage:{trusted_turns:1,unknown_turns:0},
     coverage:{turns:1,receipt_turns:0,missing_receipt_turns:1,complete_turns:0,blocked_turns:1},decisions:{committed:0}})
+
+   // The accepted current generation is part of coverage before an episode exists.
+   await client.query("INSERT INTO memory_dialogue_turns VALUES($1,'session',$2,2,clock_timestamp()),($1,'session','waiting',1,clock_timestamp())",[id,turn])
+   expect((await report()).coverage).toMatchObject({turns:2,missing_receipt_turns:2,complete_turns:0})
+   await client.query("DELETE FROM memory_dialogue_turns")
 
    // A marker under an old curation policy cannot certify processing, even for the right digest.
    const marker=async(value:Record<string,unknown>)=>client.query('UPDATE work_episodes SET dialogue_completion=$1',[value])
@@ -133,14 +149,20 @@ suite('bounded lifecycle health PostgreSQL',()=>{
   expect(result.coverage.observation_window_start).toEqual(expect.any(String))
   expect(result.execution.status).toBe('idle')
  })
- test('current bundle revision failures alert, superseded failed runs do not',async()=>{
+ test('reports an isolated failure separately and alerts on repeated independent failures',async()=>{
   await pool.query(`INSERT INTO memory_task_bundles(installation_id,bundle_id,session_id,task_key,source_digest,watermark,revision,state,updated_at,next_evaluate_at) VALUES($1,$1,'session','source:turn-000001',decode(repeat('aa',32),'hex'),1,2,'blocked',NOW()-interval '2 hours',NOW()-interval '1 hour')`,[id])
   await pool.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state) VALUES($1,$1,1,decode(repeat('aa',32),'hex'),1,repeat('a',64),repeat('b',64),'enabled','failed')`,[id])
   let rows=await loadLifecycleHealth(pool,'enabled')
   expect(rows[0]).toMatchObject({consolidation_failed:0,consolidation_stalled:1})
   await pool.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state) VALUES($1,$1,2,decode(repeat('aa',32),'hex'),1,repeat('a',64),repeat('b',64),'enabled','failed')`,[id])
   rows=await loadLifecycleHealth(pool,'enabled')
-  expect(summarizeLifecycleHealth(rows,'enabled').execution.status).toBe('degraded')
+  expect(summarizeLifecycleHealth(rows,'enabled').execution.status).toBe('healthy')
+  expect(rows[0].curation_progress).toMatchObject({inputs:1,failed:1})
+  await pool.query(`INSERT INTO memory_task_bundles(installation_id,session_id,task_key,source_digest,watermark,state)
+   SELECT $1,'session','source:more-'||n,decode(repeat('bb',32),'hex'),1,'failed' FROM generate_series(1,2)n`,[id])
+  const systemic=await loadLifecycleHealth(pool,'enabled')
+  expect(summarizeLifecycleHealth(systemic,'enabled').execution.status).toBe('degraded')
+  expect(systemic[0].curation_progress).toMatchObject({inputs:3,failed:3})
   expect(rows[0].consolidation_failed).toBe(1)
   expect(summarizeLifecycleHealth(rows,'off').execution.status).toBe('disabled')
  })

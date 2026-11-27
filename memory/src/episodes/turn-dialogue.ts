@@ -1,3 +1,4 @@
+import {lockDialogueInput, type DialogueGeneration} from './dialogue-generation.js'
 import { createHash } from 'node:crypto'
 import type pg from 'pg'
 import {
@@ -37,6 +38,7 @@ export type DialogueRef = {
   partCount?: number
 }
 export class DialogueReadDisposition extends Error {
+  inputDigest?:string
   assertCurrent?: (db: Db) => Promise<void>
   constructor(readonly reason: string) {
     super(reason)
@@ -75,17 +77,11 @@ async function context(db: Db, install: string, session: string): Promise<Contex
   if (!row?.context) throw gap('source_reference_unavailable')
   return row.context
 }
-export async function checkDialogueRef(db: Db, install: string, ref: DialogueRef, lock: boolean) {
+export async function checkDialogueRef(db: Db, install: string, ref: DialogueRef, lock: boolean, generation?: DialogueGeneration, originalContext?: Context) {
   const ctx = await context(db, install, ref.session)
-  const { rows, signature } = await metadata(db, install, ref.session, ref.turn)
+  if(lock && generation && originalContext)await lockDialogueInput(db,generation,originalContext)
   if (
-    rows.some((r) => r.kind === 'operation') ||
-    signature !== ref.members ||
-    !rows.some((r) => r.id === ref.event && r.hash === ref.eventHash && r.kind !== 'control')
-  )
-    throw Error('source_reference_changed')
-  if (
-    lock &&
+    lock && !generation &&
     !(
       await db.query("SELECT shared.lock_memory_personal_source_commit($1,'relay_event',$2,$3,FALSE) AS ok", [
         ctx.scope,
@@ -93,6 +89,15 @@ export async function checkDialogueRef(db: Db, install: string, ref: DialogueRef
         ctx.version,
       ])
     ).rows[0]?.ok
+  )
+    throw Error('source_reference_changed')
+  if(lock&&!generation && !(await db.query(`SELECT pg_try_advisory_xact_lock(hashtextextended('turn-dialogue:'||$1::text||':'||$2||':'||$3,0)) AS held`,
+    [install,ref.session,ref.turn])).rows[0]?.held)throw Error('source_reference_changed')
+  const { rows, signature } = await metadata(db, install, ref.session, ref.turn)
+  if (
+    rows.some((r) => r.kind === 'operation') ||
+    signature !== ref.members ||
+    !rows.some((r) => r.id === ref.event && r.hash === ref.eventHash && r.kind !== 'control')
   )
     throw Error('source_reference_changed')
 }
@@ -257,7 +262,7 @@ export function certifiedCodexDialogue(
 }
 
 export async function prepareDialogue(pool: pg.Pool, install: string, session: string, turn: string,
-  gapProbe?: DialogueGapProbe,
+  gapProbe?: DialogueGapProbe, generation?: DialogueGeneration,
 ) {
   const ctx = await context(pool, install, session),
     root = { kind: 'relay_event' as const, key: ctx.root }
@@ -286,7 +291,7 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
         }
       }
     }
-    const reader = createObservedSourceReader(pool, sourcePoolContext(pool).archive, turn)
+    const reader = createObservedSourceReader(pool, sourcePoolContext(pool).archive,turn,generation && {turn,generation:generation.generation,storage:ctx.version.storage,authorization:ctx.version.authorization})
     const bodies = new Map<string, Header>()
     async function loadBodies(parts: Member[]) {
       for (let start = 0; start < parts.length; start += 256) {
@@ -296,7 +301,7 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
           root,
           batch.map((r) => r.id),
         )
-        if (canonicalJsonString(page.version) !== canonicalJsonString(ctx.version)) throw waitForInput()
+        if (canonicalJsonString(page.version) !== canonicalJsonString(generation?{...ctx.version,content:generation.generation}:ctx.version)) throw waitForInput()
         const expected = new Map(batch.map((r) => [r.id, r.hash]))
         for (const b of await reader.resolveBodies(ctx.scope, root, [...page.heads], page.version)) {
           if (expected.get(b.head.canonicalKey) !== b.head.contentHash) throw waitForInput()
@@ -390,23 +395,27 @@ export async function prepareDialogue(pool: pg.Pool, install: string, session: s
       ref,
       terminal,
       assertCurrent: (db: Db, options?: { forCommit?: boolean }) =>
-        checkDialogueRef(db, install, ref, options?.forCommit === true),
+        checkDialogueRef(db, install, ref, options?.forCommit === true,generation,ctx),
     }
   } catch (error) {
     if (error instanceof DialogueInputGap && gapProbe && !error.probeResult) {
       const checked = signature + ':' + error.reason
       if (gapProbe.previous !== checked) error.probeResult = checked
     }
-    if (error instanceof DialogueReadDisposition)
+    if (error instanceof DialogueReadDisposition){
+      error.inputDigest=signature
       error.assertCurrent = async (db) => {
+        if(generation)await lockDialogueInput(db,generation,ctx)
         const current = await metadata(db, install, session, turn)
         if (current.signature !== signature) throw waitForInput()
+        if(generation)return
         const lock = await db.query(
           "SELECT shared.lock_memory_personal_source_commit($1,'relay_event',$2,$3,FALSE) AS ok",
           [ctx.scope, ctx.root, ctx.version],
         )
         if (!lock.rows[0]?.ok) throw waitForInput()
       }
+    }
     throw error
   }
 }

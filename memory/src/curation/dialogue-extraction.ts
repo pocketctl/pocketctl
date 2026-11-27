@@ -2,8 +2,8 @@ import { extractConclusions } from './conclusion-extractor.js'
 import type { ConclusionEvidence } from './conclusion-validator.js'
 import type { ModelUsage, TextGenerator } from '../ports/text-generator.js'
 
-type ExtractionInput = Parameters<typeof extractConclusions>[1]
-type ExtractionResult = Awaited<ReturnType<typeof extractConclusions>>
+export type ExtractionInput = Parameters<typeof extractConclusions>[1]
+export type ExtractionResult = Awaited<ReturnType<typeof extractConclusions>>
 type Task = Extract<ExtractionResult, { ok: true }>['tasks'][number]
 const windowSize = 64_000
 
@@ -53,24 +53,30 @@ function usageTotal(prior: ModelUsage | undefined, current: ModelUsage | undefin
 }
 
 export async function extractDialogueConclusions(
-  generator: TextGenerator,
+  generator: TextGenerator|undefined,
   input: ExtractionInput,
+  extractWindow?: (input:ExtractionInput,index:number)=>Promise<ExtractionResult>,
+  origins?:Map<Task,number[]>,
 ): Promise<ExtractionResult> {
+  if(!generator&&!extractWindow)return {ok:false,code:'budget_unavailable',retryable:true}
   if (input.sources.reduce((n, s) => n + s.text.length, 0) <= windowSize)
-    return extractConclusions(generator, { ...input, maxSpanLength: 4000 })
+    return extractWindow ? extractWindow({...input,maxSpanLength:4000},0) : extractConclusions(generator!, { ...input, maxSpanLength: 4000 })
   const tasks: Task[] = []
   const resumed = new Map<string, Task>()
   let usage: ModelUsage | undefined
   let index = 0
   for (const window of dialogueWindows(input.sources)) {
     let result: ExtractionResult
-    try {
-      result = await extractConclusions(generator, {
+    const windowInput = {
         ...input,
         sources: window.sources,
         maxSpanLength: 4000,
-        requestKey: input.requestKey + ':window:' + index++,
-      })
+        requestKey: input.requestKey + ':window:' + index,
+    }
+    if (extractWindow) result=await extractWindow(windowInput,index++)
+    else try {
+      index++
+      result=await extractConclusions(generator!,windowInput)
     } catch {
       return { ok: false, code: 'provider_result_unknown', retryable: false, usage }
     }
@@ -78,7 +84,7 @@ export async function extractDialogueConclusions(
     usage = usageTotal(usage, result.usage)
     if (!result.ok) {
       // A partial billed request cannot restart as a fresh, free budget refusal.
-      if (priorUsage && (result.code === 'budget_exceeded' || result.code === 'budget_unavailable'))
+      if (!extractWindow && priorUsage && (result.code === 'budget_exceeded' || result.code === 'budget_unavailable'))
         return {
           ok: false,
           code: 'provider_result_unknown',
@@ -95,11 +101,13 @@ export async function extractDialogueConclusions(
       })
       const prior = task.task_id && resumed.get(task.task_id)
       if (prior) {
+        origins?.get(prior)?.push(index-1)
         prior.spans.push(...spans)
         prior.conclusions.push(...task.conclusions)
         prior.rejections.push(...task.rejections)
       } else {
         const entry = { ...task, spans }
+        origins?.set(entry,[index-1])
         tasks.push(entry)
         if (task.task_id) resumed.set(task.task_id, entry)
       }

@@ -9,6 +9,9 @@ export interface JsonColumnPolicy {
  * its gates and the exact reviewed catalog definition hash.
  */
 export const JSON_COLUMN_POLICY:Readonly<Record<string,JsonColumnPolicy>>={
+ 'memory_curation_calls.response':{kind:'knowledge',action:'migrate-as-is'},
+ 'memory_curation_calls.usage':{kind:'audit',action:'migrate-as-is'},
+ 'memory_curation_calls.bindings':{kind:'reference',action:'migrate-as-is'},
  'memory_team_semantic_publications.legacy_relation_audit':{kind:'audit',action:'migrate-as-is'},
  'memory_team_semantic_publications.structured_identity':{kind:'reference',action:'migrate-as-is'},
  'memory_team_semantic_publications.native_publication_proof':{kind:'reference',action:'migrate-as-is'},

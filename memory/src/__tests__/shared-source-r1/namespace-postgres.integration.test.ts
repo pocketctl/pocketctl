@@ -1,4 +1,5 @@
-import {beginFreshInputFixture,installRetainedInputStartFixture} from './input-start-fixture.js'
+import {resolve} from 'node:path'
+import {pathToFileURL} from 'node:url'
 import pg from 'pg'
 import {afterAll,beforeAll,describe,expect,test} from 'vitest'
 import {inventoryMemory} from '../../migrations/governance-v2/inventory.js'
@@ -13,27 +14,23 @@ import {JSON_COLUMN_POLICY} from '../../migrations/shared-source/json-reference-
 const url=process.env.SHARED_R1_NAMESPACE_TEST_DATABASE_URL
 const suite=url?describe:describe.skip
 suite('shared DB namespace, migrator and least-privilege runtimes',()=>{
- let pool:pg.Pool,inputFoundation:object
+ const relay=(module:string)=>import(pathToFileURL(resolve('../relay/dist/'+module+'.js')).href)
+ const publicTablesSql="SELECT relname FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r' ORDER BY relname"
+ let pool:pg.Pool,originalPublicTables:string[]
  const roles={memoryRole:'shared_r1_memory',relayRole:'shared_r1_relay',migratorRole:'shared_r1_migrator'}
  beforeAll(async()=>{
   if(!url || !/(^|_)test$/.test(new URL(url).pathname.slice(1)))throw Error('isolated_test_required')
   pool=new pg.Pool({connectionString:url})
   await pool.query(`DROP SCHEMA IF EXISTS memory CASCADE; DROP SCHEMA IF EXISTS shared CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public;
-   CREATE EXTENSION pg_trgm WITH SCHEMA public; CREATE TABLE public.events(id bigint PRIMARY KEY,payload jsonb); CREATE TABLE public.knowledge_claims(fake text);
+   CREATE EXTENSION pg_trgm WITH SCHEMA public; CREATE TABLE public.knowledge_claims(fake text);
    DO $$ BEGIN
    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_r1_memory') THEN CREATE ROLE shared_r1_memory LOGIN PASSWORD 'only-test'; END IF;
    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_r1_relay') THEN CREATE ROLE shared_r1_relay LOGIN PASSWORD 'only-test'; END IF;
    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shared_r1_migrator') THEN CREATE ROLE shared_r1_migrator NOLOGIN; END IF;
    END $$;`)
-  // The shared contract installs Session subscription triggers on Relay's
-  // installations and grants checkpoint updates to the restricted definer.
-  await pool.query(`CREATE TABLE public.users(id integer PRIMARY KEY);
-   CREATE TABLE public.extension_installations(installation_id uuid PRIMARY KEY,provider_id text,status text,
-   owner_user_id int,owner_scope_kind text,owner_scope_id uuid,subscriptions text[],config_version bigint,
-   start_policy text NOT NULL DEFAULT 'retained_history',start_feed_id bigint NOT NULL DEFAULT 0);
-   CREATE TABLE public.extension_checkpoints(installation_id uuid PRIMARY KEY,snapshot_required_at timestamptz,
-   lease_epoch bigint,lease_token_hash text,lease_expires_at timestamptz,updated_at timestamptz)`)
-  inputFoundation=await beginFreshInputFixture(pool)
+  // Verify namespace preservation against the actual Relay source schema.
+  await (await relay('db')).initDB(pool)
+  originalPublicTables=(await pool.query(publicTablesSql)).rows.map(r=>r.relname)
  },60000)
  afterAll(async()=>{await pool?.end()})
  test('fresh target and repeat apply stay inside memory; functions and FK targets do not fall back to public',async()=>{
@@ -45,14 +42,15 @@ suite('shared DB namespace, migrator and least-privilege runtimes',()=>{
   const jsonColumns=(await pool.query(`SELECT c.relname||'.'||a.attname AS column_key FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
    WHERE c.relnamespace='memory'::regnamespace AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped AND a.atttypid IN('json'::regtype,'jsonb'::regtype) ORDER BY 1`)).rows.map(r=>r.column_key)
   expect(jsonColumns).toEqual(Object.keys(JSON_COLUMN_POLICY).sort())
-  const publicTables=(await pool.query("SELECT relname FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r' ORDER BY relname")).rows
-  expect(publicTables.map(row=>row.relname)).toEqual(['events','extension_checkpoints','extension_installations','knowledge_claims','users'])
+  const publicTables=(await pool.query(publicTablesSql)).rows
+  expect(publicTables.map(row=>row.relname)).toEqual(originalPublicTables)
   expect((await pool.query("SELECT count(*)::int n FROM pg_proc WHERE pronamespace='memory'::regnamespace AND NOT COALESCE(proconfig @> ARRAY['search_path=pg_catalog, memory, shared']::text[],false)")).rows[0].n).toBe(0)
   expect((await pool.query("SELECT count(*)::int n FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_class f ON f.oid=c.confrelid WHERE r.relnamespace='memory'::regnamespace AND f.relnamespace='public'::regnamespace")).rows[0].n).toBe(0)
  },60000)
  test('shared target refuses default public runtime/migrator namespace before creating a public ledger',async()=>{
   await applySharedSourceContract(pool)
-  await expect(prepareMemoryStartup(pool,{})).rejects.toThrow('shared_source_requires_memory_namespace')
+  await expect(prepareMemoryStartup(pool,{databaseNamespace:'public'})).rejects.toThrow('native_memory_database_required')
+  await expect(prepareMemoryStartup(pool,{})).rejects.toThrow('unsafe_shared_runtime')
   await expect(applyMemorySchema(pool)).rejects.toThrow('shared_source_requires_memory_namespace')
   expect((await pool.query("SELECT to_regclass('public.memory_schema_migrations') AS ledger")).rows[0].ledger).toBeNull()
  })
@@ -66,8 +64,9 @@ suite('shared DB namespace, migrator and least-privilege runtimes',()=>{
   expect(inventory).toMatchObject({namespace:'memory',schemaVersion:Math.max(...MEMORY_MIGRATIONS.map(m=>m.version)),compatible:true})
  })
  test('provision isolates runtime roles, locks default privileges and rejects inherited owner escalation',async()=>{
-  await installRetainedInputStartFixture(pool,'retained_history',inputFoundation)
   await applySharedSourceContract(pool)
+  await (await relay('shared-source/capture')).applyRelaySourceCapture(pool)
+  await (await relay('shared-source/team-capture')).applyRelayTeamSourceCapture(pool)
   await pool.query('GRANT shared_r1_memory TO shared_r1_relay')
   await expect(provisionSharedDatabase(pool,roles)).rejects.toThrow('runtime_role_escalation')
   await pool.query('REVOKE shared_r1_memory FROM shared_r1_relay')

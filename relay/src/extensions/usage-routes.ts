@@ -166,7 +166,20 @@ export function registerUsageRoutes(app: FastifyInstance, deps: UsageRouteDeps):
     for (const [operation, count] of insertedByOperation) {
       extensionUsageIngested.inc({ operation, result: 'ingested' }, count)
     }
-    return { installation_id: installationId, ingested: result.rowCount ?? 0 }
+    const ingested=result.rowCount??0
+    if(ingested<parsed.length) {
+      // A fresh statement sees rows inserted by a concurrent transaction that
+      // won the unique key. Compare every immutable field before issuing ACKs.
+      const verified=await deps.pool.query(`SELECT f.usage_id FROM jsonb_to_recordset($2::jsonb)
+        AS f(usage_id text,operation text,model text,input_tokens bigint,output_tokens bigint,
+             embedding_tokens bigint,cached_tokens bigint,cost_micros bigint,occurred_at timestamptz)
+        JOIN extension_provider_usage_facts u ON u.installation_id=$1 AND u.usage_id=f.usage_id
+          AND (u.operation,u.model,u.input_tokens,u.output_tokens,u.embedding_tokens,u.cached_tokens,u.cost_micros,u.occurred_at)
+          IS NOT DISTINCT FROM (f.operation,NULLIF(f.model,''),f.input_tokens,f.output_tokens,f.embedding_tokens,f.cached_tokens,f.cost_micros,f.occurred_at)`,
+        [installationId,JSON.stringify(parsed)])
+      if(verified.rowCount!==parsed.length) return fail(reply,new ExtensionApiError('revision_conflict','usage identity does not match the recorded fact'))
+    }
+    return {installation_id:installationId,ingested,acknowledged_usage_ids:parsed.map(f=>f.usage_id)}
   })
 
   // User summary: aggregates per installation and operation. No row-level

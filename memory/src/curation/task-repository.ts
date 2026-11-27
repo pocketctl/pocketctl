@@ -37,7 +37,7 @@ export async function stagePreparedLifecycleTurn(client:Pick<pg.PoolClient,'quer
  }
  const changed=(await client.query(`INSERT INTO memory_task_bundles(installation_id,session_id,task_key,source_digest,watermark)
  VALUES($1,$2,$3,$4,$5) ON CONFLICT(installation_id,session_id,task_key) DO UPDATE SET
- source_digest=EXCLUDED.source_digest,watermark=EXCLUDED.watermark,revision=memory_task_bundles.revision+1,state='pending',updated_at=clock_timestamp()
+ source_digest=EXCLUDED.source_digest,watermark=EXCLUDED.watermark,revision=memory_task_bundles.revision+1,state='pending',updated_at=clock_timestamp(),intake_received_at=clock_timestamp()
  WHERE memory_task_bundles.source_digest<>EXCLUDED.source_digest AND memory_task_bundles.body_state='present'
  RETURNING bundle_id::text,revision`,[input.installationId,input.sessionId,dialogue?`dialogue:${input.turnId}`:`source:${input.turnId}`,digest,input.watermark])).rows[0]
  if(!changed)return
@@ -91,10 +91,12 @@ export async function refreshLifecycleProcessingReceipt(client:Pick<pg.PoolClien
   count(*) FILTER(WHERE NOT EXISTS(SELECT 1 FROM memory_curation_decisions d WHERE d.installation_id=c.installation_id AND d.candidate_id=c.candidate_id AND d.state IN('committed','skipped') AND d.action<>'defer'))::int AS unresolved
   FROM memory_candidates c JOIN memory_task_bundles b USING(installation_id,bundle_id)
   WHERE b.installation_id=$1 AND b.parent_bundle_id=$2 AND b.parent_revision=$3 AND c.bundle_revision=b.revision`,[input.installationId,input.parentBundleId,parent.revision])).rows[0]
- const enabled=(await client.query(`SELECT 1 FROM memory_curation_runs r JOIN memory_curation_policies p USING(installation_id)
+ const enabled=(await client.query(`SELECT r.checkpoint_protocol FROM memory_curation_runs r JOIN memory_curation_policies p USING(installation_id)
   WHERE r.installation_id=$1 AND r.bundle_id=$2 AND r.bundle_revision=$3 AND r.source_digest=$4 AND r.state='completed'
-   AND r.mode='enabled' AND p.mode='enabled' AND r.policy_revision=p.revision LIMIT 1`,[input.installationId,input.parentBundleId,parent.revision,parent.source_digest])).rowCount
- const complete=!!enabled&&!source.unknown&&['completed','skipped_unresolved'].includes(parent.state)&&state.unresolved===0
+   AND r.mode='enabled' AND p.mode='enabled' AND r.policy_revision=p.revision LIMIT 1`,[input.installationId,input.parentBundleId,parent.revision,parent.source_digest])).rows[0]
+ // A terminal binding or validation gap cannot certify a no-conclusion outcome.
+ if(!state.candidates && (parent.reason_code==='task_binding_changed'||parent.state==='skipped_unresolved' && enabled?.checkpoint_protocol===1))return
+ const complete=!!enabled&&!source.unknown&&!(enabled.checkpoint_protocol===1&&parent.state==='skipped_unresolved')&&['completed','skipped_unresolved'].includes(parent.state)&&state.unresolved===0
  const disposition=source.unknown?'provenance_unknown':state.candidates?'concluded':'no_durable_conclusion'
  await client.query(`INSERT INTO memory_source_processing_receipts(installation_id,session_id,turn_id,source_digest,policy_version,disposition,allowed_count,excluded_count,complete)
   VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(installation_id,turn_id,source_digest,policy_version) DO UPDATE SET

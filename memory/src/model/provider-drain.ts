@@ -30,9 +30,9 @@ import type {EmbeddingProvider} from '../ports/embedding-provider.js'
  * an abort race to a caller. No request or model result is retained here. */
 export function drainTextProvider(provider:TextGenerator|undefined,drain:ProviderDrain):TextGenerator|undefined{
  if(!provider)return undefined
- return {generateJson:input=>drain.run(()=>provider.generateJson(input))}
+ return {budgetedDispatch:provider.budgetedDispatch,generateJson:input=>drain.run(()=>provider.generateJson(input))}
 }
 export function drainEmbeddingProvider(provider:EmbeddingProvider|undefined,drain:ProviderDrain):EmbeddingProvider|undefined{
  if(!provider)return undefined
- return {dimensions:provider.dimensions,embed:input=>drain.run(()=>provider.embed(input))}
+ return {budgetedDispatch:provider.budgetedDispatch,dimensions:provider.dimensions,embed:input=>drain.run(()=>provider.embed(input))}
 }

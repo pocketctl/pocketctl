@@ -6,6 +6,7 @@ import {retainInboxInstallation,type InboxRetentionSettings} from '../inbox/rete
 import {previewSourceRetention,previewLifecycleSourceRetention,reclaimSourceTurn,type SourceRetentionSettings,type RetentionPreviewCursor} from '../retention/source.js'
 import {retainMigrationChanges,retainMigrationHistory} from '../retention/migrations.js'
 import {retainInventoryReports} from '../retention/reports.js'
+import {failureRetentionSettings,removeExpiredCompletedJobs,retainFailureBatch,type FailureCursor,type FailureRetentionSettings} from './dead-letters.js'
 import {dailyMaintenanceSchedule,dailyMaintenanceSlot,nextDailyMaintenanceAt} from './daily.js'
 
 type Counts = Record<string,number>
@@ -14,10 +15,11 @@ const add = (counts:Counts, delta:Counts) => {for(const [key,n] of Object.entrie
  * Slow/locked installations yield to others. Provider delivery is a durable,
  * revisioned snapshot, retried independently of destructive work. */
 export function createDailyMaintenanceWorker(options:{
- pool:pg.Pool;signal:AbortSignal;inbox:InboxRetentionSettings;data:SourceRetentionSettings
+ pool:pg.Pool;signal:AbortSignal;failures?:FailureRetentionSettings;inbox:InboxRetentionSettings;data:SourceRetentionSettings
  report(input:Record<string,unknown>):Promise<void>
  onResult?(input:Record<string,unknown>):void;onError?(error:unknown):void
 }) {
+ const failures=options.failures??failureRetentionSettings()
  let stopped=false,timer:ReturnType<typeof setTimeout>|undefined,inFlight:Promise<boolean>|undefined
  async function reportPending() {
   const rows=await options.pool.query(`SELECT r.*,g.state global_state,g.last_error_code global_error,g.completed_at global_completed_at FROM memory_maintenance_runs r
@@ -69,7 +71,7 @@ export function createDailyMaintenanceWorker(options:{
      AND state='running' AND next_attempt_at<=NOW() FOR UPDATE SKIP LOCKED`,[candidate.scheduled_at,candidate.scope_key])).rows[0]:undefined
     if(row&&row.stage===candidate.stage&&JSON.stringify(row.cursor)===JSON.stringify(candidate.cursor)){
      const bound=createTransactionBoundPool(client),delta:Counts={},counts:Counts={...row.counts}
-     let more=false,busy=false,cursor:RetentionPreviewCursor&{lifecycleTurnId?:string}={...row.cursor}
+     let more=false,busy=false,cursor:RetentionPreviewCursor&{lifecycleTurnId?:string;failureReview?:FailureCursor}={...row.cursor}
      if(row.installation_id){
       if(row.stage===0){delta.candidates_expired=await expirePendingCandidates(bound,500,row.installation_id);more=delta.candidates_expired===500}
       else if(row.stage===1){
@@ -104,9 +106,9 @@ export function createDailyMaintenanceWorker(options:{
        // their age or a plain http_error/aborted code cannot authorize deletion.
        delta.extraction_runs=0
        delta.superseded_consolidation_jobs=await closeSupersededConsolidationJobs(client)
+       delta.jobs=await removeExpiredCompletedJobs(client)
        // Persistent expiry truth remains checked by readers/writers at use time.
        for(const [name,sql] of Object.entries({
-        jobs:`DELETE FROM memory_jobs WHERE job_id IN(SELECT job_id FROM memory_jobs WHERE (state='completed' AND completed_at<NOW()-INTERVAL '24 hours') OR (state='dead' AND completed_at<NOW()-INTERVAL '7 days') LIMIT 500)`,
         feedback:`UPDATE memory_feedback SET details='{}',reason_code=NULL WHERE ctid IN(SELECT ctid FROM memory_feedback WHERE created_at<NOW()-INTERVAL '30 days' AND (details<>'{}'::jsonb OR reason_code IS NOT NULL) LIMIT 500)`,
         maintenance_history:`DELETE FROM memory_maintenance_runs WHERE (scheduled_at,scope_key) IN(SELECT scheduled_at,scope_key FROM memory_maintenance_runs WHERE state='completed' AND scheduled_at<NOW()-INTERVAL '90 days' LIMIT 500)`,
         idempotency:`DELETE FROM memory_idempotency_keys WHERE ctid IN(SELECT ctid FROM memory_idempotency_keys WHERE expires_at<=NOW() LIMIT 500)`
@@ -114,8 +116,15 @@ export function createDailyMaintenanceWorker(options:{
        more=Object.values(delta).some(n=>n===500)
       }
      }
+     if(row.stage===3&&!more&&!busy) {
+      const review=await retainFailureBatch(client,row.installation_id,failures,cursor.failureReview)
+      more=review.more;cursor.failureReview=review.after
+      add(delta,review.counts)
+      counts.failure_oldest_eligible_seconds=Math.max(counts.failure_oldest_eligible_seconds??0,review.oldest)
+      counts.failure_last_success_epoch=Math.floor(Date.now()/1000)
+     }
      add(counts,delta)
-     const stage=row.stage+(more||busy?0:1),completed=stage>=(row.installation_id?3:4)
+     const stage=row.stage+(more||busy?0:1),completed=stage>=4
      await client.query(`UPDATE memory_maintenance_runs SET stage=$3,state=$4,counts=$5,cursor=$6,
       revision=revision+1,last_error_code=NULL,next_attempt_at=clock_timestamp()+($7::int*INTERVAL '1 second'),
       completed_at=CASE WHEN $4='completed' THEN NOW() ELSE NULL END WHERE scheduled_at=$1 AND scope_key=$2`,

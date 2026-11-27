@@ -80,26 +80,3 @@ export async function recordGenerationProviderEffect(pool:pg.Pool,input:{
   await client.query('COMMIT')
  }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
 }
-
-/** Curation's source can be revoked after HTTP returns. Its existing run
- * owns content-free token totals even when no candidate/receipt may commit. */
-export async function recordCurationProviderUsage(pool:pg.Pool,input:{installationId:string;runId:string;inputTokens:number;outputTokens:number;model?:string;costMicros?:number;responseClaim:{jobId:string;epoch:number;uncertain:boolean}}):Promise<void>{
- if(sourceConnectionKey(pool)!==pool)throw Error('provider_effect_requires_physical_pool')
- if(![input.inputTokens,input.outputTokens,input.costMicros??0].every(n=>Number.isSafeInteger(n)&&n>=0)||(input.model!==undefined&&(typeof input.model!=='string'||input.model.length<1||input.model.length>200)))throw Error('invalid_provider_effect_usage')
- const client=await pool.connect()
- try{
-  await client.query('BEGIN');await client.query("SET LOCAL statement_timeout='5s';SET LOCAL lock_timeout='1s'")
-  await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[input.installationId])
-  if(!(await client.query('SELECT installation_id FROM memory_installations WHERE installation_id=$1 AND local_status NOT IN(\'purging\',\'purged\') FOR KEY SHARE',[input.installationId])).rowCount){await client.query('COMMIT');return}
-  const effect=await client.query(`UPDATE memory_curation_runs SET input_tokens=GREATEST(input_tokens,$3::bigint),
-   output_tokens=GREATEST(output_tokens,$4::bigint),
-   error_code=CASE WHEN state='running' AND claimed_by=$5 AND claim_epoch=$6
-    THEN CASE WHEN $7::boolean THEN 'provider_response_uncertain' ELSE 'provider_response_received' END ELSE error_code END
-   WHERE installation_id=$1 AND run_id=$2 RETURNING run_id`,
-   [input.installationId,input.runId,input.inputTokens,input.outputTokens,input.responseClaim.jobId,input.responseClaim.epoch,input.responseClaim.uncertain])
-  if(effect.rowCount&&input.model)await client.query(`INSERT INTO memory_usage_outbox(installation_id,usage_id,operation,model,input_tokens,output_tokens,embedding_tokens,cached_tokens,cost_micros,occurred_at)
-   VALUES($1,$2,'curation',$3,$4,$5,0,0,$6,clock_timestamp()) ON CONFLICT(installation_id,usage_id) DO NOTHING`,
-   [input.installationId,'curation:'+input.runId,input.model,input.inputTokens,input.outputTokens,input.costMicros??0])
-  await client.query('COMMIT')
- }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
-}

@@ -1,3 +1,5 @@
+import {canIsolateStage,settleNativeStage} from './stage-recovery.js'
+import {sourcePoolContext} from '../sources/pool-context.js'
 import {jobCapacityClassSql, type JobCapacity} from './scheduling.js'
 import { createHash, randomUUID } from 'crypto'
 import type pg from 'pg'
@@ -51,6 +53,7 @@ function toClaim(row: JobRow): JobClaim {
  * finalize work a new worker already owns.
  */
 export function createJobRepository(pool: pg.Pool, options: { compileBatchIntervalMs?: number; nativeSourcesOnly?:boolean } = {}) {
+  const isolatedNative=options.nativeSourcesOnly&&sourcePoolContext(pool).namespace==='memory'
   const compileBatchMs = options.compileBatchIntervalMs ?? 0
   if (!Number.isSafeInteger(compileBatchMs) || compileBatchMs < 0 || compileBatchMs > 3_600_000) {
     throw new Error('invalid_compile_batch_interval')
@@ -101,7 +104,7 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
       const client=await pool.connect()
       try{
         await client.query('BEGIN')
-        await client.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0))")
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended('memory-jobs:claim',0)), set_config('pocketctl.failure_isolation_worker','1',true)")
         await client.query(`UPDATE memory_jobs SET state='pending',claimed_by=NULL,claim_expires_at=NULL
           WHERE state='running' AND claim_expires_at<=clock_timestamp()`)
         const capacityClass = input.capacity ? jobCapacityClassSql : "'general'::text"
@@ -116,12 +119,17 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
         kind AS(SELECT job_type,count(*)::int n FROM live GROUP BY job_type),
         lanes AS(SELECT lane,count(*)::int n FROM live GROUP BY lane),
         eligible AS(
-          SELECT j.job_id,j.installation_id,j.job_type,j.priority,j.available_at,j.created_at,j.lane,
+          SELECT j.job_id,j.installation_id,j.job_type,j.available_at,j.created_at,j.lane,
+            CASE WHEN j.repair AND f.job_type IS NOT NULL THEN COALESCE(
+              min(j.priority) FILTER (WHERE NOT j.repair) OVER (PARTITION BY j.job_type),j.priority)
+              ELSE j.priority END AS priority,
+            CASE WHEN f.job_type IS NULL OR j.repair=(f.fresh_claims=4) THEN 0 ELSE 1 END AS repair_rank,
             COALESCE(t.n,0) AS active_tenant,
             $5::int-COALESCE(t.n,0) AS tenant_room,
             COALESCE(($6::jsonb->>j.job_type)::int,2147483647)-COALESCE(k.n,0) AS type_room,
             COALESCE(($7::jsonb->>j.lane)::int,2147483647)-COALESCE(l.n,0) AS lane_room
-          FROM (SELECT job_id,installation_id,job_type,priority,available_at,created_at,${capacityClass} AS lane
+          FROM (SELECT job_id,installation_id,job_type,priority,available_at,created_at,${capacityClass} AS lane,
+                       payload @> '{"failure_recovery":true}'::jsonb AS repair
                 FROM memory_jobs CROSS JOIN batch WHERE state='pending' AND available_at<=statement_timestamp()
                   ${options.nativeSourcesOnly?`AND job_type NOT IN('snapshot_reconcile','project_feed')
                     AND (job_type<>'project_shared_source' OR payload#>>'{root,kind}' IN('team_collaboration','team_delivery'))
@@ -135,26 +143,27 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
                     AND (jsonb_typeof(payload->'compile_last_claim_ms') IS DISTINCT FROM 'number'
                       OR payload->'compile_last_claim_ms'<to_jsonb(batch.start_ms))
                   ))) j
+          LEFT JOIN memory_job_dispatch_fairness f USING(job_type)
           LEFT JOIN tenant t ON t.installation_id IS NOT DISTINCT FROM j.installation_id
           LEFT JOIN kind k ON k.job_type=j.job_type
           LEFT JOIN lanes l ON l.lane=j.lane
         ), tenant_order AS(
-          SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,available_at,created_at,job_id) AS tenant_turn
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,repair_rank,available_at,created_at,job_id) AS tenant_turn
           FROM eligible WHERE tenant_room>0 AND type_room>0 AND lane_room>0
         ), type_order AS(
-          SELECT *,ROW_NUMBER() OVER(PARTITION BY job_type ORDER BY
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY job_type ORDER BY repair_rank,
             CASE WHEN job_type='compile_episode' AND $8>0 THEN available_at END,
             priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS type_rank
           FROM tenant_order
         ), lane_order AS(
-          SELECT *,ROW_NUMBER() OVER(PARTITION BY lane ORDER BY priority,active_tenant,tenant_turn,available_at,created_at,job_id) AS lane_rank
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY lane ORDER BY priority,repair_rank,active_tenant,tenant_turn,available_at,created_at,job_id) AS lane_rank
           FROM type_order WHERE type_rank<=type_room
         ), ranked AS(
-          SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,available_at,created_at,job_id) AS tenant_rank
+          SELECT *,ROW_NUMBER() OVER(PARTITION BY installation_id ORDER BY priority,repair_rank,available_at,created_at,job_id) AS tenant_rank
           FROM lane_order WHERE lane_rank<=lane_room
         ), picked AS(SELECT j.job_id,j.last_error_code FROM memory_jobs j JOIN ranked r ON r.job_id=j.job_id
           WHERE r.tenant_rank<=r.tenant_room
-          ORDER BY r.priority,r.active_tenant,r.tenant_rank,r.available_at,r.created_at,j.job_id
+          ORDER BY r.priority,r.repair_rank,r.active_tenant,r.tenant_rank,r.available_at,r.created_at,j.job_id
           FOR UPDATE OF j SKIP LOCKED
           LIMIT LEAST($3::int,GREATEST(0,$4::int-(SELECT count(*)::int FROM live))))
         UPDATE memory_jobs j SET state='running',claimed_by=$1,claim_epoch=j.claim_epoch+1,
@@ -165,6 +174,13 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
         FROM picked WHERE j.job_id=picked.job_id
         RETURNING j.job_id,j.installation_id,j.job_type,j.idempotency_key,j.payload,j.attempts,j.claim_epoch,j.priority,picked.last_error_code`,
           [input.workerId,input.leaseMs,input.limit,globalLimit,tenantLimit,JSON.stringify(limits),JSON.stringify(input.capacity??{}),compileBatchMs])
+        const admitted=result.rows
+        if(admitted.length)await client.query(`UPDATE memory_job_dispatch_fairness f SET fresh_claims=credit.next
+          FROM (SELECT kind, CASE WHEN bool_or(repair) THEN 0 ELSE LEAST(4,previous.fresh_claims+count(*)) END AS next
+            FROM unnest($1::text[],$2::boolean[]) batch(kind,repair) JOIN memory_job_dispatch_fairness previous
+              ON previous.job_type=batch.kind GROUP BY kind,previous.fresh_claims) credit
+          WHERE f.job_type=credit.kind AND f.fresh_claims<>credit.next`,
+          [admitted.map(row=>row.job_type),admitted.map(row=>row.payload.failure_recovery===true)])
         await client.query('COMMIT');return result.rows.map(toClaim)
       }catch(error){await client.query('ROLLBACK').catch(()=>undefined);throw error}finally{client.release()}
     },
@@ -223,13 +239,19 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
     /** Budget waits undo only this claim's attempt, preserving earlier failures. */
     async deferJob(input: {
       jobId: string; claimedBy: string; claimEpoch: number
-      reason: JobDeferReason; availableAt: Date
+      reason: JobDeferReason; availableAt: Date; verifiedGrantLock?:boolean
     }): Promise<boolean> {
       if (!Number.isFinite(input.availableAt.getTime())) throw new Error('invalid_defer_clock')
       const client=await pool.connect()
       try{
         await client.query('BEGIN')
-        await client.query("SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3 AND state='running' FOR UPDATE",[input.jobId,input.claimedBy,input.claimEpoch])
+        const claimed=(await client.query("SELECT * FROM memory_jobs WHERE job_id=$1 AND claimed_by=$2 AND claim_epoch=$3 AND state='running' FOR UPDATE",[input.jobId,input.claimedBy,input.claimEpoch])).rows[0]
+        if(isolatedNative&&claimed&&canIsolateStage(claimed.job_type)&&input.reason==='source_not_ready'){
+          const live=await client.query('SELECT 1 FROM memory_jobs WHERE job_id=$1 AND claim_expires_at>clock_timestamp()',[input.jobId])
+          if(live.rowCount&&await settleNativeStage(client,claimed,input.verifiedGrantLock?'grant_lock_conflict':input.reason,false,input.availableAt)){
+            await client.query('COMMIT');return true
+          }
+        }
         const result = await client.query(`
         UPDATE memory_jobs SET state='pending',
           attempts=CASE WHEN last_error_code='rerun_required' THEN 0 ELSE GREATEST(0,attempts-1) END,
@@ -276,8 +298,8 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
             await client.query(`SELECT 1 FROM memory_skill_task_runs WHERE installation_id=$1 AND task_id::text=$2 AND generation::text=$3 FOR UPDATE`,
               [skillJob.installation_id, skillJob.payload.task_id, String(skillJob.payload.generation)])
           }
-          const claimed = await client.query<{ attempts: number; last_error_code: string | null; job_type: JobType }>(`
-            SELECT attempts, last_error_code, job_type FROM memory_jobs
+          const claimed = await client.query(`
+            SELECT * FROM memory_jobs
             WHERE job_id = $1 AND claimed_by = $2 AND claim_epoch = $3 AND state = 'running'
             FOR UPDATE
           `, [input.jobId, input.claimedBy, input.claimEpoch])
@@ -286,6 +308,10 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
             AND claim_epoch=$3 AND state='running' AND claim_expires_at>clock_timestamp()`,
             [input.jobId,input.claimedBy,input.claimEpoch])
           if (!row||!live.rowCount) {
+            await client.query('COMMIT')
+            return false
+          }
+          if(isolatedNative&&canIsolateStage(row.job_type)&&await settleNativeStage(client,row,input.errorCode,input.terminal)){
             await client.query('COMMIT')
             return false
           }
@@ -325,10 +351,11 @@ export function createJobRepository(pool: pg.Pool, options: { compileBatchInterv
                 .digest()
               await client.query(`
                 INSERT INTO memory_dead_letters
-                  (job_id, installation_id, job_type, attempts, error_code, payload_hash)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (job_id) DO NOTHING
-              `, [input.jobId, dead.installation_id, dead.job_type, attempts, input.errorCode, digest])
+                  (job_id, installation_id, job_type, attempts, error_code, payload_hash, claim_epoch)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (job_id) DO UPDATE SET attempts=EXCLUDED.attempts,error_code=EXCLUDED.error_code,
+                  payload_hash=EXCLUDED.payload_hash,claim_epoch=EXCLUDED.claim_epoch,dead_at=EXCLUDED.dead_at
+              `, [input.jobId, dead.installation_id, dead.job_type, attempts, input.errorCode, digest, input.claimEpoch])
               if (dead.job_type === 'parse_code_snapshot'
                 && typeof dead.payload?.snapshot_id === 'string') {
                 await client.query(`

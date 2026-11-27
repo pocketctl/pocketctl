@@ -1,3 +1,4 @@
+import {createOpenAICompatibleTextGenerator} from '../model/openai-compatible-text.js'
 import { createHash } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
 import type { ModelJsonResult, TextGenerator } from '../ports/text-generator.js'
@@ -26,6 +27,16 @@ describe('timeout-only text fallback', () => {
 
     expect(result).toEqual({ ...success, timeoutFallback: { primary: { code: 'http_error', detail: 'timeout' } } })
     expect(fallback.generateJson).toHaveBeenCalledTimes(1)
+  })
+
+  test('a single-attempt curation window makes exactly one HTTP request after a provider timeout',async()=>{
+    const fetch=vi.fn(async()=>new Response('{}',{status:408}))
+    const primary=createOpenAICompatibleTextGenerator({baseUrl:'https://model.invalid',apiKey:'test',model:'stub',timeoutMs:1000,fetchImpl:fetch,sleep:async()=>{}})
+    const fallback={generateJson:vi.fn(async()=>success)} as TextGenerator
+    const response=await withTimeoutFallback(primary,fallback).generateJson({...input({}),singleAttempt:true})
+    expect(response).toMatchObject({ok:false,code:'http_error',detail:'timeout'})
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fallback.generateJson).not.toHaveBeenCalled()
   })
 
   test.each([

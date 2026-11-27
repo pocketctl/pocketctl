@@ -84,7 +84,7 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
    REVOKE ALL ON ALL TABLES IN SCHEMA memory FROM PUBLIC,${relay};
    REVOKE ALL ON ALL SEQUENCES IN SCHEMA memory FROM PUBLIC,${relay};
    REVOKE ALL ON ALL FUNCTIONS IN SCHEMA memory FROM PUBLIC,${relay};
-   GRANT EXECUTE ON FUNCTION shared.reclaim_turn_dialogues(),shared.uses_turn_dialogue(UUID),shared.dispatch_turn_dialogues(),shared.memory_dialogue_context(UUID,TEXT),shared.memory_dialogue_members(UUID,TEXT,TEXT) TO ${memory};
+   GRANT EXECUTE ON FUNCTION shared.memory_team_stage_result(uuid,uuid),shared.memory_dialogue_version(JSONB,TEXT,TEXT),shared.reclaim_turn_dialogues(),shared.uses_turn_dialogue(UUID),shared.dispatch_turn_dialogues(),shared.memory_dialogue_context(UUID,TEXT),shared.memory_dialogue_members(UUID,TEXT,TEXT) TO ${memory};
    GRANT EXECUTE ON FUNCTION shared.mark_memory_source_dirty(TEXT,TEXT),shared.memory_source_processing_blocks_purge(INT,TEXT[]) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.assert_session_transport_consumer_policy(),shared.session_transport_consumer_policy(BIGINT),shared.record_session_transport_body_gap(BIGINT) TO ${relay};
    GRANT EXECUTE ON FUNCTION shared.acquire_memory_source_processing_pin(UUID,JSONB,TEXT,JSONB,BOOLEAN),shared.release_memory_source_processing_pins(UUID),shared.guard_memory_source_processing_pins(UUID,INT) TO ${memory};
@@ -304,6 +304,13 @@ export async function assertSharedRuntimeContract(pool:pg.Pool,launch:{sharedSou
     AND t.tgname=expected.trigger_name AND t.tgtype=expected.trigger_type
     AND t.tgfoid=to_regprocedure('shared.capture_memory_feature_controls()') AND t.tgenabled IN('O','A'))) AS ready`)).rows[0].ready
   if(!localControls)throw Error('shared_local_control_capture_missing')
+  const protocolInstalled=(await client.query(`SELECT EXISTS(SELECT 1 FROM pg_trigger t
+    WHERE t.tgrelid=to_regclass('memory.memory_jobs') AND t.tgname='memory_job_protocol'
+      AND t.tgfoid=to_regprocedure('shared.require_memory_job_protocol()') AND t.tgtype=19 AND t.tgenabled IN('O','A'))
+    AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['memory.memory_dialogue_compile_receipts','memory.memory_curation_calls',
+      'memory.memory_usage_delivery_schedule','memory.memory_stage_dispositions','memory.memory_index_calls','memory.memory_job_failures']) AS required(relation)
+      WHERE to_regclass(relation) IS NULL) AS ready`)).rows[0].ready
+  if(!protocolInstalled)throw Error('shared_failure_isolation_protocol_missing')
   const distributionFence=(await client.query("SELECT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('shared.memory_source_distributions') AND t.tgname='memory_source_distribution_commit' AND t.tgfoid=to_regprocedure('shared.check_memory_source_distribution_commit()') AND t.tgtype=21 AND t.tgdeferrable AND t.tginitdeferred AND t.tgenabled IN('O','A')) AS ready")).rows[0].ready
   if(!distributionFence)throw Error('shared_source_distribution_fence_missing')
   const bootstrapFence=(await client.query("SELECT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('shared.memory_source_control_progress') AND t.tgname='memory_control_bootstrap_commit' AND t.tgfoid=to_regprocedure('shared.check_memory_control_bootstrap_commit()') AND t.tgtype=21 AND t.tgdeferrable AND t.tginitdeferred AND t.tgenabled IN('O','A')) AS ready")).rows[0].ready

@@ -1,3 +1,4 @@
+import {generationForJob} from './dialogue-generation.js'
 import {compileDialogue} from './compile-dialogue.js'
 import {snapshotProvenanceSql} from '../sources/snapshot-provenance.js'
 import {prepareEpisodeSources,prepareEpisodeProjectionSources,attachPreparedSources} from '../sources/prepared-sources.js'
@@ -461,7 +462,7 @@ export function createEpisodeRepository(
         if(typeof session!=='string'||typeof turn!=='string'||!session||!turn)throw Error('invalid_dialogue_job')
         return compileDialogue(pool,job.installation_id,session,turn,options.lifecycleMode??'off',ctx?.fence, {
           previous: job.payload.dialogue_gap_probe_v1, stabilizationMs,
-        })
+        },ctx && generationForJob(job,ctx.fence))
       }
       await repository.compileTurn(job.installation_id, job.idempotency_key.replace(/^compile_episode:/, ''),ctx?.fence,signal)
     },

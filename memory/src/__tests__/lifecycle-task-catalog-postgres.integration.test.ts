@@ -1,6 +1,7 @@
+import {inspectCurationRecovery} from '../curation/recover-checkpoints.js'
 import pg from 'pg'
 import {randomUUID} from 'node:crypto'
-import {beforeAll,beforeEach,afterEach,afterAll,describe,test,expect} from 'vitest'
+import {beforeAll,beforeEach,afterEach,afterAll,describe,test,expect,vi} from 'vitest'
 import {applyMemorySchema} from '../schema.js'
 import {assertMemoryTestDatabase} from '../testing/test-db.js'
 import {governanceFixture} from '../testing/governance-fixture.js'
@@ -59,7 +60,69 @@ suite('lifecycle task continuity (synthetic provider; real persistence and admis
  test('AC-16 prior source mutation while model is running rejects the stale resume',async()=>{
   const first=await stage('Discuss deployment.');await consolidate(first,()=>[part(first)])
   const original=(await loadTaskCatalog(pool,f.personal,session))[0],later=await stage('Continue deployment.')
-  await expect(consolidate(later,async()=>{const payload={text:'WITHDRAWN'};await pool.query('UPDATE source_events SET payload=$2,payload_hash=$3 WHERE source_event_id=$1',[first.id,payload,canonicalPayloadHash(payload)]);return[part(later,space,original.id)]})).rejects.toThrow('task_binding_changed')
+  await consolidate(later,async()=>{const payload={text:'WITHDRAWN'};await pool.query('UPDATE source_events SET payload=$2,payload_hash=$3 WHERE source_event_id=$1',[first.id,payload,canonicalPayloadHash(payload)]);return[part(later,space,original.id)]})
+  expect((await pool.query('SELECT state FROM memory_curation_items WHERE task_id=$1',[original.id])).rows).toEqual([{state:'binding_pending'}])
   expect((await pool.query('SELECT revision::int FROM memory_task_bundles WHERE bundle_id=$1',[original.id])).rows[0].revision).toBe(1)
  })
+ test('unrelated revision rebinds against validated semantics and partial publication recovers without a second call',async()=>{
+  const first=await stage('Discuss deployment.');await consolidate(first,()=>[part(first)])
+  const original=(await loadTaskCatalog(pool,f.personal,session))[0]
+  const later=await stage('Continue deployment. Separate travel.')
+  const run=async()=>consolidate(later,async()=>{
+   await pool.query("UPDATE memory_task_bundles SET revision=revision+1 WHERE bundle_id=$1",[original.id])
+   await pool.query("UPDATE memory_spaces SET state='archived',revision=revision+1 WHERE space_id=$1",[other])
+   return [{...part(later,space,original.id),spans:[{event_id:later.id,start:0,end:20}]},
+    {...part(later,other),spans:[{event_id:later.id,start:21,end:later.text.length}]}]
+  })
+  await run()
+  const ledger=async()=>(await pool.query(`SELECT m.state FROM memory_curation_items m JOIN memory_curation_runs r USING(installation_id,run_id)
+    WHERE r.bundle_id=$1 ORDER BY 1`,[later.job.payload.bundle_id])).rows.map(r=>r.state)
+  expect(await ledger()).toEqual(['binding_pending','published'])
+  expect((await pool.query('SELECT revision::int FROM memory_task_bundles WHERE bundle_id=$1',[original.id])).rows[0].revision).toBe(3)
+  expect((await pool.query("SELECT complete FROM memory_source_processing_receipts WHERE installation_id=$1 AND turn_id=(SELECT substring(task_key FROM 8) FROM memory_task_bundles WHERE bundle_id=$2)",[f.personal,later.job.payload.bundle_id])).rows.some(r=>r.complete)).toBe(false)
+  const independent=await stage('Independent question.');await consolidate(independent,()=>[])
+  await pool.query("UPDATE memory_spaces SET state='active',revision=revision+1 WHERE space_id=$1",[other])
+  const {run_id}= (await pool.query('SELECT run_id FROM memory_curation_runs WHERE bundle_id=$1',[later.job.payload.bundle_id])).rows[0]
+  await pool.query("UPDATE memory_jobs SET state='completed' WHERE job_id=$1",[later.job.job_id])
+  const request={installationId:f.personal,runIds:[run_id]}
+  expect((await inspectCurationRecovery(pool,request))[0].disposition).toBe('local_recovery')
+  expect((await inspectCurationRecovery(pool,{...request,apply:true}))[0].disposition).toBe('queued')
+  let calls=0
+  await consolidate(later,()=>{calls++;return []})
+  expect(calls).toBe(0)
+  expect(await ledger()).toEqual(['published','published'])
+  expect((await pool.query('SELECT revision::int FROM memory_task_bundles WHERE bundle_id=$1',[original.id])).rows[0].revision).toBe(3)
+ })
+
+ test('three uncertain calls pause only their route and one fresh probe resumes the circuit',async()=>{
+  const failure=vi.fn(async()=>({ok:false,code:'http_error',detail:'timeout',retryable:true})),signal=new AbortController().signal
+  const build=(route:string,fn:any)=>createCurationWorker({pool,mode:'enabled',modelFingerprint:route,textGenerator:{generateJson:fn}})
+  const failed=build('incident-route',failure)
+  const originals=[]
+  for(let n=0;n<3;n++){
+   const turn=await stage('Probe input '+n);originals.push(turn)
+   await failed.consolidate(turn.job,signal)
+  }
+  const held=await stage('New input on paused route.')
+  await expect(failed.consolidate(held.job,signal)).rejects.toThrow('source_not_ready')
+  expect(failure).toHaveBeenCalledTimes(3)
+  const healthy=vi.fn(async()=>({ok:true,value:{tasks:[]},usage:{model:'fixture',inputTokens:1,outputTokens:1}}))
+  const unrelated=await stage('Unrelated route.')
+  await build('independent-route',healthy).consolidate(unrelated.job,signal)
+  expect(healthy).toHaveBeenCalledTimes(1)
+  await pool.query("UPDATE memory_curation_provider_circuits SET probe_after=now()-interval '1 second' WHERE installation_id=$1",[f.personal])
+  let release!:()=>void,started!:()=>void
+  const gate=new Promise<void>(resolve=>{release=resolve}),entered=new Promise<void>(resolve=>{started=resolve})
+  const probe=vi.fn(async()=>{started();await gate;return healthy()}),recover=build('incident-route',probe)
+  const a=await stage('First eligible probe.'),b=await stage('Second eligible probe.')
+  const first=recover.consolidate(a.job,signal)
+  await entered
+  try{await expect(recover.consolidate(b.job,signal)).rejects.toThrow('source_not_ready')}finally{release()}
+  await first
+  expect(probe).toHaveBeenCalledTimes(1)
+  for(const source of originals)await recover.consolidate(source.job,signal)
+  expect(probe).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT count(*)::int n FROM memory_curation_provider_circuits WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+ })
+
 })

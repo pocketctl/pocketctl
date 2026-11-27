@@ -29,13 +29,32 @@ export const projectedTurnCoverage = `
   ORDER BY created_at DESC,source_digest,policy_version LIMIT 1) history ON true`
 
 export const nativeTurnCoverage = `
- WITH sample AS (
-  SELECT turn_id,session_id,source_digest AS episode_digest,event_count,compiled_at,dialogue_completion AS marker,
-   row_number() OVER(ORDER BY compiled_at DESC,turn_id,session_id) AS n,
-   evidence_manifest->'lifecycle_admission' AS admission
-  FROM work_episodes WHERE installation_id=i.installation_id AND i.active AND compiler_version='relay-turn-v1'
-   AND terminal_at IS NOT NULL AND state='ready' AND compiled_at>=i.observation_window_start
-  ORDER BY compiled_at DESC,turn_id,session_id LIMIT 1001
+ WITH inputs AS MATERIALIZED (
+  (SELECT e.turn_id,e.session_id,e.source_digest AS episode_digest,e.event_count,e.compiled_at,
+     e.dialogue_completion AS marker,e.evidence_manifest->'lifecycle_admission' AS admission,true AS compiled,
+     false AS operational
+   FROM work_episodes e LEFT JOIN memory_dialogue_turns t USING(installation_id,session_id,turn_id)
+   LEFT JOIN memory_dialogue_compile_receipts r ON r.installation_id=t.installation_id AND r.session_id=t.session_id
+     AND r.turn_id=t.turn_id AND r.generation=t.requested_generation
+   WHERE e.installation_id=i.installation_id AND i.active AND e.compiler_version='relay-turn-v1'
+     AND e.terminal_at IS NOT NULL AND e.state='ready' AND e.compiled_at>=i.observation_window_start
+     AND (t.turn_id IS NULL OR e.dialogue_generation=t.requested_generation OR r.status IN ('published','not_admitted') AND r.reason IS DISTINCT FROM 'operational_turn')
+   ORDER BY e.compiled_at DESC,e.turn_id,e.session_id LIMIT 1001)
+  UNION ALL
+  (SELECT t.turn_id,t.session_id,e.source_digest,e.event_count,t.requested_at,e.dialogue_completion,
+     e.evidence_manifest->'lifecycle_admission',e.episode_id IS NOT NULL,
+     r.status='not_admitted' AND r.reason='operational_turn'
+   FROM memory_dialogue_turns t LEFT JOIN memory_dialogue_compile_receipts r ON r.installation_id=t.installation_id
+     AND r.session_id=t.session_id AND r.turn_id=t.turn_id AND r.generation=t.requested_generation
+   LEFT JOIN work_episodes e ON e.installation_id=t.installation_id AND e.session_id=t.session_id AND e.turn_id=t.turn_id
+     AND e.compiler_version='relay-turn-v1' AND e.terminal_at IS NOT NULL AND e.state='ready'
+     AND (e.dialogue_generation=t.requested_generation OR r.status IN ('published','not_admitted') AND r.reason IS DISTINCT FROM 'operational_turn')
+   WHERE t.installation_id=i.installation_id AND i.active AND t.requested_at>=i.observation_window_start
+     AND (e.episode_id IS NULL OR e.compiled_at<i.observation_window_start)
+   ORDER BY t.requested_at DESC,t.turn_id,t.session_id LIMIT 1001)
+ ), sample AS (
+  SELECT inputs.*,row_number() OVER(ORDER BY compiled_at DESC,turn_id,session_id) n
+  FROM inputs ORDER BY compiled_at DESC,turn_id,session_id LIMIT 1001
  ), counts AS (
   SELECT s.*,
    CASE WHEN jsonb_typeof(admission->'allowed_count')='number' AND admission->>'allowed_count' ~ '^(0|[1-9][0-9]{0,8})$'
@@ -53,7 +72,7 @@ export const nativeTurnCoverage = `
     WHEN 'skipped_policy' THEN s.allowed=0 ELSE false END AS attested
   FROM counts s LEFT JOIN LATERAL (SELECT bundle_id,revision,state,updated_at,source_digest,dialogue_members
    FROM memory_task_bundles b WHERE b.installation_id=i.installation_id AND b.session_id=s.session_id
-    AND b.task_key='dialogue:'||s.turn_id AND b.bundle_kind='intake' LIMIT 1) b ON true
+    AND s.compiled AND b.task_key='dialogue:'||s.turn_id AND b.bundle_kind='intake' LIMIT 1) b ON true
  ), authority AS MATERIALIZED (
   -- Legacy intakes attest admitted members. A newly compiled episode can
   -- supersede them; a present but invalid modern attestation never falls back.
@@ -86,12 +105,12 @@ export const nativeTurnCoverage = `
      AND run.source_digest=m.digest AND run.policy_revision=i.policy_revision AND run.mode=i.effective_mode AND r.created_at>=run.started_at
      AND run.state='completed' LIMIT 1) LIMIT 1) r ON true
  )
- SELECT n,CASE WHEN recorded IS NOT NULL THEN recorded
+ SELECT n,CASE WHEN operational THEN 'skipped_policy' WHEN recorded IS NOT NULL THEN recorded
    WHEN current_marker THEN COALESCE(marker->>'disposition','concluded') END AS disposition,
-  CASE WHEN recorded IS NOT NULL THEN recorded_complete AND state IN('completed','skipped_unresolved')
+  CASE WHEN operational THEN true WHEN recorded IS NOT NULL THEN recorded_complete AND state IN('completed','skipped_unresolved')
     AND (admission IS NULL OR admission->>'provenance'<>'unknown')
    WHEN current_marker THEN marker->>'disposition' IS DISTINCT FROM 'provenance_unknown' END AS complete,
-  CASE WHEN attested THEN admission->>'provenance' WHEN admission IS NULL THEN CASE
+  CASE WHEN operational THEN 'skipped_policy' WHEN attested THEN admission->>'provenance' WHEN admission IS NULL THEN CASE
    WHEN current_marker AND marker->>'disposition'='provenance_unknown' OR recorded='provenance_unknown' THEN 'unknown'
    WHEN current_marker AND marker->>'disposition'='skipped_policy' THEN 'skipped_policy'
    WHEN current_marker OR recorded IN('concluded','no_durable_conclusion')

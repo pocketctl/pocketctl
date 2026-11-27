@@ -32,7 +32,7 @@ export type ModelJsonResult<T> =
   | { ok: true; value: T; usage: ModelUsage; budgetReservationId?: string; billingUncertain?: boolean; timeoutFallback?: TimeoutFallbackDiagnostics; providerReceipt?:ProviderReceiptHandle }
   | {
       ok: false
-      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'source_not_sent' | 'provider_result_unknown'
+      code: 'invalid_json' | 'empty_content' | 'invalid_usage' | 'http_error' | 'aborted' | 'budget_exceeded' | 'budget_unavailable' | 'source_not_sent' | 'provider_result_unknown' | 'provider_circuit_open'
       retryable: boolean
       /** Bounded machine code only — never raw provider text. */
       detail?: string
@@ -47,13 +47,18 @@ export type ModelJsonResult<T> =
     }
 
 export interface TextGenerator {
+  /** True when dispatch authorization runs after the physical budget reservation. */
+  readonly budgetedDispatch?: boolean
   generateJson<T>(input: {
     operation: TextGeneratorOperation
     requestKey?: string
     /** Internal explicit isolated enrollment, never provider wire data. */
     receipt?: ReviewReceiptRequest
     /** Optional final authority check after budget waits, before provider IO. */
-    authorizeDispatch?: () => Promise<boolean>
+    authorizeDispatch?: (reservationId?:string) => Promise<boolean>
+    /** Curation supplies a persistent send fence and forbids all implicit retries. */
+    singleAttempt?: boolean
+    resumeUnsentReservation?: (reservationId:string) => Promise<boolean>
     system: string
     document: unknown
     schema: JsonSchema

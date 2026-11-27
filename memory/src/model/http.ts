@@ -51,6 +51,7 @@ export interface ModelHttpClient {
   postJson(path: string, body: unknown, options: {
     signal: AbortSignal
     timeoutMs?: number
+    singleAttempt?: boolean
   }): Promise<unknown>
 }
 
@@ -113,7 +114,8 @@ export function createModelHttpClient(options: ModelHttpClientOptions): ModelHtt
     async postJson(path, body, requestOptions): Promise<unknown> {
       const timeoutMs = requestOptions.timeoutMs ?? options.timeoutMs
       const lastError: ModelHttpError[] = []
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const attempts = requestOptions.singleAttempt ? 1 : maxAttempts
+      for (let attempt = 1; attempt <= attempts; attempt++) {
         if (requestOptions.signal.aborted) {
           throw new ModelHttpError({ code: 'timeout', retryable: false })
         }
@@ -165,7 +167,7 @@ export function createModelHttpClient(options: ModelHttpClientOptions): ModelHtt
             classified = new ModelHttpError({ code: 'network', retryable: true })
           }
           lastError.push(classified)
-          if (!classified.retryable || attempt === maxAttempts) throw classified
+          if (!classified.retryable || attempt === attempts) throw classified
           const backoff = classified.retryAfterMs
             ?? Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS)
           await abortableSleep(sleep, backoff, requestOptions.signal)

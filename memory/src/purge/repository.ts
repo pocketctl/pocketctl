@@ -421,6 +421,7 @@ async function purgeSessionRows(
     ON CONFLICT (installation_id, session_id) DO NOTHING
   `, [input.installationId, input.sessionId, input.reason, input.sourceFeedId])
 
+  await client.query('SELECT memory_forget_failure_scope($1,$2,NULL)',[input.installationId,input.sessionId])
   // Repeat the native tombstone trigger's replay policy on resumed/restored
   // rows too: ON CONFLICT skips AFTER INSERT when the barrier already exists.
   await client.query(`DELETE FROM memory_skill_replay_runs r WHERE r.installation_id=$1
@@ -808,10 +809,11 @@ async function purgeInstallationRows(
     SELECT COUNT(*)::text AS count FROM knowledge_claims WHERE installation_id = $1
   `, [input.installationId])
   for (const table of [
+    'memory_curation_provider_circuits','memory_index_rebuild_page_receipts','memory_stage_dispositions',
     'memory_task_bundles','memory_source_processing_receipts','memory_manual_entries','memory_curation_policies','memory_session_scene_frames','memory_lifecycle_observation_windows',
     'memory_authority_records','memory_publication_delegations','memory_automation_authority_records','memory_governance_executor_principals',
     'memory_review_automation_runs','memory_review_automation_policy_heads','memory_review_automation_policies',
-    'memory_session_tombstones', 'memory_dead_letters', 'memory_jobs', 'memory_usage_outbox',
+    'memory_session_tombstones', 'memory_failure_cleanup_receipts', 'memory_failure_deduplication', 'memory_job_failures', 'memory_dead_letters', 'memory_jobs', 'memory_usage_outbox', 'memory_usage_delivery_schedule',
     ...((await legacyTransportRetired(client))?['memory_source_snapshot_facts']:['memory_snapshot_runs','memory_snapshot_events','memory_inbox_checkpoints']), 'memory_source_delivery_facts',
     'knowledge_tombstones', 'memory_idempotency_keys', 'memory_feedback',
     'claim_search_documents', 'knowledge_evidence', 'knowledge_evidence_capsules', 'memory_candidates',

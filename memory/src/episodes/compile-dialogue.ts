@@ -1,3 +1,5 @@
+import {dialogueAlreadyProcessed,recordDialogueResult,markDialogueStage,type DialogueGeneration} from './dialogue-generation.js'
+import {markConfirmedDialogueLock} from '../sources/processing-pins.js'
 import type pg from 'pg'
 import { assertJobFence } from '../generation/fence.js'
 import { JobDeferredError, type JobFence } from '../jobs/types.js'
@@ -18,18 +20,23 @@ export async function compileDialogue(
   turn: string,
   mode: CurationMode,
   fence?: JobFence,
-  gapProbe?: DialogueGapProbe,
+  gapProbe?: DialogueGapProbe, generation?:DialogueGeneration,
 ) {
+  if(generation && await dialogueAlreadyProcessed(pool,generation))return
+  const observedGeneration=generation?.generation ?? (await pool.query(`SELECT requested_generation FROM memory_dialogue_turns
+    WHERE (installation_id,session_id,turn_id)=($1,$2,$3)`,[install,session,turn])).rows[0]?.requested_generation
   let input: Awaited<ReturnType<typeof prepareDialogue>>
   try {
-    input = await prepareDialogue(pool, install, session, turn, fence ? gapProbe : undefined)
+    input = await prepareDialogue(pool, install, session, turn, fence ? gapProbe : undefined,generation)
   } catch (error) {
+    markDialogueStage(error,'prepare')
     if (!(error instanceof DialogueInputGap || error instanceof DialogueExcluded)) throw error
     const probe = error instanceof DialogueInputGap ? error.probeResult : undefined
     const inspectAt = error instanceof DialogueInputGap ? error.inspectAt : undefined
     const db = await pool.connect()
     try {
       await db.query('BEGIN')
+      if(generation)await db.query("SET LOCAL lock_timeout='250ms'")
       if (fence) await assertJobFence(db, fence)
       await db.query("SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0))", [
         install,
@@ -55,7 +62,7 @@ export async function compileDialogue(
       if (error.assertCurrent) {
         await error.assertCurrent(db)
         await db.query(
-          `UPDATE work_episodes SET state='invalidated',summary='{}',document='{}',evidence_manifest='{}',dialogue_completion=NULL
+          `UPDATE work_episodes SET state='invalidated',summary='{}',document='{}',evidence_manifest='{}',dialogue_completion=NULL,dialogue_generation=NULL
      WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3 AND compiler_version='relay-turn-v1' AND state<>'invalidated'`,
           [install, session, turn],
         )
@@ -66,22 +73,29 @@ export async function compileDialogue(
       }
       if (fence && gapProbe?.previous !== undefined && error instanceof DialogueExcluded)
         await db.query("UPDATE memory_jobs SET payload=payload-'dialogue_gap_probe_v1' WHERE job_id=$1", [fence.jobId])
+      if(generation&&!inspectAt){
+        if(!error.assertCurrent)throw Error('source_reference_unavailable')
+        await recordDialogueResult(db,generation,error instanceof DialogueExcluded?'not_admitted':'input_gap',error.reason,error.inputDigest??null)
+      }
       await guardSourceExecutionCommit(db)
       await db.query('COMMIT')
     } catch (err) {
+      markDialogueStage(err,'publish')
       await db.query('ROLLBACK')
+      if(err instanceof Error&&(err as {code?:string}).code==='55P03')markConfirmedDialogueLock(err)
       throw err
     } finally {
       db.release()
     }
     // A crash between commit and defer is safe: lease recovery sees the
     // durable inspect marker. A late answer takes the normal path immediately.
-    if (inspectAt) throw new JobDeferredError('source_not_ready', inspectAt)
+    if (inspectAt) throw Object.assign(new JobDeferredError('source_not_ready', inspectAt),{dialogueInspection:true})
     return
   }
   const c = await pool.connect()
   try {
     await c.query('BEGIN')
+    if(generation)await c.query("SET LOCAL lock_timeout='250ms'")
     await lockCurationAuthority(c, install)
     await c.query(
       "SELECT pg_advisory_xact_lock(hashtextextended('purge:session:'||$1||':'||$2,0)),pg_advisory_xact_lock(hashtextextended('purge:installation:'||$1,0))",
@@ -152,16 +166,27 @@ export async function compileDialogue(
     )
     if (policy && lifecycle) await stagePreparedLifecycleTurn(c, lifecycle, policy, true)
     await input.assertCurrent(c, { forCommit: true })
+    // The source fence and turn lock cover this inventory until commit. Direct
+    // historical callers can also bind their verified episode to its generation.
+    const currentGeneration=(await c.query(`SELECT requested_generation FROM memory_dialogue_turns
+      WHERE (installation_id,session_id,turn_id)=($1,$2,$3)`,[install,session,turn])).rows[0]?.requested_generation
+    if(currentGeneration!==observedGeneration)throw Error('source_reference_changed')
+    await c.query(`UPDATE work_episodes SET dialogue_generation=$4 WHERE (installation_id,session_id,turn_id)=($1,$2,$3)
+      AND dialogue_generation IS DISTINCT FROM $4`,[install,session,turn,currentGeneration??null])
     await c.query(
       'DELETE FROM memory_dialogue_gaps WHERE installation_id=$1 AND session_id=$2 AND turn_id=$3',
       [install, session, turn],
     )
     if (fence && gapProbe?.previous !== undefined)
       await c.query("UPDATE memory_jobs SET payload=payload-'dialogue_gap_probe_v1' WHERE job_id=$1", [fence.jobId])
+    if(generation)await recordDialogueResult(c,generation,lifecycle&&!lifecycle.members.length?'not_admitted':'published',
+      lifecycle&&!lifecycle.members.length?(lifecycle.unknown?'provenance_unknown':'skipped_policy'):null,input.ref.members)
     await guardSourceExecutionCommit(c)
     await c.query('COMMIT')
   } catch (error) {
+    markDialogueStage(error,'publish')
     await c.query('ROLLBACK')
+    if(error instanceof Error&&(error as {code?:string}).code==='55P03')markConfirmedDialogueLock(error)
     throw error
   } finally {
     c.release()

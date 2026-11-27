@@ -16,9 +16,13 @@ export interface EmbeddingResult {
 }
 
 export interface EmbeddingProvider {
+  readonly budgetedDispatch?: boolean
   readonly dimensions: number
   embed(input: {
     operation: EmbeddingOperation
+    requestKey?:string
+    claimDispatch?(reservationId:string):Promise<boolean>
+    confirmDispatch?():Promise<boolean>
     texts: string[]
     signal: AbortSignal
   }): Promise<EmbeddingResult>

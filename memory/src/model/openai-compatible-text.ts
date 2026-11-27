@@ -53,6 +53,7 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
 
   return {
     async generateJson<T>(input: {
+      singleAttempt?: boolean
       operation: TextGeneratorOperation
       system: string
       document: unknown
@@ -76,7 +77,7 @@ export function createOpenAICompatibleTextGenerator(options: OpenAICompatibleTex
           ...(options.maxOutputTokens === undefined ? {} : {
             [options.maxOutputTokensParameter ?? 'max_tokens']: options.maxOutputTokens,
           }),
-        }, { signal: input.signal, timeoutMs: input.timeoutMs })
+        }, { signal: input.signal, timeoutMs: input.timeoutMs, singleAttempt: input.singleAttempt })
       } catch (error) {
         if (error instanceof ModelHttpError) {
           if (input.signal.aborted) {

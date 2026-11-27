@@ -18,6 +18,9 @@ suite('business health PostgreSQL',()=>{
  afterAll(async()=>{await pool?.end()})
  test('shared-active personal health stops timing retired Feed while legacy organization remains monitored',async()=>{
   const personal='dddddddd-dddd-4ddd-8ddd-dddddddddddd',organization='eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  // This suite supplies the native reader catalog while using a public-schema test database.
+  await pool.query(`CREATE TABLE memory_dialogue_turns(installation_id uuid,session_id text,turn_id text,requested_generation bigint,requested_at timestamptz);
+    CREATE TABLE memory_dialogue_compile_receipts(installation_id uuid,session_id text,turn_id text,generation bigint,status text,updated_at timestamptz)`)
   await pool.query('CREATE SCHEMA shared;CREATE TABLE shared.memory_source_modes(installation_id uuid PRIMARY KEY,mode text NOT NULL)')
   await pool.query("CREATE FUNCTION shared.memory_source_control_snapshot() RETURNS text LANGUAGE sql AS $$SELECT '1'::text$$")
   await pool.query(`CREATE FUNCTION shared.memory_source_pipeline_health(uuid) RETURNS TABLE(failed_jobs text,stalled_roots text)
@@ -47,7 +50,7 @@ suite('business health PostgreSQL',()=>{
   }finally{
    bindSourcePool(pool,{namespace:'public'})
    await pool.query('DELETE FROM memory_installations WHERE installation_id=ANY($1::uuid[])',[[personal,organization]])
-   await pool.query('DROP FUNCTION shared.memory_source_pipeline_health(uuid),shared.memory_source_control_snapshot();DROP TABLE shared.memory_source_modes;DROP SCHEMA shared')
+   await pool.query('DROP FUNCTION shared.memory_source_pipeline_health(uuid),shared.memory_source_control_snapshot();DROP TABLE shared.memory_source_modes;DROP SCHEMA shared; DROP TABLE memory_dialogue_compile_receipts,memory_dialogue_turns')
   }
  })
  test('shared empty control ACK refreshes health; failed ACK still reports stalled',async()=>{
@@ -70,6 +73,35 @@ suite('business health PostgreSQL',()=>{
   const degraded=(await pool.query('SELECT local_status,last_error_code FROM memory_installations WHERE installation_id=$1',[shared])).rows[0]
   expect(degraded).toEqual({local_status:'degraded',last_error_code:'evidence_gap'})
   } finally { await pool.query('DELETE FROM memory_installations WHERE installation_id=$1',[shared]) }
+ })
+ test('old isolated gaps stay visible while only a cohort of new failures degrades processing',async()=>{
+  const tenant='cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  await pool.query(`INSERT INTO memory_installations(installation_id,provider_id,relay_status,local_status,config_version)
+    VALUES($1,'pocketctl-memory','active','ready',1)`,[tenant])
+  try{
+    const insert=async(n:number,age:string)=>{
+      await pool.query(`WITH received AS (
+        INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,state,created_at,completed_at)
+        SELECT gen_random_uuid(),$1,'index_claim_version',gen_random_uuid()::text,'completed',now()-$3::interval,now()
+        FROM generate_series(1,$2::int) RETURNING *
+      ) INSERT INTO memory_stage_dispositions(job_id,claim_epoch,installation_id,job_type,object_key,input_digest,status,reason,
+        attempts,processor_revision,first_failed_at)
+        SELECT job_id,claim_epoch,installation_id,job_type,idempotency_key,idempotency_key,'isolated','failed',4,'unit',created_at FROM received`,[tenant,n,age])
+    }
+    const load=async()=>(await loadBusinessHealth(pool)).find(row=>row.installation_id===tenant)!
+    // A late bill is fresh intake when the outbox receives it, even with an old provider clock.
+    await pool.query(`INSERT INTO memory_usage_outbox(installation_id,usage_id,operation,occurred_at)
+      SELECT $1,'late-'||n,'embedding',now()-interval '2 days' FROM generate_series(1,3) n`,[tenant])
+    expect((await load()).usage_progress).toMatchObject({inputs:3,waiting:3,overdue:0})
+    await insert(17,'2 days');await insert(1,'1 minute')
+    const row=await load()
+    expect(row.recovery_stages?.find(stage=>stage.stage==='index_claim_version')).toMatchObject({unresolved:18,admitted:1,failed:1})
+    expect(evaluateBusinessHealth(row).reasons).not.toContain('downstream_processing_stalled')
+    await insert(2,'1 minute')
+    expect(evaluateBusinessHealth(await load()).reasons).toContain('downstream_processing_stalled')
+    await pool.query(`UPDATE memory_stage_dispositions SET status='resolved' WHERE installation_id=$1 AND first_failed_at>now()-interval '1 hour'`,[tenant])
+    expect(evaluateBusinessHealth(await load()).reasons).not.toContain('downstream_processing_stalled')
+  }finally{await pool.query('DELETE FROM memory_installations WHERE installation_id=$1',[tenant])}
  })
  test('faults, heartbeat, readiness and metrics recover from durable database state',async()=>{
   await pool.query(`DELETE FROM memory_installations WHERE installation_id=$1`,[id])

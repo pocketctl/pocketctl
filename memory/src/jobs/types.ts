@@ -140,3 +140,8 @@ export class JobDeferredError extends Error {
     this.name = 'JobDeferredError'
   }
 }
+
+/** The SQL grant fence explicitly rolled back its partial NOWAIT locks. */
+export class GrantLockDeferred extends JobDeferredError {
+  constructor(){super('source_not_ready',new Date(Date.now()+1000))}
+}

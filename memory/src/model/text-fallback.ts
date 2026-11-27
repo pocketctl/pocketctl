@@ -58,9 +58,10 @@ export function createExtractionTextRoute(
 /** Fall back only when the preferred provider itself timed out. */
 export function withTimeoutFallback(primary: TextGenerator, fallback: TextGenerator): TextGenerator {
   return {
+    budgetedDispatch: primary.budgetedDispatch,
     async generateJson<T>(input: Parameters<TextGenerator['generateJson']>[0]) {
       const result = await primary.generateJson<T>(input)
-      if (!result.ok && result.code === 'http_error' && result.detail === 'timeout'
+      if (!input.singleAttempt && !result.ok && result.code === 'http_error' && result.detail === 'timeout'
         && !input.signal.aborted) {
         // Keep the primary's existing identity so pre-deployment reservations
         // still fence replays. Only the second remote attempt needs a distinct,

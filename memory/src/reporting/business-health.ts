@@ -1,8 +1,10 @@
+import {recoveryStagesSql,recoveryStageDegraded,summarizeRecoveryStages,type RecoveryStageHealth} from './recovery-health.js'
+import {dialogueProgressSql,usageProgressSql,summarizeStage,stageAvailability,type StageProgress} from './stage-progress.js'
 import {UNRESOLVED_EXTRACTION_SOURCE} from '../extraction/recovery.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 
-export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap', 'source_processing_failed', 'source_processing_stalled','usage_reporting_blocked'] as const
+export const BUSINESS_HEALTH_REASONS = ['feed_stalled', 'control_stale', 'budget_blocked', 'extraction_stalled', 'extraction_failed', 'evidence_gap', 'source_processing_failed', 'source_processing_stalled','usage_reporting_blocked','downstream_processing_stalled'] as const
 export type BusinessHealthReason = typeof BUSINESS_HEALTH_REASONS[number]
 export interface BusinessHealthRow {
   installation_id: string
@@ -21,7 +23,11 @@ export interface BusinessHealthRow {
   last_feed_id?: string | null
   pending_jobs?: string
   failed_jobs_24h?: string
+  usage_progress?: StageProgress
   usage_dead_letters?: string | number
+  uncertain_embedding_calls?:number
+  recovery_stages?: RecoveryStageHealth[]
+  dialogue_progress?: StageProgress | null
   source_failed_jobs?: string | number
   source_stalled_roots?: string | number
   failed_extractions_24h?: string | number
@@ -30,10 +36,13 @@ export interface BusinessHealthRow {
   unresolved_extractions?: string | number
 }
 
+export function activeInstallation(row:BusinessHealthRow) {
+  return ['pending','active'].includes(row.relay_status) && !['purging','purged'].includes(row.local_status)
+}
+
 /** Pure, bounded decision shared by readiness, Relay heartbeat and metrics. */
 export function evaluateBusinessHealth(row: BusinessHealthRow, enabled = true) {
-  const active = enabled && ['pending', 'active'].includes(row.relay_status)
-    && !['purging', 'purged'].includes(row.local_status)
+  const active = enabled && activeInstallation(row)
   const extraction = active && ['enabled', 'shadow'].includes(row.extraction_mode)
   const reasons: BusinessHealthReason[] = []
   if (active && row.feed_enabled && Number(row.feed_lag_seconds ?? 0) > 300) reasons.push('feed_stalled')
@@ -43,9 +52,10 @@ export function evaluateBusinessHealth(row: BusinessHealthRow, enabled = true) {
     && (row.last_extract_seconds == null || Number(row.last_extract_seconds) > 3600)) reasons.push('extraction_stalled')
   if (extraction && Number(row.unresolved_extractions ?? 0) > 0) reasons.push('extraction_failed')
   if (active && Number(row.evidence_gaps) > 0) reasons.push('evidence_gap')
-  if (active && Number(row.source_failed_jobs ?? 0) > 0) reasons.push('source_processing_failed')
+  if (active && (Number(row.source_failed_jobs ?? 0) > 0 || (row.dialogue_progress && stageAvailability(row.dialogue_progress)==='degraded'))) reasons.push('source_processing_failed')
   if (active && Number(row.source_stalled_roots ?? 0) > 0) reasons.push('source_processing_stalled')
-  if(active&&Number(row.usage_dead_letters??0)>0)reasons.push('usage_reporting_blocked')
+  if(active&&(row.usage_progress?stageAvailability(row.usage_progress)==='degraded':Number(row.usage_dead_letters??0)>0))reasons.push('usage_reporting_blocked')
+  if(active&&row.recovery_stages?.some(recoveryStageDegraded))reasons.push('downstream_processing_stalled')
   const integrity = row.local_status === 'integrity_error'
   const state = integrity ? 'error' : reasons.length || row.local_status === 'degraded' ? 'degraded'
     : row.local_status === 'ready' ? 'ready' : 'syncing'
@@ -79,13 +89,21 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='pending') AS pending_jobs,
       (SELECT COUNT(*)::text FROM memory_jobs j WHERE j.installation_id=i.installation_id AND j.state='dead'
         AND j.created_at>NOW()-INTERVAL '24 hours') AS failed_jobs_24h,
+      ${shared?'dialogue.progress':'NULL::jsonb'} AS dialogue_progress,
       ${shared?'pipeline.failed_jobs':'0'} AS source_failed_jobs,
       ${shared?'pipeline.stalled_roots':'0'} AS source_stalled_roots,
+      (SELECT count(*)::int FROM (SELECT 1 FROM memory_index_calls k WHERE k.installation_id=i.installation_id
+         AND (k.state IN('unconfirmed','invalid_result') OR k.state='possible' AND k.occurred_at<statement_timestamp()-interval '5 minutes')
+         LIMIT 1001) unresolved_vectors) AS uncertain_embedding_calls,
+      recovery.stages AS recovery_stages, usage.progress AS usage_progress,
       (SELECT count(*)::text FROM (SELECT 1 FROM memory_usage_outbox u WHERE u.installation_id=i.installation_id
         AND u.reported_at IS NULL AND u.dead_lettered_at IS NOT NULL LIMIT 1001) dead_usage) AS usage_dead_letters
     FROM memory_installations i
+    CROSS JOIN LATERAL (${usageProgressSql}) usage
+    CROSS JOIN LATERAL (${recoveryStagesSql}) recovery
     ${shared?'LEFT JOIN shared.memory_source_modes source_mode USING (installation_id)':''}
     ${shared?'LEFT JOIN LATERAL shared.memory_source_pipeline_health(i.installation_id) pipeline ON TRUE':''}
+    ${shared?`LEFT JOIN LATERAL (${dialogueProgressSql}) dialogue ON TRUE`:''}
     ${shared?'LEFT JOIN memory_owner_scopes owner_scope USING(installation_id) LEFT JOIN memory_native_control_observations native_control USING(installation_id)':''}
     LEFT JOIN memory_feature_settings f ON f.installation_id=i.installation_id
     LEFT JOIN LATERAL (SELECT MAX(completed_at) AS last_extract_at FROM memory_extraction_runs r
@@ -112,10 +130,16 @@ export async function loadBusinessHealth(pool: HealthPool): Promise<BusinessHeal
 
 export function summarizeBusinessHealth(rows: BusinessHealthRow[], enabled = true) {
   const health = rows.map(row => evaluateBusinessHealth(row, enabled))
+  const active=enabled?rows.filter(activeInstallation):[]
   const reasons = BUSINESS_HEALTH_REASONS.filter(reason => health.some(item => item.reasons.includes(reason)))
   const degraded = health.some(item => ['error', 'degraded'].includes(item.state))
   return {status: degraded ? 'degraded' : 'ready', readiness: 'ready',
     operational: {status: degraded ? 'degraded' : 'healthy', reasons,
+      recovery_stages:summarizeRecoveryStages(active.flatMap(row=>row.recovery_stages??[])),
+      usage: summarizeStage(active.flatMap(row=>row.usage_progress?[row.usage_progress]:[])),
+      dialogue: summarizeStage(active.flatMap(row=>row.dialogue_progress?[row.dialogue_progress]:[])),
+      unresolved_embedding_calls:rows.reduce((sum,r)=>sum+Number(r.uncertain_embedding_calls??0),0),
+      embedding_counts_capped:rows.some(r=>Number(r.uncertain_embedding_calls??0)>1000),
       usage_dead_letters: rows.reduce((sum,row)=>sum+Number(row.usage_dead_letters??0),0),
       usage_counts_capped: rows.some(row=>Number(row.usage_dead_letters??0)>=1001),
       source_failed_jobs: rows.reduce((sum,row)=>sum+Number(row.source_failed_jobs??0),0),

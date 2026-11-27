@@ -1,3 +1,7 @@
+import {recordRebuildPage} from '../jobs/stage-recovery.js'
+import {createHash} from 'node:crypto'
+import {EmbeddingNotDispatchedError,EmbeddingReservationUnknownError,ProviderBudgetExceededError} from '../model/provider-budget.js'
+import {JobDeferredError} from '../jobs/types.js'
 import {assertJobFence} from '../generation/fence.js'
 import type {JobFence} from '../jobs/types.js'
 import {currentClaimVersionSql} from '../claims/version-selection.js'
@@ -74,10 +78,11 @@ export function createClaimIndexer(deps: IndexerDeps) {
           c.claim_type,c.consumption_hold_reason
         FROM knowledge_versions v JOIN knowledge_claims c USING(installation_id,claim_id)
         LEFT JOIN repositories r ON r.installation_id=v.installation_id AND r.repository_id=v.repository_id
-        WHERE v.installation_id=$1 AND v.version_id=$2 FOR SHARE OF v
+        WHERE v.installation_id=$1 AND v.version_id=$2 AND ${currentClaimVersionSql()} FOR SHARE OF v
       `,[installationId,versionId])
         const row=found.rows[0]
         if(row)result=await run(client,row)
+        else await client.query('DELETE FROM claim_search_documents WHERE installation_id=$1 AND version_id=$2',[installationId,versionId])
       }
       if(fence)await assertJobFence(client,fence)
       if(head?.claim_state==='active'&&head.current_version_id===versionId&&head.consumption_hold_reason===null)await guardSourceExecutionCommit(client)
@@ -118,6 +123,8 @@ export function createClaimIndexer(deps: IndexerDeps) {
         WHERE c.installation_id=$1 AND v.version_id=$2 AND ${currentClaimVersionSql()}
           AND c.state='active' AND c.consumption_hold_reason IS NULL
         ON CONFLICT (installation_id, version_id) DO UPDATE SET
+          embedding=CASE WHEN claim_search_documents.document IS DISTINCT FROM EXCLUDED.document THEN NULL ELSE claim_search_documents.embedding END,
+          embedding_status=CASE WHEN claim_search_documents.document IS DISTINCT FROM EXCLUDED.document THEN 'disabled' ELSE claim_search_documents.embedding_status END,
           document = EXCLUDED.document,
           indexed_at = NOW()
       `, [installationId, versionId, document])
@@ -127,22 +134,67 @@ export function createClaimIndexer(deps: IndexerDeps) {
       // The lexical transaction may have completed before a purge/hold wins.
       // Revalidate immediately before dispatch without holding a connection
       // through the external request; an in-flight result is fenced below.
-      if(!await withCurrentVersion(installationId,versionId,client=>embeddingAllowed(client,installationId,versionId),fence))return
+      const adapter=deps.embed!
+      const fingerprint=deps.embeddingConsentFingerprint??null
+      const digest=createHash('sha256').update(JSON.stringify([adapter.provider,adapter.model,adapter.dimensions,
+        fingerprint,prepared.document])).digest()
+      const call=await withCurrentVersion(installationId,versionId,async client=>{
+        if(!await embeddingAllowed(client,installationId,versionId))return null
+        // Retain pre-upgrade completed vectors. Existing failures cannot establish
+        // whether the provider already charged for this version.
+        const existing=(await client.query(`SELECT embedding_status,embedding_status='ready'
+          AND embedding_provider=$3 AND embedding_model=$4 AND embedding_dimensions=$5
+          AND embedding_fingerprint IS NOT DISTINCT FROM $6 AS matches
+          FROM claim_search_documents WHERE installation_id=$1 AND version_id=$2 FOR UPDATE`,
+          [installationId,versionId,adapter.provider,adapter.model,adapter.dimensions,fingerprint])).rows[0]
+        if(!existing||existing.matches)return null
+        const saved=await client.query(`INSERT INTO memory_index_calls(installation_id,version_id,input_digest,state)
+          VALUES($1,$2,$3,CASE WHEN $4 AND NOT EXISTS(SELECT 1 FROM memory_index_calls
+            WHERE installation_id=$1 AND version_id=$2) THEN 'unconfirmed' ELSE 'intended' END)
+          ON CONFLICT(installation_id,version_id,input_digest) DO UPDATE SET input_digest=EXCLUDED.input_digest
+          WHERE memory_index_calls.state='intended' RETURNING call_id,state`,[installationId,versionId,digest,existing.embedding_status==='failed'])
+        return saved.rows[0]?.state==='intended'?saved.rows[0].call_id as string:null
+      },fence)
+      if(!call)return
+      let ownsSend=false
+      const checkDispatch=async(claim:boolean,reservationId?:string)=>{
+        if(signal.aborted)return false
+        const authorized=await withCurrentVersion(installationId,versionId,async(client,row)=>{
+          if(!await embeddingAllowed(client,installationId,versionId))return false
+          const document=buildSearchDocument({claimType:row.claim_type,statement:row.statement,
+            structuredContent:row.structured_content??{},repositoryKey:row.repository_key,branch:row.branch})
+          if(document!==prepared.document)return false
+          const checked=claim?await client.query(`UPDATE memory_index_calls SET state='possible',budget_reservation_id=$2,
+            occurred_at=clock_timestamp() WHERE call_id=$1 AND state='intended' AND
+              (budget_reservation_id IS NULL OR budget_reservation_id=$2) RETURNING call_id`,[call,reservationId??null])
+            :await client.query("SELECT 1 FROM memory_index_calls WHERE call_id=$1 AND state='possible'",[call])
+          return checked.rowCount===1
+        },fence)
+        if(claim&&authorized)ownsSend=true
+        return authorized===true
+      }
+      let invalidResult=false
 
       try {
-        const embedded = await deps.embed!.embed({
+        if(!adapter.budgetedDispatch && !await checkDispatch(true))return
+        const embedded = await adapter.embed({
           operation: 'claim_index',
+          requestKey:'index:'+call,
+          confirmDispatch:()=>checkDispatch(false),
+          ...(adapter.budgetedDispatch?{claimDispatch:(id:string)=>checkDispatch(true,id)}:{}),
           texts: [prepared.document],
           signal,
         })
         await recordEmbeddingProviderUsage(deps.pool,installationId,embedded)
         if(embedded.billingUncertain)throw Error('provider_result_unknown')
-        if (embedded.vectors.length !== 1) throw new Error('embedding count mismatch')
+        if (embedded.vectors.length !== 1) {invalidResult=true;throw new Error('embedding count mismatch')}
+        invalidResult=true
         const vector = normalize(embedded.vectors[0])
-        if (vector.length !== (deps.embed?.dimensions ?? 0)) throw new Error('embedding dimension mismatch')
+        if (vector.length !== adapter.dimensions) {invalidResult=true;throw new Error('embedding dimension mismatch')}
+        invalidResult=false
         await withCurrentVersion(installationId,versionId,async client=>{
           if(!await embeddingAllowed(client,installationId,versionId))return
-          await client.query(`
+          const published=await client.query(`
           UPDATE claim_search_documents d SET
             embedding = $3::real[],
             embedding_provider = $4,
@@ -151,17 +203,35 @@ export function createClaimIndexer(deps: IndexerDeps) {
             embedding_fingerprint = $7,
             embedding_status = 'ready'
           FROM knowledge_claims c JOIN knowledge_versions v USING(installation_id,claim_id)
-          WHERE d.installation_id=$1 AND d.version_id=$2 AND c.installation_id=d.installation_id AND v.version_id=d.version_id
+          WHERE d.installation_id=$1 AND d.version_id=$2 AND d.document=$8 AND c.installation_id=d.installation_id AND v.version_id=d.version_id
             AND ${currentClaimVersionSql()} AND c.state='active' AND c.consumption_hold_reason IS NULL
         `, [installationId, versionId, vector, deps.embed!.provider,
             deps.embed!.model, (deps.embed?.dimensions ?? 0),
-            deps.embeddingConsentFingerprint ?? null])
+            fingerprint,prepared.document])
+          if(!published.rowCount)return
+          await client.query("UPDATE memory_index_calls SET state='published',finished_at=clock_timestamp() WHERE call_id=$1 AND state='possible'",[call])
         },fence)
-      } catch {
+      } catch (error) {
+        if(error instanceof ProviderBudgetExceededError||error instanceof EmbeddingNotDispatchedError){
+          if(ownsSend)await deps.pool.query("UPDATE memory_index_calls SET state='intended' WHERE call_id=$1 AND state='possible'",[call])
+          if(error instanceof EmbeddingNotDispatchedError){
+            if(error.original instanceof Error&&error.original.message==='embedding_dispatch_ineligible')return
+            throw error.original
+          }
+          throw new JobDeferredError('budget_exceeded',new Date(Date.now()+300000))
+        }
+        // Another claimant may have won the send transition while this one
+        // waited for budget. Only the sender may settle a possible dispatch.
+        if(!ownsSend && !(error instanceof EmbeddingReservationUnknownError))throw error
+        // A transport error, lost lease or ambiguous COMMIT is not permission to
+        // call the provider again. Preserve any already committed vector/receipt.
         // Retry only while the target and consent still admit indexing. A
         // failed in-flight request cannot recreate a held/deleted projection.
         const retry=await withCurrentVersion(installationId,versionId,async client=>{
           if(!await embeddingAllowed(client,installationId,versionId))return false
+          const marked=await client.query(`UPDATE memory_index_calls SET state=$2,finished_at=clock_timestamp()
+            WHERE call_id=$1 AND state=$3 RETURNING call_id`,[call,invalidResult?'invalid_result':'unconfirmed',ownsSend?'possible':'intended'])
+          if(!marked.rowCount)return false
           await client.query(`
           UPDATE claim_search_documents SET embedding_status = 'failed'
           WHERE installation_id = $1 AND version_id = $2
@@ -184,7 +254,7 @@ export function createClaimIndexer(deps: IndexerDeps) {
         await client.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('purge:installation:'||$1,0))",[job.installation_id])
         const after=typeof job.payload.after_version_id==='string'?job.payload.after_version_id:null
         if(after&&!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(after))throw new Error('invalid_rebuild_cursor')
-        const batch=await client.query<{last:string|null;n:number}>(`
+        const batch=await client.query<{last:string|null;n:number;queued:number}>(`
         WITH eligible AS MATERIALIZED (
           SELECT c.installation_id,c.current_version_id FROM knowledge_claims c
           WHERE c.installation_id=$1 AND c.state='active' AND c.current_version_id IS NOT NULL
@@ -205,7 +275,10 @@ export function createClaimIndexer(deps: IndexerDeps) {
         if(page?.n===1000&&page.last)await client.query(`INSERT INTO memory_jobs(job_id,installation_id,job_type,idempotency_key,priority,payload)
           VALUES(gen_random_uuid(),$1,'rebuild_claim_index',$2,95,$3::jsonb) ON CONFLICT DO NOTHING`,
           [job.installation_id,`rebuild:${adapterFingerprint}:after:${page.last}`,JSON.stringify({adapter_fingerprint:adapterFingerprint,after_version_id:page.last})])
-        if(ctx?.fence)await assertJobFence(client,ctx.fence)
+        if(ctx?.fence){
+          await assertJobFence(client,ctx.fence)
+          await recordRebuildPage(client,job,ctx.fence,page?.n??0,Number(page?.queued??0))
+        }
         await guardSourceExecutionCommit(client)
         await client.query('COMMIT')
       }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}

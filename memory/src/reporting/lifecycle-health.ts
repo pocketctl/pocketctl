@@ -1,9 +1,12 @@
+import {curationProgressSql,stageAvailability,summarizeStage,type StageProgress} from './stage-progress.js'
 import {nativeTurnCoverage,projectedTurnCoverage} from './lifecycle-turn-coverage.js'
 import {sourcePoolContext} from '../sources/pool-context.js'
 import {queryHealth,type HealthPool} from './health-query.js'
 
 export type LifecycleMode='off'|'shadow'|'enabled'
 export interface LifecycleHealthRow {
+ uncertain_calls?:number; unpriced_calls?:number; recorded_uncertain_cost_micros?:string; uncertain_calls_capped?:boolean
+ curation_progress?:StageProgress
  installation_id:string;relay_status:string;local_status:string;owner_scope_kind:string;owner_state:string;policy_mode:string
  consume_mode:string;cold_mode:string;reclaim_mode:string;turns:number;receipt_turns:number;complete_turns:number
  coverage_basis:'current_native_input'|'current_projection_intake';trusted_input_turns:number;unknown_input_turns:number;policy_skipped_input_turns:number
@@ -17,16 +20,17 @@ export function evaluateLifecycleHealth(row:LifecycleHealthRow,configuredMode:Li
  const active=['pending','active'].includes(row.relay_status)&&!['purging','purged'].includes(row.local_status)&&row.owner_scope_kind==='personal'&&row.owner_state==='active'
  const effective=(policy:string):LifecycleMode=>!active||configuredMode==='off'||!['shadow','enabled'].includes(policy)?'off':configuredMode==='shadow'||policy==='shadow'?'shadow':'enabled'
  const mode=effective(row.policy_mode),reasons:LifecycleHealthReason[]=[]
+ const affected=row.curation_progress ? stageAvailability(row.curation_progress)==='degraded' : Boolean(row.consolidation_failed||row.consolidation_stalled)
  if(mode!=='off'){
-  if(row.consolidation_failed>0)reasons.push('consolidation_failed')
-  if(row.consolidation_stalled>0)reasons.push('consolidation_stalled')
+  if(affected&&(row.consolidation_failed>0||Number(row.curation_progress?.failed)>0))reasons.push('consolidation_failed')
+  if(affected&&(row.consolidation_stalled>0||Number(row.curation_progress?.late)>0||Number(row.curation_progress?.overdue)>=3))reasons.push('consolidation_stalled')
   if(row.provenance_unknown_turns>0||row.unknown_input_turns>0)reasons.push('source_provenance_unknown')
   if(row.missing_receipt_turns>0||row.complete_turns+row.provenance_unknown_turns<row.turns)reasons.push('coverage_incomplete')
   if(row.counts_capped)reasons.push('counts_capped')
  }
  return {mode,consume_mode:mode==='off'?'off':effective(row.consume_mode),cold_mode:mode==='off'?'off':effective(row.cold_mode),reclaim_mode:mode==='off'?'off':effective(row.reclaim_mode),
   formal_writes_enabled:mode==='enabled',
-  execution:mode==='off'?'disabled':row.consolidation_failed||row.consolidation_stalled?'degraded':row.turns||row.consolidation_completed?'healthy':'idle',
+  execution:mode==='off'?'disabled':affected?'degraded':row.curation_progress?stageAvailability(row.curation_progress):row.turns||row.consolidation_completed?'healthy':'idle',
   coverage:mode==='off'?'disabled':!row.turns?'idle':row.complete_turns<row.turns||row.counts_capped?'limited':'complete',reasons}
 }
 
@@ -56,7 +60,11 @@ export function summarizeLifecycleHealth(rows:LifecycleHealthRow[],configuredMod
   ...(rows[0]?.coverage_basis==='current_projection_intake'&&{latest_recorded_projection_receipts:{
    receipt_turns:sum('recorded_projection_turns'),complete_turns:sum('recorded_projection_complete_turns'),
    provenance_unknown_turns:sum('recorded_projection_unknown_turns')}}),
-  consolidation:{completed:sum('consolidation_completed'),failed:sum('consolidation_failed'),stalled:sum('consolidation_stalled')},
+  consolidation:{external_uncertainty:{
+    calls:active.reduce((n,row)=>n+Number(row.uncertain_calls??0),0),
+    calls_without_recorded_price:active.reduce((n,row)=>n+Number(row.unpriced_calls??0),0),
+    recorded_cost_micros:active.reduce((n,row)=>n+BigInt(row.recorded_uncertain_cost_micros??0),0n).toString(),
+    capped:active.some(row=>row.uncertain_calls_capped)},recent:summarizeStage(active.flatMap(row=>row.curation_progress?[row.curation_progress]:[])),completed:sum('consolidation_completed'),failed:sum('consolidation_failed'),stalled:sum('consolidation_stalled')},
   decisions:{committed:sum('committed_decisions'),proposed:sum('proposed_decisions')},
   context:{delivered:sum('context_delivered'),setting_modes:Object.fromEntries(['off','shadow','enabled'].map(mode=>[mode,active.reduce((n,row)=>n+row.context_modes.filter(item=>item===mode).length,0)])),delivery_required:false}}
 }
@@ -80,13 +88,14 @@ export async function loadLifecycleHealth(pool:HealthPool,configuredMode:Lifecyc
   LEFT JOIN memory_curation_policies p USING(installation_id)
   WHERE i.relay_status IN('pending','active','paused') ORDER BY i.installation_id LIMIT 101
  )
- SELECT i.*,t.turns,t.receipt_turns,t.complete_turns,t.provenance_unknown_turns,t.missing_receipt_turns,t.blocked_turns,
+ SELECT i.*,uncertain.*,recent.progress curation_progress,t.turns,t.receipt_turns,t.complete_turns,t.provenance_unknown_turns,t.missing_receipt_turns,t.blocked_turns,
   t.recorded_projection_turns,t.recorded_projection_complete_turns,t.recorded_projection_unknown_turns,
   t.trusted_input_turns,t.unknown_input_turns,t.policy_skipped_input_turns,t.with_trusted_input_turns,t.partially_trusted_turns,
   '${native?'current_native_input':'current_projection_intake'}'::text AS coverage_basis,
   b.consolidation_completed,b.consolidation_failed,b.consolidation_stalled,d.committed_decisions,d.proposed_decisions,
   c.context_delivered,m.context_modes,(t.capped OR b.capped OR d.capped OR c.capped OR m.capped) counts_capped
  FROM installations i
+ CROSS JOIN LATERAL (${curationProgressSql}) recent
  CROSS JOIN LATERAL (
   SELECT count(*) FILTER(WHERE n<=1000)::int turns,
    count(disposition) FILTER(WHERE n<=1000)::int receipt_turns,
@@ -105,6 +114,22 @@ export async function loadLifecycleHealth(pool:HealthPool,configuredMode:Lifecyc
    COALESCE(bool_or(n>1000),false) capped
   FROM (${native?nativeTurnCoverage:projectedTurnCoverage}) turns
  ) t
+ CROSS JOIN LATERAL (
+  SELECT count(*)::int uncertain_calls,count(*) FILTER(WHERE cost IS NULL)::int unpriced_calls,
+    COALESCE(sum(cost),0)::text recorded_uncertain_cost_micros,count(*)>1000 AS uncertain_calls_capped
+  FROM (
+    (SELECT (k.usage->>'costMicros')::numeric AS cost FROM memory_curation_calls k
+      WHERE k.installation_id=i.installation_id AND i.active AND
+       (k.state IN ('unknown','conflict') OR k.state='possible' AND k.updated_at<statement_timestamp()-interval '5 minutes')
+      ORDER BY k.updated_at DESC,k.call_id LIMIT 1001)
+    UNION ALL
+    (SELECT u.cost_micros FROM memory_curation_runs r LEFT JOIN memory_usage_outbox u ON u.installation_id=r.installation_id
+       AND u.usage_id='curation:'||r.run_id WHERE r.installation_id=i.installation_id AND i.active AND r.checkpoint_protocol IS NULL
+       AND (r.state='provider_result_unknown' OR r.reconciliation_code='external_result_unconfirmed')
+       ORDER BY r.started_at DESC,r.run_id LIMIT 1001)
+    LIMIT 1001
+  ) external_calls
+ ) uncertain
  CROSS JOIN LATERAL (
   SELECT count(*) FILTER(WHERE n<=1000 AND run_state='completed')::int consolidation_completed,
    count(*) FILTER(WHERE n<=1000 AND run_state IN('failed','provider_result_unknown'))::int consolidation_failed,

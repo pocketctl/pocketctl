@@ -1,3 +1,5 @@
+import type {DialogueProtection} from './processing-pins.js'
+import {dialogueGenerationReader} from './dialogue-generation-reader.js'
 import {protectSourceExecutionBodies,protectMetadataSourceBodies} from './source-execution.js'
 import type pg from 'pg'
 import {createPostgresSharedSourceReader,createPostgresPersonalMetadataReader,SourceUnavailableError,type PersonalMetadataView,type SourceScope,type SourceRoot,type ArchiveReadStorage,type ArchiveLimits} from '@pocketctl/session-source'
@@ -5,9 +7,10 @@ import {isPhysicalSourcePool,sourcePoolContext} from './pool-context.js'
 import {boundedSourceQuery} from './bounded-source-query.js'
 const observed=new Set(['listHeads','getHeads','resolveBodies','checkCurrent','checkAuthority'])
 /** Instrument the Memory adapter only; the shared package stays independent. */
-export function createObservedSourceReader(db:pg.Pool,archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits},dialogueTurn?:string){
+export function createObservedSourceReader(db:pg.Pool,archive?:{storage:ArchiveReadStorage;limits:ArchiveLimits},dialogueTurn?:string,dialogue?:DialogueProtection){
  const queryDb=isPhysicalSourcePool(db)?{query:(sql:string,args?:any[])=>boundedSourceQuery(db,sql,args),connect:db.connect.bind(db)}:db
- const reader=createPostgresSharedSourceReader(queryDb,archive,dialogueTurn),observer=sourcePoolContext(db).readerObserver
+ const reader=dialogueTurn!==undefined&&dialogue!==undefined
+  ?dialogueGenerationReader(queryDb,archive,dialogueTurn,dialogue.generation):createPostgresSharedSourceReader(queryDb,archive,dialogueTurn),observer=sourcePoolContext(db).readerObserver
  return new Proxy(reader,{get(target,key){
   const value=Reflect.get(target,key,target)
   if(typeof value!=='function')return value
@@ -16,12 +19,14 @@ export function createObservedSourceReader(db:pg.Pool,archive?:{storage:ArchiveR
   return async(...args:any[])=>{
    try{
     // Historical cold headers may themselves require archive hydration.
-    if(key==='listHeads'||key==='getHeads')await protectSourceExecutionBodies(db,args[0],args[1],async()=>{
+    if(dialogue!==undefined && (key==='getHeads'||key==='resolveBodies')){
+     await protectMetadataSourceBodies(db,args[0],args[1],dialogue)
+    } else if(key==='listHeads'||key==='getHeads')await protectSourceExecutionBodies(db,args[0],args[1],async()=>{
      const current=await target.checkCurrent(args[0],args[1])
      if(current.state!=='current')throw new SourceUnavailableError(current.state)
      return current.version
     })
-    if(key==='resolveBodies')await protectSourceExecutionBodies(db,args[0],args[1],args[3])
+    else if(key==='resolveBodies')await protectSourceExecutionBodies(db,args[0],args[1],args[3])
     const result=await call(...args)
     if(result?.state&&result.state!=='current')observer?.(key,args[1]?.kind??'other',result.state)
     return result

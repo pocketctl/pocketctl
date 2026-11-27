@@ -1,3 +1,6 @@
+import {createPurgeRepository} from '../purge/repository.js'
+import {settleNativeStage} from '../jobs/stage-recovery.js'
+import {inspectCurationRecovery,recoverDueCurationCheckpoints} from '../curation/recover-checkpoints.js'
 import pg from 'pg'
 import {randomUUID} from 'node:crypto'
 import {beforeAll,beforeEach,afterAll,describe,test,expect,vi} from 'vitest'
@@ -12,7 +15,11 @@ import {annotateSourceFailure} from '../sources/diagnostics.js'
 import {reconcileExpiredCurationRuns} from '../curation/reconcile-expired.js'
 import {lifecycleStatus} from '../curation/status.js'
 import {createCurationExecutor} from '../curation/executor.js'
-import {createCurationWorker} from '../curation/worker.js'
+import {createCurationWorker,curationTransaction} from '../curation/worker.js'
+import {createWindowCheckpoints} from '../curation/call-checkpoints.js'
+import {extractDialogueConclusions} from '../curation/dialogue-extraction.js'
+import {createProviderBudgetStore,withTextProviderBudget} from '../model/provider-budget.js'
+import {drainTextProvider,ProviderDrain} from '../model/provider-drain.js'
 import {createSourceProjector} from '../projection/source-projector.js'
 import {stageLifecycleTurn} from '../curation/task-repository.js'
 import {canonicalPayloadHash} from '../inbox/canonical-json.js'
@@ -27,9 +34,9 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
  afterAll(async()=>{await pool?.end()})
  beforeEach(async()=>{await pool.query('TRUNCATE memory_installations CASCADE')})
  const success=(tasks:unknown[]=[])=>({ok:true,value:{tasks},usage:{inputTokens:20,outputTokens:5,model:'synthetic'}})
- async function fixture(unknown=false){
+ async function fixture(unknown=false,text='I prefer concise answers.'){
   const f=await governanceFixture(pool),id=randomUUID(),session='consolidation-session',turn='consolidation-turn'
-  const payload={text:'I prefer concise answers.'},proof={version:1,producer:'claude',session_id:session,turn_id:turn,event_id:'event-1',sequence:'1',invocation_id:'user-input',source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}
+  const payload={text},proof={version:1,producer:'claude',session_id:session,turn_id:turn,event_id:'event-1',sequence:'1',invocation_id:'user-input',source_role:'user',skill_state:'non_skill',lineage_complete:true,derived_from_event_ids:[]}
   await pool.query("INSERT INTO memory_curation_policies(installation_id,mode) VALUES($1,'enabled')",[f.personal])
   await pool.query(`INSERT INTO source_events(source_event_id,installation_id,origin,origin_position,session_id,turn_id,event_type,occurred_at,payload,payload_hash,source_provenance)
    VALUES($1,$2,'feed','1',$3,$4,'user_text',clock_timestamp(),$5,$6,$7)`,[id,f.personal,session,turn,payload,canonicalPayloadHash(payload),{memory:proof}])
@@ -238,10 +245,13 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
  test('AC-15 expired publication lease preserves the returned charge and never repeats the provider call',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{await pool.query("UPDATE memory_curation_runs SET claim_expires_at=clock_timestamp()-interval '1 second'");return success()})
   const w=worker({generateJson:generate} as TextGenerator)
-  await w.consolidate(f.job,signal());await w.consolidate(f.job,signal())
-  expect(generate).toHaveBeenCalledTimes(1)
+  await w.consolidate(f.job,signal())
   expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]).toEqual({state:'failed',error_code:'lease_expired'})
   expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(0)
+  await w.consolidate(f.job,signal())
+  expect(generate).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]).toEqual({state:'completed',error_code:null})
+  expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(1)
  })
  test('a returned charge survives pin renewal denial, with the original publication diagnosis and no second call',async()=>{
   const f=await fixture(), guard=vi.spyOn(execution,'guardSourceExecutionCommit')
@@ -261,8 +271,8 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
    await createCurationWorker({pool,mode:'enabled',textGenerator:{generateJson:generate} as TextGenerator,modelFingerprint:'updated'}).consolidate(f.job,signal())
    expect(generate).toHaveBeenCalledTimes(1)
    expect((await pool.query("SELECT count(*)::int n FROM memory_usage_outbox WHERE operation='curation'")).rows[0].n).toBe(1)
-   expect((await pool.query('SELECT result FROM memory_curation_runs')).rows).toEqual([{result:null}])
-   expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(0)
+   expect((await pool.query('SELECT state,result FROM memory_curation_runs')).rows).toEqual([{state:'completed',result:[]}])
+   expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(1)
   }finally{guard.mockRestore()}
  })
  test('a late known response refines only its own previously expired claim',async()=>{
@@ -304,8 +314,8 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   await pool.query("UPDATE memory_curation_runs SET claim_expires_at=now()-interval '1 second'")
   await w.consolidate(f.job,signal())
   expect(generate).toHaveBeenCalledTimes(1)
-  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]).toEqual(committed?initial:{state:'failed',error_code:'publication_interrupted'})
-  expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(committed?1:0)
+  expect((await pool.query('SELECT state,error_code FROM memory_curation_runs')).rows[0]).toEqual({state:'completed',error_code:null})
+  expect((await pool.query('SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete')).rows[0].n).toBe(1)
  })
  test('AC-16 source change during provider call cannot commit old output',async()=>{
   const f=await fixture(),generate=vi.fn(async()=>{const payload={text:'changed body'};await pool.query('UPDATE source_events SET payload=$2,payload_hash=$3 WHERE source_event_id=$1',[f.id,payload,canonicalPayloadHash(payload)]);return success()})
@@ -325,6 +335,181 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   await w.consolidate(f.job,signal())
   expect(generate).toHaveBeenCalledTimes(1)
   expect((await pool.query('SELECT state FROM memory_task_bundles WHERE bundle_id=$1',[f.bundleId])).rows[0].state).toBe('skipped_unresolved')
+ })
+
+ test('a budget denial after a billed window reuses its response and admits exactly the missing call',async()=>{
+  const text='a'.repeat(65000),f=await fixture(false,text),run=randomUUID(),requests:string[]=[]
+  await pool.query(`INSERT INTO memory_curation_runs(installation_id,run_id,bundle_id,bundle_revision,source_digest,policy_revision,policy_hash,model_config_hash,mode,state,checkpoint_protocol)
+    SELECT installation_id,$2,bundle_id,revision,source_digest,1,repeat('a',64),repeat('b',64),'enabled','running',1 FROM memory_task_bundles WHERE bundle_id=$1`,[f.bundleId,run])
+  const raw={generateJson:vi.fn(async(p:{requestKey:string})=>{requests.push(p.requestKey);return success()})} as unknown as TextGenerator
+  const guarded=async<T>(work:(c:pg.PoolClient)=>Promise<T>)=>{
+   const result=await curationTransaction(pool,f.personal,f.bundleId,async c=>({data:await work(c)}))
+   if(!result)throw Error('source_changed')
+   return result.data
+  }
+  async function extract(maxRequests:number){
+   const generator=drainTextProvider(withTextProviderBudget(raw,createProviderBudgetStore(pool),{
+    key:run,maxRequests,maxInputTokens:10_000_000,maxOutputTokens:10_000,maxOutputTokensPerRequest:1000}),new ProviderDrain())!
+   const runWindow=createWindowCheckpoints({pool,installation:f.personal,run,runEpoch:1,modelHash:'b'.repeat(64),generator,routeMatches:true,bindings:{tasks:{},spaces:{}},
+    owned:guarded,dispatch:guarded,receipt:guarded,witnesses:[]})
+   return extractDialogueConclusions(generator,{sources:[{id:f.id,text,role:'user'}],spaces:[],tasks:[],requestKey:run,signal:signal(),now:new Date()},runWindow)
+  }
+  expect(await extract(1)).toMatchObject({ok:false,code:'budget_exceeded'})
+  const calls=async()=>(await pool.query('SELECT window_index,state,call_id,budget_reservation_id FROM memory_curation_calls ORDER BY window_index')).rows
+  const before=await calls()
+  expect(before.map(c=>c.state)).toEqual(['saved','intended'])
+  expect(before[0].call_id).not.toBe(before[1].call_id)
+  expect(await extract(2)).toMatchObject({ok:true,usage:{inputTokens:40,outputTokens:10}})
+  const after=await calls()
+  expect(after.map(c=>c.state)).toEqual(['saved','saved'])
+  expect(after.every(c=>c.budget_reservation_id)).toBe(true)
+  expect(requests).toEqual(before.map(c=>'curation-call:'+c.call_id))
+  expect((await pool.query('SELECT input_tokens::int,output_tokens::int FROM memory_curation_runs')).rows).toEqual([{input_tokens:40,output_tokens:10}])
+  expect((await pool.query("SELECT count(*)::int n,sum(input_tokens)::int AS tokens FROM memory_usage_outbox WHERE operation='curation'")).rows[0]).toEqual({n:2,tokens:40})
+ })
+
+ test('a crash after budget reservation but before the send marker can reuse only that reserved window',async()=>{
+  const f=await fixture(),send=vi.fn(async()=>success())
+  const generator=drainTextProvider(withTextProviderBudget({generateJson:send} as TextGenerator,createProviderBudgetStore(pool),
+   {key:f.personal,maxRequests:1,maxInputTokens:1_000_000,maxOutputTokens:100,maxOutputTokensPerRequest:100}),new ProviderDrain())!
+  const w=worker(generator),original=pg.Client.prototype.query
+  let fail=true
+  const query=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:unknown[]){
+   if(fail&&typeof args[0]==='string'&&args[0].includes("SET state='possible',budget_reservation_id")){
+    fail=false
+    throw Error('fixture_dispatch_before_http')
+   }
+   return Reflect.apply(original,this,args)
+  } as typeof original)
+  try{await expect(w.consolidate(f.job,signal())).rejects.toThrow('source_not_ready')}finally{query.mockRestore()}
+  expect(send).not.toHaveBeenCalled()
+  const before=(await pool.query('SELECT reservation_id,state FROM memory_provider_budget_reservations WHERE budget_key=$1',[f.personal])).rows
+  expect(before).toHaveLength(1);expect(before[0].state).toBe('reserved')
+  expect((await pool.query('SELECT state FROM memory_curation_calls')).rows[0].state).toBe('intended')
+  await pool.query('UPDATE memory_task_bundles SET next_evaluate_at=now() WHERE bundle_id=$1',[f.bundleId])
+  await w.consolidate(f.job,signal())
+  expect(send).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT budget_reservation_id,state,request_digest IS NOT NULL AS has_digest FROM memory_curation_calls')).rows).toEqual([
+   {budget_reservation_id:before[0].reservation_id,state:'saved',has_digest:true}])
+  expect((await pool.query('SELECT reservation_id,state FROM memory_provider_budget_reservations WHERE budget_key=$1',[f.personal])).rows).toEqual([
+   {reservation_id:before[0].reservation_id,state:'settled'}])
+ })
+ test('a session purged after dispatch retains only the original billed window usage when its reply arrives',async()=>{
+  const f=await fixture(),purge=createPurgeRepository(pool,{hmacKey:'purge-fixture'})
+  let entered!:()=>void,resume!:()=>void
+  const started=new Promise<void>(resolve=>{entered=resolve}),reply=new Promise<void>(resolve=>{resume=resolve})
+  const send=vi.fn(async()=>{entered();await reply;return {...success(),usage:{...success().usage,costMicros:120}}})
+  const generator=withTextProviderBudget({generateJson:send} as TextGenerator,createProviderBudgetStore(pool),
+   {key:f.personal,maxRequests:1,maxInputTokens:1_000_000,maxOutputTokens:100,maxOutputTokensPerRequest:100})
+  const work=worker(generator).consolidate(f.job,signal()).catch(error=>error as Error)
+  await started
+  const issued=(await pool.query("SELECT run_id,budget_reservation_id FROM memory_curation_calls WHERE state='possible'")).rows[0]
+  try{
+   await purge.purgeSession({installationId:f.personal,sessionId:'consolidation-session',reason:'user_deleted',sourceFeedId:null})
+  }finally{resume()}
+  expect(await work).toMatchObject({message:'curation_source_unavailable'})
+  expect(send).toHaveBeenCalledTimes(1)
+  for(const table of ['memory_task_bundles','memory_curation_runs','memory_curation_calls','memory_curation_items']){
+   expect((await pool.query('SELECT count(*)::int n FROM '+table+' WHERE installation_id=$1',[f.personal])).rows[0].n).toBe(0)
+  }
+  expect((await pool.query("SELECT usage_id,input_tokens::int,output_tokens::int,cost_micros::int FROM memory_usage_outbox WHERE installation_id=$1 AND operation='curation'",[f.personal])).rows)
+   .toEqual([{usage_id:'curation:'+issued.run_id,input_tokens:20,output_tokens:5,cost_micros:120}])
+  expect((await pool.query('SELECT reservation_id,state FROM memory_provider_budget_reservations WHERE budget_key=$1',[f.personal])).rows)
+   .toEqual([{reservation_id:issued.budget_reservation_id,state:'settled'}])
+ })
+ test('policy withdrawal erases checkpoint content, preserves its charge and prohibits local republication',async()=>{
+  const f=await fixture(),generate=vi.fn(async()=>success())
+  await worker({generateJson:generate} as TextGenerator).consolidate(f.job,signal())
+  const before=(await pool.query('SELECT run_id,state,response,usage FROM memory_curation_calls')).rows[0]
+  expect(before.state).toBe('saved')
+  await pool.query("UPDATE memory_curation_policies SET revision=revision+1,mode='off' WHERE installation_id=$1",[f.personal])
+  expect((await pool.query('SELECT state,response,usage,response_digest IS NOT NULL AS digest FROM memory_curation_calls')).rows[0]).toEqual({
+   state:'withdrawn',response:null,usage:before.usage,digest:true})
+  expect((await inspectCurationRecovery(pool,{installationId:f.personal,runIds:[before.run_id],apply:true}))[0].disposition).toBe('source_changed')
+  expect(generate).toHaveBeenCalledTimes(1)
+ })
+ test('recovery of an expired isolated reservation with a lost COMMIT acknowledgement keeps its exact job and run epochs',async()=>{
+  const f=await fixture(),send=vi.fn(async()=>success()),w=worker({generateJson:send} as TextGenerator)
+  const job=(await pool.query(`UPDATE memory_jobs SET state='running',claimed_by='fixture',claim_epoch=7,
+   claim_expires_at=clock_timestamp()+interval '1 hour' WHERE job_id=$1 RETURNING *`,[f.job.job_id])).rows[0]
+  const original=pg.Client.prototype.query
+  let committing:pg.Client|undefined
+  const query=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:unknown[]){
+   if(typeof args[0]==='string'&&args[0].includes('INSERT INTO memory_curation_runs'))committing=this
+   if(this===committing&&args[0]==='COMMIT'){
+    committing=undefined
+    return this.query('COMMIT').then(()=>{throw Object.assign(Error('connection closed'),{code:'ECONNRESET'})})
+   }
+   return Reflect.apply(original,this,args)
+  } as typeof original)
+  try{await expect(w.consolidate(job,signal())).rejects.toThrow('curation_commit_outcome_unknown')}finally{query.mockRestore()}
+  const run=(await pool.query('SELECT run_id,claim_epoch FROM memory_curation_runs')).rows[0]
+  expect(send).not.toHaveBeenCalled()
+  expect((await pool.query('SELECT 1 FROM memory_curation_calls')).rows).toHaveLength(0)
+  const c=await pool.connect()
+  try{await c.query('BEGIN');expect(await settleNativeStage(c,job,'curation_commit_outcome_unknown')).toBe(true);await c.query('COMMIT')}
+  finally{await c.query('ROLLBACK');c.release()}
+  await pool.query("UPDATE memory_curation_runs SET recovery_at=now(),claim_expires_at=now()-interval '1 second'")
+  await pool.query('UPDATE memory_jobs SET claim_epoch=8 WHERE job_id=$1',[job.job_id])
+  expect((await inspectCurationRecovery(pool,{installationId:f.personal,runIds:[run.run_id],apply:true}))[0].disposition).toBe('unverified')
+  await pool.query('UPDATE memory_jobs SET claim_epoch=7 WHERE job_id=$1',[job.job_id])
+  expect(await recoverDueCurationCheckpoints(pool)).toBe(1)
+  expect((await pool.query('SELECT job_id,state FROM memory_jobs WHERE job_id=$1',[job.job_id])).rows[0]).toEqual({job_id:job.job_id,state:'pending'})
+  await w.consolidate(job,signal())
+  expect(send).toHaveBeenCalledTimes(1)
+  expect((await pool.query('SELECT run_id,state,claim_epoch::int FROM memory_curation_runs')).rows)
+   .toEqual([{run_id:run.run_id,state:'completed',claim_epoch:Number(run.claim_epoch)+1}])
+ })
+ test('a busy recovery bundle reports lock_wait while its next independent run is queued',async()=>{
+  const f=await fixture(),bundles:string[]=[],runs:string[]=[]
+  for(const delay of [2,1]){
+   const bundle=randomUUID(),run=randomUUID(),job=randomUUID()
+   await pool.query(`INSERT INTO memory_task_bundles(installation_id,bundle_id,session_id,task_key,source_digest,watermark,state)
+    VALUES($1,$2,'s',$3,sha256('source'),1,'blocked')`,[f.personal,bundle,'source:'+bundle])
+   await pool.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,run_id,bundle_revision,source_digest,
+     policy_revision,authorization_epoch,policy_hash,model_config_hash,mode,state,checkpoint_protocol,claimed_by,recovery_at)
+     VALUES($1,$2,$3,1,sha256('source'),1,1,repeat('a',64),repeat('b',64),'enabled','failed',1,$4,now()-$5*interval '1 second')`,
+     [f.personal,bundle,run,job,delay])
+   bundles.push(bundle);runs.push(run)
+  }
+  const c=await pool.connect()
+  try{
+   await c.query('BEGIN');await c.query('SELECT 1 FROM memory_task_bundles WHERE bundle_id=$1 FOR UPDATE',[bundles[0]])
+   const scope={installationId:f.personal,runIds:runs}
+   expect((await inspectCurationRecovery(pool,scope)).map(row=>row.disposition)).toEqual(['lock_wait','local_recovery'])
+   expect(await recoverDueCurationCheckpoints(pool)).toBe(1)
+   expect((await inspectCurationRecovery(pool,{...scope,apply:true})).map(row=>row.disposition)).toEqual(['lock_wait','queued'])
+  }finally{await c.query('ROLLBACK');c.release()}
+  await pool.query("UPDATE memory_jobs SET state='completed' WHERE payload->>'bundle_id'=$1",[bundles[1]])
+  await pool.query("UPDATE memory_curation_runs SET recovery_at=now() WHERE run_id=ANY($1::uuid[])",[runs])
+  const original=pg.Client.prototype.query
+  const query=vi.spyOn(pg.Client.prototype,'query').mockImplementation(function(this:pg.Client,...args:unknown[]){
+   if(typeof args[0]==='string'&&args[0].includes('AS bundle_state,j.state AS job_state')&&Array.isArray(args[1])&&args[1][1]===runs[0])
+    throw Error('fixture_single_run_failure')
+   return Reflect.apply(original,this,args)
+  } as typeof original)
+  try{await expect(recoverDueCurationCheckpoints(pool)).rejects.toMatchObject({errors:[expect.objectContaining({message:'fixture_single_run_failure'})]})}
+  finally{query.mockRestore()}
+  expect((await pool.query("SELECT state FROM memory_jobs WHERE payload->>'bundle_id'=$1",[bundles[1]])).rows).toEqual([{state:'pending'}])
+ })
+ test('four charged historical runs without model bodies close only their exact original obligations',async()=>{
+  const f=await fixture(),ids:string[]=[]
+  for(const [n,code] of ['task_binding_changed','task_binding_changed','provider_result_unknown','source_processing_pin_unavailable'].entries()){
+   const bundle=randomUUID(),run=randomUUID()
+   await pool.query("INSERT INTO memory_task_bundles(installation_id,bundle_id,session_id,task_key,source_digest,watermark,state,reason_code) VALUES($1,$2,'s',$3,sha256('source'),1,'blocked',$4)",[f.personal,bundle,'source:cohort'+n,code])
+   await pool.query(`INSERT INTO memory_curation_runs(installation_id,bundle_id,run_id,bundle_revision,source_digest,policy_revision,authorization_epoch,policy_hash,model_config_hash,mode,state,error_code,input_tokens,completed_at)
+     VALUES($1,$2,$3,1,sha256('source'),1,1,repeat('a',64),repeat('b',64),'enabled',$4,$5,28,now())`,[f.personal,bundle,run,code==='provider_result_unknown'?code:'failed',code])
+   ids.push(run)
+  }
+  const args={installationId:f.personal,runIds:ids}
+  expect((await inspectCurationRecovery(pool,args)).map(r=>r.disposition)).toEqual(ids.map(()=>'external_result_unconfirmed'))
+  expect((await pool.query("SELECT count(*)::int n FROM memory_task_bundles WHERE state='blocked'")).rows[0].n).toBe(4)
+  await inspectCurationRecovery(pool,{...args,apply:true});await inspectCurationRecovery(pool,{...args,apply:true})
+  expect((await pool.query("SELECT count(*)::int n FROM memory_task_bundles WHERE state='failed' AND reason_code='external_result_unconfirmed'")).rows[0].n).toBe(4)
+  expect((await pool.query("SELECT sum(input_tokens)::int total FROM memory_curation_runs")).rows[0].total).toBe(112)
+  expect((await pool.query("SELECT count(*)::int n FROM memory_source_processing_receipts WHERE complete")).rows[0].n).toBe(0)
+  expect((await pool.query('SELECT count(*)::int n FROM memory_curation_calls')).rows[0].n).toBe(0)
+  expect((await inspectCurationRecovery(pool,{...args,installationId:f.team,apply:true})).map(r=>r.disposition)).toEqual(ids.map(()=>'unavailable'))
  })
  test('AC-08 off and shadow preserve legacy extraction while enabled owns the source',async()=>{
   const f=await fixture()
@@ -375,6 +560,6 @@ suite('lifecycle consolidation transaction (synthetic provider, not model accept
   await w.consolidate(f.job,signal())
   expect(generate).toHaveBeenCalledTimes(1)
   expect((await pool.query('SELECT state FROM memory_task_bundles WHERE bundle_id=$1',[f.bundleId])).rows[0].state).toBe('skipped_unresolved')
-  expect((await pool.query('SELECT complete FROM memory_source_processing_receipts')).rows[0].complete).toBe(!validSubset)
+  expect((await pool.query('SELECT complete FROM memory_source_processing_receipts')).rows[0].complete).toBe(false)
  })
 })

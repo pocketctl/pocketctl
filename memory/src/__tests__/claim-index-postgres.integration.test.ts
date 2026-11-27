@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vit
 import { applyMemorySchema } from '../schema.js'
 import { assertMemoryTestDatabase } from '../testing/test-db.js'
 import { createClaimIndexer } from '../retrieval/indexer.js'
+import {createProviderBudgetStore,withEmbeddingProviderBudget} from '../model/provider-budget.js'
 
 const databaseUrl = process.env.MEMORY_TEST_DATABASE_URL
 const integrationEnabled = Boolean(
@@ -84,6 +85,36 @@ describeWithDatabase('claim index projection (PostgreSQL)', () => {
     }
   }
 
+  test('an expired revision removes its lexical projection before any embedding dispatch',async()=>{
+    await createClaimIndexer({pool}).indexVersion(INSTALLATION,versionId,new AbortController().signal)
+    await pool.query("UPDATE knowledge_versions SET effective_from=now()-interval '2 days',effective_until=now()-interval '1 day' WHERE version_id=$1",[versionId])
+    const { indexer, embed }=indexerWithEmbed('ok')
+    await indexer.indexVersion(INSTALLATION,versionId,new AbortController().signal)
+    expect(embed.embed).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT 1 FROM claim_search_documents WHERE installation_id=$1 AND version_id=$2',[INSTALLATION,versionId])).rowCount).toBe(0)
+  })
+
+  test('consent revoked during budget reservation prevents the raw embedding request', async () => {
+    const {embed} = indexerWithEmbed('ok')
+    const store = createProviderBudgetStore(pool)
+    let reserved = false
+    const guarded = withEmbeddingProviderBudget(embed, {
+      ...store,
+      async reserve(input) {
+        const result = await store.reserve(input)
+        reserved = result.ok
+        await pool.query("UPDATE memory_feature_settings SET embedding_mode='off' WHERE installation_id=$1", [INSTALLATION])
+        return result
+      },
+    }, {key: versionId, maxTokens: 10000, maxRequests: 2})
+    const indexer = createClaimIndexer({pool, embed: {...guarded, provider: embed.provider, model: embed.model}, embeddingConsentFingerprint: 'adapter-small'})
+    await indexer.indexVersion(INSTALLATION, versionId, new AbortController().signal)
+    expect(reserved).toBe(true)
+    expect(embed.embed).not.toHaveBeenCalled()
+    expect((await pool.query('SELECT state FROM memory_index_calls WHERE installation_id=$1 AND version_id=$2', [INSTALLATION, versionId])).rows).toEqual([{state: 'intended'}])
+    expect((await pool.query("SELECT 1 FROM memory_usage_outbox WHERE installation_id=$1 AND operation='embedding'", [INSTALLATION])).rowCount).toBe(0)
+  })
+
   test('enabled mode writes the lexical document and a normalized embedding', async () => {
     const { indexer } = indexerWithEmbed('ok')
     await indexer.indexVersion(INSTALLATION, versionId, new AbortController().signal)
@@ -119,10 +150,13 @@ describeWithDatabase('claim index projection (PostgreSQL)', () => {
   })
 
   test('embedding failure marks failed while lexical stays ready', async () => {
-    const { indexer } = indexerWithEmbed('fail')
+    const { indexer, embed } = indexerWithEmbed('fail')
     await expect(indexer.indexVersion(
       INSTALLATION, versionId, new AbortController().signal,
     )).rejects.toThrow('claim_embedding_failed')
+    await indexer.indexVersion(INSTALLATION, versionId, new AbortController().signal)
+    expect(embed.embed).toHaveBeenCalledTimes(1)
+    expect((await pool.query('SELECT state FROM memory_index_calls WHERE version_id=$1',[versionId])).rows).toEqual([{state:'unconfirmed'}])
     const doc = await pool.query<{ document: string; embedding_status: string }>(`
       SELECT document, embedding_status FROM claim_search_documents WHERE version_id = $1
     `, [versionId])
