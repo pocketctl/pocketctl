@@ -95,7 +95,7 @@ describe('db - backward pagination queries (session-history-pagination 1.4)', ()
     pool.query.mockResolvedValueOnce({ rows: [{ id: 10, payload: { type: 'agent_text', agent_id: 'agent-a' } }] })
     const result = await getRecentSubagentEvents(pool, 'sess-1', 'agent-a', 20)
     expect(pool.query).toHaveBeenCalledWith(
-      expect.stringContaining("COALESCE(payload,body_header)->>'agent_id' = $2"),
+      expect.stringContaining("COALESCE(payload,body_header) ? 'agent_id' AND COALESCE(payload,body_header)->>'agent_id' = $2"),
       ['sess-1', 'agent-a', 20]
     )
     expect(pool.query).toHaveBeenCalledWith(
@@ -511,7 +511,7 @@ describe('Router - replay pagination (session-history-pagination 6.3)', () => {
     expect(end.count).toBe(2)
     expect(end.has_more).toBe(false)
     expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
-      sql.includes("COALESCE(payload,body_header)->>'agent_id' = $2") && params.includes('agent-a')
+      sql.includes("COALESCE(payload,body_header) ? 'agent_id' AND COALESCE(payload,body_header)->>'agent_id' = $2") && params.includes('agent-a')
     )).toBe(true)
   })
 
@@ -867,7 +867,7 @@ describe('replay_subagent independent child sessions (zcode model)', () => {
     expect(batch.events).toHaveLength(1)
     expect(batch.events[0].agent_id).toBe('agent-a')
     expect(pool.query.mock.calls.some(([sql, params]: [string, any[]]) =>
-      sql.includes("COALESCE(payload,body_header)->>'agent_id' = $2") && params.includes('agent-a')
+      sql.includes("COALESCE(payload,body_header) ? 'agent_id' AND COALESCE(payload,body_header)->>'agent_id' = $2") && params.includes('agent-a')
     )).toBe(true)
   })
 })

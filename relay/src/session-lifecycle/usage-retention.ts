@@ -29,7 +29,7 @@ export async function initSessionUsageRetentionSchema(db: Pick<pg.Pool,'query'>)
   `)
 }
 
-export async function retainSessionUsageInTransaction(db: Pick<pg.PoolClient,'query'>,sessionId:string,retainLegacyDaily=true): Promise<void> {
+export async function retainSessionUsageInTransaction(db: Pick<pg.PoolClient,'query'>,sessionId:string,retainLegacyDaily=true,historicalIds:string[]=[],ownerId?:number|null): Promise<void> {
   await db.query(`INSERT INTO session_usage_retention_daily(user_id,session_id,daemon_id,agent_type,model,date,input,output,cache_read,cache_create,requests)
     SELECT s.user_id,s.session_id,s.daemon_id,COALESCE(s.agent_type,'unknown'),COALESCE(s.model,'unknown'),(e.created_at AT TIME ZONE 'UTC')::date,
       SUM(COALESCE((COALESCE(e.payload,e.body_header)->'usage'->>'input_tokens')::bigint,0)),
@@ -46,9 +46,12 @@ export async function retainSessionUsageInTransaction(db: Pick<pg.PoolClient,'qu
     FROM sessions WHERE session_id=$1 AND user_id IS NOT NULL AND daemon_id IS NOT NULL ON CONFLICT(user_id,session_id) DO NOTHING`,[sessionId])
   const usageSchema=(await db.query("SELECT to_regclass('public.usage_token_projection') IS NOT NULL AS ready")).rows[0]?.ready
   if(usageSchema){
-   await db.query('UPDATE usage_token_projection SET attribution_revoked=TRUE WHERE source_session=$1',[sessionId])
-   await db.query('UPDATE usage_call_facts SET attribution_revoked=TRUE WHERE source_session=$1',[sessionId])
-   await db.query('UPDATE usage_skill_facts SET attribution_revoked=TRUE WHERE source_session=$1',[sessionId])
+   await db.query(`UPDATE usage_token_projection SET attribution_revoked=TRUE WHERE source_session=$1
+      OR (source_session=ANY($2::varchar[]) AND owner_user_id=$3)`,[sessionId,historicalIds,ownerId ?? null])
+   await db.query(`UPDATE usage_call_facts SET attribution_revoked=TRUE WHERE source_session=$1
+      OR (source_session=ANY($2::varchar[]) AND owner_user_id=$3)`,[sessionId,historicalIds,ownerId ?? null])
+   await db.query(`UPDATE usage_skill_facts SET attribution_revoked=TRUE WHERE source_session=$1
+      OR (source_session=ANY($2::varchar[]) AND owner_user_id=$3)`,[sessionId,historicalIds,ownerId ?? null])
   }
   if(!retainLegacyDaily)return
   // Fill missing historical rollups while canonical rows are still present.

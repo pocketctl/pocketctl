@@ -509,11 +509,6 @@ async function initDBUnlocked(pool: pg.Pool): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_subagents_parent_created
     ON subagents(parent_session_id, created_at)
   `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_events_session_agent_id_desc
-    ON events (session_id, ((payload->>'agent_id')), id DESC)
-    WHERE payload ? 'agent_id'
-  `);
 
   // C2: Token cost tracking — per-session cumulative cost (USD) from result events
   await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT 0`);
@@ -2440,12 +2435,17 @@ interface ReplayFilter {
   params: any[];
 }
 
+// PostgreSQL needs the explicit key predicate to use idx_events_body_agent_id_desc.
+function subagentEventFilter(parameter: number): string {
+  return `COALESCE(payload,body_header) ? 'agent_id' AND COALESCE(payload,body_header)->>'agent_id' = $${parameter}`;
+}
+
 function completeReplayFilter(sessionId: string, beforeId: number | undefined, agentId?: string): ReplayFilter {
   const params: any[] = [sessionId];
   const clauses = ['session_id = $1'];
   if (agentId) {
     params.push(agentId);
-    clauses.push(`COALESCE(payload,body_header)->>'agent_id' = $${params.length}`);
+    clauses.push(subagentEventFilter(params.length));
   }
   if (beforeId !== undefined && beforeId > 0) {
     params.push(beforeId);
@@ -2590,7 +2590,7 @@ function completeForwardReplayFilter(sessionId: string, afterId: number, agentId
   const clauses = ['session_id = $1', 'id > $2'];
   if (agentId) {
     params.push(agentId);
-    clauses.push(`COALESCE(payload,body_header)->>'agent_id' = $${params.length}`);
+    clauses.push(subagentEventFilter(params.length));
   }
   return { where: clauses.join(' AND '), params };
 }
@@ -2759,7 +2759,7 @@ export async function getRecentSubagentEvents(pool: pg.Pool, sessionId: string, 
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
-     WHERE session_id = $1 AND COALESCE(payload,body_header)->>'agent_id' = $2
+     WHERE session_id = $1 AND ${subagentEventFilter(2)}
      ORDER BY id DESC LIMIT $3`,
     [sessionId, agentId, limit]
   );
@@ -2770,7 +2770,7 @@ export async function getSubagentEventsBefore(pool: pg.Pool, sessionId: string, 
   const result = await pool.query(
     `SELECT id, session_id, event_type, payload, created_at, ${EVENT_BODY_COLUMNS}
      FROM events
-     WHERE session_id = $1 AND COALESCE(payload,body_header)->>'agent_id' = $2 AND id < $3
+     WHERE session_id = $1 AND ${subagentEventFilter(2)} AND id < $3
      ORDER BY id DESC LIMIT $4`,
     [sessionId, agentId, cursor, limit]
   );
@@ -3296,7 +3296,7 @@ export async function reconcileSubagentInTransaction(
     await client.query(
       `DELETE FROM events
        WHERE session_id = $1
-         AND COALESCE(payload,body_header)->>'agent_id' = $2
+         AND ${subagentEventFilter(2)}
          AND COALESCE(COALESCE(payload,body_header)->>'event_id', '') = ''`,
       [relation.parentSessionId, relation.agentId]
     );
@@ -3822,7 +3822,7 @@ export async function listSessionsByUser(pool: pg.Pool, userId: number): Promise
 export async function purgeExtensionContentForSession(
   client: Pick<pg.PoolClient, 'query'>,
   sessionId: string,
-  options: { emitTombstone?: boolean } = {},
+  options: { emitTombstone?: boolean; historicalIds?: string[] } = {},
 ): Promise<void> {
   const owner = await client.query<{ user_id: number | null }>(
     `SELECT user_id FROM sessions WHERE session_id = $1`,
@@ -3831,13 +3831,15 @@ export async function purgeExtensionContentForSession(
   const ownerId = owner.rows[0]?.user_id ?? null;
   // Unprojected journal content for this session must not outlive it.
   await client.query(
-    `DELETE FROM extension_source_outbox WHERE session_id = $1 AND source_kind = 'canonical_event'`,
-    [sessionId],
+    `DELETE FROM extension_source_outbox WHERE source_kind = 'canonical_event'
+       AND (session_id = $1 OR (session_id = ANY($2::varchar[]) AND owner_user_id = $3))`,
+    [sessionId, options.historicalIds ?? [], ownerId],
   );
   // Feed content rows (tombstone rows keep a different source_kind).
   await client.query(
-    `DELETE FROM extension_feed WHERE session_id = $1 AND source_kind = 'canonical_event'`,
-    [sessionId],
+    `DELETE FROM extension_feed WHERE source_kind = 'canonical_event'
+       AND (session_id = $1 OR (session_id = ANY($2::varchar[]) AND owner_user_id = $3))`,
+    [sessionId, options.historicalIds ?? [], ownerId],
   );
   if (options.emitTombstone !== false && ownerId !== null && ownerId !== undefined) {
     await client.query(
@@ -3971,15 +3973,34 @@ export async function deleteSessionInTransaction(
     if (options.writeUsageFacts) {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext('token-usage-accounting-global'))`);
     }
-    await client.query(`SELECT session_id FROM sessions WHERE session_id = $1 FOR UPDATE`,[sessionId]);
-    await retainSessionUsageInTransaction(client,sessionId,!options.usageFactsAuthoritative);
+    const session = (await client.query(
+      'SELECT user_id, daemon_id FROM sessions WHERE session_id = $1 FOR UPDATE', [sessionId],
+    )).rows[0];
+    // The fence spans former owners too. Only authenticated aliases may authorize deletion.
+    let historicalIds: string[] = [];
+    if (session && aliasIds.length > 1) {
+      const { rows } = await client.query(
+        'SELECT public.native_session_authority($1,$2,$3) AS authority', [sessionId, session.user_id, session.daemon_id],
+      );
+      if (rows[0]?.authority?.state === 'current') {
+        historicalIds = rows[0].authority.sessionIds.filter((id: string) => id !== sessionId);
+      }
+    }
+    const routeParams = [sessionId, historicalIds, session?.user_id ?? null];
+    const inboxScope = `(inbox.session_id = $1
+      OR (inbox.session_id = ANY($2::varchar[]) AND (inbox.user_id = $3
+        OR (inbox.user_id IS NULL AND EXISTS (SELECT 1 FROM session_aliases a
+          WHERE a.old_session_id = inbox.session_id AND a.original_daemon_id = inbox.daemon_id))))
+      OR (inbox.session_id IS NULL AND inbox.materialized_event_id IN
+        (SELECT id FROM events WHERE session_id = $1)))`;
+    await retainSessionUsageInTransaction(client,sessionId,!options.usageFactsAuthoritative,historicalIds,session?.user_id);
     if (options.writeUsageFacts) await client.query(`
       INSERT INTO token_usage_facts (
         fact_key, source_event_id, user_id, daemon_id, session_id,
         agent_type, model, usage_date, recorded_at, input, output,
         cache_read, cache_create, reasoning, reported_total, requests
       )
-      SELECT 'inbox:' || inbox_id, NULL, inbox.user_id, inbox.daemon_id, inbox.session_id,
+      SELECT 'inbox:' || inbox_id, NULL, inbox.user_id, inbox.daemon_id, $1,
              COALESCE(NULLIF(inbox.payload->>'agent', ''), NULLIF(session.agent_type, ''), 'unknown'),
              COALESCE(NULLIF(inbox.payload->>'model', ''), NULLIF(session.model, ''), 'unknown'),
              (inbox.received_at AT TIME ZONE 'UTC')::date, inbox.received_at,
@@ -3991,9 +4012,9 @@ export async function deleteSessionInTransaction(
              GREATEST(COALESCE((inbox.payload->'usage'->>'total_tokens')::bigint, 0), 0),
              1
       FROM event_inbox inbox
-      LEFT JOIN sessions session ON session.session_id = inbox.session_id
+      LEFT JOIN sessions session ON session.session_id = $1
       LEFT JOIN token_usage_accounting_state baseline ON baseline.key = 'baseline-v1'
-      WHERE inbox.session_id = $1
+      WHERE ${inboxScope}
         AND (
           inbox.status IN (0, 1)
           OR (inbox.status = 2 AND inbox.received_at >= baseline.completed_at)
@@ -4001,12 +4022,13 @@ export async function deleteSessionInTransaction(
         AND inbox.event_type = 'agent_text'
         AND inbox.user_id IS NOT NULL AND inbox.payload ? 'usage'
       ON CONFLICT DO NOTHING
-    `, [sessionId]);
+    `, routeParams);
     if (options.writeUsageFacts) await client.query(
       `UPDATE token_usage_facts
        SET session_attribution_revoked = true
-       WHERE session_id = $1 AND session_attribution_revoked = false`,
-      [sessionId],
+       WHERE (session_id = $1 OR (session_id = ANY($2::varchar[]) AND user_id = $3))
+         AND session_attribution_revoked = false`,
+      routeParams,
     );
     // Compensate: roll this session's TODAY usage into token_daily_stats before
     // deleting events. Past days are already captured in stats by cron/backfill
@@ -4034,11 +4056,18 @@ export async function deleteSessionInTransaction(
         requests = token_daily_stats.requests + EXCLUDED.requests
     `, [sessionId]);
     await client.query(
-      `DELETE FROM realtime_outbox
-       WHERE inbox_id IN (SELECT inbox_id FROM event_inbox WHERE session_id = $1)`,
-      [sessionId],
+      `DELETE FROM realtime_outbox o WHERE o.session_id = $1
+       OR (o.session_id = ANY($2::varchar[]) AND (o.user_id = $3 OR (o.user_id IS NULL AND EXISTS (
+         SELECT 1 FROM event_inbox i JOIN session_aliases a ON a.old_session_id=o.session_id
+         WHERE i.inbox_id=o.inbox_id AND (i.user_id=$3 OR (i.user_id IS NULL AND i.daemon_id=a.original_daemon_id))
+       ))))`,
+      routeParams,
     );
-    await client.query(`DELETE FROM event_inbox WHERE session_id = $1`, [sessionId]);
+    // The inbox FK cascades its receipts and all deliveries sourced from it.
+    await client.query(`DELETE FROM event_inbox inbox WHERE ${inboxScope}`, routeParams);
+    await client.query(`DELETE FROM quota_reservations
+      WHERE user_id = $3 AND (session_id = $1 OR session_id = ANY($2::varchar[]))
+        AND state = 'settled' AND settled_at <= NOW() - interval '24 hours'`, routeParams);
     await client.query(
       `DELETE FROM session_document_upload_chunks
        WHERE version_id IN (
@@ -4050,8 +4079,10 @@ export async function deleteSessionInTransaction(
     await client.query(`DELETE FROM session_document_versions WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM session_documents WHERE session_id = $1`, [sessionId]);
     await client.query(`DELETE FROM events WHERE session_id = $1`, [sessionId]);
-    await client.query(`DELETE FROM attention_items WHERE session_id=$1`,[sessionId]);
-    await client.query(`DELETE FROM subagents WHERE parent_session_id=$1 OR agent_id=$1`,[sessionId]);
+    await client.query(`DELETE FROM attention_items
+      WHERE session_id = $1 OR (session_id = ANY($2::varchar[]) AND user_id = $3)`, routeParams);
+    await client.query(`DELETE FROM subagents
+      WHERE parent_session_id=ANY($1::varchar[]) OR agent_id=ANY($1::varchar[])`, [[sessionId,...historicalIds]]);
     await client.query(`UPDATE session_archive_object_deletions q SET deletion_subject_session_id=$1
       FROM sessions s WHERE s.session_id=$1 AND q.user_id=s.user_id AND q.session_id=ANY($2::text[])`,[sessionId,aliasIds]);
     await client.query(`DELETE FROM session_archive_manifests m USING sessions s WHERE s.session_id=$1 AND m.user_id=s.user_id AND m.session_id=ANY($2::text[])`,[sessionId,aliasIds]);
@@ -4060,8 +4091,10 @@ export async function deleteSessionInTransaction(
     const extensionMode = options.extensionMode ?? extensionModeFromEnv();
     await purgeExtensionContentForSession(client, sessionId, {
       emitTombstone: extensionMode !== 'off',
+      historicalIds,
     });
-    await client.query(`DELETE FROM token_session_daily_stats WHERE session_id = $1`, [sessionId]);
+    await client.query(`DELETE FROM token_session_daily_stats
+      WHERE session_id = $1 OR (session_id = ANY($2::varchar[]) AND user_id = $3)`, routeParams);
     await client.query(`UPDATE session_message_admissions
       SET state = 'completed', completed_at = NOW(), outcome = 'user_deleted'
       WHERE COALESCE(canonical_session_id,session_id) = $1 AND state <> 'completed'`, [sessionId]);
