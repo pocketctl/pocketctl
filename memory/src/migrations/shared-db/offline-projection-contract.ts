@@ -1,4 +1,8 @@
-export const APPEND_CAPTURE_V1_SHA256='9994082cfa6f1bba3789d62f4483a11946c45b06da0033f3036c52d60b1a4ac2'
+// During a rolling upgrade either reviewed producer can schedule the same append work.
+export const APPEND_CAPTURE_SHA256 = [
+ '9994082cfa6f1bba3789d62f4483a11946c45b06da0033f3036c52d60b1a4ac2',
+ '400e484485bf6b27ea4800732555d325f875be2297093412da94c0dbe2487094',
+]
 
 // Only the migrator can enroll installations. Keep one open accumulator per
 // root; frozen evidence travels with the immutable distribution scan.
@@ -113,7 +117,7 @@ export const OFFLINE_PROJECTION_DISTRIBUTION = [
      AND (t.tgname,t.tgtype) IN(('memory_window_capture_insert',4),('memory_window_capture_update',16))
      AND (t.tgtype=4 OR t.tgoldtable='capture_old'))=2)
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('shared.capture_memory_relay_events()') AND p.prosecdef
-   AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='${APPEND_CAPTURE_V1_SHA256}'
+   AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex') IN (${APPEND_CAPTURE_SHA256.map(hash=>`'${hash}'`).join(',')})
    AND (SELECT count(*) FROM pg_trigger t WHERE t.tgrelid='public.events'::regclass AND t.tgfoid=p.oid
     AND t.tgenabled IN('O','A') AND (t.tgname,t.tgtype) IN(('memory_source_capture_insert',4),
      ('memory_source_capture_update',16),('memory_source_capture_delete',8)))=3) $$`,

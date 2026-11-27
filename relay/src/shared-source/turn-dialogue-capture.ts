@@ -1,3 +1,4 @@
+import {SKIP_UNPUBLISHED_STATEMENT} from './published-transition.js'
 // Keep the capture query and the partial index predicate syntactically aligned.
 // PG13 does not infer this predicate from event_type IN ('agent_text','turn_status')
 // plus message_phase='final_answer'; it can scan a whole session for each delta.
@@ -51,10 +52,10 @@ export const TURN_DIALOGUE_INDEXES = [
    WHERE event_type='agent_text' AND body_header->>'actor_scope'='root'`,
 ] as const
 
-export const TURN_DIALOGUE_CAPTURE = [
-  `CREATE OR REPLACE FUNCTION shared.capture_turn_dialogue() RETURNS TRIGGER
+export const TURN_DIALOGUE_CAPTURE_FUNCTION = `CREATE OR REPLACE FUNCTION shared.capture_turn_dialogue() RETURNS TRIGGER
  LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shared AS $$
  DECLARE r RECORD;term RECORD;affected refcursor;BEGIN
+   ${SKIP_UNPUBLISHED_STATEMENT}
   IF NOT EXISTS(SELECT 1 FROM shared.memory_dialogue_installations) THEN RETURN NULL;END IF;
   IF TG_OP='UPDATE' THEN OPEN affected FOR ${eligibleTurns(updatedRows)};
   ELSE OPEN affected FOR ${eligibleTurns(newRows)}; END IF;
@@ -72,7 +73,10 @@ export const TURN_DIALOGUE_CAPTURE = [
     VALUES(r.installation_id,r.logical,r.turn) ON CONFLICT(installation_id,session_id,turn_id)
     DO UPDATE SET touched_at=clock_timestamp();
   END LOOP;CLOSE affected;RETURN NULL;
- END $$`,
+ END $$`
+
+export const TURN_DIALOGUE_CAPTURE = [
+  TURN_DIALOGUE_CAPTURE_FUNCTION,
   `REVOKE ALL ON FUNCTION shared.capture_turn_dialogue() FROM PUBLIC`,
   ...['INSERT', 'UPDATE', 'DELETE'].map(
     (op) => `DROP TRIGGER IF EXISTS turn_dialogue_${op.toLowerCase()} ON public.events;

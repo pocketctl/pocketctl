@@ -340,7 +340,7 @@ async function advanceContiguousCheckpoint(
 }
 
 export class InboxRepository {
-  private claimStatementName: string | undefined = 'pocketctl_inbox_claim_v1'
+  private claimStatementName: string | undefined = 'pocketctl_inbox_claim_v2'
 
   constructor(private readonly pool: pg.Pool) {}
 
@@ -427,18 +427,23 @@ export class InboxRepository {
       // row on every claim (or scans/sorts the whole table as visibility drifts).
       // Include claimed and retry-delayed heads here: filtering them before
       // choosing the head would let a successor overtake its ordering fence.
+      // Probe the eligible IDs by primary key. With empty-queue statistics a
+      // status filter on the UPDATE target can scan the whole burst per head.
+      // Recheck the locked version: another worker may have committed since
+      // stream_heads was read, before FOR UPDATE acquired the row.
       const name = this.claimStatementName
       const text = `WITH RECURSIVE stream_heads AS (
-         (SELECT daemon_id, daemon_generation, inbox_id
+         (SELECT daemon_id, daemon_generation, inbox_id, status, available_at
           FROM event_inbox
           WHERE status IN (0, 1)
           ORDER BY daemon_id, daemon_generation, seq, inbox_id
           LIMIT 1)
          UNION ALL
-         SELECT next_head.daemon_id, next_head.daemon_generation, next_head.inbox_id
+         SELECT next_head.daemon_id, next_head.daemon_generation, next_head.inbox_id,
+                next_head.status, next_head.available_at
          FROM stream_heads previous_head
          CROSS JOIN LATERAL (
-           SELECT daemon_id, daemon_generation, inbox_id
+           SELECT daemon_id, daemon_generation, inbox_id, status, available_at
            FROM event_inbox
            WHERE status IN (0, 1)
              AND (daemon_id, daemon_generation)
@@ -450,11 +455,11 @@ export class InboxRepository {
        candidates AS (
          SELECT inbox.inbox_id
          FROM event_inbox inbox
-         JOIN stream_heads head
-           ON head.inbox_id = inbox.inbox_id
-         WHERE inbox.status = 0
-           AND inbox.available_at <= NOW()
-           AND MOD(ABS(hashtext(inbox.daemon_id)::bigint), $2::bigint) = $3::bigint
+         WHERE inbox.inbox_id = ANY(ARRAY(
+           SELECT inbox_id FROM stream_heads
+           WHERE status = 0 AND available_at <= NOW()
+             AND MOD(ABS(hashtext(daemon_id)::bigint), $2::bigint) = $3::bigint
+         )) AND (inbox.status = 0 AND inbox.available_at <= NOW()) IS TRUE
          ORDER BY inbox.priority_class ASC,
                   inbox.received_at ASC,
                   inbox.inbox_id ASC
@@ -468,9 +473,9 @@ export class InboxRepository {
            claimed_at = NOW(),
            claimed_by = $1,
            last_error = NULL
-       FROM candidates
-       WHERE inbox.inbox_id = candidates.inbox_id
-         AND inbox.status = 0
+       WHERE inbox.inbox_id = ANY(ARRAY(
+         SELECT inbox_id FROM candidates
+       ))
        RETURNING inbox.*
        )
        SELECT * FROM claimed

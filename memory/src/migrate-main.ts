@@ -1,3 +1,4 @@
+import {ensureDeliveryActiveIndex} from './sources/delivery-active-index.js'
 import {applyPlatformStatisticsSchema,statisticsEnabled} from './platform-statistics/schema.js'
 import pg from 'pg'
 import {pathToFileURL} from 'node:url'
@@ -10,17 +11,22 @@ import {MEMORY_WRITER_STARTUP_OPTIONS} from './migrations/governance-v2/compatib
 import {normalizeTargetInstallations} from './migrations/shared-db/target-contract.js'
 export async function migrateMain(args=process.argv.slice(2)):Promise<number>{
  const [command,namespace,expectedDatabase]=args
- if(command!=='apply' || namespace!=='memory' || !expectedDatabase || args.length!==3){process.stderr.write('usage: migrate-main apply memory EXPECTED_DATABASE\n');return 2}
+ if(!['apply','ensure-delivery-index'].includes(command) || namespace!=='memory' || !expectedDatabase || args.length!==3){process.stderr.write('usage: migrate-main {apply|ensure-delivery-index} memory EXPECTED_DATABASE\n');return 2}
  const url=process.env.MEMORY_MIGRATION_DATABASE_URL
  if(!url){process.stderr.write('dedicated_migration_database_url_required\n');return 2}
  const pool=new pg.Pool({connectionString:url,max:1,options:MEMORY_WRITER_STARTUP_OPTIONS,application_name:'pocketctl-memory-migrator'})
  try{
-  const targetProfile=process.env.MEMORY_MIGRATION_SOURCE_TARGET_PROFILE
+  const targetProfile=command==='apply'?process.env.MEMORY_MIGRATION_SOURCE_TARGET_PROFILE:undefined
   if(targetProfile!==undefined&&(namespace!=='memory'||targetProfile!=='full'&&targetProfile!=='personal-relay-only'))throw Error('unsupported_shared_source_target_profile')
-  const rawInstallations=process.env.MEMORY_MIGRATION_PRESERVED_INSTALLATIONS
+  const rawInstallations=command==='apply'?process.env.MEMORY_MIGRATION_PRESERVED_INSTALLATIONS:undefined
   if(rawInstallations!==undefined&&targetProfile!=='personal-relay-only')throw Error('shared_source_launch_scope_mismatch')
   const preservedInstallations=targetProfile==='personal-relay-only'?normalizeTargetInstallations(rawInstallations?.split(',').map(id=>id.trim().toLowerCase())):undefined
   if((await pool.query('SELECT current_database() AS name')).rows[0].name!==expectedDatabase)throw new Error('migration_database_identity_mismatch')
+  if(command==='ensure-delivery-index'){
+   const client=await pool.connect()
+   try{await ensureDeliveryActiveIndex(client,'memory')}finally{client.release()}
+   process.stdout.write('memory_delivery_active_index_ready\n');return 0
+  }
   await applyMemorySchema(pool,{namespace:namespace as 'public'|'memory'})
   if(statisticsEnabled())await applyPlatformStatisticsSchema(pool,namespace as 'public'|'memory')
   if(namespace==='memory'){

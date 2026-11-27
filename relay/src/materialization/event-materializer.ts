@@ -137,7 +137,7 @@ export class EventMaterializer {
     this.writeTokenUsageFacts = options.writeTokenUsageFacts ?? tokenUsageFeatures().writeFacts
     this.extensionJournalSink = options.extensionJournalSink !== undefined
       ? options.extensionJournalSink
-      : createExtensionJournalSinkFromEnv()
+      : createExtensionJournalSinkFromEnv(process.env, { prepareCanonicalHeader: true })
   }
 
   private get effectPool(): pg.Pool {

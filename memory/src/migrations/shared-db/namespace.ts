@@ -3,7 +3,7 @@ import {SHARED_GRANT_FUNCTIONS} from './grant-contract.js'
 import {SHARED_SOURCE_PROCESSING_PIN_FUNCTIONS} from './processing-pin-contract.js'
 import {SHARED_SOURCE_COMMIT_FENCE_FUNCTIONS} from './commit-fence-contract.js'
 import {SHARED_INPUT_START_FUNCTIONS} from './input-start-contract.js'
-import {APPEND_CAPTURE_V1_SHA256} from './offline-projection-contract.js'
+import {APPEND_CAPTURE_SHA256} from './offline-projection-contract.js'
 import {SHARED_SOURCE_DISTRIBUTION_FUNCTIONS} from './distribution-contract.js'
 import {assertTransportMetadataContract} from '../../sources/transport-state.js'
 import {assertTeamSemanticLegacySchema} from '../../sources/team-semantic-migration.js'
@@ -169,12 +169,12 @@ export async function provisionSharedDatabase(pool:pg.Pool,roles:SharedRoles,opt
 export async function assertRelayEventAppendCapture(db:Pick<pg.PoolClient,'query'>):Promise<void>{
  const row=(await db.query(`SELECT EXISTS(SELECT 1 FROM pg_proc p
    WHERE p.oid=to_regprocedure('shared.capture_memory_relay_events()') AND p.prosecdef
-    AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')=$1
+    AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')=ANY($1::text[])
     AND NOT EXISTS(SELECT 1 FROM (VALUES ('memory_source_capture_insert',4),('memory_source_capture_update',16)) e(name,kind)
      WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('public.events') AND t.tgname=e.name
        AND t.tgfoid=p.oid AND t.tgtype=e.kind AND t.tgenabled IN('O','A'))))
    AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('shared.memory_source_work')
-     AND attname='event_append_revision' AND atttypid='int8'::regtype AND NOT attisdropped) AS ready`,[APPEND_CAPTURE_V1_SHA256])).rows[0]
+     AND attname='event_append_revision' AND atttypid='int8'::regtype AND NOT attisdropped) AS ready`,[APPEND_CAPTURE_SHA256])).rows[0]
  if(row?.ready!==true)throw Error('relay_event_append_capture_migration_required')
 }
 

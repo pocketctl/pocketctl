@@ -1,3 +1,4 @@
+import {upgradeEventCapture} from './shared-source/upgrade-event-capture.js'
 import {ensurePlatformStatisticsSchema} from './platform-statistics/schema.js'
 import pg from 'pg'
 import {resolve} from 'node:path'
@@ -10,10 +11,13 @@ import {applyRelayTeamSourceCapture} from './shared-source/team-capture.js'
 import {applyRelayControlCapture} from './shared-source/control-capture.js'
 import {enableSessionColdBodies} from './session-lifecycle/cold-schema.js'
 export async function migrateRelay(args=process.argv.slice(2)):Promise<number>{
- if(args.length!==2 || args[0]!=='apply' || !args[1] || !process.env.RELAY_MIGRATION_DATABASE_URL){console.error('usage: RELAY_MIGRATION_DATABASE_URL=... migrate-main apply EXPECTED_DATABASE');return 2}
+ if(args.length!==2 || !['apply','upgrade-event-capture'].includes(args[0]) || !args[1] || !process.env.RELAY_MIGRATION_DATABASE_URL){console.error('usage: RELAY_MIGRATION_DATABASE_URL=... migrate-main {apply|upgrade-event-capture} EXPECTED_DATABASE');return 2}
  const pool=new pg.Pool({connectionString:process.env.RELAY_MIGRATION_DATABASE_URL,max:1,options:'-c search_path=public,pg_catalog,shared',application_name:'pocketctl-relay-migrator'})
  try{
   if((await pool.query('SELECT current_database() AS name')).rows[0].name!==args[1])throw Error('migration_database_identity_mismatch')
+  if(args[0]==='upgrade-event-capture'){
+   await upgradeEventCapture(pool);console.log('relay_event_capture_upgraded');return 0
+  }
   await assertRelaySharedContract(pool)
   if(await relaySharedTarget(pool))await assertRelayCaptureMigrationCompatible(pool)
   await initDB(pool)

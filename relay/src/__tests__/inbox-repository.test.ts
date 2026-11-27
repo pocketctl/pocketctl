@@ -168,7 +168,7 @@ test('claims by bigint-safe daemon hash expression', async () => {
 
   await repo.claimBatch({ workerId: 'worker', limit: 10, shardCount: 2, shardIndex: 1 })
 
-  expect(claimSql).toContain('ABS(hashtext(inbox.daemon_id)::bigint)')
+  expect(claimSql).toContain('ABS(hashtext(daemon_id)::bigint)')
   expect(claimSql).toContain('MOD(')
 })
 
@@ -209,7 +209,7 @@ test.each([
   await repo.claimBatch(options)
   await repo.claimBatch(options)
   const first = query.mock.calls[0][0]
-  expect(first.name).toBe('pocketctl_inbox_claim_v1')
+  expect(first.name).toBe('pocketctl_inbox_claim_v2')
   expect(query.mock.calls[1]).toEqual([first.text, first.values])
   expect(query.mock.calls[2][0]).toEqual({ ...first, name: undefined })
 })

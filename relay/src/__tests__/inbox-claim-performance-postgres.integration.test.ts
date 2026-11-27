@@ -15,6 +15,13 @@ const describeWithDatabase = integrationEnabled ? describe : describe.skip
 const SAME_DAEMON_BACKLOG_ROWS = 10_000
 const CLAIM_STATEMENT_TIMEOUT_MS = 500
 
+type Plan = { 'Relation Name'?: string; 'Actual Rows'?: number; 'Actual Loops'?: number;
+  'Rows Removed by Filter'?: number; Plans?: Plan[] }
+const examined = (node: Plan): number =>
+  (node['Relation Name'] === 'event_inbox'
+    ? ((node['Actual Rows'] ?? 0) + (node['Rows Removed by Filter'] ?? 0)) * (node['Actual Loops'] ?? 0)
+    : 0) + (node.Plans ?? []).reduce((sum, child) => sum + examined(child), 0)
+
 describeWithDatabase('inbox claim performance PostgreSQL regression', () => {
   let pool: pg.Pool
 
@@ -58,23 +65,53 @@ describeWithDatabase('inbox claim performance PostgreSQL regression', () => {
       const claimed = await repository.claimBatch({ workerId: 'bounded', limit: 32, shardCount: 1, shardIndex: 0 })
       expect(claimed.map(row => [row.daemonId, row.seq])).toEqual([['deep-a', 1], ['deep-b', 40001]])
       await client.query('ROLLBACK')
-      type Plan = { 'Relation Name'?: string; 'Actual Rows'?: number; 'Actual Loops'?: number;
-        'Rows Removed by Filter'?: number; Plans?: Plan[] }
-      const examined = (node: Plan): number =>
-        (node['Relation Name'] === 'event_inbox'
-          ? ((node['Actual Rows'] ?? 0) + (node['Rows Removed by Filter'] ?? 0)) * (node['Actual Loops'] ?? 0)
-          : 0) + (node.Plans ?? []).reduce((sum, child) => sum + examined(child), 0)
       // A generous resource budget independent of CPU speed, cache warmth or
       // exact planner node names. Full-table and full-pending scans violate it.
       for (const mode of ['force_custom_plan', 'force_generic_plan']) {
         await client.query('BEGIN')
         await client.query(`SET LOCAL plan_cache_mode = ${mode}`)
         const result = await client.query(
-          "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE pocketctl_inbox_claim_v1('bounded', 1, 0, 32)",
+          "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE pocketctl_inbox_claim_v2('bounded', 1, 0, 32)",
         )
         expect(examined(result.rows[0]['QUERY PLAN'][0].Plan)).toBeLessThan(1000)
         await client.query('ROLLBACK')
       }
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+  }, 30_000)
+
+  test('claim work stays bounded when a burst arrives just after empty-queue statistics', async () => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      // Keep the fixture uncommitted so autoanalyze cannot refresh the empty
+      // pending distribution between preparing and exercising the claim.
+      await client.query(`INSERT INTO event_inbox
+        (daemon_id,daemon_generation,seq,dedup_key,event_type,priority_class,payload,status)
+        SELECT 'history',1,n,'history-'||n,'agent_text',1,'{}',CASE WHEN n%5=0 THEN 3 ELSE 2 END
+        FROM generate_series(1,150000) n`)
+      await client.query('ANALYZE event_inbox')
+      await client.query('SET LOCAL plan_cache_mode=force_generic_plan')
+      const repository = new InboxRepository({query:client.query.bind(client)} as never)
+      const config = {workerId:'burst-worker',limit:32,shardCount:1,shardIndex:0}
+      expect(await repository.claimBatch(config)).toHaveLength(0)
+      await client.query(`INSERT INTO event_inbox
+        (daemon_id,daemon_generation,seq,dedup_key,event_type,priority_class,payload)
+        SELECT 'burst',1,n,'burst-'||n,'agent_text',1,'{}' FROM generate_series(1,16000) n`)
+      for (const mode of ['force_generic_plan','force_custom_plan']) {
+        await client.query(`SET LOCAL plan_cache_mode=${mode}`)
+        await client.query('SAVEPOINT sample')
+        const result = await client.query(
+          "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE pocketctl_inbox_claim_v2('burst-worker',1,0,32)",
+        )
+        const plan = result.rows[0]['QUERY PLAN'][0].Plan
+        expect(examined(plan)).toBeLessThan(1000)
+        expect(plan['Shared Hit Blocks'] + plan['Shared Read Blocks']).toBeLessThan(1000)
+        await client.query('ROLLBACK TO sample')
+      }
+      expect((await repository.claimBatch(config)).map(row => row.seq)).toEqual([1])
     } finally {
       await client.query('ROLLBACK')
       client.release()

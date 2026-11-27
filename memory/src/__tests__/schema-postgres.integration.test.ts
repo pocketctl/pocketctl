@@ -87,6 +87,48 @@ describeWithDatabase('memory schema (PostgreSQL)', () => {
     ]))
   })
 
+  test('recovers an interrupted concurrent build, reuses equivalent indexes and preserves name conflicts', async () => {
+    await applyMemorySchema(pool)
+    const name = 'memory_feed_inbox_active_state_installation'
+    const state = () => pool.query('SELECT indexrelid::oid AS oid, indisvalid FROM pg_index WHERE indexrelid=to_regclass($1)', [name])
+    const original = (await state()).rows[0]
+    expect(original.indisvalid).toBe(true)
+    await pool.query(`ALTER INDEX ${name} RENAME TO equivalent_active_delivery_index`)
+    await applyMemorySchema(pool)
+    expect((await state()).rowCount).toBe(0)
+    await pool.query(`CREATE INDEX ${name} ON memory_feed_inbox(feed_id)`)
+    await expect(applyMemorySchema(pool)).rejects.toThrow('memory_delivery_active_index_name_conflict')
+    expect((await state()).rows[0].indisvalid).toBe(true)
+    await pool.query(`DROP INDEX ${name},equivalent_active_delivery_index`)
+
+    const writer = await pool.connect()
+    const builder = await pool.connect()
+    let build: Promise<unknown> | undefined
+    try {
+      await writer.query('BEGIN')
+      await writer.query('LOCK TABLE memory_feed_inbox IN ROW EXCLUSIVE MODE')
+      const {pid} = (await builder.query('SELECT pg_backend_pid() AS pid')).rows[0]
+      build = builder.query(`CREATE INDEX CONCURRENTLY ${name} ON memory_feed_inbox(projection_state,installation_id)
+        WHERE projection_state IN ('pending','quarantined')`).catch(error => error)
+      const deadline = Date.now() + 5000
+      while (!(await state()).rowCount) {
+        if (Date.now() >= deadline) throw Error('concurrent build did not publish its catalog entry')
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      await pool.query('SELECT pg_cancel_backend($1)', [pid])
+      expect(await build).toMatchObject({code:'57014'})
+      expect((await state()).rows[0].indisvalid).toBe(false)
+    } finally {
+      await writer.query('ROLLBACK')
+      try { await build } finally { writer.release(); builder.release() }
+    }
+    await applyMemorySchema(pool)
+    const recovered = (await state()).rows[0]
+    expect(recovered.indisvalid).toBe(true)
+    await applyMemorySchema(pool)
+    expect((await state()).rows[0]).toEqual(recovered)
+  }, 30000)
+
   test('v70 preserves legacy inbox bodies and does not infer ACK from last_ack_at', async () => {
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public')
     for (const migration of MEMORY_MIGRATIONS.filter(entry => entry.version <= 69)) {

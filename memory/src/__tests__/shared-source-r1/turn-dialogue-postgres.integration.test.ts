@@ -333,7 +333,15 @@ const url = process.env.TURN_DIALOGUE_TEST_DATABASE_URL
     const {applySharedSourceContract}=await import('../../migrations/shared-db/contract.js')
     const {provisionSharedDatabase}=await import('../../migrations/shared-db/namespace.js')
     const {verifyMemoryStartup}=await import('../../startup-schema.js')
+    const activeIndex = "memory.memory_source_delivery_receipts_active_state_installation"
+    const indexState = () => f.pool.query('SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass($1) AND indrelid=to_regclass($2)',
+      [activeIndex, 'memory.memory_source_delivery_receipts'])
+    expect((await indexState()).rows).toEqual([{indisvalid:true}])
+    // Also exercise the upgrade of an installation which retired transport
+    // before this index existed.
+    await f.pool.query('DROP INDEX '+activeIndex)
     await applyMemorySchema(f.pool,{namespace:'memory'})
+    expect((await indexState()).rows).toEqual([{indisvalid:true}])
     await applySharedSourceContract(f.pool)
     await provisionSharedDatabase(f.pool,{memoryRole:'direct_launch_memory',relayRole:'direct_launch_relay',migratorRole:'direct_launch_definer'})
     await verifyMemoryStartup(f.runtime)

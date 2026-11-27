@@ -448,12 +448,19 @@ func (s *codexAdoptionService) run(id string) error {
 			s.mu.Unlock()
 			return err
 		}
-		setAdoptionState(&op.AdoptionReceipt, "binding", "")
-		op.Revision++
-		err := s.saveLocked(op)
-		s.mu.Unlock()
-		if err != nil {
-			return err
+		// Only the first acquisition publishes `binding`. A retry of an operation
+		// that is already waiting keeps its waiting receipt, so cancel stays
+		// available while the attempt is in flight.
+		if op.Phase != "waiting" {
+			setAdoptionState(&op.AdoptionReceipt, "binding", "")
+			op.Revision++
+			err := s.saveLocked(op)
+			s.mu.Unlock()
+			if err != nil {
+				return err
+			}
+		} else {
+			s.mu.Unlock()
 		}
 		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 		if op.Deadline != nil {
@@ -488,6 +495,11 @@ func (s *codexAdoptionService) run(id string) error {
 		switch {
 		case reason == "managed":
 			setAdoptionState(&op.AdoptionReceipt, "managed", "managed")
+		case !adoptionActive(op.Phase):
+			// Cancelled while this retry was in flight and the attempt did not
+			// acquire. Keep the cancel receipt and its revision.
+			s.mu.Unlock()
+			return nil
 		case op.Deadline != nil && time.Until(*op.Deadline) <= 0:
 			setAdoptionState(&op.AdoptionReceipt, "expired", "deadline_exceeded")
 		case reason == "active_writer" && op.Deadline != nil:
@@ -500,7 +512,7 @@ func (s *codexAdoptionService) run(id string) error {
 			setAdoptionState(&op.AdoptionReceipt, "blocked", reason)
 		}
 		op.Revision++
-		err = s.saveLocked(op)
+		err := s.saveLocked(op)
 		s.mu.Unlock()
 		if err != nil || op.Phase != "waiting" {
 			return err

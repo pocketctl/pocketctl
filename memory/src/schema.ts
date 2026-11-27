@@ -1,3 +1,4 @@
+import {ensureDeliveryActiveIndex} from './sources/delivery-active-index.js'
 import {SESSION_AUTHORITY_MIGRATION} from './migrations/shared-db/session-authority-contract.js'
 import {EVIDENCE_SESSION_MIGRATION} from './migrations/shared-db/evidence-session-migration.js'
 import {SNAPSHOT_PROVENANCE_MIGRATION} from './migrations/shared-db/snapshot-provenance-migration.js'
@@ -2380,6 +2381,7 @@ export async function applyMemorySchema(pool: pg.Pool,options:{namespace?:Memory
           throw error
         }
       }
+      await ensureDeliveryActiveIndex(client, namespace)
     } finally {
       await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_KEY])
     }
